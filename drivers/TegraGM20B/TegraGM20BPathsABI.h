@@ -20,6 +20,12 @@ enum {
 	TegraGM20BPathsOpNoteSpan = 2,
 	/* "job_max_us=N spans=K; <owner>: <span>; ...": the compositor's longest job and the spans noted since the last ask */
 	TegraGM20BPathsOpSpans = 3,
+	/* "ready_kib=N floor_kib=N held_kib=N clean_chunks=N": the GPU pool's ready bytes (what a BoAlloc can take now), the
+	 * floor no compressible BoAlloc goes below (TegraGM20BPoolPolicy.h), the pool bytes this connection holds, and the
+	 * 128 KiB chunks a compressible BoAlloc could take now */
+	TegraGM20BPathsOpPool = 4,
+	/* "lines=N": the refusal lines this connection's GPU job calls wrote (SwitchGpuRefusalSites.h) */
+	TegraGM20BPathsOpRefusals = 5,
 };
 
 struct TegraGM20BAbiPaths {

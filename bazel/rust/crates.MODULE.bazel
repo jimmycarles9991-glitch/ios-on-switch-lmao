@@ -30,7 +30,7 @@ crate.spec(
 )
 crate.spec(
     # m2v's `serde` feature: the translator's plain-data values, which the bridge's compile profile is
-    # (drivers/NativeMetal/bridge/NativeMetalOffline.rs).
+    # (drivers/TegraGM20BMetal/translate/NativeMetalOffline.rs).
     features = ["derive"],
     package = "serde",
     version = "=1.0.229",

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "raw_gpu.h"
+#include <algorithm>
 
 namespace raw {
 
@@ -22,6 +23,29 @@ bool CommandBuffer::useMember(uint64_t va, uint64_t bytes, bool write, bool host
     memberUses_.push_back({m->handle, write ? uint32_t(TegraGM20BSurfaceWrite) : uint32_t(TegraGM20BSurfaceRead)});
     memberHostWritten_ |= hostWritten;
     return true;
+}
+
+void CommandBuffer::useStorage(uint64_t va, uint64_t bytes, bool write, bool hostWritten, const ArenaStorage *arena)
+{
+    if (!va || !bytes || !dev_->k_.exactJobs())
+        return;
+    const auto name = [&](uint64_t first, uint64_t length) {
+        if (useMember(first, length, write, hostWritten))
+            return;
+        RAW_ENCODE_COUNT(UseAdds);
+        surfaces_.addAddress(first, length, write,
+                             (hostWritten ? TegraGM20BSurfaceHostWritten : 0u) |
+                                 (length <= UINT32_MAX ? uint32_t(TegraGM20BSurfaceRange) : 0u));
+    };
+    if (!arena || arena->rest.empty()) {
+        name(va, bytes);
+        return;
+    }
+    arena->each([&](const StoragePiece &piece) {
+        const uint64_t first = std::max(va, piece.va), last = std::min(va + bytes, piece.va + piece.bytes);
+        if (first < last)
+            name(first, last - first);
+    });
 }
 
 // lock_ held. A heap's arena is one BO (its parts, once trimmed), named whole for reading (useHeap's resources are
@@ -82,13 +106,7 @@ void CommandBuffer::use(const Buffer &buffer, bool write, bool noted)
     const bool ranged = dev_->k_.exactJobs() && buffer.length && buffer.length <= UINT32_MAX;
     if (!ranged || !importContains(buffer.import, buffer.va, buffer.length))
         use(buffer.import, write);
-    if (buffer.va && buffer.length && dev_->k_.exactJobs() &&
-        !useMember(buffer.va, buffer.length, write, buffer.hostVisible)) {
-        RAW_ENCODE_COUNT(UseAdds);
-        surfaces_.addAddress(buffer.va, buffer.length, write,
-                             (buffer.hostVisible ? TegraGM20BSurfaceHostWritten : 0u) |
-                                 (ranged ? TegraGM20BSurfaceRange : 0u));
-    }
+    useStorage(buffer.va, buffer.length, write, buffer.hostVisible, buffer.span.storage);
 }
 
 void CommandBuffer::use(const Texture &texture, bool write)
@@ -115,13 +133,9 @@ void CommandBuffer::use(const Texture &texture, bool write)
         dev_->glassMem->wrote(storage.va ? storage.va : view->va, dev_->commitCount_,
                               dev_->stats.memEvents.load(std::memory_order_relaxed));
 #endif
-    if (view->va && dev_->k_.exactJobs() &&
-        !useMember(storage.bytes ? storage.va : view->va, storage.bytes ? storage.bytes : 1, write, hostVisible)) {
-        RAW_ENCODE_COUNT(UseAdds);
-        surfaces_.addAddress(storage.bytes ? storage.va : view->va, storage.bytes ? storage.bytes : 1, write,
-                             (hostVisible ? TegraGM20BSurfaceHostWritten : 0u) |
-                                 (ranged ? TegraGM20BSurfaceRange : 0u));
-    }
+    if (view->va)
+        useStorage(storage.bytes ? storage.va : view->va, storage.bytes ? storage.bytes : 1, write, hostVisible,
+                   storage.arena);
 }
 
 }  // namespace raw

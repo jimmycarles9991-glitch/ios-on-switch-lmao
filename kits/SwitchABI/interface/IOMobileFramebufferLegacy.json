@@ -244,6 +244,11 @@
       "type": "bool",
       "access": "set",
       "doc": "The gate the family's parameter 6 action tests before it reaches setEdrFactor; init sets it from the debug boot-arg iomfb_enable_edr_scaling only."
+    },
+    "internalDisplay": {
+      "type": "bool",
+      "access": "set",
+      "doc": "Bit 0 is what setDisplayRefreshProperties hands the timing getter: an internal panel's longest refresh interval is its period, an external display's 1/24 s. Apple's pipes set it from the inverse of their external property before they publish."
     }
   },
   "constants": {
@@ -326,6 +331,10 @@
     "native_legacy_frame_info_enqueue": {
       "decl": "IOReturn native_legacy_frame_info_enqueue(void *userClient, const void *entry, uint32_t bytes)",
       "doc": "IOMobileFramebufferUserClient's frame-info enqueue: one entry on the client's type 3 IOSharedDataQueue (0x1040 bytes, made for every client), which notifies the client's port when it was empty; kIOReturnNoSpace when full (24B119 panics instead if the client asked for that). 0 without a queue."
+    },
+    "native_legacy_set_display_refresh_properties": {
+      "decl": "bool native_legacy_set_display_refresh_properties(void *display)",
+      "doc": "IOMobileFramebufferLegacy::setDisplayRefreshProperties: publishes IOMFBDisplayRefresh (the six refresh-interval numbers QuartzCore's AppleDisplay::update_display_limits reads) from the timing getter, which it passes internalDisplay. Apple's UnifiedPipeline calls it from its own hardware start; false when the getter or the dictionary fails."
     }
   }
 }

@@ -212,6 +212,11 @@ pub fn function_key(
             .bytes(format!("{:?}", inputs.extended_range).as_bytes());
     }
     // Appended only when set, as `storage_view_slots`.
+    if !inputs.two_plane_textures.is_empty() {
+        h.bytes(b"two-plane-textures")
+            .bytes(format!("{:?}", inputs.two_plane_textures).as_bytes());
+    }
+    // Appended only when set, as `storage_view_slots`.
     if !inputs.extended_range_colors.is_empty() {
         h.bytes(b"extended-range-colors")
             .bytes(format!("{:?}", inputs.extended_range_colors).as_bytes());

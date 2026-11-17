@@ -135,7 +135,7 @@ struct CommandBuffer {
     void releaseNativeReads();
 };
 
-constexpr uint32_t kStageTextures = 31;  // raw_pack.h
+constexpr uint32_t kStageTextures = 31;  // raw_stage_textures.h on 21H461
 
 struct RenderEncoder {
     CommandBuffer *cb_ = nullptr;

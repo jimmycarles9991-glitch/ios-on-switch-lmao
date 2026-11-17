@@ -4,9 +4,12 @@
 #   smmu_owner_source_test    only TegraSMMU.cpp programs the MC's global SMMU registers (reads every driver's C++)
 #   smmu_attachments_test     the swgroups tegra_smmu_resume programs again after SC7 (TegraSMMUAttachments.h)
 #   smmu_space_test           an engine's IOVA allocation (TegraSMMUSpace.h)
+#   smmu_flush_range_test     a page-entry change flushes only its PTE groups and its IOVAs' TLB sections, a directory
+#                             change everything, no change nothing; nothing under the MC lock locks, sleeps or allocates
 #   mc_hot_reset_owner_test   tegra_mc_hot_reset is the one writer of the MC's hot-reset registers
 #   mc_hot_reset_request_test a hot-reset bit that does not read back is one line naming the client
-#   mc_errors_test            the MC error interrupt: filter with interrupts off, one line per error, INTMASK
+#   mc_errors_test            the MC error interrupt: filter with interrupts off, one line per error, INTMASK; a
+#                             client's run bounded to four lines and a count; the start returns before the GIC
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
@@ -145,6 +148,49 @@ host_test(
 )
 
 host_shims(
+    name = "smmu_flush_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/clock.h",
+        "libkern/libkern.h",
+    ],
+    stubs = "smmu_flush_stubs.h",
+)
+
+host_library(
+    name = "smmu_flush_mc",
+    srcs = [
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraMCNames.h",
+        "//drivers/TegraSMMU:TegraSMMU.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":smmu_flush_kernel"],
+)
+
+host_test(
+    name = "smmu_flush_range_test",
+    srcs = [
+        "smmu_flush_range_test.cpp",
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+        "//drivers/TegraSMMU:TegraSMMUPublish.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    deps = [
+        ":smmu_flush_kernel",
+        ":smmu_flush_mc",
+    ],
+)
+
+host_shims(
     name = "mc_errors_kernel",
     headers = [
         "IOKit/IOFilterInterruptEventSource.h",
@@ -152,6 +198,7 @@ host_shims(
         "IOKit/IOLocks.h",
         "IOKit/IOWorkLoop.h",
         "kern/clock.h",
+        "kern/thread.h",
     ],
     stubs = "mc_errors_stubs.h",
 )

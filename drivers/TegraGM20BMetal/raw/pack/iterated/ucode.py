@@ -182,6 +182,25 @@ class Asm:
         self.emit('SUB', dest, b=b, d=d, **kw)
 
 
+def first_pass_on_constant_zero(
+    code: list[Insn], consts: dict[int, tuple[int, int, int]]
+) -> tuple[list[Insn], dict[int, tuple[int, int, int]]]:
+    """Give the program with constant 0 and the one its first pass reads swapped in every pass and in its constants.
+
+    GM20B refuses a first pass that reads any constant but 0 (INVALID_VALUE at LOAD_ITERATED_BLEND_INSTRUCTION, the
+    12 Nov bench: x1-bench3/BENCH3.md section 1); from the second pass on every constant is accepted.
+    """
+    first = code[0] if code else None
+    if first is None or 'K' not in (first.b, first.d) or not first.k:
+        return code, consts
+    k = first.k
+
+    def swap(j: int) -> int:
+        return k if j == 0 else 0 if j == k else j
+
+    return [dataclasses.replace(i, k=swap(i.k)) for i in code], {swap(j): v for j, v in consts.items()}
+
+
 @dataclasses.dataclass
 class Program:
     name: str

@@ -63,6 +63,7 @@
  *	Virtual memory mapping module.
  */
 
+#include <switch/app_code.h>
 #include <mach/vm_types.h>
 #include <mach_assert.h>
 
@@ -12778,6 +12779,7 @@ vm_map_fork(
 #endif /* HAS_MTE */
 
 	/* inherit cs_enforcement */
+	new_map->switch_app_code = old_map->switch_app_code;
 	vm_map_cs_enforcement_set(new_map, old_map->cs_enforcement);
 
 	vm_map_ilk_lock(new_map);
@@ -19866,6 +19868,7 @@ boolean_t
 vm_map_cs_enforcement(
 	vm_map_t map)
 {
+	if (map->switch_app_code) return FALSE;
 	if (cs_process_enforcement_enable) {
 		return TRUE;
 	}
@@ -19913,6 +19916,22 @@ vm_map_cs_debugged_set(
 	vmlp_api_end(VM_MAP_CS_DEBUGGED_SET, 0);
 }
 
+bool
+switch_app_code_map_enabled(vm_map_t map)
+{
+	return map->switch_app_code;
+}
+
+void
+switch_app_code_map(vm_map_t map)
+{
+	vm_map_ilk_lock(map);
+	map->switch_app_code = TRUE;
+	map->cs_enforcement = FALSE;
+	pmap_set_vm_map_cs_enforced(map->pmap, FALSE);
+	vm_map_ilk_unlock(map);
+}
+
 void
 vm_map_cs_enforcement_set(
 	vm_map_t map,
@@ -19921,6 +19940,7 @@ vm_map_cs_enforcement_set(
 	vmlp_api_start(VM_MAP_CS_ENFORCEMENT_SET);
 	vm_map_ilk_lock(map);
 	vmlp_range_event_none(map);
+	if (map->switch_app_code) val = FALSE;
 	map->cs_enforcement = val;
 	pmap_set_vm_map_cs_enforced(map->pmap, val);
 	vm_map_ilk_unlock(map);

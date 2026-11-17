@@ -67,6 +67,14 @@ std::vector<uint8_t> gNvjpgRegisters(0x40000), gMcRegisters(0x1000);
 uint64_t gNextPa = 0x80000000;
 IOLock gNvdecPower;
 
+struct SmmuRangeFlush {
+    uint32_t asid;
+    uint64_t tablesPa, tableBytes, iova, iovaBytes;
+};
+
+std::vector<SmmuRangeFlush> gSmmuRangeFlushes;
+unsigned gSmmuFlushAlls;
+
 constexpr unsigned kJpgClock = 195;  // NVDEC's is the driver's kNvdecClock (194)
 constexpr uint32_t kSyncpt = 163;
 }  // namespace
@@ -252,7 +260,14 @@ void tegra_smmu_detach(uint32_t, uint32_t)
 {}
 
 void tegra_smmu_flush(uint32_t)
-{}
+{
+    ++gSmmuFlushAlls;
+}
+
+void switch_smmu_flush_range(uint32_t asid, uint64_t tablesPa, uint64_t tableBytes, uint64_t iova, uint64_t iovaBytes)
+{
+    gSmmuRangeFlushes.push_back({asid, tablesPa, tableBytes, iova, iovaBytes});
+}
 
 void switch_car_clock_enable(unsigned id)
 {
@@ -410,7 +425,7 @@ void switch_dma_free(switch_dma_buffer *buffer)
 }
 
 namespace {
-TegraNVJPGJob decodeJob()
+[[maybe_unused]] TegraNVJPGJob decodeJob()
 {
     TegraNVJPGJob job = {};
     job.setup.frame_width = 64;
@@ -425,13 +440,13 @@ TegraNVJPGJob decodeJob()
     return job;
 }
 
-void idle()
+[[maybe_unused]] void idle()
 {
     thread_call_t timer = switch_test_calls().back();
     timer->fire(timer->param, nullptr);
 }
 
-bool logged(const char *text)
+[[maybe_unused]] bool logged(const char *text)
 {
     const auto &lines = switch_test_log();
     return std::any_of(lines.begin(), lines.end(), [&](const std::string &line) {

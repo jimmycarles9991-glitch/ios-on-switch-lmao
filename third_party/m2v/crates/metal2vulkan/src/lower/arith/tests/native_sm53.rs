@@ -54,7 +54,7 @@ fn check(
     }
 }
 
-fn verify_native(m: &TypedModule) -> Result<verify::VerifyReport, VerifyError> {
+pub(super) fn verify_native(m: &TypedModule) -> Result<verify::VerifyReport, VerifyError> {
     let budget = crate::Budget::standard();
     verify::check(m, &profile(), &mut crate::budget::Meter::new(&budget))
 }

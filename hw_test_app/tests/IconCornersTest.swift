@@ -12,8 +12,9 @@ import Metal
 /// the same draw culled and scissored, which raw leaves to m2v, scissored there; `derivative_<storage>_*` that shape's
 /// dfdx, dfdy and fwidth in a fetching program, which RenderBox's coverage takes (HWTestGPU FetchStrip).
 /// `icon*`: IconServices' icons and its rendered-icon cache (IconServicesCache). FAIL: a RenderBox or strip arm off its
-/// reference, off the raw path or failing (`<arm>_error=`), RenderBox's calls absent (`rb_api=`), or an IconServices
-/// arm's own failure.
+/// reference, off the raw path or failing (`<arm>_error=`), a RenderBox arm off the Mac's drawing of its side
+/// (`<arm>_off_mac=`, RenderBoxCorner.macReference), RenderBox's calls absent (`rb_api=`), or an IconServices arm's own
+/// failure.
 struct IconCornersTest: HWTest {
     let id = "gpu.raw.icon_corners"
     let name = "Icon corners: RenderBox's mask and IconServices' icons at the App Library's sizes against references"
@@ -57,7 +58,9 @@ struct IconCornersTest: HWTest {
                     let m2v = (after["m2v"] ?? 0) - (before["m2v"] ?? 0)
                     metrics.set("\(name)_m2v", m2v)
                     metrics.set("\(name)_routes", RawFacade.fetchRoutes(before: before, after: after))
-                    if cell.beyond > 0 || m2v > 0 { wrong.append(name) }
+                    let offMac = RenderBoxCorner.offMac(cell)
+                    if let offMac { metrics.set("\(name)_off_mac", offMac) }
+                    if cell.beyond > 0 || m2v > 0 || offMac != nil { wrong.append(name) }
                 }
             }
         } else {

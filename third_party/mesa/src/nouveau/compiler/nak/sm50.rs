@@ -12,6 +12,8 @@ use std::ops::Range;
 
 #[cfg(test)]
 mod alu_tests;
+#[cfg(test)]
+mod ld_cache_tests;
 mod hsetp2;
 mod int3;
 mod texs;

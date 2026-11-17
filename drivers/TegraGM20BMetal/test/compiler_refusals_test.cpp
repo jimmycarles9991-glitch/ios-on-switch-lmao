@@ -63,10 +63,24 @@ TEST(CompilerRefusals, ARefusalIsThisBuildsAtItsCompileAndTheWarmUpMakesAnotherB
     EXPECT_THAT(warm, HasSubstr("stored == TegraGM20BCompileRefused && !confirmed.confirmed(name)"));
     EXPECT_THAT(warm, HasSubstr("if (unconfirmed)\n                store_.retire(name);"));
     EXPECT_THAT(warm, testing::Not(HasSubstr("confirm(name)")));
+    const std::string kept = switch_ios::test::Body(service, "void Service::remember(const Asked &asked, int32_t ran)");
+    EXPECT_THAT(kept,
+                HasSubstr("if (result == TegraGM20BCompileRefused)\n        refusals_->confirm(asked.prepared.name);"));
+    EXPECT_THAT(kept, HasSubstr("(result == TegraGM20BCompileMade || result == TegraGM20BCompileRefused) && "
+                                "!asked.request.empty()"));
+}
+
+// The request log and the refusal list are written once the compile's waiters have their answer, never between the
+// record's publication and the answer
+TEST(CompilerRefusals, AnAnswerWaitsOnNoRecordKeeping)
+{
+    const std::string service = switch_ios::test::SourceText("../compiler/compiler_service.mm");
     const std::string run = switch_ios::test::Body(service, "int32_t Service::run(Work &work)");
-    EXPECT_THAT(run, HasSubstr("if (result == TegraGM20BCompileRefused)\n        refusals_->confirm(p.name);"));
-    EXPECT_THAT(run, HasSubstr("(result == TegraGM20BCompileMade || result == TegraGM20BCompileRefused) && "
-                               "!asked.request.empty()"));
+    EXPECT_THAT(run, testing::Not(HasSubstr("log_.add(")));
+    EXPECT_THAT(run, testing::Not(HasSubstr("confirm(")));
+    const size_t answered = service.find("        primary(result);\n");
+    ASSERT_NE(answered, std::string::npos);
+    EXPECT_LT(answered, service.find("        remember(asked, result);\n", answered));
 }
 
 }  // namespace

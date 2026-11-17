@@ -346,9 +346,21 @@ inline int urge(const std::shared_ptr<Making> &m)
     return m->state == Making::Made ? 1 : -1;
 }
 
-// For direct bridge clients without the native job scheduler. A failed/expired compile fails their command buffer;
-// no timeout turns a pass with missing draws into a successful command buffer.
-inline bool ready(const std::shared_ptr<Making> &m)
+// Past this a creation a set waits for is lost: one line naming it, then abort() for the stack, as the frontend's waits
+// do (NativeBridgeMetalFrontend.mm waitTooLong), never a pass drawn without it
+constexpr std::chrono::milliseconds kReadyLimit{60000};
+
+[[noreturn]] inline void lostCreation(const Making &m, std::chrono::milliseconds limit)
+{
+    os_log_fault(OS_LOG_DEFAULT, "native-metal: pipeline %{public}s not made after %lld ms: abort() for the stack",
+                 m.label.c_str(), (long long)limit.count());
+    fprintf(stderr, "native-metal: pipeline %s not made after %lld ms\n", m.label.c_str(), (long long)limit.count());
+    abort();
+}
+
+// For direct bridge clients without the native job scheduler. A failed compile fails their command buffer; one not made
+// within `limit` aborts (lostCreation).
+inline bool ready(const std::shared_ptr<Making> &m, std::chrono::milliseconds limit = kReadyLimit)
 {
     {
         std::lock_guard<std::mutex> g(m->lock);
@@ -364,14 +376,15 @@ inline bool ready(const std::shared_ptr<Making> &m)
     run(m);
     std::unique_lock<std::mutex> g(m->lock);
     Lend lend(*m);
-    const bool completed = m->finished.wait_for(g, std::chrono::seconds(60), [&] {
-        return m->done();
-    });
+    if (!m->finished.wait_for(g, limit, [&] {
+            return m->done();
+        }))
+        lostCreation(*m, limit);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     c.offWaits++;
     c.offWaitUs += usNow() - began;
 #endif
-    return completed && m->state == Making::Made;
+    return m->state == Making::Made;
 }
 
 // The rates line's part (taken: each window's own): apso=<handed>/<made>/<refused> set=<found being made>/<made in the

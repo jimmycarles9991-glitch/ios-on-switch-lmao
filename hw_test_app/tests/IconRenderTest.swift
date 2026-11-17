@@ -16,7 +16,7 @@ struct IconRenderTest: HWTest {
 
     static let agent = "iconservicesagent"
     static let inactiveHardMB = 15
-    // NMB_IDLE_RELEASE_MS outside the render server (TegraGM20BMetalPlugin.mm) and the give-back's own work after it
+    // GpuMemoryRelease.h's idle second and the give-back's own work after it
     static let giveBackNs: UInt64 = 2_500_000_000
 
     func run(_ context: TestContext) async throws -> Outcome {
@@ -58,27 +58,16 @@ struct IconRenderTest: HWTest {
     /// A process's footprint by name (the first pid with it): proc_pid_rusage's phys_footprint, resident size and lifetime
     /// peak footprint; nil when it is not running or its rusage is refused
     static func footprint(_ process: String) -> Reading? {
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
-        var size = 0
-        guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return nil }
-        var procs = [kinfo_proc](repeating: kinfo_proc(), count: size / MemoryLayout<kinfo_proc>.stride + 8)
-        size = procs.count * MemoryLayout<kinfo_proc>.stride
-        guard sysctl(&mib, 4, &procs, &size, nil, 0) == 0,
+        guard let pid = RunningProcesses.pid(named: process, in: RunningProcesses.list(sysctl: "kern.proc.all")),
             let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "proc_pid_rusage")
         else { return nil }
         let rusage = unsafeBitCast(symbol, to: Rusage.self)
-        for proc in procs.prefix(size / MemoryLayout<kinfo_proc>.stride) {
-            var comm = proc.kp_proc.p_comm
-            let name = withUnsafeBytes(of: &comm) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
-            guard name == process else { continue }
-            var info = rusage_info_v4()
-            guard rusage(proc.kp_proc.p_pid, RUSAGE_INFO_V4, &info) == 0 else { return nil }
-            let mb = { (v: UInt64) in Double(v) / 1_048_576 }
-            return Reading(
-                footprintMB: mb(info.ri_phys_footprint), residentMB: mb(info.ri_resident_size),
-                peakMB: mb(info.ri_lifetime_max_phys_footprint))
-        }
-        return nil
+        var info = rusage_info_v4()
+        guard rusage(pid, RUSAGE_INFO_V4, &info) == 0 else { return nil }
+        let mb = { (v: UInt64) in Double(v) / 1_048_576 }
+        return Reading(
+            footprintMB: mb(info.ri_phys_footprint), residentMB: mb(info.ri_resident_size),
+            peakMB: mb(info.ri_lifetime_max_phys_footprint))
     }
 
     static func icon(_ bundle: String) -> NSObject? {

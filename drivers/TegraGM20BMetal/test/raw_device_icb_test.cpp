@@ -32,7 +32,7 @@ struct Channel {
     };
 
     std::map<uint64_t, uint32_t> memory;
-    uint64_t selected = 0, root = 0;
+    uint64_t selected = 0, root = 0, factorAt = 0;
     uint32_t selector[3] = {}, offset = 0;
     switch_gm20b_test::Scratch scratch;
     std::vector<uint32_t> arguments;
@@ -85,19 +85,20 @@ struct Channel {
         } else if (m == NVB197_LOAD_CONSTANT_BUFFER_OFFSET)
             offset = v;
         else if (m >= NVB197_LOAD_CONSTANT_BUFFER(0) && m <= NVB197_LOAD_CONSTANT_BUFFER(15)) {
+            EXPECT_LT(offset, selector[0]) << "a constant buffer load inside the selected buffer";
             memory[selected + offset] = v;
             offset += 4;
         } else if (m == NVB197_BEGIN && !(v >> 26 & 1))
             began();
     }
 
-    // set 0's factor entry at byte 0 (the record below), from the set's address the root table holds at 0x38
+    // set 0's factor entry at byte factorAt (the record below), from the set's address the root table holds at 0x38
     void began()
     {
         Draw d;
         d.set = uint64_t(word(root + 0x3c)) << 32 | word(root + 0x38);
         for (uint32_t w = 0; w < 3; w++)
-            d.factors[w] = word(d.set + 4 * w);
+            d.factors[w] = word(d.set + factorAt + 4 * w);
         for (uint32_t w = 0; w < 6; w++)
             d.control[w] = word(root + kControlAt + 4 * w);
         d.amplification = word(root + kIdAt);
@@ -181,7 +182,7 @@ struct Channel {
     }
 };
 
-raw::RuntimeRecord tessellation(uint64_t key)
+raw::RuntimeRecord tessellation(uint64_t key, uint16_t firstEntry = 0)
 {
     raw::RuntimeRecord r;
     r.keyString = "samples=1 c0=70:15:0 ds=0/0 ";
@@ -200,9 +201,9 @@ raw::RuntimeRecord tessellation(uint64_t key)
     }
     r.pipeline.controlWord = kControlWord;
     r.pipeline.controlPoints = 4;
-    r.pipeline.entries = raw::TessBufferCount;
+    raw::setEntryCount(r.pipeline, raw::TessBufferCount);
     for (uint8_t k = 0; k < raw::TessBufferCount; k++)
-        r.pipeline.entry[k] = {uint16_t(16 * k),
+        r.pipeline.entry[k] = {uint16_t(firstEntry + 16 * k),
                                raw::EntryTessBuffer,
                                1,
                                k,
@@ -230,7 +231,7 @@ raw::RuntimeRecord amplifying(uint64_t key, bool viewports = false)
     r.pipeline.amplificationIdWord = kIdWord;
     r.pipeline.pushMask = 1u << (kIdWord - 1) | (viewports ? 1u << (kViewportWord - 1) : 0);
     r.pipeline.vertexSlot = 0xff;
-    r.amplificationViewportWord = viewports ? kViewportWord : 0;
+    r.pipeline.amplificationViewportWord = viewports ? kViewportWord : 0;
     return r;
 }
 
@@ -262,9 +263,10 @@ protected:
     }
 
     // One pass: `body` encodes into it; the channel model run over every word the device submitted, its context's first
-    template <class Body> Channel pass(raw::Pipeline *pl, Body body)
+    template <class Body> Channel pass(raw::Pipeline *pl, Body body, uint64_t factorAt = 0)
     {
         Channel c;
+        c.factorAt = factorAt;
         raw::CommandBuffer *cb = dev.begin();
         EXPECT_NE(cb, nullptr);
         if (!cb)
@@ -375,14 +377,62 @@ TEST_F(DeviceIcb, PatchCommandsTakeATessellationStateAlone)
     cb->abandon();
 }
 
-// The patch macro loads set 0 as a buffer of kIcbSetBytes: a state whose set 0 is larger takes no patch commands
-TEST_F(DeviceIcb, PatchCommandsRefuseASetZeroPastThePatchMacrosLoad)
+// The patch macro selects set 0 at the state's own size: a set of two 256-byte blocks takes the control-stage buffers its
+// second block holds
+TEST_F(DeviceIcb, PatchCommandsLoadTheirBuffersPastASetZerosFirstBlock)
 {
-    raw::RuntimeRecord r = tessellation(0x1cb6);
-    r.pipeline.setBytes = uint16_t(raw::mme::kIcbSetBytes + 16);
+    raw::RuntimeRecord r = tessellation(0x1cb6, 0x100);
+    r.pipeline.setBytes = 0x100 + 16 * raw::TessBufferCount;
     std::string why;
     raw::Pipeline *pl = dev.addRecord(r, false, why);
     ASSERT_NE(pl, nullptr) << why;
+    const raw::icb::PatchDraw a = patches(0, first, 0, 12), b = patches(1, second, 4, 24);
+    const Channel c = pass(
+        pl,
+        [&](raw::RenderEncoder &e) {
+            const char *refused = nullptr;
+            EXPECT_TRUE(e.executeSlots(execute(0, 2, raw::icb::kPatchSlotWords, raw::icb::kPatchPrimitive), &refused))
+                << (refused ? refused : "");
+        },
+        0x100);
+    ASSERT_EQ(c.draws.size(), 2u) << c.summary();
+    expectDrawn(c.draws[0], a);
+    expectDrawn(c.draws[1], b);
+}
+
+// A set past the encoder's 512 bytes (its wide path): the patch macro selects it at its own size (SET_CONSTANT_BUFFER_SELECTOR_A's
+// 17-bit size) and loads the control-stage buffers at their bytes past 0x600 (LOAD_CONSTANT_BUFFER_OFFSET's 16 bits)
+TEST_F(DeviceIcb, PatchCommandsLoadTheirBuffersInASetPast512Bytes)
+{
+    raw::RuntimeRecord r = tessellation(0x1cb8, 0x600);
+    r.pipeline.setBytes = 0x600 + 16 * raw::TessBufferCount;
+    std::string why;
+    raw::Pipeline *pl = dev.addRecord(r, false, why);
+    ASSERT_NE(pl, nullptr) << why;
+    const raw::icb::PatchDraw a = patches(0, first, 0, 12), b = patches(1, second, 4, 24);
+    const Channel c = pass(
+        pl,
+        [&](raw::RenderEncoder &e) {
+            const char *refused = nullptr;
+            EXPECT_TRUE(e.executeSlots(execute(0, 2, raw::icb::kPatchSlotWords, raw::icb::kPatchPrimitive), &refused))
+                << (refused ? refused : "");
+        },
+        0x600);
+    ASSERT_EQ(c.draws.size(), 2u) << c.summary();
+    expectDrawn(c.draws[0], a);
+    expectDrawn(c.draws[1], b);
+}
+
+// The stack's control stage reads set 0 through its constant buffer (m2v's synthesized module, three storage buffers NVK
+// maps there): a record whose control program reads it by its address is the driver's error, never drawn
+TEST_F(DeviceIcb, AControlStageReadingSetZeroByItsAddressIsTheDriversError)
+{
+    raw::RuntimeRecord r = tessellation(0x1cb7);
+    r.tessPrograms[0].cbufTypes = {raw::CbufRoot};
+    std::string why;
+    raw::Pipeline *pl = dev.addRecord(r, false, why);
+    ASSERT_NE(pl, nullptr) << why;
+    ASSERT_EQ(pl->setSlot[2], 0u);
     patches(0, first, 0, 12);
     raw::CommandBuffer *cb = dev.begin();
     ASSERT_NE(cb, nullptr);
@@ -394,8 +444,7 @@ TEST_F(DeviceIcb, PatchCommandsRefuseASetZeroPastThePatchMacrosLoad)
     e->setPipeline(pl);
     const char *refused = nullptr;
     EXPECT_FALSE(e->executeSlots(execute(0, 1, raw::icb::kPatchSlotWords, raw::icb::kPatchPrimitive), &refused));
-    ASSERT_NE(refused, nullptr);
-    EXPECT_NE(std::string(refused).find("set 0 is larger"), std::string::npos) << refused;
+    EXPECT_EQ(cb->refusal.id, raw::RefPatchCommands);
     e->end();
     cb->abandon();
 }

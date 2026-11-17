@@ -162,7 +162,7 @@ struct HeapKindsScene: GPUScene {
             return bytes == Array([[UInt8]](repeating: want, count: bytes.count / 4).joined()) ? "exact" : "wrong"
         case .texels:
             let width = texture.width, height = texture.height
-            let pattern = (0..<width * height * 4).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
+            let pattern = Self.pattern(texture.pixelFormat, count: width * height * 4)
             let source = try gpu.buffer(pattern)
             try await gpu.run { commands in
                 let blit = commands.makeBlitCommandEncoder()!
@@ -175,5 +175,12 @@ struct HeapKindsScene: GPUScene {
             }
             return try await gpu.read(texture, bytesPerPixel: 4) == pattern ? "exact" : "wrong"
         }
+    }
+
+    /// The bytes a read-back writes into a texture of `format`: RGB9E5 texels in the one encoding of their value that a
+    /// GPU keeping the format by value (Apple's) reads back.
+    static func pattern(_ format: MTLPixelFormat, count: Int) -> [UInt8] {
+        let bytes = (0..<count).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
+        return format == .rgb9e5Float ? SharedExponent.encodings(bytes) : bytes
     }
 }

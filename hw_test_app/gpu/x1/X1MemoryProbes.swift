@@ -54,8 +54,9 @@ public enum X1MemoryProbes {
     /// Textures over a buffer at the alignments the device answers, read back exact on its path: RGBA8 2D textures
     /// sampled at each texel's centre, one at offset 64 with rows of 64 bytes, and a texture buffer at the
     /// texture-buffer alignment. The raw device answers 32 for both (its pitch texture header's, LIMITS row): an
-    /// alignment under it is alignment_low=1. Rows 16 mod 32 (offset 48, rows of 48), which no answer of 32 lets a
-    /// client make, are read and reported (odd16_wrong, odd16_path) but not judged.
+    /// alignment under it is alignment_low=1. Rows 16 mod 32 (offset 48, rows of 48) are read and reported (odd16_wrong,
+    /// odd16_path) but not judged, and only where the linear answer lets a client make them (odd16_made=no otherwise:
+    /// a command buffer of a texture outside the answer would put the probe's paths off raw).
     public static func linearAlign(_ gpu: GPU) async throws -> ProbeFinding {
         var wrong: [String: Int] = [:]
         var metrics = Metrics()
@@ -69,6 +70,10 @@ public enum X1MemoryProbes {
         }
         let kernel = try gpu.compute("sample_texture")
         for (name, offset, width, judged) in [("odd16", 48, 12, false), ("even32", 64, 16, true)] {
+            guard offset % max(linear, 1) == 0 else {
+                metrics.set(name + "_made", "no")
+                continue
+            }
             let height = 8
             let rowBytes = width * 4
             let source = try gpu.buffer(offset + rowBytes * height)
@@ -113,7 +118,7 @@ public enum X1MemoryProbes {
     }
 
     /// A 128-texel RGBA8 texture buffer at `offset` into its buffer, read texel by texel: its path and wrong channels
-    static func textureBufferRead(_ gpu: GPU, offset: Int) async throws -> (String, Int) {
+    public static func textureBufferRead(_ gpu: GPU, offset: Int) async throws -> (String, Int) {
         let width = 128
         let source = try gpu.buffer(offset + width * 4)
         let bytes = source.contents().bindMemory(to: UInt8.self, capacity: offset + width * 4)

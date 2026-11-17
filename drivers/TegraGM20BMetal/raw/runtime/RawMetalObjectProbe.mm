@@ -16,11 +16,17 @@
 @end
 
 // A render state also answers whether its record is the pack's (hw_test_app's states that must never wait on a compile)
+// and its record's set-0 entries (0: no record)
 @implementation RMPipeline (NativeProbe)
 
 - (NSDictionary<NSString *, id> *)switchRawObject
 {
-    return @{@"class" : NSStringFromClass([self class]), @"twin" : @(_twin != nil), @"packed" : @(_packed)};
+    return @{
+        @"class" : NSStringFromClass([self class]),
+        @"twin" : @(_twin != nil),
+        @"packed" : @(_packed),
+        @"entries" : @(_raw && _raw->rec ? _raw->entries.size() : 0)
+    };
 }
 
 @end

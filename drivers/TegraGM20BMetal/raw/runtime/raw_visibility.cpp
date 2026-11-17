@@ -14,11 +14,9 @@ const char *visibilityRefusal(const VisibilityAsk &a)
     if (a.mode != kVisibilityCounting && a.mode != kVisibilityBoolean)
         return "a visibility result mode Metal does not have";
     if (!a.rawBuffer)
-        return "a visibility result buffer the raw path does not hold";
+        return "a mode set in a pass with no visibility result buffer";
     if ((a.offset & ~uint64_t(7)) + 8 > a.bufferLength)
         return "a visibility offset past its buffer";
-    if (a.accumulate)
-        return "visibility results accumulated across passes";
     return nullptr;
 }
 
@@ -26,19 +24,25 @@ void VisibilityQueries::close(Push &p)
 {
     if (!open_)
         return;
-    kit(p, switch_gm20b_samples_report, queries_.back().slotVa);
+    const Query &q = queries_.back();
+    if (!q.accumulate)
+        kit(p, switch_gm20b_samples_report, q.slotVa);
+    else if (q.mode == kVisibilityCounting)
+        kit(p, switch_gm20b_samples_word, q.resultVa, true,
+            uint32_t(NVB197_SET_REPORT_SEMAPHORE_D_REDUCTION_OP_RED_ADD));
+    else
+        kit(p, switch_gm20b_samples_word, q.slotVa, false, 0u);
     open_ = false;
 }
 
-VisibilityQueries::Set VisibilityQueries::set(Push &p, uint32_t mode, uint64_t resultVa, uint64_t slotVa)
+VisibilityQueries::Set VisibilityQueries::set(Push &p, uint32_t mode, uint64_t resultVa, uint64_t slotVa,
+                                              bool accumulate)
 {
+    const size_t key = size_t(resultVa >> 3) % kVisibilityQueriesPerEncoder;
     if (mode != kVisibilityDisabled) {
-        if (std::any_of(queries_.begin(), queries_.end(), [&](const Query &q) {
-                return q.resultVa == resultVa;
-            }))
+        if (taken_.test(key))
             return Set::Retaken;
-        if (queries_.size() >= kVisibilityQueriesPerEncoder)
-            return Set::Full;
+        taken_.set(key);
     }
     close(p);
     if (mode == kVisibilityDisabled) {
@@ -47,7 +51,10 @@ VisibilityQueries::Set VisibilityQueries::set(Push &p, uint32_t mode, uint64_t r
         counting_ = false;
         return Set::Done;
     }
-    queries_.push_back({resultVa, slotVa, mode});
+    queries_.push_back({resultVa, slotVa, mode, accumulate});
+    if (accumulate && mode == kVisibilityBoolean)
+        for (uint64_t zero : {slotVa + 4, slotVa + 16, slotVa + 20})
+            kit(p, switch_gm20b_release_word, zero, 0u);
     kit(p, switch_gm20b_samples_begin);
     open_ = counting_ = true;
     return Set::Done;
@@ -59,7 +66,9 @@ void VisibilityQueries::finish(Push &p)
     if (counting_)
         kit(p, switch_gm20b_samples_end);
     counting_ = false;
-    if (!queries_.empty())
+    if (std::any_of(queries_.begin(), queries_.end(), [](const Query &q) {
+            return !q.accumulate || q.mode == kVisibilityBoolean;
+        }))
         kit(p, switch_gm20b_wait_for_idle);
 }
 
@@ -68,6 +77,15 @@ void VisibilityQueries::finish(Push &p)
 void VisibilityQueries::finishResult(Push &p, size_t i) const
 {
     const Query &q = queries_[i];
+    if (q.accumulate) {
+        if (q.mode != kVisibilityBoolean)
+            return;
+        kit(p, switch_gm20b_copy_predicate, q.slotVa, uint32_t(NVB0B5_SET_RENDER_ENABLE_C_MODE_RENDER_IF_NOT_EQUAL));
+        kit(p, switch_gm20b_copy_word_reduce, q.resultVa, q.resultVa, 1u,
+            uint32_t(NVB0B5_LAUNCH_DMA_SEMAPHORE_REDUCTION_IOR), false);
+        kit(p, switch_gm20b_copy_predicate, 0ull, uint32_t(NVB0B5_SET_RENDER_ENABLE_C_MODE_TRUE));
+        return;
+    }
     if (q.mode != kVisibilityBoolean) {
         kit(p, switch_gm20b_copy_bytes, q.slotVa, q.resultVa, 8u,
             uint8_t(NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED));

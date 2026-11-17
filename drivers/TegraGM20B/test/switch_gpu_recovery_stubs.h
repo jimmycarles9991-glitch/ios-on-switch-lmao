@@ -8,6 +8,7 @@ extern "C" {
 #endif
 
 typedef int atomic_t;
+typedef uint32_t u32;
 
 static inline int atomic_read(const atomic_t *p)
 {
@@ -121,15 +122,16 @@ void switch_gpu_recovery_abort(const char *);
 	} while (0)
 #define WARN_ON(x) ((void)(x))
 #define ENGN_DEBUG(...) ((void)0)
-#define nvkm_msec(device, ms, ...)               \
-	({                                       \
-		(void)(device);                  \
-		(void)(ms);                      \
-		int result = 0;                  \
-		do {                             \
-			__VA_ARGS__ result = -1; \
-		} while (0);                     \
-		result;                          \
+#define nvkm_msec(device, ms, ...)                                  \
+	({                                                          \
+		(void)(device);                                     \
+		(void)(ms);                                         \
+		int result = 0;                                     \
+		int remaining = 4;                                  \
+		do {                                                \
+			__VA_ARGS__                                 \
+		} while ((result = --remaining > 0 ? 0 : -1) >= 0); \
+		result;                                             \
 	})
 #define nvkm_runl_foreach_cgrp_safe(c, tmp, r) \
 	for ((c) = (r)->cgrps; (c) && (((tmp) = (c)->next), 1); (c) = (tmp))

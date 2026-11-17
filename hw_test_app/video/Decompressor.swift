@@ -30,9 +30,12 @@ public enum Decompressor {
     /// Decodes `samples` (in decode order) on the hardware decoder and checks every frame against the pattern. A
     /// missing hardware decoder throws: there is no software fallback to measure by mistake. Only the media tool's check
     /// on the Mac lets go of the hardware (`requireHardware: false`). `temporal` asks the decoder for display order.
+    /// `passes` decodes the samples that many times in the one session, `afterPass` running once each pass's frames
+    /// have all come out.
     public static func decode(
         _ samples: [CMSampleBuffer], format: CMVideoFormatDescription, pattern: Pattern, bitDepth: Int, fps: Int,
-        requireHardware: Bool = true, probeDisplayBuffer: Bool = false, temporal: Bool = false
+        requireHardware: Bool = true, probeDisplayBuffer: Bool = false, temporal: Bool = false, passes: Int = 1,
+        afterPass: ((Int) -> Void)? = nil
     ) throws -> DecodeResult {
         let session = try makeSession(
             format: format, width: pattern.width, height: pattern.height, bitDepth: bitDepth,
@@ -45,20 +48,25 @@ public enum Decompressor {
         let start = CFAbsoluteTimeGetCurrent()
         var flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
         if temporal { flags.insert(._EnableTemporalProcessing) }
-        for (index, sample) in samples.enumerated() {
-            let status = VTDecompressionSessionDecodeFrame(
-                session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil
-            ) { status, _, image, pts, _ in collector.add(status, image, pts) }
-            guard status == noErr else { throw VideoError.status("VTDecompressionSessionDecodeFrame \(index)", status) }
+        for pass in 0..<passes {
+            for (index, sample) in samples.enumerated() {
+                let status = VTDecompressionSessionDecodeFrame(
+                    session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil
+                ) { status, _, image, pts, _ in collector.add(status, image, pts) }
+                guard status == noErr else {
+                    throw VideoError.status("VTDecompressionSessionDecodeFrame \(index)", status)
+                }
+            }
+            if temporal { VTDecompressionSessionFinishDelayedFrames(session) }
+            let waited = VTDecompressionSessionWaitForAsynchronousFrames(session)
+            guard waited == noErr else {
+                throw VideoError.status("VTDecompressionSessionWaitForAsynchronousFrames", waited)
+            }
+            afterPass?(pass)
         }
-        if temporal { VTDecompressionSessionFinishDelayedFrames(session) }
-        let waited = VTDecompressionSessionWaitForAsynchronousFrames(session)
         let wall = CFAbsoluteTimeGetCurrent() - start
-        guard waited == noErr else {
-            throw VideoError.status("VTDecompressionSessionWaitForAsynchronousFrames", waited)
-        }
         var result = collector.result(
-            expected: samples.count, seconds: max(0, wall - collector.checkSeconds),
+            expected: samples.count * passes, seconds: max(0, wall - collector.checkSeconds),
             usingHardware: Compressor.readFlag(
                 session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder))
         result.routes = pictureRoutes(session)

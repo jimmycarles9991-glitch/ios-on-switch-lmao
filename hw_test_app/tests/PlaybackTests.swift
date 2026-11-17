@@ -51,7 +51,10 @@ final class PresentationCounter: NSObject {
 }
 
 /// The clip played by AVPlayer in a visible layer, five times back to back in one composition: the system's
-/// own decode, timing and presentation path. AVFoundation's access log counts the frames it dropped.
+/// own decode, timing and presentation path. AVFoundation's access log counts the frames it dropped. On a debug kernel
+/// the decoder's and the client's pools also keep one identity each (MediaMapCounters): no buffer is mapped again after
+/// an eviction (boot 22 made 1.6 VIC mappings a present); the client's surfaces and their publication objects are
+/// printed beside it.
 struct PlaybackTest: HWTest {
     let clip: Clip
     let subsystem = Subsystem.decode
@@ -96,6 +99,7 @@ struct PlaybackTest: HWTest {
             NotificationCenter.default.removeObserver(observer)
             NotificationCenter.default.removeObserver(failed)
         }
+        let (mapsBefore, mapsUnread) = MediaMapCounters.read()
         await MainActor.run {
             counter.start()
             player.play()
@@ -118,13 +122,18 @@ struct PlaybackTest: HWTest {
         metrics.set("dropped", dropped)
         metrics.set("checked", checked)
         metrics.set("mismatched", mismatched)
-        return .judged(
-            [
-                ("played to the end (\(item.error.map { String(describing: $0) } ?? "no error"))", finished == true),
-                ("no frames dropped", dropped == 0),
-                ("at least 95% of frames presented", Double(presented) >= 0.95 * Double(expected)),
-                ("sampled frames match the pattern", checked > 0 && mismatched == 0),
-            ], metrics)
+        var checks = [
+            ("played to the end (\(item.error.map { String(describing: $0) } ?? "no error"))", finished == true),
+            ("no frames dropped", dropped == 0),
+            ("at least 95% of frames presented", Double(presented) >= 0.95 * Double(expected)),
+            ("sampled frames match the pattern", checked > 0 && mismatched == 0),
+        ]
+        if let mapsBefore, let mapsAfter = MediaMapCounters.read().counters {
+            checks += mapsAfter.judge(since: mapsBefore, into: &metrics, objects: false)
+        } else {
+            metrics.set("map_counters", KernelSysctl.code(mapsUnread))
+        }
+        return .judged(checks, metrics)
     }
 
     static var all: [PlaybackTest] {

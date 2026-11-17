@@ -24,20 +24,20 @@ TEST(Host1xFlipDisplay, ItIsDebugOnlyOnTheDisplaysOwnChannel)
     EXPECT_LT(gate, trial.find("int host1xFlipStart("));
     EXPECT_LT(trial.find("#else"), trial.rfind("void host1xFlipAbort(const char *)\n{}"));
     const CodeText code(trial);
-    EXPECT_TRUE(code.Has("kHost1xFlipChannel = TEGRA_HOST1X_CHANNEL_DISPLAY"));
-    EXPECT_FALSE(code.Has("TEGRA_HOST1X_CHANNEL_NVJPG"));
-    EXPECT_EQ(code.Count("__atomic_exchange_n(&dcClassBusy, true, __ATOMIC_ACQUIRE)"), 1u);
+    EXPECT_TRUE(code.has("kHost1xFlipChannel = TEGRA_HOST1X_CHANNEL_DISPLAY"));
+    EXPECT_FALSE(code.has("TEGRA_HOST1X_CHANNEL_NVJPG"));
+    EXPECT_EQ(code.count("__atomic_exchange_n(&dcClassBusy, true, __ATOMIC_ACQUIRE)"), 1u);
     EXPECT_TRUE(
-        Block(trial, "void host1xFlipFinished()").Has("__atomic_store_n(&dcClassBusy, false, __ATOMIC_RELEASE);"));
+        Block(trial, "void host1xFlipFinished()").has("__atomic_store_n(&dcClassBusy, false, __ATOMIC_RELEASE);"));
     EXPECT_TRUE(Block(trial, "switch_host1x_flip::Active host1xFlipActive()")
-                    .Before("seen.control = dc[kDcStateControl];", "windowActive(kWinbufStartAddr)"));
+                    .before("seen.control = dc[kDcStateControl];", "windowActive(kWinbufStartAddr)"));
     EXPECT_TRUE(
-        Block(trial, "void host1xFlipFinished()").Before("planeDropSlot(", "native_legacy_frame_end_release();"));
-    EXPECT_EQ(code.Count("host1xFlipsLatched + 1"), 1u);
+        Block(trial, "void host1xFlipFinished()").before("planeDropSlot(", "native_legacy_frame_end_release();"));
+    EXPECT_EQ(code.count("host1xFlipsLatched + 1"), 1u);
     EXPECT_TRUE(Block(trial, "const char *host1xFlipSurfaces(")
-                    .Before("if (!host1xFlipAliasIsFront(entry, k))", "host1xFlip.aliasSlot = k;"));
-    EXPECT_TRUE(Block(trial, "bool host1xFlipAliasIsFront(int entry, int k) const").Has("if (mapped != scanned)"));
-    EXPECT_TRUE(Block(trial, "void host1xFlipFinished()").Has("!planeSlotBusy(s.aliasSlot)"));
+                    .before("if (!host1xFlipAliasIsFront(entry, k))", "host1xFlip.aliasSlot = k;"));
+    EXPECT_TRUE(Block(trial, "bool host1xFlipAliasIsFront(int entry, int k) const").has("if (mapped != scanned)"));
+    EXPECT_TRUE(Block(trial, "void host1xFlipFinished()").has("!planeSlotBusy(s.aliasSlot)"));
 
     const std::string probe = SourceText("../SwitchDcHost1xClassProbe.h");
     EXPECT_NE(probe.find("kDcClassChannel = TEGRA_HOST1X_CHANNEL_DISPLAY"), std::string::npos);
@@ -50,23 +50,23 @@ TEST(Host1xFlipDisplay, NothingElseWritesWindowAOrARequestWhileItRuns)
               std::string::npos);
     EXPECT_NE(display.find("            dcClassRegister();\n            host1xFlipRegister();"), std::string::npos);
     const CodeText tick = Block(display, "void vblankTick()");
-    EXPECT_TRUE(tick.Before("underflowRead();", "host1xFlipFrameEnd();"));
-    EXPECT_TRUE(tick.Before("host1xFlipFrameEnd();", "checkRotation();"));
-    EXPECT_TRUE(tick.Has("!columnScanBusy() && !windowProbeHolds() && !host1xFlipBusy();"));
+    EXPECT_TRUE(tick.before("underflowRead();", "host1xFlipFrameEnd();"));
+    EXPECT_TRUE(tick.before("host1xFlipFrameEnd();", "checkRotation();"));
+    EXPECT_TRUE(tick.has("!columnScanBusy() && !windowProbeHolds() && !host1xFlipBusy();"));
     EXPECT_TRUE(
-        Block(display, "void kickOnce()").Has("if (columnScanBusy() || windowProbeHolds() || host1xFlipBusy()) {"));
+        Block(display, "void kickOnce()").has("if (columnScanBusy() || windowProbeHolds() || host1xFlipBusy()) {"));
     for (const char *stop : {"void stopRotation()", "bool setScanout(bool on)", "void quiesceForSuspend()"})
-        EXPECT_TRUE(Block(display, stop).Has("host1xFlipAbort(\"")) << stop;
+        EXPECT_TRUE(Block(display, stop).has("host1xFlipAbort(\"")) << stop;
 
     EXPECT_TRUE(
-        Block(SourceText("../SwitchCompletionFlipDisplay.h"), "bool completionFlipMay(").Has("host1xFlipBusy()"));
+        Block(SourceText("../SwitchCompletionFlipDisplay.h"), "bool completionFlipMay(").has("host1xFlipBusy()"));
     EXPECT_TRUE(
-        Block(SourceText("../SwitchMediaCompletionFlipDisplay.h"), "bool mediaFlipMay(").Has("host1xFlipBusy()"));
+        Block(SourceText("../SwitchMediaCompletionFlipDisplay.h"), "bool mediaFlipMay(").has("host1xFlipBusy()"));
     EXPECT_TRUE(
-        Block(SourceText("../SwitchLandscapeDisplay.h"), "const char *landscapeBusy()").Has("host1xFlipBusy()"));
-    EXPECT_TRUE(Block(SourceText("../NativeColumnScanDisplay.h"), "int columnScanTrigger(").Has("!host1xFlipBusy()"));
+        Block(SourceText("../SwitchLandscapeDisplay.h"), "const char *landscapeBusy()").has("host1xFlipBusy()"));
+    EXPECT_TRUE(Block(SourceText("../NativeColumnScanDisplay.h"), "int columnScanTrigger(").has("!host1xFlipBusy()"));
     EXPECT_TRUE(
-        Block(SourceText("../DisplayWindowProbeDisplay.h"), "IOReturn windowProbeCall(").Has("host1xFlipBusy()"));
+        Block(SourceText("../DisplayWindowProbeDisplay.h"), "IOReturn windowProbeCall(").has("host1xFlipBusy()"));
 }
 
 }  // namespace

@@ -13,11 +13,11 @@ import packfile
 PROGRAM_CBUFS = packfile.PROGRAM_CBUFS
 QMD_CBUFS = 8
 FRONTIER = 6  # runtime/raw_pack.h CbufFrontier
-MAX_FRONTIER_BYTES = 4096  # runtime/raw_split_metadata.h usableSplitMetadata
+MAX_FRONTIER_BYTES = 0xFFF0  # runtime/raw_split_metadata.h kMaxFrontierBytes
 
 
 def usable_frontier(s: dict) -> bool:
-    """Whether the runtime takes the split's frontier: 16-byte steps up to 4 KiB (bound in whole 256-byte units)."""
+    """Whether the runtime takes the split's frontier: 16-byte steps up to a 64 KiB constant buffer's last."""
     return 0 < s.get('frontier_bytes', 0) <= MAX_FRONTIER_BYTES and s['frontier_bytes'] % 16 == 0
 
 
@@ -53,7 +53,15 @@ def binds_as_whole(s: dict, whole: str, programs: dict[str, dict]) -> bool:
     buffers from its state's set-0 entries, so a type the whole program does not name binds another buffer.
     """
     types = programs[whole]['cbufs']
-    return s['frontier_cbuf'] == len(types) and programs[s['fs']]['cbufs'] == [*types, FRONTIER]
+
+    def far(program: dict) -> list[int]:
+        return (list(program.get('far_ubos', [])) + [0] * len(types))[: len(types)]
+
+    return (
+        s['frontier_cbuf'] == len(types)
+        and programs[s['fs']]['cbufs'] == [*types, FRONTIER]
+        and far(programs[s['fs']]) == far(programs[whole])
+    )
 
 
 def lay_out(

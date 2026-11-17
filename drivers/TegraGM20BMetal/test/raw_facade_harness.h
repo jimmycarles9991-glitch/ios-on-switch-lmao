@@ -15,13 +15,13 @@
 #include "raw_job_methods.h"
 #include "made_metallib.h"
 #include "empty_pack.h"
-#include "raw_facade_standins.h"
 #include "../raw/runtime/RawMetal.h"
 #include "../raw/runtime/RawMetalInternal.h"
 #include "../raw/runtime/RawPipelineKey.h"
 #include "../raw/runtime/raw_compute_key.h"
 #include "../raw/runtime/raw_metallib.h"
 #include "../raw/runtime/raw_pack.h"
+#include "../raw/runtime/raw_set_entries.h"
 #include <algorithm>
 #include <dlfcn.h>
 #include <map>
@@ -117,25 +117,43 @@ inline std::vector<uint8_t> slot(uint32_t k)
 
 // A pack of this build's version holding the state of `key`: vertex program slot 0, fragment slot 1, each kSlot bytes in
 // the heap section at kHeap, so a page-multiple slot of the pack's own pages; `kernels`, each with a program slot of its
-// own after those (its `program` set here); `facts`: its compute states' answers; `entries`: the state's set-0 entries
+// own after those (its `program` set here); `facts`: its compute states' answers. Without `pixelStage` the state has no
+// fragment program (raw_pack.h kNoProgram). `reflections`: its PackReflections section (reflection_blob_writer.h).
+// `named`: further states the device looks up by name (Device::ycbcrPipeline's), each over the same two programs, its
+// fields the key's with its own attachment 0 format; `entries`: the handles and buffers the key's state reads
 inline std::string writePack(const std::string &key, std::vector<raw::PackKernel> kernels = {},
-                             std::vector<raw::PackComputeFacts> facts = {}, std::vector<raw::PackEntry> entries = {})
+                             std::vector<raw::PackComputeFacts> facts = {}, bool pixelStage = true,
+                             const std::string &reflections = "",
+                             const std::vector<std::pair<std::string, MTLPixelFormat>> &named = {},
+                             const std::vector<raw::PackEntry> &entries = {})
 {
-    constexpr uint64_t kPrograms = 0x180, kPipelines = 0x800, kComputeStates = 0xc00, kStrings = 0xe00,
-                       kKernels = 0x2000;
+    constexpr uint64_t kPrograms = 0x180, kComputeStates = 0xc00, kStrings = 0xe00, kKernels = 0x2000;
+    // one state's record fits below the compute states; more go between the kernels and the heap
+    const uint64_t kPipelines = named.empty() ? 0x800 : 0x8000;
     const uint32_t programs = 2 + uint32_t(kernels.size());
     std::vector<uint8_t> file(kHeap + programs * kSlot + 0x1000, 0);
     raw::PackHeader h = {};
     memcpy(h.magic, "GM20BPK1", 8);
     h.version = raw::kPackVersion;
     h.programs = programs;
-    h.pipelines = 1;
+    h.pipelines = uint32_t(1 + named.size());
     const std::string fields = key.substr(0, key.find(" | v"));
     std::vector<char> strings(1, 0);
-    strings.insert(strings.end(), fields.begin(), fields.end());
-    strings.push_back(0);
+    std::map<uint64_t, uint32_t> fieldsAt;
+    auto addState = [&](const std::string &name, const std::string &stateFields) {
+        fieldsAt[raw::Pack::fnv(name.data(), name.size())] = uint32_t(strings.size());
+        strings.insert(strings.end(), stateFields.begin(), stateFields.end());
+        strings.push_back(0);
+    };
+    addState(key, fields);
+    for (const auto &[name, format] : named) {
+        std::string own = fields;
+        if (const size_t at = own.find(" c0="); at != std::string::npos)
+            own.replace(at + 4, own.find(':', at) - at - 4, std::to_string(format));
+        addState(name, own);
+    }
     h.section[raw::PackPrograms] = {kPrograms, programs * sizeof(raw::PackProgram)};
-    h.section[raw::PackPipelines] = {kPipelines, sizeof(raw::PackPipeline)};
+    h.section[raw::PackPipelines] = {kPipelines, h.pipelines * sizeof(raw::PackPipeline)};
     h.section[raw::PackStrings] = {kStrings, strings.size()};
     h.section[raw::PackKernels] = {kKernels, kernels.size() * sizeof(raw::PackKernel)};
     h.section[raw::PackHeap] = {kHeap, programs * kSlot + 0x1000};
@@ -164,15 +182,26 @@ inline std::string writePack(const std::string &key, std::vector<raw::PackKernel
         kernels[i].program = uint16_t(2 + i);
         memcpy(file.data() + kKernels + i * sizeof(raw::PackKernel), &kernels[i], sizeof(raw::PackKernel));
     }
-    raw::PackPipeline pp = {};
-    pp.keyHash = raw::Pack::fnv(key.data(), key.size());
-    pp.keyString = 1;
-    pp.vs = 0;
-    pp.fs = 1;
-    pp.entries = uint8_t(std::min<size_t>(entries.size(), raw::kPackEntries));
-    std::copy_n(entries.begin(), pp.entries, pp.entry);
-    memcpy(file.data() + kPipelines, &pp, sizeof pp);
+    const uint64_t keyHash = raw::Pack::fnv(key.data(), key.size());
+    size_t record = 0;
+    for (const auto &[hash, at] : fieldsAt) {
+        raw::PackPipeline pp = {};
+        pp.keyHash = hash;
+        pp.keyString = at;
+        pp.vs = 0;
+        pp.fs = hash != keyHash || pixelStage ? 1 : raw::kNoProgram;
+        if (hash == keyHash) {
+            const uint32_t count = uint32_t(std::min<size_t>(entries.size(), raw::kPackEntries));
+            raw::setEntryCount(pp, count);
+            std::copy_n(entries.begin(), count, pp.entry);
+        }
+        memcpy(file.data() + kPipelines + record++ * sizeof pp, &pp, sizeof pp);
+    }
     memcpy(file.data() + kStrings, strings.data(), strings.size());
+    const uint64_t reflectionsAt = file.size();
+    file.insert(file.end(), reflections.begin(), reflections.end());
+    h.section[raw::PackReflections] = {reflectionsAt, reflections.size()};
+    memcpy(file.data(), &h, sizeof h);
     const std::string path = dir() + "/pack.bin";
     std::ofstream(path, std::ios::binary)
         .write(reinterpret_cast<const char *>(file.data()), std::streamsize(file.size()));
@@ -222,6 +251,34 @@ inline id<MTLDevice> open(const std::string &pack, Class methods = [HarnessM2VMe
     if (!device)
         fprintf(stderr, "open: %s\n", why.UTF8String ?: "?");
     return device;
+}
+
+// One draw of `state` sampling fragment texture 0 through sampler 0 into a 64x64 BGRA8 target, committed and waited for
+inline id<MTLCommandBuffer> drawSampling(id<MTLDevice> device, id<MTLRenderPipelineState> state, id<MTLTexture> texture,
+                                         id<MTLSamplerState> sampler)
+{
+    MTLTextureDescriptor *rt = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                  width:64
+                                                                                 height:64
+                                                                              mipmapped:NO];
+    rt.storageMode = MTLStorageModePrivate;
+    rt.usage = MTLTextureUsageRenderTarget;
+    id<MTLCommandBuffer> cb = [[device newCommandQueue] commandBuffer];
+    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = [device newTextureWithDescriptor:rt];
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:pass];
+    [e setRenderPipelineState:state];
+    [e setFragmentTexture:texture atIndex:0];
+    [e setFragmentSamplerState:sampler atIndex:0];
+    const float vertices[12] = {-1, -1, 0, 1, 3, -1, 0, 1, -1, 3, 0, 1};
+    [e setVertexBytes:vertices length:sizeof vertices atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    return cb;
 }
 
 inline NSDictionary *ask(id<MTLDevice> device, const char *selector)

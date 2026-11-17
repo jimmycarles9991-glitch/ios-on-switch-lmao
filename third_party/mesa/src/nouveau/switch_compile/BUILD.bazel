@@ -1,0 +1,366 @@
+# NAK's stage compile with no Vulkan device: what the raw GM20B path compiles each state's programs with (the pack
+# generator, the shader compiler daemon, the plugin). NVK's shader lowering, cut out of src/nouveau/vulkan, with the
+# raw path's passes; NVK links it too until NVK is deleted.
+#
+#   bazel build //third_party/mesa/src/nouveau/switch_compile:ios     the iOS object the plugin links
+#   bazel build //third_party/mesa/src/nouveau/switch_compile:host    the macOS object the pack tools link
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@xcode//:defs.bzl", "IPHONEOS_SDK", "MACOSX_SDK", "XCODE_TOOLCHAIN")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "mesa_args", "mesa_cc_library", "mesa_files")
+load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
+load("//third_party/mesa/bazel:link.bzl", "mesa_relocatable")
+load("//third_party/mesa/src/nouveau/compiler:fs_depth_test.bzl", "fs_depth_test_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files(
+    dirs = [],
+    exclude = MESA_LINT_EXCLUDE,
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+mesa_identity_files()
+
+filegroup(
+    name = "headers",
+    srcs = glob(["*.h"]),
+)
+
+# NVK's nvk_sources arguments, with this directory in place of src/nouveau/vulkan's.
+SWITCH_COMPILE_C_ARGS = mesa_args(
+    "c",
+    extra = [
+        "-DXXH_FORCE_ALIGN_CHECK=0",
+        "-DXXH_FORCE_MEMORY_ACCESS=0",
+        "-Wno-override-init",
+        "-Wno-initializer-overrides",
+        "-DNVK_HAS_DARWIN",
+    ],
+    include_dirs = [
+        "src/nouveau/switch_compile",
+        "gen:",
+        "gen:include",
+        "include",
+        "gen:src",
+        "src",
+        "gen:abi",
+        "gen:src/nouveau/compiler",
+        "src/nouveau/compiler",
+        "gen:src/nouveau/nil",
+        "src/nouveau/nil",
+        "gen:src/compiler/nir",
+        "src/compiler/nir",
+        "gen:src/compiler",
+        "src/compiler",
+        "gen:src/nouveau/cubin",
+        "src/nouveau/cubin",
+        "gen:src/nouveau/mme",
+        "src/nouveau/mme",
+        "src/nouveau/winsys",
+        "gen:src/nouveau/headers",
+        "src/nouveau/headers",
+        "src/nouveau/headers/nvidia/classes",
+        "gen:src/vulkan/runtime",
+        "src/vulkan/runtime",
+        "src/vulkan/runtime/bvh",
+        "gen:src/vulkan/util",
+        "src/vulkan/util",
+        "gen:src/vulkan/wsi",
+        "src/vulkan/wsi",
+        "gen:src/util",
+        "gen:src/util/format",
+        "gen:src/compiler/spirv",
+    ],
+)
+
+mesa_cc_library(
+    name = "switch_compile",
+    c_args = SWITCH_COMPILE_C_ARGS,
+    sources = [
+        "nvk_switch_offline.c",
+        "nvk_switch_rank.c",
+        "nvk_switch_stage.c",
+        "nvk_shader_compile.c",
+        "nvk_shader_lower.c",
+        "nvk_nir_lower_descriptors.c",
+        "nvk_nir_lower_mesh_shader.c",
+        "nvk_switch_ir.c",
+        "nvk_switch_ir_alu.c",
+        "nvk_switch_ir_barrier.c",
+        "nvk_switch_ir_decl.c",
+        "nvk_switch_ir_glsl.c",
+        "nvk_switch_ir_instr.c",
+        "nvk_switch_ir_image.c",
+        "nvk_switch_ir_image_types.c",
+        "nvk_switch_ir_values.c",
+        "nvk_switch_push.c",
+        "nvk_switch_round.c",
+        "nvk_switch_split.c",
+        "nvk_switch_split_fold.c",
+        "nvk_switch_split_nir.c",
+        "nvk_switch_split_prologue.c",
+        "nvk_switch_split_proof.c",
+        "nvk_switch_turn.c",
+        "nvk_switch_ubo_fold.c",
+        "nvk_switch_xr_planes.c",
+    ],
+)
+
+# What the compile links: NAK (its C and its Rust), NIL, NIR and the SPIR-V front end, Mesa's util, and the six functions
+# of Mesa's common Vulkan runtime the lowering calls (pipeline robustness and shader flags, SPIR-V to NIR, subgroup
+# size, descriptor heaps, YCbCr). No NVK, no Vulkan loader.
+SWITCH_COMPILE_ARCHIVES = [
+    "//third_party/mesa/src/nouveau/compiler:nak",
+    "//third_party/mesa/src/nouveau/compiler:nak_rs",
+    "//third_party/mesa/src/compiler/rust:compiler_bindings",
+    "//third_party/mesa/src/util:mesa_util",
+    "//third_party/mesa/src/util:mesa_util_simd",
+    "//third_party/mesa/src/util/blake3:blake3",
+    "//third_party/mesa/src/c11/impl:mesa_util_c11",
+    "//third_party/mesa/src/compiler/rust:compiler_c_helpers",
+    "//third_party/mesa/src/nouveau/headers:nvidia_headers_c",
+    "//third_party/mesa/src/nouveau/nil:nil",
+    "//third_party/mesa/src/nouveau/nil:libnil_format_table",
+    "//third_party/mesa/src/compiler/nir:nir",
+    "//third_party/mesa/src/compiler:compiler",
+    "//third_party/mesa/src/vulkan/runtime:vulkan_runtime",
+    "//third_party/mesa/src/vulkan/runtime:vulkan_lite_runtime",
+    "//third_party/mesa/src/vulkan/util:vulkan_util",
+    "//third_party/mesa/src/compiler/spirv:vtn",
+]
+
+# One relocatable object whose only global symbols are the compile's entry points (switch_compile.h,
+# nvk_switch_offline.h): NAK's Rust carries its own standard library (Rust 1.96.1), which cannot share an image with
+# the bridge's (1.98) as archives (both define rust_eh_personality), so everything else is local to the object.
+mesa_relocatable(
+    name = "switch_compile_o",
+    out = "switch_compile.o",
+    archives = SWITCH_COMPILE_ARCHIVES,
+    exported = [
+        "switch_compile_abi",
+        "switch_compile_ranked_stage",
+        "switch_compile_split_parts",
+        "switch_compile_stage",
+        "switch_compile_stage_finish",
+        "switch_compile_stage_metrics",
+    ],
+    force_load = ":switch_compile",
+)
+
+mesa_files(
+    name = "ios",
+    srcs = [":switch_compile_o"],
+    platform = "ios",
+)
+
+mesa_files(
+    name = "host",
+    srcs = [":switch_compile_o"],
+    platform = "macos",
+)
+
+# The macOS object as a library host tests link (the raw runtime's direct compile calls it)
+cc_library(
+    name = "host_cc",
+    srcs = [":host"],
+    linkstatic = True,
+    tags = ["no-lint"],
+)
+
+py_test(
+    name = "switch_compile_object_test",
+    size = "small",
+    srcs = ["switch_compile_object_test.py"],
+    args = [
+        XCODE_TOOLCHAIN + "/nm",
+        "$(rootpath :host)",
+        MACOSX_SDK,
+        "$(rootpath :ios)",
+        IPHONEOS_SDK,
+    ],
+    data = [
+        ":host",
+        ":ios",
+    ],
+    tags = ["requires-darwin"],
+)
+
+mesa_cc_library(
+    name = "split_batch_test_objects",
+    testonly = True,
+    c_args = SWITCH_COMPILE_C_ARGS,
+    sources = [
+        "nvk_switch_split_batch_test.c",
+        "nvk_switch_split_fold.c",
+        "nvk_switch_split_prologue.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "split_batch_test_bin",
+    testonly = True,
+    archives = [
+        ":split_batch_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "split_batch_test_host",
+    testonly = True,
+    srcs = [":split_batch_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "split_batch_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :split_batch_test_host)",
+        "split-batch",
+    ],
+    data = [":split_batch_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "turn_test_objects",
+    testonly = True,
+    c_args = SWITCH_COMPILE_C_ARGS,
+    sources = [
+        "nvk_switch_turn.c",
+        "nvk_switch_turn_test.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "turn_test_bin",
+    testonly = True,
+    archives = [
+        ":turn_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "turn_test_host",
+    testonly = True,
+    srcs = [":turn_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "turn_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :turn_test_host)",
+        "turn",
+    ],
+    data = [":turn_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "xr_planes_test_objects",
+    testonly = True,
+    c_args = SWITCH_COMPILE_C_ARGS,
+    sources = [
+        "nvk_switch_xr_planes.c",
+        "nvk_switch_xr_planes_test.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "xr_planes_test_bin",
+    testonly = True,
+    archives = [
+        ":xr_planes_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "xr_planes_test_host",
+    testonly = True,
+    srcs = [":xr_planes_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "xr_planes_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :xr_planes_test_host)",
+        "xr-planes",
+    ],
+    data = [":xr_planes_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)
+
+mesa_cc_library(
+    name = "ubo_fold_test_objects",
+    testonly = True,
+    c_args = SWITCH_COMPILE_C_ARGS,
+    sources = [
+        "nvk_switch_ubo_fold.c",
+        "nvk_switch_ubo_fold_test.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "ubo_fold_test_bin",
+    testonly = True,
+    archives = [
+        ":ubo_fold_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "ubo_fold_test_host",
+    testonly = True,
+    srcs = [":ubo_fold_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "ubo_fold_test",
+    size = "small",
+    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
+    args = [
+        "$(rootpath :ubo_fold_test_host)",
+        "ubo-fold",
+    ],
+    data = [":ubo_fold_test_host"],
+    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
+)

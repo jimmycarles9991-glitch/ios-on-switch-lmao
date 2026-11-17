@@ -26,15 +26,13 @@ struct GpuRailCycleTest: HWTest {
         guard case .value(let line) = KernelSysctl.string(Self.sysctl) else {
             return .skip(KernelSysctl.unreadable(Self.sysctl, errno), Metrics())
         }
-        let fields = DcHost1xClassTest.fields(line)
-        var metrics = Metrics()
-        let keys = [
-            "cycles", "downs", "fences", "plls", "wakes_off_rate", "wake_coeff", "fence_us_max", "coeff", "cfg", "pl",
-            "expect_pl", "khz", "why",
-        ]
-        for key in keys {
-            if let value = fields[key] { metrics.set(key, value) }
-        }
+        let fields = KernelLine.fields(line)
+        let metrics = KernelLine.metrics(
+            fields,
+            keys: [
+                "cycles", "downs", "fences", "plls", "wakes_off_rate", "wake_coeff", "fence_us_max", "coeff", "cfg",
+                "pl", "expect_pl", "khz", "why",
+            ])
         let wanted = String(Self.cycles)
         return .judged(
             [

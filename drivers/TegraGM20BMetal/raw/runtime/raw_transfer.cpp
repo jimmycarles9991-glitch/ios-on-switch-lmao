@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "raw_lock.h"
 #include "raw_transfer.h"
+#include "../fx/fx_image.h"
 #include "raw_kit.h"
 #include "raw_fence.h"
 #include <algorithm>
@@ -51,13 +52,48 @@ bool TextureTransfers::retire(Kernel &kernel, Slot &slot)
     return true;
 }
 
+namespace {
+
+// The caller's rows (`row`, `image` apart) into the staging rows (`pitch`, `plane` apart) where `in`, else out: a line
+// each, or a multisampled region's pixels' samples to and from their cells of the sample grid
+void moveRows(const TextureTransfer &region, uint8_t *bytes, uint64_t row, uint64_t image, uint8_t *staging,
+              uint64_t pitch, uint64_t plane, bool in)
+{
+    const uint32_t bpp = region.bpp;
+    if (region.samples <= 1) {
+        const uint64_t line = uint64_t(region.width) * bpp;
+        for (uint32_t z = 0; z < region.planes; ++z)
+            for (uint32_t y = 0; y < region.height; ++y) {
+                uint8_t *caller = bytes + z * image + y * row, *ours = staging + z * plane + y * pitch;
+                in ? std::memcpy(ours, caller, line) : std::memcpy(caller, ours, line);
+            }
+        return;
+    }
+    const uint32_t cellW = 1u << region.sxLog2, cellH = 1u << region.syLog2;
+    for (uint32_t y = 0; y < region.height; ++y)
+        for (uint32_t s = 0; s < region.samples; ++s) {
+            const uint8_t cell = fx::sampleCell(region.samples, s);
+            uint8_t *ours = staging + uint64_t(y * cellH + (cell >> 2)) * pitch + (cell & 3) * bpp;
+            for (uint32_t p = 0; p < region.width; ++p) {
+                uint8_t *caller = bytes + y * row + (uint64_t(p) * region.samples + s) * bpp;
+                uint8_t *at = ours + uint64_t(p) * cellW * bpp;
+                in ? std::memcpy(at, caller, bpp) : std::memcpy(caller, at, bpp);
+            }
+        }
+}
+
+}  // namespace
+
 bool TextureTransfers::copy(Kernel &kernel, ResourceSet &set, raw::Mutex &allocationLock, const TextureTransfer &region,
                             void *bytes, uint64_t row, uint64_t image, bool write, std::shared_ptr<void> owner)
 {
     if (!kernel.exactJobs() || !bytes || !region.width || !region.height || !region.planes || !region.bpp ||
-        region.bpp > 16 || (region.bpp & (region.bpp - 1)))
+        region.bpp > 16 || (region.bpp & (region.bpp - 1)) || !region.samples ||
+        (region.samples > 1 && (region.planes != 1 || region.samples != (1u << (region.sxLog2 + region.syLog2)))))
         return false;
-    const uint64_t line = uint64_t(region.width) * region.bpp;
+    const uint32_t cellW = 1u << region.sxLog2, cellH = 1u << region.syLog2;
+    const uint32_t gridWidth = region.width * cellW, gridHeight = region.height * cellH;
+    const uint64_t line = uint64_t(region.width) * region.samples * region.bpp;
     if (!row && region.height == 1)
         row = line;
     if (row < line || row > std::numeric_limits<size_t>::max() / region.height)
@@ -66,10 +102,10 @@ bool TextureTransfers::copy(Kernel &kernel, ResourceSet &set, raw::Mutex &alloca
         image = row * region.height;
     if (image < row * region.height || image > std::numeric_limits<size_t>::max() / region.planes)
         return false;
-    const uint64_t pitch = (line + 31) & ~uint64_t(31);
-    if (pitch > UINT32_MAX || pitch > UINT64_MAX / region.height)
+    const uint64_t gridLine = uint64_t(gridWidth) * region.bpp, pitch = (gridLine + 31) & ~uint64_t(31);
+    if (pitch > UINT32_MAX || pitch > UINT64_MAX / gridHeight)
         return false;
-    const uint64_t plane = pitch * region.height;
+    const uint64_t plane = pitch * gridHeight;
     if (plane > UINT64_MAX / region.planes)
         return false;
     const uint64_t dataBytes = plane * region.planes;
@@ -83,10 +119,7 @@ bool TextureTransfers::copy(Kernel &kernel, ResourceSet &set, raw::Mutex &alloca
         return false;
     Slot &slot = *opened;
     if (write)
-        for (uint32_t z = 0; z < region.planes; ++z)
-            for (uint32_t y = 0; y < region.height; ++y)
-                std::memcpy(slot.memory.cpu + z * plane + y * pitch,
-                            static_cast<const uint8_t *>(bytes) + z * image + y * row, line);
+        moveRows(region, static_cast<uint8_t *>(bytes), row, image, slot.memory.cpu, pitch, plane, true);
     auto *start = reinterpret_cast<uint32_t *>(slot.memory.cpu + commandOffset);
     Push push{start, start + commandBytes / sizeof(uint32_t)};
     SurfaceList uses;
@@ -102,8 +135,9 @@ bool TextureTransfers::copy(Kernel &kernel, ResourceSet &set, raw::Mutex &alloca
             texture.layer += z;
         const CopySurface staging{slot.memory.va + z * plane, uint32_t(pitch)};
         name(kernel, set, uses, texture.va, 1, write, 0);
-        emitCopy(push, write ? staging : texture, write ? texture : staging, region.width, region.height,
-                 copyTexelRemap(region.bpp), true);
+        const uint32_t remap = write ? region.remapIn : region.remapOut;
+        emitCopy(push, write ? staging : texture, write ? texture : staging, gridWidth, gridHeight,
+                 remap ? remap : copyTexelRemap(region.bpp), true);
     }
     KernelJob job;
     job.visibility = write ? JobVisibility::Internal : JobVisibility::External;
@@ -114,10 +148,7 @@ bool TextureTransfers::copy(Kernel &kernel, ResourceSet &set, raw::Mutex &alloca
     if (!retire(kernel, slot))
         return false;
     std::atomic_thread_fence(std::memory_order_acquire);
-    for (uint32_t z = 0; z < region.planes; ++z)
-        for (uint32_t y = 0; y < region.height; ++y)
-            std::memcpy(static_cast<uint8_t *>(bytes) + z * image + y * row, slot.memory.cpu + z * plane + y * pitch,
-                        line);
+    moveRows(region, static_cast<uint8_t *>(bytes), row, image, slot.memory.cpu, pitch, plane, false);
     return true;
 }
 

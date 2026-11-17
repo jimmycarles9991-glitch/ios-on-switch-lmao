@@ -27,8 +27,9 @@ enum Pixels {
         }
     }
 
-    /// Mean and largest per-channel difference of two images of one size, drawn into sRGB RGBX, and their PSNR in dB.
-    static func difference(_ a: CGImage, _ b: CGImage) -> (mean: Double, max: Int, psnr: Double)? {
+    /// Mean and largest per-channel difference of two images of one size, drawn into sRGB RGBX, each channel's own mean
+    /// (R, G, B), and their PSNR in dB.
+    static func difference(_ a: CGImage, _ b: CGImage) -> (mean: Double, max: Int, psnr: Double, rgb: [Double])? {
         guard a.width == b.width, a.height == b.height else { return nil }
         let rows = [a, b].map { image -> [UInt8] in
             var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
@@ -41,20 +42,21 @@ enum Pixels {
             }
             return bytes
         }
-        var sum = 0
+        var sums = [0, 0, 0]
         var squares = 0
         var largest = 0
         for i in stride(from: 0, to: rows[0].count, by: 4) {
             for c in 0..<3 {
                 let d = abs(Int(rows[0][i + c]) - Int(rows[1][i + c]))
-                sum += d
+                sums[c] += d
                 squares += d * d
                 largest = max(largest, d)
             }
         }
-        let samples = Double(a.width * a.height * 3)
+        let pixels = Double(a.width * a.height)
+        let samples = pixels * 3
         let psnr = squares == 0 ? 99 : 10 * log10(255 * 255 / (Double(squares) / samples))
-        return (Double(sum) / samples, largest, psnr)
+        return (Double(sums.reduce(0, +)) / samples, largest, psnr, sums.map { Double($0) / pixels })
     }
 
     static func patternImage(_ pattern: Pattern) -> CGImage {
@@ -165,6 +167,11 @@ struct ImageDecodeTest: HWTest {
             }
             metrics.set("\(label)_vs_software_mean", d.mean, digits: 2)
             metrics.set("\(label)_vs_software_max", d.max)
+            if label == "thumb" {
+                for (channel, mean) in zip(["r", "g", "b"], d.rgb) {
+                    metrics.set("thumb_vs_software_\(channel)", mean, digits: 2)
+                }
+            }
             checks.append(("\(label) within 1.5 mean of the software decode", d.mean <= 1.5))
         }
         for (label, divisor) in still.scaledThumbnails {

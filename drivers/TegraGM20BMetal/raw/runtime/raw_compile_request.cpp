@@ -11,8 +11,14 @@
 namespace raw {
 namespace {
 
-constexpr char kRequestMagic[8] = {'S', 'W', 'C', 'R', 'E', 'Q', '0', '3'};
+// Any change to a field's bytes or meaning takes the next magic: the compiler's request log (compiler/compiler_log.h)
+// keeps requests across builds and replays them, so a request of another layout must be refused whole
+constexpr char kRequestMagic[8] = {'S', 'W', 'C', 'R', 'E', 'Q', '0', '5'};
 constexpr char kNameMagic[8] = {'S', 'W', 'R', 'A', 'W', 'N', 'M', '2'};
+// A cubic bind's sampler flag byte: bit 0 normalized, bit 1 the vertex stage, no other; its texture's slot byte's top
+// bit: the vertex stage. Each stage binds up to 16 samplers
+constexpr uint8_t kCubicNormalizedBit = 1, kCubicVertexBit = 2, kCubicVertexSlot = 0x80;
+constexpr uint32_t kCubicBindLimit = 32;
 
 // A struct of plain values with no padding, written and read as its bytes: every field it has goes over the wire
 template <class T> void writeWhole(Writer &w, const T &v)
@@ -60,15 +66,17 @@ void writeVariant(Writer &w, const RenderVariant &v)
 {
     w.value(uint32_t(v.cubic.samplers.size()));
     for (const CubicBinds::Sampler &s : v.cubic.samplers) {
-        const uint8_t packed[6] = {s.slot, s.s, s.t, s.r, s.border, uint8_t(s.normalized)};
+        const uint8_t packed[6] = {
+            s.slot, s.s, s.t, s.r, s.border, uint8_t(s.normalized | (s.stage == kCubicVertex ? kCubicVertexBit : 0))};
         w.bytes(packed, sizeof packed);
     }
     w.value(uint32_t(v.cubic.textures.size()));
     for (const CubicBinds::Texture &t : v.cubic.textures) {
-        w.value(t.slot);
+        w.value(uint8_t(t.slot | (t.stage == kCubicVertex ? kCubicVertexSlot : 0)));
         w.value(t.format);
     }
     w.value(v.fragmentTests);
+    w.value(v.xrShadows);
     w.value(uint8_t(v.twoPlane));
     w.value(v.xrSlots);
     w.value(uint32_t(v.written.size()));
@@ -78,25 +86,31 @@ void writeVariant(Writer &w, const RenderVariant &v)
     }
 }
 
-// False: more binds than a variant has
+// False: more binds than a variant has, or a sampler flag this layout does not define
 bool readVariant(Reader &r, RenderVariant &v)
 {
     const uint32_t samplers = r.value<uint32_t>();
-    if (!r.ok() || samplers > 16)
+    if (!r.ok() || samplers > kCubicBindLimit)
         return false;
     for (uint32_t i = 0; i < samplers; ++i) {
         uint8_t packed[6] = {};
         r.bytes(packed, sizeof packed);
-        v.cubic.samplers.push_back({packed[0], packed[1], packed[2], packed[3], packed[4], packed[5] != 0});
+        if (packed[5] & ~(kCubicNormalizedBit | kCubicVertexBit))
+            return false;
+        const uint8_t stage = packed[5] & kCubicVertexBit ? kCubicVertex : kCubicFragment;
+        v.cubic.samplers.push_back(
+            {packed[0], packed[1], packed[2], packed[3], packed[4], (packed[5] & kCubicNormalizedBit) != 0, stage});
     }
     const uint32_t textures = r.value<uint32_t>();
-    if (!r.ok() || textures > 16)
+    if (!r.ok() || textures > kCubicBindLimit)
         return false;
     for (uint32_t i = 0; i < textures; ++i) {
         const uint8_t slot = r.value<uint8_t>();
-        v.cubic.textures.push_back({slot, r.value<uint32_t>()});
+        const uint8_t stage = slot & kCubicVertexSlot ? kCubicVertex : kCubicFragment;
+        v.cubic.textures.push_back({uint8_t(slot & ~kCubicVertexSlot), r.value<uint32_t>(), stage});
     }
     v.fragmentTests = r.value<uint8_t>();
+    v.xrShadows = r.value<uint8_t>();
     v.twoPlane = r.value<uint8_t>() != 0;
     v.xrSlots = r.value<uint16_t>();
     const uint32_t written = r.value<uint32_t>();
@@ -112,23 +126,45 @@ bool readVariant(Reader &r, RenderVariant &v)
 bool knownTag(const CompileRequest &r, size_t index)
 {
     const std::string &tag = r.stages[index].tag;
-    if (r.kind == RequestKind::Kernel)
-        return tag == "k";
-    if (index < 2)
-        return tag == (index ? "f" : "v");
+    if (r.kind == RequestKind::Kernel || r.kind == RequestKind::Facts || computeReflection(r))
+        return index == 0 ? tag == "k" : tag == "kl" || tag == "kp" || tag == "kb" || tag == "kg";
+    if (functionAttributes(r))
+        return tag == "a";
+    if (bufferEncoders(r))
+        return tag == "b";
+    if (index == 0)
+        return tag == "v";
+    if (index == 1 && tag == "f")
+        return true;
     return tag == "vl" || tag == "vp" || tag == "fl" || tag == "fp";
+}
+
+bool knownCodeGen(uint32_t type)
+{
+    return type == kCodeGenSource || type == kCodeGenStitch || type == kCodeGenImageFilters;
+}
+
+bool saneLibrary(const CompileRequest &r)
+{
+    return r.stages.empty() && r.libraries.empty() && r.variant.name().empty() && r.kernel.textures.empty() &&
+           r.kernel.samplers.empty() && !r.key.empty() && r.form == RequestForm::Primary && !r.codeGen.empty() &&
+           knownCodeGen(r.codeGenType);
 }
 
 bool sane(const CompileRequest &r)
 {
-    const bool kernel = r.kind == RequestKind::Kernel;
-    if ((kernel ? r.stages.size() != 1 : r.stages.size() < 2) || r.stages.size() > kRequestStageLimit ||
-        r.libraries.empty() || r.libraries.size() > kRequestLibraryLimit ||
+    if (r.kind == RequestKind::Library)
+        return saneLibrary(r);
+    const bool kernel = r.kind == RequestKind::Kernel || r.kind == RequestKind::Facts || computeReflection(r) ||
+                        functionAttributes(r) || bufferEncoders(r);
+    if (r.stages.empty() || ((functionAttributes(r) || bufferEncoders(r)) && r.stages.size() != 1) ||
+        r.stages.size() > kRequestStageLimit || r.libraries.empty() || r.libraries.size() > kRequestLibraryLimit ||
         r.kernel.textures.size() > kRequestBindLimit || r.kernel.samplers.size() > kRequestBindLimit || r.key.empty() ||
-        (kernel && r.form != RequestForm::Primary))
+        ((kernel || r.kind == RequestKind::Reflection) && r.form != RequestForm::Primary))
         return false;
     for (size_t i = 0; i < r.stages.size(); ++i)
-        if (!knownTag(r, i) || r.stages[i].library >= r.libraries.size() || r.stages[i].function.empty())
+        if (!knownTag(r, i) || r.stages[i].library >= r.libraries.size() || r.stages[i].function.empty() ||
+            (r.stages[i].tag != "kg" && !r.stages[i].group.empty()))
             return false;
     for (const RequestLibrary &l : r.libraries)
         if (l.system ? !l.bytes.empty() || !systemLibraryPath(l.path) : l.bytes.empty())
@@ -163,6 +199,16 @@ NmbDirectDispatch KernelRequest::dispatch() const
     return d;
 }
 
+size_t fragmentStage(const CompileRequest &r)
+{
+    return r.stages.size() > 1 && r.stages[1].tag == "f" ? 1 : kNoStage;
+}
+
+size_t firstLinked(const CompileRequest &r)
+{
+    return fragmentStage(r) == kNoStage ? 1 : 2;
+}
+
 std::string encodeRequest(const CompileRequest &r)
 {
     Writer w;
@@ -180,6 +226,7 @@ std::string encodeRequest(const CompileRequest &r)
         w.text(s.name);
         w.value(uint8_t(s.specialized));
         w.value(s.library);
+        w.text(s.group);
     }
     w.value(uint32_t(r.libraries.size()));
     for (const RequestLibrary &l : r.libraries) {
@@ -189,6 +236,10 @@ std::string encodeRequest(const CompileRequest &r)
     }
     writeVariant(w, r.variant);
     writeKernel(w, r.kernel);
+    if (r.kind == RequestKind::Library) {
+        w.value(r.codeGenType);
+        w.text(r.codeGen);
+    }
     return w.out;
 }
 
@@ -202,12 +253,13 @@ bool decodeRequest(const std::string &bytes, CompileRequest &out)
     CompileRequest q;
     q.stack = r.value<uint64_t>();
     const uint8_t kind = r.value<uint8_t>(), form = r.value<uint8_t>();
-    q.kind = kind ? RequestKind::Kernel : RequestKind::Render;
+    q.kind = RequestKind(kind);
     q.form = form ? RequestForm::Split : RequestForm::Primary;
     q.key = r.text();
     readWhole(r, q.fields);
     const uint32_t stages = r.value<uint32_t>();
-    if (!r.ok() || memcmp(magic, kRequestMagic, sizeof magic) || kind > 1 || form > 1 || stages > kRequestStageLimit)
+    if (!r.ok() || memcmp(magic, kRequestMagic, sizeof magic) || kind > uint8_t(RequestKind::Reflection) || form > 1 ||
+        stages > kRequestStageLimit)
         return false;
     q.stages.resize(stages);
     for (RequestStage &s : q.stages) {
@@ -217,6 +269,7 @@ bool decodeRequest(const std::string &bytes, CompileRequest &out)
         s.name = r.text();
         s.specialized = r.value<uint8_t>() != 0;
         s.library = r.value<uint32_t>();
+        s.group = r.text();
     }
     const uint32_t libraries = r.value<uint32_t>();
     if (!r.ok() || libraries > kRequestLibraryLimit)
@@ -230,6 +283,10 @@ bool decodeRequest(const std::string &bytes, CompileRequest &out)
     if (!readVariant(r, q.variant))
         return false;
     readKernel(r, q.kernel);
+    if (q.kind == RequestKind::Library) {
+        q.codeGenType = r.value<uint32_t>();
+        q.codeGen = r.text();
+    }
     if (!r.ok() || r.at() != bytes.size() || !sane(q))
         return false;
     out = std::move(q);
@@ -292,6 +349,8 @@ Digest storeName(const CacheKey &k, const CompileRequest &r, const std::vector<L
         hashText(c, s.constants);
         hashText(c, s.name);
         hashValue(c, uint8_t(s.specialized));
+        if (s.tag == "kg")
+            hashText(c, s.group);
         const LibraryIdentity none;
         const LibraryIdentity &l = s.library < libraries.size() ? libraries[s.library] : none;
         hashValue(c, uint8_t(l.system));
@@ -316,6 +375,68 @@ CacheKey kernelCacheKey(uint64_t stack, const std::string &computeKey)
     CacheKey k;
     k.stack = stack;
     k.key = "kernel | " + computeKey;
+    return k;
+}
+
+bool computeReflection(const CompileRequest &r)
+{
+    return r.kind == RequestKind::Reflection && !r.stages.empty() && r.stages[0].tag == "k";
+}
+
+CacheKey computeReflectionKey(uint64_t stack, const std::string &stateKey)
+{
+    CacheKey k;
+    k.stack = stack;
+    k.key = "reflection | " + stateKey;
+    return k;
+}
+
+bool functionAttributes(const CompileRequest &r)
+{
+    return r.kind == RequestKind::Reflection && !r.stages.empty() && r.stages[0].tag == "a";
+}
+
+CacheKey functionAttributesCacheKey(uint64_t stack, const std::string &functionKey)
+{
+    CacheKey k;
+    k.stack = stack;
+    k.key = "attributes | " + functionKey;
+    return k;
+}
+
+bool bufferEncoders(const CompileRequest &r)
+{
+    return r.kind == RequestKind::Reflection && !r.stages.empty() && r.stages[0].tag == "b";
+}
+
+CacheKey bufferEncodersCacheKey(uint64_t stack, const std::string &functionKey)
+{
+    CacheKey k;
+    k.stack = stack;
+    k.key = "buffer encoders | " + functionKey;
+    return k;
+}
+
+CacheKey factsCacheKey(uint64_t stack, const std::string &stateKey)
+{
+    CacheKey k;
+    k.stack = stack;
+    k.key = "facts | " + stateKey;
+    return k;
+}
+
+CacheKey libraryCacheKey(uint64_t stack, uint32_t type, const std::string &bytes)
+{
+    static constexpr char kDigits[] = "0123456789abcdef";
+    const Digest digest = sha256(bytes.data(), bytes.size());
+    std::string hex;
+    for (const uint8_t b : digest) {
+        hex += kDigits[b >> 4];
+        hex += kDigits[b & 15];
+    }
+    CacheKey k;
+    k.stack = stack;
+    k.key = "library | " + std::to_string(type) + " | " + hex;
     return k;
 }
 

@@ -1,0 +1,75 @@
+# QuartzCore's FragmentShaderConfig per IPSW kind (<build>.txt: its fragment buffer slot, length and padding), which
+# Core Animation's generic merge states (..Xghfc) branch on. The selected kind's layout is raw_ca_selector_layout.h:
+# #include "raw_ca_selector_layout.h" with -I$(GENDIR)/drivers/TegraGM20BMetal/precompile/ca-selectors.
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(["*.txt"]))
+
+py_binary(
+    name = "ca_selectors",
+    srcs = ["ca_selectors.py"],
+    main = "ca_selectors.py",
+)
+
+py_test(
+    name = "ca_selectors_test",
+    size = "small",
+    srcs = [
+        "ca_selectors.py",
+        "ca_selectors_test.py",
+    ],
+    data = glob(["*.txt"]),
+    main = "ca_selectors_test.py",
+)
+
+genrule(
+    name = "layout",
+    srcs = select({"//ipsw:" + kind: [kind + ".txt"] for kind in ("21H461", "24B119")}),
+    outs = ["raw_ca_selector_layout.h"],
+    cmd = "$(execpath :ca_selectors) $< $@",
+    tools = [":ca_selectors"],
+)
+
+cc_library(
+    name = "layout_h",
+    hdrs = [":raw_ca_selector_layout.h"],
+)
+
+host_test(
+    name = "ca_selector_ids_test",
+    srcs = ["ca_selector_ids_test.cpp"],
+    cxx_std = "c++17",
+    deps = [":layout_h"],
+)
+
+# The raw pack's PackSelectors section (raw/runtime/raw_pack_selectors.h): the runtime's lookup over the bytes the
+# generator writes (raw/pack/selector_section.py, which pack_selectors_test.py holds to the same bytes)
+host_test(
+    name = "pack_selectors_cpp_test",
+    srcs = [
+        "pack_selectors_test.cpp",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack_selectors.h",
+        "//drivers/TegraGM20BMetal:raw/pack/selector_configs.h",
+    ],
+    cxx_std = "c++17",
+)
+
+# The IPSW kinds' tables, of which //gpu/seed:raw_pack takes the selected kind's
+filegroup(
+    name = "tables",
+    srcs = glob(["*.txt"]),
+)
+
+py_test(
+    name = "pack_selectors_test",
+    srcs = ["pack_selectors_test.py"],
+    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+)

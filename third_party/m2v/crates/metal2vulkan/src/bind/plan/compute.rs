@@ -611,6 +611,10 @@ fn plan(p: &ComputePipeline, device: &Device, shape: &BindShape) -> Result<Bindi
                 BindingSource::RawTexture(slot) => {
                     resources.raw_texture(set.set, b.binding, b.ty, slot)?
                 }
+                // A two-plane `RGB10A8_2P_XR10` texture's alpha plane.
+                BindingSource::TexturePlane(slot) => {
+                    resources.texture_plane(set.set, b.binding, b.ty, slot)?
+                }
                 // A tile function's attachment.
                 BindingSource::TileAttachment(color_index) => WriteSource::TileAttachment {
                     color_index,

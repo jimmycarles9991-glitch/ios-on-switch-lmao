@@ -2,9 +2,11 @@
 // The functions a metallib lists, read by the facade itself (MetallibEntries.h over the AIR slice MetallibSlice.h picks), so
 // a library and its functions need no m2v object until something only m2v answers is asked of them.
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
+#include <vector>
 #include "MetallibEntries.h"
 #include "MetallibSlice.h"
 
@@ -38,24 +40,29 @@ constexpr uint32_t metalFunctionType(uint8_t tag)
 struct MetallibFunctions {
     const uint8_t *slice = nullptr;
     size_t sliceBytes = 0;
+    bool listed = false;                              // its whole function list read, which may name none
     std::unordered_map<std::string, uint32_t> types;  // each listed function's metalFunctionType (0: m2v answers it)
+    // In list order, as Metal's functionNames and externFunctionNames answer them (MetallibEntries.h kMetallibExternType)
+    std::vector<std::string> names, externs;
 
     // False: no AIR slice Metal takes, or a function list this does not read
     bool read(const uint8_t *file, size_t length)
     {
         size_t at = 0, size = 0;
-        types.clear();
+        *this = {};
         if (!switch_metal::airSlice(file, length, at, size))
             return false;
         const bool whole =
             switch_metal::forEachMetallibEntry(file + at, size, [&](const switch_metal::MetallibEntry &e) {
                 types[e.name] = e.type ? metalFunctionType(*e.type) : 0;
+                (e.type == switch_metal::kMetallibExternType ? externs : names).push_back(e.name);
                 return true;
             });
-        if (!whole || types.empty()) {
-            types.clear();
+        if (!whole) {
+            *this = {};
             return false;
         }
+        listed = true;
         slice = file + at;
         sliceBytes = size;
         return true;
@@ -71,6 +78,12 @@ struct MetallibFunctions {
     bool lists(const std::string &name) const
     {
         return types.count(name) != 0;
+    }
+
+    // A Core Image extern (TYPE 5): Metal makes its function by name, which Core Image's filter link takes
+    bool isExtern(const std::string &name) const
+    {
+        return std::find(externs.begin(), externs.end(), name) != externs.end();
     }
 };
 

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// The build's compile profile (bridge/NativeMetalOffline.rs), which directpack's offline compile makes its translator
+// The build's compile profile (translate/NativeMetalOffline.rs), which directpack's offline compile makes its translator
 // devices of, against the m2v runtime device this Mac's NVK twin opens on the mock GM20B.
 // usage: compile-profile <nvk dylib> <cache dir> [--check]
-// Without --check it prints the runtime's profile, which drivers/NativeMetal/bridge/compile_profile/<build>.json holds;
+// Without --check it prints the runtime's profile, which drivers/TegraGM20BMetal/translate/compile_profile/<build>.json holds;
 // with it, exits 1 naming the difference where the built-in profile is not the runtime's.
 #include <cstdio>
 #include <cstring>

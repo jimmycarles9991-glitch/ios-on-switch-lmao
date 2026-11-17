@@ -56,6 +56,16 @@ public:
         perJob_ = perJob;
     }
 
+    // Held, the jobs it has not begun stay in flight
+    void hold(bool held)
+    {
+        {
+            std::lock_guard<std::mutex> g(lock_);
+            held_ = held;
+        }
+        wake_.notify_all();
+    }
+
     // Jobs submitted since the GPU started
     size_t submitted()
     {
@@ -80,7 +90,7 @@ private:
             {
                 std::unique_lock<std::mutex> g(lock_);
                 wake_.wait(g, [&] {
-                    return stopping_ || next_ - first_ < submittedAt_.size();
+                    return stopping_ || (!held_ && next_ - first_ < submittedAt_.size());
                 });
                 if (stopping_)
                     return;
@@ -107,7 +117,7 @@ private:
     std::condition_variable wake_;
     size_t first_ = 0, next_ = 0;
     std::vector<Clock::time_point> submittedAt_;
-    bool stopping_ = false;
+    bool held_ = false, stopping_ = false;
     std::thread thread_;
 };
 

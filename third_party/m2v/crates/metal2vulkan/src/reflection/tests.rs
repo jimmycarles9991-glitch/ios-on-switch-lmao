@@ -42,10 +42,12 @@ fn the_type_grammar_names_metal_data_types() {
         ("char", Some(DataType::Char)),
         ("uchar2", Some(DataType::UChar2)),
         ("ulong", Some(DataType::ULong)),
-        // Matrices are float and half only; widths are 2 to 4.
+        // Matrices are float and half only; widths are 2 to 4, and Metal names no type for a
+        // one-component vector.
         ("int2x2", None),
         ("float5", None),
-        ("float1", None),
+        ("float1", Some(DataType::None)),
+        ("packed_int1", Some(DataType::None)),
         ("ReflectionArgs", None),
         ("", None),
     ] {

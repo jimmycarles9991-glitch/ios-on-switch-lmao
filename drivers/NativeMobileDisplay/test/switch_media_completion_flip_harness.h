@@ -19,12 +19,71 @@
 
 #include "../../TegraGM20B/SwitchGpuBacking.h"
 #include "../../TegraHost1x/SwitchHost1xFence.h"
+#include "../../TegraHost1x/SwitchHost1xDisplay.h"
 #include "../SwitchCompletionFlip.h"
 #include "display_filter_context.h"
 #include "../SwitchDisplayComposition.h"
 #include "../SwitchDisplayRetirement.h"
 #include "../SwitchDisplayMemoryEnvelope.h"
 #include "../SwitchLandscapeWindows.h"
+
+namespace media_flip_test {
+extern int gFenceResult;
+extern unsigned gFences;
+
+struct HostStream {
+    SwitchHost1xDisplayStream *owner = nullptr;
+    std::vector<std::pair<uint32_t, uint32_t>> stores;
+    std::vector<switch_gpu_backing_token> producers;
+    uint32_t update = 0, request = 0, sequence = 0;
+    bool executed = false;
+    std::function<void(uint32_t, uint32_t)> write;
+};
+
+inline HostStream gHost;
+inline std::function<void(void *, int)> gDelivered;
+}
+
+inline int switch_host1x_display_start(SwitchHost1xDisplayStream *stream)
+{
+    stream->syncpt = 171;
+    return 0;
+}
+
+inline int switch_host1x_display_submit(SwitchHost1xDisplayStream *stream, const switch_gpu_backing_token *producers,
+                                        uint32_t count, const uint32_t *registers, const uint32_t *values,
+                                        uint32_t stores, uint32_t update, uint32_t request,
+                                        void (*completed)(void *, int), void *context)
+{
+    using namespace media_flip_test;
+    ++gFences;
+    if (gFenceResult)
+        return gFenceResult;
+    gHost.owner = stream;
+    gHost.stores.clear();
+    for (uint32_t i = 0; i < stores; ++i)
+        gHost.stores.emplace_back(registers[i], values[i]);
+    gHost.producers.assign(producers, producers + count);
+    gHost.update = update;
+    gHost.request = request;
+    gHost.executed = false;
+    stream->status = 0;
+    stream->restore = false;
+    stream->queued = true;
+    stream->completed = completed;
+    stream->context = context;
+    stream->fence.threshold = ++gHost.sequence;
+    return 0;
+}
+
+inline int switch_host1x_display_cancel(SwitchHost1xDisplayStream *stream)
+{
+    if (stream->queued && !media_flip_test::gHost.executed) {
+        stream->restore = true;
+        stream->status = SwitchHost1xDisplayStream::kCancelled;
+    }
+    return stream->status;
+}
 
 namespace media_flip_test {
 
@@ -113,8 +172,10 @@ inline struct {
     bool panicking = false;
 } gPanicRestore;
 
-inline void native_legacy_gpu_complete(void *, int)
-{}
+inline void native_legacy_gpu_complete(void *display, int status)
+{
+    gDelivered(display, status);
+}
 
 inline int switch_host1x_token_fence(const switch_gpu_backing_token *, uint32_t, void (*)(void *, int), void *)
 {
@@ -287,6 +348,18 @@ struct Display {
         mediaFlip = {};
         mediaFlipUnverified = PlaneCommits::kNone;
         mediaFlipRequestedSeq = 0;
+        mediaHostStream = {};
+        mediaHostGeneration = mediaHostCancelled = mediaHostRestored = 0;
+        mediaHostHeldSlots = 0;
+        gHost = {};
+        gHost.write = [this](uint32_t word, uint32_t value) {
+            model.write(word, value);
+        };
+        gDelivered = [](void *display, int status) {
+            static_cast<Display *>(display)->deliver(status);
+        };
+        if (!startMediaHostFlip())
+            throw std::runtime_error("host stream setup");
         planeLatch.values = sets;
         switch_display_memory_head mode{};
         mode.pixel_clock_hz = 78000000;
@@ -402,22 +475,58 @@ struct Display {
 
     // host1x's syncpoint filter with every waiter's threshold reached (or only `threshold`'s); the stores land as a
     // completion's do.
-    void filter(uint64_t threshold = 0)
+    void hardware()
     {
-        const FilterContext context;
+        if (!gHost.owner || gHost.owner->status || gHost.executed || gProducerCertain != 1)
+            return;
+        for (const auto &producer : gHost.producers)
+            if (gUncertain.count(producer.value) && !gDoneAtArm.count(producer.value))
+                return;
+        for (const auto &[word, value] : gHost.stores)
+            gHost.write(word, value);
+        gHost.write(kDcStateControl, gHost.update);
+        gHost.write(kDcStateControl, gHost.request);
+        gHost.executed = true;
+    }
+
+    void filter([[maybe_unused]] uint64_t threshold = 0)
+    {
         model.completing = true;
+        hardware();
+        const FilterContext context;
         ++gPreemptionOff;
-        for (const auto &waiter : gWaiters)
-            if (!threshold || waiter.threshold == static_cast<uint32_t>(threshold))
+        if (gHost.executed)
+            for (const auto &waiter : gWaiters)
                 waiter.fn(waiter.ctx);
         --gPreemptionOff;
         model.completing = false;
     }
 
-    // gpuComplete on the producer's thread, after the pass that retired its filter waiters.
     void complete(int status)
     {
-        gWaiters.clear();
+        if (gHost.owner && gHost.owner->queued) {
+            auto *stream = gHost.owner;
+            if (status && !gHost.executed)
+                stream->status = status;
+            if (!status) {
+                gUncertain.clear();
+                gProducerCertain = 1;
+                model.completing = true;
+                hardware();
+                model.completing = false;
+            }
+            gWaiters.clear();
+            stream->queued = false;
+            gHost.owner = nullptr;
+            stream->completed(stream->context, stream->status ? stream->status : status);
+        } else {
+            gWaiters.clear();
+            deliver(status);
+        }
+    }
+
+    void deliver(int status)
+    {
         status = mediaFlipVerdict(status);
         gpuStatus = status;
         gpuDonePending = true;
@@ -493,7 +602,9 @@ struct Display {
     // NativePlanesDisplay.h retireUnshown: carried by the set still out, or retired now.
     void retireUnshown(uint64_t seq)
     {
-        if (planeLatch.requested())
+        if (planeRecoveryWaits())
+            planeRecoveryTarget.seq = seq;
+        else if (planeLatch.requested())
             planeSetOf(planeLatch.armed).seq = seq;
         else if (planeHeldSet)
             planeHeld.seq = seq;
@@ -542,6 +653,7 @@ struct Display {
         mediaFlipFromGate();
         const uint64_t shown = suspendShownSeq();
         planeLatch.settle();
+        mediaHostHeldSlots = 0;
         hwSuspended = true;
         retireSuspendShown(shown);
     }

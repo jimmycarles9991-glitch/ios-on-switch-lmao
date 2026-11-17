@@ -71,7 +71,7 @@ protected:
         // the same state with a sampled texture: the template of a program that samples
         raw::PackPipeline textured = pipeline;
         textured.keyHash = kTexturedKey;
-        textured.entries = 1;
+        raw::setEntryCount(textured, 1);
         textured.entry[0] = {kTextureOffset, raw::EntryTexture, 2, 0, raw::SamplerSlot, 0, 0};
         const raw::PackPipeline both[2] = {pipeline, textured};
         std::vector<uint8_t> heap(0x200, 0x5a);

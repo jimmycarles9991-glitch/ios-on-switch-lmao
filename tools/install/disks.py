@@ -36,6 +36,7 @@ RAW = ('-imagekey', 'diskimage-class=CRawDiskImage')
 class Attachment:
     whole: str
     volumes: list[str]
+    container: str | None  # the APFS container disk macOS synthesized for it (host.apfs_container), if any
 
 
 def _entities(image: Path, writable: bool, raw: bool, log: host.Log) -> list[dict]:
@@ -57,9 +58,24 @@ def attached(image: Path, log: host.Log, writable: bool = True, raw: bool = Fals
         if e.get('content-hint', '').upper() == APFS_VOLUME and re.fullmatch(r'/dev/disk\d+s\d+', e['dev-entry'])
     ]
     try:
-        yield Attachment(disks[0], volumes)
+        yield Attachment(disks[0], volumes, host.attached_container(entities))
     finally:
-        host.run('hdiutil', 'detach', disks[0], log=log, check=False)
+        detach(disks[0], log)
+
+
+def detach(disk: str, log: host.Log | None) -> None:
+    """Detach an image's disk; one that stays attached is an error.
+
+    A daemon that rescans a disk after its volume unmounts (storagekitd) can hold it open for a moment, and
+    DiskArbitration then refuses the eject (EBUSY). The disk is ours and its volume is unmounted, so the hold is
+    overridden. A disk left attached would be handed, at its old size, to the next attach of the same file.
+    """
+    try:
+        host.run('hdiutil', 'detach', disk, log=log)
+    except host.HostError as refused:
+        if log:
+            log(f'{disk}: detach refused, forcing it ({refused})')
+        host.run('hdiutil', 'detach', '-force', disk, log=log)
 
 
 @contextlib.contextmanager

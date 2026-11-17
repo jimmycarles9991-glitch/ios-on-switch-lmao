@@ -346,6 +346,10 @@ void switch_mc_errors_resume(void)
 {
 }
 
+void switch_mc_errors_detached(uint32_t)
+{
+}
+
 uint32_t tegra_mc_error_latest(uint32_t *intstatus, uint32_t *status, uint32_t *address)
 {
 	*intstatus = *status = *address = 0;

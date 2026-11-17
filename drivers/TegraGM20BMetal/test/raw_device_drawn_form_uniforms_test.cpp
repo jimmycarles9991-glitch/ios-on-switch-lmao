@@ -6,8 +6,10 @@
 // set, the bytes that draw bound.
 #include "raw_device_harness.h"
 #include "../raw/runtime/raw_record.h"
+#include "../raw/runtime/raw_mme.h"
 #include "../raw/runtime/raw_set_reads.h"
 #include "../../../kits/SwitchGM20B/SwitchGM20B3D.h"
+#include <map>
 
 namespace {
 
@@ -92,6 +94,13 @@ std::vector<uint32_t> valuesOf(const std::vector<Method> &m, uint32_t method)
     return out;
 }
 
+bool drawMacro(uint32_t method)
+{
+    const uint32_t first = NVB197_CALL_MME_MACRO(0), last = NVB197_CALL_MME_MACRO(127);
+    return method >= first && method <= last && (method - first) % 8 == 0 &&
+           raw::mme::countedAsDraw((method - first) / 8);
+}
+
 // A uniform buffer entry of the fragment stage at set-0 byte 0, its residual in root push word kResidualWord
 raw::PackEntry fragmentUniform()
 {
@@ -102,7 +111,7 @@ void describe(raw::PackPipeline &p, uint64_t keyHash)
 {
     p.keyHash = keyHash;
     p.flags = raw::PipelinePushMetadata;
-    p.entries = 1;
+    raw::setEntryCount(p, 1);
     p.entry[0] = fragmentUniform();
     p.setBytes = 16;
     p.pushMask = 1u << kResidualWord;
@@ -124,8 +133,9 @@ raw::RuntimeRecord record(uint64_t keyHash, std::vector<uint8_t> fragmentCbufs, 
     memcpy(r.programs[1].image.data() + 80 + 8, &code, sizeof code);
     describe(r.pipeline, keyHash);
     const raw::CapturedProgram &fs = r.programs[1];
-    r.pipeline.memoryEntries = raw::programSetReads(fs.image.data() + 80, fs.image.size() - 80, fs.cbufTypes.data(),
-                                                    uint32_t(fs.cbufTypes.size()), fs.boundTextures, r.pipeline);
+    r.pipeline.memoryEntries = 0;
+    raw::programSetReads(fs.image.data() + 80, fs.image.size() - 80, fs.cbufTypes.data(), uint32_t(fs.cbufTypes.size()),
+                         fs.boundTextures, raw::SetEntries(r.pipeline, nullptr), &r.pipeline.memoryEntries);
     r.blob = {0x1a00, 0x1111};
     return r;
 }
@@ -233,19 +243,23 @@ TEST_F(DrawnFormUniforms, ABarrierTwinReadingTheSetUploadsItForEachDraw)
 
 constexpr uint64_t kVariantKey = 0xf2a;
 constexpr uint32_t kGenericProgram = 1, kVariantProgram = 2;
+constexpr uint32_t kIteratedProgram[] = {0x10003201, 0x30006001, 0x0000ca19, 0x30006001,
+                                         0x1000ca11, 0x00509031, 0x30384201, 0x00609029};
 
 // A pack of one state whose fragment program has a variant for a residual-0 uniform buffer (raw_pack.h
 // AssumeUniformAligned), the generic program and the variant both reading the fragment buffer at constant buffer 1
-std::string variantPack()
+std::string variantPack(bool requiredTurned = false, bool iterated = false)
 {
-    constexpr uint32_t kPrograms = 0x400, kPipelines = 0x500, kVariants = 0x800, kStrings = 0x900, kBlob = 0xa00,
-                       kHeap = 0x1000, kSlotBytes = 0x100;
+    constexpr uint32_t kPrograms = 0x400, kPipelines = 0x500,
+                       kVariants = (kPipelines + 2 * sizeof(raw::PackPipeline) + 0xff) & ~0xffu,
+                       kStrings = kVariants + 0x100, kBlob = kStrings + 0x100, kIterated = kBlob + 0x100,
+                       kHeap = (kIterated + sizeof(raw::PackIteratedBlend) + 0xfff) & ~0xfffu, kSlotBytes = 0x100;
     std::vector<uint8_t> file(kHeap + 3 * kSlotBytes, 0);
     raw::PackHeader h = {};
     memcpy(h.magic, "GM20BPK1", 8);
     h.version = raw::kPackVersion;
     h.programs = 3;
-    h.pipelines = 1;
+    h.pipelines = 2;
     raw::PackProgram programs[3] = {};
     for (uint32_t i = 0; i < 3; i++) {
         programs[i].heapOffset = kSlotBytes * i;
@@ -264,19 +278,45 @@ std::string variantPack()
     pp.blobDwords = 2;
     pp.uniform[0] = {0, 1, 0, 0};
     pp.variantCount[1] = 1;
-    const raw::PackVariant variant = {raw::AssumeUniformAligned, kVariantProgram};
+    const raw::PackVariant variant = {requiredTurned ? raw::AssumeTurned : raw::AssumeUniformAligned, kVariantProgram};
+    raw::PackPipeline pipelines[2] = {pp, pp};
+    pipelines[1].keyHash = kVariantKey + 1;
+    pipelines[1].variantCount[1] = 0;
+    if (iterated) {
+        pipelines[0].flags |= raw::PipelineFetchFreeForm;
+        pipelines[0].fetchRung[0] = raw::FetchIteratedBlend;
+        pipelines[0].iterated = 1;
+        pipelines[0].blobDwords = pipelines[1].blobDwords = 4;
+    }
     const char strings[] = "\0samples=1 c0=70 ds=0/0 variant";
-    const uint32_t blob[] = {0x1a00, 0x1111};
+    const char iteratedStrings[] = "\0samples=1 c0=70:15:0 c1=70:0:0 ds=0/0 variant";
+    const uint32_t blob[] = {0x1a00, 0x1111, 0x1a04, 0};
     const auto put = [&](raw::PackSectionId id, uint32_t at, const void *bytes, size_t n) {
         h.section[id] = {at, n};
         memcpy(file.data() + at, bytes, n);
     };
     put(raw::PackPrograms, kPrograms, programs, sizeof programs);
-    put(raw::PackPipelines, kPipelines, &pp, sizeof pp);
+    put(raw::PackPipelines, kPipelines, pipelines, sizeof pipelines);
     put(raw::PackVariants, kVariants, &variant, sizeof variant);
-    put(raw::PackStrings, kStrings, strings, sizeof strings);
+    put(raw::PackStrings, kStrings, iterated ? iteratedStrings : strings,
+        iterated ? sizeof iteratedStrings : sizeof strings);
     put(raw::PackBlob, kBlob, blob, sizeof blob);
+    if (iterated) {
+        raw::PackIteratedBlend blend = {};
+        blend.count = sizeof kIteratedProgram / sizeof *kIteratedProgram;
+        blend.enable = 1;
+        blend.uniformSlot = raw::kNoUniform;
+        blend.alphaSource = 0x4001;
+        blend.alphaDest = 0x4303;
+        blend.name = raw::Pack::fnv("dif", 3);
+        memcpy(blend.program, kIteratedProgram, sizeof kIteratedProgram);
+        put(raw::PackIterated, kIterated, &blend, sizeof blend);
+    }
     h.section[raw::PackHeap] = {kHeap, 3 * kSlotBytes};
+    if (requiredTurned) {
+        const uint32_t localBytes = 0x400;
+        memcpy(file.data() + kHeap + programs[kVariantProgram].program + 4, &localBytes, sizeof localBytes);
+    }
     memcpy(file.data(), &h, sizeof h);
     const char *dir = getenv("TEST_TMPDIR");
     const std::string path = std::string(dir ? dir : "/tmp") + "/variant-pack.bin";
@@ -309,6 +349,13 @@ TEST_F(VariantUniforms, AResidualZeroVariantSwapBindsEachDrawsOwnUniformBuffer)
 {
     raw::Pipeline *pl = dev.pipeline(kVariantKey);
     ASSERT_NE(pl, nullptr);
+    const uint64_t placed = dev.stats.programsPlaced;
+    EXPECT_EQ(placed, 3u);
+    ASSERT_EQ(pl->chosen.size(), 2u);
+    EXPECT_NE(pl->chosen[0], pl);
+    EXPECT_EQ(dev.variant(*pl, raw::AssumeUniformAligned), pl->chosen[0]);
+    EXPECT_EQ(dev.variant(*pl, 0), pl);
+    EXPECT_EQ(dev.stats.programsPlaced, placed);
     raw::CommandBuffer *cb = dev.begin();
     ASSERT_NE(cb, nullptr);
     raw::PassDesc pass;
@@ -336,6 +383,110 @@ TEST_F(VariantUniforms, AResidualZeroVariantSwapBindsEachDrawsOwnUniformBuffer)
     EXPECT_EQ(programs[0], programs[2]);
     EXPECT_EQ(rootWordValues(m, 0x700 + 4 * kResidualWord), (std::vector<uint32_t>{16, 0}));
     EXPECT_EQ(fragmentBinds(m, kSlot), (std::vector<uint64_t>{buffer.va, buffer.va, buffer.va + 256}));
+    EXPECT_EQ(dev.stats.programsPlaced, placed);
+}
+
+TEST(RequiredVariantPreparation, NoShaderLocalMemoryRefusesCreationBeforePublishingATurnedState)
+{
+    kernel_model::model = {};
+    raw::Device dev;
+    std::string error;
+    ASSERT_TRUE(dev.open(variantPack(true).c_str(), 0, error, raw::Device::Role::Client)) << error;
+    raw::Pipeline *plain = dev.pipeline(kVariantKey + 1);
+    ASSERT_NE(plain, nullptr);
+    kernel_model::model.refuseAllocs = true;
+    EXPECT_EQ(dev.pipeline(kVariantKey), nullptr);
+    EXPECT_EQ(dev.pipeline(kVariantKey + 1), plain);
+    kernel_model::model.refuseAllocs = false;
+    raw::Pipeline *turned = dev.pipeline(kVariantKey);
+    ASSERT_NE(turned, nullptr);
+    EXPECT_NE(dev.variant(*turned, raw::AssumeTurned), turned);
+}
+
+TEST(PreparedIteratedBlend, ResidentAndInlineBaseAndDerivedProgramsEnableAndRestoreTheBlend)
+{
+    for (const bool inlineState : {false, true}) {
+        SCOPED_TRACE(inlineState);
+        kernel_model::model = {};
+        raw::Device dev;
+        std::string error;
+        ASSERT_TRUE(dev.open(variantPack(false, true).c_str(), 0, error, raw::Device::Role::Client)) << error;
+        raw::Pipeline *base = dev.pipeline(kVariantKey, raw::PackForm::FetchFree),
+                      *plain = dev.pipeline(kVariantKey + 1);
+        ASSERT_NE(base, nullptr);
+        ASSERT_NE(plain, nullptr);
+        raw::Pipeline *derived = dev.variant(*base, raw::AssumeUniformAligned);
+        ASSERT_NE(derived, base);
+        ASSERT_TRUE(bool(base->segment));
+        ASSERT_TRUE(bool(derived->segment));
+        raw::Texture target[2];
+        for (auto &texture : target)
+            ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, texture));
+        raw::Buffer buffer;
+        ASSERT_TRUE(dev.createBuffer(4096, buffer));
+        raw::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        cb->inlineStates(inlineState);
+        raw::PassDesc pass;
+        pass.count = 2;
+        for (uint32_t i = 0; i < 2; i++)
+            pass.color[i].texture = &target[i];
+        raw::RenderEncoder *encoder = cb->render(pass);
+        ASSERT_NE(encoder, nullptr);
+        encoder->setPipeline(base);
+        const char *why = nullptr;
+        for (const uint64_t offset : {0u, 16u}) {
+            encoder->setBuffer(kFragment, kSlot, &buffer, offset);
+            ASSERT_TRUE(encoder->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+        }
+        encoder->setPipeline(plain);
+        ASSERT_TRUE(encoder->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+        encoder->end();
+        uint32_t sequence = 0;
+        ASSERT_TRUE(cb->commit(sequence));
+        bool baseResident = false, derivedResident = false;
+        for (const auto &job : kernel_model::model.jobs)
+            for (const auto &push : job.pushes) {
+                baseResident |= push.va == base->segment.va;
+                derivedResident |= push.va == derived->segment.va;
+            }
+        EXPECT_EQ(baseResident, !inlineState);
+        EXPECT_EQ(derivedResident, !inlineState);
+        std::map<uint32_t, uint32_t> state;
+        uint32_t draws = 0;
+        std::vector<uint32_t> program;
+        for (const Method &method : submitted()) {
+            state[method.method] = method.value;
+            if (method.method == NVB197_LOAD_ITERATED_BLEND_INSTRUCTION)
+                program.push_back(method.value);
+            if (!drawMacro(method.method))
+                continue;
+            if (draws++ < 2) {
+                EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND], 1u);
+                EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND_PASS], 8u);
+                EXPECT_EQ(state[0x12e4], 0u);
+                EXPECT_EQ(state[0x133c], 1u);
+                EXPECT_EQ(state[0x1340], 0x8006u);
+                EXPECT_EQ(state[0x1344], 0x4001u);
+                EXPECT_EQ(state[0x1348], 0x4000u);
+                EXPECT_EQ(state[0x134c], 0x8006u);
+                EXPECT_EQ(state[0x1350], 0x4001u);
+                EXPECT_EQ(state[0x1358], 0x4303u);
+                EXPECT_EQ(state[0x1360], 1u);
+                EXPECT_EQ(state[0x13a8], 1u);
+                EXPECT_EQ(state[NVB197_SET_CT_SELECT] & 0xf, 1u);
+                ASSERT_GE(program.size(), 8u);
+                EXPECT_EQ(std::vector<uint32_t>(program.end() - 8, program.end()),
+                          std::vector<uint32_t>(std::begin(kIteratedProgram), std::end(kIteratedProgram)));
+            } else {
+                EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND], 0u);
+                EXPECT_EQ(state[0x12e4], 1u);
+                EXPECT_EQ(state[0x13a8], 0u);
+                EXPECT_EQ(state[NVB197_SET_CT_SELECT] & 0xf, 2u);
+            }
+        }
+        EXPECT_EQ(draws, 3u);
+    }
 }
 
 }  // namespace

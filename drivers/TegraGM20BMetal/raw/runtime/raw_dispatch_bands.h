@@ -53,4 +53,41 @@ inline DispatchPiece dispatchPiece(const std::array<uint32_t, 3> &groups, uint8_
     return p;
 }
 
+// What one launch's QMD holds of a grid: CTA_RASTER_WIDTH 31 bits, CTA_RASTER_HEIGHT and CTA_RASTER_DEPTH 16 (QMDV01_07,
+// clb1c0qmd.h). A grid past them is launched in slices of at most that many threadgroups an axis, each based where it
+// starts as a piece is (cs.base_group), so its threadgroups are the grid's, each once.
+constexpr std::array<uint32_t, 3> kQmdGroups = {0x7fffffffu, 0xffffu, 0xffffu};
+// The slices of a grid of 2^32 - 1 threadgroups down or deep, the most an axis of a grid raw::computeDispatch takes
+// needs: a dispatch whose slices would number more is failed, not launched (a root table and a QMD each)
+constexpr uint64_t kMaxQmdSlices = (0xffffffffull + 0xfffe) / 0xffff;
+
+inline std::array<uint32_t, 3> qmdSlicesPerAxis(const std::array<uint64_t, 3> &groups)
+{
+    std::array<uint32_t, 3> n{};
+    for (uint8_t a = 0; a < 3; ++a)
+        n[a] = groups[a] > kQmdGroups[a] ? uint32_t((groups[a] + kQmdGroups[a] - 1) / kQmdGroups[a]) : 1u;
+    return n;
+}
+
+inline uint64_t qmdSliceCount(const std::array<uint64_t, 3> &groups)
+{
+    const std::array<uint32_t, 3> n = qmdSlicesPerAxis(groups);
+    return uint64_t(n[0]) * n[1] * n[2];
+}
+
+// Slice i (x fastest) of `piece` within the QMD's fields
+inline DispatchPiece qmdSlice(const DispatchPiece &piece, uint64_t i)
+{
+    const std::array<uint32_t, 3> n = qmdSlicesPerAxis({piece.groups[0], piece.groups[1], piece.groups[2]});
+    DispatchPiece s;
+    for (uint8_t a = 0; a < 3; ++a) {
+        const uint32_t k = uint32_t(i % n[a]);
+        i /= n[a];
+        const uint32_t from = k * kQmdGroups[a];
+        s.base[a] = piece.base[a] + from;
+        s.groups[a] = std::min(kQmdGroups[a], piece.groups[a] - from);
+    }
+    return s;
+}
+
 }  // namespace raw

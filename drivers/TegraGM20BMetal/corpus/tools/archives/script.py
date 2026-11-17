@@ -68,6 +68,7 @@ class Script:
         p.samples = o.get('rasterSampleCount', o.get('sampleCount', 1))
         p.depth = o.get('depthAttachmentPixelFormat', 0)
         p.stencil = o.get('stencilAttachmentPixelFormat', 0)
+        p.rasterize = bool(o.get('rasterizationEnabled', True))
         for c in o.get('colorAttachments', []):
             color = Color(c.get('index', 0), 0)
             for key, attr in COLOR_KEYS.items():

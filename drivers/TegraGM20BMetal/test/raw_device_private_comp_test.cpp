@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 // raw/runtime/raw_private_comp.cpp on raw::Device over the kernel model: private chains, arrays and stored multisampled
 // textures on compressed memory made off the render thread (TextureAsk::compressKind), and the move to plain memory
-// before an m2v twin, every level, layer and sample copied by the copy engine.
+// before an m2v twin, every level, layer and sample copied by the copy engine. Then the clears of a pass over Core
+// Animation's zoom window target (boot 21: 1792x1472 BGRA8) whose memoryless second colour only its draws see
+// (raw_clear_box.h).
 #include "raw_device_harness.h"
+#include "../raw/runtime/raw_record.h"
 #include <array>
 #include <chrono>
 #include <cstring>
@@ -11,7 +14,7 @@
 
 namespace {
 
-constexpr uint32_t kBGRA8 = 80;
+constexpr uint32_t kBGRA8 = 80, kRGBA16F = 115, kTriangle = 3, kW = 1792, kH = 1472;
 
 // The copy engine's source and destination of each launch the jobs since `first` submitted
 std::vector<std::pair<uint64_t, uint64_t>> copies(size_t first)
@@ -280,6 +283,93 @@ TEST_F(DevicePrivateComp, AStoredDepth32FloatTakesZF32_2CZAndGivesItBack)
     dev.destroyTexture(zeta);
     EXPECT_GT(kernel_model::model.freed.size(), freedBefore);
     dev.destroyTexture(first);
+}
+
+class DeviceClearBox : public harness::DeviceTest {
+protected:
+    using Load = decltype(raw::ColorAttachment::load);
+    raw::Texture c0, c1;
+
+    void SetUp() override
+    {
+        DeviceTest::SetUp();
+        ASSERT_TRUE(dev.createTexture(kW, kH, kBGRA8, c0, false, true));
+    }
+
+    raw::Pipeline *state(const char *key, uint64_t hash)
+    {
+        raw::RuntimeRecord r;
+        r.keyString = key;
+        for (raw::CapturedProgram &p : r.programs) {
+            p.image.assign(80 + 64, 0);
+            p.gprs = 8;
+        }
+        r.pipeline.keyHash = hash;
+        r.blob = {0x1a00, 0x1111};
+        std::string why;
+        raw::Pipeline *pl = dev.addRecord(r, false, why);
+        EXPECT_NE(pl, nullptr) << why;
+        return pl;
+    }
+
+    // One pass, c0 Clear and stored, c1 loaded as `load` and stored or not, one triangle under `scissor`: its clears
+    std::vector<std::array<uint32_t, 5>> pass(Load load, bool store, bool c1Read, const uint32_t scissor[4])
+    {
+        raw::PassDesc p;
+        p.color[0].texture = &c0;
+        p.color[0].load = raw::ColorAttachment::Clear;
+        p.color[0].store = true;
+        p.color[1].texture = &c1;
+        p.color[1].load = load;
+        p.color[1].store = store;
+        p.count = 2;
+        raw::CommandBuffer *cb = dev.begin();
+        raw::RenderEncoder *e = cb ? cb->render(p) : nullptr;
+        if (!e) {
+            ADD_FAILURE() << "no pass";
+            return {};
+        }
+        e->setPipeline(c1Read ? state("samples=1 c0=80:15:0 c1=115:7:0 ds=0/0 ", 0xc1)
+                              : state("samples=1 c0=80:15:0 c1=115:15:0 ds=0/0 ", 0xc0));
+        e->setScissor(scissor[0], scissor[1], scissor[2], scissor[3]);
+        const char *why = nullptr;
+        EXPECT_TRUE(e->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+        e->end();
+        const auto cleared = raw::DeviceHarness::clears(*e);
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        return cleared;
+    }
+};
+
+using Clears = std::vector<std::array<uint32_t, 5>>;
+const Clears kCardClears = {{0, 0, 0, kW, kH}, {1, 224, 128, 800, 384}};
+
+TEST_F(DeviceClearBox, AMemorylessClearOnlyTheDrawsSeeCoversTheirTiles)
+{
+    ASSERT_TRUE(dev.createMemoryless(kW, kH, kRGBA16F, c1));
+    const uint32_t card[4] = {250, 130, 520, 250};  // pixels 250,130 to 770,380: tiles 224,128 to 800,384
+    const uint64_t narrowed = dev.stats.clearsNarrowed.load();
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, false, true, card), kCardClears) << "the stored c0 keeps Metal's reach";
+    EXPECT_EQ(dev.stats.clearsNarrowed.load(), narrowed + 1);
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, false, false, card), (Clears{{0, 0, 0, kW, kH}}))
+        << "no draw reads c1: nothing sees its clear";
+    EXPECT_EQ(pass(raw::ColorAttachment::DontCare, false, true, card), kCardClears)
+        << "a DontCare memoryless c1 a draw reads: zero over the draws' tiles";
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, true, true, card), (Clears{{0, 0, 0, kW, kH}, {1, 0, 0, kW, kH}}))
+        << "a memoryless c1 kept for a later pass (stored) clears whole";
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, true, false, card), (Clears{{0, 0, 0, kW, kH}, {1, 0, 0, kW, kH}}));
+    const uint32_t whole[4] = {0, 0, kW, kH};
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, false, true, whole), (Clears{{0, 0, 0, kW, kH}, {1, 0, 0, kW, kH}}));
+}
+
+TEST_F(DeviceClearBox, AStoredClearKeepsMetalsReach)
+{
+    ASSERT_TRUE(dev.createTexture(kW, kH, kRGBA16F, c1, false, true));
+    const uint32_t card[4] = {250, 130, 520, 250};
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, true, true, card), (Clears{{0, 0, 0, kW, kH}, {1, 0, 0, kW, kH}}));
+    EXPECT_EQ(pass(raw::ColorAttachment::Clear, false, true, card), kCardClears)
+        << "a DontCare store: nothing after the pass reads it";
 }
 
 }  // namespace

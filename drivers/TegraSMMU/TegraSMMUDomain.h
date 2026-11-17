@@ -5,9 +5,10 @@
 //
 // Plain state over the caller's physically contiguous, below-4-GiB table buffer: page 0 is the directory, the others are
 // handed out as tables in order (so the tables reserve() installs for a range are consecutive pages). No IOKit: TegraVIC,
-// the display's domain and test/smmu_domain_test.cpp share it. Every change records the bytes it wrote (takeDirty):
-// the caller cleans them to memory, which the SMMU reads without snooping, then flushes the SMMU's caches for its ASID
-// (TegraSMMU.h tegra_smmu_flush). The registers that select a directory are global, so attaching is TegraSMMU.h's job.
+// the display's domain and test/smmu_domain_test.cpp share it. Every change records the bytes it wrote, the IOVAs whose
+// page entries it wrote and whether it wrote the directory (takeChange): the caller cleans the bytes to memory, which
+// the SMMU reads without snooping, then flushes the SMMU's caches of them (TegraSMMUPublish.h). The registers that
+// select a directory are global, so attaching is TegraSMMU.h's job.
 #pragma once
 #include <stdint.h>
 
@@ -19,6 +20,16 @@ struct TegraSMMUDomain {
     uint64_t pa = 0;
     uint32_t pages = 0, used = 0;
     uintptr_t dirtyLow = UINTPTR_MAX, dirtyHigh = 0;
+    uint64_t iovaLow = UINT64_MAX, iovaHigh = 0;
+    bool directoryDirty = false;
+
+    // The table bytes [low, high) written since the last take, from physical address pa on; the IOVAs [iovaLow,
+    // iovaHigh) whose page entries they hold; directory: a directory entry among them, so any IOVA may have changed.
+    struct Change {
+        uintptr_t low, high;
+        uint64_t pa, iovaLow, iovaHigh;
+        bool directory;
+    };
 
     // tables: count 4 KiB pages at physical address tablesPa (page 0 becomes the empty directory). False when the buffer
     // cannot be one (unaligned, above 4 GiB, no room for a table).
@@ -100,8 +111,7 @@ struct TegraSMMUDomain {
             uint32_t *p = pte(page, true);
             if (!p)
                 return false;
-            *p = entry(page, writable);
-            touch(p, sizeof(*p));
+            setPte(p, page, entry(page, writable));
         }
         return true;
     }
@@ -110,11 +120,11 @@ struct TegraSMMUDomain {
     bool map(uint64_t iova, const uint64_t *pagesPa, uint32_t count, bool writable)
     {
         for (uint32_t i = 0; i < count; ++i) {
-            uint32_t *p = pte(iova + static_cast<uint64_t>(i) * kPage, true);
+            const uint64_t at = iova + static_cast<uint64_t>(i) * kPage;
+            uint32_t *p = pte(at, true);
             if (!p)
                 return false;
-            *p = entry(pagesPa[i], writable);
-            touch(p, sizeof(*p));
+            setPte(p, at, entry(pagesPa[i], writable));
         }
         return true;
     }
@@ -122,10 +132,9 @@ struct TegraSMMUDomain {
     void unmap(uint64_t iova, uint32_t count)
     {
         for (uint32_t i = 0; i < count; ++i) {
-            if (uint32_t *p = pte(iova + static_cast<uint64_t>(i) * kPage, false); p && *p) {
-                *p = 0;
-                touch(p, sizeof(*p));
-            }
+            const uint64_t at = iova + static_cast<uint64_t>(i) * kPage;
+            if (uint32_t *p = pte(at, false); p && *p)
+                setPte(p, at, 0);
         }
     }
 
@@ -144,21 +153,48 @@ struct TegraSMMUDomain {
         return (e & kRead) ? (static_cast<uint64_t>(e & kPfnMask) << 12) | (iova & (kPage - 1)) : UINT64_MAX;
     }
 
-    // The bytes written since the last call (cache maintenance for the caller); false when none.
-    bool takeDirty(uintptr_t *low, uintptr_t *high)
+    // What changed since the last take (takeDirty or takeChange); false when nothing did.
+    bool takeChange(Change *out)
     {
         if (dirtyLow >= dirtyHigh)
             return false;
-        *low = dirtyLow;
-        *high = dirtyHigh;
+        *out = {dirtyLow, dirtyHigh, pa + (dirtyLow - reinterpret_cast<uintptr_t>(va)),
+                iovaLow,  iovaHigh,  directoryDirty};
         dirtyLow = UINTPTR_MAX;
         dirtyHigh = 0;
+        iovaLow = UINT64_MAX;
+        iovaHigh = 0;
+        directoryDirty = false;
         return true;
+    }
+
+    // The bytes written since the last take, for a caller that cleans them and then attaches (which flushes all).
+    bool takeDirty(uintptr_t *low, uintptr_t *high)
+    {
+        Change change{};
+        if (!takeChange(&change))
+            return false;
+        *low = change.low;
+        *high = change.high;
+        return true;
+    }
+
+    void setPte(uint32_t *p, uint64_t iova, uint32_t value)
+    {
+        *p = value;
+        touch(p, sizeof(*p));
+        const uint64_t page = iova & ~(kPage - 1);
+        if (page < iovaLow)
+            iovaLow = page;
+        if (page + kPage > iovaHigh)
+            iovaHigh = page + kPage;
     }
 
     void touch(const void *p, uintptr_t bytes)
     {
-        const uintptr_t at = reinterpret_cast<uintptr_t>(p);
+        const uintptr_t at = reinterpret_cast<uintptr_t>(p), directory = reinterpret_cast<uintptr_t>(va);
+        if (at < directory + kPage && at + bytes > directory)
+            directoryDirty = true;
         if (at < dirtyLow)
             dirtyLow = at;
         if (at + bytes > dirtyHigh)

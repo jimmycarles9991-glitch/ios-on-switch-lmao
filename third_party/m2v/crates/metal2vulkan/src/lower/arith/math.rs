@@ -2071,7 +2071,9 @@ fn nonfinite_below_one(
 /// 32-bit container) that its special cases read, each told once from the bits and shared by
 /// every rule that reads it: each operand's bits and magnitude's, whether it is a zero to Metal (an
 /// `f32` denormal is one, [`metal_zero`]) and an infinity of either sign, and whether `x` is one.
-/// Integer comparisons, which no float mode folds.
+/// The infinities are told by integer comparisons, which no float mode folds; one, a normal value
+/// that only its own encoding equals, by an ordered comparison with it, which no float mode moves
+/// either and which a native target makes against an immediate, not a register.
 struct PowrOperands {
     x_bits: Value,
     x_magnitude: Value,
@@ -2106,8 +2108,8 @@ impl PowrOperands {
         };
         let [x_bits, x_magnitude, x_zero, x_inf] = class(fb, x)?;
         let [y_bits, y_magnitude, y_zero, y_inf] = class(fb, y)?;
-        let one = splat(fb, u, u64::from(1f32.to_bits()))?;
-        let x_one = bin(fb, BinOp::IEqual, x_bits, one)?;
+        let one = fsplat(fb, f, 1.0)?;
+        let x_one = bin(fb, BinOp::FOrdEqual, x, one)?;
         Ok(Self {
             x_bits,
             x_magnitude,
@@ -2148,12 +2150,14 @@ impl PowrOperands {
         bin(fb, BinOp::LogicalOr, nan, inf_times_zero)
     }
 
-    /// IEEE's `exp2` of an infinite `y · log2(x)` (`x` not negative where it matters): `+0` where
-    /// the product is `-inf`, `+inf` where it is `+inf`, by the signs of `log2(x)` (below zero
-    /// where `|x|` is below one, a zero included) and of `y` (its sign bit).
-    fn infinite_answer(&self, fb: &mut FunctionBuilder<'_>, f: Form) -> BResult<Value> {
-        let one = splat(fb, u32_form(f), u64::from(1f32.to_bits()))?;
-        let l_negative = bin(fb, BinOp::ULessThan, self.x_magnitude, one)?;
+    /// IEEE's `exp2` of an infinite `y · log2(x)`: `+0` where the product is `-inf`, `+inf` where it
+    /// is `+inf`, by the signs of `log2(x)` (below zero where `|x|` is below one, a zero included)
+    /// and of `y` (its sign bit). Read only where neither operand is a NaN, where `|x| < 1` is the
+    /// magnitude's bits below one's, an `f32` denormal included whether the device flushes it or not.
+    fn infinite_answer(&self, fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
+        let one = fsplat(fb, f, 1.0)?;
+        let magnitude = glsl(fb, GlslOp::FAbs, &[x])?;
+        let l_negative = bin(fb, BinOp::FOrdLessThan, magnitude, one)?;
         let y_negative = bin(fb, BinOp::INotEqual, self.y_bits, self.y_magnitude)?;
         let negative = bin(fb, BinOp::LogicalNotEqual, l_negative, y_negative)?;
         let (zero, inf) = (wide_splat(fb, f, 0.0)?, wide_splat(fb, f, f64::INFINITY)?);
@@ -2224,7 +2228,7 @@ pub(super) fn fast_powr_special(
     let infinite = bin(fb, BinOp::LogicalOr, log_infinite, c.y_inf)?;
     let numbers = c.numbers(fb, f)?;
     let infinite = bin(fb, BinOp::LogicalAnd, infinite, numbers)?;
-    let answer = c.infinite_answer(fb, f)?;
+    let answer = c.infinite_answer(fb, f, x)?;
     let r = fb.select(infinite, answer, r)?;
     let k = fsplat(fb, f, f64::NAN)?;
     fb.select(nan, k, r)
@@ -3147,7 +3151,7 @@ pub(super) fn infinite_product(
     let infinite = bin(fb, BinOp::LogicalOr, by_base, by_exponent)?;
     let numbers = c.numbers(fb, f)?;
     let infinite = bin(fb, BinOp::LogicalAnd, infinite, numbers)?;
-    let answer = c.infinite_answer(fb, f)?;
+    let answer = c.infinite_answer(fb, f, x)?;
     fb.select(infinite, answer, r)
 }
 

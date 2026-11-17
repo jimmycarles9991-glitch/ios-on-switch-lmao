@@ -332,6 +332,20 @@ py_test(
     main = "run_host_test.py",
 )
 
+# ios-on-switch-lmao: NAK's 64-bit three-source add before Volta, which SM50's IADD3 lets NIR form (nak/builder.rs
+# sm50_iadd64_tests), from the same binary
+py_test(
+    name = "sm50_iadd64_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm50_iadd64_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
 # ios-on-switch-lmao: NAK's SM50 XMAD encodings and multiply sequences (nak/sm50/xmad.rs sm53_xmad_tests), from the same binary
 py_test(
     name = "sm53_xmad_test",
@@ -353,6 +367,19 @@ py_test(
     args = [
         "$(rootpath :nak_sm53_half_test_bin)",
         "sm50::alu_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's SM50 LDG cache ops (nak/sm50/ld_cache_tests.rs): the interlock's ticket wait reads L2 alone
+py_test(
+    name = "sm50_ld_cache_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm50::ld_cache_tests",
     ],
     data = [":nak_sm53_half_test_bin"],
     main = "run_host_test.py",
@@ -387,29 +414,32 @@ py_test(
 mesa_cc_library(
     name = "nak_fs_depth_test_objects",
     testonly = True,
+    c_args = mesa_args(
+        "c",
+        include_dirs = [
+            "src/nouveau/compiler",
+            "gen:src/nouveau/compiler",
+            "include",
+            "gen:include",
+            "src",
+            "gen:src",
+            "src/compiler",
+            "gen:src/compiler",
+            "src/compiler/nir",
+            "gen:src/compiler/nir",
+            "src/nouveau/nil",
+            "gen:src/nouveau/nil",
+            "src/nouveau/headers",
+            "gen:src/nouveau/headers",
+            "src/nouveau/headers/nvidia/classes",
+            "gen:src/util",
+            "gen:src/util/format",
+        ],
+    ),
     sources = [
         "nak_fs_depth_test.c",
         "nak_nir_lower_fs_inputs.c",
     ],
-    c_args = mesa_args("c", include_dirs = [
-        "src/nouveau/compiler",
-        "gen:src/nouveau/compiler",
-        "include",
-        "gen:include",
-        "src",
-        "gen:src",
-        "src/compiler",
-        "gen:src/compiler",
-        "src/compiler/nir",
-        "gen:src/compiler/nir",
-        "src/nouveau/nil",
-        "gen:src/nouveau/nil",
-        "src/nouveau/headers",
-        "gen:src/nouveau/headers",
-        "src/nouveau/headers/nvidia/classes",
-        "gen:src/util",
-        "gen:src/util/format",
-    ]),
 )
 
 fs_depth_test_binary(
@@ -437,7 +467,10 @@ py_test(
     name = "fs_depth_test",
     size = "small",
     srcs = ["run_host_test.py"],
-    args = ["$(rootpath :nak_fs_depth_test_host)", "depth"],
+    args = [
+        "$(rootpath :nak_fs_depth_test_host)",
+        "depth",
+    ],
     data = [":nak_fs_depth_test_host"],
     main = "run_host_test.py",
 )
@@ -445,19 +478,22 @@ py_test(
 mesa_cc_library(
     name = "nak_half_contract_test_objects",
     testonly = True,
+    c_args = mesa_args(
+        "c",
+        include_dirs = [
+            "include",
+            "gen:include",
+            "src",
+            "gen:src",
+            "src/compiler",
+            "gen:src/compiler",
+            "src/compiler/nir",
+            "gen:src/compiler/nir",
+            "gen:src/util",
+            "gen:src/util/format",
+        ],
+    ),
     sources = ["nak_half_contract_test.c"],
-    c_args = mesa_args("c", include_dirs = [
-        "include",
-        "gen:include",
-        "src",
-        "gen:src",
-        "src/compiler",
-        "gen:src/compiler",
-        "src/compiler/nir",
-        "gen:src/compiler/nir",
-        "gen:src/util",
-        "gen:src/util/format",
-    ]),
 )
 
 fs_depth_test_binary(
@@ -485,7 +521,10 @@ py_test(
     name = "half_contract_test",
     size = "small",
     srcs = ["run_host_test.py"],
-    args = ["$(rootpath :nak_half_contract_test_host)", "half-contract"],
+    args = [
+        "$(rootpath :nak_half_contract_test_host)",
+        "half-contract",
+    ],
     data = [":nak_half_contract_test_host"],
     main = "run_host_test.py",
 )

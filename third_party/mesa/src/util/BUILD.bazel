@@ -253,12 +253,12 @@ mesa_genrule(
     name = "driconf_static_h",
     srcs = [
         "00-mesa-defaults.conf",
-        "//third_party/mesa/src/nouveau/vulkan:00-nvk-defaults.conf",
+        "00-nvk-defaults.conf",
     ],
     outs = [
         "driconf_static.h",
     ],
-    cmd = "$(execpath :driconf_static) $(execpath 00-mesa-defaults.conf) $(execpath //third_party/mesa/src/nouveau/vulkan:00-nvk-defaults.conf) $(execpath driconf_static.h)",
+    cmd = "$(execpath :driconf_static) $(execpath 00-mesa-defaults.conf) $(execpath 00-nvk-defaults.conf) $(execpath driconf_static.h)",
     tools = [
         ":driconf_static",
     ],

@@ -8,6 +8,9 @@
 #   xnu_memcmp_source_test   subrs.c uses it on arm64 only, through the two bodies the harness copies
 #   xnu_kernel_classes_source_test  both trees' OSKext.cpp register our drivers' classes under sKextLock, as OSKext::start
 #                            does, and no driver calls OSMetaClass::preModLoad/postModLoad itself
+#   switch_icon_cache_<xnu>_test  kernel/switch/boot/icon_cache.c over a host Data tree in that XNU's cache layout:
+#                            __cache_info__ alone goes, once per GPU build the deploy names
+#   xnu_icon_cache_source_test  both trees' boot setup runs it once before launchd, with one error line
 #   xnu_stall_test           kernel/switch/diag/stall.h's decisions: which samples of a UI main thread are a stall,
 #                            one report and one end per episode, wait names by block_hint.h value, user addresses
 #   xnu_render_senders_test  osfmk/ipc/switch_render_senders.h's table and line: the render server's senders by
@@ -727,6 +730,47 @@ host_test(
     includes = ["."],
 )
 
+# --- kernel/switch/boot/icon_cache.c -----------------------------------------------------------------------------------
+copy_file(
+    name = "switch_icon_cache_header",
+    src = "//kernel/switch:include/switch/icon_cache.h",
+    out = "switch/icon_cache.h",
+)
+
+# One build per XNU, each in its iOS's cache layout: 24B119's salt folders, 21H461's top.
+[
+    host_library(
+        name = "icon_cache_" + xnu,
+        srcs = ["//kernel/switch:boot/icon_cache.c"],
+        hdrs = ["switch/icon_cache.h"],
+        defines = ["XNU_%s=1" % xnu],
+        includes = ["."],
+    )
+    for xnu in ("12377_121_6", "10063_141_1")
+]
+
+[
+    host_test(
+        name = "switch_icon_cache_%s_test" % xnu,
+        srcs = ["switch_icon_cache_test.cpp"],
+        defines = ["XNU_%s=1" % xnu],
+        deps = [":icon_cache_" + xnu],
+    )
+    for xnu in ("12377_121_6", "10063_141_1")
+]
+
+# Both kernels' setup runs it once before launchd, with one error line, and reads the record the deploy writes.
+host_test(
+    name = "xnu_icon_cache_source_test",
+    srcs = ["xnu_icon_cache_source_test.cpp"],
+    data = [
+        "//kernel/switch:boot/icon_cache.c",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//tools/deploy:icon_cache.py",
+    ],
+)
+
 # --- kernel/switch/boot/prefs.c ----------------------------------------------------------------------------------------
 copy_file(
     name = "switch_prefs_header",
@@ -784,4 +828,175 @@ host_test(
     ],
     includes = ["."],
     target_compatible_with = ["@platforms//cpu:arm64"],
+)
+
+host_test(
+    name = "switch_app_code_test",
+    srcs = ["switch_app_code_test.cpp"],
+    additional_compiler_inputs = [
+        "//kernel/switch:include/switch/app_code_macho.h",
+        "//kernel/switch:include/switch/app_code_rules.h",
+        "//kernel/switch:include/switch/dyld_policy_24B119.h",
+    ],
+)
+
+[genrule(
+    name = "app_code_mac_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/security:mac_internal.h"],
+    outs = ["app_code_mac_" + version + ".h"],
+    cmd = """awk '
+        /^#define SWITCH_MAC_CHECK\\(/ { on = 1 }
+        on { sub(/SWITCH_MAC_CHECK\\(/, "SWITCH_MAC_CHECK_%s("); print }
+        on && /^} while \\(0\\)/ { exit }
+    ' $< > $@""" % version,
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_app_code_mac_test",
+    srcs = [
+        "switch_app_code_mac_test.cpp",
+        ":app_code_mac_17",
+        ":app_code_mac_27",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/app_code_rules.h"],
+    includes = ["."],
+)
+
+[copy_file(
+    name = "app_code_model_" + name,
+    src = "//kernel/switch:include/switch/" + name + ".h",
+    out = "switch/" + name + ".h",
+) for name in [
+    "app_code",
+    "app_code_rules",
+    "entitlements_factory",
+]]
+
+copy_file(
+    name = "app_code_model_cs_blobs",
+    src = "//kernel/xnu-12377.121.6/osfmk:kern/cs_blobs.h",
+    out = "kern/cs_blobs.h",
+)
+
+host_library(
+    name = "app_code_blob_model",
+    srcs = ["switch_app_code_blob_model.c"],
+    hdrs = [
+        ":app_code_model_app_code",
+        ":app_code_model_app_code_rules",
+        ":app_code_model_entitlements_factory",
+        ":app_code_model_cs_blobs",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/app_code_blob.h"],
+    copts = ["-Wno-deprecated-declarations"],
+    includes = ["."],
+)
+
+host_test(
+    name = "switch_app_code_blob_test",
+    srcs = ["switch_app_code_blob_test.cpp"],
+    deps = [":app_code_blob_model"],
+)
+
+genrule(
+    name = "app_capability_validation",
+    srcs = ["//kernel/switch:security/app_capabilities.cpp"],
+    outs = ["app_capability_validation.h"],
+    cmd = """awk '
+        /^static bool switch_capability_string/ { on = 1 }
+        on && /^int switch_app_code_capability_decode/ { exit }
+        on { print }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_app_capabilities_test",
+    srcs = [
+        "switch_app_capabilities_test.cpp",
+        ":app_capability_validation",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/capabilities.h"],
+    includes = ["."],
+)
+
+[genrule(
+    name = "app_code_cred_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/security:mac_vfs.c"],
+    outs = ["app_code_cred_" + version + ".h"],
+    cmd = """awk '
+        /^mac_cred_label_update_execve\\(/ { on = 1; print "void" }
+        on {
+            sub(/mac_cred_label_update_execve\\(/, "mac_cred_label_update_execve_%s(");
+            gsub(/kauth_cred_t new,/, "kauth_cred_t new_cred,");
+            gsub(/posix_cred_get\\(new\\)/, "posix_cred_get(new_cred)");
+            gsub(/mac_cred_label\\(new\\)/, "mac_cred_label(new_cred)");
+            gsub(/hook\\(cred, new,/, "hook(cred, new_cred,");
+            print;
+        }
+        on && /^\\}/ { exit }
+    ' $< > $@""" % version,
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_app_code_cred_test",
+    srcs = [
+        "switch_app_code_cred_test.cpp",
+        ":app_code_cred_17",
+        ":app_code_cred_27",
+    ],
+    additional_compiler_inputs = [
+        "//kernel/switch:include/switch/app_code_rules.h",
+        "//kernel/xnu-12377.121.6/osfmk:kern/cs_blobs.h",
+    ],
+    copts = ["-Wno-c99-designator"],
+    includes = ["."],
+)
+
+genrule(
+    name = "app_entitlements_decode",
+    srcs = ["//kernel/switch:security/entitlements_factory.c"],
+    outs = ["app_entitlements_decode.h"],
+    cmd = """awk '
+        /^void \\*switch_app_code_native_dictionary\\(/ { on = 1 }
+        on { print }
+        on && /^\\}/ { exit }
+    ' $< > $@""",
+)
+
+host_library(
+    name = "entitlements_decode_model",
+    srcs = ["switch_entitlements_decode_model.c", ":app_entitlements_decode"],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/capabilities.h"],
+    includes = ["."],
+)
+
+host_test(
+    name = "switch_entitlements_decode_test",
+    srcs = ["switch_entitlements_decode_test.cpp"],
+    deps = [":entitlements_decode_model"],
+)
+
+genrule(
+    name = "vfs_identity",
+    srcs = ["//kernel/switch:vfs/identity.c"],
+    outs = ["switch_vfs_identity.h"],
+    cmd = """awk '
+        /^mount_t switch_vfs_volume_host\\(/ { on = 1 }
+        on { print }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_vfs_identity_test",
+    srcs = [
+        "switch_vfs_identity_test.cpp",
+        ":vfs_identity",
+    ],
+    includes = ["."],
 )

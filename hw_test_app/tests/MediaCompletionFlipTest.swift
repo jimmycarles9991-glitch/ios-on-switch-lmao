@@ -12,7 +12,8 @@ import UIKit
 /// these flips off for a run of sets at each one, with one SwitchDisplay line). A set whose producers finished before
 /// its swap goes out at once from the kick and is never armed (d_done_at_swap); one that waited for VIC or NVDEC is
 /// d_fenced, and of those d_declined were not armed. With none armed the test is skipped and says which. filter_share
-/// is the part host1x's syncpoint filter wrote earlier still.
+/// is the part host1x's syncpoint filter wrote earlier still. The display is held on the copy route (CopyRouteHold), so the
+/// turned clip is a set on windows B and C and not window A's column scan.
 struct MediaCompletionFlipTest: HWTest {
     let id = "display.media_completion_flip"
     let name = "Video sets on windows B and C written by their producers' completions"
@@ -37,21 +38,24 @@ struct MediaCompletionFlipTest: HWTest {
             AVPlayerItem(asset: AVURLAsset(url: context.media.appendingPathComponent(clip.file)))
         }
         let player = await MainActor.run { AVPlayer(playerItem: item) }
-        await context.onStage { stage in
-            let view = PlayerView(frame: stage.bounds)
-            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-            view.playerLayer.player = player
-            view.playerLayer.videoGravity = .resizeAspect
-            stage.addSubview(view)
+        let finished = try await CopyRouteHold.during {
+            await context.onStage { stage in
+                let view = PlayerView(frame: stage.bounds)
+                view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                view.playerLayer.player = player
+                view.playerLayer.videoGravity = .resizeAspect
+                stage.addSubview(view)
+            }
+            let ended = Waiter<Bool>()
+            let observer = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
+            ) { _ in ended.resume(true) }
+            defer { NotificationCenter.default.removeObserver(observer) }
+            await MainActor.run { player.play() }
+            let finished = await ended.wait(timeout: Double(clip.frames) / Double(clip.fps) + 15)
+            await MainActor.run { player.pause() }
+            return finished
         }
-        let ended = Waiter<Bool>()
-        let observer = NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemDidPlayToEndTime, object: item, queue: .main
-        ) { _ in ended.resume(true) }
-        defer { NotificationCenter.default.removeObserver(observer) }
-        await MainActor.run { player.play() }
-        let finished = await ended.wait(timeout: Double(clip.frames) / Double(clip.fps) + 15)
-        await MainActor.run { player.pause() }
         let after = Self.totals().values
         let delta = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
         let dropped = (item.accessLog()?.events ?? []).reduce(0) { $0 + max(0, $1.numberOfDroppedVideoFrames) }

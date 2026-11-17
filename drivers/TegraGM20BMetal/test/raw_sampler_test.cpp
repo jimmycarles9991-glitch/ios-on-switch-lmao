@@ -130,16 +130,20 @@ TEST(RawSampler, PixelSamplerIsPlainMetals)
     EXPECT_EQ(s.tAddress, raw::kAddressClampToBorderColor);
 }
 
-TEST(RawSampler, PixelCoordinatesMirroredOnceOnAPlaneAxisAreRefused)
+// Metal leaves pixel coordinates under any wrap mode but ClampToEdge undefined (MTLSampler.h normalizedCoordinates): a plane
+// axis mirrored once is taken, clamped to the edge, and a normalized one keeps its mode
+TEST(RawSampler, PixelCoordinatesMirroredOnceOnAPlaneAxisClampToTheEdge)
 {
     raw::SamplerDesc s;
     for (int axis = 0; axis < 2; axis++) {
         raw::MetalSamplerFields m;
         m.normalizedCoordinates = false;
         (axis ? m.tAddress : m.sAddress) = raw::kAddressMirrorClampToEdge;
-        EXPECT_FALSE(raw::takeSampler(m, s)) << axis;
+        ASSERT_TRUE(raw::takeSampler(m, s)) << axis;
+        EXPECT_EQ(axis ? s.tAddress : s.sAddress, raw::kAddressClampToEdge) << axis;
         m.normalizedCoordinates = true;
-        EXPECT_TRUE(raw::takeSampler(m, s)) << axis;
+        ASSERT_TRUE(raw::takeSampler(m, s)) << axis;
+        EXPECT_EQ(axis ? s.tAddress : s.sAddress, raw::kAddressMirrorClampToEdge) << axis;
     }
 }
 

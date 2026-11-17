@@ -4,10 +4,42 @@
 #include "../runtime/raw_cache_io.h"
 #include "../runtime/raw_program_pages.h"
 #include "NativeMetalArtifactCache.h"
+#include <cerrno>
+#include <cstring>
 #include <map>
 #include <sys/stat.h>
 
 namespace rawseed {
+
+// One line on stderr naming the step that failed, its path and errno (0: none the system gave); false
+inline bool failed(const char *step, const std::string &path, int err = 0)
+{
+    if (err)
+        fprintf(stderr, "native-seed: %s %s: %s (errno %d)\n", step, path.c_str(), strerror(err), err);
+    else
+        fprintf(stderr, "native-seed: %s %s\n", step, path.c_str());
+    return false;
+}
+
+inline int posixCode(NSError *error)
+{
+    NSError *underlying = error.userInfo[NSUnderlyingErrorKey];
+    return [underlying.domain isEqualToString:NSPOSIXErrorDomain] ? int(underlying.code)
+           : [error.domain isEqualToString:NSPOSIXErrorDomain]    ? int(error.code)
+                                                                   : 0;
+}
+
+// `path` at `mode`, chmod only where it is not: a directory another user made refuses chmod (EPERM) even when it
+// already has the mode the outputs need
+inline bool withMode(const std::string &path, mode_t mode)
+{
+    struct stat st;
+    if (stat(path.c_str(), &st))
+        return failed("stat", path, errno);
+    if ((st.st_mode & 07777) == mode || !chmod(path.c_str(), mode))
+        return true;
+    return failed("chmod", path, errno);
+}
 
 inline std::string hex(uint64_t value)
 {
@@ -72,19 +104,27 @@ inline bool writeManifest(const std::string &output, uint64_t stack, NSArray *ro
     NSError *error = nil;
     NSData *json = [NSJSONSerialization dataWithJSONObject:manifest options:NSJSONWritingSortedKeys error:&error];
     const auto path = output + "/manifest.json";
-    return json && [json writeToFile:@(path.c_str()) options:NSDataWritingAtomic error:&error] &&
-           chmod(path.c_str(), 0644) == 0;
+    if (!json)
+        return failed("serialize the manifest", path);
+    if (![json writeToFile:@(path.c_str()) options:NSDataWritingAtomic error:&error])
+        return failed("write", path, posixCode(error));
+    return withMode(path, 0644);
 }
 
 inline bool openOutput(const std::string &output, uint64_t stack, raw::RecordCache &cache)
 {
     NSError *error = nil;
-    return [[NSFileManager defaultManager] createDirectoryAtPath:@(output.c_str())
-                                     withIntermediateDirectories:YES
-                                                      attributes:nil
-                                                           error:&error] &&
-           chmod(output.c_str(), 0755) == 0 && cache.attach(output, stack, 0) &&
-           chmod((output + "/raw-" + hex(stack)).c_str(), 0755) == 0;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:@(output.c_str())
+                                   withIntermediateDirectories:YES
+                                                    attributes:nil
+                                                         error:&error])
+        return failed("create the output directory", output, posixCode(error));
+    if (!withMode(output, 0755))
+        return false;
+    errno = 0;
+    if (!cache.attach(output, stack, 0))
+        return failed("attach the record cache in", output, errno);
+    return withMode(output + "/raw-" + hex(stack), 0755);
 }
 
 inline bool recordIdentity(const std::string &bytes, raw::CacheKey &key, raw::RuntimeRecord &record,
@@ -127,8 +167,9 @@ inline bool writeSlots(const raw::RuntimeRecord &record, uint64_t stack, const s
         slot.resize(raw::programSlotEntryBytes(slot.size()));
         const std::string relative = "raw-" + hex(stack) + "/" + hex(name) + ".slot";
         NSData *bytes = [NSData dataWithBytesNoCopy:slot.data() length:slot.size() freeWhenDone:NO];
-        if (![bytes writeToFile:@((output + "/" + relative).c_str()) atomically:YES] ||
-            chmod((output + "/" + relative).c_str(), 0644))
+        if (![bytes writeToFile:@((output + "/" + relative).c_str()) atomically:YES])
+            return failed("write", output + "/" + relative, errno);
+        if (!withMode(output + "/" + relative, 0644))
             return false;
         [written addObject:@{@"name" : @(hex(name).c_str()), @"path" : @(relative.c_str())}];
     }
@@ -194,7 +235,7 @@ inline bool restampRow(NSMutableDictionary *row, const std::string &input, uint6
                 raw::encodeKernelEntry(key, &loadedCompute, "") == encoded :
             cache.store(key, &record, "") && cache.load(key, loaded, refusal) == raw::RecordCache::Found::Record &&
                 raw::encodeEntry(key, &loaded, "") == encoded;
-        if (!stored || chmod((output + "/" + relative).c_str(), 0644))
+        if (!stored || !withMode(output + "/" + relative, 0644))
             return false;
     }
     NSArray *slots = nil;
@@ -242,8 +283,7 @@ inline bool copyAnalysis(NSDictionary *row, const std::string &input, const std:
         if (!inserted && at->second != digest)
             return false;
         if (inserted && (!native_artifact_cache::store(output + "/native-analysis", key, mapped.data(), mapped.size()) ||
-                         chmod((output + "/" + relative).c_str(), 0644) ||
-                         chmod((output + "/native-analysis").c_str(), 0755)))
+                         !withMode(output + "/" + relative, 0644) || !withMode(output + "/native-analysis", 0755)))
             return false;
     }
     return contracts == 3;
@@ -252,8 +292,10 @@ inline bool copyAnalysis(NSDictionary *row, const std::string &input, const std:
 inline int restamp(int argc, char **argv)
 {
     uint64_t stack;
-    if (argc < 5 || !parseStack(@(argv[2]), stack))
+    if (argc < 5 || !parseStack(@(argv[2]), stack)) {
+        fprintf(stderr, "usage: native-seed --restamp stack output input...\n");
         return 2;
+    }
     const std::string output = argv[3];
     raw::RecordCache cache;
     if (!openOutput(output, stack, cache))
@@ -269,12 +311,16 @@ inline int restamp(int argc, char **argv)
         if (![manifest isKindOfClass:[NSDictionary class]] || ![manifest[@"schema"] isEqual:@1] ||
             ![manifest[@"packVersion"] isEqual:@(raw::kPackVersion)] ||
             ![manifest[@"cacheVersion"] isEqual:@(raw::kEntryFormat)] || !parseStack(manifest[@"stack"], oldStack) ||
-            ![manifest[@"records"] isKindOfClass:[NSArray class]])
+            ![manifest[@"records"] isKindOfClass:[NSArray class]]) {
+            failed("read the manifest of another build or none in", argv[arg], posixCode(error));
             return 1;
+        }
         for (id source in manifest[@"records"]) {
             @autoreleasepool {
-                if (![source isKindOfClass:[NSDictionary class]])
+                if (![source isKindOfClass:[NSDictionary class]]) {
+                    failed("read a record row of", std::string(argv[arg]) + "/manifest.json");
                     return 1;
+                }
                 NSMutableDictionary *row = [source mutableCopy];
                 const bool valid = [row[@"kind"] isEqual:@"analysis"]
                     ? copyAnalysis(row, argv[arg], output, analysisWritten)

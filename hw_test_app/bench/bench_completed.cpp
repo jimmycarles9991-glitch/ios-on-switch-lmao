@@ -10,9 +10,9 @@
 namespace raw {
 namespace {
 
-bool benchStorageMetadata(const PackPipeline &record, const uint32_t *blob, uint32_t dwords)
+bool benchStorageMetadata(const PackPipeline &record, const uint32_t *blob, uint32_t dwords, const uint32_t *far)
 {
-    if (usableStorageMetadata(record, blob, dwords))
+    if (usableStorageMetadata(record, blob, dwords, far))
         return true;
 #if SWITCH_RAW_DIAGNOSTICS
     std::vector<uint32_t> rest;
@@ -24,7 +24,7 @@ bool benchStorageMetadata(const PackPipeline &record, const uint32_t *blob, uint
         }
         rest.insert(rest.end(), {blob[k], blob[k + 1]});
     }
-    return interlock && !record.storageMask && usableStorageMetadata(record, rest.data(), uint32_t(rest.size()));
+    return interlock && !record.storageMask && usableStorageMetadata(record, rest.data(), uint32_t(rest.size()), far);
 #else
     return false;
 #endif

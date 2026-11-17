@@ -2,6 +2,7 @@
 // kits/SwitchLinux and shim/xnu_glue.cpp as gpu_exec.c and nvif's channel reach them, on the host. A panic or an nvkm
 // warning fails the test.
 #include <chrono>
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -9,6 +10,12 @@
 #include <mutex>
 #include <gtest/gtest.h>
 #include "drivers/TegraGM20B/test/exec/switch_gpu_exec_fixture.h"
+
+namespace
+{
+std::atomic<uint64_t> mutexTakes;
+thread_local unsigned heldMutexes;
+}
 
 extern "C" {
 void *switch_exec_host_alloc(uint64_t bytes)
@@ -41,16 +48,34 @@ void *switch_linux_mutex_of(void **slot)
 void switch_linux_mutex_lock(void *mutex) __attribute__((no_thread_safety_analysis))
 {
 	static_cast<std::mutex *>(mutex)->lock();
+	++mutexTakes;
+	++heldMutexes;
 }
 
 void switch_linux_mutex_unlock(void *mutex) __attribute__((no_thread_safety_analysis))
 {
+	--heldMutexes;
 	static_cast<std::mutex *>(mutex)->unlock();
 }
 
 bool switch_linux_mutex_trylock(void *mutex) __attribute__((no_thread_safety_analysis))
 {
-	return static_cast<std::mutex *>(mutex)->try_lock();
+	const bool taken = static_cast<std::mutex *>(mutex)->try_lock();
+	if (taken) {
+		++mutexTakes;
+		++heldMutexes;
+	}
+	return taken;
+}
+
+uint64_t switch_exec_mutex_takes(void)
+{
+	return mutexTakes.load();
+}
+
+int switch_exec_mutex_held(void)
+{
+	return heldMutexes != 0;
 }
 
 uint64_t switch_linux_nanotime(void)

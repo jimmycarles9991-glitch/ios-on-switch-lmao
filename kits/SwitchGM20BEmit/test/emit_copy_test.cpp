@@ -17,6 +17,7 @@
 
 namespace {
 
+using switch_gm20b_test::Method;
 using switch_gm20b_test::Methods;
 using switch_gm20b_test::Words;
 
@@ -282,6 +283,93 @@ TEST(EmitCopy, MethodForMethodTheKernelsRelayout)
         EXPECT_EQ(Words(kernel), Words(ours)) << (toTiled ? "to tiled" : "to rows");
         EXPECT_EQ(Methods(ours), Methods(theirs)) << (toTiled ? "to tiled" : "to rows");
         EXPECT_EQ(ours.size() + 1, theirs.size()) << (toTiled ? "to tiled" : "to rows");
+    }
+}
+
+TEST(EmitCopy, ArrayOffsetsPreserveTheFullAddress)
+{
+    const struct {
+        uint32_t srcLayer, srcStride, dstLayer, dstStride;
+        uint64_t src[2], dst[2];
+    } cases[] = {
+        {3, 0x80000000, 5, 0x40000000, {0x280001234, 0x300001234}, {0x340005678, 0x380005678}},
+        {0xffffffff, 1, 0xffffffff, 2, {0x200001233, 0x200001234}, {0x400005676, 0x400005678}},
+    };
+
+    for (const auto &c : cases) {
+        SCOPED_TRACE(c.srcStride);
+        switch_gm20b_copy copy = {};
+        copy.src.base_addr = 0x100001234;
+        copy.dst.base_addr = 0x200005678;
+        copy.src.bpp = copy.dst.bpp = 1;
+        copy.src.row_stride = copy.dst.row_stride = 1;
+        copy.src.offset_el.a = c.srcLayer;
+        copy.src.array_stride = c.srcStride;
+        copy.dst.offset_el.a = c.dstLayer;
+        copy.dst.array_stride = c.dstStride;
+        copy.extent_el.width = copy.extent_el.height = copy.extent_el.depth = 1;
+        copy.extent_el.array_len = 2;
+        std::vector<uint32_t> words(SWITCH_GM20B_COPY_RECT_WORDS(2));
+        nv_push p;
+        nv_push_init(&p, words.data(), words.size(), SUBC_MASK_ALL);
+        switch_gm20b_copy_rect(&p, &copy, NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED);
+        words.resize(nv_push_dw_count(&p));
+
+        std::vector<Method> addresses, expected;
+        for (const auto &m : Methods(words))
+            if (m.method >= NVB0B5_OFFSET_IN_UPPER && m.method <= NVB0B5_OFFSET_OUT_LOWER)
+                addresses.push_back(m);
+        for (unsigned z = 0; z < 2; z++) {
+            expected.push_back({SUBC_NVB0B5, NVB0B5_OFFSET_IN_UPPER, uint32_t(c.src[z] >> 32)});
+            expected.push_back({SUBC_NVB0B5, NVB0B5_OFFSET_IN_LOWER, uint32_t(c.src[z])});
+            expected.push_back({SUBC_NVB0B5, NVB0B5_OFFSET_OUT_UPPER, uint32_t(c.dst[z] >> 32)});
+            expected.push_back({SUBC_NVB0B5, NVB0B5_OFFSET_OUT_LOWER, uint32_t(c.dst[z])});
+        }
+        EXPECT_EQ(addresses, expected);
+    }
+}
+
+TEST(EmitCopy, PitchOffsetsPreserveTheFullAddress)
+{
+    const struct {
+        uint32_t srcX, srcY, srcPitch, dstX, dstY, dstPitch;
+        uint64_t src, dst;
+    } cases[] = {
+        {3, 0x10000, 0x10000, 5, 0x20000, 0x10000, 0x300000004, 0x500000004},
+        {2, 0xffff, 0x10001, 4, 0xffff, 0x10001, 0x2ffffffff, 0x3ffffffff},
+        {0x40000001, 7, 0x100, 0x80000002, 3, 0x100, 0x3000006fc, 0x5000002f8},
+    };
+
+    for (const auto &c : cases) {
+        SCOPED_TRACE(c.srcX);
+        SCOPED_TRACE(c.srcY);
+        switch_gm20b_copy copy = {};
+        copy.src.base_addr = 0x1fffffff8;
+        copy.dst.base_addr = 0x2fffffff0;
+        copy.src.bpp = copy.dst.bpp = 4;
+        copy.src.offset_el.x = c.srcX;
+        copy.src.offset_el.y = c.srcY;
+        copy.src.row_stride = c.srcPitch;
+        copy.dst.offset_el.x = c.dstX;
+        copy.dst.offset_el.y = c.dstY;
+        copy.dst.row_stride = c.dstPitch;
+        copy.extent_el.width = copy.extent_el.height = copy.extent_el.depth = copy.extent_el.array_len = 1;
+        std::vector<uint32_t> words(SWITCH_GM20B_COPY_RECT_WORDS(1));
+        nv_push p;
+        nv_push_init(&p, words.data(), words.size(), SUBC_MASK_ALL);
+        switch_gm20b_copy_rect(&p, &copy, NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED);
+        words.resize(nv_push_dw_count(&p));
+
+        std::vector<Method> addresses;
+        for (const auto &m : Methods(words))
+            if (m.method >= NVB0B5_OFFSET_IN_UPPER && m.method <= NVB0B5_OFFSET_OUT_LOWER)
+                addresses.push_back(m);
+        EXPECT_EQ(addresses, (std::vector<Method>{
+                                 {SUBC_NVB0B5, NVB0B5_OFFSET_IN_UPPER, uint32_t(c.src >> 32)},
+                                 {SUBC_NVB0B5, NVB0B5_OFFSET_IN_LOWER, uint32_t(c.src)},
+                                 {SUBC_NVB0B5, NVB0B5_OFFSET_OUT_UPPER, uint32_t(c.dst >> 32)},
+                                 {SUBC_NVB0B5, NVB0B5_OFFSET_OUT_LOWER, uint32_t(c.dst)},
+                             }));
     }
 }
 

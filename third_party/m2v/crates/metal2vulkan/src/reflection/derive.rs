@@ -51,6 +51,21 @@ pub(crate) fn bindings(
     Ok(out)
 }
 
+/// The binding of entry `ep`'s parameter `p` alone ([`bindings`]' answer for it).
+pub(crate) fn binding(
+    ep: &EntryPoint,
+    structs: &[StructInfo],
+    channel: Channel,
+    p: &ParamBinding,
+) -> Result<Option<Binding>, Error> {
+    Cx {
+        ep,
+        structs,
+        channel,
+    }
+    .binding(p)
+}
+
 /// `MTLBindingAccess` of a declared access.
 fn binding_access(access: Access) -> BindingAccess {
     match access {

@@ -42,7 +42,8 @@ use crate::pipeline::sym::{
     PushField, ResourceKind, ResourceSlot, SlotClass, SlotRef, Stage, Symbol,
 };
 use crate::pipeline::testing::{
-    compile, engine_dir, link_and_validate, llvm_assemble, meter, typed_module, AssembleError,
+    compile, engine_dir, fixtures_dir, link_and_validate, llvm_assemble, meter, typed_module,
+    AssembleError,
 };
 use crate::spirv::interp::{run, Buffer, Config, InterpError, Resources};
 use crate::spirv::ir::{GlobalKind, TypedModule};
@@ -63,8 +64,8 @@ fn policy() -> DevicePolicy {
 /// Committed profile `stem`, optionally with buffer robustness disabled (the in-shader encoding)
 /// and optionally without `uniformBufferStandardLayout`.
 fn profile_with(stem: &str, robust: bool, standard_layout: bool) -> DeviceProfile {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../metal2vulkan-validation/profiles")
+    let path = fixtures_dir()
+        .join("../../profiles")
         .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(path).expect("profile");
     let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
@@ -2069,7 +2070,7 @@ const CONSTANT_VEC4: &str = r#"define void @constant_vec4(ptr addrspace(2) nound
 entry:
   %p = getelementptr inbounds i8, ptr addrspace(2) %0, i64 32
   %v = load <4 x float>, ptr addrspace(2) %p, align 16
-  store <4 x float> %v, ptr addrspace(1) %1, align 16
+  store <4 x float> %v, ptr addrspace(1) %1, align 4
   ret void
 }
 !air.kernel = !{!9}
@@ -2084,21 +2085,32 @@ entry:
 !18 = !{!"Metal", i32 4, i32 0, i32 0}
 "#;
 
-/// Under robust descriptors a `constant` slot's 16-aligned `float4` is one `uvec4` of its uniform
-/// view: a `Uniform { uvec4[N] }` view beside the `u32[]` words with `uniformBufferStandardLayout`,
-/// the std140 `uvec4[]` word view itself without. It reads the vector's 16 bytes exactly at every
-/// residual the binder can give the window `[32, 48)` with a 16-aligned bind offset: the window's
-/// first byte at descriptor byte `0, 16, ..., A - 16` for the base alignment `A` (the residual
-/// wraps below the window).
+/// Dynamic offsets use a uniform word array without an alignment branch. The std140 view keeps
+/// its vector/word choice; both read the same 16 bytes across vector boundaries and wraparound.
 #[test]
-fn a_constant_vector_is_one_uvec4_of_its_uniform_view() {
-    let text = format!("{HEADER}{CONSTANT_VEC4}");
-    let Some(bc) = assemble_text("constant_vec4", &text) else {
-        return;
-    };
-    for stem in PROFILES {
-        for standard in [true, false] {
-            let what = format!("{stem} standard={standard}");
+fn a_constant_vector_is_exact_at_every_word_residual() {
+    for indexed in [false, true] {
+        let mut body = CONSTANT_VEC4.to_owned();
+        if indexed {
+            body = body
+                .replace("%1) {", "%1, ptr addrspace(2) noundef \"air-buffer-no-alias\" %2) {")
+                .replace(
+                    "  %p = getelementptr inbounds i8, ptr addrspace(2) %0, i64 32",
+                    "  %raw = load i32, ptr addrspace(2) %2, align 4\n  %index = and i32 %raw, 1\n  %step = shl i32 %index, 4\n  %off = add i32 %step, 32\n  %p = getelementptr inbounds i8, ptr addrspace(2) %0, i32 %off",
+                )
+                .replace("!11 = !{!12, !13}", "!11 = !{!12, !13, !14}")
+                .replace("i32 48", "i32 64");
+            body.push_str("\n!14 = !{i32 2, !\"air.buffer\", !\"air.buffer_size\", i32 4, !\"air.location_index\", i32 2, i32 1, !\"air.read\", !\"air.address_space\", i32 2, !\"air.arg_type_size\", i32 4, !\"air.arg_type_align_size\", i32 4, !\"air.arg_type_name\", !\"uint\", !\"air.arg_name\", !\"index\"}\n");
+        }
+        let text = format!("{HEADER}{body}");
+        let Some(bc) = assemble_text("constant_vec4", &text) else {
+            return;
+        };
+        for (stem, standard) in PROFILES
+            .into_iter()
+            .flat_map(|stem| [true, false].map(|s| (stem, s)))
+        {
+            let what = format!("{stem} standard={standard} indexed={indexed}");
             let p = profile_with(stem, true, standard);
             let a = compile(&bc, "constant_vec4", &p).unwrap_or_else(|e| panic!("{what}: {e}"));
             let form = match a.interface.slots.get(&sref(0)) {
@@ -2112,37 +2124,52 @@ fn a_constant_vector_is_one_uvec4_of_its_uniform_view() {
             };
             assert_eq!(form, BufferForm::Descriptor(want), "{what}");
             link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+            assert_eq!(
+                opcodes(&a.module.words).contains(&(crate::spv::Op::SelectionMerge as u16)),
+                !standard,
+                "{what}: only the std140 uniform load needs an alignment choice"
+            );
             let (plan, m) = typed_module(&bc, "constant_vec4", &p).expect("module");
             assert_eq!(
                 views_of(&m, 0),
                 if standard { 2 } else { 1 },
                 "{what}: views of in"
             );
-            let data = pattern(512);
             let base = p
                 .fields()
                 .limits
                 .min_uniform_buffer_offset_alignment
                 .max(16) as u32;
-            // Metal byte 32 is descriptor byte `r + 32`.
-            for at in (0..base).step_by(16) {
+            let data = pattern(base as usize + 32);
+            for at in (0..base).step_by(4) {
                 let r = at.wrapping_sub(32);
-                let at = at as usize;
-                let res = Resources {
-                    buffers: vec![
+                for index in 0..if indexed { 4u32 } else { 1 } {
+                    let start = at as usize + (index as usize & 1) * 16;
+                    let mut buffers = vec![
                         Buffer {
                             slot: Some(kslot(0)),
                             address: None,
                             bytes: data.clone(),
                         },
                         bound(1, 0, &[0; 16], 0),
-                    ],
-                    push: push_bytes(&plan, &[(0, r)]),
-                    spec: Default::default(),
-                };
-                let out = run(&m, &Config::default(), res)
-                    .unwrap_or_else(|e| panic!("{what} r={r:#x}: {e:?}"));
-                assert_eq!(out.buffers[1][..16], data[at..at + 16], "{what} r={r:#x}");
+                    ];
+                    if indexed {
+                        buffers.push(bound(2, 0, &index.to_le_bytes(), 0));
+                    }
+                    let res = Resources {
+                        buffers,
+                        push: push_bytes(&plan, &[(0, r)]),
+                        spec: Default::default(),
+                    };
+                    let out = run(&m, &Config::default(), res)
+                        .unwrap_or_else(|e| panic!("{what} r={r:#x} index={index}: {e:?}"));
+                    assert_eq!(
+                        out.buffers[1][..16],
+                        data[start..start + 16],
+                        "{what} r={r:#x} index={index}"
+                    );
+                    assert_eq!(out.buffers[0], data, "{what}: input stays unchanged");
+                }
             }
         }
     }

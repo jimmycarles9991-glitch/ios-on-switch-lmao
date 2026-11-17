@@ -34,6 +34,12 @@ Switch/portrait-native-*, Switch/panic-*.log.
 """
 
 
+def content_name(pin: dict) -> str:
+    """Return the file name the member's content is staged under: an Apple Encrypted Archive's without .aea (//ipsw)."""
+    name = Path(pin['member']).name
+    return name.removesuffix('.aea') if pin.get('aea_key') else name
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     for name in ('spec', 'ipsw', 'boot-package', 'out'):
@@ -49,8 +55,12 @@ def main() -> None:
     staging = []
     for item in spec['cryptexes']:
         pin = pins['members'][item['member']]
-        if Path(item['path']).name != Path(pin['member']).name:
-            raise SystemExit('{}: kernel path {} vs IPSW member {}'.format(item['member'], item['path'], pin['member']))
+        if Path(item['path']).name != content_name(pin):
+            raise SystemExit(
+                '{}: kernel path {} vs IPSW member {} ({})'.format(
+                    item['member'], item['path'], pin['member'], content_name(pin)
+                )
+            )
         staging.append(
             {
                 'preboot_path': item['path'],

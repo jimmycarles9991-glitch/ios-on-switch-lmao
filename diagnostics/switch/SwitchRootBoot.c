@@ -43,6 +43,9 @@ static void switch_board_thread(void *parameter __unused, wait_result_t result _
     /* First: returns at once and publishes the per-unit BD address before anything here can sleep. */
     if (switch_bluetooth_start())
         printf("Switch: SwitchBluetooth did not start\n");
+    /* Returns at once (its own thread waits for the GIC, then takes what latched): ahead of every DMA client below. */
+    if (tegra_mc_errors_start())
+        printf("Switch: the MC error interrupt did not start\n");
     /* Before anything that can sleep long: launchd must find the IOWatchdog when it reads its LaunchEvents. */
     if (switch_watchdog_publish())
         printf("Switch: NativeSwitchWatchdog did not start\n");
@@ -74,8 +77,6 @@ static void switch_board_thread(void *parameter __unused, wait_result_t result _
         printf("Switch: SwitchMotion did not start\n");
     if (switch_wlan_publish())
         printf("Switch: Wi-Fi driver not started\n");
-    if (tegra_mc_errors_start())
-        printf("Switch: the MC error interrupt did not start\n");
     if (tegra_gm20b_probe())
         printf("Switch: TegraGM20B did not start\n");
     if (tegra_nvdec_probe())

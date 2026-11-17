@@ -66,7 +66,8 @@ void ComputeEncoder::stageInFromMemory(const PackKernel &r, uint64_t rootVa, boo
     inlineFrom(dst + 16, src + 12, 12);
 }
 
-bool ComputeEncoder::dispatchIndirect(const Buffer *arguments, uint64_t offset, const char **why)
+bool ComputeEncoder::dispatchIndirect(const Buffer *arguments, uint64_t offset, const std::array<uint32_t, 3> &threads,
+                                      const char **why)
 {
     constexpr uint32_t kArgumentBytes = 12;
     if (!arguments || !arguments->va || (offset & 3) || offset > arguments->length ||
@@ -79,8 +80,12 @@ bool ComputeEncoder::dispatchIndirect(const Buffer *arguments, uint64_t offset, 
         return false;
     }
     const PackKernel &r = *state_->rec;
-    if (r.regionWord >= 0) {
-        *why = "an indirect dispatch of a kernel compiled for the regions of an edge";
+    // An indirect dispatch's kernel is m2v's single-region compile (MultiRegion 0), whose grid builtins read the group
+    // counts the GPU writes into the root table: its DispatchRegion field is the base 0 and nominal size m2v's binder
+    // writes for a ThreadgroupsIndirect, the grid 0 (bind/dispatch.rs)
+    uint32_t region[8] = {};
+    if (r.regionWord >= 0 && !computeRegionWords({0, 0, 0}, {0, 0, 0}, threads, region)) {
+        *why = "an indirect dispatch's threadgroup size m2v's dispatch region cannot name";
         return false;
     }
     if (state_->heapMissing) {
@@ -95,7 +100,6 @@ bool ComputeEncoder::dispatchIndirect(const Buffer *arguments, uint64_t offset, 
     dispatched_ = true;
     slotTableVa_ = 0;
     const uint32_t none[3] = {};
-    const uint32_t region[8] = {};
     uint32_t root[kRootBytes / 4] = {};
     rootWords(r, none, none, setVa_, residualMask_, residuals_, region, root);
     argumentRoot(r, root);

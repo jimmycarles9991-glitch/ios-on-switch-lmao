@@ -46,6 +46,8 @@ protected:
             return {};
         cb->internalCompletion();
         cb->useHeap(heap);
+        cb->use(from, false);
+        cb->use(to, true, false);
         raw::BlitEncoder *e = cb->blit();
         e->copyBytes(from.va, to.va, 64);
         e->end();

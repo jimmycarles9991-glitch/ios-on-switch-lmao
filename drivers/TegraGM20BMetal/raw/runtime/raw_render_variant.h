@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 // A render state's variant as a draw asks for it (RawMetalCubic.mm renderVariant): its cubic binds (raw_cubic.h), test
-// class, two-plane colours (raw_xr_pass.h " | xr2p"), two-plane textures sampled (" | xrs="), and textures written in
-// other formats than its record's (raw_written_textures.h " | wtex="). The client names the variant's key with name(), a
-// compile request carries the whole variant (raw_compile_request.h), and the shader compiler names the key it checks
-// with the same name(), so a form a request leaves out cannot key the same.
+// class, colours whose extended-range half shadow its pass holds (raw_xr_shadow.h " | xrsh="), two-plane colours
+// (raw_xr_pass.h " | xr2p"), two-plane textures sampled (" | xrs="), and textures written in other formats than its
+// record's (raw_written_textures.h " | wtex="). The client names the variant's key with name(), a compile request
+// carries the whole variant (raw_compile_request.h), and the shader compiler names the key it checks with the same
+// name(), so a form a request leaves out cannot key the same.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -11,6 +12,7 @@
 #include "raw_cubic.h"
 #include "raw_written_textures.h"
 #include "raw_xr_pass.h"
+#include "raw_xr_shadow.h"
 
 namespace raw {
 
@@ -20,14 +22,16 @@ struct RenderVariant {
     bool twoPlane = false;
     uint16_t xrSlots = 0;
     std::vector<WrittenTexture> written;
+    uint8_t xrShadows = 0;
 
-    // The name after the state's key: " | cubic ...", " | tests=<n>", " | xr2p", " | xrs=<slots>", " | wtex=...", in
-    // raw_pack.h variantNameAt's order; "" for the state itself
+    // The name after the state's key: " | cubic ...", " | tests=<n>", " | xrsh=<colours>", " | xr2p", " | xrs=<slots>",
+    // " | wtex=...", in raw_pack.h variantNameAt's order (which names no " | xrsh=": a shadowed variant is made at its
+    // pass, never a pack's record); "" for the state itself
     std::string name() const
     {
         return (cubic.empty() ? std::string() : cubic.key()) +
                (fragmentTests ? " | tests=" + std::to_string(fragmentTests) : std::string()) +
-               (twoPlane ? std::string(kXrPlanesVariant) : std::string()) +
+               xrShadowVariant(xrShadows) + (twoPlane ? std::string(kXrPlanesVariant) : std::string()) +
                (xrSlots ? xrSampledVariant(xrSlots) : std::string()) + writtenVariant(written);
     }
 

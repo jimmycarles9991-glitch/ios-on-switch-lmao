@@ -2,7 +2,8 @@
 // Metal's completion-handler creations of render states. They may complete later, so a state the pack lacks is asked of
 // the runtime without a waiting thread (Completion::create: the shader compiler's answer arrives on the runtime's queue),
 // and the handler runs once it is there, on a global queue of the caller's class, as Metal calls it. No thread sleeps on
-// the compiler for them. A creation that fails gets the synchronous form's error and no m2v state.
+// the compiler for a record; a reflection the pack lacks is asked on that queue's worker before the handler runs
+// (RawMetalReflection.h). A creation that fails gets the synchronous form's error and no m2v state.
 #import "RawMetalInternal.h"
 
 static dispatch_queue_t creationQueue(qos_class_t qos)
@@ -26,13 +27,13 @@ static void createLater(RMDevice *device, MTLRenderPipelineDescriptor *d, MTLPip
 {
     const qos_class_t qos = qos_class_self();
     dispatch_async(creationQueue(qos), ^{
-        if (ycbcrTargetFormat(d)) {
+        if (standInTargetFormat(d)) {
             NSError *error = nil;
             MTLAutoreleasedRenderPipelineReflection reflection = nil;
-            id<MTLRenderPipelineState> state = [device ycbcrTargetState:d
-                                                                options:o
-                                                             reflection:reflect ? &reflection : nil
-                                                                  error:&error];
+            id<MTLRenderPipelineState> state = [device standInTargetState:d
+                                                                  options:o
+                                                               reflection:reflect ? &reflection : nil
+                                                                    error:&error];
             return finish(state, reflection, error);
         }
         NSError *error = nil;

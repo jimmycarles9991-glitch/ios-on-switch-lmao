@@ -4,9 +4,9 @@
 // firmware and the driver points methods at them by physical address), and buffers mapped page by page at IOVAs from
 // TegraSMMUSpace. The window sits below 2 GiB, where no RAM is, so it never meets an identity map.
 //
-// Each map and unmap cleans its table entries and flushes the SMMU's caches for the ASID; the flush includes a PTC
-// flush of every ASID, so buffers are mapped once (when allocated) and unmapped once (after the engine is done with them),
-// never per job.
+// Each map and unmap cleans its table entries and flushes the SMMU's cached copies of them, by PTE group and by the
+// ASID's 4 MiB sections (TegraSMMUPublish.h). Buffers are still mapped once (when allocated) and unmapped once (after
+// the engine is done with them), never per job: the flush costs a register write per 8 entries under the MC lock.
 #pragma once
 #include <stddef.h>
 #include <stdint.h>

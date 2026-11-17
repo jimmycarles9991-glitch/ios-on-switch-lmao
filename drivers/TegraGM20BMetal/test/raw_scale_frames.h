@@ -67,9 +67,10 @@ inline id<MTLTexture> scratch(id<MTLDevice> device, const Shape &shape)
 }
 
 // Pass `p` of `shape`: its encoder begun on `cb`, drawn, ended; with `beside`, that memoryless colour 1 cleared and
-// not stored
+// not stored; `begun` runs on the encoder before its draws
 inline void pass(id<MTLCommandBuffer> cb, id<MTLRenderPipelineState> state, const std::vector<id<MTLTexture>> &into,
-                 const Shape &shape, int p, uint32_t frame, id<MTLTexture> beside = nil)
+                 const Shape &shape, int p, uint32_t frame, id<MTLTexture> beside = nil,
+                 void (^begun)(id<MTLRenderCommandEncoder>) = nil)
 {
     MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
     d.colorAttachments[0].texture = into[size_t(p) % into.size()];
@@ -81,6 +82,8 @@ inline void pass(id<MTLCommandBuffer> cb, id<MTLRenderPipelineState> state, cons
         d.colorAttachments[1].storeAction = MTLStoreActionDontCare;
     }
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
+    if (begun)
+        begun(e);
     [e setRenderPipelineState:state];
     const int draws = shape.draws / shape.passes + (p < shape.draws % shape.passes ? 1 : 0);
     for (int i = 0; i < draws; i++) {

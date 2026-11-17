@@ -84,6 +84,60 @@ class ImmediateTest(unittest.TestCase):
         self.assertEqual(lane.r(2), 0x3F800000)
 
 
+class IntegerFloatTest(unittest.TestCase):
+    S64 = 0x5CB8000001872E0A
+
+    def test_register_pair_i2f_rounds_the_signed_integer_once(self):
+        cases = (
+            (0, (0, 0, 0, 0)),
+            (1, (0x3F800000,) * 4),
+            (-1, (0xBF800000,) * 4),
+            (2**24 + 1, (0x4B800000, 0x4B800000, 0x4B800001, 0x4B800000)),
+            (-(2**24) - 1, (0xCB800000, 0xCB800001, 0xCB800000, 0xCB800000)),
+            (2**32 + 1, (0x4F800000, 0x4F800000, 0x4F800001, 0x4F800000)),
+            (-(2**32) - 1, (0xCF800000, 0xCF800001, 0xCF800000, 0xCF800000)),
+            (2**62 + 2**38 + 1, (0x5E800001, 0x5E800000, 0x5E800001, 0x5E800000)),
+            (-(2**62) - 2**38 - 1, (0xDE800001, 0xDE800001, 0xDE800000, 0xDE800000)),
+            (-(2**63), (0xDF000000,) * 4),
+            (2**63 - 1, (0x5F000000, 0x5EFFFFFF, 0x5F000000, 0x5EFFFFFF)),
+        )
+        for value, expected in cases:
+            for mode, want in enumerate(expected):
+                with self.subTest(value=value, mode=mode):
+                    lane = Lane()
+                    lane.w(24, value)
+                    lane.w(25, value >> 32)
+                    w = self.S64 | mode << 39
+                    self.assertEqual(isa.name(w), 'I2F_reg')
+                    alu(isa.name(w), w, lane, gate.Seeded(1, 0).inputs())
+                    self.assertEqual(lane.r(10), want)
+
+    def test_unimplemented_integer_widths_and_pair_modifiers_remain_unsupported(self):
+        words = (
+            self.S64 & ~(3 << 10),
+            self.S64 & ~(3 << 10) | 1 << 10,
+            self.S64 & ~(3 << 8) | 1 << 8,
+            self.S64 | 1 << 41,
+            self.S64 | 1 << 45,
+            self.S64 | 1 << 49,
+        )
+        for w in words:
+            with self.subTest(word=hex(w)), self.assertRaises(UnsupportedError):
+                alu(isa.name(w), w, Lane(), gate.Seeded(1, 0).inputs())
+
+    def test_zero_register_pair_and_unsigned_high_word(self):
+        lane = Lane()
+        zero = self.S64 & ~(0xFF << 20) | 0xFF << 20
+        alu(isa.name(zero), zero, lane, gate.Seeded(1, 0).inputs())
+        self.assertEqual(lane.r(10), 0)
+        lane.w(24, 0xFFFFFFFF)
+        lane.w(25, 0xFFFFFFFF)
+        for mode, expected in enumerate((0x5F800000, 0x5F7FFFFF, 0x5F800000, 0x5F7FFFFF)):
+            w = self.S64 & ~(1 << 13) | mode << 39
+            alu(isa.name(w), w, lane, gate.Seeded(1, 0).inputs())
+            self.assertEqual(lane.r(10), expected)
+
+
 class ThreeSourceTest(unittest.TestCase):
     def run_one(self, w: int, regs: dict) -> int:
         lane = Lane()
@@ -237,6 +291,95 @@ class TextureTest(unittest.TestCase):
         self.assertNotEqual([lane.r(r) for r in (8, 9, 10, 11)], first)
 
 
+class TextureGatherTest(unittest.TestCase):
+    PLAIN = 0xDF000120C0270110
+    OFFSET = 0xDF0A01D201F72422
+
+    def test_f32_gather_uses_both_coordinates_and_writes_both_pairs(self):
+        inputs = gate.Seeded(1, 0).inputs(bound_cbuf=2)
+        cb_reads, keys = [], []
+        inputs.cbuf = lambda bank, at: cb_reads.append((bank, at)) or 0x1234
+        values = [f32(v) for v in (0.25, -0.5, 0.75, 1.0)]
+        inputs.texture = lambda key: keys.append(key) or values
+        lane = Lane()
+        lane.w(1, f32(0.125))
+        lane.w(2, f32(0.625))
+        self.assertEqual(isa.name(self.PLAIN), 'TLD4S')
+        alu('TLD4S', self.PLAIN, lane, inputs)
+        self.assertEqual(cb_reads, [(2, 72)])
+        self.assertEqual(keys, [('tld4', 0x1234, (f32(0.125), f32(0.625)), 0, (0, 0), texture.DIM_2D)])
+        self.assertEqual([lane.r(r) for r in (16, 17, 12, 13)], values)
+
+    def test_offset_gather_sign_extends_only_the_two_six_bit_offsets(self):
+        inputs = gate.Seeded(1, 0).inputs(bound_cbuf=2)
+        cb_reads, keys = [], []
+        inputs.cbuf = lambda bank, at: cb_reads.append((bank, at)) or 0x5678
+        values = [f32(v) for v in (0.25, -0.5, 0.75, 1.0)]
+        inputs.texture = lambda key: keys.append(key) or values
+        lane = Lane()
+        lane.w(36, f32(0.125))
+        lane.w(37, f32(0.625))
+        self.assertEqual(isa.name(self.OFFSET), 'TLD4S')
+        for packed, offset in ((0xFFFF, (-1, -1)), (0x01FF, (-1, 1)), (0xFF01, (1, -1)), (0x0101, (1, 1))):
+            with self.subTest(offset=offset):
+                lane.w(31, packed)
+                alu('TLD4S', self.OFFSET, lane, inputs)
+                self.assertEqual(keys[-1], ('tld4', 0x5678, (f32(0.125), f32(0.625)), 0, offset, texture.DIM_2D))
+                self.assertEqual([lane.r(r) for r in (34, 35, 32, 33)], values)
+                lane.w(31, packed ^ 0xFFFFC0C0)
+                alu('TLD4S', self.OFFSET ^ 1 << 49, lane, inputs)
+                self.assertEqual(keys[-1], keys[-2])
+        self.assertEqual(set(cb_reads), {(2, 116)})
+
+    def test_component_and_coordinate_changes_distinguish_gathers(self):
+        inputs = gate.Seeded(1, 0).inputs(bound_cbuf=2)
+        keys = []
+        inputs.texture = lambda key: keys.append(key) or [0] * 4
+        lane = Lane()
+        lane.w(1, f32(0.125))
+        lane.w(2, f32(0.625))
+        texture.tld4s(self.PLAIN, lane, inputs)
+        for component in (1, 2, 3):
+            texture.tld4s(self.PLAIN | component << 52, lane, inputs)
+            self.assertEqual(keys[-1][3], component)
+            self.assertNotEqual(keys[-1], keys[0])
+        lane.w(2, f32(0.75))
+        texture.tld4s(self.PLAIN, lane, inputs)
+        self.assertNotEqual(keys[-1], keys[0])
+        zero_offset = self.PLAIN & ~(0xFF << 20) | 3 << 20 | 1 << 51
+        texture.tld4s(zero_offset, lane, inputs)
+        self.assertEqual(keys[-1], keys[-2])
+
+    def test_f16_gather_packs_ties_to_even_and_signed_zero(self):
+        inputs = gate.Seeded(1, 0).inputs(bound_cbuf=2)
+        values = [f32(1 + 2**-11), f32(1 + 3 * 2**-11), f32(-0.0), f32(0.0)]
+        inputs.texture = lambda _key: values
+        lane = Lane()
+        lane.w(17, 0x1234)
+        lane.w(13, 0x5678)
+        texture.tld4s(self.PLAIN | 1 << 55, lane, inputs)
+        self.assertEqual((lane.r(16), lane.r(12)), (0x3C023C00, 0x00008000))
+        self.assertEqual((lane.r(17), lane.r(13)), (0x1234, 0x5678))
+
+    def test_discarded_pairs_and_zero_coordinate_register_do_not_spill(self):
+        inputs = gate.Seeded(1, 0).inputs(bound_cbuf=2)
+        keys = []
+        inputs.texture = lambda key: keys.append(key) or [1, 2, 3, 4]
+        lane = Lane()
+        for half in (False, True):
+            for discarded in (0, 28):
+                word = self.PLAIN & ~(0xFF << discarded) | 0xFF << discarded | half << 55
+                texture.tld4s(word, lane, inputs)
+                self.assertEqual(lane.r(255), 0)
+        word = self.OFFSET & ~(0xFF << 8) | 0xFF << 8
+        texture.tld4s(word, lane, inputs)
+        self.assertEqual(keys[-1][2], (0, 0))
+
+    def test_depth_compare_remains_explicitly_unsupported(self):
+        with self.assertRaisesRegex(UnsupportedError, 'TLD4S depth comparison'):
+            texture.tld4s(self.PLAIN | 1 << 50, Lane(), gate.Seeded(1, 0).inputs())
+
+
 class VertexAttributeTest(unittest.TestCase):
     # ALD.64 r4, a[0x80]; AST.64 a[0x90], r4; ALD.O r8, a[0x94] (the output AST wrote); RZ as offset and vertex
     ALD = 0xEFD8 << 48 | 1 << 47 | 0xFF << 39 | 0x80 << 20 | 0xFF << 8 | 4
@@ -253,6 +396,73 @@ class VertexAttributeTest(unittest.TestCase):
         self.assertEqual((lane.r(4), lane.r(5)), (0x1080, 0x1084))
         self.assertEqual([s for s in lane.stores if s[0] == 'ast'], [('ast', 0x90, 0x1080), ('ast', 0x94, 0x1084)])
         self.assertEqual(lane.r(8), 0x1084)
+
+
+class InterpolationTest(unittest.TestCase):
+    PASS_OFFSET_ZERO = 0xE023FF87CFF7FF00
+    MUL_W_OFFSET_ZERO = 0xE063FF8D0007FF01
+    PASS_OFFSET_R9 = 0xE02384880FF7FF09
+
+    def test_zero_offset_pass_reads_the_center_attribute(self):
+        inputs = gate.Seeded(1, 0).inputs()
+        inputs.attribute = lambda at: f32(1.25) if at == 0x7C else 0xDEADBEEF
+        lane = Lane()
+        alu('IPA', self.PASS_OFFSET_ZERO, lane, inputs)
+        self.assertEqual(lane.r(0), f32(1.25))
+
+    def test_zero_offset_perspective_reads_the_center_and_multiplies_inv_w(self):
+        inputs = gate.Seeded(1, 0).inputs()
+        inputs.attribute = lambda at: f32(3.0) if at == 0xD0 else 0xDEADBEEF
+        lane = Lane()
+        lane.w(0, f32(0.5))
+        alu('IPA', self.MUL_W_OFFSET_ZERO, lane, inputs)
+        self.assertEqual(lane.r(1), f32(1.5))
+
+    def test_dynamic_offset_is_a_signed_twelve_bit_pair_before_aliased_destination_write(self):
+        inputs = gate.Seeded(1, 0).inputs()
+        keys = []
+        inputs.attribute = lambda key: keys.append(key) or f32(1.25)
+        for packed in (0x0700F800, 0xA7009800):
+            lane = Lane()
+            lane.w(9, packed)
+            alu('IPA', self.PASS_OFFSET_R9, lane, inputs)
+            self.assertEqual(keys[-1], (0x80, -2048, 1792))
+            self.assertEqual(lane.r(9), f32(1.25))
+
+    def test_zero_offset_in_a_register_uses_the_same_center_input_as_rz(self):
+        inputs = gate.Seeded(1, 0).inputs()
+        keys = []
+        inputs.attribute = lambda key: keys.append(key) or f32(2.0)
+        lane = Lane()
+        alu('IPA', self.PASS_OFFSET_R9, lane, inputs)
+        self.assertEqual(keys, [0x80])
+        self.assertEqual(lane.r(9), f32(2.0))
+
+    def test_offset_identity_changes_the_seeded_input(self):
+        values = []
+        for packed in (1, 2, 0x10000, 0xFFFF):
+            lane = Lane()
+            lane.w(9, packed)
+            alu('IPA', self.PASS_OFFSET_R9, lane, gate.Seeded(1, 0).inputs())
+            values.append(lane.r(9))
+        self.assertEqual(len(set(values)), 4)
+
+    def test_other_index_address_state_and_nonzero_frequency_modes_remain_unmodelled(self):
+        address = self.PASS_OFFSET_ZERO & ~(0xFF << 8) | 1 << 8
+        state = self.PASS_OFFSET_ZERO | 3 << 54
+        unknown_location = self.PASS_OFFSET_ZERO | 1 << 52
+        for word in (
+            address,
+            state,
+            unknown_location,
+            self.PASS_OFFSET_ZERO | 1 << 38,
+            self.PASS_OFFSET_R9 | 1 << 54,
+            self.PASS_OFFSET_R9 | 2 << 54,
+        ):
+            with self.subTest(word=hex(word)), self.assertRaises(UnsupportedError):
+                lane = Lane()
+                lane.w(9, 1)
+                alu('IPA', word, lane, gate.Seeded(1, 0).inputs())
 
 
 class LocalTest(unittest.TestCase):

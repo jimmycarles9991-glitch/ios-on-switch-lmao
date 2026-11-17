@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#import "RawMetalRotated.h"
 
 @implementation RMBuffer
 
@@ -129,7 +130,7 @@
         return;
     _aliasable = true;
     if (_raw.arena)
-        gRM->raw->arenaRelease(_raw);
+        gRM->raw->makeArenaAliasable(_raw.span, _raw.lease);
     _heap->_used -= _heapBytes;
     _heapBytes = 0;
 }
@@ -153,6 +154,8 @@
                                     offset:(NSUInteger)offset
                                bytesPerRow:(NSUInteger)row
 {
+    if (refuseTurnedOffSurface(d))
+        return nil;
     RMTexture *t = [RMTexture new];
     t->_device = _device;
     t->_descriptor = [d copy];
@@ -160,23 +163,42 @@
     t->_buffer = self;
     t->_offset = offset;
     t->_rowBytes = row;
-    if (rawShape(d) && d.storageMode != MTLStorageModeMemoryless)
+    if (d.textureType == MTLTextureTypeTextureBuffer)
+        t->_rawOk = d.width <= UINT32_MAX &&
+                    gRM->raw->createTexelBuffer(_raw, offset, uint32_t(d.width), uint32_t(d.pixelFormat), t->_raw);
+    else if (rawShape(d) && d.storageMode != MTLStorageModeMemoryless)
         t->_rawOk = gRM->raw->createBufferTexture(_raw, offset, uint32_t(d.width), uint32_t(d.height), uint32_t(row),
                                                   uint32_t(d.pixelFormat), t->_raw);
     if (t->_rawOk)
         keepExtendedRange(d, t->_raw, true);
     if (!t->_rawOk) {  // which term (createBufferTexture's, recomputed: not the hot path)
         const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
-        const uint64_t packed = uint64_t(d.width) * (f ? f->bpp : 0), at = (_raw.va + offset) & 31;
+        const uint64_t packed = uint64_t(d.width) * (f ? f->bpp : 0);
         NSString *extra = [NSString stringWithFormat:@"offset %lu bytesPerRow %lu buffer %llu", (unsigned long)offset,
                                                      (unsigned long)row, (unsigned long long)_raw.length];
-        if (uint32_t term = rawShapeTerm(d))
+        if (d.textureType == MTLTextureTypeTextureBuffer) {
+            if ((_raw.va + offset) & 15) {
+                // a texel buffer's offset is a multiple of 16 (NVK's minTexelBufferOffsetAlignment): Metal's validation
+                // stops any other
+                os_log_error(rawLog(), "raw: %{public}s: no texel buffer over a buffer: offset off 16: %{public}@",
+                             getprogname(), extra);
+                return nil;
+            }
+            refuseTexture(t, PredTexBufOther, offset, _raw.length, @"texel buffer", extra);
+        } else if (uint32_t term = rawShapeTerm(d))
             refuseTexture(t, PredTexShape, term, d.pixelFormat, @"buffer", extra);
-        else if (at)
-            refuseTexture(t, PredTexBufBase, at, offset, @"buffer", extra);
-        else if ((row & 31) || row < packed)
-            refuseTexture(t, PredTexBufPitch, row, packed, @"buffer", extra);
-        else
+        else if (((_raw.va + offset) & 15) || (row & 15) || row < packed) {
+            // a 2D texture's offset and rows are multiples of 16 (m2v linear_plan.rs, measured): Metal's validation stops
+            // any other, which m2v refused
+            os_log_error(rawLog(),
+                         "raw: %{public}s: no texture over a buffer: offset or rows off 16, or short: %{public}@",
+                         getprogname(), extra);
+            return nil;
+        } else if (d.storageMode == MTLStorageModeMemoryless || offset + uint64_t(row) * d.height > _raw.length) {
+            os_log_error(rawLog(), "raw: %{public}s: no texture over a buffer: memoryless, or past its end: %{public}@",
+                         getprogname(), extra);
+            return nil;
+        } else
             refuseTexture(t, PredTexBufOther, offset + uint64_t(row) * d.height, _raw.length, @"buffer", extra);
     }
     if (!t->_rawOk && ![t rmTwin])

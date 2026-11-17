@@ -44,7 +44,7 @@ unsigned colors(const char *key)
 
 bool plainEntries(const raw::PackPipeline &p)
 {
-    for (uint32_t k = 0; k < p.entries && k < raw::kPackEntries; k++) {
+    for (uint32_t k = 0; k < raw::entryCount(p) && k < raw::kPackEntries; k++) {
         const raw::PackEntry &e = p.entry[k];
         const bool ubo = e.kind == raw::EntryUbo && !raw::bufferStorage(e);
         if (!ubo && e.kind != raw::EntryTexture && e.kind != raw::EntrySamplerOnly)
@@ -64,7 +64,7 @@ bool positionFirst(const raw::PackPipeline &p, const char *key)
 // Its first set-0 texture whose sampler is the draw's (a slot, not constexpr)
 const raw::PackEntry *sampledTexture(const raw::PackPipeline &p)
 {
-    for (uint32_t k = 0; k < p.entries && k < raw::kPackEntries; k++)
+    for (uint32_t k = 0; k < raw::entryCount(p) && k < raw::kPackEntries; k++)
         if (p.entry[k].kind == raw::EntryTexture && p.entry[k].samplerKind == raw::SamplerSlot)
             return &p.entry[k];
     return nullptr;
@@ -195,7 +195,7 @@ const raw::PackPipeline *fragmentTemplate(const raw::Pack &pack)
     const raw::PackPipeline *pipelines = pack.section<raw::PackPipeline>(raw::PackPipelines);
     const raw::PackPipeline *best = nullptr;
     auto rank = [&](const raw::PackPipeline &p) {
-        return std::make_tuple(colors(pack.string(p.keyString)), p.entries, p.keyHash);
+        return std::make_tuple(colors(pack.string(p.keyString)), raw::entryCount(p), p.keyHash);
     };
     for (uint32_t i = 0; i < pack.header()->pipelines; i++) {
         const raw::PackPipeline &p = pipelines[i];
@@ -210,7 +210,7 @@ const raw::PackPipeline *textureTemplate(const raw::Pack &pack)
     const raw::PackPipeline *pipelines = pack.section<raw::PackPipeline>(raw::PackPipelines);
     const raw::PackPipeline *best = nullptr;
     auto rank = [&](const raw::PackPipeline &p) {
-        return std::make_tuple(colors(pack.string(p.keyString)), p.entries, p.keyHash);
+        return std::make_tuple(colors(pack.string(p.keyString)), raw::entryCount(p), p.keyHash);
     };
     for (uint32_t i = 0; i < pack.header()->pipelines; i++) {
         const raw::PackPipeline &p = pipelines[i];

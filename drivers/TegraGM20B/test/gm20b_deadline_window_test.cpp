@@ -3,6 +3,8 @@
 // whether an app channel slow enough to be held is held, by what has work in flight. The holds are taken in the
 // interrupt work loop's gate; nothing takes a spinlock, and nothing waits for the gate under one.
 #include <gtest/gtest.h>
+#include <cstdarg>
+#include <cstdio>
 #include <string>
 #include <vector>
 #include "drivers/TegraGM20B/test/gm20b_sched_stubs.h"
@@ -11,6 +13,9 @@ extern "C" {
 }
 
 extern "C" void tegra_gm20b_compositor_vsync(uint64_t stamp, uint32_t lead_us, uint64_t interval);
+extern "C" {
+#include "drivers/TegraGM20B/deadline_stats.h"
+}
 
 namespace
 {
@@ -30,6 +35,7 @@ struct Work {
 };
 
 std::vector<Work *> works;
+std::vector<std::string> logged;
 
 void runDue()
 {
@@ -80,6 +86,16 @@ u64 nvxnu_abstime_to_ns(u64 t)
 void nvxnu_panic(const char *, ...)
 {
 	ADD_FAILURE() << "panic";
+}
+
+void nvxnu_log(const char *format, ...)
+{
+	char line[512];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(line, sizeof(line), format, args);
+	va_end(args);
+	logged.push_back(line);
 }
 
 void *nvxnu_work_alloc(void (*fn)(void *), void *arg)
@@ -378,4 +394,58 @@ TEST_F(DeadlineWindow, OnlyThePassLearnsAFramesTime)
 	EXPECT_EQ(learned(), 0u) << "the frame after a work item's present";
 	frame(1);
 	EXPECT_EQ(learned(), 1u);
+}
+
+// A frame whose present completes past its vblank is counted by its cause in the stats window's line, and the window's
+// first 8 each log a line naming it: here a first kick 2 ms before the vblank for 9 ms of GPU work (pacing.glass_under's
+// boot-22 frames: a swap 8.5 ms after the vsync, 9.6 ms of GPU), and the classification's other causes in order
+TEST_F(DeadlineWindow, AMissedFrameNamesItsCause)
+{
+	for (int frame = 0; frame < 4; frame++) {
+		frameEnd();
+		now += 1000000;
+		tgm_deadline_kicked(1, 0);
+		tgm_deadline_progress(9000000, 0);
+		now += 9000000;
+		tgm_deadline_presented(now, 1);
+		now += kPeriod - 10000000;
+	}
+	char window[320];
+	tgm_deadline_miss_stats(window, sizeof(window));
+	logged.clear();
+	for (int late = 0; late < 10; late++) {
+		frameEnd();
+		now += kPeriod - 2000000;
+		tgm_deadline_kicked(1, 0);
+		now += 1000000;
+		tgm_deadline_kicked(1, 0);
+		tgm_deadline_progress(9000000, 0);
+		now += 8000000;
+		tgm_deadline_presented(now, 1);
+		now += kPeriod - 7000000;
+	}
+	ASSERT_EQ(logged.size(), 8u) << "a line for each of the window's first 8";
+	EXPECT_NE(logged[0].find("missed its vblank by"), std::string::npos) << logged[0];
+	EXPECT_NE(logged[0].find("the compositor's first kick too late for its GPU time"),
+		  std::string::npos)
+		<< logged[0];
+	EXPECT_NE(logged[0].find("its GPU time 9000 us"), std::string::npos) << logged[0];
+	EXPECT_NE(logged[0].find("first kick 2000 us before the vblank"), std::string::npos)
+		<< logged[0];
+	ASSERT_EQ(tgm_deadline_miss_stats(window, sizeof(window)), 1);
+	EXPECT_NE(std::string(window).find("10 compositor frames missed their vblank"),
+		  std::string::npos)
+		<< window;
+	EXPECT_NE(std::string(window).find("first kick late 10"), std::string::npos) << window;
+	EXPECT_EQ(tgm_deadline_miss_stats(window, sizeof(window)), 0)
+		<< "the next window had no miss";
+
+	const tgm_deadline_miss held = {1000, 8000000, 9000000, 9000000, 1, 1};
+	EXPECT_EQ(tgm_deadline_miss_cause(&held), TGM_MISS_APP_HELD);
+	const tgm_deadline_miss heavy = {1000, 16000000, 14000000, 9000000, 0, 0};
+	EXPECT_EQ(tgm_deadline_miss_cause(&heavy), TGM_MISS_OWN_GPU);
+	const tgm_deadline_miss between = {1000, 16000000, 9000000, 9000000, 1, 0};
+	EXPECT_EQ(tgm_deadline_miss_cause(&between), TGM_MISS_APP_BETWEEN);
+	const tgm_deadline_miss late = {1000, 16000000, 9000000, 9000000, 0, 0};
+	EXPECT_EQ(tgm_deadline_miss_cause(&late), TGM_MISS_PRESENT);
 }

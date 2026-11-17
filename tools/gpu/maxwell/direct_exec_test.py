@@ -13,13 +13,9 @@ of 48 KiB of threadgroup memory under its QMD's shared memory size.
 usage: direct_exec_test.py <direct_runner dir> <shader tools dir>
 """
 
-import json
-import os
-import shutil
+import math
 import struct
-import subprocess
 import sys
-import tempfile
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -32,31 +28,13 @@ from tools.gpu.maxwell.quad import run_quad
 RECORDS: dict = {}
 ATTR_LAYER, ATTR_VIEWPORT, ATTR_POSITION, ATTR_GENERIC = 0x64, 0x68, 0x70, 0x80
 ATTR_TESS_COORD, ATTR_INSTANCE_ID, ATTR_VERTEX_ID = 0x2F0, 0x2F8, 0x2FC
+ATTR_FRONT_FACE, MASK = 0x3FC, 0xFFFFFFFF
 TESS_LEVELS = {'outer': (0x000, 0x004, 0x008), 'inner': 0x010}
 SV_LANE_ID, SV_INVOCATION_ID, SV_INVOCATION_INFO = 0x00, 0x11, 0x1D
 SV_COMBINED_TID, SV_TID_X, SV_CTAID_X = 0x20, 0x21, 0x25
 # a tessellation stage's one invocation of a patch of one vertex: SV_INVOCATION_INFO's byte 0 the patch in the batch,
 # byte 2 its vertices (NAK's per-vertex input index, nak_nir_lower_vtg_io.c)
 CONTROL_SYSTEM = {SV_LANE_ID: 0, SV_INVOCATION_ID: 0, SV_INVOCATION_INFO: 1 << 16}
-
-
-def load(runner: Path, tools: Path) -> dict:
-    work = Path(tempfile.mkdtemp(dir=os.environ.get('TEST_TMPDIR')))
-    for name in ('directrun', 'libmock_iokit.dylib', 'exec.metallib'):
-        shutil.copyfile(runner / name, work / name)
-    (work / 'directrun').chmod(0o755)
-    shutil.copyfile(tools / 'libvulkan_nouveau.dylib', work / 'libvulkan_nouveau.dylib')
-    (work / 'cache').mkdir()
-    out = work / 'records.json'
-    made = subprocess.run(
-        [work / 'directrun', work / 'libvulkan_nouveau.dylib', work / 'cache', work / 'exec.metallib', out],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if made.returncode:
-        raise RuntimeError(f'directrun: {made.stdout[-2000:]}{made.stderr[-4000:]}')
-    return json.loads(out.read_text())
 
 
 def outputs(environment: dr.Stage, base: int, count: int, vertex: int = 0) -> list[float]:
@@ -80,6 +58,110 @@ class Records(unittest.TestCase):
     def kernel(self, name: str) -> dict:
         self.assertIn(name, RECORDS['kernels'], RECORDS['refused'].get(name, 'not made'))
         return RECORDS['kernels'][name]
+
+
+class VertexCubic(Records):
+    SIDE, HEADER, SAMPLER = 8, 0x123, 0x56
+    # Quarter-fraction rows of Metal's measured 2^-16 weight table (metal/bicubic.rs).
+    WEIGHTS: ClassVar = {
+        0.0: (0, 1, 0, 0),
+        0.25: tuple(x / 128 for x in (-9, 111, 29, -3)),
+        0.5: tuple(x / 16 for x in (-1, 9, 9, -1)),
+        0.75: tuple(x / 128 for x in (-3, 29, 111, -9)),
+    }
+
+    @classmethod
+    def texel(cls, x: int, y: int) -> list[float]:
+        at = (min(max(x, 0), cls.SIDE - 1), min(max(y, 0), cls.SIDE - 1))
+        return [float(at == point) for point in ((2, 3), (3, 4), (0, 0), (7, 7))]
+
+    @staticmethod
+    def half_away(value: float) -> float:
+        magnitude = abs(value)
+        bits = struct.unpack('<H', struct.pack('<e', magnitude))[0]
+        rounded = struct.unpack('<e', struct.pack('<H', bits))[0]
+        if rounded < magnitude:
+            higher = struct.unpack('<e', struct.pack('<H', bits + 1))[0]
+            if magnitude - rounded == higher - magnitude:
+                rounded = higher
+        return math.copysign(rounded, value)
+
+    @classmethod
+    def reference(cls, point: tuple[float, float], cubic: bool) -> list[float]:
+        x, y = (math.floor(v) for v in point)
+        fx, fy = point[0] - x, point[1] - y
+        wx, wy = (cls.WEIGHTS[fx], cls.WEIGHTS[fy]) if cubic else ((0, 1 - fx, fx, 0), (0, 1 - fy, fy, 0))
+        return [
+            sum(wx[i] * wy[j] * cls.texel(x + i - 1, y + j - 1)[channel] for j in range(4) for i in range(4))
+            for channel in range(4)
+        ]
+
+    def run_vertex(self, name: str, point: tuple[float, float]) -> list[float]:
+        record = self.state(name)
+        program = record['programs'][0]
+        binding = dr.Binding()
+        uv = tuple((v + 0.5) / self.SIDE for v in point)
+        binding.bind((1, 0), dr.floats(*uv))
+        buffers = dict(record, entries=[entry for entry in record['entries'] if entry[1] == dr.ENTRY_UBO])
+        set0 = bytearray(dr.render_set(buffers, binding))
+        for offset, kind, stage, slot, sampler_kind, _sampler, _pad in record['entries']:
+            if kind == dr.ENTRY_UBO:
+                continue
+            self.assertEqual((stage, slot), (1, 0))
+            self.assertIn(kind, (0, 2))
+            handle = self.HEADER if kind == 2 else 0
+            if kind == 0 or sampler_kind == 1:
+                handle |= self.SAMPLER << 20
+            struct.pack_into('<I', set0, offset, handle)
+        binding.tables(dr.root_table(dr.record_push(record), record['set_bytes']), bytes(set0))
+        environment = dr.stage(program, binding, attributes({ATTR_VERTEX_ID: 0}), {})
+        fetched = []
+
+        def texture(key: tuple) -> list[int]:
+            self.assertEqual(key[1] & 0xFFFFF, self.HEADER)
+            if key[0] == 'txq':
+                self.assertEqual(key[2], 1)
+                return [self.SIDE, self.SIDE, 1, 1]
+            fetched.append(key)
+            if key[0] == 'tld':
+                self.assertEqual(key[6], 2)
+                self.assertIn(key[3], (None, 0))
+                coords = [v - (1 << 32) if v & (1 << 31) else v for v in key[2]]
+                offset = key[4] or (0, 0)
+                return [dr.f32(v) for v in self.texel(coords[0] + offset[0], coords[1] + offset[1])]
+            if key[0] == 'tex':
+                self.assertEqual(key[7], 2)
+                self.assertIn(key[3], (1, 3))
+                self.assertIn(key[4], (None, 0))
+                at = tuple(dr.value(v) * self.SIDE - 0.5 for v in key[2])
+                return [dr.f32(v) for v in self.reference(at, False)]
+            raise UnsupportedError(f'a vertex cubic fetch {key[0]}')
+
+        inputs = environment.inputs()
+        inputs.texture = texture
+        dr.run_lane(dr.code(program), inputs, environment)
+        self.assertTrue(fetched)
+        self.assertEqual(outputs(environment, ATTR_POSITION, 4), [-1.0, -1.0, 0.0, 1.0])
+        return outputs(environment, ATTR_GENERIC, 4)
+
+    def test_native_vertex_cubic_matches_the_measured_format_rules(self):
+        linear = self.state('cubic_vertex_linear')
+        half = self.state('cubic_vertex_half')
+        single = self.state('cubic_vertex_float')
+        self.assertNotEqual(half['programs'][0]['image'], linear['programs'][0]['image'])
+        self.assertEqual(half['programs'][1]['image'], linear['programs'][1]['image'])
+        self.assertEqual(single['programs'][1]['image'], linear['programs'][1]['image'])
+        differs = False
+        for point in ((-0.75, 0.25), (0.5, 0.5), (2.25, 3.75), (3.5, 4.5), (6.75, 6.25), (7.75, 7.25)):
+            with self.subTest(point=point):
+                expected_linear = self.reference(point, False)
+                expected_cubic = [self.half_away(v) for v in self.reference(point, True)]
+                self.assertEqual(self.run_vertex('cubic_vertex_linear', point), expected_linear)
+                self.assertEqual(self.run_vertex('cubic_fragment_only', point), expected_linear)
+                self.assertEqual(self.run_vertex('cubic_vertex_float', point), expected_linear)
+                self.assertEqual(self.run_vertex('cubic_vertex_half', point), expected_cubic)
+                differs |= expected_cubic != expected_linear
+        self.assertTrue(differs)
 
 
 class Tessellation(Records):
@@ -608,6 +690,43 @@ class ThreadgroupMemory(Records):
 
     THREADS = 256
 
+    def run_kernel(self, record: dict, rows: int) -> list[int]:
+        """Run one threadgroup of THREADS threads under exactly the shared memory its QMD sizes; give out[]."""
+        size = qmd_field(record['qmd'], QMD_SHARED_MEMORY_SIZE)
+        binding = dr.Binding()
+        out = binding.bind((3, 0), bytes(4 * self.THREADS))
+        binding.bind((3, 1), struct.pack('<I', rows))
+        push = dr.record_push(record)
+        if record['region_word'] >= 0:
+            for k, v in enumerate([0, 0, 0, self.THREADS - 1, self.THREADS, 1, 1, 0]):
+                push[record['region_word'] + k] = v
+        binding.tables(dr.root_table(push, record['set_bytes'], {12: 1, 16: 1, 20: 1}), dr.kernel_set(record, binding))
+        shared = bytearray(size)
+        for tid in range(self.THREADS):
+            system = {SV_TID_X: tid, 0x22: 0, 0x23: 0, SV_COMBINED_TID: tid, SV_LANE_ID: tid % 32}
+            system.update({SV_CTAID_X: 0, 0x26: 0, 0x27: 0})
+            environment = dr.stage(record, binding, attributes({}), system)
+            environment.shared = shared
+            dr.execute(record, environment, header=False)
+        return list(struct.unpack(f'<{self.THREADS}I', binding.memory.read(out, 4 * self.THREADS)))
+
+    def test_a_dispatchs_48_kib_takes_the_whole_cta(self):
+        """The length a dispatch sets (setThreadgroupMemoryLength:atIndex:), as MPS's kernels take theirs."""
+        record = self.kernel('dynamic_threadgroup')
+        self.assertEqual(qmd_field(record['qmd'], QMD_SHARED_MEMORY_SIZE), 48 << 10)
+        self.assertEqual(qmd_field(record['qmd'], QMD_L1_CONFIGURATION), QMD_L1_48KB)
+        want = []
+        for tid in range(self.THREADS):
+            x = 0
+            for k in range(48):
+                x ^= ((tid + 256 * k) * 2654435761 + k) & 0xFFFF_FFFF
+            want.append(x)
+        self.assertEqual(self.run_kernel(record, 48), want)
+
+    def test_a_dispatch_past_48_kib_is_refused_naming_the_limit(self):
+        self.assertNotIn('past_dynamic_threadgroup', RECORDS['kernels'])
+        self.assertIn('MaxComputeSharedMemorySize', RECORDS['refused'].get('past_dynamic_threadgroup', ''))
+
     def test_a_kernel_of_48_kib_takes_the_whole_cta(self):
         record = self.kernel('wide_threadgroup')
         size = qmd_field(record['qmd'], QMD_SHARED_MEMORY_SIZE)
@@ -643,11 +762,254 @@ class ThreadgroupMemory(Records):
         self.assertIn('available: 49152', why)
 
 
+class ShadowStencil(Records):
+    """A fragment function's [[stencil]] output: m2v's shader-side stencil (raw_shader_test_push.h shadowStencil).
+
+    GM20B's fragment program header has no stencil output. The record binds the stencil stand-in alone and carries the
+    ShadowStencilState word in PackShaderTests::reserved. On quads of the front and back face, the program reads the
+    stand-in's texel at its pixel (SULD), tests the output's low 8 bits against it under the face's compare function and
+    read mask, stores the stencil-failure or pass operation's value under the write mask (SUST), and kills a fragment
+    that fails, as Metal's stencil test does (the operations' values as m2v measured them, computed here on the CPU). In
+    a pass without a stencil the record binds none and the program reads and writes nothing.
+    """
+
+    HEADER = 0x2A7
+    QUADS = ((2, 4), (31, 9), (40, 1))
+    FACES = (
+        (3, 1, 2, 0xFF, 0xFF),  # LessEqual, Zero, Replace
+        (5, 6, 7, 0x3C, 0xF0),  # NotEqual, IncrementWrap, DecrementWrap
+        (6, 4, 3, 0x0F, 0x33),  # GreaterEqual, DecrementClamp, IncrementClamp
+        (2, 5, 1, 0xF0, 0x0F),  # Equal, Invert, Zero
+        (0, 2, 2, 0xFF, 0xFF),  # Never
+    )
+
+    @staticmethod
+    def word(face: tuple, attached: bool) -> int:
+        compare, fail, passed, read, write = face
+        return compare | fail << 3 | passed << 6 | read << 9 | write << 17 | (1 << 31 if attached else 0)
+
+    @staticmethod
+    def stored(x: int, y: int) -> int:
+        return (13 * x + 5 * y + 40) & 255
+
+    @staticmethod
+    def compare(code: int, a: int, b: int) -> bool:
+        """Give Metal's compare function `code` of `a` against `b`."""
+        return (False, a < b, a == b, a <= b, a > b, a != b, a >= b, True)[code]
+
+    @staticmethod
+    def operation(op: int, stored: int, reference: int, write: int) -> int:
+        """Give the value Metal's stencil operation `op` leaves under write mask `write`."""
+        value = (
+            stored,
+            0,
+            reference,
+            min(stored + 1, 255),
+            max(stored - 1, 0),
+            stored ^ 255,
+            (stored + 1) & 255,
+            (stored - 1) & 255,
+        )[op]
+        return (stored & ~write & 255) | (value & write)
+
+    @classmethod
+    def metal(cls, face: tuple, reference: int, stored: int) -> tuple[bool, int]:
+        """Give whether Metal's stencil test passes and the value it leaves."""
+        compare, fail, passed, read, write = face
+        ok = cls.compare(compare, reference & read, stored & read)
+        return ok, cls.operation(passed if ok else fail, stored, reference, write)
+
+    def setUp(self) -> None:
+        self.record = self.state('shadow_stencil')
+        _depth, _stencil, self.flags, self.word_at, _depth_tic, self.stencil_tic = self.record['shader_tests'][:6]
+
+    def test_the_record_binds_the_stencil_stand_in_alone_and_names_its_word(self):
+        self.assertEqual(self.flags, 2, 'the stencil stand-in, no depth stand-in')
+        self.assertTrue(0 < self.word_at < 32, 'ShadowStencilState in the push window')
+        self.assertNotEqual(self.stencil_tic, 0, 'the stand-in R8Uint storage view')
+        self.assertEqual([e[1] for e in self.record['entries'] if e[1] in (6, 7)], [7])
+        unattached = self.state('shadow_unattached')
+        self.assertEqual(unattached['shader_tests'][2], 0, 'a pass without a stencil: no stand-in')
+        self.assertNotEqual(unattached['shader_tests'][3], 0, 'its words still say nothing is attached')
+
+    def run_faces(self, record: dict, attached: bool) -> None:
+        program = record['programs'][1]
+        word_at = record['shader_tests'][3]
+        for face in self.FACES:
+            for front in (True, False):
+                push = dr.record_push(record)
+                other = (7, 0, 0, 0xFF, 0xFF)
+                push[word_at - 1] = self.word(face if front else other, attached)
+                push[word_at] = self.word(other if front else face, attached)
+                binding = dr.Binding()
+                stand_ins = {dr.ENTRY_STENCIL_TEST: self.HEADER}
+                binding.tables(
+                    dr.root_table(push, record['set_bytes']), dr.render_set(record, binding, stand_ins=stand_ins)
+                )
+                banks = dr.stage(program, binding, attributes({}), {})
+                for x0, y0 in self.QUADS:
+                    pixels = [(x0 + k % 2, y0 + k // 2) for k in range(4)]
+                    loads: list[list] = [[] for _ in pixels]
+                    lanes = [self.lane(banks, p, front, loads[k]) for k, p in enumerate(pixels)]
+                    for (x, y), loaded, (_, killed, stores) in zip(
+                        pixels, loads, run_quad(dr.code(program), lanes, 0), strict=True
+                    ):
+                        at = f'face {face} front={front} at {(x, y)}'
+                        if not attached:
+                            self.assertEqual((loaded, stores, killed), ([], [], False), at)
+                            continue
+                        ok, value = self.metal(face, (7 * x + 61 * y + 0x100) & 255, self.stored(x, y))
+                        self.assertEqual(loaded, [(self.HEADER, (x, y))], at)
+                        self.assertEqual(killed, not ok, at)
+                        self.assertEqual([(h, c, v[0] & 255) for h, c, v in stores], [(self.HEADER, (x, y), value)], at)
+
+    def lane(self, banks: dr.Stage, pixel: tuple[int, int], front: bool, loads: list) -> Inputs:
+        x, y = pixel
+        words = {
+            ATTR_POSITION: dr.f32(x + 0.5),
+            ATTR_POSITION + 4: dr.f32(y + 0.5),
+            ATTR_FRONT_FACE: MASK if front else 0,
+        }
+        words.update({ATTR_POSITION + 8: dr.f32(0.0), ATTR_POSITION + 12: dr.f32(1.0)})
+
+        def attribute(address: int) -> int:
+            if address not in words:
+                raise UnsupportedError(f'IPA {address:#x}, an input the test gave no word for')
+            return words[address]
+
+        def surface(op: tuple) -> list[int]:
+            if op[0] != 'suld':
+                raise UnsupportedError(f'{op[0]}, a read the test gave no memory for')
+            loads.append((op[1], op[2]))
+            return [self.stored(*op[2][:2]), 0, 0, 0]
+
+        return Inputs(attribute, banks.cbuf, surface)
+
+    def test_each_fragment_runs_metals_stencil_test_on_the_stand_in(self):
+        self.run_faces(self.record, True)
+
+    def test_a_pass_without_a_stencil_tests_nothing(self):
+        self.run_faces(self.state('shadow_unattached'), False)
+
+
+class ShadowStencilTested(Records):
+    """The same function's " | tests=4" variant, for a draw whose stencil write follows its depth test.
+
+    The shader-side stencil writes before the hardware's depth test, which picks between a face's depth-failure and pass
+    operations: this variant runs both tests on the depth and stencil stand-ins, the output's low 8 bits the stencil
+    test's reference. On quads at depths 0.25 and 0.75 over stand-in depth 0.5 (Less, depth writes), each fragment's
+    stencil stand-in texel is the face's stencil-failure, depth-failure or pass operation's value, its depth written
+    where both tests pass, and a fragment that fails either is killed, as Metal's tests do.
+    """
+
+    DEPTH, STENCIL = 0x2B1, 0x2B2
+    QUADS = ((2, 4), (31, 9))
+    FRONT = (3, 1, 3, 2, 0xFF, 0xFF)  # LessEqual; Zero, IncrementClamp on depth failure, Replace
+    BACK = (6, 6, 0, 7, 0x3C, 0xF0)  # GreaterEqual; IncrementWrap, Keep on depth failure, DecrementWrap
+
+    @staticmethod
+    def word(face: tuple) -> int:
+        compare, fail, depth_fail, passed, read, write = face
+        return compare | fail << 3 | passed << 6 | read << 9 | write << 17 | depth_fail << 25
+
+    def setUp(self) -> None:
+        self.record = self.state('shadow_tested')
+        self.depth_word, self.stencil_word, self.flags, shadow_word = self.record['shader_tests'][:4]
+        self.storage_tests = self.record['shader_tests'][6]
+        self.assertEqual(shadow_word, 0, 'no shader-side stencil in the variant')
+
+    def test_the_record_binds_both_stand_ins_for_stencil_writing_draws(self):
+        self.assertEqual(self.flags, 3)
+        self.assertEqual(self.storage_tests, 4, 'its draws are StencilWrite (raw_fragment_tests.h)')
+        self.assertEqual(sorted(e[1] for e in self.record['entries'] if e[1] in (6, 7)), [6, 7])
+
+    def test_each_fragment_runs_metals_stencil_then_depth_test(self):
+        program = self.record['programs'][1]
+        for front in (True, False):
+            push = dr.record_push(self.record)
+            push.update({self.depth_word - 1 + k: w for k, w in enumerate((1 | 1 << 3, dr.f32(0.0), dr.f32(1.0), 0))})
+            words = (self.word(self.FRONT), self.word(self.BACK), 0, 0)
+            push.update({self.stencil_word - 1 + k: w for k, w in enumerate(words)})
+            binding = dr.Binding()
+            stand_ins = {dr.ENTRY_DEPTH_TEST: self.DEPTH, dr.ENTRY_STENCIL_TEST: self.STENCIL}
+            binding.tables(
+                dr.root_table(push, self.record['set_bytes']), dr.render_set(self.record, binding, stand_ins=stand_ins)
+            )
+            banks = dr.stage(program, binding, attributes({}), {})
+            for x0, y0 in self.QUADS:
+                pixels = [(x0 + k % 2, y0 + k // 2) for k in range(4)]
+                depths = [0.25 if (x + y) % 2 else 0.75 for x, y in pixels]
+                lanes = [self.lane(banks, p, z, front) for p, z in zip(pixels, depths, strict=True)]
+                for (x, y), z, (_, killed, stores) in zip(
+                    pixels, depths, run_quad(dr.code(program), lanes, 0), strict=True
+                ):
+                    compare, fail, depth_fail, passed, read, write = self.FRONT if front else self.BACK
+                    reference, stored = (7 * x + 61 * y + 0x100) & 255, ShadowStencil.stored(x, y)
+                    stencil_ok = ShadowStencil.compare(compare, reference & read, stored & read)
+                    depth_ok = stencil_ok and z < 0.5
+                    op = passed if depth_ok else depth_fail if stencil_ok else fail
+                    value = ShadowStencil.operation(op, stored, reference, write)
+                    at = f'front={front} at {(x, y)} z={z}'
+                    self.assertEqual(killed, not depth_ok, at)
+                    self.assertEqual(
+                        [(c, v[0] & 255) for h, c, v in stores if h == self.STENCIL], [((x, y), value)], at
+                    )
+                    depth_stores = [(c, v[0]) for h, c, v in stores if h == self.DEPTH]
+                    self.assertEqual(depth_stores, [((x, y), dr.f32(z))] if depth_ok else [], at)
+
+    def lane(self, banks: dr.Stage, pixel: tuple[int, int], z: float, front: bool) -> Inputs:
+        x, y = pixel
+        words = {
+            ATTR_POSITION: dr.f32(x + 0.5),
+            ATTR_POSITION + 4: dr.f32(y + 0.5),
+            ATTR_POSITION + 8: dr.f32(z),
+            ATTR_POSITION + 12: dr.f32(1.0),
+            ATTR_FRONT_FACE: MASK if front else 0,
+        }
+
+        def attribute(address: int) -> int:
+            if address not in words:
+                raise UnsupportedError(f'IPA {address:#x}, an input the test gave no word for')
+            return words[address]
+
+        def surface(op: tuple) -> list[int]:
+            if op[0] != 'suld':
+                raise UnsupportedError(f'{op[0]}, a read the test gave no memory for')
+            header, at = op[1], op[2]
+            if header == self.DEPTH:
+                return [dr.f32(0.5), 0, 0, 0]
+            return [ShadowStencil.stored(*at[:2]), 0, 0, 0]
+
+        return Inputs(attribute, banks.cbuf, surface)
+
+
 class Kernels(Records):
     MASK = 0xFFFF_FFFF_FFFF_FFFF
     ERROR = MASK  # raw_counters.h kErrorValue
     # nanoseconds a PTIMER unit: 32 units a 19.2 MHz tick
     NUM, DEN = 625, 384
+
+    def test_a_binary_function_links_under_its_specialized_name(self):
+        record = self.kernel('binary_affine')
+        binding = dr.Binding()
+        out = binding.bind((3, 0), bytes(128))
+        self.dispatch(record, binding, 1, 32)
+        self.assertEqual(struct.unpack('<32I', binding.memory.read(out, 128)), tuple(2 * i + 1 for i in range(32)))
+        self.assertNotIn('binary_wrong_alias', RECORDS['kernels'])
+        self.assertIn('binary_affine_alias', RECORDS['refused'].get('binary_wrong_alias', ''))
+        self.assertIn('binary_affine', RECORDS['answers'], RECORDS['refused'].get('binary_affine', ''))
+        answers = RECORDS['answers']['binary_affine']
+        self.assertGreaterEqual(answers['facts'][0], 32)
+        self.assertEqual(answers['facts'][1:], [32, 0])
+        reflection = bytes.fromhex(answers['reflection'])
+        self.assertEqual(struct.unpack_from('<4sII', reflection), (b'SWRF', 1, 1))
+        nodes = struct.unpack_from('<I', reflection, 12)[0]
+        first, count = struct.unpack_from('<II', reflection, 24)
+        self.assertEqual(count, 1)
+        binding = struct.unpack_from('<I', reflection, 32 + nodes * 104 + first * 4)[0]
+        self.assertLess(binding, nodes)
+        self.assertEqual(struct.unpack_from('<I', reflection, 32 + binding * 104)[0], 1)
+        self.assertEqual(struct.unpack_from('<Q', reflection, 32 + binding * 104 + 56)[0], 0)
 
     @staticmethod
     def dispatch(record: dict, binding: dr.Binding, groups: int, local: int, stage_in: list[int] | None = None) -> None:
@@ -743,5 +1105,5 @@ class Kernels(Records):
 
 
 if __name__ == '__main__':
-    RECORDS.update(load(Path(sys.argv[1]), Path(sys.argv[2])))
+    RECORDS.update(dr.load(Path(sys.argv[1])))
     unittest.main(argv=sys.argv[:1])

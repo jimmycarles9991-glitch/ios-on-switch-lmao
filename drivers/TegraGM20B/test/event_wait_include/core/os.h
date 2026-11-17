@@ -9,6 +9,7 @@
 #include <pthread.h>
 typedef uint32_t u32;
 typedef uint64_t u64;
+typedef uint8_t __u8;
 
 typedef struct {
 	int value;
@@ -17,6 +18,7 @@ typedef struct {
 #define atomic_set(p, v) __atomic_store_n(&(p)->value, (v), __ATOMIC_RELEASE)
 #define atomic_read(p) __atomic_load_n(&(p)->value, __ATOMIC_ACQUIRE)
 #define atomic_xchg(p, v) __atomic_exchange_n(&(p)->value, (v), __ATOMIC_ACQ_REL)
+#define atomic_or(v, p) __atomic_fetch_or(&(p)->value, (v), __ATOMIC_ACQ_REL)
 typedef pthread_mutex_t spinlock_t;
 typedef pthread_rwlock_t rwlock_t;
 #define spin_lock_init(p) pthread_mutex_init(p, NULL)
@@ -34,9 +36,21 @@ typedef pthread_rwlock_t rwlock_t;
 #define __ffs(v) __builtin_ctz(v)
 #define array3_size(a, b, c) ((size_t)(a) * (b) * (c))
 #define kzalloc(n, f) calloc(1, n)
+#define kzalloc_obj(v) calloc(1, sizeof(v))
 #define kfree(p) free(p)
 #define GFP_KERNEL 0
 #define __always_inline inline __attribute__((always_inline))
+
+struct work_struct {
+	void *thread_call;
+	void (*func)(struct work_struct *);
+};
+
+void switch_event_work_init(struct work_struct *, void (*)(struct work_struct *));
+bool schedule_work(struct work_struct *);
+bool flush_work(struct work_struct *);
+void switch_linux_call_free(void *);
+#define INIT_WORK(work, func) switch_event_work_init(work, func)
 
 struct list_head {
 	struct list_head *next, *prev;

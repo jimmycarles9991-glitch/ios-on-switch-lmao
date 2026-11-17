@@ -13,6 +13,7 @@ enum JPEGRoute {
         let refused: UInt64
         /// Requests per TEGRA_NVJPG_OUT_* (formatNames' order), refused and failed ones too.
         let asked: [UInt64]
+        let outputMaps: UInt64
     }
 
     /// TegraNVJPGJpeg.h's TEGRA_NVJPG_OUT_* order.
@@ -82,7 +83,8 @@ enum JPEGRoute {
                     decodes: words.load(as: UInt64.self), formats: words.load(fromByteOffset: 8, as: UInt64.self),
                     failed: words.load(fromByteOffset: 16, as: UInt64.self),
                     refused: words.load(fromByteOffset: 24, as: UInt64.self),
-                    asked: formatNames.indices.map { words.load(fromByteOffset: 32 + 8 * $0, as: UInt64.self) })
+                    asked: formatNames.indices.map { words.load(fromByteOffset: 32 + 8 * $0, as: UInt64.self) },
+                    outputMaps: words.load(fromByteOffset: 32 + 8 * formatNames.count, as: UInt64.self))
             })
     }
 }

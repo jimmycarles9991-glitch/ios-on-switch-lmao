@@ -32,22 +32,6 @@ inline uint32_t tegra_gm20b_created_surface(const TegraGM20BSurfaceCreateAbi &ab
 	return id;
 }
 
-/* The surface an IOSurfaceRootUserClient reply of `replySize` bytes (IOSurface's reply fill, which every create and
- * lookup ends in: word 0 the client's CPU address, `idOffset` the surface's ID) gave the calling task a CPU mapping of;
- * 0 for any other output, and for a client that maps nothing (address 0). */
-inline uint32_t tegra_gm20b_mapped_surface(uint32_t replySize, uint32_t idOffset,
-					   const void *output, uint32_t outputSize)
-{
-	uint64_t address = 0;
-	uint32_t id = 0;
-	if (!output || !replySize || outputSize != replySize || idOffset > outputSize ||
-	    outputSize - idOffset < sizeof(id) || outputSize < sizeof(address))
-		return 0;
-	memcpy(&address, output, sizeof(address));
-	memcpy(&id, static_cast<const uint8_t *>(output) + idOffset, sizeof(id));
-	return address ? id : 0;
-}
-
 /* Whether a created surface of `bytes` is faulted in now: large enough, and only at memorystatus' normal level, so the
  * early fault never raises compression or jetsam that the lazy fault would not. */
 inline bool tegra_gm20b_prefault_wanted(uint64_t bytes, int pressureLevel)

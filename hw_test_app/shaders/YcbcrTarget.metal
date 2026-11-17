@@ -21,3 +21,17 @@ fragment float4 texel_read(float4 position [[position]], texture2d<float, access
 {
     return t.read(uint2(position.xy));
 }
+
+struct TwoTexels {
+    float4 first [[color(0)]];
+    float4 second [[color(1)]];
+};
+
+/// Each pixel's value at two attachments, the second's channels the first's turned (gpu.ycbcr_corner: cameracaptured's
+/// passes into two YCbCr targets at once).
+fragment TwoTexels texel_values_two(float4 position [[position]], device const float4 *values [[buffer(0)]],
+                                    constant uint &width [[buffer(1)]])
+{
+    const float4 v = values[uint(position.y) * width + uint(position.x)];
+    return {v, v.zxyw};
+}

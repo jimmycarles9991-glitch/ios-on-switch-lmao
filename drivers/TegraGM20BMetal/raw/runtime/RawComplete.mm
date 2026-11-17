@@ -7,11 +7,15 @@
 #include "NativeBridgeMetalFrontend.h"
 #include "RawMetalInternal.h"
 #include "RawRenderKey.h"
+#include "raw_answer_class.h"
 #include "raw_compute.h"
 #include "raw_gpu.h"
 
 namespace raw {
 namespace {
+
+// RawDirect.mm Direct::kernel's reason for a translation the bridge fails
+const std::string kTranslationFails = "m2v refused its translation: fails: ";
 
 constexpr uint64_t kCacheCap = 8u << 20;
 
@@ -42,10 +46,7 @@ void logHarvestParts(uint64_t name, NSString *label, const std::string &key)
 #endif
 
 Completion::Completion(Device &device, const char *cacheDir, uint64_t stack, const char *seedDir)
-    : device_(device), stack_(stack),
-      queue_(dispatch_queue_create(
-          "com.brunostjohn.switch.raw.complete",
-          dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0))),
+    : device_(device), stack_(stack), queue_(answerQueue("com.brunostjohn.switch.raw.complete")),
       persistenceQueue_(
           dispatch_queue_create("com.brunostjohn.switch.raw.kernel-cache",
                                 dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0))),
@@ -146,27 +147,28 @@ void Completion::create(Ask asked, Ready ready)
 }
 
 // Why an ask of `k` that came to nothing failed, "" where it was refused
-std::string Completion::failureOf(const CacheKey &k)
+std::string Completion::failureOf(const CacheKey &k, bool creation)
 {
     if (remote_->declined())
         return kNoCompilerComes;
     RuntimeRecord record;
     std::string why;
-    return compiler_->lookup(k, record, why) == RecordCache::Found::Refusal ? std::string()
-                                                                            : "the state's compile could not run";
+    if (compiler_->lookup(k, record, why) != RecordCache::Found::Refusal)
+        return "the state's compile could not run";
+    return creation ? "the shader compiler refused the state" + (why.empty() ? std::string() : ": " + why) : "";
 }
 
 void Completion::request(Ask asked, std::shared_ptr<Pending> pending)
 {
-    dispatch_async(queue_, ^{
+    asyncAt(queue_, asked.qos, ^{
         if (stopping_.load(std::memory_order_acquire)) {
-            pending->ready(nullptr, std::string());
+            pending->ready(nullptr, pending->creation ? "the shader compiler's client is stopping" : "");
             return;
         }
         Ask a = asked;
         CacheKey k;
         if (!keyOf(a, k)) {
-            pending->ready(nullptr, std::string());
+            pending->ready(nullptr, pending->creation ? kInexpressible : "");
             return;
         }
         const bool caTransform = a.caTransform;
@@ -176,31 +178,31 @@ void Completion::request(Ask asked, std::shared_ptr<Pending> pending)
         if (compiler_->lookup(k, known, why) != RecordCache::Found::None) {
             const RuntimeRecord *kept = nullptr;
             if (compiler_->ask(k, nullptr, &kept) == Compiler::State::Ready && kept)
-                place(k, kept, caTransform, pending);
+                place(k, kept, caTransform, a.qos, pending);
             else
-                pending->ready(nullptr, std::string());
+                pending->ready(nullptr, failureOf(k, pending->creation));
             return;
         }
         if (!remote_->serving()) {
             pending->ready(nullptr, kNoCompilerComes);
             return;
         }
-        remoteLater(a, k, [this, k, caTransform, pending](const RuntimeRecord *record) {
+        remoteLater(a, k, [this, k, caTransform, qos = a.qos, pending](const RuntimeRecord *record) {
             if (record)
-                place(k, record, caTransform, pending);
+                place(k, record, caTransform, qos, pending);
             else
-                pending->ready(nullptr, failureOf(k));
+                pending->ready(nullptr, failureOf(k, pending->creation));
         });
     });
 }
 
-void Completion::place(const CacheKey &key, const RuntimeRecord *record, bool caTransform,
+void Completion::place(const CacheKey &key, const RuntimeRecord *record, bool caTransform, uint32_t qos,
                        std::shared_ptr<Pending> pending)
 {
     const CacheKey keptKey = key;
-    dispatch_async(queue_, ^{
+    asyncAt(queue_, qos, ^{
         if (stopping_.load(std::memory_order_acquire)) {
-            pending->ready(nullptr, std::string());
+            pending->ready(nullptr, pending->creation ? "the shader compiler's client is stopping" : "");
             return;
         }
         std::string why;
@@ -209,7 +211,9 @@ void Completion::place(const CacheKey &key, const RuntimeRecord *record, bool ca
         if (!made && full)
             os_log_error(rawLog(), "raw: %{public}s: the state that needs %016llx fails", why.c_str(),
                          (unsigned long long)keptKey.name());
-        pending->ready(made, full ? why : std::string());
+        if (!made && !full && pending->creation)
+            why = why.empty() ? "the state's record could not be placed" : why;
+        pending->ready(made, full || (!made && pending->creation) ? why : std::string());
     });
 }
 
@@ -217,8 +221,10 @@ Pipeline *Completion::makeNow(Ask a, std::string &failure)
 {
     failure.clear();
     CacheKey k;
-    if (!keyOf(a, k))
+    if (!keyOf(a, k)) {
+        failure = kInexpressible;
         return nullptr;
+    }
     RuntimeRecord record;
     std::string why;
     Compiler::State state = Compiler::State::Refused;
@@ -243,12 +249,15 @@ Pipeline *Completion::makeNow(Ask a, std::string &failure)
         failure = "the state's compile could not run" + (why.empty() ? std::string() : ": " + why);
         return nullptr;
     }
-    if (state != Compiler::State::Ready)
+    if (state != Compiler::State::Ready) {
+        const std::string refusal = why.empty() ? failure : why;
+        failure = "the shader compiler refused the state" + (refusal.empty() ? std::string() : ": " + refusal);
         return nullptr;
+    }
     bool heapFull = false;
     Pipeline *made = device_.addRecord(record, a.caTransform, why, &heapFull);
-    if (!made && heapFull)
-        failure = why;
+    if (!made)
+        failure = why.empty() ? "the state's record could not be placed" : why;
     return made;
 }
 
@@ -300,6 +309,10 @@ const ComputeState *Completion::kernel(MTLComputePipelineDescriptor *descriptor,
                 break;
             }
             }
+            // a translation the bridge fails ("fails: ", NativeMetalDirectCompute.rs mapped_samplers) fails the same at
+            // every try: its dispatches fail, and nothing asks again
+            if (outcome == Compiler::Outcome::Failed && !why.compare(0, kTranslationFails.size(), kTranslationFails))
+                return Build::Outcome::Gone;
             return outcome == Compiler::Outcome::Made      ? Build::Outcome::Made
                    : outcome == Compiler::Outcome::Refused ? Build::Outcome::Refused
                                                            : Build::Outcome::Failed;

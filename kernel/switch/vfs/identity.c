@@ -23,11 +23,21 @@ extern mount_t native_owner_cryptex_host;
 
 mount_t switch_vfs_volume_host(mount_t mp)
 {
-    const mount_t host = native_owner_cryptex_host;
-    if (host != NULL && (mp == native_owner_cryptex_mount[0] || mp == native_owner_cryptex_mount[1])) {
-        return host;
+    mount_t host = mp;
+    while (host != NULL) {
+        mount_t next;
+        if (native_owner_cryptex_host != NULL &&
+            (host == native_owner_cryptex_mount[0] || host == native_owner_cryptex_mount[1])) {
+            next = native_owner_cryptex_host;
+        } else {
+            next = bindfs_boot_union_host(host);
+        }
+        if (next == NULL) {
+            break;
+        }
+        host = next;
     }
-    return bindfs_boot_union_host(mp);
+    return host != mp ? host : NULL;
 }
 
 mount_t switch_vfs_statfs_mount(vnode_t vp)

@@ -16,7 +16,7 @@ raw::RuntimeRecord storageForm(uint32_t reads)
     raw::RuntimeRecord rec;
     raw::PackPipeline &p = rec.pipeline;
     p.flags = raw::PipelineFetches | raw::PipelineStorageMetadata;
-    p.entries = 2;
+    raw::setEntryCount(p, 2);
     p.entry[0] = fetch(32, 0);
     p.entry[1] = fetch(36, 1);
     p.storageMask = 3;
@@ -62,7 +62,7 @@ TEST(RawRecordLiveness, ReadsThatNoAnalysisCouldNameKeepEveryFetch)
 TEST(RawRecordLiveness, AColourOneOfWhoseEntriesIsReadStays)
 {
     raw::RuntimeRecord rec = storageForm(1u << 2);
-    rec.pipeline.entries = 3;
+    raw::setEntryCount(rec.pipeline, 3);
     rec.pipeline.entry[2] = fetch(40, 1);
     EXPECT_EQ(raw::dropUnreadFetches(rec), 1u << 0);
     EXPECT_EQ(rec.pipeline.storageMask, 1u << 1);
@@ -132,11 +132,13 @@ TEST(RawRecordPrograms, AProgramOfMoreConstantBuffersThanAPackProgramRecordsIsSe
     EXPECT_TRUE(raw::programsBindable(parts, why)) << why;
 }
 
-// A render state's set 0 takes its NVK layout's size in 256-byte blocks, two at most (raw_descriptors.h)
-TEST(RawRecordSet, ASetPastTheEncodersRoomIsSetAside)
+// A render state's set 0 takes its NVK layout's size in 256-byte blocks; past two, the encoder's wide path draws it
+// (raw_descriptors.h WideDescriptors)
+TEST(RawRecordSet, ASetPastTheEncodersTwoBlocksIsMade)
 {
     EXPECT_EQ(raw::renderSetBytes(0), 256u);
     EXPECT_EQ(raw::renderSetBytes(260), 512u);
+    EXPECT_EQ(raw::renderSetBytes(520), 768u);
     raw::CapturedProgram vs, fs;
     vs.image.assign(96, 0);
     fs.image.assign(96, 0);
@@ -146,11 +148,26 @@ TEST(RawRecordSet, ASetPastTheEncodersRoomIsSetAside)
     parts.programs[1] = &fs;
     raw::RuntimeRecord out;
     std::string why;
-    parts.setBytes = 512;
-    EXPECT_TRUE(raw::assembleRecord(parts, "c0=80 | v vs | f fs", raw::PackRules{}, out, why)) << why;
     parts.setBytes = 520;
+    EXPECT_TRUE(raw::assembleRecord(parts, "c0=80 | v vs | f fs", raw::PackRules{}, out, why)) << why;
+}
+
+// Every uniform buffer a program reads is an entry of the record's set 0: the draw's check of it (RenderEncoder::prepare,
+// RefUnnamedUniform) is the driver's error for a record made otherwise
+TEST(RawRecordSet, AProgramReadingAUniformBufferNoEntryNamesIsSetAside)
+{
+    raw::CapturedProgram vs, fs;
+    vs.image.assign(96, 0);
+    fs.image.assign(96, 0);
+    vs.cbufTypes = {raw::CbufRoot};
+    fs.cbufTypes = {raw::CbufRoot, uint8_t(raw::CbufUbo | (32 / 16) << 3)};
+    raw::RecordParts parts;
+    parts.programs[0] = &vs;
+    parts.programs[1] = &fs;
+    raw::RuntimeRecord out;
+    std::string why;
     EXPECT_FALSE(raw::assembleRecord(parts, "c0=80 | v vs | f fs", raw::PackRules{}, out, why));
-    EXPECT_EQ(why, "a set 0 of 520 bytes, past the render encoder's 512");
+    EXPECT_EQ(why, "a program reads a set-0 uniform buffer the layout does not name");
 }
 
 }  // namespace

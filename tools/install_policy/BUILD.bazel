@@ -1,0 +1,30 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+py_binary(
+    name = "installd",
+    srcs = ["installd.py"],
+    deps = [
+        "//tools/common:macho",
+        "//tools/install:lib",
+    ],
+)
+
+py_test(
+    name = "installd_test",
+    size = "small",
+    srcs = [
+        "installd.py",
+        "installd_test.py",
+    ],
+    imports = ["."],
+    deps = [
+        "//tools/common:macho",
+        "//tools/install:lib",
+    ],
+)

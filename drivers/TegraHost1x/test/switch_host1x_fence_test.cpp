@@ -12,6 +12,26 @@
 #include "../SwitchHost1xChannels.cpp"
 #include "../SwitchHost1xFence.cpp"
 
+extern "C" bool switch_nvdec_host1x_cancelled(uint32_t, uint32_t)
+{
+    return false;
+}
+
+extern "C" bool switch_vic_host1x_cancelled(uint32_t, uint32_t)
+{
+    return false;
+}
+
+extern "C" int switch_gpu_backing_token_status(const switch_gpu_backing_token *)
+{
+    return 1;
+}
+
+extern "C" int switch_gpu_backing_token_physical_status(const switch_gpu_backing_token *, int)
+{
+    return 0;
+}
+
 namespace {
 alignas(16384) uint8_t gHostRegisters[kHost1xSize];
 alignas(4096) uint8_t gMcRegisters[0x1000];

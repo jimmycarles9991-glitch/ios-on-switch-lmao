@@ -119,13 +119,12 @@ TEST_F(MediaFlipFilter, AGateWriterBeforeTheCompletionAdoptsTheSet)
     EXPECT_EQ(d.shown.back(), seq);
 }
 
-// Two producers, a waiter on each: the first threshold's filter finds the other job still running and writes nothing;
-// the second's writes the set.
+// Both producer WAITs precede the controller stores; one waiter adopts DC A's completed stream.
 TEST_F(MediaFlipFilter, ATwoProducerSetWaitsForBothProducers)
 {
     ASSERT_TRUE(d.offer(video(2), ++seq, 2));
     ASSERT_EQ(d.mediaFlip.state(), SwitchCompletionFlip::kArmed);
-    ASSERT_EQ(gWaiters.size(), 2u);
+    ASSERT_EQ(gWaiters.size(), 1u);
     gUncertain = {seq + Display::kSecond};
     d.model.written.clear();
     d.filter(seq);
@@ -136,14 +135,14 @@ TEST_F(MediaFlipFilter, ATwoProducerSetWaitsForBothProducers)
     EXPECT_EQ(d.mediaFlip.state(), SwitchCompletionFlip::kEarly);
 }
 
-// A producer already done at the arm gets no waiter, and its record (perhaps gone) is not read in the filter.
+// A producer already done at the arm needs no job-record read when DC A's completion is adopted.
 TEST_F(MediaFlipFilter, AProducerDoneAtTheArmIsNotWaitedFor)
 {
     gDoneAtArm = {seq + 1};
     gUncertain = {seq + 1};
     ASSERT_TRUE(d.offer(video(2), ++seq, 2));
     ASSERT_EQ(gWaiters.size(), 1u);
-    EXPECT_EQ(gWaiters[0].threshold, static_cast<uint32_t>(seq + Display::kSecond));
+    EXPECT_EQ(gWaiters[0].threshold, d.mediaHostStream.fence.threshold);
     d.model.written.clear();
     d.filter();
     EXPECT_FALSE(d.model.written.empty());

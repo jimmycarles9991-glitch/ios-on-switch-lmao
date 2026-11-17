@@ -1694,11 +1694,8 @@ pub(crate) fn object_handle_load(
 /// elements: its own size for a member array (`array_len` elements) or a single member, and one
 /// handle's for an `array<texture…, N>` or `array<sampler, N>` member, which
 /// `air.struct_type_info` records as one member of all `N` handles whose role's location count is
-/// `N`.
+/// `N` (an array of such arrays too: `array_len` outer elements of `size` bytes, `N` handles each).
 pub(crate) fn member_element_size(mem: &crate::air::abi::Member) -> u32 {
-    if mem.array_len >= 1 {
-        return mem.size;
-    }
     let count = match &mem.kind {
         MemberKind::Indirect(arg) => match &arg.role {
             ParamRole::Texture(t) => Some(t.location.count),

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#import "RawMetalPassCache.h"
 #include "raw_execution_plan.h"
 #include "raw_object_pool.h"
 #include "raw_parallel.h"
@@ -14,8 +15,9 @@
 
 // A finished command buffer's recording storage, kept for the next one (its capacity a frame's): Core Animation's steady frames
 // allocate none of it. As many are kept as were live at once (an app that commits a batch before it waits records each into
-// kept storage), up to kKeptTotal bytes and kKeptMost recordings; gRawRelease gives back all but kKeptIdle. Taken and kept
-// with no lock (raw_take_pool.h): a command buffer takes one where it is made and keeps it where it is freed.
+// kept storage), up to kKeptTotal bytes and kKeptMost recordings; gRawRelease gives back all but kKeptIdle. TakePool
+// transfers exclusive ownership: a command buffer takes one where it is made and returns it after completion, or at
+// dealloc if it was never submitted. Public completion results stay with the command buffer.
 struct RMRecording {
     RMCommandPlan plan;
     raw::GrowList<RMPass> passes;
@@ -25,7 +27,7 @@ struct RMRecording {
     raw::GrowList<uint64_t> extra;
     std::vector<id> owners;
     raw::PointerMap<bool> ownerKeys;
-    std::vector<RMSegment> segs;
+    RMPassCachePtr passCache;
     size_t kept = 0;
 };
 
@@ -33,6 +35,21 @@ static constexpr size_t kKeptTotal = 16 << 20, kKeptIdle = 4;
 static constexpr uint32_t kKeptMost = 64;
 static raw::TakePool<RMRecording, kKeptMost> &gRecordings = *new raw::TakePool<RMRecording, kKeptMost>;
 static std::atomic<size_t> gRecordingBytes{0};
+
+static RMPassTrim reclaimIdlePassCaches();
+
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+static std::atomic<size_t> gIdlePasses{0}, gIdlePassTextures{0};
+
+static void countIdlePasses(const RMPassCache *cache, bool held)
+{
+    const RMPassTrim counts = rmPassCacheHeld(cache);
+    gIdlePasses.fetch_add(held ? counts.passes : -counts.passes, std::memory_order_relaxed);
+    gIdlePassTextures.fetch_add(held ? counts.textures : -counts.textures, std::memory_order_relaxed);
+}
+#else
+#define countIdlePasses(cache, held)
+#endif
 
 static void swapRecording(RMCommandBuffer *b, RMRecording &r)
 {
@@ -44,21 +61,39 @@ static void swapRecording(RMCommandBuffer *b, RMRecording &r)
     b->_extra.swap(r.extra);
     b->_owners.swap(r.owners);
     std::swap(b->_ownerKeys, r.ownerKeys);
-    b->_segs.swap(r.segs);
+    b->_passCache.swap(r.passCache);
 }
 
-static void takeRecording(RMCommandBuffer *b)
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+static std::atomic<uint64_t> gRecordingMisses{0}, gRecordingDropsLarge{0}, gRecordingDropsTotal{0},
+    gRecordingDropsSlots{0};
+#define RM_RECORDING_COUNT(counter) (counter).fetch_add(1, std::memory_order_relaxed)
+
+RMRecordingCounts rmRecordingCounts()
+{
+    return {gRecordingMisses.load(std::memory_order_relaxed), gRecordingDropsLarge.load(std::memory_order_relaxed),
+            gRecordingDropsTotal.load(std::memory_order_relaxed), gRecordingDropsSlots.load(std::memory_order_relaxed)};
+}
+#else
+#define RM_RECORDING_COUNT(counter)
+#endif
+
+void rmTakeRecording(RMCommandBuffer *b)
 {
     uint32_t node;
     RMRecording *r = gRecordings.take(node);
     if (!r) {
+        RM_RECORDING_COUNT(gRecordingMisses);
         b->_owners.reserve(256);
+        b->_passCache = rmNewPassCache();
         return;
     }
+    countIdlePasses(r->passCache.get(), false);
     swapRecording(b, *r);
     gRecordingBytes.fetch_sub(r->kept, std::memory_order_relaxed);
     r->kept = 0;
     gRecordings.giveBack(node);
+    rmPassCacheReturned(b->_passCache.get());
 }
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -147,8 +182,9 @@ static void growBytesChunks(void *)
     gBytesGrowing.store(false, std::memory_order_release);
 }
 
-// The pool is grown by a chunk once it is down to its last (or had none), on the utility queue: a command buffer recorded
-// after a burst takes the one made meanwhile instead of making its own on its recording thread
+// The pool is grown by a chunk, on the utility queue, when a completion that gave chunks back leaves it at its last chunk
+// or none: the completion side decides, so a recording thread only ever takes a chunk (or, finding none, makes its own: a
+// miss)
 static void growBytesChunksAhead()
 {
     if (gBytesChunks.kept() <= 1 && !gBytesGrowing.exchange(true, std::memory_order_acq_rel))
@@ -158,12 +194,15 @@ static void growBytesChunksAhead()
 void rmBytesDone(RMCommandBuffer *cb)
 {
     RMBytes &s = cb->_bytes;
+    const bool gaveBack = !s.chunks.empty();
     coalesceBytes(s);
     for (const raw::Buffer &k : s.chunks)
         keepBytesChunk(k);
     s.chunks.clear();  // its capacity goes on with the recording to the next command buffer
     s.at = 0;
     s.used = 0;
+    if (gaveBack)
+        growBytesChunksAhead();
 }
 
 bool rmTakeBytesChunk(uint64_t length, raw::Buffer &chunk)
@@ -176,12 +215,10 @@ bool rmTakeBytesChunk(uint64_t length, raw::Buffer &chunk)
             gBytesChunks.giveBack(node);
             gBytesChunkBytes.fetch_sub(chunk.length, std::memory_order_relaxed);
             gBytesChunkLength.store(std::min(chunk.length, kChunkMost), std::memory_order_relaxed);
-            growBytesChunksAhead();
             return true;
         }
         gBytesChunks.keep(node);
     }
-    growBytesChunksAhead();
     if (!gRM->raw->createControlBuffer(std::max(length, gBytesChunkLength.load(std::memory_order_relaxed)), chunk))
         return false;
     RM_CHUNK_COUNT(gChunkMisses, 1);
@@ -189,25 +226,34 @@ bool rmTakeBytesChunk(uint64_t length, raw::Buffer &chunk)
     return true;
 }
 
-static void giveRecording(RMCommandBuffer *b)
+void rmRecordingDone(RMCommandBuffer *b)
 {
+    if (b->_recordingReturned)
+        return;
+    b->_recordingReturned = true;
+    const uint64_t generation = rmPassCacheReturned(b->_passCache.get());
     constexpr size_t kKeptBytes = 1 << 20;  // (a command buffer of a few megabytes of setBytes: its own, freed)
     uint64_t bytes = 0;
     for (const raw::Buffer &k : b->_bytes.chunks)
         bytes += k.va ? k.length : kKeptBytes;  // (heap chunks are not kept)
     bytes += b->_plan.storageBytes() + b->_extra.capacity() * 8 + b->_shadow.capacity() +
-             b->_segs.capacity() * sizeof(RMSegment);
+             rmPassCacheBytes(b->_passCache.get());
     if (bytes > kKeptBytes) {
-        dropBytes(b->_bytes);
+        RM_RECORDING_COUNT(gRecordingDropsLarge);
+        RMRecording dropped;
+        swapRecording(b, dropped);
+        dropBytes(dropped.bytes);
         return;
     }
     uint32_t node;
-    RMRecording *r = gRecordingBytes.fetch_add(bytes, std::memory_order_relaxed) + bytes <= kKeptTotal
-                         ? gRecordings.room(node)
-                         : nullptr;
+    const bool fits = gRecordingBytes.fetch_add(bytes, std::memory_order_relaxed) + bytes <= kKeptTotal;
+    RMRecording *r = fits ? gRecordings.room(node) : nullptr;
     if (!r) {
+        RM_RECORDING_COUNT(*(fits ? &gRecordingDropsSlots : &gRecordingDropsTotal));
         gRecordingBytes.fetch_sub(bytes, std::memory_order_relaxed);
-        dropBytes(b->_bytes);
+        RMRecording dropped;
+        swapRecording(b, dropped);
+        dropBytes(dropped.bytes);
         return;
     }
     swapRecording(b, *r);
@@ -220,9 +266,48 @@ static void giveRecording(RMCommandBuffer *b)
     r->extra.clear();
     r->owners.clear();
     r->ownerKeys.clear();
-    r->segs.clear();
     coalesceBytes(r->bytes);
+    countIdlePasses(r->passCache.get(), true);
     gRecordings.keep(node);
+    // The epoch RMW and trim's increment order publication against its drain. If trim advanced first, this return
+    // reclaims idle banks; otherwise trim acquires this publication through that RMW before draining them.
+    if (!rmPassCachePublished(generation))
+        reclaimIdlePassCaches();
+}
+
+static RMPassTrim reclaimIdlePassCaches()
+{
+    RMPassTrim total{};
+    uint32_t nodes[kKeptMost], count = 0;
+    while (count < kKeptMost) {
+        uint32_t node;
+        RMRecording *r = gRecordings.take(node);
+        if (!r)
+            break;
+        nodes[count++] = node;
+        countIdlePasses(r->passCache.get(), false);
+        const RMPassTrim part = rmPassCacheTrim(r->passCache.get());
+        total.passes += part.passes;
+        total.textures += part.textures;
+    }
+    for (uint32_t i = 0; i < count; i++)
+        gRecordings.keep(nodes[i]);
+    return total;
+}
+
+RMPassTrim rmPassTrim()
+{
+    rmPassInvalidate();
+    return reclaimIdlePassCaches();
+}
+
+RMPassTrim rmPassHeld()
+{
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    return {gIdlePasses.load(std::memory_order_relaxed), gIdlePassTextures.load(std::memory_order_relaxed)};
+#else
+    return {};
+#endif
 }
 
 void releaseRecordings()
@@ -244,6 +329,7 @@ void releaseRecordings()
         RMRecording *r = gRecordings.take(node);
         if (!r)
             break;
+        countIdlePasses(r->passCache.get(), false);
         gRecordingBytes.fetch_sub(r->kept, std::memory_order_relaxed);
         dropBytes(r->bytes);
         *r = RMRecording();
@@ -277,12 +363,12 @@ static void commandBufferDropped(void *object)
     if (RMEncoder *__unsafe_unretained e = (RMEncoder *)b->_active)
         e->_cb = nil;
     b->_active = nil;
-    giveRecording(b);
+    rmRecordingDone(b);
 }
 
-// Command buffers on the storage their deallocs gave back, as the encoders (raw_object_pool.h): -dealloc is the pool's,
-// which gives the recording back first. A sub-encoder's (RMSubRecorder) allocates and frees as NSObject's do, and gives
-// its recording back the same.
+// Command-buffer objects use the same instance pool as encoders (raw_object_pool.h). Dealloc returns an unsubmitted
+// recording before pooling its object. Sub-encoders (RMSubRecorder) use NSObject allocation and return their recordings
+// there too.
 void rmPoolCommandBuffers()
 {
     if (!rawPoolInstances([RMCommandBuffer class], commandBufferDropped))
@@ -353,8 +439,9 @@ static const raw::Pipeline *recordedPipeline(const raw::RasterState &raster)
                 if (native && native->rec) {
                     _plan.resolveRenderUses(index, native, [&](std::vector<raw::ResourceUse> &bound) {
                         const auto &record = *native->rec;
-                        for (uint32_t i = 0; i < record.entries; ++i) {
-                            const auto &entry = record.entry[i];
+                        const raw::SetEntries &entries = native->entries;
+                        for (uint32_t i = 0; i < entries.size(); ++i) {
+                            const auto &entry = entries[i];
                             if (entry.kind == raw::EntryUbo && entry.stage >= 1 && entry.stage <= 2 &&
                                 entry.slot < 31) {
                                 const auto &binding =
@@ -791,6 +878,8 @@ static const raw::Pipeline *recordedPipeline(const raw::RasterState &raster)
 {
     if (!_completedSent)
         return @"pending";
+    if (_failedBy)
+        return [NSString stringWithFormat:@"error:%s", kPredNames[_failedBy]];
     raw::ExecutionAttribution route;
     for (const RMSegment &range : _segs)
         route.add(range.raw, range.event);
@@ -798,7 +887,7 @@ static const raw::Pipeline *recordedPipeline(const raw::RasterState &raster)
         return [NSString stringWithFormat:@"split:%zu+%zu:%s:%s", route.native, route.compatibility,
                                           kReasonNames[_reason], kPredNames[_pred0]];
     if (!route.onlyCompatibility() && !_m2v)
-        return @"raw";
+        return _error && _pred0 ? [NSString stringWithFormat:@"error:%s", kPredNames[_pred0]] : @"raw";
     return [NSString stringWithFormat:@"m2v:%s:%s", kReasonNames[_reason], kPredNames[_pred0]];
 }
 
@@ -939,7 +1028,7 @@ static const raw::Pipeline *recordedPipeline(const raw::RasterState &raster)
     b->_device = _device;
     b->_queue = self;
     b->_status = MTLCommandBufferStatusNotEnqueued;
-    takeRecording(b);
+    rmTakeRecording(b);
 #if SWITCH_FRAME_TIMELINE
     switch_frame::made(b->_frame);
 #endif

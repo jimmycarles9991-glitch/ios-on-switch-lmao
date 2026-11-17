@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: MIT
 #include "drivers/TegraGM20B/test/exec/switch_gpu_exec_backing.h"
+#include "drivers/TegraGM20B/SwitchGpuBackingInternal.h"
+#include <algorithm>
+#include <atomic>
 #include <map>
 #include <mutex>
+#include <tuple>
 #include <utility>
 #include <gtest/gtest.h>
 
 namespace
 {
-using Key = std::pair<uint32_t, uint64_t>;
+using Key = std::tuple<uint32_t, uint32_t, uint64_t>;
 
 // Each GM20B timeline's completed value; while `failed`, all other work failed (a test's end).
 std::map<Key, uint32_t> completed;
@@ -15,14 +19,16 @@ bool failed;
 std::mutex timeline_lock;
 uint64_t next_page = 0x80000000;
 bool retirement_scheduled;
+std::atomic<uint64_t> statusReads;
 
 Key key(const switch_gpu_backing_token *token)
 {
-	return {token->queue, token->reset_generation};
+	return {token->engine, token->queue, token->reset_generation};
 }
 
 int status(const switch_gpu_backing_token *token)
 {
+	++statusReads;
 	std::lock_guard<std::mutex> held(timeline_lock);
 	if (int32_t(completed[key(token)] - uint32_t(token->value)) >= 0)
 		return 1;
@@ -127,7 +133,9 @@ void register_engines()
 	if (registered)
 		return;
 	const switch_gpu_backing_engine operations = {status, wait, retain, release, 32};
-	ASSERT_EQ(switch_gpu_backing_register_engine(SWITCH_GPU_ENGINE_GM20B, &operations), 0);
+	for (uint32_t engine :
+	     {SWITCH_GPU_ENGINE_GM20B, SWITCH_GPU_ENGINE_PROMISE, SWITCH_GPU_ENGINE_VIC})
+		ASSERT_EQ(switch_gpu_backing_register_engine(engine, &operations), 0);
 	registered = true;
 }
 
@@ -162,6 +170,29 @@ uint32_t pending(switch_gpu_backing *backing)
 	EXPECT_EQ(switch_gpu_backing_pending(backing, SWITCH_GPU_BACKING_READ, &engines, &owners),
 		  0);
 	return engines;
+}
+
+bool recorded(switch_gpu_backing *backing, const switch_gpu_backing_token &token)
+{
+	for (uint32_t i = 0; i < backing->access_count; ++i) {
+		const auto &record = backing->accesses[i].token;
+		if (record.engine == token.engine && record.queue == token.queue &&
+		    record.reset_generation == token.reset_generation &&
+		    record.value == token.value)
+			return true;
+	}
+	return false;
+}
+
+bool order_held()
+{
+	const auto &held = ioLocksHeld();
+	return std::find(held.begin(), held.end(), switch_gpu_backing_order()) != held.end();
+}
+
+uint64_t status_reads()
+{
+	return statusReads.load();
 }
 
 void retire_all()

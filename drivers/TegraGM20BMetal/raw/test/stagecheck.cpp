@@ -37,18 +37,19 @@ bool handle(const raw::PackEntry &e)
 
 // The uniform buffers `program` reads as constant buffers, each bound at its slot of group `group` to the buffer of the
 // set-0 entry its type names; prints each one that is not. Returns {checked, wrong}.
-std::pair<unsigned, unsigned> checkUniforms(const raw::PackProgram &program, int group, const raw::PackPipeline &r,
-                                            const std::map<Slot, raw::Buffer> &buffers)
+std::pair<unsigned, unsigned> checkUniforms(const raw::Pack &pack, const raw::PackProgram &program, int group,
+                                            const raw::PackPipeline &r, const std::map<Slot, raw::Buffer> &buffers)
 {
     unsigned checked = 0, wrong = 0;
+    const raw::SetEntries entries(r, pack.far(r));
     for (uint32_t c = 1; c < program.cbufs; c++) {
         if (raw::cbufKind(program.cbufType[c]) != raw::CbufUbo)
             continue;
-        const uint32_t offset = raw::cbufUboOffset(program.cbufType[c]);
+        const uint32_t offset = raw::cbufUboOffset(program.cbufType, pack.farUbos(program), c);
         const raw::PackEntry *named = nullptr;
-        for (uint32_t i = 0; i < r.entries && !named; i++)
-            if (r.entry[i].kind == raw::EntryUbo && !raw::bufferStorage(r.entry[i]) && r.entry[i].offset == offset)
-                named = &r.entry[i];
+        for (uint32_t i = 0; i < entries.size() && !named; i++)
+            if (entries[i].kind == raw::EntryUbo && !raw::bufferStorage(entries[i]) && entries[i].offset == offset)
+                named = &entries[i];
         const auto bound = named ? buffers.find({named->stage, named->slot}) : buffers.end();
         uint64_t va = 0;
         uint32_t bytes = 0;
@@ -68,12 +69,14 @@ std::pair<unsigned, unsigned> checkUniforms(const raw::PackProgram &program, int
 Slot lastVertexUniform(const raw::Device &dev, const raw::PackPipeline &r)
 {
     const raw::PackProgram &vs = dev.pack().section<raw::PackProgram>(raw::PackPrograms)[r.vs];
+    const raw::SetEntries entries(r, dev.pack().far(r));
     Slot found{0, 0};
     for (uint32_t c = 1; c < vs.cbufs; c++)
         if (raw::cbufKind(vs.cbufType[c]) == raw::CbufUbo)
-            for (uint32_t i = 0; i < r.entries; i++)
-                if (r.entry[i].kind == raw::EntryUbo && r.entry[i].offset == raw::cbufUboOffset(vs.cbufType[c]))
-                    found = {r.entry[i].stage, r.entry[i].slot};
+            for (uint32_t i = 0; i < entries.size(); i++)
+                if (entries[i].kind == raw::EntryUbo &&
+                    entries[i].offset == raw::cbufUboOffset(vs.cbufType, dev.pack().farUbos(vs), c))
+                    found = {entries[i].stage, entries[i].slot};
     return found;
 }
 
@@ -106,7 +109,7 @@ int main(int argc, char **argv)
                 return 1;
     std::map<Slot, raw::Texture> textures;
     std::map<Slot, raw::Sampler> samplers;
-    for (uint32_t i = 0; i < r.entries; i++) {
+    for (uint32_t i = 0; i < raw::entryCount(r); i++) {
         const raw::PackEntry &e = r.entry[i];
         if (!handle(e))
             continue;
@@ -185,7 +188,7 @@ int main(int argc, char **argv)
     if (!out)
         return 1;
     fprintf(out, "{\"key\": \"%016llx\", \"entries\": [", (unsigned long long)key);
-    for (uint32_t i = 0; i < r.entries; i++) {
+    for (uint32_t i = 0; i < raw::entryCount(r); i++) {
         const raw::PackEntry &e = r.entry[i];
         uint32_t want = 0;
         bool sampled = false;
@@ -228,8 +231,9 @@ int main(int argc, char **argv)
     uint32_t sequence = 0;
     const bool committed = cb->commit(sequence) && dev.wait(sequence);
     const raw::PackProgram *programs = dev.pack().section<raw::PackProgram>(raw::PackPrograms);
-    const auto [vsChecked, vsWrong] = checkUniforms(programs[r.vs], 0, r, buffers);
-    const auto [fsChecked, fsWrong] = checkUniforms(programs[r.fs], 4, r, buffers);
+    const auto [vsChecked, vsWrong] = checkUniforms(dev.pack(), programs[r.vs], 0, r, buffers);
+    const auto [fsChecked, fsWrong] = raw::pixelStage(r) ? checkUniforms(dev.pack(), programs[r.fs], 4, r, buffers)
+                                                         : std::pair<uint32_t, uint32_t>{0, 0};
     printf("%016llx: %u handles, %u not what their stage and slot bind; %u + %u uniform buffers (vertex, pixel), %u "
            "not their own; %s\n",
            (unsigned long long)key, checked, wrong, vsChecked, fsChecked, vsWrong + fsWrong,

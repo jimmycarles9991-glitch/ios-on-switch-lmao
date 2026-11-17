@@ -14,8 +14,9 @@ import VideoToolbox
 /// buffer in the decode job (disp_output_mode 2, V13) and that buffer goes out natively; matched counts the pictures
 /// equal to the pattern, so a reference written at 8 bits (drift in the P pictures) fails it.
 /// All three also hold the kernel to a fixed set of buffers (L964, from a debug kernel): the decoder's recycles take
-/// back parked buffers and published pictures reuse retired surface objects, so allocations and new objects stay at
-/// the pool's depth while recycles and publications count every picture.
+/// back parked buffers and a surface keeps its publication object, so new decoder buffers and new objects stay at the
+/// client pool's surface count (native_surfaces, the exports into a surface with no native picture before) while
+/// recycles and publications count every picture. A kernel that does not count surfaces is held to the old literal.
 struct NativeExportTest: HWTest {
     let id: String
     let name: String
@@ -44,7 +45,7 @@ struct NativeExportTest: HWTest {
     static let poolBound = 16
     static let poolKeys = [
         "recycles", "recycles_replaced", "recycles_parked", "buffers_allocated", "native_exports", "native_objects",
-        "parked_most",
+        "parked_most", "native_surfaces",
     ]
 
     /// Why the kernel's counts for the session break the fixed-set claim, "" when they keep it, nil from a release
@@ -54,8 +55,15 @@ struct NativeExportTest: HWTest {
             let exports = routes["native_exports"], let recycles = routes["recycles"]
         else { return nil }
         let exported = routes["exported"] ?? 0
-        if allocated > poolBound { return "\(allocated) decoder buffers allocated, past the pool's \(poolBound)" }
-        if objects > poolBound { return "\(objects) new surface objects, past the pool's \(poolBound)" }
+        if let surfaces = routes["native_surfaces"] {
+            if objects > surfaces { return "\(objects) new surface objects for \(surfaces) client surfaces" }
+            if allocated > surfaces + 1 {
+                return "\(allocated) decoder buffers allocated for \(surfaces) client surfaces"
+            }
+        } else {
+            if allocated > poolBound { return "\(allocated) decoder buffers allocated, past the pool's \(poolBound)" }
+            if objects > poolBound { return "\(objects) new surface objects, past the pool's \(poolBound)" }
+        }
         if exports != exported { return "the kernel published \(exports) of the \(exported) exported pictures" }
         if recycles + poolBound < exported { return "\(recycles) recycles for \(exported) pictures" }
         return ""

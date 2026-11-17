@@ -259,3 +259,40 @@ TEST(AsyncPipelines, ProfileKeepsStatisticsOutOfRelease)
     EXPECT_STREQ(text, "unchanged");
 #endif
 }
+
+TEST(AsyncPipelinesDeathTest, ASetWaitingPastTheBoundAbortsNamingThePipeline)
+{
+    auto state = std::make_shared<nbasync::Making>();
+    state->label = "stuck";
+    std::mutex lock;
+    std::condition_variable changed;
+    bool entered = false, release = false;
+    state->work = [&](NSString **) -> id {
+        std::unique_lock<std::mutex> guard(lock);
+        entered = true;
+        changed.notify_all();
+        changed.wait(guard, [&] {
+            return release;
+        });
+        return [NSObject new];
+    };
+    std::thread worker([state] {
+        @autoreleasepool {
+            nbasync::run(state);
+        }
+    });
+    {
+        std::unique_lock<std::mutex> guard(lock);
+        ASSERT_TRUE(changed.wait_for(guard, std::chrono::seconds(5), [&] {
+            return entered;
+        }));
+    }
+    EXPECT_DEATH(nbasync::ready(state, std::chrono::milliseconds(50)), "pipeline stuck not made after 50 ms");
+    {
+        std::lock_guard<std::mutex> guard(lock);
+        release = true;
+        changed.notify_all();
+    }
+    worker.join();
+    EXPECT_TRUE(nbasync::ready(state));
+}

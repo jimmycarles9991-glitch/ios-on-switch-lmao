@@ -183,7 +183,9 @@ boot_package(
     overlay_binaries = select({
         "//install:from_release": {"@switch_release//:overlay/" + source: source for source in OVERLAY_BINARIES.values()},
         "//conditions:default": OVERLAY_BINARIES,
-    }) | select({
+    }) | {
+        "//drivers/SwitchInstallPolicy:installd": "build/switch-apps/installd",
+    } | select({
         ":local_debug": {
             "//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform",
             "//hw_test_app:switch-texpeer": "build/switch-hwtest/switch-texpeer",
@@ -294,7 +296,10 @@ py_binary(
     ],
     main = "//tools/package:snapshot.py",
     tags = ["manual"],
-    deps = ["//tools/common:paths"],
+    deps = [
+        "//tools/common:paths",
+        "//tools/deploy:lib",
+    ],
 )
 
 # The RAM metadata exporter (exporter.uimg, pinned in bazel/pinned/firmware and staged in bl33.bin): its builder and its

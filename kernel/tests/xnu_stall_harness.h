@@ -33,6 +33,12 @@ unsigned xnu_stall_wait_names(void);
 int xnu_stall_user_where(uint64_t pc, uint64_t sr_base, uint64_t sr_size, uint64_t sr_slide, uint64_t header,
                          uint64_t *value);
 
+// What ran while a stall lasted: a snapshot of `n` threads' times (`tids`, `cpus`), sorted as stall.c sorts it, then
+// the `k` (at most 8) threads that gained the most when the threads now run `now_cpus`; their ids, most first, in
+// `top_tids` and gains in `top_gains`, 0 past the last. Returns how many entered.
+unsigned xnu_stall_most(const uint64_t *tids, const uint64_t *cpus, unsigned n, bool complete, const uint64_t *now_tids,
+                        const uint64_t *now_cpus, unsigned now_n, unsigned k, uint64_t *top_tids, uint64_t *top_gains);
+
 #ifdef __cplusplus
 }
 #endif

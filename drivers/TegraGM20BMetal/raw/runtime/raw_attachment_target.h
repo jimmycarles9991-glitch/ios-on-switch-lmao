@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdint>
 #include "../fx/fx_image.h"
+#include "raw_format_standin.h"
 #include "raw_gpu.h"
 
 namespace raw {
@@ -30,12 +31,13 @@ inline bool attachmentImage(const Texture &t, fx::MipChain &c, uint64_t &base)
 // The target a pass binds for level `level` of slice `slice` of `t` (a 3D texture's plane `slice`): its address, the level's
 // extent and tiling, ARRAY_PITCH the image's array stride, a 3D level's planes as its third dimension; `layers` the layers
 // (planes) from it on, which a layered pass may render. No memory or header of its own (tic 0). False: no such part of a
-// texture the raw path renders, a pitch one above all (NVIDIA renders pitch memory as one 2D layer).
+// texture the raw path renders, a pitch one above all (NVIDIA renders pitch memory as one 2D layer). A part of a format
+// the GM20B renders none of is not renderable: a stand-in renders it (raw_format_standin.h).
 inline bool attachmentTarget(const Texture &t, uint32_t level, uint32_t slice, Texture &out)
 {
     const FormatInfo *f = formatInfo(t.format);
-    if (!f || !f->rt || !t.blockLinear || t.zeta || t.memoryless || t.converted() || t.sampled || t.standIn ||
-        t.planarStandIn || t.blockW > 1 || t.blockH > 1 || t.samples > 1)
+    if (!f || !(f->rt || formatStandIn(t.format)) || !t.blockLinear || t.zeta || t.memoryless || t.converted() ||
+        t.sampled || t.planarStandIn || t.blockW > 1 || t.blockH > 1 || t.samples > 1)
         return false;
     fx::MipChain c;
     uint64_t base = 0;
@@ -62,7 +64,7 @@ inline bool attachmentTarget(const Texture &t, uint32_t level, uint32_t slice, T
     out.layerBytes = c.layers > 1 || volume ? c.arrayStride : c.bytes;  // one layer: chainLevelDesc's ARRAY_PITCH
     out.type = volume ? fx::kTexThreeD : fx::kTexTwoD;
     out.layers = (volume ? l.depth : c.layers) - slice;
-    out.renderable = true;
+    out.renderable = f->rt != 0;
     return true;
 }
 

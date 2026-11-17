@@ -4,7 +4,8 @@ import Metal
 
 /// Raster order groups: one instanced draw of full-target quads, each fragment folding its instance into its pixel's
 /// word through a read-write texture in raster order group 0 (word * 3 + instance + 1), so a word is the CPU's only if
-/// every pixel's fragments ran one at a time in submission order. On the raw device the answer is reported beside it.
+/// every pixel's fragments ran one at a time in submission order. On the raw device the answer is reported beside it, and
+/// ordered_draws= counts the draws of a state the raw path runs in the pixel interlock (debug builds).
 struct RasterOrderScene: GPUScene {
     let id = "gpu.raw.raster_order"
     let name = "Raster order group: ordered read-modify-write of every pixel by 48 overlapping quads"
@@ -23,6 +24,7 @@ struct RasterOrderScene: GPUScene {
         ) { $0.colorAttachments[0].writeMask = [] }
         let zeros = try gpu.buffer(Self.size * Self.size * 4)
         memset(zeros.contents(), 0, zeros.length)
+        let before = RawFacade.counters(of: gpu.device)["raster_ordered_draws"]
         let timing = try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.copy(
@@ -47,6 +49,10 @@ struct RasterOrderScene: GPUScene {
         result.metrics.set("wrong_pixels", wrong)
         if RawFacade.kind(of: gpu.device) == "raw" {
             result.expect(timing.path == "raw", "the ordered draw left raw: \(timing.path)")
+            if let before, let after = RawFacade.counters(of: gpu.device)["raster_ordered_draws"] {
+                result.metrics.set("ordered_draws", after - before)
+                result.expect(after > before, "the draw's state is not raster ordered (no pixel interlock)")
+            }
             let object = gpu.device as AnyObject as! NSObject
             let answer = (object.value(forKey: "areRasterOrderGroupsSupported") as? NSNumber)?.intValue ?? -1
             result.metrics.set("answer", answer)

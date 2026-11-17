@@ -94,7 +94,7 @@ def _plugin_objects(ctx, name, stack):
     """Each unit of the plugin compiled on its own (objects in link order), with `stack` as the raw stack key's file."""
 
     # -I in the old build's order (NativeMetal, raw/runtime, TegraGM20B), and the raw path's stack key as a define.
-    includes = []
+    includes = ["-I", ctx.bin_dir.path]
     for marker in ctx.files.include_markers:
         includes += ["-I", marker.dirname]
     defines = [switch_debug_define(ctx)]
@@ -142,8 +142,9 @@ def _metal_plugin_impl(ctx):
         # The compile flags again, as the old one-line build had them: clang passes -O2 on to ld, whose code
         # deduplication it turns on (118 KB less __text).
         ["clang++"] + _IOS + _PLUGIN_CFLAGS + ["-bundle"] + [o.path for o in objects] + [ctx.file.bridge.path] +
+        [ctx.file.compile.path] +
         ["-Wl,-dead_strip", "-Wl,-oso_prefix,@PWD@/", "-lobjc"] + frameworks + ctx.attr.linkopts + ["-o", out.path],
-        objects + [ctx.file.bridge],
+        objects + [ctx.file.bridge, ctx.file.compile],
         [out],
     )
     dsym = ctx.actions.declare_directory(ctx.attr.name + "/TegraGM20BMetal.dSYM")
@@ -152,7 +153,7 @@ def _metal_plugin_impl(ctx):
         "Dsymutil",
         "Writing the plugin's dSYM",
         ["dsymutil", "--oso-prepend-path=@PWD@", out.path, "-o", dsym.path],
-        objects + [ctx.file.bridge, out],
+        objects + [ctx.file.bridge, ctx.file.compile, out],
         [dsym],
     )
     return [
@@ -176,6 +177,7 @@ metal_plugin = rule(
     attrs = _PLUGIN_ATTRS | {
         "stack": attr.label(allow_single_file = True, doc = "the raw path's stack key (TEGRA_RAW_STACK)"),
         "bridge": attr.label(mandatory = True, allow_single_file = True),
+        "compile": attr.label(mandatory = True, allow_single_file = True, doc = "the stage compile's object (NAK)"),
     },
 )
 
@@ -194,11 +196,12 @@ def _plugin_m2v_edges_impl(ctx):
     args.add_all([ctx.executable._edges, "--out", edges, "--binary", linked, "--", "clang++"])
     args.add_all(_IOS + _PLUGIN_CFLAGS + ["-bundle"])
     args.add_all(objects)
+    args.add_all([ctx.file.translate, ctx.file.compile])
     args.add_all(["-Wl,-dead_strip", "-lobjc"] + _frameworks(ctx) + ctx.attr.linkopts)
     ctx.actions.run(
         executable = ctx.executable._xcode_run,
         arguments = [args],
-        inputs = depset(objects + [ctx.file._xcode_env, ctx.file._xcode_identity]),
+        inputs = depset(objects + [ctx.file.translate, ctx.file.compile, ctx.file._xcode_env, ctx.file._xcode_identity]),
         tools = [ctx.attr._edges[DefaultInfo].files_to_run],
         outputs = [edges, linked],
         mnemonic = "PluginM2vEdges",
@@ -209,9 +212,12 @@ def _plugin_m2v_edges_impl(ctx):
 plugin_m2v_edges = rule(
     implementation = _plugin_m2v_edges_impl,
     doc = """The plugin's units linked as the plugin is, without the Metal bridge (m2v's runtime crate and the bridge's
-    exports): the symbols left undefined, each with the units that reference them (tools/gpu/m2v_link_edges.py). Empty:
-    nothing of the plugin needs m2v. Nothing here reaches a package --config=nom2v deletes.""",
+    exports) but with what stays of it, the translation and the stage compile: the symbols left undefined, each with the
+    units that reference them (tools/gpu/m2v_link_edges.py). Empty: nothing of the plugin needs m2v. Nothing here
+    reaches a package --config=nom2v deletes.""",
     attrs = _PLUGIN_ATTRS | {
+        "compile": attr.label(mandatory = True, allow_single_file = True, doc = "the stage compile's object (NAK)"),
+        "translate": attr.label(mandatory = True, allow_single_file = True, doc = "the translation's static library"),
         "_edges": attr.label(default = "//tools/gpu:m2v_link_edges", executable = True, cfg = "exec"),
     },
 )
@@ -258,7 +264,7 @@ _UNITS = {
 
 # Each unit's includes with the hashed files its only inputs: a header outside them is not found and the build fails.
 def _includes_checked(ctx):
-    headers = ctx.files.srcs + [ctx.file.metal_abi]
+    headers = ctx.files.srcs + [ctx.file.metal_abi, ctx.file._selector_layout]
     includes = []
     for marker in ctx.files.include_markers + [ctx.file.metal_abi]:
         includes += ["-I", marker.dirname]
@@ -281,7 +287,7 @@ def _includes_checked(ctx):
 def _raw_stack_impl(ctx):
     out = ctx.actions.declare_file(ctx.attr.name + ".txt")
     files = depset(
-        ctx.files.srcs + ctx.files.readers + [ctx.file.metal_abi, ctx.file.nvk],
+        ctx.files.srcs + ctx.files.readers + [ctx.file.metal_abi, ctx.file.compile, ctx.file._selector_layout],
         transitive = [ctx.attr.bridge[_CrateSourcesInfo].files],
     )
     args = ctx.actions.args()
@@ -312,9 +318,9 @@ raw_stack = rule(
     implementation = _raw_stack_impl,
     doc = """The raw path's stack key (tools/gpu/raw_stack.py): what its records are made and read by.
 
-    srcs and readers, by path and bytes, with NVK, MetalABI.h, every crate the Metal bridge compiles (its sources,
-    compile data and build scripts) and the IPSW build. Each C, C++ and Objective-C++ unit of srcs is checked to
-    include only srcs and MetalABI.h; the hashed files' paths are the output group `inputs`.""",
+    srcs and readers, by path and bytes, with the stage compile's object, MetalABI.h, every crate the direct compile's
+    translation compiles (native_metal_translate's graph: sources, compile data and build scripts) and the IPSW build. Each C, C++ and Objective-C++ unit of srcs
+    is checked to include only srcs and MetalABI.h; the hashed files' paths are the output group `inputs`.""",
     attrs = _XCODE | {
         "srcs": attr.label_list(
             mandatory = True,
@@ -322,10 +328,11 @@ raw_stack = rule(
             doc = "what records, pack entries and native records are made by",
         ),
         "readers": attr.label_list(allow_files = True, doc = "files that only read the records the device made"),
-        "bridge": attr.label(mandatory = True, aspects = [_crate_sources], doc = "the Metal bridge (its crate graph)"),
+        "bridge": attr.label(mandatory = True, aspects = [_crate_sources], doc = "the translation's crate (its graph)"),
         "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory of srcs' units"),
         "metal_abi": attr.label(mandatory = True, allow_single_file = True, doc = "the IPSW kind's MetalABI.h"),
-        "nvk": attr.label(mandatory = True, allow_single_file = True),
+        "compile": attr.label(mandatory = True, allow_single_file = True, doc = "the stage compile's iOS object"),
+        "_selector_layout": attr.label(default = "//drivers/TegraGM20BMetal/precompile/ca-selectors:raw_ca_selector_layout.h", allow_single_file = True),
         "ipsw": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
         "_tool": attr.label(default = "//tools/gpu:raw_stack", executable = True, cfg = "exec"),
         "_xcode_run": attr.label(default = "//tools/gpu:xcode_run", executable = True, cfg = "exec"),

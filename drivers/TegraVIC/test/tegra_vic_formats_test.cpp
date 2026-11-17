@@ -3,9 +3,12 @@
 // configurations tegra_vic_build makes for the formats beyond BGRA/NV12 (three planes, one-byte and two-byte
 // elements, 4:4:4), block-linear output, and the traits that hold back what the unit has not run.
 #include <gtest/gtest.h>
+#include <cstring>
+#include <vector>
 
 #include "../TegraVICConfig.h"
 #include "../TegraVICRequest.h"
+#include "vic_model.h"
 
 namespace {
 
@@ -143,21 +146,50 @@ TEST(VicFormats, ThreePlaneSourceAndDestinationNameAllThreePlanes)
     EXPECT_EQ(SLOT(in.job, SURF_CHROMA_WIDTH), 1023u);
     EXPECT_EQ(SLOT(in.job, SURF_CHROMA_HEIGHT), 539u);
     EXPECT_EQ(method(in.job, TEGRA_VIC_M_SURFACE0_SLOT0_LUMA), int64_t(in.src.base[0] >> 8));
-    EXPECT_EQ(method(in.job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U), int64_t(in.src.base[1] >> 8));
-    EXPECT_EQ(method(in.job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V), int64_t(in.src.base[2] >> 8));
+    EXPECT_EQ(method(in.job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U), int64_t(in.src.base[2] >> 8))
+        << "the Cr plane: VIC's U feeds channel 1, Cr's on this unit";
+    EXPECT_EQ(method(in.job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V), int64_t(in.src.base[1] >> 8));
     EXPECT_NE(in.src.base[1], in.src.base[2]);
 
     const Built out = build(bgra, y420);
     ASSERT_EQ(out.why, nullptr) << out.why;
     EXPECT_EQ(OUT(out.job, SURF_FORMAT), uint64_t(TEGRA_VIC_T_Y8___U8___V8_N420));
-    EXPECT_EQ(method(out.job, TEGRA_VIC_M_OUTPUT_CHROMA_U), int64_t(out.dst.base[1] >> 8));
-    EXPECT_EQ(method(out.job, TEGRA_VIC_M_OUTPUT_CHROMA_V), int64_t(out.dst.base[2] >> 8));
+    EXPECT_EQ(method(out.job, TEGRA_VIC_M_OUTPUT_CHROMA_U), int64_t(out.dst.base[2] >> 8));
+    EXPECT_EQ(method(out.job, TEGRA_VIC_M_OUTPUT_CHROMA_V), int64_t(out.dst.base[1] >> 8));
     EXPECT_EQ(method(build(bgra, bgra).job, TEGRA_VIC_M_OUTPUT_CHROMA_V), -1);
+
+    TegraVICTraits cbInOne = kTegraVICTraits;
+    cbInOne.in = cbInOne.out = {1, 2};
+    const Built named = build(y420, bgra, cbInOne);
+    ASSERT_EQ(named.why, nullptr) << named.why;
+    EXPECT_EQ(method(named.job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U), int64_t(named.src.base[1] >> 8))
+        << "a unit with Cb in channel 1 takes the Cb plane on U";
 
     TegraVICSurfaceDesc uneven = y420;
     uneven.planeBytesPerRow[2] = 2048;
     uneven.length = (tegra_vic_surface_extent(&uneven) + 0x3fff) & ~0x3fffull;
     EXPECT_STREQ(build(uneven, bgra).why, "chroma planes of different geometry");
+}
+
+TEST(VicFormats, AThreePlaneSourcesCbDrivesBlueAndItsCrRed)
+{
+    const TegraVICSurfaceDesc f420 = surface(TEGRA_VIC_FOURCC('f', '4', '2', '0'), 64, 64, 256, 256);
+    const TegraVICSurfaceDesc bgra = surface(kBgra, 64, 64, 256);
+    const Built b = build(f420, bgra);
+    ASSERT_EQ(b.why, nullptr) << b.why;
+    std::vector<uint8_t> src(f420.length), dst(bgra.length);
+    memset(&src[f420.planeOffset[0]], 128, 256 * 64);
+    memset(&src[f420.planeOffset[1]], 0xf0, 256 * 32);
+    memset(&src[f420.planeOffset[2]], 0x10, 256 * 32);
+    VicModel model = {};
+    model.region[0] = {kSrcIova, src.data(), src.size()};
+    model.region[1] = {kDstIova, dst.data(), dst.size()};
+    model.regions = 2;
+    vic_model_run(&model, &b.job);
+    EXPECT_EQ(model.faults, 0u);
+    const uint8_t *bgrx = &dst[32 * 256 + 32 * 4];
+    EXPECT_GT(bgrx[0], 240) << "Cb 240 drives blue";
+    EXPECT_LT(bgrx[2], 16) << "Cr 16 holds red down";
 }
 
 TEST(VicFormats, OneAndTwoByteElementsAndFullResolutionChroma)

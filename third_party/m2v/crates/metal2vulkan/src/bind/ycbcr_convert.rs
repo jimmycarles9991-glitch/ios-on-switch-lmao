@@ -32,7 +32,11 @@
 //!   codes, filter, range and matrix alike. Measured for `YCBCR10_420_2P_PACKED`,
 //!   `YCBCR10_422_2P_PACKED`, `YCBCR10_444_2P_PACKED` and their `_sRGB` twins over `p420`, `pf20`,
 //!   `p422`, `pf22`, `p444` and `pf44`, every texel of random planes under no matrix, BT.601,
-//!   BT.709 and BT.2020.
+//!   BT.709 and BT.2020; and for `RGB10_420_2P_PACKED`, `RGB10_422_2P_PACKED` and
+//!   `RGB10_444_2P_PACKED` (546 to 548) over `p420`, `p422` and `p444`: every texel's read the
+//!   codes model's, and every linear sample at 4 x 4 positions a texel bit for bit
+//!   `RGB10_420_2P`'s, `RGB10_422_2P`'s and `RGB10_444_2P`'s over `x420`, `x422` and `x444` of the
+//!   same codes (ios-on-switch-lmao probes packedcodes and packedsample, an Apple M4 Max).
 //! - **Codes** ([`YCbCrOutput::Codes`], `RGB10_420_2P`, `RGB8_420_2P` and their 4:2:2 and 4:4:4
 //!   formats): red `Cr`, green `Y` and blue `Cb`, each `code / (2^b - 1)`, alpha 1: an
 //!   `RGB10A2Unorm` or an `RGBA8Unorm` texel of the codes. `RGB8_420_2P` over `420v` and `420f`
@@ -162,8 +166,9 @@ impl YCbCrCodes {
     /// not convert: the 4:2:0, 4:2:2 and 4:4:4 formats of unpacked codes, 8- and 10-bit ones read
     /// converted (`YCBCR8_420_2P`, `YCBCR10_444_2P`, ...), through the sRGB curve (their
     /// `_sRGB` twins) or as codes (`RGB8_420_2P`, `RGB10_422_2P`, ...), and the packed 10-bit ones
-    /// read converted or through the sRGB curve (`YCBCR10_420_2P_PACKED`,
-    /// `YCBCR10_444_2P_PACKED_sRGB`, ...), as Metal reads them (the module docs).
+    /// read converted, through the sRGB curve or as codes (`YCBCR10_420_2P_PACKED`,
+    /// `YCBCR10_444_2P_PACKED_sRGB`, `RGB10_422_2P_PACKED`, ...), as Metal reads them (the module
+    /// docs).
     pub fn of(format: crate::metal::format::YCbCrFormat) -> Option<YCbCrCodes> {
         use crate::metal::format::YCbCrReads;
         let output = match (format.reads, format.bits, format.packed) {
@@ -171,7 +176,7 @@ impl YCbCrCodes {
                 YCbCrOutput::Converted
             }
             (YCbCrReads::Srgb, 8 | 10, false) | (YCbCrReads::Srgb, 10, true) => YCbCrOutput::Srgb,
-            (YCbCrReads::Codes, 8 | 10, false) => YCbCrOutput::Codes,
+            (YCbCrReads::Codes, 8 | 10, false) | (YCbCrReads::Codes, 10, true) => YCbCrOutput::Codes,
             _ => return None,
         };
         Some(YCbCrCodes {

@@ -80,14 +80,27 @@ template <class Expect> void DeviceHarness::ranges(Device &device, Expect expect
     auto *blit = cb->blit();
     if (!blit)
         std::abort();
+    Buffer fill = buffer;
+    fill.va += 64;
+    fill.cpu += 64;
+    fill.length = 73;
+    cb->use(fill, true, false);
     blit->fillBytes(buffer.va + 64, 73, 0);
     expect(exact(buffer.va + 64, 73, true), "CE fill carries its exact destination extent");
     cb->surfaces_.clear();
+    Buffer sourceRows = buffer, destinationRows = buffer;
+    sourceRows.length = 156;
+    destinationRows.va += 512;
+    destinationRows.cpu += 512;
+    destinationRows.length = 220;
+    cb->use(sourceRows, false);
+    cb->use(destinationRows, true, false);
     blit->copyRect(buffer.va, 64, buffer.va + 512, 96, 7, 3, 4);
     const auto &rows = cb->surfaces_.uses();
     expect(rows.size() == 2 && rows[0].reserved == 156 && rows[1].reserved == 220,
            "CE rectangle extent includes row gaps and the final visible row");
     cb->surfaces_.clear();
+    cb->use(sourceRows, true, false);
     blit->copyBufferTexels(buffer.va, 64, pitch, 0, 0, 0, 7, 3, false, kAspectWhole);
     expect(cb->surfaces_.uses()[0].handle == buffer.va && cb->surfaces_.uses()[0].reserved == 156,
            "texture readback carries the buffer-side row extent");

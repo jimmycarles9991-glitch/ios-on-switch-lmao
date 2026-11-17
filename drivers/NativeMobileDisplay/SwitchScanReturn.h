@@ -44,6 +44,12 @@ public:
         return back;
     }
 
+    // The page the last retiring swap that showed one on window A showed (kUnknown when not known).
+    const void *lastShown() const
+    {
+        return last;
+    }
+
     bool back(const void *page) const
     {
         if (!page || page == kUnchanged)

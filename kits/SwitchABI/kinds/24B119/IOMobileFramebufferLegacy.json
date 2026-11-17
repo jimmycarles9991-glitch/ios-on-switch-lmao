@@ -49,7 +49,8 @@
   "fields": {
     "displayHeight": "0x1bf4",
     "displayWidth": "0x1bf0",
-    "edrScalingEnabled": "0x1db8"
+    "edrScalingEnabled": "0x1db8",
+    "internalDisplay": "0x1cc2"
   },
   "constants": {
     "frameInfoClientOwner": "0x10",
@@ -197,6 +198,7 @@
     "opaque360": "0xfffffff009980954",
     "opaque334": "0xfffffff009980e3c",
     "opaque319": "0xfffffff009980e44",
+    "native_legacy_set_display_refresh_properties": "0xfffffff009980f94",
     "opaque225": "0xfffffff009981124",
     "opaque226": "0xfffffff009981130",
     "opaque227": "0xfffffff009981140",
@@ -276,7 +278,7 @@
     "opaque339": "0xfffffff009981fa0",
     "opaque341": "0xfffffff009981fa8",
     "opaque342": "0xfffffff009981fb4",
-    "opaque344": "0xfffffff009981fc0",
+    "setEdrFactor": "0xfffffff009981fc0",
     "opaque345": "0xfffffff009981fc8",
     "opaque346": "0xfffffff009981fd0",
     "opaque347": "0xfffffff009981fd8",
@@ -294,8 +296,7 @@
     "opaque373": "0xfffffff009982070",
     "opaque374": "0xfffffff009982078",
     "opaque376": "0xfffffff009982080",
-    "gMetaClass": "0xfffffff00aeaf830",
-    "setEdrFactor": "0xfffffff009981fc0"
+    "gMetaClass": "0xfffffff00aeaf830"
   },
   "found": {
     "C2": "stores the vtable",
@@ -306,6 +307,7 @@
     "completeCurrentSwap": "slot 312 by hint",
     "displayHeight": "offset shown by b95bf408 at 0xfffffff009981d24",
     "displayWidth": "offset shown by b95bf008 at 0xfffffff009981d18",
+    "edrScalingEnabled": "offset shown by 3976e109 at 0xfffffff0099824b8",
     "frameInfoClientOwner": "value shown by f9000a89 at 0xfffffff00997c8d0",
     "framesCompleted": "value shown by b900fe68 at 0xfffffff009975a40",
     "free": "slot 14 by PAC of _ZN8OSObject4freeEv",
@@ -317,10 +319,12 @@
     "getMatrix": "slot 204 by hint",
     "getWorkLoop": "slot 111 by PAC of _ZNK9IOService11getWorkLoopEv",
     "init": "slot 21 by PAC of _ZN15IORegistryEntry4initEP12OSDictionary",
+    "internalDisplay": "offset shown by 52839848 at 0xfffffff009980fd0",
     "isMainDisplay": "slot 186 by hint",
     "kickSwapQueue": "slot 307 by hint",
     "native_legacy_frame_info_enqueue": "IOMobileFramebufferUserClient's frame-info enqueue (user client, entry, bytes), as 21H461's: the type 3 IOSharedDataQueue at +0x3b8, enqueue through its vtable +0x90; on failure kIOReturnNoSpace, or a panic when +0x950 is set",
     "native_legacy_frame_info_notify": "the frame-info sender (display, frame), as 21H461's: the work-loop gate (+0x1b48) runs a gated function that calls slot 325 for every record on the type 3 list at +0x1a98 (21H461 +0x15b8), then slot 326",
+    "native_legacy_set_display_refresh_properties": "IOMobileFramebufferLegacy::setDisplayRefreshProperties (its failure line names it, 0xfffffff0099810f4): an OSDictionary, the timing getter at slot 319 given bit 0 of +0x1cc2, then the six IOMFBDisplayRefresh numbers; UnifiedPipeline::start_hardware_boot calls it (0xfffffff008e1e878)",
     "native_legacy_vsync_notify": "the vsync sender (display, timestamp, continuous time, interval), as 21H461's: a 0 continuous time or interval filled in by virtual calls, then every client on the list at +0x1ab8 (21H461 +0x15d8) gets the message (its +0x18), next at +0; the queue kick calls it with +0x100..+0x110 after completing a swap",
     "newUserClient": "slot 141 by PAC of _ZN9IOService13newUserClientEP4taskPvjPP12IOUserClient",
     "platformFrameInfoNotify": "slot 324 by hint",
@@ -335,6 +339,7 @@
     "setContrast": "slot 206 by hint",
     "setDisplayPowerState": "slot 375 by hint",
     "setDisplayTemperature": "slot 290 by hint",
+    "setEdrFactor": "slot 344 by hint",
     "setGammaTable": "slot 203 by hint",
     "setMatrix": "slot 205 by hint",
     "setPowerState": "slot 155 by PAC of _ZN9IOService13setPowerStateEmPS_",
@@ -366,8 +371,7 @@
     "systemWillShutdown": "slot 79 by PAC of _ZN9IOService18systemWillShutdownEj",
     "validateSwap": "slot 313 by hint",
     "vsyncClientList": "value shown by f94d5e68 at 0xfffffff009975894",
-    "vtable": "metaclass initialiser",
-    "setEdrFactor": "slot 344 by hint"
+    "vtable": "metaclass initialiser"
   },
   "hints": {
     "layout": {
@@ -415,6 +419,11 @@
         "at": "0xfffffff00996b800",
         "body": "d503237f a9be4ff4 a9017bfd 910043fd aa0003f3 f941dc00 b40001e0 f9400010 aa0003f1 f2f9b431 dac11a30 f8490e08 f2f22390 d73f0910 36000060 52800000",
         "why": "IOMobileFramebufferUserClient's frame-info enqueue (user client, entry, bytes), as 21H461's: the type 3 IOSharedDataQueue at +0x3b8, enqueue through its vtable +0x90; on failure kIOReturnNoSpace, or a panic when +0x950 is set"
+      },
+      "native_legacy_set_display_refresh_properties": {
+        "at": "0xfffffff009980f94",
+        "body": "d503237f d101c3ff a90457f6 a9054ff4 a9067bfd 910183fd aa0003f4 52800020 94000a31 b4000aa0 aa0003f3 4f05e540",
+        "why": "IOMobileFramebufferLegacy::setDisplayRefreshProperties (its failure line names it, 0xfffffff0099810f4): an OSDictionary, the timing getter at slot 319 given bit 0 of +0x1cc2, then the six IOMFBDisplayRefresh numbers; UnifiedPipeline::start_hardware_boot calls it (0xfffffff008e1e878)"
       }
     },
     "fields": {
@@ -432,6 +441,11 @@
         "offset": "0x1db8",
         "at": "0xfffffff0099824b8",
         "word": "3976e109"
+      },
+      "internalDisplay": {
+        "offset": "0x1cc2",
+        "at": "0xfffffff009980fd0",
+        "word": "52839848"
       }
     },
     "constants": {

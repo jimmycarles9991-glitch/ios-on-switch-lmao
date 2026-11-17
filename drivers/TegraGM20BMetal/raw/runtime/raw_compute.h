@@ -80,6 +80,9 @@ public:
     void setBytes(uint32_t slot, const void *bytes, uint32_t length);
     void setBytesAt(uint32_t slot, uint64_t va, uint32_t length,
                     const Buffer *allocation = nullptr);  // bytes already where the GPU reads them
+    // The kernel's own memory mapped for the connection (its clock anchor table): bound, never a job's use, since no BO of
+    // the client's holds it and SubmitJob refuses a use it cannot find
+    void setKernelBytes(uint32_t slot, uint64_t va, uint32_t length);
     void setBuffer(uint32_t slot, const Buffer *buffer, uint64_t offset);
     void setBufferOffset(uint32_t slot, uint64_t offset);
     // A stage-in kernel's: a buffer slot's bind stride (UINT32_MAX: none), which a layout of a dynamic stride reads, and
@@ -88,13 +91,19 @@ public:
     void setStageInRegion(const std::array<uint32_t, 6> &region);
     void setTexture(uint32_t slot, const Texture *t);
     void setSampler(uint32_t slot, const Sampler *s);
+    // The bytes bound at buffer slot `slot` reached through a copy of them at `va`, on 16: a buffer bound off 16 bytes
+    // whose record names no residual word (raw_kernel_shadow.h KernelUse::windowSlot); clearBufferWindows: all in place
+    void setBufferWindow(uint32_t slot, uint64_t va);
+    void clearBufferWindows();
 
     // dispatchThreadgroups: `groups` threadgroups of `threads` threads, the shape the kernel's record was made at. False:
     // refused (*why), nothing encoded
     bool dispatch(const uint32_t groups[3], const uint32_t threads[3], const char **why);
     // dispatchThreadgroupsWithIndirectBuffer: the grid is the three words at `offset` in `arguments` as the GPU reads
-    // them when it reaches the dispatch (raw_icb_compute.cpp). False: refused (*why), nothing encoded
-    bool dispatchIndirect(const Buffer *arguments, uint64_t offset, const char **why);
+    // them when it reaches the dispatch (raw_icb_compute.cpp), in threadgroups of `threads`. False: refused (*why),
+    // nothing encoded
+    bool dispatchIndirect(const Buffer *arguments, uint64_t offset, const std::array<uint32_t, 3> &threads,
+                          const char **why);
     // setStageInRegionWithIndirectBuffer: the dispatches after it take their stage-in origin and size from the six words
     // at `offset` in `region` as the GPU reads them at each dispatch; null: setStageInRegion:'s words again
     void setStageInRegionIndirect(const Buffer *region, uint64_t offset);
@@ -136,6 +145,11 @@ public:
                           const std::array<uint32_t, 3> &grid, const std::array<uint32_t, 3> &nominal,
                           const IcbBuffer (&buffers)[31], const StageIn &stageIn, uint8_t *block, uint64_t va,
                           const char **why);
+    // One launch of a region past the QMD's grid fields: its slice (raw_dispatch_bands.h qmdSlice)
+    static bool icbRegion(Device &dev, const ComputeState &k, const ComputeRegion &region, const DispatchPiece &slice,
+                          const std::array<uint32_t, 3> &grid, const std::array<uint32_t, 3> &nominal,
+                          const IcbBuffer (&buffers)[31], const StageIn &stageIn, uint8_t *block, uint64_t va,
+                          const char **why);
     // The set-0 buffer descriptors and StageInStride root words of a region of kernel `k` written at `va` (icbRegion), as a
     // buffer that inherits the encoder's buffers binds them at an execute (raw_icb_compute.h ComputeBind, ComputeStride).
     // False: refused (*why).
@@ -173,6 +187,11 @@ private:
                          uint32_t *qmd, const char **why);
     // Why an indirect dispatch command cannot carry kernel `k`, null where it can
     static const char *icbRefusal(const ComputeState &k);
+    // The header index sampler entry `e`, whose record holds its pairs, binds: its own, where the address maps of the
+    // textures it samples change none of its modes (raw_sampler_map.h); null, or why it has none
+    static const char *pairedSamplerTsc(const Device &dev, const PackKernelEntry &e,
+                                        const Texture *const (&textures)[31], const Sampler *const (&samplers)[16],
+                                        uint32_t &tsc);
 
     struct Bound {
         uint64_t va = 0;
@@ -180,11 +199,12 @@ private:
         const Buffer *buffer = nullptr;
         uint64_t offset = 0;
         uint64_t resourceVa = 0;
+        bool kernelMemory = false;
 
         bool operator==(const Bound &b) const
         {
             return va == b.va && size == b.size && buffer == b.buffer && offset == b.offset &&
-                   resourceVa == b.resourceVa;
+                   resourceVa == b.resourceVa && kernelMemory == b.kernelMemory;
         }
     };
 
@@ -194,6 +214,8 @@ private:
     uint32_t *start_ = nullptr;
     const ComputeState *state_ = nullptr;
     Bound bufs_[31];
+    uint64_t windows_[31] = {};
+    uint32_t windowMask_ = 0;
     const Texture *textures_[31] = {};
     const Sampler *samplers_[16] = {};
     bool serial_ = false, dispatched_ = false;

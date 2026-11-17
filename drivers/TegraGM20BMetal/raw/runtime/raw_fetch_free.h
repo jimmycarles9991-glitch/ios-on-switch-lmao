@@ -10,6 +10,7 @@
 #include "../../../../kits/SwitchGM20BEmit/SwitchGM20BEmitIterated.h"
 #include "raw_fetch_rungs.h"
 #include "raw_pack.h"
+#include "raw_set_entries.h"
 #include "raw_push.h"
 
 namespace raw {
@@ -17,6 +18,7 @@ namespace raw {
 namespace fetch_free {
 
 constexpr uint32_t kBlendEnable = 0x1360;  // SET_BLEND(j)
+constexpr uint32_t kPsSaturate = 0x13a8;   // SET_PS_SATURATE: OUTPUT<j> at bit 4j, its CLAMP_RANGE (0: 0 to 1) above it
 constexpr uint32_t kOglFuncAdd = 0x8006, kOglOne = 0x4001, kOglZero = 0x4000;
 
 template <typename Emit, typename... Args> void emit(std::vector<uint32_t> &out, Emit e, Args &&...args)
@@ -35,8 +37,9 @@ struct FetchFreeForm {
     uint8_t rung = FetchNone;  // FetchBlend or FetchIteratedBlend; FetchNone: not a fetch-free form
     uint8_t colour = 0;        // the colour it blends
     uint8_t programWords = 0, constants = 0;
-    uint64_t program = 0;       // the iterated blend program's name (PackIteratedBlend::name)
-    uint32_t sampledSlots = 0;  // the fragment texture slots its program samples
+    uint64_t program = 0;        // the iterated blend program's name (PackIteratedBlend::name)
+    uint32_t sampledSlots = 0;   // the fragment texture slots its program samples
+    bool samplesPast32 = false;  // it samples a fragment texture sampledSlots cannot name (24B119's slots 32 to 127)
     // a colour matrix form's: the fragment buffer the matrix is in, its bytes from the bind offset and its words there,
     // which each draw's macro call reads (kNoUniform: the program is the record's)
     uint8_t matrixSlot = kNoUniform;
@@ -49,7 +52,9 @@ struct FetchFreeForm {
 constexpr uint8_t kMatrixProgramWords = 38, kMatrixConstants = 8, kMatrixRowWords = 10, kMatrixWords = 11;
 
 // The form a record describes; rung FetchNone where it is not one, or names an iterated program the pack lacks
-inline FetchFreeForm fetchFreeForm(const PackPipeline &pp, const PackIteratedBlend *iterated)
+// `far`: the record's far block (raw_set_entries.h), null where it has kPackEntries entries or fewer
+inline FetchFreeForm fetchFreeForm(const PackPipeline &pp, const PackIteratedBlend *iterated,
+                                   const uint32_t *far = nullptr)
 {
     FetchFreeForm f;
     if (!(pp.flags & PipelineFetchFreeForm))
@@ -64,10 +69,15 @@ inline FetchFreeForm fetchFreeForm(const PackPipeline &pp, const PackIteratedBle
             return f;
         f.rung = rung;
         f.colour = c;
-        for (uint32_t k = 0; k < pp.entries && k < kPackEntries; k++) {
-            const PackEntry &e = pp.entry[k];
-            if ((e.kind == EntryTexture || e.kind == EntryTexture3d) && handleStage(e) == 1 && e.slot < kStageTextures)
-                f.sampledSlots |= 1u << e.slot;
+        const SetEntries entries(pp, far);
+        for (uint32_t k = 0; k < entries.size() && entries.complete(); k++) {
+            const PackEntry &e = entries[k];
+            if ((e.kind == EntryTexture || e.kind == EntryTexture3d) && handleStage(e) == 1) {
+                if (e.slot < 32)
+                    f.sampledSlots |= 1u << e.slot;
+                else
+                    f.samplesPast32 = true;
+            }
         }
         f.program = rung == FetchIteratedBlend ? iterated->name : 0;
         f.programWords = rung != FetchIteratedBlend ? 0 : matrix ? kMatrixProgramWords : iterated->count;
@@ -86,8 +96,11 @@ inline FetchFreeForm fetchFreeForm(const PackPipeline &pp, const PackIteratedBle
 
 // A rung-3 form's iterated blend: `on` after its registers (the blend enabled on its colour, the program loaded and
 // enabled; a colour matrix form's program is each draw's), `off` where the next state's registers go (iterated blend off,
-// the per-target blend back as the context has it)
-inline void iteratedBlendWords(const PackIteratedBlend &b, uint8_t colour, std::vector<uint32_t> &on,
+// the per-target blend back as the context has it). `format` is the blended colour's MTLPixelFormat. Metal clamps the
+// colour of an 8-bit unorm target to [0, 1] before the blend and leaves an RGBA16Float one's as it is; the iterated blend
+// takes the shader's colour as it is, so an 8-bit target's form saturates the shader's output for the draw
+// (SET_PS_SATURATE: device-proven to clamp, BENCH3 section 6)
+inline void iteratedBlendWords(const PackIteratedBlend &b, uint8_t colour, uint32_t format, std::vector<uint32_t> &on,
                                std::vector<uint32_t> &off)
 {
     uint16_t constants[kIteratedConstants * 3];
@@ -108,11 +121,20 @@ inline void iteratedBlendWords(const PackIteratedBlend &b, uint8_t colour, std::
     program.constant_count = 3u * b.constants;
     on.push_back(Push::hdr(1, SUBC_3D, fetch_free::kBlendEnable + 4 * colour, 1));
     on.push_back(1);
+    const bool saturate = format == 70 || format == 80;  // RGBA8Unorm, BGRA8Unorm
+    if (saturate) {
+        on.push_back(Push::hdr(1, SUBC_3D, fetch_free::kPsSaturate, 1));
+        on.push_back(1u << (4 * colour));
+    }
     if (b.count)
         fetch_free::emit(on, switch_gm20b_iterated_blend, &program);
     else
         fetch_free::emit(on, switch_gm20b_iterated_blend_common, &program.common);
     fetch_free::emit(off, switch_gm20b_iterated_blend_off);
+    if (saturate) {
+        off.push_back(Push::hdr(1, SUBC_3D, fetch_free::kPsSaturate, 1));
+        off.push_back(0);
+    }
 }
 
 // SET_CT_SELECT of `count` colour targets, each slot mapped to itself: a pass's, and one for a rung-3 form's draws
@@ -153,7 +175,7 @@ template <class Texture> bool eightBitSamples(uint32_t slots, const Texture *con
     return true;
 }
 
-// Whether the device showed the form's program worth its passes (kIteratedProven)
+// Whether the form's program is worth its passes (kIteratedProven)
 inline bool iteratedPassesProven(const FetchFreeForm &f)
 {
     IteratedAsk ask;
@@ -163,6 +185,15 @@ inline bool iteratedPassesProven(const FetchFreeForm &f)
     ask.constants = 3u * f.constants;
     ask.program = f.program;
     return iteratedBlendUsable(ask);
+}
+
+// Whether a pipeline places its state's form (its programs in the heap): one its rule can take, release and debug alike,
+// or any while HW Test's probe channel asks (`probe`: the rung or the storage form it forces, 0 none)
+inline bool fetchFreePlaced(const FetchFreeForm &f, uint8_t probe = 0)
+{
+    if (f.rung == FetchNone)
+        return false;
+    return (f.rung == FetchBlend ? fixedBlendProven() : iteratedPassesProven(f)) || probe;
 }
 
 // Whether a draw takes the form (rule fetch.blend or fetch.iterated); `forced`: a debug build's probe rung (2 or 3) that

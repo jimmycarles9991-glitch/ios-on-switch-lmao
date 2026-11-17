@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
-#include "NativeBridgeMetalFrontend.h"
 #include "RawComplete.h"
 #include "RawDirect.h"
 #include "raw_compute.h"
 #include "raw_compute_key.h"
 #include "raw_compute_lookup.h"
+#include "raw_kernel_texture.h"
 #import "RawMetalComputeState.h"
 #import "RawMetalResolveAsk.h"
 #include "raw_predication.h"
@@ -16,6 +16,12 @@
 #include "raw_surface_view.h"
 
 using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
+
+// An RGB10A8_2P_XR10 texture held in Metal's two planes (raw_xr_pass.h), whose kernels read and write each plane
+static bool heldInPlanes(RMTexture *t)
+{
+    return t->_rawOk && t->_raw.xrPlanes && !t->_raw.memoryless;
+}
 
 @interface RMComputeEncoder () {
     RMComputeState *_state;
@@ -86,6 +92,26 @@ using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
         [self setBuffer:buffers[k] offset:offsets[k] atIndex:range.location + k];
 }
 
+// The format a kernel is compiled to read `t` in: its own where the kernel reads and writes its two planes apart
+// (heldInPlanes, keyed :xr2p); else an RGB10A8_2P_XR10 texture with a stand-in as that stand-in, the RGBA16Float image of
+// its values drawn from the planes as the encoder begins. The two are never keyed together.
+static MTLPixelFormat kernelFormat(RMTexture *t)
+{
+    if (heldInPlanes(t))
+        return t->_descriptor.pixelFormat;
+    return MTLPixelFormat(raw::kernelTextureFormat(t->_raw, uint32_t(t->_descriptor.pixelFormat)));
+}
+
+static MTLTextureDescriptor *kernelDescriptor(RMTexture *t)
+{
+    MTLTextureDescriptor *d = t->_descriptor;
+    if (kernelFormat(t) == d.pixelFormat)
+        return d;
+    d = [d copy];
+    d.pixelFormat = kernelFormat(t);
+    return d;
+}
+
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index
 {
     RMTexture *t = [(id)texture isKindOfClass:[RMTexture class]] ? (RMTexture *)texture : nil;
@@ -95,8 +121,9 @@ using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
         if (t) {
             MTLTextureDescriptor *d = t->_descriptor;
             const MTLTextureSwizzleChannels w = d.swizzle;
-            bound = {uint32_t(index),    d.pixelFormat, d.textureType,
-                     d.mipmapLevelCount, d.arrayLength, {w.red, w.green, w.blue, w.alpha}};
+            bound = {uint32_t(index),    kernelFormat(t), d.textureType,
+                     d.mipmapLevelCount, d.arrayLength,   {w.red, w.green, w.blue, w.alpha},
+                     heldInPlanes(t)};
         }
         if (_specialization.bindTexture(uint32_t(index), t ? &bound : nullptr))
             _kernelCurrent = false;
@@ -217,11 +244,21 @@ using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
                                                      (unsigned long)threads.depth,
                                                      _state ? _state->_threadLimit : 1024u],
                           MTLCommandBufferErrorInvalidResource);
-    // more threadgroups than the grid's QMD fields hold (2^31 - 1 across, 65535 down and deep) or threads past 2^32 on
-    // an axis
-    const bool refused = invalid || dispatch.reason != raw::ComputeDispatch::Ready;
-    if (refused && !invalid)
-        [self refuse:PredComputeKernel value:groups[0] why:@"a dispatch past the grid's QMD limits"];
+    // threads past 2^32 - 1 on an axis have no thread_position_in_grid (a uint3); a grid past the QMD's fields is
+    // launched in slices (raw_dispatch_bands.h kQmdGroups), past kMaxQmdSlices of them not at all
+    const bool unaddressable =
+        !invalid && (dispatch.reason != raw::ComputeDispatch::Ready || raw::qmdSliceCount(groups) > raw::kMaxQmdSlices);
+    if (unaddressable) {
+        NSString *reason =
+            [NSString stringWithFormat:@"A dispatch of %lux%lux%lu %@ of %lux%lux%lu threads is past what a thread's "
+                                       @"position in the grid or raw's launches hold",
+                                       (unsigned long)grid.width, (unsigned long)grid.height, (unsigned long)grid.depth,
+                                       perThread ? @"threads" : @"threadgroups", (unsigned long)threads.width,
+                                       (unsigned long)threads.height, (unsigned long)threads.depth];
+        os_log_error(rawLog(), "raw: %{public}s", reason.UTF8String);
+        failCommandBuffer(_cb, reason, MTLCommandBufferErrorInvalidResource);
+    }
+    const bool refused = invalid || unaddressable;
     bool sameShape = _shape.count == dispatch.count && _shape.multi == dispatch.multi;
     for (uint8_t i = 0; sameShape && i < dispatch.count; ++i)
         sameShape = _shape.regions[i].local == dispatch.regions[i].local;
@@ -248,13 +285,12 @@ using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
                                                                      specialization.regionMode);
                     for (uint32_t slot = 0; slot < 31; ++slot)
                         if (_textures[slot])
-                            ask->texture(slot, _textures[slot]->_descriptor);
+                            ask->texture(slot, kernelDescriptor(_textures[slot]), heldInPlanes(_textures[slot]));
                     for (uint32_t slot = 0; slot < 16; ++slot)
                         if (_samplers[slot])
                             ask->sampler(slot, _samplers[slot]->_descriptor);
                     RMComputeState *state = _state;
-                    completion->backgroundKernel([pending, ask, specialization, state, completion, grid, threads,
-                                                  perThread, region] {
+                    completion->backgroundKernel([pending, ask, specialization, state, completion] {
                         RMKernelJob::Run run{pending};
                         const auto text = specialization.text();
                         const auto key =
@@ -268,11 +304,6 @@ using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
                         }
                         run.result.state = completion->kernel(state->_direct, ask->dispatch(), key, &run.result.retry,
                                                               state->_function, &run.result.gone);
-                        // the journal names m2v's state: a state the pack answered has none
-                        if (run.result.state && !region && state->_metadata)
-                            native_bridge_metal_journal_dispatch(state->_metadata, grid, threads, perThread,
-                                                                 text.memory.c_str(), text.textures.c_str(),
-                                                                 text.samplers.c_str());
                     });
                 });
             }
@@ -282,10 +313,13 @@ using RMKernelJob = raw::ComputeKernelJob<raw::ComputeState>;
         kernels = _kernel;
     }
     const auto kernelState = kernels ? kernels->state() : RMKernelSet::State::Refused;
-    // a kernel no compiler made fails its command buffer at submission (computeReadiness), as one still being made waits
+    // a kernel no compiler made fails its command buffer at submission (computeReadiness), as one still being made waits;
+    // one the compiler refused fails it as Metal's does a pipeline it could not compile
     const bool pending = kernelState == RMKernelSet::State::Pending || kernelState == RMKernelSet::State::Failed;
     const bool ready = kernelState == RMKernelSet::State::Ready;
-    if (!refused && !ready && !pending)
+    if (!refused && !ready && !pending && kernels)
+        failCommandBuffer(_cb, @"a compute kernel the shader compiler refused");
+    else if (!refused && !ready && !pending)
         [self refuse:PredComputeKernel value:groups[0] why:@"a dispatch the raw path has no kernel for"];
     Cmd m = cmd(OpDispatch, 3, perThread);
     m.c = uint64_t(t[0]) | uint64_t(t[1]) << 16 | uint64_t(t[2]) << 32;
@@ -552,7 +586,7 @@ bool encodeKernel(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMCommandBuffe
         e.setBufferOffset(c.index, c.c);
         break;
     case OpKernelClockAnchors:
-        e.setBytesAt(c.index, c.c, c.b);
+        e.setKernelBytes(c.index, c.c, c.b);
         break;
     case OpKernelTexture: {
         RMTexture *t = (RMTexture *)object;

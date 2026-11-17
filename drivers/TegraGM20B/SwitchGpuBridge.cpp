@@ -362,6 +362,20 @@ extern "C" void switch_gpu_bridge_completed(void)
 		thread_call_enter(queue.retirement);
 }
 
+extern "C" int switch_gpu_bridge_source_failure(const switch_gpu_bridge *bridge)
+{
+	for (uint32_t i = 0; i < bridge->count; ++i) {
+		const auto &token = bridge->tokens[i];
+		if (token.engine != SWITCH_GPU_ENGINE_GM20B &&
+		    token.engine != SWITCH_GPU_ENGINE_PROMISE)
+			continue;
+		const int result = switch_gpu_backing_token_physical_status(&token, 0);
+		if (result < 0)
+			return result;
+	}
+	return 0;
+}
+
 extern "C" int switch_gpu_bridge_status(const switch_gpu_bridge *bridge)
 {
 	if (!bridge)

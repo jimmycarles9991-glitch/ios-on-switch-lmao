@@ -17,7 +17,10 @@ import UIKit
 /// job, `preempt_job_end` at a job's end. One mid-job landing proves a preempt lands while the PBDMA waits at a band's
 /// release. The compositor's profiled submissions kicked behind these draws (spans op: `behind`, `sync_max_us`) must find GR
 /// within the same bound: their first push's wait for GR is the app's preemption latency. The unbanded arm shows what a whole
-/// draw costs the compositor. us_per_band is the GPU time a band took.
+/// draw costs the compositor. us_per_band is the GPU time a band took. `windows` and `holds` are the compositor's deadline
+/// windows opened and app channels held meanwhile (spans op): an app whose preemption latency is worth a hold (over
+/// the hold's slack, within a refresh period: TegraGM20BSchedPolicy.h tgm_hold_worth) with work in flight while the
+/// compositor animates gets a window, so the banded arm fails with none.
 /// The learned arm draws a loop of scattered texture reads, a few dozen instructions priced far under a band: its first
 /// draw is whole and measured (raw_band_rates.h), and once its state's rate is learned the same draw must be banded by
 /// the time it took, with the whole draw's pixels. Its draw is alone in its pass, so the state's first three are measured and
@@ -33,6 +36,8 @@ struct DrawBandsTest: HWTest {
     static let draws = 2
     static let budgetUs = 1000
     static let waitBoundUs = 2000
+    static let holdSlackUs = 1000
+    static let holdCeilingUs = 16667
     static let kickSeconds = 1.5
     static let memorySide = 2048
     static let memoryReads: UInt32 = 8
@@ -128,8 +133,15 @@ struct DrawBandsTest: HWTest {
             let maxUs = after.counts["preempt_max_us"] ?? 0
             if syncBefore != nil, let line = connection.flatMap({ LaunchHitchTest.spans($0) }) {
                 let sync = SpanReading.parse(line)
-                for key in ["sync_subs", "behind", "behind_sync_us", "sync_max_us"] {
+                for key in ["sync_subs", "behind", "behind_sync_us", "sync_max_us", "windows", "holds"] {
                     metrics.set(key + arm, sync.counts[key] ?? 0)
+                }
+                if arm.isEmpty, let windows = sync.counts["windows"], windows == 0,
+                    maxUs > Self.holdSlackUs && maxUs <= Self.holdCeilingUs
+                {
+                    failures.append(
+                        "the app's preemption latency reached \(maxUs) us, worth a hold, and the compositor opened no "
+                            + "deadline window")
                 }
                 if arm.isEmpty && (sync.counts["behind"] ?? 0) > 0
                     && (sync.counts["sync_max_us"] ?? 0) > Self.waitBoundUs

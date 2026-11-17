@@ -4,6 +4,10 @@
 // back a state whose draws go elsewhere, and the client compiles nothing itself, with no compiler at all too. The m2v stand-in makes each library's twin
 // of the same metallib (raw_facade_compute.h), so the facade keys the state as on the device.
 #include "raw_facade_compute.h"
+#include "../raw/runtime/RawCompileRequest.h"
+#include "../raw/runtime/raw_compile_request.h"
+#include "../raw/runtime/raw_render_key.h"
+#include "../../../kits/SwitchSeedPack/SwitchSeedStore.h"
 #include "bazel/testing/fresh_process.h"
 #include "../compiler/compiler_request.h"
 #include "../raw/runtime/raw_compile_request.h"
@@ -214,6 +218,74 @@ TEST(RawFacadeCreation, TheCompilerKeysAnAmplifiedStatesRequestAsTheClientDoes)
             if (most > 1)
                 EXPECT_NE(r.key.find(" amp=" + std::to_string(most) + " "), std::string::npos) << r.key;
         }
+    });
+}
+
+// The shader compiler refusing every render state it is asked for, its refusal kept in its store as SwitchShaderCompiler
+// keeps one, under the name the request's own key and libraries give
+struct RefusingCompiler {
+    switch_seed_pack::StoreWriter store;
+
+    bool serve()
+    {
+        uint8_t identity[switch_seed_pack::kIdentityBytes] = {};
+        identity[8] = 0x55;
+        std::string why;
+        if (!store.open(dir() + "/store", identity, 64, 1u << 20, why))
+            return false;
+        kernel_model::model.compilerFlags = kServing | TegraGM20BCompilerStore;
+        kernel_model::model.store = store.base();
+        kernel_model::model.storeBytes = store.mappedBytes();
+        kernel_model::model.compiler = [this](const std::string &bytes) {
+            raw::CompileRequest r;
+            if (!raw::decodeRequest(bytes, r) || r.kind != raw::RequestKind::Render || r.stages.size() < 2)
+                return int32_t(TegraGM20BCompileUnavailable);
+            std::map<std::string, raw::AirHash> hashes;
+            const std::string &library = r.libraries[r.stages[0].library].bytes;
+            if (!raw::metallibAirHashes(reinterpret_cast<const uint8_t *>(library.data()), library.size(), hashes))
+                return int32_t(TegraGM20BCompileUnavailable);
+            bool own = false;
+            const std::string packKey = raw::requestPackKey(r, own);
+            const raw::CacheKey k = raw::renderCacheKey(r.stack, packKey, hashes[r.stages[0].function],
+                                                        hashes[r.stages[1].function], {}, own);
+            std::vector<raw::LibraryIdentity> ids;
+            for (const raw::RequestLibrary &l : r.libraries)
+                ids.push_back(raw::identityOf(l));
+            const std::string entry = raw::encodeEntry(k, nullptr, "a state this compiler refuses");
+            const raw::Digest name = raw::storeName(k, r, ids);
+            store.put(name.data(), reinterpret_cast<const uint8_t *>(entry.data()), uint32_t(entry.size()));
+            return int32_t(TegraGM20BCompileRefused);
+        };
+        return true;
+    }
+};
+
+// A state the shader compiler refused fails its creation with the refusal, as Metal's does for a state it could not
+// compile, synchronously and through a completion handler; it is never m2v's
+TEST(RawFacadeCreation, AStateTheCompilerRefusedFailsTheCreation)
+{
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        RefusingCompiler compiler;
+        ASSERT_TRUE(compiler.serve());
+        const auto [device, library] = opened(kernel_model::model.compilerFlags);
+        ASSERT_TRUE(library != nil);
+        const std::string why = created(device, unpacked(library));
+        EXPECT_NE(why.find("the shader compiler refused the state: a state this compiler refuses"), std::string::npos)
+            << why;
+        dispatch_semaphore_t answered = dispatch_semaphore_create(0);
+        __block id<MTLRenderPipelineState> state = nil;
+        __block NSError *error = nil;
+        [device newRenderPipelineStateWithDescriptor:unpacked(library)
+                                   completionHandler:^(id<MTLRenderPipelineState> made, NSError *failed) {
+                                       state = made;
+                                       error = failed;
+                                       dispatch_semaphore_signal(answered);
+                                   }];
+        ASSERT_EQ(dispatch_semaphore_wait(answered, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))), 0);
+        EXPECT_EQ(state, nil);
+        EXPECT_NE(text(error.localizedDescription).find("the shader compiler refused the state"), std::string::npos)
+            << text(error);
+        EXPECT_EQ(gOpens, 0);
     });
 }
 

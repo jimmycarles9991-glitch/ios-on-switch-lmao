@@ -18,7 +18,7 @@ std::vector<std::string> gLines;
 
 void IOLog(const char *format, ...)
 {
-    char line[256];
+    char line[1024];
     va_list args;
     va_start(args, format);
     vsnprintf(line, sizeof(line), format, args);
@@ -27,6 +27,7 @@ void IOLog(const char *format, ...)
 }
 
 constexpr uint32_t kWinAUnderflowInt = 1u << 8, kWinBUnderflowInt = 1u << 9, kWinCUnderflowInt = 1u << 10;
+constexpr uint32_t kDcStateAccess = 0x40, kReadMuxActive = 1u << 0, kWriteMuxActive = 1u << 2;
 
 // The driver's frame-end order: underflowRead, checkRotation and planeFrameEnd (their latches), underflowFrameEnd.
 struct Display {
@@ -45,12 +46,17 @@ struct Display {
     PlaneSet sets[2];
     std::map<uint32_t, uint32_t> dc;
     static constexpr bool stats = false;
-    bool rotationLatched = false, scanoutStopped = false, planesAttached = true;
+    bool rotationLatched = false, scanoutStopped = false, planesAttached = true, landscape = false;
     uint64_t frameEnds = 0;
 
     const PlaneSet &planeSetOf(int set) const
     {
         return sets[set >= 0 ? 1 : 0];
+    }
+
+    bool landscapeOn() const
+    {
+        return landscape;
     }
 
     void frameEnd(uint32_t a, uint32_t b, uint32_t c, uint32_t latched = 0)
@@ -260,5 +266,27 @@ TEST(UnderflowAccounting, NextEpisodeStartsFromZero)
     EXPECT_EQ(a.episode(0).counted, 2u);
     EXPECT_EQ(a.episode(0).frames, 1u);
     EXPECT_FALSE(a.episode(0).overflowed);
+}
+
+TEST(UnderflowDisplay, WindowAColumnScanningTheVideoNamesItsWordsAtTheFirstUnderflow)
+{
+    gLines.clear();
+    Display d;
+    d.rotationLatched = true;
+    d.landscape = true;
+    d.dc[0xb86] = 0x7800438;
+    d.dc[0xbeb] = 1;
+    d.frameEnd(3, 0, 0, kWinAUnderflowInt);
+    d.frameEnd(9, 0, 0, kWinAUnderflowInt);
+    ASSERT_EQ(gLines.size(), 2u);
+    EXPECT_EQ(gLines[1], "SwitchDisplay: window A column-scans the video: OPTIONS 0 SIZE 0 PRESCALED 0x7800438 DDA 0 "
+                         "INITIAL 0/0 OFFSET 0/0 KIND 0 MEMFETCH_CONTROL 0x1 MEMFETCH_DEBUG_STATUS 0\n");
+    EXPECT_EQ(d.dc[kDcStateAccess] & kReadMuxActive, 0u);
+    d.landscape = false;
+    gLines.clear();
+    for (unsigned i = 0; i < Accounting::kQuietFrames; ++i)
+        d.frameEnd(0, 0, 0);
+    d.frameEnd(3, 0, 0);
+    ASSERT_EQ(gLines.size(), 2u) << "the episode's end, then window A's next one in portrait alone";
 }
 }  // namespace

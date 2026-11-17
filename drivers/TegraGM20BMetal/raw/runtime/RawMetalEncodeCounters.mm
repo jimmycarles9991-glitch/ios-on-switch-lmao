@@ -57,7 +57,8 @@ static_assert(sizeof kCountNames / sizeof *kCountNames == raw::kEncodeCounts);
 // hw_test_app's gpu.path.encode_cost: this process's encode profile since the device opened (raw_encode_profile.h),
 // never reset. <part>_us and <part>_self_us are microseconds, <part>_calls the spans; the events are counts, mallocs
 // and frees over malloc_encodes of the encodes only; facade_locks the runtime's locks on every thread since the process
-// began (raw_lock.h); <kind>_encoders_made and _freed its pooled encoders' blocks (raw_object_pool.h).
+// began (raw_lock.h); <kind>_encoders_made and _freed its pooled encoders' blocks (raw_object_pool.h); recording_misses
+// and recording_drops_<why> the kept recordings' (rmRecordingCounts).
 - (NSDictionary<NSString *, NSNumber *> *)switchRawEncodeProfile
 {
     const raw::EncodeTotals &k = gRM->raw->stats.encode;
@@ -82,6 +83,11 @@ static_assert(sizeof kCountNames / sizeof *kCountNames == raw::kEncodeCounts);
     }
     for (size_t i = 0; i < raw::kEncodeCounts; ++i)
         d[@(kCountNames[i])] = @(k.counts[i].load());
+    const RMRecordingCounts recordings = rmRecordingCounts();
+    d[@"recording_misses"] = @(recordings.misses);
+    d[@"recording_drops_large"] = @(recordings.dropsLarge);
+    d[@"recording_drops_total"] = @(recordings.dropsTotal);
+    d[@"recording_drops_slots"] = @(recordings.dropsSlots);
     return d;
 }
 

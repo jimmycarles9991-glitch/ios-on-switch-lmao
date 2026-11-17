@@ -15,3 +15,14 @@ exports_files([
     "crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll",
     "crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll",
 ])
+
+filegroup(
+    name = "translation_test_inputs",
+    srcs = [
+        "crates/metal2vulkan-validation/fixtures/public/engine/grouped_pointer.ll",
+        "crates/metal2vulkan-validation/fixtures/public/engine/linked_visible_caller.ll",
+        "crates/metal2vulkan-validation/fixtures/public/engine/linked_visible_functions.ll",
+        "crates/metal2vulkan-validation/fixtures/public/engine/stage_io.ll",
+        "crates/metal2vulkan-validation/fixtures/public/fragment_depth_stencil.ll",
+    ] + glob(["crates/metal2vulkan-validation/profiles/*.json"]),
+)

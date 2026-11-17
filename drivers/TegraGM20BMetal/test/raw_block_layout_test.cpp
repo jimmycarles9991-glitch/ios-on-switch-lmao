@@ -6,6 +6,7 @@
 // where TegraGM20BLayout.h's TegraColor GOB addressing has it.
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cstdint>
 #include <vector>
 
@@ -220,6 +221,106 @@ TEST(BlockChainLayout, IsNils)
             EXPECT_EQ(uint64_t(lv.rowBytes) * lv.rows, n.level[l].bytes)
                 << n.width << "x" << n.height << " level " << l;
         }
+    }
+}
+
+// NVK's answers for VK_IMAGE_TYPE_3D optimal images of BC1_RGBA (133, 8-byte blocks), ASTC_4x4 (157) and ASTC_10x10
+// (179) (m2vf-shapes2 probe/nil/niloracle3d, niloracle.c over a 3D extent, the NVK host twin of x1-allon-key): the
+// image's size and each level's offset, row pitch, depth pitch (one plane of blocks) and size. Metal's BC and ASTC 3D
+// textures hold blocks one plane deep.
+struct NilVolume {
+    uint32_t blockW, bpp, width, height, depth, levels;
+    uint64_t bytes;
+    std::vector<std::array<uint64_t, 4>> level;
+};
+
+const NilVolume kNilVolumes[] = {
+    {4, 8, 16, 16, 4, 3, 4096, {{0, 64, 512, 2048}, {2048, 64, 512, 1024}, {3072, 64, 512, 512}}},
+    {4,
+     8,
+     64,
+     32,
+     12,
+     5,
+     24576,
+     {{0, 128, 1024, 16384},
+      {16384, 64, 512, 4096},
+      {20480, 64, 512, 2048},
+      {22528, 64, 512, 512},
+      {23040, 64, 512, 512}}},
+    {4,
+     8,
+     100,
+     60,
+     7,
+     4,
+     40960,
+     {{0, 256, 4096, 32768}, {32768, 128, 1024, 4096}, {36864, 64, 512, 512}, {37376, 64, 512, 512}}},
+    {4, 8, 8, 8, 1, 1, 4096, {{0, 64, 512, 512}}},
+    {4, 8, 4, 4, 16, 3, 16384, {{0, 64, 512, 8192}, {8192, 64, 512, 4096}, {12288, 64, 512, 2048}}},
+    {4,
+     16,
+     64,
+     32,
+     12,
+     5,
+     49152,
+     {{0, 256, 2048, 32768},
+      {32768, 128, 1024, 8192},
+      {40960, 64, 512, 2048},
+      {43008, 64, 512, 512},
+      {43520, 64, 512, 512}}},
+    {4,
+     16,
+     100,
+     60,
+     7,
+     4,
+     69632,
+     {{0, 448, 7168, 57344}, {57344, 256, 2048, 8192}, {65536, 128, 1024, 1024}, {66560, 64, 512, 512}}},
+    {10, 16, 50, 30, 5, 3, 12288, {{0, 128, 1024, 8192}, {8192, 64, 512, 1024}, {9216, 64, 512, 512}}},
+};
+
+TEST(BlockVolumeLayout, IsNils)
+{
+    for (const NilVolume &n : kNilVolumes) {
+        raw::fx::MipChain c;
+        ASSERT_TRUE(raw::fx::volumeLayout(n.width, n.height, n.depth, n.levels, n.bpp, false, c, n.blockW, n.blockW))
+            << n.width << "x" << n.height << "x" << n.depth;
+        EXPECT_EQ(c.bytes, n.bytes) << n.width << "x" << n.height << "x" << n.depth << " blocks " << n.blockW;
+        for (uint32_t l = 0; l < n.levels; l++) {
+            const raw::fx::MipLevel &lv = c.level[l];
+            const uint64_t plane = uint64_t(lv.rowBytes) * lv.rows;
+            EXPECT_EQ(lv.offset, n.level[l][0]) << n.width << "x" << n.height << "x" << n.depth << " level " << l;
+            EXPECT_EQ(lv.rowBytes, n.level[l][1]) << n.width << "x" << n.height << "x" << n.depth << " level " << l;
+            EXPECT_EQ(plane, n.level[l][2]) << n.width << "x" << n.height << "x" << n.depth << " level " << l;
+            EXPECT_EQ(plane * lv.planes, n.level[l][3])
+                << n.width << "x" << n.height << "x" << n.depth << " level " << l;
+        }
+    }
+}
+
+// A 3D image's planes of blocks move through the volume copies as elements: every byte back out as it went in, at the
+// offset volumeOffset gives it
+TEST(BlockVolumeLayout, PlanesOfBlocksRoundTrip)
+{
+    raw::fx::MipChain c;
+    ASSERT_TRUE(raw::fx::volumeLayout(100, 60, 7, 3, 16, false, c, 4, 4));
+    std::vector<uint8_t> memory(c.bytes, 0);
+    for (uint32_t l = 0; l < 3; l++) {
+        const raw::fx::MipLevel &lv = c.level[l];
+        const size_t row = size_t(lv.width) * 16, plane = row * lv.height;
+        std::vector<uint8_t> src(plane * lv.depth), back(src.size());
+        for (size_t i = 0; i < src.size(); i++)
+            src[i] = uint8_t(i * 13 + l * 29 + (i >> 9));
+        const uint32_t origin[3] = {0, 0, 0}, size[3] = {lv.width, lv.height, lv.depth};
+        raw::fx::writeVolume(c, memory.data(), l, origin, size, src.data(), row, plane);
+        for (uint32_t z = 0; z < lv.depth; z++)
+            for (uint32_t y = 0; y < lv.height; y++)
+                ASSERT_EQ(memory[raw::fx::volumeOffset(c, l, 17, y, z)], src[z * plane + y * row + 17])
+                    << "level " << l << " plane " << z << " row " << y;
+        raw::fx::readVolume(c, memory.data(), l, origin, size, back.data(), row, plane);
+        EXPECT_EQ(back, src) << "level " << l;
     }
 }
 

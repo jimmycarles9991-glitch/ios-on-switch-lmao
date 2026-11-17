@@ -24,10 +24,4 @@ constexpr bool textureBindChecks(CheckedTexture old, CheckedTexture next, bool c
     return old.read() || next.read() || cubicSamplers || writesTextures;
 }
 
-// A sampler bound over `old`: cubicBinds reads which are cubic
-constexpr bool samplerBindChecks(bool oldCubic, bool nextCubic)
-{
-    return oldCubic || nextCubic;
-}
-
 }  // namespace raw

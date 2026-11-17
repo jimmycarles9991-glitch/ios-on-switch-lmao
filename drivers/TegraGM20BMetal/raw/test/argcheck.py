@@ -64,9 +64,7 @@ class Memory:
         return self.words.get(va, 0)
 
 
-V20_AT = (
-    directlink.PIPELINE_BYTES - packfile.PIPELINE_V22.size - packfile.PIPELINE_V21.size - packfile.PIPELINE_V20.size
-)
+V20_AT = directlink.V20_AT
 
 
 def f32(x: float) -> int:

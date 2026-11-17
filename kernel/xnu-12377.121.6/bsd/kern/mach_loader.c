@@ -37,6 +37,7 @@
  *	Started.
  */
 
+#include <switch/app_code.h>
 #include <sys/param.h>
 #include <sys/vnode_internal.h>
 #include <sys/uio.h>
@@ -822,6 +823,7 @@ load_machfile(
 	    vm_compute_max_offset(result->is_64bit_addr),
 	    vm_map_pageshift,
 	    VM_MAP_CREATE_DEFAULT);
+	if (switch_app_code_image(vp)) switch_app_code_map(map);
 
 
 #ifndef CONFIG_ENFORCE_SIGNED_CODE
@@ -1326,6 +1328,7 @@ parse_machfile(
 	}
 
 	abi64 = ((header->cputype & CPU_ARCH_ABI64) == CPU_ARCH_ABI64);
+	if (switch_app_code_image(vp) && switch_app_code_blob(vp, file_offset)) return LOAD_FAILURE;
 
 	switch (header->filetype) {
 	case MH_EXECUTE:
@@ -1347,7 +1350,7 @@ parse_machfile(
 		} else {
 			/* Check properties of static executables (disallowed except for development) */
 #if !(DEVELOPMENT || DEBUG)
-			return LOAD_FAILURE;
+			if (!switch_app_code_image(vp)) return LOAD_FAILURE;
 #endif
 		}
 		break;
@@ -1754,6 +1757,7 @@ parse_machfile(
 				}
 				break;
 			case LC_CODE_SIGNATURE:
+				if (switch_app_code_image(vp)) break;
 				/* CODE SIGNING */
 				if (pass != 1) {
 					break;
@@ -1937,7 +1941,7 @@ parse_machfile(
 	}
 
 	if (ret == LOAD_SUCCESS) {
-		if (!got_code_signatures && cs_process_global_enforcement()) {
+		if (!got_code_signatures && cs_process_global_enforcement() && !switch_app_code_image(vp)) {
 			ret = LOAD_FAILURE;
 		}
 
@@ -1996,6 +2000,7 @@ parse_machfile(
 	}
 
 	if (ret == LOAD_SUCCESS && switch_a64x_load_refused(header, map, vp, file_offset, addr, alloc_size, slide)) ret = LOAD_FAILURE;
+	if (ret == LOAD_SUCCESS && switch_app_code_dyld(map, addr, alloc_size, slide)) ret = LOAD_FAILURE;
 
 	kfree_data(addr, alloc_size);
 

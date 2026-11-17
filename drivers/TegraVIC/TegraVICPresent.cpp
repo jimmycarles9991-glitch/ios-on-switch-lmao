@@ -12,6 +12,9 @@
 
 namespace {
 bool gPresentReady;
+// A destination up to this size is mapped whole, once for its allocation's life, so the client's pool maps once; a
+// larger allocation holding the surface maps only the planes' rows the picture covers.
+constexpr uint64_t kWholeDestinationBytes = 64ULL << 20;
 
 struct Present {
     uint32_t references;
@@ -100,11 +103,16 @@ int place(const TegraVICPicture *picture, task_t task, Present *work, switch_gpu
             return -95;
     }
     const uint32_t planes = placement.whole.format->planes;
+    switch_gpu_backing_info destinationInfo = {};
+    switch_gpu_backing_describe(work->destination, &destinationInfo);
+    const bool mapWhole = (uint64_t(destinationInfo.page_count) << 12) <= kWholeDestinationBytes;
     work->sourceMap = switch_vic_mapping_acquire(picture->backing, false);
-    for (uint32_t plane = 0; plane < planes; ++plane)
+    if (mapWhole)
+        work->destinationMaps[0] = switch_vic_mapping_acquire_described(work->destination, destinationInfo, true);
+    for (uint32_t plane = 0; !mapWhole && plane < planes; ++plane)
         work->destinationMaps[plane] = switch_vic_mapping_acquire_range(
             work->destination, true, static_cast<uint32_t>(placement.band[plane].start >> 12), placement.pages[plane]);
-    if (!work->sourceMap || !work->destinationMaps[0] || (planes > 1 && !work->destinationMaps[1])) {
+    if (!work->sourceMap || !work->destinationMaps[0] || (!mapWhole && planes > 1 && !work->destinationMaps[1])) {
         *why = "the picture mappings could not be retained";
         return -12;
     }
@@ -114,7 +122,8 @@ int place(const TegraVICPicture *picture, task_t task, Present *work, switch_gpu
                                 &destination, &operation);
     for (uint32_t plane = 0; plane < planes; ++plane)
         destination.base[plane] =
-            switch_vic_mapping_address(work->destinationMaps[plane]) + (placement.band[plane].start & 4095);
+            mapWhole ? switch_vic_mapping_address(work->destinationMaps[0]) + placement.band[plane].start
+                     : switch_vic_mapping_address(work->destinationMaps[plane]) + (placement.band[plane].start & 4095);
     *why = tegra_vic_build(&source, &destination, &operation, tegra_vic_traits(), tegra_vic_config_address(),
                            tegra_vic_filter_address(), &work->job);
     if (*why)

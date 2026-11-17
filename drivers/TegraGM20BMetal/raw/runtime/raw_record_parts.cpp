@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <set>
+#include "raw_own_states.h"
 #include "raw_owned.h"
 #include "raw_set_reads.h"
 #include "raw_spill_table.h"
@@ -36,13 +37,11 @@ bool rawBindable(const CapturedProgram &p, bool heap)
     if (t.empty() || t[0] != CbufRoot)
         return false;
     bool data = false, set = false, heapSet = false;
-    uint32_t ubos = 0;
+    std::set<uint32_t> ubos;
     for (size_t i = 1; i < t.size(); i++) {
         if (cbufKind(t[i]) == CbufUbo) {
-            const uint32_t bit = 1u << (cbufUboOffset(t[i]) / 16);
-            if (ubos & bit)
+            if (!ubos.insert(cbufUboOffset(t.data(), farUbosOf(p), uint32_t(i))).second)
                 return false;
-            ubos |= bit;
             continue;
         }
         if (heap && t[i] == kCbufHeapSet && !heapSet) {
@@ -57,14 +56,15 @@ bool rawBindable(const CapturedProgram &p, bool heap)
 }
 
 // mkpack.py pipeline: every uniform buffer a program reads as a constant buffer is a uniform entry of set 0
-bool ubosNamed(const CapturedProgram &p, const PackPipeline &pipe)
+bool ubosNamed(const CapturedProgram &p, const SetEntries &entries)
 {
     for (size_t i = 1; i < p.cbufTypes.size(); i++) {
         if (cbufKind(p.cbufTypes[i]) != CbufUbo)
             continue;
+        const uint32_t offset = cbufUboOffset(p.cbufTypes.data(), farUbosOf(p), uint32_t(i));
         bool named = false;
-        for (uint32_t k = 0; k < pipe.entries && !named; k++)
-            named = uniformEntry(pipe.entry[k]) && pipe.entry[k].offset == cbufUboOffset(p.cbufTypes[i]);
+        for (uint32_t k = 0; k < entries.size() && !named; k++)
+            named = uniformEntry(entries[k]) && entries[k].offset == offset;
         if (!named)
             return false;
     }
@@ -132,6 +132,10 @@ bool handleEntry(const LayoutEntry &e, RuntimeRecord &rec, PackEntry &p, std::st
     case Tex::StencilTest:
         p.kind = e.tex == Tex::DepthTest ? EntryDepthTest : EntryStencilTest;
         p.slot = 0;
+        break;
+    case Tex::XrShadow:
+        p.kind = EntryXrShadow;
+        p.slot = e.texSlot;
         break;
     case Tex::Unknown:
         why = "texture unidentified";
@@ -217,11 +221,28 @@ bool foreign(uint32_t m, uint32_t targets)
            (m >= 0x1360 && m < 0x1380 && lacks((m - 0x1360) / 4));
 }
 
+// The state of pack key `key` as its functions name it: "v <vertex> + f <fragment>"
+std::string stateName(const std::string &key)
+{
+    std::string name;
+    for (size_t at = key.find(" | "); at != std::string::npos; at = key.find(" | ", at + 3)) {
+        const size_t end = key.find(" | ", at + 3);
+        std::string field = key.substr(at + 3, end == std::string::npos ? std::string::npos : end - at - 3);
+        while (!field.empty() && field.back() == ' ')
+            field.pop_back();
+        if (field.rfind("v ", 0) == 0 || field.rfind("f ", 0) == 0)
+            name += (name.empty() ? "" : " + ") + field.substr(0, field.find(' ', 2));
+    }
+    return name.empty() ? key.substr(0, 64) : name;
+}
+
 bool programsBindable(const RecordParts &parts, std::string &why)
 {
     const CapturedProgram *all[] = {parts.programs[0], parts.programs[1], parts.tessPrograms[0], parts.tessPrograms[1]};
     for (uint32_t k = 0; k < (parts.controlWord ? 4u : 2u); k++) {
         const CapturedProgram *p = all[k];
+        if (k == 1 && !parts.pixelStage)
+            continue;
         if (!p) {
             why = "unknown program";
             return false;
@@ -245,7 +266,8 @@ bool programsBindable(const RecordParts &parts, std::string &why)
 static uint8_t uniformBank(const CapturedProgram &program, const PackEntry &e)
 {
     for (size_t c = 1; c < program.cbufTypes.size(); c++)
-        if (cbufKind(program.cbufTypes[c]) == CbufUbo && cbufUboOffset(program.cbufTypes[c]) == e.offset)
+        if (cbufKind(program.cbufTypes[c]) == CbufUbo &&
+            cbufUboOffset(program.cbufTypes.data(), farUbosOf(program), uint32_t(c)) == e.offset)
             return uint8_t(c);
     return kNoUniform;
 }
@@ -271,12 +293,14 @@ static void describeReads(RuntimeRecord &out, const std::string &key)
     PackPipeline &p = out.pipeline;
     memset(p.uniform, kNoUniform, sizeof p.uniform);
     const uint8_t writes = (describedWrites(key) & ~p.storageMask) | (p.storageWriteMask & p.storageMask);
+    const SetEntries entries = entriesOf(out);
     uint32_t n = 0;
-    for (uint32_t k = 0; k < p.entries; k++) {
-        const PackEntry &e = p.entry[k];
+    for (uint32_t k = 0; k < entries.size(); k++) {
+        const PackEntry &e = entries[k];
         if (e.kind == EntryFetch && e.slot < 8)
             p.fetchRung[e.slot] = writes >> e.slot & 1 ? FetchInterlock : FetchBarrier;
-        if (e.kind != EntryUbo || bufferStorage(e) || n == kUniformRanges)
+        // PackUniformRange::entry names an entry below kNoUniform
+        if (e.kind != EntryUbo || bufferStorage(e) || n == kUniformRanges || k >= kNoUniform)
             continue;
         const uint8_t bank = uniformBank(out.programs[e.stage == 1 ? 0 : 1], e);
         if (bank != kNoUniform)
@@ -285,39 +309,58 @@ static void describeReads(RuntimeRecord &out, const std::string &key)
     const CapturedProgram &fs = out.programs[1];
     if (!fs.boundTextures || fs.boundTextures > fs.cbufTypes.size() || fs.cbufTypes[fs.boundTextures - 1] != CbufSet)
         return;
-    for (uint32_t k = 0; k < p.entries; k++)
-        if (p.entry[k].kind != EntryUbo && p.entry[k].kind != EntryColorTable && p.entry[k].kind != EntryTextureTable &&
-            p.entry[k].kind != EntrySamplerTable && p.entry[k].kind != EntrySpillTable)
+    const uint32_t farBound = kFarEntryWords * farEntries(entries.size());
+    for (uint32_t k = 0; k < entries.size(); k++) {
+        const uint8_t kind = entries[k].kind;
+        if (kind == EntryUbo || kind == EntryColorTable || kind == EntryTextureTable || kind == EntrySamplerTable ||
+            kind == EntrySpillTable)
+            continue;
+        if (k < kPackEntries)
             p.boundEntries |= 1u << k;
+        else
+            out.far[farBound + (k - kPackEntries) / 32] |= 1u << (k - kPackEntries) % 32;
+    }
+}
+
+// The record's memoryEntries bits (`read`, entryMaskWords of its entries): its first 32 in its PackPipeline, the rest in
+// its far block
+static void storeMemoryEntries(RuntimeRecord &out, const std::vector<uint32_t> &read)
+{
+    const uint32_t count = entryCount(out.pipeline);
+    out.pipeline.memoryEntries = read[0];
+    const uint32_t farMemory = kFarEntryWords * farEntries(count) + farMaskWords(count);
+    for (uint32_t k = kPackEntries; k < count; k++)
+        if (read[k / 32] >> k % 32 & 1)
+            out.far[farMemory + (k - kPackEntries) / 32] |= 1u << (k - kPackEntries) % 32;
 }
 
 bool assembleRecord(const RecordParts &parts, const std::string &key, const PackRules &rules, RuntimeRecord &out,
                     std::string &why)
 {
-    if (!programsBindable(parts, why))
+    if (!programsBindable(parts, why)) {
+        why = stateName(key) + ": " + why;
         return false;
+    }
     out.programs[0] = *parts.programs[0];
-    out.programs[1] = *parts.programs[1];
+    out.programs[1] = parts.pixelStage ? *parts.programs[1] : CapturedProgram();
     if (parts.controlWord) {
         out.tessPrograms[0] = *parts.tessPrograms[0];
         out.tessPrograms[1] = *parts.tessPrograms[1];
     }
-    if (parts.layout.size() > kPackEntries) {
-        why = "more than " + std::to_string(kPackEntries) + " set-0 entries";
-        return false;
-    }
-    if (renderSetBytes(parts.setBytes) > kRenderSetBytes) {
-        why = "a set 0 of " + std::to_string(parts.setBytes) + " bytes, past the render encoder's " +
-              std::to_string(kRenderSetBytes);
+    if (parts.layout.size() > kSetEntriesMax) {
+        why = "more than " + std::to_string(kSetEntriesMax) + " set-0 entries, every argument a render pipeline binds";
         return false;
     }
     PackPipeline &p = out.pipeline;
+    setEntryCount(p, uint32_t(parts.layout.size()));
+    out.far.assign(farWords(uint32_t(parts.layout.size())), 0);
     std::map<uint32_t, int> storageCodes;
     for (const LayoutEntry &e : parts.layout)
         if (e.buffer && bufferEntry(e, parts, false).samplerKind & 1)
             storageCodes[probeStorageCode(e.stage, e.slot)]++;
-    for (const LayoutEntry &e : parts.layout) {
-        PackEntry &entry = p.entry[p.entries++];
+    for (uint32_t k = 0; k < parts.layout.size(); k++) {
+        const LayoutEntry &e = parts.layout[k];
+        PackEntry &entry = entryAt(p, out.far, k);
         if (e.colorTable)
             entry = {uint16_t(e.offset), EntryColorTable, 2, 0, 0, 0, 0};
         else if (e.table)
@@ -340,8 +383,17 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
             entry.slot < kWrittenSlots)
             p.writtenFormat[entry.slot] = e.writtenFormat;
     }
-    if (!ubosNamed(out.programs[0], p) || !ubosNamed(out.programs[1], p) ||
-        (parts.controlWord && (!ubosNamed(out.tessPrograms[0], p) || !ubosNamed(out.tessPrograms[1], p)))) {
+    const SetEntries entries = entriesOf(out);
+    for (const CapturedProgram *program :
+         {&out.programs[0], &out.programs[1], &out.tessPrograms[0], &out.tessPrograms[1]})
+        for (uint16_t far : program->farUbos)
+            if (far && uint32_t(far) * 16 + 16 > parts.setBytes) {
+                why = "a program reads a uniform buffer descriptor at set-0 byte " + std::to_string(far * 16) +
+                      ", past its set of " + std::to_string(parts.setBytes) + " bytes";
+                return false;
+            }
+    if (!ubosNamed(out.programs[0], entries) || !ubosNamed(out.programs[1], entries) ||
+        (parts.controlWord && (!ubosNamed(out.tessPrograms[0], entries) || !ubosNamed(out.tessPrograms[1], entries)))) {
         why = "a program reads a set-0 uniform buffer the layout does not name";
         return false;
     }
@@ -361,23 +413,26 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
         if (!foreign(m, colors))
             regs[m] = disabledStream(m, v) ? 0 : v;
     registers(regs, colors, rules, out);
+    const auto keep = [&](uint32_t m) {
+        bool found = false;
+        for (size_t i = 0; i < out.blob.size(); i += 2)
+            found |= out.blob[i] == m;
+        if (!found) {
+            out.blob.push_back(m);
+            out.blob.push_back(valueOf(regs, m));
+        }
+    };
     if (parts.storageMask) {
         for (uint32_t m :
-             {0x0210u, 0x0754u, 0x1224u, 0x1a00u, 0x1a04u, 0x1a08u, 0x1a0cu, 0x1a10u, 0x1a14u, 0x1a18u, 0x1a1cu}) {
-            if (m >= 0x1a00 && !(parts.storageMask & (1u << ((m - 0x1a00) / 4))))
-                continue;
-            bool found = false;
-            for (size_t i = 0; i < out.blob.size(); i += 2)
-                found |= out.blob[i] == m;
-            if (!found) {
-                out.blob.push_back(m);
-                out.blob.push_back(valueOf(regs, m));
-            }
-        }
+             {0x0210u, 0x0754u, 0x1224u, 0x1a00u, 0x1a04u, 0x1a08u, 0x1a0cu, 0x1a10u, 0x1a14u, 0x1a18u, 0x1a1cu})
+            if (m < 0x1a00 || (parts.storageMask & (1u << ((m - 0x1a00) / 4))))
+                keep(m);
+    } else if (parts.rasterOrdered) {
+        keep(0x1224u);
     }
     p.keyHash = packKeyHash(key);
     p.vs = 0;
-    p.fs = 1;
+    p.fs = parts.pixelStage ? 1 : kNoProgram;
     p.blobDwords = uint32_t(out.blob.size());
     for (const auto &[offset, word] : parts.push) {
         if (offset < 0x700 || offset >= 0x780)
@@ -394,6 +449,7 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
     p.blendColorWord = parts.blendColorWord;
     p.halfBlendColorWord = parts.halfBlendColorWord;
     p.flags |= parts.storageMask ? PipelineStorageMetadata : 0;
+    p.flags |= parts.rasterOrdered ? PipelineRasterOrdered : 0;
     p.storageMask = parts.storageMask;
     p.storageWriteMask = parts.storageWriteMask;
     p.storageSamples = parts.storageSamples;
@@ -410,10 +466,10 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
     memcpy(p.heap, parts.heap.array, sizeof p.heap);
     out.spill.clear();
     for (uint32_t k = 0; k < 2; k++) {
-        for (uint32_t i = 0; i < p.entries; i++)
-            if (p.entry[i].kind == EntrySpillTable && p.entry[i].stage == k + 1)
-                p.spillEntry[k] = uint8_t(i + 1);
-        if (bool(p.spillEntry[k]) != !parts.spill[k].empty() || parts.spill[k].size() > kSpillWordsMax) {
+        for (uint32_t i = 0; i < entries.size(); i++)
+            if (entries[i].kind == EntrySpillTable && entries[i].stage == k + 1)
+                setSpillEntry(p, k, i + 1);
+        if (bool(spillEntryOf(p, k)) != !parts.spill[k].empty() || parts.spill[k].size() > kSpillWordsMax) {
             why = "an argument table its layout and its words disagree on";
             return false;
         }
@@ -422,12 +478,14 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
     }
     describeReads(out, key);
     constexpr size_t kHeaderBytes = 0x50;
+    std::vector<uint32_t> read(entryMaskWords(entries.size()));
     for (const CapturedProgram *program :
          {&out.programs[0], &out.programs[1], &out.tessPrograms[0], &out.tessPrograms[1]})
         if (program->image.size() > kHeaderBytes)
-            p.memoryEntries |= programSetReads(program->image.data() + kHeaderBytes,
-                                               program->image.size() - kHeaderBytes, program->cbufTypes.data(),
-                                               uint32_t(program->cbufTypes.size()), program->boundTextures, p);
+            programSetReads(program->image.data() + kHeaderBytes, program->image.size() - kHeaderBytes,
+                            program->cbufTypes.data(), uint32_t(program->cbufTypes.size()), program->boundTextures,
+                            entries, read.data());
+    storeMemoryEntries(out, read);
     const size_t bar = key.find(" | ");
     out.keyString = key.substr(0, bar);
     while (!out.keyString.empty() && isspace(static_cast<unsigned char>(out.keyString.back())))
@@ -435,16 +493,18 @@ bool assembleRecord(const RecordParts &parts, const std::string &key, const Pack
     return true;
 }
 
-uint32_t recordSetReads(const RuntimeRecord &rec)
+std::vector<uint32_t> recordSetReads(const RuntimeRecord &rec)
 {
     constexpr size_t kHeaderBytes = 0x50;
-    const PackPipeline &p = rec.pipeline;
-    uint32_t reads = p.memoryEntries;
+    const SetEntries entries = entriesOf(rec);
+    std::vector<uint32_t> reads(entryMaskWords(entries.size()));
+    for (uint32_t k = 0; k < entries.size(); k++)
+        reads[k / 32] |= uint32_t(entries.memory(k)) << k % 32;
     const auto add = [&](const CapturedProgram &program) {
         if (program.image.size() > kHeaderBytes)
-            reads |=
-                programSetReads(program.image.data() + kHeaderBytes, program.image.size() - kHeaderBytes,
-                                program.cbufTypes.data(), uint32_t(program.cbufTypes.size()), program.boundTextures, p);
+            programSetReads(program.image.data() + kHeaderBytes, program.image.size() - kHeaderBytes,
+                            program.cbufTypes.data(), uint32_t(program.cbufTypes.size()), program.boundTextures,
+                            entries, reads.data());
     };
     for (const RuntimeRecord::Variant &v : rec.variants)
         add(v.program);
@@ -458,18 +518,19 @@ uint32_t recordSetReads(const RuntimeRecord &rec)
 uint8_t dropUnreadFetches(RuntimeRecord &rec)
 {
     PackPipeline &p = rec.pipeline;
-    const uint32_t reads = recordSetReads(rec);
+    const std::vector<uint32_t> reads = recordSetReads(rec);
+    const SetEntries entries = entriesOf(rec);
     uint8_t unread = 0, read = 0;
-    for (uint32_t k = 0; k < p.entries && k < kPackEntries; k++) {
-        const PackEntry &e = p.entry[k];
+    for (uint32_t k = 0; k < entries.size(); k++) {
+        const PackEntry &e = entries[k];
         if (e.kind == EntryFetch && e.slot < 8)
-            (reads >> k & 1 ? read : unread) |= uint8_t(1u << e.slot);
+            (reads[k / 32] >> k % 32 & 1 ? read : unread) |= uint8_t(1u << e.slot);
     }
     const uint8_t dropped = unread & ~read;
     if (!dropped)
         return 0;
-    for (uint32_t k = 0; k < p.entries && k < kPackEntries; k++) {
-        PackEntry &e = p.entry[k];
+    for (uint32_t k = 0; k < entries.size(); k++) {
+        PackEntry &e = entryAt(p, rec.far, k);
         if (e.kind == EntryFetch && e.slot < 8 && (dropped >> e.slot & 1))
             e = {e.offset, EntrySamplerOnly, e.stage, 0, SamplerNone, 0, 0};
     }
@@ -527,95 +588,7 @@ uint64_t packKeyHash(const std::string &key)
             vertex.pop_back();
         pair = vertex + " | f " + key.substr(fragmentAt + 5);
     }
-    for (const char *state : {"ycbcr_vert | f ycbcr_converted_frag",
-                              "ycbcr_vert | f ycbcr_srgb_frag",
-                              "ycbcr_vert | f ycbcr_codes_frag",
-                              "ycbcr_vert | f ycbcr_codes10_frag",
-                              "ycbcr_vert | f ycbcr_packed_converted_frag",
-                              "ycbcr_vert | f ycbcr_packed_srgb_frag",
-                              "ycbcr_vert | f ycbcr_packed_codes10_frag",
-                              "ycbcr_vert | f ycbcr_packed_plane_frag",
-                              "ycbcr_store_vert | f ycbcr_store_luma8_frag",
-                              "ycbcr_store_vert | f ycbcr_store_luma16_frag",
-                              "ycbcr_store_vert | f ycbcr_store_chroma8_frag",
-                              "ycbcr_store_vert | f ycbcr_store_chroma16_frag",
-                              "ycbcr_store_vert | f ycbcr_store_luma8_srgb_frag",
-                              "ycbcr_store_vert | f ycbcr_store_luma16_srgb_frag",
-                              "ycbcr_store_vert | f ycbcr_store_chroma8_srgb_frag",
-                              "ycbcr_store_vert | f ycbcr_store_chroma16_srgb_frag",
-                              "ycbcr_store_vert | f ycbcr_store_luma_packed_frag",
-                              "ycbcr_store_vert | f ycbcr_store_chroma_packed_frag",
-                              "ycbcr_store_vert | f ycbcr_store_luma_packed_srgb_frag",
-                              "ycbcr_store_vert | f ycbcr_store_chroma_packed_srgb_frag",
-                              "ycbcr_store_vert | f ycbcr_store_plane_packed_frag",
-                              "turn_vert | f turn_copy8_frag",
-                              "turn_vert | f turn_copy16_frag",
-                              "turn_vert | f turn_copy32_frag",
-                              "turn_vert | f turn_copy64_frag",
-                              "turn_vert | f turn_copy128_frag",
-                              "turn_vert | f turn_masked8_frag",
-                              "turn_vert | f turn_masked16_frag",
-                              "turn_vert | f turn_masked32_frag",
-                              "turn_vert | f turn_masked64_frag",
-                              "turn_vert | f turn_masked128_frag",
-                              "turn_vert | f turn_reach_frag",
-                              "turn_vert | f turn_reach_reduce_frag",
-                              "turn_vert | f turn_depth16_frag",
-                              "turn_vert | f turn_depth32f_frag",
-                              "turn_vert | f turn_depth32fs8_frag",
-                              "stencil_bits_vert | f stencil_bits_s8_frag",
-                              "stencil_bits_vert | f stencil_bits_d32fs8_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_s8_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_d32fs8_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_d32fs8_min_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_d32fs8_max_frag",
-                              "stencil_bits_vert | f stencil_bits_s8_colour_frag",
-                              "stencil_bits_vert | f stencil_bits_d32fs8_colour_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_s8_colour_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_d32fs8_colour_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_d32fs8_min_colour_frag",
-                              "stencil_bits_vert | f stencil_bits_ms_d32fs8_max_colour_frag",
-                              "xr_vert | f xr_bgr10_frag",
-                              "xr_vert | f xr_bgra10_frag",
-                              "xr_vert | f xr_planes_frag",
-                              "xr_vert | f xr_two_planes_frag",
-                              "two_plane_cover | f two_plane_load",
-                              "two_plane_cover | f two_plane_store",
-                              "resolve_vert | f resolve_rgba8_frag",
-                              "resolve_vert | f resolve_rgba8_srgb_frag",
-                              "resolve_vert | f resolve_bgra8_frag",
-                              "resolve_vert | f resolve_bgra8_srgb_frag",
-                              "resolve_vert | f resolve_rgba8_2x_frag",
-                              "resolve_vert | f resolve_rgba8_4x_frag",
-                              "resolve_vert | f resolve_bgra8_2x_frag",
-                              "resolve_vert | f resolve_bgra8_4x_frag",
-                              "resolve_vert | f resolve_rg11b10f_frag",
-                              "resolve_vert | f resolve_rgba16f_frag",
-                              "resolve_vert | f resolve_depth16_sample0_frag",
-                              "resolve_vert | f resolve_depth16_min_frag",
-                              "resolve_vert | f resolve_depth16_max_frag",
-                              "resolve_vert | f resolve_depth32f_sample0_frag",
-                              "resolve_vert | f resolve_depth32f_min_frag",
-                              "resolve_vert | f resolve_depth32f_max_frag",
-                              "resolve_vert | f resolve_depth32fs8_sample0_frag",
-                              "resolve_vert | f resolve_depth32fs8_min_frag",
-                              "resolve_vert | f resolve_depth32fs8_max_frag",
-                              "mip_vert | f mip_a8_frag",
-                              "mip_vert | f mip_r16_frag",
-                              "mip_vert | f mip_r16f_frag",
-                              "mip_vert | f mip_b5g6r5_frag",
-                              "mip_vert | f mip_bgr5a1_frag",
-                              "mip_vert | f mip_r32f_frag",
-                              "mip_vert | f mip_rg16_frag",
-                              "mip_vert | f mip_rg16f_frag",
-                              "mip_vert | f mip_rgba8_srgb_frag",
-                              "mip_vert | f mip_bgra8_srgb_frag",
-                              "mip_vert | f mip_rgb10a2_frag",
-                              "mip_vert | f mip_rg11b10f_frag",
-                              "mip_vert | f mip_bgr10a2_frag",
-                              "mip_vert | f mip_rg32f_frag",
-                              "mip_vert | f mip_rgba16_frag",
-                              "mip_vert | f mip_rgba32f_frag"}) {
+    for (const char *state : kOwnStates) {
         if (pair != state)
             continue;
         const size_t vertexEnd = pair.find(" | f ");

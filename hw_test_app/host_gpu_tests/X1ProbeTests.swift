@@ -23,14 +23,28 @@ final class X1ProbeTests: XCTestCase {
         return GPU(device: device, queue: queue, library: library)
     }
 
-    /// Runs `body` and checks that every count it judges by is zero on this Mac: its reference is Apple's.
+    /// Runs `body` and checks that every count it judges by is zero on this Mac: its reference is Apple's. A count's
+    /// <prefix>_flushed part is what Apple's G13 does and G16 does not (X1ConversionProbes.flushedSubnormal).
     private func check(_ name: String, _ body: (GPU) async throws -> ProbeFinding) async throws {
-        let finding = try await body(makeGPU())
+        let gpu = try makeGPU()
+        let host = HostFacts.fields(gpu.device)
+        let finding = try await body(gpu)
         let fields = finding.metrics.ordered.map { "\($0.0)=\($0.1.logText)" }.joined(separator: " ")
-        print("X1 \(name) \(finding.verdict.rawValue) \(fields) \(finding.note)")
+        print("X1 \(name) \(host) \(finding.verdict.rawValue) \(fields) \(finding.note)")
         for (key, value) in finding.metrics.ordered where key.hasSuffix("_wrong") {
-            XCTAssertEqual(value, .integer(0), "\(name) \(key)")
+            let flushed = finding.metrics[String(key.dropLast("_wrong".count)) + "_flushed"] ?? .integer(0)
+            XCTAssertEqual(value, flushed, "\(name) \(key) on \(host)")
         }
+    }
+
+    func testOnlyAZeroForASubnormalHalfCountsAsFlushed() {
+        XCTAssertTrue(X1ConversionProbes.flushedSubnormal(0, nearest: 0x0100))
+        XCTAssertTrue(X1ConversionProbes.flushedSubnormal(0, nearest: 0x0300))
+        XCTAssertFalse(X1ConversionProbes.flushedSubnormal(0x00FF, nearest: 0x0100))
+        XCTAssertFalse(X1ConversionProbes.flushedSubnormal(0x8000, nearest: 0x0100))
+        XCTAssertFalse(X1ConversionProbes.flushedSubnormal(0, nearest: 0x0400))
+        XCTAssertFalse(X1ConversionProbes.flushedSubnormal(0x3BFE, nearest: 0x3BFD))
+        XCTAssertFalse(X1ConversionProbes.flushedSubnormal(0, nearest: 0))
     }
 
     func testMetalOnlyProbesMatchAppleOnThisMac() async throws {

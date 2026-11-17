@@ -1,20 +1,27 @@
 // SPDX-License-Identifier: MIT
-// What the system shader compiler compiles with: the plugin's own m2v translator and NVK's stage compile, over the frontend's
-// compile context (bridge/NativeMetalCompile.h: no m2v device, no shader cache on disk), and the installed pack's rules, so
-// a record made here is the one the runtime would make in process (RawComplete.mm make, kernel).
+// What the system shader compiler compiles with: the translator's own libraries and functions (raw/runtime/RawOffline.h: no
+// m2v device, no shader cache on disk), the stage compile linked into the plugin (third_party/mesa/src/nouveau/
+// switch_compile) and the installed pack's rules, as the pack generator makes its records.
 #pragma once
 #include <cstdint>
 #include <memory>
 #include <string>
+#include "compiler_codegen.h"
 #include "compiler_request.h"
+
+namespace raw {
+class Direct;
+}
 
 namespace switch_compiler {
 
-// Where the engine reads: the pack and NVK, and the root the system volumes are at ("" on the device)
+// Where the engine reads: the pack, the root the system volumes are at ("" on the device), and where the system's
+// Metal front end keeps its module cache and replies and finds the seed's
 struct EngineInputs {
-    std::string pack, nvk, systemRoot;
+    std::string pack, systemRoot;
+    CodeGenPaths codeGen;
 
-    // The installed plugin's, beside it
+    // The installed plugin's, beside it, with the seed's replies: the service names where the front end writes
     static EngineInputs installed();
 };
 
@@ -25,16 +32,15 @@ public:
 
     // The pack read: what the store is named by
     bool open(uint64_t stack, const EngineInputs &inputs, std::string &why);
-    // The compile context opened: what compiles. compile() opens it at the first compile that needs it, so a compiler
-    // that serves its store alone has none; one that did not open fails that compile alone (Failed), and the next compile
-    // opens afresh
-    bool openCompiler(std::string &why);
     // The installed pack's rules (raw_record.h PackRules), as the store is named by them
     raw::Digest rules() const;
     // `p`'s record or refusal as the store keeps it (raw_cache.h's entry bytes); TegraGM20BCompilerABI.h's result
     int32_t compile(const Prepared &p, std::string &entry, std::string &why);
 
 private:
+    // What compiles, made at the first compile that needs it, so a compiler that serves its store alone has none
+    raw::Direct &compiler();
+
     struct State;
     std::unique_ptr<State> state_;
 };

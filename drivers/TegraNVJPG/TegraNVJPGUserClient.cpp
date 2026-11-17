@@ -30,10 +30,9 @@
 //
 // Per decode, in the calling thread: the source wired (IOSurface::prepare), its headers read and parsed, its scan
 // copied into a kernel buffer (the only CPU work proportional to the file: compressed bytes, a few per cent of the
-// picture's); on the engine thread: the destination wired and mapped page by page into NVJPG's output window (past its
-// last page a sink page takes the MCU padding the plan allowed), the scan's buffer into the input window, the
-// destination's cache lines cleaned and invalidated, the decode run (host1x OP_DONE syncpoint, by interrupt), the
-// destination invalidated again for CPU readers, the windows emptied, the surfaces completed and released.
+// picture's); the destination backing keeps its wired pages and NVJPG mapping through retirement. The scan buffer
+// maps for its request, and the output mapping includes sink pages for MCU padding. The engine thread cleans and
+// invalidates the destination, runs the decode (host1x OP_DONE syncpoint, by interrupt), then invalidates CPU readers.
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
@@ -47,6 +46,7 @@
 #include <string.h>
 #include "../TegraVIC/TegraVICSurface.h"
 #include "TegraNVJPG.h"
+#include "TegraNVJPGMapping.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "../../kits/SwitchDMA/SwitchHwPage.h"
 #include "../../kits/SwitchMath/SwitchMath.h"
@@ -76,12 +76,10 @@ constexpr uint32_t kQueueMax = 16;
 constexpr uint64_t kSinkBytes = 1ULL << 20;   // MCU padding past a destination's last page (15 rows of 64 KiB)
 constexpr uint32_t kHeaderChunk = 128 << 10;  // headers read first (APP segments: EXIF, ICC, XMP)
 constexpr uint32_t kHeaderMax = 4 << 20;      // ... and at most this far, if the first chunk ends before SOS
-const uint32_t kOutPages =
-    static_cast<uint32_t>(kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOW_OUT] >> SWITCH_HW_PAGE_SHIFT);
 const uint32_t kInPages = static_cast<uint32_t>(kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOW_IN] >> SWITCH_HW_PAGE_SHIFT);
 
-uint64_t *gOutList, *gInList;  // the engine thread's page lists
-TegraNVJPGBuffer gSink;        // one arena page, mapped for every sink entry
+uint64_t *gInList;       // the engine thread's bitstream page list
+TegraNVJPGBuffer gSink;  // one arena page, mapped for every sink entry
 volatile uint32_t gConnections;
 IOLock *gQueueLock;
 
@@ -128,6 +126,8 @@ struct Job {
     Job *next;
     AppleJPEGDriverUserClient *client;  // retained by async jobs until their completion is sent
     TegraVICSurface dst;
+    switch_gpu_backing *backing;
+    uint64_t input;
     TegraNVJPGPlan plan;
     TegraNVJPGJob engine;
     IOBufferMemoryDescriptor *bits;  // the scan, copied
@@ -160,23 +160,25 @@ uint32_t gQueued;
 
 void dropJob(Job *job)
 {
+    if (job->backing)
+        switch_gpu_backing_release(job->backing);
     tegra_vic_surface_release(&job->dst);
     OSSafeReleaseNULL(job->bits);
     IODelete(job, Job, 1);
 }
 
 // The CPU's part of a grey picture into '420f': neutral chroma over the picture's rows, written through the physical
-// aperture of the destination's pages (wired, listed in gOutList), cleaned to DRAM for readers that do not snoop.
-void fillChroma(const TegraNVJPGPlan &p, uint32_t pages)
+// aperture of the destination's wired pages, cleaned to DRAM for readers that do not snoop.
+void fillChroma(const TegraNVJPGPlan &p, const uint64_t *addresses, uint32_t pages)
 {
     const auto fill = [&] {
         for (uint64_t row = 0; row < p.fillRows; row++) {
             for (uint64_t at = p.fillStart + row * p.fillPitch, end = at + p.fillRowBytes; at < end;) {
                 const uint32_t page = static_cast<uint32_t>(at >> SWITCH_HW_PAGE_SHIFT);
                 const uint64_t stop = SWITCH_MIN(switch_align_down(at, SWITCH_HW_PAGE_SIZE) + SWITCH_HW_PAGE_SIZE, end);
-                if (page >= pages || !switch_dma_pa_managed(gOutList[page]))
+                if (page >= pages || !switch_dma_pa_managed(addresses[page]))
                     return;  // the plan bounded it
-                uint8_t *va = reinterpret_cast<uint8_t *>(phystokv(gOutList[page])) + (at & SWITCH_HW_PAGE_MASK);
+                uint8_t *va = reinterpret_cast<uint8_t *>(phystokv(addresses[page])) + (at & SWITCH_HW_PAGE_MASK);
                 memset(va, 0x80, stop - at);
                 switch_dcache_clean_lines(va, stop - at);
                 at = stop;
@@ -240,12 +242,11 @@ IOReturn ended(Job *job, int error, const nvjpg_dec_status &status, uint64_t bus
 // Engine thread: a '422f' or '444f' decode, its planes re-packed by VIC (TegraNVJPGRepack.h).
 IOReturn runRepack(Job *job)
 {
-    listBits(job);
     nvjpg_dec_status status = {};
     uint64_t busy = 0;
     const char *why = nullptr;
-    const int error = tegra_nvjpg_repack(&job->engine, &job->plan, &job->request.base, &job->dst, gInList,
-                                         job->bitPages + 1, &status, &busy, &why);
+    const int error =
+        tegra_nvjpg_repack(&job->engine, &job->plan, &job->request.base, &job->dst, job->input, &status, &busy, &why);
     if (why) {
         refused(why, job->plan.target.format);
         return kIOReturnUnsupported;
@@ -259,66 +260,41 @@ IOReturn runJob(Job *job)
     const TegraNVJPGPlan &p = job->plan;
     if (p.repack)
         return runRepack(job);
-    uint32_t pages = 0;
-    const uint64_t surfaceBytes = switch_align_up(job->dst.desc.length, SWITCH_HW_PAGE_SIZE);
-    IOReturn ret = tegra_vic_surface_prepare(&job->dst, job->dst.desc.length, gOutList, kOutPages, &pages);
-    if (ret)
-        return ret == kIOReturnNotAligned ? kIOReturnIOError : ret;
+    const uint32_t extent = static_cast<uint32_t>(switch_div_round_up(job->dst.desc.length, SWITCH_HW_PAGE_SIZE));
+    const SwitchNVJPGMapping *mapping = switch_nvjpg_mapping(job->backing, extent, job->pid);
+    if (!mapping) {
+        IOLog("TegraNVJPG: destination mapping failed for %u pages; this decode fails\n", extent);
+        return kIOReturnNoSpace;
+    }
+    const uint64_t *addresses = mapping->pages;
+    const uint32_t pages = mapping->count;
     tegra_vic_surface_written(&job->dst);
     void *hold = nullptr;
-    if (const char *why = pages ? takeLayout(job, gOutList[0], &hold) : nullptr) {
+    if (const char *why = takeLayout(job, addresses[0], &hold)) {
         if (hold)
             tegra_gm20b_surface_unhold(hold);
-        tegra_vic_surface_complete(&job->dst);
         refused(why, job->plan.target.format);
         return kIOReturnUnsupported;
     }
-    // Sink entries for the MCU padding the plan allowed past the surface's pages.
-    uint32_t mapped = pages;
-    while ((static_cast<uint64_t>(mapped) << SWITCH_HW_PAGE_SHIFT) < p.writeEnd && mapped < kOutPages)
-        gOutList[mapped++] = gSink.pa;
-    if ((static_cast<uint64_t>(mapped) << SWITCH_HW_PAGE_SHIFT) < p.writeEnd ||
-        surfaceBytes > (static_cast<uint64_t>(pages) << SWITCH_HW_PAGE_SHIFT)) {
-        if (hold)
-            tegra_gm20b_surface_unhold(hold);
-        tegra_vic_surface_complete(&job->dst);
-        return kIOReturnBadArgument;
-    }
-    listBits(job);
+    const uint64_t out = mapping->address;
     tegra_nvjpg_lock();
-    const uint64_t out = tegra_nvjpg_window_map(TEGRA_NVJPG_WINDOW_OUT, gOutList, mapped, true);
-    const uint64_t in = tegra_nvjpg_window_map(TEGRA_NVJPG_WINDOW_IN, gInList, job->bitPages + 1, false);
-    if (!out || !in)
-        ret = kIOReturnNoSpace;
     // NVJPG does not snoop the CPU's caches: no dirty line of the destination may be written back over the picture.
-    if (!ret) {
-        switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, gOutList, pages);
-        switch_dcache_sync();
-    }
+    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, addresses, pages);
+    switch_dcache_sync();
     nvjpg_dec_status status = {};
     uint64_t busy = 0;
-    int error = 0;
-    if (!ret) {
-        job->engine.bitstream = in;
-        for (uint32_t i = 0; i < p.planes; i++)
-            job->engine.plane[i] = out + p.planeStart[i];
-        error = tegra_nvjpg_run(&job->engine, &status, &busy);
-    }
+    job->engine.bitstream = job->input;
+    for (uint32_t i = 0; i < p.planes; i++)
+        job->engine.plane[i] = out + p.planeStart[i];
+    const int error = tegra_nvjpg_run(&job->engine, &status, &busy);
     // The CPU may have pulled destination lines in while NVJPG wrote: readers must see DRAM.
-    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, gOutList, pages);
+    switch_dcache_hw_pages(SWITCH_DCACHE_CLEAN_INVALIDATE, addresses, pages);
     switch_dcache_sync();
-    tegra_nvjpg_window_clear(TEGRA_NVJPG_WINDOW_OUT);
-    tegra_nvjpg_window_clear(TEGRA_NVJPG_WINDOW_IN);
     tegra_nvjpg_unlock();
     if (hold)
         tegra_gm20b_surface_unhold(hold);
-    if (ret) {
-        tegra_vic_surface_complete(&job->dst);
-        return ret;
-    }
     if (!error && p.fillChroma && !status.error_status && status.bytes_offset)
-        fillChroma(p, pages);
-    tegra_vic_surface_complete(&job->dst);
+        fillChroma(p, addresses, pages);
     return ended(job, error, status, busy);
 }
 
@@ -337,7 +313,14 @@ void engineThread(void *, wait_result_t)
         gQueued--;
         IOLockWakeup(gQueueLock, &gQueued, false);
         IOLockUnlock(gQueueLock);
-        job->status = runJob(job);
+        listBits(job);
+        tegra_nvjpg_lock();
+        job->input = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_IN, gInList, job->bitPages + 1, false);
+        tegra_nvjpg_unlock();
+        job->status = job->input ? runJob(job) : kIOReturnNoSpace;
+        tegra_nvjpg_lock();
+        tegra_nvjpg_pages_unmap(job->input, job->bitPages + 1);
+        tegra_nvjpg_unlock();
 #if TEGRA_NVJPG_STATS
         tegra_nvjpg_count_job(job->pid, job->plan.target.format, job->status != 0, job->engineUs, job->cpuUs,
                               static_cast<uint64_t>(job->plan.extent.width) * job->plan.extent.height,
@@ -578,7 +561,7 @@ IOReturn AppleJPEGDriverUserClient::decode(const void *in, uint32_t inSize, void
         why = readSource(&src, size, &img, job, &ret);
     }
     tegra_vic_surface_release(&src);
-    if (!ret && job->dst.desc.length + kSinkBytes > kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOW_OUT]) {
+    if (!ret && job->dst.desc.length + kSinkBytes > kTegraNVJPGOutputBytes) {
         ret = kIOReturnUnsupported;
         why = "destination larger than the 255 MiB output window";
     }
@@ -612,6 +595,13 @@ IOReturn AppleJPEGDriverUserClient::decode(const void *in, uint32_t inSize, void
         job->engine.pixels = static_cast<uint64_t>(img.mcusX) * img.mcuW * img.mcusY * img.mcuH;
         job->engine.selector = kind == kSelector1 ? 1 : kind == kSelector5 ? 5 : 7;
         job->engine.target = job->plan.target.format;
+    }
+    if (!ret && !job->plan.repack) {
+        job->backing = switch_vic_surface_backing(&job->dst);
+        if (!job->backing) {
+            ret = kIOReturnNoMemory;
+            why = "destination backing";
+        }
     }
     if (ret) {
         if (why) {
@@ -833,13 +823,13 @@ extern "C" int tegra_nvjpg_publish(void)
 #else
     const bool stats = true;
 #endif
-    gOutList = IONewData(uint64_t, kOutPages);
     gInList = IONewData(uint64_t, kInPages);
-    if (!gQueueLock || !stats || !gOutList || !gInList || tegra_nvjpg_buffer(SWITCH_HW_PAGE_SIZE, &gSink) ||
+    if (!gQueueLock || !stats || !gInList || tegra_nvjpg_buffer(SWITCH_HW_PAGE_SIZE, &gSink) ||
         !tegra_vic_surface_start()) {
         IOLog("TegraNVJPG: J3 FAIL no memory for the service, or no IOCoreSurfaceRoot\n");
         return -12;
     }
+    switch_nvjpg_mapping_start(gSink.pa);
     thread_t thread = nullptr;
     if (kernel_thread_start(engineThread, nullptr, &thread) != KERN_SUCCESS) {
         IOLog("TegraNVJPG: J3 FAIL could not start the engine thread\n");

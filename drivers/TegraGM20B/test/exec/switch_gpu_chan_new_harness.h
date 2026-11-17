@@ -1,0 +1,39 @@
+// SPDX-License-Identifier: MIT
+// switch_gpu_chan_new_driver.c's model of the host's RAMFC for one channel. Plain C, for the C++ test.
+#pragma once
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define SWITCH_CHAN_NEW_NOUVEAU_ACQUIRE 0xfffff902u /* fifo/gk104.c gk104_chan_ramfc_write */
+#define SWITCH_CHAN_NEW_ACQUIRE 0x7fff0041u         /* what tgm_acquire_arm writes, in the model */
+
+struct switch_chan_new_ramfc {
+	uint32_t timeslice, acquire;
+};
+
+struct switch_chan_new_host {
+	uint32_t chid;
+	struct switch_chan_new_ramfc memory; /* the instance block's */
+	struct switch_chan_new_ramfc pbdma;  /* the loaded channel's copy */
+	int loaded, enabled;
+	uint32_t quiesced_waited; /* tgm_sched_ramfc calls that may wait for the runlist lock */
+};
+
+struct switch_chan_new_host *switch_chan_new_host(void);
+/* tgm_chan_new on a client address space, the model's channel `chid`: 0 or its error */
+int switch_chan_new_make(uint32_t chid, int critical);
+/* The timeslice the driver records as written (gpu_ramfc_probe.c's expected value), and the channel's teardown */
+uint32_t switch_chan_new_recorded_timeslice(void);
+void switch_chan_new_delete(void);
+/* A job on the channel: the host saves what it holds, loads RAMFC from memory, runs it and saves it back. */
+void switch_chan_new_job(void);
+
+void *switch_exec_host_alloc(uint64_t bytes);
+void switch_exec_host_free(void *block);
+
+#ifdef __cplusplus
+}
+#endif

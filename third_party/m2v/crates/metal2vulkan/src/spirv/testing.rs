@@ -12,11 +12,10 @@ pub mod barriers;
 pub mod forwarding;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 #[cfg(test)]
-pub use metal2vulkan_devtools::spirv::{spirv_dis, L3Failure};
+pub use metal2vulkan_devtools::spirv::{L3Failure, spirv_dis};
 
 #[cfg(test)]
 use crate::budget::{Budget, Meter};
@@ -101,9 +100,7 @@ impl ValOptions {
         ValOptions {
             scalar_block_layout: has(VkFeature::ScalarBlockLayout),
             uniform_buffer_standard_layout: has(VkFeature::UniformBufferStandardLayout),
-            workgroup_scalar_block_layout: has(
-                VkFeature::WorkgroupMemoryExplicitLayoutScalarBlockLayout,
-            ),
+            workgroup_scalar_block_layout: has(VkFeature::WorkgroupMemoryExplicitLayoutScalarBlockLayout),
             allow_localsizeid: has(VkFeature::Maintenance4),
             allow_offset_texture_operand: has(VkFeature::Maintenance8),
         }
@@ -114,19 +111,10 @@ impl ValOptions {
         let mut out = Vec::new();
         for (on, arg) in [
             (self.scalar_block_layout, "--scalar-block-layout"),
-            (
-                self.uniform_buffer_standard_layout,
-                "--uniform-buffer-standard-layout",
-            ),
-            (
-                self.workgroup_scalar_block_layout,
-                "--workgroup-scalar-block-layout",
-            ),
+            (self.uniform_buffer_standard_layout, "--uniform-buffer-standard-layout"),
+            (self.workgroup_scalar_block_layout, "--workgroup-scalar-block-layout"),
             (self.allow_localsizeid, "--allow-localsizeid"),
-            (
-                self.allow_offset_texture_operand,
-                "--allow-offset-texture-operand",
-            ),
+            (self.allow_offset_texture_operand, "--allow-offset-texture-operand"),
         ] {
             if on {
                 out.push(arg);
@@ -146,8 +134,7 @@ pub fn spirv_val(words: &[u32], env: TargetEnv) -> Result<(), String> {
 /// diagnostic (or the launch failure).
 #[cfg(test)]
 pub fn spirv_val_with(words: &[u32], env: TargetEnv, opts: ValOptions) -> Result<(), String> {
-    metal2vulkan_devtools::spirv::spirv_val(words, env.arg(), &opts.args())
-        .map_err(L3Failure::into_text)
+    metal2vulkan_devtools::spirv::spirv_val(words, env.arg(), &opts.args()).map_err(L3Failure::into_text)
 }
 
 /// A link table numbering every symbol of `r` densely per kind, descriptor set 0 for every
@@ -183,8 +170,7 @@ pub fn link_dense(r: &RelocatableModule) -> BTreeMap<Symbol, u32> {
 #[cfg(test)]
 pub fn check_valid(m: TypedModule, profile: &DeviceProfile) -> Result<Vec<u32>, String> {
     let mut meter = Meter::new(&Budget::default());
-    crate::spirv::verify::check(&m, profile, &mut meter)
-        .map_err(|e| format!("owned verifier: {e}"))?;
+    crate::spirv::verify::check(&m, profile, &mut meter).map_err(|e| format!("owned verifier: {e}"))?;
     let r = serialize_for(m, profile).map_err(|e| format!("serialize: {e}"))?;
     let words = relocate(&r, &link_dense(&r)).map_err(|e| format!("relocate: {e}"))?;
     check_words_valid(&words, &r.requirements, profile)?;
@@ -194,22 +180,14 @@ pub fn check_valid(m: TypedModule, profile: &DeviceProfile) -> Result<Vec<u32>, 
 /// [`check_valid`] for already linked words: requirements ⊆ profile, then `spirv-val` under
 /// Vulkan 1.2 and the profile's environment with the profile's layout relaxations.
 #[cfg(test)]
-pub fn check_words_valid(
-    words: &[u32],
-    requirements: &Requirements,
-    profile: &DeviceProfile,
-) -> Result<(), String> {
+pub fn check_words_valid(words: &[u32], requirements: &Requirements, profile: &DeviceProfile) -> Result<(), String> {
     check_words_l3(words, requirements, profile).map_err(|failure| failure.to_string())
 }
 
 /// [`check_words_valid`] with the failure typed, so a missing or broken `spirv-val` is not
 /// reported as an invalid module.
 #[cfg(test)]
-pub fn check_words_l3(
-    words: &[u32],
-    requirements: &Requirements,
-    profile: &DeviceProfile,
-) -> Result<(), L3Failure> {
+pub fn check_words_l3(words: &[u32], requirements: &Requirements, profile: &DeviceProfile) -> Result<(), L3Failure> {
     profile
         .check(requirements)
         .map_err(|c| L3Failure::Requirements(format!("requirements exceed the profile: {c:?}")))?;
@@ -250,9 +228,7 @@ pub fn committed_exact_profiles() -> Result<Vec<(String, DeviceProfile)>, String
 
 /// [`committed_profiles`] under `policy` (the tests of the exact maths routines take
 /// `FloatMathsPolicy::Exact`, [`crate::pipeline::testing::exact_maths`]).
-pub fn committed_profiles_with(
-    policy: DevicePolicy,
-) -> Result<Vec<(String, DeviceProfile)>, String> {
+pub fn committed_profiles_with(policy: DevicePolicy) -> Result<Vec<(String, DeviceProfile)>, String> {
     committed_profiles_under(policy)
 }
 
@@ -279,12 +255,10 @@ fn committed_profiles_under(policy: DevicePolicy) -> Result<Vec<(String, DeviceP
 /// stem, sorted by stem, read and parsed once per test process: a test may derive the profiles
 /// once per case it checks, and parsing the files each time was a fifth of such a test's time.
 pub(crate) fn committed_descriptions() -> Result<&'static [(String, DeviceDescription)], String> {
-    static DESCRIPTIONS: OnceLock<Result<Vec<(String, DeviceDescription)>, String>> =
-        OnceLock::new();
+    static DESCRIPTIONS: OnceLock<Result<Vec<(String, DeviceDescription)>, String>> = OnceLock::new();
     DESCRIPTIONS
         .get_or_init(|| {
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../metal2vulkan-validation/profiles");
+            let dir = metal2vulkan_devtools::fixtures_dir().join("../../profiles");
             let entries = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
             let mut out = Vec::new();
             for e in entries {
@@ -296,10 +270,8 @@ pub(crate) fn committed_descriptions() -> Result<&'static [(String, DeviceDescri
                     .file_stem()
                     .map(|s| s.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("{}: {e}", path.display()))?;
-                let desc = DeviceDescription::from_khronos_json(&text, None)
-                    .map_err(|e| format!("{stem}: {e}"))?;
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                let desc = DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
                 out.push((stem, desc));
             }
             out.sort_by(|a, b| a.0.cmp(&b.0));

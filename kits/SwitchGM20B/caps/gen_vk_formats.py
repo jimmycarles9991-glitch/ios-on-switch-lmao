@@ -47,9 +47,14 @@ def vk_to_pipe(path: str) -> dict[str, str]:
 
 
 def vk_values(path: str) -> dict[str, int]:
+    """Each VkFormat enumerant's value, an alias (VK_FORMAT_A8_UNORM_KHR = VK_FORMAT_A8_UNORM) taking its target's."""
     with open(path, encoding='utf-8') as f:
         text = f.read()
-    return {name: int(v) for name, v in re.findall(r'^\s+VK_FORMAT_(\w+) = (\d+),', text, re.MULTILINE)}
+    values = {name: int(v) for name, v in re.findall(r'^\s+VK_FORMAT_(\w+) = (\d+),', text, re.MULTILINE)}
+    for name, target in re.findall(r'^\s+VK_FORMAT_(\w+) = VK_FORMAT_(\w+),', text, re.MULTILINE):
+        if target in values:
+            values[name] = values[target]
+    return values
 
 
 def pure_integer(entry: dict) -> bool:

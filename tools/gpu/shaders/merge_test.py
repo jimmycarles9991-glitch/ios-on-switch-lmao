@@ -93,6 +93,21 @@ class JoinTest(unittest.TestCase):
         report.write_text(json.dumps({'identity': identity}))
         return pack, index, report
 
+    def test_replay_view_keeps_nested_compiler_replies_and_record_pack(self):
+        meta, view = self.root / 'meta', self.root / 'view'
+        files = {'SEED': b'identity', 'msl/one.reply': b'reply', 'packs/001': b'records'}
+        for relative, data in files.items():
+            source = meta / relative
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_bytes(data)
+        bucket = self.root / '000.pack'
+        bucket.write_bytes(b'bucket')
+        precompile.seed_view(meta, [bucket], view)
+        for relative, data in files.items():
+            self.assertTrue((view / relative).is_symlink())
+            self.assertEqual((view / relative).read_bytes(), data)
+        self.assertEqual((view / 'packs/000').read_bytes(), b'bucket')
+
     def test_packed_native_seed_is_installed_beside_the_raw_pack_without_its_host_files(self):
         seed, raw, native = (self.root / name for name in ('seed', 'raw', 'native'))
         for folder in (seed, raw, native / 'raw-0000000000001234' / 'packs', native / 'native-analysis' / 'packs'):

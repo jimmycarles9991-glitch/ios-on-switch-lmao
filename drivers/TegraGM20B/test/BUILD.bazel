@@ -91,6 +91,9 @@
 #                            kernel log's lines carry every value once, in order, under a count and sum
 #   switch_gpu_async_rights_test     an asynchronous call's wake port right on every return of EventObserve and
 #                                    ResourceObserve: MIG releases it after an error, the notification after a success
+#   switch_gpu_refusal_sites_test    SwitchGpuRefusalSites.h: a SubmitJob or ResourceSetCreate refusal's line (process,
+#                                    channel, site, values) from the call's one exit, silent only for an ended set and a
+#                                    held admission, four then every 256th per connection and site
 #   switch_gpu_compiler_rights_test  the same for the shader compiler broker's Compile: a request answered, abandoned or
 #                                    refused (past its connection's bound, a stack not the compiler's, no compiler while
 #                                    one was lost a third time); kern.switch_shader_compiler's line of the broker
@@ -116,6 +119,15 @@ host_shims(
     stubs = "switch_gpu_recovery_stubs.h",
 )
 
+host_shims(
+    name = "client_retirement_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_gpu_client_fixture.h",
+)
+
 host_test(
     name = "switch_gpu_client_retirement_test",
     srcs = [
@@ -129,9 +141,11 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuBindings.h",
         "//drivers/TegraGM20B:TegraGM20BBindHistory.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "gm20b_gpu_memory.h",
     ],
+    deps = [":client_retirement_kernel"],
 )
 
 # SubmitJob's lock-free reads of BOs and bindings against the connection's changes and retirement, under ThreadSanitizer.
@@ -148,12 +162,14 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuBindings.h",
         "//drivers/TegraGM20B:TegraGM20BBindHistory.h",
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "gm20b_gpu_memory.h",
     ],
     copts = ["-fsanitize=thread"],
     linkopts = ["-fsanitize=thread"],
     sanitize = False,
+    deps = [":client_retirement_kernel"],
 )
 
 host_library(
@@ -170,6 +186,51 @@ host_test(
         ":switch_gpu_recovery",
         ":recovery_kernel",
     ],
+)
+
+host_shims(
+    name = "gr_fault_kernel",
+    headers = [
+        "core/device.h",
+        "engine/fifo/chan.h",
+        "engine/fifo/runl.h",
+    ],
+    stubs = "switch_gpu_gr_fault_fixture.h",
+)
+
+host_test(
+    name = "switch_gpu_gr_fault_test",
+    srcs = [
+        "switch_gpu_gr_fault_test.cpp",
+        "switch_gpu_gr_fault_fixture.h",
+        "//drivers/TegraGM20B:TegraGM20BGrFault.h",
+    ],
+    deps = [":gr_fault_kernel"],
+)
+
+genrule(
+    name = "switch_gpu_recovery_phase_source",
+    testonly = True,
+    srcs = ["//drivers/TegraGM20B:recover_engine.c"],
+    outs = ["switch_gpu_recovery_phase_source.h"],
+    cmd = """
+set -e
+awk '/^static .* switch_gpu_recover_/ || /^bool switch_gpu_recover_/ || /^void tgm_recover_preempt_unblock\\(/ { body = 1; count++ } body { print } /^}/ { body = 0 } END { if (count != 8) exit 1 }' $< > $@
+""",
+)
+
+host_test(
+    name = "switch_gpu_recovery_phase_test",
+    srcs = [
+        "switch_gpu_recovery_phase_test.cpp",
+        "switch_gpu_recovery_phase_fixture.h",
+        ":switch_gpu_recovery_phase_source",
+        "//drivers/TegraGM20B:TegraGM20BHost.h",
+        "//drivers/TegraGM20B:TegraGM20BRecover.h",
+        "//drivers/TegraGM20B:TegraGM20BAcquire.h",
+        "//drivers/TegraGM20B:TegraGM20BKernelHang.h",
+    ],
+    cxx_std = "c++17",
 )
 
 host_library(
@@ -260,6 +321,21 @@ host_test(
     name = "gm20b_push_scan_test",
     srcs = [
         "gm20b_push_scan_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuPushScanQueue.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BPushScan.h",
+        "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
+    ],
+    copts = ["-Wno-unused-parameter"],
+    cxx_std = "c++17",
+    deps = ["//kits/SwitchGM20BEmit:macros_h"],
+)
+
+host_test(
+    name = "gm20b_push_scan_deferred_test",
+    srcs = [
+        "gm20b_push_scan_deferred_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuPushScanQueue.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BPushScan.h",
         "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
@@ -981,6 +1057,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BUserClient.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientBo.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientImport.cpp",
+        "//drivers/TegraGM20B:TegraGM20BPushScan.h",
         "//drivers/TegraGM20B:TegraGM20BPushScanRun.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientChannel.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientDispatch.cpp",
@@ -1013,6 +1090,19 @@ host_test(
         "//drivers/TegraGM20B:shim/include/nvxnu.h",
         "//drivers/TegraGM20B:shim/linux.c",
         "//drivers/TegraGM20B:shim/xnu_glue.cpp",
+    ],
+)
+
+# SwitchGpuRefusalSites.h's sites, line and rate bound, and every SubmitJob and ResourceSetCreate refusal going through one
+host_test(
+    name = "switch_gpu_refusal_sites_test",
+    srcs = [
+        "switch_gpu_refusal_sites_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuRefusalSites.h",
+    ],
+    data = [
+        "//drivers/TegraGM20B:TegraGM20BUserClientJob.cpp",
+        "//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp",
     ],
 )
 
@@ -1273,6 +1363,7 @@ host_library(
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BSched.h",
         "//drivers/TegraGM20B:SwitchGpuBusy.h",
+        "//drivers/TegraGM20B:deadline_stats.h",
     ],
     defines = ["DEVELOPMENT=1"],
     deps = [":path_stats_kernel"],
@@ -1312,6 +1403,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuTimelineRefs.cpp",
         "//drivers/TegraGM20B:TegraGM20BSched.h",
         "//drivers/TegraGM20B:SwitchGpuBusy.h",
+        "//drivers/TegraGM20B:deadline_stats.h",
         "//kits/SwitchSysctl:SwitchSysctl.h",
     ] + BACKING_SRCS + BACKING_HDRS,
     copts = ["-fsanitize=thread"],
@@ -1483,6 +1575,7 @@ host_library(
         "//drivers/TegraGM20B:TegraGM20BRecord.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
         "//drivers/TegraGM20B:TegraGM20BTiled.h",
+        "//drivers/TegraGM20B:TegraGM20BTiledDecision.h",
         "//drivers/TegraGM20B:TegraGM20BViewMerge.h",
         "//drivers/TegraGM20B:TegraGM20BViews.h",
         "//drivers/TegraGM20B:SwitchGpuPathStats.h",
@@ -2341,6 +2434,14 @@ host_test(
 )
 
 exports_files(
+    [
+        "gm20b_ce_model.h",
+        "gm20b_gpu_memory.h",
+    ],
+    visibility = ["//drivers/TegraGM20BMetal/test:__pkg__"],
+)
+
+exports_files(
     ["switch_gpu_backing_fixture.h"],
     visibility = ["//drivers/TegraNVENC/test:__pkg__"],
 )
@@ -2357,14 +2458,18 @@ host_library(
     name = "event_wait",
     srcs = [
         "//drivers/TegraGM20B:nouveau/nvkm/core/event.c",
+        "//drivers/TegraGM20B:nouveau/nvkm/core/uevent.c",
         "nvkm_event_wait_fixture.c",
     ],
     hdrs = [
+        "event_wait_include/core/client.h",
         "event_wait_include/core/event.h",
         "event_wait_include/core/os.h",
         "event_wait_include/core/subdev.h",
+        "event_wait_include/nvif/if000e.h",
         "nvkm_event_wait_fixture.h",
         "//drivers/TegraGM20B:nouveau/include/nvkm/core/event.h",
+        "//drivers/TegraGM20B:nouveau/include/nvif/if000e.h",
     ],
     c_std = "gnu11",
     copts = ["-Wno-unused-parameter"],
@@ -2797,6 +2902,43 @@ grep -q '^void tgm_deadline_stats(' $@
 """,
 )
 
+genrule(
+    name = "deadline_lines_source",
+    testonly = True,
+    srcs = ["//drivers/TegraGM20B:deadline_lines.c"],
+    outs = ["deadline_lines_source.h"],
+    cmd = """
+set -e
+grep -v '^#include' $< > $@
+grep -q '^void tgm_latency_add(' $@
+""",
+)
+
+host_library(
+    name = "deadline_lines_unit",
+    srcs = [
+        "gm20b_deadline_lines_unit.c",
+        ":deadline_lines_source",
+    ],
+    hdrs = [
+        "gm20b_sched_stubs.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:deadline_stats.h",
+    ],
+    c_std = "gnu11",
+    defines = ["DEVELOPMENT=1"],
+)
+
+# deadline_lines.c: the deadline's stats lines at every count's widest, and many channels' latencies, each line whole
+# within nvxnu_stats's 1 KiB
+host_test(
+    name = "gm20b_deadline_lines_test",
+    srcs = ["gm20b_deadline_lines_test.cpp"],
+    cxx_std = "c++17",
+    defines = ["DEVELOPMENT=1"],
+    deps = [":deadline_lines_unit"],
+)
+
 SCHED_UNIT_HDRS = [
     "gm20b_sched_stubs.h",
     "//drivers/TegraGM20B:SwitchGpuBusy.h",
@@ -2842,6 +2984,7 @@ host_library(
     c_std = "gnu11",
     copts = ["-Wno-unused-function"],
     defines = ["DEVELOPMENT=1"],
+    deps = [":deadline_lines_unit"],
 )
 
 host_test(
@@ -2905,6 +3048,7 @@ host_library(
     c_std = "gnu11",
     copts = ["-Wno-unused-function"],
     defines = ["DEVELOPMENT=1"],
+    deps = [":deadline_lines_unit"],
 )
 
 # deadline.c and hold.c over whole display periods: the locks, read-modify-writes and thread calls one costs, and the
@@ -2921,6 +3065,23 @@ host_test(
 )
 
 host_library(
+    name = "deadline_lines_unit_tsan",
+    srcs = [
+        "gm20b_deadline_lines_unit.c",
+        ":deadline_lines_source",
+    ],
+    hdrs = [
+        "gm20b_sched_stubs.h",
+        "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:deadline_stats.h",
+    ],
+    c_std = "gnu11",
+    copts = ["-fsanitize=thread"],
+    defines = ["DEVELOPMENT=1"],
+    sanitize = False,
+)
+
+host_library(
     name = "deadline_unit_tsan",
     srcs = DEADLINE_UNIT_SRCS,
     hdrs = DEADLINE_UNIT_HDRS,
@@ -2931,6 +3092,7 @@ host_library(
     ],
     defines = ["DEVELOPMENT=1"],
     sanitize = False,
+    deps = [":deadline_lines_unit_tsan"],
 )
 
 host_library(
@@ -2944,6 +3106,7 @@ host_library(
     ],
     defines = ["DEVELOPMENT=1"],
     sanitize = False,
+    deps = [":deadline_lines_unit_tsan"],
 )
 
 # deadline.c and hold.c between the frame end, the pass, the kicks, teardown, sleep and the owner's thread calls,

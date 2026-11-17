@@ -127,6 +127,35 @@ TEST_P(EveryQuarterTurn, ScaledEverySampleStaysInsideTheSourceRectangle)
         }
 }
 
+TEST_P(EveryQuarterTurn, PastThreeTimesDownTheInitialDdasStayFractionsAndThePixelCentresStay)
+{
+    const uint32_t t = GetParam();
+    const Rect src = {0, 0, 1280, 720};
+    ASSERT_TRUE(admit(src, t, {100, 200, 200, 356}));  // 3.6x down both ways, as 1920x1080 onto 300x534
+    const uint32_t hInc = image.dda & 0xffff, vInc = image.dda >> 16;
+    ASSERT_GT(hInc, 3u * 4096);
+    ASSERT_GT(vInc, 3u * 4096);
+    EXPECT_LT(image.hInitial, 0x1000u);
+    EXPECT_LT(image.vInitial, 0x1000u);
+    const uint32_t rowPhase = (hInc - 4096) / 2, columnPhase = (vInc - 4096) / 2;
+    const uint32_t rows = (rowPhase >> 12) & ~1u, columns = (columnPhase >> 12) & ~1u;
+    EXPECT_EQ(image.prescaled, (1280u - columns) << 16 | (720u - rows));
+    const bool hDirection = (image.options & native_column_scan::kHDirection) != 0;
+    const bool vDirection = (image.options & native_column_scan::kVDirection) != 0;
+    EXPECT_EQ((image.hOffset + (hDirection ? 1 : 0)) % 2, 0u) << "ADDR_H_OFFSET keeps the 1:1 scan's parity";
+    EXPECT_EQ((image.vOffset + (vDirection ? 1 : 0)) % 2, 0u) << "ADDR_V_OFFSET keeps the 1:1 scan's parity";
+    for (uint32_t line = 0; line < 356; ++line)
+        for (uint32_t pixel = 0; pixel < 200; pixel += 7) {
+            // The pixel-centre mapping less an odd whole part's last pixel.
+            const int64_t across = ((columnPhase + int64_t(line) * vInc) >> 12) - ((columnPhase >> 12) & 1);
+            const int64_t along = ((rowPhase + int64_t(pixel) * hInc) >> 12) - ((rowPhase >> 12) & 1);
+            int64_t x = 0, y = 0;
+            sample(line, pixel, x, y);
+            ASSERT_EQ(x, hDirection ? 1279 - across : across) << "t " << t << " line " << line;
+            ASSERT_EQ(y, vDirection ? 719 - along : along) << "t " << t << " pixel " << pixel;
+        }
+}
+
 INSTANTIATE_TEST_SUITE_P(Transforms, EveryQuarterTurn, testing::Values(4u, 5u, 6u, 7u));
 
 TEST_F(Landscape, WhatWindowACannotTurnIsRefused)

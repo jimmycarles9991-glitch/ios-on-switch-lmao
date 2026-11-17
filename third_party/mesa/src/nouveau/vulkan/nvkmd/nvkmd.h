@@ -10,7 +10,7 @@
 #include "util/simple_mtx.h"
 #include "util/u_atomic.h"
 
-#include "../nvk_debug.h"
+#include "nvk_debug.h"
 #include "vulkan/vulkan_core.h"
 
 #include <assert.h>

@@ -6,6 +6,8 @@
 //! answers itself. The OS on this device was built and tuned against these answers, so the device gives the target's
 //! answer wherever it honours it and its own lower one where it does not, never more: an answer above the target's sends
 //! the OS down paths the target never takes. `gpuCoreCount` is not here: work sizing reads it as this GPU's real core count.
+//! The raw device answers above the target on purpose where raw itself draws what GM20B has (raw_device_answers.h:
+//! layered passes, viewports, tessellation, amplification, threadgroup memory, framebuffer bits, interpolants, tier 2).
 
 use metal2vulkan_runtime::Device;
 

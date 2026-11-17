@@ -149,10 +149,10 @@ void TegraDisplayB::setMode(const struct switch_dp_mode &mode)
 {
     write(DC_DISP_DISP_CLOCK_CONTROL, 0);
     write(DC_DISP_REF_TO_SYNC, (1u << 16) | 1u);
-    write(DC_DISP_SYNC_WIDTH, ((uint32_t)mode.vsync << 16) | mode.hsync);
-    write(DC_DISP_BACK_PORCH, ((uint32_t)mode.vback << 16) | mode.hback);
-    write(DC_DISP_FRONT_PORCH, ((uint32_t)mode.vfront << 16) | mode.hfront);
-    write(DC_DISP_ACTIVE, ((uint32_t)mode.vactive << 16) | mode.hactive);
+    write(DC_DISP_SYNC_WIDTH, (static_cast<uint32_t>(mode.vsync) << 16) | mode.hsync);
+    write(DC_DISP_BACK_PORCH, (static_cast<uint32_t>(mode.vback) << 16) | mode.hback);
+    write(DC_DISP_FRONT_PORCH, (static_cast<uint32_t>(mode.vfront) << 16) | mode.hfront);
+    write(DC_DISP_ACTIVE, (static_cast<uint32_t>(mode.vactive) << 16) | mode.hactive);
     write(DC_CMD_INT_STATUS, ~0u);
     write(DC_CMD_INT_ENABLE, 0);
     write(DC_CMD_INT_MASK, kFrameEnd);

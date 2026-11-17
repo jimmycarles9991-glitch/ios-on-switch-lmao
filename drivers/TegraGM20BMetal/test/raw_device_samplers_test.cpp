@@ -3,6 +3,17 @@
 // state's header and to a constexpr sampler's, which the device places with the sampler.
 #include "raw_device_harness.h"
 #include "../raw/runtime/raw_record.h"
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+#include "../../../kits/SwitchGM20B/SwitchGM20BSampler.h"
 
 namespace {
 
@@ -37,7 +48,7 @@ protected:
             p.cbufTypes = {raw::CbufRoot, raw::CbufSet};
         }
         r.pipeline.keyHash = key;
-        r.pipeline.entries = 1;
+        raw::setEntryCount(r.pipeline, 1);
         r.pipeline.entry[0] = {0, raw::EntryTexture, 2, 0, raw::SamplerConstexpr, 0, 0};
         r.pipeline.setBytes = 32;
         r.samplers = {header};
@@ -59,7 +70,7 @@ protected:
             p.cbufTypes = {raw::CbufRoot, raw::CbufSet};
         }
         r.pipeline.keyHash = 0x53;
-        r.pipeline.entries = 1;
+        raw::setEntryCount(r.pipeline, 1);
         r.pipeline.entry[0] = {0, raw::EntryTexture, 2, 0, raw::SamplerSlot, 0, 0};
         r.pipeline.setBytes = 32;
         r.blob = {0x1a00, 0x1111};
@@ -209,6 +220,74 @@ TEST_F(DeviceSamplers, ASamplerStatesVariantIsItsHeaderUnderTheMap)
     EXPECT_EQ(raw::DeviceHarness::tscHeader(dev, s.mapped[2]), want);
     ASSERT_TRUE(dev.samplerVariant(s, 1));
     EXPECT_EQ(s.mapped[1], s.tsc) << "nothing wraps";
+}
+
+float fromBits(uint32_t bits)
+{
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+std::string hex(const uint32_t w[8])
+{
+    std::string out;
+    char word[10];
+    for (int i = 0; i < 8; i++) {
+        snprintf(word, sizeof word, " %08x", w[i]);
+        out += word;
+    }
+    return out;
+}
+
+TEST(RawSamplerTsc, EachSweptSamplersHeaderIsThePackerOfTheTranslatorsState)
+{
+    const char *path = getenv("SAMPLER_STATES");
+    ASSERT_NE(path, nullptr);
+    std::ifstream in(path);
+    ASSERT_TRUE(in.good()) << path;
+    unsigned samplers = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::istringstream fields(line);
+        unsigned minmag, mip, addr, aniso, lod, mag, min, mipmap, u, v, w, anisotropy, compareOp, border, reduction;
+        std::string maxAnisotropy, minLod, maxLod;
+        fields >> minmag >> mip >> addr >> aniso >> lod >> mag >> min >> mipmap >> u >> v >> w >> anisotropy >>
+            maxAnisotropy >> compareOp >> minLod >> maxLod >> border >> reduction;
+        ASSERT_FALSE(fields.fail()) << line;
+        raw::SamplerDesc d;
+        d.minFilter = uint8_t(minmag & 1);
+        d.magFilter = uint8_t(minmag >> 1);
+        d.mipFilter = uint8_t(mip);
+        d.sAddress = uint8_t(addr);
+        d.tAddress = uint8_t(addr == 4 ? 4 : (addr + 1) % 4);
+        d.rAddress = uint8_t(addr);
+        d.maxAnisotropy = uint8_t(aniso);
+        if (lod)
+            d.lodMin = 0.5f, d.lodMax = 3.25f;
+        uint32_t got[8];
+        raw::samplerHeader(d, got);
+
+        switch_gm20b_sampler_state s = {};
+        s.mag_filter = mag;
+        s.min_filter = min;
+        s.mipmap_mode = mipmap;
+        s.address[0] = u, s.address[1] = v, s.address[2] = w;
+        s.anisotropy = anisotropy != 0;
+        s.max_anisotropy = fromBits(uint32_t(std::stoul(maxAnisotropy, nullptr, 16)));
+        s.compare_op = compareOp;
+        s.min_lod = fromBits(uint32_t(std::stoul(minLod, nullptr, 16)));
+        s.max_lod = fromBits(uint32_t(std::stoul(maxLod, nullptr, 16)));
+        s.border_color = border;
+        s.reduction = reduction;
+        uint32_t want[8];
+        ASSERT_TRUE(switch_gm20b_sampler_header(&s, want)) << line;
+        EXPECT_EQ(memcmp(got, want, sizeof got), 0) << line << "\n  raw" << hex(got) << "\n  kit" << hex(want);
+        samplers++;
+    }
+    EXPECT_EQ(samplers, 4u * 3 * 5 * 4 * 2);
 }
 
 }  // namespace

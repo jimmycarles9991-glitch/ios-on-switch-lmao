@@ -67,6 +67,38 @@ TEST(RawComputeLookup, TextPreservesPackAndJournalIdentity)
     EXPECT_EQ(text.samplers, "5:1:1:0:0:0:0:0:41800000:1:7:0:1:0");
 }
 
+// An RGB10A8_2P_XR10 texture held in two planes (raw_xr_pass.h) selects the kernel that reads and writes its planes
+// apart, named by ":xr2p" after its slot's fields; one of one image keeps its key and text, byte for byte
+TEST(RawComputeLookup, ATwoPlaneTextureSelectsItsOwnKernelAndKeyText)
+{
+    raw::BoundTexture one = {2, 550, 2, 1, 1, {2, 3, 4, 5}};
+    raw::BoundTexture planes = one;
+    planes.planes = true;
+    raw::ComputeSpecialization a, b;
+    a.bindTexture(2, &one);
+    b.bindTexture(2, &planes);
+    EXPECT_FALSE(a == b);
+    EXPECT_EQ(a.text().textures, "2:550:2:1:1:02030405");
+    EXPECT_EQ(b.text().textures, "2:550:2:1:1:02030405:xr2p");
+    EXPECT_TRUE(a.bindTexture(2, &planes));
+    EXPECT_EQ(a, b);
+}
+
+// The pack generator reads a key's textures back (pack/kernel_shapes.h): a two-plane texture's mark with them, anything
+// else after the swizzle refused
+TEST(RawComputeLookup, ATwoPlaneTexturesTextReadsBack)
+{
+    raw::BoundTexture t = {};
+    ASSERT_TRUE(raw::parseComputeTexture("2:550:2:1:1:02030405:xr2p", t));
+    EXPECT_TRUE(t.planes);
+    EXPECT_EQ(raw::computeTextures(&t, 1), "2:550:2:1:1:02030405:xr2p");
+    ASSERT_TRUE(raw::parseComputeTexture("3:80:2:1:1:00010203", t));
+    EXPECT_FALSE(t.planes);
+    EXPECT_EQ(raw::computeTextures(&t, 1), "3:80:2:1:1:00010203");
+    EXPECT_FALSE(raw::parseComputeTexture("2:550:2:1:1:02030405:xr", t));
+    EXPECT_FALSE(raw::parseComputeTexture("2:550:2:1:1", t));
+}
+
 TEST(RawComputeLookup, EverySpecializationInputSelectsAnotherKernel)
 {
     raw::ComputeSpecialization key;
@@ -314,8 +346,10 @@ TEST(RawComputeLookup, PlansEdgesAndRejectsOutOfRangeGroupsBeforeLookup)
     EXPECT_TRUE(edge.multi);
     EXPECT_EQ(edge.axis, 0);
     EXPECT_EQ(raw::computeDispatch({1, 1, 1}, {0, 1, 1}, true).reason, raw::ComputeDispatch::Edge);
-    EXPECT_EQ(raw::computeDispatch({1, 65536, 1}, {1, 1, 1}, false).reason, raw::ComputeDispatch::Range);
-    EXPECT_EQ(raw::computeDispatch({uint64_t(1) << 31, 1, 1}, {1, 1, 1}, false).reason, raw::ComputeDispatch::Range);
+    // past the QMD's grid fields: launched in slices (raw_dispatch_bands.h qmdSlice), not refused
+    EXPECT_EQ(raw::computeDispatch({1, 65536, 1}, {1, 1, 1}, false).reason, raw::ComputeDispatch::Ready);
+    EXPECT_EQ(raw::computeDispatch({uint64_t(1) << 31, 1, 1}, {1, 1, 1}, false).reason, raw::ComputeDispatch::Ready);
+    EXPECT_EQ(raw::computeDispatch({1, uint64_t(1) << 32, 1}, {1, 1, 1}, false).reason, raw::ComputeDispatch::Range);
     EXPECT_EQ(raw::computeDispatch({0, 0, 0}, {8, 4, 1}, true).reason, raw::ComputeDispatch::Ready);
 }
 

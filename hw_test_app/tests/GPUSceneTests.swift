@@ -44,7 +44,9 @@ public struct GPUSceneTest: HWTest {
             metrics.set(kind + "_threw", true)
         }
         let offRaw = primary.paths.offRaw
-        if kind == "raw" && !offRaw.isEmpty { reasons.append("raw: command buffers off the raw path: \(offRaw.text)") }
+        if kind == "raw" && !offRaw.isEmpty {
+            reasons.insert("raw: command buffers off the raw path: \(offRaw.text)", at: 0)
+        }
         reasons += scene.judge(&metrics)
         if saved > 0 { metrics.set("pngs", saved) }
         if reasons.isEmpty { return .pass(metrics, proof: primary.proof, detail: LogLine.fitted(notes)) }

@@ -33,6 +33,7 @@
  * SUCH DAMAGE.
  */
 
+#include <switch/app_code.h>
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/lock.h>
@@ -159,7 +160,9 @@ mac_file_check_library_validation(struct proc *proc,
 {
 	int error;
 
-	MAC_CHECK(file_check_library_validation, proc, fg, slice_offset, error_message, error_message_size);
+	SWITCH_MAC_CHECK(switch_app_code_process(proc) && FILEGLOB_DTYPE(fg) == DTYPE_VNODE &&
+	    switch_app_code_image((struct vnode *)fg_get_data(fg)),
+	    file_check_library_validation, proc, fg, slice_offset, error_message, error_message_size);
 	return error;
 }
 
@@ -181,7 +184,9 @@ mac_file_check_mmap(struct ucred *cred, struct fileglob *fg, int prot,
 
 	if ((error = switch_pretranslated_mmap(fg, flags, prot, *maxprot))) return error;
 	maxp = *maxprot;
-	MAC_CHECK(file_check_mmap, cred, fg, NULL, prot, flags, offset, &maxp);
+	SWITCH_MAC_CHECK(switch_app_code_process(current_proc()) && FILEGLOB_DTYPE(fg) == DTYPE_VNODE &&
+	    switch_app_code_image((struct vnode *)fg_get_data(fg)),
+	    file_check_mmap, cred, fg, NULL, prot, flags, offset, &maxp);
 	if ((maxp | *maxprot) != *maxprot) {
 		panic("file_check_mmap increased max protections");
 	}

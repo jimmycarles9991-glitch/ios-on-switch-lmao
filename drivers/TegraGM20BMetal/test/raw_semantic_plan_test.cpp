@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -241,10 +242,14 @@ TEST(SemanticPlan, ADrawsTextureCaptureCopiesOnlyTheChunkOfSlotsItBound)
         EXPECT_EQ(textures.objects[0], object(100 + d % 3));
         EXPECT_EQ(textures.objects[1], nullptr);
         EXPECT_EQ(textures.objects[9], object(70));
-        EXPECT_EQ(textures.set, 1u << 0 | 1u << 1 | 1u << 9);
+        raw::TextureSnapshots::Mask set{};
+        for (uint32_t slot : {0, 1, 9})
+            raw::addSlot(set, slot);
+        EXPECT_TRUE(textures.set == set);
     }
-    // a capture's chunk of four slots and its chunk list, half of a whole table's copy and its mask at most
-    EXPECT_LT(plan.textures[1].storageBytes(), kDraws * 32 * sizeof(void *) / 2);
+    // a capture's chunk of slots and its chunk list, half of a whole table's copy and its mask at most
+    EXPECT_LT(plan.textures[1].storageBytes(),
+              kDraws * raw::kMaskSlots<raw::TextureSnapshots::Mask> * sizeof(void *) / 2);
 }
 
 TEST(SemanticPlan, AWordKeyedMapKeepsItsStorageAcrossClears)
@@ -301,6 +306,46 @@ TEST(SemanticPlan, APointerMapKeepsItsStorageAcrossClears)
     }
     EXPECT_EQ(map.size(), 100u);
     EXPECT_EQ(map.storageBytes(), bytes);
+}
+
+TEST(SemanticPlan, PageSpacedPointerKeysKeepLookupProbesBounded)
+{
+    struct Key {
+        const void *pointer = nullptr;
+        uint32_t *comparisons = nullptr;
+
+        bool operator==(const Key &other) const
+        {
+            ++*comparisons;
+            return pointer == other.pointer;
+        }
+    };
+
+    struct Hash {
+        size_t operator()(const Key &key) const
+        {
+            return raw::PointerHash{}(key.pointer);
+        }
+    };
+
+    constexpr uint32_t count = 96;
+    for (uintptr_t stride : {16u, 64u, 256u, 4096u, 16384u})
+        for (uintptr_t base : {uintptr_t(0), uintptr_t(0x110), uintptr_t(0xffff000000000000ull)}) {
+            uint32_t comparisons = 0;
+            raw::StampMap<Key, uint32_t, Hash> map;
+            const auto key = [&](uint32_t i) {
+                return Key{object(base + i * stride), &comparisons};
+            };
+            for (uint32_t i = 0; i < count; ++i)
+                EXPECT_TRUE(map.insert(key(i), i).second);
+            comparisons = 0;
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint32_t *value = map.find(key(i));
+                ASSERT_NE(value, nullptr);
+                EXPECT_EQ(*value, i);
+            }
+            EXPECT_LE(comparisons, 2 * count) << "stride " << stride << ", base " << base;
+        }
 }
 
 TEST(SemanticPlan, PassRasterGroupsSurviveBindingChangesAndSeparatePasses)
@@ -952,8 +997,8 @@ TEST(SemanticPlan, DeferredComputeRebuildsRangeOwnershipFromTheOriginalSnapshot)
     plan.setKernelUses(2, object(200), [](std::vector<raw::ResourceUse> &out) {
         out = std::vector<raw::ResourceUse>{{object(20), raw::ResourceUse::Write}};
     });
-    plan.resolveDispatch(1, object(200), 4);
-    plan.resolveDispatch(2, object(200), 0);
+    plan.resolveDispatch(1, object(200), 4, 1u << 3);
+    plan.resolveDispatch(2, object(200), 0, 0);
     plan.invalidateUses();
     plan.prepareRange(0, boundary);
     plan.prepareRange(0, plan.size());
@@ -961,6 +1006,9 @@ TEST(SemanticPlan, DeferredComputeRebuildsRangeOwnershipFromTheOriginalSnapshot)
     EXPECT_EQ(plan.pendingComputes(0, plan.size()), (std::vector<size_t>{boundary + 1}));
     EXPECT_EQ(plan.dispatch(1).kernel, object(200));
     EXPECT_EQ(plan.dispatch(1).surfaceSlots, 4u);
+    EXPECT_EQ(plan.dispatch(1).windowSlots, 1u << 3);
+    EXPECT_EQ(plan.legacy(1).a, 4u);
+    EXPECT_EQ(plan.legacy(1).b, 1u << 3) << "a dispatch's window slots go through the plan's command form";
     std::map<void *, uint8_t> uses;
     plan.forEachUse(0, boundary, [&](void *object, uint8_t access) {
         uses[object] = access;
@@ -1097,7 +1145,7 @@ TEST(SemanticPlan, NonuniformRegionsKeepOneOriginalReplayOperationAndImmutableGr
     ASSERT_EQ(plan.dispatch(1).regions.count, 8);
     EXPECT_EQ(plan.dispatch(1).grid, (std::array<uint64_t, 3>{19, 11, 7}));
     EXPECT_EQ(plan.dispatch(1).threads, (std::array<uint32_t, 3>{8, 5, 3}));
-    plan.resolveDispatch(1, object(41), 0);
+    plan.resolveDispatch(1, object(41), 0, 0);
     plan.record(dispatch, words({3, 2, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0}));
     EXPECT_EQ(plan.dispatch(1).regions.count, 8);
     EXPECT_EQ(plan.dispatch(2).regions.count, 1);
@@ -1165,8 +1213,8 @@ void applyEverySlot(const RMCommandPlan &plan, uint32_t index, uint32_t &applied
             const auto bindings = plan.textures[stage][next.textures[stage]];
             const auto old = plan.textures[stage][previous ? previous->textures[stage] : next.textures[stage]];
             for (uint32_t slot = 0; slot < bindings.objects.size(); ++slot)
-                if ((bindings.set & (1u << slot)) &&
-                    (!previous || !(old.set & (1u << slot)) || bindings.objects[slot] != old.objects[slot]))
+                if (raw::hasSlot(bindings.set, slot) &&
+                    (!previous || !raw::hasSlot(old.set, slot) || bindings.objects[slot] != old.objects[slot]))
                     log.texture(stage + 1, slot, bindings.objects[slot]);
         }
         if (!previous || previous->samplers[stage] != next.samplers[stage]) {
@@ -1268,6 +1316,55 @@ TEST(SemanticPlan, ASnapshotNotNextAfterTheAppliedOneComparesEverySlot)
         applyEverySlot(plan, plan.draw(at).state, applied, every);
     }
     EXPECT_EQ(masked.calls, every.calls);
+}
+
+// A render stage's texture slots are the identity's (raw_stage_textures.h): 24B119's 128, whose binds at slots 31, 64 and
+// 127 are captured, compared and applied as a bind at slot 0 is, an edit past the first mask word compared alone; on
+// 21H461 a bind past its 31 is not kept. A kernel's table keeps 31 slots on both.
+TEST(SemanticPlan, ARenderStagesTextureSlotsAreTheIdentitysAndAKernelsAre31)
+{
+    static_assert(raw::kStageTextures > 32 || std::is_same_v<raw::TextureSnapshots::Mask, uint32_t>,
+                  "21H461's tables keep the one-word masks they had");
+    static_assert(std::is_same_v<raw::KernelTextureSnapshots::Mask, uint32_t>);
+    const std::vector<uint16_t> slots =
+        raw::kStageTextures == 128 ? std::vector<uint16_t>{31, 64, 127} : std::vector<uint16_t>{29, 30};
+    RMCommandPlan plan;
+    plan.record(cmd(OpRender), {});
+    for (uint8_t stage : {1, 2})
+        for (uint16_t slot : slots)
+            plan.record(binding(OpTexture, stage, slot, 1000 * stage + slot), {});
+    plan.record(binding(OpTexture, 2, uint16_t(raw::kStageTextures), 7), {});
+    draw(plan, 0);
+    plan.record(binding(OpTexture, 2, slots.back(), 9), {});
+    draw(plan, 1);
+    const auto &first = plan.renderStates[plan.draw(plan.size() - 2).state];
+    const auto &second = plan.renderStates[plan.draw(plan.size() - 1).state];
+    for (uint32_t stage = 0; stage < 2; ++stage) {
+        const auto textures = plan.textures[stage][first.textures[stage]];
+        EXPECT_EQ(raw::slotCount(textures.set), slots.size()) << "stage " << stage + 1;
+        for (uint16_t slot : slots) {
+            EXPECT_TRUE(raw::hasSlot(textures.set, slot)) << "stage " << stage + 1 << " slot " << slot;
+            EXPECT_EQ(textures.objects[slot], object(1000 * (stage + 1) + slot)) << "slot " << slot;
+        }
+    }
+    EXPECT_EQ(plan.textures[1][second.textures[1]].objects[slots.back()], object(9));
+    EXPECT_TRUE(plan.textures[1].changedFrom(first.textures[1], second.textures[1]) ==
+                raw::oneSlot<raw::TextureSnapshots::Mask>(slots.back()));
+    CallLog masked, every;
+    raw::StateCursor cursor;
+    uint32_t applied = raw::kNoSnapshot;
+    for (size_t at : {plan.size() - 2, plan.size() - 1}) {
+        raw::applyRenderState(plan, plan.draw(at).state, cursor, masked);
+        applyEverySlot(plan, plan.draw(at).state, applied, every);
+    }
+    EXPECT_EQ(masked.calls, every.calls);
+    const std::string rebound = "t2." + std::to_string(slots.back()) + "=9";
+    EXPECT_EQ(masked.calls.back(), rebound);
+    plan.record(cmd(OpEnd), {});
+    plan.record(cmd(OpCompute), {});
+    plan.record(binding(OpKernelTexture, 3, 30, 11), {});
+    plan.record(binding(OpKernelTexture, 3, 31, 12), {});
+    EXPECT_EQ(plan.kernelTextures.current().set, 1u << 30);
 }
 
 // A draw whose caller resolves its state's uses after it (resolvesUses) leaves them to the caller only while the state

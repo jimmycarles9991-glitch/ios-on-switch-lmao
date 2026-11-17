@@ -46,12 +46,11 @@ const char *poolRefusal(uint64_t bytes, uint64_t held, bool compositor)
 		compositor);
 }
 
-const char *compressibleRefusal(uint64_t bytes, uint64_t held, bool compositor)
+const char *compressibleRefusal(uint64_t bytes)
 {
 	const tgm_pool::Limits limits = {kPoolSmallBytes, kPoolFloorBytes, poolReserveBytes(),
 					 clientPoolBytes()};
-	const uint64_t avail = tgm_pool_avail();
-	return tgm_pool::compressibleRefusal(bytes, held, avail, limits, compositor);
+	return tgm_pool::compressibleRefusal(bytes, tgm_pool_avail(), limits);
 }
 
 IOReturn takeChunks(uint64_t bytes, uint64_t *pas)
@@ -113,7 +112,7 @@ AGXDeviceUserClient::BoCharge AGXDeviceUserClient::chargeBo(const TegraGM20BAbiB
 {
 	BoCharge c = {nullptr, 0, 0, 0, critical_};
 	if (in->flags & TegraGM20BBoCompressible) {
-		c.refused = compressibleRefusal(in->bytes, pool_bytes_, critical_);
+		c.refused = compressibleRefusal(in->bytes);
 	} else if (in->flags & TegraGM20BBoCoherent) {
 		const uint64_t pages = (in->bytes + PAGE_SIZE - 1) & ~(uint64_t(PAGE_SIZE) - 1);
 		const bool control = tgm_pool::controlReserve(
@@ -187,6 +186,18 @@ IOReturn AGXDeviceUserClient::settleBo(const TegraGM20BAbiBoAlloc *in, const BoC
 	}
 	return kIOReturnSuccess;
 }
+
+#if SWITCH_GPU_PATH_STATS
+void AGXDeviceUserClient::poolLine(char *line, size_t size)
+{
+	IOLockLock(lock_);
+	const uint64_t held = pool_bytes_;
+	IOLockUnlock(lock_);
+	snprintf(line, size, "ready_kib=%llu floor_kib=%llu held_kib=%llu clean_chunks=%llu",
+		 tgm_pool_avail() >> 10, kPoolFloorBytes >> 10, held >> 10,
+		 tgm_pool_clean_chunks());
+}
+#endif
 
 // lock_ held: `bo`, made without it, becomes the connection's: a handle (and a map token), the BO list, the index
 // SubmitJob reads with no lock (SwitchGpuBoIndex.h) and the imports' list. The submit gate stays open: nothing a job in

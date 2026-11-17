@@ -43,7 +43,8 @@ class GrErrorsTest(unittest.TestCase):
         self.assertEqual(gr_errors.names()[0x59], 'ITERATED_BLEND_TARGET_COUNT')
 
     def test_a_trap_line_keeps_its_text(self) -> None:
-        self.assertIn('ILLEGAL_INSTR_ENCODING', gr_errors.decode(TRAP))
+        for line in (TRAP, TRAP + ' pc 00000380'):
+            self.assertEqual(gr_errors.decode(line), line.split('gr: ', 1)[1])
         self.assertIsNone(gr_errors.decode('tegra-gm20b: fifo: errored - disabling channel'))
 
     def test_the_lines_go_to_the_experiment_logged_after_them(self) -> None:

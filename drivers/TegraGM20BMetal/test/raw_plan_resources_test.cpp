@@ -187,7 +187,7 @@ TEST(PlanResources, PendingComputeDoesNotRefuseItsConservativeWritableSummary)
     plan.setKernelUses(1, object(3), [](std::vector<raw::ResourceUse> &out) {
         out = std::vector<raw::ResourceUse>{{object(1), read | sample}};
     });
-    plan.resolveDispatch(1, object(3), 0);
+    plan.resolveDispatch(1, object(3), 0, 0);
     plan.invalidateUses();
     plan.prepareRange(0, 3);
     EXPECT_EQ(plan.nativeRangeRefusal(0, 3), nullptr);

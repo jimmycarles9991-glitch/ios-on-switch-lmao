@@ -32,12 +32,17 @@ def ours(spec: dict, found: list[tuple[uuid.UUID, int, str]] | None) -> bool:
 
 
 def attach_raw(image: Path, log: host.Log, mount: bool = False) -> str:
+    return _attach_raw(image, log, mount)[0]
+
+
+def _attach_raw(image: Path, log: host.Log, mount: bool = False) -> tuple[str, str | None]:
+    """Attach a raw disk image; return its whole disk and the APFS container disk macOS synthesized for it, if any."""
     args = ['attach', '-plist'] + ([] if mount else ['-nomount'])
     out = host.plist('hdiutil', *args, '-imagekey', 'diskimage-class=CRawDiskImage', str(image), log=log)
     disk = host.whole_disk_of(out['system-entities'])
     if not disk:
         raise host.HostError(f'hdiutil attach gave no disk for {image}')
-    return disk
+    return disk, host.attached_container(out['system-entities'])
 
 
 def fsck(store: str, what: str, log: host.Log) -> None:
@@ -52,18 +57,15 @@ def fsck(store: str, what: str, log: host.Log) -> None:
     log(f'fsck_apfs {store} ({what}): {tail[0]}')
 
 
-APFS_CONTAINER = 'EF57347C-0000-11AA-AA11-00306543ECAC'  # hdiutil's hint for the container macOS synthesizes
-
-
-def _attach_os(os_dmg: str, log: host.Log) -> tuple[str, str]:
+def _attach_os(os_dmg: str, log: host.Log) -> tuple[str, str, str]:
     out = host.plist(
         'hdiutil', 'attach', '-plist', '-readonly', '-nomount', '-noverify', '-noautofsck', os_dmg, log=log
     )
     # The APFS physical store, never a volume: a GPT image's Apple_APFS partition (21H461), or the image itself when
     # it is a bare container (24B119's OS dmg). How hdiutil hints the image itself differs between macOS releases
     # (none at all on macOS 27), so the store is the one diskutil names for the synthesized container.
-    containers = [e['dev-entry'] for e in out['system-entities'] if e.get('content-hint', '').upper() == APFS_CONTAINER]
-    info = host.disk_info(containers[0]) if len(containers) == 1 else None
+    container = host.attached_container(out['system-entities'])
+    info = host.disk_info('/dev/' + container) if container else None
     stores = (info or {}).get('APFSPhysicalStores', [])
     if len(stores) != 1:
         for d in (e.get('dev-entry', '') for e in out['system-entities']):
@@ -72,7 +74,7 @@ def _attach_os(os_dmg: str, log: host.Log) -> tuple[str, str]:
         raise host.HostError(f'{os_dmg}: expected one APFS container on one physical store, got {out}')
     store = '/dev/' + stores[0]['APFSPhysicalStore']
     slice_at = store.rfind('s', len('/dev/disk'))
-    return (store[:slice_at] if slice_at > 0 else store), store
+    return (store[:slice_at] if slice_at > 0 else store), store, container
 
 
 def os_measure(os_dmg: str, system_uuid: str, log: host.Log) -> tuple[int, int]:
@@ -80,11 +82,11 @@ def os_measure(os_dmg: str, system_uuid: str, log: host.Log) -> tuple[int, int]:
 
     Composing writes the first; populating copies the second onto Data.
     """
-    whole, source = _attach_os(os_dmg, log)
+    whole, source, reference = _attach_os(os_dmg, log)
     try:
-        container = host.container_on(source[len('/dev/') :])
+        container = host.apfs_container(reference)
         if not container:
-            raise host.HostError(f'{os_dmg}: no APFS container on {source}')
+            raise host.HostError(f'{os_dmg}: no APFS container {reference} on {source}')
         used = int(container['CapacityCeiling']) - int(container['CapacityFree'])
         volume = next(
             (v['DeviceIdentifier'] for v in container['Volumes'] if v['APFSVolumeUUID'].upper() == system_uuid.upper()),
@@ -100,7 +102,7 @@ def os_measure(os_dmg: str, system_uuid: str, log: host.Log) -> tuple[int, int]:
 
 def _copy_os(os_dmg: str, image: Path, partition_sectors: int, spec: dict, log: host.Log) -> int:
     disk_sectors = START_SECTOR + partition_sectors + 2048
-    whole, source = _attach_os(os_dmg, log)
+    whole, source, _ = _attach_os(os_dmg, log)
     try:
         os_bytes = int(host.disk_info(source)['TotalSize'])
         raw_source = '/dev/r' + source[len('/dev/') :]
@@ -134,14 +136,14 @@ def _copy_os(os_dmg: str, image: Path, partition_sectors: int, spec: dict, log: 
 
 
 def _grow(image: Path, partition_bytes: int, spec: dict, log: host.Log) -> None:
-    disk = attach_raw(image, log)
+    disk, reference = _attach_raw(image, log)
     try:
         store = disk + 's1'
         with progress.step(f'compose: growing the container to {progress.size(partition_bytes)}', unit=None):
             host.watch(
                 'diskutil', 'apfs', 'resizeContainer', store, f'{partition_bytes}B', parse=progress.phases, log=log
             )
-        container = host.container_on(store)
+        container = host.apfs_container(reference) if reference else None
         if not container:
             raise host.HostError('the scratch container did not attach')
         for key, role in (('data', 'D'), ('preboot', 'B')):

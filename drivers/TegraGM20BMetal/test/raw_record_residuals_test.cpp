@@ -54,7 +54,7 @@ std::vector<uint32_t> residualWords(const raw::RecordParts &parts)
     std::string why;
     EXPECT_TRUE(raw::assembleRecord(parts, "c0=80 | v vs | f fs", raw::PackRules{}, out, why)) << why;
     std::vector<uint32_t> words;
-    for (uint32_t k = 0; k < out.pipeline.entries; k++) {
+    for (uint32_t k = 0; k < raw::entryCount(out.pipeline); k++) {
         EXPECT_EQ(out.pipeline.entry[k].samplerKind & 1, 1u) << k;
         words.push_back(out.pipeline.entry[k].samplerKind >> 2);
     }

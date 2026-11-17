@@ -25,13 +25,21 @@ inline raw::ProbeTextures probeTextures(const std::string &line, bool ours)
         return {MTLPixelFormatR32Uint, 4};
     if (ours && line.find("| v resolve_vert | f resolve_") != std::string::npos)
         return {MTLPixelFormatBGRA8Unorm, 4};
-    const std::pair<const char *, raw::ProbeTextures> sets[] = {
-        {"f xr_bgr10_frag", {MTLPixelFormatR32Uint, 1}},       {"f xr_bgra10_frag", {MTLPixelFormatRGBA16Uint, 1}},
-        {"f xr_planes_frag", {MTLPixelFormatRG32Uint, 1}},     {"f xr_two_planes_frag", {MTLPixelFormatR32Uint, 1}},
-        {"f two_plane_store", {MTLPixelFormatRGBA16Float, 1}}, {"f ycbcr_store_", {MTLPixelFormatRGBA32Float, 1}},
-        {"f ycbcr_packed_", {MTLPixelFormatR32Uint, 1}},       {"f turn_copy", {MTLPixelFormatR32Uint, 1}},
-        {"f turn_masked", {MTLPixelFormatR32Uint, 1}},         {"f turn_reach", {MTLPixelFormatR32Uint, 1}},
-        {"f turn_depth", {MTLPixelFormatDepth32Float, 1}},     {"f stencil_bits_", {MTLPixelFormatR32Uint, 1}}};
+    const std::pair<const char *, raw::ProbeTextures> sets[] = {{"f xr_bgr10_frag", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f xr_bgra10_frag", {MTLPixelFormatRGBA16Uint, 1}},
+                                                                {"f xr_planes_frag", {MTLPixelFormatRG32Uint, 1}},
+                                                                {"f xr_two_planes_frag", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f two_plane_store", {MTLPixelFormatRGBA16Float, 1}},
+                                                                {"f ycbcr_store_", {MTLPixelFormatRGBA32Float, 1}},
+                                                                {"f ycbcr_packed_", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f turn_copy", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f turn_masked", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f turn_reach", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f turn_depth", {MTLPixelFormatDepth32Float, 1}},
+                                                                {"f stencil_bits_", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f fmt_store_", {MTLPixelFormatRGBA32Float, 1}},
+                                                                {"f fmt_load_rgb9e5", {MTLPixelFormatR32Uint, 1}},
+                                                                {"f fmt_mip_", {MTLPixelFormatR32Uint, 1}}};
     for (const auto &[fragment, textures] : sets)
         if (line.find(std::string("| ") + fragment) != std::string::npos)
             return textures;
@@ -51,10 +59,10 @@ inline bool twoPlaneColors(const std::string &key)
 // Each state of `lines` (corpusLines') once, made with its functions' library: Core Animation's `qc`, another framework's
 // default.metallib or a bundle's library under PROBE_LIB_ROOT, the raw path's own `own` (`standIn` for the two-plane moves).
 // `each(line, ours, state)` gets the line without its mark and the state keyed as the raw path keys it: a bundle's under its
-// functions' AIR too (RawRenderKey.h, as RawMetalStates.mm looks it up).
-template <typename Each>
+// functions' AIR too (RawRenderKey.h, as RawMetalStates.mm looks it up). `drop(line, why)` gets a line that makes no state.
+template <typename Each, typename Drop>
 void eachState(id<MTLDevice> dev, id<MTLLibrary> qc, id<MTLLibrary> own, id<MTLLibrary> standIn,
-               const std::vector<std::string> &lines, Each each)
+               const std::vector<std::string> &lines, Each each, Drop drop)
 {
     std::set<std::string> seen;
     for (const std::string &marked : lines) {
@@ -62,17 +70,25 @@ void eachState(id<MTLDevice> dev, id<MTLLibrary> qc, id<MTLLibrary> own, id<MTLL
         const bool ours = marked.rfind("@O ", 0) == 0, framework = marked.rfind("@L ", 0) == 0;
         const size_t pathEnd = framework ? marked.find(' ', 3) : 0;
         const std::string line = ours ? marked.substr(3) : framework ? marked.substr(pathEnd + 1) : marked;
+        const std::string path = framework ? marked.substr(3, pathEnd - 3) : "";
         id<MTLLibrary> library = !ours ? qc : line.find("| f two_plane_") != std::string::npos ? standIn : own;
-        if (framework && !(library = frameworkLibrary(dev, marked.substr(3, pathEnd - 3))))
+        if (framework && !(library = frameworkLibrary(dev, path))) {
+            drop(line, "its library " + path + " did not load from the crawl (PROBE_LIB_ROOT)");
             continue;
-        const std::string name = framework ? frameworkName(marked.substr(3, pathEnd - 3)) : "";
-        if (!parseState(library, line, s, name))
+        }
+        const std::string name = framework ? frameworkName(path) : "";
+        std::string why;
+        if (!parseState(library, line, s, name, &why)) {
+            drop(line, why);
             continue;
+        }
         raw::CacheKey airKeyed;
         if (framework && name.empty()) {
             const std::string cubic = s.cubic.empty() ? std::string() : s.cubic.key();
-            if (!raw::renderCacheKey(s.d, s.key.substr(0, s.key.size() - cubic.size()), true, 0, airKeyed))
+            if (!raw::renderCacheKey(s.d, s.key.substr(0, s.key.size() - cubic.size()), true, 0, airKeyed)) {
+                drop(line, "its functions' AIR keys no state (renderCacheKey)");
                 continue;
+            }
             s.key = airKeyed.key + cubic;
         }
         if (seen.insert(s.key + (s.xrSlots ? raw::xrSampledVariant(s.xrSlots) : std::string()) +

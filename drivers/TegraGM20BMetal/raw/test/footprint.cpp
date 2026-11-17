@@ -80,6 +80,8 @@ bool ringGrows(raw::Device &dev, const Sample &base)
         if (!cb)
             return false;
         grew = std::max(grew, sample().allocated - std::min(sample().allocated, ringsBefore));
+        cb->use(a, false);
+        cb->use(b, true, false);
         raw::BlitEncoder *be = cb->blit();
         for (int k = 0; k < 2000; k++)
             be->copyBytes(a.va, b.va, 64);

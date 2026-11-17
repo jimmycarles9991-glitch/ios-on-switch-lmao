@@ -8,6 +8,8 @@
 #include "../fx/fx_image.h"
 #include "raw_nonfinite.h"
 #include "raw_clear.h"
+#include "raw_clear_box.h"
+#include "drivers/TegraGM20BMetal/precompile/ca-selectors/raw_ca_selector_layout.h"
 #include "raw_icb.h"
 #include "raw_event_release.h"
 #include "raw_attachment_lifetime.h"
@@ -26,6 +28,9 @@
 #include "raw_attachment_target.h"
 #include "raw_layers.h"
 #include "raw_kit.h"
+#include "raw_zeta_cpu.h"
+#include "raw_srgb_pair.h"
+#include "raw_xr_parts.h"
 #include "../../../../kits/SwitchGM20BEmit/SwitchGM20BEmitRaster.h"
 #include "raw_mme.h"
 #include "raw_mip.h"
@@ -36,12 +41,14 @@
 #include "raw_residual.h"
 #include "raw_multisample.h"
 #include "raw_rotated_pass.h"
+#include "raw_sampler_map.h"
 #include "raw_draw_interlock.h"
 #include "raw_ycbcr_store.h"
 #include "raw_fragment_tests.h"
 #include "raw_shader_tests.h"
 #include "raw_shader_test_push.h"
 #include "raw_slm.h"
+#include "raw_stage_switches.h"
 #include "raw_srgb_table.h"
 #include "raw_stamps.h"
 #include "raw_program_stores.h"
@@ -240,17 +247,23 @@ void turnWordsInto(Push &p, uint64_t root, const Rotation &r)
 // Texture header word 0 per MTLPixelFormat as NVK writes it (pack/mkformats.py over the twin, 11-04), and the color target format
 // NVK writes for a target of it (0 where m2v's NVK renders none): both NIL's rows (test/raw_tic_words_test.py).
 // The integer formats' are NIL's rows (nil_formats.csv: the class's RU*/RS* target, UINT or SINT components, alpha ONE_INT).
+// A row commented with NIL's format ("Name: PIPE") is that row by NIL's rules (test/raw_tic_words_test.py), its target the
+// class's.
 const FormatInfo kFormats[] = {
     {1, 0xf7, 0x2002491d, 1, false},     // A8Unorm
     {10, 0xf3, 0x7012491d, 1, false},    // R8Unorm
     {11, 0, 0x7012491d, 1, true},        // R8Unorm_sRGB
+    {12, 0xf4, 0x7011249d, 1, false},    // R8Snorm: R8_SNORM
     {13, 0xf6, 0x6014921d, 1, false},    // R8Uint (NIL's R8_UINT: UINT components, alpha ONE_INT)
     {14, 0xf5, 0x60136d9d, 1, false},    // R8Sint
     {20, 0xee, 0x7012491b, 2, false},    // R16Unorm
+    {22, 0xef, 0x7011249b, 2, false},    // R16Snorm: R16_SNORM
     {23, 0xf1, 0x6014921b, 2, false},    // R16Uint
     {24, 0xf0, 0x60136d9b, 2, false},    // R16Sint
     {25, 0xf2, 0x7017ff9b, 2, false},    // R16Float
     {30, 0xea, 0x70d24918, 2, false},    // RG8Unorm
+    {31, 0, 0x70d24918, 2, false},       // RG8Unorm_sRGB (its bytes, sampled through its stand-in, raw_srgb_pair.h)
+    {32, 0xeb, 0x70d12498, 2, false},    // RG8Snorm: R8G8_SNORM
     {33, 0xed, 0x60d49218, 2, false},    // RG8Uint
     {34, 0xec, 0x60d36d98, 2, false},    // RG8Sint
     {40, 0xe8, 0x74e24915, 2, false},    // B5G6R5Unorm
@@ -261,11 +274,13 @@ const FormatInfo kFormats[] = {
     {54, 0xe3, 0x60136d8f, 4, false},    // R32Sint
     {55, 0xe5, 0x7017ff8f, 4, false},    // R32Float
     {60, 0xda, 0x70d2490c, 4, false},    // RG16Unorm
+    {62, 0xdb, 0x70d1248c, 4, false},    // RG16Snorm: R16G16_SNORM
     {63, 0xdd, 0x60d4920c, 4, false},    // RG16Uint
     {64, 0xdc, 0x60d36d8c, 4, false},    // RG16Sint
     {65, 0xde, 0x70d7ff8c, 4, false},    // RG16Float
     {70, 0xd5, 0x58d24908, 4, false},    // RGBA8Unorm (rendered: a 4:2:0 code texture's image)
     {71, 0xd6, 0x58d24908, 4, true},     // RGBA8Unorm_sRGB
+    {72, 0xd7, 0x58d12488, 4, false},    // RGBA8Snorm: R8G8B8A8_SNORM
     {73, 0xd9, 0x58d49208, 4, false},    // RGBA8Uint
     {74, 0xd8, 0x58d36d88, 4, false},    // RGBA8Sint
     {80, 0xcf, 0x54e24908, 4, false},    // BGRA8Unorm
@@ -279,6 +294,7 @@ const FormatInfo kFormats[] = {
     {104, 0xcc, 0x60d36d84, 8, false},   // RG32Sint
     {105, 0xcb, 0x70d7ff84, 8, false},   // RG32Float
     {110, 0xc6, 0x58d24903, 8, false},   // RGBA16Unorm
+    {112, 0xc7, 0x58d12483, 8, false},   // RGBA16Snorm: R16G16B16A16_SNORM
     {113, 0xc9, 0x58d49203, 8, false},   // RGBA16Uint
     {114, 0xc8, 0x58d36d83, 8, false},   // RGBA16Sint
     {115, 0xca, 0x58d7ff83, 8, false},   // RGBA16Float (rendered: a 4:2:0 texture's converted image)
@@ -339,6 +355,9 @@ const FormatInfo kFormats[] = {
     {216, 0, 0x58d24945, 16, false, 10, 10},  // ASTC_10x10_LDR: ASTC_10x10
     {217, 0, 0x58d24954, 16, false, 12, 10},  // ASTC_12x10_LDR: ASTC_12x10
     {218, 0, 0x58d24946, 16, false, 12, 12},  // ASTC_12x12_LDR: ASTC_12x12
+    // 4:2:2: two texels a 4-byte element sharing their chroma, sampled as NIL's B8G8R8G8 and G8B8G8R8 rows decode them
+    {240, 0, 0x74e24923, 4, false, 2, 1},  // GBGR422: G8B8_G8R8_UNORM
+    {241, 0, 0x74e24922, 4, false, 2, 1},  // BGRG422: B8G8_R8G8_UNORM
     // the extended-range formats' codes (raw_xr.h), as m2v's NVK renders and fetches them: RG32_UINT, RGBA16_UINT, R32_UINT
     {550, 0xcd, 0x60d49204, 8, false},  // RGB10A8_2P_XR10
     {552, 0xc9, 0x58d49203, 8, false},  // BGRA10_XR
@@ -373,7 +392,18 @@ void cleanToMemory(const void *at, uint64_t bytes)
     (void)bytes;
 #endif
 }
+
+const PackProgram kNoPixelProgram = {};
+const uint8_t kNoPixelHeader[0x50] = {};
 }  // namespace
+
+PlacedProgram noPixelProgram()
+{
+    PlacedProgram p;
+    p.record = &kNoPixelProgram;
+    p.header = kNoPixelHeader;
+    return p;
+}
 
 // The render server's: what one 720p screen's composition holds. A client's: the most it grows a chunk to (chunkSize).
 const Device::Sizes Device::kSizes[2] = {
@@ -531,6 +561,7 @@ void Device::emitContext(Push &p)
     for (uint64_t i = 0; i < pack_.bytes(PackBaseline) / 8; i++)
         if (!ownedMethod(base[2 * i]))
             p.m(base[2 * i], base[2 * i + 1]);
+    stageSwitchesOn(p);
     mme::install(p, root_.va);
     tiledCacheInit(p, k_.info());
     // the depth/stencil registers (the runtime's, as NVK leaves them for Metal's default state in a pass without the attachment)
@@ -557,7 +588,7 @@ bool Device::open(const char *packPath, uint64_t stack, std::string &err, Role r
         glassMem = std::make_unique<GlassMem>();
 #endif
     openFailure_ = OpenFailure::Structural;
-    if (!pack_.load(packPath, stack, err))
+    if (!pack_.load(packPath, stack, err, kCaSelectorConfigs))
         return false;
     openFailure_ = OpenFailure::Transient;
     if (!k_.open(err))
@@ -660,6 +691,7 @@ bool Device::init(std::string &err)
     }
     for (uint32_t i = 0; i < pack_.header()->samplers; i++) {
         memcpy(tsc_.cpu + 32 * nextTsc_, cs + 8 * i, 32);
+        constexprWord0_[constexprCount_] = cs[8 * i];
         constexprTsc_[constexprCount_] = nextTsc_++;
         if (!placeConstexprMaps(constexprCount_++, cs + 8 * i)) {
             err = "no sampler header left for the pack's constexpr samplers under planar address maps";
@@ -763,7 +795,7 @@ bool Device::openChannel(std::string &err)
     SetView view;
     if (!job(view, channel_, &seg, 1, resources, JobVisibility::External, seq))
         return undo(true);
-    lastSeqno_ = seq;
+    submittedThrough(seq);
     retire(push_, seq);
     return true;
 }
@@ -782,7 +814,7 @@ bool Device::place(uint32_t prog, uint32_t &program, uint64_t &data)
         const uint8_t *file = reinterpret_cast<const uint8_t *>(pack_.header());
         const uint64_t fileOffset = pack_.header()->section[PackHeap].offset + p.heapOffset;
         const bool inPlace = p.bytes >= k_.info().page_size || packPages_.bound(fileOffset, p.bytes + kHeapSlack);
-        if (!(inPlace && placeInPlace(packPages_, file, fileOffset, p.bytes, at)) &&
+        if (!(inPlace && placeInPlace(packPages_, file, fileOffset, p.bytes, false, at)) &&
             !heapPlace(pack_.section<uint8_t>(PackHeap) + p.heapOffset, p.bytes, at))
             return false;
         placed_[prog] = uint32_t(at);
@@ -881,12 +913,16 @@ bool Device::heapPlace(const uint8_t *bytes, uint32_t size, uint64_t &offset)
 // lock_ held: a slot of `size` bytes at `fileOffset` of the read-only mapping `file` run in place: the grains it and the
 // instruction prefetch past its end lie in imported and bound at their window offsets where they are not yet, its window
 // offset in `offset`. The kernel wires the pages read-only (BoImport's read-only retry; the GPU maps them read-only),
-// cleans them at the import, and the bind's TLB and L2 invalidate makes the GPU's first walk read them; a slot in grains
-// bound already is cleaned here. The imports are held as long as the device and are never a job's use or a set member: no
-// job writes them, the CPU never changes a published slot, the kernel refuses a read-only import as a member, and a
-// connection's close kills its channels before it unbinds and unwires anything (drainResources). False: not inside the
-// file's region, or the kernel refused an import (the slot is then copied).
-bool Device::placeInPlace(ProgramPages &pages, const uint8_t *file, uint64_t fileOffset, uint32_t size,
+// cleans them at the import (an import of no surface is never `covered`), and the bind's TLB and L2 invalidate makes the
+// GPU's first walk read them. The pack's pages need nothing more: no process can write the file, and this device's import
+// keeps them wired, so no line of them is dirty after that clean. `written`: a slot lookup's mapping (runSlotsFrom), which
+// may be the shader compiler's store: the compiler writes it while it is mapped, maybe after the import of a grain the slot
+// lies in, so the slot is cleaned here.
+// The imports are held as long as the device and are never a job's use or a set member: no job writes them, the CPU never
+// changes a published slot, the kernel refuses a read-only import as a member, and a connection's close kills its channels
+// before it unbinds and unwires anything (drainResources). False: not inside the file's region, or the kernel refused an
+// import (the slot is then copied).
+bool Device::placeInPlace(ProgramPages &pages, const uint8_t *file, uint64_t fileOffset, uint32_t size, bool written,
                           uint64_t &offset)
 {
     std::vector<ProgramPages::Grain> grains;
@@ -910,8 +946,16 @@ bool Device::placeInPlace(ProgramPages &pages, const uint8_t *file, uint64_t fil
         inPlaceImports_.push_back(bo);
         pages.bind(r);
     }
-    if (grains.empty())
+#if SWITCH_RAW_DIAGNOSTICS
+    std::atomic<uint64_t> &placed = written ? stats.storeSlotsPlaced : stats.packSlotsInBoundGrains;
+    if (written || grains.empty())
+        placed.store(placed.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+#endif
+    if (written) {
         cleanToMemory(file + fileOffset, size);
+        RAW_DIAGNOSTIC(
+            stats.slotCleans.store(stats.slotCleans.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed));
+    }
     offset = pages.windowOffset(fileOffset);
     heapEpoch_.fetch_add(1, std::memory_order_release);
     return true;
@@ -939,7 +983,7 @@ bool Device::placeFromStore(const uint8_t *slot, uint32_t size, uint64_t &offset
         region = &storeRegions_.emplace_back(StoreRegion{mapping, {}});
         region->pages.reset(0, bytes, (bytes + page - 1) / page * page, window);
     }
-    return placeInPlace(region->pages, mapping, uint64_t(at - mapping), size, offset);
+    return placeInPlace(region->pages, mapping, uint64_t(at - mapping), size, true, offset);
 }
 
 void Device::runSlotsFrom(SlotLookup lookup)
@@ -1164,27 +1208,23 @@ Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)
     return pl;
 }
 
-// Whether the state's fetch-free form, where the pack holds one, is a form a draw can take: its rung's unit proven, or a
-// debug build, whose probe channel forces a rung (its programs are placed in the heap only then)
+// Whether the state's fetch-free form, where the pack holds one, is placed (raw_fetch_free.h fetchFreePlaced)
 bool Device::fetchFreeReachable(uint64_t keyHash) const
 {
     const PackPipeline *rec = pack_.find(keyHash, PackForm::FetchFree);
     if (!rec)
         return false;
-    const FetchFreeForm f = fetchFreeForm(*rec, pack_.iterated(*rec));
-    const bool proven =
-        f.rung == FetchBlend ? fixedBlendProven() : f.rung == FetchIteratedBlend && iteratedPassesProven(f);
+    uint8_t probe = 0;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    return proven || f.rung != FetchNone;
-#else
-    return proven;
+    probe = probeFetchRung.load(std::memory_order_relaxed);
 #endif
+    return fetchFreePlaced(fetchFreeForm(*rec, pack_.iterated(*rec), pack_.far(*rec)), probe);
 }
 
 bool Device::usableRecord(const PackPipeline *rec) const
 {
     return rec && usableDynamicPush(*rec, pack_.string(rec->keyString)) &&
-           usableStorageMetadata(*rec, pack_.section<uint32_t>(PackBlob) + rec->blob, rec->blobDwords);
+           usableStorageMetadata(*rec, pack_.section<uint32_t>(PackBlob) + rec->blob, rec->blobDwords, pack_.far(*rec));
 }
 
 std::vector<std::pair<std::string, Pipeline *>> Device::variantPipelines(uint64_t keyHash, bool caTransform)
@@ -1243,34 +1283,60 @@ Pipeline *Device::placePipeline(uint64_t keyHash, PackForm form, bool caTransfor
     return placeRecord(*rec, caTransform);
 }
 
+// A pack record is drawn as addRecord draws a runtime record of the same state: a tessellation state's control and
+// evaluation programs bound beside its own, the registers its draws set back after it, and its stride twin
+std::vector<uint32_t> restoreWords(const uint32_t *pairs, uint32_t dwords)
+{
+    std::vector<uint32_t> words(dwords + 2);
+    Push w{words.data(), words.data() + words.size()};
+    for (uint32_t k = 0; k + 1 < dwords; k += 2)
+        w.m(pairs[k], pairs[k + 1]);
+    return {words.data(), w.at};
+}
+
 Pipeline *Device::placeRecord(const PackPipeline &pp, bool caTransform)
 {
     Pipeline &pl = pipelines_[&pp - pack_.section<PackPipeline>(PackPipelines)];
     if (pl.rec)
         return &pl;
-    const PackProgram *progs = pack_.section<PackProgram>(PackPrograms);
-    PlacedProgram vs, fs;
-    if (!place(pp.vs, vs.program, vs.data) || !place(pp.fs, fs.program, fs.data)) {
+    const bool tess = tessellates(pp);
+    PlacedProgram vs, fs = noPixelProgram(), tessPlaced[2];
+    if (!placePackProgram(pp.vs, vs) || (pixelStage(pp) && !placePackProgram(pp.fs, fs)) ||
+        (tess && (!placePackProgram(pp.tessPrograms[0], tessPlaced[0]) ||
+                  !placePackProgram(pp.tessPrograms[1], tessPlaced[1]))))
+        return nullptr;
+    uint64_t slm = std::max(slmPerWarpOfHeader(vs.header), slmPerWarpOfHeader(fs.header));
+    for (uint32_t k = 0; tess && k < 2; k++)
+        slm = std::max(slm, slmPerWarpOfHeader(tessPlaced[k].header));
+    if (!placeRequiredVariants(pp, slm))
+        return nullptr;
+    if (!slmNeed(slm)) {
         stats.heapFull++;
         return nullptr;
     }
-    vs.record = &progs[pp.vs];
-    fs.record = &progs[pp.fs];
-    vs.header = pack_.section<uint8_t>(PackHeap) + progs[pp.vs].program;
-    fs.header = pack_.section<uint8_t>(PackHeap) + progs[pp.fs].program;
-    if (!slmNeed(std::max(slmPerWarpOfHeader(vs.header), slmPerWarpOfHeader(fs.header)))) {
-        stats.heapFull++;
-        return nullptr;
+    Pipeline *twin = nullptr;
+    if (pp.strideTwin) {
+        const PackPipeline *twinRecord = pack_.find(pp.strideTwin, recordForm(pp));
+        if (twinRecord && twinRecord != &pp && usableRecord(twinRecord) &&
+            !(twin = placeRecord(*twinRecord, caTransform)))
+            return nullptr;
     }
     build(pl, pp, vs, fs, pack_.section<uint32_t>(PackBlob) + pp.blob, pack_.string(pp.keyString), caTransform,
-          pack_.spills(pp));
+          pack_.spills(pp), pack_.far(pp), tess ? tessPlaced : nullptr);
+    if (pp.restoreDwords && uint64_t(pp.restoreAt) + pp.restoreDwords <= pack_.bytes(PackBlob) / 4) {
+        const std::vector<uint32_t> words =
+            restoreWords(pack_.section<uint32_t>(PackBlob) + pp.restoreAt, pp.restoreDwords);
+        pl.restore.insert(pl.restore.end(), words.begin(), words.end());
+    }
+    pl.strideTwin = twin;
     offerVariants(pl, pp);
-    if (const PackSplit *split = pack_.split(pp.fs); split && !pl.storageBits) {
+    if (const PackSplit *split = pixelStage(pp) ? pack_.split(pp.fs) : nullptr; split && !pl.storageBits) {
         SplitSource source;
         source.rec = *split;
         source.packed = true;
         source.pp = &pp;
         source.blob = pack_.section<uint32_t>(PackBlob) + pp.blob;
+        source.far = pack_.far(pp);
         source.keyString = pack_.string(pp.keyString);
         source.vs = vs;
         source.caTransform = caTransform;
@@ -1283,8 +1349,9 @@ Pipeline *Device::placeRecord(const PackPipeline &pp, bool caTransform)
 // and whose key's attachment and vertex fields are `keyString`
 void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs, const PlacedProgram &fs,
                    const uint32_t *blob, const char *keyString, bool caTransform, const uint32_t *spills,
-                   const PlacedProgram *tess)
+                   const uint32_t *far, const PlacedProgram *tess)
 {
+    pl.entries = SetEntries(pp, far);
     auto instructions = [](const PackProgram &program) {
         const uint32_t bytes = program.dataBytes ? program.dataOffset : program.bytes;
         return std::max(1u, (bytes > 128 ? bytes - 128 : 0) / 8);
@@ -1299,7 +1366,7 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
     pl.writesMemory[0] = writesMemory(vs);
     pl.writesMemory[1] = writesMemory(fs);
     pl.memoryEntries = pp.memoryEntries;
-    std::vector<uint32_t> words(64 + 16 + (tess ? 64 : 0) + pp.blobDwords * 2);
+    std::vector<uint32_t> words(64 + 16 + kStageSwitchWords + (tess ? 64 : 0) + pp.blobDwords * 2);
     Push w{words.data(), words.data() + words.size()};
     uint32_t writes[8];
     uint32_t interlockControl = 0;
@@ -1340,9 +1407,11 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
         if (writes[c] & 0x1111)  // R_ENABLE, G_ENABLE, B_ENABLE, A_ENABLE
             pl.writeBits |= uint8_t(1u << c);
     w.m(0x2044, vs.program);  // SET_PIPELINE_PROGRAM(VERTEX)
-    w.m(0x2144, fs.program);  // SET_PIPELINE_PROGRAM(PIXEL)
     w.m(PIPELINE_REGISTER_COUNT_VERTEX, vs.record->gprs);
-    w.m(PIPELINE_REGISTER_COUNT_PIXEL, fs.record->gprs);
+    if (pixelStage(pp)) {
+        w.m(0x2144, fs.program);  // SET_PIPELINE_PROGRAM(PIXEL)
+        w.m(PIPELINE_REGISTER_COUNT_PIXEL, fs.record->gprs);
+    }
     if (fs.record->boundTextures)
         w.m(BINDLESS_TEXTURE, fs.record->boundTextures - 1u);
     bool exactCbufs = false;
@@ -1352,12 +1421,14 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
     pl.setSlot[0] = bindProgramCbufs(w, *vs.record, kSetGroups[0], vs.data, root_.va, exactCbufs);
     pl.setSlot[1] = bindProgramCbufs(w, *fs.record, kSetGroups[1], fs.data, root_.va, exactCbufs);
     const PackProgram *programs[4] = {vs.record, fs.record};
+    const uint16_t *farUbos[4] = {vs.farUbos, fs.farUbos};
     for (uint32_t k = 0; tess && k < 2; k++) {
         w.m(PIPELINE_PROGRAM_TESS + kPipelineStageStride * k, tess[k].program);
         w.m(PIPELINE_REGISTER_COUNT_TESS + kPipelineStageStride * k, tess[k].record->gprs);
         pl.setSlot[2 + k] = bindProgramCbufs(w, *tess[k].record, kSetGroups[2 + k], tess[k].data, root_.va, exactCbufs);
         programs[2 + k] = tess[k].record;
-        pl.tessReadsHeap |= heapCbufSlot(*tess[k].record) != 0;
+        pl.heapSlot[2 + k] = heapCbufSlot(*tess[k].record);
+        farUbos[2 + k] = tess[k].farUbos;
     }
     for (uint32_t k = 0; k < 4; k++)
         for (uint8_t c = 1; programs[k] && c < programs[k]->cbufs; c++) {
@@ -1365,23 +1436,25 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
             const uint8_t group = kSetGroups[k];
             if (cbufKind(prog->cbufType[c]) != CbufUbo)
                 continue;
-            uint8_t entry = 0;
-            while (entry < pp.entries &&
-                   !(uniformEntry(pp.entry[entry]) && pp.entry[entry].offset == cbufUboOffset(prog->cbufType[c])))
+            const uint32_t offset = cbufUboOffset(prog->cbufType, farUbos[k], c);
+            const SetEntries &entries = pl.entries;
+            uint32_t entry = 0;
+            while (entry < entries.size() && !(uniformEntry(entries[entry]) && entries[entry].offset == offset))
                 entry++;
-            pl.ubosNamed &= entry < pp.entries;
-            if (entry < pp.entries)
-                pl.ubos[pl.uboCount++] = {group, c, entry};
+            pl.ubosNamed &= entry < entries.size();
+            if (entry < entries.size())
+                pl.ubos[pl.uboCount++] = {group, c, uint16_t(entry)};
         }
+    stageSwitches(pp, keyString, w, pl.restore);
+    pl.stagesOff = !pixelStage(pp) || rasterOff(keyString);
     pl.methods.assign(words.data(), w.at);
-    pl.segment = segmentHeap_.place(pl.methods.data(), uint32_t(pl.methods.size()));
     memcpy(pl.push, pp.pushWords, sizeof pl.push);
     pl.pushMask = pp.pushMask;
     pl.heapSlot[0] = heapCbufSlot(*vs.record);
     pl.heapSlot[1] = heapCbufSlot(*fs.record);
     bindArguments(pl, pp);
     for (uint32_t k = 0; k < 2; k++)
-        if (pp.spillEntry[k])
+        if (spillEntryOf(pp, k))
             pl.spill[k] = spills ? spills + (k ? pp.spillWords[0] : 0) : nullptr;
     // the color formats of its key, and which colors its draws read as they were (raw_blend_reads.h)
     for (const char *at = keyString; (at = strstr(at, " c")); at += 2) {
@@ -1420,8 +1493,8 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
     if (const char *ds = strstr(keyString, "ds=")) {
         uint32_t depth = 0, stencil = 0;
         sscanf(ds, "ds=%u/%u", &depth, &stencil);
-        // a Depth32Float and a Stencil8 apart are rendered as one Depth32Float_Stencil8 (PassDesc::separate)
-        pl.depthFormat = depth == 252 && stencil == 253 ? kZetaFormat : depth ? depth : stencil;
+        // a Depth32Float or Depth16Unorm and a Stencil8 apart are rendered as one Depth32Float_Stencil8 (PassDesc::separate)
+        pl.depthFormat = (depth == 252 || depth == 250) && stencil == 253 ? kZetaFormat : depth ? depth : stencil;
     }
     if (const char *n = strstr(keyString, "samples="))
         pl.samples = uint8_t(std::max(1, atoi(n + 8)));
@@ -1446,9 +1519,9 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
     }
     pl.dropsPixels = (sph[0] >> 15 & 1) || (sph[19] & 1) || tests || strncmp(keyString, "samples=1 ", 10) ||
                      !strstr(keyString, " ds=0/0 ");
-    for (uint32_t k = 0; k < pp.entries; k++)
-        if (pp.entry[k].kind == EntryFetch && pp.entry[k].slot < 8)
-            pl.fetchBits |= uint8_t(1u << pp.entry[k].slot);
+    for (uint32_t k = 0; k < pl.entries.size(); k++)
+        if (pl.entries[k].kind == EntryFetch && pl.entries[k].slot < 8)
+            pl.fetchBits |= uint8_t(1u << pl.entries[k].slot);
     if (pp.flags & PipelineStorageMetadata) {
         pl.storageBits = pp.storageMask;
         pl.storageWriteBits = pp.storageWriteMask;
@@ -1456,18 +1529,20 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
         memcpy(pl.storageTic, pp.storageTic, sizeof pl.storageTic);
         pl.readBits &= ~pl.storageBits;
     }
-    pl.freeForm = (pp.flags & PipelineFetchFreeForm) ? fetchFreeForm(pp, pack_.iterated(pp)) : FetchFreeForm();
+    pl.freeForm = (pp.flags & PipelineFetchFreeForm) ? fetchFreeForm(pp, pack_.iterated(pp), far) : FetchFreeForm();
     if (pl.freeForm.rung != FetchNone) {
         pl.readBits |= uint8_t(1u << pl.freeForm.colour);
         if (pl.freeForm.rung == FetchIteratedBlend) {
             pl.restore.clear();
-            iteratedBlendWords(*pack_.iterated(pp), pl.freeForm.colour, pl.methods, pl.restore);
+            iteratedBlendWords(*pack_.iterated(pp), pl.freeForm.colour, pl.colorFormats[pl.freeForm.colour], pl.methods,
+                               pl.restore);
         }
     }
     pl.turnRefused = pp.flags & PipelineTurnRefused;
     pl.xrSlots = pp.xrSlots;
     pl.writtenSlots = writtenSlots(pp);
     pl.rec = &pp;
+    pl.segment = segmentHeap_.place(pl.methods.data(), uint32_t(pl.methods.size()));
 }
 
 // ---- device: memory ----
@@ -1923,6 +1998,8 @@ void Device::writeTic(const Texture &t)
         const FormatInfo *f = z < kZetaFormats ? nullptr : formatInfo(t.format);
         multisampleHeader(t.width, t.height, t.samples, t.bpp, t.va, f ? f->tic0 : kZetaFormatInfo[z].tic0,
                           f && f->srgb, w);
+    } else if (t.zeta && t.layers > 1 && t.type != fx::kTexTwoD && zetaArrayHeader(t, t.type, w)) {
+        // an owned depth array, cube or cube array (createOwnedZeta) as the type it was made
     } else if (t.zeta) {  // NVK's image as laid out (createZetaOver): one level, its block height
         one.width = t.width;
         one.height = t.height;
@@ -1930,6 +2007,9 @@ void Device::writeTic(const Texture &t)
         one.bpp = t.bpp;
         one.yLog2 = t.blockHeight;
         fx::mipChainTic(one, t.va, kZetaFormatInfo[zetaFormatIndex(t.format)].tic0, false, 0, 1, w, fx::kTexTwoD);
+    } else if (t.type == fx::kTexOneDBuffer) {
+        const FormatInfo *f = formatInfo(t.format);
+        fx::bufferTic(t.va, f->tic0, f->srgb, t.width, w);
     } else if (const FormatInfo *f = formatInfo(t.format);
                (t.layers > 1 && fx::arrayLayout(t.width, t.height, t.layers, 1, t.bpp, one)) ||
                (t.type == fx::kTexThreeD &&
@@ -1972,6 +2052,12 @@ void Device::swizzle(Texture &t, const uint8_t channels[4])
         return;
     uint32_t *w = reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic);
     w[0] = swizzledWord0(w[0], t.swizzle);
+    // a draw reads its stand-in (raw_bound_texture.h): the swizzle over the stand-in's own (an RG8Unorm_sRGB one's red,
+    // green, zero, one)
+    if (t.standIn && t.standIn->tic) {
+        uint32_t *s = reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.standIn->tic);
+        s[0] = swizzledWord0(s[0], channels);
+    }
 }
 
 uint32_t swizzledWord0(uint32_t word0, const uint8_t channels[4])
@@ -2115,7 +2201,6 @@ bool Device::layout(const TextureAsk &ask, Texture &t, uint64_t &bytes, uint64_t
     fx::MipChain own;
     fx::MipChain &c = chain ? *chain : own;
     const FormatInfo *f = formatInfo(ask.format);
-    const bool xr = xrForm(ask.format) != XrForm::None;
     kind = fx::kBlockLinearKind;
     switch (ask.kind) {
     case TextureAsk::Plain: {
@@ -2138,7 +2223,7 @@ bool Device::layout(const TextureAsk &ask, Texture &t, uint64_t &bytes, uint64_t
     }
     case TextureAsk::Line: {
         tgm_layout bl;
-        if (!shape(ask.width, 1, ask.format, t) || xr || !tgm_layout_tiled(ask.width, 1, t.bpp, &bl))
+        if (!shape(ask.width, 1, ask.format, t) || !tgm_layout_tiled(ask.width, 1, t.bpp, &bl))
             return false;
         tiledRows(t, bl);
         t.type = fx::kTexOneD;
@@ -2147,13 +2232,14 @@ bool Device::layout(const TextureAsk &ask, Texture &t, uint64_t &bytes, uint64_t
         return true;
     }
     case TextureAsk::Mips:
-        if (!f || ask.levels < 2 || !f->rt || xr || !fx::mipChainLayout(ask.width, ask.height, ask.levels, f->bpp, c) ||
+        if (!f || ask.levels < 2 || blockCompressed(f) ||
+            !fx::mipChainLayout(ask.width, ask.height, ask.levels, f->bpp, c) ||
             !shape(ask.width, ask.height, ask.format, t))
             return false;
         chainRows(t, c, c.bytes);
         break;
     case TextureAsk::Volume:
-        if (!shape(ask.width, ask.height, ask.format, t) || xr ||
+        if (!shape(ask.width, ask.height, ask.format, t) ||
             !fx::volumeLayout(ask.width, ask.height, ask.depth, ask.levels, t.bpp, ask.view2d, c))
             return false;
         chainRows(t, c, c.bytes);
@@ -2162,7 +2248,7 @@ bool Device::layout(const TextureAsk &ask, Texture &t, uint64_t &bytes, uint64_t
         t.blockDepth = c.zLog2;
         break;
     case TextureAsk::Array:
-        if (!shape(ask.width, ask.height, ask.format, t) || xr ||
+        if (!shape(ask.width, ask.height, ask.format, t) ||
             !fx::arrayLayout(ask.width, ask.height, ask.layers, ask.levels, t.bpp, c))
             return false;
         chainRows(t, c, c.arrayStride);
@@ -2170,18 +2256,28 @@ bool Device::layout(const TextureAsk &ask, Texture &t, uint64_t &bytes, uint64_t
         t.layers = ask.layers;
         break;
     case TextureAsk::Multisample:
-        if (!shape(ask.width, ask.height, ask.format, t) || !t.renderable || blockCompressed(f) || xr ||
+        if (!shape(ask.width, ask.height, ask.format, t) || blockCompressed(f) ||
             !fx::msLayout(t.width, t.height, ask.samples, t.bpp, c))
             return false;
         chainRows(t, c, uint64_t(c.level[0].rowBytes) * c.level[0].rows);
         t.samples = uint8_t(ask.samples);
         break;
     case TextureAsk::Zeta:
-        if (!zetaShape(ask.width, ask.height, ask.format, ask.samples, t, bytes, align))
+        if (!zetaImageLayout(ask.width, ask.height, ask.format, ask.samples, ask.layers, ask.levels, ask.type,
+                             ask.sampled, t, c, bytes, align))
             return false;
         align = std::max(align, kBlAlign);
         kind = kZetaFormatInfo[zetaFormatIndex(ask.format)].kind;
         return true;
+    case TextureAsk::Block:
+        if (!blockCompressed(f) || !shape(ask.width, ask.height, ask.format, t) ||
+            !(ask.type == fx::kTexThreeD ? fx::volumeLayout(ask.width, ask.height, ask.depth, ask.levels, f->bpp, false,
+                                                            c, f->blockW, f->blockH)
+                                         : fx::blockChainLayout(ask.width, ask.height, ask.levels, ask.layers,
+                                                                f->blockW, f->blockH, f->bpp, c)))
+            return false;
+        chainRows(t, c, c.arrayStride);
+        break;
     }
     bytes = c.bytes;
     align = c.align;
@@ -2214,13 +2310,32 @@ bool Device::footprint(const TextureAsk &ask, uint64_t &bytes, uint64_t &align)
     return true;
 }
 
+// Its codes' shape (raw_xr_parts.h converts the pair texel for texel): a one-level 2D texture's tiled, else the kind
+// and levels, layers, planes or samples of the texture's own layout
 TextureAsk Device::standInAsk(const Texture &t)
 {
     TextureAsk ask;
     ask.width = t.width;
     ask.height = t.height;
-    ask.format = kXrStandInFormat;
+    ask.format = srgbPair(t.format) ? kSrgbPairStandInFormat : kXrStandInFormat;
     ask.tiled = true;
+    ask.levels = t.chain ? t.chain->layout.levels : 1;
+    if (t.samples > 1) {
+        ask.kind = TextureAsk::Multisample;
+        ask.samples = t.samples;
+    } else if (t.type == fx::kTexThreeD) {
+        ask.kind = TextureAsk::Volume;
+        ask.depth = t.depth;
+        ask.view2d = t.blockDepth == 0;
+    } else if (t.type == fx::kTexOneD) {
+        ask.kind = TextureAsk::Line;
+    } else if (t.type != fx::kTexTwoD || t.layers > 1) {
+        ask.kind = TextureAsk::Array;
+        ask.type = t.type;
+        ask.layers = std::max(t.layers, 1u);
+    } else if (t.chain) {
+        ask.kind = TextureAsk::Mips;
+    }
     return ask;
 }
 
@@ -2229,12 +2344,13 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
     uint64_t bytes = 0, align = 0;
     uint32_t kind = 0;
     Texture::Chain *chain = ask.kind == TextureAsk::Mips ? new Texture::Chain : nullptr;
-    const bool image = ask.kind == TextureAsk::Volume || ask.kind == TextureAsk::Array;
+    const bool image = ask.kind == TextureAsk::Volume || ask.kind == TextureAsk::Array || ask.kind == TextureAsk::Block;
+    const bool zetaLevels = ask.kind == TextureAsk::Zeta && ask.levels > 1;
     fx::MipChain imageLayout;
     if ((!at && ask.kind == TextureAsk::Plain) || !layout(ask, t, bytes, align, kind,
-                                                          chain   ? &chain->layout
-                                                          : image ? &imageLayout
-                                                                  : nullptr)) {
+                                                          chain                 ? &chain->layout
+                                                          : image || zetaLevels ? &imageLayout
+                                                                                : nullptr)) {
         delete chain;
         return false;
     }
@@ -2269,7 +2385,7 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
     if (compressed) {
         noteCompressed(ask, comp, bytes, t);
     } else if (zeta) {
-        t.storage = {span.va, bytes, false};
+        t.storage = {span.va, bytes, false, span.storage};
         if (!at)
             ownedZeta_[span.va] = {z, owned};
     } else {
@@ -2286,8 +2402,19 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
         t.chain = chain;
         RAW_DIAGNOSTIC(stats.chains++);
         RAW_DIAGNOSTIC(stats.chainBytes += chain->layout.bytes);
+    } else if (ask.kind == TextureAsk::Block) {
+        layBlocks(imageLayout, formatInfo(ask.format), ask.width, ask.height, ask.type, t);
     } else if (image) {
         layImage(imageLayout, formatInfo(ask.format), t.type, t);
+    } else if (zetaLevels) {
+        t.chain = new Texture::Chain;
+        t.chain->layout = imageLayout;
+        t.chain->va = t.va;
+        if (t.tic) {
+            uint32_t w[8];
+            fx::mipChainTic(imageLayout, t.va, kZetaFormatInfo[z].tic0, false, 0, ask.levels, w, t.type);
+            memcpy(tic_.cpu + 32 * t.tic, w, 32);
+        }
     } else if (t.tic) {
         writeTic(t);
     }
@@ -2398,14 +2525,22 @@ bool Device::tiledSurfaceTexture(uint64_t offset, uint32_t width, uint32_t heigh
 
 bool Device::createSurfaceTexture(uint64_t surfaceId, void *base, uint64_t allocBytes, const void *surface,
                                   uint64_t offset, uint32_t width, uint32_t height, uint32_t pitch, uint32_t format,
-                                  Texture &t, bool writes)
+                                  Texture &t, bool writes, uint64_t readable)
 {
-    // rows and offset a multiple of 16, as m2v takes a surface (linear_plan.rs); the texture header's 32 through `sampled`
-    if (!shape(width, height, format, t) || (pitch & 15) || (offset & 15) || pitch < width * t.bpp ||
-        offset > allocBytes || uint64_t(pitch) * (height - 1) + uint64_t(width) * t.bpp > allocBytes - offset ||
-        (uintptr_t(base) & (pageSize() - 1)))
+    const uint64_t page = pageSize(),
+                   mapped = ((uintptr_t(base) + allocBytes + page - 1) & ~(page - 1)) - uintptr_t(base);
+    const bool readsPast = readable != 0;
+    readable = readsPast ? std::min(readable, mapped) : allocBytes;
+    // rows and offset a multiple of 16, as m2v takes a surface (linear_plan.rs); the texture header's 32 through `sampled`.
+    // A plane read past its rows' ends (readsPast: a YCbCr plane read with more codes a row than its pitch holds) has rows
+    // that overlap, which no header lays out: the copy engine gathers them into `sampled` too. A base off a page (a surface
+    // over the client's memory) is imported from its page, its VA as far into it (bindImport).
+    const bool offPage = uintptr_t(base) & (page - 1);
+    if (!shape(width, height, format, t) || (pitch & 15) || ((uintptr_t(base) + offset) & 15) ||
+        (pitch < width * t.bpp && !readsPast) || offset > readable ||
+        uint64_t(pitch) * (height - 1) + uint64_t(width) * t.bpp > readable - offset)
         return false;
-    const bool unaligned = (pitch | offset) & 31;
+    const bool unaligned = ((pitch | (uintptr_t(base) + offset)) & 31) || pitch < width * t.bpp;
     Texture *sampled = nullptr;
     if (unaligned) {
         sampled = new Texture;
@@ -2418,6 +2553,10 @@ bool Device::createSurfaceTexture(uint64_t surfaceId, void *base, uint64_t alloc
     t.pitch = pitch;
     const LayoutAsk ask = {width, height, t.bpp, pitch, writes && !offset && !sampled};
     t.import = importSurface(surfaceId, base, (allocBytes + pageSize() - 1) & ~uint64_t(pageSize() - 1), surface, &ask);
+    if (t.import && offPage && t.import->kernelTiled()) {
+        release(t.import);
+        t.import = nullptr;
+    }
     if (t.import && t.import->kernelTiled()) {
         SurfaceView view;
         const bool valid = surfaceView(t.import->layout, offset, width, height, t.bpp, pitch, view);
@@ -2449,7 +2588,9 @@ bool Device::createSurfaceTexture(uint64_t surfaceId, void *base, uint64_t alloc
         return true;
     }
     t.va = t.import->bo.va + offset;
-    t.storage = {t.va, std::min(uint64_t(pitch) * height, allocBytes - offset), !t.import->id};
+    const uint64_t extent =
+        std::max(uint64_t(pitch) * height, uint64_t(pitch) * (height - 1) + uint64_t(width) * t.bpp);
+    t.storage = {t.va, std::min(extent, readable - offset), !t.import->id};
     t.cpu = static_cast<uint8_t *>(base) + offset;
     t.shadowTarget = t.renderable && !linearTarget(t);
     t.renderable = t.renderable && linearTarget(t);
@@ -2530,20 +2671,148 @@ bool Device::createPlanarTarget(uint64_t surfaceId, void *base, uint64_t allocBy
 bool Device::createBufferTexture(const Buffer &b, uint64_t offset, uint32_t width, uint32_t height, uint32_t pitch,
                                  uint32_t format, Texture &t)
 {
-    if (!shape(width, height, format, t) || blockCompressed(formatInfo(format)) || (pitch & 31) ||
+    // rows and address a multiple of 16, as a surface's (createSurfaceTexture): the texture header's 32 through `sampled`
+    if (!shape(width, height, format, t) || blockCompressed(formatInfo(format)) || (pitch & 15) ||
         pitch < width * t.bpp || offset > b.length || uint64_t(pitch) * height > b.length - offset ||
-        offset > UINT64_MAX - b.va || ((b.va + offset) & 31))
+        offset > UINT64_MAX - b.va || ((b.va + offset) & 15))
         return false;
+    // rows or a start 16 bytes off 32, which the texture header cannot address: sampled through a pool image of its
+    // texels, as a surface texture's are (createSurfaceTexture)
+    Texture *sampled = nullptr;
+    if ((pitch | (b.va + offset)) & 31) {
+        sampled = new Texture;
+        if (!createTexture(width, height, format, *sampled, false, true)) {
+            delete sampled;
+            return false;
+        }
+    }
     std::lock_guard<raw::Mutex> l(lock_);
     t.pitch = pitch;
     t.va = b.va + offset;
-    t.storage = {t.va, uint64_t(pitch) * height, b.hostVisible};
+    t.storage = {t.va, uint64_t(pitch) * height, b.hostVisible, b.span.storage};
     t.shadowTarget = t.renderable && !linearTarget(t);
     t.renderable = t.renderable && linearTarget(t);
     t.cpu = b.cpu + offset;
+    if (sampled) {  // sampled through its pool image's header
+        t.sampled = sampled;
+        t.tic = sampled->tic;
+        return true;
+    }
     if (!(t.tic = allocTic()))
         return false;
     writeTic(t);
+    return true;
+}
+
+// NVK's texel buffer views start on 16 bytes (NVK_MIN_TEXEL_BUFFER_ALIGNMENT, its minTexelBufferOffsetAlignment) and hold
+// at most 2^27 texels (maxTexelBufferElements); the header itself takes a byte address
+bool Device::createTexelBuffer(const Buffer &b, uint64_t offset, uint32_t elements, uint32_t format, Texture &t)
+{
+    constexpr uint64_t kTexelBufferAlign = 16, kMaxElements = 1u << 27;
+    const FormatInfo *f = formatInfo(format);
+    if (!f || blockCompressed(f) || xrForm(format) != XrForm::None || !elements || elements > kMaxElements ||
+        offset > b.length || uint64_t(elements) * f->bpp > b.length - offset || ((b.va + offset) % kTexelBufferAlign))
+        return false;
+    std::lock_guard<raw::Mutex> l(lock_);
+    t = {};
+    t.format = format;
+    t.bpp = f->bpp;
+    t.width = t.texelWidth = elements;
+    t.height = t.texelHeight = 1;
+    t.pitch = elements * f->bpp;
+    t.type = fx::kTexOneDBuffer;
+    t.va = b.va + offset;
+    t.storage = {t.va, uint64_t(t.pitch), b.hostVisible, b.span.storage};
+    t.cpu = b.cpu ? b.cpu + offset : nullptr;
+    if (!(t.tic = allocTic()))
+        return false;
+    writeTic(t);
+    return true;
+}
+
+// A chain's header over layers from `va`, levels [baseLevel, +levels) seen as `type`; a block format's extent in texels
+// (NIL's extent_px), as layBlocks writes it
+static void chainViewHeader(const Texture &of, const fx::MipChain &c, uint64_t va, const FormatInfo &f,
+                            uint32_t baseLevel, uint32_t levels, uint32_t type, uint32_t w[8])
+{
+    fx::mipChainTic(c, va, f.tic0, f.srgb, baseLevel, levels, w, type);
+    if (of.blockW > 1 || of.blockH > 1) {
+        setField(w, 143, 128, of.texelWidth - 1);
+        setField(w, 175, 160, of.texelHeight - 1);
+    }
+}
+
+// A depth/stencil texture viewed in its own format, or in X32_Stencil8 (261) for its stencil: NVK's stencil-only header
+// (raw_stencil_bits.h kStencilViews) over the same image. The view keeps its texture's format, which every zeta table
+// is indexed by; only its header reads the stencil.
+bool Device::createZetaView(const Texture &of, uint32_t format, Texture &t)
+{
+    constexpr uint32_t kX32Stencil8 = 261;
+    const uint32_t stencilWord0 = format == kX32Stencil8 ? stencilViewWord0(of.format) : 0;
+    if ((format != of.format && !stencilWord0) || of.memoryless)
+        return false;
+    std::lock_guard<raw::Mutex> l(lock_);
+    const Texture::Chain *chain = of.chain;
+    t = of;
+    t.storage = of.storageRange();
+    memcpy(t.swizzle, kIdentitySwizzle, 4);
+    t.view = true;
+    t.renderable = of.renderable && !stencilWord0;
+    t.shadowTarget = false;
+    t.import = nullptr;
+    t.span = {};
+    t.lease = nullptr;
+    t.chain = nullptr;
+    if (!(t.tic = allocTic()))
+        return false;
+    if (chain) {  // every level, as the texture's own header names them
+        uint32_t w[8];
+        fx::mipChainTic(chain->layout, chain->va, kZetaFormatInfo[zetaFormatIndex(of.format)].tic0, false, 0,
+                        chain->layout.levels, w, of.type);
+        memcpy(tic_.cpu + 32 * t.tic, w, 32);
+    } else {
+        writeTic(t);
+    }
+    if (stencilWord0)
+        reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic)[0] = stencilWord0;
+    return true;
+}
+
+// A depth texture's layers as an array or cube: NIL's array header, where the image's layers lie as NIL's array lays them
+// (the header's layer stride is the one it implies)
+bool zetaArrayHeader(const Texture &t, uint32_t type, uint32_t w[8])
+{
+    fx::MipChain c;
+    if (!fx::arrayLayout(t.width, t.height, t.layers, 1, t.bpp, c) || c.yLog2 != t.blockHeight ||
+        c.arrayStride != t.layerBytes)
+        return false;
+    fx::mipChainTic(c, t.va, kZetaFormatInfo[zetaFormatIndex(t.format)].tic0, false, 0, 1, w, type);
+    return true;
+}
+
+bool zetaImageLayout(uint32_t width, uint32_t height, uint32_t format, uint32_t samples, uint32_t layers,
+                     uint32_t levels, uint8_t type, bool sampled, Texture &t, fx::MipChain &c, uint64_t &bytes,
+                     uint64_t &align)
+{
+    if (!samples || !layers || layers > 2048 || !levels || (samples > 1 && (layers > 1 || levels > 1)) ||
+        !zetaShape(width, height, format, samples, t, bytes, align))
+        return false;
+    if (layers == 1 && levels == 1)
+        return true;
+    t.layers = layers;
+    t.type = type;
+    if (levels == 1) {
+        uint32_t header[8];
+        bytes = (t.layerBytes * layers + align - 1) / align * align;
+        return !sampled || zetaArrayHeader(t, type, header);
+    }
+    if (!fx::arrayLayout(width, height, layers, levels, t.bpp, c))
+        return false;
+    t.pitch = c.level[0].rowBytes;
+    t.blockHeight = c.level[0].yLog2;
+    t.layerBytes = c.arrayStride;
+    bytes = c.bytes;
+    align = std::max(align, c.align);
     return true;
 }
 
@@ -2553,9 +2822,11 @@ bool Device::createView(const Texture &of, uint32_t format, Texture &t)
     // neither of which has a header here.
     if (of.converted())
         return false;
+    if (of.zeta)
+        return createZetaView(of, format, t);
     const FormatInfo *f = formatInfo(format);
     if (!f || f->bpp != of.bpp || f->blockW != of.blockW || f->blockH != of.blockH || of.memoryless || of.sampled ||
-        xrForm(format) != XrForm::None || xrForm(of.format) != XrForm::None)
+        xrForm(format) != XrForm::None || xrForm(of.format) != XrForm::None || srgbPair(format) || srgbPair(of.format))
         return false;
     std::lock_guard<raw::Mutex> l(lock_);
     t = of;
@@ -2575,7 +2846,7 @@ bool Device::createView(const Texture &of, uint32_t format, Texture &t)
     noteView(of, t);
     if (of.chain) {
         uint32_t w[8];
-        fx::mipChainTic(of.chain->layout, of.va, f->tic0, f->srgb, 0, of.chain->layout.levels, w, of.type);
+        chainViewHeader(of, of.chain->layout, of.va, *f, 0, of.chain->layout.levels, of.type, w);
         memcpy(tic_.cpu + 32 * t.tic, w, 32);
         return true;
     }
@@ -2586,39 +2857,52 @@ bool Device::createView(const Texture &of, uint32_t format, Texture &t)
 bool Device::createPartView(const Texture &of, uint32_t format, uint32_t type, uint32_t baseLevel, uint32_t levels,
                             uint32_t baseLayer, uint32_t layers, Texture &t)
 {
-    const FormatInfo *f = formatInfo(format);
-    const bool cube = type == fx::kTexCube || type == fx::kTexCubeArray;
-    if (of.converted() || !of.blockLinear || of.zeta || of.type == fx::kTexOneD || of.type == fx::kTexThreeD || !f ||
-        f->bpp != of.bpp || blockCompressed(f) || of.blockW > 1 || of.blockH > 1 || of.memoryless || of.sampled ||
-        xrForm(format) != XrForm::None || xrForm(of.format) != XrForm::None || !levels || !layers ||
-        (type == fx::kTexTwoD && layers != 1) || (cube && (layers % 6 || of.width != of.height)))
+    const bool cube = type == fx::kTexCube || type == fx::kTexCubeArray, volume = type == fx::kTexThreeD;
+    const bool oneLayer = type == fx::kTexOneD || type == fx::kTexTwoD || volume;
+    const FormatInfo *f = of.zeta ? nullptr : formatInfo(format);
+    const bool sameTexels =
+        of.zeta ? format == of.format : f && f->bpp == of.bpp && f->blockW == of.blockW && f->blockH == of.blockH;
+    // A pitch image, or a multisampled one, is viewed whole, as 2D or a one-layer 2D array (NIL's pitch header is
+    // TWO_D_NO_MIPMAP for either)
+    const bool whole = !baseLevel && levels == 1 && !baseLayer && layers == 1 && !of.chain &&
+                       (type == fx::kTexTwoD || type == fx::kTexTwoDArray);
+    if (of.converted() || ((!of.blockLinear || of.samples > 1) && !whole) || !sameTexels || of.memoryless ||
+        of.sampled || xrForm(format) != XrForm::None || xrForm(of.format) != XrForm::None || srgbPair(format) ||
+        srgbPair(of.format) || !levels || !layers || (of.type == fx::kTexThreeD) != volume ||
+        (oneLayer && layers != 1) || (cube && (layers % 6 || of.width != of.height)) ||
+        (of.zeta && type == fx::kTexOneD))
         return false;
-    fx::MipChain c;
-    uint64_t va = of.va;
     Texture image;
+    uint64_t layerBytes = 0;
     if (of.chain) {
-        if (baseLayer || layers != 1 || baseLevel + levels > of.chain->layout.levels ||
+        const fx::MipChain &c = of.chain->layout;
+        if (baseLevel + levels > c.levels || baseLayer + layers > c.layers ||
             (baseLevel && !chainLevelImage(of, baseLevel, image)))
             return false;
-        c = of.chain->layout;
-        va = of.chain->va;
         if (!baseLevel)
             image = of;
-        // (a later level's block height is the chain's clamp, not its own image's: the CPU goes by m2v)
         image.cpu = nullptr;
-        image.layerBytes = c.arrayStride;
+        layerBytes = c.arrayStride;
     } else {
-        if (baseLevel || levels != 1 || baseLayer + layers > of.layers ||
-            !fx::arrayLayout(of.width, of.height, of.layers, 1, of.bpp, c))
+        if (baseLevel || levels != 1 || baseLayer + layers > std::max<uint32_t>(1, of.layers) ||
+            (baseLayer && !of.layerBytes))
             return false;
-        va += baseLayer * c.arrayStride;
         image = of;
-        image.va = va;
-        image.cpu = of.cpu ? of.cpu + baseLayer * c.arrayStride : nullptr;
-        image.layers = layers;
-        image.layerBytes = c.arrayStride;
+        layerBytes = of.layerBytes;
+        image.cpu = of.cpu ? of.cpu + baseLayer * layerBytes : nullptr;
     }
-    c.layers = layers;
+    image.va += baseLayer * layerBytes;
+    image.layers = layers;
+    image.layerBytes = layerBytes;
+    uint32_t zetaHeader[8];
+    if (of.zeta && of.chain) {
+        fx::MipChain c = of.chain->layout;
+        c.layers = layers;
+        fx::mipChainTic(c, of.chain->va + baseLayer * layerBytes, kZetaFormatInfo[zetaFormatIndex(of.format)].tic0,
+                        false, baseLevel, levels, zetaHeader, type);
+    } else if (of.zeta && type != fx::kTexTwoD && !zetaArrayHeader(image, type, zetaHeader)) {
+        return false;
+    }
     std::lock_guard<raw::Mutex> l(lock_);
     t = image;
     t.storage = of.storageRange();
@@ -2626,18 +2910,29 @@ bool Device::createPartView(const Texture &of, uint32_t format, uint32_t type, u
     t.view = true;
     t.format = format;
     t.type = uint8_t(type);
-    t.renderable = f->rt != 0 && type == fx::kTexTwoD && levels == 1 && layers == 1;
+    t.renderable = (f ? f->rt != 0 : of.renderable) && type == fx::kTexTwoD && levels == 1;
     t.shadowTarget = false;
     t.import = nullptr;
     t.span = {};
     t.lease = nullptr;
     t.chain = nullptr;
-    t.wc = false;
     if (!(t.tic = allocTic()))
         return false;
     noteView(of, t);
+    if (of.zeta && (of.chain || type != fx::kTexTwoD)) {
+        memcpy(tic_.cpu + 32 * t.tic, zetaHeader, 32);
+        return true;
+    }
+    if (!of.chain) {
+        writeTic(t);
+        if (of.samples > 1)
+            setField(reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic), 154, 151, type);
+        return true;
+    }
+    fx::MipChain c = of.chain->layout;
+    c.layers = layers;
     uint32_t w[8];
-    fx::mipChainTic(c, va, f->tic0, f->srgb, baseLevel, levels, w, type);
+    chainViewHeader(of, c, of.chain->va + baseLayer * layerBytes, *f, baseLevel, levels, type, w);
     memcpy(tic_.cpu + 32 * t.tic, w, 32);
     return true;
 }
@@ -2697,12 +2992,11 @@ bool Device::createMemoryless(uint32_t width, uint32_t height, uint32_t format, 
     const bool zeta = zetaFormatIndex(format) < kZetaFormats;
     if (!layers || layers > 2048 || (layers > 1 && samples > 1) ||
         (zeta ? !zetaShape(width, height, format, samples, t, bytes, align) : !shape(width, height, format, t)) ||
-        (layers > 1 && !zeta && (!t.renderable || xrForm(format) != XrForm::None)))
+        (layers > 1 && !zeta && xrForm(format) != XrForm::None))
         return false;
     t.layers = layers;
     fx::MipChain c;
-    if (samples > 1 && !zeta &&
-        (!t.renderable || xrForm(format) != XrForm::None || !fx::msLayout(width, height, samples, t.bpp, c)))
+    if (samples > 1 && !zeta && (xrForm(format) != XrForm::None || !fx::msLayout(width, height, samples, t.bpp, c)))
         return false;
     t.memoryless = true;
     t.samples = uint8_t(samples);
@@ -2943,25 +3237,18 @@ bool Device::createBlockTextureOver(void *bytes, uint64_t length, uint32_t width
 }
 
 bool Device::createBlockTexture(uint32_t width, uint32_t height, uint32_t levels, uint32_t layers, uint32_t format,
-                                uint8_t type, Texture &t)
+                                uint8_t type, Texture &t, uint32_t depth, const ArenaAt *at)
 {
-    const FormatInfo *f = formatInfo(format);
-    fx::MipChain c;
-    if (!blockCompressed(f) || !shape(width, height, format, t) ||
-        !fx::blockChainLayout(width, height, levels, layers, f->blockW, f->blockH, f->bpp, c))
-        return false;
-    std::lock_guard<raw::Mutex> l(lock_);
-    if (!blAlloc(c.bytes, c.align, t.span))
-        return false;
-    t.va = t.span.va;
-    t.cpu = t.span.cpu;
-    if (!(t.tic = allocTic())) {
-        Lease *none = nullptr;
-        freeSpan(t.span, Memory::Bl, none);
-        return false;
-    }
-    layBlocks(c, f, width, height, type, t);
-    return true;
+    TextureAsk ask;
+    ask.kind = TextureAsk::Block;
+    ask.width = width;
+    ask.height = height;
+    ask.depth = depth;
+    ask.levels = levels;
+    ask.layers = layers;
+    ask.format = format;
+    ask.type = type;
+    return createLaidOut(ask, t, at);
 }
 
 void Device::layBlocks(const fx::MipChain &layout, const FormatInfo *f, uint32_t width, uint32_t height, uint8_t type,
@@ -2971,7 +3258,9 @@ void Device::layBlocks(const fx::MipChain &layout, const FormatInfo *f, uint32_t
     t.blockLinear = true;
     t.blockHeight = layout.yLog2;
     t.layers = layout.layers;
-    t.layerBytes = layout.arrayStride;
+    t.layerBytes = type == fx::kTexThreeD ? layout.bytes : layout.arrayStride;
+    t.depth = layout.depth;
+    t.blockDepth = layout.zLog2;
     t.type = type;
     uint32_t w[8];
     fx::mipChainTic(layout, t.va, f->tic0, f->srgb, 0, layout.levels, w, t.type);
@@ -3028,10 +3317,10 @@ void Device::destroyTexture(Texture &t)
     if (t.zeta)
         freeOwnedZeta(t.va);
     if (t.chain) {
-        for (const uint32_t level : t.chain->levelTic)
-            if (level) {
-                freeTic(level);
-            }
+        for (const uint32_t *tics : {t.chain->levelTic, t.chain->levelCodesTic})
+            for (uint32_t level = 0; level < fx::kMaxLevels; level++)
+                if (tics[level])
+                    freeTic(tics[level]);
         delete t.chain;
         t.chain = nullptr;
     }
@@ -3266,13 +3555,12 @@ bool Device::createBufferNoCopy(void *bytes, uint64_t length, Buffer &b)
     return true;
 }
 
-bool Device::createSurfaceBuffer(uint64_t id, void *base, uint64_t bytes, uint64_t length, const void *owner, Buffer &b,
-                                 bool &tiled)
+bool Device::createSurfaceBuffer(uint64_t id, void *base, uint64_t length, const void *owner, Buffer &b, bool &tiled)
 {
     b = {};
     tiled = false;
     std::lock_guard<raw::Mutex> l(lock_);
-    Import *i = importSurface(id, base, bytes, owner);
+    Import *i = importSurface(id, base, length, owner);
     if (!i)
         return false;
     if (i->kind == TGM_LAYOUT_KIND) {
@@ -3406,6 +3694,37 @@ bool Device::takeTsc(uint32_t &tsc)
     return true;
 }
 
+bool Device::takeHeader(const uint32_t words[8], uint32_t &slot)
+{
+    std::array<uint32_t, 8> header;
+    memcpy(header.data(), words, sizeof header);
+    if (const auto shared = sharedTsc_.find(header); shared != sharedTsc_.end()) {
+        shared->second.users++;
+        slot = shared->second.slot;
+        return true;
+    }
+    if (!takeTsc(slot))
+        return false;
+    memcpy(tsc_.cpu + 32 * slot, words, 32);
+    sharedTsc_[header] = {slot, 1};
+    tscHeaders_[slot] = header;
+    return true;
+}
+
+void Device::dropHeader(uint32_t slot)
+{
+    const auto header = tscHeaders_.find(slot);
+    if (header == tscHeaders_.end())
+        return;
+    const auto shared = sharedTsc_.find(header->second);
+    if (shared != sharedTsc_.end() && --shared->second.users)
+        return;
+    if (shared != sharedTsc_.end())
+        sharedTsc_.erase(shared);
+    tscHeaders_.erase(header);
+    freeTsc_.push_back(slot);
+}
+
 bool Device::createSampler(const SamplerDesc &d, Sampler &s)
 {
     uint32_t w[8], compared[8];
@@ -3414,15 +3733,15 @@ bool Device::createSampler(const SamplerDesc &d, Sampler &s)
     compareHeader(compared, d.compare);
     s.desc = d;
     std::lock_guard<raw::Mutex> l(lock_);
+    // the sampler's own slot is its name in the argument heap (heapSampler), so never shared; its compare form is
     if (!takeTsc(s.tsc))
         return false;
-    if (!takeTsc(s.compareTsc)) {
+    if (!takeHeader(compared, s.compareTsc)) {
         freeTsc_.push_back(s.tsc);
         s.tsc = 0;
         return false;
     }
     memcpy(tsc_.cpu + 32 * s.tsc, w, 32);
-    memcpy(tsc_.cpu + 32 * s.compareTsc, compared, 32);
     return true;
 }
 
@@ -3432,13 +3751,13 @@ void Device::destroySampler(Sampler &s)
     if (s.tsc)
         freeTsc_.push_back(s.tsc);
     if (s.compareTsc)
-        freeTsc_.push_back(s.compareTsc);
+        dropHeader(s.compareTsc);
     for (uint32_t m : s.mapped)
-        if (m && m != s.tsc && std::find(freeTsc_.begin(), freeTsc_.end(), m) == freeTsc_.end())
-            freeTsc_.push_back(m);
+        if (m && m != s.tsc)
+            dropHeader(m);
     for (uint32_t b : s.bordered)
         if (b)
-            freeTsc_.push_back(b);
+            dropHeader(b);
     s = {};
 }
 
@@ -3463,9 +3782,8 @@ bool Device::samplerVariant(Sampler &s, uint8_t map)
     }
     RAW_ENCODE_LOCK(l, lock_);
     uint32_t tsc = 0;
-    if (!takeTsc(tsc))
+    if (!takeHeader(w, tsc))
         return false;
-    memcpy(tsc_.cpu + 32 * tsc, w, 32);
     s.mapped[map] = tsc;
     return true;
 }
@@ -3487,9 +3805,8 @@ bool Device::borderVariant(Sampler &s, const Texture &t)
     borderHeader(w, texel);
     RAW_ENCODE_LOCK(l, lock_);
     uint32_t tsc = 0;
-    if (!takeTsc(tsc))
+    if (!takeHeader(w, tsc))
         return false;
-    memcpy(tsc_.cpu + 32 * tsc, w, 32);
     s.bordered[texel] = tsc;
     return true;
 }
@@ -3542,7 +3859,10 @@ Pipeline *Device::ycbcrPipeline(uint8_t output)
                                         "raw.ycbcr.ycbcr_packed_converted_frag",
                                         "raw.ycbcr.ycbcr_packed_srgb_frag",
                                         "raw.ycbcr.ycbcr_packed_codes10_frag",
-                                        "raw.ycbcr.ycbcr_packed_plane_frag"};
+                                        "raw.ycbcr.ycbcr_packed_plane_frag",
+                                        "raw.ycbcr.ycbcr_codes_frag",
+                                        "raw.ycbcr.ycbcr_codes10_frag",
+                                        "raw.ycbcr.ycbcr_packed_codes10_frag"};
     if (!output || output >= sizeof names / sizeof *names)
         return nullptr;
     return pipeline(Pack::fnv(names[output], strlen(names[output])));
@@ -3562,6 +3882,20 @@ Pipeline *Device::ycbcrStorePipeline(bool chroma, const YcbcrStoreShape &store)
                        : store.packed ? packed[store.srgb != 0][chroma]
                                       : names[store.srgb != 0][chroma][store.max > 255];
     return pipeline(Pack::fnv(name, strlen(name)));
+}
+
+Pipeline *Device::ycbcrLoadPipeline(uint32_t channels)
+{
+    const char *name = channels == 1   ? "raw.ycbcr.ycbcr_load_plane_packed_r_frag"
+                       : channels == 2 ? "raw.ycbcr.ycbcr_load_plane_packed_rg_frag"
+                                       : nullptr;
+    return name ? pipeline(Pack::fnv(name, strlen(name))) : nullptr;
+}
+
+Pipeline *Device::xrPlanesImagePipeline(bool split)
+{
+    static const char merge[] = "raw.xr.xr_planes_merge_frag", splitBack[] = "raw.xr.xr_planes_split_frag";
+    return split ? pipeline(Pack::fnv(splitBack, strlen(splitBack))) : pipeline(Pack::fnv(merge, strlen(merge)));
 }
 
 Pipeline *Device::xrPipeline(XrForm form, bool twoPlanes)
@@ -3584,22 +3918,86 @@ Pipeline *Device::depthResolvePipeline(uint32_t format, uint32_t filter)
     return name ? pipeline(Pack::fnv(name, strlen(name))) : nullptr;
 }
 
+bool Device::depthConvertible(uint32_t samples)
+{
+    for (uint32_t format : {250u, 260u}) {
+        const char *name = turnDepthState(format, samples);
+        if (!name || !pipeline(Pack::fnv(name, strlen(name))))
+            return false;
+    }
+    return true;
+}
+
 Pipeline *Device::mipPipeline(uint32_t format)
 {
     const char *name = mipState(format);
     return name ? pipeline(Pack::fnv(name, strlen(name))) : nullptr;
 }
 
+Pipeline *Device::mip3dPipeline(uint32_t format)
+{
+    const char *name = mip3dState(format);
+    return name ? pipeline(Pack::fnv(name, strlen(name))) : nullptr;
+}
+
 bool Device::createStandIn(Texture &t, const ArenaAt *at)
 {
-    if (t.standIn || !xrPipeline(xrForm(t.format), t.xrPlanes))
+    const bool pair = srgbPair(t.format);
+    if (t.standIn || (!pair && !xrPipeline(xrForm(t.format), t.xrPlanes)))
         return t.standIn != nullptr;
     Texture *s = new Texture;
-    if (!createTexture(t.width, t.height, kXrStandInFormat, *s, false, true, at)) {
+    const TextureAsk ask = standInAsk(t);
+    const bool made = ask.kind == TextureAsk::Plain ? createTexture(t.width, t.height, ask.format, *s, false, true, at)
+                                                    : createLaidOut(ask, *s, at);
+    if (!made) {
         delete s;
         return false;
     }
+    if (pair)
+        swizzle(*s, kSrgbPairSwizzle);
     t.standIn = s;
+    return true;
+}
+
+// A one-plane 4:2:2 YCbCr texture (YcbcrPlan::onePlane): its image and the luma and chroma pool images its conversion reads,
+// which BlitEncoder::splitPlane fills from the surface's plane
+bool Device::createOnePlaneYcbcr(uint64_t surfaceId, void *base, uint64_t allocBytes, const void *surface,
+                                 const YcbcrPlan &plan, uint32_t width, uint32_t height, Texture &t)
+{
+    const uint64_t mapped = (allocBytes + pageSize() - 1) & ~uint64_t(pageSize() - 1);
+    const uint64_t pairs = plan.chromaWidth;
+    if (!pairs || !height || plan.lumaPitch < 16 || (plan.lumaPitch & 15) || (plan.luma & 15) ||
+        plan.luma + uint64_t(plan.lumaPitch) * (height - 1) + 4 * pairs > std::min(plan.readable, mapped) ||
+        (uintptr_t(base) & (pageSize() - 1)))
+        return false;
+    Import *planes;
+    {
+        std::lock_guard<raw::Mutex> l(lock_);
+        planes = importSurface(surfaceId, base, mapped, surface);
+    }
+    if (!planes)
+        return false;
+    Texture *y = new Texture, *c = new Texture;
+    if (!createTexture(plan.lumaWidth, height, plan.lumaFormat, *y) ||
+        !createTexture(plan.chromaWidth, plan.chromaHeight, plan.chromaFormat, *c) || y->blockLinear ||
+        c->blockLinear || !createTexture(width, height, plan.image, t, false, true)) {
+        for (Texture *x : {y, c}) {
+            destroyTexture(*x);
+            delete x;
+        }
+        std::lock_guard<raw::Mutex> l(lock_);
+        release(planes);
+        return false;
+    }
+    t.import = planes;
+    t.planes = {planes->bo.va + plan.luma, 0, plan.lumaPitch, 0};
+    t.onePlane = true;
+    t.luma = y;
+    t.chroma = c;
+    memcpy(t.shape, plan.shape, sizeof t.shape);
+    t.ycbcr = plan.output;
+    t.addressMap = plan.addressMap;
+    ycbcrImageHeader(t, plan.output, plan.shape[2]);
     return true;
 }
 
@@ -3608,6 +4006,8 @@ bool Device::createYcbcrTexture(uint64_t surfaceId, void *base, uint64_t allocBy
 {
     if (!ycbcrPipeline(plan.output))
         return false;
+    if (plan.onePlane)
+        return createOnePlaneYcbcr(surfaceId, base, allocBytes, surface, plan, width, height, t);
     Texture *y = new Texture, *c = plan.chromaWidth ? new Texture : nullptr;
     auto undo = [&] {
         for (Texture *x : {y, c})
@@ -3618,10 +4018,10 @@ bool Device::createYcbcrTexture(uint64_t surfaceId, void *base, uint64_t allocBy
         return false;
     };
     if (!createSurfaceTexture(surfaceId, base, allocBytes, surface, plan.luma, plan.lumaWidth, height, plan.lumaPitch,
-                              plan.lumaFormat, *y))
+                              plan.lumaFormat, *y, false, plan.readable))
         return undo();
     if (c && !createSurfaceTexture(surfaceId, base, allocBytes, surface, plan.chroma, plan.chromaWidth,
-                                   plan.chromaHeight, plan.chromaPitch, plan.chromaFormat, *c))
+                                   plan.chromaHeight, plan.chromaPitch, plan.chromaFormat, *c, false, plan.readable))
         return undo();
     if (!createTexture(width, height, plan.image, t, false, true))  // block-linear, as NVK makes m2v's converted image
         return undo();
@@ -3635,18 +4035,25 @@ bool Device::createYcbcrTexture(uint64_t surfaceId, void *base, uint64_t allocBy
     memcpy(t.shape, plan.shape, sizeof t.shape);
     t.ycbcr = plan.output;
     t.addressMap = plan.addressMap;
-    // its alpha read as one, as m2v's view of its own converted image reads it (W_SOURCE ONE_FLOAT; the conversion writes 1 there
-    // too: the same texels, now the same header)
-    {
-        std::lock_guard<raw::Mutex> l(lock_);
-        uint32_t *w = reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic);
-        w[0] = (w[0] & ~(7u << 28)) | 7u << 28;
-        // a packed plane's channels past its codes read 0, as Metal reads R10Unorm_PACKED and RG10Unorm_PACKED (Z_SOURCE,
-        // and Y_SOURCE of a one-code texel, ZERO)
-        if (plan.output == YcbcrPackedPlane)
-            w[0] &= ~(7u << 25 | (plan.shape[2] == 1 ? 7u << 22 : 0u));
-    }
+    ycbcrImageHeader(t, plan.output, plan.shape[2]);
     return true;
+}
+
+void Device::ycbcrImageHeader(Texture &t, uint8_t output, uint32_t packedCodes)
+{
+    std::lock_guard<raw::Mutex> l(lock_);
+    uint32_t *w = reinterpret_cast<uint32_t *>(tic_.cpu + 32 * t.tic);
+    if (ycbcrLumaFirst(output)) {
+        constexpr uint8_t kLumaFirst[4] = {3, 4, 2, 5};  // the codes image's green, blue, red: Y, Cb, Cr
+        w[0] = swizzledWord0(w[0], kLumaFirst);
+    }
+    // its alpha read as one, as m2v's view of its own converted image reads it (W_SOURCE ONE_FLOAT; the conversion writes 1
+    // there too: the same texels, now the same header)
+    w[0] = (w[0] & ~(7u << 28)) | 7u << 28;
+    // a packed plane's channels past its codes read 0, as Metal reads R10Unorm_PACKED and RG10Unorm_PACKED (Z_SOURCE, and
+    // Y_SOURCE of a one-code texel, ZERO)
+    if (output == YcbcrPackedPlane)
+        w[0] &= ~(7u << 25 | (packedCodes == 1 ? 7u << 22 : 0u));
 }
 
 // A memoryless attachment's memory: one per size, format, tag and layout, kept while passes use it (m2v 0105 gives a memoryless
@@ -3967,9 +4374,8 @@ bool Device::waitFence(uint32_t seqno, uint64_t generation)
                          seqno, k_.error().c_str());
             {
                 std::lock_guard<raw::Mutex> l(killedLock_);
-                killedKept_[killedNext_++ % killedKept_.size()] = {
-                    st.completed + 1, __atomic_load_n(&lastSeqno_, __ATOMIC_RELAXED), kWaitRefused};
-                keptThrough_.store(__atomic_load_n(&lastSeqno_, __ATOMIC_RELAXED), std::memory_order_relaxed);
+                killedKept_[killedNext_++ % killedKept_.size()] = {st.completed + 1, lastSubmitted(), kWaitRefused};
+                keptThrough_.store(lastSubmitted(), std::memory_order_relaxed);
                 keptKills_.store(true, std::memory_order_release);
             }
             k_.markLost(ch, opened);  // begin() makes it again
@@ -4003,9 +4409,9 @@ std::vector<KillRange> Device::failedSeqnos() const
     }
     Killed live = {};
     if (!k_.killRecords())  // nothing tells the seqnos the channel finished from those it took with it
-        failed.push_back({1, lastSeqno_, kWaitRefused});
+        failed.push_back({1, lastSubmitted(), kWaitRefused});
     else if (k_.lost(channel_) && !liveKill(live))  // the kernel publishes the error before the record and the fence
-        failed.push_back({*fence_ + 1, lastSeqno_, k_.lostError() ? k_.lostError() : kWaitRefused});
+        failed.push_back({*fence_ + 1, lastSubmitted(), k_.lostError() ? k_.lostError() : kWaitRefused});
     const auto *record = reinterpret_cast<const volatile TegraGM20BAbiFence *>(fence_);
     if (const uint32_t seqno =
             newestSemanticFailure(reinterpret_cast<const volatile TegraGM20BAbiFenceSemantic *>(record + 1)))
@@ -4174,6 +4580,7 @@ bool Device::newContext(uint32_t channel, uint32_t &seq)
     restart_ = 0;
     rtLayer_ = ~0u;
     alphaHeld_ = kAlphaControlUnknown;
+    sampleMaskHeld_ = kSampleMaskUnknown;
     const uint32_t words = contextWords() + uint32_t(fx::twodInitWords());
     uint64_t va;
     uint32_t *start = reinterpret_cast<uint32_t *>(alloc(push_, words * 4, 256, va));
@@ -4211,7 +4618,7 @@ void Device::growRing(Ring &r, uint64_t most)
     if (!grow || !k_.allocControl(std::min(r.bo.bytes * 2, most), larger, ControlUse::Ring))
         return;
     set_.add(k_, larger, &r == &upload_ ? TegraGM20BSurfaceWrite : TegraGM20BSurfaceRead);
-    grownOut_.push_back({r.bo, lastSeqno_, channelGeneration()});
+    grownOut_.push_back({r.bo, lastSubmitted(), channelGeneration()});
     r.bo = larger;
     r.head = r.since = r.clear = 0;
     r.inflight.clear();
@@ -4289,12 +4696,16 @@ CommandBuffer *Device::begin()
 #endif
     cb.draws = cb.passes = cb.blits = cb.bands = 0;
     cb.refusal = {};
+    cb.skipped = {};
+    cb.skips = 0;
     cb.partial = false;
     cb.admissionBlocked = false;
     cb.quietEnd = false;
     cb.promises.clear();
     cb.promisesKept = false;
     cb.nativeError = 0;
+    cb.kernelResult = 0;
+    cb.notSubmitted = nullptr;
     cb.setRefused.clear();
     cb.nativeReads_.clear();
     cb.nativeSurfaces_.clear();
@@ -4308,6 +4719,7 @@ CommandBuffer *Device::begin()
     cb.restart_ = restart_;
     cb.rtLayer_ = rtLayer_;
     cb.alphaHeld_ = alphaHeld_;
+    cb.sampleMaskHeld_ = sampleMaskHeld_;
     cb.ds_ = ds_;
     cb.extrasLive_ = extrasLive_;
     cb.heldSegment_ = heldSegment_;
@@ -4406,8 +4818,15 @@ void CommandBuffer::clean(const void *cpu, uint64_t bytes, bool invalidate)
     dirty_.add(cpu, bytes, invalidate);
 }
 
-RenderEncoder *CommandBuffer::render(const PassDesc &pass)
+RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
 {
+    const auto refused = [why](const char *rule) -> RenderEncoder * {
+        if (why)
+            *why = rule;
+        return nullptr;
+    };
+    constexpr const char *kNoMemory =
+        "no memory for a pass's attachment backing: MTLCommandBufferErrorOutOfMemory (MTLCommandBuffer.h)";
     RAW_ENCODE_SPAN(PassBegin);
     RenderEncoder &e = render_;
     // a pass's lists keep the last one's capacity: no allocation a steady frame
@@ -4440,18 +4859,21 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass)
     // get a backing of the pass's layout
     const Texture *zeta = pass.depthStencil.texture;
     if (zeta && !zeta->zeta)
-        return nullptr;
+        return refused("a depth/stencil attachment of a colour pixel format, which Metal's validation layer stops");
     // every attachment of one sample count (Metal's rule)
     uint8_t samples = zeta ? zeta->samples : 0;
     for (uint32_t j = 0; j < pass.count && j < 8; j++)
         if (const Texture *t = pass.color[j].texture) {
             if (samples && t->samples != samples)
-                return nullptr;
+                return refused("attachments of different sample counts, which Metal's validation layer stops "
+                               "(MTLRenderPipeline.h rasterSampleCount: the samples per fragment of the render pass)");
             samples = t->samples;
         }
     e.samples_ = std::max<uint8_t>(samples, 1);
-    if (passRotation(pass, e.rot_) != RotatedRefusal::None || layeredRefusal(pass, e.samples_, e.rot_.turned()))
-        return nullptr;
+    if (const RotatedRefusal turn = passRotation(pass, e.rot_); turn != RotatedRefusal::None)
+        return refused(rotatedRefusalText(turn));
+    if (const char *layered = layeredRefusal(pass, e.samples_, e.rot_.turned()))
+        return refused(layered);
     const uint32_t layers = e.pass_.layers = std::max(pass.layers, 1u);
     const auto layered = [layers](Texture shape) {
         shape.layers = layers;
@@ -4486,14 +4908,14 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass)
     if (zeta && backed(*zeta)) {
         Texture *b = backing(layered(planeShaped(*zeta, e.rot_)), 0, false, true);
         if (!b)
-            return nullptr;
+            return refused(kNoMemory);
         e.pass_.depthStencil.texture = b;
         backings_.push_back(b);
     }
     uint8_t scratchMask = 0;
     for (uint32_t j = 0; j < pass.count && j < 8; ++j)
         if (const Texture *t = pass.color[j].texture;
-            t && (backed(*t) || t->shadowTarget || (blockLinear && !t->blockLinear)))
+            t && (backed(*t) || t->shadowTarget || t->zetaPages || (blockLinear && !t->blockLinear)))
             scratchMask |= uint8_t(1u << j);
     const auto scratchTags = transientColorTags(scratchMask);
     for (uint32_t j = 0; j < pass.count && j < 8; j++) {
@@ -4501,22 +4923,24 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass)
         if (!t)
             continue;
         if (!t->renderable && !t->shadowTarget)
-            return nullptr;
+            return refused("a colour attachment the raw path does not render to (pass.fmt's at record)");
         const bool mixed = blockLinear && !t->blockLinear && !backed(*t);
-        if ((t->shadowTarget && !backed(*t)) ||
+        if (((t->shadowTarget || t->zetaPages) && !backed(*t)) ||
             mixed) {  // rendered through a pool image (end(): copied in before, back after)
             RAW_DIAGNOSTIC(dev_->stats.xrPlaneShadows += t->xrPlane != 0);
             if (mixed) {
                 RAW_DIAGNOSTIC(dev_->stats.rtMixed++);
-            } else {
+            } else if (t->shadowTarget) {
                 RAW_DIAGNOSTIC(dev_->stats.rtUnaligned++);
                 RAW_DIAGNOSTIC(dev_->stats.rtUnalignedPitch = t->pitch);
                 RAW_DIAGNOSTIC(dev_->stats.rtUnalignedVa = uint32_t(t->va & 255));
             }
+            // a zeta's view takes plain memory: gpu.x1.ce_compressed proved the copy engine over compressed BGRA8 and
+            // RGBA16Float texels, not over a zeta's depth bits and stencil
             Texture *b = backing(*t, scratchTags[j], blockLinear,
-                                 dev_->storageCompressedOk() || !(pass.storageMask >> j & 1), true);
+                                 !t->zetaPages && (dev_->storageCompressedOk() || !(pass.storageMask >> j & 1)), true);
             if (!b || !b->renderable)
-                return nullptr;
+                return refused(kNoMemory);
             e.pass_.color[j].texture = b;
             e.shadowOf_[j] = t;
             backings_.push_back(b);
@@ -4526,7 +4950,7 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass)
             Texture *b = backing(layered(planeShaped(*t, e.rot_)), scratchTags[j], blockLinear,
                                  layers == 1 && (dev_->storageCompressedOk() || !(pass.storageMask >> j & 1)));
             if (!b)
-                return nullptr;
+                return refused(kNoMemory);
             e.pass_.color[j].texture = b;
             e.memoryless_[j] = true;
             backings_.push_back(b);
@@ -4535,30 +4959,34 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass)
     if (hidden) {
         Texture *b = backing(e.hiddenZetaShape(pass), 0, false, true);
         if (!b)
-            return nullptr;
+            return refused(kNoMemory);
         e.pass_.depthStencil = {b, true, true, 1.0f, 0};
         e.hiddenZeta_ = true;
         backings_.push_back(b);
     }
-    if (const Texture *depth = pass.separate.depth) {
+    if (const Texture *stencil = pass.separate.stencil) {
         constexpr uint32_t kRG8Unorm = 30;
         Texture shape;
-        shape.width = depth->width;
-        shape.height = depth->height;
-        shape.samples = depth->samples;
+        shape.width = stencil->width;
+        shape.height = stencil->height;
+        shape.samples = stencil->samples;
         shape.layers = layers;
         shape.format = kZetaFormat;
         shape.zeta = shape.memoryless = true;
-        Texture *b = backing(shape, Device::kSeparateZetaTag, false, true, true);
+        // a Depth16Unorm's pair names no depth here: the caller hands the pass a converted scratch (depthConvert)
+        Texture *b = pass.separate.depth ? backing(shape, Device::kSeparateZetaTag, false, true, true) : nullptr;
         shape.format = kRG8Unorm;
         shape.zeta = false;
-        Texture *temporary = b ? backing(shape, Device::kSeparateTempTag, true, false, true) : nullptr;
+        Texture *temporary =
+            b || !pass.separate.depth ? backing(shape, Device::kSeparateTempTag, true, false, true) : nullptr;
         if (!temporary)
-            return nullptr;
-        e.pass_.depthStencil.texture = b;
+            return refused(kNoMemory);
+        if (b) {
+            e.pass_.depthStencil.texture = b;
+            backings_.push_back(b);
+        }
         e.separate_ = pass.separate;
         e.separateTemp_ = temporary;
-        backings_.push_back(b);
         backings_.push_back(temporary);
     }
     if (backingLock.owns_lock())
@@ -4586,10 +5014,11 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass)
         e.areaW_ = std::min(e.areaW_, pass.width);
     if (pass.height)
         e.areaH_ = std::min(e.areaH_, pass.height);
+    // (a separate depth and stencil pair renders a scratch zeta of the pass's, which keeps zcull off)
     ZcullAsk zask;
     zask.on = dev_->zcullOn_;
-    zask.depth = zeta && !pass.separate.depth && zetaHasDepth(zeta->format);
-    zask.cleared = pass.depthStencil.clearDepth;
+    zask.depth = zeta && !pass.separate.stencil && zetaHasDepth(zeta->format);
+    zask.cleared = pass.depthStencil.clearDepth && !std::isnan(pass.depthStencil.depth);
     zask.layers = layers;
     zask.zetaLayers = zeta ? std::max(zeta->layers, 1u) : 1;
     zask.atStorageBase = zeta && (!zeta->storage.va || zeta->va == zeta->storage.va);
@@ -4648,6 +5077,13 @@ void CommandBuffer::releaseEvent(uint64_t va, uint32_t payload)
 #endif
 }
 
+uint64_t CommandBuffer::transient(uint32_t bytes)
+{
+    uint64_t va = 0;
+    dev_->alloc(dev_->upload_, std::max(bytes, 16u), 256, va);
+    return va;
+}
+
 BlitEncoder *CommandBuffer::blit()
 {
     BlitEncoder &e = blit_;
@@ -4678,7 +5114,7 @@ Texture::StorageRange Texture::storageRange() const
     if (storage.bytes)
         return storage;
     if (span.bytes)
-        return {span.va, span.bytes, false};
+        return {span.va, span.bytes, false, span.storage};
     if (chain)
         return {chain->va, chain->layout.bytes, false};
     if ((blockLinear || nativeGeneration) && layerBytes && layers && layerBytes <= UINT64_MAX / layers)
@@ -4819,6 +5255,7 @@ void CommandBuffer::foldCounts()
     stats.segmentCopies += counts_.segmentCopies;
     stats.blendKillBinds += counts_.blendKillBinds;
     stats.interlockDraws += counts_.interlockDraws;
+    stats.rasterOrderedDraws += counts_.rasterOrderedDraws;
     stats.fetch.interlocked += counts_.interlocked;
     stats.fetch.interlockedBlends += counts_.interlockedBlends;
     stats.fetch.twinRule += counts_.twinRule;
@@ -4829,8 +5266,45 @@ void CommandBuffer::foldCounts()
 }
 #endif
 
+void CommandBuffer::describeRefusal(char *line, size_t size) const
+{
+    if (!setRefused.empty())
+        snprintf(line, size, "%s", setRefused.c_str());
+    else if (kernelResult)
+        snprintf(line, size, "the kernel refused its job (0x%x)", unsigned(kernelResult));
+    else
+        snprintf(line, size, "%s", notSubmitted ? notSubmitted : "nothing named why");
+}
+
+// One error line a commit that submits nothing more for a reason its caller does not take up again (the CPU holding a
+// use, a native surface changed under it): the first 16, then every 256th
+static void logNotSubmitted(const CommandBuffer &cb)
+{
+    if (cb.kernelResult == kIOReturnCannotLock || (cb.nativeError && cb.kernelResult == cb.nativeError))
+        return;
+    static std::atomic<uint32_t> lines{0};
+    const uint32_t n = lines.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (n > 16 && n % 256)
+        return;
+    char why[192];
+    cb.describeRefusal(why, sizeof why);
+    os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
+                 "raw: a command buffer not submitted: %{public}s (#%u)", why, n);
+}
+
 bool CommandBuffer::commit(uint32_t &seqno)
 {
+    struct NotSubmittedLine {
+        const CommandBuffer &cb;
+        bool submitted = false;
+
+        ~NotSubmittedLine()
+        {
+            if (!submitted && (cb.kernelResult || cb.notSubmitted || !cb.setRefused.empty()))
+                logNotSubmitted(cb);
+        }
+    } notSubmittedLine{*this};
+
     RAW_ENCODE_SPAN(Commit);
     RAW_ENCODE_COUNT(GeometryVertices, GeometryBudget().vertices - geometryBudget_.vertices);
     if (nativeError)
@@ -4851,8 +5325,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
     d.heldSegment_.lose();
     launchPrologues();
     if (d.overflowing_) {
-        os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
-                     "raw: a command buffer larger than its ring, with no memory for a larger one: not submitted");
+        notSubmitted = "a command buffer larger than its ring, with no memory for a larger one";
         return false;
     }
     bool invalidates = false, published = false;
@@ -4946,13 +5419,18 @@ bool CommandBuffer::commit(uint32_t &seqno)
             nameHeaps();
         }
     }
-    if (geometryWritable())
+    if (geometryWritable()) {
+        notSubmitted = surfaces_.valid() ? "a write of the geometry the CPU read"
+                                         : "a job's uses past what one job names, or a use of no backing";
         return false;  // later internal writes invalidate the CPU proof; no prefix may reach the GPU
+    }
     if (!batchWork_.operations)
         segments_.includeTail();
     const uint32_t maxPushes = d.k_.maxPushes(), maxFences = d.k_.maxFences();
-    if (!segments_.valid(maxPushes))
+    if (!segments_.valid(maxPushes)) {
+        notSubmitted = "a continuation group past the pushes one job takes";
         return false;  // validate all indivisible continuation groups before publishing any prefix
+    }
     // A command buffer of several jobs holds its shared uses' CPU-lock admission from its first job to its last
     const bool multiple = (!segments_.empty() && segments_.submission(0, maxPushes, maxFences) < segments_.size()) ||
                           sharedWaits_.size() + sharedSignals_.size() > TegraGM20BMaxJobEvents;
@@ -4975,7 +5453,13 @@ bool CommandBuffer::commit(uint32_t &seqno)
                   memberRemovals_, invalidates || memberHostWritten_ || tablesInvalidate, admission, admissionFlags,
                   !last || quietEnd, last && !promises.empty() ? &promises : nullptr);
         RAW_ENCODE_END(execSpan);
+        if (executed && last && quietEnd && raw::jobKeptLoud())
+            quietEnd = false;
         if (!executed) {
+            if (!uses.valid())
+                notSubmitted = "a job's uses past what one job names, or a use of no backing";
+            else
+                kernelResult = result;
             admissionBlocked = !published && result == kIOReturnCannotLock;
             setRefused = d.setView_.refused;
             if (admissionHeld) {
@@ -4990,7 +5474,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
                 nativeError = result;
             if (published) {
                 partial = true;
-                d.wait(d.lastSeqno_);
+                d.wait(d.lastSubmitted());
                 d.contextless_ = true;
             }
             return false;
@@ -4998,7 +5482,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
         published = true;
         promisesKept |= last && !promises.empty();
         admissionHeld = admission && !last;
-        d.lastSeqno_ = seq;
+        d.submittedThrough(seq);
         return true;
     };
     SurfaceList eventResources;
@@ -5050,7 +5534,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
         waited += waitCount;
         signaled += signalCount;
     }
-    seqno = d.lastSeqno_;
+    seqno = d.lastSubmitted();
 #if SWITCH_RAW_DIAGNOSTICS
     if (glassMemSlot_ >= 0) {
         d.glassMemCbs_[glassMemSlot_].seqno = seqno;
@@ -5067,6 +5551,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
     d.restart_ = restart_;
     d.rtLayer_ = rtLayer_;
     d.alphaHeld_ = alphaHeld_;
+    d.sampleMaskHeld_ = sampleMaskHeld_;
     d.ds_ = ds_;
     d.extrasLive_ = extrasLive_;
     d.heldSegment_ = heldSegment_;
@@ -5082,6 +5567,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
     d.noteCommittedTimings(timings);
     releaseNativeReads();
     RAW_DIAGNOSTIC(d.stats.commits++);
+    notSubmittedLine.submitted = true;
     return true;
 }
 
@@ -5178,7 +5664,7 @@ void CommandBuffer::abandon()
         r->head = r->since = (r == &d.push_ ? pushStart_ : uploadStart_);
         if (!r->outgrown.empty()) {  // it began in a ring it grew out of: the new one is empty
             for (const Bo &b : r->outgrown)
-                d.grownOut_.push_back({b, d.lastSeqno_, d.channelGeneration()});
+                d.grownOut_.push_back({b, d.lastSubmitted(), d.channelGeneration()});
             r->outgrown.clear();
             r->head = r->since = 0;
         }
@@ -5263,6 +5749,8 @@ void RenderEncoder::setBytes(int stage, uint32_t slot, const void *bytes, uint32
     memset(m + length, 0, (chunk ? chunk : kUboChunk) - length);
     bufs_[stage][slot] = {va, length, nullptr, 0,
                           m};  // m2v binds the Metal length (its upload chunks are 256-byte aligned)
+    if (kCaSelectorConfigs && stage == 2 && slot == kCaSelectorSlot)
+        selectorId_ = pipeline_ && pipeline_->selectorLayout() ? caSelectorId(m, length) : UINT16_MAX;
     bufs_[stage][slot].resourceVa = dev_->upload_.bo.va;
     bufs_[stage][slot].named = true;
     bufferMoved(stage, slot);
@@ -5279,6 +5767,8 @@ void RenderEncoder::setBytesAt(int stage, uint32_t slot, uint64_t va, uint32_t l
     if (old.va == va && old.size == length && !old.buffer && old.cpu == cpu && old.resourceVa == resourceVa)
         return;
     bufs_[stage][slot] = {va, length, nullptr, 0, cpu, resourceVa, allocation != nullptr};
+    if (kCaSelectorConfigs && stage == 2 && slot == kCaSelectorSlot)
+        selectorId_ = pipeline_ && pipeline_->selectorLayout() ? caSelectorId(cpu, length) : UINT16_MAX;
     if (allocation) {
         cb_->use(*allocation, false);
         if (allocation->hostVisible && !allocation->wc)
@@ -5291,6 +5781,8 @@ void RenderEncoder::setBuffer(int stage, uint32_t slot, const Buffer *b, uint64_
 {
     if (slot >= 31 || stage < 1 || stage > 2)
         return;
+    if (stage == 2 && slot == kCaSelectorSlot)
+        selectorId_ = 0;
     const Bound next =
         b ? Bound{b->va + offset, uint32_t(std::min<uint64_t>(b->length - std::min(offset, b->length), 0xffffffffu)), b,
                   offset, b->cpu && offset < b->length ? b->cpu + offset : nullptr}
@@ -5500,7 +5992,7 @@ bool RenderEncoder::draw(uint32_t primitive, uint32_t first, uint32_t count, uin
             const bool prepared = prepare(pl, primitive, first + begin, first + begin, end - begin, false, why);
             raster_.winding ^= reverse;
             if (!prepared)
-                return false;
+                return skippedDraw();
             if (drawnWhole(*pl)) {
                 wholeDraw(*pl, false, first + begin, end - begin, 1, first + begin, baseInstance);
                 finishDraw(end - begin, 1);
@@ -5512,7 +6004,7 @@ bool RenderEncoder::draw(uint32_t primitive, uint32_t first, uint32_t count, uin
         return true;
     }
     if (!prepare(pl, primitive, first, first, count, false, why))
-        return false;
+        return skippedDraw();
     cb_->draws += amplifies() ? amplifications_ : 1;
     const uint32_t drawnInstances = amplifies() ? instances * amplifications_ : instances;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -5622,7 +6114,7 @@ Pipeline *RenderEncoder::fetchFreeFor(const Pipeline &pl)
         return nullptr;
     const uint64_t blended = __atomic_load_n(&t->ropBlendSerial, __ATOMIC_RELAXED);
     FetchFreeDraw draw = {t->format, t->storage.hostVisible && !t->import, ropLayers_[f.colour]};
-    draw.eightBitSources = eightBitSamples(f.sampledSlots, textures_[1]);
+    draw.eightBitSources = !f.samplesPast32 && eightBitSamples(f.sampledSlots, textures_[1]);
     draw.accumulates = pass_.color[f.colour].load == ColorAttachment::Load && !(covered_ >> f.colour & 1) && blended &&
                        blended != cb_->serial;
     uint8_t forced = 0;
@@ -5709,10 +6201,14 @@ bool RenderEncoder::drawIndexed(uint32_t primitive, uint32_t count, uint32_t ind
     readBits_ |= pl->fetchBits;
     if (!count || !instances)
         return true;
-    if (!ib || (indexSize != 2 && indexSize != 4) || !ib->cpu) {
-        *why = "an indexed draw the raw path does not take";
-        cb_->refusal = {RefIndexedRange, uint32_t(offset), indexSize,
-                        ib ? uint32_t(std::min<uint64_t>(ib->length, ~0u)) : 0};
+    if (!ib || (indexSize != 2 && indexSize != 4)) {
+        cb_->skipped = {RefIndexedRange, uint32_t(offset), indexSize, 0};
+        cb_->skips++;
+        return true;
+    }
+    if (!ib->cpu) {
+        *why = "an index buffer with no raw memory";
+        cb_->refusal = {RefIndexMemory, uint32_t(offset), uint32_t(std::min<uint64_t>(ib->length, ~0u))};
         return false;
     }
     // Metal's fetch (m2v render.rs draw_indexed_primitives, measured): the offset's low 32 bits rounded down to the index size,
@@ -5750,9 +6246,9 @@ bool RenderEncoder::drawIndexed(uint32_t primitive, uint32_t count, uint32_t ind
         drawIndexBuffer_ = nullptr;  // the CPU reads no index past the buffer's end (an unbounded draw)
     } else if (count > inside) {
         if (inside && !cb_->acquireGeometry(*ib, ib->cpu + offset, inside * indexSize)) {
-            *why = "index padding requires available CPU read ownership";
-            cb_->refusal = {RefIndexedRange, uint32_t(offset), indexSize, count};
-            return false;
+            cb_->skipped = {RefIndexedRange, uint32_t(offset), indexSize, count};
+            cb_->skips++;
+            return true;
         }
         const uint64_t bytes = uint64_t(count) * indexSize;
         uint8_t *m =
@@ -5802,7 +6298,7 @@ bool RenderEncoder::drawIndexed(uint32_t primitive, uint32_t count, uint32_t ind
         raster_.winding ^= reverse;
         drawIndices_ = nullptr;
         if (!prepared)
-            return false;
+            return skippedDraw();
         const uint64_t va = ib->va + offset, last = va + indexLimit - 1;
         if (va != ibVa_ || last != ibEnd_ || indexSize != ibSize_) {
             p_.inc(INDEX_BUFFER_A, {uint32_t(va >> 32), uint32_t(va), uint32_t(last >> 32), uint32_t(last)});
@@ -5841,21 +6337,25 @@ bool RenderEncoder::indirect(uint32_t primitive, bool indexed, const Buffer *arg
         return false;
     }
     const uint32_t bytes = indexed ? 20 : 16;
-    if (!arguments || !arguments->va || (offset & 3) || offset > arguments->length ||
-        arguments->length - offset < bytes) {
-        *why = "indirect arguments outside their buffer or not four-byte aligned";
-        return false;
+    if (!arguments || !arguments->va || (offset & 3)) {
+        cb_->skipped = {RefIndexedRange, uint32_t(offset), bytes, 0};
+        cb_->skips++;
+        return true;
     }
+    // arguments past their buffer read as zeros, never the memory after it
+    const uint32_t inside = argumentWordsInside(arguments->length, offset, bytes / 4);
     called_ = true;
     indirectGeometry_ = true;
     const bool prepared = prepare(form, primitive, 0, 0, UINT32_MAX, indexed, why);
     indirectGeometry_ = false;
     if (!prepared)
-        return false;
-    cb_->use(*arguments, false);
-    if (arguments->hostVisible && !arguments->wc && arguments->cpu)
-        cb_->clean(arguments->cpu + offset, bytes);
-    if (p_.room() < 8 + mme::kAmplificationScratchWords + mme::kAmplifyCallWords)
+        return skippedDraw();
+    if (inside) {
+        cb_->use(*arguments, false);
+        if (arguments->hostVisible && !arguments->wc && arguments->cpu)
+            cb_->clean(arguments->cpu + offset, inside * 4);
+    }
+    if (p_.room() < 8 + bytes / 4 + mme::kAmplificationScratchWords + mme::kAmplifyCallWords)
         reserve();
     // Prior shader writes must reach the command fetcher; NO_PREFETCH on the argument entry prevents early fetch.
     p_.m(WAIT_FOR_IDLE, 0);
@@ -5868,11 +6368,15 @@ bool RenderEncoder::indirect(uint32_t primitive, bool indexed, const Buffer *arg
     } else {
         mme::indirectHeader(p_, indexed);
     }
-    bodies_.push_back({bodyStart_, p_.at, 0, 0, true});
-    bodies_.push_back(PushBody::resident(arguments->va + offset, bytes / 4, TegraGM20BPushNoPrefetch));
-    dev_->push_.head = uint64_t(reinterpret_cast<uint8_t *>(p_.at) - dev_->push_.bo.cpu);
-    bodyStart_ = nullptr;
-    reserve();
+    if (inside) {
+        bodies_.push_back({bodyStart_, p_.at, 0, 0, true});
+        bodies_.push_back(PushBody::resident(arguments->va + offset, inside, TegraGM20BPushNoPrefetch));
+        dev_->push_.head = uint64_t(reinterpret_cast<uint8_t *>(p_.at) - dev_->push_.bo.cpu);
+        bodyStart_ = nullptr;
+        reserve();
+    }
+    for (uint32_t k = inside; k < bytes / 4; k++)
+        *p_.at++ = 0;
     params_.unknown = true;
     cb_->draws += amplifies() ? amplifications_ : 1;
     finishDraw(0, 0, true);
@@ -5890,15 +6394,22 @@ bool RenderEncoder::drawIndexedIndirect(uint32_t primitive, uint32_t indexSize, 
 {
     if (!pipeline_)
         return true;
-    if (!indices || !indices->va || (indexSize != 2 && indexSize != 4) || indexOffset > indices->length ||
-        indices->length - indexOffset < indexSize || indexOffset % indexSize) {
-        *why = "an indirect draw has no valid aligned index buffer range";
-        return false;
+    if (!indices || !indices->va || (indexSize != 2 && indexSize != 4) || indexOffset % indexSize) {
+        cb_->skipped = {RefIndexedRange, uint32_t(indexOffset), indexSize, 0};
+        cb_->skips++;
+        return true;
     }
+    // An offset at or past the end, which Metal's validation takes: index 0 at every position, as NVK binds an empty
+    // range (nvk_mme_bind_ib), from the zero page and past its limit (3D-B11)
+    const bool inside = indexOffset <= indices->length && indices->length - indexOffset >= indexSize;
     if (p_.room() < 16)
         reserve();
-    cb_->use(*indices, false);
-    const uint64_t va = indices->va + indexOffset, last = indices->va + indices->length - 1;
+    if (inside)
+        cb_->use(*indices, false);
+    else
+        cb_->useAddress(dev_->zero_.va, dev_->zero_.bytes, false);
+    const uint64_t va = inside ? indices->va + indexOffset : dev_->zero_.va,
+                   last = inside ? indices->va + indices->length - 1 : dev_->zero_.va + dev_->zero_.bytes - 1;
     p_.inc(INDEX_BUFFER_A, {uint32_t(va >> 32), uint32_t(va), uint32_t(last >> 32), uint32_t(last)});
     cb_->restart_ = indexSize == 2 ? 0xffffu : 0xffffffffu;
     p_.m(DA_PRIMITIVE_RESTART_INDEX, cb_->restart_);
@@ -5906,7 +6417,7 @@ bool RenderEncoder::drawIndexedIndirect(uint32_t primitive, uint32_t indexSize, 
     ibVa_ = va;
     ibEnd_ = last;
     ibSize_ = indexSize;
-    if (indices->hostVisible && !indices->wc && indices->cpu)
+    if (inside && indices->hostVisible && !indices->wc && indices->cpu)
         cb_->clean(indices->cpu + indexOffset, indices->length - indexOffset);
     return indirect(primitive, true, arguments, argumentOffset, why);
 }
@@ -5930,19 +6441,25 @@ bool RenderEncoder::executeSlots(const IcbExecute &x, const char **why)
     const uint64_t slotBytes = uint64_t(x.slotWords) * 4, offset = x.first * slotBytes, bytes = x.count * slotBytes;
     if (!x.slots->va || offset > x.slots->length || x.slots->length - offset < bytes) {
         *why = "indirect command buffer commands outside its memory";
+        cb_->refusal = {RefCommandsRange, x.first, x.count,
+                        uint32_t(std::min<uint64_t>(x.slots->length / std::max<uint64_t>(slotBytes, 1), ~0u))};
         return false;
     }
     if (x.range && (!x.range->va || (x.rangeOffset & 3) || x.rangeOffset > x.range->length ||
                     x.range->length - x.rangeOffset < 8)) {
         *why = "an indirect command buffer's execution range outside its buffer or not four-byte aligned";
+        cb_->refusal = {RefCommandsRangeBuffer, uint32_t(std::min<uint64_t>(x.rangeOffset, ~0u)),
+                        x.range ? uint32_t(std::min<uint64_t>(x.range->length, ~0u)) : 0};
         return false;
     }
     called_ = true;
     indirectGeometry_ = true;
     const bool prepared = prepare(form, x.primitive, 0, 0, UINT32_MAX, x.indexed, why);
     indirectGeometry_ = false;
+    if (!prepared)
+        return skippedDraw();
     const bool patches = x.primitive == icb::kPatchPrimitive;
-    if (!prepared || (patches && !icbPatchLayout(why)))
+    if (patches && !icbPatchLayout(why))
         return false;
     cb_->use(*x.slots, false);
     if (x.slots->hostVisible && !x.slots->wc && x.slots->cpu)
@@ -5983,8 +6500,13 @@ bool RenderEncoder::executeSlots(const IcbExecute &x, const char **why)
     }
     if (patches)
         icbPatchesDone();
+    // the commands set the polygon offset of their own kinds (icb::polygonOffset)
+    p_.m(NVB197_SET_POLY_OFFSET_POINT, rasterHeld_.bias);
+    p_.m(NVB197_SET_POLY_OFFSET_LINE, rasterHeld_.bias);
+    p_.m(NVB197_SET_POLY_OFFSET_FILL, rasterHeld_.bias);
     topology_ = restart_ = ~0u;
     cb_->alphaHeld_ = kAlphaControlUnknown;
+    cb_->sampleMaskHeld_ = kSampleMaskUnknown;
     ibVa_ = ibEnd_ = ~uint64_t(0);
     ibSize_ = 0;
     params_.unknown = true;
@@ -6136,9 +6658,9 @@ void RenderEncoder::probeDraw(const Pipeline &bound, Pipeline &drawn, uint32_t p
         used += std::min(room - 1, size_t(std::max(n, 0)));
     }
     uint32_t sampledSlots = 0;
-    for (uint32_t k = 0; k < rec.entries && k < kPackEntries; k++)
-        if (rec.entry[k].kind == EntryTexture && rec.entry[k].stage == 2 && rec.entry[k].slot < 16)
-            sampledSlots |= 1u << rec.entry[k].slot;
+    for (uint32_t k = 0; k < drawn.entries.size(); k++)
+        if (drawn.entries[k].kind == EntryTexture && drawn.entries[k].stage == 2 && drawn.entries[k].slot < 16)
+            sampledSlots |= 1u << drawn.entries[k].slot;
     char sampled[16 * 48], left[2 * 48] = "-", colour[64] = "-";
     describeTextures(sampled, sizeof sampled, textures_[1], sampledSlots);
     if (!sampledSlots)
@@ -6182,16 +6704,16 @@ void RenderEncoder::probeGlassDraw(const Pipeline &bound, const Pipeline &drawn,
             at += std::min(sizeof attachments - at - 1, size_t(std::max(n, 0)));
         }
     at = 0;
-    for (uint32_t k = 0; k < rec.entries && k < kPackEntries && at + 1 < sizeof sampled; k++)
-        if (const PackEntry &e = rec.entry[k];
+    for (uint32_t k = 0; k < drawn.entries.size() && at + 1 < sizeof sampled; k++)
+        if (const PackEntry &e = drawn.entries[k];
             e.kind == EntryTexture && e.stage == 2 && e.slot < 16 && textures_[1][e.slot]) {
             at += at ? size_t(snprintf(sampled + at, sizeof sampled - at, " ")) : 0;
             const int n = glassProbeTexture(sampled + at, sizeof sampled - at, e.slot, *textures_[1][e.slot]);
             at += std::min(sizeof sampled - at - 1, size_t(std::max(n, 0)));
         }
     at = 0;
-    for (uint32_t k = 0; k < rec.entries && k < kPackEntries && at + 1 < sizeof uniforms; k++)
-        if (const PackEntry &e = rec.entry[k]; e.kind == EntryUbo && !bufferStorage(e)) {
+    for (uint32_t k = 0; k < drawn.entries.size() && at + 1 < sizeof uniforms; k++)
+        if (const PackEntry &e = drawn.entries[k]; e.kind == EntryUbo && !bufferStorage(e)) {
             const Bound &b = bufs_[e.stage][e.slot];
             at += at ? size_t(snprintf(uniforms + at, sizeof uniforms - at, " ")) : 0;
             const int n = glassProbeUniform(uniforms + at, sizeof uniforms - at, e.stage, e.slot, b.cpu, b.size);
@@ -6219,9 +6741,8 @@ void RenderEncoder::probeGlassDraw(const Pipeline &bound, const Pipeline &drawn,
 // them), and the copy engine reads plain memory only: a compressed binding hands it compressed bytes (raw_comp.h).
 void RenderEncoder::glassMemSample(const Pipeline &bound, const Pipeline &drawn)
 {
-    const PackPipeline &rec = *drawn.rec;
-    for (uint32_t k = 0; k < rec.entries && k < kPackEntries; k++) {
-        const PackEntry &e = rec.entry[k];
+    for (uint32_t k = 0; k < drawn.entries.size(); k++) {
+        const PackEntry &e = drawn.entries[k];
         if (e.kind != EntryTexture || e.stage != 2 || e.slot >= 16 || !textures_[1][e.slot])
             continue;
         const Texture &t = *textures_[1][e.slot];
@@ -6356,23 +6877,224 @@ uint64_t RenderEncoder::rootTable(const PackPipeline &r, uint32_t k, bool writes
     return va;
 }
 
+// Set-0 entry `e` of `pl` into `set`, its buffer's bind residual into `prepared`; false: the draw is refused (`why`)
+__attribute__((always_inline)) inline bool RenderEncoder::writeSetEntry(Pipeline *pl, const PackEntry &e, uint32_t *set,
+                                                                        SetResiduals &prepared, const char **why)
+{
+    Device &d = *dev_;
+    const PackPipeline &r = *pl->rec;
+    uint32_t *at = set + e.offset / 4;
+    if (e.kind == EntrySpillTable)
+        return true;
+    if (e.kind == EntryColorTable) {
+        at[0] = uint32_t(d.colorTable_.va);
+        at[1] = uint32_t(d.colorTable_.va >> 32);
+        at[2] = kColorTableBytes;
+        at[3] = 0;
+        return true;
+    }
+    if (e.kind == EntryTextureTable || e.kind == EntrySamplerTable) {
+        const bool textures = e.kind == EntryTextureTable;
+        const uint64_t va = textures ? d.heapTables_.textureTableVa() : d.heapTables_.samplerTableVa();
+        at[0] = uint32_t(va);
+        at[1] = uint32_t(va >> 32);
+        at[2] = textures ? d.heapTables_.textureTableBytes() : d.heapTables_.samplerTableBytes();
+        at[3] = 0;
+        return true;
+    }
+    if (e.kind == EntryUbo || e.kind == EntryTessBuffer) {
+        const Bound b = e.kind == EntryUbo ? bufs_[e.stage][e.slot] : tessBuffer(e.slot);
+        if (bufferStorage(e))
+            cb_->bufferWrites_.note(b.va, b.size);
+        if (b.buffer)
+            cb_->use(*b.buffer, bufferStorage(e));
+        else if (!b.named || bufferStorage(e))
+            cb_->useAddress(b.va, b.size, bufferStorage(e));
+        BufferDescriptor desc;
+        if (!bufferDescriptor(e, b.va, b.size, desc)) {
+            *why = bufferStorage(e) ? "a storage buffer bound at an offset that is not a multiple of 16, with no "
+                                      "residual push word"
+                                    : "a uniform buffer bound at an offset that is not a multiple of 256, with no "
+                                      "residual push word";
+            cb_->refusal = {RefUboOffset, uint32_t(e.stage) << 8 | e.slot, desc.residual,
+                            uint32_t(std::min<uint64_t>(b.offset, ~0u))};
+            return false;
+        }
+        // a word that held a residual takes the slot's next one even where it is 0: the set keeps its
+        // words from the draws before
+        if (const int word = bufferResidualWord(e); spilledWord(word)) {
+            prepared.spilled[e.stage == 1 ? 0 : 1].set(word, desc.residual);
+        } else if (word >= 0 && (desc.residual || (prepared.residualMask >> word & 1))) {
+            prepared.residuals[word] = desc.residual;
+            prepared.residualMask |= 1u << word;
+        }
+        if (b.buffer && b.buffer->hostVisible && !b.buffer->wc)
+            cb_->clean(b.buffer->cpu + b.offset, std::min<uint64_t>(desc.range - desc.residual, b.size));
+#if SWITCH_RAW_DIAGNOSTICS
+        if (pl->uniformProbe && b.cpu)
+            probeUniforms(*pl, e.stage, e.slot, b.cpu, std::min<uint64_t>(desc.range - desc.residual, b.size));
+#endif
+        at[0] = uint32_t(desc.base);
+        at[1] = uint32_t(desc.base >> 32);
+        at[2] = b.va ? desc.range : 0;
+        at[3] = 0;
+        return true;
+    }
+    RAW_ENCODE_SPAN(Textures);
+    uint32_t tic = 0, tsc = 0;
+    if (e.kind == EntryStencilTest && shadowStencil(r.shaderTests) && !(r.shaderTests.flags & kShaderTestStencil)) {
+        tic = 0;  // a shader-side stencil's program in a pass with no stencil tests none (m2v's neutral)
+    } else if (e.kind == EntryDepthTest || e.kind == EntryStencilTest) {
+        const bool depth = e.kind == EntryDepthTest;
+        const Texture *t = depth ? shaderDepth_ : shaderStencil_;
+        const uint32_t view = depth ? r.shaderTests.depthTic : r.shaderTests.stencilTic;
+        if (t && layeredRecord(r.arrayLengthWord) && pass_.layers > 1) {
+            AttachmentView layers;
+            layers.word0 = view;
+            layers.layers = pass_.layers;
+            layers.arrayed = true;
+            tic = texelBytes(view) == t->bpp ? passViewTic(*t, layers, why) : 0;
+        } else if (t && texelBytes(view) == t->bpp) {
+            tic = passViewTic(*t, view);
+        }
+        if (!t || t->samples != samples_ || !tic) {
+            *why = "an unavailable native shader depth/stencil view";
+            cb_->refusal = {RefDepthStencil, e.kind, t ? t->format : 0, samples_};
+            return false;
+        }
+        cb_->use(*t, true);
+    } else if (e.kind == EntryTexture) {
+        const Texture *t = boundTexture(e);
+        if (t && !t->tic) {
+            *why = "a texture the raw path cannot sample";
+            cb_->refusal = {RefNoTic, e.slot, t->format, t->width};
+            return false;
+        }
+        // a two-plane texture's header pair where the program reads it so, else its stand-in
+        const bool xrSlot = e.stage == 2 && xrPairSlot(pl->xrSlots, e.slot);
+        const bool pair = t && t->xrPlanes && xrSlot;
+        if (!pair && xrSlot) {
+            *why = "a state that reads a two-plane texture's header pair drawn without one";
+            cb_->refusal = {RefNoTic, e.slot, t ? t->format : 0, t ? t->width : 0};
+            return false;
+        }
+        const bool written = handleStage(e) == 1 && writtenSlot(pl->writtenSlots, e.slot);
+        const Texture *image = written && t && t->xrPlanes ? pass_.writtenImage(*t) : nullptr;
+        if (written && t && t->xrPlanes && !image) {
+            *why = "a written RGB10A8_2P_XR10 texture held in its two planes with no image";
+            cb_->refusal = {RefWrittenPlanes, e.slot};
+            return false;
+        }
+        if (written && t && t->format != pl->rec->writtenFormat[e.slot]) {
+            *why = "a written texture of another format than its program stores";
+            cb_->refusal = {RefWrittenTexture, e.slot, t->format, pl->rec->writtenFormat[e.slot]};
+            return false;
+        }
+        // A written texture is stored through tic: its own memory, or the sampled shadow that stands for
+        // rows its header cannot address, which the frontend copies back after the pass; its stand-in is
+        // drawn again from the codes before work after the pass samples it (RawMetalEncode.mm)
+        if (pair) {
+            cb_->use(*t->luma, false);
+            cb_->use(*t->chroma, false);
+            RAW_DIAGNOSTIC(dev_->stats.xrPairBinds++);
+        } else if (image) {
+            cb_->use(*image, true);
+        } else if (t && written) {
+            cb_->use(t->sampled ? *t->sampled : *t, true);
+        } else if (t) {
+            cb_->use(t->standIn ? *t->standIn : t->sampled ? *t->sampled : *t, false);
+        }
+        tic = !t ? 0 : image ? image->tic : pair ? t->tic : t->standIn && !written ? t->standIn->tic : t->tic;
+    } else if (e.kind == EntryFetch) {
+        const ColorAttachment &a = pass_.color[e.slot];
+        const Texture *t = a.texture;
+        const bool storage = t && (pl->storageBits >> e.slot & 1);
+        if (storage && storageViewMismatch(texelBytes(pl->storageTic[e.slot]), pl->rec->storageSamples, *t,
+                                           dev_->storageCompressedOk()) != StorageFallback::None) {
+            *why = "an incompatible framebuffer storage view";
+            cb_->refusal = {RefStorageView, e.slot, t->format, t->width};
+            return false;
+        }
+        if (t) {
+            cb_->use(*t, pl->storageWriteBits >> e.slot & 1);
+            tic = fetchTic(a, storage ? pl->storageTic[e.slot] : 0, layeredRecord(pl->rec->arrayLengthWord), why);
+            if (!tic) {
+                cb_->refusal = {storage ? RefStorageView : RefNoTic, e.slot, t->format, t->width};
+                return false;
+            }
+        }
+    } else if (e.kind == EntryXrShadow) {
+        const Texture *shadow = e.slot < 8 ? pass_.xrShadow[e.slot] : nullptr;
+        if (!shadow || !shadow->tic) {
+            *why = "an extended-range shadow's variant drawn in a pass that holds no shadow of the colour";
+            cb_->refusal = {RefStorageView, e.slot, 0, 0};
+            return false;
+        }
+        cb_->use(*shadow, true);
+        tic = shadow->tic;
+    } else if (e.kind == EntryTexture3d) {
+        // a texture of another type there is no binding of the argument: m2v writes its neutral, raw an empty handle
+        const Texture *bound = boundTexture(e);
+        const Texture *t = bound && bound->type == fx::kTexThreeD ? bound : nullptr;
+        if (t && !t->tic) {
+            *why = "a texture the raw path cannot sample";
+            cb_->refusal = {RefNoTic, e.slot, t->format, t->width};
+            return false;
+        }
+        const bool written = handleStage(e) == 1 && writtenSlot(pl->writtenSlots, e.slot);
+        if (written && t && t->format != pl->rec->writtenFormat[e.slot]) {
+            *why = "a written texture of another format than its program stores";
+            cb_->refusal = {RefWrittenTexture, e.slot, t->format, pl->rec->writtenFormat[e.slot]};
+            return false;
+        }
+        if (t)
+            cb_->use(*t, written);
+        tic = t ? t->tic : 0;
+    }
+    const Texture *mapped = e.kind == EntryTexture ? boundTexture(e) : nullptr;
+    const uint8_t map = mapped ? mapped->addressMap : 0;
+    if (e.samplerKind == SamplerSlot) {
+        const Sampler *s = boundSampler(e);
+        const bool compares = entryCompares(e);
+        if (s && map && compares) {
+            *why = "a planar texture sampled by comparison";
+            return false;
+        }
+        tsc = s          ? (map        ? s->mapped[map]
+                            : compares ? s->compareTsc
+                                       : borderedTsc(*s, mapped))
+              : compares ? d.neutralCompareTsc_
+                         : d.neutralTsc_;
+        if (s && !tsc) {
+            *why = map ? "a planar texture's sampler without its address map"
+                       : "a sampler without its opaque border's header for the texture";
+            return false;
+        }
+    } else if (e.samplerKind == SamplerConstexpr) {
+        tsc = map ? d.constexprMapped_[e.sampler][map] : d.constexprTsc_[e.sampler];
+        if (!tsc) {
+            *why = "a planar texture's constexpr sampler without its address map";
+            return false;
+        }
+    }
+    at[0] = tic | tsc << 20;
+    return true;
+}
+
 bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uint32_t vFirst, uint32_t vCount,
                             bool indexed, const char **why)
 {
     RAW_ENCODE_SPAN(Prepare);
-#if SWITCH_RAW_DIAGNOSTICS
-    const bool genericMerge = pl->genericState;
-#endif
     if (pl->strideTwin && bindStridePastStream(*pl->rec))
         pl = pl->strideTwin;
     if (tessellates(*pl->rec) != (primitive == icb::kPatchPrimitive)) {
-        *why = "primitives drawn with a tessellation state";
-        cb_->refusal = {};
+        *why = primitive == icb::kPatchPrimitive ? "patches drawn with a state of no post-tessellation vertex function"
+                                                 : "primitives drawn with a tessellation state";
+        cb_->refusal = {RefTessellationDraw, primitive, tessellates(*pl->rec)};
         return false;
     }
-    if (const char *refused = drawnWordsRefusal(*pl->rec)) {
+    if (const char *refused = drawnWordsRefusal(*pl->rec, cb_->refusal)) {
         *why = refused;
-        cb_->refusal = {};
         return false;
     }
     // A record of a vertex function that chooses its slice writes Layer below the pass's length (arrayLengthWord) and
@@ -6380,7 +7102,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     // draws layer 0, and a record made before the viewport word viewport 0
     if (const char *missing = layeredDrawMissing(pl->rec->arrayLengthWord, pass_.layers, kLayerDropped)) {
         *why = missing;
-        cb_->refusal = {};
+        cb_->refusal = {RefLayerDropped, pass_.layers};
         return false;
     }
     if (views_.viewports > 1 && pl->viewportIndex && !pl->rec->viewportCountWord) {
@@ -6410,6 +7132,9 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         x[0] = std::min(x[0], xj[0]), x[1] = std::max(x[1], xj[1]);
         y[0] = std::min(y[0], yj[0]), y[1] = std::max(y[1], yj[1]);
     }
+    Pipeline *prepared = dev_->variant(*pl, bindingFacts(*pl) | (rot_.turned() ? AssumeTurned : 0u), selectorId_);
+    if (prepared->selectorVariant)
+        pl = prepared;
     RAW_ENCODE_BEGIN(geometrySpan, Geometry);
     // only a pass's first draw is bounded by its vertices, for the cover test below (its vertex bytes the recording's
     // cached copy, RMCommandBuffer::_shadow); every other decision takes the draw's pixel limit
@@ -6432,20 +7157,24 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     if (!generic)
         pl = twin;
     // a variant has no split of its own: a draw large enough for the generic program's split twin keeps the twin
-    if (rot_.turned() && pl->turnedTwin)
-        pl = pl->turnedTwin;
-    else if (!pl->splitOf && !generic)
-        pl = dev_->variant(*pl, bindingFacts(*pl) | (rot_.turned() ? AssumeTurned : 0u));
-#if SWITCH_RAW_DIAGNOSTICS
-    if (genericMerge)
-        logUniformTuple(*pl);
-#endif
+    if (rot_.turned() && pl->turnedSource) {
+        Pipeline *turned = __atomic_load_n(&pl->turnedTwin, __ATOMIC_ACQUIRE);
+        if (!turned && !(turned = dev_->makeTurned(*pl))) {
+            *why = rotatedRefusalText(RotatedRefusal::Variant);
+            cb_->refusal = {RefRotated, uint32_t(RotatedRefusal::Variant), rot_.turn};
+            return false;
+        }
+        pl = turned;
+    } else if (!pl->splitOf && !generic)
+        pl = prepared;
     RAW_ENCODE_END(variantSpan);
     if (!whole_) {
         if (x[1] > x[0] && y[1] > y[0]) {
             const std::array<uint32_t, 4> r = {x[0], y[0], x[1], y[1]};
-            if (std::find(rects_.begin(), rects_.end(), r) == rects_.end())
+            if (std::find(rects_.begin(), rects_.end(), r) == rects_.end()) {
                 rects_.push_back(r);
+                growReached(reached_, {r[0], r[1], r[2], r[3]});
+            }
             if (rects_.size() > 1024) {
                 whole_ = true;
                 rects_.clear();
@@ -6457,9 +7186,13 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     if (compatible_ != pl) {
         for (uint32_t j = 0; j < 8; j++) {  // the pass's attachments are the formats the state was made for
             const Texture *t = j < pass_.count ? pass_.color[j].texture : nullptr;
-            if ((t ? t->format : 0) != pl->colorFormats[j] && !(t && pl->colorFormats[j] == 0)) {
-                *why = "a state whose color formats differ from the pass's";
-                cb_->refusal = {RefColorFormats, j, t ? t->format : 0, pl->colorFormats[j]};
+            const uint32_t f = t ? t->format : 0;
+            if (f != pl->colorFormats[j] && !(t && pl->colorFormats[j] == 0) &&
+                !(targetOrdersChannels(pl->colorFormats[j], f) && !(pl->storageBits >> j & 1))) {
+                *why = "a state whose color formats differ from the pass's: the draw skipped";
+                cb_->skipped = {RefColorFormats, j, f, pl->colorFormats[j]};
+                cb_->skips++;
+                skipDraw_ = true;
                 return false;
             }
         }
@@ -6477,14 +7210,19 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
             cb_->refusal = {RefDepthStencil, pl->depthFormat, declared ? declared->format : 0, ds_.active()};
             return false;
         }
-        if (pl->samples != samples_ || !sampleShadingMasks(samples_, pl->samplePasses, compatibleSampleMasks_)) {
-            *why = "a state whose samples a pixel or per-sample shading the pass's attachments do not take";
-            cb_->refusal = {RefSamples, pl->samples, samples_, pl->samplePasses};
+        if (!samplesDrawn(pl->samples, samples_, pl->samplePasses) ||
+            !sampleShadingMasks(samples_, pl->samples == samples_ ? pl->samplePasses : 1, compatibleSampleMasks_)) {
+            *why = "a state whose samples a pixel or per-sample shading the pass's attachments do not take: skipped";
+            cb_->skipped = {RefSamples, pl->samples, samples_, pl->samplePasses};
+            cb_->skips++;
+            skipDraw_ = true;
             return false;
         }
+        compatibleRasterMask_ = sampleMaskFor(pl->samples, samples_);
         if (rot_.turned() && pl->turnRefused) {
-            *why = rotatedRefusalText(RotatedRefusal::Variant);
-            cb_->refusal = {RefRotated, uint32_t(RotatedRefusal::Variant), rot_.turn};
+            *why =
+                "a state drawn into a turned plane whose record holds no turned fragment program (PipelineTurnRefused)";
+            cb_->refusal = {RefTurnRefused, uint32_t(pl->rec->keyHash), uint32_t(pl->rec->keyHash >> 32), rot_.turn};
             return false;
         }
         compatible_ = pl;
@@ -6510,13 +7248,14 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     if (dsDirty_) {
         RAW_ENCODE_SPAN(Bind);
         const bool depth = zeta && zetaHasDepth(zeta->format), stencil = zeta && zetaHasStencil(zeta->format);
-        RAW_DIAGNOSTIC(cb_->counts_.segmentCopies += !shaderTestsActive_ && !measuringInline() && !bindsBySegment() &&
-                                                     dsState_->segment(depth, stencil));
-        if (shaderTestsActive_)
+        const bool fixedStencil = stencil && !shadowStencil_, shaderTests = shaderTestsActive_ && !shadowStencil_;
+        RAW_DIAGNOSTIC(cb_->counts_.segmentCopies += !shaderTests && !measuringInline() && !bindsBySegment() &&
+                                                     dsState_->segment(depth, fixedStencil));
+        if (shaderTests)
             emitDepthStencil(p, shaderDepthStencilRegs(depth), cb_->ds_);
         else if (bindDepthStencil(p, bodies_, bodyStart_,
-                                  dsState_->regs(depth, stencil, stencilRef_[0], stencilRef_[1]), cb_->ds_,
-                                  bindsBySegment() ? dsState_->segment(depth, stencil) : StateSegment())) {
+                                  dsState_->regs(depth, fixedStencil, stencilRef_[0], stencilRef_[1]), cb_->ds_,
+                                  bindsBySegment() ? dsState_->segment(depth, fixedStencil) : StateSegment())) {
             cb_->segmentBinds_++;
             RAW_DIAGNOSTIC(cb_->counts_.segmentBinds++);
         }
@@ -6535,248 +7274,99 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     // set 0 first (it may refuse the draw before anything is written): the layout's entries only
     if (!pl->ubosNamed) {
         *why = "a program reads a set-0 uniform buffer its record does not name";
-        cb_->refusal = {};
+        cb_->refusal = {RefUnnamedUniform};
         return false;
     }
     if (__atomic_load_n(&pl->heapMissing, __ATOMIC_ACQUIRE) && !dev_->rebindArguments(*pl)) {
         *why = "no memory for the tables a state reads argument buffers through";
-        cb_->refusal = {};
+        cb_->refusal = {RefHeapMemory};
         return false;
     }
-    if (pl->tessReadsHeap) {
-        *why = "a tessellation program that reads argument buffers through set 1";
-        cb_->refusal = {};
+    const SetEntries &entries = pl->entries;
+    if (!entries.complete()) {
+        *why = "a record of more set-0 entries than its far block holds";
+        cb_->refusal = {RefSetBytes, entries.size()};
         return false;
     }
-    if ((r.spillEntry[0] && !pl->spill[0]) || (r.spillEntry[1] && !pl->spill[1])) {
+    if ((spillEntryOf(r, 0) && !pl->spill[0]) || (spillEntryOf(r, 1) && !pl->spill[1])) {
         *why = "an argument table whose words its record does not hold";
-        cb_->refusal = {};
+        cb_->refusal = {RefSpillTable, spillEntryOf(r, 0) && !pl->spill[0] ? 1u : 2u};
         return false;
     }
     const uint32_t setBytes = renderSetBytes(r.setBytes);
-    if (setBytes > kRenderSetBytes) {
-        *why = "a set 0 past the raw path's 512 bytes";
-        cb_->refusal = {};
-        return false;
-    }
-    RAW_ENCODE_BEGIN(descriptorSpan, Descriptors);
-    const auto *prepared = descriptors_.resolve(
-        pl, movedEntries(r), pl->memoryEntries,
-        [&](PreparedDescriptorWords &prepared, uint32_t moved) {
-            RAW_ENCODE_COUNT(DescriptorBuilds);
-            uint32_t *set = prepared.words.data();
-            for (uint32_t i = 0; i < r.entries; i++) {
-                if (!(moved >> i & 1))
-                    continue;
-                const PackEntry &e = r.entry[i];
-                uint32_t *at = set + e.offset / 4;
-                if (e.kind == EntrySpillTable)
-                    continue;
-                if (e.kind == EntryColorTable) {
-                    at[0] = uint32_t(d.colorTable_.va);
-                    at[1] = uint32_t(d.colorTable_.va >> 32);
-                    at[2] = kColorTableBytes;
-                    at[3] = 0;
-                    continue;
-                }
-                if (e.kind == EntryTextureTable || e.kind == EntrySamplerTable) {
-                    const bool textures = e.kind == EntryTextureTable;
-                    const uint64_t va = textures ? d.heapTables_.textureTableVa() : d.heapTables_.samplerTableVa();
-                    at[0] = uint32_t(va);
-                    at[1] = uint32_t(va >> 32);
-                    at[2] = textures ? d.heapTables_.textureTableBytes() : d.heapTables_.samplerTableBytes();
-                    at[3] = 0;
-                    continue;
-                }
-                if (e.kind == EntryUbo || e.kind == EntryTessBuffer) {
-                    const Bound b = e.kind == EntryUbo ? bufs_[e.stage][e.slot] : tessBuffer(e.slot);
-                    if (bufferStorage(e))
-                        cb_->bufferWrites_.note(b.va, b.size);
-                    if (b.buffer)
-                        cb_->use(*b.buffer, bufferStorage(e));
-                    else if (!b.named || bufferStorage(e))
-                        cb_->useAddress(b.va, b.size, bufferStorage(e));
-                    BufferDescriptor desc;
-                    if (!bufferDescriptor(e, b.va, b.size, desc)) {
-                        *why = bufferStorage(e)
-                                   ? "a storage buffer bound at an offset that is not a multiple of 16, with no "
-                                     "residual push word"
-                                   : "a uniform buffer bound at an offset that is not a multiple of 256, with no "
-                                     "residual push word";
-                        cb_->refusal = {RefUboOffset, uint32_t(e.stage) << 8 | e.slot, desc.residual,
-                                        uint32_t(std::min<uint64_t>(b.offset, ~0u))};
-                        return false;
-                    }
-                    // a word that held a residual takes the slot's next one even where it is 0: the set keeps its
-                    // words from the draws before
-                    if (const int word = bufferResidualWord(e); spilledWord(word)) {
-                        prepared.spilled[e.stage == 1 ? 0 : 1].set(word, desc.residual);
-                    } else if (word >= 0 && (desc.residual || (prepared.residualMask >> word & 1))) {
-                        prepared.residuals[word] = desc.residual;
-                        prepared.residualMask |= 1u << word;
-                    }
-                    if (b.buffer && b.buffer->hostVisible && !b.buffer->wc)
-                        cb_->clean(b.buffer->cpu + b.offset, std::min<uint64_t>(desc.range - desc.residual, b.size));
-#if SWITCH_RAW_DIAGNOSTICS
-                    if (pl->uniformProbe && b.cpu)
-                        probeUniforms(*pl, e.stage, e.slot, b.cpu,
-                                      std::min<uint64_t>(desc.range - desc.residual, b.size));
-#endif
-                    at[0] = uint32_t(desc.base);
-                    at[1] = uint32_t(desc.base >> 32);
-                    at[2] = b.va ? desc.range : 0;
-                    at[3] = 0;
-                    continue;
-                }
-                RAW_ENCODE_SPAN(Textures);
-                uint32_t tic = 0, tsc = 0;
-                if (e.kind == EntryDepthTest || e.kind == EntryStencilTest) {
-                    const bool depth = e.kind == EntryDepthTest;
-                    const Texture *t = depth ? shaderDepth_ : shaderStencil_;
-                    const uint32_t view = depth ? r.shaderTests.depthTic : r.shaderTests.stencilTic;
-                    if (!t || t->samples != samples_ || texelBytes(view) != t->bpp || !(tic = passViewTic(*t, view))) {
-                        *why = "an unavailable native shader depth/stencil view";
-                        cb_->refusal = {RefDepthStencil, e.kind, t ? t->format : 0, samples_};
-                        return false;
-                    }
-                    cb_->use(*t, true);
-                } else if (e.kind == EntryTexture) {
-                    const Texture *t = boundTexture(e);
-                    if (t && !t->tic) {
-                        *why = "a texture the raw path cannot sample";
-                        cb_->refusal = {RefNoTic, e.slot, t->format, t->width};
-                        return false;
-                    }
-                    // a two-plane texture's header pair where the program reads it so, else its stand-in
-                    const bool xrSlot = e.stage == 2 && (pl->xrSlots >> e.slot & 1);
-                    const bool pair = t && t->xrPlanes && xrSlot;
-                    if (!pair && xrSlot) {
-                        *why = "a state that reads a two-plane texture's header pair drawn without one";
-                        cb_->refusal = {RefNoTic, e.slot, t ? t->format : 0, t ? t->width : 0};
-                        return false;
-                    }
-                    const bool written = handleStage(e) == 1 && (pl->writtenSlots >> e.slot & 1);
-                    // tic is the image a draw samples: a stand-in's, a sampled shadow's or a plane pair's is not the
-                    // texture's own memory
-                    const bool heldApart = t && (t->standIn || t->sampled || pair);
-                    if (written && t && (heldApart || t->format != pl->rec->writtenFormat[e.slot])) {
-                        *why = heldApart ? "a written texture the raw path holds through another image"
-                                         : "a written texture of another format than its program stores";
-                        cb_->refusal = {RefWrittenTexture, e.slot, t->format, pl->rec->writtenFormat[e.slot]};
-                        return false;
-                    }
-                    if (pair) {
-                        cb_->use(*t->luma, false);
-                        cb_->use(*t->chroma, false);
-                        RAW_DIAGNOSTIC(dev_->stats.xrPairBinds++);
-                    } else if (t && written) {
-                        cb_->use(*t, true);
-                    } else if (t) {
-                        cb_->use(t->standIn ? *t->standIn : t->sampled ? *t->sampled : *t, false);
-                    }
-                    tic = !t ? 0 : pair ? t->tic : t->standIn ? t->standIn->tic : t->tic;
-                } else if (e.kind == EntryFetch) {
-                    const ColorAttachment &a = pass_.color[e.slot];
-                    const Texture *t = a.texture;
-                    const bool storage = t && (pl->storageBits >> e.slot & 1);
-                    if (storage && storageViewMismatch(texelBytes(pl->storageTic[e.slot]), pl->rec->storageSamples, *t,
-                                                       dev_->storageCompressedOk()) != StorageFallback::None) {
-                        *why = "an incompatible framebuffer storage view";
-                        cb_->refusal = {RefStorageView, e.slot, t->format, t->width};
-                        return false;
-                    }
-                    if (t) {
-                        cb_->use(*t, pl->storageWriteBits >> e.slot & 1);
-                        tic = fetchTic(a, storage ? pl->storageTic[e.slot] : 0, layeredRecord(pl->rec->arrayLengthWord),
-                                       why);
-                        if (!tic) {
-                            cb_->refusal = {storage ? RefStorageView : RefNoTic, e.slot, t->format, t->width};
-                            return false;
-                        }
-                    }
-                } else if (e.kind == EntryTexture3d) {
-                    // a texture of another type there is no binding of the argument: m2v writes its neutral, raw an empty handle
-                    const Texture *bound = boundTexture(e);
-                    const Texture *t = bound && bound->type == fx::kTexThreeD ? bound : nullptr;
-                    if (t && !t->tic) {
-                        *why = "a texture the raw path cannot sample";
-                        cb_->refusal = {RefNoTic, e.slot, t->format, t->width};
-                        return false;
-                    }
-                    const bool written = handleStage(e) == 1 && (pl->writtenSlots >> e.slot & 1);
-                    if (written && t && t->format != pl->rec->writtenFormat[e.slot]) {
-                        *why = "a written texture of another format than its program stores";
-                        cb_->refusal = {RefWrittenTexture, e.slot, t->format, pl->rec->writtenFormat[e.slot]};
-                        return false;
-                    }
-                    if (t)
-                        cb_->use(*t, written);
-                    tic = t ? t->tic : 0;
-                }
-                const Texture *mapped = e.kind == EntryTexture ? boundTexture(e) : nullptr;
-                const uint8_t map = mapped ? mapped->addressMap : 0;
-                if (e.samplerKind == SamplerSlot) {
-                    const Sampler *s = boundSampler(e);
-                    const bool compares = entryCompares(e);
-                    if (s && map && compares) {
-                        *why = "a planar texture sampled by comparison";
-                        return false;
-                    }
-                    tsc = s          ? (map        ? s->mapped[map]
-                                        : compares ? s->compareTsc
-                                                   : borderedTsc(*s, mapped))
-                          : compares ? d.neutralCompareTsc_
-                                     : d.neutralTsc_;
-                    if (s && !tsc) {
-                        *why = map ? "a planar texture's sampler without its address map"
-                                   : "a sampler without its opaque border's header for the texture";
-                        return false;
-                    }
-                } else if (e.samplerKind == SamplerConstexpr) {
-                    tsc = map ? d.constexprMapped_[e.sampler][map] : d.constexprTsc_[e.sampler];
-                    if (!tsc) {
-                        *why = "a planar texture's constexpr sampler without its address map";
-                        return false;
-                    }
-                }
-                at[0] = tic | tsc << 20;
-            }
-            return fillSpills(*pl, moved, prepared, set, why);
-        },
-        [&](const DescriptorWords &words) {
-            RAW_ENCODE_COUNT(DescriptorUploads);
-            uint64_t address = 0;
-            uint8_t *upload = d.alloc(d.upload_, setBytes, 256, address);
-            memcpy(upload, words.data(), setBytes);
+    const auto upload = [&](const uint32_t *words) {
+        RAW_ENCODE_COUNT(DescriptorUploads);
+        uint64_t address = 0;
+        uint8_t *at = d.alloc(d.upload_, setBytes, 256, address);
+        memcpy(at, words, setBytes);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-            RAW_DIAGNOSTIC(cb_->counts_.uploadBytes += setBytes);
+        RAW_DIAGNOSTIC(cb_->counts_.uploadBytes += setBytes);
 #endif
-            return address;
-        },
-        setBytes);
+        return address;
+    };
+    const uint32_t *set = nullptr;
+    const SetResiduals *built = nullptr;
+    uint64_t setVa = 0;
+    RAW_ENCODE_BEGIN(descriptorSpan, Descriptors);
+    if (!entries.wide() && setBytes <= kRenderSetBytes) {
+        wideDescriptors_.forget();
+        const auto *prepared = descriptors_.resolve(
+            pl, movedEntries(entries), pl->memoryEntries,
+            [&](PreparedDescriptorWords &prepared, uint32_t moved) {
+                RAW_ENCODE_COUNT(DescriptorBuilds);
+                uint32_t *set = prepared.words.data();
+                for (uint32_t i = 0; i < entries.size(); i++)
+                    if ((moved >> i & 1) && !writeSetEntry(pl, entries[i], set, prepared, why))
+                        return false;
+                return fillSpills(*pl, moved, false, prepared, set, why);
+            },
+            [&](const DescriptorWords &words) {
+                return upload(words.data());
+            },
+            setBytes);
+        if (prepared)
+            set = prepared->words.data(), built = prepared, setVa = prepared->address;
+    } else {
+        descriptors_.leave();
+        const auto *prepared = wideDescriptors_.resolve(
+            pl, anyEntryMoved(entries), setBytes,
+            [&](WideDescriptorWords &prepared) {
+                RAW_ENCODE_COUNT(DescriptorBuilds);
+                uint32_t *set = prepared.words.data();
+                for (uint32_t i = 0; i < entries.size(); i++)
+                    if (!writeSetEntry(pl, entries[i], set, prepared, why))
+                        return false;
+                return fillSpills(*pl, 0, true, prepared, set, why);
+            },
+            [&](const std::vector<uint32_t> &words) {
+                return upload(words.data());
+            });
+        if (prepared)
+            set = prepared->words.data(), built = prepared, setVa = prepared->address;
+    }
     RAW_ENCODE_END(descriptorSpan);
-    if (!prepared)
+    if (!set)
         return false;
     moved_ = MovedBindings{{}, {}, {}, false};
     spillDirty_ = false;
-    const uint32_t *set = prepared->words.data();
-    const auto &residuals = prepared->residuals;
-    const uint32_t residualMask = prepared->residualMask;
-    const uint64_t setVa = prepared->address;
+    const auto &residuals = built->residuals;
+    const uint32_t residualMask = built->residualMask;
     prepared_ = pl;
     preparedSet_ = setVa;
     RAW_ENCODE_BEGIN(bindSpan, Bind);
-    writeRaster(p, rasterFor(primitive));
+    const Raster raster = rasterFor(primitive);
+    writeRaster(p, raster);
     const bool dynamicBlend = r.blendColorWord || r.halfBlendColorWord;
     const bool slotRoots = r.rootSlots[0] || r.rootSlots[1];
     const bool patches = tessellates(r);
-    const bool drawnWordsDirty = ((r.amplificationIdWord || r.amplificationCountWord || pl->amplificationLayerWord ||
-                                   pl->amplificationViewportWord) &&
+    const bool drawnWordsDirty = ((r.amplificationIdWord || r.amplificationCountWord || r.amplificationLayerWord ||
+                                   r.amplificationViewportWord) &&
                                   amplificationDirty_) ||
                                  r.pulledStride[0][1] || r.arrayLengthWord || r.viewportCountWord;
     const bool rebinds = pl != emitted_;
     if (pl != emitted_ || residualMask || residualsPushed_ || (dynamicBlend && blendColorDirty_) ||
-        r.shaderTests.flags || slotRoots || (patches && tessWordsDirty_) || drawnWordsDirty) {
+        r.shaderTests.flags || shadowStencil(r.shaderTests) || slotRoots || (patches && tessWordsDirty_) ||
+        drawnWordsDirty) {
         if (pl != emitted_) {
             blendColorDirty_ |= pl->constantBlend || dynamicBlend;
             if (cb_->extrasLive_ && cb_->extrasLive_ != pl) {
@@ -6841,10 +7431,18 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         emitted_ = pl;
         residualsPushed_ = residualMask != 0;
     }
+    writeBiasUnits(p, raster);
     writeAlphaControl(p, cb_->alphaHeld_, alphaWanted_, rebinds, pl->namesAlphaControl, pl->ownsAlphaControl,
                       pl->blendKill);
+    if (rebinds && cb_->sampleMaskHeld_ != kSampleMaskAll)
+        cb_->sampleMaskHeld_ = kSampleMaskUnknown;
+    if (compatibleRasterMask_ != cb_->sampleMaskHeld_) {
+        const uint32_t m = compatibleRasterMask_;
+        p.inc(NVB197_SET_SAMPLE_MASK_X0_Y0, {m, m, m, m});
+        cb_->sampleMaskHeld_ = m;
+    }
     RAW_ENCODE_END(bindSpan);
-    if (!writeClipControl(p, *pl, why))
+    if (!writeClipControl(p, *pl, raster, why))
         return false;
     if (samplePasses_ != pl->samplePasses) {
         p.m(LOAD_CB_OFFSET, kRootSampleInfo + 8);
@@ -6888,12 +7486,11 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
                                uint32_t(heapVa >> 32), heap ? r.heapBytes : 0, 0};
         p.m(LOAD_CB_OFFSET, 0x38);
         p.nonInc(LOAD_CB, s, heap ? 8 : 4);
-        if (pl->heapSlot[0] || pl->heapSlot[1]) {
+        if (pl->heapSlot[0] || pl->heapSlot[1] || pl->heapSlot[2] || pl->heapSlot[3]) {
             p.inc(CB_SELECTOR_A, {cbufBindBytes(r.heapBytes), uint32_t(heapVa >> 32), uint32_t(heapVa)});
-            if (pl->heapSlot[0])
-                p.m(BIND_GROUP_CB + 0x20 * 0, 1 | uint32_t(pl->heapSlot[0]) << 4);
-            if (pl->heapSlot[1])
-                p.m(BIND_GROUP_CB + 0x20 * 4, 1 | uint32_t(pl->heapSlot[1]) << 4);
+            for (uint32_t k = 0; k < 4; k++)
+                if (pl->heapSlot[k])
+                    p.m(BIND_GROUP_CB + 0x20 * kSetGroups[k], 1 | uint32_t(pl->heapSlot[k]) << 4);
             selected = true;
         }
         const bool setRead = pl->setSlot[0] || pl->setSlot[1] || pl->setSlot[2] || pl->setSlot[3];
@@ -6908,7 +7505,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
     // NVK_MME_BIND_CBUF_DESC's bindings, read from cached CPU words rather than the WC upload.
     for (uint8_t u = 0; u < pl->uboCount; u++) {
         const Pipeline::UboCbuf &c = pl->ubos[u];
-        const uint32_t *desc = set + r.entry[c.entry].offset / 4;
+        const uint32_t *desc = set + entries[c.entry].offset / 4;
         if (!descriptorBinding_.uboMoved(u, desc))
             continue;
         if (desc[2]) {
@@ -6983,6 +7580,7 @@ bool RenderEncoder::prepare(Pipeline *pl, uint32_t primitive, int32_t first, uin
         probeDraw(*pipeline_, *pl, primitive, first, count, indexed, {x[0], y[0], x[1], y[1]});
 #endif
     RAW_DIAGNOSTIC(cb_->counts_.interlockDraws += pl->storageBits != 0);
+    RAW_DIAGNOSTIC(cb_->counts_.rasterOrderedDraws += pl->rec && (pl->rec->flags & PipelineRasterOrdered));
 #if SWITCH_RAW_DIAGNOSTICS
     if (pl->rec && pl->storageBits)
         dev_->stats.fetch.interlockKeys.note(pl->rec->keyHash);
@@ -7035,23 +7633,37 @@ bool RenderEncoder::matrixConstants(const Pipeline &pl, const char **why)
 
 // What the region test reads of a draw: Core Animation's transform (Pipeline::caTransform) over a triangle list or strip
 // of one instance, with its matrix, positions and indices where the CPU maps them; anything else is its scissor alone
-uint32_t RenderEncoder::movedEntries(const PackPipeline &rec) const
+bool RenderEncoder::entryMoved(const PackEntry &e) const
+{
+    const bool buffer = e.kind == EntryUbo && e.stage < 3 && e.slot < 32 && (moved_.buffers[e.stage] >> e.slot & 1);
+    const bool texture = (e.kind == EntryTexture || e.kind == EntryTexture3d) && e.slot < kStageTextures &&
+                         hasSlot(moved_.textures[handleStage(e)], e.slot);
+    const bool sampler = e.kind != EntryUbo && e.samplerKind == SamplerSlot && e.sampler < kStageSamplers &&
+                         (moved_.samplers[handleStage(e)] >> e.sampler & 1);
+    const bool spill =
+        e.kind == EntrySpillTable && e.stage < 3 && (moved_.buffers[e.stage] || (e.stage == 2 && spillDirty_));
+    return buffer || texture || sampler || spill;
+}
+
+// The entries of a set of kPackEntries or fewer whose bindings moved since the last draw, bit k entry k
+uint32_t RenderEncoder::movedEntries(const SetEntries &entries) const
 {
     if (moved_.all)
         return ~0u;
     uint32_t moved = 0;
-    for (uint32_t i = 0; i < rec.entries; i++) {
-        const PackEntry &e = rec.entry[i];
-        const bool buffer = e.kind == EntryUbo && e.stage < 3 && e.slot < 32 && (moved_.buffers[e.stage] >> e.slot & 1);
-        const bool texture = (e.kind == EntryTexture || e.kind == EntryTexture3d) && e.slot < kStageTextures &&
-                             (moved_.textures[handleStage(e)] >> e.slot & 1);
-        const bool sampler = e.kind != EntryUbo && e.samplerKind == SamplerSlot && e.sampler < kStageSamplers &&
-                             (moved_.samplers[handleStage(e)] >> e.sampler & 1);
-        const bool spill =
-            e.kind == EntrySpillTable && e.stage < 3 && (moved_.buffers[e.stage] || (e.stage == 2 && spillDirty_));
-        moved |= uint32_t(buffer || texture || sampler || spill) << i;
-    }
+    for (uint32_t i = 0; i < entries.size(); i++)
+        moved |= uint32_t(entryMoved(entries[i])) << i;
     return moved;
+}
+
+bool RenderEncoder::anyEntryMoved(const SetEntries &entries) const
+{
+    if (moved_.all)
+        return true;
+    for (uint32_t i = 0; i < entries.size(); i++)
+        if (entryMoved(entries[i]))
+            return true;
+    return false;
 }
 
 // The extended blend colour's words (raw_blend_color.h) where `r` reads them, made again after the colour moved
@@ -7068,14 +7680,14 @@ bool RenderEncoder::blendWords(const PackPipeline &r, [[maybe_unused]] const cha
 
 // `pl`'s argument tables (raw_spill_table.h) whose entries moved: the record's words with the spilled bind offsets'
 // residuals and a fragment table's dynamic words, uploaded where they differ from the encoder's last upload, named in set 0
-bool RenderEncoder::fillSpills(const Pipeline &pl, uint32_t moved, PreparedDescriptorWords &prepared, uint32_t *set,
+bool RenderEncoder::fillSpills(const Pipeline &pl, uint32_t moved, bool all, SetResiduals &prepared, uint32_t *set,
                                const char **why)
 {
     const PackPipeline &r = *pl.rec;
     Device &d = *dev_;
     for (uint32_t k = 0; k < 2; k++) {
-        const uint32_t entry = r.spillEntry[k], count = r.spillWords[k];
-        if (!entry || entry > r.entries || !(moved >> (entry - 1) & 1))
+        const uint32_t entry = spillEntryOf(r, k), count = r.spillWords[k];
+        if (!entry || entry > pl.entries.size() || !(all || (entry <= 32 && moved >> (entry - 1) & 1)))
             continue;
         uint32_t words[kSpillWordsMax];
         composeSpill(pl.spill[k], count, prepared.spilled[k], words);
@@ -7092,7 +7704,7 @@ bool RenderEncoder::fillSpills(const Pipeline &pl, uint32_t moved, PreparedDescr
             memcpy(upload, from, n * sizeof(uint32_t));
             return address;
         });
-        spillDescriptor(va, count, set + r.entry[entry - 1].offset / 4);
+        spillDescriptor(va, count, set + pl.entries[entry - 1].offset / 4);
     }
     return true;
 }
@@ -7415,7 +8027,13 @@ void Device::glassMemEvent(const char *what, uint64_t bytes)
 
 bool RenderEncoder::prepareShaderTests(const Pipeline &pipeline, const char **why)
 {
-    const uint8_t flags = pipeline.rec->shaderTests.flags;
+    const PackShaderTests &tests = pipeline.rec->shaderTests;
+    const uint8_t flags = tests.flags;
+    const bool shadow = shadowStencil(tests) && flags == kShaderTestStencil;
+    if (shadow != shadowStencil_) {
+        shadowStencil_ = shadow;
+        dsDirty_ = true;
+    }
     if (!flags) {
         endShaderTests();
         return true;
@@ -7426,6 +8044,17 @@ bool RenderEncoder::prepareShaderTests(const Pipeline &pipeline, const char **wh
         *why = "a shader depth/stencil test whose attachment cannot be copied exactly";
         cb_->refusal = {RefDepthStencil, zeta ? zeta->format : 0, flags, samples_};
         return false;
+    }
+    if (shadow && shadowDependsOnDepth(ds_, zetaHasDepth(zeta->format))) {
+        *why = "a shader-side stencil whose stencil write depends on the depth test after its program";
+        cb_->refusal = {RefDepthStencil, zeta->format, flags, ds_.depthCompare};
+        return false;
+    }
+    // a shader-side stencil's depth test is the hardware's, against the attachment
+    if (shadow && (shaderTestsActive_ & kShaderTestDepth)) {
+        copyShaderTests(kShaderTestDepth, true);
+        shaderTestsActive_ &= uint8_t(~kShaderTestDepth);
+        dsDirty_ = true;
     }
     const uint8_t missing = flags & ~shaderTestsActive_;
     if (!missing)
@@ -7438,6 +8067,7 @@ bool RenderEncoder::prepareShaderTests(const Pipeline &pipeline, const char **wh
         shape.height = zeta->height;
         shape.format = format;
         shape.samples = samples_;
+        shape.layers = std::max(pass_.layers, 1u);
         if (!(slot = dev_->lastBacking(shape, tag, true, false))) {
             RAW_ENCODE_LOCK(lock, dev_->lock_);
             slot = dev_->backing(shape, tag, true, false);
@@ -7471,35 +8101,37 @@ void RenderEncoder::copyShaderTests(uint8_t flags, bool toAttachment)
     const Texture &zeta = *pass_.depthStencil.texture;
     ShaderTestShape shape;
     shaderTestShape(zeta.format, samples_, planeArea().x1, planeArea().y1, flags, shape);
-    auto side = [](const Texture &texture) {
-        auto result = sideOf(texture, 0, 0, 0);
+    auto side = [](const Texture &texture, uint32_t layer) {
+        auto result = sideOf(texture, 0, 0, layer);
         result.height = sampleRows(texture);
         return result;
     };
-    const CopySide attachment = side(zeta);
     cb_->use(zeta, toAttachment);
     tiledCacheDrain(p_, dev_->k_.info());
     p_.m(WAIT_FOR_IDLE, 0);
     if (toAttachment)
         p_.m(INVALIDATE_SHADER_CACHES, kFlushData | kInvalidateData);
-    const auto image = [&](ShaderTestImage which) {
-        switch (which) {
-        case ShaderTestImage::depth:
-            return side(*shaderDepth_);
-        case ShaderTestImage::stencil:
-            return side(*shaderStencil_);
-        case ShaderTestImage::temporary:
-            return side(*shaderStencilTemp_);
-        case ShaderTestImage::attachment:
-            return attachment;
-        }
-        return attachment;
-    };
     const auto copies = shaderTestTransfers(flags, shape.packedStencil, toAttachment);
-    for (uint8_t at = 0; at < copies.count; ++at) {
-        const auto &copy = copies.transfers[at];
-        copyRemapped(p_, image(copy.source), image(copy.destination), shape.width, shape.height, copy.remap, copy.bytes,
-                     dev_->stats, copy.ordered);
+    // every layer of a layered pass: a slice-choosing state's tests read the stand-ins' layers as a 2D array
+    for (uint32_t layer = 0; layer < std::max(pass_.layers, 1u); ++layer) {
+        const auto image = [&](ShaderTestImage which) {
+            switch (which) {
+            case ShaderTestImage::depth:
+                return side(*shaderDepth_, layer);
+            case ShaderTestImage::stencil:
+                return side(*shaderStencil_, layer);
+            case ShaderTestImage::temporary:
+                return side(*shaderStencilTemp_, layer);
+            case ShaderTestImage::attachment:
+                break;
+            }
+            return side(zeta, layer);
+        };
+        for (uint8_t at = 0; at < copies.count; ++at) {
+            const auto &copy = copies.transfers[at];
+            copyRemapped(p_, image(copy.source), image(copy.destination), shape.width, shape.height, copy.remap,
+                         copy.bytes, dev_->stats, copy.ordered);
+        }
     }
     RAW_DIAGNOSTIC(dev_->stats.compZetaCopies += zeta.comptags);
     p_.inc(CE_LINE_LENGTH_IN, {0, 0}, SUBC_COPY);
@@ -7517,8 +8149,10 @@ void RenderEncoder::copySeparateZeta(Push &p, uint8_t aspects, bool toAttachment
     ShaderTestShape shape;
     if (!aspects || !shaderTestShape(zeta.format, samples_, planeArea().x1, planeArea().y1, aspects, shape))
         return;
-    auto side = [](const Texture &texture) {
-        auto result = sideOf(texture, 0, 0, 0);
+    // a layered pass's every layer, each through the temporary's one
+    uint32_t layer = 0;
+    auto side = [&](const Texture &texture) {
+        auto result = sideOf(texture, 0, 0, &texture == separateTemp_ ? 0 : layer);
         result.height = sampleRows(texture);
         return result;
     };
@@ -7545,11 +8179,12 @@ void RenderEncoder::copySeparateZeta(Push &p, uint8_t aspects, bool toAttachment
     if (toAttachment)
         p.m(INVALIDATE_SHADER_CACHES, kFlushData | kInvalidateData);
     const auto copies = shaderTestTransfers(aspects, shape.packedStencil, toAttachment);
-    for (uint8_t at = 0; at < copies.count; ++at) {
-        const auto &copy = copies.transfers[at];
-        copyRemapped(p, image(copy.source), image(copy.destination), shape.width, shape.height, copy.remap, copy.bytes,
-                     dev_->stats, copy.ordered);
-    }
+    for (layer = 0; layer < std::max(pass_.layers, 1u); layer++)
+        for (uint8_t at = 0; at < copies.count; ++at) {
+            const auto &copy = copies.transfers[at];
+            copyRemapped(p, image(copy.source), image(copy.destination), shape.width, shape.height, copy.remap,
+                         copy.bytes, dev_->stats, copy.ordered || (layer && !at));
+        }
     RAW_DIAGNOSTIC(dev_->stats.compZetaCopies += zeta.comptags);
     p.inc(CE_LINE_LENGTH_IN, {0, 0}, SUBC_COPY);
     p.m(CE_LAUNCH_DMA, (kLaunchPitch & ~3u) | 2u | (1u << 10), SUBC_COPY);
@@ -7626,6 +8261,30 @@ uint32_t Device::attachmentTic(Texture &t, const Texture &part, uint32_t level, 
         return levelTic(t, level);
     // above every key viewTic keeps in views_ (word 0, a sample grid below bit 48)
     const uint64_t key = 1ull << 63 | uint64_t(part.format) << 32 | uint64_t(slice) << 4 | level;
+    if (part.zeta) {
+        uint32_t w[8];
+        const uint32_t z = zetaFormatIndex(part.format);
+        if (!t.zeta || part.format != t.format || z >= kZetaFormats ||
+            !attachmentHeader(part, kZetaFormatInfo[z].tic0, false, w))
+            return 0;
+        // Depth conversion headers are prepared by concurrent recording threads, outside the encode view cache.
+        std::lock_guard<raw::Mutex> l(lock_);
+        if (!t.tic) {
+            if (!(t.tic = allocTic()))
+                return 0;
+            writeTic(t);
+        }
+        const auto made = partTics_.equal_range(t.tic);
+        for (auto m = made.first; m != made.second; ++m)
+            if (m->second.first == key)
+                return m->second.second;
+        const uint32_t tic = allocTic();
+        if (!tic)
+            return 0;
+        memcpy(tic_.cpu + 32 * tic, w, 32);
+        partTics_.emplace(t.tic, std::make_pair(key, tic));
+        return tic;
+    }
     if (!t.tic)
         return 0;
     if (const uint32_t seen = views_.find(t.tic, key))
@@ -7650,19 +8309,22 @@ uint32_t Device::attachmentTic(Texture &t, const Texture &part, uint32_t level, 
     return tic;
 }
 
-uint32_t Device::levelTic(Texture &t, uint32_t level)
+uint32_t Device::levelTic(Texture &t, uint32_t level, bool codes)
 {
-    const FormatInfo *f = formatInfo(t.format);
-    if (!t.chain || !f || level >= t.chain->layout.levels)
+    const FormatInfo *f = t.zeta ? nullptr : formatInfo(t.format);
+    const uint32_t z = t.zeta ? zetaFormatIndex(t.format) : kZetaFormats;
+    const bool zeta = t.zeta && z < kZetaFormats;
+    if (!t.chain || (!f && !zeta) || (zeta && codes) || level >= t.chain->layout.levels)
         return 0;
-    uint32_t &slot = t.chain->levelTic[level];
+    uint32_t &slot = (codes ? t.chain->levelCodesTic : t.chain->levelTic)[level];
     if (const uint32_t made = __atomic_load_n(&slot, __ATOMIC_ACQUIRE))
         return made;
     RAW_ENCODE_LOCK(l, lock_);
     uint32_t tic = slot;
     if (!tic && (tic = allocTic())) {
         uint32_t w[8];
-        fx::mipChainTic(t.chain->layout, t.chain->va, f->tic0, f->srgb, level, 1, w);
+        fx::mipChainTic(t.chain->layout, t.chain->va, f ? f->tic0 : kZetaFormatInfo[z].tic0, f && f->srgb && !codes,
+                        level, 1, w, t.type == fx::kTexThreeD ? fx::kTexThreeD : fx::kTexTwoD);
         memcpy(tic_.cpu + 32 * tic, w, 32);  // visible at the next submission's header invalidate
         __atomic_store_n(&slot, tic, __ATOMIC_RELEASE);
     }
@@ -7811,6 +8473,8 @@ static bool chainLevelView(const Texture &t, uint32_t level, uint32_t rtFormat, 
     }
     out.blockW = t.blockW;
     out.blockH = t.blockH;
+    out.zeta = t.zeta;  // a depth chain's level is zeta memory: its copies move the aspect Metal names
+    out.stencilTemp = t.stencilTemp;
     out.texelWidth = std::max(1u, t.texelWidth >> level);
     out.texelHeight = std::max(1u, t.texelHeight >> level);
     return true;
@@ -7836,7 +8500,7 @@ TextureTransferResult Device::transferTexture(const Texture &texture, uint32_t l
 {
     Texture view;
     const Texture *selected = &texture;
-    if (texture.chain) {
+    if (texture.chain && level) {  // a chain's level 0 is its own image
         if (!chainLevelImage(texture, level, view))
             return TextureTransferResult::Unsupported;
         selected = &view;
@@ -7844,9 +8508,13 @@ TextureTransferResult Device::transferTexture(const Texture &texture, uint32_t l
         return TextureTransferResult::Unsupported;
     }
     const Texture &t = *selected;
-    if (!t.va || t.zeta || t.samples > 1 || t.converted() || t.blockW > 1 || t.blockH > 1 ||
-        xrForm(t.format) != XrForm::None || !size[0] || !size[1] || !size[2] || origin[0] > t.width ||
-        size[0] > t.width - origin[0] || origin[1] > t.height || size[1] > t.height - origin[1])
+    ZetaCpuCopy zeta;
+    fx::MipChain grid;
+    if (!t.va || (texture.zeta && !zetaCpuCopy(texture.format, zeta)) ||
+        (t.samples > 1 && (!texture.zeta || !fx::msLayout(t.width, t.height, t.samples, t.bpp, grid))) ||
+        t.converted() || t.blockW > 1 || t.blockH > 1 || xrForm(t.format) != XrForm::None || !size[0] || !size[1] ||
+        !size[2] || origin[0] > t.width || size[0] > t.width - origin[0] || origin[1] > t.height ||
+        size[1] > t.height - origin[1])
         return TextureTransferResult::Unsupported;
     const bool volume = t.type == fx::kTexThreeD;
     if (volume ? (slice || origin[2] > t.depth || size[2] > t.depth - origin[2])
@@ -7854,10 +8522,20 @@ TextureTransferResult Device::transferTexture(const Texture &texture, uint32_t l
         return TextureTransferResult::Unsupported;
     TextureTransfer region;
     region.texture = sideOf(t, origin[0], origin[1], volume ? origin[2] : slice);
+    if (t.samples > 1) {  // the pixels' cells of the sample grid
+        region.texture = {
+            t.va, t.pitch,      origin[0] << grid.sxLog2, origin[1] << grid.syLog2, t.height << grid.syLog2,
+            true, t.blockHeight};
+        region.samples = t.samples;
+        region.sxLog2 = grid.sxLog2;
+        region.syLog2 = grid.syLog2;
+    }
     region.width = size[0];
     region.height = size[1];
     region.planes = size[2];
-    region.bpp = t.bpp;
+    region.bpp = texture.zeta ? zeta.bytes : t.bpp;
+    region.remapIn = zeta.remapIn;
+    region.remapOut = zeta.remapOut;
     if (!transfers_.copy(k_, set_, lock_, region, bytes, row, image, write, std::move(owner)))
         return TextureTransferResult::Failed;
     RAW_DIAGNOSTIC((write ? stats.textureUploads : stats.textureReadbacks).fetch_add(1, std::memory_order_relaxed));
@@ -7881,22 +8559,24 @@ bool Device::copyCallerPages(const Texture &t, std::shared_ptr<void> owner)
 
 void RenderEncoder::setDepthBias(float constant, float slope, float clamp)
 {
-    depthBias_[0] = constant;
-    depthBias_[1] = slope;
-    depthBias_[2] = std::isfinite(clamp) ? clamp : 0.0f;
+    depthBias_ = depthBiasFactors(constant, slope, clamp);
 }
 
-// The rasterizer state of a draw of `primitive` (MTLPrimitiveType): the encoder's, with m2v's depth bias for its topology
-// (metal::state::depth_bias): on, of Metal's factors, for triangles; off and zero for points and lines, and zero where
-// both factors are
+// The rasterizer state of a draw of `primitive` (MTLPrimitiveType, or icb::kPatchPrimitive): the encoder's, with
+// Metal's depth bias for its topology: on, of Metal's factors, for triangles and the triangles of patches (an M4 Max
+// biases a tessellated quad patch as a triangle); off and zero for points and lines, and zero where both factors are
 RenderEncoder::Raster RenderEncoder::rasterFor(uint32_t primitive) const
 {
     Raster r = raster_;
-    r.bias = primitive == 3 || primitive == 4;
-    if (r.bias && (depthBias_[0] != 0 || depthBias_[1] != 0)) {
-        r.biasConstant = fbits(depthBias_[0]);
-        r.biasSlope = fbits(depthBias_[1]);
-        r.biasClamp = fbits(depthBias_[2]);
+    r.bias = icb::triangles(primitive);
+    if (r.bias && (depthBias_.constant != 0 || depthBias_.slope != 0)) {
+        // Metal's unit of an n-bit UNORM depth is one code, 1 / (2^n - 1) (an M4 Max's Depth16Unorm, macOS 27.2.1)
+        const uint32_t bits = depthBias_.unorm24 ? 0 : pass_.biasDepthBits;
+        r.units = bits || depthBias_.unorm24 ? Raster::Units::Unorm24 : Raster::Units::Format;
+        const double scale = bits ? 16777216.0 / double((1u << bits) - 1) : 1.0;
+        r.biasConstant = fbits(float(double(depthBias_.constant) * scale));
+        r.biasSlope = fbits(depthBias_.slope);
+        r.biasClamp = fbits(depthBias_.clamp);
     }
     return r;
 }
@@ -7922,12 +8602,13 @@ void RenderEncoder::continuePass(uint8_t stores)
     // Clear reach is a Metal encoder property, including its empty-draw behavior.
     // Later encoders must not enlarge or elide the first encoder's clear.
     if (!clearsSealed_) {
-        clears(initialClears_);
+        clears(initialClears_, true);
         clearsSealed_ = true;
     }
     for (uint32_t i = 0; i < 8; ++i)
         pass_.color[i].store = stores & (1u << i);
     pipeline_ = nullptr;
+    selectorId_ = 0;
     for (auto &stage : bufs_)
         for (auto &binding : stage)
             binding = {};
@@ -7991,12 +8672,17 @@ void RenderEncoder::noteLargePass(const PixelBox &drawn, bool drawnKnown) const
     if (inSecond++ >= 20)
         return;
     const Texture *c1 = pass_.count > 1 ? pass_.color[1].texture : nullptr;
+    uint64_t cleared[2] = {};
+    for (const Clear &c : initialClears_)
+        if (c.target < 2)
+            cleared[c.target] += uint64_t(c.x1 - c.x0) * (c.y1 - c.y0);
     os_log(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
            "raw: large target pass %ux%u f%u%{public}s area %ux%u box %{public}s%u,%u-%u,%u rects %zu load %c c1 "
-           "%u%{public}s",
+           "%u%{public}s%{public}s cleared c0 %llu c1 %llu px",
            t->width, t->height, t->format, t->comptags ? " comp" : "", areaW_, areaH_, drawnKnown ? "" : "unknown ",
            drawn.x0, drawn.y0, drawn.x1, drawn.y1, rects_.size(), "dlc"[pass_.color[0].load], c1 ? c1->format : 0u,
-           c1 && memoryless_[1] ? "+ml" : "");
+           c1 && memoryless_[1] ? "+ml" : "", c1 && c1->comptags ? " comp" : "", (unsigned long long)cleared[0],
+           (unsigned long long)cleared[1]);
 }
 #endif
 
@@ -8033,10 +8719,14 @@ void RenderEncoder::end()
     }
     if (samples_ > 1)
         sampleWords(p_, 1, d.root_.va);
-    // the 3D engine's work outside the pass (the blit encoder's draws) meets no iterated blend and the pass's targets
-    if (const Pipeline *live = cb_->extrasLive_; live && live->freeForm.rung == FetchIteratedBlend) {
+    // the 3D engine's work outside the pass (the blit encoder's draws) meets no iterated blend and the pass's
+    // targets, and the pixel stage and rasteriser on; the state's segment, run again at its next bind, turns them off
+    if (const Pipeline *live = cb_->extrasLive_;
+        live && (live->freeForm.rung == FetchIteratedBlend || live->stagesOff)) {
         p_.raw(live->restore.data(), uint32_t(live->restore.size()));
         cb_->extrasLive_ = nullptr;
+        if (live->stagesOff)
+            cb_->heldSegment_.lose();
     }
     if (narrowed_) {
         p_.m(CT_SELECT, targetSelect(colorTargets()));
@@ -8075,7 +8765,7 @@ void RenderEncoder::end()
     const uint32_t room = 160 + 8 * 32 + uint32_t(cl.size()) * 48 + kZetaTargetWords + kZcullRegionWords +
                           kZetaClearWords + 16 + kSampleWords + kTurnWordsMethods + uint32_t(restore.size()) +
                           kSpanMarkWords + startStampCount_ * counters::kTimestampWords + kDrawStampWords +
-                          (separate_.depth ? 192 : 0);
+                          (separate_.stencil ? 64 + 128 * layers : 0);
     uint64_t va;
     uint32_t *start = reinterpret_cast<uint32_t *>(d.alloc(d.push_, room * 4, 256, va));
     Push p{start, start + room};
@@ -8117,7 +8807,7 @@ void RenderEncoder::end()
         p.m(WAIT_FOR_IDLE, 0);
         p.m(INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI, 0);
     }
-    if (separate_.depth)
+    if (separate_.stencil)
         copySeparateZeta(
             p, (separate_.loadDepth ? kShaderTestDepth : 0) | (separate_.loadStencil ? kShaderTestStencil : 0), true);
     // the clears m2v makes by passes of their own first (Clear loads reaching past the render area): each its attachment alone
@@ -8241,8 +8931,8 @@ void RenderEncoder::end()
     }
     if (const uint8_t aspects =
             (separate_.storeDepth ? kShaderTestDepth : 0) | (separate_.storeStencil ? kShaderTestStencil : 0);
-        separate_.depth && aspects) {
-        constexpr uint32_t room3 = 192;
+        separate_.stencil && aspects) {
+        const uint32_t room3 = 64 + 128 * std::max(pass_.layers, 1u);
         uint32_t *at = reinterpret_cast<uint32_t *>(d.alloc(d.push_, room3 * 4, 256, va));
         Push q{at, at + room3};
         copySeparateZeta(q, aspects, false);
@@ -8259,7 +8949,7 @@ void RenderEncoder::end()
 // DontCare-loaded memoryless color some draw reads (or that is stored) clears to zero where the pass reaches anything; a stored
 // DontCare-loaded color some draw reads (blended into, written through a partial mask, fetched) clears to zero over what the
 // pass reaches: the whole render area, or the reached tiles' runs along each row of tiles. Any other DontCare load loads.
-void RenderEncoder::clears(std::vector<Clear> &out)
+void RenderEncoder::clears(std::vector<Clear> &out, bool fused)
 {
     out.clear();
 
@@ -8323,6 +9013,8 @@ void RenderEncoder::clears(std::vector<Clear> &out)
                 RAW_DIAGNOSTIC(dev_->stats.clearsElided++);
                 continue;
             }
+            if (clearSeenOnlyByDraws(a.store, samples_, fused, pass_.drawn) && drawnClear(j, a.clear, out))
+                continue;
             out.push_back(c);
             continue;
         }
@@ -8330,7 +9022,9 @@ void RenderEncoder::clears(std::vector<Clear> &out)
             continue;
         const bool read = readBits_ >> j & 1;
         if (memoryless_[j]) {
-            if (read || a.store)
+            const bool narrowed =
+                clearSeenOnlyByDraws(a.store, samples_, fused, pass_.drawn) && drawnClear(j, zero, out);
+            if (!narrowed && (read || a.store))
                 out.push_back({j, 0, 0, w, h, zero});
             continue;
         }
@@ -8357,6 +9051,21 @@ void RenderEncoder::clears(std::vector<Clear> &out)
     }
 }
 
+// A clear of colour `j` that only the pass's draws see (raw_clear_box.h) into `out`, over their tiles' box: false where
+// that is the whole render area, which the caller clears as before
+bool RenderEncoder::drawnClear(uint32_t j, const float *value, std::vector<Clear> &out) const
+{
+    const PixelBox b = drawnClearBox(reached_, drew_, whole_, readBits_ >> j & 1, areaW_, areaH_);
+    if (!b.x0 && !b.y0 && b.x1 == areaW_ && b.y1 == areaH_)
+        return false;
+    if (!b.empty())
+        out.push_back({j, b.x0, b.y0, b.x1, b.y1, value});
+    RAW_DIAGNOSTIC(dev_->stats.clearsNarrowed++);
+    RAW_DIAGNOSTIC(dev_->stats.clearPixelsLeft +=
+                   uint64_t(areaW_) * areaH_ - (b.empty() ? 0 : uint64_t(b.x1 - b.x0) * (b.y1 - b.y0)));
+    return true;
+}
+
 // ---- blit encoder ----
 
 // NVK's copies of pitch memory: a byte copy (vkCmdCopyBuffer, nvk_cmd_copy_memory_ce: 128 KiB per launch, no remap) or a
@@ -8378,10 +9087,6 @@ void BlitEncoder::room(uint32_t words)
 
 void BlitEncoder::copyBytes(uint64_t src, uint64_t dst, uint64_t bytes)
 {
-    if (bytes) {
-        cb_->useAddress(src, bytes, false);
-        cb_->useAddress(dst, bytes, true);
-    }
     cb_->bufferWrites_.note(dst, bytes);
     for (uint64_t done = 0; done < bytes;) {
         room();
@@ -8416,8 +9121,6 @@ void BlitEncoder::fillRun(uint64_t at, uint32_t width, uint32_t height, [[maybe_
 
 void BlitEncoder::fillWords(uint64_t dst, uint64_t bytes, uint32_t word)
 {
-    if (bytes)
-        cb_->useAddress(dst, bytes, true);
     cb_->bufferWrites_.note(dst, bytes);
     if (bytes < 4)
         return;
@@ -8438,8 +9141,6 @@ void BlitEncoder::fillWords(uint64_t dst, uint64_t bytes, uint32_t word)
 
 void BlitEncoder::fillBytes(uint64_t dst, uint64_t bytes, uint8_t value)
 {
-    if (bytes)
-        cb_->useAddress(dst, bytes, true);
     cb_->bufferWrites_.note(dst, bytes);
     auto bytesOf = [&](uint64_t at, uint64_t n) {
         if (!n)
@@ -8463,19 +9164,20 @@ void BlitEncoder::copyRect(uint64_t src, uint32_t srcPitch, uint64_t dst, uint32
     cb_->bufferWrites_.note(dst, rowStorageBytes(dstPitch, width, lines, bpp));
     if (!width || !lines || !bpp)
         return;
-    cb_->useAddress(src, rowStorageBytes(srcPitch, width, lines, bpp), false);
-    cb_->useAddress(dst, rowStorageBytes(dstPitch, width, lines, bpp), true);
     room();
     copyRows(p_, src, srcPitch, dst, dstPitch, width, lines, bpp, dev_->stats);
 }
 
 void BlitEncoder::copyTexels(const Texture &src, uint32_t sx, uint32_t sy, uint32_t sz, const Texture &dst, uint32_t dx,
-                             uint32_t dy, uint32_t dz, uint32_t w, uint32_t h)
+                             uint32_t dy, uint32_t dz, uint32_t w, uint32_t h, uint8_t aspect)
 {
     cb_->use(src, false);
     cb_->use(dst, true);
     room(32);
-    copySides(p_, sideOf(src, sx, sy, sz), sideOf(dst, dx, dy, dz), w, h, src.bpp, dev_->stats);
+    const uint32_t remap = aspect == kAspectStencil ? remapOf(kRemapNoWrite, 1, kRemapNoWrite, kRemapNoWrite, 4, 2, 2)
+                                                    : texelRemap(src.bpp);
+    copyRemapped(p_, sideOf(src, sx, sy, sz), sideOf(dst, dx, dy, dz), w, h, remap,
+                 aspect == kAspectStencil ? 4 : src.bpp, dev_->stats);
 #if SWITCH_RAW_DIAGNOSTICS
     char detail[64];
     snprintf(detail, sizeof detail, " from %ux%u f%u at %u,%u", src.width, src.height, src.format, sx, sy);
@@ -8493,6 +9195,16 @@ void BlitEncoder::fillTexels(const Texture &t, uint32_t z, uint32_t w, uint32_t 
     copyRemapped(p_, side, side, w, h, fill.remap, uint32_t(fill.componentBytes) * fill.components, dev_->stats);
 }
 
+void BlitEncoder::copyFirstByte(const Texture &from, const Texture &to)
+{
+    cb_->use(from, false);
+    cb_->use(to, true);
+    room(32);
+    copyRemapped(p_, sideOf(from, 0, 0, 0), sideOf(to, 0, 0, 0), std::min(from.width, to.width),
+                 std::min(from.height, to.height),
+                 remapOf(0, kRemapNoWrite, kRemapNoWrite, kRemapNoWrite, 1, from.bpp, to.bpp), 1, dev_->stats);
+}
+
 void BlitEncoder::copyBufferTexels(uint64_t va, uint32_t pitch, const Texture &t, uint32_t x, uint32_t y, uint32_t z,
                                    uint32_t w, uint32_t h, bool toTexture, uint8_t aspect)
 {
@@ -8500,11 +9212,6 @@ void BlitEncoder::copyBufferTexels(uint64_t va, uint32_t pitch, const Texture &t
         return copyBufferTexels(va, pitch, *t.luma, x, y, z, w, h, toTexture, aspect);
     if (!toTexture)
         cb_->bufferWrites_.note(va, uint64_t(pitch) * h + uint64_t(w) * 16);
-    const uint32_t element = t.zeta && aspect == kAspectStencil ? 1
-                             : t.zeta && aspect == kAspectDepth ? 4
-                                                                : bufferTexelBytes(t.format, t.bpp);
-    if (w && h)
-        cb_->useAddress(va, rowStorageBytes(pitch, w, h, element), !toTexture);
     cb_->use(t, toTexture);
 #if SWITCH_RAW_DIAGNOSTICS
     if (toTexture && !t.zeta)
@@ -8549,6 +9256,35 @@ void BlitEncoder::copyBufferTexels(uint64_t va, uint32_t pitch, const Texture &t
     copySides(p_, from, to, w, h, t.bpp, dev_->stats);
 }
 
+bool BlitEncoder::widenSrgbPair(const Texture &t)
+{
+    if (!srgbPair(t.format) || !t.standIn)
+        return false;
+    std::vector<XrPart> parts;
+    if (!t.blockLinear) {
+        XrPart whole;
+        whole.codes = t;
+        whole.standIn = *t.standIn;
+        parts.push_back(whole);
+    } else {
+        Texture codes = t;
+        codes.standIn = nullptr;
+        if (!xrParts(codes, *t.standIn, parts))
+            return false;
+    }
+    cb_->use(t, false);
+    cb_->use(*t.standIn, true);
+    // each texel's red and green bytes into the stand-in's first two, its blue and alpha NO_WRITE (the swizzle reads
+    // zero and one there)
+    const uint32_t widen = remapOf(0, 1, kRemapNoWrite, kRemapNoWrite, 1, 2, 4);
+    for (const XrPart &part : parts) {
+        room();
+        copyRemapped(p_, sideOf(part.codes, 0, 0, 0), sideOf(part.standIn, 0, 0, 0), part.codes.width,
+                     part.codes.height, widen, 2, dev_->stats);
+    }
+    return true;
+}
+
 // The codes Metal reads of RGB8_444_2P (pack/../m2v ycbcr_convert.rs: "Codes"): red Cr, green Y, blue Cb, each code / 255, alpha
 // 1, an RGBA8Unorm texel of the codes, as m2v's image holds them. Remap per destination component: SRC_X..W 0..3, CONST_A 4,
 // NO_WRITE 6 (clb0b5 SET_REMAP_COMPONENTS); one byte a component, four destination components.
@@ -8580,6 +9316,29 @@ void BlitEncoder::convertPlanar(const Texture &t)
             t.planes.chromaPitch, t.pitch, t.width, t.height},
            SUBC_COPY);
     p_.m(CE_LAUNCH_DMA, kLaunchPitch | 1u << 10, SUBC_COPY);
+}
+
+void BlitEncoder::splitPlane(const Texture &t)
+{
+    if (!t.onePlane || !t.luma || !t.chroma || !t.chroma->width || !t.height)
+        return;
+    const uint32_t pairs = t.chroma->width;
+    cb_->useAddress(t.planes.luma, rowStorageBytes(t.planes.lumaPitch, pairs, t.height, 4), false);
+    cb_->use(*t.luma, true);
+    cb_->use(*t.chroma, true);
+    RAW_DIAGNOSTIC(dev_->stats.ceOps += 2);
+    RAW_DIAGNOSTIC(dev_->stats.ceBytes += uint64_t(pairs) * t.height * 4);
+    constexpr uint32_t one = 0 << 16, src4 = 3u << 20, dst2 = 1u << 24;
+    for (const Texture *to : {t.luma, t.chroma}) {
+        const uint32_t remap = to == t.luma ? 0 | 2 << 4 : 1 | 3 << 4;  // Y0, Y1 or Cb, Cr of Y0 Cb Y1 Cr
+        room();
+        p_.m(CE_SET_REMAP_COMPONENTS, remap | one | src4 | dst2, SUBC_COPY);
+        p_.inc(CE_OFFSET_IN_UPPER,
+               {uint32_t(t.planes.luma >> 32), uint32_t(t.planes.luma), uint32_t(to->va >> 32), uint32_t(to->va),
+                t.planes.lumaPitch, to->pitch, pairs, t.height},
+               SUBC_COPY);
+        p_.m(CE_LAUNCH_DMA, kLaunchPitch | 1u << 10, SUBC_COPY);
+    }
 }
 
 void BlitEncoder::access(const void *read, const void *write)
@@ -8615,14 +9374,14 @@ void BlitEncoder::timestamp(uint64_t va, bool afterCopies)
 }
 
 void BlitEncoder::generate(Texture &t, uint32_t fmt2d, uint32_t first, uint32_t last,
-                           [[maybe_unused]] uint32_t unproven)
+                           [[maybe_unused]] uint32_t unproven, uint32_t firstLayer, uint32_t layers)
 {
     Texture::Chain *c = t.chain;
     if (!c || !fmt2d || first >= last || last >= c->layout.levels)
         return;
-    cb_->useAddress(c->va, c->layout.bytes, true);
-    room(uint32_t(fx::generateLayersWords(c->layout, first, last)));
-    fx::emitGenerateLayers(p_, c->layout, c->va, fmt2d, first, last);
+    cb_->use(t, true);
+    room(uint32_t(fx::generateWords(c->layout, first, last) * layers));
+    fx::emitGenerateLayers(p_, c->layout, c->va, fmt2d, first, last, firstLayer, layers);
     RAW_DIAGNOSTIC(dev_->stats.chainGenerates++);
     RAW_DIAGNOSTIC(dev_->stats.mipTwodLevels += last - first);
     RAW_DIAGNOSTIC(dev_->stats.mipTwodUnproven += unproven);

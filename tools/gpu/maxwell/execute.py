@@ -81,11 +81,20 @@ def f2i(w: int, lane: Lane, name: str, inputs: Inputs) -> int:
 
 
 def i2f(w: int, lane: Lane, name: str, inputs: Inputs) -> int:
-    if bits(w, 10, 2) != 2:
-        raise UnsupportedError('I2F from other than 32 bits')
+    width = 8 << bits(w, 10, 2)
+    if width != 32 and not (
+        width == 64
+        and name == 'I2F_reg'
+        and bits(w, 8, 2) == 2
+        and not (bits(w, 41, 2) or bits(w, 45, 1) or bits(w, 49, 1))
+    ):
+        raise UnsupportedError('I2F source width or modifiers')
     v = operand_b(lane, w, name, inputs, i20)
-    if bits(w, 13, 1) and v & 0x80000000:
-        v -= 1 << 32
+    r = bits(w, 20, 8)
+    if width == 64 and r != RZ_REG:
+        v |= lane.r(r + 1) << 32
+    if bits(w, 13, 1) and v & (1 << (width - 1)):
+        v -= 1 << width
     if bits(w, 45, 1):
         v = -v
     return encode(Fraction(v), width_format(bits(w, 8, 2)), bits(w, 39, 2))
@@ -229,6 +238,8 @@ def alu(name: str, w: int, lane: Lane, inputs: Inputs) -> None:  # noqa: C901, P
         texture.tld(name, w, lane, inputs, d)
     elif base == 'TLDS':
         texture.tlds(w, lane, inputs)
+    elif base == 'TLD4S':
+        texture.tld4s(w, lane, inputs)
     elif base == 'TXD':
         texture.txd(name, w, lane, inputs, d)
     elif name == 'TXQ_b':
@@ -267,10 +278,15 @@ def iadd(base: str, name: str, w: int, lane: Lane, inputs: Inputs, a: int, d: in
     lane.w(d, total)
 
 
+# LDG's cache op .CG (L2 only): the interlock's ticket wait reads the ticket word with it, which the model holds at 0
+# as it gives an atomic 0, so the wait passes at once either way
+LDG_CG = 1
+
+
 def memory(base: str, w: int, lane: Lane, inputs: Inputs, d: int) -> None:
     if base in {'MEMBAR', 'RED'}:
         return
-    if base == 'ATOM':
+    if base == 'ATOM' or (base == 'LDG' and bits(w, 46, 2) == LDG_CG):
         lane.w(d, 0)
         return
     dimension = 2 if base == 'LDG' else SURFACE_COORDS.get(bits(w, 33, 3), 2)
@@ -486,11 +502,22 @@ def fminmax(x: int, y: int, want_min: bool, ftz: bool) -> int:
 
 
 def ipa(w: int, lane: Lane, inputs: Inputs, d: int) -> None:
-    """Interpolate an attribute: one value over a lane's pixel, so its centroid reads the centre's."""
+    """Read an attribute by byte address and, for .OFFSET, its packed signed-s12 location."""
     freq, loc = bits(w, 54, 2), bits(w, 52, 2)
-    if loc > 1 or bits(w, 38, 1):
+    if loc > 2 or bits(w, 8, 8) != RZ_REG or bits(w, 38, 1):
         raise UnsupportedError('IPA offset or indexed')
-    v = inputs.attribute(bits(w, 28, 10))
+    address = bits(w, 28, 10)
+    key = address
+    if loc == 2:
+        offset = lane.r(bits(w, 39, 8))
+        dx, dy = bits(offset, 0, 12), bits(offset, 16, 12)
+        dx -= 0x1000 if dx & 0x800 else 0
+        dy -= 0x1000 if dy & 0x800 else 0
+        if dx or dy:
+            if freq != 0:
+                raise UnsupportedError('IPA nonzero offset frequency')
+            key = (address, dx, dy)
+    v = inputs.attribute(key)
     if freq == 1:
         v = arith('mul', [v, lane.r(bits(w, 20, 8))], F32)
     elif freq not in (0, 2):

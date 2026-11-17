@@ -257,6 +257,28 @@ def apfs_containers() -> list[dict]:
     return plist('diskutil', 'apfs', 'list', '-plist').get('Containers', [])
 
 
+APFS_CONTAINER = 'EF57347C-0000-11AA-AA11-00306543ECAC'  # hdiutil's hint for the container macOS synthesizes
+
+
+def attached_container(entities: list[dict]) -> str | None:
+    """Find the container disk macOS synthesized for an attached image in hdiutil attach's system-entities, or None.
+
+    hdiutil lists it once the disk is published, which `diskutil apfs list` can still lag behind: name it to
+    apfs_container() rather than looking for its store in the whole listing.
+    """
+    found = [e['dev-entry'][len('/dev/') :] for e in entities if e.get('content-hint', '').upper() == APFS_CONTAINER]
+    return found[0] if len(found) == 1 else None
+
+
+def apfs_container(reference: str) -> dict | None:
+    """Return the APFS container whose container disk is `reference` (e.g. disk5), or None."""
+    try:
+        containers = plist('diskutil', 'apfs', 'list', '-plist', reference).get('Containers', [])
+    except HostError:
+        return None
+    return containers[0] if len(containers) == 1 else None
+
+
 def container_on(store: str) -> dict | None:
     """Return the APFS container whose physical store is `store` (e.g. disk4s9), or None."""
     for container in apfs_containers():

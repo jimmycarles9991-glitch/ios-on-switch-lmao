@@ -29,7 +29,8 @@
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
 #if SWITCH_NVDEC_PROBES
-extern "C" void switch_native_surface_publications(uint64_t *published, uint64_t *allocated) __attribute__((weak));
+extern "C" void switch_native_surface_publications(uint64_t *published, uint64_t *allocated, uint64_t *surfaces)
+    __attribute__((weak));
 #endif
 
 namespace {
@@ -68,7 +69,7 @@ class AppleD5500UserClient : public IOUserClient {
     Buffer buffers_[kMaxBuffers] = {};
     SwitchNVDECPark park_ = {};
 #if SWITCH_NVDEC_PROBES
-    uint64_t recycles_ = 0, exports_ = 0, exportObjects_ = 0;
+    uint64_t recycles_ = 0, exports_ = 0, exportObjects_ = 0, exportSurfaces_ = 0;
     IOReturn bufferStats(uint32_t inSize, void *out, uint32_t *outSize) const;
 #endif
     alignas(8) uint8_t input_[sizeof(TegraNVDECSubmit)] = {};  // under lock_: the record of a locked call
@@ -200,14 +201,14 @@ IOReturn AppleD5500UserClient::clientClose()
         IOLog("TegraNVDEC: a closing client's job never finished; its buffers stay wired\n");
 #if SWITCH_NVDEC_PROBES
     if (recycles_) {
-        uint64_t published = 0, objects = 0;
+        uint64_t published = 0, objects = 0, surfaces = 0;
         if (switch_native_surface_publications)
-            switch_native_surface_publications(&published, &objects);
+            switch_native_surface_publications(&published, &objects, &surfaces);
         IOLog("TegraNVDEC: client closed: %llu recycles, %llu of an exported picture's buffer: %llu took a parked "
-              "buffer, %llu allocated one (%u parked at most); %llu exports, %llu new surface objects; since boot %llu "
-              "native publications, %llu new surface objects\n",
-              recycles_, park_.recycled, park_.taken, park_.allocated, park_.most, exports_, exportObjects_, published,
-              objects);
+              "buffer, %llu allocated one (%u parked at most); %llu exports into %llu surfaces, %llu new surface "
+              "objects; since boot %llu native publications into %llu surfaces, %llu new surface objects\n",
+              recycles_, park_.recycled, park_.taken, park_.allocated, park_.most, exports_, exportSurfaces_,
+              exportObjects_, published, surfaces, objects);
     }
 #endif
     dropAll(idle);
@@ -251,7 +252,7 @@ IOReturn AppleD5500UserClient::bufferStats(uint32_t inSize, void *out, uint32_t 
     if (inSize || !out || *outSize < sizeof(SwitchNVDECBufferStats))
         return kIOReturnBadArgument;
     *static_cast<SwitchNVDECBufferStats *>(out) = {recycles_, park_.recycled, park_.taken, park_.allocated,
-                                                   exports_,  exportObjects_, park_.most,  0};
+                                                   exports_,  exportObjects_, park_.most,  uint32_t(exportSurfaces_)};
     *outSize = sizeof(SwitchNVDECBufferStats);
     return kIOReturnSuccess;
 }
@@ -432,12 +433,14 @@ IOReturn AppleD5500UserClient::run(uint32_t method, const void *in, uint32_t inS
         const auto *request = static_cast<const TegraNVDECPresent *>(in);
         const auto *buffer = find(request->handle);
         SwitchNVDECExportRefusal refusal = {"native export of a buffer the connection does not hold", 0, 0, 0};
-        bool fresh = false;
+        bool fresh = false, first = false;
         const int error =
-            buffer ? switch_nvdec_output_export(&buffer->block, request, current_task(), &refusal, &fresh) : -22;
+            buffer ? switch_nvdec_output_export(&buffer->block, request, current_task(), &refusal, &fresh, &first)
+                   : -22;
 #if SWITCH_NVDEC_PROBES
         exports_ += !error;
         exportObjects_ += !error && fresh;
+        exportSurfaces_ += !error && first;
 #endif
         if (error) {
             const uint64_t key =

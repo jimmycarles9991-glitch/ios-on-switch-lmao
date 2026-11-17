@@ -41,7 +41,7 @@ protected:
         r.programs[1].cbufTypes = {raw::CbufRoot, raw::CbufSet, uint8_t(raw::CbufUbo | (32 / 16) << 3)};
         r.pipeline.keyHash = 0x5b111;
         r.pipeline.flags = raw::PipelinePushMetadata;
-        r.pipeline.entries = 6;
+        raw::setEntryCount(r.pipeline, 6);
         r.pipeline.entry[0] = uniform(0, 2, 13, 32);
         r.pipeline.entry[1] = uniform(16, 2, 14, 33);
         r.pipeline.entry[2] = {32, raw::EntrySpillTable, 2, 0, 0, 0, 0};

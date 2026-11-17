@@ -53,8 +53,8 @@ IOReturn AGXDeviceUserClient::resourceObserve(const TegraGM20BAbiResourceObserve
 		const Bo *bo = addressed ? (binding ? binding->bo : nullptr) : findBo(use.handle);
 		uint64_t offset = 0;
 		if (!bo || !bo->backing ||
-		    (ranged &&
-		     !switch_gpu_binding_offset(*binding, use.handle, use.reserved, offset)) ||
+		    (ranged && (!binding || !switch_gpu_binding_offset(*binding, use.handle,
+								       use.reserved, offset))) ||
 		    ((use.access & TegraGM20BSurfaceWrite) && bo->readOnly)) {
 			result = kIOReturnBadArgument;
 			break;

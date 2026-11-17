@@ -155,6 +155,19 @@ static inline int tgm_comp_pick_chunks(const unsigned long *map, const unsigned 
 	return clean + unclean < count ? -1 : (int)unclean;
 }
 
+/* How many chunks of a pool of `npages` pages have no page in use (`map`) and none not known to be zero (`dirty`): what
+ * tgm_comp_pick_chunks can hand a compressible BO now. */
+static inline uint64_t tgm_comp_clean_chunks(const unsigned long *map, const unsigned long *dirty,
+					     uint64_t npages)
+{
+	uint64_t chunk = npages / TGM_COMP_PAGES;
+	uint64_t clean = 0;
+
+	while (chunk-- > 0)
+		clean += !tgm_comp_chunk_any(map, chunk) && !tgm_comp_chunk_any(dirty, chunk);
+	return clean;
+}
+
 /* A compressible kind binds only as whole big pages of memory that has them. */
 static inline int tgm_comp_bind_ok(uint64_t va, uint64_t offset, uint64_t range, uint32_t mem_shift)
 {

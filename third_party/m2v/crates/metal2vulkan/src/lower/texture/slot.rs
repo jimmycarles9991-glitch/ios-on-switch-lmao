@@ -225,6 +225,9 @@ pub struct SlotPlan {
     /// texel's raw code from the slot's raw view (`ResourceKind::RawTexture`), the slot being one
     /// of `LoweringInputs::srgb_textures` (`RuntimeFact::SrgbTexture`).
     pub raw: bool,
+    /// The slot holds a two-plane `RGB10A8_2P_XR10` texture's color words, and its plane image
+    /// (`ResourceKind::TexturePlane`) the alpha bytes ([`two_planes`]); set by [`finish`].
+    pub plane: bool,
     /// A read of the slot, a texture buffer, applies the bound texture buffer's swizzle, which
     /// the slot's `TextureSwizzle` specialization gives (`RuntimeFact::TextureSwizzle`); or the
     /// slot, a storage slot of `LoweringInputs::swizzled_storage`, applies the bound texture's to
@@ -268,6 +271,7 @@ impl SlotPlan {
             float_format: false,
             norm_write: false,
             raw: false,
+            plane: false,
             swizzle: false,
             constant_lanes: false,
             offset_base: false,
@@ -985,6 +989,20 @@ fn cross_reads(s: &SlotPlan, shape: ImageShape) -> bool {
         )
 }
 
+/// Whether slot `slot`, bound in extended-range form `extended`, holds a two-plane
+/// `RGB10A8_2P_XR10` texture (`LoweringInputs::two_plane_textures`): its image the color words
+/// (`R32ui`), its plane image the alpha bytes (`R8ui`).
+pub(crate) fn two_planes(
+    inputs: &crate::pipeline::LoweringInputs,
+    slot: SlotRef,
+    extended: Option<crate::metal::format::ExtendedRange>,
+) -> bool {
+    matches!(
+        extended,
+        Some(crate::metal::format::ExtendedRange::Planes { .. })
+    ) && inputs.two_plane_textures.contains(&slot)
+}
+
 /// The declaration of slot `s`, checked on the profile, with the facts, push fields, and
 /// descriptors it contributes.
 fn declare_slot(
@@ -1037,6 +1055,11 @@ fn declare_slot(
         None if ycbcr_write || half_bits => TexelClass::Uint,
         None => image_class(cx.inputs, s),
     };
+    // A two-plane texture's texel is split across two images: an atomic has no such form.
+    let planes = two_planes(cx.inputs, s.slot, extended);
+    if planes && s.uses.atomic {
+        return Err(Unsupported::not_implemented(Feature::Format).into());
+    }
     if shape.depth && storage {
         // Metal has no writable depth textures.
         return Err(refuse());
@@ -1068,6 +1091,9 @@ fn declare_slot(
     } else {
         None
     };
+    if planes && views.is_some() {
+        return Err(Unsupported::not_implemented(Feature::Format).into());
+    }
     let (format, class) = if storage {
         facts.push(RuntimeFact::StorageTextureFormat { slot: s.slot });
         if s.uses.half_channels {
@@ -1078,7 +1104,10 @@ fn declare_slot(
             facts.push(RuntimeFact::StorageTextureIntegerChannels { slot: s.slot });
             push.push(PushField::TextureIntegerChannels(s.slot));
         }
-        storage_format(cx, s, texel)?
+        match planes && (s.uses.read || s.uses.write) {
+            true => (crate::spv::ImageFormat::R32ui, StorageImageClass::Identity),
+            false => storage_format(cx, s, texel)?,
+        }
     } else {
         (
             crate::spv::ImageFormat::Unknown,
@@ -1104,14 +1133,16 @@ fn declare_slot(
     if shape.dim == ImageDim::Buffer {
         facts.push(RuntimeFact::TexelBufferRange { slot: s.slot });
     }
+    // The plane image's binding beside the texture's own.
+    let plane = u32::from(planes);
     if storage {
         let n = views.unwrap_or(1);
-        counts.storage_images = counts.storage_images.saturating_add(n);
+        counts.storage_images = counts.storage_images.saturating_add(n + plane);
     } else {
         // The raw view's binding beside the texture's own.
         counts.sampled_images = counts
             .sampled_images
-            .saturating_add(if s.raw { 2 } else { 1 });
+            .saturating_add(if s.raw { 2 } else { 1 } + plane);
     }
     Ok(ImageDecl {
         dim,
@@ -1400,6 +1431,7 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
             cx.families.arith.srgb.get_or_insert(dir);
         }
         if let Some(s) = cx.families.texture.slots.get_mut(&index) {
+            s.plane = two_planes(cx.inputs, s.slot, d.extended);
             s.decl = Some(d);
             s.volatile = volatile;
         }

@@ -524,7 +524,7 @@ def window_checks(m: dict, payload: bytes, adt: bytes, pins: KindPins, manifest_
         'osenvironment': b'main\0',
         'root-matching': root_matching(pins.root_volume_uuid),
         'crypto-hash-method': b'sha2-384\0',
-        'amfi-only-platform-code': struct.pack('<I', 1),
+        'amfi-only-platform-code': struct.pack('<I', 0),
         'ephemeral-storage': struct.pack('<I', 0),  # persistent SD Data
     }
     for key, value in required.items():

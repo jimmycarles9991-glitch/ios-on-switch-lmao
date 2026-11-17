@@ -82,6 +82,12 @@ inline uint16_t writtenSlots(const PackPipeline &rec)
     return slots;
 }
 
+// Whether writtenSlots `slots` holds fragment slot `slot` (none past kWrittenSlots)
+inline bool writtenSlot(uint16_t slots, uint32_t slot)
+{
+    return slot < kWrittenSlots && (slots >> slot & 1);
+}
+
 // Whether `rec`'s programs were compiled for each of `written`'s formats at its slot
 inline bool compiledFor(const PackPipeline &rec, const std::vector<WrittenTexture> &written)
 {

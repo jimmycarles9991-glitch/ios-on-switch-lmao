@@ -78,6 +78,7 @@
  * Version 2.0.
  */
 
+#include <switch/app_code.h>
 #include <kern/assert.h>
 #include <kern/bits.h>
 #include <sys/param.h>
@@ -1152,6 +1153,7 @@ forkproc(proc_t parent_proc, cloneproc_flags_t clone_flags)
 	proc_transstart(child_proc, 0, 0);
 
 	child_proc->p_pcaction = 0;
+	if (switch_app_code_process(parent_proc)) child_proc->p_lflag |= SWITCH_P_LAPP_CODE;
 
 	TAILQ_INIT(&child_proc->p_uthlist);
 	TAILQ_INIT(&child_proc->p_aio_activeq);

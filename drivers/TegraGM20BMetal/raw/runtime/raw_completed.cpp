@@ -2,6 +2,7 @@
 // Device::addRecord (raw_gpu.h): a state the runtime made a record of (raw_record.h), drawn from then on as the pack's states are.
 #include <algorithm>
 #include <cstring>
+#include <os/log.h>
 #include "raw_gpu.h"
 #include "raw_dynamic_push.h"
 #include "raw_record.h"
@@ -15,24 +16,42 @@ namespace raw {
 // submission's prologue invalidates the shader and constant caches before any draw reads it.
 bool Device::placeCompleted(const CapturedProgram &p, PlacedProgram &out)
 {
-    const std::string key = p.id + std::string(p.cbufTypes.begin(), p.cbufTypes.end());
+    const std::string key = programSlotKey(p);
     if (const auto it = completedPrograms_.find(key); it != completedPrograms_.end()) {
         out = it->second.placed;
         return true;
     }
-    if (p.image.size() < sizeof CompletedProgram::header || !slmNeed(slmPerWarpOfHeader(p.image.data())))
-        return false;
-    PackProgram info;
-    const std::vector<uint8_t> slot = programSlot(p, info);
+    return p.image.size() >= sizeof CompletedProgram::header && placeCompletedSlot(completedSlot(p), out);
+}
+
+CompletedSlot Device::completedSlot(const CapturedProgram &p)
+{
+    CompletedSlot slot;
+    slot.key = programSlotKey(p);
+    slot.bytes = programSlot(p, slot.info);
+    slot.farUbos = p.farUbos;
+    memcpy(slot.header, p.image.data(), std::min(sizeof slot.header, p.image.size()));
+    return slot;
+}
+
+// lock_ held
+bool Device::placeCompletedSlot(const CompletedSlot &slot, PlacedProgram &out)
+{
+    if (const auto it = completedPrograms_.find(slot.key); it != completedPrograms_.end()) {
+        out = it->second.placed;
+        return true;
+    }
     uint64_t at = 0;
-    if (!heapPlace(slot.data(), uint32_t(slot.size()), at))
+    if (!slmNeed(slmPerWarpOfHeader(slot.header)) || !heapPlace(slot.bytes.data(), uint32_t(slot.bytes.size()), at))
         return false;
-    info.heapOffset = uint32_t(at);
-    CompletedProgram &placed = completedPrograms_[key];
-    placed.info = info;
-    memcpy(placed.header, p.image.data(), sizeof placed.header);
-    placed.placed = {&placed.info, uint32_t(at) + info.program, info.dataBytes ? heap_.va + at + info.dataOffset : 0,
-                     placed.header};
+    CompletedProgram &placed = completedPrograms_[slot.key];
+    placed.info = slot.info;
+    placed.info.heapOffset = uint32_t(at);
+    memcpy(placed.header, slot.header, sizeof placed.header);
+    placed.farUbos = slot.farUbos;
+    placed.placed = {&placed.info, uint32_t(at) + slot.info.program,
+                     slot.info.dataBytes ? heap_.va + at + slot.info.dataOffset : 0, placed.header,
+                     placed.farUbos.empty() ? nullptr : placed.farUbos.data()};
     RAW_DIAGNOSTIC(stats.programsPlaced++);
     out = placed.placed;
     return true;
@@ -53,6 +72,7 @@ bool Device::constexprSampler(const std::array<uint32_t, 8> &words, uint32_t &in
             return false;
         memcpy(tsc_.cpu + 32 * tsc, words.data(), 32);
         constexprTsc_[constexprCount_] = tsc;
+        constexprWord0_[constexprCount_] = words[0];
         known = completedSamplers_.emplace(words, uint8_t(constexprCount_++)).first;
     }
     index = known->second;
@@ -76,6 +96,7 @@ void Device::offerCompletedSplit(Completed &c, const RuntimeRecord &r, const Pla
     source.prologueSlot.insert(source.prologueSlot.end(), prologue.data.begin(), prologue.data.end());
     source.pp = &c.record;
     source.blob = c.blob.data();
+    source.far = c.far.empty() ? nullptr : c.far.data();
     source.keyString = c.keyString.c_str();
     source.vs = vs;
     source.caTransform = caTransform;
@@ -86,9 +107,10 @@ Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::strin
 {
     if (retry)
         *retry = false;
-    const bool tess = tessellates(r.pipeline);
+    const bool tess = tessellates(r.pipeline), pixel = pixelStage(r.pipeline);
     for (const CapturedProgram *program : {&r.programs[0], &r.programs[1], &r.tessPrograms[0], &r.tessPrograms[1]}) {
-        if (!tess && (program == &r.tessPrograms[0] || program == &r.tessPrograms[1]))
+        if ((!tess && (program == &r.tessPrograms[0] || program == &r.tessPrograms[1])) ||
+            (!pixel && program == &r.programs[1]))
             continue;
         if (program->image.size() < sizeof CompletedProgram::header) {
             why = "missing shader program header";
@@ -108,8 +130,8 @@ Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::strin
     const uint64_t key = r.pipeline.keyHash;
     if (const auto it = completed_.find(key); it != completed_.end())
         return it->second;
-    PlacedProgram vs, fs, tessPlaced[2];
-    if (!placeCompleted(r.programs[0], vs) || !placeCompleted(r.programs[1], fs) ||
+    PlacedProgram vs, fs = noPixelProgram(), tessPlaced[2];
+    if (!placeCompleted(r.programs[0], vs) || (pixel && !placeCompleted(r.programs[1], fs)) ||
         (tess &&
          (!placeCompleted(r.tessPrograms[0], tessPlaced[0]) || !placeCompleted(r.tessPrograms[1], tessPlaced[1])))) {
         stats.heapFull++;
@@ -123,18 +145,23 @@ Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::strin
     c.keyString = r.keyString;
     c.blob = r.blob;
     c.spill = r.spill;
+    c.far = r.far;
+    if (c.far.size() != farWords(entryCount(c.record))) {
+        why = "a record whose far entries are not its entries'";
+        return nullptr;
+    }
     for (const auto &[m, v] : r.extras) {
         c.blob.push_back(m);
         c.blob.push_back(v);
     }
     c.record.blobDwords = uint32_t(c.blob.size());
-    if (!usableStorageMetadata(c.record, c.blob.data(), c.record.blobDwords)) {
+    if (!usableStorageMetadata(c.record, c.blob.data(), c.record.blobDwords, c.far.empty() ? nullptr : c.far.data())) {
         why = "missing or invalid ordered storage attachment metadata";
         return nullptr;
     }
     bool unknownSampler = false;
     if (!placeConstexprSamplers(
-            c.record, r.samplers,
+            c.record, c.far, r.samplers,
             [&](const std::array<uint32_t, 8> &words, uint32_t &index) {
                 return constexprSampler(words, index);
             },
@@ -148,39 +175,68 @@ Pipeline *Device::addRecord(const RuntimeRecord &r, bool caTransform, std::strin
     build(stored.pipeline, stored.record, vs, fs, stored.blob.data(), stored.keyString.c_str(), caTransform,
           stored.spill.size() == stored.record.spillWords[0] + stored.record.spillWords[1] ? stored.spill.data()
                                                                                            : nullptr,
-          tess ? tessPlaced : nullptr);
-    std::vector<uint32_t> words(2 * r.restore.size() + 2);
-    Push w{words.data(), words.data() + words.size()};
+          stored.far.empty() ? nullptr : stored.far.data(), tess ? tessPlaced : nullptr);
+    std::vector<uint32_t> pairs;
     for (const auto &[m, v] : r.restore)
-        w.m(m, v);
-    stored.pipeline.restore.assign(words.data(), w.at);
-    stored.pipeline.amplificationLayerWord = r.amplificationLayerWord;
-    stored.pipeline.amplificationViewportWord = r.amplificationViewportWord;
+        pairs.insert(pairs.end(), {m, v});
+    const std::vector<uint32_t> restored = restoreWords(pairs.data(), uint32_t(pairs.size()));
+    stored.pipeline.restore.insert(stored.pipeline.restore.end(), restored.begin(), restored.end());
     stored.pipeline.strideTwin = strideTwin;
     if (r.split && !c.record.storageMask)
         offerCompletedSplit(stored, r, vs, caTransform);
     for (uint32_t i = r.pipeline.variantCount[0]; i < r.variants.size(); i++) {
         if (!(r.variants[i].assume & AssumeTurned))
             continue;
-        PlacedProgram turned;
-        if (!placeCompleted(r.variants[i].program, turned)) {
+        if (r.variants[i].program.image.size() < sizeof CompletedProgram::header) {
             stored.pipeline.turnRefused = true;
             break;
         }
-        build(stored.turned, stored.record, vs, turned, stored.blob.data(), stored.keyString.c_str(), caTransform,
-              stored.spill.size() == stored.record.spillWords[0] + stored.record.spillWords[1] ? stored.spill.data()
-                                                                                               : nullptr,
-              tess ? tessPlaced : nullptr);
-        stored.turned.restore = stored.pipeline.restore;
-        stored.turned.amplificationLayerWord = r.amplificationLayerWord;
-        stored.turned.amplificationViewportWord = r.amplificationViewportWord;
-        stored.turned.strideTwin = strideTwin;
-        stored.pipeline.turnedTwin = &stored.turned;
+        TurnedSource &t = stored.turnedSource;
+        t.fs = completedSlot(r.variants[i].program);
+        t.pp = &stored.record;
+        t.blob = stored.blob.data();
+        t.far = stored.far.empty() ? nullptr : stored.far.data();
+        t.spills = stored.spill.size() == stored.record.spillWords[0] + stored.record.spillWords[1]
+                       ? stored.spill.data()
+                       : nullptr;
+        t.keyString = stored.keyString.c_str();
+        t.vs = vs;
+        t.tess[0] = tessPlaced[0];
+        t.tess[1] = tessPlaced[1];
+        t.tessellates = tess;
+        t.caTransform = caTransform;
+        t.turned = &stored.turned;
+        stored.pipeline.turnedSource = &t;
         stored.pipeline.turnedVariant = true;
         break;
     }
     completed_[key] = &stored.pipeline;
     return &stored.pipeline;
+}
+
+Pipeline *Device::makeTurned(Pipeline &pl)
+{
+    RAW_ENCODE_LOCK(l, lock_);
+    if (Pipeline *made = pl.turnedTwin)
+        return made;
+    const TurnedSource *t = pl.turnedSource;
+    if (!t)
+        return nullptr;
+    PlacedProgram fs;
+    if (!placeCompletedSlot(t->fs, fs)) {
+        stats.heapFull++;
+        os_log_error(
+            os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "raw"),
+            "raw: a turned variant found no room in the shader heap or local memory: this turned draw is refused");
+        return nullptr;
+    }
+    Pipeline &turned = *t->turned;
+    build(turned, *t->pp, t->vs, fs, t->blob, t->keyString, t->caTransform, t->spills, t->far,
+          t->tessellates ? t->tess : nullptr);
+    turned.restore = pl.restore;
+    turned.strideTwin = pl.strideTwin;
+    __atomic_store_n(&pl.turnedTwin, &turned, __ATOMIC_RELEASE);
+    return &turned;
 }
 
 }  // namespace raw

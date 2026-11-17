@@ -238,6 +238,7 @@ struct Display {
 #include "../SwitchOverlayRegisters.h"
 #include "../SwitchPlaneAdmissionDrop.h"
 #include "../SwitchCompositionRegisters.h"
+    static inline uint64_t mediaHostHeldSlots = 0;
 #include "../SwitchOverlayRecovery.h"
 #include "../SwitchLandscapeDisplay.h"
 
@@ -602,5 +603,39 @@ TEST(LandscapeDisplay, AFailedChangeIsDroppedAndTheNextOneGoesLandscape)
     EXPECT_TRUE(d.landscapeState.switching);
     ASSERT_TRUE(d.boundary());
     EXPECT_TRUE(d.landscapeOn());
+}
+
+// L4T window.c writes MEMFETCH_RESET before every T21x update (TRM 24.11.27); window A moving between the UI and a
+// column-scanned planar picture is the update whose fetch must not start on the other mode's FIFO state.
+uint32_t memfetchResets(Display &d)
+{
+    uint32_t windows = 0;
+    for (unsigned w = 0; w < 3; ++w) {
+        const uint32_t word = switch_landscape::bufferBase(Display::Window(w)) + kMemfetchControl;
+        windows |= (d.dc[word] & kMemfetchReset) << w;
+        d.dc[word] = 0;
+    }
+    return windows;
+}
+
+TEST(LandscapeDisplay, EveryChangeOfModeResetsTheWindowsMemfetchWithItsRequest)
+{
+    Display d;
+    portrait(d);
+    EXPECT_EQ(memfetchResets(d), 0u) << "a portrait overlay set is no change of mode";
+    ASSERT_FALSE(d.stage(landscapeVideo(2)));
+    d.landscapeFrameEnd();
+    EXPECT_EQ(memfetchResets(d), 7u) << "entering landscape";
+    ASSERT_TRUE(d.boundary());
+    ASSERT_FALSE(d.stage(portraitVideo(3)));
+    d.landscapeFrameEnd();
+    EXPECT_EQ(memfetchResets(d), 7u) << "leaving at a quiet frame end";
+    ASSERT_TRUE(d.boundary());
+    ASSERT_FALSE(d.stage(landscapeVideo(4)));
+    d.landscapeFrameEnd();
+    ASSERT_TRUE(d.boundary());
+    memfetchResets(d);
+    d.landscapeLeaveNow("test");
+    EXPECT_EQ(memfetchResets(d), 7u) << "leaving at once (an overlay recovery)";
 }
 }  // namespace

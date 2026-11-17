@@ -16,7 +16,8 @@ enum {
 	SWITCH_GPU_ENGINE_NVENC = 6,
 	/* a writer promise (SwitchGpuWriterPromise.h): queue is its word's byte offset in the fence pool */
 	SWITCH_GPU_ENGINE_PROMISE = 7,
-	SWITCH_GPU_ENGINE_COUNT = 8,
+	SWITCH_GPU_ENGINE_NVJPG = 8,
+	SWITCH_GPU_ENGINE_COUNT = 9,
 	SWITCH_GPU_BACKING_READ = 1u << 0,
 	SWITCH_GPU_BACKING_WRITE = 1u << 1,
 	SWITCH_GPU_BACKING_CPU_AVOID_SYNC = 1u << 2,
@@ -102,6 +103,16 @@ struct switch_gpu_backing_engine {
 
 int switch_gpu_backing_register_engine(uint32_t engine,
 				       const struct switch_gpu_backing_engine *operations);
+/* An engine that maps backings into its own SMMU space (SwitchGpuBackingMaps.h) notes each backing it maps; when such a
+ * backing is destroyed (no reference left and none of its jobs pending), its forget runs with the allocation's id
+ * before the pages go back. Registered once per engine, before its first mapping. */
+int switch_gpu_backing_register_forget(uint32_t engine, void (*forget)(uint64_t allocation_id));
+void switch_gpu_backing_note_mapped(struct switch_gpu_backing *backing, uint32_t engine);
+/* The engine serializes its context access and holds a backing reference through every use. Installation fixes the
+ * page extent; destruction retires the context before releasing its pinned allocation. */
+void *switch_gpu_backing_mapping_context(const struct switch_gpu_backing *backing, uint32_t engine);
+int switch_gpu_backing_mapping_install(struct switch_gpu_backing *backing, uint32_t engine,
+				       uint64_t generation, void *context, void (*destroy)(void *));
 int switch_gpu_backing_token_retain(const struct switch_gpu_backing_token *token);
 void switch_gpu_backing_token_release(const struct switch_gpu_backing_token *token);
 int switch_gpu_backing_token_status(const struct switch_gpu_backing_token *token);
@@ -206,8 +217,9 @@ struct switch_gpu_backing_transaction {
 
 /* begin sorts/merges the caller's use array and claims its backings in allocation order: their locks, held across
  * dependency encoding, the kick and publication. An ordered begin (begin_held, begin_ordered) holds the ownership order
- * instead, and its uses' locks only while one of them is claimed or CPU-dirty: for a job that commits before its kick
- * (switch_gpu_chan_exec_events), whose hold ends before any long work. Every success must end with commit or abort. No
+ * instead, and its uses' locks only while one of them is claimed or CPU-dirty. A GPU job publishes after private
+ * validation and finishes after GP_PUT, keeping the ownership order between them. Every success must end with commit
+ * or publish/finish, and every refusal with abort. No
  * token can be lost at commit.
  * The transaction keeps the caller's array, not a copy: commit and abort find the backings to record and unlock in it,
  * so it must stay as begin left it until then (an array in a frame that returns before the commit is a dangling one;
@@ -274,6 +286,9 @@ int switch_gpu_backing_promise_dependencies(struct switch_gpu_backing_transactio
 					    struct switch_gpu_backing_token *out, uint32_t capacity,
 					    uint32_t *needed, uint32_t own_first, uint32_t own_end);
 void switch_gpu_backing_commit(struct switch_gpu_backing_transaction *transaction);
+int switch_gpu_backing_seal(struct switch_gpu_backing_transaction *transaction);
+void switch_gpu_backing_publish(struct switch_gpu_backing_transaction *transaction);
+void switch_gpu_backing_finish(struct switch_gpu_backing_transaction *transaction);
 void switch_gpu_backing_abort(struct switch_gpu_backing_transaction *transaction);
 int switch_gpu_backing_write_ranges(struct switch_gpu_backing_transaction *transaction,
 				    struct switch_gpu_backing_write_range *ranges, uint32_t count);

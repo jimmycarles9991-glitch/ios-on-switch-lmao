@@ -8,6 +8,7 @@
 #include "nvk_private.h"
 
 #include "nvk_debug.h"
+#include "nvk_descriptor_types.h"
 #include "nvk_instance.h"
 #include "nv_device_info.h"
 
@@ -58,12 +59,6 @@ struct nvk_physical_device {
    struct nvk_queue_family queue_families[3];
    uint8_t queue_family_count;
 };
-
-static inline uint32_t
-nvk_min_cbuf_alignment(const struct nv_device_info *info)
-{
-   return info->cls_eng3d >= 0xC597 /* TURING_A */ ? 64 : 256;
-}
 
 VK_DEFINE_HANDLE_CASTS(nvk_physical_device,
    vk.base,

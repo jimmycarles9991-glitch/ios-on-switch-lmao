@@ -40,7 +40,7 @@ std::vector<uint8_t> code(const std::vector<uint64_t> &instructions, uint64_t sc
 raw::PackPipeline record()
 {
     raw::PackPipeline pp{};
-    pp.entries = 3;
+    raw::setEntryCount(pp, 3);
     pp.entry[0] = {0, raw::EntryUbo, 1, 0, 0, 0, 0};
     pp.entry[1] = {16, raw::EntryTexture, 2, 0, raw::SamplerSlot, 0, 0};
     pp.entry[2] = {20, raw::EntrySamplerOnly, 2, 0, raw::SamplerSlot, 1, 0};
@@ -51,7 +51,9 @@ uint32_t reads(const std::vector<uint64_t> &instructions, uint32_t setSlot = 3, 
 {
     const raw::PackPipeline pp = record();
     const std::vector<uint8_t> bytes = code(instructions, schedule);
-    return raw::setMemoryReads(bytes.data(), bytes.size(), setSlot, pp.entry, pp.entries);
+    uint32_t read = 0;
+    raw::setMemoryReads(bytes.data(), bytes.size(), setSlot, raw::SetEntries(pp, nullptr), &read);
+    return read;
 }
 
 TEST(RawSetReads, AConstantOperandAtTheSetSlotReadsTheEntryItCovers)
@@ -83,9 +85,14 @@ TEST(RawSetReads, BoundTexturesReadEveryHandleOfTheSet)
     const raw::PackPipeline pp = record();
     const std::vector<uint8_t> bytes = code({movCbuf(2, 0)});
     const uint8_t cbufs[4] = {raw::CbufRoot, raw::CbufShaderData, raw::CbufUbo, raw::CbufSet};
-    EXPECT_EQ(raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, 4, pp), 1u << 1 | 1u << 2);
-    EXPECT_EQ(raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, 0, pp), 0u);
-    EXPECT_EQ(raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, 3, pp), 0u);
+    const auto reads = [&](uint8_t boundTextures) {
+        uint32_t read = 0;
+        raw::programSetReads(bytes.data(), bytes.size(), cbufs, 4, boundTextures, raw::SetEntries(pp, nullptr), &read);
+        return read;
+    };
+    EXPECT_EQ(reads(4), 1u << 1 | 1u << 2);
+    EXPECT_EQ(reads(0), 0u);
+    EXPECT_EQ(reads(3), 0u);
 }
 
 // A program as the heap holds it (PackProgram): its slot, the shader program header at 0x30, the code at 0x80
@@ -132,9 +139,10 @@ TEST(RawSetReads, ASyntheticStateThatComputesItsSetOffsetUploadsTheSetForEveryMo
     const raw::PackPipeline pp = record();
     const std::vector<uint8_t> types = {raw::CbufRoot, raw::CbufShaderData, raw::CbufUbo, raw::CbufSet};
     const PlacedProgram computed = placed({movCbuf(3, 0), ldc(3, 0, 2)}, types);
-    const uint32_t memory = raw::placedSetReads(computed.slot.data() + 0x30, computed.record, pp);
+    const uint32_t memory =
+        raw::placedSetReads(computed.slot.data() + 0x30, computed.record, raw::SetEntries(pp, nullptr));
     EXPECT_EQ(memory, 7u);
-    for (uint32_t entry = 0; entry < pp.entries; entry++)
+    for (uint32_t entry = 0; entry < raw::entryCount(pp); entry++)
         EXPECT_EQ(uploadsWhenMoved(memory, entry), 1u) << entry;
 }
 
@@ -143,9 +151,9 @@ TEST(RawSetReads, ASyntheticStateThatReadsTheRootsSetAddressUploadsTheSetForEver
     const raw::PackPipeline pp = record();
     const std::vector<uint8_t> types = {raw::CbufRoot, raw::CbufShaderData};
     const PlacedProgram root = placed({movCbuf(1, 0), movCbuf(0, 0x3c)}, types);
-    const uint32_t memory = raw::placedSetReads(root.slot.data() + 0x30, root.record, pp);
+    const uint32_t memory = raw::placedSetReads(root.slot.data() + 0x30, root.record, raw::SetEntries(pp, nullptr));
     EXPECT_EQ(memory, 7u);
-    for (uint32_t entry = 0; entry < pp.entries; entry++)
+    for (uint32_t entry = 0; entry < raw::entryCount(pp); entry++)
         EXPECT_EQ(uploadsWhenMoved(memory, entry), 1u) << entry;
 }
 
@@ -155,7 +163,7 @@ TEST(RawSetReads, ASyntheticStateThatReadsOneEntryUploadsTheSetWhereThatEntryMov
     const raw::PackPipeline pp = record();
     const std::vector<uint8_t> types = {raw::CbufRoot, raw::CbufShaderData, raw::CbufUbo, raw::CbufSet};
     const PlacedProgram one = placed({movCbuf(3, 4), movCbuf(0, 0x700)}, types);
-    const uint32_t memory = raw::placedSetReads(one.slot.data() + 0x30, one.record, pp);
+    const uint32_t memory = raw::placedSetReads(one.slot.data() + 0x30, one.record, raw::SetEntries(pp, nullptr));
     EXPECT_EQ(memory, 1u);
     EXPECT_EQ(uploadsWhenMoved(memory, 0), 1u);
     EXPECT_EQ(uploadsWhenMoved(memory, 1), 0u);

@@ -5,7 +5,7 @@
 #include <cstring>
 #include "NativeBridgeMetalFrontend.h"
 #include "raw_direct_compute.h"
-#include "bridge/NativeMetalDirect.h"
+#include "raw_direct_abi.h"
 #include "raw_pack.h"
 #include "raw_record_parts.h"
 
@@ -17,13 +17,12 @@ extern "C" bool native_bridge_metal_render_direct(id descriptor, bool barrier, N
 extern "C" bool native_bridge_metal_compute_direct(id descriptor, const struct NmbDirectDispatch *dispatch,
                                                    bool (*each)(const struct NmbDirectKernel *, void *), void *ctx,
                                                    const char **why) __attribute__((weak_import));
-extern "C" void *native_bridge_metal_nvk_symbol(const char *name) __attribute__((weak_import));
 
 namespace raw {
 namespace {
 
 struct Asked {
-    const DirectNvk &nvk;
+    const StageCompile &compile;
     const PackRules &rules;
     const std::string &key;
     const std::vector<uint32_t> &attributes;
@@ -33,15 +32,18 @@ struct Asked {
     bool variants;
     BoundDraw *bound;
     uint16_t xrSlots;
+    const SelectorConfigs *selectors;
     std::string why;
     CompileOutcome outcome = CompileOutcome::Failed;
+    bool splittable = false;
 };
 
 bool made(const NmbDirectState *state, void *ctx)
 {
     Asked &a = *static_cast<Asked *>(ctx);
-    a.outcome = directRecord(*state, a.nvk, a.rules, a.key, a.attributes, a.out, a.why, a.registers, a.split,
-                             a.variants, a.xrSlots);
+    a.splittable = splitsFragment(*state);
+    a.outcome = directRecord(*state, a.compile, a.rules, a.key, a.attributes, a.out, a.why, a.registers, a.split,
+                             a.variants, a.xrSlots, a.selectors);
     if (a.bound) {
         const NmbDirectDraw &d = state->draws[3];
         a.bound->pushMask = d.pushMask;
@@ -53,7 +55,7 @@ bool made(const NmbDirectState *state, void *ctx)
 }
 
 struct AskedKernel {
-    const DirectNvk &nvk;
+    const StageCompile &compile;
     const std::string &key;
     ComputeRecord &out;
     std::string why;
@@ -63,7 +65,7 @@ struct AskedKernel {
 bool madeKernel(const NmbDirectKernel *kernel, void *ctx)
 {
     AskedKernel &a = *static_cast<AskedKernel *>(ctx);
-    a.outcome = directKernel(*kernel, a.nvk, a.key, a.out, a.why);
+    a.outcome = directKernel(*kernel, a.compile, a.key, a.out, a.why);
     return true;
 }
 
@@ -74,7 +76,6 @@ DirectTranslator DirectTranslator::frontend()
     DirectTranslator t;
     t.render = native_bridge_metal_render_direct;
     t.compute = native_bridge_metal_compute_direct;
-    t.nvkSymbol = native_bridge_metal_nvk_symbol;
     return t;
 }
 
@@ -82,43 +83,37 @@ Direct::Direct(const Pack &pack) : Direct(PackRules::of(pack))
 {}
 
 Direct::Direct(PackRules rules, bool rankArtifacts, DirectTranslator translator)
-    : rules_(std::move(rules)), translator_(translator),
-      nvk_(translator.nvkSymbol ? DirectNvk::find(translator.nvkSymbol) : DirectNvk{})
-{
-    if (rankArtifacts)
-        nvk_.nakCompileStage = translator.nvkSymbol ? translator.nvkSymbol("switch_nak_compile_ranked_stage") : nullptr;
-}
+    : rules_(std::move(rules)), translator_(translator), compile_(StageCompile::linked(rankArtifacts))
+{}
 
 CompileOutcome Direct::form(MTLRenderPipelineDescriptor *descriptor, bool barrier, ProbeTextures textures,
                             const std::string &key, const std::vector<uint32_t> &attributes, RuntimeRecord &out,
                             std::string &why, std::map<uint32_t, uint32_t> *registers, bool split)
 {
-    Asked a = {nvk_,
-               rules_,
-               key,
-               attributes,
-               out,
-               registers,
-               split,
-               variants_,
-               keepBound_ ? &bound_ : nullptr,
-               textures.xrSlots,
-               {}};
+    const SelectorConfigs *selectors = nullptr;
+    if (selectors_) {
+        const auto found = selectors_->find(packKeyHash(key.substr(0, variantNameAt(key))));
+        if (found != selectors_->end())
+            selectors = &found->second;
+    }
+    Asked a = {
+        compile_,         rules_,    key, attributes, out, registers, split, variants_, keepBound_ ? &bound_ : nullptr,
+        textures.xrSlots, selectors, {}};
     if (keepBound_)
         bound_ = {};
     std::vector<NmbDirectCubicSampler> cubic;
     std::vector<NmbDirectTextureFormat> formats;
     for (const CubicBinds::Sampler &c : textures.cubic.samplers)
-        cubic.push_back({c.slot, c.s, c.t, c.r, c.border, c.normalized});
+        cubic.push_back({c.slot, c.s, c.t, c.r, c.border, c.normalized, c.stage == kCubicVertex});
     for (const CubicBinds::Texture &t : textures.cubic.textures)
-        formats.push_back({t.slot, t.format});
+        formats.push_back({t.slot, t.format, t.stage == kCubicVertex});
     for (const WrittenTexture &t : textures.written)
-        formats.push_back({t.slot, t.format});
+        formats.push_back({t.slot, t.format, false});
     const NmbDirectBinds binds = {
-        cubic.data(),           uint32_t(cubic.size()), formats.data(),   uint32_t(formats.size()),
-        textures.fragmentTests, textures.bindStride,    textures.twoPlane};
-    const bool plain =
-        formats.empty() && cubic.empty() && !textures.fragmentTests && !textures.bindStride && !textures.twoPlane;
+        cubic.data(),           uint32_t(cubic.size()), formats.data(),    uint32_t(formats.size()),
+        textures.fragmentTests, textures.bindStride,    textures.twoPlane, textures.xrShadows};
+    const bool plain = formats.empty() && cubic.empty() && !textures.fragmentTests && !textures.bindStride &&
+                       !textures.twoPlane && !textures.xrShadows;
     const char *refused = nullptr;
     if (!translator_.render(descriptor, barrier, textures.format, textures.samples, plain ? nullptr : &binds, made, &a,
                             &refused)) {
@@ -126,6 +121,7 @@ CompileOutcome Direct::form(MTLRenderPipelineDescriptor *descriptor, bool barrie
         return refused && !strncmp(refused, "retry: ", 7) ? CompileOutcome::Failed : CompileOutcome::Refused;
     }
     why = a.why;
+    splittable_ = a.splittable;
     if (a.outcome == CompileOutcome::Made && !compiledFor(out.pipeline, textures.written)) {
         why = "a written texture's variant m2v compiled for another format than the one bound";
         return CompileOutcome::Refused;
@@ -138,9 +134,9 @@ CompileOutcome Direct::make(MTLRenderPipelineDescriptor *descriptor, const std::
                             bool split, PackForm requested)
 {
     storageRefusal_.clear();
-    if (!translator_.render || !nvk_.complete()) {
-        why = nvk_.nakCompileStage && !nvk_.abiMatches ? "NVK's switch_nvk_compile structs are not raw_direct.cpp's"
-                                                       : "the frontend or NVK has no direct compile";
+    splittable_ = false;
+    if (!translator_.render || !StageCompile::abiMatches()) {
+        why = translator_.render ? "the stage compile's structs are not raw_direct_nvk.h's" : "no translator";
         return CompileOutcome::Failed;
     }
     // The function's reflection marks active an attribute a function constant gates (CoreRE's vsShadow texcoord, under
@@ -196,7 +192,9 @@ CompileOutcome Direct::strideTwin(MTLRenderPipelineDescriptor *descriptor, Probe
     std::string twinWhy;
     const bool barrier = (out.pipeline.flags & PipelineBarrierForm) || !storageRefusal_.empty();
     const BoundDraw bound = bound_;
-    const CompileOutcome outcome = form(descriptor, barrier, textures, key, attributes, *twin, twinWhy, nullptr, split);
+    twinRegisters_.clear();
+    const CompileOutcome outcome = form(descriptor, barrier, textures, key, attributes, *twin, twinWhy,
+                                        keepBound_ ? &twinRegisters_ : nullptr, split);
     bound_ = bound;
     if (outcome == CompileOutcome::Failed) {
         why = "its stride twin: " + twinWhy;
@@ -207,6 +205,7 @@ CompileOutcome Direct::strideTwin(MTLRenderPipelineDescriptor *descriptor, Probe
     dropUnreadFetches(*twin);
     twin->pipeline.flags |= out.pipeline.flags & PipelineBarrierForm;
     twin->pipeline.keyHash = packKeyHash(strideTwinKey(key));
+    out.pipeline.strideTwin = twin->pipeline.keyHash;
     out.strideTwin = std::move(twin);
     return CompileOutcome::Made;
 }
@@ -224,10 +223,10 @@ KernelDispatch::KernelDispatch(const uint32_t threads[3], const std::map<uint32_
             dispatch_.memory[index] = length;
 }
 
-void KernelDispatch::texture(uint32_t slot, MTLTextureDescriptor *d)
+void KernelDispatch::texture(uint32_t slot, MTLTextureDescriptor *d, bool planes)
 {
-    textures_.push_back(
-        {slot, d.pixelFormat, d.textureType, d.usage, d.mipmapLevelCount, d.arrayLength, d.sampleCount});
+    textures_.push_back({slot, planes ? 1u : 0u, d.pixelFormat, d.textureType, d.usage, d.mipmapLevelCount,
+                         d.arrayLength, d.sampleCount});
 }
 
 void KernelDispatch::sampler(uint32_t slot, MTLSamplerDescriptor *d)
@@ -250,15 +249,19 @@ const NmbDirectDispatch &KernelDispatch::dispatch()
 CompileOutcome Direct::kernel(MTLComputePipelineDescriptor *descriptor, const NmbDirectDispatch &dispatch,
                               const std::string &key, ComputeRecord &out, std::string &why)
 {
-    if (!translator_.compute || !nvk_.complete()) {
-        why = "the frontend or NVK has no direct compile of kernels";
+    if (!translator_.compute || !StageCompile::abiMatches()) {
+        why =
+            translator_.compute ? "the stage compile's structs are not raw_direct_nvk.h's" : "no translator of kernels";
         return CompileOutcome::Failed;
     }
-    AskedKernel a = {nvk_, key, out, {}};
+    AskedKernel a = {compile_, key, out, {}};
     const char *refused = nullptr;
     if (!translator_.compute(descriptor, &dispatch, madeKernel, &a, &refused)) {
         why = std::string("m2v refused its translation: ") + (refused ? refused : "");
-        return refused && !strncmp(refused, "retry: ", 7) ? CompileOutcome::Failed : CompileOutcome::Refused;
+        // "fails: ", a dispatch Metal runs that m2v fails too (NativeMetalDirectCompute.rs mapped_samplers): its command
+        // buffer fails, not a route to m2v
+        const bool fails = refused && (!strncmp(refused, "retry: ", 7) || !strncmp(refused, "fails: ", 7));
+        return fails ? CompileOutcome::Failed : CompileOutcome::Refused;
     }
     why = a.why;
     return a.outcome;

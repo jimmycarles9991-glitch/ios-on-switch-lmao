@@ -211,7 +211,8 @@ impl Sample {
     /// inner ones), the clamp, and the status composite.
     pub(crate) fn words(&self) -> u32 {
         let axes = AXES as u32;
-        let decode = crate::lower::arith::extended_range::DECODE_WORDS;
+        let decode = crate::lower::arith::extended_range::DECODE_WORDS
+            + crate::lower::arith::extended_range::plane_words(Some(self.form));
         if let Some(cubic) = &self.cubic {
             return cubic.words() + 20 * decode + CLAMP_WORDS + 16;
         }
@@ -289,6 +290,9 @@ pub(super) struct Texture {
     /// The slot's `SpecKey::OffsetBaseAxes` tests, by which a texel offset is placed
     /// (`position::offset_dropped`), where the sample reads them ([`Sample::offset_base`]).
     pub parent: Option<crate::lower::texture::OffsetBase>,
+    /// The slot's plane image, where it holds a two-plane `RGB10A8_2P_XR10` texture's color words:
+    /// each tap joins its alpha byte from there (`texture::joined_planes`).
+    pub plane: Option<SValue>,
 }
 
 /// How a sample's raw texels decode: by one form, a slot's variant's, through the form's sRGB
@@ -327,6 +331,11 @@ pub(crate) fn emit(
     e: &Sample,
 ) -> BResult<SValue> {
     let (decl, img) = crate::lower::texture::slot_image(cx, fb, e.texture)?;
+    let plane = crate::lower::texture::plane_image(
+        cx,
+        fb,
+        &crate::lower::texture::ImageRef::Slot(e.texture),
+    )?;
     let table = crate::lower::texture::extended_table(cx, e.form)?;
     let t = Tys::new(fb)?;
     let flags = scalar(fb, t.u32_, u64::from(flags(e.form)))?;
@@ -375,6 +384,7 @@ pub(crate) fn emit(
         flags: value(fb, flags)?,
         swizzle,
         parent,
+        plane,
     };
     let at = At {
         coord: e.coord,
@@ -753,7 +763,15 @@ fn tap(
     site: &[Tap],
 ) -> BResult<(SValue, Option<SValue>)> {
     let (at, inside) = fp.site(fb, site)?;
-    Ok((fp.read(fb, tex.img, at)?, inside))
+    let raw = fp.read(fb, tex.img, at)?;
+    let raw = match tex.plane {
+        Some(plane) => {
+            let alpha = fp.read(fb, plane, at)?;
+            crate::lower::texture::joined_planes(fb, raw, alpha)?
+        }
+        None => raw,
+    };
+    Ok((raw, inside))
 }
 
 /// Raw texel `raw` decoded by `tex`'s form (`extended_range::decode`, rounded to `half` when

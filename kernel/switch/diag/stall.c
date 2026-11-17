@@ -17,6 +17,9 @@
  * waits on (or the receiver of the port it is still queued at), the receiver of the port a send is blocked on, or the
  * thread or workqueue at the end of its turnstile's inheritor chain (lock holders, sync IPC servers), with that
  * thread's own state.
+ *
+ * The line that ends it names the threads that ran the most on the cores since its first line: the first line takes
+ * every thread's time on a core, the end the gains since (the newest stall's: one snapshot).
  */
 
 #include <switch/sched.h>
@@ -27,6 +30,8 @@
 
 #include <kern/clock.h>
 #include <kern/locks.h>
+#include <kern/processor.h>
+#include <kern/recount.h>
 #include <kern/sched_prim.h>
 #include <kern/simple_lock.h>
 #include <kern/task.h>
@@ -44,6 +49,10 @@ void switch_stall_tick(uint64_t now);
 void switch_stall_report(thread_call_param_t p0, thread_call_param_t p1);
 
 #define STALL_CHECK_NS 250000000ull /* the most often the tick samples */
+#define STALL_USED     4096         /* more threads than the system runs */
+#define STALL_TOP      4
+
+extern void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 
 struct stall_slot {
     const char *name;
@@ -63,6 +72,12 @@ static struct stall_slot stall_slots[] = {
 static SIMPLE_LOCK_DECLARE(stall_lock, 0);
 static thread_call_t stall_call;
 static uint64_t stall_threshold, stall_check, stall_last;
+
+/* The report's own (a ONCE thread call: never two at a time): the snapshot of the newest stall's first line, and whose */
+static struct switch_stall_used stall_used[STALL_USED];
+static unsigned int stall_used_n;
+static bool stall_used_complete;
+static int stall_used_slot = -1;
 
 /* kern_exec.c, after a successful posix_spawn or execve: the new main thread, if its process is a UI one. */
 void switch_stall_exec(thread_t thread)
@@ -205,6 +220,70 @@ static void stall_report_one(const char *name, struct stall_snapshot *ss, struct
     os_log(OS_LOG_DEFAULT, "SwitchStall: %s", l.text);
 }
 
+static void stall_used_take(int slot)
+{
+    thread_t t = THREAD_NULL;
+    unsigned int n = 0;
+    bool complete = true;
+
+    lck_mtx_lock(&tasks_threads_lock);
+    queue_iterate(&threads, t, thread_t, threads)
+    {
+        if (n == STALL_USED) {
+            complete = false;
+            break;
+        }
+        stall_used[n].tid = thread_tid(t);
+        stall_used[n].cpu = recount_thread_time_mach(t);
+        n++;
+    }
+    lck_mtx_unlock(&tasks_threads_lock);
+    qsort(stall_used, n, sizeof(stall_used[0]), switch_stall_used_cmp);
+    stall_used_n = n;
+    stall_used_complete = complete;
+    stall_used_slot = slot;
+}
+
+/* "; on a core since its first line: <process>[pid] 0x<tid> <thread> <mode> <pri> <N> ms; ..." */
+static void stall_put_used(struct stall_line *l)
+{
+    struct switch_stall_top top[STALL_TOP] = {0};
+    thread_t t = THREAD_NULL;
+
+    lck_mtx_lock(&tasks_threads_lock);
+    queue_iterate(&threads, t, thread_t, threads)
+    {
+        const uint64_t tid = thread_tid(t);
+        const struct switch_stall_top e = {
+            .tid = tid,
+            .cpu = switch_stall_gained(stall_used, stall_used_n, stall_used_complete, tid, recount_thread_time_mach(t)),
+            .ref = t,
+        };
+
+        switch_stall_rank(top, STALL_TOP, e);
+    }
+    for (unsigned int i = 0; i < STALL_TOP && top[i].ref != NULL; i++) {
+        thread_reference((thread_t)top[i].ref);
+    }
+    lck_mtx_unlock(&tasks_threads_lock);
+    if (top[0].ref != NULL) {
+        switch_stall_put(l, "; on a core since its first line:");
+    }
+    for (unsigned int i = 0; i < STALL_TOP && top[i].ref != NULL; i++) {
+        thread_t th = (thread_t)top[i].ref;
+        char process[STALL_NAME];
+        char name[64]; /* thread_get_thread_name copies MAXTHREADNAMESIZE bytes */
+        uint64_t ns = 0;
+
+        switch_task_name(get_threadtask(th), process, sizeof(process));
+        thread_get_thread_name(th, name);
+        absolutetime_to_nanoseconds(top[i].cpu, &ns);
+        switch_stall_put(l, " %s[%d] 0x%llx %s %s %d %llu ms;", process, task_pid(get_threadtask(th)), top[i].tid,
+                         name[0] ? name : "-", switch_stall_mode_name(th->sched_mode), th->sched_pri, ns / 1000000ull);
+        thread_deallocate(th);
+    }
+}
+
 void switch_stall_report(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
     for (unsigned int i = 0; i < sizeof(stall_slots) / sizeof(stall_slots[0]); i++) {
@@ -232,12 +311,20 @@ void switch_stall_report(__unused thread_call_param_t p0, __unused thread_call_p
         }
         if (report) {
             stall_report_one(slot->name, &snap, episode);
+            stall_used_take((int)i);
         }
         if (ended) {
-            os_log(OS_LOG_DEFAULT, "SwitchStall: %s[%d] main thread 0x%llx ran again %llu.%llu s after it %s",
-                   slot->name, task_pid(get_threadtask(t)), thread_tid(t), ended_ns / 1000000000ull,
-                   ended_ns / 100000000ull % 10,
-                   episode.kind == SWITCH_STALL_RUNNABLE ? "was made runnable" : "blocked");
+            struct stall_line l = {.at = 0};
+
+            switch_stall_put(&l, "%s[%d] main thread 0x%llx ran again %llu.%llu s after it %s", slot->name,
+                             task_pid(get_threadtask(t)), thread_tid(t), ended_ns / 1000000000ull,
+                             ended_ns / 100000000ull % 10,
+                             episode.kind == SWITCH_STALL_RUNNABLE ? "was made runnable" : "blocked");
+            if (stall_used_slot == (int)i) {
+                stall_put_used(&l);
+                stall_used_slot = -1;
+            }
+            os_log(OS_LOG_DEFAULT, "SwitchStall: %s", l.text);
         }
         thread_deallocate(t);
     }

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // raw/runtime/raw_ycbcr_store_rule.h against this Mac's Metal: render passes (clears, float draws, half draws) into two-plane
 // YCbCr attachments over CoreVideo surfaces, every byte of both planes against the rule: the 4:2:0 and 4:2:2 code formats
-// over their surfaces, the converted ones and their sRGB twins over both ranges under no matrix, BT.709 and BT.2020. The draws' floats lie beside the half midpoints and
+// over their surfaces, the converted ones and their sRGB twins over both ranges under no matrix, BT.709 and BT.2020, and the
+// unpacked 4:2:0 and 4:2:2 converted ones under P3_D65 and DCI_P3, which store as their codes formats. The draws' floats lie beside the half midpoints and
 // the ties of the 1/255, 1/1023, 1/2048 and 1/8192 grids, out of range and not numbers.
 // Then the raw path's route on this Mac's GPU: the same texels in an RGBA32Float stand-in (a clear's colour as its half, as
 // RawMetalEncode.mm puts it there), the pack's store states (raw/pack/ycbcr_store.metal) into R8/RG8 or R16/RG16 planes: their
@@ -15,14 +16,10 @@
 #include <random>
 #include <vector>
 
-#include "../runtime/raw_ycbcr_store.h"
+#include "ycbcr_oracle.h"
 
 namespace {
-constexpr uint32_t W = 128, H = 64, N = W * H;
-
-const uint16_t kKnots[513] = {
-#include "../pack/srgb_knots.h"
-};
+using namespace ycbcr_oracle;
 
 NSString *const kValues =
     @"#include <metal_stdlib>\nusing namespace metal;\n"
@@ -80,193 +77,6 @@ std::vector<float> valueSet(uint32_t seed)
             }
         }
     return v;
-}
-
-struct Config {
-    uint32_t format;
-    OSType fourcc;
-    const char *matrix;
-};
-
-bool fullRange(OSType f)
-{
-    return f == '420f' || f == '422f' || f == '444f' || f == 'xf20' || f == 'xf22' || f == 'xf44';
-}
-
-// The target's subsampling: its 4:2:0, 4:2:2 or 4:4:4 surface's
-void halved(OSType f, bool &across, bool &down)
-{
-    across = f != '444v' && f != '444f' && f != 'x444' && f != 'xf44';
-    down = f == '420v' || f == '420f' || f == 'x420' || f == 'xf20';
-}
-
-raw::YcbcrConvertedTarget convertedTarget(const Config &c)
-{
-    raw::YcbcrConvertedTarget t;
-    t.bits = c.format < 505 || (c.format >= 520 && c.format < 525) ? 8 : 10;
-    t.srgb = c.format >= 520;
-    t.full = fullRange(c.fourcc);
-    t.matrix = !c.matrix                          ? raw::YcbcrMatrix::Bt601
-               : !strcmp(c.matrix, "ITU_R_709_2") ? raw::YcbcrMatrix::Bt709
-                                                  : raw::YcbcrMatrix::Bt2020;
-    halved(c.fourcc, t.across, t.down);
-    return t;
-}
-
-raw::YcbcrStoreShape shapeOf(const Config &c)
-{
-    raw::YcbcrCodeTarget codes;
-    if (!raw::ycbcrCodeTarget(c.format, codes))
-        return raw::ycbcrConvertedShape(convertedTarget(c));
-    return raw::ycbcrCodesShape(codes.max > 255 ? 10 : 8, true, codes.halvedDown);
-}
-
-struct Surface {
-    CVPixelBufferRef pb = nullptr;
-    IOSurfaceRef s = nullptr;
-};
-
-Surface makeSurface(const Config &c)
-{
-    Surface out;
-    NSDictionary *attrs =
-        @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{},
-          (id)kCVPixelBufferMetalCompatibilityKey : @YES};
-    if (!CVPixelBufferCreate(nullptr, W, H, c.fourcc, (__bridge CFDictionaryRef)attrs, &out.pb))
-        out.s = CVPixelBufferGetIOSurface(out.pb);
-    if (out.s && c.matrix)
-        IOSurfaceSetValue(out.s, CFSTR("IOSurfaceYCbCrMatrix"), (__bridge CFStringRef) @(c.matrix));
-    return out;
-}
-
-// Plane 0's codes then plane 1's, `bytes` a code (a 10-bit code its word's high bits)
-std::vector<uint16_t> planes(IOSurfaceRef s, uint32_t bytes)
-{
-    std::vector<uint16_t> out;
-    IOSurfaceLock(s, kIOSurfaceLockReadOnly, nullptr);
-    for (size_t p = 0; p < 2; p++) {
-        const uint8_t *b = static_cast<const uint8_t *>(IOSurfaceGetBaseAddressOfPlane(s, p));
-        const size_t codes = p ? 2 * IOSurfaceGetWidthOfPlane(s, p) : IOSurfaceGetWidthOfPlane(s, p);
-        for (size_t y = 0; y < IOSurfaceGetHeightOfPlane(s, p); y++)
-            for (size_t x = 0; x < codes; x++) {
-                const uint8_t *at = b + y * IOSurfaceGetBytesPerRowOfPlane(s, p) + x * bytes;
-                out.push_back(bytes == 2 ? uint16_t((at[0] | at[1] << 8) >> 6) : at[0]);
-            }
-    }
-    IOSurfaceUnlock(s, kIOSurfaceLockReadOnly, nullptr);
-    return out;
-}
-
-void scribble(IOSurfaceRef s, uint32_t seed)
-{
-    IOSurfaceLock(s, 0, nullptr);
-    for (size_t p = 0; p < 2; p++) {
-        uint8_t *b = static_cast<uint8_t *>(IOSurfaceGetBaseAddressOfPlane(s, p));
-        for (size_t i = 0; i < IOSurfaceGetBytesPerRowOfPlane(s, p) * IOSurfaceGetHeightOfPlane(s, p); i++)
-            b[i] = uint8_t(i * 31 + seed);
-    }
-    IOSurfaceUnlock(s, 0, nullptr);
-}
-
-std::vector<uint16_t> reference(const Config &c, const uint16_t *encode, const std::vector<float> &v,
-                                raw::YcbcrTexelSource source)
-{
-    bool across, down;
-    halved(c.fourcc, across, down);
-    std::vector<uint16_t> luma(N), chroma(2 * (across ? W / 2 : W) * (down ? H / 2 : H));
-    raw::YcbcrCodeTarget t;
-    if (raw::ycbcrCodeTarget(c.format, t))
-        raw::ycbcrStore(t, v.data(), W, H, source, luma.data(), chroma.data());
-    else
-        raw::ycbcrStoreConverted(convertedTarget(c), encode, v.data(), W, H, source, luma.data(), chroma.data());
-    luma.insert(luma.end(), chroma.begin(), chroma.end());
-    return luma;
-}
-
-struct Gpu {
-    id<MTLDevice> dev;
-    id<MTLCommandQueue> q;
-    id<MTLLibrary> lib, store;
-    id<MTLBuffer> encode;  // pack/srgb_encode.h, at the _srgb states' buffer(1) as the device binds it
-
-    id<MTLRenderPipelineState> state(id<MTLLibrary> from, NSString *vertex, NSString *fragment, MTLPixelFormat f)
-    {
-        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-        d.vertexFunction = [from newFunctionWithName:vertex];
-        d.fragmentFunction = [from newFunctionWithName:fragment];
-        d.colorAttachments[0].pixelFormat = f;
-        NSError *e = nil;
-        id<MTLRenderPipelineState> s = [dev newRenderPipelineStateWithDescriptor:d error:&e];
-        if (!s)
-            fprintf(stderr, "state %s: %s\n", fragment.UTF8String, e.localizedDescription.UTF8String);
-        return s;
-    }
-
-    // One pass into `target`: a clear of `clear` (no state) or a draw with `s` of `values` or the `sampled` texture
-    void pass(id<MTLTexture> target, id<MTLRenderPipelineState> s, const float *values, MTLClearColor clear,
-              id<MTLTexture> sampled = nil, const raw::YcbcrStoreShape *shape = nullptr)
-    {
-        MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = target;
-        rp.colorAttachments[0].loadAction = s ? MTLLoadActionDontCare : MTLLoadActionClear;
-        rp.colorAttachments[0].storeAction = MTLStoreActionStore;
-        rp.colorAttachments[0].clearColor = clear;
-        id<MTLCommandBuffer> cb = [q commandBuffer];
-        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
-        if (s) {
-            [e setRenderPipelineState:s];
-            if (values)
-                [e setFragmentBuffer:[dev newBufferWithBytes:values length:N * 16 options:MTLResourceStorageModeShared]
-                              offset:0
-                             atIndex:0];
-            if (sampled)
-                [e setFragmentTexture:sampled atIndex:0];
-            if (shape)
-                [e setFragmentBytes:shape length:sizeof *shape atIndex:0];
-            if (shape && shape->srgb)
-                [e setFragmentBuffer:encode offset:0 atIndex:raw::kSrgbEncodeSlot];
-            [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
-        }
-        [e endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
-    }
-};
-
-// The pack's store states' bytes of `texels` (the stand-in's), plane 0's codes then plane 1's
-std::vector<uint16_t> route(Gpu &g, const Config &c, const std::vector<float> &texels)
-{
-    const raw::YcbcrStoreShape shape = shapeOf(c);
-    const bool wide = shape.max > 255;
-    const uint32_t bytes = wide ? 2 : 1, cw = shape.across ? W / 2 : W, ch = shape.down ? H / 2 : H;
-    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float
-                                                                                  width:W
-                                                                                 height:H
-                                                                              mipmapped:NO];
-    td.usage = MTLTextureUsageShaderRead;
-    td.storageMode = MTLStorageModeShared;
-    id<MTLTexture> standIn = [g.dev newTextureWithDescriptor:td];
-    [standIn replaceRegion:MTLRegionMake2D(0, 0, W, H) mipmapLevel:0 withBytes:texels.data() bytesPerRow:W * 16];
-    NSString *suffix = shape.srgb ? @"_srgb_frag" : @"_frag";
-    std::vector<uint16_t> out;
-    for (int plane = 0; plane < 2; plane++) {
-        const MTLPixelFormat f = plane ? (wide ? MTLPixelFormatRG16Unorm : MTLPixelFormatRG8Unorm)
-                                       : (wide ? MTLPixelFormatR16Unorm : MTLPixelFormatR8Unorm);
-        td.pixelFormat = f;
-        td.width = plane ? cw : W;
-        td.height = plane ? ch : H;
-        td.usage = MTLTextureUsageRenderTarget;
-        id<MTLTexture> t = [g.dev newTextureWithDescriptor:td];
-        NSString *name =
-            [NSString stringWithFormat:@"ycbcr_store_%@%u%@", plane ? @"chroma" : @"luma", wide ? 16 : 8, suffix];
-        g.pass(t, g.state(g.store, @"ycbcr_store_vert", name, f), nullptr, {}, standIn, &shape);
-        const uint32_t codes = uint32_t(td.width) * (plane ? 2 : 1), rows = uint32_t(td.height);
-        std::vector<uint8_t> b(codes * bytes * rows);
-        [t getBytes:b.data() bytesPerRow:codes * bytes fromRegion:MTLRegionMake2D(0, 0, td.width, rows) mipmapLevel:0];
-        for (uint32_t i = 0; i < codes * rows; i++)
-            out.push_back(wide ? uint16_t((b[2 * i] | b[2 * i + 1] << 8) >> 6) : b[i]);
-    }
-    return out;
 }
 
 // The packed states' words (raw/pack/ycbcr_store.metal's _packed functions) of `texels`, a packed target whose unpacked twin is
@@ -360,6 +170,10 @@ int main(int argc, char **argv)
         for (const auto &[format, fourcc] : converted)
             for (const char *matrix : {(const char *)nullptr, "ITU_R_709_2", "ITU_R_2020"})
                 configs.push_back({format, fourcc, matrix});
+        for (const auto &[format, fourcc] : converted)
+            if (format == 500 || format == 502 || format == 505 || format == 506)
+                for (const char *matrix : {"P3_D65", "DCI_P3"})
+                    configs.push_back({format, fourcc, matrix});
         std::vector<std::vector<float>> sets;
         for (uint32_t k = 0; k < 6; k++)
             sets.push_back(valueSet(540 + k));

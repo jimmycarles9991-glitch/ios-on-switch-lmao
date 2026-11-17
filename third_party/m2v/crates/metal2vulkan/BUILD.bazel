@@ -76,20 +76,40 @@ filegroup(
 
 rust_test(
     name = "bound_alignment_test",
-    args = ["tests::engine_bound_alignment::"],
+    args = [
+        "tests::engine_bound_alignment::",
+        "tests::engine_access::a_constant_vector_is_exact_at_every_word_residual",
+    ],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
-    data = ["@gpu_llvm_as//:bin/llvm-as"],
-    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    data = [
+        "//third_party/m2v:translation_test_inputs",
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )
 
-# The raw path's argument buffers: a layout's flat runs against its own lookup, and a heap class's word
+# The raw path's argument buffers: a function's layouts (arrays of arrays included), their flat runs against their own
+# lookup, a function's buffer encoders against each index's layout alone, a plain struct buffer's encoder and the data
+# types reflection names its members, every handle of an array of arrays an element a shader reads, and a heap class's
+# word
 rust_test(
     name = "argument_runs_test",
     args = [
+        "argument_buffers",
         "argument_runs",
+        "buffer_encoders",
+        "handle_grids",
         "heap_code",
+        "plain_index_encoders",
+        "reflection::tests::the_type_grammar",
     ],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
@@ -101,6 +121,15 @@ rust_test(
 rust_test(
     name = "center_fragment_depth_test",
     args = ["device::tests::profile::center_fragment_depth_contract_is_explicit_and_keys_the_profile"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# Every residual a render stage pushes stays within the 31 argument-table words a raw record names
+rust_test(
+    name = "push_placement_test",
+    args = ["lower::push::"],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
@@ -125,6 +154,22 @@ rust_test(
 rust_test(
     name = "native_sm53_test",
     args = ["native_sm53"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# powr's and pow's special-operand rules on the interpreter against the rules read from the bits (every half base and
+# exponent against the specials), the compositions they wrap, and their word estimates. The other arith tests that run
+# modules check them against the committed Vulkan profiles, which this import leaves out.
+rust_test(
+    name = "powr_specials_test",
+    size = "large",
+    args = [
+        "lower::arith::tests::powr::",
+        "fast_functions_are_metals_compositions",
+        "second_stage_fits_its_word_estimates",
+    ],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
@@ -160,6 +205,43 @@ rust_test(
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )
 
+# ios-on-switch-lmao: two-plane YCbCr reads converted from their surfaces (bind/ycbcr_convert.rs), the packed 10-bit
+# code formats with them. The profile sweep runs in validation; this target checks the native conversion.
+rust_test(
+    name = "ycbcr_convert_test",
+    args = [
+        "bind::ycbcr_convert::",
+        "--skip",
+        "the_ycbcr_conversion_kernels_are_valid_on_every_committed_profile",
+    ],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = ["@gpu_llvm_as//:bin/llvm-as"],
+    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+# A fragment function's [[stencil]] output (lower/fragment/stencil.rs): the shader-side stencil, the binder's words, and
+# the variant that runs both tests where a draw's stencil write follows its depth test
+rust_test(
+    name = "shadow_stencil_test",
+    args = ["tests::engine_stencil::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:translation_test_inputs",
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
 # RGB10A8_2P_XR10 in its two planes (pipeline/two_plane.rs): the output split, the input attachments and storage views
 # of a fetch, the alpha index
 rust_test(
@@ -167,7 +249,57 @@ rust_test(
     args = ["tests::engine_extended_range::two_plane::"],
     compile_data = glob(["tests/**"]),
     crate = ":metal2vulkan",
-    data = ["@gpu_llvm_as//:bin/llvm-as"],
-    env = {"METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)"},
+    data = [
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
     deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
 )
+
+# A kernel's RGB10A8_2P_XR10 texture in its two planes (VariantKey::two_plane_textures): the binder's variant and plane
+# binding, and stores, reads and samples against Apple's bytes (src/tests/engine_extended_range/planes_m4.txt)
+rust_test(
+    name = "kernel_planes_test",
+    args = ["tests::engine_extended_range::kernel_planes::"],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+)
+
+[rust_test(
+    name = name,
+    args = [test_filter],
+    compile_data = glob(["tests/**"]),
+    crate = ":metal2vulkan",
+    data = [
+        "//third_party/m2v:translation_test_inputs",
+        "@gpu_llvm_as//:bin/llvm-as",
+        "@spirv_tools//:spirv-dis",
+        "@spirv_tools//:spirv-val",
+    ],
+    env = {
+        "METAL2VULKAN_LLVM_AS": "$(rootpath @gpu_llvm_as//:bin/llvm-as)",
+        "METAL2VULKAN_SPIRV_DIS": "$(rootpath @spirv_tools//:spirv-dis)",
+        "METAL2VULKAN_SPIRV_VAL": "$(rootpath @spirv_tools//:spirv-val)",
+    },
+    deps = ["//third_party/m2v/crates/metal2vulkan-devtools"],
+) for name, test_filter in [
+    ("binary_linking_test", "tests::engine_linking::binary_functions_link_under_their_specialized_names_and_compute_exact_outputs"),
+    ("group_linking_test", "tests::engine_linking::groups::"),
+]]

@@ -223,7 +223,8 @@ struct Host1xFlipIo {
     // The CPU stands in for the producer: its work is done when the stream is queued.
     static int raiseProducer(uint32_t at)
     {
-        return tegra_host1x_syncpt_release_failed(producer(), at, 1);
+        (void)at;
+        return tegra_host1x_syncpt_cpu_increment(producer());
     }
 
     static void releaseProducer(uint32_t at)

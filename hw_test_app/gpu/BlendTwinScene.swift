@@ -49,6 +49,16 @@ public enum BlendTwinScene {
         }
     }
 
+    /// `triangles` triangles (pairs) in thin vertical slices of one band over half the target's width and a tenth of its
+    /// height, about 5% of it: a mesh covering little of its pass, as Core Animation's glass edges do.
+    public static func mesh(_ triangles: Int) -> [CAState.Vertex] {
+        let slices = max(1, triangles / 2)
+        return (0..<slices).flatMap { k -> [CAState.Vertex] in
+            let x0 = -0.5 + Float(k) / Float(slices), x1 = -0.5 + Float(k + 1) / Float(slices)
+            return list(CAState.rectangle(x0: x0, y0: -0.1, x1: x1, y1: 0.1, color: SIMD4(0.45, 0.1, 0.3, 0.5)))
+        }
+    }
+
     /// A strip's four vertices as the triangle list of the same two triangles (0 1 2, 2 1 3)
     static func list(_ strip: [CAState.Vertex]) -> [CAState.Vertex] {
         [strip[0], strip[1], strip[2], strip[2], strip[1], strip[3]].map(CAStateSweep.premultiply)
@@ -105,11 +115,20 @@ public enum BlendTwinScene {
     public static func microseconds(
         _ line: PipelineLine, quads: Int, width: Int, height: Int, library: MTLLibrary, gpu: GPU, draws: Int, runs: Int
     ) async throws -> Double? {
+        try await microseconds(
+            line, vertices: overlapping(quads), width: width, height: height, library: library, gpu: gpu, draws: draws,
+            runs: runs)
+    }
+
+    /// The same for one draw of `vertices` (a triangle list)
+    public static func microseconds(
+        _ line: PipelineLine, vertices quadVertices: [CAState.Vertex], width: Int, height: Int, library: MTLLibrary,
+        gpu: GPU, draws: Int, runs: Int
+    ) async throws -> Double? {
         let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
         let targets = try targets(line, gpu, width, height)
         let source = try CAStateSweep.patternTexture(gpu, premultiplied: true)
         let sampler = try CAStateSweep.linearSampler(gpu.device)
-        let quadVertices = overlapping(quads)
         let draw = { (commands: MTLCommandBuffer) in
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass(targets))!
             encoder.setRenderPipelineState(pipeline)

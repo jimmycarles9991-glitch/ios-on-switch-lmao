@@ -14,6 +14,7 @@
 //! key derivation is [`key`].
 
 pub mod api;
+mod buffer_encoders;
 mod entry;
 pub mod key;
 mod numbered;
@@ -56,6 +57,7 @@ use crate::pipeline::sym::VaryingKey;
 use crate::reflection;
 use crate::spirv::ir::TypedModule;
 
+pub(crate) use buffer_encoders::buffer_encoders;
 pub use entry::{EntryDescriptor, EntryPlan, StandaloneModule};
 
 /// Which entry of a bitcode module to compile.

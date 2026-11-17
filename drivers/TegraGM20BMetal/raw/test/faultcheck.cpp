@@ -205,6 +205,7 @@ void constantAfterFill(raw::Device &dev, const Expect &expect)
     raw::CommandBuffer *cb = dev.begin();
     bool drawn = false;
     if (cb) {
+        cb->use(b, true, false);
         raw::BlitEncoder *fill = cb->blit();
         fill->fillBytes(b.va, 4096, 0x5a);
         fill->end();
@@ -294,6 +295,8 @@ uint32_t copy(raw::Device &dev, const raw::Buffer &from, const raw::Buffer &to)
     raw::CommandBuffer *cb = dev.begin();
     if (!cb)
         return 0;
+    cb->use(from, false);
+    cb->use(to, true, false);
     raw::BlitEncoder *e = cb->blit();
     e->copyBytes(from.va, to.va, from.length);
     e->end();
@@ -319,6 +322,8 @@ void partialCommit(raw::Device &dev, const Expect &expect)
         expect(false, "a command buffer");
         return;
     }
+    cb->use(a, false);
+    cb->use(b, true, false);
     for (int i = 0; i < 300; i++) {
         raw::BlitEncoder *e = cb->blit();
         e->copyBytes(a.va, b.va, 64);
@@ -381,6 +386,7 @@ void outgrownRing(const char *pack, const Expect &expect)
         return;
     }
     cb->clean(chain.cpu, chain.length);
+    cb->use(chain, true, false);
     raw::BlitEncoder *e = cb->blit();
     for (uint32_t i = 0; i < kCopies; i++)
         e->copyBytes(chain.va + 4 * i, chain.va + 4 * (i + 1), 4);
@@ -418,6 +424,7 @@ void fills(raw::Device &dev, const Expect &expect)
             break;
         }
         cb->clean(b.cpu, kBytes, true);
+        cb->use(b, true, false);
         raw::BlitEncoder *e = cb->blit();
         e->fillBytes(b.va + f.at, f.bytes, f.value);
         e->end();
@@ -454,6 +461,7 @@ void overflowRing(const char *pack, const Expect &expect)
         return;
     }
     mock_iokit_fail_next(TegraGM20BMethodBoAlloc, 1000, kIOReturnNoMemory);
+    cb->use(chain, true, false);
     raw::BlitEncoder *e = cb->blit();
     for (uint32_t i = 0; i < 10000; i++)
         e->copyBytes(chain.va, chain.va + 4, 4);

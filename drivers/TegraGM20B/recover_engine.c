@@ -360,12 +360,148 @@ int tgm_recover_reload(struct nvkm_device *device, int chid)
 /* gpu_fault.c, runl->mutex held: hardware channel chid is a live client's with nothing pending */
 int tgm_chid_unowned(int chid);
 
+static u32 switch_gpu_recover_target(u32 status)
+{
+	return (status & 0xfff) | ((status & 0x1000) << 12);
+}
+
+static bool switch_gpu_recover_status_holds(u32 status, u32 target, bool engine)
+{
+	const u32 context = PFIFO_ENG_CTX_STATUS(status);
+
+	if (engine && !(status & (PFIFO_ENG_BUSY | PFIFO_ENG_CHSW)))
+		return false;
+	return ((context == PFIFO_ENG_CTX_VALID || context == PFIFO_ENG_CTX_SAVE ||
+		 context == PFIFO_ENG_CTX_SWITCH) &&
+		switch_gpu_recover_target(status) == target) ||
+	       ((context == PFIFO_ENG_CTX_LOAD || context == PFIFO_ENG_CTX_SWITCH) &&
+		switch_gpu_recover_target(status >> 16) == target);
+}
+
+static bool switch_gpu_recover_failed_target(struct nvkm_runl *runl, u32 target, bool running)
+{
+	struct nvkm_chan *chan = NULL;
+	struct nvkm_cgrp *cgrp = NULL;
+	unsigned long flags = 0;
+	bool failed = false;
+	int state = NVKM_CGRP_RC_NONE;
+
+	if (target & PFIFO_PREEMPT_TSG) {
+		cgrp = nvkm_runl_cgrp_get_cgid(runl, PFIFO_PREEMPT_ID(target), &flags);
+	} else {
+		chan = nvkm_runl_chan_get_chid(runl, PFIFO_PREEMPT_ID(target), &flags);
+		cgrp = chan ? chan->cgrp : NULL;
+	}
+	if (cgrp != NULL && cgrp->runl == runl) {
+		state = atomic_read(&cgrp->rc);
+		failed = (bool)(running ? state == NVKM_CGRP_RC_RUNNING
+					: state != NVKM_CGRP_RC_NONE);
+	}
+	if (chan != NULL) {
+		nvkm_chan_put(&chan, flags);
+	} else {
+		nvkm_cgrp_put(&cgrp, flags);
+	}
+	return failed;
+}
+
+static u32 switch_gpu_recover_failed_status(struct nvkm_runl *runl, u32 status, bool engine)
+{
+	u32 target = switch_gpu_recover_target(status);
+
+	if (switch_gpu_recover_status_holds(status, target, engine) &&
+	    switch_gpu_recover_failed_target(runl, target, true))
+		return target;
+	target = switch_gpu_recover_target(status >> 16);
+	if (switch_gpu_recover_status_holds(status, target, engine) &&
+	    switch_gpu_recover_failed_target(runl, target, true))
+		return target;
+	return ~0U;
+}
+
+static u32 switch_gpu_recover_failed_resident(struct nvkm_runl *runl)
+{
+	struct nvkm_device *device = runl->fifo->engine.subdev.device;
+	struct nvkm_engn *engn = NULL;
+	u32 target = ~0U;
+	int i = 0;
+
+	for (i = 0; i < runl->runq_nr; i++) {
+		if (!runl->runq[i])
+			continue;
+		target = switch_gpu_recover_failed_status(
+			runl, nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)), false);
+		if (target != ~0U)
+			return target;
+	}
+	nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
+	{
+		target = switch_gpu_recover_failed_status(
+			runl, nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)), true);
+		if (target != ~0U)
+			return target;
+	}
+	return ~0U;
+}
+
+static bool switch_gpu_recover_target_resident(struct nvkm_runl *runl, u32 target)
+{
+	struct nvkm_device *device = runl->fifo->engine.subdev.device;
+	struct nvkm_engn *engn = NULL;
+	int i = 0;
+
+	for (i = 0; i < runl->runq_nr; i++) {
+		if (runl->runq[i] &&
+		    switch_gpu_recover_status_holds(
+			    nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)), target, false))
+			return true;
+	}
+	nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
+	{
+		if (switch_gpu_recover_status_holds(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)),
+						    target, true))
+			return true;
+	}
+	return false;
+}
+
+bool switch_gpu_recover_pending(struct nvkm_runl *runl, u32 *target)
+{
+	struct nvkm_device *device = runl->fifo->engine.subdev.device;
+	unsigned long flags = 0;
+	u32 preempt = 0;
+	bool pending = true, issued = false;
+
+	BUG_ON(!mutex_is_locked(&runl->mutex));
+	spin_lock_irqsave(&device->intr.lock, flags);
+	preempt = nvkm_rd32(device, PFIFO_PREEMPT);
+	if (preempt & PFIFO_PREEMPT_PENDING) {
+		if (*target == ~0U && switch_gpu_recover_failed_target(runl, preempt, false))
+			*target = preempt & ((u32)PFIFO_PREEMPT_TSG | 0xfffU);
+	} else if (*target != ~0U && switch_gpu_recover_target_resident(runl, *target)) {
+		/* A completed request must evict its target; never replace it with another request. */
+	} else {
+		*target = switch_gpu_recover_failed_resident(runl);
+		if (*target != ~0U) {
+			nvkm_wr32(device, PFIFO_PREEMPT, *target);
+			issued = true;
+		} else {
+			pending = false;
+		}
+	}
+	spin_unlock_irqrestore(&device->intr.lock, flags);
+	if (issued)
+		tgm_recover_preempt_unblock(runl);
+	return pending;
+}
+
 void tgm_recover_preempt_unblock(struct nvkm_runl *runl)
 {
 	struct nvkm_device *device = runl->fifo->engine.subdev.device;
 	struct nvkm_engn *engn = NULL;
 	u32 status = 0;
 	int id = 0;
+	int tsg = 0;
 
 	if (!(nvkm_rd32(device, PFIFO_PREEMPT) & PFIFO_PREEMPT_PENDING))
 		return;
@@ -373,13 +509,27 @@ void tgm_recover_preempt_unblock(struct nvkm_runl *runl)
 	/* NOLINTNEXTLINE(clang-analyzer-security.ArrayBound) */
 	nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 	{
+		tsg = 0;
 		status = nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id));
 		id = tgm_engine_saving(status,
 				       PFIFO_ENG_CTX_STATUS(status) == PFIFO_ENG_CTX_SWITCH &&
 					       nvkm_engine_chsw_load(engn->engine));
+		if (tgm_engine_load_stuck(status))
+			id = tgm_engine_chid(status, true, &tsg);
+		if (tsg) {
+			if (id >= 0 && switch_gpu_recover_failed_target(
+					       runl, PFIFO_PREEMPT_TSG | (u32)id, false)) {
+				tgm_engine_reset_locked(runl, engn, id,
+							"loading the context of failed group");
+			}
+			continue;
+		}
 		if (id >= 0 && (!chan_alive(runl->fifo, (u32)id) || tgm_chid_unowned(id)))
-			tgm_engine_reset_locked(runl, engn, id,
-						"saving, with nothing to drain, the context of");
+			tgm_engine_reset_locked(
+				runl, engn, id,
+				tgm_engine_load_stuck(status)
+					? "loading the context of dead"
+					: "saving, with nothing to drain, the context of");
 	}
 }
 

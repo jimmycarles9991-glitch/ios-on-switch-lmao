@@ -6,8 +6,12 @@ each, the observed states' packs first.
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//ipsw:ipsw.bzl", "IpswInfo")
+load(":tools.bzl", "raw_tool_files")
 
 DARWIN = {"requires-darwin": ""}
+
+# What tools/gpu/shaders/native_seed.py runs of the raw tools (bucket and stamp): none of the others
+_NATIVE_TOOLS = ["native-seed", "libmock_iokit.dylib"]
 
 def named(ctx, path):
     return "{}/{}{}".format(ctx.attr.ipsw[IpswInfo].kind, ctx.attr.name, path)
@@ -22,11 +26,12 @@ def native_records(ctx, tools, crawl, views, lines):
     """Make, stamp and check the native records; returns the stamped tree and the coverage check.
 
     Bucket i reads views[i] of the libraries (its root, files and store; metal_seed's plan)."""
+    native_tools = raw_tool_files(tools, _NATIVE_TOOLS)
     buckets = []
     for i, corpus in enumerate(lines):
         view = views[i]
         inputs = depset(
-            tools.raw + [view.store, tools.twin] + ctx.files.device_libraries + ctx.files.embedded,
+            native_tools + [view.store, tools.twin] + ctx.files.device_libraries + ctx.files.embedded,
             transitive = [view.files],
         )
         out = ctx.actions.declare_directory(named(ctx, "_native/bucket-" + three(i)))
@@ -63,7 +68,7 @@ def native_records(ctx, tools, crawl, views, lines):
     ctx.actions.run(
         executable = ctx.executable._native_seed,
         arguments = [args],
-        inputs = buckets + lines + tools.raw + [tools.manifest],
+        inputs = buckets + lines + native_tools + [tools.manifest],
         outputs = [native_records],
         mnemonic = "MetalNativeStamp",
         progress_message = "Stamping native records for this OS and compiler",

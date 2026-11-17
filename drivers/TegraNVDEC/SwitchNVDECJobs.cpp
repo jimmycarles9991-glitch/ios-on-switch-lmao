@@ -106,8 +106,8 @@ struct Retirement {
     static void physical(uint32_t slot, int result)
     {
         auto &job = gQueue.jobs[slot];
-        switch_gpu_bridge_release(&job.bridge);
         Results::physical(job.outcome, result);
+        switch_gpu_bridge_release(&job.bridge);
         switch_nvdec_semantics_physical(0);
     }
 
@@ -315,7 +315,8 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
         bool bridgeRequired = false;
         for (uint32_t i = 0; i < needed && !error; ++i) {
             auto &dependency = dependencies.tokens[i];
-            const int ready = switch_gpu_backing_token_external_status(&dependency);
+            const int physical = switch_gpu_backing_token_physical_status(&dependency, 0);
+            const int ready = physical < 0 ? physical : switch_gpu_backing_token_external_status(&dependency);
             if (ready == 1) {
                 dependency = {};
                 continue;
@@ -371,13 +372,17 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
         if (dependencies.acquire(&bridgeSyncpoint, &bridgeThreshold))
             n += tegra_host1x_op_wait_syncpt(work.words + n, bridgeSyncpoint, bridgeThreshold);
         SwitchHost1xProducers producers;
-        for (uint32_t i = 0; i < needed; ++i)
+        for (uint32_t i = 0; i < needed; ++i) {
             if (dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_VIC ||
-                dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_NVENC) {
-                n += tegra_host1x_op_wait_syncpt(work.words + n, dependencies.tokens[i].queue,
-                                                 static_cast<uint32_t>(dependencies.tokens[i].value));
+                dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_NVENC ||
+                dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_NVDEC) {
+                if (dependencies.tokens[i].engine != SWITCH_GPU_ENGINE_NVDEC) {
+                    n += tegra_host1x_op_wait_syncpt(work.words + n, dependencies.tokens[i].queue,
+                                                     static_cast<uint32_t>(dependencies.tokens[i].value));
+                }
                 producers.add(dependencies.tokens[i]);
             }
+        }
         const uint64_t slot = static_cast<uint64_t>(gQueue.tail()) * kSetupStride;
         memcpy(gSetup.va + slot, submit.setup, submit.setup_bytes);
         switch_dcache_clean(gSetup.va + slot, submit.setup_bytes);
@@ -414,7 +419,7 @@ int publish(const TegraNVDECSubmit &submit, Submission &work, const SwitchNVDECC
             const auto &job = gQueue.jobs[queued];
             bridge = job.bridge;
             if (const int failed = Stages::start(queued, gSyncpt, *fence, bridge != nullptr, job.semantics != nullptr,
-                                                 kWaitBoundUs, producers, ahead))
+                                                 kWaitBoundUs, producers, ahead, bridgeSyncpoint, bridgeThreshold))
                 Retirement::unarmed(queued, failed);
             IOLockWakeup(gLock, &gQueue.count, false);
         } else {
@@ -581,6 +586,23 @@ bool switch_nvdec_jobs_falcon_failed()
         return false;
     switch_nvdec_job_stalled(fence, TEGRA_HOST1X_EFALCON, submittedUs ? switch_now_us() - submittedUs : 0);
     return true;
+}
+
+extern "C" bool switch_nvdec_host1x_cancelled(uint32_t syncpt, uint32_t reached)
+{
+    if (!gLock)
+        return false;
+    bool changed = false;
+    IOLockLock(gLock);
+    for (uint32_t i = 0; i < gQueue.count; ++i) {
+        const uint32_t slot = (gQueue.head + i) % SwitchNVDECQueue::kSlots;
+        const auto &job = gQueue.jobs[slot];
+        const int source = Results::sourceFailure(job.outcome, &job.bridge, switch_gpu_bridge_source_failure);
+        if (Stages::producerCancelled(slot, syncpt, reached, source < 0))
+            changed |= Results::physical(job.outcome, Stages::kCancelled);
+    }
+    IOLockUnlock(gLock);
+    return changed;
 }
 
 uint32_t switch_nvdec_jobs_cancel(uint32_t reached)

@@ -334,23 +334,22 @@ void AGXDeviceUserClient::drainResources()
 }
 
 // lock_ held. The BO leaves the index and the published bindings at once, and goes only after its bindings retire and
-// every job that may have found it left (retireBatch). The submit gate stays open unless the BO is a resource set's
-// member: its free ends the set's generation, waits for the jobs inside the set (switch_gpu_set_reached) and rewrites
-// the member list they read.
+// every job that may have found it left (retireBatch). Bound BOs drain submissions before their retirement snapshots
+// are taken; resource set members also end the set's generation and rewrite its member list.
 IOReturn AGXDeviceUserClient::boFree(const TegraGM20BAbiBoFree *in)
 {
 	const uint64_t start = nowNs();
 	Bo **p = findLink(in->handle);
 	if (!*p)
 		return kIOReturnBadArgument;
-	const bool member = switch_gpu_backing_set((*p)->backing) != nullptr;
-	if (member) {
+	const bool mutation = (*p)->bindings || switch_gpu_backing_set((*p)->backing) != nullptr;
+	if (mutation) {
 		if (!submitGate_.beginMutation(lock_))
 			return kIOReturnNotOpen;
 		p = findLink(in->handle);
 	}
 	const IOReturn freed = *p ? freeBo(p) : kIOReturnBadArgument;
-	if (member)
+	if (mutation)
 		submitGate_.endMutation(lock_);
 	if (!freed)
 		tgm_stats_bo_free(nowNs() - start);

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* The push profile's slowest submission of a window, push by push in order (gpu_fenced.h "push profile"): each push's class,
- * its pass's colour target 0 in thousands of samples, its draws and interlock enables, and its GPU time. With the jobs
+ * its pass's colour target 0 in thousands of samples, its draws, interlock enables and barrier twin draws, and its GPU
+ * time. With the jobs
  * line's batches it attributes a frame's GPU time pass by pass. */
 #ifndef SWITCH_GPU_PROFILE_SEQUENCE_H
 #define SWITCH_GPU_PROFILE_SEQUENCE_H
@@ -11,7 +12,7 @@
 
 struct switch_gpu_prof_push {
 	uint8_t cls, ilk;
-	uint16_t draws, kpx;
+	uint16_t draws, kpx, twins;
 	uint32_t us;
 };
 
@@ -101,7 +102,8 @@ static inline int switch_gpu_prof_cost_format(char *buf, unsigned long len,
 
 /* A push: D draw, C clear, P pass, S sync, X compute, Y copy, 2 2D engine, T state; then for draws and clears its
  * target's thousands of samples (a multisampled target counts its sample grid: 720x1280 at 4x is 3686k), p if
- * pitch-linear, m if multisampled, /draws, i and the interlock enables (conflict detection on); then its microseconds. */
+ * pitch-linear, m if multisampled, /draws, i and the interlock enables (conflict detection on), b and the draws a pixel
+ * shader barrier ordered after an earlier one of their pass (the barrier twin's); then its microseconds. */
 static inline int switch_gpu_prof_push_format(char *buf, unsigned long len,
 					      const struct switch_gpu_prof_push *p)
 {
@@ -111,9 +113,9 @@ static inline int switch_gpu_prof_push_format(char *buf, unsigned long len,
 		return snprintf(buf, len, " %c %u",
 				p->cls - TGM_PC_PASS < 6 ? other[p->cls - TGM_PC_PASS] : '?',
 				p->us);
-	return snprintf(buf, len, " %c%uk%s%s/%u%s%.0u %u", p->cls < TGM_PC_CLEAR ? 'D' : 'C',
+	return snprintf(buf, len, " %c%uk%s%s/%u%s%.0u%s%.0u %u", p->cls < TGM_PC_CLEAR ? 'D' : 'C',
 			p->kpx, p->cls & 2 ? "p" : "", p->cls & 1 ? "m" : "", p->draws,
-			p->ilk ? "i" : "", p->ilk, p->us);
+			p->ilk ? "i" : "", p->ilk, p->twins ? "b" : "", p->twins, p->us);
 }
 
 static inline int switch_gpu_prof_seq_format(char *buf, unsigned long len, const char *owner,

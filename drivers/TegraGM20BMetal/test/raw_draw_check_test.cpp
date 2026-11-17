@@ -24,7 +24,6 @@ constexpr CheckedTexture kPlain{}, kPlanar{true, false}, kXr{false, true};
 TEST(DrawCheck, APlainTextureOverAPlainOneLeavesTheAnswer)
 {
     EXPECT_FALSE(raw::textureBindChecks(kPlain, kPlain, false, false));
-    EXPECT_FALSE(raw::samplerBindChecks(false, false));
 }
 
 TEST(DrawCheck, APlanarOrXrTextureBoundOrReplacedChecksAgain)
@@ -41,12 +40,6 @@ TEST(DrawCheck, ATextureUnderACubicSamplerOrOfAStateThatWritesTexturesChecksAgai
     EXPECT_TRUE(raw::textureBindChecks(kPlain, kPlain, false, true));
 }
 
-TEST(DrawCheck, ACubicSamplerBoundOrReplacedChecksAgain)
-{
-    EXPECT_TRUE(raw::samplerBindChecks(false, true));
-    EXPECT_TRUE(raw::samplerBindChecks(true, false));
-}
-
 // The facade: its check keeps its answer only at the same bind count, plan epoch and pipeline; its binds count by the
 // rule, and every other bind its check reads counts always
 TEST(DrawCheck, TheFacadesBindsAndCheckUseTheRule)
@@ -54,7 +47,7 @@ TEST(DrawCheck, TheFacadesBindsAndCheckUseTheRule)
     const std::string encoder = SourceText("../raw/runtime/RawMetalRenderEncoder.mm"),
                       bindings = SourceText("../raw/runtime/RawMetalBindings.mm"),
                       strides = SourceText("../raw/runtime/RawMetalStrides.mm");
-    const std::string check = Body(encoder, "- (void)checkDraw");
+    const std::string check = Body(encoder, "- (BOOL)checkDraw");
     EXPECT_THAT(check,
                 HasSubstr("if (_checkedEligibility == _eligibility && _checkedEpoch == _cb->_plan.stateEpoch() &&"));
     EXPECT_THAT(check, HasSubstr("_checkedPipeline == _pipe->_raw)"));
@@ -62,8 +55,7 @@ TEST(DrawCheck, TheFacadesBindsAndCheckUseTheRule)
                 HasSubstr("_eligibility++;"));
     EXPECT_THAT(Body(encoder, "- (void)setDepthStencilState:(id<MTLDepthStencilState>)s"),
                 HasSubstr("_eligibility++;"));
-    EXPECT_THAT(Body(bindings, "void rmBindTexture("), HasSubstr("raw::textureBindChecks("));
-    EXPECT_THAT(Body(bindings, "void rmBindSampler("), HasSubstr("raw::samplerBindChecks("));
+    EXPECT_THAT(Body(bindings, "bool rmBindTexture("), HasSubstr("raw::textureBindChecks("));
     EXPECT_THAT(Body(bindings, "- (void)buffer:(int)stage object:(id<MTLBuffer>)b offset:(NSUInteger)offset index:"),
                 HasSubstr("_eligibility++;"));
     EXPECT_THAT(Body(bindings, "- (void)bufferOffset:(int)stage offset:(NSUInteger)offset index:(NSUInteger)index"),

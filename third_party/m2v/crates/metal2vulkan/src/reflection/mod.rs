@@ -87,8 +87,8 @@ mod linked_tests;
 mod tests;
 
 pub(crate) use derive::{
-    bindings, needs_resolution, read_attributes, specialization_decides_reads, specialized_reads,
-    Channel, UnspecializedReads,
+    binding, bindings, needs_resolution, read_attributes, specialization_decides_reads,
+    specialized_reads, Channel, UnspecializedReads,
 };
 pub(crate) use function::{
     entry_properties, metallib_constants, metallib_properties, module_constants, visible_properties,

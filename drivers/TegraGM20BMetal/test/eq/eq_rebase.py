@@ -15,10 +15,17 @@ A draw that moved from its golden is refused unless one of these says why:
              (barrier.entry_no_drain), in place of the drain's wait and shader-cache flush
   follows    a draw after a draw of its pass that took another form: the shader barrier that ordered it after that
              draw's storage writes goes with them
+  tscrenumber
+             a draw whose sampler headers sit at other indices (headers placed in another order), seen where it binds a
+             set again as a uniform buffer, whose words nvdec hashes as they are: proven against a log that keeps the
+             golden, every line of the two logs alike but uniform buffers' word hashes, and every word that differs a
+             sampler-header index of the same texture header whose sampler header holds the same words
 
 A draw equal to its golden keeps its golden's tags; its barriers may only grow. `moved` below names the fields the
 golden keeps one by one (its sampled draws) that moved.
 """
+
+import re
 
 import eq_fields
 
@@ -75,3 +82,64 @@ def follows(draws: list[eq_fields.Draw], i: int, formed: set[int], missing: set[
         if draws[j].first:
             return None
     return None
+
+
+UNIFORM = re.compile(r'^(\s*cb\d+ type=5 size=\w+ data=)[0-9a-f]+(:.*)$')
+TEXTURE_BITS = 0xFFFFF
+
+
+def uniforms(log: list[str]) -> list[tuple[int, int]]:
+    """Give the stage and slot of each uniform buffer line of a log, in its order."""
+    out, stage = [], -1
+    for line in log:
+        text = line.strip()
+        if text.startswith('stage'):
+            stage = int(text.split()[0][len('stage') :])
+        elif UNIFORM.match(line):
+            out.append((stage, int(text.split()[0][len('cb') :])))
+    return out
+
+
+def dumped(words: list[str]) -> list[tuple[int, int, list[int], dict[int, str]]]:
+    """Give eq_capture.cpp's EQ_UBO_WORDS lines: stage, slot, words, and the sampler header each handle word names."""
+    out = []
+    for line in words:
+        head, _, named = line.partition(' |')
+        _, stage, slot, *values = head.split()
+        headers = dict(entry.split(':') for entry in named.split())
+        out.append((int(stage), int(slot), [int(v, 16) for v in values], {int(k): h for k, h in headers.items()}))
+    return out
+
+
+def tsc_renumber(was_log: list[str], was_words: list[str], log: list[str], words: list[str]) -> list[str]:
+    """Give why two runs' logs differ in more than sampler-header indices, [] where they do not."""
+    if len(was_log) != len(log):
+        return [f'tscrenumber: logs of {len(was_log)} and {len(log)} lines']
+    order = uniforms(log)
+    was_dumps, dumps = dumped(was_words), dumped(words)
+    if uniforms(was_log) != order or [d[:2] for d in was_dumps] != order or [d[:2] for d in dumps] != order:
+        return ["tscrenumber: the word dumps do not list the logs' uniform buffers"]
+    refused, k = [], 0
+    for a, b in zip(was_log, log, strict=True):
+        uniform = bool(UNIFORM.match(b))
+        if a != b and (not uniform or UNIFORM.sub(r'\1\2', a) != UNIFORM.sub(r'\1\2', b)):
+            return [f"tscrenumber: {b.strip()[:100]} moved, which is no uniform buffer's word hash"]
+        if a != b:
+            refused += renumbered_words(k, was_dumps[k], dumps[k])
+        k += uniform
+    return refused
+
+
+def renumbered_words(k: int, was: tuple, now: tuple) -> list[str]:
+    """Give why uniform buffer k's words differ in more than sampler-header indices."""
+    (_, _, was_words, was_headers), (_, _, words, headers) = was, now
+    if len(was_words) != len(words):
+        return [f'tscrenumber: uniform buffer {k} of {len(was_words)} and {len(words)} words']
+    refused = []
+    for j, (a, b) in enumerate(zip(was_words, words, strict=True)):
+        if a == b:
+            continue
+        same_header = j in was_headers and j in headers and was_headers[j] == headers[j]
+        if a & TEXTURE_BITS != b & TEXTURE_BITS or not same_header:
+            refused.append(f'tscrenumber: uniform buffer {k} word {j} {a:x} -> {b:x} is no sampler header renumbered')
+    return refused

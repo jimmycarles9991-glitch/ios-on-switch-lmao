@@ -14,7 +14,7 @@ OUT=$4
 METAL_ABI=${METAL_ABI:-$TREE/bazel-bin/drivers/NativeMetal/abi}
 mkdir -p "$OUT"
 # SWITCH_RAW_HARNESS_MARKS: raw_gpu.cpp marks each fetch barrier it leaves out and each draw it splits, for pack/eqcheck.py
-FLAGS=(-O2 -g -Wall -Wextra -std=c++17 -DSWITCH_RAW_HARNESS_MARKS -I "$TREE/kits/SwitchGM20BEmit/mesa"
+FLAGS=(-O2 -g -Wall -Wextra -std=c++17 -DSWITCH_RAW_HARNESS_MARKS -I "$TREE/bazel-bin" -I "$TREE/kits/SwitchGM20BEmit/mesa"
     -I "$TREE/bazel-bin/kits/SwitchGM20BEmit/gen" -I "$TREE/third_party/mesa/src/nouveau/headers")
 for f in mme_fermi mme_fermi_sim; do xcrun clang -O2 -std=c11 -w -I "$RAW/pack/mesa" -c "$RAW/pack/mesa/$f.c" -o "$OUT/$f.o"; done
 xcrun clang -O1 -Wall -c -DSWITCH_MOCK_JOB_INTERFACE -I "$TREE/drivers/TegraGM20B" "$RAW/pack/mock_iokit.c" -o "$OUT/mock_iokit.o"
@@ -31,12 +31,12 @@ for f in SwitchGM20BEmit3D SwitchGM20BEmitBarrier SwitchGM20BEmitIterated mesa/n
 done
 xcrun clang++ -dynamiclib "$OUT/mock_iokit.o" "$OUT/cap.o" "$OUT/nvdec.o" "$OUT/nvdec_compute.o" "$OUT/twod_sim.o" "$OUT/mme_fermi.o" "$OUT/mme_fermi_sim.o" "$OUT"/kit_*.o -framework IOKit \
     -framework CoreFoundation -install_name @rpath/libmock_iokit.dylib -o "$OUT/libmock_iokit.dylib"
-OBJC=(-O2 -g -std=c++17 -fobjc-arc -Wno-deprecated-declarations -DSWITCH_RAW_HARNESS_MARKS -I "$TREE/kits/SwitchGM20BEmit/mesa" -I "$TREE/bazel-bin/kits/SwitchGM20BEmit/gen" -I "$TREE/third_party/mesa/src/nouveau/headers" -I "$FRONT" -I "$TREE/drivers/NativeMetal" -I "$METAL_ABI" -I "$TREE/drivers/TegraGM20B" -I "$TREE/bazel-bin/kits/SwitchGM20B")
+OBJC=(-O2 -g -std=c++17 -fobjc-arc -Wno-deprecated-declarations -DSWITCH_RAW_HARNESS_MARKS -I "$TREE/bazel-bin" -I "$TREE/kits/SwitchGM20BEmit/mesa" -I "$TREE/bazel-bin/kits/SwitchGM20BEmit/gen" -I "$TREE/third_party/mesa/src/nouveau/headers" -I "$FRONT" -I "$TREE/drivers/NativeMetal" -I "$METAL_ABI" -I "$TREE/drivers/TegraGM20B" -I "$TREE/bazel-bin/kits/SwitchGM20B")
 # the runtime's completion of states the pack lacks (RawComplete.mm, RawDirect.mm; raw_completed.cpp beside raw_gpu.cpp)
 # the facade's own runtime units: its recording plan (RawMetalPlan.h), XR planes, multisample resolves and visibility
 FACADE_RUNTIME=("$RAW/runtime/raw_semantic_plan.cpp" "$RAW/runtime/raw_semantic_resources.cpp" "$RAW/runtime/raw_semantic_setters.cpp"
     "$RAW/runtime/raw_xr_texture.cpp" "$RAW/runtime/raw_multisample.cpp" "$RAW/runtime/raw_object_pool.cpp"
-    "$RAW/runtime/raw_visibility.cpp" "$RAW/runtime/raw_visibility_pass.cpp")
+    "$RAW/runtime/raw_visibility.cpp" "$RAW/runtime/raw_visibility_pass.cpp" "$RAW/runtime/raw_texture_shape.cpp")
 COMPLETION=("$RAW/runtime/raw_record_parts.cpp" "$RAW/runtime/raw_direct.cpp" "$RAW/runtime/raw_direct_compute.cpp" "$RAW/runtime/raw_emit.cpp" "$RAW/runtime/raw_cache.cpp" "$RAW/runtime/raw_kernel_cache.cpp" "$RAW/runtime/raw_compiler.cpp" "$RAW/runtime/raw_metallib.cpp")
 # the raw facade (RawMetal.mm and the RawMetal*.mm beside it, RawAlias.mm, RawComplete.mm, RawDirect.mm)
 FACADE=("$RAW"/runtime/Raw*.mm "$RAW/runtime/SwitchSharedEvent.mm")
@@ -112,19 +112,12 @@ xcrun clang++ -O2 -g -std=c++17 -fobjc-arc -Wall -Wextra -I "$RAW/pack" "$HERE/v
 # cachecheck: the runtime's record cache and compile table on a bucket's records, and the AIR hashes on a real library
 xcrun clang++ "${FLAGS[@]}" -I "$FRONT" -I "$METAL_ABI" "$HERE/cachecheck.cpp" "$RAW/runtime/raw_cache.cpp" "$RAW/runtime/raw_kernel_cache.cpp" "$RAW/runtime/raw_compiler.cpp" "$RAW/runtime/raw_metallib.cpp" "$RAW/runtime/raw_record.cpp" "$RAW/runtime/raw_record_parts.cpp" \
     "$RAW/runtime/raw_pack.cpp" -o "$OUT/cachecheck"
-# directcheck: the direct compile of every state of a corpus (runtime/raw_direct.h), its records against the pack
-xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/directcheck.mm" "$RAW/runtime/RawDirect.mm" "$RAW/runtime/RawRenderKey.mm" "$FRONT/NativeBridgeMetalFrontend.mm" \
-    -x c++ "$RAW/runtime/raw_pack.cpp" "${COMPLETION[@]}" -x none "$BRIDGE" "${LIBS[@]}" \
-    -o "$OUT/directcheck" 2>&1 | awk '!/duplicate libraries/'
 xcrun clang++ "${FLAGS[@]}" -I "$TREE/drivers/TegraGM20B" "$HERE/edgecheck.cpp" \
     "$RAW/runtime/raw_gpu.cpp" "$RAW/runtime/raw_draw_bands.cpp" "$RAW/runtime/raw_job_uses.cpp" "$RAW/runtime/raw_compute.cpp" "$RAW/runtime/raw_predication.cpp" "$RAW/runtime/raw_icb_compute.cpp" "$RAW/runtime/raw_transfer.cpp" "$RAW/runtime/raw_split.cpp" "$RAW/runtime/raw_variants.cpp" "$RAW/runtime/raw_compute_loops.cpp" "$RAW/runtime/raw_loop_copies.cpp" "$RAW/runtime/raw_predicate_loops.cpp" \
     "$RAW/fx/fx_mip.cpp" "$RAW/fx/fx_image.cpp" "$RAW/runtime/raw_kernel.cpp" "$RAW/runtime/raw_kernel_job.cpp" "$RAW/runtime/raw_resource_set.cpp" "$RAW/runtime/raw_state_segment.cpp" "$RAW/runtime/raw_encoder_state.cpp" "$RAW/runtime/raw_shared_events.cpp" \
     "$RAW/runtime/raw_alias.cpp" "$RAW/runtime/raw_arena.cpp" "$RAW/runtime/raw_pack.cpp" "$RAW/runtime/raw_ycbcr.cpp" \
     "$RAW/runtime/raw_zeta.cpp" "$RAW/runtime/raw_comp.cpp" "$RAW/runtime/raw_completed.cpp" "$RAW/runtime/raw_record_parts.cpp" \
     "$RAW/runtime/raw_emit.cpp" "${LIBS[@]}" -o "$OUT/edgecheck"
-# linkcheck: a state whose fragment function links a visible function (test/linked/*.metal), made directly
-xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/linkcheck.mm" "$RAW/runtime/RawDirect.mm" "$FRONT/NativeBridgeMetalFrontend.mm" \
-    -x c++ "$RAW/runtime/raw_pack.cpp" "${COMPLETION[@]}" -x none "$BRIDGE" "${LIBS[@]}" -o "$OUT/linkcheck" 2>&1 | awk '!/duplicate libraries/'
 # computeframe: one Metal kernel through the frontend + m2v + NVK and through the raw compute encoder (test/computeeq.sh)
 xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/computeframe.mm" "$FRONT/NativeBridgeMetalFrontend.mm" \
     -x c++ "$HERE/computeframe_raw.cpp" "$RAW/runtime/raw_compute.cpp" "$RAW/runtime/raw_predication.cpp" "$RAW/runtime/raw_icb_compute.cpp" "$RAW/runtime/raw_completed.cpp" "${COMPLETION[@]}" "$RAW/runtime/raw_gpu.cpp" "$RAW/runtime/raw_draw_bands.cpp" "$RAW/runtime/raw_job_uses.cpp" "$RAW/runtime/raw_transfer.cpp" "$RAW/runtime/raw_split.cpp" "$RAW/runtime/raw_variants.cpp" "$RAW/fx/fx_mip.cpp" "$RAW/fx/fx_image.cpp" "$RAW/runtime/raw_kernel.cpp" "$RAW/runtime/raw_kernel_job.cpp" "$RAW/runtime/raw_resource_set.cpp" "$RAW/runtime/raw_state_segment.cpp" "$RAW/runtime/raw_encoder_state.cpp" "$RAW/runtime/raw_shared_events.cpp" "$RAW/runtime/raw_alias.cpp" "$RAW/runtime/raw_arena.cpp" "$RAW/runtime/raw_compute_loops.cpp" "$RAW/runtime/raw_loop_copies.cpp" "$RAW/runtime/raw_predicate_loops.cpp" \
@@ -134,7 +127,8 @@ xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/computeframe.mm
 xcrun clang++ "${OBJC[@]}" -Wall -Wextra -DRAW_FACADE -x objective-c++ "$HERE/computeframe.mm" "${FACADE[@]}" "$FRONT/NativeBridgeMetalFrontend.mm" \
     -x c++ "$HERE/computeframe_raw.cpp" "$RAW/runtime/raw_gpu.cpp" "$RAW/runtime/raw_draw_bands.cpp" "$RAW/runtime/raw_job_uses.cpp" "$RAW/runtime/raw_transfer.cpp" "$RAW/runtime/raw_split.cpp" "$RAW/runtime/raw_variants.cpp" "$RAW/fx/fx_mip.cpp" "$RAW/fx/fx_image.cpp" "$RAW/runtime/raw_kernel.cpp" "$RAW/runtime/raw_kernel_job.cpp" "$RAW/runtime/raw_resource_set.cpp" "$RAW/runtime/raw_state_segment.cpp" "$RAW/runtime/raw_encoder_state.cpp" "$RAW/runtime/raw_shared_events.cpp" "$RAW/runtime/raw_alias.cpp" "$RAW/runtime/raw_arena.cpp" "$RAW/runtime/raw_pack.cpp" "$RAW/runtime/raw_ycbcr.cpp" "$RAW/runtime/raw_zeta.cpp" "$RAW/runtime/raw_comp.cpp" "$RAW/runtime/raw_completed.cpp" "$RAW/runtime/raw_compute.cpp" "$RAW/runtime/raw_predication.cpp" "$RAW/runtime/raw_icb_compute.cpp" "$RAW/runtime/raw_compute_loops.cpp" "$RAW/runtime/raw_loop_copies.cpp" "$RAW/runtime/raw_predicate_loops.cpp" "${COMPLETION[@]}" "${FACADE_RUNTIME[@]}" "$TREE/kits/SwitchRefusal/SwitchRefusal.c" -x none "$BRIDGE" "${LIBS[@]}" \
     -o "$OUT/computefacade" 2>&1 | awk '!/duplicate libraries/'
-echo "built $OUT/nvkframe $OUT/rawframe $OUT/facadeframe $OUT/arenacheck $OUT/heapframe $OUT/compchurn $OUT/lockcheck $OUT/facadecost $OUT/geomcheck $OUT/poolcheck $OUT/killcheck $OUT/xrcopycheck $OUT/zetacheck $OUT/faultcheck $OUT/footprint $OUT/heapcheck $OUT/emitcheck $OUT/vertexcheck $OUT/cachecheck $OUT/directcheck $OUT/linkcheck $OUT/computeframe $OUT/computefacade"
+echo "built $OUT/nvkframe $OUT/rawframe $OUT/facadeframe $OUT/arenacheck $OUT/heapframe $OUT/compchurn $OUT/lockcheck $OUT/facadecost $OUT/geomcheck $OUT/poolcheck $OUT/killcheck $OUT/xrcopycheck $OUT/zetacheck $OUT/faultcheck $OUT/footprint $OUT/heapcheck $OUT/emitcheck $OUT/vertexcheck $OUT/cachecheck $OUT/computeframe $OUT/computefacade"
+echo "native compiler checks: bazel test //drivers/TegraGM20BMetal/test:directcheck_test //tools/gpu/maxwell:direct_consumers_test"
 xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/blitframe.mm" "${FACADE[@]}" "$FRONT/NativeBridgeMetalFrontend.mm" \
     -x c++ "$RAW/runtime/raw_gpu.cpp" "$RAW/runtime/raw_draw_bands.cpp" "$RAW/runtime/raw_job_uses.cpp" "$RAW/runtime/raw_transfer.cpp" "$RAW/runtime/raw_split.cpp" "$RAW/runtime/raw_variants.cpp" "$RAW/fx/fx_mip.cpp" "$RAW/fx/fx_image.cpp" "$RAW/runtime/raw_kernel.cpp" "$RAW/runtime/raw_kernel_job.cpp" "$RAW/runtime/raw_resource_set.cpp" "$RAW/runtime/raw_state_segment.cpp" "$RAW/runtime/raw_encoder_state.cpp" "$RAW/runtime/raw_shared_events.cpp" "$RAW/runtime/raw_alias.cpp" "$RAW/runtime/raw_arena.cpp" "$RAW/runtime/raw_pack.cpp" "$RAW/runtime/raw_ycbcr.cpp" "$RAW/runtime/raw_zeta.cpp" "$RAW/runtime/raw_comp.cpp" "$RAW/runtime/raw_completed.cpp" "$RAW/runtime/raw_compute.cpp" "$RAW/runtime/raw_predication.cpp" "$RAW/runtime/raw_icb_compute.cpp" "$RAW/runtime/raw_compute_loops.cpp" "$RAW/runtime/raw_loop_copies.cpp" "$RAW/runtime/raw_predicate_loops.cpp" "${COMPLETION[@]}" "${FACADE_RUNTIME[@]}" "$TREE/kits/SwitchRefusal/SwitchRefusal.c" -x none "$BRIDGE" "${LIBS[@]}" \
     -o "$OUT/blitframe" 2>&1 | awk '!/duplicate libraries/'
@@ -220,9 +214,21 @@ xcrun clang++ -O1 -std=c++17 -fobjc-arc -I "$TREE/drivers/TegraGM20B" -I "$TREE/
     -x c++ "$RAW/fx/fx_mip.cpp" -framework Metal -framework Foundation -framework CoreVideo -framework IOSurface \
     -o "$OUT/ycbcrstoreoracle"
 echo "built $OUT/ycbcrstoreoracle"
-# ycbcrloadoracle: raw_ycbcr_store_rule.h's rule of what a Load of a two-plane YCbCr code target holds, against this Mac's Metal
-xcrun clang++ -O1 -std=c++17 -fobjc-arc "$HERE/ycbcrloadoracle.mm" -framework Metal -framework Foundation \
-    -framework CoreVideo -framework IOSurface -o "$OUT/ycbcrloadoracle"
+# ycbcrblendoracle: blended and masked states into two-plane YCbCr attachments, the stand-in's route against this Mac's Metal
+# ($OUT/ycbcrblendoracle pack)
+xcrun clang++ -O1 -std=c++17 -fobjc-arc "$HERE/ycbcrblendoracle.mm" -framework Metal -framework Foundation \
+    -framework CoreVideo -framework IOSurface -o "$OUT/ycbcrblendoracle"
+echo "built $OUT/ycbcrblendoracle"
+# formatoracle, miporacle: passes into and mips of R8Unorm_sRGB, A1BGR5Unorm, ABGR4Unorm and RGB9E5Float targets, the
+# stand-ins' and mip states' route (pack/fmt.metal, a key checkout's) against this Mac's Metal ($OUT/formatoracle pack)
+for o in formatoracle miporacle; do
+    xcrun clang++ -O1 -std=c++17 -fobjc-arc "$HERE/$o.mm" -framework Metal -framework Foundation -o "$OUT/$o"
+    echo "built $OUT/$o"
+done
+# ycbcrloadoracle: raw_ycbcr_load.h's Load rule and the loaded passes' route against this Mac's Metal
+# ($OUT/ycbcrloadoracle pack)
+xcrun clang++ -O1 -std=c++17 -fobjc-arc "$HERE/ycbcrloadoracle.mm" "$RAW/runtime/raw_ycbcr.cpp" -framework Metal \
+    -framework Foundation -framework CoreVideo -framework IOSurface -o "$OUT/ycbcrloadoracle"
 echo "built $OUT/ycbcrloadoracle"
 # packedplaneoracle: R10Unorm_PACKED and RG10Unorm_PACKED: the conversion and store states against this Mac's Metal's reads
 # ($OUT/packedplaneoracle pack)
@@ -241,6 +247,9 @@ echo "built $OUT/xroracle"
 # resolveoracle: the multisample resolves against this Mac's Metal ($OUT/resolveoracle pack/resolve.metal)
 xcrun clang++ -O1 -std=c++17 -fobjc-arc "$HERE/resolveoracle.mm" -framework Metal -framework Foundation -o "$OUT/resolveoracle"
 echo "built $OUT/resolveoracle"
+# mip3doracle: the 3D mips a plane a pass against this Mac's Metal ($OUT/mip3doracle pack/mip.metal)
+xcrun clang++ -O1 -std=c++17 -fobjc-arc "$HERE/mip3doracle.mm" -framework Metal -framework Foundation -o "$OUT/mip3doracle"
+echo "built $OUT/mip3doracle"
 # viewframe: kernels that write half-float textures, which m2v views as unsigned integers, on raw (test/viewframe.sh)
 xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/viewframe.mm" "${FACADE[@]}" "$FRONT/NativeBridgeMetalFrontend.mm" \
     -x c++ "$RAW/runtime/raw_gpu.cpp" "$RAW/runtime/raw_draw_bands.cpp" "$RAW/runtime/raw_job_uses.cpp" "$RAW/runtime/raw_transfer.cpp" "$RAW/runtime/raw_split.cpp" "$RAW/runtime/raw_variants.cpp" "$RAW/fx/fx_mip.cpp" "$RAW/fx/fx_image.cpp" "$RAW/runtime/raw_kernel.cpp" "$RAW/runtime/raw_kernel_job.cpp" "$RAW/runtime/raw_resource_set.cpp" "$RAW/runtime/raw_state_segment.cpp" "$RAW/runtime/raw_encoder_state.cpp" "$RAW/runtime/raw_shared_events.cpp" "$RAW/runtime/raw_alias.cpp" "$RAW/runtime/raw_arena.cpp" "$RAW/runtime/raw_pack.cpp" "$RAW/runtime/raw_ycbcr.cpp" "$RAW/runtime/raw_zeta.cpp" "$RAW/runtime/raw_comp.cpp" "$RAW/runtime/raw_completed.cpp" "$RAW/runtime/raw_compute.cpp" "$RAW/runtime/raw_predication.cpp" "$RAW/runtime/raw_icb_compute.cpp" "$RAW/runtime/raw_compute_loops.cpp" "$RAW/runtime/raw_loop_copies.cpp" "$RAW/runtime/raw_predicate_loops.cpp" "${COMPLETION[@]}" "${FACADE_RUNTIME[@]}" "$TREE/kits/SwitchRefusal/SwitchRefusal.c" -x none "$BRIDGE" "${LIBS[@]}" \

@@ -153,3 +153,32 @@ TEST(XnuStall, UserAddresses)
     // No shared region.
     EXPECT_EQ(xnu_stall_user_where(0x1a0001234, 0, 0, 0, 0, &value), 0);
 }
+
+// The end of a stall names the threads that ran the most since its first line: their gains over the snapshot, most
+// first, a thread born since counting whole; a cut-short snapshot counts nothing for a thread it may have missed.
+TEST(XnuStall, MostRunSinceTheFirstLine)
+{
+    const uint64_t tids[] = {0x47c, 0x17cd, 0x25a, 0x17d8, 0x2b3};
+    const uint64_t cpus[] = {9000, 100, 50000, 200, 7000};
+    const uint64_t nowTids[] = {0x25a, 0x17d8, 0x2b3, 0x47c, 0x17cd, 0x2b2};
+    const uint64_t nowCpus[] = {50010, 2400, 9500, 9700, 3100, 1800};
+    uint64_t top[4] = {}, gains[4] = {};
+    EXPECT_EQ(xnu_stall_most(tids, cpus, 5, true, nowTids, nowCpus, 6, 4, top, gains), 4u);
+    EXPECT_EQ(top[0], 0x17cdu);
+    EXPECT_EQ(gains[0], 3000u);
+    EXPECT_EQ(top[1], 0x2b3u);
+    EXPECT_EQ(gains[1], 2500u);
+    EXPECT_EQ(top[2], 0x17d8u);
+    EXPECT_EQ(gains[2], 2200u);
+    EXPECT_EQ(top[3], 0x2b2u);
+    EXPECT_EQ(gains[3], 1800u);
+
+    EXPECT_EQ(xnu_stall_most(tids, cpus, 5, false, nowTids, nowCpus, 6, 4, top, gains), 4u);
+    EXPECT_EQ(top[3], 0x47cu);
+    EXPECT_EQ(gains[3], 700u);
+
+    const uint64_t idle[] = {50000, 200, 7000, 9000, 100};
+    const uint64_t idleTids[] = {0x25a, 0x17d8, 0x2b3, 0x47c, 0x17cd};
+    EXPECT_EQ(xnu_stall_most(tids, cpus, 5, true, idleTids, idle, 5, 4, top, gains), 0u);
+    EXPECT_EQ(top[0], 0u);
+}

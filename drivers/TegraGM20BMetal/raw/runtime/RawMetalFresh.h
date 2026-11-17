@@ -7,6 +7,9 @@
 #include <vector>
 
 void establishFresh(RMTexture *t, MTLTextureDescriptor *d);
+// Whether establishFresh takes `t`: a Private texture of the raw path's own pool memory, written to its first contents
+// ahead of its first use
+bool freshFills(RMTexture *t, MTLTextureDescriptor *d);
 
 // The fresh textures a raw submission writes ahead of its commands: made after the submission began and before its first
 // command, kept by the command buffer until it completes once submitted() says it went through, else given back.

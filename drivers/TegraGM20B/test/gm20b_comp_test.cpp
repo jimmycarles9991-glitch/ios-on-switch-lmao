@@ -247,6 +247,23 @@ TEST(PoolChunks, ChunksStraddleNoWord)
 	EXPECT_EQ(p.pick(6, chunks), -1);
 }
 
+// HW Test gpu.pool.compressed_floor's measure of what a compressible BoAlloc can take: the chunks the pick would hand out
+// clean, under the same spinlock and in one pass as the pick
+TEST(PoolChunks, CleanChunksAreWholeUnusedAndZeroedOnes)
+{
+	Pool p;
+	const uint64_t total = Pool::kPages / TGM_COMP_PAGES;
+	EXPECT_EQ(tgm_comp_clean_chunks(p.map.data(), p.dirty.data(), Pool::kPages), total);
+	for (uint64_t c = 0; c < total; c += 4)
+		Pool::set(p.map, c * TGM_COMP_PAGES + 31);
+	for (uint64_t c = 1; c < total; c += 4)
+		Pool::set(p.dirty, c * TGM_COMP_PAGES);
+	EXPECT_EQ(tgm_comp_clean_chunks(p.map.data(), p.dirty.data(), Pool::kPages), total / 2);
+	std::vector<uint64_t> chunks;
+	EXPECT_EQ(p.pick(uint32_t(total / 2), chunks), 0)
+		<< "every counted chunk is the pick's, clean";
+}
+
 // The kernel picks under the pool's spinlock: one pass over 2048 chunks, however fragmented the pool, in microseconds.
 TEST(PoolChunks, OnePassBoundsThePick)
 {

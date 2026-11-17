@@ -1,4 +1,4 @@
-"""Maxwell's texture fetches on the host: TEX and TLD (bindless and bound), TEXS and TLDS, as interp.py runs them.
+"""Maxwell's texture fetches on the host: TEX and TLD (bindless and bound), TEXS, TLDS and TLD4S.
 
 A fetch is a pure function of a canonical key, so two programs that sample the same texel the same way get the same
 result whatever form each uses: the handle word (a bindless one's register, a bound one's constant buffer word at its
@@ -186,3 +186,28 @@ def texs(w: int, lane: Lane, inputs: Inputs) -> None:
     handle = inputs.cbuf(inputs.bound_cbuf, bits(w, 36, 13) * 4)
     coords = tuple(at(p) for p in where_coords)
     write_scalar(w, lane, fetch(inputs, handle, coords, mode, at(where_level), at(where_dref), None, dim))
+
+
+def tld4s(w: int, lane: Lane, inputs: Inputs) -> None:
+    if bits(w, 50, 1):
+        raise UnsupportedError('TLD4S depth comparison')
+    ra, rb = bits(w, 8, 8), bits(w, 20, 8)
+    offset = (0, 0)
+    if bits(w, 51, 1):
+        coords = (reg(lane, ra), reg(lane, ra + 1 if ra != RZ_REG else RZ_REG))
+        packed = reg(lane, rb)
+        offset = tuple(((packed >> shift & 63) ^ 32) - 32 for shift in (0, 8))
+    else:
+        coords = (reg(lane, ra), reg(lane, rb))
+    handle = inputs.cbuf(inputs.bound_cbuf, bits(w, 36, 13) * 4)
+    result = inputs.texture(('tld4', handle, coords, bits(w, 52, 2), offset, DIM_2D))
+    # TLD4S reverses TEXS/TLDS's precision bit and always returns four gathered values.
+    for pair, target in enumerate((bits(w, 0, 8), bits(w, 28, 8))):
+        if target == RZ_REG:
+            continue
+        a, b = result[pair * 2 : pair * 2 + 2]
+        if bits(w, 55, 1):
+            lane.w(target, convert(a, F32, F16, RN) | convert(b, F32, F16, RN) << 16)
+        else:
+            lane.w(target, a)
+            lane.w(target + 1, b)

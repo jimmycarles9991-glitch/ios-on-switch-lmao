@@ -23,6 +23,8 @@ int switch_gpu_bridge_covers(const struct switch_gpu_bridge *bridge,
 			     const struct switch_gpu_backing_token *token);
 void switch_gpu_bridge_completed(void);
 int switch_gpu_bridge_status(const struct switch_gpu_bridge *bridge);
+/* Exceptional inspection of retained original GM20B/promise producers; no bridge queue lock or retirement. */
+int switch_gpu_bridge_source_failure(const struct switch_gpu_bridge *bridge);
 /* Retained consumer completion only; the handle remains owned by the caller. */
 int switch_gpu_bridge_wait(const struct switch_gpu_bridge *bridge);
 /* The same completion without a CPU wait: completed(context, 0 or the producers' failure) runs once, in retirement

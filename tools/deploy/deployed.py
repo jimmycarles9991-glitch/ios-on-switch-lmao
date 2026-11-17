@@ -1,7 +1,7 @@
 """The commit a deploy wrote to the card, <Data>/Switch/deployed.json, which tools/hwtest joins HW Test's reports with.
 
-The build cannot stamp a commit (.bazelrc: --nostamp keeps every output reproducible) and the app's sandbox cannot read
-this folder, so the deploy records the checkout `bazel run` started in, and the Mac reads it back off the card.
+The reproducible build carries no commit. A frozen snapshot keeps its source in the same format; a deploy of one records
+that source, otherwise the invoking checkout's. The Mac joins it with reports the app writes in its sandbox.
 """
 
 import json
@@ -29,9 +29,21 @@ def describe(checkout: Path) -> dict:
     }
 
 
-def record(data_root: Path, checkout: Path, build: str, log: Callable[..., None]) -> dict:
+def provenance(package: Path) -> dict | None:
+    marker = package / NAME
+    return json.loads(marker.read_text()) if marker.is_file() else None
+
+
+def record(data_root: Path, checkout: Path, build: str, log: Callable[..., None], package: Path | None = None) -> dict:
     """Write deployed.json into the Data volume's own folder; return what was written."""
-    info = {**describe(checkout), 'build': build, 'deployed_at': datetime.now(UTC).isoformat(timespec='seconds')}
+    source = provenance(package) if package else None
+    if source is None:
+        source = describe(checkout)
+    info = {
+        **source,
+        'build': source.get('build') or build,
+        'deployed_at': datetime.now(UTC).isoformat(timespec='seconds'),
+    }
     folder = renamed.data_folder(data_root)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / NAME).write_text(json.dumps(info, indent=1) + '\n')

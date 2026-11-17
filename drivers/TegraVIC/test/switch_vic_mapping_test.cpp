@@ -16,7 +16,8 @@
 namespace {
 switch_gpu_backing backing;
 switch_gpu_backing_info description;
-std::array<uint64_t, 40000> pages;
+constexpr uint32_t kPages = 200000;  // past the cache's 768 MiB
+std::array<uint64_t, kPages> pages;
 
 struct Created {
     uint64_t address, first;
@@ -43,6 +44,27 @@ extern "C" void switch_gpu_backing_release(switch_gpu_backing *item)
 {
     --item->refs;
 }
+
+namespace {
+void (*gForget)(uint64_t);
+unsigned gNoted;
+}  // namespace
+
+extern "C" int switch_gpu_backing_register_forget(uint32_t engine, void (*forget)(uint64_t))
+{
+    EXPECT_EQ(engine, uint32_t(SWITCH_GPU_ENGINE_VIC));
+    gForget = forget;
+    return 0;
+}
+
+extern "C" void switch_gpu_backing_note_mapped(switch_gpu_backing *, uint32_t engine)
+{
+    EXPECT_EQ(engine, uint32_t(SWITCH_GPU_ENGINE_VIC));
+    ++gNoted;
+}
+
+void switch_vic_totals_register()
+{}
 
 extern "C" uint64_t switch_vic_mapping_create(const uint64_t *physical, uint32_t count, bool writable)
 {
@@ -124,14 +146,53 @@ TEST_F(SwitchVICMappingTest, GenerationAndAccessRightsArePartOfTheMappingIdentit
 TEST_F(SwitchVICMappingTest, RangeAndCacheBudgetRejectBeforeChangingTheIommu)
 {
     EXPECT_EQ(switch_vic_mapping_acquire_range(&backing, true, UINT32_MAX, 2), nullptr);
-    EXPECT_EQ(switch_vic_mapping_acquire_range(&backing, true, 39999, 2), nullptr);
+    EXPECT_EQ(switch_vic_mapping_acquire_range(&backing, true, kPages - 1, 2), nullptr);
     EXPECT_EQ(switch_vic_mapping_acquire_range(&backing, true, 0, 0), nullptr);
     EXPECT_EQ(switch_vic_mapping_acquire(&backing, true), nullptr);
     EXPECT_TRUE(created.empty());
-    auto *tile = switch_vic_mapping_acquire_range(&backing, true, 39999, 1);
+    auto *tile = switch_vic_mapping_acquire_range(&backing, true, kPages - 1, 1);
     ASSERT_NE(tile, nullptr);
-    EXPECT_EQ(created[0].first, pages[39999]);
+    EXPECT_EQ(created[0].first, pages[kPages - 1]);
     switch_vic_mapping_release(tile);
+}
+
+// The cache holds no reference: a freed pool buffer goes back when its last user lets go, and its destruction forgets
+// the mapping (SwitchGpuBackingMaps.h).
+TEST_F(SwitchVICMappingTest, AnIdleMappingHoldsNoReferenceAndGoesWhenItsAllocationIsForgotten)
+{
+    gNoted = 0;
+    auto *mapping = switch_vic_mapping_acquire_range(&backing, false, 0, 4);
+    ASSERT_NE(mapping, nullptr);
+    EXPECT_EQ(backing.refs, 1u);
+    EXPECT_EQ(gNoted, 1u);
+    switch_vic_mapping_release(mapping);
+    EXPECT_EQ(backing.refs, 1u);
+    ASSERT_NE(gForget, nullptr);
+    gForget(description.allocation_id + 1);
+    EXPECT_TRUE(unmapped.empty());
+    gForget(description.allocation_id);
+    ASSERT_EQ(unmapped.size(), 1u);
+    EXPECT_EQ(unmapped[0], created[0].address);
+    EXPECT_EQ(gMappings.bytes, 0u);
+}
+
+// Remakes of a mapping evicted for room are what a pool larger than the cache costs (kern.switch_vic_remaps).
+TEST_F(SwitchVICMappingTest, ARemakeOfAnEvictedMappingIsCounted)
+{
+    uint64_t made = 0, remade = 0;
+    switch_vic_mapping_totals(&made, &remade);
+    const uint64_t madeBefore = made, remadeBefore = remade;
+    for (uint32_t round = 0; round < 2; ++round)
+        for (uint32_t i = 0; i < 128 + 1; ++i)
+            switch_vic_mapping_release(switch_vic_mapping_acquire_range(&backing, true, i, 1));
+    switch_vic_mapping_totals(&made, &remade);
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    EXPECT_EQ(made - madeBefore, 2u * 129u);
+    EXPECT_GT(remade - remadeBefore, 0u);
+#else
+    EXPECT_EQ(made, 0u);
+    EXPECT_EQ(remade, 0u);
+#endif
 }
 
 TEST_F(SwitchVICMappingTest, EvictionCannotUnmapAnActivePlane)
@@ -139,7 +200,7 @@ TEST_F(SwitchVICMappingTest, EvictionCannotUnmapAnActivePlane)
     auto *held = switch_vic_mapping_acquire_range(&backing, true, 0, 1);
     ASSERT_NE(held, nullptr);
     const uint64_t address = switch_vic_mapping_address(held);
-    for (uint32_t i = 1; i < 32 + 10; ++i) {
+    for (uint32_t i = 1; i < 128 + 10; ++i) {
         auto *mapping = switch_vic_mapping_acquire_range(&backing, true, i, 1);
         ASSERT_NE(mapping, nullptr);
         switch_vic_mapping_release(mapping);

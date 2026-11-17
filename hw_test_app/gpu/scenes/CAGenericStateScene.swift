@@ -37,7 +37,7 @@ struct CAGenericStateScene: GPUScene {
             let library = try gpu.device.makeLibrary(URL: CAState.library)
             pipeline = try CAState.pipeline(Self.line, library: library, device: gpu.device)
         } catch {
-            result.notes.append("no generic state from this QuartzCore (\(GPU.describe(error)))")
+            result.unavailable("no generic state from this QuartzCore (\(GPU.describe(error)))", on: gpu.device)
             return result
         }
         let target = try gpu.texture(.bgra8Unorm, Self.size, Self.size)

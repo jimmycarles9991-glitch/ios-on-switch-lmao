@@ -55,13 +55,6 @@ static void switch_exec_gpfifo_push(struct nvif_chan *nvif, bool main, u64 addr,
 	switch_exec_of(nvif)->real->gpfifo.push(nvif, main, addr, size, no_prefetch);
 }
 
-static void switch_exec_gpfifo_kick(struct nvif_chan *nvif)
-{
-	if (hooks.doorbell)
-		hooks.doorbell(hooks.context, switch_exec_of(nvif), nvif->gpfifo.cur);
-	switch_exec_of(nvif)->real->gpfifo.kick(nvif);
-}
-
 /* gpu_exec.c's MMIO (SWITCH_MMIO_HOST_MODEL): plain host memory, and the doorbell is chan_doorbell's GP_PUT store to a
  * channel's USERD */
 uint32_t switch_mmio_model_read32(uintptr_t address);
@@ -144,12 +137,12 @@ struct switch_exec_chan *switch_exec_chan_new(uint32_t uid, uint32_t fence_page)
 	nvif_chan906f_ctor(&tgm->chan, chan->userd, ring + CHAN_PUSH_BYTES, CHAN_GPFIFO_BYTES, ring,
 			   tgm->ring_va, CHAN_PUSH_BYTES, ring + SWITCH_EXEC_SEMA_OFFSET,
 			   tgm->ring_va + SWITCH_EXEC_SEMA_OFFSET);
+	tgm->chan.push.seg = tgm->chan.push.cur;
 	chan->real = tgm->chan.func;
 	chan->func = *chan->real;
 	chan->func.push.read_get = switch_exec_push_read_get;
 	chan->func.gpfifo.read_get = switch_exec_gpfifo_read_get;
 	chan->func.gpfifo.push = switch_exec_gpfifo_push;
-	chan->func.gpfifo.kick = switch_exec_gpfifo_kick;
 	tgm->chan.func = &chan->func;
 	return chan;
 }
@@ -157,6 +150,23 @@ struct switch_exec_chan *switch_exec_chan_new(uint32_t uid, uint32_t fence_page)
 struct tgm_chan *switch_exec_chan_tgm(struct switch_exec_chan *chan)
 {
 	return &chan->tgm;
+}
+
+void switch_exec_chan_high(struct switch_exec_chan *chan, int high)
+{
+	chan->tgm.high = high;
+}
+
+void switch_exec_chan_task_order(struct switch_exec_chan *chan, struct switch_exec_chan *source,
+				 uint32_t value)
+{
+	struct tgm_order *order = &chan->tgm.order[chan->tgm.norder++];
+
+	order->va = source->tgm.fence_gpu;
+	order->cpu = source->tgm.fence_cpu;
+	order->id = source->tgm.id;
+	order->seqno = value;
+	order->chid = source->tgm.chid;
 }
 
 void switch_exec_chan_live(struct switch_exec_chan *chan, int live)
@@ -198,16 +208,14 @@ void switch_exec_chan_read(struct switch_exec_chan *chan, struct switch_exec_cha
 	out->push_bgn = nvif->push.bgn - map;
 	out->push_cur = nvif->push.cur - map;
 	out->push_end = nvif->push.end - map;
+	out->push_seg = nvif->push.seg - map;
 	out->push_max = nvif->push.hw.max;
 	out->defer_kick = nvif->defer_kick;
 }
 
-uint32_t switch_exec_chan_acquires(struct switch_exec_chan *waiter,
-				   struct switch_exec_chan *producer, uint32_t value)
+static uint32_t switch_exec_acquires(struct switch_exec_chan *waiter, uint64_t va, uint32_t value)
 {
 	const u32 *words = waiter->tgm.chan.push.mem.object.map.ptr;
-	const u64 va = waiter->vm.fences_va +
-		       ((uintptr_t)producer->tgm.fence_cpu - (uintptr_t)tgm_fence_pages.va);
 	/* NOLINTNEXTLINE(bugprone-signed-bitwise): nouveau's NVDEF computes in int */
 	const u32 acquire = NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
 			    NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED);
@@ -217,5 +225,32 @@ uint32_t switch_exec_chan_acquires(struct switch_exec_chan *waiter,
 	for (i = 0; i + 4 <= CHAN_PUSH_BYTES / 4; ++i)
 		found += words[i] == upper_32_bits(va) && words[i + 1] == lower_32_bits(va) &&
 			 words[i + 2] == value && words[i + 3] == acquire;
+	return found;
+}
+
+uint32_t switch_exec_chan_acquires(struct switch_exec_chan *waiter,
+				   struct switch_exec_chan *producer, uint32_t value)
+{
+	return switch_exec_acquires(waiter,
+				    waiter->vm.fences_va + ((uintptr_t)producer->tgm.fence_cpu -
+							    (uintptr_t)tgm_fence_pages.va),
+				    value);
+}
+
+uint32_t switch_exec_chan_word_acquires(struct switch_exec_chan *waiter, uint32_t pool,
+					uint32_t value)
+{
+	return switch_exec_acquires(waiter, waiter->vm.fences_va + pool, value);
+}
+
+uint32_t switch_exec_chan_syncpt_waits(struct switch_exec_chan *waiter, uint32_t id, uint32_t value)
+{
+	const u32 *words = waiter->tgm.chan.push.mem.object.map.ptr;
+	u32 expected[TGM_SYNCPT_WAIT_DWORDS];
+	u32 found = 0, i;
+
+	tgm_syncpt_wait(expected, id, value);
+	for (i = 0; i + TGM_SYNCPT_WAIT_DWORDS <= CHAN_PUSH_BYTES / 4; ++i)
+		found += !memcmp(words + i, expected, sizeof(expected));
 	return found;
 }

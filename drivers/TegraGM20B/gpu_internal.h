@@ -304,8 +304,10 @@ struct tgm_chan {
 	/* the ACQUIRE probe: the first look that found it parked on an acquire, and what it had completed then */
 	u64 acquire_probe_ns;
 	u32 acquire_probe_done;
-	/* RAMFC's timeslice as last written, and the seqno submitted then (gpu_ramfc_probe.c) */
+	/* RAMFC's timeslice as last written, the seqno submitted then, and whether that was the creation's (nvkm's or
+	 * tgm_chan_ramfc_open's, not a level change's) (gpu_ramfc_probe.c) */
 	u32 timeslice, timeslice_at;
+	int timeslice_created;
 #endif
 	u32 acquire_unread; /* checks since its interrupt that found RAMFC naming nothing yet */
 
@@ -347,7 +349,8 @@ struct tgm_chan {
 		prof_spans; /* this window's jobs kicked with stamps, their stamps, spans read */
 	u64 prof_span;      /* those spans (PTIMER units) */
 	u8 prof_cls[TGM_PROF_MAX], prof_ilk[TGM_PROF_MAX];
-	u16 prof_draws[TGM_PROF_MAX], prof_sdraws[TGM_PROF_MAX], prof_kpx[TGM_PROF_MAX];
+	u16 prof_draws[TGM_PROF_MAX], prof_sdraws[TGM_PROF_MAX], prof_kpx[TGM_PROF_MAX],
+		prof_twin[TGM_PROF_MAX];
 	struct switch_gpu_prof_seq prof_run,
 		prof_slow; /* the profile being read, the window's slowest */
 	u64 prof_ns[TGM_PC_COUNT];
@@ -590,6 +593,8 @@ extern u64 tgm_high_end_ns, tgm_high_end_pt;
 static void present_fenced(struct tgm_chan *chan);
 static void scrub_fenced(struct tgm_chan *chan);
 void tgm_chan_ramfc_due(struct tgm_chan *chan);
+/* gpu_chan_level.c, chan_new under tgm_gpu.lock: the new channel's timeslice (high when critical) and acquire timeout */
+int tgm_chan_ramfc_open(struct tgm_chan *chan, int critical);
 
 static int chan_push_wait(struct tgm_chan *chan, u32 push_nr);
 
@@ -634,6 +639,7 @@ extern u64 tgm_fences_pas[];
 extern struct tgm_mem *tgm_fences_mem;
 int tgm_fences_map(struct tgm_vm *vm);
 int tgm_order_waits(struct tgm_chan *chan);
+int switch_gpu_order_waits_locked(struct tgm_chan *chan);
 
 /* CPU readers of GPU-written memory:
  * The GPU is not IO-coherent; its sysmem PTEs are volatile (no GPU L2 lines), so a submission's writes are in DRAM once
@@ -675,6 +681,12 @@ void tgm_idle_settle(void *arg);
 /* gpu_promise.c: a GPU job whose acquires include pending writer promises parks on them (SwitchGpuPromiseGiveUp.h),
  * once those acquires are pushed and nothing rolls them back */
 int tgm_chan_note_promise(struct tgm_chan *chan, uint32_t offset, uint32_t value);
+int switch_gpu_promise_park_locked(uint32_t offset, uint32_t value, const char *waiter,
+				   const char *who, const struct switch_gpu_giveup_job *reader,
+				   int display);
+void switch_gpu_chan_park_promises_locked(struct tgm_chan *chan,
+					  const struct switch_gpu_backing_token *tokens, u32 count,
+					  const u32 *unsettled);
 void tgm_chan_park_promises(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
 			    u32 count);
 /* tgm_live_lock held: the process whose fence page holds the word at `offset` */
@@ -697,7 +709,9 @@ void tgm_chan_wanted(uint32_t uid, uint32_t seqno);
 int tgm_chan_announced_id(u64 id, u32 seqno);
 int tgm_chan_announced_uid(u32 uid, u32 seqno);
 int tgm_backing_dependencies(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
-			     u32 count, int emit);
+			     u32 count);
+u32 switch_gpu_chan_fence_sealed(struct tgm_chan *chan, int external,
+				 struct switch_gpu_backing_transaction *owned);
 
 /* GPU present (TegraDisplayFlip/TegraScanoutCopy.h):
  * The display's swap path hands a frame (an IOSurface, pitch-linear BGRA) to the GPU instead

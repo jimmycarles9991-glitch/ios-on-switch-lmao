@@ -8,6 +8,7 @@
 #include "nvk_private.h"
 
 #include "nvk_descriptor_types.h"
+#include "nvk_physical_device.h"
 
 #include "util/format/u_formats.h"
 

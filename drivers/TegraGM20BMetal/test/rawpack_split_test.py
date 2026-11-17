@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'raw', 'pack'))
+import directbucket
 import probelog
 import rawpack
 
@@ -48,10 +49,13 @@ class SplitTest(unittest.TestCase):
         corpus = WARM + DISPATCH + ''.join(state(i) for i in range(32))
         self.assertEqual(sum(text.count(DISPATCH) for text in self.split(corpus)), 1)
 
-    def test_an_apps_state_reaches_one_bucket(self):
+    def test_an_apps_state_reaches_the_apps_bucket_alone(self):
         app = ' lib=/Applications/SwitchHWTest.app/default.metallib '
         line = f'R ok=1 label=- samples=2 topo=0 ds=252/0 | v quad_vertex{app} | f solid_fragment{app} | \n'
-        self.assertEqual(sum(text.count(line) for text in self.split(WARM + line)), 1)
+        buckets = self.split(WARM + line + ''.join(state(i) for i in range(64)))
+        self.assertEqual(len(buckets), 17)
+        self.assertEqual(buckets[16], WARM + line)
+        self.assertEqual(sum(text.count(line) for text in buckets[:16]), 0)
 
 
 RB = ' lib=/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib'
@@ -113,6 +117,31 @@ class CoreAnimationTest(unittest.TestCase):
             harvested = dict(rawpack.ca_states(tables, corpus))['harvested']
         state = rawpack.state_key(line)
         self.assertEqual([rawpack.state_key(drawn) for drawn in harvested], [state, state + ' | xrs=8'])
+
+
+class ProbeEnvTest(unittest.TestCase):
+    def test_a_bucket_reads_the_device_libraries_its_command_line_names(self):
+        # tools/gpu/rawprobe.py's view of @gpu_device_data's libraries: a lib=data: D line's library is only there
+        argv, environ = sys.argv, dict(os.environ)
+        try:
+            os.environ['PROBE_DATA_LIBS'] = '/stray'
+            sys.argv = [
+                'directbucket.py',
+                '--probe-bucket',
+                'b',
+                '--root',
+                '/crawl/root',
+                '--data-libs',
+                '/view/data',
+                '-',
+            ]
+            env = directbucket.probe_env()
+        finally:
+            sys.argv = argv
+            os.environ.clear()
+            os.environ.update(environ)
+        self.assertEqual(env['PROBE_DATA_LIBS'], str(Path('/view/data').resolve()))
+        self.assertEqual(env['PROBE_LIB_ROOT'], str(Path('/crawl/root').resolve()))
 
 
 class ProbeLogTest(unittest.TestCase):

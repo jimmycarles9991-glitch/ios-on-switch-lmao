@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import Metal
 
 /// One deterministic GPU scene: it draws offscreen on the GPU it is given, reads every result back and compares it
 /// with a reference worked out on the CPU, or, for a picture the CPU cannot model, with the same picture drawn on a
@@ -113,6 +114,12 @@ public struct SceneResult: Sendable {
     /// A failure that is no picture (a value out of range, a call that returned nil).
     public mutating func expect(_ condition: Bool, _ problem: @autoclosure () -> String) {
         if !condition { problems.append(problem()) }
+    }
+
+    /// What the scene could not make: on the raw facade a failure, every Core Animation library, state and texture being
+    /// the device's to make; elsewhere (a Mac without that QuartzCore) a note.
+    public mutating func unavailable(_ what: String, on device: MTLDevice) {
+        if RawFacade.kind(of: device) == "raw" { problems.append(what) } else { notes.append(what) }
     }
 
     public var failed: [SceneCheck] { checks.filter { !$0.diff.matches } }

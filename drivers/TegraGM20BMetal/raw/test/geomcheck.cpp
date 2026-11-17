@@ -196,7 +196,7 @@ void splits(raw::Device &dev, Frame &frame, raw::Pipeline *split, Pushes &pushes
         bool drawn = e != nullptr;
         for (uint32_t d = 0; drawn && d < kDraws; d++) {
             e->setPipeline(split);
-            for (uint32_t k = 0; k < split->rec->entries; k++)
+            for (uint32_t k = 0; k < raw::entryCount(*split->rec); k++)
                 if (const raw::PackEntry &x = split->rec->entry[k]; x.kind == raw::EntryUbo && x.stage < 3)
                     e->setBytes(x.stage, x.slot, frame.zeros, sizeof frame.zeros);
             e->setScissor(0, 0, w, h);

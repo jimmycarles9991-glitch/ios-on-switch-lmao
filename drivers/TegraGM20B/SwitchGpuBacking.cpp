@@ -148,6 +148,7 @@ bool reached_locked(switch_gpu_backing *backing)
 
 void destroy(switch_gpu_backing *backing)
 {
+	switch_gpu_backing_forget_mapped(backing);
 	switch_gpu_backing_writer_free_locked(backing);
 	if (backing->host_acquire.engine)
 		switch_gpu_backing_drop_token(backing->host_acquire);
@@ -205,7 +206,8 @@ extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages
 		const uint32_t common = count < found->pages->count ? count : found->pages->count;
 		if (memcmp(pages, found->pages->addresses, uint64_t(common) * sizeof(*pages)) ||
 		    (count > found->pages->count &&
-		     (found->gpu_memory_flags & SWITCH_GPU_BACKING_MEMORY_FIXED)) ||
+		     ((found->gpu_memory_flags & SWITCH_GPU_BACKING_MEMORY_FIXED) ||
+		      found->mapping_engines)) ||
 		    (count > found->pages->count && found->owner && !owner) ||
 		    (count > found->pages->count &&
 		     (found->cpu_readers || found->cpu_writers || found->gpu_admission_readers ||

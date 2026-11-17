@@ -37,6 +37,7 @@
  *	Started.
  */
 
+#include <switch/app_code.h>
 #include <sys/param.h>
 #include <sys/vnode_internal.h>
 #include <sys/uio.h>
@@ -508,6 +509,7 @@ load_machfile(
 	map = vm_map_create_options(pmap, 0,
 	    vm_compute_max_offset(result->is_64bit_addr),
 	    VM_MAP_CREATE_PAGEABLE);
+	if (switch_app_code_image(vp)) switch_app_code_map(map);
 
 #if defined(__arm64__)
 	if (result->is_64bit_addr) {
@@ -859,6 +861,7 @@ parse_machfile(
 	}
 
 	abi64 = ((header->cputype & CPU_ARCH_ABI64) == CPU_ARCH_ABI64);
+	if (switch_app_code_image(vp) && switch_app_code_blob(vp, file_offset)) return LOAD_FAILURE;
 
 	switch (header->filetype) {
 	case MH_EXECUTE:
@@ -880,7 +883,7 @@ parse_machfile(
 		} else {
 			/* Check properties of static executables (disallowed except for development) */
 #if !(DEVELOPMENT || DEBUG)
-			return LOAD_FAILURE;
+			if (!switch_app_code_image(vp)) return LOAD_FAILURE;
 #endif
 		}
 		break;
@@ -1287,6 +1290,7 @@ parse_machfile(
 				}
 				break;
 			case LC_CODE_SIGNATURE:
+				if (switch_app_code_image(vp)) break;
 				/* CODE SIGNING */
 				if (pass != 1) {
 					break;
@@ -1470,7 +1474,7 @@ parse_machfile(
 	}
 
 	if (ret == LOAD_SUCCESS) {
-		if (!got_code_signatures && cs_process_global_enforcement()) {
+		if (!got_code_signatures && cs_process_global_enforcement() && !switch_app_code_image(vp)) {
 			ret = LOAD_FAILURE;
 		}
 

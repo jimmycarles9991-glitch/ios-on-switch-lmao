@@ -6,6 +6,10 @@ usage: gate.py <before dump> <after dump> --corpus <R lines>... [--invocations N
        gate.py --rungs <dump> --corpus <R lines>... [--invocations N] [--seed S]
            each fetch-free form of the dump with the ROP unit that stands in for its fetch against its storage form,
            counted per rung (rungcheck.py)
+       gate.py --selectors <dump> [--invocations N] [--seed S] [--bound B]
+           each selector variant of the dump (directcheck DIRECTCHECK_SELECTORS, runtime/raw_pack_selectors.h) against
+           its state's generic program with its config's compared bytes pinned and the uniform bind residuals 0, as
+           the variant reads them; with the instructions a quad issued on each (selectorgate.py)
 
 Every state of the corpora in both dumps runs N quads of each program (quad.py over interp.py's lanes) on the same
 seeded attributes, constant buffers, texture and storage-image results (specials included: NaNs with payloads,
@@ -72,14 +76,20 @@ class Seeded:
         # in every run
         return random.Random(int.from_bytes(hashlib.blake2b(repr((self.base, key)).encode(), digest_size=8).digest()))
 
-    def inputs(self, lane: int = 0, bound_cbuf: int = -1) -> Inputs:
+    def inputs(self, lane: int = 0, bound_cbuf: int = -1, cbuf_map: tuple[int, ...] | None = None) -> Inputs:
         def attribute(addr: int) -> int:
             return 0x3F800000 if addr == 0x7C else word(self.rng('a', addr, lane), 0.9)
 
         def cbuf(bank: int, offset: int) -> int:
-            if (bank, offset) in self.pinned:
-                return self.pinned[bank, offset]
-            return word(self.rng('c', bank, offset & 0xFFFFFFFF), 0.6)
+            if cbuf_map is not None:
+                if not 0 <= bank < len(cbuf_map):
+                    raise UnsupportedError(f'unmapped constant buffer {bank}')
+                bank = cbuf_map[bank]
+            seeded = word(self.rng('c', bank, offset & 0xFFFFFFFF), 0.6)
+            pin = self.pinned.get((bank, offset))
+            if isinstance(pin, tuple):
+                return (seeded & ~pin[0] | pin[1]) & 0xFFFFFFFF
+            return seeded if pin is None else pin
 
         def texture(operands: tuple) -> list[int]:
             r = self.rng('t', operands)
@@ -88,14 +98,15 @@ class Seeded:
         return Inputs(attribute, cbuf, texture, bound_cbuf)
 
 
-def run_pixel(image: bytes, quad: list[Inputs], widths: list | None = None) -> list[tuple]:
+def run_pixel(image: bytes, quad: list[Inputs], widths: list | None = None, issued: list | None = None) -> list[tuple]:
     """Run a pixel program's quad; give each lane killed with its stores, or the components it writes and its stores.
 
     Where `widths` names a component's channel width, the component is the code the ROP stores (rop.store_code).
+    `issued` gets the instructions the quad issued.
     """
     registers = rungcheck.written_registers(image)
     out = []
-    for regs, killed, stores in run_quad(image[isa.HEADER_BYTES :], quad, rungcheck.nakstat_outputs(image)):
+    for regs, killed, stores in run_quad(image[isa.HEADER_BYTES :], quad, rungcheck.nakstat_outputs(image), issued):
         if killed:
             out.append((killed, stores))
             continue
@@ -106,22 +117,39 @@ def run_pixel(image: bytes, quad: list[Inputs], widths: list | None = None) -> l
     return out
 
 
-def compare(  # noqa: PLR0913, PLR0917  the inputs' seed and pins and the state's attachments
-    before: tuple, after: tuple, n: int, seed: int, pinned: dict | None = None, key: str = ''
+def compare(  # noqa: PLR0913, PLR0917  the inputs' seed and pins, the state's attachments, the counts
+    before: tuple,
+    after: tuple,
+    n: int,
+    seed: int,
+    pinned: dict | None = None,
+    key: str = '',
+    issued: tuple = (None, None),
+    *,
+    after_cbuf_map: tuple[int, ...] | None = None,
 ) -> str:
-    """Compare two programs, each (image, the constant buffer its bound textures read handles from or -1)."""
+    """Compare two programs, each (image, the constant buffer its bound textures read handles from or -1).
+
+    `issued`: lists that get each quad's issued instructions, before's then after's.
+    `after_cbuf_map`: after's physical banks to before's logical banks, validated against their binding metadata.
+    """
+    if after_cbuf_map is not None and sorted(after_cbuf_map) != list(range(len(after_cbuf_map))):
+        raise ValueError('constant buffer map must be a permutation')
     if rungcheck.written_registers(before[0]) != rungcheck.written_registers(after[0]):
         return 'different: output maps'
     widths = rop.widths(key, struct.unpack_from('<I', before[0], OMAP_TARGET_BYTE)[0])
 
-    def run(program: tuple, i: int) -> list:
+    def run(program: tuple, i: int, counts: list | None, cbuf_map: tuple[int, ...] | None = None) -> list:
         return run_pixel(
-            program[0], [Seeded(seed, i, pinned).inputs(lane, program[1]) for lane in range(LANES)], widths
+            program[0],
+            [Seeded(seed, i, pinned).inputs(lane, program[1], cbuf_map) for lane in range(LANES)],
+            widths,
+            counts,
         )
 
     for i in range(n):
         try:
-            a, b = run(before, i), run(after, i)
+            a, b = run(before, i, issued[0]), run(after, i, issued[1], after_cbuf_map)
         except UnsupportedError as e:
             return f'unsupported: {e}'
         if a != b:
@@ -145,6 +173,12 @@ def main() -> None:
     if '--rungs' in sys.argv:
         sys.argv.remove('--rungs')
         rungcheck.main()
+        return
+    if '--selectors' in sys.argv:
+        sys.argv.remove('--selectors')
+        from tools.gpu.maxwell import selectorgate  # noqa: PLC0415  only this mode's: the gate's other users lack it
+
+        selectorgate.main(compare)
         return
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('before', type=Path)

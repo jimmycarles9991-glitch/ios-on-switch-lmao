@@ -93,6 +93,36 @@ inline const char *resolveState(uint32_t format, uint32_t samples)
         return "raw.resolve.resolve_rg11b10f_frag";
     case 115:
         return "raw.resolve.resolve_rgba16f_frag";
+    case 1:
+        return "raw.resolve.resolve_a8_frag";
+    case 10:
+        return "raw.resolve.resolve_r8_frag";
+    case 20:
+        return "raw.resolve.resolve_r16_frag";
+    case 25:
+        return "raw.resolve.resolve_r16f_frag";
+    case 30:
+        return "raw.resolve.resolve_rg8_frag";
+    case 40:
+        return "raw.resolve.resolve_b5g6r5_frag";
+    case 43:
+        return "raw.resolve.resolve_bgr5a1_frag";
+    case 55:
+        return "raw.resolve.resolve_r32f_frag";
+    case 60:
+        return "raw.resolve.resolve_rg16_frag";
+    case 65:
+        return "raw.resolve.resolve_rg16f_frag";
+    case 90:
+        return "raw.resolve.resolve_rgb10a2_frag";
+    case 94:
+        return "raw.resolve.resolve_bgr10a2_frag";
+    case 105:
+        return "raw.resolve.resolve_rg32f_frag";
+    case 110:
+        return "raw.resolve.resolve_rgba16_frag";
+    case 125:
+        return "raw.resolve.resolve_rgba32f_frag";
     default:
         return nullptr;
     }

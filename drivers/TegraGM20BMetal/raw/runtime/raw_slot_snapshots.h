@@ -6,6 +6,7 @@
 #include <limits>
 #include <vector>
 #include "raw_grow_list.h"
+#include "raw_slot_mask.h"
 
 namespace raw {
 
@@ -16,7 +17,9 @@ template <typename Slot, size_t N, size_t K = 4> class SlotSnapshots {
 public:
     using Table = std::array<Slot, N>;
     using Chunk = std::array<Slot, K>;
+    using Mask = SlotMask<N>;
     static constexpr size_t kChunks = (N + K - 1) / K;
+    static_assert(kChunks <= 32 && 32 % K == 0, "a capture's chunks are one word, a mask word's slots whole chunks");
     using Header = std::array<uint32_t, kChunks>;
 
     class View {
@@ -98,7 +101,7 @@ public:
     size_t storageBytes() const
     {
         return headers_.capacity() * sizeof(Header) + chunks_.capacity() * sizeof(Chunk) +
-               changed_.capacity() * sizeof(uint32_t);
+               changed_.capacity() * sizeof(Mask);
     }
 
     template <typename Edit> bool update(Edit edit)
@@ -106,7 +109,7 @@ public:
         if (!edit(current_))
             return false;
         ++generation_;
-        pending_ = edited_ = ~0u;
+        pending_ = edited_ = everySlot<Mask>();
         return true;
     }
 
@@ -116,7 +119,7 @@ public:
         if (!edit(current_))
             return false;
         ++generation_;
-        const uint32_t bit = slot < 32 ? 1u << slot : ~0u;
+        const Mask bit = slot < kMaskSlots<Mask> ? oneSlot<Mask>(slot) : everySlot<Mask>();
         pending_ |= bit;
         edited_ |= bit;
         return true;
@@ -127,7 +130,7 @@ public:
         if (captured_ == generation_)
             return index_;
         Header header;
-        uint32_t chunks = (1u << kChunks) - 1;
+        uint32_t chunks = kAllChunks;
         if (!headers_.empty()) {
             header = headers_.back();
             chunks = editedChunks(pending_);
@@ -142,16 +145,16 @@ public:
         index_ = static_cast<uint32_t>(headers_.size());
         headers_.push_back(header);
         changed_.push_back(pending_);
-        pending_ = 0;
+        pending_ = Mask{};
         captured_ = generation_;
         return index_;
     }
 
     // The slots in which value `index` may differ from value `from`: exactly the edited ones where `index` was captured
     // next after `from`, every slot otherwise
-    uint32_t changedFrom(uint32_t from, uint32_t index) const
+    Mask changedFrom(uint32_t from, uint32_t index) const
     {
-        return index == from + 1 ? changed_[index] : ~0u;
+        return index == from + 1 ? changed_[index] : everySlot<Mask>();
     }
 
     // Only the slots edited since the last reset differ from the empty table
@@ -160,7 +163,7 @@ public:
         current_ = {};
         ++generation_;
         pending_ |= edited_;
-        edited_ = 0;
+        edited_ = Mask{};
     }
 
     void clear()
@@ -168,8 +171,8 @@ public:
         headers_.clear();
         chunks_.clear();
         changed_.clear();
-        pending_ = ~0u;
-        edited_ = 0;
+        pending_ = everySlot<Mask>();
+        edited_ = Mask{};
         current_ = {};
         generation_ = 0;
         captured_ = std::numeric_limits<uint64_t>::max();
@@ -177,13 +180,15 @@ public:
     }
 
 private:
+    static constexpr uint32_t kAllChunks = kChunks >= 32 ? ~0u : (1u << kChunks) - 1;
+
     static constexpr uint32_t chunkSlots(size_t chunk)
     {
         return chunk * K >= 32 ? ~0u : uint32_t(((uint64_t(1) << K) - 1) << (chunk * K));
     }
 
-    // the chunks holding a slot of `slots`, visited by the set slots alone
-    static constexpr uint32_t editedChunks(uint32_t slots)
+    // the chunks of one mask word holding a slot of `slots`, visited by the set slots alone
+    static constexpr uint32_t wordChunks(uint32_t slots)
     {
         uint32_t chunks = 0;
         while (slots) {
@@ -191,7 +196,20 @@ private:
             chunks |= 1u << c;
             slots &= ~chunkSlots(c);
         }
-        return chunks & ((1u << kChunks) - 1);
+        return chunks;
+    }
+
+    static constexpr uint32_t editedChunks(uint32_t slots)
+    {
+        return wordChunks(slots) & kAllChunks;
+    }
+
+    template <size_t Words> static constexpr uint32_t editedChunks(const WideSlotMask<Words> &slots)
+    {
+        uint32_t chunks = 0;
+        for (size_t w = 0; w < Words; ++w)
+            chunks |= wordChunks(slots.words[w]) << (w * 32 / K);
+        return chunks & kAllChunks;
     }
 
     Table current_{};
@@ -200,26 +218,28 @@ private:
     uint32_t index_ = std::numeric_limits<uint32_t>::max();
     GrowList<Header> headers_;
     GrowList<Chunk> chunks_;
-    GrowList<uint32_t> changed_;
-    uint32_t pending_ = ~0u;
-    uint32_t edited_ = 0;
+    GrowList<Mask> changed_;
+    Mask pending_ = everySlot<Mask>();
+    Mask edited_{};
 };
 
 // A table of N object slots (textures, samplers) kept as SlotSnapshots keeps a buffer table, each capture with its mask of
-// the slots bound (to an object or to nil): a draw that binds one texture copies one chunk of four, not the table
+// the slots bound (to an object or to nil): a draw that binds one texture copies one chunk of four, not the table (of
+// eight in a table past 32 slots, whose chunk list stays one word)
 template <size_t N> class ObjectSnapshots {
-    static_assert(N <= 32);
-    using Objects = SlotSnapshots<void *, N>;
+    using Objects = SlotSnapshots<void *, N, (N <= 32 ? 4 : 8)>;
 
 public:
+    using Mask = SlotMask<N>;
+
     struct View {
         typename Objects::View objects;
-        uint32_t set;
+        Mask set;
     };
 
     struct Current {
         const typename Objects::Table &objects;
-        uint32_t set;
+        Mask set;
     };
 
     Current current() const
@@ -244,7 +264,7 @@ public:
 
     size_t storageBytes() const
     {
-        return objects_.storageBytes() + sets_.capacity() * sizeof(uint32_t);
+        return objects_.storageBytes() + sets_.capacity() * sizeof(Mask);
     }
 
     // `object` at `slot`; false where the slot held it bound already or there is no such slot
@@ -252,10 +272,9 @@ public:
     {
         if (slot >= N)
             return false;
-        const uint32_t bit = uint32_t(1) << slot;
-        if ((set_ & bit) && objects_.current()[slot] == object)
+        if (hasSlot(set_, slot) && objects_.current()[slot] == object)
             return false;
-        set_ |= bit;
+        addSlot(set_, slot);
         return objects_.update(slot, [&](typename Objects::Table &table) {
             table[slot] = object;
             return true;
@@ -270,7 +289,7 @@ public:
         return index;
     }
 
-    uint32_t changedFrom(uint32_t from, uint32_t index) const
+    Mask changedFrom(uint32_t from, uint32_t index) const
     {
         return objects_.changedFrom(from, index);
     }
@@ -278,20 +297,20 @@ public:
     void resetCurrent()
     {
         objects_.resetCurrent();
-        set_ = 0;
+        set_ = Mask{};
     }
 
     void clear()
     {
         objects_.clear();
         sets_.clear();
-        set_ = 0;
+        set_ = Mask{};
     }
 
 private:
     Objects objects_;
-    GrowList<uint32_t> sets_;
-    uint32_t set_ = 0;
+    GrowList<Mask> sets_;
+    Mask set_{};
 };
 
 }  // namespace raw

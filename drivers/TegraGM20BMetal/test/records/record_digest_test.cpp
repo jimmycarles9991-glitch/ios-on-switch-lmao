@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "drivers/TegraGM20BMetal/test/records/golden_files.h"
+#include "drivers/TegraGM20BMetal/raw/runtime/raw_set_entries.h"
 
 namespace {
 
@@ -72,6 +73,7 @@ std::string write(const char *name, const Built &b)
     h.pipelines = uint32_t(b.pipelines.size());
     std::vector<uint8_t> file(sizeof h);
     const auto append = [&](PackSectionId id, const void *p, size_t n) {
+        file.resize((file.size() + 7) & ~size_t(7));
         h.section[id] = {file.size(), n};
         file.insert(file.end(), static_cast<const uint8_t *>(p), static_cast<const uint8_t *>(p) + n);
     };
@@ -168,6 +170,24 @@ TEST(RecordDigest, ARecordDigestsTheSameWhereverItsProgramsAreLaidOut)
     }
 }
 
+TEST(RecordDigest, ATexture3dPastTheInlineEntriesKeepsItsSamplingTrait)
+{
+    Built b;
+    PackPipeline pp = {};
+    pp.keyHash = 5;
+    pp.keyString = b.string("state 5");
+    pp.vs = addProgram(b, 0x22, 5);
+    pp.fs = addProgram(b, 0x11, 5);
+    setEntryCount(pp, kPackEntries + 1);
+    b.blob.resize(farWords(entryCount(pp)));
+    PackEntry texture = {};
+    texture.kind = EntryTexture3d;
+    memcpy(b.blob.data(), &texture, sizeof texture);
+    b.pipelines.push_back(pp);
+    const auto all = load(write("far_texture.bin", b));
+    EXPECT_TRUE(state(all, 5).traits & records::TraitTexture3d);
+}
+
 TEST(RecordDigest, AProgramByteMovesItsRecordAndNamesTheSection)
 {
     const auto before = load(writePack("c.bin", {5}, 0));
@@ -178,6 +198,42 @@ TEST(RecordDigest, AProgramByteMovesItsRecordAndNamesTheSection)
     EXPECT_NE(was.at("fs"), now.at("fs"));
     EXPECT_EQ(was.at("vs"), now.at("vs"));
     EXPECT_EQ(was.at("registers"), now.at("registers"));
+}
+
+// A pack of state 5 with a tessellation state's v24 fields: its control and evaluation programs (of `tessByte`), a stride
+// twin and amplification words, and the restore pairs `restore` after its blob
+std::string writeTessellationPack(const char *name, uint8_t tessByte, const std::vector<uint32_t> &restore)
+{
+    Built b;
+    PackPipeline pp = {};
+    pp.fs = addProgram(b, 0x11, 5);
+    pp.vs = addProgram(b, 0x22, 5);
+    pp.tessPrograms[0] = addProgram(b, tessByte, 1);
+    pp.tessPrograms[1] = addProgram(b, tessByte, 2);
+    pp.controlWord = 5;
+    pp.keyHash = 5;
+    pp.keyString = b.string("state 5");
+    pp.strideTwin = 0x77;
+    pp.amplificationLayerWord = 3;
+    pp.restoreAt = uint32_t(b.blob.size());
+    pp.restoreDwords = uint16_t(restore.size());
+    b.blob.insert(b.blob.end(), restore.begin(), restore.end());
+    b.pipelines.push_back(pp);
+    return write(name, b);
+}
+
+TEST(RecordDigest, ARecordsV24FieldsAreASectionOfTheirOwnWhereItHasThem)
+{
+    const auto plain = records::sectionHashes(state(load(writePack("t0.bin", {5}, 0)), 5));
+    EXPECT_FALSE(plain.count("tail")) << "a record of none digests as a version-23 pack's";
+    const auto a = records::sectionHashes(state(load(writeTessellationPack("t1.bin", 0x55, {0x2080, 0x20})), 5));
+    const auto b = records::sectionHashes(state(load(writeTessellationPack("t2.bin", 0x56, {0x2080, 0x20})), 5));
+    const auto c = records::sectionHashes(state(load(writeTessellationPack("t3.bin", 0x55, {0x2080, 0x21})), 5));
+    ASSERT_TRUE(a.count("tail"));
+    EXPECT_NE(a.at("tail"), b.at("tail")) << "a control program's byte";
+    EXPECT_NE(a.at("tail"), c.at("tail")) << "a restored value";
+    EXPECT_EQ(a.at("record"), b.at("record"));
+    EXPECT_EQ(a.at("vs"), plain.at("vs"));
 }
 
 TEST(RecordDigest, AStatesRegistersAreTheSameFromTheBaselineOrItsBlob)

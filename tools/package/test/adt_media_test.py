@@ -144,6 +144,15 @@ class FramebufferFormat27(unittest.TestCase):
 
 
 class Capabilities(unittest.TestCase):
+    def test_root_boot_accepts_nonplatform_code(self):
+        adt_edit = load_adt_edit()
+        booted = native_oled_adt.generate_adt(
+            bytes(native_oled_adt.SEED_BYTES),
+            native_oled_adt.Profile(storage_probe=True, root_boot=True, full_ram=True),
+        )
+        tree, _ = adt_edit.adt_parse(adt_edit.with_ipad_identity(adt_edit.ipad_adt(booted), apple_tree()))
+        self.assertEqual(properties(find(tree, 'chosen'))['amfi-only-platform-code'], struct.pack('<I', 0))
+
     def test_buttons_and_maps(self):
         adt_edit = load_adt_edit()
         tree, _ = adt_edit.adt_parse(adt_edit.ipad_adt(switch_tree()))

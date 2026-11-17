@@ -47,15 +47,25 @@ TEST(RawSplitMetadata, FragmentBindingsAreDistinctAndPrecedeFrontier)
         split.uboCbuf[1] = slot;
         EXPECT_FALSE(raw::usableSplitMetadata(split));
     }
-    for (unsigned bytes : {0u, 1u, 4095u, 4112u, 65535u}) {
+    for (unsigned bytes : {0u, 1u, 4095u, 4104u, 65528u, 65535u}) {
         split = record(1, 2, false);
-        split.frontierBytes = bytes;
-        EXPECT_FALSE(raw::usableSplitMetadata(split));
+        split.frontierBytes = uint16_t(bytes);
+        EXPECT_FALSE(raw::usableSplitMetadata(split)) << bytes;
     }
     for (unsigned slot : {0u, 16u, 255u}) {
         split = record(1, 2, false);
         split.frontierCbuf = slot;
         EXPECT_FALSE(raw::usableSplitMetadata(split));
+    }
+}
+
+// One constant buffer's worth, as the chip binds one (raw_cbuf.h): every 16-byte frontier up to 64 KiB less 16
+TEST(RawSplitMetadata, AFrontierIsUsableUpToAConstantBuffersLastSixteenBytes)
+{
+    for (unsigned bytes : {16u, 4096u, 4112u, 8192u, 0xFFF0u}) {
+        auto split = record(1, 2, false);
+        split.frontierBytes = uint16_t(bytes);
+        EXPECT_TRUE(raw::usableSplitMetadata(split)) << bytes;
     }
 }
 

@@ -7,7 +7,13 @@ its base alignment so no residual word is written), and each program's constant 
 did not give stops its run.
 """
 
+import json
+import os
+import shutil
 import struct
+import subprocess
+import tempfile
+from pathlib import Path
 
 from tools.gpu.maxwell import isa
 from tools.gpu.maxwell.execute import run_lane
@@ -15,12 +21,29 @@ from tools.gpu.maxwell.stage import Memory, Stage
 
 ROOT_BYTES, ROOT_SETS, ROOT_PUSH = 0x800, 0x38, 0x700
 CBUF_ROOT, CBUF_SHADER_DATA, CBUF_SET = 1, 2, 3
-ENTRY_UBO, ENTRY_FETCH, ENTRY_TESS_BUFFER = 1, 3, 11
+ENTRY_UBO, ENTRY_FETCH, ENTRY_DEPTH_TEST, ENTRY_STENCIL_TEST, ENTRY_TESS_BUFFER = 1, 3, 6, 7, 11
 KERNEL_BUFFER = 0
 SET_ADDRESS = 0xF0_0000_0000
 ROOT_ADDRESS = 0xF1_0000_0000
 BUFFER_BASE = 0x2_0000_0000 - 0x100
 MASK = 0xFFFFFFFF
+
+
+def load(runner: Path) -> dict:
+    work = Path(tempfile.mkdtemp(dir=os.environ.get('TEST_TMPDIR')))
+    for name in ('directrun', 'libmock_iokit.dylib', 'exec.metallib'):
+        shutil.copyfile(runner / name, work / name)
+    (work / 'directrun').chmod(0o755)
+    out = work / 'records.json'
+    made = subprocess.run(
+        [work / 'directrun', work / 'exec.metallib', out],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode:
+        raise RuntimeError(f'directrun: {made.stdout[-2000:]}{made.stderr[-4000:]}')
+    return json.loads(out.read_text())
 
 
 def f32(x: float) -> int:
@@ -84,12 +107,20 @@ class Binding:
         return struct.pack('<IIII', address & MASK, address >> 32, descriptor_range(storage, window, size), 0)
 
 
-def render_set(record: dict, binding: Binding, attachments: dict[int, int] | None = None) -> bytes:
-    """Give set 0: each buffer's descriptor, and each framebuffer fetch's header index of `attachments` by color."""
+def render_set(
+    record: dict, binding: Binding, attachments: dict[int, int] | None = None, stand_ins: dict[int, int] | None = None
+) -> bytes:
+    """Give set 0: buffers' descriptors and the header indices of fetched colors and of the test stand-ins.
+
+    `attachments` gives each framebuffer fetch's header index by color, `stand_ins` each stand-in's by its entry kind.
+    """
     data = bytearray(max(256, record['set_bytes']))
     for offset, kind, stage, slot, sampler_kind, sampler, pad in record['entries']:
         if kind == ENTRY_FETCH and attachments is not None and slot in attachments:
             struct.pack_into('<I', data, offset, attachments[slot])
+            continue
+        if kind in (ENTRY_DEPTH_TEST, ENTRY_STENCIL_TEST) and stand_ins is not None and kind in stand_ins:
+            struct.pack_into('<I', data, offset, stand_ins[kind])
             continue
         if kind == ENTRY_UBO:
             key = (stage, slot)

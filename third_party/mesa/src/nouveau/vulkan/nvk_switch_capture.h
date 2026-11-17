@@ -12,19 +12,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-struct nvk_cbuf;
+#include "nvk_switch_stage.h"
+
 struct nvk_device;
 struct nvk_shader;
 struct switch_nvk_programs;
-
-/* A constant buffer as the raw path's pack names it (raw_pack.h PackCbufType) */
-uint8_t switch_nvk_cbuf_code(const struct nvk_cbuf *cbuf);
-
-struct switch_nvk_stage;
-
-/* What switch_nvk_compile_stage hands over of a compiled shader */
-void switch_nvk_stage_of(const struct nvk_shader *shader,
-                         struct switch_nvk_stage *out);
 
 /* nvk_device's and nvk_shader's hooks: the registry the capture names a bound
  * program from

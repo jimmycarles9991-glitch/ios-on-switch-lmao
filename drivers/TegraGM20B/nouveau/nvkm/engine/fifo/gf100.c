@@ -354,8 +354,10 @@ gf100_runq_intr(struct nvkm_runq *runq, struct nvkm_runl *null)
 #endif
 
 		/*TODO: use proper procedure for clearing each exception / debug output */
-		if ((stat & 0xc67fe000) && chan)
-			nvkm_chan_error(chan, true);
+		if ((stat & 0xc67fe000) && chan) {
+			nvkm_chan_error(chan, false);
+			nvkm_runl_rc_cgrp(chan->cgrp);
+		}
 		nvkm_chan_put(&chan, flags);
 	}
 

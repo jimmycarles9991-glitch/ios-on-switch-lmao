@@ -27,9 +27,9 @@ enum class MipEngine : uint8_t {
     ThreeD
 };
 
-// A step goes to the 2D engine where the format has a 2D surface format (twodFormat) and the step is proven, else to the
-// pack's 3D mip state (raw_mip.h). A format with no 3D state keeps its unproven steps on the 2D engine: BGRA8, RGBA8,
-// RGBA16Float, R8 and RG8 have none, and giving them one changes the pack.
+// A step goes to the 2D engine where the format has a 2D surface format (twodChainFormat) and the step is proven, else to
+// the pack's 3D mip state (raw_mip.h), which takes Metal's taps itself. A format with no 3D state would keep its unproven
+// steps on the 2D engine; every 2D chain format has one.
 struct MipStep {
     MipEngine engine = MipEngine::None;
     bool unproven = false;
@@ -55,10 +55,11 @@ struct MipRun {
 
 // The chain's steps in order, consecutive steps of one engine as one run; false (after the runs before it) at a step no engine
 // makes
-template <class Run> bool eachMipRun(const MipChain &c, bool twod, bool threeD, Run &&run)
+template <class Run>
+bool eachMipRun(const MipChain &c, uint32_t first, uint32_t last, bool twod, bool threeD, Run &&run)
 {
     MipRun r;
-    for (uint32_t l = 0; l + 1 < c.levels; l++) {
+    for (uint32_t l = first; l < last; l++) {
         const MipStep s = mipStep(c, l, twod, threeD);
         if (s.engine == MipEngine::None)
             return false;
@@ -78,18 +79,14 @@ template <class Run> bool eachMipRun(const MipChain &c, bool twod, bool threeD, 
 
 inline bool mipRoutable(const MipChain &c, bool twod, bool threeD)
 {
-    return eachMipRun(c, twod, threeD, [](const MipRun &) {});
+    return eachMipRun(c, 0, c.levels - 1, twod, threeD, [](const MipRun &) {});
 }
 
-inline size_t generateLayersWords(const MipChain &c, uint32_t first, uint32_t last)
+// emitGenerate of levels first + 1 .. last in the selected layers of the chain at `va`
+inline void emitGenerateLayers(Push &p, const MipChain &c, uint64_t va, uint32_t fmt2d, uint32_t first, uint32_t last,
+                               uint32_t firstLayer, uint32_t layers)
 {
-    return generateWords(c, first, last) * c.layers;
-}
-
-// emitGenerate of levels first + 1 .. last in every layer of the chain at `va`
-inline void emitGenerateLayers(Push &p, const MipChain &c, uint64_t va, uint32_t fmt2d, uint32_t first, uint32_t last)
-{
-    for (uint32_t layer = 0; layer < c.layers; layer++)
+    for (uint32_t layer = firstLayer; layer < firstLayer + layers; layer++)
         emitGenerate(p, c, va + layer * c.arrayStride, nullptr, fmt2d, first, last);
 }
 

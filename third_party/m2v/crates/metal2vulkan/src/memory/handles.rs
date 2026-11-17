@@ -979,7 +979,8 @@ fn strided_member<'s>(
         // A member array, or one `array<T, N>` member of `N` handles, whose element the index
         // may walk.
         let element = u64::from(member_element_size(mem));
-        if (mem.array_len >= 1 || element != u64::from(mem.size)) && element == stride {
+        let outer = mem.array_len >= 1 && u64::from(mem.size) == stride;
+        if outer || ((mem.array_len >= 1 || element != u64::from(mem.size)) && element == stride) {
             walked = true;
         }
         let within = off - u64::from(mem.offset);

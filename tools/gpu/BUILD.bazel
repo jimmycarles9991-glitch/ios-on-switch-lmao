@@ -50,6 +50,24 @@ py_binary(
     srcs = ["rawpack.py"],
 )
 
+# One bucket of the raw pack (--generator: drivers/TegraGM20BMetal/raw/pack/directbucket.py): its own tool, so a bucket's
+# action is keyed on neither rawpack.py's other steps nor the generator's other modules.
+py_binary(
+    name = "rawprobe",
+    srcs = ["rawprobe.py"],
+)
+
+py_library(
+    name = "rawprobe_steps",
+    srcs = ["rawprobe.py"],
+)
+
+py_test(
+    name = "rawprobe_test",
+    srcs = ["rawprobe_test.py"],
+    deps = [":rawprobe_steps"],
+)
+
 # The compile profile the shader tools' bridge is built with, held to their runtime device
 py_test(
     name = "compile_profile_test",
@@ -57,6 +75,14 @@ py_test(
     data = ["//gpu/seed:local_tools"],
     env = {"COMPILE_PROFILE_TOOLS": "$(rootpath //gpu/seed:local_tools)"},
     tags = ["requires-darwin"],
+)
+
+py_test(
+    name = "seed_tools_debug_map_test",
+    srcs = ["seed_tools_debug_map_test.py"],
+    data = ["//gpu/seed:local_tools"],
+    env = {"SEED_TOOLS": "$(rootpath //gpu/seed:local_tools)"},
+    deps = ["//tools/common:macho"],
 )
 
 # Its steps, for the pack's coverage test (//drivers/TegraGM20BMetal:archive_coverage_test: archive_lines)
@@ -71,6 +97,7 @@ py_test(
     srcs = ["rawpack_test.py"],
     data = [
         "//drivers/TegraGM20BMetal:precompile/corpus.log",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_format_standin.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr_store.h",
     ],
     env = {
@@ -112,7 +139,6 @@ py_test(
         "//drivers/TegraGM20BMetal:raw_tree",
         "//gpu:raw_stack_inputs",
     ],
-    tags = ["m2v"],
 )
 
 py_binary(

@@ -53,6 +53,13 @@ bool tegra_nvjpg_stats_start(void)
     return gLock != nullptr;
 }
 
+void switch_nvjpg_count_mapping(int pid)
+{
+    IOLockLock(gLock);
+    slotOf(pid).outputMaps++;
+    IOLockUnlock(gLock);
+}
+
 void tegra_nvjpg_count_refused(int pid, uint32_t format)
 {
     IOLockLock(gLock);

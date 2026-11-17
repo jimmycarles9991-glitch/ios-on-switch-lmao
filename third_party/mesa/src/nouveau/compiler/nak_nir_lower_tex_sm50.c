@@ -252,34 +252,11 @@ fold_f16(nir_tex_instr *tex)
    return true;
 }
 
-/* hw_test_app/shaders/Scenes.metal TEXS_F16_PROBE_MARKER: SwitchHWTest's
- * probe of TEXS.F16's rounding, whose fetches take the F16 forms in debug
- * builds whatever the chip facts say; its TEXS_F16_PROOF_MARKER becomes
- * 0x5346 << 16 | the fetches folded, so the probe knows it ran them
+/* hw_test_app/shaders/Scenes.metal TEXS_F16_PROOF_MARKER: a constant that
+ * becomes 0x5346 << 16 | the fetches folded, so SwitchHWTest's probe of
+ * TEXS.F16's rounding (gpu.raw.texs_f16) knows the chip fact folded them
  */
-#define TEXS_F16_PROBE_MARKER 0x7fa55346u
 #define TEXS_F16_PROOF_MARKER 0x7fa55347u
-
-static bool
-texs_f16_probe(nir_shader *nir)
-{
-#if defined(SWITCH_DEBUG) && SWITCH_DEBUG
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_load_const)
-               continue;
-            nir_load_const_instr *c = nir_instr_as_load_const(instr);
-            for (unsigned i = 0; i < c->def.num_components; i++) {
-               if (c->def.bit_size == 32 && c->value[i].u32 == TEXS_F16_PROBE_MARKER)
-                  return true;
-            }
-         }
-      }
-   }
-#endif
-   return false;
-}
 
 static void
 stamp_proof(nir_shader *nir, uint32_t proof)
@@ -303,10 +280,7 @@ bool
 nak_nir_sm50_fold_f16_fetches(nir_shader *nir, const struct nak_compiler *nak,
                               bool texs_f16)
 {
-   if (nak->sm < 50 || nak->sm >= 70)
-      return false;
-   const bool probe = texs_f16_probe(nir);
-   if (!texs_f16 && !probe)
+   if (nak->sm < 50 || nak->sm >= 70 || !texs_f16)
       return false;
 
    bool progress = false;
@@ -330,7 +304,7 @@ nak_nir_sm50_fold_f16_fetches(nir_shader *nir, const struct nak_compiler *nak,
       }
       progress |= nir_progress(folded, impl, nir_metadata_control_flow);
    }
-   if (probe)
+   if (count)
       stamp_proof(nir, 0x53460000u | MIN2(count, 0xffffu));
    return progress;
 }

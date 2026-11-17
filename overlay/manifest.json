@@ -58,6 +58,16 @@
   ],
   "files": [
     {
+      "path": "/usr/lib/libSwitchInstallPolicy.dylib",
+      "source": "build/switch-apps/libSwitchInstallPolicy.dylib",
+      "trust": true
+    },
+    {
+      "path": "/usr/libexec/installd",
+      "source": "build/switch-apps/installd",
+      "trust": true
+    },
+    {
       "path": "/usr/sbin/BlueTool",
       "source": "build/switch-bluetooth/BlueTool",
       "trust": true,

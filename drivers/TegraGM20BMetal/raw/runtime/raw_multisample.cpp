@@ -21,21 +21,17 @@ bool Device::createStoredMultisample(uint32_t width, uint32_t height, uint32_t f
 }
 
 bool Device::createOwnedZeta(uint32_t width, uint32_t height, uint32_t format, uint32_t samples, bool sampled,
-                             Texture &t, uint32_t layers)
+                             Texture &t, uint32_t layers, uint8_t type, uint32_t levels)
 {
     uint64_t bytes = 0, align = 0;
-    if (!samples || !layers || layers > 2048 || (layers > 1 && samples > 1) ||
-        !zetaShape(width, height, format, samples, t, bytes, align))
+    fx::MipChain chain;
+    if (!zetaImageLayout(width, height, format, samples, layers, levels, type, sampled, t, chain, bytes, align))
         return false;
-    if (layers > 1) {
-        t.layers = layers;
-        bytes = (t.layerBytes * layers + align - 1) / align * align;
-        sampled = false;
-    }
     const uint32_t z = zetaFormatIndex(format);
     std::lock_guard<raw::Mutex> l(lock_);
     if (const uint32_t kind =
-            storedZetaKind((k_.info().flags & TegraGM20BInfoCompression) != 0, format, samples, layers);
+            levels == 1 ? storedZetaKind((k_.info().flags & TegraGM20BInfoCompression) != 0, format, samples, layers)
+                        : 0;
         kind && createCompressedZeta(bytes, kind, sampled, t))
         return true;
     Span span;
@@ -48,8 +44,17 @@ bool Device::createOwnedZeta(uint32_t width, uint32_t height, uint32_t format, u
     t.va = span.va;
     t.storage = {span.va, bytes, false};
     ownedZeta_[span.va] = {z, span};
-    if (t.tic)
+    if (levels > 1) {
+        t.chain = new Texture::Chain;
+        t.chain->layout = chain;
+        t.chain->va = t.va;
+        uint32_t w[8];
+        fx::mipChainTic(chain, t.va, kZetaFormatInfo[z].tic0, false, 0, levels, w, type);
+        if (t.tic)
+            memcpy(tic_.cpu + 32 * t.tic, w, 32);  // visible at the next submission's header invalidate
+    } else if (t.tic) {
         writeTic(t);
+    }
     return true;
 }
 
@@ -71,18 +76,20 @@ bool Device::createOwnedZeta(uint32_t width, uint32_t height, uint32_t format, u
 bool Device::moveOwnedZeta(Texture &t, const ZetaMemory &m, const char **why)
 {
     Texture over;
-    bool owned;
+    uint32_t layers;
     {
         std::lock_guard<raw::Mutex> l(lock_);
-        owned = ownedZeta_.count(t.va) != 0 || compZeta_.count(t.va) != 0;
+        const bool owned = ownedZeta_.count(t.va) != 0 || compZeta_.count(t.va) != 0;
+        if (!owned || t.samples > 1 || t.chain) {
+            *why = !owned    ? "it is in no zeta memory of its own"
+                   : t.chain ? "it is mipmapped (the copy moves level 0)"
+                             : "it is multisampled";
+            return false;
+        }
+        layers = std::max<uint32_t>(t.layers, 1);
+        if (!createZetaOver(m, t.width, t.height, t.format, true, over, why, layers))
+            return false;
     }
-    if (!owned || t.samples > 1) {
-        *why = !owned ? "it is in no zeta memory of its own" : "it is multisampled";
-        return false;
-    }
-    const uint32_t layers = std::max<uint32_t>(t.layers, 1);
-    if (!createZetaOver(m, t.width, t.height, t.format, t.tic != 0, over, why, layers))
-        return false;
     uint32_t seqno = 0;
     CommandBuffer *rc = begin();
     bool copied = rc != nullptr;
@@ -101,6 +108,10 @@ bool Device::moveOwnedZeta(Texture &t, const ZetaMemory &m, const char **why)
             freeTic(over.tic);
         *why = "the copy into NVK's image was not submitted";
         return false;
+    }
+    if (t.tic && layers > 1 && (over.tic = allocTic())) {
+        over.type = t.type;
+        writeTic(over);
     }
     movedZeta_[over.va] = {t.va, t.tic};
     t.va = over.va;

@@ -85,6 +85,19 @@ TEST(Variant, PendingProducerRetainsCellAfterRecordingOwnerReleasesIt)
     EXPECT_TRUE(weak.expired());
 }
 
+// A packed state's two-plane or shadowed variant the pack lacks is made at the draw that needs it,
+// as every other form is, and only a test class alone draws the state's own record
+TEST(VariantRoute, APackedStatesFormsThePackLacksAreMadeAtTheDraw)
+{
+    EXPECT_TRUE(raw::variantMadeAtDraw(true, false, true, false, false, false)) << "two-plane";
+    EXPECT_TRUE(raw::variantMadeAtDraw(true, true, false, false, false, false)) << "cubic";
+    EXPECT_TRUE(raw::variantMadeAtDraw(true, false, false, true, false, false)) << "sampled";
+    EXPECT_TRUE(raw::variantMadeAtDraw(true, false, false, false, true, false)) << "written";
+    EXPECT_TRUE(raw::variantMadeAtDraw(true, false, false, false, false, true)) << "shadowed";
+    EXPECT_FALSE(raw::variantMadeAtDraw(true, false, false, false, false, false)) << "a test class alone";
+    EXPECT_TRUE(raw::variantMadeAtDraw(false, false, false, false, false, false)) << "a state of no pack";
+}
+
 // A variant no compiler made fails that draw's command buffer alone; the next draw that needs it asks afresh: no count
 TEST(VariantAsks, TheDrawThatMeetsAFailedVariantAsksItAfresh)
 {

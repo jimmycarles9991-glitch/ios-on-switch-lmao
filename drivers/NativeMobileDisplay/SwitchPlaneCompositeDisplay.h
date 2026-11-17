@@ -386,7 +386,7 @@ bool planeComposeWaits(switch_display::Overlay wanted[2], const int selected[2],
         return false;
     wanted[0] = {true, slot, image, 1};
     wanted[1] = {};
-    planeBuildingSlots |= 1u << unsigned(slot);
+    planeBuildingSlots |= uint64_t(1) << unsigned(slot);
     return false;
 }
 

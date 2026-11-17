@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The libraries the engine's compiles are made from (compiler_engine.h), made over the frontend's compile context: kept
+// The libraries the engine's compiles are made from (compiler_engine.h), made by the translator alone (RawOffline.h): kept
 // while compiles come, so a burst of one library's states reads it once, and let go once none ran for a while. m2v's
 // translator holds a copy of each library's AIR on the heap (metal2vulkan::library::Library), several MB for Core
 // Animation's and RenderBox's, which a compiler at rest has no use for.

@@ -194,6 +194,7 @@ host_test(
         "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_sample_shading.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_slot_mask.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_target.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_xr.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_xr_pass.h",
@@ -270,7 +271,10 @@ host_test(
     name = "context_test",
     srcs = ["context_test.cpp"],
     data = ["testdata/context_capture.txt"],
-    deps = ["//kits/SwitchGM20BEmit:context_h"],
+    deps = [
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:context_h",
+    ],
 )
 
 host_test(

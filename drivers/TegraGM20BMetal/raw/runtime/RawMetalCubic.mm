@@ -2,39 +2,45 @@
 #import "RawMetalInternal.h"
 #include "raw_fragment_tests.h"
 #include "raw_render_variant.h"
+#include "raw_shader_test_push.h"
 
-raw::CubicBinds cubicBinds(const raw::Pipeline &pl, RMSampler *const samplers[16],
-                           RMTexture *const textures[raw::kStageTextures])
+static void cubicBinds(__unsafe_unretained RMRenderEncoder *encoder, const raw::Pipeline &pl, raw::CubicBinds &b)
 {
-    raw::CubicBinds b;
-    const raw::PackPipeline &r = *pl.rec;
-    for (uint32_t i = 0; i < r.entries; i++) {
-        const raw::PackEntry &e = r.entry[i];
+    b.samplers.clear();
+    b.textures.clear();
+    encoder->_cubicTextures[0] = {};
+    encoder->_cubicTextures[1] = {};
+    encoder->_formSamplers[0] = encoder->_formSamplers[1] = 0;
+    for (uint32_t i = 0; i < pl.entries.size(); i++) {
+        const raw::PackEntry &e = pl.entries[i];
         if ((e.kind != raw::EntryTexture && e.kind != raw::EntrySamplerOnly) || e.samplerKind != raw::SamplerSlot ||
-            e.stage != 2 || e.sampler >= 16)
+            (e.stage != 1 && e.stage != 2) || e.sampler >= 16)
             continue;
-        RMSampler *s = samplers[e.sampler];
+        encoder->_formSamplers[e.stage - 1] |= uint16_t(1u << e.sampler);
+        __unsafe_unretained RMSampler *s = encoder->_samp[e.stage - 1][e.sampler];
         if (!s || !s->_raw.desc.cubic)
             continue;
         const raw::SamplerDesc &d = s->_raw.desc;
         if (std::none_of(b.samplers.begin(), b.samplers.end(), [&](const auto &c) {
-                return c.slot == e.sampler;
+                return c.slot == e.sampler && c.stage == e.stage;
             }))
-            b.samplers.push_back(
-                {e.sampler, d.sAddress, d.tAddress, d.rAddress, uint8_t(s->_descriptor.borderColor & 3), !d.pixel});
-        RMTexture *t = e.kind == raw::EntryTexture && e.slot < raw::kStageTextures ? textures[e.slot] : nil;
+            b.samplers.push_back({e.sampler, d.sAddress, d.tAddress, d.rAddress,
+                                  uint8_t(s->_descriptor.borderColor & 3), !d.pixel, e.stage});
+        if (e.kind != raw::EntryTexture || e.slot >= raw::kStageTextures)
+            continue;
+        raw::addSlot(encoder->_cubicTextures[e.stage - 1], e.slot);
+        __unsafe_unretained RMTexture *t = encoder->_tex[e.stage - 1][e.slot];
         if (t && std::none_of(b.textures.begin(), b.textures.end(), [&](const auto &c) {
-                return c.slot == e.slot;
+                return c.slot == e.slot && c.stage == e.stage;
             }))
-            b.textures.push_back({e.slot, uint32_t(t->_descriptor.pixelFormat)});
+            b.textures.push_back({e.slot, uint32_t(t->_descriptor.pixelFormat), e.stage});
     }
     std::sort(b.samplers.begin(), b.samplers.end(), [](const auto &x, const auto &y) {
-        return x.slot < y.slot;
+        return x.stage != y.stage ? x.stage > y.stage : x.slot < y.slot;
     });
     std::sort(b.textures.begin(), b.textures.end(), [](const auto &x, const auto &y) {
-        return x.slot < y.slot;
+        return x.stage != y.stage ? x.stage > y.stage : x.slot < y.slot;
     });
-    return b;
 }
 
 void packedVariants(RMPipeline *p, uint64_t keyHash)
@@ -47,47 +53,25 @@ void packedVariants(RMPipeline *p, uint64_t keyHash)
     }
 }
 
-// A packed state's variant the pack does not hold, of no cubic, sampled or written form (those are made,
-// renderVariant): one of a test class the pack builder could not make draws the record without it (the state's own, or
-// its two-plane variant's), as a refused device compile left it, and says so; a two-plane variant it could not make is
-// refused
-static raw::Pipeline *unpackedVariant(RMPipeline *p, const std::string &suffix, const std::string &name)
+// A packed state's test class the pack does not hold (its builder could not make it, and no other form is asked): the
+// state's own record draws it, as a refused device compile leaves it, and says so
+static raw::Pipeline *untestedVariant(RMPipeline *p, const std::string &name)
 {
     const std::string key = p->_key + name;
-    raw::Pipeline *untested = p->_raw;
-    if (!suffix.empty()) {
-        std::lock_guard<raw::Mutex> lock(p->_variantLock);
-        const auto found = p->_variants.find(suffix);
-        untested = suffix != name && found != p->_variants.end() ? found->second->value() : nullptr;
-    }
-    if (untested) {
-        SWITCH_REFUSE_DETAIL("raw", "state.tests_unpacked", raw::Pack::fnv(key.data(), key.size()),
-                             "a packed state's test class the pack builder could not make: drawn without it: %s",
-                             key.c_str());
-        return untested;
-    }
-    // The variant's name and its state's hash come first, as the line is cut at SWITCH_REFUSAL_TEXT:
-    // tools/gpu/logharvest.py finds the state by the hash and harvests the variant
-    SWITCH_REFUSE_DETAIL("raw", "state.variant_unpacked", raw::Pack::fnv(key.data(), key.size()),
-                         "a packed state's variant the pack lacks: its draws are refused:%s of %016llx %s",
-                         name.c_str(), (unsigned long long)raw::Pack::fnv(p->_key.data(), p->_key.size()),
-                         p->_key.c_str());
-    return nullptr;
+    SWITCH_REFUSE_DETAIL("raw", "state.tests_unpacked", raw::Pack::fnv(key.data(), key.size()),
+                         "a packed state's test class the pack builder could not make: drawn without it: %s",
+                         key.c_str());
+    return p->_raw;
 }
 
-// The state's variant for a draw's cubic binds, test class, pass of two-plane colours, two-plane textures sampled at
-// `xrSlots` (raw_xr_pass.h) and textures written in other formats than its record's (raw_written_textures.h), named in
-// that order. A cubic, sampled or written variant no pack holds is made off the encoding thread from the binds of the
-// draw that first needs it, the only place they are known (the texture unit has no cubic filter for another record to
-// stand in with). Until it is, a sampled variant's draws sample those textures' stand-ins, and a command buffer with any
-// other variant's draws waits at its queue's head (RawMetalSchedule.mm variantReadiness); one no compiler makes fails
-// that command buffer, as a pipeline Metal could not compile, and the next draw that needs it asks afresh. Its record is
-// kept on disk, so a later boot draws it raw from its first draw. A RenderBox state's compile takes seconds on the device, which no encoding thread may wait for.
+// Binding and pass preparation starts asynchronous variant work. Sampled variants can use stand-ins while
+// pending; other variants hold the queue head until they publish or fail (RawMetalSchedule.mm variantReadiness).
 static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::CubicBinds &binds, uint8_t tests,
                                                   bool planes, uint16_t xrSlots,
-                                                  const std::vector<raw::WrittenTexture> &written)
+                                                  const std::vector<raw::WrittenTexture> &written,
+                                                  uint8_t xrShadows = 0)
 {
-    const raw::RenderVariant forms = {binds, tests, planes, xrSlots, written};
+    const raw::RenderVariant forms = {binds, tests, planes, xrSlots, written, xrShadows};
     const std::string suffix = forms.untested().name(), name = forms.name();
     std::shared_ptr<raw::Variant<raw::Pipeline>> variant;
     {
@@ -101,8 +85,8 @@ static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::Cubi
         variant = std::make_shared<raw::Variant<raw::Pipeline>>();
         p->_variants.emplace(name, variant);
     }
-    if (p->_packed && binds.empty() && !xrSlots && written.empty()) {
-        variant->publish(unpackedVariant(p, suffix, name));
+    if (!raw::variantMadeAtDraw(p->_packed, !binds.empty(), planes, xrSlots != 0, !written.empty(), xrShadows != 0)) {
+        variant->publish(untestedVariant(p, name));
         return variant.get();
     }
     raw::Completion::Ask request;
@@ -113,9 +97,9 @@ static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::Cubi
     request.own = !p->_packable;
     request.variant = forms;
     request.resolveDescriptor = true;
-    // the state's own record draws a test class's draws it could not be made for, never a cubic, two-plane or written
-    // variant's
-    raw::Pipeline *base = binds.empty() && !planes && !xrSlots && written.empty() ? p->_raw : nullptr;
+    // the state's own record draws a test class's draws it could not be made for, never a cubic, two-plane, written or
+    // shadowed variant's
+    raw::Pipeline *base = binds.empty() && !planes && !xrSlots && written.empty() && !xrShadows ? p->_raw : nullptr;
     raw::Completion *completion = gRM->completion.get();
     if (!request.descriptor || !completion) {
         variant->publish(base);
@@ -143,61 +127,99 @@ static raw::Variant<raw::Pipeline> *renderVariant(RMPipeline *p, const raw::Cubi
 }
 
 // The textures a draw of `pl` writes in other formats than its record's programs store (raw_written_textures.h)
-static std::vector<raw::WrittenTexture> reboundTextures(const raw::Pipeline &pl,
-                                                        RMTexture *const textures[raw::kStageTextures])
+static void reboundTextures(const raw::Pipeline &pl, RMTexture *const textures[raw::kStageTextures],
+                            std::vector<raw::WrittenTexture> &out)
 {
-    if (!pl.writtenSlots)
-        return {};
-    return raw::reboundWritten(*pl.rec, [&](uint32_t slot) {
-        return textures[slot] ? uint32_t(textures[slot]->_descriptor.pixelFormat) : 0u;
-    });
+    out.clear();
+    for (uint32_t slots = pl.writtenSlots; slots; slots &= slots - 1) {
+        const uint32_t slot = uint32_t(__builtin_ctz(slots));
+        const uint32_t format = textures[slot] ? uint32_t(textures[slot]->_descriptor.pixelFormat) : 0u;
+        if (format && format != pl.rec->writtenFormat[slot])
+            out.push_back({uint8_t(slot), format});
+    }
 }
 
 // The slots of each stage (vertex, fragment: raw::handleStage) a draw of `pl` samples a two-plane RGB10A8_2P_XR10
 // texture at (raw_xr_pass.h)
-static std::array<uint32_t, 2> xrSampledSlots(const raw::Pipeline &pl,
-                                              RMTexture *const textures[2][raw::kStageTextures])
+static std::array<raw::StageTextureMask, 2> xrSampledSlots(const raw::Pipeline &pl,
+                                                           RMTexture *const textures[2][raw::kStageTextures])
 {
-    std::array<uint32_t, 2> slots{};
-    const raw::PackPipeline &r = *pl.rec;
-    for (uint32_t i = 0; i < r.entries; i++) {
-        const raw::PackEntry &e = r.entry[i];
-        RMTexture *t =
+    std::array<raw::StageTextureMask, 2> slots{};
+    for (uint32_t i = 0; i < pl.entries.size(); i++) {
+        const raw::PackEntry &e = pl.entries[i];
+        __unsafe_unretained RMTexture *t =
             e.kind == raw::EntryTexture && e.slot < raw::kStageTextures ? textures[raw::handleStage(e)][e.slot] : nil;
         if (t && t->_raw.xrPlanes && !t->_raw.memoryless)
-            slots[raw::handleStage(e)] |= 1u << e.slot;
+            raw::addSlot(slots[raw::handleStage(e)], e.slot);
     }
     return slots;
 }
 
+raw::Variant<raw::Pipeline> *rmRenderVariant(RMPipeline *p, const raw::CubicBinds &binds, uint8_t tests, bool planes,
+                                             uint16_t xrSlots, const std::vector<raw::WrittenTexture> &written,
+                                             uint8_t xrShadows)
+{
+    return renderVariant(p, binds, tests, planes, xrSlots, written, xrShadows);
+}
+
 @implementation RMRenderEncoder (Cubic)
+
+- (void)prepareDrawnRecord
+{
+    raw::Pipeline *base = !_cb->_encRefused && _pipe ? _pipe->_raw : nullptr;
+    _formVariant = _sampledVariant = nullptr;
+    _sampledSlots = {};
+    if (!base || !(_cubicMask[0] | _cubicMask[1])) {
+        _forms.cubic.samplers.clear();
+        _forms.cubic.textures.clear();
+        _cubicTextures[0] = {};
+        _cubicTextures[1] = {};
+    } else {
+        cubicBinds(self, *base, _forms.cubic);
+    }
+    _forms.written.clear();
+    _forms.fragmentTests = 0;
+    _forms.xrSlots = 0;
+    _forms.twoPlane = _xrPlanes;
+    if (!base) {
+        _formSamplers[0] = _formSamplers[1] = 0;
+        return;
+    }
+    _forms.fragmentTests =
+        raw::drawnTests(base->fetchBits && base->depthFormat && !base->storageBits, base->rec->shaderTests, _ds, _zeta);
+    reboundTextures(*base, _tex[1], _forms.written);
+    if (!_forms.cubic.empty() || _forms.fragmentTests || _forms.twoPlane || !_forms.written.empty())
+        _formVariant = renderVariant(_pipe, _forms.cubic, _forms.fragmentTests, _forms.twoPlane, 0, _forms.written);
+    if (_cb->_passes[_passAt].xrPlaneBinds)
+        _sampledSlots = xrSampledSlots(*base, _tex);
+    _forms.xrSlots = raw::xrPairSlots(_sampledSlots[1]);
+    if (_forms.xrSlots)
+        _sampledVariant =
+            renderVariant(_pipe, _forms.cubic, _forms.fragmentTests, _forms.twoPlane, _forms.xrSlots, _forms.written);
+}
 
 - (const raw::Pipeline *)drawnRecord
 {
     raw::Pipeline *base = _pipe->_raw;
-    const raw::CubicBinds binds = _cubicMask ? cubicBinds(*base, _samp, _tex[1]) : raw::CubicBinds();
-    const uint8_t tests =
-        base->fetchBits && base->depthFormat && !base->storageBits ? uint8_t(raw::fragmentTests(_ds, _zeta)) : 0;
-    const std::vector<raw::WrittenTexture> written = reboundTextures(*base, _tex[1]);
-    auto *variant = (!binds.empty() || tests || _xrPlanes || !written.empty())
-                        ? renderVariant(_pipe, binds, tests, _xrPlanes, 0, written)
-                        : nullptr;
-    // a variant reads the header pairs of fragment slots 0 to 15 alone (PackPipeline::xrSlots): every other two-plane
-    // texture a draw samples is sampled through its stand-in
-    const std::array<uint32_t, 2> xrSampled = xrSampledSlots(*base, _tex);
-    std::array<uint32_t, 2> standIns = {xrSampled[0], xrSampled[1] & ~0xffffu};
-    if (const uint16_t xrSlots = uint16_t(xrSampled[1])) {
-        auto *sampled = renderVariant(_pipe, binds, tests, _xrPlanes, xrSlots, written);
-        if (sampled->state() == raw::Variant<raw::Pipeline>::State::Ready)
-            variant = sampled;
-        else
-            standIns[1] |= xrSlots;
+    auto *variant = _formVariant;
+    std::array<raw::StageTextureMask, 2> standIns = {_sampledSlots[0], raw::pastXrPairSlots(_sampledSlots[1])};
+    uint16_t drawnSlots = 0;
+    if (_sampledVariant) {
+        if (_sampledVariant->state() == raw::Variant<raw::Pipeline>::State::Ready) {
+            variant = _sampledVariant;
+            drawnSlots = _forms.xrSlots;
+        } else {
+            standIns[1] = _sampledSlots[1];
+        }
     }
-    if (standIns[0] | standIns[1])
+    if (raw::anySlot(standIns[0]) || raw::anySlot(standIns[1]))
         rmPipelineVeto(_cb, VetoShadows);
     for (uint32_t stage = 0; stage < 2; stage++)
-        for (uint32_t slots = standIns[stage]; slots; slots &= slots - 1)
-            _cb->_xrStandIns.insert(_tex[stage][__builtin_ctz(slots)]);
+        raw::forEachSlot(standIns[stage], [&](uint32_t slot) {
+            _cb->_xrStandIns.insert(_tex[stage][slot]);
+        });
+    rmXrShadowDraw(_cb, _pipe, *base, variant, _forms.cubic, _forms.fragmentTests, _forms.twoPlane, drawnSlots,
+                   _forms.written);
     if (base != _drawn || variant != _drawnVariant) {
         Cmd state = cmd(OpPipeline);
         state.obj = (__bridge void *)_pipe;

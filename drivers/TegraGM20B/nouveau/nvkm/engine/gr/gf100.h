@@ -82,6 +82,8 @@ struct gf100_gr {
 	} gpccs;
 
 	bool firmware;
+	/* device->intr.lock; reset/reinit cannot reopen a fatal channel before RC quiesces it. */
+	bool fault_fifo_held;
 
 	/*
 	 * Used if the register packs are loaded from NVIDIA fw instead of

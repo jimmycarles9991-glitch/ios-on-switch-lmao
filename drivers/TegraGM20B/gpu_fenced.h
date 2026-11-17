@@ -28,6 +28,7 @@ static inline void prof_collect(struct tgm_chan *chan, u32 seqno, u64 start, u64
 	u32 draws = 0;
 	u32 sdraws = 0;
 	u32 ilk = 0;
+	u32 twin = 0;
 	u32 syncs = 0;
 	u64 sync_ns = 0;
 	struct switch_gpu_prof_seq *run = &chan->prof_run;
@@ -44,6 +45,7 @@ static inline void prof_collect(struct tgm_chan *chan, u32 seqno, u64 start, u64
 				[i]; /* a push not stamped: its draws ran in the next stamped one's time */
 		sdraws += chan->prof_sdraws[i];
 		ilk += chan->prof_ilk[i];
+		twin += chan->prof_twin[i];
 		if (c == TGM_PC_SKIP)
 			continue;
 		if (c >= TGM_PC_COUNT || slot[i].payload != seqno)
@@ -65,10 +67,11 @@ static inline void prof_collect(struct tgm_chan *chan, u32 seqno, u64 start, u64
 			at->ilk = (u8)min_t(u32, ilk, 0xff);
 			at->draws = (u16)min_t(u32, draws, 0xffff);
 			at->kpx = chan->prof_kpx[i];
+			at->twins = (u16)min_t(u32, twin, 0xffff);
 			at->us = (u32)(tgm_deadline_pt_ns(t - prev) / 1000);
 		}
 		run->pushes++;
-		draws = sdraws = ilk = 0;
+		draws = sdraws = ilk = twin = 0;
 		prev = t;
 	}
 	if (end >= prev) {

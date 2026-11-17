@@ -51,21 +51,6 @@ inline bool ycbcrRenderedFormat(uint32_t pixelFormat)
     return (pixelFormat >= 500 && pixelFormat <= 548 && pixelFormat != 542) || packedPlaneChannels(pixelFormat);
 }
 
-// The MTLColorWriteMask bits a state's attachment of such a format writes for its stand-in to hold every channel the
-// store reads: red, green and blue, or the packed plane's red (and green)
-inline uint32_t ycbcrTargetWrites(uint32_t pixelFormat)
-{
-    constexpr uint32_t kRed = 8, kGreen = 4, kBlue = 2;
-    switch (packedPlaneChannels(pixelFormat)) {
-    case 1:
-        return kRed;
-    case 2:
-        return kRed | kGreen;
-    default:
-        return kRed | kGreen | kBlue;
-    }
-}
-
 // Null where the raw path renders passes into a two-plane YCbCr attachment of `pixelFormat` (its stand-in, then the pack's
 // store states into the planes: pack/ycbcr_store.metal), else why it cannot
 inline const char *ycbcrTargetRefusal(uint32_t pixelFormat)

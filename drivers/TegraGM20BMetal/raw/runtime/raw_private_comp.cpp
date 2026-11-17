@@ -207,6 +207,8 @@ bool Device::plainFromCompressed(Texture &t)
     CommandBuffer *rc = begin();
     bool copied = rc != nullptr;
     if (copied) {
+        rc->use(headers, false);
+        rc->useAddress(tic_.va, tic_.bytes, true);
         BlitEncoder *b = rc->blit();
         copyImages(*b, t, plain);
         for (size_t i = 0; i < tics.size(); i++)

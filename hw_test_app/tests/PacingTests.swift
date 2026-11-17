@@ -1,5 +1,6 @@
 import Foundation
 import HWTestCore
+import HWTestGPU
 import Metal
 import QuartzCore
 import UIKit
@@ -22,6 +23,7 @@ final class PacingRun: NSObject {
     private(set) var linkTimes: [CFTimeInterval] = []
     private(set) var late = 0
     private(set) var nilDrawables = 0
+    nonisolated let paths = CommandPaths()
     /// The first drawable's texture and its IOSurface, as "WxH/WxH": a quarter-turned drawable on the portrait panel
     /// shows as 1280x720/720x1280.
     private(set) var drawableShape = "-"
@@ -93,6 +95,7 @@ final class PacingRun: NSObject {
         let submitted = CACurrentMediaTime()
         drawable.addPresentedHandler { shown.add($0.presentedTime, submitted: submitted, measured: measuring) }
         commands.present(drawable)
+        paths.watch(commands)
         commands.commit()
     }
 }
@@ -190,7 +193,8 @@ public struct PacingTest: HWTest {
                 ("the app missed \(link.missed) frames (link_missed)", link.missed == 0),
                 ("\(shown.frames) of \(link.frames) probe frames shown with a time", shown.frames >= link.frames / 2),
                 ("the display missed \(shown.missed) frames (present_missed)", shown.missed == 0),
-            ], metrics)
+            ], metrics
+        ).onRawPath(recorder.paths, device: MTLCreateSystemDefaultDevice())
     }
 }
 

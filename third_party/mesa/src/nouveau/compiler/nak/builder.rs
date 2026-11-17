@@ -398,6 +398,18 @@ pub trait SSABuilder: Builder {
     }
 
     fn iadd64(&mut self, x: Src, y: Src, z: Src) -> SSARef {
+        // ios-on-switch-lmao: SM50 forms IADD3 (has_iadd3), so NIR's iadd3 reaches here at 64 bits too; before Volta a 64-bit
+        // add takes two sources (IADD + IADD.X over one carry), so a third is a second add
+        if self.sm() < 70 && !z.is_zero() {
+            if x.is_zero() {
+                return self.iadd64(y, z, 0.into());
+            }
+            if y.is_zero() {
+                return self.iadd64(x, z, 0.into());
+            }
+            let xy = self.iadd64(x, y, 0.into());
+            return self.iadd64(xy.into(), z, 0.into());
+        }
         fn split_iadd64_src(src: Src) -> [Src; 2] {
             match src.src_ref {
                 SrcRef::Zero => [0.into(), 0.into()],
@@ -1037,5 +1049,36 @@ impl<T: SSABuilder> SSABuilder for UniformBuilder<'_, T> {
             file
         };
         self.b.alloc_ssa_vec(file, comps)
+    }
+}
+
+// ios-on-switch-lmao: a 64-bit three-source add (NIR's iadd3, which SM50 forms) before Volta, which has no 64-bit IADD3
+#[cfg(test)]
+mod sm50_iadd64_tests {
+    use super::*;
+
+    fn adds(sm: u8, zero: Option<usize>) -> (usize, usize) {
+        let model = ShaderModelInfo::new(sm, 64);
+        let mut alloc = SSAValueAllocator::new();
+        let mut b = SSAInstrBuilder::new(&model, &mut alloc);
+        let mut srcs: Vec<Src> = (0..3)
+            .map(|_| b.alloc_ssa_vec(RegFile::GPR, 2).into())
+            .collect();
+        if let Some(i) = zero {
+            srcs[i] = 0.into();
+        }
+        b.iadd64(srcs[0].clone(), srcs[1].clone(), srcs[2].clone());
+        let instrs = b.into_vec();
+        let count = |f: fn(&Op) -> bool| instrs.iter().filter(|i| f(&i.op)).count();
+        (count(|op| matches!(op, Op::IAdd2(_))), count(|op| matches!(op, Op::IAdd2X(_))))
+    }
+
+    #[test]
+    fn a_third_source_is_a_second_add_on_maxwell() {
+        assert_eq!(adds(50, None), (2, 2));
+        assert_eq!(adds(53, None), (2, 2));
+        for zero in 0..3 {
+            assert_eq!(adds(53, Some(zero)), (1, 1));
+        }
     }
 }

@@ -5,10 +5,13 @@
 // leaves a block-linear surface on its memory's record, whose first CPU lock, next import or other engine moves its
 // texels back to rows, and whose memory going ends it unmoved.
 #include <gtest/gtest.h>
+#include <set>
+#include <string>
 #include "drivers/TegraGM20B/TegraGM20BLayoutAsk.h"
 #include "drivers/TegraGM20B/TegraGM20BGpu.h"
 #include "drivers/TegraGM20B/TegraGM20BRelayout.h"
 #include "drivers/TegraGM20B/TegraGM20BTiled.h"
+#include "drivers/TegraGM20B/TegraGM20BTiledDecision.h"
 #include "drivers/TegraGM20B/TegraGM20BViews.h"
 #include "drivers/TegraDisplayFlip/TegraScanoutCopy.h"
 #include "gm20b_record_model.h"
@@ -153,54 +156,21 @@ TEST_F(Deferred, ASamplerOfAFreshSurfaceTilesWhatItHolds)
 	tgm_coherency_record_gone(&record);
 }
 
-// An unlocked CPU read of a block-linear surface sees texels, and no lock shows a reader in another process rows unless it
-// takes one: a surface another process maps when its first writer or sampler asks (made by one process and rendered by
-// another, the way a render server fills a client's snapshot) stays pitch. The asking process's own mapping does not
-// count (this host's process is 1).
-TEST_F(Deferred, ASurfaceAnotherProcessMapsForTheCpuStaysPitch)
+// Boot 22: 522 snapshot surfaces (made and mapped by SpringBoard, migrationpluginwrapper or an app's UIKit, rendered
+// first by backboardd, read by their maker under IOSurfaceLock) stayed pitch for that mapping, a decision the debug line
+// printed as "(null)". Every decision has a name of its own, and pitch has only the four named reasons.
+TEST(LayoutDecision, EveryDecisionHasANameOfItsOwn)
 {
-	struct Case {
-		const char *what;
-		int32_t mappers[2];
-		int layout;
-	};
-
-	const Case cases[] = {
-		{"mapped by the asker alone", {1, 0}, 1},
-		{"made by another process", {7, 0}, 0},
-		{"made by the asker, looked up by another", {1, 7}, 0},
-		{"mapped by no process (IOSurfaceHostOnly)", {0, 0}, 1},
-	};
-	uint64_t first = 0xd0e00000;
-	for (const Case &k : cases) {
-		gMoves.clear();
-		const auto p = pages(first += 0x10000);
-		tgm_record record{nullptr, 306};
-		for (const int32_t pid : k.mappers)
-			if (pid)
-				tgm_record_mappers_note(&record.mappers, pid);
-		tgm_coh *c = import(p, 306, record, 1);
-		EXPECT_EQ(ask(c), k.layout) << k.what;
-		EXPECT_EQ(tegra_gm20b_surface_tiled(p[0]), k.layout) << k.what;
-		if (!k.layout)
-			EXPECT_TRUE(gMoves.empty()) << k.what;
-		tgm_coherency_put(c);
-		tgm_coherency_record_gone(&record);
+	using tgm_layout_decision::Decision;
+	std::set<std::string> names;
+	for (int d = 0; d < tgm_layout_decision::Decisions; d++) {
+		const char *why = tgm_layout_decision::why(static_cast<Decision>(d));
+		ASSERT_NE(why, nullptr) << d;
+		EXPECT_STRNE(why, "?") << d;
+		names.insert(why);
 	}
-}
-
-TEST(RecordMappers, TheFirstMapperIsKeptAndAnyOtherIsSeen)
-{
-	tgm_record_mappers m{};
-	EXPECT_FALSE(tgm_record_mappers_other(&m, 5));
-	tgm_record_mappers_note(&m, 5);
-	tgm_record_mappers_note(&m, 5);
-	EXPECT_FALSE(tgm_record_mappers_other(&m, 5));
-	EXPECT_TRUE(tgm_record_mappers_other(&m, 6));
-	tgm_record_mappers_note(&m, 6);
-	EXPECT_EQ(m.first, 5);
-	EXPECT_TRUE(tgm_record_mappers_other(&m, 5));
-	EXPECT_TRUE(tgm_record_mappers_other(&m, 6));
+	EXPECT_EQ(names.size(), size_t(tgm_layout_decision::Decisions));
+	EXPECT_EQ(tgm_layout_decision::Decisions, 5) << "block-linear and four pitch reasons";
 }
 
 TEST_F(Deferred, ALastImportLeavesTheSurfaceBlockLinearOnItsRecord)

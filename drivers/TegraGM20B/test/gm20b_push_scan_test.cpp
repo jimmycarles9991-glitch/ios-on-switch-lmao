@@ -237,6 +237,42 @@ TEST(GM20BPushScan, PixelShaderBarrierAndInterlock)
 	CHECK(e.c.psBarriers == 1 && e.c.texInval == 1 && e.c.wfi == 0);
 	CHECK(e.c.interlocks == 1);
 	CHECK(e.cls[0] == TGM_PC_SYNC && e.cls[1] == TGM_PC_STATE);
+	CHECK(e.c.twinDraws == 0);
+}
+
+// The raw path's barrier twin (rule fetch.twin): a triangle a draw, each after a PIXEL_SHADER_BARRIER and the texture
+// invalidate it orders. A pass's first draw has no draw of its pass to wait for, so a barrier before it (a pixel-ordered
+// pass opening) is no twin's, and neither is a draw with no barrier since the one before. NVK's macro draws count the same.
+static void twin_triangle(Push &p)
+{
+	p.push_back(immd(0, 0x0de0, 0));
+	p.push_back(immd(0, 0x0f74, 0));
+	raw_draw(p);
+}
+
+TEST(GM20BPushScan, TwinDrawsAreTheDrawsABarrierOrdersAfterAnEarlierOneOfTheirPass)
+{
+	Push t0, t1, t2;
+	raw_target(t0, 1280, 720);
+	twin_triangle(t0);
+	for (int i = 0; i < 9; i++)
+		twin_triangle(t1);
+	raw_draw(t1);
+	raw_target(t2, 1280, 720);
+	twin_triangle(t2);
+	raw_draw(t2);
+	Result r = scan({&t0, &t1, &t2});
+	CHECK(r.c.passes == 2 && r.c.draws == 13 && r.c.psBarriers == 11);
+	CHECK(r.c.twinDraws == 9);
+	CHECK(r.c.interlocks == 0);
+
+	Push n0, n1;
+	begin_pass(n0, 720, 1280, false, 0, false);
+	draws(n0, 1);
+	n1 = {immd(0, 0x0de0, 0), immd(0, 0x0f74, 0)};
+	draws(n1, 2);
+	Result m = scan({&n0, &n1});
+	CHECK(m.c.draws == 3 && m.c.twinDraws == 1);
 }
 
 // A hang's line names the last engine method of the hung submission: F-v1's twod_clear ended on the 2D engine's

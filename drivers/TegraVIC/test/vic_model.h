@@ -23,7 +23,9 @@
 //               2-tap job is modelled as 1-tap (the same at 1:1)
 //   colour      10-bit pipeline: RGB in as x << 2, Y'CbCr in as x << 2 | x >> 6 (V4's measured widening), the slot and
 //               output matrices through tegra_vic_matrix_apply, out as x >> 2; Cb in pipeline channel 2, Cr in 1
-//               (T210B01, as V4 measures it)
+//               (T210B01, as V4 measures it). Those are VIC's V and U: Table 51 of the TRM (p.706) names T_Y8___U8V8
+//               NV21, U the pair's second byte; so a three-plane source's chroma-U plane goes into channel 1 and its
+//               chroma-V plane into channel 2
 // Every access is checked against the regions the test maps; one outside them counts as a fault. Pitch linear only.
 #ifndef VIC_MODEL_H
 #define VIC_MODEL_H
@@ -103,11 +105,23 @@ static inline uint32_t vic_model_widen(uint32_t v8)
 
 typedef struct {
     uint32_t format, pitched, lw, lh, cw, matrixOn;
-    uint64_t luma, chroma;
+    uint64_t luma, chroma, chromaV;
     TegraVICMatrix matrix;
 } VicModelSlot;
 
-static inline void vic_model_slot(const uint8_t *cfg, uint64_t luma, uint64_t chroma, VicModelSlot *s)
+static inline int vic_model_planar(uint32_t format)
+{
+    return format == TEGRA_VIC_T_Y8___U8___V8_N444 || format == TEGRA_VIC_T_Y8___U8___V8_N422 ||
+           format == TEGRA_VIC_T_Y8___U8___V8_N420;
+}
+
+static inline int vic_model_semi_planar(uint32_t format)
+{
+    return format == TEGRA_VIC_T_Y8___U8V8_N420 || format == TEGRA_VIC_T_Y8___U8V8_N422 ||
+           format == TEGRA_VIC_T_Y8___U8V8_N444;
+}
+
+static inline void vic_model_slot(const uint8_t *cfg, uint64_t luma, uint64_t chroma, uint64_t chromaV, VicModelSlot *s)
 {
     const uint32_t sf = TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_SURFACE;
     s->format = (uint32_t)TEGRA_VIC_GET(cfg, sf, SURF_FORMAT);
@@ -118,6 +132,7 @@ static inline void vic_model_slot(const uint8_t *cfg, uint64_t luma, uint64_t ch
     s->matrixOn = (uint32_t)vic_model_matrix(cfg, TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_MATRIX, &s->matrix);
     s->luma = luma;
     s->chroma = chroma;
+    s->chromaV = chromaV;
 }
 
 static inline int vic_model_read(VicModel *m, const VicModelSlot *s, uint32_t x, uint32_t y, VicModelPixel *p)
@@ -138,15 +153,29 @@ static inline int vic_model_read(VicModel *m, const VicModelSlot *s, uint32_t x,
         p->c[1] = ((w >> 8) & 0xff) << 2;
         p->c[2] = b << 2;
         p->a = vic_model_widen(w >> 24);
-    } else if (s->format == TEGRA_VIC_T_Y8___U8V8_N420 || s->format == TEGRA_VIC_T_Y8___U8V8_N422) {
-        const uint32_t cy = s->format == TEGRA_VIC_T_Y8___U8V8_N420 ? y / 2 : y;
+    } else if (vic_model_semi_planar(s->format) || vic_model_planar(s->format)) {
+        const int full = s->format == TEGRA_VIC_T_Y8___U8V8_N444 || s->format == TEGRA_VIC_T_Y8___U8___V8_N444;
+        const int halfRows = s->format == TEGRA_VIC_T_Y8___U8V8_N420 || s->format == TEGRA_VIC_T_Y8___U8___V8_N420;
+        const uint64_t cx = full ? x : x / 2;
+        const uint64_t at = (halfRows ? y / 2 : y) * (uint64_t)s->cw + cx;
         const uint8_t *yq = vic_model_at(m, s->luma + (uint64_t)y * s->lw + x, 1);
-        const uint8_t *cq = vic_model_at(m, s->chroma + ((uint64_t)cy * s->cw + x / 2) * 2, 2);
-        if (!yq || !cq)
+        if (!yq)
             return 0;
         p->c[0] = vic_model_widen(yq[0]);
-        p->c[2] = vic_model_widen(cq[0]);  // Cb
-        p->c[1] = vic_model_widen(cq[1]);  // Cr
+        if (vic_model_planar(s->format)) {
+            const uint8_t *uq = vic_model_at(m, s->chroma + at, 1);
+            const uint8_t *vq = vic_model_at(m, s->chromaV + at, 1);
+            if (!uq || !vq)
+                return 0;
+            p->c[1] = vic_model_widen(uq[0]);
+            p->c[2] = vic_model_widen(vq[0]);
+        } else {
+            const uint8_t *cq = vic_model_at(m, s->chroma + at * 2, 2);
+            if (!cq)
+                return 0;
+            p->c[2] = vic_model_widen(cq[0]);  // Cb
+            p->c[1] = vic_model_widen(cq[1]);  // Cr
+        }
         p->a = 1023;
     } else {
         m->faults++;
@@ -232,6 +261,7 @@ static inline void vic_model_run(VicModel *m, const TegraVICJob *job)
     const uint64_t outChroma = (uint64_t)vic_model_method(job, TEGRA_VIC_M_OUTPUT_CHROMA_U, &found) << 8;
     const uint64_t inLuma = (uint64_t)vic_model_method(job, TEGRA_VIC_M_SURFACE0_SLOT0_LUMA, &found) << 8;
     const uint64_t inChroma = (uint64_t)vic_model_method(job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U, &found) << 8;
+    const uint64_t inChromaV = (uint64_t)vic_model_method(job, TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V, &found) << 8;
     const uint32_t tr = (uint32_t)TEGRA_VIC_GET(c, TEGRA_VIC_OUTPUT, OUT_TRANSPOSE);
     VicModelJob j;
     j.fx = (uint32_t)TEGRA_VIC_GET(c, TEGRA_VIC_OUTPUT, OUT_FLIP_X);
@@ -270,7 +300,7 @@ static inline void vic_model_run(VicModel *m, const TegraVICJob *job)
     j.background.c[2] = (uint32_t)TEGRA_VIC_GET(c, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_B);
     j.background.a = (uint32_t)TEGRA_VIC_GET(c, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA);
     j.outMatrixOn = vic_model_matrix(c, TEGRA_VIC_OUT_MATRIX, &j.outMatrix);
-    vic_model_slot(c, inLuma, inChroma, &j.in);
+    vic_model_slot(c, inLuma, inChroma, inChromaV, &j.in);
     for (uint32_t y = j.T; y <= j.B; y++)
         for (uint32_t x = j.L; x <= j.R; x++) {
             VicModelPixel p;
@@ -294,15 +324,14 @@ static inline void vic_model_run(VicModel *m, const TegraVICJob *job)
                     a << 24 | (format == TEGRA_VIC_T_A8R8G8B8 ? (r << 16 | g << 8 | b) : (b << 16 | g << 8 | r));
                 memcpy(q, &w, 4);
                 m->writes++;
-            } else if (format == TEGRA_VIC_T_Y8___U8V8_N420 || format == TEGRA_VIC_T_Y8___U8V8_N422 ||
-                       format == TEGRA_VIC_T_Y8___U8V8_N422R) {
+            } else if (vic_model_semi_planar(format) || format == TEGRA_VIC_T_Y8___U8V8_N422R) {
                 uint8_t *q = vic_model_at(m, outLuma + at, 1);
                 if (!q)
                     continue;
                 q[0] = (uint8_t)(p.c[0] >> 2);
                 m->writes++;
-                const uint32_t halfCol = format != TEGRA_VIC_T_Y8___U8V8_N422R;
-                const uint32_t halfRow = format != TEGRA_VIC_T_Y8___U8V8_N422;
+                const uint32_t halfCol = format == TEGRA_VIC_T_Y8___U8V8_N420 || format == TEGRA_VIC_T_Y8___U8V8_N422;
+                const uint32_t halfRow = format == TEGRA_VIC_T_Y8___U8V8_N420 || format == TEGRA_VIC_T_Y8___U8V8_N422R;
                 if ((halfCol && (col & 1)) || (halfRow && (row & 1)))
                     continue;
                 const uint32_t ccol = halfCol ? col / 2 : col, crow = halfRow ? row / 2 : row;

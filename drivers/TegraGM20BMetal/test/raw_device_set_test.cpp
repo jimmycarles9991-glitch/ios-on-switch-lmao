@@ -22,6 +22,8 @@ protected:
         if (!e)
             return 0;
         cb->useHeap(heap);
+        cb->use(from, false);
+        cb->use(to, true, false);
         e->copyBytes(from.va, to.va, 4096);
         e->end();
         uint32_t seqno = 0;
@@ -141,6 +143,8 @@ TEST_F(DeviceSet, TheIdleGiveBackAfterABenchLeavesASetTheKernelTakes)
         raw::CommandBuffer *cb = bench.begin();
         raw::BlitEncoder *e = cb ? cb->blit() : nullptr;
         ASSERT_NE(e, nullptr);
+        cb->use(x, false);
+        cb->use(y, true, false);
         e->copyBytes(x.va, y.va, 4096);
         e->end();
         uint32_t seqno = 0;

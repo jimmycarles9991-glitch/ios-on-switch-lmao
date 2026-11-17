@@ -101,6 +101,7 @@ host_test(
 
 host_test(
     name = "cryptex_map_test",
+    size = "medium",
     srcs = [
         "cryptex_map_test.cpp",
         "//drivers/NativeSwitchBlock:SwitchCryptexMap.h",

@@ -9,10 +9,10 @@
 // time with barriers between: it is drawn once per amplification. Its view mappings are the state's words too: the
 // direct compile makes an amplifying state as for a layered pass with viewport offsets, so its vertex program writes
 // Layer and ViewportIndex from the amplification's AmplificationLayerOffset and AmplificationViewportOffset words below
-// the pass's length and the encoder's count (Pipeline::amplificationLayerWord, amplificationViewportWord), as Metal adds a
-// mapping's offsets. A state of a dynamic stride reads its bind's stride: its vertex stream's at each draw, a pulled
-// layout's from its VertexBufferStride word. A bind stride past the stream's field draws the state's stride twin, which
-// pulls those layouts in the shader.
+// the pass's length and the encoder's count (PackPipeline::amplificationLayerWord, amplificationViewportWord), as Metal
+// adds a mapping's offsets. A state of a dynamic stride reads its bind's stride: its vertex stream's at each draw, a
+// pulled layout's from its VertexBufferStride word. A bind stride past the stream's field draws the state's stride twin,
+// which pulls those layouts in the shader.
 #include <algorithm>
 #include "raw_gpu.h"
 
@@ -41,23 +41,25 @@ void RenderEncoder::setAmplification(uint32_t count, const uint32_t (&viewports)
     std::copy(std::begin(viewports), std::end(viewports), amplificationViewports_);
     std::copy(std::begin(layers), std::end(layers), amplificationLayers_);
     amplificationDirty_ = true;
-    amplificationMapsWide_ = false;
-    for (uint32_t a = 0; a < std::min(amplifications_, kAmplificationMaps); a++)
-        amplificationMapsWide_ |= ((layers[a] | viewports[a]) >> SWITCH_GM20B_AMP_MAP_VIEWPORT_SHIFT) != 0;
 }
 
-const char *RenderEncoder::drawnWordsRefusal(const PackPipeline &r) const
+const char *RenderEncoder::drawnWordsRefusal(const PackPipeline &r, Refusal &refusal) const
 {
     const uint32_t most = std::max<uint32_t>(1, r.amplificationMax);
-    if (amplifications_ > most)
+    refusal = {};
+    if (amplifications_ > most) {
+        refusal = {RefAmplificationCount, amplifications_, most, 0};
         return "a vertex amplification count above the state's maxVertexAmplificationCount";
-    if (amplificationMapsWide_)
-        return "a vertex amplification view mapping's offset past the 16 bits of its scratch word";
+    }
     for (uint32_t k = 1; k < kPackVertexStreams && r.vertexStreams[k - 1]; k++)
-        if (streamSlot(r.vertexStreams[k - 1]) >= 31)
+        if (streamSlot(r.vertexStreams[k - 1]) >= 31) {
+            refusal = {RefStreamSlot, streamSlot(r.vertexStreams[k - 1])};
             return "a vertex stream of no Metal buffer";
-    if (bindStridePastStream(r))
+        }
+    if (bindStridePastStream(r)) {
+        refusal = {RefStrideTwin};
         return "a vertex buffer bind stride past the vertex stream's 12-bit stride, of a state with no stride twin";
+    }
     return nullptr;
 }
 
@@ -79,8 +81,8 @@ void RenderEncoder::icbAmplification(uint32_t a)
     amplificationDirty_ = true;
     const uint32_t m = a < kAmplificationMaps ? a : 0;
     const std::pair<uint8_t, uint32_t> words[] = {{pl.rec->amplificationIdWord, a},
-                                                  {pl.amplificationLayerWord, amplificationLayers_[m]},
-                                                  {pl.amplificationViewportWord, amplificationViewports_[m]}};
+                                                  {pl.rec->amplificationLayerWord, amplificationLayers_[m]},
+                                                  {pl.rec->amplificationViewportWord, amplificationViewports_[m]}};
     for (const auto &[word, value] : words) {
         if (!word || word > 32 || cb_->rootPush_[word - 1] == value)
             continue;
@@ -112,8 +114,8 @@ void RenderEncoder::amplificationScratch(Push &p, const Pipeline &pl)
     mme::AmplificationWords words;
     words.id = byte(r.amplificationIdWord);
     words.count = byte(r.amplificationCountWord);
-    words.viewport = byte(pl.amplificationViewportWord);
-    words.layer = pl.amplificationLayerWord ? byte(pl.amplificationLayerWord) : SWITCH_GM20B_AMP_LAYER_FIRST;
+    words.viewport = byte(r.amplificationViewportWord);
+    words.layer = r.amplificationLayerWord ? byte(r.amplificationLayerWord) : SWITCH_GM20B_AMP_LAYER_FIRST;
     words.barrier = fetchesOwnColor(pl.fetchBits, pl.writeBits, pl.storageBits);
     if (!words.same(heldAmplification_)) {
         mme::amplificationWords(p, words);
@@ -135,10 +137,12 @@ void RenderEncoder::heldAmplifyWords(const Pipeline &pl)
 {
     const PackPipeline &r = *pl.rec;
     const uint32_t last = std::min(amplifications_, kAmplificationMaps) - 1;
+    const uint32_t layer = mme::mappedOffset(amplificationLayers_[last]),
+                   viewport = mme::mappedOffset(amplificationViewports_[last]);
     const std::pair<uint8_t, uint32_t> words[] = {{r.amplificationIdWord, amplifications_ - 1},
                                                   {r.amplificationCountWord, amplifications_},
-                                                  {pl.amplificationLayerWord, amplificationLayers_[last]},
-                                                  {pl.amplificationViewportWord, amplificationViewports_[last]}};
+                                                  {r.amplificationLayerWord, layer},
+                                                  {r.amplificationViewportWord, viewport}};
     for (const auto &[word, value] : words)
         if (word && word <= 32)
             cb_->rootPush_[word - 1] = value;
@@ -150,8 +154,8 @@ void RenderEncoder::drawnWords(const Pipeline &pl, uint32_t (&want)[32])
     // an amplify call and an indirect command buffer's execute write each amplification's own words themselves
     const uint32_t m = amplification_ < kAmplificationMaps ? amplification_ : 0;
     const std::pair<uint8_t, uint32_t> amplified[] = {{r.amplificationIdWord, amplification_},
-                                                      {pl.amplificationLayerWord, amplificationLayers_[m]},
-                                                      {pl.amplificationViewportWord, amplificationViewports_[m]}};
+                                                      {pl.rec->amplificationLayerWord, amplificationLayers_[m]},
+                                                      {pl.rec->amplificationViewportWord, amplificationViewports_[m]}};
     for (const auto &[word, value] : amplified)
         if (word && word <= 32)
             want[word - 1] = amplifies() ? cb_->rootPush_[word - 1] : value;

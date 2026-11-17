@@ -2491,9 +2491,15 @@ impl LdCacheOp {
         sm: &dyn ShaderModel,
         space: MemSpace,
         order: MemOrder,
-        _eviction_priority: MemEvictionPriority,
+        eviction_priority: MemEvictionPriority,
     ) -> Self {
         match space {
+            MemSpace::Global(_)
+                if sm.sm() < 70
+                    && eviction_priority == MemEvictionPriority::NoAllocate =>
+            {
+                LdCacheOp::CacheGlobal
+            }
             MemSpace::Global(_) => match order {
                 MemOrder::Constant => {
                     if sm.sm() >= 50 {

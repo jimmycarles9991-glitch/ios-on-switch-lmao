@@ -58,6 +58,13 @@ inline bool videoImage(const native_planes::Layer &picture, const switch_gpu_bac
     const uint32_t vInc = ddaIncrement(uint32_t(src.w), uint32_t(dst.h), 15);
     if (!hInc || !vInc)
         return false;
+    // Core Animation's pixel-centre phase, (inc - 1) / 2 source pixels at the first sample. Each initial DDA is only its
+    // fraction, as L4T window.c writes it (dfixed_frac): the TRM (24.10.7) has the hardware force the integer portion
+    // itself. From 3x down the phase passes 1.0, and window A underflowed from its first landscape frame with 1.3 in
+    // both (1920x1080 onto 300x534). An even whole part moves into the offsets and PRESCALED_SIZE; an odd one leaves
+    // its last pixel out, so the offsets keep the parity of the 4:2:0 pair the column scan was proven on (probe V3).
+    const uint32_t rowPhase = hInc > 4096 ? (hInc - 4096) / 2 : 0, columnPhase = vInc > 4096 ? (vInc - 4096) / 2 : 0;
+    const uint32_t rows = (rowPhase >> 12) & ~1u, columns = (columnPhase >> 12) & ~1u;
     image = Image();
     image.visible = true;
     image.yuv = true;
@@ -65,13 +72,13 @@ inline bool videoImage(const native_planes::Layer &picture, const switch_gpu_bac
     image.colorDepth = kDepthYCbCr420SP;
     image.position = uint32_t(dst.y) << 16 | uint32_t(dst.x);
     image.size = uint32_t(dst.h) << 16 | uint32_t(dst.w);
-    image.prescaled = uint32_t(src.w) << 16 | uint32_t(src.h);
+    image.prescaled = (uint32_t(src.w) - columns) << 16 | (uint32_t(src.h) - rows);
     image.dda = vInc << 16 | hInc;
-    image.hInitial = hInc > 4096 ? (hInc - 4096) / 2 : 0;
-    image.vInitial = vInc > 4096 ? (vInc - 4096) / 2 : 0;
+    image.hInitial = rowPhase & 0xfff;
+    image.vInitial = columnPhase & 0xfff;
     const uint32_t x0 = cropX + uint32_t(src.x), y0 = cropY + uint32_t(src.y);
-    image.hOffset = turn.hDirection ? x0 + uint32_t(src.w) - 1 : x0;
-    const uint32_t v = turn.vDirection ? y0 + uint32_t(src.h) - 1 : y0;
+    image.hOffset = turn.hDirection ? x0 + uint32_t(src.w) - 1 - columns : x0 + columns;
+    const uint32_t v = turn.vDirection ? y0 + uint32_t(src.h) - 1 - rows : y0 + rows;
     if (v > 0xffff)
         return false;
     image.vOffset = uint16_t(v);

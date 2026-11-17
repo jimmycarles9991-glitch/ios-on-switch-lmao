@@ -41,8 +41,24 @@ final class RenderBoxCornerTests: XCTestCase {
                 XCTAssertEqual(cell.beyond, 0, "\(side) \(cell.storage)")
                 XCTAssertGreaterThan(cell.referencePartial, 0)
                 XCTAssertGreaterThanOrEqual(cell.partial * 4, cell.referencePartial * 3, "\(side) \(cell.storage)")
+                let mac = try XCTUnwrap(RenderBoxCorner.macReference[side])
+                XCTAssertEqual(cell.partial, mac.partial, "\(side) \(cell.storage): RenderBoxCorner.macReference")
+                XCTAssertEqual(cell.maxDiff, mac.maxDiff, "\(side) \(cell.storage): RenderBoxCorner.macReference")
+                XCTAssertNil(RenderBoxCorner.offMac(cell))
             }
         }
+    }
+
+    func testACellOffTheMacsDrawingIsNamed() {
+        var cell = RenderBoxCorner.Cell(side: 136, storage: "private")
+        cell.partial = 236
+        cell.maxDiff = 24
+        XCTAssertNil(RenderBoxCorner.offMac(cell))
+        cell.partial = 200
+        XCTAssertEqual(RenderBoxCorner.offMac(cell), "partial 200 under the Mac's 236")
+        cell.partial = 236
+        cell.maxDiff = 36
+        XCTAssertEqual(RenderBoxCorner.offMac(cell), "max_diff 36 over the Mac's 24")
     }
 
     func testASteppedCornerIsBeyondTheTolerance() {

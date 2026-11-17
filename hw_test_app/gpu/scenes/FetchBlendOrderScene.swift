@@ -14,8 +14,7 @@ import Metal
 ///
 /// <shape>=ok|bad each; a bad shape adds <shape>_wrong (pixels, its three formats together) and <shape>_first
 /// (format:x,y:got:r/g/b/a:want:r/g/b/a in steps). On the raw facade fetch_<shape> is how the fetch counters say it
-/// kept order, warm_<shape> the runs drawn by m2v until the state was made, and a pass that is still not drawn raw
-/// fails. The frozen m2v device is not run.
+/// kept order, and a pass not drawn raw fails.
 struct FetchBlendOrderScene: GPUScene {
     let id = "gpu.raw.fetch_blend_order"
     let name = "Self-blending framebuffer fetch: overlapping draws of every shape, in primitive order"

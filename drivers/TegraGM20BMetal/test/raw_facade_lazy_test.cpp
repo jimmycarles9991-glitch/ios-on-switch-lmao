@@ -2,13 +2,17 @@
 // A process that draws only states the pack holds never opens its m2v device (RawM2V); each thing only m2v does opens it
 // once, at its first use, naming it. Each scenario is a process of its own: one raw device and one m2v device a process.
 #include "raw_facade_harness.h"
+#include "reflection_blob_writer.h"
 #include "MetalABI.h"
 #include "bazel/testing/fresh_process.h"
 
 #import <IOSurface/IOSurface.h>
 #include <gtest/gtest.h>
+#include <cmath>
 #include <mach/vm_page_size.h>
+#include <algorithm>
 #include <set>
+#include <vector>
 
 @protocol HarnessDeviceSPI
 - (id<MTLBuffer>)newBufferWithIOSurface:(IOSurfaceRef)surface;
@@ -117,27 +121,73 @@ void packedDraw()
     note("packed_draw", line);
 }
 
+// A state of this device's functions that no record draws (the pack lacks it and no shader compiler serves the process)
+// fails its creation with Metal's error, as a state Metal could not compile; it is never m2v's
 void unpackedState()
 {
     const auto [device, library] = openWithLibrary(writePack(packKey(kPacked)));
     ASSERT_TRUE(device != nil && library != nil);
     NSError *error = nil;
-    (void)[device newRenderPipelineStateWithDescriptor:descriptor(library, kUnpacked) error:&error];
-    expectOpenedFor(device, "a render state's twin");
+    EXPECT_EQ([device newRenderPipelineStateWithDescriptor:descriptor(library, kUnpacked) error:&error], nil);
+    EXPECT_EQ(error.domain, MTLLibraryErrorDomain);
+    EXPECT_EQ(gOpens, 0);
 }
 
+// One buffer binding, "uniforms" at index 2, as a blob of `stages` stages
+std::string oneBinding(uint32_t stages)
+{
+    NmbReflectionNode root = {}, binding = {};
+    root.count = 1;
+    binding.kind = raw::ReflectionBinding;
+    binding.name = "uniforms";
+    binding.flags = 1;
+    binding.values[0] = MTLBindingTypeBuffer;
+    binding.values[2] = 2;
+    for (NmbReflectionNode *n : {&root, &binding})
+        std::fill(std::begin(n->children), std::end(n->children), raw::kReflectionAbsent);
+    return reflection_blob::of({root, binding}, {1}, stages);
+}
+
+// A render and a compute state's reflections asked with argument info are the pack's (PackReflections): no m2v device
+// opens, and without the option none is given
 void reflection()
 {
-    const auto [device, library] = openWithLibrary(writePack(packKey(kPacked)));
-    ASSERT_TRUE(device != nil && library != nil);
-    MTLAutoreleasedRenderPipelineReflection reflected = nil;
+    const std::string metallib = writeMetallib();
+    const uint64_t kernelState = computeStateHash(metallib, "k");
+    const std::string key = packKey(kPacked);
+    const std::string reflections = reflection_blob::section(
+        {{raw::Pack::fnv(key.data(), key.size()), false, oneBinding(5)}, {kernelState, true, oneBinding(1)}});
+    id<MTLDevice> device = open(writePack(key, {}, {{kernelState, 768, 32, 1024, 0}}, true, reflections));
+    ASSERT_TRUE(device != nil);
     NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib.c_str())] error:&error];
+    ASSERT_TRUE(library != nil) << text(error);
+    MTLAutoreleasedRenderPipelineReflection reflected = nil;
     id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:descriptor(library, kPacked)
                                                                             options:MTLPipelineOptionArgumentInfo
                                                                          reflection:&reflected
                                                                               error:&error];
     EXPECT_TRUE(state != nil) << text(error);
-    expectOpenedFor(device, "a render state's twin with its reflection");
+    ASSERT_EQ(reflected.vertexBindings.count, 1u);
+    EXPECT_STREQ(reflected.vertexBindings[0].name.UTF8String, "uniforms");
+    EXPECT_EQ(reflected.vertexBindings[0].index, 2u);
+    EXPECT_EQ(reflected.fragmentBindings.count, 0u);
+    MTLAutoreleasedComputePipelineReflection computed = nil;
+    id<MTLComputePipelineState> kernel = [device newComputePipelineStateWithFunction:[library newFunctionWithName:@"k"]
+                                                                             options:MTLPipelineOptionBufferTypeInfo
+                                                                          reflection:&computed
+                                                                               error:&error];
+    EXPECT_TRUE(kernel != nil) << text(error);
+    ASSERT_EQ(computed.bindings.count, 1u);
+    EXPECT_STREQ(computed.bindings[0].name.UTF8String, "uniforms");
+    MTLAutoreleasedRenderPipelineReflection unasked = nil;
+    (void)[device newRenderPipelineStateWithDescriptor:descriptor(library, kPacked)
+                                               options:MTLPipelineOptionNone
+                                            reflection:&unasked
+                                                 error:&error];
+    EXPECT_EQ(unasked, nil);
+    EXPECT_EQ(gOpens, 0);
+    EXPECT_EQ([m2vRecord(device)[@"needs"] count], 0u) << text(m2vRecord(device));
 }
 
 void foreignSampler()
@@ -154,11 +204,16 @@ void foreignSampler()
     EXPECT_TRUE([(id)[device newSamplerStateWithDescriptor:white] isKindOfClass:NSClassFromString(@"RMSampler")])
         << "an opaque border is the raw sampler's";
     EXPECT_EQ(gOpens, 0);
+    MTLSamplerDescriptor *mirrored = [MTLSamplerDescriptor new];
+    mirrored.normalizedCoordinates = NO;
+    mirrored.sAddressMode = MTLSamplerAddressModeMirrorClampToEdge;
+    EXPECT_TRUE([(id)[device newSamplerStateWithDescriptor:mirrored] isKindOfClass:NSClassFromString(@"RMSampler")])
+        << "pixel coordinates mirrored once are the raw sampler's, clamped to the edge";
+    EXPECT_EQ(gOpens, 0);
     MTLSamplerDescriptor *s = [MTLSamplerDescriptor new];
-    s.normalizedCoordinates = NO;
-    s.sAddressMode = MTLSamplerAddressModeMirrorClampToEdge;
-    (void)[device newSamplerStateWithDescriptor:s];
-    expectOpenedFor(device, "a sampler's twin");
+    s.lodMinClamp = NAN;
+    EXPECT_EQ([device newSamplerStateWithDescriptor:s], nil) << "a sampler the device has no form of is nil";
+    EXPECT_EQ(gOpens, 0);
 }
 
 // A method of m2v's device class the raw device has none of answers respondsToSelector: at once, opens the m2v device at
@@ -175,7 +230,8 @@ void inheritedMethod()
     EXPECT_EQ(gOpens, 1);
 }
 
-// A compute state the pack answers is made without m2v, its answers the pack's; one it has no answers of opens m2v
+// A compute state the pack answers is made without m2v, its answers the pack's; one it has no answers of is the shader
+// compiler's (raw_facade_open_test), and with none this boot fails its creation, opening no m2v
 void computeStates()
 {
     const std::string metallib = writeMetallib();
@@ -197,32 +253,55 @@ void computeStates()
     MTLComputePipelineDescriptor *other = [MTLComputePipelineDescriptor new];
     other.computeFunction = kernel;
     other.maxTotalThreadsPerThreadgroup = 256;
-    (void)[device newComputePipelineStateWithDescriptor:other
-                                                options:MTLPipelineOptionNone
-                                             reflection:nil
-                                                  error:&error];
-    EXPECT_EQ(gOpens, 1);
-    EXPECT_NE(m2vRecord(device)[@"needs"][@"a compute state the pack has no facts of"], nil) << text(m2vRecord(device));
+    EXPECT_EQ(
+        [device newComputePipelineStateWithDescriptor:other options:MTLPipelineOptionNone reflection:nil error:&error],
+        nil);
+    EXPECT_NE(error, nil);
+    EXPECT_EQ(gOpens, 0);
+    EXPECT_EQ([m2vRecord(device)[@"needs"] count], 0u) << text(m2vRecord(device));
 }
 
 // A buffer over an IOSurface's pages and a linear texture's row are the raw device's own answers
 void surfaceBufferAndLinearRow()
 {
-    const auto [device, library] = openWithLibrary(writePack(packKey(kPacked)));
+    const Opened opened = openWithLibrary(writePack(packKey(kPacked)));
+    const id<MTLDevice> device = opened.device;
     ASSERT_TRUE(device != nil);
     id<HarnessDeviceSPI> spi = (id<HarnessDeviceSPI>)device;
-    IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef) @{
-        (id)kIOSurfaceWidth : @64,
-        (id)kIOSurfaceHeight : @64,
-        (id)kIOSurfaceBytesPerElement : @4,
-        (id)kIOSurfacePixelFormat : @(uint32_t('BGRA'))
-    });
-    ASSERT_TRUE(surface != nullptr);
-    id<MTLBuffer> buffer = [spi newBufferWithIOSurface:surface];
-    ASSERT_TRUE(buffer != nil);
-    EXPECT_EQ(buffer.contents, IOSurfaceGetBaseAddress(surface));
-    EXPECT_EQ(buffer.length % vm_page_size, 0u);
-    EXPECT_GE(buffer.length, IOSurfaceGetAllocSize(surface));
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    id<MTLBuffer> copy = [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+    ASSERT_TRUE(queue != nil && copy != nil);
+    for (NSUInteger height : {64u, 80u, 96u, 112u}) {
+        IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef) @{
+            (id)kIOSurfaceWidth : @64,
+            (id)kIOSurfaceHeight : @(height),
+            (id)kIOSurfaceBytesPerElement : @4,
+            (id)kIOSurfaceBytesPerRow : @256,
+            (id)kIOSurfaceAllocSize : @(height * 256),
+            (id)kIOSurfacePixelFormat : @(uint32_t('BGRA'))
+        });
+        ASSERT_TRUE(surface != nullptr);
+        id<MTLBuffer> buffer = [spi newBufferWithIOSurface:surface];
+        ASSERT_TRUE(buffer != nil);
+        EXPECT_EQ(buffer.contents, IOSurfaceGetBaseAddress(surface));
+        EXPECT_EQ(buffer.length % vm_page_size, 0u);
+        EXPECT_GE(buffer.length, IOSurfaceGetAllocSize(surface));
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        ASSERT_TRUE(blit != nil);
+        [blit copyFromBuffer:buffer sourceOffset:0 toBuffer:copy destinationOffset:0 size:4];
+        [blit endEncoding];
+        const size_t before = kernel_model::model.jobs.size();
+        const bool refused = kernel_model::model.unknownUsesRefused;
+        kernel_model::model.unknownUsesRefused = true;
+        [cb commit];
+        [cb waitUntilCompleted];
+        kernel_model::model.unknownUsesRefused = refused;
+        EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted) << text(cb.error);
+        EXPECT_GT(kernel_model::model.jobs.size(), before);
+        buffer = nil;
+        CFRelease(surface);
+    }
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                  width:100
                                                                                 height:4
@@ -232,10 +311,84 @@ void surfaceBufferAndLinearRow()
     EXPECT_EQ([spi requiredLinearTextureBytesPerRowForDescriptor:d], (400 + align - 1) / align * align);
     d.pixelFormat = MTLPixelFormatASTC_4x4_LDR;
     EXPECT_EQ([spi requiredLinearTextureBytesPerRowForDescriptor:d], 0u);
+    const auto rowOf = [&](NSUInteger format) {
+        d.pixelFormat = MTLPixelFormat(format);
+        return [spi requiredLinearTextureBytesPerRowForDescriptor:d];
+    };
+    const auto aligned = [&](NSUInteger format, NSUInteger bytes) {
+        const NSUInteger a = [device minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormat(format)];
+        return a ? (100 * bytes + a - 1) / a * a : 0;
+    };
+    EXPECT_GT(aligned(MTLPixelFormatR8Snorm, 1), 0u);
+    EXPECT_EQ(rowOf(MTLPixelFormatR8Snorm), aligned(MTLPixelFormatR8Snorm, 1));
+    EXPECT_EQ(rowOf(MTLPixelFormatRGBA16Snorm), aligned(MTLPixelFormatRGBA16Snorm, 8));
+    EXPECT_EQ(rowOf(26), aligned(26, 2));    // R16Bfloat
+    EXPECT_EQ(rowOf(550), aligned(550, 8));  // RGB10A8_2P_XR10, raw's texel, not Metal's plane of 2
+    EXPECT_EQ(rowOf(MTLPixelFormatDepth32Float), 0u);
     EXPECT_EQ(gOpens, 0);
     EXPECT_EQ([m2vRecord(device)[@"needs"] count], 0u) << text(m2vRecord(device));
-    buffer = nil;
-    CFRelease(surface);
+}
+
+// A heap's block-compressed textures (a chain, an array, and a single level in a shared heap, block-linear as the device
+// makes it) are placed in its arena as the device lays them out, each one's size the device's answer (heapTextureAsk)
+void heapBlockTextures()
+{
+    const Opened opened = openWithLibrary(writePack(packKey(kPacked)));
+    const id<MTLDevice> device = opened.device;
+    ASSERT_TRUE(device != nil);
+    const auto heapOf = [&](MTLStorageMode mode) {
+        MTLHeapDescriptor *h = [MTLHeapDescriptor new];
+        h.storageMode = mode;
+        h.size = 16 << 20;
+        return [device newHeapWithDescriptor:h];
+    };
+    const id<MTLHeap> privateHeap = heapOf(MTLStorageModePrivate), sharedHeap = heapOf(MTLStorageModeShared);
+    ASSERT_TRUE(privateHeap != nil && sharedHeap != nil);
+    const auto described = [](MTLPixelFormat format, NSUInteger size, BOOL mipmapped) {
+        return [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                  width:size
+                                                                 height:size * 3 / 5
+                                                              mipmapped:mipmapped];
+    };
+    MTLTextureDescriptor *mips = described(MTLPixelFormatASTC_4x4_LDR, 100, YES),
+                         *layers = described(MTLPixelFormatBC1_RGBA, 64, NO),
+                         *single = described(MTLPixelFormatBC1_RGBA, 64, NO);
+    layers.textureType = MTLTextureType2DArray;
+    layers.arrayLength = 3;
+    mips.storageMode = layers.storageMode = MTLStorageModePrivate;
+    single.storageMode = MTLStorageModeShared;
+    for (MTLTextureDescriptor *d in @[ mips, layers, single ]) {
+        const MTLSizeAndAlign need = [device heapTextureSizeAndAlignWithDescriptor:d];
+        EXPECT_GT(need.size, 0u);
+        id<MTLTexture> t = [(d == single ? sharedHeap : privateHeap) newTextureWithDescriptor:d];
+        ASSERT_TRUE([(id)t isKindOfClass:[RMTexture class]]) << text(t);
+        EXPECT_TRUE(((RMTexture *)t)->_raw.arena);
+        EXPECT_TRUE(((RMTexture *)t)->_raw.blockLinear);
+        EXPECT_EQ(((RMTexture *)t)->_raw.span.bytes, need.size);
+    }
+    EXPECT_EQ(gOpens, 0);
+    EXPECT_EQ([m2vRecord(device)[@"needs"] count], 0u) << text(m2vRecord(device));
+}
+
+// A CPU copy of a memoryless texture moves nothing, as Apple's driver: getBytes leaves the bytes, replaceRegion drops them
+void memorylessCpuCopies()
+{
+    const auto [device, library] = openWithLibrary(writePack(packKey(kPacked)));
+    ASSERT_TRUE(device != nil);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                 width:16
+                                                                                height:16
+                                                                             mipmapped:NO];
+    d.storageMode = MTLStorageModeMemoryless;
+    d.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> t = [device newTextureWithDescriptor:d];
+    ASSERT_TRUE(t != nil);
+    std::vector<uint8_t> in(16 * 16 * 4, 0x5a), out(16 * 16 * 4, 0xab);
+    [t replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0 withBytes:in.data() bytesPerRow:64];
+    [t getBytes:out.data() bytesPerRow:64 fromRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0];
+    EXPECT_EQ(std::count(out.begin(), out.end(), 0xab), ptrdiff_t(out.size()));
+    EXPECT_EQ(gOpens, 0);
+    EXPECT_EQ([m2vRecord(device)[@"needs"] count], 0u) << text(m2vRecord(device));
 }
 
 // The device is an _MTLDevice of its own; its identity and every limits field m2v's device answered are its own answers
@@ -348,12 +501,12 @@ TEST(RawFacadeLazy, PackedDrawOpensNoM2V)
     show("packed_draw");
 }
 
-TEST(RawFacadeLazy, UnpackedStateOpensM2VForItsTwin)
+TEST(RawFacadeLazy, AnUnpackedStateIsMetalsCreationFailure)
 {
     switch_ios::test::ExpectPassesInFreshProcess(unpackedState);
 }
 
-TEST(RawFacadeLazy, ReflectionOpensM2VForItsTwin)
+TEST(RawFacadeLazy, ReflectionsOfPackedStatesOpenNoM2V)
 {
     switch_ios::test::ExpectPassesInFreshProcess(reflection);
 }
@@ -376,6 +529,16 @@ TEST(RawFacadeLazy, AComputeStateThePackAnswersOpensNoM2V)
 TEST(RawFacadeLazy, SurfaceBufferAndLinearRowOpenNoM2V)
 {
     switch_ios::test::ExpectPassesInFreshProcess(surfaceBufferAndLinearRow);
+}
+
+TEST(RawFacadeLazy, AHeapsBlockCompressedTexturesArePlacedInItsArena)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(heapBlockTextures);
+}
+
+TEST(RawFacadeLazy, ACpuCopyOfAMemorylessTextureMovesNothing)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(memorylessCpuCopies);
 }
 
 TEST(RawFacadeLazy, DeviceIsItsOwn)

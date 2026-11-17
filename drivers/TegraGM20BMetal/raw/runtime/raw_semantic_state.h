@@ -8,6 +8,7 @@
 
 #include "raw_grow_list.h"
 #include "raw_slot_snapshots.h"
+#include "raw_stage_textures.h"
 
 namespace raw {
 
@@ -154,7 +155,8 @@ struct BufferBinding {
 using BufferBindings = std::array<BufferBinding, 31>;
 using BufferSnapshots = SlotSnapshots<BufferBinding, 31>;
 
-using TextureSnapshots = ObjectSnapshots<31>;
+using TextureSnapshots = ObjectSnapshots<kStageTextures>;
+using KernelTextureSnapshots = ObjectSnapshots<kKernelTextures>;
 using SamplerSnapshots = ObjectSnapshots<16>;
 
 struct RasterState {

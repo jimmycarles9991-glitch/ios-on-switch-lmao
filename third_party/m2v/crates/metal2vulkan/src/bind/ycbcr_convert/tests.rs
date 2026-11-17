@@ -59,19 +59,22 @@ const HELD_SUBSAMPLED: [[PixelFormat; 6]; 2] = [
     ],
 ];
 
-/// The packed formats whose layouts the module converts: 4:2:0, 4:2:2 and 4:4:4, converted and
-/// their `_sRGB` twins.
-const HELD_PACKED: [PixelFormat; 6] = [
+/// The packed formats whose layouts the module converts: 4:2:0, 4:2:2 and 4:4:4, converted, their
+/// `_sRGB` twins, and read as codes.
+const HELD_PACKED: [PixelFormat; 9] = [
     PixelFormat::YCBCR104202PPACKED,
     PixelFormat::YCBCR104222PPACKED,
     PixelFormat::YCBCR104442PPACKED,
     PixelFormat::YCBCR104202PPACKEDSRGB,
     PixelFormat::YCBCR104222PPACKEDSRGB,
     PixelFormat::YCBCR104442PPACKEDSRGB,
+    PixelFormat::RGB104202PPACKED,
+    PixelFormat::RGB104222PPACKED,
+    PixelFormat::RGB104442PPACKED,
 ];
 
 /// The packed layouts the module converts.
-fn packed_layouts() -> [YCbCrCodes; 6] {
+fn packed_layouts() -> [YCbCrCodes; 9] {
     HELD_PACKED.map(codes_of)
 }
 
@@ -87,8 +90,8 @@ fn subsampled_layouts() -> impl Iterator<Item = YCbCrCodes> {
 }
 
 /// The module converts the 4:2:0, 4:2:2 and 4:4:4 layouts of unpacked 8- and 10-bit codes read
-/// converted, through the sRGB curve or as codes, and of packed 10-bit codes read converted or
-/// through the sRGB curve, and no other two-plane format's.
+/// converted, through the sRGB curve or as codes, and of packed 10-bit codes read converted,
+/// through the sRGB curve or as codes, and no other two-plane format's.
 #[test]
 fn the_module_converts_the_measured_layouts_alone() {
     let held: Vec<PixelFormat> = PixelFormat::ALL
@@ -138,15 +141,15 @@ fn the_module_converts_the_measured_layouts_alone() {
         .into_iter()
         .chain(subsampled_layouts())
         .all(|c| !c.packed && c.units(7) == 7));
-    // The packed layouts: three 10-bit codes to a 4-byte unit, `ten`'s and `ten_srgb`'s at
-    // each subsampling.
+    // The packed layouts: three 10-bit codes to a 4-byte unit, `ten`'s, `ten_srgb`'s and
+    // `codes`' at each subsampling.
     let subsamplings = [
         ChromaSubsampling::Chroma420,
         ChromaSubsampling::Chroma422,
         ChromaSubsampling::Chroma444,
     ];
     for (i, (pf, codes)) in HELD_PACKED.into_iter().zip(packed_layouts()).enumerate() {
-        let own = if i < 3 { ten } else { ten_srgb };
+        let own = [ten, ten_srgb, codes][i / 3];
         let want = YCbCrCodes {
             bytes: 4,
             packed: true,

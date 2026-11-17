@@ -67,13 +67,13 @@ std::vector<Header> drawn(raw::RuntimeRecord record, Samplers &device)
 {
     bool unknown = false;
     EXPECT_TRUE(raw::placeConstexprSamplers(
-        record.pipeline, record.samplers,
+        record.pipeline, record.far, record.samplers,
         [&](const Header &words, uint32_t &index) {
             return device.place(words, index);
         },
         unknown));
     std::vector<Header> out;
-    for (uint32_t k = 0; k < record.pipeline.entries; k++)
+    for (uint32_t k = 0; k < raw::entryCount(record.pipeline); k++)
         if (record.pipeline.entry[k].samplerKind == raw::SamplerConstexpr)
             out.push_back(device.placed.at(record.pipeline.entry[k].sampler));
     return out;
@@ -84,7 +84,7 @@ TEST(RecordSamplers, AnEntryIndexesItsRecordsOwnHeaders)
     const raw::RuntimeRecord r =
         assemble({sampled(0x10, 0, kLinearClamp), sampled(0x14, 1, kNearestClamp), sampled(0x18, 2, kLinearClamp)});
     ASSERT_EQ(r.samplers.size(), 2u);
-    for (uint32_t k = 0; k < r.pipeline.entries; k++) {
+    for (uint32_t k = 0; k < raw::entryCount(r.pipeline); k++) {
         const raw::PackEntry &e = r.pipeline.entry[k];
         ASSERT_EQ(e.samplerKind, raw::SamplerConstexpr);
         ASSERT_LT(e.sampler, r.samplers.size());
@@ -108,7 +108,7 @@ TEST(RecordSamplers, ASlotSampledByComparisonIsACompareEntry)
     plain.offset = 0x14;
     plain.texSlot = plain.smpSlot = 1;
     const raw::RuntimeRecord r = assemble({compared, plain});
-    ASSERT_EQ(r.pipeline.entries, 2u);
+    ASSERT_EQ(raw::entryCount(r.pipeline), 2u);
     EXPECT_TRUE(raw::entryCompares(r.pipeline.entry[0]));
     EXPECT_EQ(r.pipeline.entry[0].sampler, 0);
     EXPECT_FALSE(raw::entryCompares(r.pipeline.entry[1]));
@@ -143,7 +143,7 @@ TEST(RecordSamplers, AnEntryNamingNoHeaderOfItsRecordIsRefused)
     Samplers device{{kLinearRepeat, kLinearClamp}};
     bool unknown = false;
     EXPECT_FALSE(raw::placeConstexprSamplers(
-        r.pipeline, r.samplers,
+        r.pipeline, r.far, r.samplers,
         [&](const Header &words, uint32_t &index) {
             return device.place(words, index);
         },
@@ -156,7 +156,7 @@ TEST(RecordSamplers, NoRoomLeavesTheRecordRetryable)
     raw::RuntimeRecord r = assemble({sampled(0x10, 0, kLinearClamp)});
     bool unknown = true;
     EXPECT_FALSE(raw::placeConstexprSamplers(
-        r.pipeline, r.samplers,
+        r.pipeline, r.far, r.samplers,
         [](const Header &, uint32_t &) {
             return false;
         },

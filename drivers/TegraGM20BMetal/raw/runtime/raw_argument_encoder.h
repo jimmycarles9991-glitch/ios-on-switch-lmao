@@ -25,7 +25,7 @@ enum class ArgumentRefusal : uint8_t {
     OffsetPastEnd  // a buffer's offset at or past its end
 };
 
-// One layout as the bridge gives a function's (bridge/NativeMetalObjects.h NmbArgumentLayout)
+// One layout of a function's buffer over its runs (raw_buffer_encoders.h FlatArgumentLayout)
 struct ArgumentRuns {
     uint64_t encodedLength, alignment;
     const ArgumentRun *runs;

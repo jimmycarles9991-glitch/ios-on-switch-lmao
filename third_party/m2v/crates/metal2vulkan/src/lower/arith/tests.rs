@@ -4111,6 +4111,7 @@ mod libm;
 mod libm_exp;
 mod narrow;
 mod norm_write;
+mod powr;
 mod round_texel;
 mod specials;
 mod store_code;

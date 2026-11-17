@@ -245,6 +245,17 @@ public:
         return generationOf(load(publishedWord, __ATOMIC_ACQUIRE)) - released;
     }
 
+    uint32_t publishedGeneration() const
+    {
+        return generationOf(load(publishedWord, __ATOMIC_ACQUIRE));
+    }
+
+    // The action's (under the gate): every hold through `generation` released, its tables and enable in DC A.
+    bool settledThrough(uint32_t generation) const
+    {
+        return static_cast<int32_t>(released - generation) >= 0;
+    }
+
     const ActionSequence &actionState() const
     {
         return action;

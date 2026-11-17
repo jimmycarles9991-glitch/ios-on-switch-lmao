@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""Build directcheck (raw/test/directcheck.mm) into one directory with what it runs with.
-
-usage: directcheck_build.py --xcode-env <xcode.env> --host-bridge <darwin bridge .a> --metal-abi <MetalABI.h>
-                            --raw <shader tools' raw/> --twin <NVK twin dylib> --out <dir>
-
-directcheck links the raw runtime's direct compile as the pack generator's directpack does, over the frontend and the
-host bridge, beside the shader tools' mock GM20B (rpath @executable_path). The directory also holds the NVK twin the
-pack's records were compiled with and the raw path's own library (own.metallib, PROBE_OWN_LIB).
-"""
+"""Build directcheck beside its mock GPU and own.metallib, using the native translator and compiler."""
 
 import argparse
 import shutil
@@ -22,7 +14,7 @@ DIRECT_RUNTIME = ('raw_direct', 'raw_direct_compute', 'raw_record_parts', 'raw_e
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    for name in ('xcode-env', 'host-bridge', 'metal-abi', 'raw', 'twin', 'out'):
+    for name in ('xcode-env', 'translate', 'compile', 'metal-abi', 'raw', 'out'):
         parser.add_argument('--' + name, required=True)
     args = parser.parse_args()
     xcode = dict(line.split('=', 1) for line in Path(args.xcode_env).read_text().splitlines() if '=' in line)
@@ -34,7 +26,6 @@ def main() -> None:
     env['TMPDIR'] = str(work)
     for name in ('libmock_iokit.dylib', 'own.metallib'):
         shutil.copyfile(Path(args.raw) / name, out / name)
-    shutil.copyfile(args.twin, out / 'libvulkan_nouveau.dylib')
     frameworks = [
         f for name in ('Foundation', 'Metal', 'IOSurface', 'IOKit', 'CoreVideo') for f in ('-framework', name)
     ]
@@ -44,7 +35,8 @@ def main() -> None:
         RAW / 'test/directcheck.mm',
         RAW / 'runtime/RawDirect.mm',
         RAW / 'runtime/RawRenderKey.mm',
-        METAL / 'NativeBridgeMetalFrontend.mm',
+        RAW / 'runtime/RawOffline.mm',
+        RAW / 'runtime/RawOfflineReflection.mm',
     ]
     command = [
         'xcrun',
@@ -62,11 +54,16 @@ def main() -> None:
         *(RAW / 'runtime' / f'{name}.cpp' for name in DIRECT_RUNTIME),
         '-x',
         'none',
-        args.host_bridge,
+        args.translate,
+        args.compile,
         '-L',
         out,
         '-lmock_iokit',
         '-Wl,-rpath,@executable_path',
+        *[
+            f'-Wl,-U,_native_bridge_metal_{name}'
+            for name in ('render_direct', 'compute_direct', 'function_metallib', 'function_library_name')
+        ],
         '-lobjc',
         *frameworks,
         '-o',

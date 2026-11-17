@@ -11,8 +11,8 @@ struct NmbDirectKernel;
 
 namespace raw {
 
-// Refused: a kernel the raw path does not dispatch from a record (`why`); Failed: NVK could not compile it
-CompileOutcome directKernel(const NmbDirectKernel &kernel, const DirectNvk &nvk, const std::string &key,
+// Refused: a kernel the raw path does not dispatch from a record (`why`); Failed: the stage compile could not compile it
+CompileOutcome directKernel(const NmbDirectKernel &kernel, const StageCompile &compiler, const std::string &key,
                             ComputeRecord &out, std::string &why);
 
 }  // namespace raw

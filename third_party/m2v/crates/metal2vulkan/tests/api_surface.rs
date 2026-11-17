@@ -205,6 +205,7 @@ surface! {
         enum BindError N;
     }
     "device" => metal2vulkan::device {
+        enum NativeShaderTarget E;
         fn vk_stage;
         struct Device O;
         struct DeviceDescription N;
@@ -307,6 +308,10 @@ surface! {
         struct UnwrittenFragmentInputs N;
     }
     "pipeline" => metal2vulkan::pipeline {
+        struct NativeFunction O;
+        struct NativePipeline O;
+        struct NativeProgram O;
+        struct NativeRecord E;
         fn heap_unused_while_pending;
         struct ComputePipeline N;
         struct ComputePipelineMetalInfo N;
@@ -444,7 +449,15 @@ surface! {
         struct ArgumentMember N;
         struct ArgumentPlace N;
         enum ArgumentType N;
+        struct BufferEncoder N;
         const ARGUMENT_HANDLE_BYTES;
+        struct ArgumentRun E;
+        struct FlatLayout E;
+        fn flat_layouts;
+        fn extended_blend_color_words;
+        fn heap_class_code;
+        fn heap_code_class;
+        fn heap_code_holds;
         enum Dispatch N;
         struct DispatchCommands N;
         struct DispatchRegion N;

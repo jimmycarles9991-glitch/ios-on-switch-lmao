@@ -31,6 +31,15 @@ extern "C" void tgm_hold_samples_take(int, uint32_t *n, uint64_t *max_ns,
 	*max_ns = 0;
 }
 
+extern "C" int tgm_deadline_counts(struct tgm_deadline_counts *)
+{
+	return 0;
+}
+
+extern "C" void tgm_hold_counts(struct tgm_hold_counts *)
+{
+}
+
 namespace
 {
 constexpr uint32_t kTextures = 16, kFrames = 400, kDraws = 200;

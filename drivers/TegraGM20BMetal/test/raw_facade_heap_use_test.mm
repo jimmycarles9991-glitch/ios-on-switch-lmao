@@ -5,6 +5,7 @@
 // holds of the arena.
 #include "raw_device_harness.h"
 #include "raw_facade_harness.h"
+#include "predication_model.h"
 
 namespace {
 
@@ -191,6 +192,158 @@ TEST_F(FacadeHeapUse, AHeapTextureAComputeEncoderUsesNamesItsOwnRange)
         const auto jobs = commit(cb);
         ASSERT_FALSE(jobs.empty());
         EXPECT_EQ(arenaUses(jobs.back(), TegraGM20BSurfaceRange), 3u) << "the three used, none of the other seven";
+    }
+}
+
+TEST_F(FacadeHeapUse, ABlitReadsAHeapBufferAcrossRestoredMappings)
+{
+    kernel_model::model.unknownUsesRefused = true;
+    constexpr uint64_t quarter = 0x40000;
+    for (MTLStorageMode mode : {MTLStorageModeShared, MTLStorageModePrivate}) {
+        SCOPED_TRACE(int(mode));
+        @autoreleasepool {
+            id<MTLHeap> h = facade::heap(mode, 4 * quarter);
+            ASSERT_NE(h, nil);
+            const auto options = MTLResourceOptions(mode << MTLResourceStorageModeShift);
+            id<MTLBuffer> a, b, c;
+            @autoreleasepool {
+                a = [h newBufferWithLength:quarter options:options];
+                b = [h newBufferWithLength:quarter options:options];
+                c = [h newBufferWithLength:quarter options:options];
+            }
+            ASSERT_NE(a, nil);
+            ASSERT_NE(b, nil);
+            ASSERT_NE(c, nil);
+            const uint64_t firstVa = ((RMBuffer *)a)->_raw.va;
+            [b makeAliasable];
+            b = nil;
+            gRM->raw->trimArenas(gRM->committed);
+            ASSERT_EQ(raw::DeviceHarness::arena(*gRM->raw, ((RMHeap *)h)->_arena - 1).handle, 0u);
+            [a makeAliasable];
+            a = nil;
+            id<MTLBuffer> source = [h newBufferWithLength:2 * quarter options:options];
+            ASSERT_NE(source, nil);
+            ASSERT_EQ(((RMBuffer *)source)->_raw.va, firstVa);
+            const uint64_t bytes = source.length;
+            std::vector<uint8_t> expected(bytes);
+            for (size_t i = 0; i < expected.size(); ++i)
+                expected[i] = uint8_t((i * 13) ^ (i >> 12));
+            memcpy(((RMBuffer *)source)->_raw.cpu, expected.data(), bytes);
+            id<MTLBuffer> destination = [facade::device() newBufferWithLength:bytes
+                                                                      options:MTLResourceStorageModeShared];
+            ASSERT_NE(destination, nil);
+            memset(destination.contents, 0xA5, bytes);
+            id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            [blit copyFromBuffer:source sourceOffset:0 toBuffer:destination destinationOffset:0 size:bytes];
+            [blit endEncoding];
+            const size_t firstJob = kernel_model::model.jobs.size();
+            [cb commit];
+            [cb waitUntilCompleted];
+            ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
+            predication_model::Gpu gpu(0);
+            gpu.map = [](uint64_t va) {
+                return kernel_model::model.host(va);
+            };
+            for (size_t j = firstJob; j < kernel_model::model.jobs.size(); ++j)
+                for (const auto &push : kernel_model::model.jobs[j].pushes) {
+                    const auto *words = reinterpret_cast<const uint32_t *>(
+                        kernel_model::model.host(push.va, uint64_t(push.dwords) * 4));
+                    ASSERT_NE(words, nullptr);
+                    gpu.run(words, push.dwords, true);
+                }
+            EXPECT_EQ(memcmp(destination.contents, expected.data(), bytes), 0);
+        }
+    }
+}
+
+TEST_F(FacadeHeapUse, ARecordedHeapUseOutlivesMakeAliasableAndIdleTrim)
+{
+    kernel_model::model.unknownUsesRefused = true;
+    constexpr uint64_t quarter = 0x40000;
+    for (MTLStorageMode mode : {MTLStorageModeShared, MTLStorageModePrivate}) {
+        SCOPED_TRACE(int(mode));
+        @autoreleasepool {
+            id<MTLHeap> h = facade::heap(mode, 4 * quarter);
+            ASSERT_NE(h, nil);
+            const auto options = MTLResourceOptions(mode << MTLResourceStorageModeShift);
+            id<MTLBuffer> a = [h newBufferWithLength:quarter options:options];
+            id<MTLBuffer> b = [h newBufferWithLength:quarter options:options];
+            id<MTLBuffer> c = [h newBufferWithLength:quarter options:options];
+            ASSERT_NE(a, nil);
+            ASSERT_NE(b, nil);
+            ASSERT_NE(c, nil);
+            uint8_t *const bytes = ((RMBuffer *)b)->_raw.cpu;
+            memset(bytes, 0x3C, quarter);
+            id<MTLBuffer> source = [facade::device() newBufferWithLength:quarter options:MTLResourceStorageModeShared];
+            ASSERT_NE(source, nil);
+            memset(source.contents, 0xA7, quarter);
+            id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            [blit copyFromBuffer:source sourceOffset:0 toBuffer:b destinationOffset:0 size:quarter];
+            [blit endEncoding];
+            [b makeAliasable];
+            EXPECT_EQ(h.usedSize, 2 * quarter);
+            gRM->raw->trimArenas(gRM->committed);
+            const size_t firstJob = kernel_model::model.jobs.size();
+            [cb commit];
+            [cb waitUntilCompleted];
+            ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
+            predication_model::Gpu gpu(0);
+            gpu.map = [](uint64_t va) {
+                return kernel_model::model.host(va);
+            };
+            for (size_t j = firstJob; j < kernel_model::model.jobs.size(); ++j)
+                for (const auto &push : kernel_model::model.jobs[j].pushes) {
+                    const auto *words = reinterpret_cast<const uint32_t *>(
+                        kernel_model::model.host(push.va, uint64_t(push.dwords) * 4));
+                    ASSERT_NE(words, nullptr);
+                    gpu.run(words, push.dwords, true);
+                }
+            const std::vector<uint8_t> expected(quarter, 0xA7);
+            EXPECT_EQ(memcmp(bytes, expected.data(), quarter), 0);
+            EXPECT_EQ(a.length + c.length, 2 * quarter);
+        }
+    }
+}
+
+TEST_F(FacadeHeapUse, ARecordedHeapViewKeepsItsAliasableOwnersMappings)
+{
+    kernel_model::model.unknownUsesRefused = true;
+    constexpr uint64_t quarter = 0x40000;
+    for (MTLStorageMode mode : {MTLStorageModeShared, MTLStorageModePrivate}) {
+        SCOPED_TRACE(int(mode));
+        @autoreleasepool {
+            id<MTLHeap> h = facade::heap(mode, 4 * quarter);
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                         width:256
+                                                                                        height:256
+                                                                                     mipmapped:NO];
+            d.storageMode = mode;
+            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView;
+            id<MTLTexture> a = [h newTextureWithDescriptor:d];
+            id<MTLTexture> b = [h newTextureWithDescriptor:d];
+            id<MTLTexture> c = [h newTextureWithDescriptor:d];
+            ASSERT_NE(a, nil);
+            ASSERT_NE(b, nil);
+            ASSERT_NE(c, nil);
+            id<MTLTexture> view = [b newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+            ASSERT_NE(view, nil);
+            id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+            MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+            pass.colorAttachments[0].texture = view;
+            pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+            [[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
+            [b makeAliasable];
+            b = nil;
+            EXPECT_EQ(h.usedSize, 2 * quarter);
+            gRM->raw->trimArenas(gRM->committed);
+            [cb commit];
+            [cb waitUntilCompleted];
+            EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
+            EXPECT_EQ(a.width + c.width, 512u);
+        }
     }
 }
 

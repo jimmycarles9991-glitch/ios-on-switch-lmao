@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "raw_cbuf.h"
 #include "raw_pack.h"
 
 namespace raw {
+
+// A split's frontier is bound as one constant buffer, whole 256-byte units of at most kCbufMaxBytes (the chip honours a
+// bind's size to the byte up to SET_CONSTANT_BUFFER_SELECTOR_A SIZE's 64 KiB), and PackSplit::frontierBytes is 16 bits:
+// its largest 16-byte multiple. nvk_switch_split.h and pack/splits.py bound the frontiers they make and pack the same.
+constexpr uint32_t kMaxFrontierBytes = 0xFFF0;
+static_assert(kMaxFrontierBytes == kCbufMaxBytes - 16 && cbufBindBytes(kMaxFrontierBytes) == kCbufMaxBytes);
 
 inline bool usableSplitMetadata(const PackSplit &split)
 {
@@ -12,8 +19,8 @@ inline bool usableSplitMetadata(const PackSplit &split)
                                !cost.prologueWarpCycles || !cost.prologueInstructions || !cost.savedPixelInstructions ||
                                !cost.frontierValues || cost.frontierValues > split.frontierBytes / 4)))
         return false;
-    if (!split.frontierBytes || split.frontierBytes > 4096 || (split.frontierBytes & 15) || !split.frontierCbuf ||
-        split.frontierCbuf >= 16 || split.uboCount > 6)
+    if (!split.frontierBytes || split.frontierBytes > kMaxFrontierBytes || (split.frontierBytes & 15) ||
+        !split.frontierCbuf || split.frontierCbuf >= 16 || split.uboCount > 6)
         return false;
     uint16_t used = 0;
     for (unsigned i = 0; i < split.uboCount; ++i) {

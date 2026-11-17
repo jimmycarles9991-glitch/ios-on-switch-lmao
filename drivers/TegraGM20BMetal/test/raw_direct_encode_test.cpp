@@ -134,6 +134,19 @@ TEST(DirectEncode, AnswersAsNvk)
     EXPECT_GT(checked, 0u);
 }
 
+// VK_FORMAT_A8_UNORM, which Metal's A8Unorm views come as, under the extension name vk_format.c maps it by
+// (VK_FORMAT_A8_UNORM_KHR, an alias in vulkan_core.h): NIL's A8_UNORM row, an R8 texture read as 000R
+TEST(DirectEncode, AnA8ViewIsAnR8ViewReadAsAlpha)
+{
+    constexpr uint32_t kA8 = 1000470001, kR8 = 9, kA1B5G5R5 = 1000470000;
+    const uint32_t identity[4] = {}, alpha[4] = {1, 1, 1, 3};
+    uint32_t a8 = 0, r8 = 0, a1 = 0;
+    ASSERT_TRUE(raw::viewWord0(kA8, identity, false, a8));
+    ASSERT_TRUE(raw::viewWord0(kR8, alpha, false, r8));
+    EXPECT_EQ(a8, r8);
+    EXPECT_TRUE(raw::viewWord0(kA1B5G5R5, identity, false, a1));
+}
+
 // Set 1 as metal2vulkan's heap_set makes it on the raw path's compile devices (pipeline/link.rs: binding n per heap
 // class, 8192 elements, PARTIALLY_BOUND | UPDATE_AFTER_BIND, UPDATE_UNUSED_WHILE_PENDING on some), live and offline
 // alike
@@ -205,6 +218,22 @@ TEST(DirectEncode, HeapSetOffTheRawHeapRefused)
     NmbDirectLayout setZeroOnly = sized.layout;
     setZeroOnly.setCount = 1;
     EXPECT_NE(raw::heapSetArrays(&setZeroOnly, 2, classes, arrays, bytes), nullptr);
+}
+
+// gpu.upload.blit_buffer and gpu.upload.replace_region read A8Unorm textures through read_float_texture, which m2v
+// compiles over a VK_FORMAT_A8_UNORM view (1000470001, vulkan_core.h's VK_FORMAT_A8_UNORM_KHR alias): NIL's A8_UNORM
+// row, R8 under the 0,0,0,R swizzle, which is raw's own A8Unorm header word (raw_gpu.cpp kFormats), so the slot binds
+// the texture's header. The generator once skipped alias enumerants and the kernel was refused ("a texture view of
+// VkFormat 1000470001 NVK has no header for").
+TEST(DirectEncode, AnA8ViewIsTheR8HeaderUnderAlphaFromRed)
+{
+    constexpr uint32_t kA8Unorm = 1000470001, kA1B5G5R5Unorm = 1000470000, kRawA8Word0 = 0x2002491d;
+    const uint32_t identity[4] = {};
+    uint32_t word = 0;
+    ASSERT_TRUE(raw::viewWord0(kA8Unorm, identity, false, word));
+    EXPECT_EQ(word, kRawA8Word0);
+    EXPECT_TRUE(raw::viewWord0(kA8Unorm, identity, true, word)) << "NIL's A8_UNORM takes storage";
+    EXPECT_TRUE(raw::viewWord0(kA1B5G5R5Unorm, identity, false, word));
 }
 
 // A kernel's set-1 constant buffer is sized as set 0's would be at the heap's bytes, and refused without them

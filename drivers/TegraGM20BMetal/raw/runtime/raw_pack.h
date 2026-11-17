@@ -32,15 +32,17 @@ enum PackSectionId {
     PackArchives,
     PackIterated,
     PackComputeStates,
+    PackReflections,
+    PackSelectors,
     PackSectionCount
 };
 
-constexpr uint32_t kPackVersion = 23;
+constexpr uint32_t kPackVersion = 28;
 
 // What a record or a program variant (PackVariant) assumes, as bits of a mask: a draw takes a variant only where all of them
 // hold. Bits 0-15 are facts of the draw's bindings, bit 16 of its pipeline, bit 26 of its pass, bits 17-25 of the chip
-// (kChipAssumptions): 17 and
-// 18 of the code a variant runs, 19-25 of the ROP blend a storage form computes in its program (PackPipeline::storageBlendModel
+// (kChipAssumptions): 17 and 18 of the code a program runs (a proven one is every program's, raw_chip_facts.h, so no
+// variant assumes it), 19-25 of the ROP blend a storage form computes in its program (PackPipeline::storageBlendModel
 // holds them shifted down by kRopBlendShift, m2v rop_blend::Assumption's bits). A record is drawn whatever its ROP bits: they
 // name what a device probe has to confirm before the program's blend can be called the ROP's.
 enum PackAssumption : uint32_t {
@@ -85,8 +87,8 @@ struct PackHeader {
 };
 
 // A program's constant buffer as the pack and the runtime's capture name it: its nvk_cbuf_type in bits 0-2, and for a uniform
-// buffer's descriptor (CbufUbo) its byte offset in set 0 / 16 in bits 3-7. A uniform buffer of another set, or past 496 bytes,
-// is CbufUnbindable: no raw draw binds it.
+// buffer's descriptor (CbufUbo) its byte offset in set 0 / 16 in bits 3-7, or 0 where the offset is past 496 bytes and the
+// program's far table (PackProgram::farUbos) holds it. A uniform buffer of another set is CbufUnbindable: no raw draw binds it.
 enum PackCbufType : uint8_t {
     CbufRoot = 1,
     CbufShaderData = 2,
@@ -110,7 +112,9 @@ struct PackProgram {
     // SET_BINDLESS_TEXTURE's constant buffer slot + 1: where its bound texture instructions read their handles (word
     // index x 4, the handles' set-0 entries: PackPipeline::boundEntries); 0: it has none
     uint8_t boundTextures;
-    uint8_t reserved[3];
+    // v27. Its uniform buffers past set-0 byte 496 (cbufType CbufUbo, bits 3-7 zero): the blob section's dword + 1 of its far
+    // table, kProgramCbufs uint16_t of each slot's set-0 byte / 16 (0: none); 0: it has none (programFarUbos)
+    uint8_t farUbos[3];
 };
 
 // One of a stage's programs compiled under assumptions about its draws (PackAssumption). A stage's variants are tried in order
@@ -143,6 +147,16 @@ struct PackComputeFacts {
     uint32_t executionWidth;  // threadExecutionWidth
     uint32_t staticMemory;    // staticThreadgroupMemoryLength
     uint32_t reserved;
+};
+
+// A state's reflection (raw_reflection_blob.h) as the translator made it when the pack was made, so a state of the pack
+// answers its creation's reflection without m2v or the shader compiler. The PackReflections section: u32 render count,
+// u32 compute count, the render states' entries ascending by keyHash (the key its records are found by), then the
+// compute states' (Pack::fnv of its computeStateKey), then the blobs, each at `offset` from the section's start and
+// shared by every state of the same reflection.
+struct PackReflection {
+    uint64_t keyHash;
+    uint32_t offset, bytes;
 };
 
 // The rung of the fetch ladder a color attachment's framebuffer fetch needs: FetchNone where it is not fetched
@@ -210,7 +224,10 @@ enum PackEntryKind : uint8_t {
     // m2v's ArgumentTable of stage `stage` (raw_spill_table.h): a uniform buffer descriptor of the words the encoder uploads
     EntrySpillTable = 10,
     // A tessellation state's control-stage storage buffer (PackTessBuffer at `slot`), its residual word the control stage's
-    EntryTessBuffer = 11
+    EntryTessBuffer = 11,
+    // The pass's half shadow of extended-range colour `slot` (raw_xr_shadow.h): an RGBA16Float storage image the program
+    // reads as the tile and writes beside the colour's codes
+    EntryXrShadow = 12
 };
 
 // What an EntryTessBuffer binds: the encoder's factor buffer, the draw's patch index buffer, its control-point index buffer
@@ -244,9 +261,8 @@ struct PackEntry {
     uint8_t pad;          //   window on the slot in 16-byte units (sampler | pad << 8), 0 = the whole buffer
 };
 
-// The texture and sampler slots of a render stage the raw encoder keeps (Metal's argument table on the A10X); a state
-// whose function reads a texture past them is not packed
-constexpr uint32_t kStageTextures = 31, kStageSamplers = 16;
+// The sampler slots of a render stage the raw encoder keeps (its texture slots: raw_stage_textures.h)
+constexpr uint32_t kStageSamplers = 16;
 
 // A handle entry's stage's index in the encoder's per-stage tables: vertex 0, fragment 1
 inline uint32_t handleStage(const PackEntry &e)
@@ -299,7 +315,10 @@ enum PackPipelineFlags : uint32_t {
     // does not draw it
     PipelineTurnRefused = 64,
     // its RGB10A8_2P_XR10 colours drawn in Metal's two planes (raw_xr_pass.h): the record of the state's " | xr2p" variant
-    PipelineTwoPlane = 128
+    PipelineTwoPlane = 128,
+    // its fragment program runs whole inside the pixel interlock with no colour in the storage form: m2v orders the
+    // function's raster order groups so (rog.rs), each pixel's fragments in primitive order by the ticket
+    PipelineRasterOrdered = 256
 };
 
 // Where a key's variant name starts (" | cubic ...", then " | tests=<n>", then " | xr2p", then " | xrs=<slots>", then
@@ -318,6 +337,7 @@ enum class PackForm : uint8_t {
 };
 
 struct PackPipeline;
+struct PackSelectorTable;
 
 // The form a record answers to (Pack::find): a variant record's is its state's own
 PackForm recordForm(const PackPipeline &pp);
@@ -327,27 +347,47 @@ constexpr uint8_t cbufKind(uint8_t type)
     return type & 7;
 }
 
-// A program's constant buffer of set 1, the heap's arrays (nvk_switch_capture.c switch_nvk_cbuf_code: the set in bits 3-7)
+// A program's constant buffer of set 1, the heap's arrays (nvk_switch_stage.c switch_nvk_cbuf_code: the set in bits 3-7)
 constexpr uint8_t kCbufHeapSet = CbufSet | 1 << 3;
 
-constexpr uint32_t cbufUboOffset(uint8_t type)
+// A program's constant buffer slots (PackProgram::cbufType): as many as a GM20B stage binds
+constexpr uint32_t kProgramCbufs = 18;
+// The set-0 bytes a uniform buffer's cbufType names its descriptor within (bits 3-7); one past them is in the far table
+constexpr uint32_t kInlineUboBytes = 512;
+
+// PackProgram::farUbos: its far table's first blob dword + 1, 0: none
+inline uint32_t programFarAt(const PackProgram &p)
 {
-    return uint32_t(type >> 3) * 16;
+    return p.farUbos[0] | uint32_t(p.farUbos[1]) << 8 | uint32_t(p.farUbos[2]) << 16;
 }
 
-// Set-0 entries a state may have: Core Animation's generic states (the uber shader) take 27; and the bytes of its set 0,
-// every entry's 16-byte descriptor at most (RenderEncoder::prepare's)
-constexpr uint32_t kPackEntries = 32, kSetMaxBytes = 16 * kPackEntries;
+// The set-0 byte of the uniform buffer (cbufKind CbufUbo) a program reads at constant buffer slot `c`: its far table's
+// (`farUbos`, nullptr: none) where that names one, else its cbufType's
+constexpr uint32_t cbufUboOffset(const uint8_t *cbufType, const uint16_t *farUbos, uint32_t c)
+{
+    return farUbos && farUbos[c] ? uint32_t(farUbos[c]) * 16 : uint32_t(cbufType[c] >> 3) * 16;
+}
+
+// The cbufType byte of a set-0 uniform buffer at `offset` (a multiple of 16): 0 offset bits past kInlineUboBytes
+constexpr uint8_t uboCbufType(uint32_t offset)
+{
+    return uint8_t(CbufUbo | (offset < kInlineUboBytes ? offset / 16 : 0) << 3);
+}
+
+// The set-0 entries a PackPipeline holds (Core Animation's generic states, the uber shader, take 27); a record's past them
+// are in its far block (raw_set_entries.h)
+constexpr uint32_t kPackEntries = 32;
 // The fragment texture slots a record can bind (probe.mm's tagged textures), and so the slots a record names a written
 // texture's format at
 constexpr uint32_t kWrittenSlots = 16;
 // A record's fixed-function vertex streams: stream 0 (vertexSlot) and PackPipeline::vertexStreams'
 constexpr uint32_t kPackVertexStreams = 8;
-// A vertexStreams byte's flag: the stream's stride is its bind's (MTLBufferLayoutStrideDynamic, a runtime record's alone)
+// A vertexStreams byte's flag: the stream's stride is its bind's (MTLBufferLayoutStrideDynamic)
 constexpr uint8_t kStreamBindStride = 0x80;
 // The largest stride a fixed-function vertex stream fetches at: NVB197_SET_VERTEX_STREAM_A_FORMAT_STRIDE is bits 11:0
 constexpr uint32_t kStreamStrideField = 0xFFF;
 
+// `reserved`: a shader-side stencil's ShadowStencilState push word + 1 (raw_shader_test_push.h shadowStencil), 0: none
 struct PackShaderTests {
     uint8_t depthWord, stencilWord, flags, reserved;
     uint32_t depthTic, stencilTic;
@@ -365,12 +405,18 @@ constexpr uint32_t kPackHeapArrays = 8;
 // Every heap array's elements: the texture header pool's (Device kTicCount), which the sampler header pool's fits
 constexpr uint32_t kPackHeapElements = 8192;
 
+// PackPipeline::fs of a state of no fragment function: its draws run with the pixel stage off (raw_stage_switches.h),
+// writing depth and stencil and no colour
+constexpr uint32_t kNoProgram = 0xFFFFFFFF;
+
 struct PackPipeline {
     uint64_t keyHash;    // FNV-1a 64 of the state key (the frontend journal's R-line fields but the label)
     uint32_t keyString;  // offset in the strings section: the key's fields before " | v" (attachments, vertex layout)
-    uint32_t vs, fs;     // program indices
+    uint32_t vs, fs;     // program indices; fs kNoProgram: none
     uint32_t blob, blobDwords;  // (method, value) pairs in the blob section, dwords = 2 x pairs
-    uint8_t entries, pushes, vertexSlot, pad;
+    // its set-0 entries, entriesLow | entriesHigh << 8 (entryCount): the first kPackEntries in entry, the rest in its far
+    // block (farEntriesAt)
+    uint8_t entriesLow, pushes, vertexSlot, entriesHigh;
     uint16_t vertexStride, setBytes;
     uint32_t flags;
     PackEntry entry[kPackEntries];
@@ -399,23 +445,24 @@ struct PackPipeline {
     // (bit n: [[buffer(n)]], m2v's BufferForm::Psb), vertex then fragment
     uint8_t rootTableWord[2], statusWord[2];
     uint32_t rootSlots[2];
-    uint8_t heapArrays, heapReserved[3];
+    uint8_t heapArrays;
+    // v27. Its far block's first dword in the blob section, 24 bits (raw_set_entries.h): its entries past kPackEntries, then
+    // the boundEntries and the memoryEntries bits of those, a word per 32
+    uint8_t farEntriesAt[3];
     uint32_t heapBytes;  // set 1's size in NVK's layout
     PackHeapArray heap[kPackHeapArrays];
     // m2v's ArgumentTable of each stage, vertex then fragment (raw_spill_table.h): its EntrySpillTable's index + 1 (0: none),
     // its words, and the first of them in the blob section (the vertex table's first, then the fragment table's)
     uint8_t spillEntry[2], spillWords[2];
     uint32_t spillAt;
-    // v21. Up to arrayLengthWord and pulledStride, runtime records only (raw_direct.cpp; every pack state has these 0). A
-    // tessellation state's
-    // push word of its control stage's first field + 1 (raw_direct_push.h kControlWords; its control and evaluation
-    // programs are RuntimeRecord's), its patches' control points (0: any) and its control-point index size in bytes (0:
-    // none). vertexStrideDynamic: stream 0's stride is its bind's (MTLBufferLayoutStrideDynamic).
+    // v21. A tessellation state's push word of its control stage's first field + 1 (raw_direct_push.h kControlWords; its
+    // control and evaluation programs: tessPrograms), its patches' control points (0: any) and its control-point index
+    // size in bytes (0: none). vertexStrideDynamic: stream 0's stride is its bind's (MTLBufferLayoutStrideDynamic).
     uint8_t controlWord, controlPoints, controlPointIndexBytes, vertexStrideDynamic;
     // A state of vertex amplification: its maxVertexAmplificationCount (0: 1), and the push words + 1 of m2v's
     // AmplificationId and AmplificationCount (0: none), which each draw writes (its [[amplification_count]] is the draw's)
     uint8_t amplificationMax, amplificationIdWord, amplificationCountWord;
-    // A pack field: the push word + 1 of m2v's RenderTargetArrayLength (0: none), the pass's length, which each draw writes:
+    // The push word + 1 of m2v's RenderTargetArrayLength (0: none), the pass's length, which each draw writes:
     // its vertex program writes Layer (SET_RT_LAYER takes it), an index at or past the length as 0. kLayerDropped: its
     // vertex function chooses its slice, but the translation had no layered form of the state; its record draws layer 0
     uint8_t arrayLengthWord;
@@ -436,7 +483,21 @@ struct PackPipeline {
     uint16_t writtenFormat[kWrittenSlots];
     // the fragment texture slots its programs read through a two-plane RGB10A8_2P_XR10 texture's header pair (raw_xr_pass.h):
     // the record of its " | xrs=<slots>" variant
-    uint16_t xrSlots, xrReserved;
+    uint16_t xrSlots;
+    // v27. Bits 8-15 of spillEntry[0] (bits 0-7 here) and spillEntry[1] (bits 8-15 here): an argument table past entry 254
+    uint16_t spillEntryHigh;
+    // v24. A tessellation state's control and evaluation programs (program indices; a runtime record's are its
+    // tessPrograms). strideTwin: the keyHash of the same state with its bind-stride layouts pulled in the shader
+    // (RuntimeRecord::strideTwin), which a draw of a bind stride past a stream's 12 bits takes; 0: none.
+    uint32_t tessPrograms[2];
+    uint64_t strideTwin;
+    // An amplifying state's push words + 1 of m2v's AmplificationLayerOffset and AmplificationViewportOffset (0: none),
+    // which each amplification writes
+    uint8_t amplificationLayerWord, amplificationViewportWord;
+    // The registers its draws set back after it (RuntimeRecord::restore): restoreDwords words of (method, value) pairs in the
+    // blob section from restoreAt
+    uint16_t restoreDwords;
+    uint32_t restoreAt;
 };
 
 // PackPipeline::arrayLengthWord of a record of one layer whose vertex function chooses its slice
@@ -469,6 +530,11 @@ inline bool tessellates(const PackPipeline &p)
     return p.controlWord != 0;
 }
 
+inline bool pixelStage(const PackPipeline &p)
+{
+    return p.fs != kNoProgram;
+}
+
 // A compute state at one threadgroup shape (runtime/raw_compute.h): NVK's work for the kernel m2v made of it, keyed by
 // computeKeyHash. Its program is a PackProgram whose code starts its slot (no shader header); its constant buffers are the
 // program's (PackProgram::cbufType, QMD slot c its cbuf c)
@@ -480,7 +546,9 @@ enum PackKernelEntryKind : uint8_t {
     // (EntryTextureTable, EntrySamplerTable)
     KernelTextureTable,
     KernelSamplerTable,
-    KernelSpillTable  // m2v's ArgumentTable (EntrySpillTable)
+    KernelSpillTable,    // m2v's ArgumentTable (EntrySpillTable)
+    KernelTexturePlane,  // the alpha plane (R8Uint) of the two-plane RGB10A8_2P_XR10 texture at the slot (raw_xr_pass.h),
+                         // whose KernelTexture entry binds its color words (R32Uint)
 };
 
 // A word range of set 0 and the Metal argument it holds: a buffer's {address, range} descriptor (its range the bound bytes
@@ -490,9 +558,24 @@ struct PackKernelEntry {
     uint16_t offset;
     uint8_t kind;  // PackKernelEntryKind
     uint8_t slot;
-    // buffers: kernelBufferWindow, kernelResidualWord; textures: the header's word 0 m2v bound (format, swizzle)
+    // buffers: kernelBufferWindow, kernelResidualWord; textures: the header's word 0 m2v bound (format, swizzle);
+    // samplers: kernelSamplerPairs (v26)
     uint32_t window;
 };
+
+// A sampler entry's window: bit 31 set where the record holds the texture slots whose reads the sampler samples, bits
+// 0-30 (none: it samples only images at no slot, or none); clear where it does not know them
+constexpr uint32_t kSamplerPairsKnown = 1u << 31;
+
+inline bool kernelSamplerPairsKnown(const PackKernelEntry &e)
+{
+    return e.window & kSamplerPairsKnown;
+}
+
+inline uint32_t kernelSamplerPairs(const PackKernelEntry &e)
+{
+    return e.window & ~kSamplerPairsKnown;
+}
 
 // A buffer entry's window in bytes, 0 the whole buffer
 inline uint32_t kernelBufferWindow(const PackKernelEntry &e)
@@ -606,7 +689,7 @@ struct InitAddresses {
 uint32_t relocated(const PackInitMethod &m, const InitAddresses &a);
 static_assert(sizeof(PackShaderTests) == 16, "shader test layout");
 static_assert(sizeof(PackPipeline) ==
-                  40 + kPackEntries * 8 + 4 + 32 * 4 + 4 + 36 + 16 + 56 + 4 + 92 + 24 + 2 * kWrittenSlots + 4,
+                  40 + kPackEntries * 8 + 4 + 32 * 4 + 4 + 36 + 16 + 56 + 4 + 92 + 24 + 2 * kWrittenSlots + 4 + 24,
               "pack layout");
 static_assert(offsetof(PackPipeline, storageBlendMask) == 490 && offsetof(PackPipeline, fetchRung) == 528,
               "pack layout: packfile.py PIPELINE_V15");
@@ -618,10 +701,17 @@ static_assert(offsetof(PackPipeline, controlWord) == 636 && offsetof(PackPipelin
               "pack layout: packfile.py PIPELINE_V21");
 static_assert(offsetof(PackPipeline, writtenFormat) == 660 && offsetof(PackPipeline, xrSlots) == 692,
               "pack layout: packfile.py PIPELINE_V22");
-static_assert(sizeof(PackProgram) == 44, "pack layout");
+static_assert(offsetof(PackPipeline, tessPrograms) == 696 && offsetof(PackPipeline, strideTwin) == 704 &&
+                  offsetof(PackPipeline, restoreAt) == 716,
+              "pack layout: packfile.py PIPELINE_V24");
+static_assert(offsetof(PackPipeline, entriesHigh) == 31 && offsetof(PackPipeline, farEntriesAt) == 557 &&
+                  offsetof(PackPipeline, spillEntryHigh) == 694,
+              "pack layout: packfile.py PIPELINE_V27");
+static_assert(sizeof(PackProgram) == 44 && offsetof(PackProgram, farUbos) == 41, "pack layout");
 static_assert(sizeof(PackVariant) == 8, "pack layout");
 static_assert(sizeof(PackArchive) == 16, "pack layout");
 static_assert(sizeof(PackComputeFacts) == 24, "pack layout: packfile.py compute_facts_bytes");
+static_assert(sizeof(PackReflection) == 16, "pack layout: packfile.py reflection_bytes");
 static_assert(sizeof(PackHeader) == 24 + 16 * PackSectionCount + 16, "pack layout: packfile.py pack_bytes header_size");
 static_assert(sizeof(PackKernel) == 18 + 256 + 14 + 128 + 8 * kKernelEntries + 84 + 12, "pack layout");
 static_assert(offsetof(PackKernel, stageInRegionWord) == 1012, "pack layout: packfile.py KERNEL_V21");
@@ -632,7 +722,7 @@ class Pack {
 public:
     ~Pack();
     // `stack`: the plugin's own key; a pack of another build (another m2v, NVK or frontend) is refused. 0 takes any (host tests).
-    bool load(const char *path, uint64_t stack, std::string &err);
+    bool load(const char *path, uint64_t stack, std::string &err, uint32_t maxSelectorId = UINT16_MAX);
 
     const PackHeader *header() const
     {
@@ -659,13 +749,21 @@ public:
     const PackSplit *split(uint32_t wholeProgram) const;   // nullptr: not split
     // `pp`'s variants of stage `stage` (0 vertex, 1 fragment), `count` of them; nullptr: none
     const PackVariant *variants(const PackPipeline &pp, uint32_t stage, uint32_t &count) const;
+    const PackSelectorTable *selectors(const PackPipeline &pp) const;
     const PackArchive *archive(uint64_t pathHash) const;              // nullptr: the pack lists no such archive
     const PackIteratedBlend *iterated(const PackPipeline &pp) const;  // nullptr: it names none
     // `pp`'s or `k`'s ArgumentTable words (PackPipeline::spillAt); nullptr: none, or past the section
     const uint32_t *spills(const PackPipeline &pp) const;
     const uint32_t *spills(const PackKernel &k) const;
+    // `pp`'s far block (raw_set_entries.h); nullptr: it has kPackEntries entries or fewer
+    const uint32_t *far(const PackPipeline &pp) const;
+    // `program`'s far table of uniform buffers (PackProgram::farUbos); nullptr: it names none
+    const uint16_t *farUbos(const PackProgram &program) const;
     bool declares(const PackArchive &archive, uint64_t keyHash) const;
     const PackComputeFacts *computeFacts(uint64_t keyHash) const;  // nullptr: the pack has no facts of that state
+    // The reflection blob of the render state (or, with `compute`, the compute state) of `keyHash`, its `length`;
+    // nullptr: the pack holds none
+    const uint8_t *reflection(uint64_t keyHash, bool compute, uint32_t &length) const;
 
     const char *string(uint32_t off) const
     {
@@ -675,6 +773,9 @@ public:
     static uint64_t fnv(const void *p, size_t n);
 
 private:
+    bool farBlocksFit(std::string &err) const;
+    bool selectorsFit(uint32_t maxId, std::string &err) const;
+
     const uint8_t *base_ = nullptr;
     size_t size_ = 0;
     const PackHeader *hdr_ = nullptr;

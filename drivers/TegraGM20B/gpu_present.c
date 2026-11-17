@@ -273,6 +273,7 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	struct nvif_push *push = NULL;
 	u32 *push_start = NULL;
 	u32 words = 0;
+	struct switch_gpu_backing_transaction seal;
 	int ret = 0;
 	int cut = 0;
 
@@ -291,9 +292,6 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	}
 	ret = switch_gpu_present_tokens_prepare(&tgm_present.tokens, dependencies,
 						dependency_count);
-	if (!ret)
-		ret = tgm_backing_dependencies(chan, tgm_present.tokens.tokens, dependency_count,
-					       0);
 	if (ret) {
 		switch_gpu_present_tokens_drop(&tgm_present.tokens);
 		mutex_unlock(&tgm_present.lock);
@@ -321,9 +319,22 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 		return ret;
 	}
 	push_start = push->cur;
-	ret = tgm_backing_dependencies(chan, tgm_present.tokens.tokens, dependency_count, 1);
+	if (dependency_count) {
+		memset(&seal, 0, sizeof(seal));
+		ret = switch_gpu_backing_seal(&seal);
+		if (ret) {
+			switch_gpu_present_tokens_drop(&tgm_present.tokens);
+			mutex_unlock(&tgm_present.lock);
+			return ret;
+		}
+	}
+	chan->chan.defer_kick = true;
+	ret = tgm_backing_dependencies(chan, tgm_present.tokens.tokens, dependency_count);
 	if (ret) {
 		push->cur = push_start;
+		chan->chan.defer_kick = false;
+		if (dependency_count)
+			switch_gpu_backing_abort(&seal);
 		switch_gpu_present_tokens_drop(&tgm_present.tokens);
 		mutex_unlock(&tgm_present.lock);
 		return ret;
@@ -366,7 +377,6 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	tgm_present.recheck = TGM_PRESENT_NS;
 	/* before the kick, so the completion cancels it */
 	nvxnu_work_schedule_after(tgm_present.deadline_work, tgm_present.recheck);
-	tgm_chan_park_promises(chan, tgm_present.tokens.tokens, dependency_count);
 	/* The present job's own fence, on this kernel channel whose completion is its visibility: the nonstall filter runs
 	 * the display's callout as it passes, ahead of the completion work item. A direct present of a producer that ended
 	 * without external visibility (a compositor job's) comes here through present_watch_flush, so this is the filter's
@@ -378,10 +388,8 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	}
 	/* A copy's flush above put the frame's source in DRAM, and the copy and its read-backs write through the present's
 	 * volatile PTEs (tgm_present_map); a fence-only present is direct scanout of a surface the GPU drew through the L2. */
-	if (dst_va)
-		chan_fence_volatile(chan);
-	else
-		chan_fence(chan);
+	switch_gpu_chan_fence_sealed(chan, dst_va ? TGM_FENCE_VOLATILE_WRITES : 1,
+				     dependency_count ? &seal : NULL);
 	if (!dst_va && stats_on())
 		__atomic_fetch_add(&tgm_stats.present_flushes, 1, __ATOMIC_RELAXED);
 	if (stats_on())

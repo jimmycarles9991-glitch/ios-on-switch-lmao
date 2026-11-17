@@ -33,6 +33,40 @@ void switch_gm20b_samples_report(struct nv_push *p, uint64_t va)
                                        });
 }
 
+void switch_gm20b_samples_word(struct nv_push *p, uint64_t va, bool reduce, uint32_t reduction)
+{
+    assert(!(va & 3));
+    P_MTHD(p, NVB197, SET_REPORT_SEMAPHORE_A);
+    P_NVB197_SET_REPORT_SEMAPHORE_A(p, va >> 32);
+    P_NVB197_SET_REPORT_SEMAPHORE_B(p, va & 0xffffffff);
+    P_NVB197_SET_REPORT_SEMAPHORE_C(p, 0);
+    P_NVB197_SET_REPORT_SEMAPHORE_D(p, {
+                                           .operation = OPERATION_REPORT_ONLY,
+                                           .pipeline_location = PIPELINE_LOCATION_ALL,
+                                           .report = REPORT_ZPASS_PIXEL_CNT,
+                                           .structure_size = STRUCTURE_SIZE_ONE_WORD,
+                                           .flush_disable = FLUSH_DISABLE_TRUE,
+                                           .reduction_enable = reduce ? REDUCTION_ENABLE_TRUE : REDUCTION_ENABLE_FALSE,
+                                           .reduction_op = reduce ? reduction : 0,
+                                           .reduction_format = REDUCTION_FORMAT_UNSIGNED_32,
+                                       });
+}
+
+void switch_gm20b_release_word(struct nv_push *p, uint64_t va, uint32_t payload)
+{
+    assert(!(va & 3));
+    P_MTHD(p, NVB197, SET_REPORT_SEMAPHORE_A);
+    P_NVB197_SET_REPORT_SEMAPHORE_A(p, va >> 32);
+    P_NVB197_SET_REPORT_SEMAPHORE_B(p, va & 0xffffffff);
+    P_NVB197_SET_REPORT_SEMAPHORE_C(p, payload);
+    P_NVB197_SET_REPORT_SEMAPHORE_D(p, {
+                                           .operation = OPERATION_RELEASE,
+                                           .release = RELEASE_AFTER_ALL_PRECEEDING_WRITES_COMPLETE,
+                                           .pipeline_location = PIPELINE_LOCATION_ALL,
+                                           .structure_size = STRUCTURE_SIZE_ONE_WORD,
+                                       });
+}
+
 void switch_gm20b_copy_bytes(struct nv_push *p, uint64_t src, uint64_t dst, uint32_t bytes, uint8_t data_transfer_type)
 {
     assert(bytes && bytes < (1u << 15));

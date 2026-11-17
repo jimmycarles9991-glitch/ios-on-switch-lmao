@@ -325,6 +325,7 @@ void rmWriteCommand(RMIndirectCommandBuffer *b, NSUInteger index, const RMICBCom
          offset:(NSUInteger)offset
 {
     SWITCH_API(ApiDraw);
+    rmXrShadowBlock(_cb);
     RMIndirectCommandBuffer *b =
         [(id)buffer isKindOfClass:[RMIndirectCommandBuffer class]] ? (RMIndirectCommandBuffer *)buffer : nil;
     if (!b || [(id)b isKindOfClass:[RMIndirectComputeBuffer class]] || !count || first + count > b->_count) {
@@ -333,22 +334,19 @@ void rmWriteCommand(RMIndirectCommandBuffer *b, NSUInteger index, const RMICBCom
         return;
     }
     const uint8_t kinds = [b kinds];
-    if ((kinds & RMICBPatches) && (kinds & (RMICBTriangles | RMICBOthers))) {
-        [_cb takeReason:WhyEncode why:@"an indirect command buffer of patches and primitives"];
-        hit(_cb, PredEncGeometry, 1, kinds);
-    } else if ((kinds & (RMICBTriangles | RMICBOthers)) == (RMICBTriangles | RMICBOthers)) {
-        [_cb takeReason:WhyEncode why:@"an indirect command buffer of triangles and lines or points"];
-        hit(_cb, PredEncGeometry, 0, kinds);
-    }
     const std::vector<RMBuffer *> reads = [b buffers];
-    [self checkDraw];
+    if (![self checkDraw])
+        return;
     [_cb retain:b];
     [_cb retain:rangeBuffer];
     for (RMBuffer *read : reads)
         [_cb retain:read];
-    const uint8_t primitive = kinds & RMICBPatches     ? uint8_t(raw::icb::kPatchPrimitive)
-                              : kinds & RMICBTriangles ? 3
-                                                       : 0;
+    // each command sets its own topology and polygon offset (raw::icb::polygonOffset), so triangles and lines or points
+    // share an execute; a buffer of patches and primitives draws those of the inherited state's kind, the others under it
+    // being Metal's validation error
+    const bool patchState = _pipe && _pipe->_raw && _pipe->_raw->rec && raw::tessellates(*_pipe->_raw->rec);
+    const bool patches = (kinds & RMICBPatches) && (patchState || !(kinds & (RMICBTriangles | RMICBOthers)));
+    const uint8_t primitive = patches ? uint8_t(raw::icb::kPatchPrimitive) : kinds & RMICBTriangles ? 3 : 0;
     Cmd m = cmd(OpExecuteCommands, primitive);
     m.obj = (__bridge void *)rangeBuffer;
     m.obj2 = (__bridge void *)b;

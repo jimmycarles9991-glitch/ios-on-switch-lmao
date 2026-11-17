@@ -72,19 +72,19 @@ switch_gm20b_copy_rect(struct nv_push *p, const struct switch_gm20b_copy *copy,
       uint64_t dst_addr = copy->dst.base_addr;
 
       if (!copy->src.is_3d)
-         src_addr += (z + copy->src.offset_el.a) * copy->src.array_stride;
+         src_addr += ((uint64_t)z + copy->src.offset_el.a) * copy->src.array_stride;
 
       if (!copy->dst.is_3d)
-         dst_addr += (z + copy->dst.offset_el.a) * copy->dst.array_stride;
+         dst_addr += ((uint64_t)z + copy->dst.offset_el.a) * copy->dst.array_stride;
 
       if (!copy->src.tiled) {
-         src_addr += copy->src.offset_el.x * copy->src.bpp +
-                     copy->src.offset_el.y * copy->src.row_stride;
+         src_addr += (uint64_t)copy->src.offset_el.x * copy->src.bpp +
+                     (uint64_t)copy->src.offset_el.y * copy->src.row_stride;
       }
 
       if (!copy->dst.tiled) {
-         dst_addr += copy->dst.offset_el.x * copy->dst.bpp +
-                     copy->dst.offset_el.y * copy->dst.row_stride;
+         dst_addr += (uint64_t)copy->dst.offset_el.x * copy->dst.bpp +
+                     (uint64_t)copy->dst.offset_el.y * copy->dst.row_stride;
       }
 
       P_MTHD(p, NVB0B5, OFFSET_IN_UPPER);

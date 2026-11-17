@@ -679,7 +679,8 @@ struct _vm_map {
 	/* reserved */ res0:1,
 #endif /* HAS_MTE || HAS_MTE_EMULATION_SHIMS */
 	/* bool     */lock_contention_debug:1,    /* Enable extra checks for potential lock contention issues */
-	/* reserved  */ pad:7;
+	switch_app_code:1,
+	/* reserved  */ pad:6;
 	/*
 	 * Weak reference to the task that owns this map. This will be NULL if the
 	 * map has terminated, so you must have a task reference to be able to safely

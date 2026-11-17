@@ -67,6 +67,7 @@ IOSimpleLock *IOSimpleLockAlloc()
     return new IOSimpleLock{};
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage,misc-const-correctness): IOKit's signature, linked by the driver under test
 void IOSimpleLockFree(IOSimpleLock *lock)
 {
     delete lock;
@@ -90,7 +91,7 @@ uint32_t switch_mmio_model_read32(uintptr_t address)
 
 void switch_mmio_model_write32(uintptr_t address, uint32_t value)
 {
-    if (gFrozen.count(address))
+    if (gFrozen.contains(address))
         return;
     gRegisters[address] = value & ~gStuckClear[address];
 }
@@ -118,7 +119,7 @@ void switch_mmio_model_write8(uintptr_t address, uint8_t value)
 void IOLog(const char *format, ...)
 {
     char line[256];
-    va_list args;
+    va_list args;  // NOLINT(cppcoreguidelines-init-variables): va_start initialises it
     va_start(args, format);
     vsnprintf(line, sizeof(line), format, args);
     va_end(args);
@@ -141,5 +142,8 @@ uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t)
 }
 
 void switch_mc_errors_resume(void)
+{}
+
+void switch_mc_errors_detached(uint32_t)
 {}
 }

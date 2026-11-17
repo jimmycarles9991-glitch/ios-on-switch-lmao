@@ -117,8 +117,8 @@ struct OutgrownRing {
 // the kernel made none, or refused its context, and no channel is left: `fence` is `none`, which every seqno has passed, so
 // nothing waits for `last` (a seqno of the dead channel) on a channel that never runs, whose slot's fence may be behind.
 template <class Context>
-bool makeChannel(Kernel &k, uint32_t engines, uint32_t &channel, const volatile uint32_t *&fence, uint32_t &last,
-                 const volatile uint32_t *none, Context &&context)
+bool makeChannel(Kernel &k, uint32_t engines, uint32_t &channel, const volatile uint32_t *&fence,
+                 std::atomic<uint32_t> &last, const volatile uint32_t *none, Context &&context)
 {
     channel = 0;
     fence = none;
@@ -131,7 +131,7 @@ bool makeChannel(Kernel &k, uint32_t engines, uint32_t &channel, const volatile 
         fence = none;
         return false;
     }
-    last = seqno;
+    last.store(seqno, std::memory_order_release);
     return true;
 }
 

@@ -17,6 +17,9 @@ load("@rules_rust//rust:defs.bzl", "rust_test")
 #                           ci_filters', so a real device misses there too (NBLibrary answers that miss as Metal does)
 #   native_tess_modes_test  NativeMetalTessModes.rs: a tessellation state's SET_TESSELLATION_PARAMETERS, and its evaluation
 #                           stage's module with the control stage's modes, as the raw path's direct compile needs them
+#   native_address_maps_test  NativeMetalAddressMaps.rs: the address-mode map of each two-plane format raw converts, as raw's
+#                           Texture::addressMap, and the map each runtime sampler takes of the textures it samples, a
+#                           sampler two maps give two sets of modes named
 #   journal_source_test     NativeBridgeMetalFrontend.mm: a raw-made state's journal line is written on the persist queue,
 #                           not on its creating thread
 #
@@ -26,6 +29,11 @@ load("//bazel/testing:defs.bzl", "host_test")
 
 lint_files()
 
+exports_files([
+    "neutral_compute.mm",
+    "neutral_compute.metal",
+])
+
 rust_test(
     name = "native_variants_test",
     srcs = ["//drivers/NativeMetal:bridge/NativeMetalVariants.rs"],
@@ -33,8 +41,14 @@ rust_test(
 )
 
 rust_test(
+    name = "native_address_maps_test",
+    srcs = ["//drivers/TegraGM20BMetal:translate/NativeMetalAddressMaps.rs"],
+    edition = "2024",
+)
+
+rust_test(
     name = "native_tess_modes_test",
-    srcs = ["//drivers/NativeMetal:bridge/NativeMetalTessModes.rs"],
+    srcs = ["//drivers/TegraGM20BMetal:translate/NativeMetalTessModes.rs"],
     edition = "2024",
 )
 
@@ -118,7 +132,6 @@ host_test(
     srcs = [
         "gpu_memory_release_test.cpp",
         "//drivers/NativeMetal:GpuMemoryRelease.h",
-        "//drivers/NativeMetal:bridge/NativeMetalObjects.h",
     ],
     cxx_std = "c++17",
 )
@@ -181,6 +194,24 @@ host_test(
     linkopts = [
         "-framework",
         "Foundation",
+    ],
+)
+
+host_test(
+    name = "bridge_budget_test",
+    srcs = ["bridge_budget_test.cpp"],
+    data = [
+        "//drivers/NativeMetal:bridge/NativeMetalBridge.rs",
+        "//drivers/NativeMetal:bridge/NativeMetalCompile.rs",
+        "//drivers/NativeMetal:bridge/NativeMetalComputeArtifact.rs",
+        "//drivers/NativeMetal:bridge/NativeMetalFunctions.rs",
+        "//drivers/NativeMetal:bridge/NativeMetalVariants.rs",
+        "//drivers/TegraGM20BMetal:translate/NativeMetalDirect.rs",
+        "//drivers/TegraGM20BMetal:translate/NativeMetalDirectCompute.rs",
+        "//drivers/TegraGM20BMetal:translate/NativeMetalDirectTess.rs",
+        "//drivers/TegraGM20BMetal:translate/NativeMetalOffline.rs",
+        "//drivers/TegraGM20BMetal:translate/NativeMetalReflection.rs",
+        "//drivers/TegraGM20BMetal:translate/NativeMetalTranslate.rs",
     ],
 )
 

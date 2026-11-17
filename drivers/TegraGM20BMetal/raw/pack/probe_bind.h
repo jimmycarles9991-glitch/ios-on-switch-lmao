@@ -27,7 +27,7 @@ constexpr uint32_t probeStorageCode(uint32_t stage, uint32_t slot)
     return probeBindOffset(stage, slot) & 15;
 }
 
-// A kernel's buffer slot's residual in the direct compile's bind-offset dispatch (bridge/NativeMetalDirectCompute.rs,
+// A kernel's buffer slot's residual in the direct compile's bind-offset dispatch (translate/NativeMetalDirectCompute.rs,
 // runtime/raw_direct_compute.cpp): a kernel's buffers are storage buffers, and slots 15 apart share one, so a kernel binding
 // both names no word for either
 constexpr uint32_t probeComputeCode(uint32_t slot)

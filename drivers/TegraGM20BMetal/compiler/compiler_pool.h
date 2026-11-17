@@ -7,7 +7,8 @@
 // the worker drops to the background class for the split form. A request nobody waits for runs at the background class.
 // Among jobs of one class, a client with none running goes first, then the oldest: one process asking for many states
 // does not hold the others back by more than the compile it already has running.
-// Workers park on a condition until there is a job; nothing polls.
+// Workers park on a condition until there is a job; nothing polls. They park at the interactive class, so the one woken
+// for an urgent job runs at once on a busy system, and take the job's class once they have it.
 #pragma once
 #include <pthread.h>
 #include <array>
@@ -61,7 +62,8 @@ public:
         // A running job's worker raised to `band` until lower(token)
         std::function<void *(pthread_t worker, Band band)> raise;
         std::function<void(void *token)> lower;
-        // On the worker whose job was the last one queued or running, after its waiters were answered
+        // On the worker whose job was the last one queued or running, after its waiters were answered, at the background
+        // class
         std::function<void()> idle;
     };
 

@@ -4,8 +4,8 @@ import Metal
 
 /// What the Switch's Metal stack tells a process about its GPU paths (drivers/TegraGM20BMetal/raw/runtime/RawMetal.mm,
 /// debug builds): the default device is the raw GM20B facade unless the process runs with TEGRA_RAW_METAL=0 or the
-/// pack was refused; the facade hands out the m2v device it wraps, counts its command buffers per path and names each
-/// one's path. On a Mac (the host tests) or a device without them, every answer says so instead.
+/// pack was refused; the facade counts its command buffers per path and names each one's path. On a Mac (the host tests)
+/// or a device without them, every answer says so instead.
 public enum RawFacade {
     static let facadeClass = "RawGM20BMetalDevice"
 
@@ -19,10 +19,6 @@ public enum RawFacade {
         #endif
     }
 
-    public static func m2vDevice(of device: MTLDevice) -> MTLDevice? {
-        ask(device, "switchM2VDevice") as? MTLDevice
-    }
-
     /// Whether the facade still wraps an m2v device (a debug build that has one answers switchM2VDevice), asked
     /// without opening it.
     public static func wrapsM2V(_ device: MTLDevice) -> Bool {
@@ -33,6 +29,11 @@ public enum RawFacade {
     /// facade or in a release runtime, raw/runtime/RawMetalObjectProbe.mm).
     public static func packed(_ state: MTLRenderPipelineState) -> Bool? {
         ((ask(state, "switchRawObject") as? [String: Any])?["packed"] as? NSNumber)?.boolValue
+    }
+
+    /// The set-0 entries of the record the facade draws `state` from (0: none; nil off the facade or in a release runtime).
+    public static func entries(of state: MTLRenderPipelineState) -> Int? {
+        ((ask(state, "switchRawObject") as? [String: Any])?["entries"] as? NSNumber)?.intValue
     }
 
     /// The facade's record of its m2v device, read without opening it (debug builds; empty off the facade):
@@ -142,11 +143,43 @@ extension Outcome {
     /// whatever else the test found; unchanged off the facade and when every one ran raw. paths= on the line.
     public func onRawPath(_ gpu: GPU) -> Outcome {
         guard RawFacade.kind(of: gpu.device) == "raw" else { return self }
-        var metrics = self.metrics
-        metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
-        let off = gpu.paths.offRaw
-        guard !off.isEmpty else { return Outcome(verdict, metrics, detail: detail, proof: proof) }
-        let reason = "command buffers off the raw path: \(off.text)"
-        return Outcome(.fail, metrics, detail: detail.isEmpty ? reason : reason + "; " + detail, proof: proof)
+        var marked = self
+        marked.metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
+        return marked.failing(offRaw: gpu.paths.offRaw)
+    }
+}
+
+/// The facade's paths of command buffers a test makes itself rather than through a GPU (a layer's drawables), each read
+/// once it completed.
+public final class CommandPaths: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tally = PathTally()
+
+    public init() {}
+
+    public func watch(_ buffer: MTLCommandBuffer) {
+        buffer.addCompletedHandler { [self] done in
+            let path = RawFacade.path(of: done)
+            lock.lock()
+            tally.add(path)
+            lock.unlock()
+        }
+    }
+
+    public var paths: PathTally {
+        lock.lock()
+        defer { lock.unlock() }
+        return tally
+    }
+}
+
+extension Outcome {
+    /// onRawPath for command buffers `watched` saw on `device`.
+    public func onRawPath(_ watched: CommandPaths, device: MTLDevice?) -> Outcome {
+        guard let device, RawFacade.kind(of: device) == "raw" else { return self }
+        var marked = self
+        let paths = watched.paths
+        marked.metrics.set("paths", paths.isEmpty ? "-" : paths.text)
+        return marked.failing(offRaw: paths.offRaw)
     }
 }

@@ -25,6 +25,7 @@ struct SwitchNVDECExportRefusal {
     uint64_t allocationBytes, descriptorBytes, baseOffset;
 };
 
-// fresh: switch_native_surface_publish's.
+// fresh, first: switch_native_surface_publish's.
 int switch_nvdec_output_export(const TegraNVDECBlock *block, const TegraNVDECPresent *request, task_t task,
-                               SwitchNVDECExportRefusal *refusal = nullptr, bool *fresh = nullptr);
+                               SwitchNVDECExportRefusal *refusal = nullptr, bool *fresh = nullptr,
+                               bool *first = nullptr);

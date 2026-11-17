@@ -51,6 +51,7 @@
 #include "../TegraHost1x/TegraHost1x.h"
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUDomain.h"
+#include "../TegraSMMU/TegraSMMUPublish.h"
 #include "../TegraSMMU/TegraSMMUSpace.h"
 #include "TegraVIC.h"
 #include "TegraVICEngine.h"
@@ -181,11 +182,6 @@ bool parse(const uint8_t *fw, size_t length)
 }
 
 // --- SMMU domain (TegraSMMUDomain.h; the registers under TegraSMMU.h's lock) ---------------------------------------
-void smmuFlush()
-{
-    tegra_smmu_flush(kAsid);
-}
-
 bool identity(const TegraVICBuffer &b, bool writable)
 {
     return gDomain.identity(b.pa, b.size, writable);
@@ -564,11 +560,7 @@ extern "C" uint64_t switch_vic_mapping_create(const uint64_t *pages, uint32_t co
         gMappingSpace.release(address, bytes);
         address = 0;
     }
-    uintptr_t low = 0, high = 0;
-    if (gDomain.takeDirty(&low, &high)) {
-        switch_dcache_clean(reinterpret_cast<void *>(low), high - low);
-        smmuFlush();
-    }
+    switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
     IOLockUnlock(gMappingLock);
     return address;
 }
@@ -578,11 +570,7 @@ extern "C" void switch_vic_mapping_destroy(uint64_t address, uint32_t count)
     IOLockLock(gMappingLock);
     if (gMappingSpace.release(address, static_cast<uint64_t>(count + kTailPages) * SWITCH_HW_PAGE_SIZE)) {
         gDomain.unmap(address, count + kTailPages);
-        uintptr_t low = 0, high = 0;
-        if (gDomain.takeDirty(&low, &high)) {
-            switch_dcache_clean(reinterpret_cast<void *>(low), high - low);
-            smmuFlush();
-        }
+        switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
     }
     IOLockUnlock(gMappingLock);
 }

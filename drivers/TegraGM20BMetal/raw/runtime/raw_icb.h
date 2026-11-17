@@ -2,12 +2,12 @@
 // An indirect command buffer of draws that inherit their pipeline and buffers: each command is kSlotWords push words in GPU
 // memory, written once as the CPU encodes the command, and a range of commands is one run of words the channel fetches by
 // reference (RenderEncoder::executeSlots), after the encoder prepared the state they inherit. A command is its topology,
-// its index buffer, and the gated draw macro (raw_mme.h) called with its index and Metal's indirect arguments inline: it
-// draws as an indirect draw does (root draw parameters, base registers) where its index is in the range the execute put in
-// the macros' scratch, and draws nothing elsewhere. A command with nothing encoded is no-ops. The macro call is at the
-// same words in every command, so a copy to another index rewrites one word (kIndexWord). A buffer that may hold patch
-// commands has kPatchSlotWords a command: a patch command is its topology and the patch macro called with its control-stage
-// words, which load them for the state the execute's layout names (raw_mme.h kIcbPatches).
+// its polygon offset, its index buffer, and the gated draw macro (raw_mme.h) called with its index and Metal's indirect
+// arguments inline: it draws as an indirect draw does (root draw parameters, base registers) where its index is in the
+// range the execute put in the macros' scratch, and draws nothing elsewhere. A command with nothing encoded is no-ops. The
+// macro call is at the same words in every command, so a copy to another index rewrites one word (kIndexWord). A buffer
+// that may hold patch commands has kPatchSlotWords a command: a patch command is its topology and the patch macro called
+// with its control-stage words, which load them for the state the execute's layout names (raw_mme.h kIcbPatches).
 #pragma once
 #include <cstdint>
 #include "raw_mme.h"
@@ -15,7 +15,7 @@
 
 namespace raw::icb {
 
-constexpr uint32_t kSlotWords = 18, kPatchSlotWords = 32, kCallWord = 10, kIndexWord = kCallWord + 1;
+constexpr uint32_t kSlotWords = 21, kPatchSlotWords = 34, kCallWord = 13, kIndexWord = kCallWord + 1;
 static_assert(kIndexWord + mme::kIcbPatchesArguments <= kPatchSlotWords);
 constexpr uint32_t kNop = Push::hdr(4, SUBC_3D, NVB197_NO_OPERATION, 0);
 
@@ -57,10 +57,20 @@ inline bool restarts(uint32_t primitive)
     return primitive == 2 || primitive == 4;
 }
 
-// Metal biases the depth of triangles alone (RenderEncoder::rasterFor): commands of both kinds need different raster state
+// Metal biases the depth of triangles alone (RenderEncoder::rasterFor; an M4 Max moves no line or point by a depth bias)
 inline bool triangles(uint32_t primitive)
 {
     return primitive == 3 || primitive == 4 || primitive == kPatchPrimitive;
+}
+
+// The polygon offset of a command's kind, so one buffer's triangles and lines or points each take theirs; the encoder puts
+// its own back after an execute
+inline void polygonOffset(Push &p, uint32_t primitive)
+{
+    const bool on = triangles(primitive);
+    p.m(NVB197_SET_POLY_OFFSET_POINT, on);
+    p.m(NVB197_SET_POLY_OFFSET_LINE, on);
+    p.m(NVB197_SET_POLY_OFFSET_FILL, on);
 }
 
 inline void empty(uint32_t *slot, uint32_t words = kSlotWords)
@@ -81,6 +91,7 @@ inline void draw(uint32_t *slot, uint32_t index, const Draw &d, uint32_t words =
     Push p{slot, slot + words};
     p.m(NVB197_SET_PRIMITIVE_TOPOLOGY, topology(d.primitive));
     p.m(NVB197_SET_DA_PRIMITIVE_RESTART, restarts(d.primitive));
+    polygonOffset(p, d.primitive);
     padToCall(slot, p);
     mme::icbDrawHeader(p, false);
     const uint32_t arguments[] = {index, d.count, d.instances, d.first, d.baseInstance};
@@ -99,6 +110,7 @@ inline void indexed(uint32_t *slot, uint32_t index, const IndexedDraw &d, uint32
     p.m(NVB197_SET_INDEX_BUFFER_E, d.indexSize == 2 ? 1 : 2);
     p.m(NVB197_SET_PRIMITIVE_TOPOLOGY, topology(d.primitive));
     p.m(NVB197_SET_DA_PRIMITIVE_RESTART, restarts(d.primitive));
+    polygonOffset(p, d.primitive);
     padToCall(slot, p);
     mme::icbDrawHeader(p, true);
     const uint32_t arguments[] = {index, d.count, d.instances, d.firstIndex, uint32_t(d.baseVertex), d.baseInstance};
@@ -112,6 +124,7 @@ inline void patches(uint32_t *slot, uint32_t index, const PatchDraw &d)
     Push p{slot, slot + kPatchSlotWords};
     p.m(NVB197_SET_PRIMITIVE_TOPOLOGY, topology(kPatchPrimitive));
     p.m(NVB197_SET_DA_PRIMITIVE_RESTART, 0);
+    polygonOffset(p, kPatchPrimitive);
     padToCall(slot, p);
     mme::icbPatchesHeader(p);
     const uint32_t head[] = {index, d.count, d.instances};

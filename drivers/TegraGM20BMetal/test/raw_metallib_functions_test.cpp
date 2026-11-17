@@ -44,6 +44,32 @@ TEST(RawMetallibFunctions, AFileMetalWouldNotLoadIsNotRead)
     const std::string cut = file.substr(0, 0x110 + 0x40);
     EXPECT_FALSE(f.read(reinterpret_cast<const uint8_t *>(cut.data()), cut.size())) << "a function list past the end";
     EXPECT_FALSE(f.read(nullptr, 0));
+    EXPECT_FALSE(f.listed);
+}
+
+// functionNames and externFunctionNames in list order: the extern entries (TYPE 5, a Core Image kernel library's) apart
+TEST(RawMetallibFunctions, NamesAndExternsAreListedInOrder)
+{
+    const std::string file = made_metallib::universal({"b", "tint", "a", "swap_rb"}, 0xA0, 0xEE, {2, 5, 0, 5});
+    raw::MetallibFunctions f;
+    ASSERT_TRUE(f.read(reinterpret_cast<const uint8_t *>(file.data()), file.size()));
+    EXPECT_TRUE(f.listed);
+    EXPECT_EQ(f.names, (std::vector<std::string>{"b", "a"}));
+    EXPECT_EQ(f.externs, (std::vector<std::string>{"tint", "swap_rb"}));
+}
+
+// A metallib that lists no function is read (Metal loads it, a library with no functions), not left to m2v
+TEST(RawMetallibFunctions, AnEmptyListIsRead)
+{
+    const std::string file = made_metallib::universal({});
+    raw::MetallibFunctions f;
+    ASSERT_TRUE(f.read(reinterpret_cast<const uint8_t *>(file.data()), file.size()));
+    EXPECT_TRUE(f.listed);
+    EXPECT_TRUE(f.types.empty() && f.names.empty() && f.externs.empty());
+    EXPECT_FALSE(f.lists("f"));
+    const std::string cut = file.substr(0, file.size() - 1);
+    EXPECT_FALSE(f.read(reinterpret_cast<const uint8_t *>(cut.data()), cut.size()));
+    EXPECT_FALSE(f.listed);
 }
 
 TEST(RawMetallibFunctions, EachTypeTagIsMetalsFunctionType)

@@ -76,8 +76,9 @@ int main(int argc, char **argv)
         }
         const std::map<uint32_t, uint32_t> regs = registers(pack, pipes[i]);
         learn(pipes[i].vs, programs[pipes[i].vs].gprs, false, false, 0, false);
-        learn(pipes[i].fs, programs[pipes[i].fs].gprs, regs.count(kEarlyZ) && regs.at(kEarlyZ), true,
-              regs.count(0x1224) ? regs.at(0x1224) : 0, regs.count(0x0754) && (regs.at(0x0754) & 15) > 1);
+        if (raw::pixelStage(pipes[i]))
+            learn(pipes[i].fs, programs[pipes[i].fs].gprs, regs.count(kEarlyZ) && regs.at(kEarlyZ), true,
+                  regs.count(0x1224) ? regs.at(0x1224) : 0, regs.count(0x0754) && (regs.at(0x0754) & 15) > 1);
     }
 
     uint64_t compared = 0, read = 0, unread = 0, unparsed = 0;
@@ -89,7 +90,8 @@ int main(int argc, char **argv)
         const std::map<uint32_t, uint32_t> regs = registers(pack, pipes[i]);
         std::vector<raw::EmitRegister> made;
         std::string why;
-        if (!raw::emitState(pack.string(pipes[i].keyString), info[pipes[i].vs], info[pipes[i].fs], made, why, nullptr,
+        const raw::EmitProgram none, &fragment = raw::pixelStage(pipes[i]) ? info[pipes[i].fs] : none;
+        if (!raw::emitState(pack.string(pipes[i].keyString), info[pipes[i].vs], fragment, made, why, nullptr,
                             pipes[i].flags & raw::PipelineTwoPlane)) {
             if (!unparsed++)
                 printf("emitcheck: %s\n", why.c_str());

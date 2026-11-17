@@ -1,7 +1,7 @@
 """The analyses of a `run` of batches/*.json, chosen by the families their experiments name, and one line per answer."""
 
 from tools.benchloop import store2fma
-from tools.benchloop.sm53 import affinity, fit, hsetp2, icache, int3, interlock_spin, measure, overlap
+from tools.benchloop.sm53 import affinity, fit, hsetp2, icache, int3, interlock_spin, measure, overlap, powr_verdict
 
 # The clock the ladder measured (loop1, 11 Nov), for a run without a ladder of its own
 MEASURED_CLOCK_HZ = 769.1e6
@@ -26,6 +26,7 @@ STEPS = {
     'store2fma': ('store2fma', lambda planned, results, _: store2fma.analyse(planned, results)),
     'hsetp2': ('hsetp2', lambda planned, results, _: hsetp2.analyse(planned, results)),
     'interlock': ('interlock', lambda planned, results, _: interlock_spin.analyse(planned, results)),
+    'powr-native': ('powr_native', lambda planned, results, _: powr_verdict.analyse(planned, results)),
 }
 
 
@@ -131,6 +132,7 @@ LINES = {
     'store2fma': _store,
     'interlock': _interlock,
     'hsetp2': _hsetp2,
+    'powr_native': powr_verdict.lines,
 }
 
 

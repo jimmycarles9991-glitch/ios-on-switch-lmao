@@ -4,19 +4,10 @@
 
 #include <cstring>
 
-#include "raw_chip_facts.h"
 #include "raw_gpu.h"
+#include "raw_tiled_cache.h"
 
 namespace raw {
-
-bool Device::zetaColourTaken() const
-{
-#if SWITCH_RAW_DIAGNOSTICS
-    if (probeZetaColour.load(std::memory_order_relaxed))
-        return true;
-#endif
-    return kColourRopWritesZeta;
-}
 
 Pipeline *Device::stencilColourPipeline(uint32_t format, uint32_t samples, StencilSample pick)
 {
@@ -26,7 +17,11 @@ Pipeline *Device::stencilColourPipeline(uint32_t format, uint32_t samples, Stenc
 
 bool CommandBuffer::zetaColourTakes(const Texture &into, const Texture &src, StencilSample pick)
 {
-    return into.zeta && src.format == into.format && zetaColourWrites(into, dev_->zetaColourTaken()) &&
+#if SWITCH_RAW_DIAGNOSTICS
+    if (dev_->probeStencilBits.load(std::memory_order_relaxed))
+        return false;
+#endif
+    return into.zeta && src.format == into.format && zetaColourWrites(into) &&
            dev_->stencilColourPipeline(into.format, src.samples, pick);
 }
 
@@ -35,6 +30,14 @@ bool CommandBuffer::zetaColour(const Texture &into, const Texture &src, StencilS
 {
     Pipeline *pl = dev_->stencilColourPipeline(into.format, src.samples, pick);
     Texture target = zetaColourView(into);
+#if SWITCH_RAW_DIAGNOSTICS
+    // hw_test_app gpu.raw.zeta_colour's direct arm: the colour ROP over the zeta's own pages with the tiled cache off for
+    // the draw, the configuration nvc0 draws into kind 0xc3 in
+    const bool direct = dev_->probeZetaDirect.load(std::memory_order_relaxed);
+    const bool untiled = direct && tiledCache(dev_->k_.info());
+    if (direct)
+        target.zetaPages = false;
+#endif
     RenderEncoder *e = pl ? render(zetaColourPass<PassDesc>(target, width, height)) : nullptr;
     if (!e) {
         *why = "a stencil plane the raw path cannot render as colour";
@@ -48,8 +51,22 @@ bool CommandBuffer::zetaColour(const Texture &into, const Texture &src, StencilS
     e->setPipeline(pl);
     const StencilBitsArgs args = stencilBitsArgs(map, src.samples, pick);
     e->setBytes(2, 0, &args, sizeof args);
+#if SWITCH_RAW_DIAGNOSTICS
+    if (untiled) {
+        if (e->p_.room() < 8)
+            e->reserve();
+        e->p_.m(SET_TILED_CACHE_ENABLE, 0);
+    }
+#endif
     if (!e->draw(4 /* MTLPrimitiveTypeTriangleStrip */, 0, 4, 1, 0, why))
         return false;
+#if SWITCH_RAW_DIAGNOSTICS
+    if (untiled) {
+        if (e->p_.room() < 8)
+            e->reserve();
+        e->p_.m(SET_TILED_CACHE_ENABLE, 1);
+    }
+#endif
     RAW_DIAGNOSTIC(dev_->stats.zetaColourDraws++);
     e->end();
     return true;

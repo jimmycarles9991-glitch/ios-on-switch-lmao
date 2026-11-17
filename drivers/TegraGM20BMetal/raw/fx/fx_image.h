@@ -15,10 +15,13 @@
 namespace raw {
 namespace fx {
 
-// NIL's layout of a 3D colour image of `levels` levels; false: not one (a size of 0 or past 16384 on a side, levels 0 or more
-// than kMaxLevels or than the largest side's full chain, bpp not 1/2/4/8/16)
+// NIL's layout of a 3D colour image of `levels` levels; false: not one (a size of 0 or past 16384 on a side, levels 0
+// or more than kMaxLevels or than the largest side's full chain, bpp not 1/2/4/8/16). A block-compressed one's (blocks
+// of blockW x blockH texels, one plane deep, `bpp` bytes each: Metal's BC and ASTC 3D textures) is laid out in its
+// elements as blockChainLayout's levels are, ceil(max(1, size >> level) / block) of them a level; `width` and `height`
+// are texels, the chain's are elements.
 bool volumeLayout(uint32_t width, uint32_t height, uint32_t depth, uint32_t levels, uint32_t bpp, bool view2d,
-                  MipChain &out);
+                  MipChain &out, uint32_t blockW = 1, uint32_t blockH = 1);
 
 // NIL's layout of a 2D array of `layers` layers (a cube's six faces, a cube array's six a cube), each a 2D image of `levels`
 // levels (mipChainLayout's), `arrayStride` apart
@@ -27,6 +30,20 @@ bool arrayLayout(uint32_t width, uint32_t height, uint32_t layers, uint32_t leve
 // NIL's layout of a multisampled 2D colour image of one level: its samples as a 2D image of the sample grid NIL's sample layout
 // gives (2: 2X1_D3D, 4: 2X2, 8: 4X2_D3D), its block height chosen by the height in pixels; false: not 1, 2, 4 or 8 samples
 bool msLayout(uint32_t width, uint32_t height, uint32_t samples, uint32_t bpp, MipChain &out);
+
+// Sample s's place in its pixel's cell of the grid NIL lays out for `samples` (nil/image.rs SampleLayout::sa_offset of
+// msLayout's layouts: 2X1_D3D, 2X2, 4X2_D3D), x | y << 2
+uint8_t sampleCell(uint32_t samples, uint32_t s);
+
+// The CPU's copy of a w x h rectangle at (x, y) of a multisampled image (msLayout's, of `samples`) between its memory and
+// Metal's rows `rowBytes` apart, which hold each pixel's samples in turn (an M4 Max's getBytes and replaceRegion: pixel p's
+// sample s at texel p * samples + s of its row). NIL's image holds a pixel's samples as a cell of the sample grid (2: a
+// row of two, 4: two rows of two, 8: two rows of four), sample s where the layout the texture header's MULTI_SAMPLE_COUNT
+// names puts it (NIL's sa_offset), each cell row whole. The caller handles the cache lines.
+void writeSamples(const MipChain &c, uint8_t *memory, uint32_t samples, const uint32_t at[2], const uint32_t size[2],
+                  const uint8_t *src, size_t rowBytes);
+void readSamples(const MipChain &c, const uint8_t *memory, uint32_t samples, const uint32_t at[2],
+                 const uint32_t size[2], uint8_t *dst, size_t rowBytes);
 
 // Byte offset of texel byte (xB, y) of plane z in level `l`, from the image's base, in the CPU's view (TegraColor GOBs)
 uint64_t volumeOffset(const MipChain &c, uint32_t l, uint32_t xB, uint32_t y, uint32_t z);

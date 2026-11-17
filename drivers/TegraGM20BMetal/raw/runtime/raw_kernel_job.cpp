@@ -41,7 +41,15 @@ uint32_t releasedSignals(const JobEvents &events)
         released += events.releases[i] != 0;
     return released;
 }
+
+// the submitting thread's last job: asked quiet, kept loud by the kernel (TegraGM20BExecReplyLoud)
+thread_local bool tKeptLoud;
 }  // namespace
+
+bool jobKeptLoud()
+{
+    return tKeptLoud;
+}
 
 bool Kernel::submitJob(const KernelJob &job, uint32_t &seqno, int *result)
 {
@@ -117,6 +125,7 @@ bool Kernel::submitJob(const KernelJob &job, uint32_t &seqno, int *result)
     const int kr = call(TegraGM20BMethodSubmitJob, &address, sizeof address, &reply, sizeof reply);
     if (result)
         *result = kr;
+    tKeptLoud = kr == KERN_SUCCESS && (reply.flags & TegraGM20BExecReplyLoud);
     if (kr == KERN_SUCCESS) {
         seqno = reply.seqno;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG

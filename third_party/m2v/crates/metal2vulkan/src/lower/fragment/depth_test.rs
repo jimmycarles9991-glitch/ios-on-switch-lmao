@@ -176,6 +176,9 @@ pub struct DepthTest {
     /// the invocation's sample (bit 0 at one sample) keeps the fragment before the tests; `None`
     /// where the function returns no sample mask.
     pub mask: Option<u32>,
+    /// The stand-ins are 2D arrays of a layered pass's layers, addressed at each fragment's layer
+    /// (`LoweringInputs::layered_storage`, one sample).
+    pub layered: bool,
 }
 
 /// The in-shader stencil test's plan: how the module declares the stencil's stand-in (of the
@@ -338,10 +341,9 @@ pub(super) struct Exports {
 /// refusal of its form is placed at the stencil attachment.
 pub(super) fn plan(cx: &mut SelectCx<'_>, exports: Exports) -> Result<(), Error> {
     let at_depth = |u: Unsupported| Error::from(u).at_attachment(Attachment::Depth);
-    // The stand-in is one 2D view: a layered pass's tests in the shader are not implemented.
-    if cx.inputs.layered_storage {
-        return Err(at_depth(not_implemented()));
-    }
+    // In a layered pass the stand-ins hold the pass's layers, each fragment's texel at its
+    // primitive's layer, as the storage form's images do.
+    super::fetch::plan_layer(cx)?;
     let returned = exports.depth;
     let form = depth_test_form(cx.profile, cx.inputs.multisampled, returned.is_some())
         .map_err(at_depth)?;
@@ -384,6 +386,7 @@ pub(super) fn plan(cx: &mut SelectCx<'_>, exports: Exports) -> Result<(), Error>
         returned,
         stencil,
         mask: exports.mask,
+        layered: fp.fetch_layer.is_some(),
     });
     cx.facts.insert(RuntimeFact::ShaderTests {
         formatless: form.declared == crate::spv::ImageFormat::Unknown,
@@ -442,7 +445,7 @@ pub(super) fn declare(
         sampled_type,
         dim: Dim::D2,
         depth: false,
-        arrayed: plan.samples == StorageSamples::Planes,
+        arrayed: plan.samples == StorageSamples::Planes || plan.layered,
         multisampled: plan.samples == StorageSamples::Multisampled,
         usage: ImageUsage::Storage,
         format: plan.declared,
@@ -473,7 +476,7 @@ pub(super) fn declare_stencil(
         sampled_type,
         dim: Dim::D2,
         depth: false,
-        arrayed: false,
+        arrayed: plan.layered,
         multisampled: plan.samples == StorageSamples::Multisampled,
         usage: ImageUsage::Storage,
         format: stencil.declared,
@@ -859,17 +862,18 @@ fn stencil_test(
 }
 
 /// The stand-in's texel of the invocation's sample held as `samples`, and the access's image
-/// operands: the pixel alone at one sample; with the `Sample` operand of its `SampleId` in a
-/// multisampled image; and for planes the pixel and its `SampleId` as the layer.
+/// operands: the pixel alone at one sample (in a layered pass with its layer); with the `Sample`
+/// operand of its `SampleId` in a multisampled image; and for planes the pixel and its `SampleId`
+/// as the layer.
 fn texel(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     samples: StorageSamples,
 ) -> BResult<(SValue, ImageOperands)> {
-    let pixel = super::fetch::pixel(cx, fb)?;
     if samples == StorageSamples::One {
-        return Ok((pixel, ImageOperands::default()));
+        return Ok((super::fetch::storage_texel(cx, fb)?, ImageOperands::default()));
     }
+    let pixel = super::fetch::pixel(cx, fb)?;
     let Some(sample) = super::fetch::sample(cx, fb)? else {
         return Err(cx.fail("a per-sample depth test without its SampleId"));
     };

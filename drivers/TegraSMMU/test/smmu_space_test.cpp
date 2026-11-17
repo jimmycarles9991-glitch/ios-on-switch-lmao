@@ -34,7 +34,9 @@ TEST(SmmuSpace, PlacesFirstFitInWholeGranules)
 TEST(SmmuSpace, ReusesTheLowestRunThatFits)
 {
     Space s(8 * kGranule);
-    const uint64_t a = s.space.alloc(2 * kGranule), b = s.space.alloc(kGranule), c = s.space.alloc(3 * kGranule);
+    const uint64_t a = s.space.alloc(2 * kGranule);
+    const uint64_t b = s.space.alloc(kGranule);
+    const uint64_t c = s.space.alloc(3 * kGranule);
     ASSERT_TRUE(a && b && c);
     ASSERT_TRUE(s.space.release(a, 2 * kGranule));
     EXPECT_EQ(s.space.alloc(3 * kGranule), 0u) << "two free at the start and two at the end are not three";
@@ -66,7 +68,7 @@ TEST(SmmuSpace, RefusesWindowsThatAreNotOne)
     EXPECT_FALSE(space.init(kBase + 1, kGranule, bitmap.data(), 64));
     EXPECT_FALSE(space.init(kBase, kGranule + 1, bitmap.data(), 64));
     EXPECT_FALSE(space.init(kBase, 0, bitmap.data(), 64));
-    EXPECT_FALSE(space.init(kBase, 64 * 32 * kGranule + kGranule, bitmap.data(), 64)) << "bitmap too small";
+    EXPECT_FALSE(space.init(kBase, uint64_t{64} * 32 * kGranule + kGranule, bitmap.data(), 64)) << "bitmap too small";
     EXPECT_FALSE(space.init(0xfff00000, 32 * kGranule, bitmap.data(), 64)) << "past 4 GiB";
     EXPECT_FALSE(space.init(kBase, kGranule, nullptr, 64));
     EXPECT_EQ(space.alloc(kGranule), 0u);
@@ -74,18 +76,18 @@ TEST(SmmuSpace, RefusesWindowsThatAreNotOne)
 
 TEST(SmmuSpace, FillsAGibibyteWindowOfFourKSurfaces)
 {
-    Space s(1ull << 30);
-    const uint64_t surface = 3840ull * 2176 * 3 / 2;  // a 4K HEVC picture, 12,533,760 bytes
+    Space s(1ULL << 30);
+    const uint64_t surface = 3840ULL * 2176 * 3 / 2;  // a 4K HEVC picture, 12,533,760 bytes
     const uint64_t rounded = TegraSMMUSpace::round(surface);
     std::vector<uint64_t> taken;
-    for (uint64_t iova; (iova = s.space.alloc(surface));) {
+    for (uint64_t iova = 0; (iova = s.space.alloc(surface));) {
         if (!taken.empty())
             EXPECT_EQ(iova, taken.back() + rounded);
         taken.push_back(iova);
     }
-    EXPECT_EQ(taken.size(), (size_t)((1ull << 30) / rounded));
+    EXPECT_EQ(taken.size(), (size_t)((1ULL << 30) / rounded));
     EXPECT_LT(s.space.bytesFree(), rounded);
-    for (uint64_t iova : taken)
+    for (uint64_t const iova : taken)
         ASSERT_TRUE(s.space.release(iova, surface));
-    EXPECT_EQ(s.space.bytesFree(), 1ull << 30);
+    EXPECT_EQ(s.space.bytesFree(), 1ULL << 30);
 }

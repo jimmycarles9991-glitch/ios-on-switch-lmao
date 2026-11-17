@@ -6,9 +6,10 @@
 // vectors; a run of constants is a block whose first may raise its alignment, stepped as (o + a - 1) & ~(a - 1) even where
 // a is no power of two. The layout's alignment is the largest type alignment, its length the end rounded up to it. An index
 // two descriptors claim is the later one's.
-// A function's argument buffer (newArgumentEncoderWithBufferIndex:) is m2v's layout of its AIR as flat runs
-// (bind/argument_runs.rs, fromRuns): a member covers `count` elements of `idsPerElement` ids, the first `width` of each
-// arguments at offset + element * stride + w * elementStride, and a pointer to an argument buffer names that buffer's layout.
+// A function's argument buffer (newArgumentEncoderWithBufferIndex:) is the translator's layout of its AIR as flat runs
+// (bind/argument_runs.rs, fromRuns), which the shader compiler answers (raw_buffer_encoders.h): a member covers `count`
+// elements of `idsPerElement` ids, the first `width` of each arguments at offset + element * stride + w * elementStride, and
+// a pointer to an argument buffer names that buffer's layout.
 #pragma once
 #include <algorithm>
 #include <cstddef>
@@ -69,7 +70,7 @@ struct ArgumentPlace {
     int32_t nested = -1;
 };
 
-// One flat run of a function's layout as the bridge gives it (bridge/NativeMetalObjects.h NmbArgumentRun)
+// One flat run of a function's layout as the translator gives it (bridge/NativeMetalObjects.h NmbArgumentRun)
 struct ArgumentRun {
     uint32_t id, count, idsPerElement, width, kind, nested;
     uint64_t offset, stride, elementStride, size;

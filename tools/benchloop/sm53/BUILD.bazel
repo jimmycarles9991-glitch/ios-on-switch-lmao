@@ -94,6 +94,8 @@ py_library(
         "int3.py",
         "interlock_spin.py",
         "overlap.py",
+        "powr_native.py",
+        "powr_verdict.py",
     ],
     deps = [
         ":encode",
@@ -110,7 +112,7 @@ py_library(
 [
     py_test(
         name = name,
-        size = "medium" if name == "hsetp2_test" else "small",
+        size = "medium" if name in ("hsetp2_test", "powr_native_test") else "small",
         srcs = [name + ".py"],
         deps = [
             ":encode",
@@ -132,6 +134,7 @@ py_library(
         "interlock_spin_test",
         "intops_test",
         "overlap_test",
+        "powr_native_test",
     ]
 ]
 

@@ -24,6 +24,24 @@ void tgm_chan_park_promises(struct tgm_chan *chan, const struct switch_gpu_backi
 			tgm_chan_note_promise(chan, tokens[i].queue, (u32)tokens[i].value);
 }
 
+void switch_gpu_chan_park_promises_locked(struct tgm_chan *chan,
+					  const struct switch_gpu_backing_token *tokens, u32 count,
+					  const u32 *unsettled)
+{
+	u32 i;
+
+	for (i = 0; i < count; i++)
+		if (tokens[i].engine == SWITCH_GPU_ENGINE_PROMISE &&
+		    (unsettled[i / 32] & (1u << (i % 32)))) {
+			const struct switch_gpu_giveup_job reader = {(u32)chan->id,
+								     chan->submitted + 1};
+			switch_gpu_promise_park_locked(
+				tokens[i].queue, (u32)tokens[i].value, chan->owner,
+				chan == tgm_present.chan ? "a present job" : "a GPU job", &reader,
+				0);
+		}
+}
+
 #if TGM_STATS
 /* Promise words the CPU raised (a cancel, a kill, a close, a give-up): a reader parked on ACQ_GEQ for one goes on
  * only if the GPU reads the word again after that write, which the present's completion reports once

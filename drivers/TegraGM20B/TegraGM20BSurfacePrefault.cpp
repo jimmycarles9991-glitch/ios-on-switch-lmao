@@ -7,8 +7,7 @@
 // surface's first import takes the wiring, which then needs no clean of its own (tegra_gm20b_import_cleans).
 // kern/switch's IOSurfaceRootUserClient hook (is_io_connect_method) hands every method's structure output here, with the
 // calling task; the surface is looked up and measured with IOSurface's own functions (kits/SwitchABI IOSurface, bound by
-// address in TegraVIC's original-bindings.S). Every reply that gives the calling task a CPU mapping of a surface is noted on
-// the surface's record (TegraGM20BRecord.h tgm_record_mappers), which its layout decision reads.
+// address in TegraVIC's original-bindings.S).
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOService.h>
@@ -244,10 +243,6 @@ void prefaultWork(thread_call_param_t param, thread_call_param_t)
 extern "C" void tegra_gm20b_iosurface_method_done(uint32_t selector, const void *output,
 						  uint32_t outputSize, task_t task)
 {
-	if (const uint32_t mapped = tegra_gm20b_mapped_surface(
-		    static_cast<uint32_t>(RootClient::createOutputSize),
-		    static_cast<uint32_t>(RootClient::createOutputSurfaceID), output, outputSize))
-		tgm_surface_mapped(mapped, task);
 	const uint32_t id = tegra_gm20b_created_surface(kCreateAbi, selector, output, outputSize);
 	if (!id || __atomic_load_n(&memorystatus_vm_pressure_level, __ATOMIC_RELAXED))
 		return;

@@ -10,6 +10,7 @@
 #include <map>
 #include <vector>
 #include <gtest/gtest.h>
+#include "drivers/TegraGM20B/TegraGM20BFences.h"
 #include "drivers/TegraGM20B/TegraGM20BLayout.h"
 #include "drivers/TegraGM20B/TegraGM20BRelayout.h"
 #include "gm20b_ce_model.h"
@@ -150,6 +151,14 @@ TEST(Relayout, RoundTripIsIdentity)
 // A tiling move follows the surface's running writers in its own push: a connection's channel and the copy engine's (whose
 // fence is in every space's fence view, gpu_chan.c tgm_fence_kernel) are semaphore acquires ahead of its copies; its own
 // channel's work needs none; a writer with no fence in the view, or past the push's acquires, is refused, never waited for.
+TEST(WriterOrder, AKernelCopyOrdersOnTheGpuOrRefuses)
+{
+	EXPECT_EQ(tgm_writer_order(7, 7, 0), TGM_WRITER_IN_CHANNEL);
+	EXPECT_EQ(tgm_writer_order(7, 7, 1), TGM_WRITER_IN_CHANNEL);
+	EXPECT_EQ(tgm_writer_order(7, 9, 1), TGM_WRITER_GPU_ACQUIRE);
+	EXPECT_EQ(tgm_writer_order(7, 9, 0), TGM_WRITER_REFUSED);
+}
+
 TEST(Relayout, TheMovesPushCarriesItsWritersAcquires)
 {
 	constexpr uint32_t kSelf = 3;

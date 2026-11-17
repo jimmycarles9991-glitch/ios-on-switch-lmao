@@ -1,4 +1,4 @@
-"""Writes gpu_exec.c with its commit point moved, for the commit test's mutant runs.
+"""Writes gpu_exec.c with its ownership boundary moved, for the mutant runs.
 
     switch_gpu_exec_mutant.py <mutant> <gpu_exec.c> <out.c>
 
@@ -8,27 +8,28 @@ quietly testing something else.
 
 import sys
 
-COMMIT = '\tif (owned)\n\t\tswitch_gpu_backing_commit(owned);\n'
-PASS_ONE = '\ttgm_backing_dependencies(chan, dependencies, dependency_count, 1);\n'
-PASS_ZERO = '\tret = tgm_backing_dependencies(chan, dependencies, dependency_count, 0);\n'
-FIRST_KICK = '\tPUSH_KICK(&chan->chan.push);\n\ttgm_chan_park_promises(chan, dependencies, dependency_count);\n'
-FENCE_KICK = (
-    '\t*seqno = chan_fence_job(chan, external, chan->submitted + 1, last, quiet, releases,\n\t\t\t\trelease_count);\n'
-)
+PUBLISH = '\tif (owned)\n\t\tswitch_gpu_backing_publish(owned);\n'
+FINISH = '\tif (owned)\n\t\tswitch_gpu_backing_finish(owned);\n'
+VALIDATE = '\tret = backing_waits(chan, dependencies, dependency_count, unsettled, 0);\n'
+USER_ENTRIES = '\tlast = switch_gpu_job_emit(pushes, count, chan->submitted, &emitter);\n'
+DOORBELL = '\tchan_doorbell(chan);\n'
 EMPTY_COMMIT = '\t\tif (owned)\n\t\t\tswitch_gpu_backing_commit(owned);\n\t\t*seqno = chan->submitted;\n'
 
 MUTANTS = {
     'after_first_kick': [
-        (COMMIT + PASS_ONE, PASS_ONE),
-        (FIRST_KICK, FIRST_KICK.replace('\ttgm_chan_park_promises', COMMIT + '\ttgm_chan_park_promises')),
+        (PUBLISH, ''),
+        (USER_ENTRIES, USER_ENTRIES + PUBLISH),
     ],
     'after_doorbell': [
-        (COMMIT + PASS_ONE, PASS_ONE),
-        (FENCE_KICK, FENCE_KICK + COMMIT),
+        (PUBLISH, ''),
+        (DOORBELL, DOORBELL + PUBLISH),
     ],
     'before_checks': [
-        (COMMIT + PASS_ONE, PASS_ONE),
-        (PASS_ZERO, COMMIT + PASS_ZERO),
+        (PUBLISH, ''),
+        (VALIDATE, PUBLISH + VALIDATE),
+    ],
+    'before_finish': [
+        (DOORBELL + FINISH, FINISH + DOORBELL),
     ],
     'no_empty_commit': [
         (EMPTY_COMMIT, '\t\t*seqno = chan->submitted;\n'),

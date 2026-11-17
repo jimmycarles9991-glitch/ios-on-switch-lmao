@@ -13,10 +13,13 @@ struct FramebufferFetchDepthScene: GPUScene {
         var packed: [Bool] = []
         for samples in [1, 2, 4, 8] where gpu.device.supportsTextureSampleCount(samples) {
             for stencil in [false, true] {
-                do {
-                    try await draw(gpu, samples: samples, stencil: stencil, &packed, &result)
-                } catch {
-                    result.expect(false, "\(Self.key(samples, stencil)): \(GPU.describe(error))")
+                for memoryless in [false, true] {
+                    do {
+                        try await draw(
+                            gpu, samples: samples, stencil: stencil, memoryless: memoryless, &packed, &result)
+                    } catch {
+                        result.expect(false, "\(Self.key(samples, stencil, memoryless)): \(GPU.describe(error))")
+                    }
                 }
             }
         }
@@ -26,17 +29,21 @@ struct FramebufferFetchDepthScene: GPUScene {
         return result
     }
 
-    private static func key(_ samples: Int, _ stencil: Bool) -> String {
-        "\(stencil ? "depth_stencil" : "depth")_\(samples)x"
+    private static func key(_ samples: Int, _ stencil: Bool, _ memoryless: Bool) -> String {
+        "\(stencil ? "depth_stencil" : "depth")_\(samples)x\(memoryless ? "_memoryless" : "")"
     }
 
-    /// One case in a command buffer of its own: a case that throws leaves the other cases' compares
+    /// One case in a command buffer of its own: a case that throws leaves the other cases' compares. A memoryless zeta
+    /// (the raw path's compressed backings: raw_comp.h backingKind) lives for the first pass alone, so its case reads
+    /// that pass's picture and draws no verify pass.
     private func draw(
-        _ gpu: GPU, samples: Int, stencil: Bool, _ packed: inout [Bool], _ result: inout SceneResult
+        _ gpu: GPU, samples: Int, stencil: Bool, memoryless: Bool, _ packed: inout [Bool], _ result: inout SceneResult
     ) async throws {
-        let key = Self.key(samples, stencil)
+        let key = Self.key(samples, stencil, memoryless)
         let format: MTLPixelFormat = stencil ? .depth32Float_stencil8 : .depth32Float
-        let depth = try gpu.texture(format, Self.size, Self.size, usage: [.renderTarget], samples: samples)
+        let depth = try gpu.texture(
+            format, Self.size, Self.size, usage: [.renderTarget], samples: samples,
+            storage: memoryless ? .memoryless : .private)
         let target = try gpu.texture(.rgba8Unorm, Self.size, Self.size, samples: samples)
         let resolved = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
         let snapshot = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
@@ -61,12 +68,12 @@ struct FramebufferFetchDepthScene: GPUScene {
                 pass.depthAttachment.texture = depth
                 pass.depthAttachment.loadAction = clear ? .clear : .load
                 pass.depthAttachment.clearDepth = 1
-                pass.depthAttachment.storeAction = .store
+                pass.depthAttachment.storeAction = memoryless ? .dontCare : .store
                 if stencil {
                     pass.stencilAttachment.texture = depth
                     pass.stencilAttachment.loadAction = clear ? .clear : .load
                     pass.stencilAttachment.clearStencil = 0
-                    pass.stencilAttachment.storeAction = .store
+                    pass.stencilAttachment.storeAction = memoryless ? .dontCare : .store
                 }
                 return pass
             }
@@ -102,9 +109,11 @@ struct FramebufferFetchDepthScene: GPUScene {
                 sourceOrigin: MTLOrigin(), sourceSize: MTLSize(width: Self.size, height: Self.size, depth: 1),
                 to: snapshot, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin())
             blit.endEncoding()
-            let verify = commands.makeRenderCommandEncoder(descriptor: pass(clear: false))!
-            draw(verify, ordinary, final, 0.1875, SIMD4(0.625, 0.5, 0.375, 1), 8)
-            verify.endEncoding()
+            if !memoryless {
+                let verify = commands.makeRenderCommandEncoder(descriptor: pass(clear: false))!
+                draw(verify, ordinary, final, 0.1875, SIMD4(0.625, 0.5, 0.375, 1), 8)
+                verify.endEncoding()
+            }
         }
         result.metrics.set("path_\(key)", timing.path)
         if RawFacade.kind(of: gpu.device) == "raw" {
@@ -118,10 +127,11 @@ struct FramebufferFetchDepthScene: GPUScene {
             result.metrics.set("interlock_\(key)", draws)
             result.expect(draws >= 5, "\(key) has no confirmed native interlock draw coverage")
         }
-        for (label, texture, expected) in [
-            ("fetch", snapshot, [Float(0.375), 0.25, 0.375, 1]),
-            ("stored_depth_stencil", samples == 1 ? target : resolved, [Float(0.625), 0.5, 0.375, 1]),
-        ] {
+        var reads: [(String, MTLTexture, [Float])] = [("fetch", snapshot, [0.375, 0.25, 0.375, 1])]
+        if !memoryless {
+            reads.append(("stored_depth_stencil", samples == 1 ? target : resolved, [0.625, 0.5, 0.375, 1]))
+        }
+        for (label, texture, expected) in reads {
             let bytes = try await gpu.read(texture, bytesPerPixel: 4)
             result.compare(
                 "\(key)_\(label)", bytes: bytes,

@@ -9,10 +9,80 @@
 #include <string>
 #include <vector>
 #include "../raw/runtime/raw_pack.h"
+#include "../raw/runtime/raw_pack_selectors.h"
 #include "../raw/runtime/raw_variants.h"
 #include "SwitchGM20BContext.h"
 
 namespace {
+
+std::string writeSelectorPack(const std::vector<uint32_t> &selectors, const char *name, uint64_t bytes = 0)
+{
+    std::vector<uint8_t> file(0x3000, 0);
+    raw::PackHeader h = {};
+    memcpy(h.magic, "GM20BPK1", 8);
+    h.version = raw::kPackVersion;
+    h.pipelines = 2;
+    h.programs = 4;
+    h.section[raw::PackPipelines] = {0x200, 2 * sizeof(raw::PackPipeline)};
+    h.section[raw::PackPrograms] = {0x1400, 4 * sizeof(raw::PackProgram)};
+    h.section[raw::PackSelectors] = {0x2000, bytes ? bytes : selectors.size() * sizeof(uint32_t)};
+    memcpy(file.data(), &h, sizeof h);
+    if (!selectors.empty())
+        memcpy(file.data() + 0x2000, selectors.data(), selectors.size() * sizeof(uint32_t));
+    const std::string path = std::string(getenv("TEST_TMPDIR") ?: "/tmp") + "/" + name;
+    FILE *f = fopen(path.c_str(), "wb");
+    fwrite(file.data(), 1, file.size(), f);
+    fclose(f);
+    return path;
+}
+
+TEST(RawPack, SelectorTablesAreTrustedAfterTheirDomainIsLoaded)
+{
+    const std::vector<uint32_t> selectors = {1, 0, 0, 16, 2, raw::AssumeUniformAligned, 1, 1, 2, 2};
+    raw::Pack pack;
+    std::string err;
+    ASSERT_TRUE(pack.load(writeSelectorPack(selectors, "selectors.bin").c_str(), 0, err, 2)) << err;
+    const auto *records = pack.section<raw::PackPipeline>(raw::PackPipelines);
+    const raw::PackSelectorTable *table = pack.selectors(records[0]);
+    ASSERT_NE(table, nullptr);
+    ASSERT_EQ(table->configs, 2u);
+    EXPECT_EQ(raw::selectorConfigs(*table)[1].id, 2u);
+    EXPECT_EQ(raw::selectorConfigs(*table)[1].program, 2u);
+    EXPECT_EQ(pack.selectors(records[1]), nullptr);
+    raw::Pack empty;
+    ASSERT_TRUE(empty.load(writeSelectorPack({}, "selectors-empty.bin").c_str(), 0, err, 0)) << err;
+    EXPECT_EQ(empty.selectors(empty.section<raw::PackPipeline>(raw::PackPipelines)[0]), nullptr);
+    raw::Pack wrongDomain;
+    EXPECT_FALSE(wrongDomain.load(writeSelectorPack(selectors, "selectors-wrong-domain.bin").c_str(), 0, err, 0));
+}
+
+TEST(RawPack, MalformedSelectorSectionsAreRefusedAtLoad)
+{
+    const std::vector<uint32_t> selectors = {1, 0, 0, 16, 2, raw::AssumeUniformAligned, 1, 1, 2, 2};
+    for (const auto &[word, value] : std::vector<std::pair<size_t, uint32_t>>{
+             {0, 100}, {2, 2}, {3, 8}, {3, 17}, {3, 40}, {4, 0}, {4, 3}, {6, 0}, {6, 3}, {8, 1}, {9, 4}}) {
+        SCOPED_TRACE(word);
+        SCOPED_TRACE(value);
+        auto invalid = selectors;
+        invalid[word] = value;
+        raw::Pack pack;
+        std::string err;
+        EXPECT_FALSE(pack.load(writeSelectorPack(invalid, "selectors-invalid.bin").c_str(), 0, err, 2));
+        EXPECT_NE(err.find("invalid selector section"), std::string::npos) << err;
+    }
+    for (const uint32_t second : {0u, 1u}) {
+        const std::vector<uint32_t> records = {2, 0, 1, 24, second, 24, 1, 0, 1, 1};
+        raw::Pack pack;
+        std::string err;
+        EXPECT_FALSE(pack.load(writeSelectorPack(records, "selectors-records-invalid.bin").c_str(), 0, err, 2));
+        EXPECT_NE(err.find("record index"), std::string::npos) << err;
+    }
+    for (const uint64_t bytes : {uint64_t(4), UINT64_MAX}) {
+        raw::Pack pack;
+        std::string err;
+        EXPECT_FALSE(pack.load(writeSelectorPack(selectors, "selectors-truncated.bin", bytes).c_str(), 0, err, 2));
+    }
+}
 
 // A pack of one pipeline whose fragment stage has `variants` variants, its header saying `version`
 std::string writePack(uint32_t version, uint32_t variants, const char *name)
@@ -365,7 +435,7 @@ TEST(RawPack, AProgramOfTwelveConstantBuffersReadsBackWhole)
     EXPECT_EQ(p.cbufType[0], raw::CbufRoot);
     for (uint32_t c = 1; c < 12; c++) {
         EXPECT_EQ(raw::cbufKind(p.cbufType[c]), raw::CbufUbo);
-        EXPECT_EQ(raw::cbufUboOffset(p.cbufType[c]), 16 * (c - 1));
+        EXPECT_EQ(raw::cbufUboOffset(p.cbufType, nullptr, c), 16 * (c - 1));
     }
     EXPECT_EQ(p.cbufType[12], 0u);
     EXPECT_EQ(p.gprs, 40u);

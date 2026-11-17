@@ -8,6 +8,7 @@
 
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
+#include <os/log.h>
 #include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <cstdio>
@@ -325,10 +326,23 @@ uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, ui
     if (!(info_.flags & TegraGM20BInfoSurfaceLayout))
         return 0;
     TegraGM20BAbiSurfaceLayoutReply out = {};
-    if (call(TegraGM20BMethodSurfaceLayout, &in, sizeof in, &out, sizeof out) != KERN_SUCCESS)
+    if (const int kr = call(TegraGM20BMethodSurfaceLayout, &in, sizeof in, &out, sizeof out); kr != KERN_SUCCESS) {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        os_log_error(OS_LOG_DEFAULT,
+                     "raw: SurfaceLayout of import %llu (%ux%u x%u, rows %u, %s) failed: 0x%x: no texture over it",
+                     (unsigned long long)bo.handle, width, height, bpp, bytesPerRow, writes ? "writes" : "reads", kr);
+#endif
         return TegraGM20BLayoutOtherShape;
+    }
     if (canonical && out.layout == TegraGM20BLayoutTiled && !tgm_layout_tiled(width, height, bpp, canonical))
         return TegraGM20BLayoutOtherShape;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (out.layout == TegraGM20BLayoutOtherShape)
+        os_log_error(OS_LOG_DEFAULT,
+                     "raw: SurfaceLayout of import %llu (%ux%u x%u, rows %u, %s): tiled at another shape: no texture "
+                     "over it",
+                     (unsigned long long)bo.handle, width, height, bpp, bytesPerRow, writes ? "writes" : "reads");
+#endif
     return out.layout;
 }
 

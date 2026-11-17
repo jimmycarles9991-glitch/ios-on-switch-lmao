@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace raw {
 namespace fx {
@@ -13,6 +14,12 @@ namespace {
 uint8_t chooseZLog2(uint32_t depth)
 {
     return depth >= 11 ? 4 : depth >= 6 ? 3 : depth >= 3 ? 2 : depth >= 2 ? 1 : 0;
+}
+
+// Elements of `block` texels across a level's max(1, texels >> level) texels (NIL's extent_px minified, then to_el)
+uint32_t levelElements(uint32_t texels, uint32_t level, uint32_t block)
+{
+    return (std::max(1u, texels >> level) + block - 1) / block;
 }
 
 template <class Move>
@@ -31,14 +38,15 @@ void eachRun(const MipChain &c, uint32_t l, const uint32_t origin[3], const uint
 }  // namespace
 
 bool volumeLayout(uint32_t width, uint32_t height, uint32_t depth, uint32_t levels, uint32_t bpp, bool view2d,
-                  MipChain &out)
+                  MipChain &out, uint32_t blockW, uint32_t blockH)
 {
     out = MipChain();
     if (!width || !height || !depth || width > 16384 || height > 16384 || depth > 16384 || !levels ||
-        levels > kMaxLevels || levels > fullLevels(std::max(width, depth), height) || !tgm_layout_tiles_bpp(bpp))
+        levels > kMaxLevels || levels > fullLevels(std::max(width, depth), height) || !tgm_layout_tiles_bpp(bpp) ||
+        !blockW || !blockH)
         return false;
-    out.width = width;
-    out.height = height;
+    out.width = levelElements(width, 0, blockW);
+    out.height = levelElements(height, 0, blockH);
     out.depth = depth;
     out.levels = levels;
     out.bpp = bpp;
@@ -47,8 +55,8 @@ bool volumeLayout(uint32_t width, uint32_t height, uint32_t depth, uint32_t leve
     uint64_t at = 0;
     for (uint32_t l = 0; l < levels; l++) {
         MipLevel &lv = out.level[l];
-        lv.width = std::max(1u, width >> l);
-        lv.height = std::max(1u, height >> l);
+        lv.width = levelElements(width, l, blockW);
+        lv.height = levelElements(height, l, blockH);
         lv.depth = std::max(1u, depth >> l);
         lv.zLog2 = uint8_t(std::min<uint32_t>(z, tgm_layout_log2_ceil(lv.depth)));
         lv.rowBytes = (lv.width * bpp + 63) & ~63u;
@@ -98,6 +106,71 @@ bool msLayout(uint32_t width, uint32_t height, uint32_t samples, uint32_t bpp, M
     return true;
 }
 
+uint8_t sampleCell(uint32_t samples, uint32_t s)
+{
+    static constexpr uint8_t k4x2D3d[8] = {2, 1 | 4, 3 | 4, 1, 4, 0, 2 | 4, 3};
+    return samples == 2 ? uint8_t(1 - s) : samples == 4 ? uint8_t((s & 1) | (s >> 1) << 2) : k4x2D3d[s & 7];
+}
+
+namespace {
+
+// Each grid row of the rectangle's cells: the grid's chain, the row's first texel and texels, Metal's row and the
+// cell row
+template <typename Each>
+void eachSampleRow(const MipChain &c, uint32_t samples, const uint32_t at[2], const uint32_t size[2], Each each)
+{
+    const uint32_t cellW = samples == 8 ? 4 : 2, cellH = samples / cellW;
+    MipChain grid = c;
+    grid.level[0].width = c.width * cellW;
+    grid.level[0].height = c.height * cellH;
+    for (uint32_t y = 0; y < size[1]; y++)
+        for (uint32_t cy = 0; cy < cellH; cy++)
+            each(grid, at[0] * cellW, (at[1] + y) * cellH + cy, size[0] * cellW, y, cy, cellW);
+}
+
+// Each sample of a cell row of pixel p: its offset in Metal's row and in the grid row
+template <typename Each>
+void eachSampleOf(uint32_t samples, uint32_t p, uint32_t cy, uint32_t cellW, uint32_t bpp, Each each)
+{
+    for (uint32_t s = 0; s < samples; s++) {
+        const uint8_t cell = sampleCell(samples, s);
+        if (uint32_t(cell >> 2) == cy)
+            each((size_t(p) * samples + s) * bpp, (size_t(p) * cellW + (cell & 3)) * bpp);
+    }
+}
+
+}  // namespace
+
+void writeSamples(const MipChain &c, uint8_t *memory, uint32_t samples, const uint32_t at[2], const uint32_t size[2],
+                  const uint8_t *src, size_t rowBytes)
+{
+    std::vector<uint8_t> line(size_t(size[0]) * samples * c.bpp);
+    eachSampleRow(
+        c, samples, at, size,
+        [&](const MipChain &grid, uint32_t gx, uint32_t gy, uint32_t gw, uint32_t y, uint32_t cy, uint32_t cellW) {
+            for (uint32_t p = 0; p < size[0]; p++)
+                eachSampleOf(samples, p, cy, cellW, c.bpp, [&](size_t metal, size_t cell) {
+                    memcpy(&line[cell], src + y * rowBytes + metal, c.bpp);
+                });
+            writeLevel(grid, memory, 0, gx, gy, gw, 1, line.data(), line.size());
+        });
+}
+
+void readSamples(const MipChain &c, const uint8_t *memory, uint32_t samples, const uint32_t at[2],
+                 const uint32_t size[2], uint8_t *dst, size_t rowBytes)
+{
+    std::vector<uint8_t> line(size_t(size[0]) * samples * c.bpp);
+    eachSampleRow(
+        c, samples, at, size,
+        [&](const MipChain &grid, uint32_t gx, uint32_t gy, uint32_t gw, uint32_t y, uint32_t cy, uint32_t cellW) {
+            readLevel(grid, memory, 0, gx, gy, gw, 1, line.data(), line.size());
+            for (uint32_t p = 0; p < size[0]; p++)
+                eachSampleOf(samples, p, cy, cellW, c.bpp, [&](size_t metal, size_t cell) {
+                    memcpy(dst + y * rowBytes + metal, &line[cell], c.bpp);
+                });
+        });
+}
+
 bool arrayLayout(uint32_t width, uint32_t height, uint32_t layers, uint32_t levels, uint32_t bpp, MipChain &out)
 {
     if (!layers || layers > 2048 || !mipChainLayout(width, height, levels, bpp, out))
@@ -141,11 +214,8 @@ bool blockChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t
         levels > fullLevels(width, height) || !layers || layers > 2048 || !blockW || !blockH ||
         !tgm_layout_tiles_bpp(bpp))
         return false;
-    auto elements = [](uint32_t texels, uint32_t level, uint32_t block) {
-        return (std::max(1u, texels >> level) + block - 1) / block;
-    };
-    out.width = elements(width, 0, blockW);
-    out.height = elements(height, 0, blockH);
+    out.width = levelElements(width, 0, blockW);
+    out.height = levelElements(height, 0, blockH);
     out.levels = levels;
     out.layers = layers;
     out.bpp = bpp;
@@ -154,8 +224,8 @@ bool blockChainLayout(uint32_t width, uint32_t height, uint32_t levels, uint32_t
     uint64_t at = 0;
     for (uint32_t l = 0; l < levels; l++) {
         MipLevel &lv = out.level[l];
-        lv.width = elements(width, l, blockW);
-        lv.height = elements(height, l, blockH);
+        lv.width = levelElements(width, l, blockW);
+        lv.height = levelElements(height, l, blockH);
         lv.yLog2 = uint8_t(std::min(y, tgm_layout_log2_ceil((lv.height + 7) / 8)));
         lv.rowBytes = (lv.width * bpp + 63) & ~63u;
         const uint32_t tileRows = 8u << lv.yLog2;

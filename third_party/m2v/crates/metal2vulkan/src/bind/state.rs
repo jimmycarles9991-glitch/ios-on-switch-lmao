@@ -996,6 +996,7 @@ impl TextureFacts {
             address_modes: self.address_modes,
             offset_base_axes: self.offset_base_axes(),
             own_format_views: self.own_format_views,
+            two_planes: self.two_planes,
         }
     }
 }
@@ -1208,6 +1209,12 @@ pub struct TextureFacts {
     /// (`StorageImageClass::HalfBits`) the image cannot take.
     #[cfg_attr(feature = "serde", serde(default))]
     pub own_format_views: bool,
+    /// An `RGB10A8_2P_XR10` texture held in Metal's two planes (one made over a two-plane
+    /// surface): its color words in one image and its alpha bytes in another, which a kernel slot
+    /// bound to it reads and writes apart (`VariantKey::two_plane_textures`). `false` for every
+    /// other texture, which holds its texels in one image.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub two_planes: bool,
 }
 
 impl TextureFacts {
@@ -1227,6 +1234,7 @@ impl TextureFacts {
             parent_relative_level: 0,
             parent_base_size: [0; 3],
             own_format_views: false,
+            two_planes: false,
         }
     }
 
@@ -1793,6 +1801,10 @@ pub enum TextureShape {
         /// another choice serves.
         #[cfg_attr(feature = "serde", serde(default))]
         own_format_views: bool,
+        /// The texture is held in two planes ([`TextureFacts::two_planes`]): a kernel slot that
+        /// binds it compiles under `VariantKey::two_plane_textures`.
+        #[cfg_attr(feature = "serde", serde(default))]
+        two_planes: bool,
     },
     Buffer {
         pixel_format: metal::PixelFormat,

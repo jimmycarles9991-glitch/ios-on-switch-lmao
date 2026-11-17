@@ -136,3 +136,5 @@ void tgm_deadline_presented(uint64_t queued, int pass);
 void tgm_deadline_suspend(void);
 void tgm_deadline_resume(void);
 void tgm_deadline_stats(char *buf, unsigned int len);
+/* Debug kernels: the stats window's missed compositor frames by cause (deadline_stats.h); 0 when none missed */
+int tgm_deadline_miss_stats(char *buf, unsigned int len);

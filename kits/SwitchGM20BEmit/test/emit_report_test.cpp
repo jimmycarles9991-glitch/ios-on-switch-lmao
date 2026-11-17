@@ -63,6 +63,53 @@ TEST(EmitReport, SamplesReportIsTheFourWordCounterAfterAllStages)
                           }));
 }
 
+TEST(EmitReport, SamplesWordIsTheCounterLowWordAloneOrReducedIntoMemory)
+{
+    const uint32_t plain = uint32_t(NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, OPERATION, REPORT_ONLY) |
+                                    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, PIPELINE_LOCATION, ALL) |
+                                    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, REPORT, ZPASS_PIXEL_CNT) |
+                                    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, STRUCTURE_SIZE, ONE_WORD) |
+                                    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, FLUSH_DISABLE, TRUE));
+    const auto w = emitted(SWITCH_GM20B_SAMPLES_WORD_WORDS, [](nv_push *p) {
+        switch_gm20b_samples_word(p, 0x0100002004ull, false, 0);
+    });
+    EXPECT_EQ(Methods(w), (std::vector<Method>{
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_A, 0x01},
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_B, 0x00002004},
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_C, 0},
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_D, plain},
+                          }));
+    const auto r = emitted(SWITCH_GM20B_SAMPLES_WORD_WORDS, [](nv_push *p) {
+        switch_gm20b_samples_word(p, 0x0100002008ull, true, NVB197_SET_REPORT_SEMAPHORE_D_REDUCTION_OP_RED_ADD);
+    });
+    const uint32_t added = plain | uint32_t(NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, REDUCTION_ENABLE, TRUE) |
+                                            NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, REDUCTION_OP, RED_ADD) |
+                                            NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, REDUCTION_FORMAT, UNSIGNED_32));
+    EXPECT_EQ(Methods(r).back(), (Method{k3D, NVB197_SET_REPORT_SEMAPHORE_D, added}));
+    const auto o = emitted(SWITCH_GM20B_SAMPLES_WORD_WORDS, [](nv_push *p) {
+        switch_gm20b_samples_word(p, 0x0100002008ull, true, NVB197_SET_REPORT_SEMAPHORE_D_REDUCTION_OP_RED_OR);
+    });
+    EXPECT_EQ(Methods(o).back().value >> 9 & 7, uint32_t(NVB197_SET_REPORT_SEMAPHORE_D_REDUCTION_OP_RED_OR));
+    EXPECT_EQ(Methods(o).back().value >> 3 & 1, 1u);
+}
+
+TEST(EmitReport, ReleaseWordIsOneWordAfterTheWritesBefore)
+{
+    const auto w = emitted(SWITCH_GM20B_RELEASE_WORD_WORDS, [](nv_push *p) {
+        switch_gm20b_release_word(p, 0x0300000014ull, 0);
+    });
+    const uint32_t d = uint32_t(NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, OPERATION, RELEASE) |
+                                NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, RELEASE, AFTER_ALL_PRECEEDING_WRITES_COMPLETE) |
+                                NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, PIPELINE_LOCATION, ALL) |
+                                NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, STRUCTURE_SIZE, ONE_WORD));
+    EXPECT_EQ(Methods(w), (std::vector<Method>{
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_A, 0x03},
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_B, 0x14},
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_C, 0},
+                              {k3D, NVB197_SET_REPORT_SEMAPHORE_D, d},
+                          }));
+}
+
 TEST(EmitReport, CopyBytesIsOnePitchLine)
 {
     const auto w = emitted(SWITCH_GM20B_COPY_BYTES_WORDS, [](nv_push *p) {

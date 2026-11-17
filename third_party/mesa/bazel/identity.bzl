@@ -18,7 +18,10 @@ def mesa_identity_files():  # buildifier: disable=unnamed-macro
                 "**/*.pyc",
             ],
         ),
-        visibility = ["//third_party/mesa/src/nouveau/vulkan:__pkg__"],
+        visibility = [
+            "//third_party/mesa/src/nouveau/switch_compile:__pkg__",
+            "//third_party/mesa/src/nouveau/vulkan:__pkg__",
+        ],
     )
 
 def _nvk_compiler_identity_impl(ctx):

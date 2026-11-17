@@ -3,8 +3,10 @@
 // bind's stride into the StageInRegion and StageInStride push words of the root table its QMD names (read off the
 // device's submitted words and the memory they point at), and an indirect dispatch command's region writes its own into
 // its region's root table in ICB memory, or, inheriting the encoder's buffers, its bind slot writes the encoder's stride
-// there at each execute; a kernel of no stage-in takes neither.
+// there at each execute; a kernel of no stage-in takes neither. Each holds of the kernels' runtime records and of their
+// pack records alike.
 #include "raw_device_harness.h"
+#include "raw_record_pack.h"
 #include "../../../kits/SwitchGM20B/SwitchGM20BCompute.h"
 // the class headers' nv_push_compat.h and Mesa's util/macros.h spell MIN2 and MAX2 apart
 #undef MIN2
@@ -69,13 +71,35 @@ uint32_t word(uint64_t va)
     return 0xdeadbeef;
 }
 
-class DeviceStageIn : public harness::DeviceTest {
+constexpr uint64_t kStageInKey = 0x5101, kPlainKey = 0x5102;
+
+// The parameter: the kernels are the pack's (raw_record_pack.h), else the runtime's (placeCompute)
+class DeviceStageIn : public harness::DeviceTest, public testing::WithParamInterface<bool> {
 protected:
+    void SetUp() override
+    {
+        if (!GetParam())
+            return DeviceTest::SetUp();
+        kernel_model::model = {};
+        std::string err;
+        const std::string pack = harness::recordPack({}, "stage-in-pack.bin",
+                                                     {{kStageInKey, &stageInKernel()}, {kPlainKey, &plainKernel()}});
+        ASSERT_TRUE(dev.open(pack.c_str(), 0, err, raw::Device::Role::Client)) << err;
+    }
+
+    // `r`'s state: its pack record's, or the one the runtime places of it
+    const raw::ComputeState *state(const raw::ComputeRecord &r)
+    {
+        if (!GetParam())
+            return raw::placeCompute(dev, r);
+        return raw::computeState(dev, &r == &stageInKernel() ? kStageInKey : kPlainKey);
+    }
+
     // One dispatch of `r` at region {3, 5, 7} + {64, 2, 1}, buffer 1 bound at stride 24: the root table's push words its
     // QMD names
     std::vector<uint32_t> dispatched(const raw::ComputeRecord &r)
     {
-        const raw::ComputeState *k = raw::placeCompute(dev, r);
+        const raw::ComputeState *k = state(r);
         EXPECT_NE(k, nullptr);
         raw::CommandBuffer *cb = dev.begin();
         EXPECT_NE(cb, nullptr);
@@ -112,7 +136,7 @@ protected:
     }
 };
 
-TEST_F(DeviceStageIn, ADispatchWritesItsRegionAndABindsStrideIntoItsRootTable)
+TEST_P(DeviceStageIn, ADispatchWritesItsRegionAndABindsStrideIntoItsRootTable)
 {
     const std::vector<uint32_t> push = dispatched(stageInKernel());
     ASSERT_EQ(push.size(), 32u);
@@ -122,7 +146,7 @@ TEST_F(DeviceStageIn, ADispatchWritesItsRegionAndABindsStrideIntoItsRootTable)
     EXPECT_EQ(push[kStrideWord - 1], 24u);
 }
 
-TEST_F(DeviceStageIn, AKernelOfNoStageInTakesNeither)
+TEST_P(DeviceStageIn, AKernelOfNoStageInTakesNeither)
 {
     const std::vector<uint32_t> push = dispatched(plainKernel());
     ASSERT_EQ(push.size(), 32u);
@@ -130,9 +154,9 @@ TEST_F(DeviceStageIn, AKernelOfNoStageInTakesNeither)
         EXPECT_EQ(push[w], 0u) << w;
 }
 
-TEST_F(DeviceStageIn, AnIndirectDispatchCommandsRegionIsInItsOwnRootTable)
+TEST_P(DeviceStageIn, AnIndirectDispatchCommandsRegionIsInItsOwnRootTable)
 {
-    const raw::ComputeState *k = raw::placeCompute(dev, stageInKernel());
+    const raw::ComputeState *k = state(stageInKernel());
     ASSERT_NE(k, nullptr);
     std::vector<uint8_t> block(raw::icb::computeRegionBytes(0));
     raw::ComputeRegion region;
@@ -155,7 +179,7 @@ TEST_F(DeviceStageIn, AnIndirectDispatchCommandsRegionIsInItsOwnRootTable)
 
 // A kernel whose buffer's residual word lies past the 32 push words (an argument table's): a command's root table has no
 // such word, so its region and its binds are refused before either writes anything
-TEST_F(DeviceStageIn, AnIndirectDispatchCommandOfASpilledBindOffsetIsRefused)
+TEST_P(DeviceStageIn, AnIndirectDispatchCommandOfASpilledBindOffsetIsRefused)
 {
     static const raw::ComputeRecord spilled = [] {
         raw::ComputeRecord r = kernel(false);
@@ -274,9 +298,9 @@ struct BindChannel {
 
 // A buffer that inherits the encoder's buffers writes a stage-in command's region once, its stride word 0: each execute's
 // bind slot writes the encoder's bind stride there, 24 at the first and 40 at the second, and 0 once none is bound
-TEST_F(DeviceStageIn, AnInheritingCommandTakesEachExecutesBindStride)
+TEST_P(DeviceStageIn, AnInheritingCommandTakesEachExecutesBindStride)
 {
-    const raw::ComputeState *k = raw::placeCompute(dev, stageInKernel());
+    const raw::ComputeState *k = state(stageInKernel());
     ASSERT_NE(k, nullptr);
     // write-combined: the kernel model reads a submission's words from memory a BoAlloc made, as an ICB's are
     raw::Buffer block, slots, binds, bound;
@@ -327,5 +351,7 @@ TEST_F(DeviceStageIn, AnInheritingCommandTakesEachExecutesBindStride)
         EXPECT_EQ(channel.memory.at(word), stride == raw::kNoBindStride ? 0u : stride);
     }
 }
+
+INSTANTIATE_TEST_SUITE_P(RuntimeAndPackRecords, DeviceStageIn, testing::Bool());
 
 }  // namespace

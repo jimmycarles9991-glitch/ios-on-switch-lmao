@@ -6,10 +6,10 @@
  *
  * A client asks for a render state's record (Compile: its request, raw/runtime/raw_compile_request.h, in its own memory at
  * `address`, copied at the call): synchronously, the calling thread sleeping in the kernel until the request completes, or
- * with IOConnectCallAsyncStructMethod, whose callback gets two words: the cookie, and the result with the generation in its
- * high half. Each request completes exactly once, by a compiler: one that arrives before any compiler registered waits for
- * one (TegraGM20BCompilerExpected), and one a compiler held when its connection closed is queued again for the next (twice:
- * Failed). Unavailable: no compiler will come this boot, or the compiler did not take it. The record itself is never sent:
+ * with IOConnectCallAsyncStructMethod, whose callback gets TegraGM20BCompileAnswerWords words: the cookie, the result with
+ * the generation in its high half, then TegraGM20BAbiCompileTimes' words in order. Each request completes exactly once, by
+ * a compiler: one that arrives before any compiler registered waits for one (TegraGM20BCompilerExpected), and one a
+ * compiler held when its connection closed is queued again for the next (twice: Failed). Unavailable: no compiler will come this boot, or the compiler did not take it. The record itself is never sent:
  * it lands in the store, which a client maps read only with Map (method 12) and TegraGM20BCompilerStoreToken. `generation`
  * names the store a completion is about; a client holding another generation's mapping maps the store again.
  *
@@ -67,6 +67,7 @@ enum {
 
 	/* a request carries a data library's bytes whole: as large as an app's metallib may be */
 	TegraGM20BCompileRequestLimit = 256u << 20,
+	TegraGM20BCompileAnswerWords = 6,
 	TegraGM20BCompilePendingPerClient = 16,
 	TegraGM20BCompilePending = 256,
 	TegraGM20BCompileQueuedBytes = 512u << 20,
@@ -83,9 +84,18 @@ struct TegraGM20BAbiCompile {
 	uint32_t qos, flags;
 };
 
+/* Where an answered request's wait went, in CLOCK_UPTIME_RAW nanoseconds, as a debug compiler measures it (0 from a
+ * release one, and for a record the store held): its compile's start and end, the compiler's Complete call, and the
+ * answering thread's scheduler priority then. The kernel passes it on unread. */
+struct TegraGM20BAbiCompileTimes {
+	uint64_t compile_start, compile_end, answered;
+	uint32_t answer_priority, reserved;
+};
+
 struct TegraGM20BAbiCompileReply {
 	int32_t result;
 	uint32_t generation, how, reserved;
+	struct TegraGM20BAbiCompileTimes times;
 };
 
 /* flags: TegraGM20BCompilerRestarts, its launcher starts it again when it exits (launchd's KeepAlive, the BlueTool
@@ -122,6 +132,7 @@ struct TegraGM20BAbiCompilerComplete {
 	uint64_t id;
 	int32_t result;
 	uint32_t how;
+	struct TegraGM20BAbiCompileTimes times;
 };
 
 #endif

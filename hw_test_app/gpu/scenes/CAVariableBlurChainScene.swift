@@ -41,7 +41,7 @@ struct CAVariableBlurChainScene: GPUScene {
         do {
             library = try gpu.device.makeLibrary(URL: CAState.library)
         } catch {
-            result.notes.append("no QuartzCore library here (\(GPU.describe(error)))")
+            result.unavailable("no QuartzCore library here (\(GPU.describe(error)))", on: gpu.device)
             return result
         }
         for chain in Self.chains {
@@ -53,7 +53,7 @@ struct CAVariableBlurChainScene: GPUScene {
             do {
                 pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
             } catch {
-                result.notes.append("\(chain.key): no state (\(GPU.describe(error)))")
+                result.unavailable("\(chain.key): no state (\(GPU.describe(error)))", on: gpu.device)
                 continue
             }
             let texture = try gpu.texture(chain.format.metal, Self.width, Self.height, mipmaps: Self.levels)

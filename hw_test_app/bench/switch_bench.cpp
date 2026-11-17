@@ -441,7 +441,7 @@ void bindTemplate(raw::RenderEncoder *e, const raw::Pipeline &p, const uint32_t 
         identity[k] = (k % 16) % 5 == 0 ? 1.f : 0.f;
         uniforms[k] = float(k % 7) / 7.f;
     }
-    for (uint32_t k = 0; k < r.entries; k++) {
+    for (uint32_t k = 0; k < raw::entryCount(r); k++) {
         const raw::PackEntry &entry = r.entry[k];
         if (entry.kind == raw::EntryUbo)
             e->setBytes(entry.stage, entry.slot, entry.stage == 1 ? identity : uniforms, sizeof uniforms);

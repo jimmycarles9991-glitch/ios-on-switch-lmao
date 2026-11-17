@@ -3,6 +3,7 @@
 // records nothing in it, and VIC's job waits for NVJPG's syncpoint instead.
 #include <IOKit/IOLib.h>
 #include "TegraNVJPGRepack.h"
+#include "TegraNVJPGMapping.h"
 #include "../TegraGM20B/SwitchGpuBacking.h"
 #include "../TegraVIC/SwitchVICDecodeOutput.h"
 #include "../../kits/SwitchDMA/SwitchDMAPages.h"
@@ -92,8 +93,8 @@ void queueRepack(void *context, uint32_t syncpt, uint32_t fence)
 }  // namespace
 
 int tegra_nvjpg_repack(TegraNVJPGJob *engine, const TegraNVJPGPlan *plan, const TegraNVJPGDecodeRequest *request,
-                       const TegraVICSurface *destination, const uint64_t *bits, uint32_t bitPages,
-                       nvjpg_dec_status *status, uint64_t *busyUs, const char **why)
+                       const TegraVICSurface *destination, uint64_t bitstream, nvjpg_dec_status *status,
+                       uint64_t *busyUs, const char **why)
 {
     *why = nullptr;
     if (!gWaitLock && !(gWaitLock = IOLockAlloc()))
@@ -102,21 +103,24 @@ int tegra_nvjpg_repack(TegraNVJPGJob *engine, const TegraNVJPGPlan *plan, const 
         *why = "no memory for the planes VIC re-packs";
         return error;
     }
+    const SwitchNVJPGMapping *mapping = switch_nvjpg_mapping(gBacking, gPages->count);
+    if (!mapping) {
+        *why = "repack mapping could not be allocated";
+        IOLog("TegraNVJPG: repack mapping failed for %u pages; this decode fails\n", gPages->count);
+        return -12;
+    }
+    const uint64_t out = mapping->address;
     tegra_nvjpg_lock();
-    const uint64_t out = tegra_nvjpg_window_map(TEGRA_NVJPG_WINDOW_OUT, gPages->pages, gPages->count, true);
-    const uint64_t in = tegra_nvjpg_window_map(TEGRA_NVJPG_WINDOW_IN, bits, bitPages, false);
     Wait wait = {};
-    int ret = out && in ? 0 : -12;
+    int ret = out && bitstream ? 0 : -12;
     if (!ret) {
-        engine->bitstream = in;
+        engine->bitstream = bitstream;
         for (uint32_t i = 0; i < plan->planes; ++i)
             engine->plane[i] = out + plan->planeStart[i];
         Queue q = {plan, request, destination, &wait};
         const TegraNVJPGFollow follow = {queueRepack, &q};
         ret = tegra_nvjpg_run(engine, status, busyUs, &follow);
     }
-    tegra_nvjpg_window_clear(TEGRA_NVJPG_WINDOW_OUT);
-    tegra_nvjpg_window_clear(TEGRA_NVJPG_WINDOW_IN);
     tegra_nvjpg_unlock();
     if (wait.queued) {
         IOLockLock(gWaitLock);

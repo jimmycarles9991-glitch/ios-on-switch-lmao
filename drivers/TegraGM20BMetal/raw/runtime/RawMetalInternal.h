@@ -37,6 +37,7 @@
 #include "raw_gpu.h"
 #include "raw_handoff_queue.h"
 #include "raw_progress_gate.h"
+#include "raw_texture_shape.h"
 #include "TegraGM20BLayout.h"
 #include "../../../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "RawMetalNeeds.h"
@@ -85,9 +86,7 @@ static constexpr auto kWaitLimit = std::chrono::seconds(20);
 
 os_log_t rawLog();
 void once(NSString *text);
-// The device's handle tables of argument buffers (RawMetalResourceIds.mm): which texture a heap array holds, and an object
-// whose ID was named going
-bool rmHeapHolds(uint32_t heapClass, const raw::HeapTextureFacts *facts);
+// The device's handle tables of argument buffers (RawMetalResourceIds.mm): an object whose ID was named going
 void rmHeapForgetTexture(RMTexture *t);
 void rmHeapForgetSampler(RMSampler *s);
 // A resource a heap made outside its arena (RawMetalHeap.mm): a member of what a job names of the heap until it goes
@@ -189,6 +188,7 @@ struct RMRawRetirement {
     // the range laid predicated loops: the stamp of the record that names one which ran past its copies, and the range
     uint32_t loopStamp = 0;
     uint32_t loopFrom = 0, loopTo = 0;
+    uint64_t frameDue = 0;  // left quiet for its frame's loud end, due by then (raw_completion_source.h completionLook)
 };
 
 // A change of the submit worker's schedule another thread hands it (RawState::schedule)
@@ -292,6 +292,7 @@ bool twinAnswers(Class twinClass, SEL selector);
 void answerZero(id object, NSInvocation *invocation);
 // A selector m2v's object answers that raw has no method for: answered zero, a fault in debug builds and the rates line's tw=../f
 void answerMissing(id object, NSInvocation *invocation);
+raw::shapes::TextureShape textureShape(MTLTextureDescriptor *d);
 bool rawShape(MTLTextureDescriptor *d);
 bool chainShape(MTLTextureDescriptor *d);
 bool lineShape(MTLTextureDescriptor *d);
@@ -303,14 +304,20 @@ bool multisampleShape(MTLTextureDescriptor *d);
 uint32_t memorylessLayers(MTLTextureDescriptor *d);
 bool blockShape(MTLTextureDescriptor *d);
 bool cpuBlocks(RMTexture *t, MTLRegion r, NSUInteger level, NSUInteger slice, uint8_t *bytes, NSUInteger row,
-               bool write);
+               NSUInteger image, bool write);
 uint32_t rawShapeTerm(MTLTextureDescriptor *d);
 bool identitySwizzle(MTLTextureSwizzleChannels s);
 // `t` reading its channels through `s` (a descriptor's swizzle, or a swizzled view's): its raw header, its descriptor
 id<MTLTexture> swizzled(id<MTLTexture> t, MTLTextureSwizzleChannels s);
 // A texture the raw path does not keep: its predicate, and the predicate's first line with the texture's details
 void refuseTexture(RMTexture *t, RMPred p, uint64_t a, uint64_t b, NSString *kind, NSString *extra);
+// A visibility result mode Metal's validation stops (MTLRenderCommandEncoder.h setVisibilityResultMode:offset:): `why`,
+// in the predicate's first line
+void visibilityError(RMCommandBuffer *cb, uint64_t mode, uint64_t offset, const char *why);
+void eventError(RMCommandBuffer *cb, bool signal, const char *why);
 void keepExtendedRange(MTLTextureDescriptor *d, raw::Texture &t, bool overBuffer);
+// The header type (raw::fx::kTex*) of a texture or view of `type`; -1: one the raw path makes none of
+int viewHeaderType(MTLTextureType type);
 
 // Where plain Metal reads or writes each buffer row of a copy between a buffer and a texture: rows `bytesPerRow` apart from
 // `offset`. A layout off Metal's rules (an offset or bytesPerRow off the texel, or rows that overlap) is placed as Apple's
@@ -331,7 +338,6 @@ bool bufferRows(uint64_t offset, uint64_t bytesPerRow, uint32_t rows, uint32_t r
 uint64_t bufferRow(const BufferRows &r, uint64_t offset, uint64_t bytesPerRow, uint32_t y);
 
 // RawMetalLibrary.mm
-RMLibrary *wrapLibrary(id device, id<MTLLibrary> twin, NSString *path);
 // A library of the metallib `bytes` (a file's at `path`, or data) read by the facade, with no m2v twin; nil: bytes it does
 // not read (m2v's library answers then)
 RMLibrary *readLibrary(id device, NSString *path, NSData *bytes);
@@ -350,12 +356,28 @@ MTLRenderPipelineDescriptor *twinDescriptor(MTLRenderPipelineDescriptor *d);
 // A compute descriptor over m2v's functions (RawMetalComputeState.mm): for m2v's state, or a kernel compiled in process
 MTLComputePipelineDescriptor *twinComputeDescriptor(MTLComputePipelineDescriptor *d);
 
-// RawMetalCubic.mm: the cubic binds (raw_cubic.h) of a draw of `pl` with these fragment samplers and textures bound (empty: no
-// cubic sampler where it samples), and a packed state's variants, the pack's records of them (under its pack key's hash)
-// placed at its creation
-raw::CubicBinds cubicBinds(const raw::Pipeline &pl, RMSampler *const samplers[16],
-                           RMTexture *const textures[raw::kStageTextures]);
+// A packed state's variants placed with its own record at creation (RawMetalCubic.mm)
 void packedVariants(RMPipeline *p, uint64_t keyHash);
+// The state's variant for a draw's cubic binds, test class, two-plane colours, sampled two-plane slots, written textures and
+// the colours whose half shadow its pass holds (raw_xr_shadow.h), asked of the compiler where no pack holds it
+raw::Variant<raw::Pipeline> *rmRenderVariant(RMPipeline *p, const raw::CubicBinds &binds, uint8_t tests, bool planes,
+                                             uint16_t xrSlots, const std::vector<raw::WrittenTexture> &written,
+                                             uint8_t xrShadows);
+
+// RawMetalXrShadow.mm (raw_xr_shadow.h): a render encoder's pass opened, each draw of a state, each state and variant its
+// draws take, an execution of indirect commands, the encoder ended (its held colours' shadowed variants asked); at the queue
+// head, 0 while a shadowed variant of the range is being made (one refused or failed: its pass holds none); a pass's
+// shadows, and filled before it into `p` (false: *why)
+void rmXrShadowBegin(RMCommandBuffer *cb, RMRenderEncoder *e, const RMPass &facts);
+void rmXrShadowDrew(RMCommandBuffer *cb, const raw::Pipeline &base);
+void rmXrShadowDraw(RMCommandBuffer *cb, RMPipeline *pipe, const raw::Pipeline &base,
+                    raw::Variant<raw::Pipeline> *variant, const raw::CubicBinds &binds, uint8_t tests, bool planes,
+                    uint16_t xrSlots, const std::vector<raw::WrittenTexture> &written);
+void rmXrShadowBlock(RMCommandBuffer *cb);
+void rmXrShadowEnd(RMCommandBuffer *cb);
+int rmXrShadowReadiness(RMCommandBuffer *cb, size_t from, size_t to);
+const RMXrShadowTwins *rmXrShadowTwinsOf(const RMCommandBuffer *cb, uint32_t passAt);
+bool rmXrShadowFill(raw::CommandBuffer *rc, const RMPass &pass, raw::PassDesc &p, const char **why);
 
 // RawMetalHeap.mm: the purged heaps a committed command buffer's resources lie in, given their pages back before it is encoded
 // (it counts as committed already, so no purge runs meanwhile)
@@ -368,6 +390,9 @@ void noteReplayShape(RMCommandBuffer *cb, size_t from, size_t to);
 bool heapResident(RMHeap *h);
 // The device's ask of `d` in an arena of `blockLinear` (a private heap's): every kind the raw path keeps; false: none
 bool heapTextureAsk(MTLTextureDescriptor *d, bool blockLinear, raw::TextureAsk &ask);
+// RawMetalPlainLayout.mm: the texture layout object of a texture no block-linear image of caller memory is made of, nil for
+// one it does not describe
+id rmPlainLayout(id device, MTLTextureDescriptor *d);
 
 // RawMetalTexture.mm
 void declareGpuWrites(RMTexture *t);
@@ -400,12 +425,18 @@ bool fillTexturePass(RMCommandBuffer *cb, const Cmd &c, raw::CommandBuffer *rc);
 void cacheLines(const uint8_t *from, uint64_t bytes, bool invalidate);
 bool transferTexture(RMTexture *texture, MTLRegion region, NSUInteger level, NSUInteger slice, void *bytes,
                      NSUInteger row, NSUInteger image, bool write);
+// A depth/stencil texture's CPU copy transferTexture did not make: one error line, and nothing else moves it (its zeta
+// memory is the copy engine's alone); false for any other texture
+bool refuseZetaCpu(RMTexture *texture, MTLRegion region, NSUInteger level, NSUInteger slice, bool write);
 void cpuTiled(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, bool write);
 const tgm_layout *textureCpuImportLayout(RMTexture *texture);
 void cpuLevel(RMTexture *t, MTLRegion r, NSUInteger level, NSUInteger slice, uint8_t *bytes, NSUInteger row,
               NSUInteger image, bool write);
 void cpuVolume(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, NSUInteger image, bool write);
 void cpuLayer(RMTexture *t, MTLRegion r, NSUInteger slice, uint8_t *bytes, NSUInteger row, bool write);
+bool cpuSamples(RMTexture *t, MTLRegion r, uint8_t *bytes, NSUInteger row, bool write);
+bool cpuXrWords(RMTexture *t, MTLRegion r, NSUInteger level, NSUInteger slice, uint8_t *bytes, NSUInteger row,
+                NSUInteger image, bool write);
 
 // RawMetalDevice.mm
 const char *ycbcrPlan(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane, raw::YcbcrPlan &out);
@@ -432,18 +463,30 @@ NSError *rmCreationError(const std::string &failure);
 
 // RawMetalYcbcrTargets.mm: two-plane YCbCr textures rendered into (raw_ycbcr_store.h). A target's stand-in and store shape
 // (Texture::planarStandIn, ycbcrStore), the reason a pass into one goes to m2v (null: none), its planes stored from its pass's
-// backing of the stand-in (0; 1 a pass it cannot render, 2 a draw the encoder refused: *why), and a descriptor's first such
-// attachment's format (0: none)
+// backing of the stand-in (0; 1 a pass it cannot render, 2 a draw the encoder refused: *why; `loaded`: the reach of a pass that
+// loaded it, whose store writes the tiles it reaches alone), and a descriptor's first attachment a stand-in renders (YCbCr or
+// raw_format_standin.h's formats; 0: none), whose state standInTargetState makes. A loaded target's pass at colour `j` renders into `loaded`, a stand-in of the command buffer's that a pass of the load state
+// filled first (0, or as storeYcbcrPlanes')
 void makeYcbcrTarget(raw::Texture &t, uint32_t pixelFormat, const raw::YcbcrStoreShape &store);
 const char *ycbcrTargetPassRefusal(const raw::Texture &t, MTLRenderPassColorAttachmentDescriptor *a);
-int storeYcbcrPlanes(raw::CommandBuffer *rc, const raw::Texture &t, const raw::Texture &standIn, const char **why);
-uint32_t ycbcrTargetFormat(MTLRenderPipelineDescriptor *d);
+int storeYcbcrPlanes(raw::CommandBuffer *rc, const raw::Texture &t, const raw::Texture &standIn, const char **why,
+                     const raw::PassReach *loaded = nullptr);
+int loadYcbcrStandIn(raw::CommandBuffer *rc, const raw::Texture &t, uint32_t j, raw::Texture *&loaded,
+                     const char **why);
+bool reachOfLoadedTargets(const RMPass &pass, const raw::PassDesc &p, raw::DrawReplay &draws, raw::CommandBuffer &rc,
+                          raw::PassReach &out, const char **why);
+uint32_t standInTargetFormat(MTLRenderPipelineDescriptor *d);
+// RawMetalEncodeBlit.mm: whether the pack holds the mip state of a format the GM20B renders none of (raw_format_standin.h)
+bool rmFormatMips(uint32_t format);
+// A stand-in's attachment of a format with no alpha: its factors of the destination alpha the constants they come to
+// (raw_standin_blend.h)
+void rmAlphaOneBlend(MTLRenderPipelineColorAttachmentDescriptor *a);
 
 @interface RMDevice (YcbcrTargets)
-- (id<MTLRenderPipelineState>)ycbcrTargetState:(MTLRenderPipelineDescriptor *)d
-                                       options:(MTLPipelineOption)o
-                                    reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection
-                                         error:(NSError **)error;
+- (id<MTLRenderPipelineState>)standInTargetState:(MTLRenderPipelineDescriptor *)d
+                                         options:(MTLPipelineOption)o
+                                      reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection
+                                           error:(NSError **)error;
 @end
 
 // RawMetalParallel.mm: the command at `at` is a pass that continues the one before it (a parallel encoder's sub-encoder after
@@ -460,6 +503,12 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
 const char *rmM2vMissingState(MTLRenderPipelineDescriptor *d);
 const char *rmM2vMissingKernel(MTLComputePipelineDescriptor *d);
 bool rmRefuseM2vRange(RMCommandBuffer *cb, size_t from, size_t to);
+// RawMetalDrawErrors.mm: a draw refused as `f` (raw_gpu.h RefusalId) that goes nowhere else: its line logged, the
+// command buffer failed (with Metal's error where Metal fails it too); false: a refusal of another kind
+bool drawFailed(RMCommandBuffer *cb, const raw::Refusal &f, const char *why);
+// A draw into a plane of rotation `turn` of the state of `keyHash` (its key text `key`, null where unknown) whose
+// record holds no turned fragment program (PipelineTurnRefused): its line logged, the command buffer failed
+void rmTurnRefused(RMCommandBuffer *cb, uint64_t keyHash, uint32_t turn, const char *key);
 
 // RawMetalEncode.mm
 bool encodeRaw(RMCommandBuffer *cb, size_t from, size_t to, const char **why, size_t *refusedEncoder);
@@ -575,6 +624,17 @@ void rmStorageTargetsPlain(RMCommandBuffer *cb, size_t from, size_t to);
 
 // RawMetalCommandBuffer.mm: the kept recordings and setBytes chunks past what steady frames take, given back
 void releaseRecordings();
+void rmTakeRecording(RMCommandBuffer *cb);
+void rmRecordingDone(RMCommandBuffer *cb);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// gpu.path.encode_cost's: command buffers that found no kept recording, and recordings given back but not kept (over
+// kKeptBytes alone, over kKeptTotal with those kept, or every slot full), since the process began
+struct RMRecordingCounts {
+    uint64_t misses, dropsLarge, dropsTotal, dropsSlots;
+};
+
+RMRecordingCounts rmRecordingCounts();
+#endif
 // cb completed: its setBytes chunks kept for the next command buffer's (one of their total where it filled several)
 void rmBytesDone(RMCommandBuffer *cb);
 // A setBytes chunk of at least `length` bytes: one a completed command buffer gave back, else a new one (false: the kernel
@@ -643,7 +703,8 @@ void commitBuffer(RMCommandBuffer *cb);
 void submitLoop();
 bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKernelSet<raw::ComputeState> *kernels,
                           const char **why);
-int computeReadiness(RMCommandBuffer *cb, const RMSegment &range);
+// 1 ready, 0 still being made, -1 refused (`why`), -2 failed to compile
+int computeReadiness(RMCommandBuffer *cb, const RMSegment &range, const char **why);
 // RawMetalComputeAdmission.mm: an admitted dispatch's textures and buffers, and the encoder's resources it may reach
 void kernelUses(RMCommandBuffer *cb, size_t at, std::vector<raw::KernelUse> &uses);
 

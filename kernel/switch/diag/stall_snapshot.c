@@ -334,7 +334,7 @@ static const char *wq_name(int type)
     }
 }
 
-static const char *mode_name(int mode)
+const char *switch_stall_mode_name(int mode)
 {
     return mode == TH_MODE_REALTIME ? "RT" : mode == TH_MODE_FIXED ? "FX" : mode == TH_MODE_TIMESHARE ? "TS" : "-";
 }
@@ -453,7 +453,7 @@ void switch_stall_put_census(struct stall_line *l, const struct stall_cpu cpus[S
             continue;
         }
         switch_stall_put(l, " cpu%u %s[%d] 0x%llx %s %s %d;", i, c->process, c->pid, c->tid,
-                         c->thread[0] ? c->thread : "-", mode_name(c->mode), c->sched_pri);
+                         c->thread[0] ? c->thread : "-", switch_stall_mode_name(c->mode), c->sched_pri);
     }
 }
 

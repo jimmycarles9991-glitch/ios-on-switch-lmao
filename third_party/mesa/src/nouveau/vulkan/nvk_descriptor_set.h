@@ -7,6 +7,7 @@
 
 #include "nvk_private.h"
 
+#include "nvk_buffer_descriptor.h"
 #include "nvk_descriptor_types.h"
 #include "nvk_device.h"
 #include "nvk_physical_device.h"

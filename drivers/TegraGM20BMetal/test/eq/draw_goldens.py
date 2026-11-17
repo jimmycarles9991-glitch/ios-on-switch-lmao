@@ -3,8 +3,10 @@
 The goldens are written while NVK can still be run; a raw log is then held to them alone.
 
 usage: draw_goldens.py write <nvk.log> <raw.log> <golden>   refuses where raw differs from NVK in a way no rule allows
-       draw_goldens.py rebase <golden> <raw.log> <new golden>  refuses where raw moved from the golden in a way no
-                                                                eq_rebase.py rule allows
+       draw_goldens.py rebase <golden> <raw.log> <new golden> [<kept.log> <kept words> <words>]
+                                                               refuses where raw moved from the golden in a way no
+                                                               eq_rebase.py rule allows; tscrenumber's proof takes a log
+                                                               that keeps the golden and both runs' EQ_UBO_WORDS dumps
        draw_goldens.py check <raw.log> <golden>
 
 A golden line per item of the frame (eq_fields.py's normalisation):
@@ -97,12 +99,36 @@ def rule(
     return tag, f'barriers {sorted(d.barriers)}, the golden {sorted(need)}'
 
 
-def rebased(want: list[list[str]], log: str) -> tuple[eq_fields.Frame, list[set], list[str]]:
+def renumbered(want: list[list[str]], log: str, evidence: list[str]) -> tuple[set[int], list[str]]:
+    """Give the draws whose move from the golden is sampler headers renumbered (eq_rebase.tsc_renumber), or why not."""
+    kept_log, kept_words, words = evidence
+    if moved := differences(want, kept_log):
+        return set(), [f'tscrenumber: {kept_log} does not keep the golden ({moved[0]})']
+
+    def lines(path: str) -> list[str]:
+        return Path(path).read_text().splitlines()
+
+    if why := eq_rebase.tsc_renumber(lines(kept_log), lines(kept_words), lines(log), lines(words)):
+        return set(), why
+    kept, now = eq_fields.frame(kept_log).draws, eq_fields.frame(log).draws
+    return {
+        i
+        for i, (a, b) in enumerate(zip(kept, now, strict=True))
+        if eq_fields.digest_fields(a) != eq_fields.digest_fields(b)
+    }, []
+
+
+def rebased(
+    want: list[list[str]], log: str, evidence: list[str] | None = None
+) -> tuple[eq_fields.Frame, list[set], list[str]]:
     """Give raw's frame, each draw's tags, and every move from the golden no eq_rebase.py rule allows."""
     frame = eq_fields.frame(log)
     events = [r for r in want if r[0] == 'E']
     if len(events) != len(frame.draws):
         return frame, [], [f'draws: golden {len(events)} log {len(frame.draws)}']
+    renumber, refused_renumber = renumbered(want, log, evidence) if evidence else (set(), [])
+    if refused_renumber:
+        return frame, [], refused_renumber
     got = {r[1]: r for r in rows_of(frame, [set()] * len(frame.draws)) if r[0] == 'E'}
     refused = [] if rows_of(frame, [set()] * len(frame.draws))[0] == want[0] else ['clears moved']
     fields = {(r[1], r[2]): r[3] for r in want if r[0] == 'F'}
@@ -115,7 +141,9 @@ def rebased(want: list[list[str]], log: str) -> tuple[eq_fields.Frame, list[set]
         now = eq_fields.digest_fields(d)
         named = [k for (j, k), h in fields.items() if j == row[1] and h != digest(now.get(k, ''))]
         left = bool(need - {'ELIDED'} - d.barriers) or ('ELIDED' in d.barriers and 'ELIDED' not in need)
-        if got[row[1]][2] != row[2] or left:
+        if i in renumber and not left:
+            t.add('tscrenumber')
+        elif got[row[1]][2] != row[2] or left:
             tag, why = rule(frame, i, row, named, (formed, pushed))
             if tag in eq_rebase.FORMS:
                 t.discard(eq_rebase.STORAGE_TAG)
@@ -144,8 +172,8 @@ def main() -> int:
         print(f'{len(r.draws)} draws -> {golden}')
         return 0
     if mode == 'rebase':
-        golden, raw, rebased_golden = paths
-        frame, tags, refused = rebased(read(golden), raw)
+        golden, raw, rebased_golden, *evidence = paths
+        frame, tags, refused = rebased(read(golden), raw, evidence or None)
         for line in refused[:60]:
             print(line)
         if refused:

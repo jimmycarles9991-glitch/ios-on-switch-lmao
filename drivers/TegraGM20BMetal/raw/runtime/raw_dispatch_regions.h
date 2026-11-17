@@ -55,8 +55,6 @@ inline ComputeDispatch computeDispatch(std::array<uint64_t, 3> grid, const std::
         edge[i] = uint32_t(total % threads[i]);
         out.groups[i] = full[i] + (edge[i] != 0);
         out.multi |= edge[i] != 0;
-        if (out.groups[i] > (i ? 0xffffu : 0x7fffffffu))
-            out.reason = ComputeDispatch::Range;
     }
     if (out.reason != ComputeDispatch::Ready || !out.grid[0] || !out.grid[1] || !out.grid[2])
         return out;

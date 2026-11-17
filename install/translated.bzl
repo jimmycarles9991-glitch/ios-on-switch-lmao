@@ -1,14 +1,15 @@
 """iOS 27's translated parts as Bazel actions (tools/install/translate.py): each role's pretranslate delta, and each
 cryptex rebuilt from its delta, given its owners and sealed. A rerun after any failure redoes only what is missing.
 
-They attach disk images, so they run unsandboxed on this Mac (.bazelrc gives their mnemonics the local strategy).
+They attach disk images, so they run unsandboxed: on a build host, or on this Mac under --config=noremote (.bazelrc
+gives their mnemonics the remote and then the local strategy).
 """
 
 load("//translate/arm64e/pretranslate:defs.bzl", "PretranslatedInfo")
 
-# no-remote keeps the IPSW's translated bytes off any remote cache; the local disk cache keeps them, so a new output
-# base or a `bazel clean` takes them from there instead of translating again.
-_LOCAL = {"no-remote": "", "no-sandbox": "", "requires-darwin": ""}
+# The IPSW's translated bytes are built and cached on the build hosts: their cache is the owner's own, private to him
+# (his decision, 14 Nov 2026), so another output base or Mac takes them from there instead of translating again.
+_REQUIREMENTS = {"requires-darwin": ""}
 
 DeltaInfo = provider(doc = "A role's delta directory.", fields = {"role": "os, app_cryptex or system_cryptex", "dir": "File"})
 
@@ -35,7 +36,7 @@ def _pretranslated_delta_impl(ctx):
         outputs = [out],
         mnemonic = "Pretranslate",
         progress_message = "Translating %s's arm64e code to arm64 (%%{label})" % info.role,
-        execution_requirements = _LOCAL,
+        execution_requirements = _REQUIREMENTS,
     )
     return [DefaultInfo(files = depset([out])), DeltaInfo(role = info.role, dir = out)]
 
@@ -72,7 +73,7 @@ def _translated_cryptex_impl(ctx):
         outputs = [image, sha256],
         mnemonic = "TranslatedCryptex",
         progress_message = "Rebuilding and sealing the translated %s (%%{label})" % ctx.attr.role,
-        execution_requirements = _LOCAL,
+        execution_requirements = _REQUIREMENTS,
     )
     return [DefaultInfo(files = depset([image]), runfiles = ctx.runfiles(files = [sha256]))]
 

@@ -2,12 +2,17 @@
 // raw_tessellation.cpp and a tessellation state's record on raw::Device: its control and evaluation programs bound at their
 // stages beside its tessellator registers, the stages switched off again after it, patches drawn only with it and
 // primitives only without it, a draw's indexing and control points as Metal draws them for the state, and Metal's factor
-// scale as m2v's control stage takes it.
+// scale as m2v's control stage takes it. Each holds of the state's runtime record and of its pack record alike.
 #include "raw_device_harness.h"
+#include "raw_record_pack.h"
+#include "../raw/runtime/raw_depth_bias.h"
 #include "../raw/runtime/raw_icb.h"
 #include "../raw/runtime/raw_record.h"
 #include <cmath>
+#include <cstring>
 #include <map>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -15,20 +20,26 @@ constexpr uint32_t kRGBA8 = 70, kTriangle = 3, kControlWord = 5;
 constexpr uint32_t kTessParameters = 0x0320, kShaderControl = 0x2080, kShaderEvaluation = 0x20c0;
 constexpr uint32_t kProgramControl = 0x2084, kProgramEvaluation = 0x20c4, kRegistersControl = 0x208c;
 
-// (method, value) of every method a pushed word stream writes (raw_push.h's encodings)
-std::multimap<uint32_t, uint32_t> methods(const std::vector<uint32_t> &words)
+// (method, value) of every method a pushed word stream writes (raw_push.h's encodings), in order
+std::vector<std::pair<uint32_t, uint32_t>> written(const std::vector<uint32_t> &words)
 {
-    std::multimap<uint32_t, uint32_t> out;
+    std::vector<std::pair<uint32_t, uint32_t>> out;
     for (size_t i = 0; i < words.size();) {
         const uint32_t h = words[i++], op = h >> 29, count = (h >> 16) & 0x1fff, method = (h & 0x1fff) << 2;
         if (op == 4) {
-            out.emplace(method, count);
+            out.emplace_back(method, count);
             continue;
         }
         for (uint32_t k = 0; k < count && i < words.size(); k++)
-            out.emplace(op == 1 ? method + 4 * k : method, words[i++]);
+            out.emplace_back(op == 1 ? method + 4 * k : op == 5 && k ? method + 4 : method, words[i++]);
     }
     return out;
+}
+
+std::multimap<uint32_t, uint32_t> methods(const std::vector<uint32_t> &words)
+{
+    const auto in = written(words);
+    return {in.begin(), in.end()};
 }
 
 raw::RuntimeRecord record(bool tessellates, uint64_t key, uint8_t indexBytes = 0)
@@ -52,7 +63,7 @@ raw::RuntimeRecord record(bool tessellates, uint64_t key, uint8_t indexBytes = 0
     r.pipeline.controlWord = kControlWord;
     r.pipeline.controlPoints = 4;
     r.pipeline.controlPointIndexBytes = indexBytes;
-    r.pipeline.entries = raw::TessBufferCount;
+    raw::setEntryCount(r.pipeline, raw::TessBufferCount);
     for (uint8_t k = 0; k < raw::TessBufferCount; k++)
         r.pipeline.entry[k] = {uint16_t(16 * k),
                                raw::EntryTessBuffer,
@@ -68,25 +79,36 @@ raw::RuntimeRecord record(bool tessellates, uint64_t key, uint8_t indexBytes = 0
     return r;
 }
 
-class DeviceTessellation : public harness::DeviceTest {
+// The parameter: the states' records are the pack's (raw_record_pack.h), else the runtime's (Device::addRecord)
+class DeviceTessellation : public harness::DeviceTest, public testing::WithParamInterface<bool> {
 protected:
     raw::Texture target;
     raw::Buffer factors, indices;
     raw::Pipeline *patches = nullptr, *plain = nullptr, *indexed = nullptr;
+    raw::Refusal refused;  // the last refused draw's
 
     void SetUp() override
     {
-        DeviceTest::SetUp();
+        const std::vector<raw::RuntimeRecord> records = {record(true, 0x7e55), record(false, 0x7e56),
+                                                         record(true, 0x7e57, 2)};
+        if (GetParam()) {
+            kernel_model::model = {};
+            std::string err;
+            ASSERT_TRUE(dev.open(harness::recordPack(records, "tessellation-pack.bin").c_str(), 0, err,
+                                 raw::Device::Role::Client))
+                << err;
+        } else {
+            DeviceTest::SetUp();
+        }
         ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
         ASSERT_TRUE(dev.createBuffer(4096, factors));
         ASSERT_TRUE(dev.createBuffer(4096, indices));
-        std::string why;
-        patches = dev.addRecord(record(true, 0x7e55), false, why);
-        ASSERT_NE(patches, nullptr) << why;
-        plain = dev.addRecord(record(false, 0x7e56), false, why);
-        ASSERT_NE(plain, nullptr) << why;
-        indexed = dev.addRecord(record(true, 0x7e57, 2), false, why);
-        ASSERT_NE(indexed, nullptr) << why;
+        raw::Pipeline **made[] = {&patches, &plain, &indexed};
+        for (size_t k = 0; k < records.size(); k++) {
+            std::string why;
+            *made[k] = GetParam() ? dev.pipeline(records[k].pipeline.keyHash) : dev.addRecord(records[k], false, why);
+            ASSERT_NE(*made[k], nullptr) << why;
+        }
     }
 
     template <class Draw> std::string drawWith(raw::Pipeline *pl, Draw draw)
@@ -109,6 +131,7 @@ protected:
         e->end();
         uint32_t seqno = 0;
         if (!ok || !cb->commit(seqno)) {
+            refused = cb->refusal;
             cb->abandon();
             return why ? why : "not committed";
         }
@@ -116,7 +139,7 @@ protected:
     }
 };
 
-TEST_F(DeviceTessellation, AStateBindsItsControlAndEvaluationProgramsAndSwitchesThemOffAfter)
+TEST_P(DeviceTessellation, AStateBindsItsControlAndEvaluationProgramsAndSwitchesThemOffAfter)
 {
     const auto bound = methods(patches->methods);
     ASSERT_EQ(bound.count(kProgramControl), 1u);
@@ -132,7 +155,8 @@ TEST_F(DeviceTessellation, AStateBindsItsControlAndEvaluationProgramsAndSwitches
     EXPECT_EQ(methods(plain->methods).count(kProgramControl), 0u);
 }
 
-TEST_F(DeviceTessellation, PatchesDrawOnlyWithATessellationState)
+// Either way round is Metal's validation error, which fails the command buffer (RawMetalDrawErrors.mm)
+TEST_P(DeviceTessellation, PatchesDrawOnlyWithATessellationState)
 {
     EXPECT_EQ(drawWith(patches,
                        [](raw::RenderEncoder &e, const char **why) {
@@ -144,11 +168,17 @@ TEST_F(DeviceTessellation, PatchesDrawOnlyWithATessellationState)
                            return e.draw(kTriangle, 0, 3, 1, 0, why);
                        }),
               "");
+    EXPECT_EQ(refused.id, raw::RefTessellationDraw);
+    EXPECT_EQ(refused.a, kTriangle);
+    EXPECT_EQ(refused.b, 1u);
     EXPECT_NE(drawWith(plain,
                        [](raw::RenderEncoder &e, const char **why) {
                            return e.drawPatches(4, 0, 2, 1, 0, nullptr, 0, nullptr, 0, why);
                        }),
               "");
+    EXPECT_EQ(refused.id, raw::RefTessellationDraw);
+    EXPECT_EQ(refused.a, raw::icb::kPatchPrimitive);
+    EXPECT_EQ(refused.b, 0u);
     EXPECT_EQ(drawWith(plain,
                        [](raw::RenderEncoder &e, const char **why) {
                            return e.draw(kTriangle, 0, 3, 1, 0, why);
@@ -159,7 +189,7 @@ TEST_F(DeviceTessellation, PatchesDrawOnlyWithATessellationState)
 // As Metal draws them (m2v render.rs draw_patches): the state's control points whatever the draw names, a control-point
 // index buffer the state has no index type for unread, none where it has one read as index 0, patch indices from their
 // offset rounded down to 4; control-point indices off their size are refused
-TEST_F(DeviceTessellation, ADrawsIndexingAndControlPointsAreTheStates)
+TEST_P(DeviceTessellation, ADrawsIndexingAndControlPointsAreTheStates)
 {
     const raw::Buffer *points = &indices;
     EXPECT_EQ(drawWith(patches,
@@ -192,9 +222,23 @@ TEST_F(DeviceTessellation, ADrawsIndexingAndControlPointsAreTheStates)
                            return e.drawPatches(4, 0, 1, 1, 0, points, 4, points, 1, why);
                        }),
               "");
+    EXPECT_EQ(refused.id, raw::RefControlPointOffset);
+    EXPECT_EQ(refused.a, 1u);
 }
 
-TEST_F(DeviceTessellation, AnIndirectPatchDrawReadsItsArgumentsOnTheGpu)
+// A factor scale that is not a normal float above 0 is Metal's validation error (setTessellationFactorScale:)
+TEST_P(DeviceTessellation, AScaleMetalsValidationStopsFailsTheCommandBuffer)
+{
+    EXPECT_EQ(drawWith(patches,
+                       [](raw::RenderEncoder &e, const char **why) {
+                           e.setTessellationFactorScale(0);
+                           return e.drawPatches(4, 0, 1, 1, 0, nullptr, 0, nullptr, 0, why);
+                       }),
+              "a tessellation factor scale that is not a positive half");
+    EXPECT_EQ(refused.id, raw::RefTessellationScale);
+}
+
+TEST_P(DeviceTessellation, AnIndirectPatchDrawReadsItsArgumentsOnTheGpu)
 {
     raw::Buffer arguments;
     ASSERT_TRUE(dev.createBuffer(256, arguments));
@@ -208,21 +252,60 @@ TEST_F(DeviceTessellation, AnIndirectPatchDrawReadsItsArgumentsOnTheGpu)
               "");
 }
 
-// Set 1 is bound at the vertex and pixel programs' slots alone (Pipeline::heapSlot)
-TEST_F(DeviceTessellation, AStateWhoseTessellationProgramReadsSetOneIsRefused)
+// A post-tessellation vertex function reading textures or samplers of argument buffers reads set 1 from its
+// tessellation program's constant buffer: the draw binds the state's set 1 there (group 2, Pipeline::heapSlot), as it
+// does at the vertex and pixel programs' slots
+TEST_P(DeviceTessellation, AStateWhoseTessellationProgramReadsSetOneBindsItAtItsGroup)
 {
+    constexpr uint32_t kBindGroupCb = 0x2410, kCbSelectorB = 0x2384, kCbSelectorC = 0x2388, kSampled2d = 0x5;
     raw::RuntimeRecord r = record(true, 0x7e58);
     r.tessPrograms[1].id = "tessheap";
     r.tessPrograms[1].cbufTypes = {raw::CbufRoot, raw::kCbufHeapSet};
+    r.pipeline.heapArrays = 1;
+    r.pipeline.heap[0] = {kSampled2d, 0};
+    r.pipeline.heapBytes = 0x1000;
     std::string why;
     raw::Pipeline *heap = dev.addRecord(r, false, why);
     ASSERT_NE(heap, nullptr) << why;
+    ASSERT_NE(heap->heapSet, nullptr);
+    EXPECT_EQ(heap->heapSlot[3], 1);
+    const size_t first = kernel_model::model.jobs.size();
     EXPECT_EQ(drawWith(heap,
                        [](raw::RenderEncoder &e, const char **refused) {
                            return e.drawPatches(4, 0, 2, 1, 0, nullptr, 0, nullptr, 0, refused);
                        }),
-              "a tessellation program that reads argument buffers through set 1");
+              "");
+    std::vector<uint32_t> words;
+    for (size_t j = first; j < kernel_model::model.jobs.size(); j++)
+        words.insert(words.end(), kernel_model::model.jobs[j].words.begin(), kernel_model::model.jobs[j].words.end());
+    uint64_t selected = 0, boundAtTessellation = 0;
+    for (const auto &[m, v] : written(words)) {
+        if (m == kCbSelectorB)
+            selected = uint64_t(v) << 32;
+        else if (m == kCbSelectorC)
+            selected |= v;
+        else if (m == kBindGroupCb + 0x20 * 2 && v == (1u | 1u << 4))
+            boundAtTessellation = selected;
+    }
+    EXPECT_EQ(boundAtTessellation, heap->heapSet->memory.va);
 }
+
+// A pack record draws with the methods and restore its runtime record has: only where each program sits differs
+TEST_P(DeviceTessellation, ItsMethodsAndRestoreAreTheRuntimeRecordsOfTheState)
+{
+    std::string why;
+    const raw::Pipeline *made = dev.addRecord(record(true, 0x7e59), false, why);
+    ASSERT_NE(made, nullptr) << why;
+    EXPECT_EQ(patches->restore, made->restore);
+    auto bound = methods(patches->methods), runtime = methods(made->methods);
+    for (const uint32_t placed : {0x2044u, 0x2144u, kProgramControl, kProgramEvaluation}) {
+        bound.erase(placed);
+        runtime.erase(placed);
+    }
+    EXPECT_EQ(bound, runtime);
+}
+
+INSTANTIATE_TEST_SUITE_P(RuntimeAndPackRecords, DeviceTessellation, testing::Bool());
 
 TEST(TessellationScale, MetalsScaleAsAHalfAsM2vPushesIt)
 {
@@ -239,6 +322,57 @@ TEST(TessellationScale, MetalsScaleAsAHalfAsM2vPushesIt)
     EXPECT_EQ(subnormal, std::ldexp(1.0f, -24));
     for (float refused : {0.0f, -1.0f, std::nanf("")})
         EXPECT_FALSE(raw::tessellationScaleBits(refused, bits)) << refused;
+}
+
+// An M4 Max biases a tessellated quad patch's depth as a triangle's: the draw's polygon offset is on with the encoder's
+// factors, the infinite ones included (raw_depth_bias.h)
+TEST_P(DeviceTessellation, PatchesTakeTheEncodersDepthBias)
+{
+    constexpr uint32_t kPolyOffsetFill = 0x0dc8, kDepthBias = 0x15bc, kMacroCalls = 0x3800;
+    for (const float constant : {100.0f, INFINITY}) {
+        const size_t first = kernel_model::model.jobs.size();
+        EXPECT_EQ(drawWith(patches,
+                           [constant](raw::RenderEncoder &e, const char **why) {
+                               e.setDepthBias(constant, 0, 0);
+                               return e.drawPatches(4, 0, 1, 1, 0, nullptr, 0, nullptr, 0, why);
+                           }),
+                  "");
+        const float written = raw::depthBiasFactors(constant, 0, 0).constant;
+        uint32_t want;
+        memcpy(&want, &written, 4);
+        uint32_t fill = 1, bias = 0;  // the channel holds polygon offset on until a write turns it off
+        bool drawn = false;
+        for (size_t j = first; j < kernel_model::model.jobs.size() && !drawn; j++) {
+            uint32_t op = 0, subc = 0, m = 0, left = 0;
+            for (const uint32_t w : kernel_model::model.jobs[j].words) {
+                if (left) {
+                    if (subc == raw::SUBC_3D && m >= kMacroCalls) {
+                        drawn = true;
+                        break;
+                    }
+                    if (subc == raw::SUBC_3D && m == kPolyOffsetFill)
+                        fill = w;
+                    if (subc == raw::SUBC_3D && m == kDepthBias)
+                        bias = w;
+                    left--;
+                    m += op == 1 || op == 5 ? 4 : 0;
+                    op = op == 5 ? 3 : op;
+                    continue;
+                }
+                if (!w)
+                    continue;
+                op = w >> 29;
+                subc = w >> 13 & 7;
+                m = (w & 0xfff) << 2;
+                left = op == 4 ? 0 : w >> 16 & 0x1fff;
+                if (op == 4 && subc == raw::SUBC_3D && m == kPolyOffsetFill)
+                    fill = w >> 16 & 0x1fff;
+            }
+        }
+        EXPECT_TRUE(drawn) << constant;
+        EXPECT_EQ(fill, 1u) << constant;
+        EXPECT_EQ(bias, want) << constant;
+    }
 }
 
 TEST(PatchPrimitive, IsAPatchListOfTrianglesOut)

@@ -3,13 +3,15 @@
 
 #include <array>
 #include <cstdint>
+#include <utility>
+#include <vector>
 #include "raw_spill_table.h"
 
 namespace raw {
 
-// A render state's set 0: its NVK layout's size (PackPipeline::setBytes) in 256-byte blocks, at most two (its record's
-// kPackEntries entries, 16 bytes each at most). The words past a state's own size stay zero, so two builds of a set
-// compare whole.
+// A render state's set 0 of kPackEntries entries or fewer: its NVK layout's size (PackPipeline::setBytes) in 256-byte blocks,
+// at most two (16 bytes an entry at most). The words past a state's own size stay zero, so two builds of a set compare
+// whole. A larger set is a WideDescriptors'.
 using DescriptorWords = std::array<uint32_t, 128>;
 constexpr uint32_t kRenderSetBytes = sizeof(DescriptorWords);
 
@@ -46,11 +48,15 @@ private:
     uint64_t address_ = 0;
 };
 
-struct PreparedDescriptorWords {
-    DescriptorWords words{};
+// What a set's build leaves besides its words: the root push words' bind residuals, and its argument tables'
+struct SetResiduals {
     std::array<uint32_t, 32> residuals{};
     uint32_t residualMask = 0;
     SpillResiduals spilled[2];  // the vertex and the fragment argument tables' (raw_spill_table.h)
+};
+
+struct PreparedDescriptorWords : SetResiduals {
+    DescriptorWords words{};
     uint64_t address = 0;
 };
 
@@ -87,6 +93,13 @@ public:
         return value_;
     }
 
+    // Another cache built the encoder's last set, so the bindings that moved since this one's are not all in `moved`: the
+    // next resolve builds the set whole
+    void leave()
+    {
+        pipeline_ = nullptr;
+    }
+
     // The GPU loaded words into the set it uploaded last: the next resolve builds and uploads one of its own
     void forget()
     {
@@ -98,6 +111,45 @@ public:
 private:
     DescriptorSnapshot snapshot_;
     PreparedDescriptorWords value_;
+    const void *pipeline_ = nullptr;
+};
+
+struct WideDescriptorWords : SetResiduals {
+    std::vector<uint32_t> words;
+    uint64_t address = 0;
+};
+
+// A pipeline's set 0 of more than kPackEntries entries or past kRenderSetBytes (no shipped state has one), built whole where
+// it is another pipeline's or any of its bindings moved, and uploaded again where its words differ from its last upload
+class WideDescriptors {
+public:
+    template <typename Build, typename Upload>
+    const WideDescriptorWords *resolve(const void *pipeline, bool moved, uint32_t bytes, Build build, Upload upload)
+    {
+        const bool same = value_.address && pipeline_ == pipeline;
+        if (same && !moved)
+            return &value_;
+        pipeline_ = nullptr;  // until this build succeeds
+        static_cast<SetResiduals &>(next_) = {};
+        next_.words.assign(bytes / sizeof(uint32_t), 0);
+        if (!build(next_))
+            return nullptr;
+        next_.address = same && next_.words == value_.words ? value_.address : upload(next_.words);
+        if (!next_.address)
+            return nullptr;
+        std::swap(value_, next_);
+        pipeline_ = pipeline;
+        return &value_;
+    }
+
+    void forget()
+    {
+        value_.address = 0;
+        pipeline_ = nullptr;
+    }
+
+private:
+    WideDescriptorWords value_, next_;
     const void *pipeline_ = nullptr;
 };
 

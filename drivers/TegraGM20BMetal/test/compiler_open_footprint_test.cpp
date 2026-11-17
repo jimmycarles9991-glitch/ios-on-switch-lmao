@@ -165,7 +165,6 @@ TEST(CompilerOpen, TheM2VDeviceAtItsLeast)
     switch_ios::test::ExpectPassesInFreshProcess([] {
         setenv("NMB_MEMO_MB", "1", 1);
         setenv("M2V_BLOCK_MIB", "1", 1);
-        setenv("NMB_IDLE_RELEASE_MS", "0", 1);
         m2vDevice("m2v_device_least");
     });
     show("m2v_device_least");

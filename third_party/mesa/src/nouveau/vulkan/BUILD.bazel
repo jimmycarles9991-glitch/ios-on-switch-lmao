@@ -1,10 +1,11 @@
 # Mesa's src/nouveau/vulkan/meson.build, in Bazel: what NVK's build needs of it (third_party/mesa/bazel/defs.bzl).
 # Translated from the compile, archive and generator commands of the meson builds that reproduce main's NVK dylibs.
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_archive", "mesa_args", "mesa_cc_library", "mesa_file", "mesa_files", "mesa_genrule")
+load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_ONLY", "MESA_PY_DEPS", "mesa_archive", "mesa_args", "mesa_cc_library", "mesa_file", "mesa_files", "mesa_genrule")
 load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files", "nvk_compiler_identity")
 load("//third_party/mesa/bazel:link.bzl", "mesa_dylib")
 load("//third_party/mesa/bazel:rust.bzl", "NOUVEAU_RUST_ARGS", "mesa_rust_library")
@@ -38,6 +39,14 @@ filegroup(
     ],
 )
 
+# NVK's own headers: //third_party/mesa:headers leaves this package out, so the rest of Mesa builds without it.
+cc_library(
+    name = "nvk_headers",
+    hdrs = [":headers"],
+    tags = ["no-lint"],
+    target_compatible_with = MESA_ONLY,
+)
+
 filegroup(
     name = "rust_srcs",
     srcs = glob(["**/*.rs"]),
@@ -58,6 +67,7 @@ mesa_cc_library(
         include_dirs = [
             "gen:src/nouveau/vulkan",
             "src/nouveau/vulkan",
+            "src/nouveau/switch_compile",
             "gen:",
             "gen:include",
             "include",
@@ -101,6 +111,7 @@ mesa_cc_library(
         include_dirs = [
             "gen:src/nouveau/vulkan",
             "src/nouveau/vulkan",
+            "src/nouveau/switch_compile",
             "gen:",
             "gen:include",
             "include",
@@ -205,6 +216,7 @@ mesa_cc_library(
         "//third_party/mesa/src/nouveau/headers:nv_push_clce97.c",
         "nvkcl.cpp",
     ],
+    deps = [":nvk_headers"],
 )
 
 # nvk_sources' arguments, which nvk_physical_device's and nvk_sources_tail's objects share.
@@ -220,6 +232,7 @@ NVK_C_ARGS = mesa_args(
     include_dirs = [
         "gen:src/nouveau/vulkan",
         "src/nouveau/vulkan",
+        "src/nouveau/switch_compile",
         "gen:",
         "gen:include",
         "include",
@@ -293,9 +306,8 @@ mesa_cc_library(
         "nvk_mem_arena.c",
         "nvk_mem_stream.c",
         "nvk_mme.c",
-        "nvk_nir_lower_descriptors.c",
-        "nvk_nir_lower_mesh_shader.c",
     ],
+    deps = [":nvk_headers"],
 )
 
 # nvk_physical_device.c in its place in the archive, a library of its own: the one object nvk_build_id.h
@@ -307,6 +319,7 @@ mesa_cc_library(
         "nvk_physical_device.c",
         ":nvk_build_id",
     ],
+    deps = [":nvk_headers"],
 )
 
 mesa_cc_library(
@@ -320,26 +333,7 @@ mesa_cc_library(
         "nvk_switch_capture.c",
         "nvk_switch_compile.c",
         "nvk_switch_directcheck.c",
-        "nvk_switch_ir.c",
-        "nvk_switch_ir_alu.c",
-        "nvk_switch_ir_barrier.c",
-        "nvk_switch_ir_decl.c",
-        "nvk_switch_ir_glsl.c",
-        "nvk_switch_ir_instr.c",
-        "nvk_switch_ir_image.c",
-        "nvk_switch_ir_image_types.c",
-        "nvk_switch_ir_values.c",
-        "nvk_switch_offline.c",
         "nvk_switch_rank.c",
-        "nvk_switch_push.c",
-        "nvk_switch_round.c",
-        "nvk_switch_split.c",
-        "nvk_switch_split_fold.c",
-        "nvk_switch_split_nir.c",
-        "nvk_switch_split_prologue.c",
-        "nvk_switch_split_proof.c",
-        "nvk_switch_turn.c",
-        "nvk_switch_xr_planes.c",
         "nvk_upload_queue.c",
         "nvk_video_session.c",
         "nvk_wsi.c",
@@ -348,6 +342,7 @@ mesa_cc_library(
         "nvkmd/darwin/nvkmd_darwin.c",
         "//third_party/mesa/src/nouveau/headers:nv_push.c",
     ],
+    deps = [":nvk_headers"],
 )
 
 # NVK's compiler identity (third_party/mesa/bazel/compiler_identity.py), which its pipeline cache UUID hashes in place
@@ -365,6 +360,7 @@ nvk_compiler_identity(
         "//third_party/mesa/src/nouveau/compiler:identity_files",
         "//third_party/mesa/src/nouveau/compiler/latencies:identity_files",
         "//third_party/mesa/src/nouveau/headers:identity_files",
+        "//third_party/mesa/src/nouveau/switch_compile:identity_files",
         "//third_party/mesa/src/util:identity_files",
         "//third_party/mesa/src/util/blake3:identity_files",
         "//third_party/mesa/src/util/format:identity_files",
@@ -398,6 +394,7 @@ mesa_cc_library(
         include_dirs = [
             "gen:src/nouveau/vulkan",
             "src/nouveau/vulkan",
+            "src/nouveau/switch_compile",
             "gen:",
             "gen:include",
             "include",
@@ -500,6 +497,7 @@ mesa_cc_library(
         "//third_party/mesa/src/nouveau/headers:nv_push_clcec0.c",
         "//third_party/mesa/src/nouveau/headers:nv_push_clce97.c",
     ],
+    deps = [":nvk_headers"],
 )
 
 mesa_cc_library(
@@ -517,6 +515,7 @@ mesa_cc_library(
         include_dirs = [
             "gen:src/nouveau/vulkan",
             "src/nouveau/vulkan",
+            "src/nouveau/switch_compile",
             "gen:",
             "gen:include",
             "include",
@@ -554,6 +553,7 @@ mesa_cc_library(
     sources = [
         "//third_party/mesa/src/nouveau/headers:nv_push.c",
     ],
+    deps = [":nvk_headers"],
 )
 
 mesa_archive(
@@ -568,6 +568,7 @@ mesa_archive(
         ":nvk_sources",
         ":nvk_physical_device",
         ":nvk_sources_tail",
+        "//third_party/mesa/src/nouveau/switch_compile",
     ],
 )
 
@@ -588,6 +589,7 @@ mesa_genrule(
     name = "nvk_bindings_rs_gen",
     srcs = [
         "rust/bindings.h",
+        ":headers",
         "//third_party/mesa:header_files",
     ],
     outs = [
@@ -595,8 +597,8 @@ mesa_genrule(
         "nvk_inline_wrappers.c",
     ],
     cmd = select({
-        "//third_party/mesa/bazel:ios": "LIBCLANG_PATH=\"$$PWD/$$(dirname $(execpath @nvk_libclang//:lib/libclang.dylib))\" PATH=\"$$PWD/$$(dirname $(execpath @nvk_rust//:bin/rustfmt)):$$PATH\" BINDGEN_EXTRA_CLANG_ARGS=\"$(BINDGEN_CLANG_ARGS)\" $(execpath //third_party/mesa/bazel:bindgen) $(execpath rust/bindings.h) --output $(execpath nvk_bindings.rs) --wrap-unsafe-ops --raw-line '#![allow(clippy::all)]' --raw-line '#![allow(warnings)]' --raw-line '#![allow(unsafe_op_in_unsafe_fn)]' --no-prepend-enum-name --with-derive-default --allowlist-type 'Std.*|vk_video.*|.*nv.*|Vk.*|vk.*' --allowlist-function '.*vk_find.*|.*vk_video.*|nvk.*' --allowlist-function vk_buffer_address --allowlist-var '.*SUBC.*' --experimental --wrap-static-fns --wrap-static-fns-path $(execpath nvk_inline_wrappers.c) --rust-target 1.96.1 --rust-edition 2021 -- -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 --target=aarch64-apple-ios -Ithird_party/mesa/src/nouveau/vulkan/. -I$(GENDIR)/third_party/mesa/src/nouveau/vulkan/. -DNDEBUG -Ithird_party/mesa/src/nouveau/compiler/. -I$(GENDIR)/third_party/mesa/src/nouveau/compiler/. -Ithird_party/mesa/src/nouveau/nil/. -I$(GENDIR)/third_party/mesa/src/nouveau/nil/. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/compiler/nir/. -I$(GENDIR)/third_party/mesa/src/compiler/nir/. -Ithird_party/mesa/src/compiler/. -I$(GENDIR)/third_party/mesa/src/compiler/. -Ithird_party/mesa/src/. -I$(GENDIR)/third_party/mesa/src/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/src/util/.. -I$(GENDIR)/third_party/mesa/src/util/.. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/nouveau/cubin/. -I$(GENDIR)/third_party/mesa/src/nouveau/cubin/. -Ithird_party/mesa/src/nouveau/mme/. -I$(GENDIR)/third_party/mesa/src/nouveau/mme/. -Ithird_party/mesa/src/nouveau/winsys -I$(GENDIR)/third_party/mesa/src/nouveau/winsys -Ithird_party/mesa/src/nouveau/headers/. -I$(GENDIR)/third_party/mesa/src/nouveau/headers/. -Ithird_party/mesa/src/nouveau/headers/nvidia/classes -I$(GENDIR)/third_party/mesa/src/nouveau/headers/nvidia/classes -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/runtime/. -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/. -Ithird_party/mesa/src/vulkan/runtime/bvh -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/bvh -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/util/. -I$(GENDIR)/third_party/mesa/src/vulkan/util/. -Ithird_party/mesa/src/vulkan/wsi/. -I$(GENDIR)/third_party/mesa/src/vulkan/wsi/. -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 -std=c11",
-        "//conditions:default": "LIBCLANG_PATH=\"$$PWD/$$(dirname $(execpath @nvk_libclang//:lib/libclang.dylib))\" PATH=\"$$PWD/$$(dirname $(execpath @nvk_rust//:bin/rustfmt)):$$PATH\" BINDGEN_EXTRA_CLANG_ARGS=\"$(BINDGEN_CLANG_ARGS)\" $(execpath //third_party/mesa/bazel:bindgen) $(execpath rust/bindings.h) --output $(execpath nvk_bindings.rs) --wrap-unsafe-ops --raw-line '#![allow(clippy::all)]' --raw-line '#![allow(warnings)]' --raw-line '#![allow(unsafe_op_in_unsafe_fn)]' --no-prepend-enum-name --with-derive-default --allowlist-type 'Std.*|vk_video.*|.*nv.*|Vk.*|vk.*' --allowlist-function '.*vk_find.*|.*vk_video.*|nvk.*' --allowlist-function vk_buffer_address --allowlist-var '.*SUBC.*' --experimental --wrap-static-fns --wrap-static-fns-path $(execpath nvk_inline_wrappers.c) --rust-target 1.96.1 --rust-edition 2021 -- -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 -Ithird_party/mesa/src/nouveau/vulkan/. -I$(GENDIR)/third_party/mesa/src/nouveau/vulkan/. -DNDEBUG -Ithird_party/mesa/src/nouveau/compiler/. -I$(GENDIR)/third_party/mesa/src/nouveau/compiler/. -Ithird_party/mesa/src/nouveau/nil/. -I$(GENDIR)/third_party/mesa/src/nouveau/nil/. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/compiler/nir/. -I$(GENDIR)/third_party/mesa/src/compiler/nir/. -Ithird_party/mesa/src/compiler/. -I$(GENDIR)/third_party/mesa/src/compiler/. -Ithird_party/mesa/src/. -I$(GENDIR)/third_party/mesa/src/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/src/util/.. -I$(GENDIR)/third_party/mesa/src/util/.. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/nouveau/cubin/. -I$(GENDIR)/third_party/mesa/src/nouveau/cubin/. -Ithird_party/mesa/src/nouveau/mme/. -I$(GENDIR)/third_party/mesa/src/nouveau/mme/. -Ithird_party/mesa/src/nouveau/winsys -I$(GENDIR)/third_party/mesa/src/nouveau/winsys -Ithird_party/mesa/src/nouveau/headers/. -I$(GENDIR)/third_party/mesa/src/nouveau/headers/. -Ithird_party/mesa/src/nouveau/headers/nvidia/classes -I$(GENDIR)/third_party/mesa/src/nouveau/headers/nvidia/classes -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/runtime/. -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/. -Ithird_party/mesa/src/vulkan/runtime/bvh -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/bvh -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/util/. -I$(GENDIR)/third_party/mesa/src/vulkan/util/. -Ithird_party/mesa/src/vulkan/wsi/. -I$(GENDIR)/third_party/mesa/src/vulkan/wsi/. -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 -std=c11",
+        "//third_party/mesa/bazel:ios": "LIBCLANG_PATH=\"$$PWD/$$(dirname $(execpath @nvk_libclang//:lib/libclang.dylib))\" PATH=\"$$PWD/$$(dirname $(execpath @nvk_rust//:bin/rustfmt)):$$PATH\" BINDGEN_EXTRA_CLANG_ARGS=\"$(BINDGEN_CLANG_ARGS)\" $(execpath //third_party/mesa/bazel:bindgen) $(execpath rust/bindings.h) --output $(execpath nvk_bindings.rs) --wrap-unsafe-ops --raw-line '#![allow(clippy::all)]' --raw-line '#![allow(warnings)]' --raw-line '#![allow(unsafe_op_in_unsafe_fn)]' --no-prepend-enum-name --with-derive-default --allowlist-type 'Std.*|vk_video.*|.*nv.*|Vk.*|vk.*' --allowlist-function '.*vk_find.*|.*vk_video.*|nvk.*' --allowlist-function vk_buffer_address --allowlist-var '.*SUBC.*' --experimental --wrap-static-fns --wrap-static-fns-path $(execpath nvk_inline_wrappers.c) --rust-target 1.96.1 --rust-edition 2021 -- -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 --target=aarch64-apple-ios -Ithird_party/mesa/src/nouveau/vulkan/. -I$(GENDIR)/third_party/mesa/src/nouveau/vulkan/. -Ithird_party/mesa/src/nouveau/switch_compile/. -DNDEBUG -Ithird_party/mesa/src/nouveau/compiler/. -I$(GENDIR)/third_party/mesa/src/nouveau/compiler/. -Ithird_party/mesa/src/nouveau/nil/. -I$(GENDIR)/third_party/mesa/src/nouveau/nil/. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/compiler/nir/. -I$(GENDIR)/third_party/mesa/src/compiler/nir/. -Ithird_party/mesa/src/compiler/. -I$(GENDIR)/third_party/mesa/src/compiler/. -Ithird_party/mesa/src/. -I$(GENDIR)/third_party/mesa/src/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/src/util/.. -I$(GENDIR)/third_party/mesa/src/util/.. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/nouveau/cubin/. -I$(GENDIR)/third_party/mesa/src/nouveau/cubin/. -Ithird_party/mesa/src/nouveau/mme/. -I$(GENDIR)/third_party/mesa/src/nouveau/mme/. -Ithird_party/mesa/src/nouveau/winsys -I$(GENDIR)/third_party/mesa/src/nouveau/winsys -Ithird_party/mesa/src/nouveau/headers/. -I$(GENDIR)/third_party/mesa/src/nouveau/headers/. -Ithird_party/mesa/src/nouveau/headers/nvidia/classes -I$(GENDIR)/third_party/mesa/src/nouveau/headers/nvidia/classes -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/runtime/. -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/. -Ithird_party/mesa/src/vulkan/runtime/bvh -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/bvh -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/util/. -I$(GENDIR)/third_party/mesa/src/vulkan/util/. -Ithird_party/mesa/src/vulkan/wsi/. -I$(GENDIR)/third_party/mesa/src/vulkan/wsi/. -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 -std=c11",
+        "//conditions:default": "LIBCLANG_PATH=\"$$PWD/$$(dirname $(execpath @nvk_libclang//:lib/libclang.dylib))\" PATH=\"$$PWD/$$(dirname $(execpath @nvk_rust//:bin/rustfmt)):$$PATH\" BINDGEN_EXTRA_CLANG_ARGS=\"$(BINDGEN_CLANG_ARGS)\" $(execpath //third_party/mesa/bazel:bindgen) $(execpath rust/bindings.h) --output $(execpath nvk_bindings.rs) --wrap-unsafe-ops --raw-line '#![allow(clippy::all)]' --raw-line '#![allow(warnings)]' --raw-line '#![allow(unsafe_op_in_unsafe_fn)]' --no-prepend-enum-name --with-derive-default --allowlist-type 'Std.*|vk_video.*|.*nv.*|Vk.*|vk.*' --allowlist-function '.*vk_find.*|.*vk_video.*|nvk.*' --allowlist-function vk_buffer_address --allowlist-var '.*SUBC.*' --experimental --wrap-static-fns --wrap-static-fns-path $(execpath nvk_inline_wrappers.c) --rust-target 1.96.1 --rust-edition 2021 -- -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 -Ithird_party/mesa/src/nouveau/vulkan/. -I$(GENDIR)/third_party/mesa/src/nouveau/vulkan/. -Ithird_party/mesa/src/nouveau/switch_compile/. -DNDEBUG -Ithird_party/mesa/src/nouveau/compiler/. -I$(GENDIR)/third_party/mesa/src/nouveau/compiler/. -Ithird_party/mesa/src/nouveau/nil/. -I$(GENDIR)/third_party/mesa/src/nouveau/nil/. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/compiler/nir/. -I$(GENDIR)/third_party/mesa/src/compiler/nir/. -Ithird_party/mesa/src/compiler/. -I$(GENDIR)/third_party/mesa/src/compiler/. -Ithird_party/mesa/src/. -I$(GENDIR)/third_party/mesa/src/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/include/. -I$(GENDIR)/third_party/mesa/include/. -Ithird_party/mesa/src/util/.. -I$(GENDIR)/third_party/mesa/src/util/.. -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/nouveau/cubin/. -I$(GENDIR)/third_party/mesa/src/nouveau/cubin/. -Ithird_party/mesa/src/nouveau/mme/. -I$(GENDIR)/third_party/mesa/src/nouveau/mme/. -Ithird_party/mesa/src/nouveau/winsys -I$(GENDIR)/third_party/mesa/src/nouveau/winsys -Ithird_party/mesa/src/nouveau/headers/. -I$(GENDIR)/third_party/mesa/src/nouveau/headers/. -Ithird_party/mesa/src/nouveau/headers/nvidia/classes -I$(GENDIR)/third_party/mesa/src/nouveau/headers/nvidia/classes -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/runtime/. -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/. -Ithird_party/mesa/src/vulkan/runtime/bvh -I$(GENDIR)/third_party/mesa/src/vulkan/runtime/bvh -DXXH_FORCE_ALIGN_CHECK=0 -DXXH_FORCE_MEMORY_ACCESS=0 -Ithird_party/mesa/src/vulkan/util/. -I$(GENDIR)/third_party/mesa/src/vulkan/util/. -Ithird_party/mesa/src/vulkan/wsi/. -I$(GENDIR)/third_party/mesa/src/vulkan/wsi/. -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS '-DPACKAGE_VERSION=\"27.0.0-devel\"' -DHAVE_OPENGL=0 -DHAVE_OPENGL_ES_1=0 -DHAVE_OPENGL_ES_2=0 -DMESA_SYSTEM_HAS_KMS_DRM=0 -DHAVE_NVK -DBUILDING_MESA -DVK_ENABLE_BETA_EXTENSIONS -DVIDEO_CODEC_VC1DEC=0 -DVIDEO_CODEC_H264DEC=0 -DVIDEO_CODEC_H264ENC=0 -DVIDEO_CODEC_H265DEC=0 -DVIDEO_CODEC_H265ENC=0 -DVIDEO_CODEC_AV1DEC=1 -DVIDEO_CODEC_AV1ENC=1 -DVIDEO_CODEC_VP9DEC=1 -DVIDEO_CODEC_MPEG12DEC=1 -DVIDEO_CODEC_JPEGDEC=1 -DUSE_LIBGLVND=0 -DHAVE_GFX_COMPUTE -DGLAPI_EXPORT_PROTO_ENTRY_POINTS=1 -DALLOW_KCMP -DMESA_DEBUG=0 -DHAVE___BUILTIN_BSWAP32 -DHAVE___BUILTIN_BSWAP64 -DHAVE___BUILTIN_CLZ -DHAVE___BUILTIN_CLZLL -DHAVE___BUILTIN_CTZ -DHAVE___BUILTIN_EXPECT -DHAVE___BUILTIN_FFS -DHAVE___BUILTIN_FFSLL -DHAVE___BUILTIN_POPCOUNT -DHAVE___BUILTIN_POPCOUNTLL -DHAVE___BUILTIN_UNREACHABLE -DHAVE___BUILTIN_TYPES_COMPATIBLE_P -DHAVE___BUILTIN_ADD_OVERFLOW -DHAVE_FUNC_ATTRIBUTE_CONST -DHAVE_FUNC_ATTRIBUTE_FLATTEN -DHAVE_FUNC_ATTRIBUTE_MALLOC -DHAVE_FUNC_ATTRIBUTE_PURE -DHAVE_FUNC_ATTRIBUTE_UNUSED -DHAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT -DHAVE_FUNC_ATTRIBUTE_WEAK -DHAVE_FUNC_ATTRIBUTE_FORMAT -DHAVE_FUNC_ATTRIBUTE_PACKED -DHAVE_FUNC_ATTRIBUTE_RETURNS_NONNULL -DHAVE_FUNC_ATTRIBUTE_NORETURN -DHAVE_FUNC_ATTRIBUTE_COLD -DHAVE_FUNC_ATTRIBUTE_VISIBILITY -DHAVE_UINT128 -DHAVE_FMEMOPEN -DUSE_GCC_ATOMIC_BUILTINS -DHAS_SCHED_H -DHAVE_SYS_SYSCTL_H -DHAVE_XLOCALE_H -DHAVE_DLFCN_H -DHAVE_SYS_SHM_H -DHAVE_CET_H -DHAVE_POLL_H -DHAVE_FENV_H -DHAVE_STRTOF -DHAVE_MKOSTEMP -DHAVE_FLOCK -DHAVE_STRTOK_R -DHAVE_SYSCONF -DHAVE_SC_PHYS_PAGES -DHAVE_BSD_QSORT_R -DHAVE_STRUCT_TIMESPEC -DHAVE_POSIX_MEMALIGN -DHAVE_DIRENT_D_TYPE -DHAVE_STRTOD_L -DHAVE_DLADDR -DHAVE_PTHREAD -DDRAW_LLVM_AVAILABLE=0 -DAMD_LLVM_AVAILABLE=0 -DGALLIVM_USE_ORCJIT=0 -DTHREAD_SANITIZER=0 -DHAVE_DRI2 -DHAVE_RENDERDOC_INTEGRATION=0 -std=c11",
     }),
     toolchains = ["//third_party/mesa/bazel:bindgen_vars"],
     tools = [
@@ -611,14 +613,14 @@ mesa_genrule(
 mesa_genrule(
     name = "nvk_drirc_c",
     srcs = [
-        "00-nvk-defaults.conf",
+        "//third_party/mesa/src/util:00-nvk-defaults.conf",
         "//third_party/mesa/src/util:drirc_gen.py",
     ],
     outs = [
         "nvk_drirc.c",
         "nvk_drirc.h",
     ],
-    cmd = "$(execpath :nvk_drirc_gen) --import-path third_party/mesa/src/util --drirc-src $(execpath nvk_drirc.c) --drirc-hdr $(execpath nvk_drirc.h) --validate $(execpath 00-nvk-defaults.conf)",
+    cmd = "$(execpath :nvk_drirc_gen) --import-path third_party/mesa/src/util --drirc-src $(execpath nvk_drirc.c) --drirc-hdr $(execpath nvk_drirc.h) --validate $(execpath //third_party/mesa/src/util:00-nvk-defaults.conf)",
     tools = [
         ":nvk_drirc_gen",
     ],
@@ -806,140 +808,11 @@ mesa_dylib(
 )
 
 mesa_cc_library(
-    name = "split_batch_test_objects",
-    testonly = True,
-    c_args = NVK_C_ARGS,
-    sources = [
-        "nvk_switch_split_batch_test.c",
-        "nvk_switch_split_fold.c",
-        "nvk_switch_split_prologue.c",
-    ],
-)
-
-fs_depth_test_binary(
-    name = "split_batch_test_bin",
-    testonly = True,
-    archives = [
-        ":split_batch_test_objects",
-        "//third_party/mesa/src/compiler/nir:nir",
-        "//third_party/mesa/src/compiler:compiler",
-        "//third_party/mesa/src/util:mesa_util",
-        "//third_party/mesa/src/util:mesa_util_simd",
-        "//third_party/mesa/src/c11/impl:mesa_util_c11",
-        "//third_party/mesa/src/util/blake3",
-    ],
-)
-
-mesa_files(
-    name = "split_batch_test_host",
-    testonly = True,
-    srcs = [":split_batch_test_bin"],
-    platform = "macos",
-)
-
-py_test(
-    name = "split_batch_test",
-    size = "small",
-    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
-    args = [
-        "$(rootpath :split_batch_test_host)",
-        "split-batch",
-    ],
-    data = [":split_batch_test_host"],
-    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
-)
-
-mesa_cc_library(
-    name = "turn_test_objects",
-    testonly = True,
-    c_args = NVK_C_ARGS,
-    sources = [
-        "nvk_switch_turn.c",
-        "nvk_switch_turn_test.c",
-    ],
-)
-
-fs_depth_test_binary(
-    name = "turn_test_bin",
-    testonly = True,
-    archives = [
-        ":turn_test_objects",
-        "//third_party/mesa/src/compiler/nir:nir",
-        "//third_party/mesa/src/compiler:compiler",
-        "//third_party/mesa/src/util:mesa_util",
-        "//third_party/mesa/src/util:mesa_util_simd",
-        "//third_party/mesa/src/c11/impl:mesa_util_c11",
-        "//third_party/mesa/src/util/blake3",
-    ],
-)
-
-mesa_files(
-    name = "turn_test_host",
-    testonly = True,
-    srcs = [":turn_test_bin"],
-    platform = "macos",
-)
-
-py_test(
-    name = "turn_test",
-    size = "small",
-    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
-    args = [
-        "$(rootpath :turn_test_host)",
-        "turn",
-    ],
-    data = [":turn_test_host"],
-    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
-)
-
-mesa_cc_library(
-    name = "xr_planes_test_objects",
-    testonly = True,
-    c_args = NVK_C_ARGS,
-    sources = [
-        "nvk_switch_xr_planes.c",
-        "nvk_switch_xr_planes_test.c",
-    ],
-)
-
-fs_depth_test_binary(
-    name = "xr_planes_test_bin",
-    testonly = True,
-    archives = [
-        ":xr_planes_test_objects",
-        "//third_party/mesa/src/compiler/nir:nir",
-        "//third_party/mesa/src/compiler:compiler",
-        "//third_party/mesa/src/util:mesa_util",
-        "//third_party/mesa/src/util:mesa_util_simd",
-        "//third_party/mesa/src/c11/impl:mesa_util_c11",
-        "//third_party/mesa/src/util/blake3",
-    ],
-)
-
-mesa_files(
-    name = "xr_planes_test_host",
-    testonly = True,
-    srcs = [":xr_planes_test_bin"],
-    platform = "macos",
-)
-
-py_test(
-    name = "xr_planes_test",
-    size = "small",
-    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
-    args = [
-        "$(rootpath :xr_planes_test_host)",
-        "xr-planes",
-    ],
-    data = [":xr_planes_test_host"],
-    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
-)
-
-mesa_cc_library(
     name = "bound_textures_test_objects",
     testonly = True,
     c_args = NVK_C_ARGS,
     sources = ["nvk_switch_bound_textures_test.c"],
+    deps = [":nvk_headers"],
 )
 
 fs_depth_test_binary(
@@ -983,6 +856,7 @@ mesa_cc_library(
     testonly = True,
     c_args = NVK_C_ARGS,
     sources = ["nvk_switch_interlock_test.c"],
+    deps = [":nvk_headers"],
 )
 
 fs_depth_test_binary(

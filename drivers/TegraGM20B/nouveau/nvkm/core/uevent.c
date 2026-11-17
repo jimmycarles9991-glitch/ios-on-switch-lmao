@@ -33,7 +33,16 @@ struct nvkm_uevent {
 
 	struct nvkm_event_ntfy ntfy;
 	atomic_t allowed;
+	struct work_struct work;
+	atomic_t pending;
 };
+
+static void
+nvkm_uevent_drain(struct nvkm_uevent *uevent)
+{
+	if (uevent->work.thread_call)
+		flush_work(&uevent->work);
+}
 
 static int
 nvkm_uevent_mthd_block(struct nvkm_uevent *uevent, union nvif_event_block_args *args, u32 argc)
@@ -42,6 +51,7 @@ nvkm_uevent_mthd_block(struct nvkm_uevent *uevent, union nvif_event_block_args *
 		return -ENOSYS;
 
 	nvkm_event_ntfy_block(&uevent->ntfy);
+	nvkm_uevent_drain(uevent);
 	return 0;
 }
 
@@ -76,6 +86,7 @@ nvkm_uevent_fini(struct nvkm_object *object, enum nvkm_suspend_state suspend)
 	struct nvkm_uevent *uevent = nvkm_uevent(object);
 
 	atomic_set(&uevent->allowed, nvkm_event_ntfy_suspend(&uevent->ntfy));
+	nvkm_uevent_drain(uevent);
 	return 0;
 }
 
@@ -96,6 +107,9 @@ nvkm_uevent_dtor(struct nvkm_object *object)
 	struct nvkm_uevent *uevent = nvkm_uevent(object);
 
 	nvkm_event_ntfy_del(&uevent->ntfy);
+	nvkm_uevent_drain(uevent);
+	switch_linux_call_free(uevent->work.thread_call);
+	uevent->work.thread_call = NULL;
 	return uevent;
 }
 
@@ -128,6 +142,41 @@ nvkm_uevent_add(struct nvkm_uevent *uevent, struct nvkm_event *event, int id, u3
 
 	nvkm_event_ntfy_add(event, id, bits, uevent->wait, nvkm_uevent_ntfy, &uevent->ntfy);
 	uevent->func = func;
+	return 0;
+}
+
+static void
+nvkm_uevent_work(struct work_struct *work)
+{
+	struct nvkm_uevent *uevent = container_of(work, typeof(*uevent), work);
+	const u32 bits = atomic_xchg(&uevent->pending, 0);
+
+	if (bits)
+		nvkm_uevent_ntfy(&uevent->ntfy, bits);
+}
+
+static int
+nvkm_uevent_deferred(struct nvkm_event_ntfy *ntfy, u32 bits)
+{
+	struct nvkm_uevent *uevent = container_of(ntfy, typeof(*uevent), ntfy);
+
+	atomic_or(bits, &uevent->pending);
+	schedule_work(&uevent->work);
+	return NVKM_EVENT_KEEP;
+}
+
+int
+nvkm_uevent_add_deferred(struct nvkm_uevent *uevent, struct nvkm_event *event, int id, u32 bits,
+			 nvkm_uevent_func func)
+{
+	if (WARN_ON(uevent->ntfy.event))
+		return -EBUSY;
+	INIT_WORK(&uevent->work, nvkm_uevent_work);
+	if (!uevent->work.thread_call)
+		return -ENOMEM;
+	uevent->func = func;
+	/* Removing a synchronized notification joins every scheduler before the work is drained. */
+	nvkm_event_ntfy_add(event, id, bits, true, nvkm_uevent_deferred, &uevent->ntfy);
 	return 0;
 }
 

@@ -12,6 +12,7 @@ inline void IOLog(const char *, ...)
 {}
 
 #include "../SwitchVICDecodeOutput.cpp"
+#include "vic_model.h"
 
 struct SwitchVICMapping {
     uint64_t address;
@@ -233,8 +234,9 @@ protected:
             EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, matrix, MATRIX_C22), 0u);
         }
         EXPECT_EQ(method(TEGRA_VIC_M_SURFACE0_SLOT0_LUMA), 0x40000000u >> 8);
-        EXPECT_EQ(method(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U), uint32_t((0x40000000u + output.planeOffset[1]) >> 8));
-        EXPECT_EQ(method(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V), uint32_t((0x40000000u + output.planeOffset[2]) >> 8));
+        EXPECT_EQ(method(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U), uint32_t((0x40000000u + output.planeOffset[2]) >> 8))
+            << "VIC's U is Cr on this unit";
+        EXPECT_EQ(method(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V), uint32_t((0x40000000u + output.planeOffset[1]) >> 8));
         EXPECT_EQ(method(TEGRA_VIC_M_OUTPUT_LUMA), 0x50000000u >> 8);
         EXPECT_EQ(method(TEGRA_VIC_M_OUTPUT_CHROMA_U), uint32_t((0x50000000u + 320 * 240) >> 8));
         ASSERT_TRUE(hadAfter);
@@ -245,6 +247,40 @@ protected:
         EXPECT_EQ(declaredUses[0].access, uint32_t(SWITCH_GPU_BACKING_WRITE));
         EXPECT_EQ(declaredUses[1].backing, &decoded);
         EXPECT_EQ(declaredUses[1].access, uint32_t(SWITCH_GPU_BACKING_READ));
+    }
+
+    // The submitted job on vic_model.h: every destination pair holds the decoder's Cb then its Cr, as '422f' and '444f'
+    // keep them, and the luma lands unchanged at the request's place.
+    void expectSamplesInPlace(bool f444)
+    {
+        const uint32_t chromaPitch = output.pitch[1];
+        std::vector<uint8_t> source(output.planeOffset[2] + uint64_t(chromaPitch) * output.rows[2]);
+        for (uint32_t y = 0; y < output.rows[0]; ++y)
+            for (uint32_t x = 0; x < output.pitch[0]; ++x)
+                source[y * output.pitch[0] + x] = uint8_t(16 + (x * 3 + y) % 220);
+        for (uint32_t y = 0; y < output.rows[1]; ++y)
+            for (uint32_t x = 0; x < chromaPitch; ++x) {
+                source[output.planeOffset[1] + y * chromaPitch + x] = uint8_t(0x20 + (x + y) % 64);
+                source[output.planeOffset[2] + y * chromaPitch + x] = uint8_t(0xa0 + (x + 2 * y) % 64);
+            }
+        const TegraVICSurface d = destination(f444);
+        std::vector<uint8_t> target(d.desc.length);
+        VicModel model = {};
+        model.region[0] = {0x40000000, source.data(), source.size()};
+        model.region[1] = {0x50000000, target.data(), target.size()};
+        model.regions = 2;
+        vic_model_run(&model, &submittedJob);
+        EXPECT_EQ(model.faults, 0u);
+        const uint32_t chromaRow = d.desc.planeBytesPerRow[1];
+        for (uint32_t y = 0; y < kHeight; ++y) {
+            for (uint32_t x = 0; x < kWidth; ++x)
+                ASSERT_EQ(target[(8 + y) * 320 + 16 + x], source[y * output.pitch[0] + x]) << x << "," << y;
+            for (uint32_t c = 0; c < (f444 ? kWidth : kWidth / 2); ++c) {
+                const uint8_t *pair = &target[d.desc.planeOffset[1] + (8 + y) * chromaRow + ((f444 ? 16 : 8) + c) * 2];
+                ASSERT_EQ(pair[0], source[output.planeOffset[1] + y * chromaPitch + c]) << "Cb first, pair " << c;
+                ASSERT_EQ(pair[1], source[output.planeOffset[2] + y * chromaPitch + c]) << "Cr second, pair " << c;
+            }
+        }
     }
 };
 
@@ -271,6 +307,20 @@ TEST_F(SwitchVICDecodeOutputTest, RepacksAPlanar444DecodeInto444fAfterTheDecoder
     pending(pendingContext, -5);
     pending = nullptr;
     EXPECT_EQ(lastStatus, -5) << "the job's failure is the decode's";
+}
+
+TEST_F(SwitchVICDecodeOutputTest, PlacesCbAndCrWhereThe422fAnd444fPairsHoldThem)
+{
+    for (const bool f444 : {false, true}) {
+        SCOPED_TRACE(f444 ? "444f" : "422f");
+        planar(f444);
+        const TegraVICSurface d = destination(f444);
+        const char *why = nullptr;
+        ASSERT_EQ(switch_vic_decode_output(&d, &output, heard, &completions, &why), 0) << why;
+        expectSamplesInPlace(f444);
+        pending(pendingContext, 0);
+        pending = nullptr;
+    }
 }
 
 TEST_F(SwitchVICDecodeOutputTest, RefusesASamplingTheDestinationDoesNotHoldAndALayoutNotOfRows)

@@ -133,13 +133,18 @@ constant ushort kSrgbKnots[513] = {
 #include "srgb_knots.h"
 };
 
-static float srgbStep(int t)
+static uint srgbStepCode(int t)
 {
     const uint q = uint(clamp((t + 512) >> 10, 0, 8192));
     const uint i = min(q >> 4, 511u), f = q - 16 * i;
     const uint a = kSrgbKnots[i], b = kSrgbKnots[i + 1];
     const uint n = 16 * a + (b - a) * f;
-    return float((n + 7 + ((n >> 4) & 1)) >> 4) / 8192.0f;
+    return (n + 7 + ((n >> 4) & 1)) >> 4;
+}
+
+static float srgbStep(int t)
+{
+    return float(srgbStepCode(t)) / 8192.0f;
 }
 
 fragment float4 ycbcr_srgb_frag(Out in [[stage_in]], texture2d<float, access::read> luma [[texture(0)]],
@@ -196,6 +201,14 @@ struct PlaneShape {
     uint width, height, channels;
 };
 
+static float4 planeTexel(PackedPlane words, constant PlaneShape &s, uint2 at)
+{
+    const uint first = s.channels * at.x;
+    const float r = float(packedCode(words, first, at.y)) / 1023.0f;
+    const float g = s.channels == 2 ? float(packedCode(words, first + 1, at.y)) / 1023.0f : 0.0f;
+    return float4(r, g, 0.0f, 1.0f);
+}
+
 fragment float4 ycbcr_packed_plane_frag(Out in [[stage_in]], PackedPlane words [[texture(0)]],
                                         constant PlaneShape &s [[buffer(0)]])
 {
@@ -204,4 +217,90 @@ fragment float4 ycbcr_packed_plane_frag(Out in [[stage_in]], PackedPlane words [
     const float r = float(packedCode(words, first, at.y)) / 1023.0f;
     const float g = s.channels == 2 ? float(packedCode(words, first + 1, at.y)) / 1023.0f : 0.0f;
     return float4(r, g, 0.0f, 1.0f);
+}
+
+// A loaded pass's stand-in of such a texture (R32Float, RG32Float): the same values, which the store state writes back as the
+// codes they were read from (runtime/raw_packed_plane.h packedPlaneLoadStoresCode)
+fragment float4 ycbcr_load_plane_packed_r_frag(Out in [[stage_in]], PackedPlane words [[texture(0)]],
+                                               constant PlaneShape &s [[buffer(0)]])
+{
+    return planeTexel(words, s, uint2(in.position.xy));
+}
+
+fragment float4 ycbcr_load_plane_packed_rg_frag(Out in [[stage_in]], PackedPlane words [[texture(0)]],
+                                                constant PlaneShape &s [[buffer(0)]])
+{
+    return planeTexel(words, s, uint2(in.position.xy));
+}
+
+// A loaded pass's stand-in of a YCbCr target (RGBA32Float, runtime/raw_ycbcr_load.h): each channel's read num / den as the half
+// Metal's Load holds in the tile, the nearest one with ties up (an M4 Max: the code formats' to the nearest, the sRGB steps'
+// ties up; a converted channel's v / 2048 is a half already), worked out in integers so no float conversion's rounding
+// decides it
+static float loadHalf(uint num, uint den)
+{
+    if (!num)
+        return 0.0f;
+    uint p = 10 + clz(num) - clz(den);
+    if ((num << p) < (den << 10))
+        p++;
+    return ldexp(float(((num << p) * 2 + den) / (2 * den)), -int(p));
+}
+
+static float4 loadedConverted(int3 t)
+{
+    const int3 v = clamp((t + 2048) >> 12, 0, 2048);
+    return float4(loadHalf(v.x, 2048), loadHalf(v.y, 2048), loadHalf(v.z, 2048), 1.0f);
+}
+
+static float4 loadedSrgb(int3 t)
+{
+    return float4(loadHalf(srgbStepCode(t.x), 8192), loadHalf(srgbStepCode(t.y), 8192),
+                  loadHalf(srgbStepCode(t.z), 8192), 1.0f);
+}
+
+template <typename P> static float4 loadedCodes(P luma, P chroma, constant Shape &s, uint2 at)
+{
+    const uint3 c = codes(luma, chroma, s, at);
+    return float4(loadHalf(c.z, s.max), loadHalf(c.x, s.max), loadHalf(c.y, s.max), 1.0f);
+}
+
+fragment float4 ycbcr_load_converted_frag(Out in [[stage_in]], texture2d<float, access::read> luma [[texture(0)]],
+                                          texture2d<float, access::read> chroma [[texture(1)]],
+                                          constant Shape &s [[buffer(0)]])
+{
+    return loadedConverted(sums(codes(luma, chroma, s, uint2(in.position.xy)), s));
+}
+
+fragment float4 ycbcr_load_srgb_frag(Out in [[stage_in]], texture2d<float, access::read> luma [[texture(0)]],
+                                     texture2d<float, access::read> chroma [[texture(1)]],
+                                     constant Shape &s [[buffer(0)]])
+{
+    return loadedSrgb(sums(codes(luma, chroma, s, uint2(in.position.xy)), s));
+}
+
+// 8-bit and 10-bit codes alike: the shape's max is the quotient's
+fragment float4 ycbcr_load_codes_frag(Out in [[stage_in]], texture2d<float, access::read> luma [[texture(0)]],
+                                      texture2d<float, access::read> chroma [[texture(1)]],
+                                      constant Shape &s [[buffer(0)]])
+{
+    return loadedCodes(luma, chroma, s, uint2(in.position.xy));
+}
+
+fragment float4 ycbcr_load_packed_converted_frag(Out in [[stage_in]], PackedPlane luma [[texture(0)]],
+                                                 PackedPlane chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    return loadedConverted(sums(codes(luma, chroma, s, uint2(in.position.xy)), s));
+}
+
+fragment float4 ycbcr_load_packed_srgb_frag(Out in [[stage_in]], PackedPlane luma [[texture(0)]],
+                                            PackedPlane chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    return loadedSrgb(sums(codes(luma, chroma, s, uint2(in.position.xy)), s));
+}
+
+fragment float4 ycbcr_load_packed_codes10_frag(Out in [[stage_in]], PackedPlane luma [[texture(0)]],
+                                               PackedPlane chroma [[texture(1)]], constant Shape &s [[buffer(0)]])
+{
+    return loadedCodes(luma, chroma, s, uint2(in.position.xy));
 }

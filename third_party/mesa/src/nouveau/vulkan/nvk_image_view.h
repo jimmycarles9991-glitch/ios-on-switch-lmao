@@ -6,6 +6,7 @@
 #define NVK_IMAGE_VIEW_H 1
 
 #include "nvk_descriptor_types.h"
+#include "nvk_physical_device.h"
 
 #include "vk_image.h"
 

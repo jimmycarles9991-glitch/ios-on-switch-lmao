@@ -31,7 +31,7 @@ raw::RuntimeRecord fetching(uint64_t key, bool storage, bool layered)
         r.programs[0].image[53] |= 2;
     raw::PackPipeline &pp = r.pipeline;
     pp.keyHash = key;
-    pp.entries = 1;
+    raw::setEntryCount(pp, 1);
     pp.entry[0] = {0, raw::EntryFetch, 2, 0, 0, 0, 0};
     pp.flags = raw::PipelineFetches;
     if (layered) {

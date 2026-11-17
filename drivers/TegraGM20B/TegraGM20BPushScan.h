@@ -10,6 +10,7 @@
 #pragma once
 #include <stdint.h>
 #include "TegraGM20BGpu.h"
+#include "SwitchGpuPushScanQueue.h"
 #include "../../kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h"
 
 namespace tgm_scan
@@ -37,6 +38,9 @@ struct PushCounts {
 	uint64_t
 		psBarriers;  // PIXEL_SHADER_BARRIER: later pixel shading waits for earlier pixels, not the whole pipe
 	uint64_t interlocks;  // SET_PIXEL_SHADER_INTERLOCK_CONTROL with conflict detection on
+	// draws a PIXEL_SHADER_BARRIER orders after an earlier draw of their pass: the barrier twin's, a triangle a draw (the
+	// raw path's rule fetch.twin), in place of one draw inside the interlock
+	uint64_t twinDraws;
 };
 
 struct PushParse {
@@ -57,6 +61,8 @@ struct PushParse {
 	// stream wrote or the GPU reads (icbRangeRead: every gated one counts)
 	bool rawMacros;
 	bool icbRangeRead;
+	// whether the pass drew yet, and a PIXEL_SHADER_BARRIER came since its last draw (PushCounts::twinDraws)
+	bool passDrawn, barrierSinceDraw;
 	uint32_t icbLocation, icbLength;
 };
 
@@ -91,9 +97,17 @@ inline bool multisampled(const Target &t)
 	return (t.gridX | t.gridY) != 0;
 }
 
+inline void drawOrder(PushCounts &c, PushParse &p)
+{
+	c.twinDraws += static_cast<uint64_t>(p.passDrawn && p.barrierSinceDraw);
+	p.passDrawn = true;
+	p.barrierSinceDraw = false;
+}
+
 inline void countDraw(PushCounts &c, PushParse &p)
 {
 	c.draws++;
+	drawOrder(c, p);
 	c.sampleDraws += static_cast<uint64_t>(p.shadingKnown && shadingPassesLog2(p) != 0u);
 	p.drawn = p.rt;
 }
@@ -152,6 +166,7 @@ inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd
 			c.texInval++;  // INVALIDATE_TEXTURE_DATA_CACHE(_NO_WFI), 0x0f74 the one PIXEL_SHADER_BARRIER orders
 		} else if (mthd == 0x0de0) {
 			c.psBarriers++;  // PIXEL_SHADER_BARRIER
+			p.barrierSinceDraw = true;
 		} else if (mthd == 0x1224 && (data & 3)) {
 			c.interlocks++;  // SET_PIXEL_SHADER_INTERLOCK_CONTROL: TILE_COALESCER_MODE not NO_CONFLICT_DETECT
 		} else if (mthd == 0x021c) {
@@ -161,6 +176,7 @@ inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd
 		} else if (mthd == 0x1538) {
 			c.passes++;  // SET_ZT_SELECT: once per vkCmdBeginRendering
 			c.depthPasses += data & 1;
+			p.passDrawn = false;
 		} else if (mthd == 0x19d0) {
 			c.clears++;  // CLEAR_SURFACE
 			p.drawn = p.rt;
@@ -202,6 +218,8 @@ inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd
 				p.shadingKnown = p.shadingKnown || ((mask & 0xf) != 0u);
 			}
 			c.draws += static_cast<uint64_t>(draw);
+			if (draw)
+				drawOrder(c, p);
 			c.sampleDraws += static_cast<uint64_t>(draw && p.shadingKnown &&
 							       shadingPassesLog2(p) != 0u);
 			c.clears += static_cast<uint64_t>(j == SWITCH_GM20B_MACRO_NVK_CLEAR);
@@ -344,5 +362,62 @@ inline uint8_t scanPush(PushCounts &c, PushParse &p, bool &whole, const uint32_t
 	pushParse(c, p, w, n);
 	whole = whole && c.unparsed == before.unparsed;
 	return whole && !p.left ? pushClass(before, c, p) : TGM_PC_SKIP;
+}
+
+struct SubmissionRead {
+	PushCounts c;
+	TargetImage largest;  // the largest image a draw or clear of the submission drew into
+};
+
+// A submission's pushes (`push[i].words` null: not read), `budget` bytes of them at most, and with `prof` each push's
+// profile class and marks. `rawMacros`: a raw job's stream (PushParse).
+inline SubmissionRead readSubmission(const switch_gpu_scan_words *push, uint32_t count,
+				     tgm_prof *prof, bool rawMacros, uint64_t budget)
+{
+	SubmissionRead r = {};
+	PushParse p = {};
+	p.rawMacros = rawMacros;
+	bool whole = true;
+	for (uint32_t i = 0; i < count; i++) {
+		if (prof && i < TGM_PROF_MAX) {
+			prof->cls[i] = TGM_PC_SKIP;
+			prof->draws[i] = prof->sampleDraws[i] = prof->kpx[i] = 0;
+			prof->interlocks[i] = 0;
+			prof->twinDraws[i] = 0;
+		}
+		const uint64_t bytes = static_cast<uint64_t>(push[i].dwords) * 4;
+		r.c.bytes += bytes;
+		if (!push[i].words || bytes > budget) {
+			scanPush(r.c, p, whole, nullptr, 0);  // not read: no later push is stamped
+			continue;
+		}
+		budget -= bytes;
+		r.c.readBytes += bytes;
+		const PushCounts before = r.c;
+		const uint8_t cls = scanPush(r.c, p, whole, push[i].words, bytes / 4);
+		if (r.c.draws > before.draws || r.c.clears > before.clears) {
+			const TargetImage drawn = targetImage(p);
+			if (static_cast<uint64_t>(drawn.width) * drawn.height >
+			    static_cast<uint64_t>(r.largest.width) * r.largest.height)
+				r.largest = drawn;
+		}
+		if (prof && i < TGM_PROF_MAX) {
+			prof->cls[i] = cls;
+			const uint64_t draws = r.c.draws - before.draws;
+			const uint64_t sample = r.c.sampleDraws - before.sampleDraws;
+			prof->draws[i] = static_cast<uint16_t>(draws > 0xffff ? 0xffff : draws);
+			prof->sampleDraws[i] =
+				static_cast<uint16_t>(sample > 0xffff ? 0xffff : sample);
+			const uint64_t kpx = targetPixels(p) / 1000;
+			const uint64_t interlocks = r.c.interlocks - before.interlocks;
+			prof->kpx[i] = static_cast<uint16_t>(kpx > 0xffff ? 0xffff : kpx);
+			prof->interlocks[i] =
+				static_cast<uint8_t>(interlocks > 0xff ? 0xff : interlocks);
+			const uint64_t twins = r.c.twinDraws - before.twinDraws;
+			prof->twinDraws[i] = static_cast<uint16_t>(twins > 0xffff ? 0xffff : twins);
+		}
+	}
+	r.c.scanned = 1;
+	return r;
 }
 }  // namespace tgm_scan

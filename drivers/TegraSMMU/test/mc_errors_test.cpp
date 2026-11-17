@@ -23,13 +23,34 @@ uint32_t &mc(uint32_t offset)
     return gRegisters[kMc + offset];
 }
 
+unsigned gNubAsks;
+bool gStartReturnedBeforeTheGic;
+std::vector<std::string> gLatchedLines;
+
+// The start, then (the GIC up) its thread, with an SMMU fault latched before either.
 IOFilterInterruptEventSource *started()
 {
     static IOFilterInterruptEventSource *source = [] {
+        mc(0x0) = 1u << 10;
+        mc(0x8) = 0x6a00006d;
+        mc(0xc) = 0x1000;
         EXPECT_EQ(tegra_mc_errors_start(), 0);
+        gStartReturnedBeforeTheGic =
+            gNubAsks == 0 && IOFilterInterruptEventSource::last() == nullptr && switch_test_threads.size() == 1;
+        if (switch_test_threads.size() == 1)
+            switch_test_threads[0].first(switch_test_threads[0].second, 0);
+        gLatchedLines = switch_test_lines;
         return IOFilterInterruptEventSource::last();
     }();
     return source;
+}
+
+void fault(uint32_t client, uint32_t address)
+{
+    mc(0x0) = 1u << 10;
+    mc(0x8) = 0x6a000000 | client;
+    mc(0xc) = address;
+    ASSERT_TRUE(started()->fire());
 }
 
 class McErrors : public testing::Test {
@@ -66,7 +87,9 @@ TEST_F(McErrors, TheFilterTakesTheCaptureBeforeClearingAndTheActionNamesTheClien
     EXPECT_EQ(switch_test_lines[0], "TegraSMMU: MC error DECERR_EMEM: DECERR_EMEM (no DRAM at the address), a read by "
                                     "csr_sesrd (SE) (client 0x80) at 0; INTSTATUS 0x40 ERR_STATUS 0x20000080 ERR_ADR "
                                     "0\n");
-    uint32_t intstatus = 0, status = 0, address = 0;
+    uint32_t intstatus = 0;
+    uint32_t status = 0;
+    uint32_t address = 0;
     EXPECT_GE(tegra_mc_error_latest(&intstatus, &status, &address), 1u);
     EXPECT_EQ(intstatus, 1u << 6);
     EXPECT_EQ(status, 0x20000080u);
@@ -91,6 +114,67 @@ TEST_F(McErrors, AnInterruptWithNoErrorBitTakesNothing)
     EXPECT_FALSE(started()->fire());
     EXPECT_TRUE(gWrites.empty());
     EXPECT_TRUE(switch_test_lines.empty());
+}
+
+// The start waits for nothing: its thread asks for the GIC's nub, attaches, and takes the error latched before it.
+TEST(McErrorsStart, ReturnsBeforeTheGicAndItsThreadTakesWhatLatched)
+{
+    ASSERT_NE(started(), nullptr);
+    EXPECT_TRUE(gStartReturnedBeforeTheGic) << "the start asked for the GIC's nub or attached on the caller's thread";
+    EXPECT_EQ(gNubAsks, 1u);
+    EXPECT_TRUE(started()->enabled);
+    ASSERT_EQ(gLatchedLines.size(), 1u);
+    EXPECT_NE(gLatchedLines[0].find("csw_vicswr (VIC) (client 0x6d) at 0x1000"), std::string::npos);
+}
+
+// A storm: the first four of a client's run in full, then one count line once its swgroup detaches; another swgroup's
+// detach leaves it be.
+TEST_F(McErrors, AClientsRunPrintsItsFirstFourThenOneCountLineWhenItsSwgroupDetaches)
+{
+    for (uint32_t i = 0; i < 50; ++i)
+        fault(0x7e, 0x2000 + i * 0x1000);
+    EXPECT_EQ(switch_test_lines.size(), 4u);
+    switch_mc_errors_detached(TEGRA_SMMU_VIC_ASID);
+    EXPECT_EQ(switch_test_lines.size(), 4u);
+    switch_mc_errors_detached(TEGRA_SMMU_NVJPG_ASID);
+    ASSERT_EQ(switch_test_lines.size(), 5u);
+    EXPECT_EQ(
+        switch_test_lines[4].rfind("TegraSMMU: MC error run over: 50 errors by csr_nvjpgsrd (NVJPG) (client 0x7e), "
+                                   "the first 4 printed, ended by detach; the last INVALID_SMMU_PAGE",
+                                   0),
+        0u)
+        << switch_test_lines[4];
+    EXPECT_NE(switch_test_lines[4].find("at 0x33000"), std::string::npos) << "the run's last error";
+    fault(0x7e, 0x1000);
+    EXPECT_EQ(switch_test_lines.size(), 6u) << "a new run prints in full";
+    switch_mc_errors_detached(TEGRA_SMMU_NVJPG_ASID);
+    EXPECT_EQ(switch_test_lines.size(), 6u) << "a run within its four lines ends with none";
+}
+
+// A client goes quiet once 16 errors by others came after its last; two clients alternating stay bounded; SC7 ends
+// every run.
+TEST_F(McErrors, AQuietClientsRunEndsAndInterleavedStormsStayBounded)
+{
+    for (uint32_t i = 0; i < 6; ++i)
+        fault(0x78, 0x1000);
+    for (uint32_t i = 0; i < 17; ++i)
+        fault(0x79, 0x1000);
+    ASSERT_EQ(switch_test_lines.size(), 9u);
+    EXPECT_EQ(
+        switch_test_lines[8].rfind("TegraSMMU: MC error run over: 6 errors by csr_nvdecsrd (NVDEC) (client 0x78), "
+                                   "the first 4 printed, ended by displaced; the last ",
+                                   0),
+        0u)
+        << switch_test_lines[8];
+    switch_test_lines.clear();
+    for (uint32_t i = 0; i < 100; ++i)
+        fault(i % 2 ? 0x1c : 0x2b, 0x1000);
+    EXPECT_EQ(switch_test_lines.size(), 1u + 4u + 4u) << "csw_nvdecswr's run ends quiet with its count; two new runs";
+    switch_test_lines.clear();
+    switch_mc_errors_resume();
+    ASSERT_EQ(switch_test_lines.size(), 2u) << "SC7 ends both runs, each with its count";
+    for (const std::string &line : switch_test_lines)
+        EXPECT_NE(line.find(", the first 4 printed, ended by SC7; the last "), std::string::npos) << line;
 }
 
 TEST(McErrorsDescribe, AKindWithItsOwnCaptureRegistersIsNamedAlone)
@@ -140,8 +224,11 @@ uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t)
 }
 }
 
+// NOLINTNEXTLINE(misc-use-internal-linkage): the driver under test links to this symbol
 IOService *switch_interrupt_nub(uint32_t, bool)
 {
+    switch_test_may_block("switch_interrupt_nub");
+    ++gNubAsks;
     static IOService nub;
     return &nub;
 }

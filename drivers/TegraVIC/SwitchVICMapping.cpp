@@ -24,18 +24,41 @@ struct VICSpace {
     }
 };
 
-constinit SwitchGpuBackingMaps<SwitchVICMapping, VICSpace, 32, 128ULL << 20> gMappings;
+// A decoder's pool and its client's surfaces at 4K, with the encoder's and the display's conversions beside them,
+// within VIC's 1 GiB window, which also holds each mapping's tail pages (TegraVIC.cpp).
+constinit SwitchGpuBackingMaps<SwitchVICMapping, VICSpace, SWITCH_GPU_ENGINE_VIC, 128, 768ULL << 20> gMappings;
+
+void forget(uint64_t allocation)
+{
+    gMappings.forget(allocation);
+}
 }  // namespace
 
 bool switch_vic_mapping_start()
 {
-    return gMappings.start();
+    if (!gMappings.start(forget))
+        return false;
+    switch_vic_totals_register();
+    return true;
+}
+
+void switch_vic_mapping_totals(uint64_t *made, uint64_t *remade)
+{
+    const SwitchGpuBackingMapTotals totals = gMappings.readTotals();
+    *made = totals.made;
+    *remade = totals.remade;
 }
 
 SwitchVICMapping *switch_vic_mapping_acquire_range(switch_gpu_backing *backing, bool writable, uint32_t firstPage,
                                                    uint32_t pageCount)
 {
     return gMappings.acquire(backing, writable, firstPage, pageCount);
+}
+
+SwitchVICMapping *switch_vic_mapping_acquire_described(switch_gpu_backing *backing, const switch_gpu_backing_info &info,
+                                                       bool writable)
+{
+    return gMappings.acquire(backing, info, writable, 0, info.page_count);
 }
 
 SwitchVICMapping *switch_vic_mapping_acquire(switch_gpu_backing *backing, bool writable)
@@ -63,7 +86,7 @@ extern "C" int switch_vic_mapping_describe(uint32_t iova, char *out, size_t size
     IOLockLock(gMappings.lock);
     const SwitchVICMapping *nearest = nullptr;
     for (const auto &mapping : gMappings.maps) {
-        if (mapping.backing && mapping.address <= iova && (!nearest || mapping.address > nearest->address))
+        if (mapping.address && mapping.address <= iova && (!nearest || mapping.address > nearest->address))
             nearest = &mapping;
     }
     if (!nearest) {

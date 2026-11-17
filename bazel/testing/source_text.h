@@ -34,6 +34,7 @@ namespace switch_ios::test {
 inline std::string PackagePath(std::string_view relative)
 {
     std::string path = SWITCH_TEST_PACKAGE;
+    // NOLINTNEXTLINE(modernize-use-starts-ends-with): also included by cc_test units built as C++17
     while (relative.substr(0, 3) == "../") {
         const size_t slash = path.rfind('/');
         path = slash == std::string::npos ? std::string() : path.substr(0, slash);
@@ -47,7 +48,7 @@ inline std::string PackagePath(std::string_view relative)
 inline std::string SourceText(std::string_view relative)
 {
     const std::string path = PackagePath(relative);
-    std::ifstream file(path, std::ios::binary);
+    std::ifstream const file(path, std::ios::binary);
     if (!file) {
         ADD_FAILURE() << "cannot read " << path << " (is it in the test's data?)";
         return {};
@@ -97,12 +98,14 @@ inline std::string Configured(const std::string &source, std::string_view macro,
         kSkipped
     };
 
-    const std::string ifSet = "#if " + std::string(macro), ifUnset = "#if !" + std::string(macro);
+    const std::string ifSet = "#if " + std::string(macro);
+    const std::string ifUnset = "#if !" + std::string(macro);
     std::vector<Branch> open;
     std::istringstream lines(source);
     std::string out;
     for (std::string line; std::getline(lines, line);) {
         const auto starts = [&](std::string_view prefix) {
+            // NOLINTNEXTLINE(modernize-use-starts-ends-with): C++17 includers
             return line.rfind(prefix, 0) == 0;
         };
         if (line == ifSet || line == ifUnset) {
@@ -178,7 +181,8 @@ inline std::vector<bool> CodeMask(std::string_view raw)
 
     std::vector<bool> code(raw.size(), false);
     for (size_t i = 0; i < raw.size(); ++i) {
-        const char c = raw[i], next = i + 1 < raw.size() ? raw[i + 1] : '\0';
+        const char c = raw[i];
+        const char next = i + 1 < raw.size() ? raw[i + 1] : '\0';
         switch (state) {
         case kCode:
             if (c == '/' && (next == '/' || next == '*')) {
@@ -204,10 +208,11 @@ inline std::vector<bool> CodeMask(std::string_view raw)
             break;
         case kString:
         case kChar:
-            if (c == '\\')
+            if (c == '\\') {
                 ++i;
-            else if (c == (state == kString ? '"' : '\'') || c == '\n')
+            } else if (c == (state == kString ? '"' : '\'') || c == '\n') {
                 state = kCode;
+            }
             break;
         }
     }
@@ -224,9 +229,10 @@ struct Prepared {
 inline const Prepared &Prepare(const std::string &source)
 {
     static std::vector<std::unique_ptr<const Prepared>> cache;
-    for (const auto &prepared : cache)
+    for (const auto &prepared : cache) {
         if (prepared->source == source)
             return *prepared;
+    }
     if (cache.size() == 8)
         cache.erase(cache.begin());
     cache.push_back(std::make_unique<const Prepared>(Prepared{source, Squeeze(source, true), CodeMask(source)}));
@@ -240,124 +246,128 @@ inline const Prepared &Prepare(const std::string &source)
 // or end anywhere, in code, a comment or a literal.
 //
 //   const CodeText kick = switch_ios::test::Block(source, "void kickOnce()");  // its body, braces matched
-//   EXPECT_TRUE(kick.Has("if (!pd.uiNew) {"));
-//   EXPECT_FALSE(kick.Has("planeNextUnfenced"));
-//   EXPECT_TRUE(kick.Before("planeDecide(request, pd);", "kickHeld(request,"));
-//   EXPECT_TRUE(kick.StartsWith("if (presentNotDue(request))"));  // its first statement
+//   EXPECT_TRUE(kick.has("if (!pd.uiNew) {"));
+//   EXPECT_FALSE(kick.has("planeNextUnfenced"));
+//   EXPECT_TRUE(kick.before("planeDecide(request, pd);", "kickHeld(request,"));
+//   EXPECT_TRUE(kick.startsWith("if (presentNotDue(request))"));  // its first statement
 class CodeText {
 public:
     CodeText() = default;
 
-    explicit CodeText(std::string_view text) : text_(Normal(text))
+    explicit CodeText(std::string_view text) : text_(normal(text))
     {}
 
-    [[nodiscard]] testing::AssertionResult Has(std::string_view needle) const
+    [[nodiscard]] testing::AssertionResult has(std::string_view needle) const
     {
-        if (Find(needle) != std::string::npos)
+        if (find(needle) != std::string::npos)
             return testing::AssertionSuccess() << "has " << needle;
-        return testing::AssertionFailure() << "no " << needle << " in " << Shown();
+        return testing::AssertionFailure() << "no " << needle << " in " << shown();
     }
 
-    size_t Count(std::string_view needle) const
+    size_t count(std::string_view needle) const
     {
-        return switch_ios::test::Count(text_, Normal(needle));
+        return switch_ios::test::Count(text_, normal(needle));
     }
 
     // `first` and `second` both occur, the first `first` before the first `second`.
-    [[nodiscard]] testing::AssertionResult Before(std::string_view first, std::string_view second) const
+    [[nodiscard]] testing::AssertionResult before(std::string_view first, std::string_view second) const
     {
-        const size_t a = Find(first), b = Find(second);
-        if (a == std::string::npos || b == std::string::npos)
+        const size_t a = find(first);
+        const size_t b = find(second);
+        if (a == std::string::npos || b == std::string::npos) {
             return testing::AssertionFailure()
-                   << "no " << (a == std::string::npos ? first : second) << " in " << Shown();
+                   << "no " << (a == std::string::npos ? first : second) << " in " << shown();
+        }
         if (a >= b)
-            return testing::AssertionFailure() << second << " comes before " << first << " in " << Shown();
+            return testing::AssertionFailure() << second << " comes before " << first << " in " << shown();
         return testing::AssertionSuccess() << first << " comes before " << second;
     }
 
-    [[nodiscard]] testing::AssertionResult StartsWith(std::string_view needle) const
+    [[nodiscard]] testing::AssertionResult startsWith(std::string_view needle) const
     {
-        const std::string start = Normal(needle);
+        const std::string start = normal(needle);
+        // NOLINTNEXTLINE(modernize-use-starts-ends-with): C++17 includers
         if (text_.compare(0, start.size(), start) == 0)
             return testing::AssertionSuccess() << "starts with " << needle;
-        return testing::AssertionFailure() << "does not start with " << needle << ": " << Shown();
+        return testing::AssertionFailure() << "does not start with " << needle << ": " << shown();
     }
 
-    [[nodiscard]] testing::AssertionResult EndsWith(std::string_view needle) const
+    [[nodiscard]] testing::AssertionResult endsWith(std::string_view needle) const
     {
-        const std::string end = Normal(needle);
+        const std::string end = normal(needle);
+        // NOLINTNEXTLINE(modernize-use-starts-ends-with): C++17 includers
         if (end.size() <= text_.size() && text_.compare(text_.size() - end.size(), end.size(), end) == 0)
             return testing::AssertionSuccess() << "ends with " << needle;
-        return testing::AssertionFailure() << "does not end with " << needle << ": " << Shown();
+        return testing::AssertionFailure() << "does not end with " << needle << ": " << shown();
     }
 
     // The code after the first `start` up to the first `end` after it (to the end when there is none); a missing `start`
     // is a failure and gives nothing.
-    CodeText Between(std::string_view start, std::string_view end) const
+    CodeText between(std::string_view start, std::string_view end) const
     {
-        const size_t from = Find(start);
+        const size_t from = find(start);
         if (from == std::string::npos) {
             ADD_FAILURE() << "not found: " << start;
             return {};
         }
-        const size_t begin = from + Normal(start).size();
-        const size_t to = text_.find(Normal(end), begin);
-        return Normalized(text_.substr(begin, to == std::string::npos ? std::string::npos : to - begin));
+        const size_t begin = from + normal(start).size();
+        const size_t to = text_.find(normal(end), begin);
+        return normalized(text_.substr(begin, to == std::string::npos ? std::string::npos : to - begin));
     }
 
     // The code after the first `start` to the end; a missing `start` is a failure and gives nothing.
-    CodeText After(std::string_view start) const
+    CodeText after(std::string_view start) const
     {
-        const size_t from = Find(start);
+        const size_t from = find(start);
         if (from == std::string::npos) {
             ADD_FAILURE() << "not found: " << start;
             return {};
         }
-        return Normalized(text_.substr(from + Normal(start).size()));
+        return normalized(text_.substr(from + normal(start).size()));
     }
 
     // The code after the last `start` to the end; a missing `start` is a failure and gives nothing.
-    CodeText AfterLast(std::string_view start) const
+    CodeText afterLast(std::string_view start) const
     {
-        const std::string normal = Normal(start);
-        const size_t from = normal.empty() ? std::string::npos : text_.rfind(normal);
+        const std::string squeezed = normal(start);
+        const size_t from = squeezed.empty() ? std::string::npos : text_.rfind(squeezed);
         if (from == std::string::npos) {
             ADD_FAILURE() << "not found: " << start;
             return {};
         }
-        return Normalized(text_.substr(from + normal.size()));
+        return normalized(text_.substr(from + squeezed.size()));
     }
 
     CodeText operator+(const CodeText &more) const
     {
-        return Normalized(text_ + more.text_);
+        return normalized(text_ + more.text_);
     }
 
     friend std::ostream &operator<<(std::ostream &out, const CodeText &code)
     {
-        return out << code.Shown();
+        return out << code.shown();
     }
 
 private:
-    static std::string Normal(std::string_view text)
+    static std::string normal(std::string_view text)
     {
         return source_text_detail::Squeeze(text, false).text;
     }
 
-    static CodeText Normalized(std::string text)
+    static CodeText normalized(std::string text)
     {
         CodeText code;
         code.text_ = std::move(text);
         return code;
     }
 
-    size_t Find(std::string_view needle) const
+    size_t find(std::string_view needle) const
     {
-        const std::string normal = Normal(needle);
-        return normal.empty() ? std::string::npos : text_.find(normal);
+        const std::string squeezed = normal(needle);
+        return squeezed.empty() ? std::string::npos : text_.find(squeezed);
     }
 
-    std::string Shown() const
+    std::string shown() const
     {
         if (text_.size() <= 1500)
             return text_;
@@ -381,16 +391,18 @@ inline CodeText Block(const std::string &source, std::string_view head)
          at = squeezed.text.find(needle, at + 1)) {
         if (!code[squeezed.origin[at]])
             continue;
-        size_t open = squeezed.origin[at], parens = 0;
+        size_t open = squeezed.origin[at];
+        size_t parens = 0;
         for (; open < source.size(); ++open) {
             if (!code[open])
                 continue;
-            if (source[open] == '(')
+            if (source[open] == '(') {
                 ++parens;
-            else if (source[open] == ')' && parens > 0)
+            } else if (source[open] == ')' && parens > 0) {
                 --parens;
-            else if (parens == 0 && (source[open] == '{' || source[open] == ';'))
+            } else if (parens == 0 && (source[open] == '{' || source[open] == ';')) {
                 break;
+            }
         }
         if (open == source.size() || source[open] == ';')
             continue;
@@ -398,10 +410,11 @@ inline CodeText Block(const std::string &source, std::string_view head)
         for (size_t close = open; close < source.size(); ++close) {
             if (!code[close] || (source[close] != '{' && source[close] != '}'))
                 continue;
-            if (source[close] == '{')
+            if (source[close] == '{') {
                 ++depth;
-            else if (--depth == 0)
+            } else if (--depth == 0) {
                 return CodeText(std::string_view(source).substr(open + 1, close - open - 1));
+            }
         }
         ADD_FAILURE() << "unbalanced braces after " << head;
         return {};
@@ -424,28 +437,40 @@ inline std::vector<Occurrence> Occurrences(const std::string &source, std::strin
     const std::string squeezedNeedle = source_text_detail::Squeeze(needle, false).text;
     std::vector<size_t> sites;
     for (size_t at = squeezedNeedle.empty() ? std::string::npos : squeezed.text.find(squeezedNeedle);
-         at != std::string::npos; at = squeezed.text.find(squeezedNeedle, at + squeezedNeedle.size()))
+         at != std::string::npos; at = squeezed.text.find(squeezedNeedle, at + squeezedNeedle.size())) {
         if (code[squeezed.origin[at]])
             sites.push_back(squeezed.origin[at]);
+    }
     std::vector<Occurrence> found;
-    size_t depth = 0, headStart = 0, open = 0, next = 0;
+    size_t depth = 0;
+    size_t headStart = 0;
+    size_t open = 0;
+    size_t next = 0;
     for (size_t i = 0; i < source.size() && next < sites.size(); ++i) {
         if (i == sites[next]) {
-            if (depth == 0)
+            if (depth == 0) {
                 found.push_back({CodeText(), CodeText()});
-            else
+            } else {
                 found.push_back({CodeText(std::string_view(source).substr(headStart, open - headStart)),
                                  CodeText(std::string_view(source).substr(open + 1, i - open - 1))});
+            }
             ++next;
         }
         if (!code[i])
             continue;
-        if (source[i] == '{' && depth++ == 0)
-            open = i;
-        else if (source[i] == '}' && depth > 0 && --depth == 0)
+        if (source[i] == '{') {
+            if (depth == 0) {
+                open = i;
+            }
+            ++depth;
+        } else if (source[i] == '}' && depth > 0) {
+            --depth;
+            if (depth == 0) {
+                headStart = i + 1;
+            }
+        } else if (source[i] == ';' && depth == 0) {
             headStart = i + 1;
-        else if (source[i] == ';' && depth == 0)
-            headStart = i + 1;
+        }
     }
     return found;
 }

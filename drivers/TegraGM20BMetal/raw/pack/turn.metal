@@ -85,6 +85,19 @@ fragment Depth turn_depth32fs8_frag(Out in [[stage_in]], depth2d<float, access::
     return {s.read(source(in.position, m))};
 }
 
+// A multisampled conversion's: each sample's depth into that sample of the target, the fragment run once a sample
+#define TURN_DEPTH_MS(name, count)                                                                                         \
+    fragment Depth turn_##name##_ms##count##_frag(Out in [[stage_in]], uint k [[sample_id]],                              \
+                                                  depth2d_ms<float, access::read> s [[texture(0)]])                     \
+    {                                                                                                                      \
+        return {s.read(uint2(in.position.xy), k)};                                                                         \
+    }
+
+TURN_DEPTH_MS(depth16, 2)
+TURN_DEPTH_MS(depth16, 4)
+TURN_DEPTH_MS(depth32fs8, 2)
+TURN_DEPTH_MS(depth32fs8, 4)
+
 // A masked turn copy: a destination texel whose frame tile, (ax x + ay y + cx, bx x + by y + cy) / 32, no draw reaches (0 in the
 // mask, raw/runtime/raw_reach.h), or that lies in no tile of it, is kept
 struct Tiles {

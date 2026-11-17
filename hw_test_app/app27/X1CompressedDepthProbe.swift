@@ -4,21 +4,18 @@ import HWTestGPU
 import Metal
 
 /// copy.ce_compressed for zetas (drivers/TegraGM20BMetal/raw/runtime/raw_comp.h): the copy engine copying a compressed
-/// Depth32Float or multisampled Depth32Float_Stencil8 zeta (kinds ZF32_2CZ, ZF32_MS4_2CZ, ZF32_X24S8_MS2/MS4_2CSZV) into the
-/// shader's depth-test images and back, as the facade does around framebuffer-fetching draws that test depth in the
-/// shader. The one-sample case runs as shipped (ZF32_2CZ is copyEngineReadsCompressed's); a debug build's switch
-/// (switchRawProbeZetaKinds:) gives the multisampled zetas their compressible kinds. The same pass drawn on plain memory
+/// Depth32Float or multisampled Depth32Float_Stencil8 zeta (kinds ZF32_2CZ, ZF32_MS2/MS4_2CZ, ZF32_X24S8_MS2/MS4_2CSZV)
+/// into the shader's depth-test images and back, as the facade does around framebuffer-fetching draws that test depth in
+/// the shader. Every case runs as shipped (each kind is copyEngineReadsCompressed's); the same pass drawn on plain memory
 /// (switchRawProbePlainMemory:) is the reference. PASS: every round's picture with compressed zetas is the reference's
 /// byte for byte and zeta_ce_copies moved; INCONCLUSIVE: no switch, the work left the raw path, or no copy went through
 /// compressed memory (the facade had none made yet).
 ///
 /// T-v2's run died on the draws of a multisampled case with INVALID_A_A_COMBINATION03 (class error 0x134 at
-/// DRAW_VERTEX_ARRAY), as framebuffer_fetch_depth and fetch_routes do, before judging anything. Our context differs from
-/// NVIDIA's on two anti-alias controls: 0x15b4 (golden 1, NVIDIA's userspace writes 0; nvk_cmd_draw.c) and
-/// SET_ANTI_ALIAS_ENABLE 0x1534 (NVK 1, golden 0). So the single-sample case runs first, as is, and each multisampled
-/// case runs with NVIDIA's 0x15b4 around every draw (`<case>_aa=csaa_off`), then, if that killed its command buffer, with
-/// 0x1534 cleared instead (aa_off); a case whose arms all failed is named (`<case>_aa=killed`) and the multisampled cases
-/// after it are not run. A multisampled case whose words the channel refused or never emitted judges nothing and makes the
+/// DRAW_VERTEX_ARRAY) under the golden context's 0x15b4 (CSAA_ENABLE) of 1; boots 19 and 21 drew every multisampled case
+/// exact with NVIDIA's 0 around each draw, which raw's context now holds (context.tsv). So every case runs as is
+/// (`<case>_aa=as_is`), then, if that killed its command buffer, with SET_ANTI_ALIAS_ENABLE 0x1534 cleared (aa_off); a
+/// case whose arms all failed is named (`<case>_aa=killed`) and the multisampled cases after it are not run. A multisampled case whose words the channel refused or never emitted judges nothing and makes the
 /// claim INCONCLUSIVE. Each case is journaled before it runs.
 enum X1CompressedDepthProbe {
     static let probe = X1Probe(
@@ -30,13 +27,9 @@ enum X1CompressedDepthProbe {
     // compressed memory is made off the render thread after the first ask: rounds wait for it, up to `attempts`
     static let size = 64, rounds = 16, attempts = 60
     static let cases: [(String, MTLPixelFormat, Int)] = [
-        ("d32f_1x", .depth32Float, 1), ("d32f_4x", .depth32Float, 4), ("d32s8_2x", .depth32Float_stencil8, 2),
-        ("d32s8_4x", .depth32Float_stencil8, 4),
+        ("d32f_1x", .depth32Float, 1), ("d32f_2x", .depth32Float, 2), ("d32f_4x", .depth32Float, 4),
+        ("d32s8_2x", .depth32Float_stencil8, 2), ("d32s8_4x", .depth32Float_stencil8, 4),
     ]
-
-    static func zetaKinds(_ device: MTLDevice, _ on: Bool) -> Bool {
-        flag(device, "switchRawProbeZetaKinds:", on)
-    }
 
     static func plainMemory(_ device: MTLDevice, _ on: Bool) -> Bool {
         flag(device, "switchRawProbePlainMemory:", on)
@@ -49,20 +42,18 @@ enum X1CompressedDepthProbe {
         return true
     }
 
-    static let csaa: UInt32 = 0x15b4, antiAliasEnable: UInt32 = 0x1534
+    static let antiAliasEnable: UInt32 = 0x1534
 
     /// The anti-alias controls a case's draws run under: name, words before each draw, words after it
     static let aaArms: [(String, [(UInt32, UInt32)], [(UInt32, UInt32)])] = [
-        ("csaa_off", [(csaa, 0)], [(csaa, 1)]), ("aa_off", [(antiAliasEnable, 0)], [(antiAliasEnable, 1)]),
+        ("as_is", [], []), ("aa_off", [(antiAliasEnable, 0)], [(antiAliasEnable, 1)]),
     ]
 
     /// One case's reference and compressed rounds: (pictures that differ, rounds through compressed memory)
-    static func rounds(_ gpu: GPU, _ scene: Scene, shipped: Bool) async throws -> (Int, Int) {
-        _ = zetaKinds(gpu.device, false)
+    static func rounds(_ gpu: GPU, _ scene: Scene) async throws -> (Int, Int) {
         _ = plainMemory(gpu.device, true)
         let reference = try await scene.draw()
         _ = plainMemory(gpu.device, false)
-        _ = zetaKinds(gpu.device, !shipped)
         var bad = 0, compressed = 0
         for _ in 0..<attempts where compressed < rounds {
             let before = RawFacade.compression(of: gpu.device)["zeta_ce_copies"] ?? 0
@@ -79,13 +70,10 @@ enum X1CompressedDepthProbe {
     static func run(_ gpu: GPU) async throws -> ProbeFinding {
         var metrics = Metrics()
         metrics.set("rule", "copy.ce_compressed_depth")
-        guard zetaKinds(gpu.device, false), plainMemory(gpu.device, false) else {
+        guard plainMemory(gpu.device, false) else {
             return ProbeFinding(.inconclusive, metrics, note: "the facade has no zeta probe switch (a release build)")
         }
-        defer {
-            _ = zetaKinds(gpu.device, false)
-            _ = plainMemory(gpu.device, false)
-        }
+        defer { _ = plainMemory(gpu.device, false) }
         let journal = ProbeJournal(probe: "gpu.x1.ce_compressed_depth")
         var wrong: [String: Int] = [:]
         var engaged = 0
@@ -102,7 +90,7 @@ enum X1CompressedDepthProbe {
                     continue cases
                 }
                 do {
-                    let (bad, compressed) = try await rounds(gpu, scene, shipped: samples == 1)
+                    let (bad, compressed) = try await rounds(gpu, scene)
                     let emitted = before.isEmpty ? 0 : RawMethods.disarm(gpu.device)
                     if !before.isEmpty && emitted == 0 {
                         metrics.set("\(name)_aa", "\(arm)_not_emitted")
@@ -112,7 +100,7 @@ enum X1CompressedDepthProbe {
                     wrong[name] = bad
                     metrics.set("\(name)_aa", arm)
                     metrics.set("\(name)_compressed_rounds", compressed)
-                    metrics.set("\(name)_route", samples == 1 ? "shipped" : "probe")
+                    metrics.set("\(name)_route", "shipped")
                     engaged += compressed
                     continue cases
                 } catch {

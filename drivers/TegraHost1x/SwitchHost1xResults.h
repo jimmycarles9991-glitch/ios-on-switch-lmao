@@ -206,13 +206,29 @@ public:
         IOLockUnlock(State.lock);
     }
 
-    static void physical(SwitchHost1xResult *record, int result)
+    static bool physical(SwitchHost1xResult *record, int result)
     {
         if (!record)
-            return;
+            return false;
         IOLockLock(State.lock);
-        record->physicalResult = result < 0 ? result : 1;
+        const bool failed = record->physicalResult >= 0 && result < 0;
+        if (record->physicalResult >= 0)
+            record->physicalResult = result < 0 ? result : 1;
         IOLockUnlock(State.lock);
+        return failed;
+    }
+
+    // Physical completion publishes before releasing this source; inspection excludes that publication.
+    template <class Source>
+    static int sourceFailure(SwitchHost1xResult *record, Source *const *source, int (*inspect)(const Source *))
+    {
+        if (!record)
+            return 0;
+        IOLockLock(State.lock);
+        const int physical = record->physicalResult;
+        const int result = physical ? physical : *source ? inspect(*source) : 0;
+        IOLockUnlock(State.lock);
+        return result < 0 ? result : 0;
     }
 
     static int physicalStatus(const switch_gpu_backing_token *token)

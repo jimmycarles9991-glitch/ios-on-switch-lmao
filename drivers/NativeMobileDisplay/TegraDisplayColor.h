@@ -54,6 +54,17 @@ public:
     // Under the gate: a blank swap's black, from the next frame on, and its end at the first flip latched after it.
     void setBlank(bool blank);
 
+    // Under the gate: the newest generation published, and whether the frame-end action has settled it.
+    uint32_t generation() const
+    {
+        return unit.publishedGeneration();
+    }
+
+    bool settledThrough(uint32_t generation) const
+    {
+        return unit.settledThrough(generation);
+    }
+
     // DC A's frame end: the filter (primary interrupt context) writes changed tables, the action (work-loop gate) moves
     // the enable bit. Each change holds the frame end (native_legacy_frame_end_hold) until both are done. Neither locks.
     void frameEndFilter();

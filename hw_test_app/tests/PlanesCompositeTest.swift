@@ -6,7 +6,8 @@ import HWTestCore
 /// TegraVIC's kernel-test selector tells the display to take every set as refused (debug kernels), display.planes plays
 /// its clip, and the report says how many frames VIC composited meanwhile. The clip must still play on window B with
 /// nothing dropped (display.planes' own checks). The composite is VIC's colour conversion and filtering, not DC A's, so
-/// no CRC is compared. iOS 27's app runs it: the selector call is its X1VICKernelTest.
+/// no CRC is compared. iOS 27's app runs it: the selector call is its X1VICKernelTest. The display is held on the copy
+/// route (CopyRouteHold), so the turned clip is an overlay set and not window A's column scan.
 public struct PlanesCompositeTest: HWTest {
     public let id = "display.planes_composite"
     public let name = "Video on window B as VIC's composite, the memory admission refusing it"
@@ -29,7 +30,13 @@ public struct PlanesCompositeTest: HWTest {
             return .skip("arming the composite: the display answered \(Int32(bitPattern: reply[3]))")
         case .success: break
         }
-        let played = try await PlanesTest().run(context)
+        let played: Outcome
+        do {
+            played = try await CopyRouteHold.during { try await PlanesTest().run(context) }
+        } catch {
+            _ = kernelTest(Self.report, Self.replyBytes)
+            throw error
+        }
         let composited: Int
         switch kernelTest(Self.report, Self.replyBytes) {
         case .failure(let failure): return .fail("reporting the composite: \(failure)", played.metrics)

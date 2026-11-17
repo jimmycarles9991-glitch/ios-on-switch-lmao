@@ -1,5 +1,6 @@
-use super::emit::Mem;
+use super::emit::{Mem, ViewMem};
 use crate::memory::leaf::{self, k32, known, Leaf, Path, WordMem};
+use crate::memory::views::ViewKind;
 use crate::spirv::builder::constructs::{ArmEnd, ArmFn};
 use crate::spirv::builder::FunctionBuilder;
 use crate::spirv::error::{BResult, BuildError, Dangling};
@@ -33,6 +34,10 @@ pub(super) fn load(
     if let Some(offset_bits) = known(fb, offset)? {
         let selected = if offset_bits & 15 == 0 { leaf } else { words };
         return leaf::load(fb, &mut mem, &selected, offset);
+    }
+    if matches!(mem, Mem::View(ViewMem(view, ..)) if matches!(view.kind, ViewKind::UniformWords { .. }))
+    {
+        return leaf::load(fb, &mut mem, &words, offset);
     }
     // AIR aligns the address within a Metal binding. A nonzero binding residual can lower its absolute alignment.
     let condition = aligned(fb, offset)?;

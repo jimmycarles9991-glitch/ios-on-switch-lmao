@@ -20,10 +20,11 @@ inline const char *hotResetClient(uint32_t ctrl, uint32_t bit)
     };
     const unsigned index = static_cast<unsigned>(__builtin_ctz(bit | 0x80000000u));
     const char *name = nullptr;
-    if (ctrl == kHotResetCtrl)
+    if (ctrl == kHotResetCtrl) {
         name = kCtrl[index];
-    else if (ctrl == kHotResetCtrl1)
+    } else if (ctrl == kHotResetCtrl1) {
         name = kCtrl1[index];
+    }
     return name ? name : "an unnamed client";
 }
 
@@ -105,9 +106,10 @@ inline const char *client(uint32_t id)
         {0x88, "csr_gpusrd2 (GPU)"},
         {0x89, "csw_gpuswr2 (GPU)"},
     };
-    for (const Entry &entry : kClients)
+    for (const Entry &entry : kClients) {
         if (entry.id == id)
             return entry.name;
+    }
     return "an unlisted client";
 }
 

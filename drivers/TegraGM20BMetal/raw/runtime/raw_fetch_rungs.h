@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // The fetch ladder's fixed-function rungs (raw_pack.h PackFetchRung): where a state that blends by fetching its own
 // colour may instead draw through the ROP, with its fetch-free form (raw_fetch_free.h) where the pack holds one. Each
-// rung is taken only once its unit is proven on the chip (raw_chip_facts.h kProvenUnits, kIteratedProven).
+// rung is taken once its unit is proven on the chip (raw_chip_facts.h kProvenUnits), rung 3 for the programs whose
+// passes beat the interlock (kIteratedProven).
 #pragma once
 #include <cstdint>
 #include "raw_chip_facts.h"
@@ -25,7 +26,7 @@ constexpr uint8_t kProbeBlendTwinTriangles = 5, kProbeBlendTwinWhole = 6;
 // count of gpu.x1.blend_exact; bench blendff 81,920 of 81,920): within one code of Metal for 8-bit content at any depth,
 // up to 2 codes for shader-computed colour stacked twice, 4 codes deeper. It is taken only where that error cannot be seen
 // as data: a target the client never reads back, not re-blended across frames, of standard factors, of a format whose
-// ROP blend gpu.raw.fixed_blend_rule reads against Metal's (fixedBlendFormat).
+// ROP blend gpu.raw.fixed_blend_rule and gpu.raw.fixed_blend_formats read against Metal's (fixedBlendFormat).
 struct FixedBlendAsk {
     uint16_t format = 0;           // MTLPixelFormat
     bool readable = false;         // CPU-visible storage, a blit or compute pass reads it as data, or a HW Test golden
@@ -36,18 +37,25 @@ struct FixedBlendAsk {
 };
 
 // RGBA8Unorm and BGRA8Unorm (the fit's); RGBA16Float, BGRA8Unorm_sRGB and RGBA8Unorm_sRGB, each judged by its
-// gpu.raw.fixed_blend_rule arm (rop_rgba16f_*_worst, rop_bgra8_srgb_*_worst, rop_rgba8_srgb_*_worst). Never an
-// extended-range format: the raw path renders those through an unsigned-integer target, its codes encoded in the program
-// (raw_xr.h), which the ROP cannot blend
+// gpu.raw.fixed_blend_formats arm. Never an extended-range format: the raw path renders those through an unsigned-integer
+// target, its codes encoded in the program (raw_xr.h), which the ROP cannot blend
 constexpr bool fixedBlendFormat(uint16_t format)
 {
     return format == 70 || format == 80 || format == 115 || format == 81 || format == 71;
 }
 
+constexpr bool srgbBlendFormat(uint16_t format)
+{
+    return format == 71 || format == 81;
+}
+
+// 8-bit sources are exact at any depth only where the target stores 8-bit codes as they are: into an sRGB target they are
+// linear light the blend encodes, as a computed colour is, and GM20B's encode drifts 3 codes off Metal's by eight layers
+// where Apple's GPU stays within 2 (gpu.raw.fixed_blend_formats rop_*_srgb_8)
 constexpr bool fixedBlendAcceptable(const FixedBlendAsk &a)
 {
     return fixedBlendProven() && fixedBlendFormat(a.format) && !a.readable && !a.accumulates && a.standardFactors &&
-           (a.eightBitSources || a.computedLayers <= 2);
+           ((a.eightBitSources && !srgbBlendFormat(a.format)) || a.computedLayers <= 2);
 }
 
 // Rung 3, rule fetch.iterated: the ROP's iterated blend (kits/SwitchGM20BEmit/SwitchGM20BEmitIterated.h) for blends with
@@ -70,7 +78,7 @@ constexpr uint64_t iteratedProgramName(std::string_view name)
     return h;
 }
 
-// Whether the device proved the program worth its passes (raw_chip_facts.h kIteratedProven)
+// Whether the program's passes cost less than the interlocked storage form (raw_chip_facts.h kIteratedProven)
 constexpr bool iteratedProgramProven(uint64_t program)
 {
     for (const std::string_view name : kIteratedProven)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What the raw pack generator keeps of a probe.
 
-A texture3d argument is an entry with no slot, a state holds up to 32 set-0 entries, the buffer m2v binds of its own
+A texture3d argument is an entry with no slot, a state holds 32 set-0 entries in line, the buffer m2v binds of its own
 beside an 8-bit sRGB target is named as such, and a storage buffer's SlotBindOffset residual word is named by its code
 (raw/pack/probe_bind.h, the runtime's raw_residual_test); a compute kernel's direct record (kernels.py) is the
 PackKernel it holds, its samplers numbered among the pack's.
@@ -60,7 +60,7 @@ class RecordsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'obsolete layout'):
             directlink.pipeline_of(record, [], ids, [])
 
-    def test_vertex_streams_past_stream_0_round_trip_and_a_bind_stride_is_refused(self):
+    def test_vertex_streams_past_stream_0_round_trip_and_a_bind_stride_is_the_pack_s(self):
         rec = {
             'key': 'samples=1 c0=80:15:0 a0=30:0:1:12:1:1 a1=31:0:4:16:1:1',
             'vs': 0,
@@ -74,7 +74,7 @@ class RecordsTest(unittest.TestCase):
             'vertex_streams': [5],
         }
         data = packfile.pipeline_bytes(rec, 0, 0)
-        v21 = len(data) - packfile.PIPELINE_V22.size - packfile.PIPELINE_V21.size
+        v21 = directlink.V21_AT
         self.assertEqual(data[v21 : v21 + packfile.PIPELINE_V21.size], bytes(16) + bytes([5]) + bytes(7))
         programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
@@ -93,9 +93,16 @@ class RecordsTest(unittest.TestCase):
         back = directlink.pipeline_of(record, [], ids, [])
         self.assertEqual(back['vertex_streams'], [5])
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), data)
-        record['pipeline'] = packfile.pipeline_bytes(dict(rec, vertex_streams=[5 | packfile.STREAM_BIND_STRIDE]), 0, 0)
-        with self.assertRaisesRegex(ValueError, 'runtime-only'):
-            directlink.pipeline_of(record, [], ids, [])
+        # a layout of a dynamic stride: its stream's format holds no stride (each draw writes its bind's)
+        bound = dict(rec, key=rec['key'].replace(':16:1:1', ':4294967295:1:1'), vertex_streams=[5 | 0x80])
+        dynamic = dict(record, key=bound['key'], pipeline=packfile.pipeline_bytes(bound, 0, 0))
+        dynamic['probe'] = dict(record['probe'], records=[{'regs': {0x1C00: 0x1000 | 12, 0x1C10: 0x1000}}])
+        back = directlink.pipeline_of(dynamic, [], ids, [])
+        self.assertEqual(back['vertex_streams'], [5 | packfile.STREAM_BIND_STRIDE])
+        self.assertEqual(packfile.pipeline_bytes(back, 0, 0), dynamic['pipeline'])
+        dynamic['probe'] = record['probe']
+        with self.assertRaisesRegex(ValueError, 'vertex stream 1 of buffer 4 at stride 16'):
+            directlink.pipeline_of(dynamic, [], ids, [])
         # a vertex function choosing its slice and viewport: the two push words each draw writes are the pack's
         record['pipeline'] = packfile.pipeline_bytes(dict(rec, array_length_word=3, viewport_count_word=4), 0, 0)
         self.assertEqual(
@@ -122,7 +129,7 @@ class RecordsTest(unittest.TestCase):
             'xr_slots': 0x8001,
         }
         data = packfile.pipeline_bytes(rec, 0, 0)
-        self.assertEqual(data[-4:], struct.pack('<HH', 0x8001, 0))
+        self.assertEqual(data[directlink.V24_AT - 4 : directlink.V24_AT], struct.pack('<HH', 0x8001, 0))
         self.assertEqual(directlink.PIPELINE.unpack_from(data)[-1] & 0xE0, 0xC0)
         programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
@@ -213,14 +220,7 @@ class RecordsTest(unittest.TestCase):
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0, 5), data)
         pipes, _, _, variants = packfile.pipeline_sections([dict(back, key=rec['key']), dict(back, key=rec['key'])])
         self.assertEqual(len(variants), 16)
-        v15 = (
-            directlink.PIPELINE_BYTES * 2
-            - packfile.PIPELINE_V22.size
-            - packfile.PIPELINE_V21.size
-            - packfile.PIPELINE_V20.size
-            - packfile.PIPELINE_V18.size
-            - packfile.PIPELINE_V15.size
-        )
+        v15 = directlink.PIPELINE_BYTES + directlink.V20_AT - packfile.PIPELINE_V18.size - packfile.PIPELINE_V15.size
         self.assertEqual(struct.unpack_from('<I', pipes, v15), (1,))
 
     def test_argument_buffer_tail_round_trip(self):
@@ -272,8 +272,7 @@ class RecordsTest(unittest.TestCase):
         }
         data = packfile.pipeline_bytes(rec, 0, 0)
         self.assertEqual(len(data), directlink.PIPELINE_BYTES)
-        v20 = len(data) - packfile.PIPELINE_V22.size - packfile.PIPELINE_V21.size - packfile.PIPELINE_V20.size
-        self.assertEqual(packfile.PIPELINE_V20.unpack_from(data, v20)[24:], (1, 2, 2, 4, 5))
+        self.assertEqual(packfile.PIPELINE_V20.unpack_from(data, directlink.V20_AT)[24:], (1, 2, 2, 4, 5))
         programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(2)]
         ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
         probe = {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {}}]}
@@ -292,11 +291,78 @@ class RecordsTest(unittest.TestCase):
             [dict(back, blob=[(0x1A00, 9)]), dict(rec, spill_entry=[0, 0], spill=[[], []], entries=[])]
         )
         self.assertEqual(blob, [0x1A00, 9, 7, 8, 1, 2, 3, 4])
-        v20_end = packfile.PIPELINE_V22.size + packfile.PIPELINE_V21.size + packfile.PIPELINE_V20.size
         tails = [
-            packfile.PIPELINE_V20.unpack_from(pipes, (i + 1) * directlink.PIPELINE_BYTES - v20_end) for i in range(2)
+            packfile.PIPELINE_V20.unpack_from(pipes, i * directlink.PIPELINE_BYTES + directlink.V20_AT)
+            for i in range(2)
         ]
         self.assertEqual((tails[0][24:], tails[1][24:]), ((1, 2, 2, 4, 2), (0, 0, 0, 0, 0)))
+
+    def test_a_tessellation_amplification_and_stride_twin_record_is_the_pack_s(self):
+        # directpack.mm's record of a tessellation state of a dynamic stream-0 stride (its stride twin's hash in its
+        # v24 tail) and of vertex amplification: what the runtime makes of such a state at its creation
+        rec = {
+            'key': 'samples=1 topo=3 ds=0/0 c0=80:15:0 a0=30:0:1:4294967295:1:1 t=0:0:0:0:0:16:0 amp=2',
+            'vs': 0,
+            'fs': 1,
+            'blob': [],
+            'entries': [],
+            'push': [],
+            'vbs': [{'stream': 0, 'slot': 1, 'stride': 0}],
+            'set_size': 0,
+            'fetch': False,
+            'runtime_head': bytes([5, 4, 2, 1, 2, 3, 4]),
+            'pulled_stride': bytes([2, 6, 0, 0, 0, 0, 0, 0]),
+            'tess': [2, 3],
+            'stride_twin': 0xFEED,
+            'amplification_layer_word': 7,
+            'amplification_viewport_word': 8,
+        }
+        data = packfile.pipeline_bytes(rec, 0, 0)
+        programs = [{'image': bytes([i]), 'data': b'', 'cbufs': []} for i in range(4)]
+        ids = {directlink.program_id(p): i for i, p in enumerate(programs)}
+        extras, restore = [(0x0320, 0x202), (0x2080, 0x21)], [(0x2080, 0x20)]
+        record = {
+            'pipeline': data,
+            'key': rec['key'],
+            'programs': programs[:2],
+            'tess_programs': programs[2:],
+            'extras': extras,
+            'restore': restore,
+            'samplers': [],
+            'probe': {'index': 0, 'form': '', 'targets': 1, 'records': [{'regs': {0x1C00: 0x1000}}]},
+        }
+        back = directlink.pipeline_of(record, [0x1C00], ids, [])
+        self.assertEqual((back['tess'], back['stride_twin']), ([2, 3], 0xFEED))
+        self.assertEqual((back['amplification_layer_word'], back['amplification_viewport_word']), (7, 8))
+        self.assertEqual(back['blob'], [(0x1C00, 0x1000), *extras])
+        self.assertEqual(back['restore'], restore)
+        self.assertEqual(
+            packfile.pipeline_bytes(dict(back, blob=[]), 0, 0)[: directlink.V24_AT], data[: directlink.V24_AT]
+        )
+        pipes, blob, _, _ = packfile.pipeline_sections([back])
+        self.assertEqual(blob, [0x1C00, 0x1000, 0x0320, 0x202, 0x2080, 0x21, 0x2080, 0x20])
+        self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0xFEED, 7, 8, 2, 6))
+
+    def test_record_v24_tail_and_its_restore_pairs_in_the_blob(self):
+        rec = {
+            'key': 'samples=1 c0=80:15:0',
+            'vs': 0,
+            'fs': 1,
+            'blob': [(0x1A00, 9)],
+            'entries': [],
+            'push': [],
+            'vbs': [],
+            'set_size': 0,
+            'fetch': False,
+            'tess': [2, 3],
+            'stride_twin': 0x1234,
+            'amplification_layer_word': 3,
+            'amplification_viewport_word': 4,
+            'restore': [(0x2080, 0x20), (0x20C0, 0x30)],
+        }
+        pipes, blob, _, _ = packfile.pipeline_sections([rec])
+        self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0x1234, 3, 4, 4, 2))
+        self.assertEqual(blob, [0x1A00, 9, 0x2080, 0x20, 0x20C0, 0x30])
 
     def test_record_v22_written_formats_round_trip(self):
         rec = {
@@ -366,13 +432,7 @@ class RecordsTest(unittest.TestCase):
         records = [pipes[i * directlink.PIPELINE_BYTES : (i + 1) * directlink.PIPELINE_BYTES] for i in range(2)]
         flags = [directlink.PIPELINE.unpack_from(r)[-1] for r in records]
         self.assertEqual((flags[0] & 16, flags[1] & 16), (0, 16))
-        v18 = (
-            directlink.PIPELINE_BYTES
-            - packfile.PIPELINE_V22.size
-            - packfile.PIPELINE_V21.size
-            - packfile.PIPELINE_V20.size
-            - packfile.PIPELINE_V18.size
-        )
+        v18 = directlink.V20_AT - packfile.PIPELINE_V18.size
         name = struct.unpack_from('<I', records[1], v18 - 4)[0]
         self.assertEqual(strings[name:].split(b'\0')[0], b' | tests=3')
 
@@ -434,11 +494,12 @@ class RecordsTest(unittest.TestCase):
         }
         data = packfile.pipeline_bytes(rec, 0, 0)
         self.assertEqual(directlink.PIPELINE.unpack_from(data)[-1] & 4, 0)
-        v21 = len(data) - packfile.PIPELINE_V22.size - packfile.PIPELINE_V21.size
-        v20 = v21 - packfile.PIPELINE_V20.size
+        v21, v20 = directlink.V21_AT, directlink.V20_AT
         self.assertEqual(data[v20 - 8 : v20 - 4], bytes(4))
         self.assertEqual(struct.unpack_from('<I', data, v20 - 4), (packfile.ALL_ENTRIES,))
-        self.assertEqual(data[v21:], bytes(packfile.PIPELINE_V21.size + packfile.PIPELINE_V22.size))
+        self.assertEqual(
+            data[v21:], bytes(packfile.PIPELINE_V21.size + packfile.PIPELINE_V22.size + packfile.PIPELINE_V24.size)
+        )
 
     def test_shader_test_views_and_push_placements_round_trip(self):
         rec = {
@@ -489,6 +550,22 @@ class RecordsTest(unittest.TestCase):
             self.assertEqual(back[field], rec[field], field)
         back['blob'] = []
         self.assertEqual(packfile.pipeline_bytes(back, 0, 0), data)
+
+    def test_own_states_are_keyed_by_the_names_the_runtime_asks_for(self):
+        # raw_own_states.h is the one list: a state added there (the YCbCr loads and masked stores, the XR tile, merge
+        # and split states) is keyed as the runtime looks it up, never by its full key
+        head = 'samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0 | v '
+        for vertex, fragment, name in (
+            ('ycbcr_vert', 'ycbcr_load_codes_frag', b'raw.ycbcr.ycbcr_load_codes_frag'),
+            ('ycbcr_store_vert', 'ycbcr_store_luma8_masked_frag', b'raw.ycbcr_store.ycbcr_store_luma8_masked_frag'),
+            ('xr_vert', 'xr_tile_bgr10_frag', b'raw.xr.xr_tile_bgr10_frag'),
+            ('xr_vert', 'xr_planes_merge_frag', b'raw.xr.xr_planes_merge_frag'),
+            ('two_plane_cover', 'two_plane_load', b'raw.two_plane.two_plane_load'),
+        ):
+            with self.subTest(fragment=fragment):
+                key = f'{head}{vertex}  | f {fragment}'
+                self.assertEqual(packfile.key_hash({'key': key}), packfile.fnv(name))
+        self.assertGreaterEqual(len(packfile.own_states()), 168)
 
     def test_only_known_own_shader_pairs_use_alias_keys(self):
         own = 'samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0 | v resolve_vert  | f resolve_bgra8_frag'
@@ -558,11 +635,12 @@ class RecordsTest(unittest.TestCase):
         read = directlink.entries_of(pipeline, 2, [], [])
         self.assertEqual([e['compare'] for e in read], [True, False])
 
-    def test_a_pipeline_holds_32_entries(self):
+    def test_a_pipeline_holds_32_entries_and_a_record_every_argument_past_them(self):
         ents = packfile.entry_bytes([handle(('slot', 3))] * 27)
         self.assertEqual(len(ents), 8 * 32)
+        self.assertEqual(len(packfile.entry_bytes([handle(('slot', 3))] * 33)), 8 * 33)
         with self.assertRaises(ValueError):
-            packfile.entry_bytes([handle(('slot', 3))] * 33)
+            packfile.entry_bytes([handle(('slot', 3))] * (packfile.SET_ENTRIES_MAX + 1))
 
     def test_srgb_targets(self):
         key = 'samples=1 topo=0 ds=0/0 c0=81:15:0:1:0:0:1:0:0 c1=115:15:0:1:0:0:1:0:0  | v f'

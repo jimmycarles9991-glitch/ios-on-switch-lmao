@@ -31,7 +31,7 @@ struct RotatedTargetTest: HWTest {
     /// width (a pitch the render hardware takes only through a shadow, as the device's 60x60 and 720x1280 drawables'
     /// were), and the device's 1280x720 drawable for its clear and a load that reaches some tiles
     static let shapes: [(name: String, width: Int, height: Int, aligned: Bool, cells: [RotatedCell])] = [
-        ("a", 96, 64, true, RotatedCell.allCases), ("n", 90, 60, false, RotatedCell.allCases),
+        ("a", 96, 64, true, RotatedCell.targetCells), ("n", 90, 60, false, RotatedCell.targetCells),
         ("hd", 1280, 720, false, [.clear, .partLoad]),
     ]
 
@@ -87,7 +87,11 @@ struct RotatedTargetTest: HWTest {
 
 enum RotatedCell: String, CaseIterable {
     case clear, draw, load, idleLoad, partLoad, pointLoad, edgeLoad, besideR4, points, fetch, position, derivative,
-        fwidth, depth, resolve, beside, keptDepth, keptStencil, turns, frames, sized, tie
+        fwidth, depth, resolve, beside, keptDepth, keptStencil, turns, frames, sized, tie, keptPair, keptPair16
+
+    /// gpu.raw.turned_separate_pair's (TurnedSeparatePairTest), and this test's: every other
+    static let pairCells: [RotatedCell] = [.keptPair, .keptPair16]
+    static let targetCells = allCases.filter { !pairCells.contains($0) }
 
     enum Kind { case native, informational }
 
@@ -223,13 +227,18 @@ struct RotatedCells {
             throw TestFailure("IOSurfaceLock for the readback failed")
         }
         defer { plane.surface.unlock(options: .readOnly, seed: nil) }
+        // the plain run's 4x resolve into a private texture nothing reads as data takes the 2D engine, within one code
+        // of Metal (raw_resolve_rule.h resolve.twod); a turned target's takes the exact resolve pass
+        let slack = cell == .resolve ? 1 : 0
         var wrong = 0
         for y in 0..<h {
             for x in 0..<w {
                 let (px, py) = stored(x, y)
                 let at = plane.surface.baseAddress + py * plane.rowBytes + px * 4
                 let got = UnsafeRawBufferPointer(start: at, count: 4)
-                if !zip(got, expected.pixel(x, y, width: w)).allSatisfy({ $0 == $1 }) { wrong += 1 }
+                if !zip(got, expected.pixel(x, y, width: w)).allSatisfy({ abs(Int($0) - Int($1)) <= slack }) {
+                    wrong += 1
+                }
             }
         }
         return Result(path: path, referencePath: referencePath, wrong: wrong + wrongBeside)
@@ -308,6 +317,10 @@ struct RotatedCells {
             return mixedSizes()
         case .keptStencil:
             return [keptStencil]
+        case .keptPair:
+            return [keptPair(.depth32Float)]
+        case .keptPair16:
+            return [keptPair(.depth16Unorm)]
         case .tie:
             return [
                 encode(load: .clear) { e in shapes(e, halfPixelRect(10.5, 5.5, 30.5, 20.5), [1, 1, 1, 1], states.plain)

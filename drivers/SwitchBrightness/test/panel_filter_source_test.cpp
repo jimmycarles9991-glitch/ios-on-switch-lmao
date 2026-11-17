@@ -24,19 +24,19 @@ TEST(PanelFilterSource, TheFrameEndStepTakesNothingThatBlocksOrSpins)
 {
     for (const char *signature : {"extern \"C\" void tegra_panel_frame_end_filter(void)", "void advance(Move move)"}) {
         const CodeText body = Block(panel(), signature);
-        ASSERT_TRUE(body.Has("__atomic_")) << signature;
+        ASSERT_TRUE(body.has("__atomic_")) << signature;
         for (const char *banned : {"IOSimpleLock", "IOLock", "IOMalloc", "IONew", "IOLog", "IOSleep", "thread_block",
                                    "assert_wait", "__atomic_fetch_", "__atomic_exchange", "__atomic_compare_exchange"})
-            EXPECT_FALSE(body.Has(banned)) << signature << " has " << banned;
+            EXPECT_FALSE(body.has(banned)) << signature << " has " << banned;
     }
     EXPECT_TRUE(
         Block(panel(), "extern \"C\" void tegra_panel_frame_end_filter(void)")
-            .Has("__atomic_store_n(&gFrames, __atomic_load_n(&gFrames, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);"));
+            .has("__atomic_store_n(&gFrames, __atomic_load_n(&gFrames, __ATOMIC_RELAXED) + 1, __ATOMIC_RELEASE);"));
 }
 
 TEST(PanelFilterSource, OnlyTheFilterWritesTheFrameCount)
 {
     const CodeText code(panel());
-    EXPECT_EQ(code.Count("&gFrames, __atomic_load_n(&gFrames"), 1u);
-    EXPECT_EQ(code.Count("__atomic_store_n(&gFrames"), 1u);
+    EXPECT_EQ(code.count("&gFrames, __atomic_load_n(&gFrames"), 1u);
+    EXPECT_EQ(code.count("__atomic_store_n(&gFrames"), 1u);
 }

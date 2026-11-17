@@ -24,19 +24,34 @@
 	<array>
 		<string>com.apple.BlueTool</string>
 	</array>
+	<key>com.apple.security.exception.files.absolute-path.read-only</key>
+	<array>
+		<string>/private/var/Switch/icon-cache-gpu</string>
+		<string>/private/var/Switch/icon-cache-reset</string>
+	</array>
 	<key>com.apple.security.exception.files.absolute-path.read-write</key>
 	<array>
 		<string>/private/var/mobile/Media/Switch/benchloop/</string>
 	</array>
 	<key>com.apple.security.exception.sysctl.read-only</key>
 	<array>
+		<string>kern.bootsessionuuid</string>
+		<string>kern.uuid</string>
 		<string>kern.switch_planes_flips</string>
 		<string>kern.switch_planes_latched</string>
 		<string>kern.switch_planes_maps</string>
 		<string>kern.switch_planes_dropped</string>
 		<string>kern.switch_planes_native</string>
+		<string>kern.switch_planes_remaps</string>
+		<string>kern.switch_vic_maps</string>
+		<string>kern.switch_vic_remaps</string>
+		<string>kern.switch_native_objects</string>
+		<string>kern.switch_native_surfaces</string>
+		<string>kern.switch_native_publications</string>
 		<string>kern.switch_frame_info_shown</string>
 		<string>kern.switch_frame_info_unsent</string>
+		<string>kern.switch_frame_info_ordinary</string>
+		<string>kern.switch_frame_info_early</string>
 		<string>kern.switch_joycon</string>
 		<string>kern.switch_soctherm</string>
 		<string>kern.switch_gpu_paths</string>
@@ -83,6 +98,7 @@
 		<string>kern.switch_scanout_vic</string>
 		<string>kern.switch_scanout_vic_up</string>
 		<string>kern.memorystatus_level</string>
+		<string>kern.proc.all</string>
 		<string>kern.switch_shader_compiler</string>
 	</array>
 	<key>com.apple.security.exception.sysctl.read-write</key>

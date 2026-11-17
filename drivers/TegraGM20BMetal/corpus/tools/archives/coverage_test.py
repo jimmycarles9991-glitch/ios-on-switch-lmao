@@ -57,9 +57,9 @@ class CorpusLines(unittest.TestCase):
         vertex_only = vector + ' | f -  | '
         foreign_link = both[:-2] + '| fp c lib=/Applications/X.app/default.metallib | '
         lines = steps.probe_lines('\n'.join((both, vertex_only, foreign_link)))
-        self.assertEqual(lines, [both])
-        self.assertTrue(packable(both))
-        self.assertFalse(packable(vertex_only) or packable(foreign_link))
+        self.assertEqual(lines, [both, vertex_only])
+        self.assertTrue(packable(both) and packable(vertex_only))
+        self.assertFalse(packable(foreign_link))
 
 
 class Coverage(unittest.TestCase):

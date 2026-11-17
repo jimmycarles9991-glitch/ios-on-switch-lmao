@@ -49,7 +49,8 @@
   "fields": {
     "displayWidth": "0x16b0",
     "displayHeight": "0x16b4",
-    "edrScalingEnabled": "0x1878"
+    "edrScalingEnabled": "0x1878",
+    "internalDisplay": "0x1782"
   },
   "constants": {
     "swapQueueCurrent": "0x1560",
@@ -274,6 +275,7 @@
     "gMetaClass": "0xfffffff007b35940",
     "native_legacy_frame_info_notify": "0xfffffff0067968b4",
     "native_legacy_frame_info_enqueue": "0xfffffff00677ae18",
+    "native_legacy_set_display_refresh_properties": "0xfffffff00679ebb8",
     "setEdrFactor": "0xfffffff0067a017c"
   }
 }

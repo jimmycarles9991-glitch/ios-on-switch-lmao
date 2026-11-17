@@ -118,15 +118,18 @@ void tgm_hold_stats(char *buf, unsigned int len)
 {
 	struct tgm_hold_counts now;
 	const struct tgm_hold_counts *was = &seen.counts;
+	struct tgm_hold_counts gained;
 
 	tgm_hold_counts(&now);
-	scnprintf(buf, len,
-		  "%u app channels held, %u early preempts (%u skipped: a preempt in flight or the "
-		  "runlist busy), %u one-period turns, %u holds put off to the next vblank "
-		  "(hopeless), "
-		  "preemption latency %u samples, %u lowered",
-		  now.holds - was->holds, now.preempts - was->preempts, now.busy - was->busy,
-		  now.turned - was->turned, now.hopeless - was->hopeless,
-		  now.samples - was->samples, now.checks - was->checks);
+	gained = (struct tgm_hold_counts){
+		.holds = now.holds - was->holds,
+		.preempts = now.preempts - was->preempts,
+		.busy = now.busy - was->busy,
+		.turned = now.turned - was->turned,
+		.hopeless = now.hopeless - was->hopeless,
+		.samples = now.samples - was->samples,
+		.checks = now.checks - was->checks,
+	};
+	tgm_hold_format(buf, len, &gained);
 	seen.counts = now;
 }

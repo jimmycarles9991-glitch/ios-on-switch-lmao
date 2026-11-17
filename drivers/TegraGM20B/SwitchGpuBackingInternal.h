@@ -66,6 +66,11 @@ struct switch_gpu_backing {
 	const void *host_acquire_handle;  // host_acquire's timeline, as a record's handle
 	uint32_t
 		claims;  // under the ownership order: parties holding `lock` as a claim (switch_gpu_backing_claim)
+	void *mapping_contexts[SWITCH_GPU_ENGINE_COUNT];
+	void (*mapping_destroy[SWITCH_GPU_ENGINE_COUNT])(void *);
+	uint32_t mapping_engines;
+	uint32_t
+		mapped_engines;  // atomic: 1 << engine for each engine that mapped it (switch_gpu_backing_note_mapped)
 };
 
 struct switch_gpu_cpu_lease {
@@ -120,6 +125,8 @@ inline bool switch_gpu_backing_needs_lock(const switch_gpu_backing *backing)
 }
 
 const switch_gpu_backing_engine *switch_gpu_backing_engine_ops(uint32_t engine);
+// destroy: every engine that mapped the backing forgets its allocation, before the pages go back.
+void switch_gpu_backing_forget_mapped(const switch_gpu_backing *backing);
 const switch_gpu_backing_timeline_refs *switch_gpu_backing_timeline_ops(uint32_t engine);
 // A token's status through its timeline's handle where it has one (switch_gpu_backing_timeline_refs)
 int switch_gpu_backing_held_status(const switch_gpu_backing_token &token, const void *handle);

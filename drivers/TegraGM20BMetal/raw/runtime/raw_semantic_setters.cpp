@@ -66,8 +66,10 @@ bool RMCommandPlan::setter(const Cmd &c, const uint64_t *extra)
         break;
     case OpTexture:
     case OpKernelTexture:
-        if (stage < 3)
+        if (stage < 2)
             changed = textures[stage].bind(c.index, c.obj);
+        else if (stage == 2)
+            changed = kernelTextures.bind(c.index, c.obj);
         resourcesChanged = changed;
         break;
     case OpSampler:

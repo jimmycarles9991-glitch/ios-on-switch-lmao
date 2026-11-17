@@ -10,7 +10,8 @@ keeps both, an edit to the compiler makes them all new.
 
 Of the sources given (each by its path below --mesa), counted are: Mesa's version and its Bazel flags (the files'
 text, the same for the iOS dylib and the macOS twin), NIR and the SPIR-V front end (src/compiler), NAK with its crate
-flags (src/nouveau/compiler), the class headers its code and NVK's shader setup encode, util (blobs, hashes, the hash
+flags (src/nouveau/compiler), NVK's shader lowering and the raw path's stage compile (src/nouveau/switch_compile),
+the class headers its code and NVK's shader setup encode, util (blobs, hashes, the hash
 tables NIR walks), the Vulkan runtime's pipelines, shaders, layouts and caches (src/vulkan/runtime, src/vulkan/util,
 the registry), include/, and of NVK its headers, its shader, lowering, descriptor and sampler code, the physical
 device (features and compiler flags) and the device and instance (drirc, app workarounds). Not counted: NVK's image,
@@ -27,6 +28,7 @@ TREES = (
     'src/compiler/',
     'src/nouveau/compiler/',
     'src/nouveau/headers/',
+    'src/nouveau/switch_compile/',
     'src/util/',
     'src/vulkan/registry/',
     'src/vulkan/runtime/',
@@ -43,7 +45,6 @@ FILES = (
 )
 NVK = 'src/nouveau/vulkan/'
 NVK_SOURCES = (
-    '00-nvk-defaults.conf',
     'BUILD.bazel',
     'nvk_descriptor_set.c',
     'nvk_descriptor_set_layout.c',
@@ -52,24 +53,10 @@ NVK_SOURCES = (
     'nvk_drirc_gen.py',
     'nvk_format.c',
     'nvk_instance.c',
-    'nvk_nir_lower_descriptors.c',
-    'nvk_nir_lower_mesh_shader.c',
     'nvk_physical_device.c',
     'nvk_sampler.c',
     'nvk_shader.c',
-    'nvk_switch_push.c',
     'nvk_switch_compile.c',
-    'nvk_switch_ir.c',
-    'nvk_switch_ir_alu.c',
-    'nvk_switch_ir_barrier.c',
-    'nvk_switch_ir_decl.c',
-    'nvk_switch_ir_glsl.c',
-    'nvk_switch_ir_instr.c',
-    'nvk_switch_ir_values.c',
-    'nvk_switch_round.c',
-    'nvk_switch_split.c',
-    'nvk_switch_split_nir.c',
-    'nvk_switch_split_prologue.c',
     'nvkmd/nvkmd.h',
 )
 NVK_TREES = ('layers/',)

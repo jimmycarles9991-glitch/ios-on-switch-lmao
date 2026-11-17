@@ -177,11 +177,13 @@ private:
 // Swaps between the kick taking them and the screen showing them, by take sequence. A present names the sequence of the
 // swap it shows: that swap's frame comes out, and older ones go unsent (replaced before a frame showed them; Core
 // Animation drops its frame info for every swap id up to the one it gets). timedShown and timedUnsent count the swaps
-// the timed-present gate held for their presentation time (presentDrawable:atTime:'s) by which way they went.
+// the timed-present gate held for their presentation time (presentDrawable:atTime:'s) by which way they went;
+// timedOrdinary (debug kernels) those it let go as the render server's ordinary frame though the next frame end came
+// too early for them, and shownEarly those shown more than `early` before their requested presentation.
 class Pending {
 public:
     static constexpr unsigned kMax = 16;
-    uint32_t timedShown = 0, timedUnsent = 0;
+    uint32_t timedShown = 0, timedUnsent = 0, timedOrdinary = 0, shownEarly = 0;
 
     void take(uint64_t seq, uint32_t swapId, uint64_t requested, bool timed = false)
     {
@@ -199,7 +201,7 @@ public:
         *slot = {seq, swapId, requested, timed};
     }
 
-    bool shown(uint64_t seq, uint64_t presented, Frame &frame)
+    bool shown(uint64_t seq, uint64_t presented, Frame &frame, uint64_t early = 0)
     {
         bool found = false;
         for (Swap &s : swaps) {
@@ -208,6 +210,12 @@ public:
             if (s.seq == seq) {
                 frame = {presented, s.requested, s.swapId};
                 found = true;
+#if SWITCH_FRAME_TIMELINE
+                if (early && s.requested > presented && s.requested - presented > early)
+                    ++shownEarly;
+#else
+                (void)early;
+#endif
             }
             if (s.timed)
                 ++(s.seq == seq ? timedShown : timedUnsent);

@@ -43,9 +43,15 @@ struct NVENCSpace {
     }
 };
 
-// Native decoder pictures NVENC reads in place (TegraNVENCDirect.cpp), as many and as much as VIC keeps mapped: a
-// decoder's whole pool stays mapped, and a job's picture is held until its fence (TegraNVENC.cpp: kInFlight jobs).
-constinit SwitchGpuBackingMaps<SwitchGpuBackingMap, NVENCSpace, 32, 128ULL << 20> gNative;
+// Native decoder pictures NVENC reads in place (TegraNVENCDirect.cpp): a decoder's whole pool stays mapped, at 4K too,
+// beside NVENC's own buffers (kWiredLimit) in its 1 GiB window, and a job's picture is held until its fence
+// (TegraNVENC.cpp: kInFlight jobs).
+constinit SwitchGpuBackingMaps<SwitchGpuBackingMap, NVENCSpace, SWITCH_GPU_ENGINE_NVENC, 64, 640ULL << 20> gNative;
+
+void forgetNative(uint64_t allocation)
+{
+    gNative.forget(allocation);
+}
 
 void releaseAllocation(void *context)
 {
@@ -70,8 +76,11 @@ extern "C" int tegra_nvenc_memory_init(const switch_dma_buffer *firmware, const 
         gSpace.release();
         return -1;
     }
-    if (!gNative.lock)
-        gNative.start();
+    if (!gNative.lock && !gNative.start(forgetNative)) {
+        snprintf(line, size, "E1 FAIL no lock for NVENC's map of decoder pictures");
+        gSpace.release();
+        return -1;
+    }
     return tegra_nvenc_memory_attach(line, size);
 }
 

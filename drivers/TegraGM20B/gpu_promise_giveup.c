@@ -252,15 +252,15 @@ int tgm_promise_giveup_open(void)
 	return ret;
 }
 
-int tgm_promise_park(uint32_t offset, uint32_t value, const char *waiter, const char *who,
-		     const struct switch_gpu_giveup_job *reader, int display)
+int switch_gpu_promise_park_locked(uint32_t offset, uint32_t value, const char *waiter,
+				   const char *who, const struct switch_gpu_giveup_job *reader,
+				   int display)
 {
 	struct switch_gpu_giveup *e = NULL;
 	unsigned long flags;
 	int recalled = 0;
 	int at = 0;
 
-	mutex_lock(&tgm_live_lock);
 	at = switch_gpu_giveup_park(&giveups, &giveup_ops, offset, value, waiter, who, reader,
 				    display, nvxnu_nanotime());
 	e = at >= 0 ? &giveups.entry[at] : NULL;
@@ -273,8 +273,17 @@ int tgm_promise_park(uint32_t offset, uint32_t value, const char *waiter, const 
 	}
 	if (e)
 		giveup_arm();
-	mutex_unlock(&tgm_live_lock);
 	return at >= 0;
+}
+
+int tgm_promise_park(uint32_t offset, uint32_t value, const char *waiter, const char *who,
+		     const struct switch_gpu_giveup_job *reader, int display)
+{
+	mutex_lock(&tgm_live_lock);
+	const int result =
+		switch_gpu_promise_park_locked(offset, value, waiter, who, reader, display);
+	mutex_unlock(&tgm_live_lock);
+	return result;
 }
 
 void tgm_promise_leave(uint32_t offset, uint32_t value, int display)

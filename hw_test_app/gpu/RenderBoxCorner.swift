@@ -14,10 +14,32 @@ import Metal
 public enum RenderBoxCorner {
     public static let tolerance = 64
 
+    /// RenderBox's GPU drawing on an M4 Max under macOS 27.2.1, which RenderBoxCornerTests holds this Mac to: per side,
+    /// the antialiased corner pixels and the largest difference from its CPU drawing. A device's cell stays within
+    /// `partialSlack` of the first and `maxDiffSlack` codes of the second.
+    public static let macReference: [Int: (partial: Int, maxDiff: Int)] = [54: (92, 21), 136: (236, 24)]
+    public static let partialSlack = 0.03
+    public static let maxDiffSlack = 6
+
+    /// Why a cell is off the Mac's drawing of its side, nil within the slack or without a reference
+    public static func offMac(_ cell: Cell) -> String? {
+        guard let mac = macReference[cell.side] else { return nil }
+        if Double(cell.partial) < Double(mac.partial) * (1 - partialSlack) {
+            return "partial \(cell.partial) under the Mac's \(mac.partial)"
+        }
+        if cell.maxDiff > mac.maxDiff + maxDiffSlack { return "max_diff \(cell.maxDiff) over the Mac's \(mac.maxDiff)" }
+        return nil
+    }
+
     public struct Cell: Sendable {
         public let side: Int
         public let storage: String
         public var beyond = 0, maxDiff = 0, partial = 0, referencePartial = 0
+
+        public init(side: Int, storage: String) {
+            self.side = side
+            self.storage = storage
+        }
     }
 
     /// The classes and selectors the cells use, all present

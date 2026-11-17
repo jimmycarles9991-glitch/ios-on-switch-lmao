@@ -62,7 +62,7 @@ std::vector<uint64_t> fetchStates(raw::Device &d)
     const raw::PackPipeline *pp = d.pack().section<raw::PackPipeline>(raw::PackPipelines);
     for (uint32_t i = 0; i < d.pack().header()->pipelines && keys.size() < kStates; i++) {
         bool fetchesColor0 = false;
-        for (uint32_t k = 0; k < pp[i].entries; k++)
+        for (uint32_t k = 0; k < raw::entryCount(pp[i]); k++)
             fetchesColor0 |= pp[i].entry[k].kind == raw::EntryFetch && pp[i].entry[k].slot == 0;
         if (!(pp[i].flags & raw::PipelineBarrierForm) || !fetchesColor0)
             continue;
@@ -136,7 +136,7 @@ void bind(raw::RenderEncoder *e, const raw::Pipeline &p, uint32_t draw, const Su
         identity[k] = (k % 16) % 5 == 0 ? 1.f : 0.f;
         uniforms[k] = float((draw * 37 + k * 11) % 97) / 97.f;
     }
-    for (uint32_t k = 0; k < r.entries; k++) {
+    for (uint32_t k = 0; k < raw::entryCount(r); k++) {
         const raw::PackEntry &x = r.entry[k];
         if (x.kind == raw::EntryUbo)
             e->setBytes(x.stage, x.slot, x.stage == 1 ? identity : uniforms, sizeof uniforms);

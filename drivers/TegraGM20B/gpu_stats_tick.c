@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The periodic statistics lines (TGM_STATS): job stamps, fences, clocks, submissions and owners.
 #include "gpu_internal.h"
+#include "deadline_stats.h"
 
 #if TGM_STATS
 /* TegraVIC (drivers/TegraVIC/SwitchVICMapping.cpp, debug kernels) */
@@ -222,21 +223,27 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 	}
 }
 
+static void deadline_print(const char *line)
+{
+	nvxnu_stats("tegra-gm20b: deadline %s", line);
+}
+
 /* The compositor's deadline (deadline.c, hold.c), and each app channel's preemption latency and the one-period turns it
- * got, those above the minimum or with a turn, by owner. */
+ * got, those above the minimum or with a turn, by owner: lines of their own (deadline_stats.h TGM_DEADLINE_LINE). */
 static void stats_deadline(char *buf, unsigned int len)
 {
-	char deadline[320];
-	char holds[240];
+	struct tgm_latency_lines latencies = {buf, min_t(unsigned int, len, TGM_DEADLINE_LINE), 0,
+					      0, deadline_print};
 	struct tgm_chan *chan = NULL;
-	unsigned int n = 0;
 	unsigned int turns = 0;
-	unsigned int shown = 0;
 	u64 latency = 0;
 
-	tgm_deadline_stats(deadline, sizeof(deadline));
-	tgm_hold_stats(holds, sizeof(holds));
-	n = scnprintf(buf, len, "%s; %s; latency by channel:", deadline, holds);
+	tgm_deadline_stats(buf, latencies.len);
+	deadline_print(buf);
+	if (tgm_deadline_miss_stats(buf, latencies.len))
+		deadline_print(buf);
+	tgm_hold_stats(buf, latencies.len);
+	deadline_print(buf);
 	mutex_lock(&tgm_live_lock);
 	list_for_each_entry(chan, &tgm_live_chans, live)
 	{
@@ -245,18 +252,10 @@ static void stats_deadline(char *buf, unsigned int len)
 		tgm_hold_chan_stats(chan->chid, &latency, &turns);
 		if (latency <= TGM_PREEMPT_MIN_NS && !turns)
 			continue;
-		if (turns) {
-			n += scnprintf(buf + n, len - n, " %s ch%u %llu us (%u turns)", chan->owner,
-				       chan->chid, latency / 1000, turns);
-		} else {
-			n += scnprintf(buf + n, len - n, " %s ch%u %llu us", chan->owner,
-				       chan->chid, latency / 1000);
-		}
-		shown++;
+		tgm_latency_add(&latencies, chan->owner, chan->chid, latency, turns);
 	}
 	mutex_unlock(&tgm_live_lock);
-	if (!shown)
-		scnprintf(buf + n, len - n, " all at the minimum");
+	tgm_latency_end(&latencies);
 }
 
 /* Run by each submission: the first one after a window's end logs it. */
@@ -394,7 +393,6 @@ void tgm_stats_tick(void)
 		  behind ? PT_NS(bs) / behind / 1000 : 0, PT_NS(bm) / 1000, behind, sched, recov);
 	nvxnu_stats("tegra-gm20b: stats %s", line);
 	stats_deadline(line, sizeof(line));
-	nvxnu_stats("tegra-gm20b: deadline %s", line);
 	tgm_acquire_probe_window(line, sizeof(line), now);
 	if (line[0])
 		nvxnu_stats("tegra-gm20b: acquire probe: %s", line);
@@ -485,17 +483,16 @@ void tgm_stats_tick(void)
 	/* IOSurface layouts decided this window (TegraGM20BTiled.cpp), the block-linear ones live, and the CPU views'
 	 * scratch: what tiling costs in memory */
 	{
-		uint64_t t[10];
+		uint64_t t[9];
 		tgm_tiled_take_stats(t);
-		if (t[0] || t[1] || t[2] || t[3] || t[4] || t[5] || t[6] || t[8]) {
+		if (t[0] || t[1] || t[2] || t[3] || t[4] || t[5] || t[7]) {
 			nvxnu_log("tegra-gm20b: layouts %llu block-linear, pitch %llu sampled "
 				  "first, %llu shared, "
-				  "%llu by shape, %llu failed tiling, %llu mapped by another "
-				  "process; "
-				  "%llu block-linear live (%llu KiB), CPU views' "
+				  "%llu by shape, %llu failed tiling; %llu block-linear live (%llu "
+				  "KiB), CPU views' "
 				  "scratch %llu KiB (peak %llu KiB)\n",
-				  t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7] >> 10, t[8] >> 10,
-				  t[9] >> 10);
+				  t[0], t[1], t[2], t[3], t[4], t[5], t[6] >> 10, t[7] >> 10,
+				  t[8] >> 10);
 		}
 		uint64_t r[5];
 		tgm_tiled_take_relayouts(r);

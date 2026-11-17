@@ -7,7 +7,7 @@
 #include "../../../../kits/SwitchGM20B/SwitchGM20BQmd.h"
 #include "../../../../kits/SwitchGM20B/SwitchGM20BSampler.h"
 #include "../../../../kits/SwitchGM20B/SwitchGM20BTexture.h"
-#include "bridge/NativeMetalDirect.h"
+#include "raw_direct_abi.h"
 #include "raw_direct_nvk.h"
 #include "raw_pack.h"
 #include "raw_set_layout.h"
@@ -139,6 +139,41 @@ inline bool immutableSamplerHeader(const NmbDirectBinding *bindings, uint32_t co
 inline bool viewWord0(uint32_t vkFormat, const uint32_t components[4], bool storage, uint32_t &word0)
 {
     return switch_gm20b_view_word0(vkFormat, components, storage, &word0);
+}
+
+// The set-0 bindings of draw `d`'s writes of fragment texture slots `slots` (nvk_switch_xr_planes.h), none where a slot
+// has no write
+inline XrPlaneBindings xrPlaneBindings(const NmbDirectDraw &d, uint16_t slots)
+{
+    XrPlaneBindings bindings = {};
+    uint16_t found = 0;
+    for (uint32_t i = 0; i < d.writeCount; i++) {
+        const NmbDirectWrite &w = d.writes[i];
+        if (w.set == 0 && w.stage == 2 && w.slot < 16 && (slots >> w.slot & 1) && w.binding < 64 * kXrPlaneWords &&
+            (w.source == NmbDirectTexture || w.source == NmbDirectCombined)) {
+            bindings[w.binding / 64] |= uint64_t(1) << w.binding % 64;
+            found |= uint16_t(1u << w.slot);
+        }
+    }
+    return found == slots ? bindings : XrPlaneBindings{};
+}
+
+// A compiled stage's constant buffers as its program holds them (CapturedProgram::cbufTypes): NVK's codes, and a set-0 uniform
+// buffer descriptor past kInlineUboBytes, which NVK's code names CbufUnbindable, as CbufUbo with its offset in the far table
+// (PackProgram::farUbos). One of another set, or off 16 bytes, stays CbufUnbindable.
+inline void capturedCbufs(const NvkStage &s, CapturedProgram &p)
+{
+    p.cbufTypes.assign(s.cbufTypes, s.cbufTypes + (s.cbufCount < 16 ? s.cbufCount : 16));
+    p.farUbos.clear();
+    for (uint32_t c = 0; c < p.cbufTypes.size(); c++) {
+        const uint32_t offset = s.cbufOffsets[c];
+        if (p.cbufTypes[c] != CbufUnbindable || s.cbufSets[c] != 0 || offset % 16 || offset < kInlineUboBytes ||
+            offset / 16 > UINT16_MAX)
+            continue;
+        p.farUbos.resize(p.cbufTypes.size());
+        p.cbufTypes[c] = uboCbufType(offset);
+        p.farUbos[c] = uint16_t(offset / 16);
+    }
 }
 
 inline switch_gm20b_qmd_info qmdInfo(const NvkStage &stage)

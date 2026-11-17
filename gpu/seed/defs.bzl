@@ -15,7 +15,7 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//ipsw:ipsw.bzl", "IpswInfo")
 load(":crawl.bzl", "QUARTZCORE")
 load(":native.bzl", "DARWIN", "bucket_resources", "named", "native_pack", "native_records", "three")
-load(":tools.bzl", "seed_tool_files")
+load(":tools.bzl", "raw_tool_files", "seed_tool_files")
 
 _IPSW = {"ipsw": attr.label(default = "//ipsw:current", providers = [IpswInfo])}
 
@@ -354,13 +354,14 @@ metal_seed = rule(
     },
 )
 
-# rawpack.py's BUCKETS: the split writes this many bucket corpora, each made by its own action.
+# rawpack.py's BUCKETS: the split writes this many bucket corpora, then our own apps' states in one more, each bucket
+# made by its own action.
 _RAW_BUCKETS = 16
 
 # The generator's modules each step runs (rawpack.py imports or runs them by path, beside it). Python finds a module
 # beside a script through the script's real path, so a module missing here still imported in the local sandbox (its
 # inputs are links into the source tree) and failed on a remote worker.
-_RAW_STAMP = ["rawpack.py", "packfile.py"]
+_RAW_STAMP = ["rawpack.py", "packfile.py", "selector_section.py"]
 _RAW_SPLIT = _RAW_STAMP + [
     "ca/caset.py",
     "ca/caspec.py",
@@ -372,7 +373,12 @@ _RAW_SPLIT = _RAW_STAMP + [
     "iterated/table.py",
     "iterated/ucode.py",
 ]
-_RAW_PROBE = _RAW_STAMP
+
+# A bucket runs directbucket.py alone (it imports none of the other modules), with directpack and the mock it loads;
+# bucket 0 also draws the raw path's own states (own.metallib) and keeps the context init nvdec ran (context.log).
+_RAW_PROBE = ["directbucket.py"]
+_PROBE_TOOLS = ["directpack", "libmock_iokit.dylib"]
+_PROBE0_TOOLS = _PROBE_TOOLS + ["own.metallib", "context.log"]
 _RAW_LINK = [
     "rawpack.py",
     "directlink.py",
@@ -386,14 +392,16 @@ _RAW_LINK = [
     "layouts.py",
     "packfile.py",
     "probelog.py",
+    "selector_section.py",
     "splits.py",
     "archives.py",
     "draw_context.txt",
     # Read beside the generator's directory: mkpack.py's owned methods, layouts.py's colour table, packfile.py's chip
-    # facts.
+    # facts and own states.
     "../runtime/raw_owned.h",
     "../runtime/raw_srgb_table.h",
     "../runtime/raw_chip_facts.h",
+    "../runtime/raw_own_states.h",
 ]
 
 def _generator_files(ctx, names):
@@ -405,32 +413,33 @@ def _generator_files(ctx, names):
         fail("the raw pack generator's srcs lack some of " + ", ".join(names))
     return files
 
-def _raw_buckets(ctx, tools, crawl, corpora):
-    probe_inputs = depset([tools.twin] + tools.raw + ctx.files.device_libraries +
-                          _generator_files(ctx, _RAW_PROBE), transitive = [crawl.files])
+def _raw_buckets(ctx, tools, corpora, views, selectors = []):
+    """Probe each corpus over its view of the libraries (views[i]: a root and its files)."""
+    generator = _generator_files(ctx, _RAW_PROBE)
     buckets = []
     for i, bucket_corpus in enumerate(corpora):
-        # rawpack.py knows a bucket by its directory's name (bucket0 also draws the raw path's own states).
-        bucket = ctx.actions.declare_directory(named(ctx, "_work/bucket{}".format(i)))
-        args = ctx.actions.args()
-        args.add("probe")
-        args.add("--generator", ctx.file.generator)
-        args.add("--raw", tools.raw_dir)
-        args.add("--nvk", tools.twin)
-        args.add("--qc", crawl.qc)
+        view = views[i]
 
-        # The probe reads every library under --root, the crawl's root/ with this build's applications (the pack's app
-        # states are theirs), not the base tree, which has none of them. crawl.files declares that whole tree: a remote
-        # worker has only the declared files.
-        args.add("--data-dir", crawl.root + "/data")
-        args.add("--root", crawl.root + "/root")
+        # directbucket.py knows a bucket by its directory's name (bucket0 also draws the raw path's own states).
+        bucket = ctx.actions.declare_directory(named(ctx, "_work/bucket{}".format(i)))
+        probe_tools = raw_tool_files(tools, _PROBE0_TOOLS if i == 0 else _PROBE_TOOLS)
+        args = ctx.actions.args()
+        args.add("--generator", generator[0])
+        args.add("--raw", tools.raw_dir)
+        args.add("--qc", view.qc)
+
+        # The probe reads the libraries under --root, which `view` declares whole: a remote worker has only the declared
+        # files.
+        args.add("--data-dir", view.root + "/data")
+        args.add("--root", view.root + "/root")
         args.add_all(ctx.files.device_libraries, before_each = "--data")
         args.add("--lines", bucket_corpus)
+        args.add_all(selectors, before_each = "--ca-selectors")
         args.add("--out", bucket.path)
         ctx.actions.run(
-            executable = ctx.executable._tool,
+            executable = ctx.executable._probe,
             arguments = [args],
-            inputs = depset([bucket_corpus], transitive = [probe_inputs]),
+            inputs = depset([bucket_corpus] + probe_tools + generator + selectors + ctx.files.device_libraries, transitive = [view.files]),
             outputs = [bucket],
             mnemonic = "MetalRawProbe",
             progress_message = "Making the raw pack's bucket {} of {} directly".format(i + 1, len(corpora)),
@@ -439,7 +448,7 @@ def _raw_buckets(ctx, tools, crawl, corpora):
         buckets.append(bucket)
     return buckets
 
-def _raw_link(ctx, buckets, corpus_report, archives):
+def _raw_link(ctx, buckets, corpus_report, archives, selectors = []):
     linked = ctx.actions.declare_directory(named(ctx, "_work/linked"))
     args = ctx.actions.args()
     args.add("link")
@@ -448,11 +457,12 @@ def _raw_link(ctx, buckets, corpus_report, archives):
     if corpus_report:
         args.add("--corpus-report", corpus_report)
     args.add_all(archives, before_each = "--archives")
+    args.add_all(selectors, before_each = "--ca-selectors")
     args.add_all(buckets, expand_directories = False)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = depset(([corpus_report] if corpus_report else []) + archives + buckets +
+        inputs = depset(([corpus_report] if corpus_report else []) + archives + selectors + buckets +
                         _generator_files(ctx, _RAW_LINK)),
         outputs = [linked],
         mnemonic = "MetalRawLink",
@@ -482,7 +492,7 @@ def _seed_raw_pack_impl(ctx):
 
     # QuartzCore's tables (ca/qc-<build>.json) make Core Animation's states from their names.
     tables = [f for f in ctx.files.srcs if f.dirname.endswith("/ca") and f.extension == "json"]
-    corpora = [ctx.actions.declare_file(named(ctx, "_work/split/bucket{}.log".format(i))) for i in range(_RAW_BUCKETS)]
+    corpora = [ctx.actions.declare_file(named(ctx, "_work/split/bucket{}.log".format(i))) for i in range(_RAW_BUCKETS + 1)]
     args = ctx.actions.args()
     names = [f for f in ctx.files.ca_names if f.basename == kind + ".txt"]
     args.add("split")
@@ -501,8 +511,12 @@ def _seed_raw_pack_impl(ctx):
         progress_message = "Splitting the raw pack's states into buckets",
     )
 
-    buckets = _raw_buckets(ctx, tools, crawl, corpora)
-    linked = _raw_link(ctx, buckets, corpus_report, archives)
+    # The shared buckets read the crawl without this build's applications; the apps' bucket, the last, reads them too.
+    base = struct(root = crawl.base_root, files = crawl.base_files, qc = crawl.qc)
+    full = struct(root = crawl.root, files = crawl.files, qc = crawl.qc)
+    selectors = [f for f in ctx.files.ca_selectors if f.basename == kind + ".txt"]
+    buckets = _raw_buckets(ctx, tools, corpora, [base] * _RAW_BUCKETS + [full], selectors)
+    linked = _raw_link(ctx, buckets, corpus_report, archives, selectors)
 
     out = ctx.actions.declare_directory(named(ctx, ""))
     args = ctx.actions.args()
@@ -541,6 +555,7 @@ seed_raw_pack = rule(
             allow_files = [".txt"],
             doc = "Core Animation states devices named missing (precompile/ca-names/<build>.txt): the IPSW kind's",
         ),
+        "ca_selectors": attr.label_list(allow_files = [".txt"]),
         "app_states": attr.label_list(
             allow_files = [".log"],
             doc = "our own apps' states the pack holds (precompile/app-states/<build>.log): the IPSW kind's",
@@ -554,12 +569,16 @@ seed_raw_pack = rule(
             allow_single_file = True,
         ),
         "_tool": attr.label(default = "//tools/gpu:rawpack", executable = True, cfg = "exec"),
+        "_probe": attr.label(default = "//tools/gpu:rawprobe", executable = True, cfg = "exec"),
     },
 )
 
 def _sample_raw_pack_impl(ctx):
     tools = seed_tool_files(ctx.attr.tools)
-    buckets = _raw_buckets(ctx, tools, ctx.attr.crawl[CrawlInfo], [ctx.file.corpus])
+    crawl = ctx.attr.crawl[CrawlInfo]
+    kind = ctx.attr.ipsw[IpswInfo].build
+    selectors = [f for f in ctx.files.ca_selectors if f.basename == kind + ".txt"]
+    buckets = _raw_buckets(ctx, tools, [ctx.file.corpus], [struct(root = crawl.root, files = crawl.files, qc = crawl.qc)], selectors)
     return [DefaultInfo(files = depset([_raw_link(ctx, buckets, None, [])]))]
 
 sample_raw_pack = rule(
@@ -568,6 +587,7 @@ sample_raw_pack = rule(
     (the first bucket's warm-up line first), probed and linked as seed_raw_pack probes and links its buckets, with no
     archive inventory and no stamp. Its records are the full pack's records of those states.""",
     attrs = _IPSW | {
+        "ca_selectors": attr.label(default = "//drivers/TegraGM20BMetal/precompile/ca-selectors:tables"),
         "tools": attr.label(mandatory = True),
         "crawl": attr.label(mandatory = True, providers = [CrawlInfo]),
         "device_libraries": attr.label(allow_files = True, doc = "device-compiled libraries used by native corpus states"),
@@ -575,6 +595,7 @@ sample_raw_pack = rule(
         "generator": attr.label(mandatory = True, allow_single_file = True, doc = "raw/pack/rawpack.py"),
         "srcs": attr.label_list(allow_files = True, doc = "the generator's modules (raw/pack)"),
         "_tool": attr.label(default = "//tools/gpu:rawpack", executable = True, cfg = "exec"),
+        "_probe": attr.label(default = "//tools/gpu:rawprobe", executable = True, cfg = "exec"),
     },
 )
 

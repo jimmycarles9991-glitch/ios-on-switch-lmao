@@ -71,6 +71,7 @@
 #warning "MAC policy is not KPI, see Technical Q&A QA1574, this header will be removed in next version"
 #endif
 
+#include <switch/app_code.h>
 #include <string.h>
 #include <sys/param.h>
 #include <sys/queue.h>
@@ -270,6 +271,20 @@ enum mac_iterate_types {
 	            MAC_CHECK_RSLT(check, mpc);                          \
 	            error = mac_error_select(__step_err, error);         \
 	    }                                                            \
+    });                                                                  \
+} while (0)
+
+#define SWITCH_MAC_CHECK(skip_amfi, check, args...) do {                 \
+    const bool switch_skip_amfi = (skip_amfi);                           \
+    error = 0;                                                           \
+    MAC_POLICY_ITERATE({                                                 \
+        if (mpc->mpc_ops->mpo_ ## check != NULL &&                        \
+            !(switch_skip_amfi && switch_app_code_amfi(mpc->mpc_name))) { \
+            MAC_CHECK_CALL(check, mpc);                                  \
+            int __step_err = mpc->mpc_ops->mpo_ ## check (args);           \
+            MAC_CHECK_RSLT(check, mpc);                                  \
+            error = mac_error_select(__step_err, error);                 \
+        }                                                               \
     });                                                                  \
 } while (0)
 

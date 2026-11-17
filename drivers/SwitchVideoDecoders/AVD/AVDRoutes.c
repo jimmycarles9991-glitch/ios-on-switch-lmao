@@ -18,7 +18,7 @@ CFDictionaryRef avd_copy_picture_routes(const Decoder *d)
         kEmitter = 9,
         kPort = kEmitter + AVD_ROUTE_COUNT,
         kBuffers,
-        kCount = kBuffers + 7
+        kCount = kBuffers + 8
     };
 
     int32_t counts[kCount] = {(int32_t)d->frames, (int32_t)d->exported, (int32_t)(d->presented - d->exported),
@@ -35,6 +35,7 @@ CFDictionaryRef avd_copy_picture_routes(const Decoder *d)
     counts[kBuffers + 4] = (int32_t)stats.exports;
     counts[kBuffers + 5] = (int32_t)stats.export_objects;
     counts[kBuffers + 6] = (int32_t)stats.parked_most;
+    counts[kBuffers + 7] = (int32_t)stats.export_surfaces;
     const void *keys[kCount] = {CFSTR("frames"),
                                 CFSTR("exported"),
                                 CFSTR("vic"),
@@ -57,7 +58,8 @@ CFDictionaryRef avd_copy_picture_routes(const Decoder *d)
                                 CFSTR("buffers_allocated"),
                                 CFSTR("native_exports"),
                                 CFSTR("native_objects"),
-                                CFSTR("parked_most")};
+                                CFSTR("parked_most"),
+                                CFSTR("native_surfaces")};
     const void *values[kCount];
     for (int i = 0; i < count; i++)
         values[i] = CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &counts[i]);

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
-// The chip facts (raw_pack.h kChipAssumptions) a device probe has proved on GM20B. The pack builder compiles the variants
-// that assume them and stamps them into the pack header (PackHeader::chipFacts, pack/packfile.py chip_facts), whose draws
-// then hold them. A bit is set here by hand, from the probe's log line, never at run time.
-//   AssumeTexsF16: SwitchHWTest gpu.raw.texs_f16: every unorm8_* and rgba16f_* "_f16_wrong" 0, its "_proof" 0x5346....
+// The chip facts (raw_pack.h kChipAssumptions) a device probe has proved on GM20B. Every program a record holds is compiled
+// under them, its generic one too (raw_direct.cpp), and the pack builder stamps them into the pack header
+// (PackHeader::chipFacts, pack/packfile.py chip_facts), whose draws then hold them. A bit is set here by hand, from the
+// probe's log line, never at run time; pack/packfile.py reads the literal, so it stays a number.
+//   AssumeTexsF16 (1 << 18): SwitchHWTest gpu.raw.texs_f16 on boots 14, 15, 17, 18, 19 and 21: every unorm8_* and
+//     rgba16f_* "_f16_wrong" 0, its "_proof" 0x53460001
 //   AssumeRopRounding: no probe yet (COMPILER.md E3)
 #pragma once
 #include <array>
@@ -11,7 +13,7 @@
 
 namespace raw {
 
-constexpr uint32_t kProvenChipFacts = 0;
+constexpr uint32_t kProvenChipFacts = 0x40000;
 
 // The ROP units a device probe proved the raw path drives right, set by hand from the probe's line (never at run time):
 //   ProvenFixedBlend: SwitchHWTest gpu.x1.blend_exact "model=chip chip_misses=0" (T-v2, 11 Nov: the 8-bit integer blender
@@ -22,18 +24,26 @@ enum ProvenUnit : uint32_t {
 
 constexpr uint32_t kProvenUnits = ProvenFixedBlend;
 
-// The iterated blend programs (pack/iterated/table.py's names; vcm, the colour matrix macro's, and vcm.rows, its route
-// for a QuartzCore whose matrix has no clamp: pack/fetchfree_link.py) the device showed within their bound of the
-// storage form and faster than it, each by its own measured cost, not by a pass count: SwitchHWTest
-// gpu.raw.fetch_rung3 "proven" (every state of the program within the bound and faster), with gpu.x1.iterated_blend
-// "nvn_within_one" equal to "nvn_run". None has been, so rung 3 takes no draw.
-inline constexpr std::array<std::string_view, 0> kIteratedProven = {};
-
-// The colour ROP writes a zeta's memory (PTE kinds ZF32_X24S8 and S8) as a colour target of its texel size, and the zeta's
-// depth and stencil tests and the texture unit then read what it wrote: the one-draw stencil route (raw_zeta_colour.h).
-// Set by hand from SwitchHWTest gpu.raw.zeta_colour: claim_verdict=PASS (its colour arm's counts 0, colour_bit_draws=0,
-// colour_rop_draws and colour_turn_cells above 0), reopens=0, gpu_after=1, and no "fault", "ROP", "LTC" or "TRAP"
-// kernel line in its window. Until then stencil planes take the eight-draw route.
-constexpr bool kColourRopWritesZeta = false;
+// The iterated blend programs rung 3 draws (pack/iterated/table.py's names; vcm, the colour matrix macro's, and vcm.rows,
+// its route for a QuartzCore whose matrix has no clamp: pack/fetchfree_link.py): those whose passes cost less than the
+// interlocked storage form they stand in for.
+// Accuracy: on T-v3i and T-v4c (x1-bench3/BENCH3.md) every Core Animation program ran within 1 code of the exact
+// interpreter of its words; lum only for premultiplied colour.
+// Cost at 720p (BENCH3 section 5, T-v3i/T-v4c): the first pass is free, each further one 150.3 us, on BGRA8 and RGBA16F,
+// pitch and block-linear alike. Boot 21's interlocked storage forms: 1,501.5 us for Core Animation's add (gpu.raw.fetch_rung2
+// us_rung4_add), the shortest in-shader blend; 1,542.4 us for a bare fetch (gpu.raw.fetch_blend_cost); 2,295.4 us for vcm
+// (gpu.raw.blend_twin). A longer in-shader blend costs the storage form more: about 2.6 us a dependent instruction inside
+// the interlock (BENCH3 T-v4c interlock section, 64 to 256 FFMAs).
+//   up to 9 passes (1,353 us): below every storage form
+//   10 passes (1,503 us: hlt, sbt.x, llt.x, dlc.u): level with add's, whose blend is the shortest; their own storage forms
+//     carry longer blends
+//   11 passes and more (1,653 us and up): slt, div, cbn.u, div.x, cdg, dso, cdg.x, lso, cbn, cbn.x, dlc 28, col and lum 42,
+//     cli 54, hue and sat 64, vcm 26-38 (3,908 us and more against its 2,295) lose to the interlock and stay on it
+// SwitchHWTest gpu.raw.fetch_rung3 judges each on the device: worst_<mode> (codes off the storage form, bound 2),
+// us_rung3_<mode> against us_rung4_<mode>, "slower" and "proven".
+inline constexpr std::array<std::string_view, 20> kIteratedProven = {
+    "mpy", "pdi", "lbn", "drk",   "ltn", "sbt.u", "llt.u", "pld",   "sds",   "div.u",
+    "dif", "ovl", "pin", "cdg.u", "sbt", "llt",   "hlt",   "sbt.x", "llt.x", "dlc.u",
+};
 
 }  // namespace raw

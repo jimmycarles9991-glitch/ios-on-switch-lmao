@@ -1,7 +1,7 @@
 """A 2x2 quad of interp.py lanes, run in lockstep: cross-lane instructions (SHFL, FSWZADD, VOTE) and divergence.
 
 Memory is modelled as interp.py's single lane has it: a load (SULD, LDG) is a pure function of its operands, a store
-(SUST) is recorded and compared, an atomic returns 0, so the interlock's ticket wait passes at once.
+(SUST) is recorded and compared, an atomic or an L2 (.CG) load returns 0, so the interlock's ticket wait passes at once.
 
 Divergence follows Maxwell's reconvergence stack: SSY, PBK and PCNT push their targets; a branch some active lanes take
 runs the rest first and parks the takers; SYNC (and an empty active set) resumes the next parked path, then reconverges
@@ -58,14 +58,19 @@ def cross_lane(name: str, w: int, lanes: list[Lane], active: set[int]) -> None:
             lane.setp(bits(w, 45, 3), (all(votes), any(votes), all(votes) or not any(votes))[mode])
 
 
-def run_quad(code: bytes, inputs: list[Inputs], outputs: int) -> list[tuple]:  # noqa: C901, PLR0912, PLR0915  every control opcode here
-    """Run a quad to EXIT; give each lane's first `outputs` registers, whether it was killed, and its stores."""
+def run_quad(  # noqa: C901, PLR0912, PLR0915  every control opcode here
+    code: bytes, inputs: list[Inputs], outputs: int, issued: list[int] | None = None
+) -> list[tuple]:
+    """Run a quad to EXIT; give each lane's first `outputs` registers, whether it was killed, and its stores.
+
+    `issued` gets the instructions the quad issued, every path a lane of it took: what a pixel costs the SM.
+    """
     words = isa.words_of(code)
     lanes = [Lane() for _ in range(LANES)]
     results: list[tuple | None] = [None] * LANES
     done: set[int] = set()
     pc, active, stack = 8, set(range(LANES)), []
-    steps = 0
+    steps = count = 0
 
     def resume() -> tuple[int, set[int]] | None:
         while stack:
@@ -82,6 +87,7 @@ def run_quad(code: bytes, inputs: list[Inputs], outputs: int) -> list[tuple]:  #
         if (pc // 8) % 4 == 0:
             pc += 8
             continue
+        count += 1
         w = words[pc // 8]
         name = isa.name(w)
         base = name.split('_', 1)[0]
@@ -127,6 +133,8 @@ def run_quad(code: bytes, inputs: list[Inputs], outputs: int) -> list[tuple]:  #
             for i in guard:
                 alu(name, w, lanes[i], inputs[i])
         pc = nxt
+    if issued is not None:
+        issued.append(count)
     return [
         r if r is not None else ([lanes[i].r(k) for k in range(outputs)], False, lanes[i].stores)
         for i, r in enumerate(results)

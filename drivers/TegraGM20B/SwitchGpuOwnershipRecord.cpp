@@ -145,11 +145,26 @@ extern "C" int switch_gpu_backing_promise_dependencies(switch_gpu_backing_transa
 	return 0;
 }
 
-extern "C" void switch_gpu_backing_commit(switch_gpu_backing_transaction *transaction)
+extern "C" int switch_gpu_backing_seal(switch_gpu_backing_transaction *transaction)
+{
+	if (transaction == nullptr)
+		return -22;
+	if (transaction->ordered != 0)
+		return 0;
+	if (transaction->count != 0)
+		return -22;
+	switch_gpu_backing_order_lock();
+	transaction->ordered = 1;
+	return 0;
+}
+
+namespace
+{
+bool publish_transaction(switch_gpu_backing_transaction *transaction)
 {
 	if (!transaction || !holds(transaction) || transaction->prepared != transaction->count ||
 	    !uses_intact(transaction, "commit"))
-		return;
+		return false;
 	const auto *timeline = transaction->timeline;
 	uint32_t used = 0;
 	for (uint32_t i = 0; i < transaction->count; ++i) {
@@ -189,7 +204,35 @@ extern "C" void switch_gpu_backing_commit(switch_gpu_backing_transaction *transa
 	}
 	if (timeline)
 		settle_refs(*transaction, used);
-	unlock_transaction(transaction);
+	return true;
+}
+}  // namespace
+
+extern "C" void switch_gpu_backing_publish(switch_gpu_backing_transaction *transaction)
+{
+	if (!publish_transaction(transaction))
+		return;
+	if (transaction->ordered == 0)
+		return;
+	for (uint32_t i = transaction->count; transaction->locked != 0 && i != 0; --i) {
+		if ((transaction->uses[i - 1].reserved & kUseLocked) == 0)
+			continue;
+		transaction->uses[i - 1].reserved = 0;
+		IOLockUnlock(transaction->uses[i - 1].backing->lock);
+		--transaction->locked;
+	}
+}
+
+extern "C" void switch_gpu_backing_finish(switch_gpu_backing_transaction *transaction)
+{
+	if (transaction != nullptr)
+		unlock_transaction(transaction);
+}
+
+extern "C" void switch_gpu_backing_commit(switch_gpu_backing_transaction *transaction)
+{
+	if (publish_transaction(transaction))
+		unlock_transaction(transaction);
 }
 
 extern "C" void switch_gpu_backing_abort(switch_gpu_backing_transaction *transaction)

@@ -25,8 +25,8 @@ struct RMICBCommand {
     RMBuffer *factors = nil, *patchIndices = nil, *pointIndices = nil;
 };
 
-// The kinds of a buffer's commands (RMIndirectCommandBuffer kinds): triangles and lines or points take different raster
-// state (raw::icb::triangles), patches a tessellation state
+// The kinds of a buffer's commands (RMIndirectCommandBuffer kinds): triangles and lines or points take different polygon
+// offsets (raw::icb::polygonOffset), patches a tessellation state
 enum RMICBKinds : uint8_t {
     RMICBTriangles = 1,
     RMICBOthers = 2,
@@ -74,4 +74,4 @@ bool encodeCommands(raw::RenderEncoder *re, raw::CommandBuffer *rc, const RMPlan
 void replayCommands(id<MTLRenderCommandEncoder> encoder, const RMPlanDraw &draw, const std::function<id(void *)> &use);
 // OpResetCommands and OpCopyCommands: on the copy engine (`be`), or with none (m2v's replay) the commands as the CPU keeps
 // them alone, which every encode brings to the commands' state in its command buffer's order
-void encodeCommandsBlit(raw::BlitEncoder *be, const Cmd &c);
+void encodeCommandsBlit(raw::CommandBuffer *rc, raw::BlitEncoder *be, const Cmd &c);

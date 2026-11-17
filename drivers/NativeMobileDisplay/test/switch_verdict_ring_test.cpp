@@ -88,9 +88,13 @@ TEST(VerdictRing, AnOverlaySwapsLayersReachTheGateWhole)
 
     static switch_display::VerdictRing<Overlay, 32> ring;
     constexpr uint64_t kSwaps = 20000;
-    std::atomic<bool> done{false};
+    std::atomic<bool> done{false}, gateRunning{false};
     uint64_t dropped = 0;
+    // Started on its own, the swapping thread can publish every swap (a full ring refuses most at once) before the gate
+    // thread first looks at `done`.
     std::thread swapping([&] {
+        while (!gateRunning)
+            std::this_thread::yield();
         for (uint64_t i = 1; i <= kSwaps; ++i) {
             Overlay o = {i, i % 3 == 0, {}};
             for (uint64_t w = 0; w < 64; ++w)
@@ -112,11 +116,12 @@ TEST(VerdictRing, AnOverlaySwapsLayersReachTheGateWhole)
         last = o.index;
         ++received;
     };
-    while (!done) {
+    gateRunning = true;
+    do {
         ring.drain(take);
         kicks += reserved != 0u;
         ++frameEnds;
-    }
+    } while (!done);
     swapping.join();
     ring.drain(take);
     EXPECT_FALSE(torn);

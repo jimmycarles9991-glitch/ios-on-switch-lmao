@@ -7,6 +7,7 @@
 #   bazel run //tools/gpu/maxwell:blendcheck -- <dump dir>   (storage forms whose shader computes the blend)
 #   bazel run //tools/gpu/maxwell:gate -- --rungs <dump dir> --corpus ...   (fetch-free forms through the ROP: rungcheck.py)
 #   bazel run //tools/gpu/maxwell:storecheck -- <pack.bin> --corpus ...   (what storage forms do with each fetched colour)
+#   bazel run //tools/gpu/maxwell:ticketcheck -- <pack.bin>   (each interlock ticket reader's wait and header bit)
 #
 # direct_exec_test runs the raw path's direct compile of direct/exec.metal's states and kernels and the counter resolve
 # kernel (direct/directrun.mm, built on this Mac beside the shader tools' mock GM20B) and executes their programs here.
@@ -118,6 +119,7 @@ py_library(
         ":interp",
         ":isa",
         ":nakstat",
+        ":rop",
         "//drivers/TegraGM20BMetal:raw_pack",
         "//tools/benchloop:lib",
     ],
@@ -125,7 +127,10 @@ py_library(
 
 py_binary(
     name = "gate",
-    srcs = ["gate.py"],
+    srcs = [
+        "gate.py",
+        "selectorgate.py",
+    ],
     data = ["scoreboard.log"],
     visibility = ["//visibility:public"],
     deps = [
@@ -135,6 +140,14 @@ py_binary(
         ":rungcheck_lib",
         ":rop",
     ],
+)
+
+py_test(
+    name = "selectorgate_test",
+    size = "small",
+    srcs = ["selectorgate_test.py"],
+    data = ["testdata/image_draw_fragment.hex"],
+    deps = [":gate"],
 )
 
 py_binary(
@@ -162,6 +175,41 @@ py_test(
     size = "small",
     srcs = ["storecheck_test.py"],
     deps = [":storecheck_lib"],
+)
+
+py_library(
+    name = "ticketcheck_lib",
+    srcs = ["ticketcheck.py"],
+    deps = [":isa"],
+)
+
+py_binary(
+    name = "ticketcheck",
+    srcs = ["ticketcheck.py"],
+    deps = [":ticketcheck_lib"],
+)
+
+py_test(
+    name = "ticketcheck_test",
+    size = "small",
+    srcs = ["ticketcheck_test.py"],
+    deps = [":ticketcheck_lib"],
+)
+
+# Every interlock ticket reader of the configured kind's full pack (ticketcheck.py)
+py_test(
+    name = "ticketcheck_pack_test",
+    size = "medium",
+    srcs = ["ticketcheck_test.py"],
+    data = ["//gpu/seed:raw_pack"],
+    env = {"TICKETCHECK_PACK": "$(rootpath //gpu/seed:raw_pack)/pack.bin"},
+    main = "ticketcheck_test.py",
+    # m2v: //gpu/seed:raw_pack's probe runs NVK until the pack generator stops needing it
+    tags = [
+        "m2v",
+        "pack",
+    ],
+    deps = [":ticketcheck_lib"],
 )
 
 py_test(
@@ -237,14 +285,38 @@ direct_runner(
     srcs = [
         "direct/directrun.mm",
         "direct/exec.metal",
+        "//drivers/TegraGM20BMetal:raw/test/linkcheck.mm",
+        "//drivers/TegraGM20BMetal:raw/test/linked/caller.metal",
+        "//drivers/TegraGM20BMetal:raw/test/linked/callee.metal",
+        "//drivers/TegraGM20BMetal/test:grouped_pointer.metal",
+        "//drivers/NativeMetal/test:neutral_compute.mm",
+        "//drivers/NativeMetal/test:neutral_compute.metal",
         "//drivers/TegraGM20BMetal:raw_runtime_headers",
         "//drivers/TegraGM20B:TegraGM20BClockABI.h",
         "//drivers/TegraGM20BMetal:raw_stack_sources",
         "//kits/SwitchGM20B:class_headers",
     ],
-    host_bridge = "//gpu:bridge_host",
     metal_abi = "//drivers/NativeMetal/abi:MetalABI.h",
-    tools = "//gpu/seed:local_tools",
+    tools = "//gpu/seed:local_raw_tools",
+    translate = "//gpu:translate_host",
+    visibility = ["//drivers/TegraGM20BMetal/test:__pkg__"],
+)
+
+py_test(
+    name = "direct_consumers_test",
+    srcs = ["direct_consumers_test.py"],
+    args = [
+        "$(rootpath :direct_runner)",
+        "$(rootpath //gpu/seed:raw_pack)",
+    ],
+    data = [
+        ":direct_runner",
+        "//gpu/seed:raw_pack",
+    ],
+    tags = [
+        "pack",
+        "requires-darwin",
+    ],
 )
 
 py_test(
@@ -256,14 +328,33 @@ py_test(
     ],
     args = [
         "$(rootpath :direct_runner)",
-        "$(rootpath //gpu/seed:local_tools)",
     ],
     data = [
         ":direct_runner",
-        "//gpu/seed:local_tools",
     ],
     tags = [
-        "no-remote-exec",
+        "requires-darwin",
+    ],
+    deps = [
+        ":interp",
+        ":isa",
+    ],
+)
+
+py_test(
+    name = "direct_wide_test",
+    size = "medium",
+    srcs = [
+        "direct_records.py",
+        "direct_wide_test.py",
+    ],
+    args = [
+        "$(rootpath :direct_runner)",
+    ],
+    data = [
+        ":direct_runner",
+    ],
+    tags = [
         "requires-darwin",
     ],
     deps = [

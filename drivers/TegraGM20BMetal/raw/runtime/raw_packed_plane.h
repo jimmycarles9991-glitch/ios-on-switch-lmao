@@ -22,6 +22,9 @@
 
 namespace raw {
 
+// The command buffer's backing tag of a loaded packed plane's stand-in at colour j: kPackedLoadTag + j
+constexpr uint32_t kPackedLoadTag = 80;
+
 // The words of a row of `codes` codes
 inline uint32_t packedPlaneWords(uint32_t codes)
 {
@@ -64,7 +67,7 @@ inline const char *planPackedPlane(const YcbcrFacts &f, YcbcrPlan &out)
     if (f.plane != channels - 1)
         return "R10Unorm_PACKED over a plane but 0, or RG10Unorm_PACKED over one but 1";
     if (!f.simple)
-        return "shape or usage";
+        return "shape";
     const bool chroma = f.plane == 1;
     const uint32_t width = chroma && surface->across ? (f.surfaceWidth + 1) / 2 : f.surfaceWidth;
     const uint32_t height = chroma && surface->down ? (f.surfaceHeight + 1) / 2 : f.surfaceHeight;
@@ -102,6 +105,17 @@ inline void packedPlaneTexel(const uint32_t *row, uint32_t x, uint32_t channels,
         const uint32_t n = channels * x + c;
         codes[c] = c < channels ? (row[n / 3] >> (10 * (n % 3))) & 1023 : 0;
     }
+}
+
+// A loaded pass's stand-in texel x of a plane row (pack/ycbcr.metal ycbcr_load_plane_packed_*_frag): each code over 1023, the
+// stand-in's float. The store gives each back (packedPlaneDrawn): it holds the value as the half toward zero, at most one half
+// step below it, and rounds h x 1023 to the nearest code, which a half step (2^-11 below 1) x 1023 keeps within 0.4995.
+inline void packedPlaneLoad(const uint32_t *row, uint32_t x, uint32_t channels, float value[2])
+{
+    uint32_t codes[2];
+    packedPlaneTexel(row, x, channels, codes);
+    for (uint32_t c = 0; c < 2; c++)
+        value[c] = float(codes[c]) / 1023.0f;
 }
 
 // The store state's words of a pass's stand-in (`rgba`, width x height texels), as pack/ycbcr_store.metal

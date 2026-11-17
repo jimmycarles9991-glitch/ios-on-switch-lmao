@@ -122,6 +122,7 @@ std::shared_ptr<Pool::Job> Pool::next()
 
 void Pool::workerLoop()
 {
+    hooks_.setBand(Band::Interactive);
     std::unique_lock<std::mutex> l(lock_);
     for (;;) {
         std::shared_ptr<Job> job;
@@ -141,6 +142,7 @@ void Pool::workerLoop()
             primary(job, result);
         });
         finish(job, split);
+        hooks_.setBand(Band::Interactive);
         l.lock();
     }
 }
@@ -149,6 +151,7 @@ void Pool::primary(const std::shared_ptr<Job> &job, int32_t result)
 {
     std::vector<Waiter> answered;
     std::vector<void *> raises;
+    bool splitWaited = false;
     {
         std::lock_guard<std::mutex> l(lock_);
         job->primaryDone = true;
@@ -158,6 +161,7 @@ void Pool::primary(const std::shared_ptr<Job> &job, int32_t result)
         });
         answered.assign(split, job->waiters.end());
         job->waiters.erase(split, job->waiters.end());
+        splitWaited = !job->waiters.empty();
         raises.swap(job->raises);
         if (job->foreground) {
             foregroundRunning_--;
@@ -168,11 +172,12 @@ void Pool::primary(const std::shared_ptr<Job> &job, int32_t result)
         job->band = Band::Background;
     }
     work_.notify_all();
-    hooks_.setBand(Band::Background);
-    for (void *token : raises)
-        hooks_.lower(token);
     for (const Waiter &w : answered)
         hooks_.complete(w, result);
+    for (void *token : raises)
+        hooks_.lower(token);
+    if (splitWaited)
+        hooks_.setBand(Band::Background);
 }
 
 void Pool::finish(const std::shared_ptr<Job> &job, int32_t splitResult)
@@ -197,12 +202,14 @@ void Pool::finish(const std::shared_ptr<Job> &job, int32_t splitResult)
     }
     work_.notify_all();
     idle_.notify_all();
-    for (void *token : raises)
-        hooks_.lower(token);
     for (const Waiter &w : answered)
         hooks_.complete(w, w.split ? splitResult : primaryResult);
-    if (idle && hooks_.idle)
+    for (void *token : raises)
+        hooks_.lower(token);
+    if (idle && hooks_.idle) {
+        hooks_.setBand(Band::Background);
         hooks_.idle();
+    }
 }
 
 void Pool::drain()

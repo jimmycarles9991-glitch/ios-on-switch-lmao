@@ -270,17 +270,6 @@ protected:
 	}
 };
 
-// A kernel copy (the copy engine's plane copies, a tiling move) follows every running writer on the GPU: its own channel's
-// earlier work runs before it anyway, another's fence is an acquire, and one it cannot acquire on is refused (said), never
-// waited for on the CPU.
-TEST(WriterOrder, AKernelCopyOrdersOnTheGpuOrRefuses)
-{
-	EXPECT_EQ(tgm_writer_order(7, 7, 0), TGM_WRITER_IN_CHANNEL);
-	EXPECT_EQ(tgm_writer_order(7, 7, 1), TGM_WRITER_IN_CHANNEL);
-	EXPECT_EQ(tgm_writer_order(7, 9, 1), TGM_WRITER_GPU_ACQUIRE);
-	EXPECT_EQ(tgm_writer_order(7, 9, 0), TGM_WRITER_REFUSED);
-}
-
 TEST_F(Fences, AReadOfASurfaceAnotherChannelIsWritingWaitsOnceForThatWrite)
 {
 	Surface s(0x90000000, 101);
@@ -760,22 +749,6 @@ TEST(FenceDecisions, WaitOnlyForAnUnfinishedWriteOfALiveOtherChannel)
 	EXPECT_FALSE(tgm_fence_wanted(0, &running));
 }
 
-// A present's wait passed on a killed writer's release (gpu_fenced.h present_fenced): the frame is lost only when the submission it
-// waited for was among those the kill left unfinished, across the seqno wrap too.
-TEST(FenceDecisions, AWaitIsLostOnlyOnASubmissionTheKillLeftUnfinished)
-{
-	const TegraGM20BAbiFence live = {9, 0, 0, 0};
-	const TegraGM20BAbiFence killed = {12, 7, 12, 2};
-	const TegraGM20BAbiFence wrapped = {3, 0xfffffffe, 3, 1};
-	EXPECT_FALSE(tgm_fence_lost(&live, 9));
-	EXPECT_FALSE(tgm_fence_lost(&killed, 6));
-	EXPECT_TRUE(tgm_fence_lost(&killed, 7));
-	EXPECT_TRUE(tgm_fence_lost(&killed, 12));
-	EXPECT_FALSE(tgm_fence_lost(&killed, 13));
-	EXPECT_FALSE(tgm_fence_lost(&wrapped, 0xfffffffd));
-	EXPECT_TRUE(tgm_fence_lost(&wrapped, 0xffffffff));
-	EXPECT_TRUE(tgm_fence_lost(&wrapped, 2));
-}
 }  // namespace
 
 TEST_F(Fences, ExplicitVisibilityRequiresAddressedSubmissionAndCoherentFlags)

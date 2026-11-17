@@ -639,6 +639,7 @@ fn the_inputs_encoding_is_the_earlier_derived_debug() {
             derived
                 .replace(", emulated_simdgroups: false", "")
                 .replace(", dropped_vertex_layer: false", "")
+                .replace(", layered_storage: false", "")
                 .replace(", stage_input: None", "")
                 .replace(", storage_view_slots: {}", "")
                 .replace(", signed_color_attachments: {}", "")
@@ -659,7 +660,9 @@ fn the_inputs_encoding_is_the_earlier_derived_debug() {
                 .replace(", viewport_compensation: None", "")
                 .replace(", folded_groups: false", "")
                 .replace(", extended_range: {}", "")
+                .replace(", two_plane_textures: {}", "")
                 .replace(", extended_range_colors: {}", "")
+                .replace(", two_plane_alphas: {}", "")
                 .replace(", srgb_fetches: {}", "")
                 .replace(", zeroed_colors: {}", "")
                 .replace(", dropped_colors: {}", "")

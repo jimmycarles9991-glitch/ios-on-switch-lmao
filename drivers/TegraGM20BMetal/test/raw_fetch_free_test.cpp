@@ -73,7 +73,7 @@ TEST(RawFetchFree, AColourMatrixFormReadsItsRowsAndTheClampPairWhereItsUniformHa
 TEST(RawFetchFree, TheIteratedWordsEnableTheColoursBlendLoadTheProgramAndTurnOffAfter)
 {
     std::vector<uint32_t> on, off;
-    raw::iteratedBlendWords(multiply(), 0, on, off);
+    raw::iteratedBlendWords(multiply(), 0, 80, on, off);
     ASSERT_GE(on.size(), 4u);
     EXPECT_EQ(on[0], raw::Push::hdr(1, raw::SUBC_3D, 0x1360, 1));  // SET_BLEND(0)
     EXPECT_EQ(on[1], 1u);
@@ -83,6 +83,38 @@ TEST(RawFetchFree, TheIteratedWordsEnableTheColoursBlendLoadTheProgramAndTurnOff
     EXPECT_TRUE(has(0x00091001));
     EXPECT_TRUE(has(0x00081209));
     EXPECT_FALSE(off.empty());
+}
+
+// The iterated blend takes the shader's colour unclamped, where Metal's blend into an 8-bit target clamps it first
+uint32_t saturateAfter(const std::vector<uint32_t> &words)
+{
+    const uint32_t header = raw::Push::hdr(1, raw::SUBC_3D, 0x13a8, 1);  // SET_PS_SATURATE
+    const auto at = std::find(words.begin(), words.end(), header);
+    return at == words.end() || at + 1 == words.end() ? ~0u : at[1];
+}
+
+TEST(RawFetchFree, TheIteratedFormSaturatesAnEightBitColourAndTheNextStateDoesNot)
+{
+    for (uint8_t colour : {0, 2}) {
+        std::vector<uint32_t> on, off;
+        raw::iteratedBlendWords(multiply(), colour, 80, on, off);
+        EXPECT_EQ(saturateAfter(on), 1u << (4 * colour)) << "OUTPUT" << int(colour) << " TRUE, CLAMP_RANGE 0 to 1";
+        EXPECT_EQ(saturateAfter(off), 0u);
+    }
+    raw::PackIteratedBlend matrix = {};
+    matrix.uniformSlot = 1;
+    std::vector<uint32_t> on, off;
+    raw::iteratedBlendWords(matrix, 0, 70, on, off);
+    EXPECT_EQ(saturateAfter(on), 1u);
+    EXPECT_EQ(saturateAfter(off), 0u);
+}
+
+TEST(RawFetchFree, AFloatTargetsIteratedFormKeepsItsColourUnclamped)
+{
+    std::vector<uint32_t> on, off;
+    raw::iteratedBlendWords(multiply(), 0, 115, on, off);  // RGBA16Float
+    EXPECT_EQ(saturateAfter(on), ~0u) << "no SET_PS_SATURATE: Metal blends a float target's colour as it is";
+    EXPECT_EQ(saturateAfter(off), ~0u);
 }
 
 TEST(RawFetchFree, TargetSelectMapsEachSlotToItself)
@@ -104,15 +136,42 @@ TEST(RawFetchFree, Rung2TakesAnEightBitScreenTargetTwoLayersDeep)
     EXPECT_FALSE(raw::fetchFreeTaken(f, {80, false, 0}, 4));
 }
 
+TEST(RawFetchFree, APipelinePlacesTheFormsItsRuleTakesAndAnyTheProbeAsksFor)
+{
+    raw::PackIteratedBlend b = multiply();
+    const raw::FetchFreeForm listed = raw::fetchFreeForm(formRecord(0, raw::FetchIteratedBlend), &b);
+    EXPECT_TRUE(raw::fetchFreePlaced(listed));
+    b.name = raw::iteratedProgramName("hue");
+    const raw::FetchFreeForm unlisted = raw::fetchFreeForm(formRecord(0, raw::FetchIteratedBlend), &b);
+    EXPECT_FALSE(raw::fetchFreePlaced(unlisted)) << "release and debug place the same forms";
+    for (uint8_t probe : {2, 3, 4})
+        EXPECT_TRUE(raw::fetchFreePlaced(unlisted, probe));
+    EXPECT_FALSE(raw::fetchFreePlaced(raw::FetchFreeForm{}, 3));
+}
+
 TEST(RawFetchFree, AFormKnowsTheFragmentTexturesItSamples)
 {
     raw::PackPipeline pp = formRecord(0, raw::FetchBlend);
-    pp.entries = 3;
+    raw::setEntryCount(pp, 3);
     pp.entry[0] = {0, raw::EntryTexture, 2, 3, 0, 0, 0};
     pp.entry[1] = {8, raw::EntryTexture, 1, 5, 0, 0, 0};
     pp.entry[2] = {16, raw::EntryUbo, 2, 0, 0, 0, 0};
     const raw::FetchFreeForm f = raw::fetchFreeForm(pp, nullptr);
     EXPECT_EQ(f.sampledSlots, 1u << 3) << "the fragment stage's texture alone";
+    EXPECT_FALSE(f.samplesPast32);
+}
+
+// 24B119's fragment slots 32 to 127: a form sampling one is never a draw of eight-bit sources, whatever it binds there
+TEST(RawFetchFree, AFormSamplingAFragmentSlotPast31KnowsItSamplesOneSampledSlotsCannotName)
+{
+    raw::PackPipeline pp = formRecord(0, raw::FetchBlend);
+    raw::setEntryCount(pp, 3);
+    pp.entry[0] = {0, raw::EntryTexture, 2, 31, 0, 0, 0};
+    pp.entry[1] = {8, raw::EntryTexture, 2, 64, 0, 0, 0};
+    pp.entry[2] = {16, raw::EntryTexture, 1, 127, 0, 0, 0};
+    const raw::FetchFreeForm f = raw::fetchFreeForm(pp, nullptr);
+    EXPECT_EQ(f.sampledSlots, 1u << 31);
+    EXPECT_TRUE(f.samplesPast32);
 }
 
 struct Image {

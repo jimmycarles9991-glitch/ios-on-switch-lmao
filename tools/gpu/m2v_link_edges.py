@@ -19,9 +19,9 @@ from pathlib import Path
 LOOKED_UP = re.compile(r'\(undefined\) (?:weak )?external (\S+) \(dynamically looked up\)')
 
 
-def run(command: list[str]) -> str:
+def run(command: list[str], partial: bool = False) -> str:
     done = subprocess.run(command, capture_output=True, text=True, check=False)
-    if done.returncode:
+    if done.returncode and not (partial and done.stdout):
         sys.exit(f'{command[0]} failed ({done.returncode}):\n{done.stdout}{done.stderr}')
     return done.stdout
 
@@ -41,7 +41,9 @@ def main() -> None:
     missing = {m.group(1) for m in map(LOOKED_UP.search, run(['nm', '-m', str(args.binary)]).splitlines()) if m}
     users: dict[str, set[str]] = {symbol: set() for symbol in missing}
     for path in (Path(a) for a in link if a.endswith(('.o', '.a'))):
-        for symbol in run(['nm', '-u', '-j', str(path)]).split():
+        # A Rust staticlib carries compiler_builtins members as bitcode of a newer LLVM than Xcode's nm reads: nm lists
+        # the other members and fails on those, which reference nothing of m2v
+        for symbol in run(['nm', '-u', '-j', str(path)], partial=path.suffix == '.a').split():
             if symbol in users:
                 users[symbol].add(path.name.removesuffix('.o'))
     lines = [f'{plain(s)}\t{",".join(sorted(users[s])) or "-"}' for s in sorted(missing, key=plain)]

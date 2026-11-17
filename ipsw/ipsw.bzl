@@ -25,8 +25,7 @@ load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo", "string_fla
 load("//gpu/seed:crawl.bzl", "QUARTZCORE", "shader_crawl_repository")
 load(":pins.bzl", "DEFAULT_KIND", "IPSWS")
 
-# Members above this are inflated only on demand (the SD install): they stay out of `bazel build //...`, out of the
-# disk cache, and out of every output base that does not install.
+# Members above this are inflated only on demand (the SD install): they stay out of `bazel build //...`.
 _LARGE = 256 << 20
 
 _STORED_BUILD = """\
@@ -221,9 +220,6 @@ def _ipsw_inflate_impl(ctx):
         outputs = [out],
         mnemonic = "IpswInflate",
         progress_message = "Inflating the IPSW's " + ctx.attr.filename,
-        # A multi-GB output (the system cryptex) would evict everything else from the 10 GB disk cache, and its input,
-        # from the repository cache, is no remote worker's to read.
-        execution_requirements = {"no-cache": "", "no-remote": ""} if ctx.attr.large else {},
         resource_set = _inflate_resources,
     )
     return [DefaultInfo(files = depset([out]))]
@@ -235,7 +231,6 @@ ipsw_inflate = rule(
         "src": attr.label(mandatory = True, allow_single_file = True, doc = "the member's stored (deflated) bytes"),
         "filename": attr.string(mandatory = True),
         "content_sha256": attr.string(mandatory = True),
-        "large": attr.bool(doc = "kept out of the disk and remote caches"),
         "_inflate": attr.label(default = "//ipsw:inflate", executable = True, cfg = "exec"),
     },
 )
@@ -249,8 +244,7 @@ def _ipsw_aea_decrypt_impl(ctx):
         outputs = [out],
         mnemonic = "IpswAeaDecrypt",
         progress_message = "Decrypting the IPSW's " + ctx.attr.filename,
-        # A multi-GB member of the repository cache: decrypted here, never uploaded for a remote worker.
-        execution_requirements = {"no-cache": "", "no-remote": "", "requires-darwin": ""},
+        execution_requirements = {"requires-darwin": ""},
     )
     return [DefaultInfo(files = depset([out]))]
 
@@ -413,7 +407,6 @@ def ipsw_kinds():  # buildifier: disable=unnamed-macro
                 src = "@ipsw//:stored_{}_{}".format(kind, role),
                 filename = _filename(pin),
                 content_sha256 = pin["content_sha256"],
-                large = large,
                 # Only the SD install reads the large ones: `bazel build //...` leaves them alone.
                 tags = ["manual"] if large else [],
                 visibility = ["//visibility:public"],

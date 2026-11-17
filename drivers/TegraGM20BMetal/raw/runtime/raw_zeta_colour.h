@@ -1,19 +1,22 @@
 // SPDX-License-Identifier: MIT
-// The one-draw stencil route: a stencil plane written by the colour ROP over the zeta's own memory, as Gallium nvc0 writes
-// depth and stencil (nv50_blit.h nv50_blit_zeta_to_colour_format and nv50_blit_derive_color_mask, nvc0_surface.c
-// nvc0_blit_3d). The zeta is a colour target of its texel size over its own block-linear layout (raw_zeta.h: a zeta's GOBs
-// are a colour image's; its PTE kind stays the zeta's), and one draw of the pack's program (pack/stencil_bits.metal's
-// *_colour_frag) writes each texel:
+// The one-draw stencil route: a stencil plane written by one draw of the colour ROP, as Gallium nvc0 writes depth and
+// stencil (nv50_blit.h nv50_blit_zeta_to_colour_format and nv50_blit_derive_color_mask, nvc0_surface.c nvc0_blit_3d). The
+// zeta is a colour image of its texel size over its own block-linear layout (raw_zeta.h: a zeta's GOBs are a colour
+// image's), and the pack's program (pack/stencil_bits.metal's *_colour_frag) writes each texel:
 //  - Depth32Float_Stencil8 (ZF32_X24S8) as RG32Uint: R its depth's bits, G its stencil in the low byte, the word its stencil
 //    view (X32_S8X24_UINT, raw_stencil_bits.h kStencilViews) reads. nvc0 draws R32G32_FLOAT; an integer target stores the
 //    words as the program gives them. A turn copy writes both words; a resolve writes G alone (nvc0's XS mode: colour mask
 //    G), keeping the depth its depth resolve wrote.
 //  - Stencil8 (S8) as R8Uint, the format its own header samples it as. nvc0 has no such zeta.
-// Taken where raw_chip_facts.h's kColourRopWritesZeta holds, or while a debug build's probe asks for it (hw_test_app
-// gpu.raw.zeta_colour), into a one-sample zeta without comptags (the colour ROP keeps no zeta compression); any other
-// stencil plane is raw_stencil_bits.h's eight draws. The draw is a pass of its own: the WAIT_FOR_IDLE of the barrier between
-// passes orders its colour writes after the zeta writes before it and before the zeta tests after it, as nvc0 serializes a
-// surface it flips between zeta and colour.
+// The colour ROP does not write the zeta's pages: on GM20B its writes through a ZF32_X24S8 or S8 PTE kind never reached
+// memory (boot 21, gpu.raw.zeta_colour: every route-written texel read back as it was before the route, by the copy engine
+// and by the zeta's own tests, with no fault or ROP trap), though nvc0 draws into kind 0xc3 the same way. The view is
+// rendered as a shadow target is (zetaPages): through a plain pool image of its colour format that the copy engine fills
+// from the zeta before the draw and copies back over the render area after it (CommandBuffer::render, RenderEncoder::end),
+// the engine whose zeta writes gpu.raw.stored_depth proves on both kinds. The fill keeps the texels the draw leaves: a
+// resolve's depth word, a turn copy's texels outside its source rectangle.
+// Every one-sample zeta without comptags takes it; any other stencil plane is raw_stencil_bits.h's eight draws, and so is
+// every plane while a debug build's probe asks for them (hw_test_app gpu.raw.zeta_colour's comparison arm).
 #pragma once
 #include <cstdint>
 #include <type_traits>
@@ -58,26 +61,27 @@ inline const char *stencilColourState(uint32_t format, uint32_t samples, Stencil
     return nullptr;
 }
 
-// Whether the one-draw route writes zeta `z` while the route is `taken`
-template <typename Texture> bool zetaColourWrites(const Texture &z, bool taken)
+// Whether the one-draw route writes zeta `z`
+template <typename Texture> bool zetaColourWrites(const Texture &z)
 {
-    return taken && zetaColourFormat(z.format) && z.samples == 1 && !z.comptags;
+    return zetaColourFormat(z.format) && z.samples == 1 && !z.comptags;
 }
 
-// Zeta `z`'s memory as the route's colour target
+// Zeta `z`'s memory as the route's colour target, rendered through a pool image
 template <typename Texture> Texture zetaColourView(const Texture &z)
 {
     Texture c = z;
     c.zeta = false;
     c.format = zetaColourFormat(z.format);
     c.renderable = true;
+    c.zetaPages = true;
     c.tic = 0;
     return c;
 }
 
-// The route's pass into `view` over (0, 0, width, height) (0: the whole target), no zeta bound. Loaded, never DontCare: a
-// stored DontCare target written through a partial mask is cleared first (RenderEncoder::clears), which would zero a
-// resolve's depth word, and a turn copy keeps the texels outside its source rectangle.
+// The route's pass into `view` over (0, 0, width, height) (0: the whole target), no zeta bound. Loaded, never DontCare: the
+// load is the pool image's fill from the zeta, which keeps a resolve's depth word and a turn copy's texels outside its
+// source rectangle.
 template <typename Pass, typename Texture> Pass zetaColourPass(Texture &view, uint32_t width, uint32_t height)
 {
     using Attachment = std::decay_t<decltype(Pass().color[0])>;

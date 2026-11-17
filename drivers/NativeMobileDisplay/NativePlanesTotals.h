@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // NativeLegacyDisplay's hardware-plane diagnostics, debug kernels only. Included in the class body after
 // NativePlanesDisplay.h.
-//  - Counters since boot: kern.switch_planes_{flips,latched,maps,dropped,native}, which hw_test_app's display.planes and
-//    display.planes_cropped read around a video they play. The pacing line's counters restart every stats window (noteStatsWindow); these add each closed window,
-//    and a read adds the open one's.
+//  - Counters since boot: kern.switch_planes_{flips,latched,maps,dropped,native,remaps}, which hw_test_app's
+//    display.planes and display.planes_cropped read around a video they play. The pacing line's counters restart every
+//    stats window (noteStatsWindow); these add each closed window, and a read adds the open one's.
 //  - A detached layer refused for its format or layout: one line with its surface as the kernel's IOSurface describes it,
 //    once per format, reason and geometry (Core Animation resends a refused swap every frame).
 
 #if SWITCH_FRAME_TIMELINE
-static constexpr unsigned kPlaneTotals = 5;
+static constexpr unsigned kPlaneTotals = 6;
 static inline uint32_t planeTotals[kPlaneTotals] = {};
 static inline struct sysctl_oid planeTotalOids[kPlaneTotals] = {};
 
@@ -19,6 +19,7 @@ void planeTotalsWindow(uint32_t (&window)[kPlaneTotals]) const
     window[2] = stPlaneMaps;
     window[3] = stPlaneDropped;
     window[4] = stPlaneNative;
+    window[5] = stPlaneRemaps;
 }
 
 void planeTotalsClose() const
@@ -41,16 +42,16 @@ static int planeTotalSysctl(struct sysctl_oid *, void *, int which, struct sysct
 
 static void planeTotalsRegister()
 {
-    static const char *const names[kPlaneTotals] = {"switch_planes_flips", "switch_planes_latched",
-                                                    "switch_planes_maps", "switch_planes_dropped",
-                                                    "switch_planes_native"};
+    static const char *const names[kPlaneTotals] = {"switch_planes_flips",  "switch_planes_latched",
+                                                    "switch_planes_maps",   "switch_planes_dropped",
+                                                    "switch_planes_native", "switch_planes_remaps"};
     for (unsigned i = 0; i < kPlaneTotals; ++i) {
         if (planeTotalOids[i].oid_name)
             continue;
         switch_sysctl_oid(&planeTotalOids[i], &sysctl__kern_children, names[i],
                           CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED, planeTotalSysctl, "I",
                           "window B since boot: sets written, sets latched, slot mappings, detached layers not shown, "
-                          "placements of a decoder's own picture");
+                          "placements of a decoder's own picture, mappings of an allocation dropped for room");
         planeTotalOids[i].oid_arg2 = static_cast<int>(i);
         sysctl_register_oid(&planeTotalOids[i]);
     }

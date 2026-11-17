@@ -66,5 +66,52 @@ class PushWord(unittest.TestCase):
         self.assertEqual(eq_rebase.pushword(draws, 3, {1}, {2, 3}, ['R']), (None, "moved ['R']"))
 
 
+def run(uniform_hash: str, set_hash: str = 'bbbb') -> list[str]:
+    return [
+        'DRAW first=0 count=4 begin=00000000 barriers=PSB',
+        '  stage5 prog=p regs=8 group=4',
+        '    cb1 type=5 size=10 data=' + uniform_hash + ':10 @0=ptr{c0ffee:100}',
+        '    cb2 type=3 size=10 data=' + set_hash + ':10',
+    ]
+
+
+KEPT_WORDS = ['U 5 1 1000005 7 | 0:000260db02000291']
+
+
+class TscRenumber(unittest.TestCase):
+    def test_a_sampler_header_at_another_index_holding_the_same_words_is_a_renumber(self):
+        words = ['U 5 1 1e00005 7 | 0:000260db02000291']
+        self.assertEqual(eq_rebase.tsc_renumber(run('aaaa'), KEPT_WORDS, run('cccc'), words), [])
+
+    def test_another_sampler_header_or_texture_header_is_refused(self):
+        other_sampler = ['U 5 1 1e00005 7 | 0:0002609202000291']
+        other_texture = ['U 5 1 1e00006 7 | 0:000260db02000291']
+        for words in (other_sampler, other_texture):
+            refused = eq_rebase.tsc_renumber(run('aaaa'), KEPT_WORDS, run('cccc'), words)
+            self.assertEqual(len(refused), 1, words)
+            self.assertIn('word 0', refused[0])
+
+    def test_a_buffer_with_no_handle_word_is_read_too(self):
+        self.assertEqual(
+            eq_rebase.tsc_renumber(run('aaaa'), ['U 5 1 7 |'], run('cccc'), ['U 5 1 8 |']),
+            ['tscrenumber: uniform buffer 0 word 0 7 -> 8 is no sampler header renumbered'],
+        )
+
+    def test_a_word_that_names_no_header_is_refused(self):
+        words = ['U 5 1 1000005 8 | 0:000260db02000291']
+        refused = eq_rebase.tsc_renumber(run('aaaa'), KEPT_WORDS, run('cccc'), words)
+        self.assertEqual(refused, ['tscrenumber: uniform buffer 0 word 1 7 -> 8 is no sampler header renumbered'])
+
+    def test_any_other_line_that_moved_is_refused(self):
+        refused = eq_rebase.tsc_renumber(run('aaaa'), KEPT_WORDS, run('aaaa', 'dddd'), KEPT_WORDS)
+        self.assertEqual(len(refused), 1)
+        self.assertIn('no uniform buffer', refused[0])
+
+    def test_dumps_that_do_not_list_the_logs_uniform_buffers_are_refused(self):
+        words = ['U 1 1 1e00005 7 | 0:000260db02000291']
+        refused = eq_rebase.tsc_renumber(run('aaaa'), KEPT_WORDS, run('cccc'), words)
+        self.assertEqual(refused, ["tscrenumber: the word dumps do not list the logs' uniform buffers"])
+
+
 if __name__ == '__main__':
     unittest.main()

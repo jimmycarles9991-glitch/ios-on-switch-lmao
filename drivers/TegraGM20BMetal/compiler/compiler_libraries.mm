@@ -3,8 +3,8 @@
 #import "compiler_libraries.h"
 
 #include <dispatch/dispatch.h>
-#include "NativeBridgeMetalFrontend.h"
 #include "compiler_request.h"
+#include "../raw/runtime/RawOffline.h"
 
 namespace switch_compiler {
 
@@ -59,15 +59,16 @@ id<MTLLibrary> LibraryCache::library(const raw::RequestLibrary &l, std::string &
     }
     NSError *error = nil;
     id<MTLLibrary> made = nil;
+    RawOfflineDevice *device = [RawOfflineDevice new];
     if (l.system) {
-        made = native_bridge_metal_compile_library(real.c_str(), nil, &error);
+        made = [device newLibraryWithURL:[NSURL fileURLWithPath:@(real.c_str())] error:&error];
     } else {
         dispatch_data_t bytes =
             dispatch_data_create(l.bytes.data(), l.bytes.size(), nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        made = native_bridge_metal_compile_library(nullptr, bytes, &error);
+        made = [device newLibraryWithData:bytes error:&error];
     }
     if (!made) {
-        why = std::string("m2v refused the library ") + (l.path.empty() ? "of its data" : l.path) +
+        why = std::string("the translator refused the library ") + (l.path.empty() ? "of its data" : l.path) +
               (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
         return nil;
     }

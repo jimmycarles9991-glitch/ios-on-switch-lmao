@@ -225,10 +225,11 @@ TEST(SwitchWindowCaps, EveryAcceptedLayerFitsOnePlaneSlot)
     }
     std::printf("largest plane read: %llu MiB of a %llu MiB slot\n", static_cast<unsigned long long>(largest >> 20),
                 static_cast<unsigned long long>(switch_window_caps::kPlaneSlotSpan >> 20));
-    const uint64_t tablesPerSlot = switch_window_caps::kPlaneSlotSpan / (4ULL << 20);
-    // 8 plane slots, 5 direct slots and the probe's, the directory, and identity maps of 3 scan buffers and the tape.
-    EXPECT_LE(8 * tablesPerSlot + 6 + 1 + 8, switch_window_caps::kDomainTables);
+    // Window B's space, 5 direct slots and the probe's, the directory, and identity maps of 3 scan buffers and the tape.
+    EXPECT_LE(switch_window_caps::kPlaneSpace / (4ULL << 20) + 6 + 1 + 8, switch_window_caps::kDomainTables);
     EXPECT_EQ(switch_window_caps::kPlaneSlotSpan % (4ULL << 20), 0u);
+    EXPECT_EQ(switch_window_caps::kPlaneSpace % (4ULL << 20), 0u);
+    EXPECT_GE(switch_window_caps::kPlaneSpace, switch_window_caps::kPlaneSlotSpan);
 }
 
 }  // namespace

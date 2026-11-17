@@ -120,11 +120,12 @@ protected:
         raw::CommandBuffer *cb = dev.begin();
         if (!cb)
             return {};
-        raw::RenderEncoder *e = cb->render(p);
+        const char *rule = nullptr;
+        raw::RenderEncoder *e = cb->render(p, &rule);
         if (!e) {
             cb->abandon();
             if (why)
-                *why = "no pass";
+                *why = std::string("no pass: ") + (rule ? rule : "?");
             return {};
         }
         const char *refused = nullptr;
@@ -220,7 +221,9 @@ TEST_F(DeviceLayers, PitchMemoryRendersOneLayerOnly)
     EXPECT_FALSE(raw::attachmentTarget(t, 0, 1, part));
     std::string why;
     EXPECT_TRUE(pass(onto(t, 2), none, &why).empty());
-    EXPECT_EQ(why, "no pass");
+    EXPECT_NE(why.find("which Metal's validation layer stops (MTL4RenderPass.h renderTargetArrayLength"),
+              std::string::npos)
+        << why;
 }
 
 TEST_F(DeviceLayers, ALayeredPassBindsAndClearsEveryLayer)
@@ -252,6 +255,26 @@ TEST_F(DeviceLayers, ALayeredPassPastItsTargetsLayersIsRefused)
     EXPECT_FALSE(pass(onto(view, 3), none).empty());
     std::string why;
     EXPECT_TRUE(pass(onto(view, 4), none, &why).empty());
+    EXPECT_NE(why.find("which Metal's validation layer stops (MTL4RenderPass.h renderTargetArrayLength"),
+              std::string::npos)
+        << why;
+}
+
+// A pass of one-sample and four-sample attachments is Metal's validation error, named so (no m2v form of it either)
+TEST_F(DeviceLayers, APassOfAttachmentsOfTwoSampleCountsNamesMetalsRule)
+{
+    raw::Texture one, four;
+    ASSERT_TRUE(dev.createTexture(32, 32, kRGBA8, one, false, true));
+    ASSERT_TRUE(dev.createMemoryless(32, 32, kRGBA8, four, 4));
+    raw::PassDesc p = onto(one);
+    p.color[1].texture = &four;
+    p.count = 2;
+    std::string why;
+    EXPECT_TRUE(pass(p, none, &why).empty());
+    EXPECT_NE(
+        why.find("attachments of different sample counts, which Metal's validation layer stops (MTLRenderPipeline.h"),
+        std::string::npos)
+        << why;
 }
 
 // A layered pass draws a state whose vertex program writes no Layer into its first layer (SET_RT_LAYER 0), and one that

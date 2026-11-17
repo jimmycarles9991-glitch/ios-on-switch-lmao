@@ -20,30 +20,35 @@ template <class Pass> const char *layeredRefusal(const Pass &pass, uint8_t sampl
     if (turned)
         return "a layered pass of a turned surface plane";
     if (samples > 1)
-        return "a layered multisampled pass";
+        return "a layered multisampled pass, which has no attachment: the device makes no "
+               "MTLTextureType2DMultisampleArray (MTLTexture.h)";
     for (uint32_t j = 0; j < pass.count && j < 8; j++) {
         const auto *t = pass.color[j].texture;
         if (!t || t->memoryless)
             continue;
         if (!t->blockLinear || t->shadowTarget)
-            return "a layered pass of a pitch color target";
+            return "renderTargetArrayLength past a linear colour attachment's one layer, which Metal's validation "
+                   "layer stops (MTL4RenderPass.h renderTargetArrayLength: the layers all attachments have)";
         if (t->layers < layers)
-            return "a layered pass past a color attachment's layers";
+            return "renderTargetArrayLength past a colour attachment's layers, which Metal's validation layer stops "
+                   "(MTL4RenderPass.h renderTargetArrayLength: the layers all attachments have)";
     }
     const auto *z = pass.depthStencil.texture;
     if (z && !z->memoryless && z->layers < layers)
-        return "a layered pass past its depth/stencil attachment's layers";
+        return "renderTargetArrayLength past the depth/stencil attachment's layers, which Metal's validation layer "
+               "stops (MTL4RenderPass.h renderTargetArrayLength: the layers all attachments have)";
     return nullptr;
 }
 
 // What a draw of a state whose record is `arrayLengthWord`'s in a pass of `layers` layers leaves no renderer for (null:
-// none): a state whose vertex function chooses its slice, made for one layer (kLayerDropped), has no layered form in
-// m2v either (its plan refuses the same fragment function in a layered pass)
+// none): a state whose vertex function chooses its slice, made for one layer (kLayerDropped). The translation has a
+// layered form of every fragment function the raw path records but a multisampled storage form's, and no layered pass
+// is multisampled (layeredRefusal), so a record that meets one is the driver's error
 inline const char *layeredDrawMissing(uint8_t arrayLengthWord, uint32_t layers, uint8_t layerDropped)
 {
     if (layers <= 1 || arrayLengthWord != layerDropped)
         return nullptr;
-    return "a state whose vertex function chooses its layer and which m2v has no layered form of, in a layered pass";
+    return "a one-layer record of a state whose vertex function chooses its layer, in a layered pass";
 }
 
 }  // namespace raw

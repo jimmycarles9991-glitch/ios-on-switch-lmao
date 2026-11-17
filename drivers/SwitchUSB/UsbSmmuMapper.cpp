@@ -8,13 +8,14 @@
 // by physical address until then stays where it was, identity-mapped: the firmware image (the falcon reads it at
 // ILOAD_BASE again after every SC7) and the bounce pool (UsbDmaMapper.cpp keeps physical addresses for what it
 // bounces). The SMMU does not snoop the CPU's caches:
-// table entries are cleaned to memory, then the ASID's PTC and TLB entries flushed (TegraSMMU.h), before an address is
-// handed out and after one is taken back.
+// table entries are cleaned to memory, then the SMMU's cached copies of them flushed (TegraSMMUPublish.h), before an
+// address is handed out and after one is taken back.
 #include "UsbSmmuMapper.h"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUDomain.h"
+#include "../TegraSMMU/TegraSMMUPublish.h"
 #include "UsbIova.h"
 #include "XudcHardware.h"
 
@@ -44,11 +45,7 @@ bool gAttached;
 
 void publishTables()
 {
-    uintptr_t low = 0;
-    uintptr_t high = 0;
-    if (gDomain.takeDirty(&low, &high))
-        switch_dcache_clean_invalidate(reinterpret_cast<const void *>(low), high - low);
-    tegra_smmu_flush(kAsid);
+    switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN_INVALIDATE);
 }
 
 auto segments(IOMemoryDescriptor *memory, uint64_t offset)

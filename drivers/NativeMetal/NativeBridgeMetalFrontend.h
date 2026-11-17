@@ -10,12 +10,6 @@ extern "C" {
 // accelerator service's registry entry. missing (may be null) is told the class and selector of every unimplemented call.
 id native_bridge_metal_open(const char *loader, const char *cache, uint64_t registryID,
                             void (*missing)(const char *, const char *));
-// The system shader compiler's: no device, only what the direct compiles below need (bridge/NativeMetalCompile.h), over NVK
-// at `loader`. False with nmb_last_error. A process opens this or the device, never both
-bool native_bridge_metal_compile_open(const char *loader);
-// A library of a metallib file or of `data`'s bytes (nil `path`) to compile directly over the compile context: its functions
-// answer as a device library's do, and make no pipeline state. Nil with `error`
-id native_bridge_metal_compile_library(const char *path, dispatch_data_t data, NSError **error);
 // Every Metal selector `cls` (and its subclasses) lacks that an MTL* protocol declares is answered zero/nil/NO through message
 // forwarding, `answered` (may be null) told each class and selector once; respondsToSelector: still answers NO. Each selector's
 // protocols are looked up once: a forwarded call costs an NSInvocation. Counted in the rates line (fwd=).

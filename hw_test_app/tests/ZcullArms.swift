@@ -5,10 +5,13 @@ import Metal
 
 /// gpu.raw.zcull's arms past a one-sample, one-layer, cleared depth (raw_zcull.h): the near quad over the left half and
 /// the far quads over everything again, on a 4x multisampled depth resolved into the target (`msaa4x`), on a two-layer
-/// array whose layers each take the quads (`layered`), and on a depth one pass clears and stores and the next pass of
-/// the same command buffer loads (`loaded`, the second pass drawing only the far quads). `<arm>_wrong`: channels off
-/// the expected colours; `<arm>_passes`: regions the facade programmed for the arm (at least one, two for `loaded`);
-/// `<arm>_error`: the arm could not run.
+/// array whose layers each take the quads (`layered`), and on a depth one pass clears and stores and a later pass of
+/// the same command buffer loads, the second pass drawing only the far quads: right after it, where the facade fuses the
+/// two into one pass that keeps its region, or stores and loads it (`fused`), and past a blit between them, where the
+/// first stores its region and the second loads it (`loaded`). `<arm>_wrong`: channels off the expected colours;
+/// `<arm>_passes`: regions the facade programmed for the arm (at least one, two for `loaded` and an unfused `fused`);
+/// `<arm>_fused`: passes it fused; `<arm>_loads`: regions loaded (at least one for `loaded`); `<arm>_error`: the arm could
+/// not run.
 extension ZcullTest {
     struct ArmContext {
         let gpu: GPU
@@ -18,9 +21,11 @@ extension ZcullTest {
     }
 
     func arms(_ c: ArmContext, _ metrics: inout Metrics, _ wrong: inout [String], _ paths: inout Set<String>) async {
-        for (name, regions, run) in [
-            ("msaa4x", 1, msaa4x), ("layered", 1, layered), ("loaded", 2, loaded),
-        ] as [(String, Int, (ArmContext) async throws -> (Int, String))] {
+        for (name, regions, fusions, loads, run) in [
+            ("msaa4x", 1, 0, 0, msaa4x), ("layered", 1, 0, 0, layered),
+            ("fused", 2, 1, 0, { try await self.loaded($0, apart: false) }),
+            ("loaded", 2, 0, 1, { try await self.loaded($0, apart: true) }),
+        ] as [(String, Int, Int, Int, (ArmContext) async throws -> (Int, String))] {
             let before = RawFacade.counters(of: c.gpu.device)
             let ran: (Int, String)
             do {
@@ -32,12 +37,20 @@ extension ZcullTest {
             }
             let (bad, path) = ran
             let after = RawFacade.counters(of: c.gpu.device)
-            let passes = (after["zcull_passes"] ?? 0) - (before["zcull_passes"] ?? 0)
+            let delta = { (key: String) in (after[key] ?? 0) - (before[key] ?? 0) }
+            let passes = delta("zcull_passes"), fused = delta("fused_passes"), loaded = delta("zcull_loads")
             metrics.set("\(name)_wrong", bad)
             metrics.set("\(name)_passes", passes)
+            if fusions > 0 || loads > 0 {
+                metrics.set("\(name)_fused", fused)
+                metrics.set("\(name)_loads", loaded)
+            }
             paths.insert(path)
             if bad != 0 { wrong.append(name) }
-            if passes < regions { wrong.append("\(name)_passes") }
+            // a store and a load the fusion made needless: one pass, its region kept
+            let keptInOne = fusions > 0 && fused >= fusions && passes >= 1
+            if passes < regions && !keptInOne { wrong.append("\(name)_passes") }
+            if loaded < loads { wrong.append("\(name)_loads") }
         }
     }
 
@@ -139,12 +152,18 @@ extension ZcullTest {
         return (bad, ran.path)
     }
 
-    func loaded(_ c: ArmContext) async throws -> (Int, String) {
+    func loaded(_ c: ArmContext, apart: Bool) async throws -> (Int, String) {
         let gpu = c.gpu
         let depth = try gpu.texture(.depth32Float, c.width, c.height, usage: [.renderTarget])
         let pipeline = try gpu.render(fragment: "exact_fragment", format: .bgra8Unorm, depth: .depth32Float)
+        let between = try gpu.buffer(256)
         let ran = try await gpu.run { commands in
             for first in [true, false] {
+                if !first && apart {
+                    let blit = commands.makeBlitCommandEncoder()!
+                    blit.fill(buffer: between, range: 0..<256, value: 0)
+                    blit.endEncoding()
+                }
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = c.target
                 pass.colorAttachments[0].loadAction = first ? .clear : .load

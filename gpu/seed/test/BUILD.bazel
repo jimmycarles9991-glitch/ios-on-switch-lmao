@@ -13,11 +13,13 @@ RAW = [
     "archives.py",
     "draw_context.txt",
     "rawpack.py",
+    "directbucket.py",
     "directlink.py",
     "mkpack.py",
     "probelog.py",
     "layouts.py",
     "packfile.py",
+    "selector_section.py",
     "kernels.py",
     "splits.py",
     "eqcheck.py",
@@ -40,6 +42,18 @@ RAW_RUNTIME = [
     "raw_owned.h",
     "raw_srgb_table.h",
     "raw_chip_facts.h",
+    "raw_own_states.h",
+]
+
+# The shader tools' raw/ (gpu/seed/tools.bzl _PACK_TOOLS and _BRIDGE_TOOLS)
+RAW_TOOLS = [
+    "directpack",
+    "libmock_iokit.dylib",
+    "own.metallib",
+    "context.log",
+    "probe",
+    "native-seed",
+    "compile-profile",
 ]
 
 [write_file(
@@ -59,9 +73,9 @@ RAW_RUNTIME = [
     "tools/libvulkan_nouveau.dylib",
     "tools/libvulkan_nouveau.dylib.source",
     "tools/MANIFEST.json",
-    "tools/raw/probe",
     "corpus/corpus.log",
-] + ["raw/" + name for name in RAW] + ["runtime/" + name for name in RAW_RUNTIME]]
+    "app/SwitchHWTest.ipa",
+] + ["raw/" + name for name in RAW] + ["runtime/" + name for name in RAW_RUNTIME] + ["tools/raw/" + name for name in RAW_TOOLS]]
 
 filegroup(
     name = "base",
@@ -77,8 +91,7 @@ filegroup(
         ":tools/libvulkan_nouveau.dylib",
         ":tools/libvulkan_nouveau.dylib.source",
         ":tools/precompile",
-        ":tools/raw/probe",
-    ],
+    ] + [":tools/raw/" + name for name in RAW_TOOLS],
     tags = ["manual"],
 )
 
@@ -122,9 +135,30 @@ seed_raw_pack(
     tools = ":tools",
 )
 
+shader_crawl(
+    name = "crawl_apps",
+    applications = [":app/SwitchHWTest.ipa"],
+    inventory = ":crawl/inventory.json",
+    qc = ":crawl/tree/" + QUARTZCORE,
+    tags = ["manual"],
+    tree = ":tree",
+)
+
+seed_raw_pack(
+    name = "raw_pack_apps",
+    srcs = [":raw/" + name for name in RAW] + [":runtime/" + name for name in RAW_RUNTIME],
+    corpus = ":corpus/corpus.log",
+    crawl = ":crawl_apps",
+    device_libraries = ":device/1.metallib",
+    generator = ":raw/rawpack.py",
+    tags = ["manual"],
+    tools = ":tools",
+)
+
 seed_inputs_tests(
     name = "inputs_test",
     crawl = ":crawl",
     raw_pack = ":raw_pack",
+    raw_pack_apps = ":raw_pack_apps",
     seed = ":seed",
 )

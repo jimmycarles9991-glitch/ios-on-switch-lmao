@@ -5,7 +5,7 @@ bootloader/, overlay/ and gpu/). The snapshot is for rollback and for deploying 
 
     bazel run //boot:snapshot -- 1900-r9-something
     LKG="$HOME/Library/Application Support/switch-ios/lkg/1900-r9-something"
-    bazel run //deploy:sd -- disk4 --yes --stage-gpu --boot-package="$LKG" --gpu-bundle="$LKG/gpu"
+    bazel run //deploy:sd -- disk4 --yes --boot-package="$LKG" --gpu-bundle="$LKG/gpu"
 
 The snapshot also keeps the build's kernel.macho, which names the unslid kernel addresses in panics and in the
 "SwitchKprof" lines: `xcrun atos -o "$LKG/kernel.macho" -arch arm64 <addr>...`.
@@ -14,13 +14,14 @@ Refuses to overwrite an existing snapshot.
 """
 
 import argparse
-import hashlib
+import json
 import os
 import shutil
 import sys
 from pathlib import Path
 
 from tools.common import paths
+from tools.deploy import deployed
 
 
 def materialize(manifest: Path, out: Path) -> None:
@@ -62,11 +63,15 @@ def main() -> None:
         materialize(Path(paths.located(args.gpu)), target / 'gpu')
     if args.kernel:
         shutil.copyfile(paths.located(args.kernel), target / 'kernel.macho')
+    source = deployed.provenance(Path(boot))
+    if source is None:
+        source = deployed.describe(paths.workspace())
+        manifest = target / 'gpu/ngpu/addons/TegraGM20BMetal.m2v-seed/shared/MANIFEST.json'
+        source['build'] = json.loads(manifest.read_text())['ipsw'] if args.gpu and not args.no_gpu else ''
+    (target / deployed.NAME).write_text(json.dumps(source, indent=1) + '\n')
     for path in target.rglob('*'):
         path.chmod(0o755 if path.is_dir() or os.access(path, os.X_OK) else 0o644)
     print(target)
-    for path in sorted((target / 'switchroot/ios').iterdir()):
-        print(f'  {path.name} sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}')
 
 
 if __name__ == '__main__':

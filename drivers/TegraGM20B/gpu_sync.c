@@ -131,19 +131,16 @@ int tgm_chan_order(struct tgm_chan *chan, uint32_t flags, uint32_t seqno, uint32
 
 /* From tgm_chan_exec, before a submission's own entries: the acquires tgm_chan_order queued for it, as one entry. One whose
  * source passed its seqno already is left out. 1 if any was pushed. */
-int tgm_order_waits(struct tgm_chan *chan)
+int switch_gpu_order_waits_locked(struct tgm_chan *chan)
 {
 	struct nvif_push *push = &chan->chan.push;
-	struct tgm_order wait[TGM_ORDER_MAX];
+	const struct tgm_order *wait = chan->order;
 	u32 i = 0;
 	u32 n = 0;
 	u32 kicked = 0;
 
-	mutex_lock(&tgm_live_lock);
 	n = chan->norder;
-	memcpy(wait, chan->order, n * sizeof(wait[0]));
 	chan->norder = 0;
-	mutex_unlock(&tgm_live_lock);
 	for (i = 0; i < n; i++) {
 		if ((s32)(READ_ONCE(*wait[i].cpu) - wait[i].seqno) >= 0)
 			continue;
@@ -165,6 +162,14 @@ int tgm_order_waits(struct tgm_chan *chan)
 	if (kicked)
 		PUSH_KICK(push);
 	return kicked != 0;
+}
+
+int tgm_order_waits(struct tgm_chan *chan)
+{
+	mutex_lock(&tgm_live_lock);
+	const int result = switch_gpu_order_waits_locked(chan);
+	mutex_unlock(&tgm_live_lock);
+	return result;
 }
 
 static int sync_wait(u64 id, u32 seqno, u64 end)

@@ -27,10 +27,13 @@
 #include <nouveau/nvkm/engine/fifo/runq.h>
 #include <subdev/timer.h>
 
+void switch_gpu_gr_fault_recovered(struct nvkm_runl *);
+
 void tgm_recover_reset_hold(struct nvkm_engine *);
 void tgm_recover_reset_release(struct nvkm_engine *);
 void tgm_recover_preempt_unblock(struct nvkm_runl *);
 void tgm_recover_owed_preempt(struct nvkm_runl *);
+bool switch_gpu_recover_pending(struct nvkm_runl *, u32 *);
 
 struct nvkm_cgrp *
 nvkm_engn_cgrp_get(struct nvkm_engn *engn, unsigned long *pirqflags)
@@ -65,7 +68,8 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 	struct nvkm_engn *engn;
 	unsigned long flags;
 	int rc, state, i;
-	bool reset;
+	bool reset, owed = false;
+	u32 preempt = ~0U;
 
 	/* Runlist is blocked before scheduling recovery - fetch count. */
 	BUG_ON(!mutex_is_locked(&runl->mutex));
@@ -132,11 +136,19 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 	if (runl->func->preempt_pending) {
 		tgm_recover_preempt_unblock(runl);
 		BUG_ON(nvkm_msec(fifo->engine.subdev.device, 2000,
-			if (!runl->func->preempt_pending(runl))
-				break;
+			if (switch_gpu_recover_pending(runl, &preempt))
+				continue;
+			if (!owed) {
+				tgm_recover_owed_preempt(runl);
+				owed = true;
+				if (runl->func->preempt_pending(runl))
+					continue;
+			}
+			break;
 		) < 0);
+	} else {
+		tgm_recover_owed_preempt(runl);
 	}
-	tgm_recover_owed_preempt(runl);
 
 	/* Removed channels remain in chid until their destructor takes runl->mutex.
 	 * ERRORED releases external memory leases, so publish only after quiescence. */
@@ -149,5 +161,6 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 			nvkm_event_ntfy(&runl->chid->event, chan->id, NVKM_CHAN_EVENT_ERRORED);
 		nvkm_chan_put(&chan, flags);
 	}
+	switch_gpu_gr_fault_recovered(runl);
 }
 

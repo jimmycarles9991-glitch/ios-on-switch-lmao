@@ -9,6 +9,7 @@
 #include "../raw/runtime/raw_gpu.h"
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -79,6 +80,19 @@ struct DeviceHarness {
         leases = hold ? leases + 1 : leases - 1;
     }
 
+    static const Bo &zeroPage(const Device &d)
+    {
+        return d.zero_;
+    }
+
+    // An extended-range texture's stand-in of its shape (Device::standInAsk), whatever states the pack holds
+    static bool standIn(Device &d, const Texture &t, Texture &s)
+    {
+        const TextureAsk ask = Device::standInAsk(t);
+        return ask.kind == TextureAsk::Plain ? d.createTexture(t.width, t.height, kXrStandInFormat, s, false, true)
+                                             : d.createLaidOut(ask, s, nullptr);
+    }
+
     static std::array<uint32_t, 8> header(const Device &d, uint32_t tic)
     {
         std::array<uint32_t, 8> w;
@@ -128,10 +142,25 @@ struct DeviceHarness {
         return d.comp_.ready.size();
     }
 
+    // The clears of the pass `e` ended: target, x0, y0, x1, y1
+    static std::vector<std::array<uint32_t, 5>> clears(const RenderEncoder &e)
+    {
+        std::vector<std::array<uint32_t, 5>> out;
+        for (const RenderEncoder::Clear &c : e.initialClears_)
+            out.push_back({c.target, c.x0, c.y0, c.x1, c.y1});
+        return out;
+    }
+
     // What the root table holds at push word `word` after the command buffer's work encoded so far
     static uint32_t rootPush(const CommandBuffer &cb, uint32_t word)
     {
         return cb.rootPush_[word];
+    }
+
+    // The state segments the command buffer bound so far (each bind a call of the state's words, not a skip of them)
+    static uint32_t segmentBinds(const CommandBuffer &cb)
+    {
+        return cb.segmentBinds_;
     }
 
     // Where the encoder's last upload of stage `k`'s argument table lies (raw_spill_table.h), 0: none
@@ -144,6 +173,12 @@ struct DeviceHarness {
     static const uint32_t *kernelSet(const ComputeEncoder &e)
     {
         return e.descriptorWords_.empty() ? nullptr : e.descriptorWords_.data();
+    }
+
+    // The sampler header the device wrote at index `tsc`
+    static const uint32_t *samplerHeader(const Device &d, uint32_t tsc)
+    {
+        return reinterpret_cast<const uint32_t *>(d.tsc_.cpu + 32 * tsc);
     }
 };
 
@@ -185,6 +220,8 @@ protected:
         raw::BlitEncoder *e = cb ? cb->blit() : nullptr;
         if (!e)
             return 0;
+        cb->use(from, false);
+        cb->use(to, true, false);
         for (uint32_t i = 0; i < copies; i++)
             e->copyBytes(from.va, to.va, bytes);
         e->end();

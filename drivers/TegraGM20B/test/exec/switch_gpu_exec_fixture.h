@@ -24,7 +24,7 @@ struct switch_exec_hooks {
 struct switch_exec_chan_pointers {
 	uint32_t gpfifo_cur, gp_put, submitted, push_max;
 	int32_t gpfifo_free;
-	uint32_t push_bgn, push_cur, push_end;
+	uint32_t push_bgn, push_cur, push_end, push_seg;
 	int defer_kick;
 };
 
@@ -40,7 +40,16 @@ void switch_exec_chan_read(struct switch_exec_chan *chan, struct switch_exec_cha
 /* The ACQ_GEQ acquires of producer's fence word reaching value in waiter's push buffer */
 uint32_t switch_exec_chan_acquires(struct switch_exec_chan *waiter,
 				   struct switch_exec_chan *producer, uint32_t value);
+uint32_t switch_exec_chan_word_acquires(struct switch_exec_chan *waiter, uint32_t pool,
+					uint32_t value);
+uint32_t switch_exec_chan_syncpt_waits(struct switch_exec_chan *waiter, uint32_t id,
+				       uint32_t value);
 uint32_t switch_exec_parked_promises(void);
+uint64_t switch_exec_mutex_takes(void);
+int switch_exec_mutex_held(void);
+void switch_exec_chan_high(struct switch_exec_chan *chan, int high);
+void switch_exec_chan_task_order(struct switch_exec_chan *chan, struct switch_exec_chan *source,
+				 uint32_t value);
 
 void *switch_exec_host_alloc(uint64_t bytes);
 void switch_exec_host_free(void *block);

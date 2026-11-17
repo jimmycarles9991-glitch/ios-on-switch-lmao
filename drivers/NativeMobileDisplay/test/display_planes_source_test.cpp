@@ -71,67 +71,67 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
 {
     const std::string source = Display(), planes = Planes();
     const CodeText code(source);
-    EXPECT_TRUE(code.Has("#include \"NativePlanesDisplay.h\""));
+    EXPECT_TRUE(code.has("#include \"NativePlanesDisplay.h\""));
     // validateSwap mirrors the published limits through checkUpdated; the UI's memory is still bounded.
     const CodeText validate = Block(source, "bool validateSwap(const OriginalLegacySwapRequest *request) override");
-    EXPECT_TRUE(validate.Has("native_planes::checkUpdated("));
-    EXPECT_TRUE(validate.Has("native_legacy_surface_bounds("));
+    EXPECT_TRUE(validate.has("native_planes::checkUpdated("));
+    EXPECT_TRUE(validate.has("native_legacy_surface_bounds("));
     // The kick reads the effective layers first; a swap that leaves window A alone changes window B only.
     const CodeText kick = Block(source, "void kickOnce()");
-    EXPECT_TRUE(kick.Before("planeDecide(request, pd)", "directCandidate(pd.ui)"));
-    EXPECT_TRUE(kick.Has("if (!pd.uiNew) {"));
-    EXPECT_TRUE(kick.Has("kickPlaneOnly(request, pd"));
-    EXPECT_FALSE(kick.Has("+ 2624"));  // window A's surface is the effective UI layer, not layer 0's slot
+    EXPECT_TRUE(kick.before("planeDecide(request, pd)", "directCandidate(pd.ui)"));
+    EXPECT_TRUE(kick.has("if (!pd.uiNew) {"));
+    EXPECT_TRUE(kick.has("kickPlaneOnly(request, pd"));
+    EXPECT_FALSE(kick.has("+ 2624"));  // window A's surface is the effective UI layer, not layer 0's slot
     const CodeText decide =
         Block(planes, "void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)");
-    EXPECT_TRUE(decide.Has("swapEffectiveSurfaces"));
-    EXPECT_TRUE(decide.Has("native_planes::rolesOf("));
+    EXPECT_TRUE(decide.has("swapEffectiveSurfaces"));
+    EXPECT_TRUE(decide.has("native_planes::rolesOf("));
     // Window B goes out with window A in one UPDATE write and one ACT_REQ write.
     const CodeText flip = Block(source, "void writeFlip(int i)");
-    EXPECT_TRUE(flip.Has("planeStage(entryPlane[i], update, request)"));
-    EXPECT_EQ(flip.Count("dc[kDcStateControl] ="), 2u);
-    EXPECT_TRUE(Block(source, "void presentEntry(int i)").Has("entryPlane[i].seq = entrySeq[i]"));
+    EXPECT_TRUE(flip.has("planeStage(entryPlane[i], update, request)"));
+    EXPECT_EQ(flip.count("dc[kDcStateControl] ="), 2u);
+    EXPECT_TRUE(Block(source, "void presentEntry(int i)").has("entryPlane[i].seq = entrySeq[i]"));
     // A latched window B set retires its swaps in queue order; a stuck one or an underflow run turns planes off.
     const CodeText frame = Block(planes, "void planeFrameEnd()");
-    EXPECT_TRUE(frame.Has("retireThrough(now.seq, __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE))"));
-    EXPECT_TRUE(frame.Has("beginPlaneRecovery("));
-    EXPECT_TRUE(code.Has("if (status & kFrameEndInt) { planeFrameEnd(); landscapeFrameEnd();"));
+    EXPECT_TRUE(frame.has("retireThrough(now.seq, __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE))"));
+    EXPECT_TRUE(frame.has("beginPlaneRecovery("));
+    EXPECT_TRUE(code.has("if (status & kFrameEndInt) { planeFrameEnd(); landscapeFrameEnd();"));
     // The first client frame's swap retires at its own latch (latchRetire is on from the plane probe, before it).
     EXPECT_TRUE(
-        Block(source, "void startRotation(int target = kNoBuffer)").Has("entrySeq[target] = seqOf(flipRequest);"));
-    EXPECT_TRUE(Block(source, "void checkRotation()").Has("retireThrough(entrySeq[asked], stamp);"));
+        Block(source, "void startRotation(int target = kNoBuffer)").has("entrySeq[target] = seqOf(flipRequest);"));
+    EXPECT_TRUE(Block(source, "void checkRotation()").has("retireThrough(entrySeq[asked], stamp);"));
     // Swaps wait while the plane probe covers the screen; a window B set out after planes went off never panics.
-    EXPECT_TRUE(kick.Has("if (planeProbe.active()) {"));
-    EXPECT_TRUE(Block(source, "void checkFlipDeadline()").Has("!(planesOn && planeLatch.requested())"));
+    EXPECT_TRUE(kick.has("if (planeProbe.active()) {"));
+    EXPECT_TRUE(Block(source, "void checkFlipDeadline()").has("!(planesOn && planeLatch.requested())"));
     // Planes retire at the latch: a video's previous frame may still be scanned.
-    EXPECT_TRUE(Block(planes, "void planeProbeDetach()").Has("latchRetire = true;"));
+    EXPECT_TRUE(Block(planes, "void planeProbeDetach()").has("latchRetire = true;"));
     // The panic screen never sits under window B.
     const CodeText panic = Block(source, "void restorePitchOnPanic(const char *message)");
-    EXPECT_EQ(panic.Count("dc[kWinBBase + native_planes::kOptions] = 0;"), 2u);
+    EXPECT_EQ(panic.count("dc[kWinBBase + native_planes::kOptions] = 0;"), 2u);
     // The limits Core Animation reads at the display's creation.
     for (const char *key : {"IOMFBScalingLimits", "IOMFBMaxSrcPixels", "IOMFBNumLayers",
                             "DisplayPipePlaneBaseAlignment", "RGBLayer_MinScaleFraction", "YUVLayer_MaxScale",
                             "MaxSrcRectWidth", "MaxNumLayers", "PlaneBaseAlignmentLinear"})
-        EXPECT_TRUE(code.Has(std::string("\"") + key + "\""));
+        EXPECT_TRUE(code.has(std::string("\"") + key + "\""));
     // The gate: planes on and the IOSA quarter turns (transforms 4 and 7) proven.
     const CodeText gate = Block(source, "extern \"C\" bool native_legacy_detach_ready(void)");
-    EXPECT_TRUE(gate.Has("planesReady()"));
-    EXPECT_TRUE(gate.Has("(vic->rotations & 0x90) == 0x90"));
+    EXPECT_TRUE(gate.has("planesReady()"));
+    EXPECT_TRUE(gate.has("(vic->rotations & 0x90) == 0x90"));
     // And a VIC row pitch the published alignment is a multiple of; the alignment itself is VIC's from start, never raised
     // later (Core Animation and VideoToolbox read it once).
-    EXPECT_TRUE(gate.Has("vic->sourcePitchAlign"));
-    EXPECT_TRUE(gate.Has("const bool ok = planes && turns && pitched;"));
-    EXPECT_FALSE(code.Has("publishDetachAlignment"));
+    EXPECT_TRUE(gate.has("vic->sourcePitchAlign"));
+    EXPECT_TRUE(gate.has("const bool ok = planes && turns && pitched;"));
+    EXPECT_FALSE(code.has("publishDetachAlignment"));
     EXPECT_TRUE(Block(source, "void publishStrideRequirements()")
-                    .Has("OSNumber::withNumber(native_planes::kPublishedRowAlignment, 32)"));
+                    .has("OSNumber::withNumber(native_planes::kPublishedRowAlignment, 32)"));
     const CodeText limits = Block(source, "void publishPlaneLimits()");
-    EXPECT_TRUE(limits.Has("{\"PlaneBaseAlignmentLinear\", native_planes::kPublishedBaseAlignment}"));
+    EXPECT_TRUE(limits.has("{\"PlaneBaseAlignmentLinear\", native_planes::kPublishedBaseAlignment}"));
     // iOS 27's own limits; iOS 17's dictionary has no key they add.
-    EXPECT_TRUE(limits.Has("publish(\"IOMFBMaxSrcPixels\", source, limits.compressionUnsupported ? 8 : 7, 64);"));
-    EXPECT_TRUE(limits.Before("#if SWITCH_IPSW_KIND_24B119", "native_planes::kLimits24B119;"));
-    EXPECT_TRUE(limits.Has("if (limits.packedYuvUnsupported) setProperty(\"IOMFBYUVPackedUnSupported\", true);"));
+    EXPECT_TRUE(limits.has("publish(\"IOMFBMaxSrcPixels\", source, limits.compressionUnsupported ? 8 : 7, 64);"));
+    EXPECT_TRUE(limits.before("#if SWITCH_IPSW_KIND_24B119", "native_planes::kLimits24B119;"));
+    EXPECT_TRUE(limits.has("if (limits.packedYuvUnsupported) setProperty(\"IOMFBYUVPackedUnSupported\", true);"));
     // The service is found as J120's: IOServiceMatching("AppleCLCD").
-    EXPECT_TRUE(code.Has(": OSMetaClass(\"AppleCLCD\", NativeLegacyDisplay::superClass, sizeof(NativeLegacyDisplay))"));
+    EXPECT_TRUE(code.has(": OSMetaClass(\"AppleCLCD\", NativeLegacyDisplay::superClass, sizeof(NativeLegacyDisplay))"));
 }
 
 // The first-boot data migration keeps XNU's console on screen (switch_console_hold). A released console stops drawing, so
@@ -141,27 +141,27 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
 TEST(DisplayPlanesSource, TheConsoleHoldKeepsTheScreen)
 {
     const std::string source = Display(), planes = Planes();
-    EXPECT_EQ(CodeText(source).Count("switch_console_hold"), 4u);  // the declaration, consoleHolds and its comment
+    EXPECT_EQ(CodeText(source).count("switch_console_hold"), 4u);  // the declaration, consoleHolds and its comment
     EXPECT_TRUE(Block(source, "bool consoleHolds() const")
-                    .Before("if (rotated || &switch_console_hold == nullptr) return false;",
+                    .before("if (rotated || &switch_console_hold == nullptr) return false;",
                             "return switch_console_hold != 0;"));
     const CodeText kick = Block(source, "void kickOnce()");
-    EXPECT_TRUE(kick.Before("planeDecide(request, pd);", "if (consoleHolds()) { kickHeld(request,"));
+    EXPECT_TRUE(kick.before("planeDecide(request, pd);", "if (consoleHolds()) { kickHeld(request,"));
     for (const char *taker : {"kickPlaneOnly(request, pd", "native_legacy_prepare_scanout()", "offerDirect(",
                               "offerGpuCopy(", "startCopy(", "presentBlock();"})
-        EXPECT_TRUE(kick.Before("kickHeld(request,", taker));
+        EXPECT_TRUE(kick.before("kickHeld(request,", taker));
     const CodeText held = Block(source, "void kickHeld(const OriginalLegacySwapRequest *request, uint64_t kickAt)");
-    EXPECT_TRUE(held.Before("noteTaken(request, kickAt);", "retireUnshown(seqOf(request));"));
-    EXPECT_TRUE(held.Has("finishTransfer(request, true);"));
+    EXPECT_TRUE(held.before("noteTaken(request, kickAt);", "retireUnshown(seqOf(request));"));
+    EXPECT_TRUE(held.has("finishTransfer(request, true);"));
     for (const char *taker : {"native_legacy_prepare_scanout", "presentBlock", "flip", "ring.", "plane"})
-        EXPECT_FALSE(held.Has(taker));
-    EXPECT_FALSE(Block(source, "void presentBlock()").Has("hold"));
+        EXPECT_FALSE(held.has(taker));
+    EXPECT_FALSE(Block(source, "void presentBlock()").has("hold"));
     const CodeText unshown = Block(planes, "void retireUnshown(uint64_t seq)");
-    EXPECT_TRUE(unshown.Before("if (!latchRetire)", "retireThrough(seq, mach_absolute_time());"));
+    EXPECT_TRUE(unshown.before("if (!latchRetire)", "retireThrough(seq, mach_absolute_time());"));
     for (const char *outstanding : {"planeSetOf(planeLatch.armed).seq = seq;", "planeHeld.seq = seq;",
                                     "entrySeq[ring.held] = seq;", "entrySeq[ring.pending] = seq;"})
-        EXPECT_TRUE(unshown.Before(outstanding, "retireThrough(seq, mach_absolute_time());"));
-    EXPECT_TRUE(Block(planes, "void kickPlaneOnly(").Has("retireUnshown(seq);"));
+        EXPECT_TRUE(unshown.before(outstanding, "retireThrough(seq, mach_absolute_time());"));
+    EXPECT_TRUE(Block(planes, "void kickPlaneOnly(").has("retireUnshown(seq);"));
 }
 
 // A plane slot holds what window B scans from it as a direct slot does (the surface, its wired memory, its layout), and
@@ -170,37 +170,37 @@ TEST(DisplayPlanesSource, TheConsoleHoldKeepsTheScreen)
 TEST(DisplayPlanesSource, PlaneSlotsHoldTheSurfaceTheyScan)
 {
     const std::string planes = Planes();
-    const CodeText make = Block(planes, "int planeSlotFor(");
-    EXPECT_TRUE(make.Has("surface->retain();"));
-    EXPECT_TRUE(make.Has("planeSlots[k].tiled == tiled"));
-    EXPECT_TRUE(make.Before("tegra_gm20b_surface_hold(", "(held != 0) != tiled"));
+    const CodeText make = Block(SourceText("../SwitchPlaneSlots.h"), "int planeSlotFor(");
+    EXPECT_TRUE(make.has("surface->retain();"));
+    EXPECT_TRUE(make.has("planeSlots[k].tiled == tiled"));
+    EXPECT_TRUE(make.before("tegra_gm20b_surface_hold(", "(held != 0) != tiled"));
     EXPECT_TRUE(Block(planes, "void planeDecide(")
-                    .Before("planeNativeSlotFor(layer.surface", "planeBuildingSlots |= 1u << unsigned(slot)"));
+                    .before("planeNativeSlotFor(layer.surface", "planeBuildingSlots |= uint64_t(1) << unsigned(slot)"));
     const CodeText native(SourceText("../SwitchNativePlaneDisplay.h"));
-    EXPECT_TRUE(native.Before("switch_native_scanout_acquire(surface", "planeMapSnapshot(scanout, image)"));
-    EXPECT_TRUE(native.Has("surfaceLayout(surface, block)"));
+    EXPECT_TRUE(native.before("switch_native_scanout_acquire(surface", "planeMapSnapshot(scanout, image)"));
+    EXPECT_TRUE(native.has("surfaceLayout(surface, block)"));
     EXPECT_TRUE(Block(planes, "static const tgm_layout *surfaceLayout(")
-                    .Has("tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1"));
+                    .has("tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1"));
     const CodeText write =
         Block(planes, "void planeWriteWindowRegisters(Window w, const switch_display::Overlay &p, bool live)");
-    EXPECT_TRUE(write.Has("buf[kSurfaceKind] = m.surfaceKind;"));
-    EXPECT_TRUE(write.Has("buf[kVOffset] = m.vOffset;"));
-    EXPECT_TRUE(Block(planes, "static bool planeSame(").Has("x.surfaceKind != y.surfaceKind"));
+    EXPECT_TRUE(write.has("buf[kSurfaceKind] = m.surfaceKind;"));
+    EXPECT_TRUE(write.has("buf[kVOffset] = m.vOffset;"));
+    EXPECT_TRUE(Block(planes, "static bool planeSame(").has("x.surfaceKind != y.surfaceKind"));
     const CodeText drop = Block(SourceText("../SwitchPlaneSlots.h"), "void planeDropSlot(unsigned k)");
-    EXPECT_TRUE(drop.Before("probeDomain.unmap(", "tegra_gm20b_surface_unhold(slot.layout);"));
-    EXPECT_TRUE(drop.Before("tegra_gm20b_surface_unhold(slot.layout);", "slot.memory->release();"));
-    EXPECT_TRUE(drop.Before("slot.memory->release();", "OSSafeReleaseNULL(slot.surface);"));
+    EXPECT_TRUE(drop.before("probeDomain.unmap(", "tegra_gm20b_surface_unhold(slot.layout);"));
+    EXPECT_TRUE(drop.before("tegra_gm20b_surface_unhold(slot.layout);", "slot.memory->release();"));
+    EXPECT_TRUE(drop.before("slot.memory->release();", "OSSafeReleaseNULL(slot.surface);"));
 }
 
 TEST(DisplayPlanesSource, BackboarddDetachesOnlyWhenTheDisplaySaysSo)
 {
     const std::string xnu = XnuKernExec();
     // The weak default: never.
-    EXPECT_TRUE(CodeText(xnu).Has("native_legacy_detach_ready(void) { return false; }"));
-    EXPECT_TRUE(CodeText(xnu).Has("if (!native_legacy_detach_ready()) {"));
+    EXPECT_TRUE(CodeText(xnu).has("native_legacy_detach_ready(void) { return false; }"));
+    EXPECT_TRUE(CodeText(xnu).has("if (!native_legacy_detach_ready()) {"));
     const CodeText exec = Block(xnu, "native_switch_exec_environment(const struct image_params *imgp)");
-    EXPECT_FALSE(exec.Has("if (single_layer) {"));
-    EXPECT_FALSE(exec.Has("if (vbl && single_layer) {"));
+    EXPECT_FALSE(exec.has("if (single_layer) {"));
+    EXPECT_FALSE(exec.has("if (vbl && single_layer) {"));
 }
 
 // No kernel has backboardd log why each layer was or was not detached: QuartzCore 24B119's CA_PRINT_DETACHING
@@ -208,8 +208,8 @@ TEST(DisplayPlanesSource, BackboarddDetachesOnlyWhenTheDisplaySaysSo)
 // "[Server]" and "[Display] Surface ID ... detach result").
 TEST(DisplayPlanesSource, NoKernelHasTheRenderServerLogItsDetachReasons)
 {
-    EXPECT_FALSE(CodeText(Runfile(XNU27_KERN_EXEC)).Has("CA_PRINT_DETACHING"));
-    EXPECT_FALSE(CodeText(XnuKernExec()).Has("CA_PRINT_DETACHING"));
+    EXPECT_FALSE(CodeText(Runfile(XNU27_KERN_EXEC)).has("CA_PRINT_DETACHING"));
+    EXPECT_FALSE(CodeText(XnuKernExec()).has("CA_PRINT_DETACHING"));
 }
 
 // iOS 27's CoreVideo registers no compressed pixel format (H12's AGX and HTPC tiled layouts), so nothing hands the display
@@ -217,24 +217,24 @@ TEST(DisplayPlanesSource, NoKernelHasTheRenderServerLogItsDetachReasons)
 TEST(DisplayPlanesSource, Ios27CoreVideoMakesNoCompressedSurfaces)
 {
     const CodeText setup = Block(Runfile(XNU27_KERN_EXEC), "native_switch_setup_state(");
-    EXPECT_TRUE(setup.Has(
+    EXPECT_TRUE(setup.has(
         "{\"com.apple.corevideo\", SWITCH_PLIST(\"<key>disable-buffer-compression</key><true/>\"), kSetupManaged},"));
-    EXPECT_FALSE(CodeText(XnuKernExec()).Has("disable-buffer-compression"));
+    EXPECT_FALSE(CodeText(XnuKernExec()).has("disable-buffer-compression"));
 }
 
 // A detached layer refused for its format or layout is logged with its surface's geometry on debug kernels only.
 TEST(DisplayPlanesSource, RefusedLayoutsLoggedOnlyByDebugKernels)
 {
-    EXPECT_TRUE(CodeText(Display()).Before(
+    EXPECT_TRUE(CodeText(Display()).before(
         "reason = native_planes::checkUpdated(updated, background, hasSurface, layers, width, height);",
         "planeNoteRefused(reason, updated, hasSurface, layers, width, height);"));
     const std::string totals = SourceText("../NativePlanesTotals.h");
     const CodeText debug(Configured(totals, "SWITCH_FRAME_TIMELINE", true));
     const CodeText release(Configured(totals, "SWITCH_FRAME_TIMELINE", false));
-    EXPECT_TRUE(debug.Has("switch_refusal_k(key, \"display\", \"plane-layout\","));
-    EXPECT_FALSE(release.Has("switch_refusal_k(key, \"display\", \"plane-layout\","));
+    EXPECT_TRUE(debug.has("switch_refusal_k(key, \"display\", \"plane-layout\","));
+    EXPECT_FALSE(release.has("switch_refusal_k(key, \"display\", \"plane-layout\","));
     EXPECT_TRUE(
-        release.Has("static void planeNoteRefused(unsigned, uint32_t, const bool *, const native_planes::Layer *, "
+        release.has("static void planeNoteRefused(unsigned, uint32_t, const bool *, const native_planes::Layer *, "
                     "uint32_t, uint32_t) {}"));
 }
 
@@ -246,33 +246,33 @@ TEST(DisplayPlanesSource, WindowBWaitsForTheGpuOnSurfacesItRenders)
     const std::string source = Display(), planes = Planes();
     const std::string fence = SourceText("../NativePlaneFenceDisplay.h");
     EXPECT_TRUE(Block(source, "bool offerGpuCopy(")
-                    .Before("copy.alsoWritten = planeNextAlsoWritten();", "offerWithCompletionFlip(copy, target)"));
+                    .before("copy.alsoWritten = planeNextAlsoWritten();", "offerWithCompletionFlip(copy, target)"));
     EXPECT_TRUE(Block(source, "bool offerDirect(")
-                    .Before("copy.alsoWritten = planeNextAlsoWritten();", "offerWithCompletionFlip(copy, entry)"));
+                    .before("copy.alsoWritten = planeNextAlsoWritten();", "offerWithCompletionFlip(copy, entry)"));
     const CodeText kick = Block(source, "void kickOnce()");
-    EXPECT_FALSE(kick.Has("planeNextUnfenced"));
-    EXPECT_TRUE(kick.Has("!(planeNextSet && planeFenced(planeNext))"));
-    EXPECT_TRUE(CodeText(SourceText("../SwitchCopiedPlanes.h")).Has("if (!copyPixelsReady || !copyPlaneReady)"));
-    EXPECT_TRUE(Block(source, "void startCopy(").Has("beginCopiedPlaneFence()"));
-    EXPECT_TRUE(Block(source, "void copyFinished()").Has("copiedPixelsFinished()"));
+    EXPECT_FALSE(kick.has("planeNextUnfenced"));
+    EXPECT_TRUE(kick.has("!(planeNextSet && planeFenced(planeNext))"));
+    EXPECT_TRUE(CodeText(SourceText("../SwitchCopiedPlanes.h")).has("if (!copyPixelsReady || !copyPlaneReady)"));
+    EXPECT_TRUE(Block(source, "void startCopy(").has("beginCopiedPlaneFence()"));
+    EXPECT_TRUE(Block(source, "void copyFinished()").has("copiedPixelsFinished()"));
     const CodeText only = Block(planes, "void kickPlaneOnly(");
-    EXPECT_TRUE(only.Before(
+    EXPECT_TRUE(only.before(
         "native_planes::planeRoute(planeFenced(p), false, false) == native_planes::PlaneRoute::kNow", "planeOut(p);"));
-    EXPECT_TRUE(only.Before("} else if (planeFence(p)) {", "transferred = true;"));
+    EXPECT_TRUE(only.before("} else if (planeFence(p)) {", "transferred = true;"));
     const CodeText admission = Block(fence, "bool planeFence(const PlaneSet &p)");
-    EXPECT_FALSE(admission.Has("switch_gpu_bridge_fence("));
-    EXPECT_TRUE(admission.Before("planeFencePending = true;", "copySource->interruptOccurred"));
-    EXPECT_TRUE(Block(source, "void copyWork()").Has("planeFenceWork();"));
+    EXPECT_FALSE(admission.has("switch_gpu_bridge_fence("));
+    EXPECT_TRUE(admission.before("planeFencePending = true;", "copySource->interruptOccurred"));
+    EXPECT_TRUE(Block(source, "void copyWork()").has("planeFenceWork();"));
     const CodeText worker(SourceText("../SwitchPlaneFenceAdmission.h"));
-    EXPECT_TRUE(worker.Has("switch_gpu_bridge_fence(producers, count"));
-    EXPECT_TRUE(worker.Has("switch_gpu_bridge_wait_room()"));
-    EXPECT_TRUE(Block(fence, "bool planeFenced(const PlaneSet &p) const").Has("planeOverlayWaits(*native)"));
+    EXPECT_TRUE(worker.has("switch_gpu_bridge_fence(producers, count"));
+    EXPECT_TRUE(worker.has("switch_gpu_bridge_wait_room()"));
+    EXPECT_TRUE(Block(fence, "bool planeFenced(const PlaneSet &p) const").has("planeOverlayWaits(*native)"));
     EXPECT_TRUE(Block(SourceText("../SwitchNativePlaneDisplay.h"), "static bool planeOverlayWaits(")
-                    .Has("switch_gpu_backing_token_external_status"));
+                    .has("switch_gpu_backing_token_external_status"));
     EXPECT_TRUE(Block(fence, "void finishPlaneFence(int status)")
-                    .Before("if (status || !planesOn) {", "planeOut(planeFencing);"));
+                    .before("if (status || !planesOn) {", "planeOut(planeFencing);"));
     EXPECT_TRUE(Block(source, "void finishGpuSwap(int status)")
-                    .Has("if (gpuScanout && planeFencePending) { finishPlaneFence(status);"));
+                    .has("if (gpuScanout && planeFencePending) { finishPlaneFence(status);"));
     EXPECT_TRUE(Block(fence, "uint64_t planeFencePa(const PlaneSet &p) const")
-                    .Has("planeSlots[overlay.slot].memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone)"));
+                    .has("planeSlots[overlay.slot].memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone)"));
 }

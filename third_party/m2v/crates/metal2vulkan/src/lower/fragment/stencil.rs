@@ -36,8 +36,10 @@
 //!
 //! **Exact only where the stencil write cannot depend on the depth result**: the binder refuses a
 //! state with a depth attachment, a depth comparison other than `Always`, and a face whose
-//! depth-failure operation differs from its pass operation; link refuses alpha to coverage. A
-//! returned sample mask and an imageblock beside the output are not implemented.
+//! depth-failure operation differs from its pass operation, unless its consumer states the draw's
+//! tests (`FragmentTests::Stencil`), for which the function runs both tests itself
+//! ([`plan_tests`]); link refuses alpha to coverage. A returned sample mask and an imageblock
+//! beside the output are not implemented.
 
 use crate::air::abi::OutputRole;
 use crate::air::ir::TypeId as AirTypeId;
@@ -100,6 +102,9 @@ pub struct ShadowStencil {
     pub front_facing: usize,
     /// The multisampled form's coverage objects (see the module docs); `None` for one sample.
     pub samples: Option<SampleMasks>,
+    /// The shadow is a 2D array of a layered pass's layers, addressed at each fragment's layer
+    /// (`LoweringInputs::layered_storage`, one sample).
+    pub layered: bool,
 }
 
 /// The stage interface's objects of the multisampled form: the `SampleMask` input it tests and
@@ -188,6 +193,9 @@ pub fn select_output(cx: &mut SelectCx<'_>, field: u32, ty: AirTypeId) -> Result
     if cx.families.fragment.stencil.is_some() {
         return Err(cx.invariant("a second stencil output"));
     }
+    // In a layered pass the shadow holds the pass's layers, each fragment's texel at its
+    // primitive's layer, as the storage form's images do.
+    super::fetch::plan_layer(cx)?;
     let coord = stage_io::frag_coord(cx);
     let front_facing = stage_io::front_facing(cx);
     let samples = multisampled.then(|| {
@@ -196,12 +204,14 @@ pub fn select_output(cx: &mut SelectCx<'_>, field: u32, ty: AirTypeId) -> Result
     });
     let fp = &mut cx.families.fragment;
     fp.fetch_coord = Some(coord);
+    let layered = fp.fetch_layer.is_some();
     fp.stencil = Some(ShadowStencil {
         field,
         form,
         declared,
         front_facing,
         samples,
+        layered,
     });
     cx.facts.insert(RuntimeFact::ShadowStencil {
         formatless: declared == crate::spv::ImageFormat::Unknown,
@@ -210,6 +220,35 @@ pub fn select_output(cx: &mut SelectCx<'_>, field: u32, ty: AirTypeId) -> Result
     cx.push.insert(PushField::ShadowStencilState);
     cx.descriptors.storage_images = cx.descriptors.storage_images.saturating_add(1);
     Ok(())
+}
+
+/// Plan the in-shader depth and stencil tests (`depth_test`) of a function that returns
+/// `[[stencil]]`, compiled for a draw whose stencil write follows its depth test
+/// (`LoweringInputs::shader_tests` and `shader_stencil`): the shader-side stencil writes before the
+/// device's depth test, which chooses between the face's depth-failure and pass operations, so the
+/// function runs both tests, its output the stencil test's reference. A function that stores a
+/// color in the storage form planned them already (`fetch`).
+pub(super) fn plan_tests(cx: &mut SelectCx<'_>) -> Result<(), Error> {
+    if cx.stage != Stage::Fragment
+        || !cx.inputs.shader_tests
+        || !cx.inputs.shader_stencil
+        || cx.families.fragment.depth_test.is_some()
+        || cx.profile.fields().fragment.stencil_export
+    {
+        return Ok(());
+    }
+    let outputs = &cx.entry.ep.outputs;
+    let field =
+        |role: fn(&OutputRole) -> bool| outputs.iter().find(|o| role(&o.role)).map(|o| o.field);
+    let exports = super::depth_test::Exports {
+        depth: field(|r| matches!(r, OutputRole::Depth(_))),
+        stencil: field(|r| matches!(r, OutputRole::Stencil)),
+        mask: field(|r| matches!(r, OutputRole::SampleMask)),
+    };
+    if exports.stencil.is_none() {
+        return Ok(());
+    }
+    super::depth_test::plan(cx, exports)
 }
 
 /// Check the plan once every output and parameter is planned: an imageblock beside the output
@@ -242,7 +281,7 @@ pub(super) fn words(cx: &SelectCx<'_>, rets: u64) -> u64 {
 }
 
 /// Declare the shadow: a 2D `uint` storage image of the planned declaration, multisampled for the
-/// multisampled form.
+/// multisampled form, arrayed in a layered pass.
 pub(super) fn declare(
     mb: &mut ModuleBuilder,
     plan: Option<&ShadowStencil>,
@@ -258,7 +297,7 @@ pub(super) fn declare(
         sampled_type,
         dim: Dim::D2,
         depth: false,
-        arrayed: false,
+        arrayed: plan.layered,
         multisampled: plan.samples.is_some(),
         usage: ImageUsage::Storage,
         format: plan.declared,
@@ -508,7 +547,7 @@ pub(super) fn emit_return(
     let reference = fb.binary(BinOp::BitwiseAnd, output, max)?;
     let state = cx.push_field(fb, PushField::ShadowStencilState)?;
     let facing = stage_io::object_global(cx, plan.front_facing)?;
-    let pixel = super::fetch::pixel(cx, fb)?;
+    let pixel = super::fetch::storage_texel(cx, fb)?;
     let mem = memory_model::coherence(cx.plan).texel(fb)?;
     let masks = match plan.samples {
         // The coverage word, from the entry's copy inside an interlocked body.

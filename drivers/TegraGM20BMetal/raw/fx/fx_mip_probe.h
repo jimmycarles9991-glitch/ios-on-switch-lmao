@@ -51,6 +51,10 @@ inline uint32_t twodCandidateFormat(uint32_t mtl)
 // (fx_mip_route.h)
 inline uint32_t twodChainFormat(uint32_t mtl)
 {
+    // the 2D engine reads an sRGB level through the texture unit's decode, two codes off Metal's at proven steps (boot 21
+    // gpu.raw.mip_twod bgra8srgb_wrong=19 max_diff=2): its chains are the mip state's
+    if (mtl == 71 || mtl == 81)
+        return 0;
     if (const uint32_t f = twodFormat(mtl))
         return f;
     return twodCandidateFormat(mtl);

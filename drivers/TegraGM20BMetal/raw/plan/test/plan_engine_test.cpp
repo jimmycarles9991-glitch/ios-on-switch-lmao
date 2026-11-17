@@ -113,6 +113,7 @@ TEST(Engine, FetchLadderTakesTheRecordsRung)
     EXPECT_EQ(fetchRung(candidates, chipCaps(probe(Probe::BlendExact) | probe(Probe::IteratedBlend)), rule),
               Rung::Blend)
         << "fixed-function blend before the iterated blend";
+    EXPECT_EQ(fetchRung(candidates, chipCaps(kProvenOnChip), rule), Rung::Iterated) << "gpu.x1.iterated_blend passed";
 }
 
 }  // namespace

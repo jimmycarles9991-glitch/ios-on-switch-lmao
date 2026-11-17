@@ -12,12 +12,12 @@ uint64_t Device::visibilitySlot()
     });
     if (!visibilityPage_.va)
         return 0;
-    // The channel runs a process's work in order, so a slot is free again long before 4,096 later queries reach it
+    // The channel runs a process's work in order, so a slot is free again long before 8,192 later queries reach it
     const uint32_t slot = visibilityNext_.fetch_add(1, std::memory_order_relaxed) % kVisibilitySlots;
     return visibilityPage_.va + uint64_t(slot) * kVisibilitySlotBytes;
 }
 
-bool RenderEncoder::setVisibility(uint32_t mode, const Buffer *results, uint64_t offset)
+bool RenderEncoder::setVisibility(uint32_t mode, const Buffer *results, uint64_t offset, bool accumulate)
 {
     if (mode == kVisibilityDisabled && !visibility_.any())
         return true;  // Core Animation sets Disabled at every encoder state change: it emits nothing
@@ -31,7 +31,7 @@ bool RenderEncoder::setVisibility(uint32_t mode, const Buffer *results, uint64_t
     }
     if (p_.room() < VisibilityQueries::kSetWords)
         reserve();
-    return visibility_.set(p_, mode, resultVa, slotVa) == VisibilityQueries::Set::Done;
+    return visibility_.set(p_, mode, resultVa, slotVa, accumulate) == VisibilityQueries::Set::Done;
 }
 
 void RenderEncoder::finishVisibility()

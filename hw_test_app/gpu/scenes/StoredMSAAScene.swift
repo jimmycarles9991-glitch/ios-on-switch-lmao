@@ -117,6 +117,23 @@ struct StoredMSAAScene: GPUScene {
             Self.draw(e, Self.clip(Self.triangle, z: 0.5), Self.red)
             e.endEncoding()
         }
+        let copied = try gpu.texture(.rgba8Unorm, size, size, samples: samples)
+        try await gpu.run { commands in
+            let e = commands.makeBlitCommandEncoder()!
+            e.copy(from: color, to: copied)
+            e.copy(
+                from: color, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 3, y: 5, z: 0),
+                sourceSize: MTLSize(width: 7, height: 9, depth: 1), to: copied, destinationSlice: 0,
+                destinationLevel: 0, destinationOrigin: MTLOrigin(x: 1, y: 2, z: 0))
+            e.endEncoding()
+        }
+        let copiedCover = (0..<size * size).map { i in
+            let x = i % size, y = i / size
+            return (1..<8).contains(x) && (2..<11).contains(y) ? cover[(y + 3) * size + x + 2] : cover[i]
+        }
+        result.compare(
+            "\(samples)x whole and partial sample copies", try await Self.unpack(gpu, copied, samples, .rgba8Unorm),
+            Self.each(copiedCover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255)
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = color

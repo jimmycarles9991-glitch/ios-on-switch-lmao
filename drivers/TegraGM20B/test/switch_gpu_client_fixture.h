@@ -38,6 +38,7 @@ constexpr int THREAD_UNINT = 0;
 struct IOLock {
 	std::mutex mutex;
 	std::condition_variable changed;
+	std::function<void()> sleeping;
 };
 
 void IOLockLock(IOLock *lock) __attribute__((no_thread_safety_analysis))
@@ -57,6 +58,8 @@ bool IOLockTryLock(IOLock *lock) __attribute__((no_thread_safety_analysis))
 
 void IOLockSleep(IOLock *lock, void *, int) __attribute__((no_thread_safety_analysis))
 {
+	if (lock->sleeping)
+		lock->sleeping();
 	std::unique_lock<std::mutex> held(lock->mutex, std::adopt_lock);
 	lock->changed.wait(held);
 	held.release();
@@ -66,6 +69,8 @@ void IOLockWakeup(IOLock *lock, void *, bool)
 {
 	lock->changed.notify_all();
 }
+
+#include "drivers/TegraGM20B/SwitchGpuSubmitGate.h"
 
 #define IODelete(p, type, count) \
 	do {                     \
@@ -395,35 +400,13 @@ public:
 		RetiredBinding *retirement;
 	};
 
-	struct Gate {
-		bool value = false, mutation = false;
+	struct Gate : SwitchGpuSubmitGate {
 		unsigned mutations = 0;
 
-		bool closed() const
-		{
-			return value;
-		}
-
-		void close(IOLock *)
-		{
-			value = true;
-		}
-
-		bool beginMutation(IOLock *)
+		bool beginMutation(IOLock *lock)
 		{
 			++mutations;
-			mutation = true;
-			return !value;
-		}
-
-		void endMutation(IOLock *)
-		{
-			mutation = false;
-		}
-
-		bool mutating() const
-		{
-			return mutation;
+			return SwitchGpuSubmitGate::beginMutation(lock);
 		}
 	} submitGate_;
 

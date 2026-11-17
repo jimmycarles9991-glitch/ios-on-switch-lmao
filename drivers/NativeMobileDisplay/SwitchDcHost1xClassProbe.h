@@ -124,7 +124,7 @@ bool dcClassSubmit(const uint32_t *body, uint32_t count, DcClassStream &s)
 // The CPU raises the gate; then whether the channel ran past the stream. A stopped channel is torn down and restarted.
 void dcClassRelease(DcClassStream &s)
 {
-    s.error = tegra_host1x_syncpt_release_failed(dcClassSyncpts[0], s.gateAt, 1);
+    s.error = tegra_host1x_syncpt_cpu_increment(dcClassSyncpts[0]);
     s.ran = !s.error && tegra_host1x_syncpt_wait(dcClassSyncpts[2], s.channelAt, kDcClassRunUs) == TEGRA_HOST1X_OK;
     tegra_host1x_describe_channel(kDcClassChannel, s.channel, sizeof(s.channel));
     if (!s.ran) {

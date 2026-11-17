@@ -3,10 +3,13 @@
 // below are an Apple M4 Max's, read back by raw/test/xroracle.mm, which holds xrClearTexel to Metal's clears on this Mac's GPU
 // over 755 colors of each linear form by both routes, and pack/xr.metal's stand-in to Metal's reads of every code.
 #include "../raw/runtime/raw_xr.h"
+#include "../raw/runtime/raw_xr_words.h"
 
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <cstring>
+#include <vector>
 
 namespace {
 
@@ -83,6 +86,36 @@ TEST(RawXr, NaNIsColorCodeZeroAndAlphaZero)
     const float nan = std::nanf("");
     expectTexel(clear(raw::XrForm::Bgra10, nan, 0.1f, 1.0f, nan), 0xdf80, 0x6cc0, 0x6000, 0x6000);
     expectTexel(clear(raw::XrForm::Bgra10, nan, 0.1f, 1.0f, nan, true), 0xdf80, 0x6cc0, 0, 0x6000);
+}
+
+// Metal's CPU copies of a shared RGB10A8_2P_XR10 texture move colour words alone: getBytes gives each texel's word in 4
+// bytes, replaceRegion writes them and keeps the alpha plane (an M4 Max, m2vf-shapes2 probe/hwref/xr550cpu.swift: the
+// words round-trip and a sampled texel keeps alpha 128 / 255 after it, for a 2D, 2D array and 3D texture)
+TEST(RawXr, TwoPlaneCpuCopiesMoveTheColourWordsAndKeepTheAlpha)
+{
+    constexpr uint32_t w = 3, h = 2, d = 2;
+    std::vector<uint8_t> texels(size_t(w) * h * d * raw::kXrTexelBytes);
+    for (size_t i = 0; i < texels.size(); i++)
+        texels[i] = uint8_t(0xa0 + i);
+    const std::vector<uint8_t> before = texels;
+    std::vector<uint32_t> words(size_t(w) * h * d);
+    for (size_t i = 0; i < words.size(); i++)
+        words[i] = 0x10000000u | uint32_t(i * 0x40401);
+    const size_t wordRow = w * 4, wordImage = wordRow * h, texelRow = w * 8, texelImage = texelRow * h;
+    raw::xrWordsIntoTexels(reinterpret_cast<const uint8_t *>(words.data()), wordRow, wordImage, texels.data(), texelRow,
+                           texelImage, w, h, d);
+    for (size_t i = 0; i < words.size(); i++) {
+        uint32_t word, alpha, alphaBefore;
+        memcpy(&word, &texels[i * 8], 4);
+        memcpy(&alpha, &texels[i * 8 + 4], 4);
+        memcpy(&alphaBefore, &before[i * 8 + 4], 4);
+        EXPECT_EQ(word, words[i]) << i;
+        EXPECT_EQ(alpha, alphaBefore) << i;
+    }
+    std::vector<uint32_t> back(words.size());
+    raw::xrWordsFromTexels(texels.data(), texelRow, texelImage, reinterpret_cast<uint8_t *>(back.data()), wordRow,
+                           wordImage, w, h, d);
+    EXPECT_EQ(back, words);
 }
 
 }  // namespace

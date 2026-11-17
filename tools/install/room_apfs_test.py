@@ -51,7 +51,7 @@ def check(image: Path, blocks: int) -> None:
     with disks.attached(image, LOG, writable=False, raw=True) as target:
         if len(target.volumes) != 1:
             raise host.HostError(f'macOS attaches no volume from {image.name}')
-        container = host.container_on(target.whole) or {}
+        container = (host.apfs_container(target.container) if target.container else None) or {}
         if container.get('CapacityCeiling') != blocks * BLOCK:
             raise host.HostError(f'the container is {container.get("CapacityCeiling")} bytes, not {blocks * BLOCK}')
         compose.fsck(target.whole, image.name, LOG)

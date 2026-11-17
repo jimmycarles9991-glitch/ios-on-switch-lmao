@@ -19,6 +19,20 @@ static void reportFirst(const RMTexture *t, MTLTextureDescriptor *d)
                               : "through a block-linear shadow");
 }
 
+// An M4 Max's Metal answers such a descriptor with its validation's "a non-zero rotation set but is not marked as
+// framebufferOnly", and with framebufferOnly set its driver's "Buffer texture has invalid rotation"
+bool refuseTurnedOffSurface(MTLTextureDescriptor *d)
+{
+    const NSUInteger turn = descriptorRotation(d);
+    if (!turn)
+        return false;
+    SWITCH_REFUSE("raw", "tex.turned",
+                  "no %lux%lu texture of format %lu and rotation %lu over no surface: nil, as Metal makes none (a "
+                  "rotation is a framebuffer-only surface plane's; MTLDevice.h newTextureWithDescriptor:, nullable)",
+                  (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, (unsigned long)turn);
+    return true;
+}
+
 bool rotatedShape(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane, raw::Rotation &out)
 {
     const NSUInteger turn = descriptorRotation(d);

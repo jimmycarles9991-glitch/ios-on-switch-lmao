@@ -82,6 +82,16 @@ py_binary(
     deps = [":metallib"],
 )
 
+py_test(
+    name = "crawl_test",
+    srcs = [
+        "crawl.py",
+        "crawl_test.py",
+        "metallib_test.py",
+    ],
+    deps = [":metallib"],
+)
+
 py_library(
     name = "replies",
     srcs = ["replies.py"],

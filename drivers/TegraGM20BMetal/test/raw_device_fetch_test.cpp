@@ -22,7 +22,7 @@ raw::RuntimeRecord fetchingRecord(uint64_t key, bool storage)
     r.programs[1].id = "fs";
     raw::PackPipeline &pp = r.pipeline;
     pp.keyHash = key;
-    pp.entries = 1;
+    raw::setEntryCount(pp, 1);
     pp.entry[0] = {0, raw::EntryFetch, 2, 0, 0, 0, 0};
     pp.flags = raw::PipelineFetches;
     if (storage) {

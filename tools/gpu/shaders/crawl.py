@@ -10,9 +10,9 @@ path both hold: the SystemOS cryptex is grafted over the OS volume.
 - <out>/data/<sha256>.metallib: every library embedded in a CPU binary (the dyld shared cache's images, executables),
   which a process can only make from bytes.
 - inventory.json: every library found, also those the seed leaves out (GPU binary archives and pipeline libraries,
-  which the frontend refuses, so no process makes them), each with its function types and AIR versions; every MTLB
-  that does not parse, and where; the Metal source strings embedded in binaries, which only the device's own
-  compiler can turn into AIR.
+  which the frontend refuses, so no process makes them), each with its function types and AIR versions over every
+  AIR slice of a fat file (and the slices, when there are several); every MTLB that does not parse, and where; the
+  Metal source strings embedded in binaries, which only the device's own compiler can turn into AIR.
 """
 
 import argparse
@@ -30,7 +30,7 @@ from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
 
-from tools.gpu.shaders.metallib import FAT_MAGIC, HEADER, MAGIC, functions, thin
+from tools.gpu.shaders.metallib import FAT_MAGIC, HEADER, MAGIC, functions, slices, thin
 
 HDIUTIL = '/usr/bin/hdiutil'
 MACHO = b'\xcf\xfa\xed\xfe'
@@ -69,14 +69,18 @@ def mounted(image: Path, point: Path) -> Iterator[Path]:
 
 
 def _library_entry(data: bytes, where: str) -> dict:
-    found = functions(data)
-    return {
+    found = {subtype: functions(library) or [] for subtype, library in slices(data)}
+    every = [f for fs in found.values() for f in fs]
+    entry = {
         'where': where,
         'sha256': hashlib.sha256(data).hexdigest(),
         'bytes': len(data),
-        'types': dict(Counter(str(f.type) for f in found or ())),
-        'air': sorted({f.air for f in found or () if f.air}),
+        'types': dict(Counter(str(f.type) for f in every)),
+        'air': sorted({f.air for f in every if f.air}),
     }
+    if len(found) > 1:
+        entry['slices'] = [{'cpusubtype': subtype, 'functions': len(fs)} for subtype, fs in found.items()]
+    return entry
 
 
 def _embedded(data: mmap.mmap) -> Iterator[tuple[int, bytes]]:
@@ -114,14 +118,14 @@ class Crawl:
         """Take a library file, or scan any other file for embedded libraries."""
         with path.open('rb') as f:
             head = f.read(8)
-            if head[:4] not in (MAGIC, FAT_MAGIC):
+            data = path.read_bytes() if head[:4] == FAT_MAGIC else None
+            if head[:4] != MAGIC and (data is None or thin(data) is None):
                 self.scan(f, relative, head)
                 return
-        data = path.read_bytes()
-        found = functions(data) if thin(data) is not None else None
+        data = data or path.read_bytes()
+        found = functions(data)
         if found is None:
-            if head[:4] == MAGIC or thin(data) is not None:
-                self.unreadable.append({'where': relative, 'why': 'function list does not parse'})
+            self.unreadable.append({'where': relative, 'why': 'function list does not parse'})
             return
         if not found:
             return

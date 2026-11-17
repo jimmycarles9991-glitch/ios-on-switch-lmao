@@ -45,6 +45,7 @@ use crate::spirv::ir::TypedModule;
 
 mod bicubic;
 mod heap;
+mod kernel_planes;
 mod samples;
 mod targets;
 mod two_plane;

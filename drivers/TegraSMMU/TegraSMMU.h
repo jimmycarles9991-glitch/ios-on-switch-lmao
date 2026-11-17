@@ -5,7 +5,8 @@
 // goes through here, under one lock. Page tables are TegraSMMUDomain.h.
 //
 // Registers (Linux memory/tegra/tegra210.c, iommu/tegra-smmu.c): PTB_ASID 0x1c, PTB_DATA 0x20, TLB_FLUSH 0x30 (ASID match
-// bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (0: all). A swgroup's ASID register is ENABLE 31 |
+// bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (0: all; PA[31:4] | 1: one PTE group, whose
+// PA[33:32] PTC_FLUSH_1 0x9b8 holds; Tegra X1 TRM 18.11.1.10, .11, .122). A swgroup's ASID register is ENABLE 31 |
 // ASID; each memory client has a translation bit in TRANSLATION_ENABLE_0..4 (0x228..0x238), which switchroot's bl31 sets
 // for every client while leaving every swgroup in bypass. The global SMMU enable is secure-only (reads back garbage), so a
 // whether translation is on is known from what the unit's engines did (TegraVIC.cpp), not read back.
@@ -78,8 +79,12 @@ int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t tr
 int switch_smmu_restore(uint32_t asid, uint32_t ptb, uint32_t asidReg, char *line, size_t size);
 // The swgroup back to bypass, the ASID's directory cleared, a flush.
 void tegra_smmu_detach(uint32_t asid, uint32_t asidReg);
-// After a change to the ASID's tables (cleaned to memory first): PTC all, then the ASID's TLB entries.
+// After a change to the ASID's directory (cleaned to memory first): every ASID's PTC entries, then the ASID's TLB.
 void tegra_smmu_flush(uint32_t asid);
+// After a change to page entries only (cleaned to memory first): the PTC entries of the table bytes [tablesPa,
+// tablesPa + tableBytes), then the ASID's TLB entries in the 4 MiB sections of [iova, iova + iovaBytes). Other ASIDs,
+// the display's isochronous fetches among them, keep their cached translations. TegraSMMUPublish.h calls it.
+void switch_smmu_flush_range(uint32_t asid, uint64_t tablesPa, uint64_t tableBytes, uint64_t iova, uint64_t iovaBytes);
 // The MC register at offset (for a driver's own checks and FAIL lines).
 uint32_t tegra_smmu_read(uint32_t offset);
 // Sets or clears a memory client's hot-reset bit in MC_CLIENT_HOTRESET_CTRL (0x200) or CTRL_1 (0x970); the flush has
@@ -97,12 +102,16 @@ int tegra_smmu_resume(void);
 // The memory controller's error interrupt (TegraMCErrors.cpp), the one owner of MC_INTSTATUS, INTMASK, ERR_STATUS and
 // ERR_ADR: each decode, security or SMMU error a client raises is one line naming its kind, client, direction and
 // address, and its INTSTATUS bit is cleared so the next is captured. Nobody else clears INTSTATUS: a driver that wants
-// the MC's errors in its own line reads tegra_mc_error_latest. Thread context, at boot; -1 with one line when the
-// interrupt cannot be had.
+// the MC's errors in its own line reads tegra_mc_error_latest. A client's run of errors prints its first few in full and
+// then one count line when it ends (TegraMCErrors.h Runs). Thread context, at boot; returns at once, its own thread
+// attaching once the GIC is up; -1 with one line when that thread or the registers cannot be had.
 int tegra_mc_errors_start(void);
 // How many errors the interrupt took since boot, and the latest one (zeros before the first). Any context.
 uint32_t tegra_mc_error_latest(uint32_t *intstatus, uint32_t *status, uint32_t *address);
+// After SC7 (the MC was reset): the runs end, INTMASK again. Thread context.
 void switch_mc_errors_resume(void);
+// Swgroup register `asidReg` went back to bypass (tegra_smmu_detach): its clients' runs end. Thread context, no lock held.
+void switch_mc_errors_detached(uint32_t asidReg);
 
 #ifdef __cplusplus
 }

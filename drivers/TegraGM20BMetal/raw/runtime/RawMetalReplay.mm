@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "raw_lock.h"
 #import "RawMetalCounters.h"
+#import "RawMetalFunctionTags.h"
 #import "RawMetalMultisample.h"
 #import <objc/message.h>
 #import "RawMetalPlanAdapters.h"
@@ -92,17 +93,16 @@ static bool takesArgumentBuffers(id<MTLFunction> f)
         return false;
     RMFunction *function = (RMFunction *)f;
     if (!function->_argumentBuffers) {
-        id twin = function->_twin ?: [function twinOn:RM_M2V(NeedReplayArgumentCheck)];
-        bool takes = false;
-        for (NSUInteger index = 0; index < 31 && !takes; index++) {
-            const char *why = nullptr;
-            takes = native_bridge_metal_argument_layouts(
-                twin, index,
-                [](const NmbArgumentLayout *, uint32_t, void *) {
-                    return true;
-                },
-                nullptr, &why);
+        raw::BufferEncoders encoders;
+        std::string why;
+        if (!rmBufferEncoders(function, encoders, why)) {
+            once([NSString stringWithFormat:@"replay: whether %@ takes an argument buffer is unknown, none taken: %s",
+                                            function.name, why.c_str()]);
+            return false;
         }
+        bool takes = false;
+        for (const raw::BufferEncoder &e : encoders)
+            takes |= e.argumentBuffer;
         function->_argumentBuffers = takes ? 2 : 1;
     }
     return function->_argumentBuffers == 2;
@@ -114,9 +114,10 @@ static bool readsArguments(RMPipeline *p)
 {
     if (p->_raw && p->_raw->rec) {
         const raw::PackPipeline &r = *p->_raw->rec;
+        const raw::SetEntries &entries = p->_raw->entries;
         bool tables = false;
-        for (uint32_t i = 0; i < r.entries; i++)
-            tables |= r.entry[i].kind == raw::EntryTextureTable || r.entry[i].kind == raw::EntrySamplerTable;
+        for (uint32_t i = 0; i < entries.size(); i++)
+            tables |= entries[i].kind == raw::EntryTextureTable || entries[i].kind == raw::EntrySamplerTable;
         return tables || r.heapArrays || r.rootTableWord[0] || r.rootTableWord[1] || r.statusWord[0] || r.statusWord[1];
     }
     MTLRenderPipelineDescriptor *d = p->_madeFrom;
@@ -267,8 +268,9 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
             return;
         }
         const raw::PackPipeline &r = *pipe->_raw->rec;
-        for (uint32_t i = 0; i < r.entries; i++) {
-            const raw::PackEntry &e = r.entry[i];
+        const raw::SetEntries &entries = pipe->_raw->entries;
+        for (uint32_t i = 0; i < entries.size(); i++) {
+            const raw::PackEntry &e = entries[i];
             if (e.kind != raw::EntryUbo || e.stage > 2 || e.slot > 30)
                 continue;
             RMBuffer *b = bound[e.stage][e.slot];
@@ -371,7 +373,8 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
             // an SPI selector the SDK's protocol does not declare
             using Fill = void (*)(id, SEL, id, NSUInteger, NSUInteger, MTLRegion, MTLClearColor);
             reinterpret_cast<Fill>(objc_msgSend)(
-                enc, NSSelectorFromString(@"fillTexture:level:slice:region:color:"), twinOf((__bridge id)c.obj), 0, 0,
+                enc, NSSelectorFromString(@"fillTexture:level:slice:region:color:"), twinOf((__bridge id)c.obj),
+                NSUInteger(uint32_t(c.c)), NSUInteger(uint32_t(c.c >> 32)),
                 MTLRegionMake2D(extra(cb, c.x), extra(cb, c.x + 1), extra(cb, c.x + 2), extra(cb, c.x + 3)),
                 MTLClearColorMake(rgba[0], rgba[1], rgba[2], rgba[3]));
             break;
@@ -541,7 +544,7 @@ id<MTLCommandBuffer> replay(RMCommandBuffer *cb, size_t from, size_t to, bool pa
             break;
         case OpResetCommands:
         case OpCopyCommands:
-            encodeCommandsBlit(nullptr, c);
+            encodeCommandsBlit(nullptr, nullptr, c);
             break;
         default:  // a compute encoder's: replayKernel, above
             break;

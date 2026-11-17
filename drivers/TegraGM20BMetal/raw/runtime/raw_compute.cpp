@@ -13,6 +13,7 @@
 #include "raw_icb_compute.h"
 #include "raw_residual.h"
 #include <os/log.h>
+#include "raw_sampler_map.h"
 #include "raw_slm.h"
 #include "raw_view.h"
 
@@ -224,6 +225,12 @@ void ComputeEncoder::setBytesAt(uint32_t slot, uint64_t va, uint32_t length, con
     }
 }
 
+void ComputeEncoder::setKernelBytes(uint32_t slot, uint64_t va, uint32_t length)
+{
+    if (slot < 31)
+        bindBuffer(slot, {va, length, nullptr, 0, va, true});
+}
+
 void ComputeEncoder::setBuffer(uint32_t slot, const Buffer *b, uint64_t offset)
 {
     if (slot >= 31)
@@ -303,12 +310,53 @@ void ComputeEncoder::setSampler(uint32_t slot, const Sampler *s)
     }
 }
 
+void ComputeEncoder::setBufferWindow(uint32_t slot, uint64_t va)
+{
+    if (slot < 31 && (!(windowMask_ >> slot & 1) || windows_[slot] != va)) {
+        windows_[slot] = va;
+        windowMask_ |= 1u << slot;
+        ++bindingRevision_;
+        RAW_DIAGNOSTIC(dev_.stats.kernelWindows++);
+    }
+}
+
+void ComputeEncoder::clearBufferWindows()
+{
+    if (windowMask_) {
+        windowMask_ = 0;
+        ++bindingRevision_;
+    }
+}
+
 void ComputeEncoder::bindBuffer(uint32_t slot, const Bound &binding)
 {
     if (!(bufs_[slot] == binding)) {
         bufs_[slot] = binding;
         ++bindingRevision_;
     }
+}
+
+const char *ComputeEncoder::pairedSamplerTsc(const Device &dev, const PackKernelEntry &e,
+                                             const Texture *const (&textures)[31], const Sampler *const (&samplers)[16],
+                                             uint32_t &tsc)
+{
+    const bool constant = e.slot & kConstexprSampler;
+    const uint32_t index = e.slot & ~kConstexprSampler;
+    const Sampler *s = !constant && e.slot < 16 ? samplers[e.slot] : nullptr;
+    if (constant && index >= dev.constexprCount_)
+        return "a kernel's constexpr sampler the pack holds no header of";
+    const auto leaves = [&](uint8_t m) {
+        if (constant)
+            return dev.constexprLeaves(index, m);
+        return !s || mapLeavesModes(s->desc.sAddress, s->desc.tAddress, s->desc.rAddress, m);
+    };
+    const auto mapOf = [&](uint32_t slot) -> uint8_t {
+        return slot < 31 && textures[slot] ? textures[slot]->addressMap : 0;
+    };
+    if (!pairedSamplerKept(kernelSamplerPairs(e), leaves, mapOf))
+        return "a kernel sampler whose modes a converted texture's address map changes, compiled without that map";
+    tsc = constant ? dev.constexprTsc_[index] : s ? s->tsc : dev.neutralTsc_;
+    return nullptr;
 }
 
 bool ComputeEncoder::prepareDescriptors(const char **why)
@@ -330,7 +378,8 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
         return false;
     }
     // a planar or YCbCr texture's address map: its samplers' headers with the map applied, as a draw's handle takes them
-    // (admission keeps a kernel here only where every texture it binds is under one map, or the map changes no sampler)
+    // (admission keeps a kernel here only where every texture it binds is under one map, or the map changes no sampler;
+    // a sampler entry that holds its pairs only where its own textures' maps change none of its modes)
     uint8_t map = 0;
     for (uint32_t i = 0; i < r.entries; i++)
         if (r.entry[i].kind == KernelTexture && r.entry[i].slot < 31 && textures_[r.entry[i].slot])
@@ -343,10 +392,10 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
             const Bound &b = bufs_[e.slot];
             if (b.buffer)
                 cb_.use(*b.buffer, writes);
-            else
+            else if (!b.kernelMemory)
                 cb_.useAddress(b.va, b.size, writes);
             BufferDescriptor desc;
-            if (!bufferDescriptor(e, b.va, b.size, desc)) {
+            if (!bufferDescriptor(e, windowMask_ >> e.slot & 1 ? windows_[e.slot] : b.va, b.size, desc)) {
                 *why = "a buffer bound at an offset that is not a multiple of 16";
                 return false;
             }
@@ -362,7 +411,7 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
             at[1] = uint32_t(desc.base >> 32);
             at[2] = b.va ? desc.range : 0;
             at[3] = 0;
-        } else if (e.kind == KernelTexture) {
+        } else if (e.kind == KernelTexture || e.kind == KernelTexturePlane) {
             const Texture *t = writes ? textures_[e.slot] : cb_.readTexture(textures_[e.slot]);
             if (t && !t->tic) {  // memoryless, or depth without ShaderRead: a load reads header 0's zeros
                 if (writes) {
@@ -376,6 +425,13 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
                 if (s && slotView(e.window, s->tic0, swizzledWord0(s->tic0, t->standIn->swizzle), s->bpp,
                                   blockCompressed(s)) == SlotView::Own)
                     t = t->standIn;
+            }
+            // a two-plane texture's color words at the slot's own entry, its alpha bytes at its plane entry
+            if (t && t->xrPlanes && t->luma && t->chroma) {
+                t = e.kind == KernelTexturePlane ? t->chroma : t->luma;
+            } else if (t && e.kind == KernelTexturePlane) {
+                *why = "a kernel record's alpha plane at a texture held in one image";
+                return false;
             }
             if (t) {
                 cb_.use(*t, writes);
@@ -398,6 +454,9 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
             at[0] |= tic;
         } else if (e.kind == KernelSpillTable) {
             continue;
+        } else if (e.kind != KernelSampler && e.kind != KernelTextureTable && e.kind != KernelSamplerTable) {
+            *why = "a kernel record entry of a kind the raw path does not bind";
+            return false;
         } else if (e.kind == KernelTextureTable || e.kind == KernelSamplerTable) {
             const HeapTables &tables = dev_.heapTables_;
             const bool textures = e.kind == KernelTextureTable;
@@ -406,6 +465,13 @@ bool ComputeEncoder::prepareDescriptors(const char **why)
             at[1] = uint32_t(va >> 32);
             at[2] = textures ? tables.textureTableBytes() : tables.samplerTableBytes();
             at[3] = 0;
+        } else if (kernelSamplerPairsKnown(e)) {
+            uint32_t tsc = 0;
+            if (const char *refused = pairedSamplerTsc(dev_, e, textures_, samplers_, tsc)) {
+                *why = refused;
+                return false;
+            }
+            at[0] |= tsc << 20;
         } else if (e.slot & kConstexprSampler) {
             const uint32_t index = e.slot & ~kConstexprSampler;
             if (index >= dev_.constexprCount_) {
@@ -565,8 +631,8 @@ bool ComputeEncoder::dispatchRegion(const ComputeRegion &part, const std::array<
     }
     if (!groups[0] || !groups[1] || !groups[2])
         return true;
-    if (groups[1] > 0xffff || groups[2] > 0xffff) {
-        *why = "a grid taller or deeper than 65535 threadgroups";
+    if (qmdSliceCount({groups[0], groups[1], groups[2]}) > kMaxQmdSlices) {
+        *why = "a grid of more slices than raw launches";
         return false;
     }
     const PackKernel &r = *state_->rec;
@@ -603,8 +669,11 @@ bool ComputeEncoder::dispatchRegion(const ComputeRegion &part, const std::array<
         noteDispatch(units, looping);
     slotTableVa_ = 0;
     for (uint32_t i = 0; i < pieces; i++) {
-        if (!launch(grid, dispatchPiece(grid, axis, i, pieces), region, why))
-            return false;
+        const DispatchPiece piece = dispatchPiece(grid, axis, i, pieces);
+        const uint64_t slices = qmdSliceCount({piece.groups[0], piece.groups[1], piece.groups[2]});
+        for (uint64_t s = 0; s < slices; s++)
+            if (!launch(grid, qmdSlice(piece, s), region, why))
+                return false;
         if (pieces > 1)
             cutBatch();
     }
@@ -726,7 +795,8 @@ void ComputeEncoder::argumentRoot(const PackKernel &r, uint32_t *root)
             cb_.use(*b.buffer, true);
             slot[n] = {b.buffer->va, b.buffer->length, b.offset};
         } else {
-            cb_.useAddress(b.va, b.size, true);
+            if (!b.kernelMemory)
+                cb_.useAddress(b.va, b.size, true);
             slot[n] = {b.va, b.size, 0};
         }
     }

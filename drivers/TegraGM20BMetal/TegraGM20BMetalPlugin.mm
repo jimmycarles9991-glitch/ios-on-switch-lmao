@@ -18,8 +18,8 @@
 // not exist and crashes at once, and launchd's respawns hang Settings) and, by default, every other process (the kernel's
 // grant admits them too; TEGRA_GPU_ALL_CLIENTS=0 limits it to those named here). A process left out gets nil from here and
 // keeps rendering on the CPU, as does one whose device does not open (raw_device_open.h: one error line naming the cause's
-// class); Metal's next ask opens afresh. Every process but the render server compiles the Metal source and stitched
-// libraries Core Image makes (NMB_SYSTEM_COMPILER, the frontend's in-process MTLCompiler).
+// class); Metal's next ask opens afresh. Every process, the render server too, compiles the Metal source and stitched
+// libraries Core Image makes (the frontend's in-process MTLCompiler).
 //
 // Knobs, environment variables of the process (none is a boot-arg):
 //   TEGRA_GPU_ALL_CLIENTS=0   only the processes named above get a device (default: every process)
@@ -30,8 +30,6 @@
 //                             in three pools, the first a quarter of it, at least 1 MiB, mapped whole and charged to it; each
 //                             block is one BoAlloc on the thread that ran out of room, and goes back to the kernel once empty
 //                             and the GPU idle, or on a memory warning: GpuMemoryRelease.h)
-//   NMB_IDLE_RELEASE_MS=<ms>  idle GPU memory goes back to the kernel once the GPU idled this long (default 1000 outside
-//                             backboardd, 0 in it: on memory warnings alone)
 //   NMB_CACHE_MB=<MiB>        the shader cache directory's cap (default 256; the runtime's is 25 GiB)
 //   NMB_ANSWER_CACHE=0        ask the runtime every device question again (default: keep each answer)
 //   NMB_REFUSE_REBINDS=0      encoders log their calls for rebinds again (default: nothing rebinds)
@@ -41,7 +39,6 @@
 //                             the device's own here)
 //   M2V_ZERO_FRESH=1          zero fresh memory and upload staging on the CPU again (default off)
 //   TEGRA_M2V_SEED=0          no shared shader cache seed (default 1)
-//   NMB_SYSTEM_COMPILER       Metal source and stitched libraries compiled in-process (default 1 outside backboardd, 0 in it)
 //   TEGRA_RAW_METAL=0         this process keeps the m2v device even with a raw pack staged
 //
 // The raw GM20B path (raw/runtime/RawMetal.h): when the build's pipeline pack is staged beside the bundle
@@ -766,9 +763,11 @@ private:
     {
         const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
         id made = nil;
-        @try {
+        // C++'s catch, which takes Objective-C exceptions too: Objective-C's own personality routine would be the image's
+        // fourth beside two Rust standard libraries' (the bridge's, the stage compile's), past what compact unwind encodes
+        try {
             made = native_bridge_metal_open(loader_, cache, registryID_, missing);
-        } @catch (NSException *exception) {
+        } catch (...) {
             made = nil;
         }
         bridgeNs_ += clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began;
@@ -811,10 +810,6 @@ id openOnce(unsigned port, raw::OpenFailure &failure)
         // for cached memory a 64 MiB block stalled it ~100 ms (r5c: 66 MB of BoAllocs, 103 ms, in the 5 s Settings opened);
         // 16 MiB blocks bound that to a quarter and still pool any 720p texture, half a block being the dedicated limit.
         setenv("M2V_BLOCK_MIB", renderServer ? "16" : "4", 0);
-        if (renderServer)
-            setenv("NMB_IDLE_RELEASE_MS", "0", 0);  // read by the frontend (GpuMemoryRelease.h)
-        if (!renderServer)
-            setenv("NMB_SYSTEM_COMPILER", "1", 0);  // read by the frontend: Core Image's kernels are compiled here
         if (const char *zero = getenv("M2V_ZERO_FRESH"); zero && !strcmp(zero, "0"))
             unsetenv("M2V_ZERO_FRESH");  // the runtime reads any value as on
         char loader[1024];
@@ -872,7 +867,6 @@ id openOnce(unsigned port, raw::OpenFailure &failure)
                 return m2v.device();
             };
             lazy.methods = NSClassFromString(@"NBDeviceMethods");
-            lazy.answerSelector = nmb_device_answer_selector;
             NSString *why = nil;
             if (id raw = raw_metal_device_open_lazy(pack, uint64_t(TEGRA_RAW_STACK), registryID, lazy, &why)) {
                 os_log(logger(), "TegraGM20BMetal: raw GM20B path on in %{public}s (pack %{public}s, stack %016llx)",

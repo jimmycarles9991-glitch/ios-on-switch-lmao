@@ -73,6 +73,10 @@ constexpr MethodRange kOwnedMethods[] = {
     {0x204C, 0x2050},
     {0x214C, 0x2150},
     {0x2608, 0x260C},
+    // the pixel stage's switch and the rasteriser's: on, but where a record has no fragment program (raw_pack.h
+    // kNoProgram) or its key " rast=0": its state turns them off, the next state back on (raw_stage_switches.h)
+    {0x2140, 0x2144},
+    {0x037C, 0x0380},
     // the iterated blend (raw_fetch_free.h): SET_ITERATED_BLEND and its pass count, the program's loads, its constants, the
     // per-target blend switch and the common blend block it takes alpha from, a rung-3 fetch-free form's
     {0x0DD0, 0x0DD8},

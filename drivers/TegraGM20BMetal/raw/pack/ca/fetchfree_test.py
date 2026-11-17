@@ -44,13 +44,36 @@ class Forms27(unittest.TestCase):
     def test_what_has_no_form(self):
         self.assertEqual(self.form('PBGRAXm_BbcmA2Xhf')[0], 0)  # reads a second attachment
         self.assertEqual(self.form('PBGRAXmw_TcimBdsoA3Xhfs_Ialp'), (0, 'HDR scale or EDR factor'))
-        self.assertEqual(self.form('PBGRAXm_TcimBaddA2S1Xhfu_Ialp'), (0, 'blended colour not 8-bit unorm'))
+        self.assertEqual(self.form('PBGRAXm_TdgdBaddA2Xhfu_Isrc'), (0, 'unbounded range on an 8-bit target'))
+        self.assertEqual(self.form('PRGhAXm_TdgdBaddA2Xhfx_Isrc'), (0, 'extended range'))
         self.assertEqual(self.form('PBGRAXm_TimgA2Xhfn_Isrc'), (0, 'no fragment blend'))
 
-    def test_what_the_host_gate_has_not_shown_within_the_bound_has_no_form(self):
-        self.assertEqual(self.form('PBGRAXm_TkfhBpldA2Xhf_Irsd'), (0, 'kfh discards every lane on the host gate'))
+    def test_what_the_host_gate_measured_beyond_the_bound_has_no_form(self):
         self.assertEqual(self.form('PBGRAXmw_TimgBlltA3Xhfcu_IsrcN3Ocsmtsdnlnlnl'), (0, 'colour opcodes'))
         self.assertEqual(self.form('PBGRAXm_TcimBdivA2Xhf_Isrc'), (0, 'div beyond the bound on the host gate'))
+        self.assertEqual(
+            self.form('PBGRAXm_TsplBlumA2Xhf_Isrc'),
+            (0, 'lum beyond the bound on the host gate with its texture function'),
+        )
+
+    def test_a_texture_function_whose_lanes_the_host_gate_never_keeps_takes_its_form(self):
+        self.assertEqual(self.form('PBGRAXm_TkfhBpldA2Xhf_Irsd'), (3, 'pld'))
+        self.assertEqual(self.form('PBGRAXm_TkfhBmpyA2Xhf_Irsd'), (3, 'mpy'))
+
+    def test_an_unbounded_rgba16float_state_takes_its_program_where_one_is_written(self):
+        self.assertEqual(self.form('PRGhAXm_TdgdBsbtA2Xhfu_Isrc'), (3, 'sbt.u'))
+        self.assertEqual(self.form('PRGhAXm_TdgdBdivA2Xhfu_Isrc'), (3, 'div.u'), 'no saturate on a float target')
+        self.assertEqual(self.form('PRGhAXm_TdgdBmpyA2Xhfu_Isrc'), (0, 'no iterated program for mpy'))
+        self.assertEqual(self.form('PRGhAXm_TdgdBaddA2Xhfu_Isrc'), (2, ''), 'the ROP clamps no float source')
+
+    def test_an_unbounded_form_takes_its_program_except_with_the_functions_beyond_the_bound(self):
+        self.assertEqual(self.form('PBGRAXm_TimgBlltA2Xhfu_Isrc'), (3, 'llt.u'))
+        self.assertEqual(self.form('PBGRAXm_TimgBdivA2Xhfu_Isrc'), (3, 'div.u'))
+        self.assertEqual(self.form('PBGRAXm_TdgdBsbtA2Xhfu_Isrc'), (3, 'sbt.u'))
+        self.assertEqual(
+            self.form('PBGRAXm_TdgdBdivA2Xhfu_Isrc'),
+            (0, 'div.u beyond the bound on the host gate with its texture function'),
+        )
 
     def test_another_builds_line_of_the_name_has_no_form(self):
         name = 'PBGRAXm_TcimBmpyA2Xhf_Isr1'
@@ -73,6 +96,33 @@ class Forms27(unittest.TestCase):
         tagged = caset.with_fetch_rung(self.t, line, why)
         self.assertIn(' rung=3 free=3:0:mpy;fc_blend_function:49:', tagged)
         self.assertEqual(why, {'rung 3: form on rung 3': 1})
+
+
+def float_rung_2(tables: caspec.Tables) -> tuple[int, int]:
+    """Give the states of the pack's tiers that blend into an RGBA16Float colour on rung 2, and those not unbounded."""
+    seen, forms, bounded = set(), 0, 0
+    corpus = os.path.join(HERE, '..', '..', '..', 'precompile', 'corpus.log')
+    for names in caset.labels(tables, caset.corpus_names(corpus, tables)).values():
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            try:
+                line = caspec.state_line(tables, name)
+            except (KeyError, IndexError, ValueError):
+                continue
+            s = caspec.decode(tables, name)
+            on_float = fetchfree._colors(line).get(s.S, (0,))[0] == fetchfree.RGBA16_FLOAT
+            if on_float and fetchfree.classify(tables, name, line)[0] == 2:
+                forms += 1
+                bounded += not s.flag('u')
+    return forms, bounded
+
+
+class FloatRung2(unittest.TestCase):
+    def test_the_pack_blends_into_rgba16float_on_rung_2(self):
+        self.assertEqual(float_rung_2(caspec.Tables(os.path.join(HERE, 'qc-24B119.json'))), (494, 188))
+        self.assertEqual(float_rung_2(caspec.Tables(os.path.join(HERE, 'qc-21H461.json'))), (34, 0))
 
 
 class Forms17(unittest.TestCase):

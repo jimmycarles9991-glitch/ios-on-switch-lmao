@@ -86,7 +86,7 @@ extern "C" void tegra_vic_surface_release(TegraVICSurface *)
 }
 
 int switch_native_surface_publish(const TegraVICSurface *surface, const TegraVICPicture *picture, const char **why,
-                                  bool *)
+                                  bool *, bool *)
 {
     ++publishes;
     EXPECT_EQ(surface->id, picture->surfaceID);

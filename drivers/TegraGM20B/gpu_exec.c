@@ -88,7 +88,8 @@ static void chan_doorbell(struct tgm_chan *chan)
  * (chan_job_fence) released first .. next - 1 ahead of it, in the same kick, and raise no interrupt: this one announces
  * them all (the job's record says which). */
 static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 next, int quiet,
-			  const struct switch_gpu_release *releases, u32 release_count)
+			  const struct switch_gpu_release *releases, u32 release_count,
+			  struct switch_gpu_backing_transaction *owned)
 {
 	struct nvif_push *push = &chan->chan.push;
 	struct switch_gpu_kicked_job *job = NULL;
@@ -164,6 +165,8 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 	PUSH_KICK(push);
 	chan->chan.defer_kick = false;
 	chan_doorbell(chan);
+	if (owned)
+		switch_gpu_backing_finish(owned);
 	if (chan->high) {
 		struct tgm_sched_queued queued;
 		enum tgm_sched_kick kick = tgm_sched_kicked(tgm_gpu.device, chan->chid, &queued);
@@ -185,7 +188,14 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 
 u32 tgm_chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 next)
 {
-	return chan_fence_job(chan, external, first, next, 0, NULL, 0);
+	return chan_fence_job(chan, external, first, next, 0, NULL, 0, NULL);
+}
+
+u32 switch_gpu_chan_fence_sealed(struct tgm_chan *chan, int external,
+				 struct switch_gpu_backing_transaction *owned)
+{
+	return chan_fence_job(chan, external, chan->submitted + 1, chan->submitted + 1, 0, NULL, 0,
+			      owned);
 }
 
 void switch_gpu_chan_semantic_visibility(struct tgm_chan *chan,
@@ -261,8 +271,6 @@ static int backing_dependency(struct tgm_chan *chan, const struct switch_gpu_bac
 
 		if (!chan->vm->fences_va || token->value > UINT32_MAX)
 			return -ENODEV;
-		/* gone or reset since the first pass found it: its work ended or was killed, and the emitting pass runs past
-		 * the point where the job may still fail */
 		if (!source || token->reset_generation != (source->id >> 32) + 1)
 			return emit ? 0 : -ENODEV;
 		va = chan->vm->fences_va +
@@ -307,30 +315,48 @@ static int backing_dependency(struct tgm_chan *chan, const struct switch_gpu_bac
 	return 0;
 }
 
-/* Every status first, outside tgm_live_lock (a timeline's status may take its engine's state), then one hold of it for
- * all the producer channels: a job over many producers takes it once. A producer that failed after the ownership layer
- * collected it leaves nothing to wait for; that layer logs it, and its readers go on. The emitting pass (emit) never
- * fails on tokens the checking pass passed. */
-int tgm_backing_dependencies(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
-			     u32 count, int emit)
+static u32 backing_unsettled(const struct switch_gpu_backing_token *tokens, u32 count,
+			     u32 *unsettled)
 {
-	u32 unsettled[(TegraGM20BMaxJobDependencies + 31) / 32] = {0};
 	u32 channels = 0;
 	u32 i;
-	int ret = 0;
 
-	if (count > TegraGM20BMaxJobDependencies)
-		return -E2BIG;
 	for (i = 0; i < count; ++i)
 		if (!switch_gpu_backing_token_status(&tokens[i])) {
 			unsettled[i / 32] |= 1u << (i % 32);
-			channels += tokens[i].engine == SWITCH_GPU_ENGINE_GM20B;
+			channels += tokens[i].engine == SWITCH_GPU_ENGINE_GM20B ||
+				    tokens[i].engine == SWITCH_GPU_ENGINE_PROMISE;
 		}
-	if (channels)
-		mutex_lock(&tgm_live_lock);
+	return channels;
+}
+
+static int backing_waits(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
+			 u32 count, const u32 *unsettled, int emit)
+{
+	u32 i;
+	int ret = 0;
+
 	for (i = 0; !ret && i < count; ++i)
 		if (unsettled[i / 32] & (1u << (i % 32)))
 			ret = backing_dependency(chan, &tokens[i], emit);
+	return ret;
+}
+
+int tgm_backing_dependencies(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
+			     u32 count)
+{
+	u32 unsettled[(TegraGM20BMaxJobDependencies + 31) / 32] = {0};
+
+	if (count > TegraGM20BMaxJobDependencies)
+		return -E2BIG;
+	const u32 channels = backing_unsettled(tokens, count, unsettled);
+	if (channels)
+		mutex_lock(&tgm_live_lock);
+	const int ret = backing_waits(chan, tokens, count, unsettled, 0);
+	if (!ret) {
+		backing_waits(chan, tokens, count, unsettled, 1);
+		switch_gpu_chan_park_promises_locked(chan, tokens, count, unsettled);
+	}
 	if (channels)
 		mutex_unlock(&tgm_live_lock);
 	return ret;
@@ -455,11 +481,9 @@ chan_word_waits(struct tgm_chan *chan, const struct switch_gpu_word_wait *words,
 		/* NOLINTEND(bugprone-signed-bitwise,bugprone-branch-clone) */
 		if (chan->high) {
 			struct tgm_chan *source;
-			mutex_lock(&tgm_live_lock);
 			source = live_by_uid(words[i].queue);
 			if (source)
 				tgm_hold_need(tgm_gpu.device, source->chid);
-			mutex_unlock(&tgm_live_lock);
 		}
 	}
 }
@@ -477,8 +501,7 @@ static int words_valid(const struct tgm_chan *chan, const struct switch_gpu_word
 	return 1;
 }
 
-/* chan_exec and switch_gpu_chan_exec_events: one body, inlined into each, so chan_exec keeps its code. `owned` is
- * committed at the point past which nothing fails the job, before its kick. */
+/* Private control words stay behind GP_PUT until publication. The ownership order spans both. */
 static inline __attribute__((always_inline)) int
 chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t count,
 	       uint32_t *seqno, const struct tgm_prof *prof,
@@ -497,6 +520,9 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	int ret = 0;
 	int tlb = 0;
 	u32 waits = 0;
+	u32 unsettled[(TegraGM20BMaxJobDependencies + 31) / 32] = {0};
+	u32 channels = 0;
+	struct switch_gpu_backing_transaction seal;
 	u32 ring_cur;
 	int ring_free;
 	u32 *push_bgn, *push_cur, *push_end, *push_seg;
@@ -534,9 +560,6 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 		return -E2BIG;
 	if (!words_valid(chan, word_waits, word_wait_count))
 		return -ENODEV;
-	ret = tgm_backing_dependencies(chan, dependencies, dependency_count, 0);
-	if (ret)
-		return ret;
 	if (may_wait) {
 		idle_wake();
 		tgm_chan_ramfc_due(chan);
@@ -574,21 +597,30 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	push_seg = chan->chan.push.seg;
 	chan->chan.defer_kick = true;
 	ret = nvif_chan_gpfifo_wait(&chan->chan, entries, words);
-	if (ret) {
-		chan->chan.gpfifo.cur = ring_cur;
-		chan->chan.gpfifo.free = ring_free;
-		chan->chan.push.bgn = push_bgn;
-		chan->chan.push.cur = push_cur;
-		chan->chan.push.end = push_end;
-		chan->chan.push.seg = push_seg;
-		chan->chan.defer_kick = false;
-		return ret;
+	if (ret)
+		goto rollback;
+	channels = READ_ONCE(chan->norder) != 0;
+	if ((dependency_count || sibling_count || word_wait_count || channels) &&
+	    (!owned || !owned->ordered)) {
+		if (!owned) {
+			memset(&seal, 0, sizeof(seal));
+			owned = &seal;
+		}
+		ret = switch_gpu_backing_seal(owned);
+		if (ret)
+			goto rollback;
 	}
-	/* The job's records go up here, with its seqno fixed and its room reserved: whoever finds one waits for a job that is
-	 * kicked below, and tgm_live_lock, the GPFIFO writes and the doorbell run with none of its backings' locks held. */
-	if (owned)
-		switch_gpu_backing_commit(owned);
-	tgm_backing_dependencies(chan, dependencies, dependency_count, 1);
+	channels += backing_unsettled(dependencies, dependency_count, unsettled);
+	channels += word_wait_count && chan->high;
+	if (channels)
+		mutex_lock(&tgm_live_lock);
+	ret = backing_waits(chan, dependencies, dependency_count, unsettled, 0);
+	if (ret) {
+		if (channels)
+			mutex_unlock(&tgm_live_lock);
+		goto rollback;
+	}
+	backing_waits(chan, dependencies, dependency_count, unsettled, 1);
 	chan_sibling_waits(chan, siblings, sibling_count);
 	chan_word_waits(chan, word_waits, word_wait_count);
 	/* a VA rebound over work still queued: nothing after the bind runs before retirement switched its PTEs; the TLB
@@ -600,12 +632,16 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 			  NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
 				  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
 	PUSH_KICK(&chan->chan.push);
-	tgm_chan_park_promises(chan, dependencies, dependency_count);
-	if (READ_ONCE(chan->norder)) {
+	switch_gpu_chan_park_promises_locked(chan, dependencies, dependency_count, unsettled);
+	if (channels && chan->norder) {
 		/* the task's other channels' work it follows (tgm_chan_order), first, so the start stamp below times the work
 		 * itself */
-		waits = (u32)tgm_order_waits(chan);
+		waits = (u32)switch_gpu_order_waits_locked(chan);
 	}
+	if (channels)
+		mutex_unlock(&tgm_live_lock);
+	if (owned)
+		switch_gpu_backing_publish(owned);
 	/* a high channel's start stamp, in every kernel: the end of the preemption latency of an app it was queued behind */
 	if (stats_on() || chan->high) {
 		u32 next = chan->submitted + 1;
@@ -635,6 +671,7 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 		memcpy(chan->prof_sdraws, prof->sampleDraws, count * sizeof(prof->sampleDraws[0]));
 		memcpy(chan->prof_kpx, prof->kpx, count * sizeof(prof->kpx[0]));
 		memcpy(chan->prof_ilk, prof->interlocks, count);
+		memcpy(chan->prof_twin, prof->twinDraws, count * sizeof(prof->twinDraws[0]));
 		WRITE_ONCE(chan->prof_count, count);
 		WRITE_ONCE(chan->prof_first, chan->submitted + 1);
 		WRITE_ONCE(chan->prof_seqno,
@@ -675,12 +712,24 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	tgm_hang_log_submit(&chan->hang, last, job.first, chan->chan.gpfifo.cur);
 
 	*seqno = chan_fence_job(chan, external, chan->submitted + 1, last, quiet, releases,
-				release_count);
+				release_count, owned);
 	if (SWITCH_FRAME_TIMELINE && !chan->kernel)
 		frame_submitted(chan, *seqno, start);
 	if (stats_on())
 		tgm_stats_tick();
 	return 0;
+
+rollback:
+	chan->chan.gpfifo.cur = ring_cur;
+	chan->chan.gpfifo.free = ring_free;
+	chan->chan.push.bgn = push_bgn;
+	chan->chan.push.cur = push_cur;
+	chan->chan.push.end = push_end;
+	chan->chan.push.seg = push_seg;
+	chan->chan.defer_kick = false;
+	if (owned == &seal)
+		switch_gpu_backing_abort(owned);
+	return ret;
 }
 
 static int chan_exec(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t count,

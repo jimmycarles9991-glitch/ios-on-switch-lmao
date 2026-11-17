@@ -126,14 +126,14 @@ TEST(GpuNonstallSource, TheNonstallPassSkipsNvkmAndThePanicNamesTheLine)
 	const std::string glue = SourceText("../shim/xnu_glue.cpp");
 	const auto pass =
 		Block(glue, "void gpuInterrupt(OSObject *, IOInterruptEventSource *source, int)");
-	EXPECT_TRUE(pass.Has("line ? switch_gpu_nonstall_ack(gPmc) : nvxnu_poll_irqs()"));
-	EXPECT_TRUE(pass.Before("switch_gpu_nonstall_ack(gPmc)", "tgm_chans_completed();"));
+	EXPECT_TRUE(pass.has("line ? switch_gpu_nonstall_ack(gPmc) : nvxnu_poll_irqs()"));
+	EXPECT_TRUE(pass.before("switch_gpu_nonstall_ack(gPmc)", "tgm_chans_completed();"));
 	const auto panic = Block(
 		glue,
 		"[[noreturn]] void gpuPanic(const char *why, const char *what, uint32_t value)");
-	EXPECT_TRUE(panic.Has("job interrupts on the %s line, INTID %u"));
-	EXPECT_TRUE(panic.Has("kLines[kJobLine], kGpuIntids[kJobLine]"));
+	EXPECT_TRUE(panic.has("job interrupts on the %s line, INTID %u"));
+	EXPECT_TRUE(panic.has("kLines[kJobLine], kGpuIntids[kJobLine]"));
 	EXPECT_TRUE(
 		Block(SourceText("../gpu_bringup.c"), "static int m1(char *line, unsigned int len)")
-			.Before("tgm_nonstall_init(device);", "nvxnu_irq_start();"));
+			.before("tgm_nonstall_init(device);", "nvxnu_irq_start();"));
 }

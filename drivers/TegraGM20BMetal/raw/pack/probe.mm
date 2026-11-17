@@ -165,7 +165,10 @@ int main(int argc, char **argv)
             {"f turn_masked", tagged(MTLPixelFormatR32Uint)},
             {"f turn_reach", tagged(MTLPixelFormatR32Uint)},
             {"f turn_depth", tagged(MTLPixelFormatDepth32Float)},
-            {"f stencil_bits_", tagged(MTLPixelFormatR32Uint)}};
+            {"f stencil_bits_", tagged(MTLPixelFormatR32Uint)},
+            {"f fmt_store_", tagged(MTLPixelFormatRGBA32Float)},
+            {"f fmt_load_rgb9e5", tagged(MTLPixelFormatR32Uint)},
+            {"f fmt_mip_", tagged(MTLPixelFormatR32Uint)}};
         const std::vector<id<MTLTexture>> multisampled = tagged(MTLPixelFormatBGRA8Unorm, 4),
                                           multisampledDepth = tagged(MTLPixelFormatDepth32Float, 4),
                                           multisampledCodes = tagged(MTLPixelFormatR32Uint, 4);

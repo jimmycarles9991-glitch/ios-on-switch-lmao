@@ -96,5 +96,7 @@ void switch_stall_put_kernel(struct stall_line *l, const char *label, const stru
 void switch_stall_put_address(struct stall_line *l, task_t task, const char *label, uint64_t pc);
 void switch_stall_put_user(struct stall_line *l, const struct stall_snapshot *ss);
 void switch_stall_put_census(struct stall_line *l, const struct stall_cpu cpus[STALL_CPUS]);
+/* "RT", "FX", "TS" or "-" for a thread's sched_mode */
+const char *switch_stall_mode_name(int mode);
 
 #endif /* SWITCH_DIAG_STALL_SNAPSHOT_H */

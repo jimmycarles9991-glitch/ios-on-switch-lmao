@@ -2,7 +2,7 @@
 """Add the render states a device made at run time, read from a pulled logarchive, to the precompile corpus.
 
 usage: bazel run //tools/gpu:logharvest -- <boot.logarchive>... [--build <IPSW build>] [--corpus <corpus.log>]
-                                            [--dry-run]
+                                            [--crawl <the build's crawl inventory.json>] [--dry-run]
        bazel run //tools/gpu:logharvest -- --ndjson <file>...   (`log show --style ndjson --info` output instead)
 
 The lines it reads, os_log's (the raw runtime's in debug builds, RawComplete.mm and RawMetalCubic.mm):
@@ -27,11 +27,21 @@ state gets its own line first.
 A USB pull holds several boots with overlapping clocks: each boot (log show's bootUUID) is read alone, and names its OS
 build in its own lines ("OS version: 24B119"). A boot naming none is skipped unless --build names it; one naming
 another build than --build is refused. A key's test class (" | tests=<n>") and two-plane pass (" | xr2p") are left
-off, as the pack builder makes those of every line. Left out and counted: our own apps' states (SwitchHWTest*), a key
-the log cut with no whole parts (or parts that disagree with it), a key whose library the log does not name (" | air
-...": a bundle's), one linking functions, a Core Animation state with no label, a framework whose library path the
-build's archive inventory and the corpus do not name, a variant whose state the corpus lacks, and the states the device
-refused.
+off, as the pack builder makes those of every line. A framework's library path is the build's archive inventory's, the
+corpus's, else its crawl's (--crawl: @ipsw//:crawl_inventory of the build's kind).
+
+The made line's key is the cache key (raw_render_key.h renderCacheKey): a state that links functions carries
+" | linked <stage><AIR>..." after it, and one the runtime keys by its functions' AIR (a bundle's or a framework resource
+library's, which name no framework) " | air <vertex> <fragment>". The log names neither library, so a linked function's
+library and such a state's are the one library the build's archive inventory, its corpus lines and the corpus's
+specializations (S lines) name for that function. The line carries the state's key without those tails: the pack builder
+keys an AIR-keyed state by the AIR of the library it loads (raw/pack/direct_states.h), so its record is the device's
+only where that library is the one the device loaded.
+
+Left out and counted: our own apps' states (SwitchHWTest*), a key the log cut with no whole parts (or parts that
+disagree with it), a function no one library is named for, an AIR-keyed state that links functions, a Core Animation
+state that links functions or has no label, a framework whose library path none of those name, a variant whose state the
+corpus lacks, and the states the device refused.
 """
 
 import argparse
@@ -68,6 +78,8 @@ MADE = re.compile(
     r'raw: a state the pack lacks (made|not made|refused) in .*? for a compile slot: ([0-9a-f]{16}) (.*)$', re.DOTALL
 )
 CUT = 400  # RawComplete.mm's made line: %.400s
+# A harvest part's characters but the last part's; the log drops a part's trailing spaces, which pads them back
+PART_CHARS = 700
 PART = re.compile(r'raw: harvest ([0-9a-f]{16}) (\d+)/(\d+) (.*)$', re.DOTALL)
 VARIANT = re.compile(r'state\.variant_unpacked: .*?refused:( \| .*?) of ([0-9a-f]{16}) ')
 VARIANT_ANY = 'state.variant_unpacked: '
@@ -84,6 +96,14 @@ BUILDER_FORMS = re.compile(r' \| (tests=\d+|xr2p)(?= \| |$)')
 OWN_APPS = ('SwitchHWTest',)
 CA_LABEL = 'com.apple.coreanimation.'
 FRAMEWORK_PATH = re.compile(r' lib=(/System/Library/(?:Private)?Frameworks/(\w+)\.framework/default\.metallib)')
+CRAWLED_FRAMEWORK = re.compile(r'"(System/Library/(?:Private)?Frameworks/(\w+)\.framework/default\.metallib)"')
+CACHE_TAILS = ('linked ', 'air ')
+FUNCTION_LIBRARY = (
+    re.compile(r' \| (?:[vf]|[vf][lp]) (\S+) lib=(/System/Library/\S+\.metallib)'),
+    re.compile(r'^S ok=1 lib=(/System/Library/\S+\.metallib) name=(\S+)'),
+)
+# The libraries the pack keys a state of by its functions' AIR (tools/gpu/rawpack.py OS_LIBRARY)
+AIR_KEYED = re.compile(r'/System/Library/\S+?\.(?:bundle|framework/Resources)/\S+\.metallib')
 PREDICATE = ' OR '.join(
     f'eventMessage CONTAINS "{text}"'
     for text in (
@@ -154,59 +174,109 @@ def whole(boot: Boot, process: str, name: str) -> tuple[str, str] | None:
     parts, total = boot.parts.get((process, name)), boot.totals.get((process, name))
     if not parts or sorted(parts) != list(range(1, total + 1)):
         return None
-    text = ''.join(parts[i] for i in range(1, total + 1))
+    text = ''.join(parts[i].ljust(PART_CHARS) for i in range(1, total)) + parts[total]
     label, _, key = text.partition(' ')
     return label.removeprefix('label='), key
 
 
 class Libraries:
-    """A framework's default.metallib path for one build: its archive inventory's, else the corpus's."""
+    """A framework's default.metallib path for one build: its archive inventory's, the corpus's, else its crawl's.
 
-    def __init__(self, build: str, corpus: list[str], inventory: Path) -> None:
+    And each function's libraries other than QuartzCore's: those the inventory, the build's corpus lines and the
+    corpus's specializations name.
+    """
+
+    def __init__(self, build: str, corpus: list[str], inventory: Path, crawl: Path | None = None) -> None:
         self.paths: dict[str, str] = {}
+        self.functions: dict[str, set[str]] = defaultdict(set)
         rows = inventory.read_text().splitlines() if inventory.is_file() else []
         tagged = [line for line in corpus if build in os_tags(line)]
         for line in [*rows, *tagged, *corpus]:
             for path, name in FRAMEWORK_PATH.findall(line):
                 self.paths.setdefault(name, path)
+        for path, name in CRAWLED_FRAMEWORK.findall(crawl.read_text() if crawl else ''):
+            self.paths.setdefault(name, '/' + path)
+        staged, specialized = FUNCTION_LIBRARY
+        for line in [*rows, *tagged]:
+            for function, path in staged.findall(line):
+                self.functions[function].add(path)
+        for line in corpus:
+            if m := specialized.match(line):
+                self.functions[m[2]].add(m[1])
+        for paths in self.functions.values():
+            paths -= {p for p in paths if '/QuartzCore.framework/' in p}
+
+    def of_function(self, function: str) -> str | None:
+        """Give the one library named for `function`, None where none or several are."""
+        paths = self.functions.get(function, set())
+        return next(iter(paths)) if len(paths) == 1 else None
+
+
+def without_cache_tails(key: str) -> str:
+    """Give a made line's key without what the cache key adds to the state's key (its linked and AIR tails)."""
+    return ' | '.join(s for s in key.split(' | ') if not s.startswith(CACHE_TAILS))
 
 
 def corpus_line(key: str, label: str, build: str, libraries: Libraries) -> tuple[str | None, str]:
-    """Give the R line whose state key is `key`, or None and why not."""
+    """Give the R line whose state key is `key` without its cache tails, or None and why not."""
     segments = key.split(' | ')
     if len(segments) < 3 or not segments[1].startswith('v ') or not segments[2].startswith('f '):
         return None, 'not a render key'
-    rest = segments[3:]
-    framework = rest.pop(0)[2:].strip() if rest and rest[0].startswith('l ') else ''
-    why = unharvestable(rest, framework, label, libraries)
+    air = any(s.startswith('air ') for s in segments[3:])
+    rest = [s for s in segments[3:] if not s.startswith(CACHE_TAILS)]
+    framework = next((s[2:].strip() for s in rest if s.startswith('l ')), '')
+    rest = [s for s in rest if not s.startswith('l ')]
+    linked = [s for s in rest if s.startswith(rawpack.LINKED)]
+    variants = [s for s in rest if not s.startswith(rawpack.LINKED)]
+    stages = [stage.split(' ', 2) for stage in segments[1:3]]
+    library, why = stage_library([stage[1] for stage in stages], framework, air, label, libraries)
+    why = why or unharvestable(variants, linked, framework, air, libraries)
     if why:
         return None, why
-    lib = f' lib={libraries.paths[framework]}' if framework else ''
-    stages = []
-    for stage in segments[1:3]:
-        kind, function, *constants = stage.split(' ', 2)
-        stages.append(f'{kind} {function}{lib} {constants[0] if constants else ""}')
+    lib = f' lib={library}' if library else ''
+    made = [f'{kind} {function}{lib} {constants[0] if constants else ""}' for kind, function, *constants in stages]
+    links = [with_library(s, libraries.of_function(s.split(' ', 2)[1])) for s in linked]
     head = segments[0].rstrip()
-    tail = ''.join(f' | {s}' for s in rest)
+    tail = ''.join(f' | {s}' for s in links + variants)
     shown = label if label.startswith(CA_LABEL) else '-'
-    line = f'R ok=1 label={shown} os={build} {head} | {" | ".join(stages)}{tail} | '
-    if rawpack.state_key(line) != key:
+    line = f'R ok=1 label={shown} os={build} {head} | {" | ".join(made)}{tail} | '
+    if rawpack.state_key(line) != without_cache_tails(key):
         return None, 'its line does not give back its key'
     return line, ''
 
 
-def unharvestable(rest: list[str], framework: str, label: str, libraries: Libraries) -> str:
-    """Why a key's segments after its stages (and its framework) cannot make a corpus line, '' where they can."""
-    if any(s.startswith('air ') for s in rest):
-        return 'a bundle library (air): the log names no path'
-    if any(s.startswith(rawpack.LINKED) for s in rest):
-        return 'links functions'
-    if any(not s.startswith(LINE_VARIANTS) for s in rest):
+def with_library(segment: str, library: str) -> str:
+    """Give a linked function's segment (" <tag> <function> [as=<name>] <constants>") naming its library."""
+    tag, function, *rest = segment.split(' ', 2)
+    return ' '.join([tag, function, f'lib={library}', *rest])
+
+
+def stage_library(functions: list[str], framework: str, air: bool, label: str, libraries: Libraries) -> tuple[str, str]:
+    """Give the library a state's stages are made from ('' for QuartzCore's), or '' and why there is none."""
+    if framework and air:
+        return '', 'a framework state keyed by its AIR: it links a function no framework library holds'
+    if framework:
+        path = libraries.paths.get(framework)
+        return (path, '') if path else ('', f'no library path for {framework}')
+    if not air:
+        return '', '' if label.startswith(CA_LABEL) else 'a QuartzCore state without its Core Animation label'
+    paths = {libraries.of_function(f) for f in functions}
+    if None in paths or len(paths) != 1:
+        return '', "an AIR-keyed state whose functions' one library no corpus line or archive row names"
+    path = paths.pop()
+    return (path, '') if AIR_KEYED.fullmatch(path) else ('', f'an AIR-keyed state of {path}, which names a framework')
+
+
+def unharvestable(variants: list[str], linked: list[str], framework: str, air: bool, libraries: Libraries) -> str:
+    """Why a key's segments after its stages cannot make a corpus line, '' where they can."""
+    if any(not s.startswith(LINE_VARIANTS) for s in variants):
         return 'an unknown segment'
-    if not framework and not label.startswith(CA_LABEL):
-        return 'a QuartzCore state without its Core Animation label'
-    if framework and framework not in libraries.paths:
-        return f'no library path for {framework}'
+    if linked and not framework:
+        return 'an AIR-keyed state that links functions' if air else 'a Core Animation state that links functions'
+    for segment in linked:
+        path = libraries.of_function(segment.split(' ', 2)[1])
+        if not path or not FRAMEWORK_PATH.fullmatch(' lib=' + path):
+            return 'links a function no one framework library is named for'
     return ''
 
 
@@ -230,7 +300,7 @@ class Report:
 
 
 def harvest(
-    boots: dict[str, Boot], corpus: list[str], forced: str | None, precompile: Path
+    boots: dict[str, Boot], corpus: list[str], forced: str | None, precompile: Path, crawl: Path | None = None
 ) -> tuple[list[str], Report]:
     report, new = Report(), []
     for uuid, boot in sorted(boots.items()):
@@ -241,7 +311,7 @@ def harvest(
         report.boots.append(f'{uuid}: {build}')
         for process, count in boot.unnamed.items():
             report.left[process, "a variant line that names no state hash (the runtime's older line)"] += count
-        libraries = Libraries(build, corpus, precompile / 'archives' / f'{build}.tsv')
+        libraries = Libraries(build, corpus, precompile / 'archives' / f'{build}.tsv', crawl)
         new += harvest_boot(boot, build, libraries, in_corpus(corpus + new, build), report)
     return new, report
 
@@ -265,11 +335,12 @@ def harvest_boot(boot: Boot, build: str, libraries: Libraries, held: set[str], r
         elif key is None:
             report.left[process, missing] += 1
         else:
-            for wanted in dict.fromkeys((base_key(key), key)):
+            tails, state = cache_tails(key), without_cache_tails(key)
+            for wanted in dict.fromkeys((base_key(state), state)):
                 if wanted in held:
-                    report.present[process] += wanted == key
+                    report.present[process] += wanted == state
                     continue
-                line, why = corpus_line(wanted, label, build, libraries)
+                line, why = corpus_line(wanted + tails, label, build, libraries)
                 if not line:
                     report.left[process, why] += 1
                     break
@@ -301,8 +372,14 @@ def untested(key: str | None) -> str | None:
     """Give a key without the forms the pack builder makes of each line it takes: its test class and two-plane pass."""
     if not key:
         return key
+    tails, key = cache_tails(key), without_cache_tails(key)
     name = rawpack.packfile.variant_name(key)
-    return key[: len(key) - len(name)] + BUILDER_FORMS.sub('', name)
+    return key[: len(key) - len(name)] + BUILDER_FORMS.sub('', name) + tails
+
+
+def cache_tails(key: str) -> str:
+    """Give the tails the cache key adds after a state's key and its variant's name (renderCacheKey's)."""
+    return ''.join(f' | {s}' for s in key.split(' | ') if s.startswith(CACHE_TAILS))
 
 
 def base_key(key: str) -> str:
@@ -316,10 +393,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--ndjson', action='store_true', help='the inputs are `log show --style ndjson` output')
     parser.add_argument('--build', help='the OS build of every boot (each boot must name it or none)')
     parser.add_argument('--corpus', type=Path, default=PROJECT / PRECOMPILE / 'corpus.log')
+    parser.add_argument('--crawl', type=Path, help="the build's crawl inventory.json, for framework library paths")
     parser.add_argument('--dry-run', action='store_true', help='print the lines instead of adding them')
     args = parser.parse_args(argv)
     corpus = args.corpus.read_text().splitlines()
-    new, report = harvest(read_boots(records(args.archives, args.ndjson)), corpus, args.build, args.corpus.parent)
+    new, report = harvest(
+        read_boots(records(args.archives, args.ndjson)), corpus, args.build, args.corpus.parent, args.crawl
+    )
     for line in report.boots:
         print('boot', line)
     for process in sorted(set(report.added) | set(report.present)):

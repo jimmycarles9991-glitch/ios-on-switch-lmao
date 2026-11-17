@@ -10,10 +10,11 @@
 // What one process asked of NVJPG: `formats` bit n for each TEGRA_NVJPG_OUT_n decoded, `asked[n]` the requests for
 // TEGRA_NVJPG_OUT_n, refused and failed ones too.
 struct TegraNVJPGRouteCounts {
-    uint64_t decodes, formats, failed, refused, asked[TEGRA_NVJPG_OUT_COUNT];
+    uint64_t decodes, formats, failed, refused, asked[TEGRA_NVJPG_OUT_COUNT], outputMaps;
 };
 
 bool tegra_nvjpg_stats_start(void);
+void switch_nvjpg_count_mapping(int pid);
 // A request refused before any engine work; `format` TEGRA_NVJPG_OUT_COUNT when no destination was read.
 void tegra_nvjpg_count_refused(int pid, uint32_t format);
 // A job the engine ran.

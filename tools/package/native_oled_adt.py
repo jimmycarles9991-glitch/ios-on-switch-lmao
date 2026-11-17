@@ -115,7 +115,7 @@ def _bootstrap(profile: Profile) -> list[tuple[str, bytes]]:
         [
             ('osenvironment', b'main\0' if root_boot else b'ramdisk\0'),
             ('crypto-hash-method', b'sha2-384\0'),
-            ('amfi-only-platform-code', struct.pack('<I', 1)),
+            ('amfi-only-platform-code', struct.pack('<I', 0 if root_boot else 1)),
         ]
         if userspace_fixture or root_boot
         else []

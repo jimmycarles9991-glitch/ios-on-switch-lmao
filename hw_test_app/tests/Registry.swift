@@ -9,25 +9,48 @@ public enum Registry {
     static let metal: [any HWTest] = [
         MetalDeviceTest(), MetalComputeTest(), MetalColorPassTest(), MetalDepthStencilTest(), MetalMSAATest(),
         MetalPixelFormatTest(), MetalHalfRoundingTest(), MetalCompressedTest(), MetalBlitTest(), MetalTextureViewTest(),
-        MetalIOSurfaceTest(), SurfaceTiledDefaultTest(), SurfaceCrossProcessTest(), RawReadbackRoutesTest(),
+        MetalIOSurfaceTest(), SurfaceTiledDefaultTest(), SurfaceCrossProcessTest(), SurfaceSnapshotLayoutTest(),
+        PeerUserClientTest(), RawReadbackRoutesTest(),
         YcbcrTargetTest(),
         YcbcrPackedTargetTest(),
         PackedPlaneTargetTest(), PackedSpareBitsTest(), XRTwoPlaneTest(),
         MPSBlurTest(), MPSMatrixTest(), MetalRuntimeCompileTest(), CoreImageLibraryTest(),
         MetalBenchmarkTest(), FetchBlendCostTest(), CompressionChurnTest(), RotatedTargetTest(), IntegerTargetTest(),
         BlendKillTest(), WrittenTextureTest(),
-        Float32FilterTest(), CompareSamplerTest(), SurfaceBufferTest(), CompressedTargetsTest(), ZcullTest(),
-        MipTwodTest(), MipCandidatesTest(), MipLodTest(),
-        VisibilityTest(), FixedBlendRuleTest(), PrivateCompressionTest(), AlphaToCoverageTest(), IconCornersTest(),
-        CompileSharedTest(), CompileFirstDrawTest(), DrawBandsTest(), DispatchPiecesTest(), PosterTargetsTest(),
-        ResolveCostTest(),
+        Float32FilterTest(), CompareSamplerTest(), SurfaceBufferTest(), OwnAnswersTest(), ComputeFactsTest(),
+        SourceLibraryTest(), StitchedLibraryTest(), SamplerTableTest(), FunctionTagsTest(),
+        FunctionArgumentEncoderTest(), ArgumentGridsTest(), PlainStructEncoderTest(), BufferTexture16Test(),
+        PlaneRows16Test(), CompressedTargetsTest(), ZcullTest(), MipTwodTest(), MipCandidatesTest(), MipLodTest(),
+        MipmapVolumeTest(), ShadowStencilTest(), ShadowStencilDepthTest(), XrShadowTest(),
+        VisibilityTest(), FixedBlendRuleTest(), FixedBlendFormatsTest(), PrivateCompressionTest(),
+        PackSlotCleanTest(), ZoomTargetTest(),
+        AlphaToCoverageTest(),
+        IconCornersTest(), TextureBufferTest(), IconSmallSizesTest(), IconPasscodeTest(), IconCalendarTest(),
+        CompileSharedTest(), CompileFirstDrawTest(), CompileStageLibraryTest(), CompileAnswerLatencyTest(),
+        DrawBandsTest(), DispatchPiecesTest(), PosterTargetsTest(),
+        PushScanTargetsTest(), ResolveCostTest(), JobRefusalLinesTest(),
         MsaaFirstUseTest(), StoredDepthTest(),
         ResolveTwodTest(), FillTextureTest(), StorageCompressedTest(), SharedLayoutTest(), PredicationTest(),
         MPSControlFlowTest(),
         EventReleaseTest(), CoherenceRewriteTest(),
         FetchRungTest(id: "gpu.raw.fetch_rung2", rung: 2), BlendTwinTest(), ZetaColourTest(), PlanarConstexprTest(),
+        TessellationRootTableTest(),
         StripOverCompressedTest(), OpaqueBorderTest(), IndirectDispatchTest(), TileRefusedTest(),
-        SeparateDepthStencilTest(),
+        SeparateDepthStencilTest(), PixelMirrorSamplerTest(), DeferredZetaStoreTest(),
+        NanClearDepthTest(), Depth16ClearTest(), SeparateDepth16StencilTest(),
+        SamplerUnsupportedTest(), SeparateZetaLayeredTest(), VisibilityAccumulateTest(),
+        DepthBiasUnitsTest(), SeparateZetaSliceTest(), TextureViewsTest(), MipmapLayersTest(), DepthArraySampleTest(),
+        SeparateZetaResolveTest(), SeparateDepth16StencilMultisampleTest(), PackedPlaneLoadTest(),
+        WrittenXrTextureTest(), WrittenShadowedSurfaceTest(), WrittenXrPlanesTest(), YcbcrCornerTest(),
+        YcbcrOddSizeTest(), TurnedBoundTest(), TurnedOffSurfaceTest(), NonFiniteDepthBiasTest(),
+        UnalignedBufferOffsetsTest(), VertexCubicSamplerTest(), YcbcrLoadTest(), TurnedUnalignedPlanesTest(),
+        YcbcrP3MatrixTest(), YcbcrPastRowsTest(), YcbcrOnePlaneTest(), DrawErrorsTest(), DepthClipBoundsTest(),
+        TessellationArgumentTextureTest(), AmplificationWideOffsetTest(), TextureShapesTest(), FormatTargetTest(),
+        YcbcrBlendTargetTest(), TurnedSeparatePairTest(), IndirectIndexEndTest(), PatchCommandsWideSetTest(),
+        LayeredShaderTestsTest(), LayeredShaderStencilTest(), WideSetTest(), FarUniformTest(), WideTexturesTest(),
+        TextureShapesXRTest(),
+        TextureShapesDepthTest(), TextureShapesSrgbPairTest(), DepthShapesTest(),
+        VertexOnlyStateTest(), RenderReflectionTest(), ComputeReflectionTest(),
     ]
 
     static let video: [any HWTest] =
@@ -40,7 +63,8 @@ public enum Registry {
 
     static let images: [any HWTest] =
         ImageDecodeTest.all + [
-            JPEGAfterIdleTest(), HEICEncodeTest(), CoreImageTest(), PixelTransferTest(), PixelTransfer422Test(),
+            JPEGAfterIdleTest(), JPEGMappingLifetimeTest(), HEICEncodeTest(), CoreImageTest(), PixelTransferTest(),
+            PixelTransfer422Test(),
         ]
 
     static let audio: [any HWTest] = [
@@ -52,10 +76,11 @@ public enum Registry {
         [
             DisplayModeTest(), DisplayPacingTest(), CompletionFlipTest(), MediaCompletionFlipTest(),
             MediaCompletionFlipGatedTest(), ScanReturnedTest(), BrightnessTest(),
-            ColourPipelineTest(), PlanesTest(), SmallDrawableTest(), PresentAtTimeTest(), PlaneInUseTest(),
+            ColourPipelineTest(), PlanesTest(), SmallDrawableTest(), PresentAtTimeTest(), DisplayRefreshTest(),
+            PlaneInUseTest(),
             ScanoutRoutesTest(), PlainSurfacesTest(), DisplaySnapshotTest(), WakeTest(),
             PlanesCroppedTest(),
-        ] + DisplayWindowProbeTest.all + [LandscapeVideoTest()]
+        ] + DisplayWindowProbeTest.all + [LandscapeVideoTest(), LandscapeDownscaleTest()]
         // Holds the swaps for a second each; the forced producer failure last.
         + [Host1xFlipTest.trial, Host1xFlipTest.teardown]
 
@@ -73,8 +98,9 @@ public enum Registry {
     static let cpuAndSystem: [any HWTest] = [
         CPUSingleTest(), CPUMultiTest(), A64XSelfTest(), CryptoKitTest(), CommonCryptoTest(), KeychainTest(),
         LocalAuthenticationTest(), IdentityTest(), PowerStateTest(), ThermalTest(), SocThermThrottleTest(),
-        MemoryTest(), UnionDirectoryTest(), OverlayAppsTest(), OverlayAppRecordsTest(), CPUClockTest(),
-        CPUDfllLandingTest(), CPUSustainedTest(), CPUSchedTest(), CPUIPIPingPongTest(),
+        MemoryTest(), UnionDirectoryTest(), OverlayAppsTest(), OverlayAppRecordsTest(), IconCacheTest(),
+        IconCacheResetTest(), CPUClockTest(), CPUDfllLandingTest(), CPUSustainedTest(), CPUSchedTest(),
+        CPUIPIPingPongTest(),
         DispatchSyncTest(), DispatchSyncWorkloopTest(), WorkloopSyncTest(), WidgetsRenderTest(), IconRenderTest(),
         SnapshotPurgeableTest(),
     ]
@@ -94,14 +120,16 @@ public enum Registry {
         // May stop the display's host1x channel for 50 ms: last.
         + [DcHost1xClassTest()]
         // Every client channel's RAMFC timeslice once the shared tests have run jobs on them.
-        + [RamfcTimesliceTest()]
+        + [RamfcTimesliceTest(), RamfcCreationTest()]
         // Rail-gates the GPU under every other client four times: after the shared tests.
         + [GpuRailCycleTest()]
         // Leaves this app for Settings and opens it again: last, so no other test runs while it is away.
         + [LaunchHitchTest()]
 
-    /// Programs a unit no other driver here drives, which kills the channel when its setup is wrong: each app's last.
-    public static let last: [any HWTest] = [FetchRungTest(id: "gpu.raw.fetch_rung3", rung: 3)]
+    /// Takes the GPU pool's compressed memory down to its floor, which refuses every other process's compressed asks
+    /// while it runs; then programs a unit no other driver here drives, which kills the channel when its setup is
+    /// wrong: each app's last.
+    public static let last: [any HWTest] = [CompressedFloorTest(), FetchRungTest(id: "gpu.raw.fetch_rung3", rung: 3)]
     /// Reset the copy engine under the present, then kill the app's raw channel: each app runs them after all its other
     /// tests, so a failed recovery spoils none of them.
     public static let recovery: [any HWTest] = [

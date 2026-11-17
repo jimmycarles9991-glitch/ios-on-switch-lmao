@@ -147,6 +147,9 @@ TEST(RawIcb, ADrawSetsItsTopologyThenDrawsAsAnIndirectDraw)
         f.run(slot, raw::icb::kSlotWords);
         std::vector<Method> want = {{NVB197_SET_PRIMITIVE_TOPOLOGY, raw::icb::topology(primitive)},
                                     {NVB197_SET_DA_PRIMITIVE_RESTART, primitive == 2 || primitive == 4},
+                                    {NVB197_SET_POLY_OFFSET_POINT, primitive >= 3},
+                                    {NVB197_SET_POLY_OFFSET_LINE, primitive >= 3},
+                                    {NVB197_SET_POLY_OFFSET_FILL, primitive >= 3},
                                     {NVB197_LOAD_CONSTANT_BUFFER_OFFSET, 0},
                                     {NVB197_LOAD_CONSTANT_BUFFER(0), 10},
                                     {NVB197_LOAD_CONSTANT_BUFFER(1), 7},
@@ -156,7 +159,7 @@ TEST(RawIcb, ADrawSetsItsTopologyThenDrawsAsAnIndirectDraw)
         const auto loop = drawn(NVB197_SET_VERTEX_ARRAY_START, 10, 6, 3);
         want.insert(want.end(), loop.begin(), loop.end());
         EXPECT_EQ(f.methods, want) << primitive;
-        EXPECT_EQ(f.nops, raw::icb::kSlotWords - 8);
+        EXPECT_EQ(f.nops, raw::icb::kSlotWords - 11);
     }
 }
 
@@ -177,6 +180,9 @@ TEST(RawIcb, AnIndexedDrawBindsItsIndicesThenDrawsAsAnIndexedIndirectDraw)
                                     {NVB197_SET_INDEX_BUFFER_E, size == 2 ? 1u : 2u},
                                     {NVB197_SET_PRIMITIVE_TOPOLOGY, raw::icb::topology(4)},
                                     {NVB197_SET_DA_PRIMITIVE_RESTART, 1},
+                                    {NVB197_SET_POLY_OFFSET_POINT, 1},
+                                    {NVB197_SET_POLY_OFFSET_LINE, 1},
+                                    {NVB197_SET_POLY_OFFSET_FILL, 1},
                                     {NVB197_LOAD_CONSTANT_BUFFER_OFFSET, 0},
                                     {NVB197_LOAD_CONSTANT_BUFFER(0), uint32_t(-5)},
                                     {NVB197_LOAD_CONSTANT_BUFFER(1), 3},
@@ -218,6 +224,31 @@ TEST(RawIcb, CommandsRunBackToBackInOneRange)
         begins += m.first == NVB197_BEGIN;
     EXPECT_EQ(begins, 3u) << "one instance of the first, two of the second";
     EXPECT_EQ(f.methods.back(), Method(NVB197_END, 0));
+}
+
+// Metal biases triangles' depth alone: in one buffer a line's command turns the polygon offset off and a triangle's on
+TEST(RawIcb, TrianglesAndLinesEachSetTheirOwnPolygonOffset)
+{
+    std::vector<uint32_t> range(3 * raw::icb::kSlotWords);
+    raw::icb::draw(range.data(), 0, {1, 2, 1, 0, 0});
+    raw::icb::draw(range.data() + raw::icb::kSlotWords, 1, {3, 3, 1, 0, 0});
+    raw::icb::draw(range.data() + 2 * raw::icb::kSlotWords, 2, {0, 1, 1, 0, 0});
+    Fifo f;
+    cpuRange(f, 0, 3);
+    f.run(range.data(), range.size());
+    std::vector<uint32_t> fill, line, point;
+    for (const Method &m : f.methods) {
+        if (m.first == NVB197_SET_POLY_OFFSET_FILL)
+            fill.push_back(m.second);
+        else if (m.first == NVB197_SET_POLY_OFFSET_LINE)
+            line.push_back(m.second);
+        else if (m.first == NVB197_SET_POLY_OFFSET_POINT)
+            point.push_back(m.second);
+    }
+    const std::vector<uint32_t> want = {0, 1, 0};
+    EXPECT_EQ(fill, want);
+    EXPECT_EQ(line, want);
+    EXPECT_EQ(point, want);
 }
 
 std::vector<uint32_t> fourCommands()
@@ -271,17 +302,17 @@ TEST(RawIcb, ACommandOutsideTheCpuRangeDrawsNothing)
 }
 
 constexpr uint64_t kSet = 0x1122334400ull, kRoot = 0x5566778800ull;
-constexpr uint32_t kControl = 0x700 + 4 * 4;
+constexpr uint32_t kControl = 0x700 + 4 * 4, kSetBytes = 0x200;
 
-// An execute's layout of a state whose factor and control-point index buffers are at set-0 bytes 0x40 and 0x80 and which
-// reads no patch index buffer, in a channel whose install() wrote the root table's address
+// An execute's layout of a state of a two-block set 0 whose factor and control-point index buffers are at set-0 bytes 0x40
+// and 0x80 and which reads no patch index buffer, in a channel whose install() wrote the root table's address
 void patchLayout(Fifo &f)
 {
     f.scratch[SWITCH_GM20B_SCRATCH_ROOT_HI] = uint32_t(kRoot >> 32);
     f.scratch[SWITCH_GM20B_SCRATCH_ROOT_HI + 1] = uint32_t(kRoot);
-    uint32_t words[7];
-    raw::Push p{words, words + 7};
-    raw::mme::icbPatchLayout(p, kSet, {0x40, raw::mme::kNoEntry, 0x80}, kControl);
+    uint32_t words[8];
+    raw::Push p{words, words + 8};
+    raw::mme::icbPatchLayout(p, kSet, kSetBytes, {0x40, raw::mme::kNoEntry, 0x80}, kControl);
     EXPECT_EQ(p.at, p.end);
     f.run(words, size_t(p.at - words));
 }
@@ -307,7 +338,10 @@ std::vector<Method> patchLoads(const raw::icb::PatchDraw &d)
 {
     std::vector<Method> m = {{NVB197_SET_PRIMITIVE_TOPOLOGY, raw::icb::topology(raw::icb::kPatchPrimitive)},
                              {NVB197_SET_DA_PRIMITIVE_RESTART, 0},
-                             {NVB197_SET_CONSTANT_BUFFER_SELECTOR_A, raw::mme::kIcbSetBytes},
+                             {NVB197_SET_POLY_OFFSET_POINT, 1},
+                             {NVB197_SET_POLY_OFFSET_LINE, 1},
+                             {NVB197_SET_POLY_OFFSET_FILL, 1},
+                             {NVB197_SET_CONSTANT_BUFFER_SELECTOR_A, kSetBytes},
                              {NVB197_SET_CONSTANT_BUFFER_SELECTOR_B, uint32_t(kSet >> 32)},
                              {NVB197_SET_CONSTANT_BUFFER_SELECTOR_C, uint32_t(kSet)}};
     for (const auto &[k, at] : {std::pair<uint32_t, uint32_t>{0, 0x40}, {2, 0x80}}) {

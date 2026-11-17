@@ -796,6 +796,7 @@ codec_enum! {
         CombinedTextureSampler(f0), HeapSampler(f0), AccelerationStructure(f0), TileAttachment(f0),
         TileMap, SeparateTexture(f0), SeparateSampler(f0),
         RawTexture,
+        TexturePlane,
         ExtendedShadow(f0),
     }
     AccelerationStructureLevel { Primitive, Instance }
@@ -1352,6 +1353,7 @@ codec_enum! {
         AccelerationStructure { slot, level }, TileAttachment(f0), TileMap(f0),
         SeparateTexture { texture, sampler }, SeparateSampler { stage, sampler },
         RawTexture(f0),
+        TexturePlane(f0),
         ExtendedShadow(f0),
     }
     VertexStride { Static(f0), PerBind }

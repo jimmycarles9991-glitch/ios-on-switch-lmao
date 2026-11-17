@@ -152,15 +152,6 @@ void installM2VForwarders(Class cls, const RawM2V &m2v)
             forward(method_getName(methods[i]), method_getTypeEncoding(methods[i]));
         free(methods);
     }
-    // the bridge's answer kinds (NativeMetalObjects.h NmbAnswerKind): count, flag, and each with an argument
-    static const char *const kAnswerTypes[] = {"Q16@0:8", "B16@0:8", "Q24@0:8Q16", "B24@0:8Q16"};
-    uint32_t kind = 0;
-    for (size_t i = 0; m2v.answerSelector; i++) {
-        const char *name = m2v.answerSelector(i, &kind);
-        if (!name)
-            break;
-        forward(sel_registerName(name), kind < std::size(kAnswerTypes) ? kAnswerTypes[kind] : nullptr);
-    }
 }
 
 @interface RMDevice (M2V)

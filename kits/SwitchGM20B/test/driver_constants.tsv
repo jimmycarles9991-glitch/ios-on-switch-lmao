@@ -78,7 +78,7 @@ raw_mme.h	kScratchLength	policy	MME shadow scratch word of an indirect command b
 raw_mme.h	kIcbPatches	policy	raw macro slot
 raw_mme.h	kScratchSetHi	policy	MME shadow scratch words of a patch execute's layout, after the range's
 raw_mme.h	kNoEntry	policy	a patch execute's layout word for a control-stage buffer its state names no entry of
-raw_mme.h	kIcbSetBytes	policy	NVK's descriptor set slot, as the patch macro selects it
+raw_mme.h	kScratchSetBytes	policy	MME shadow scratch word of a patch execute's set 0 size, past the amplification words
 raw_mme.h	kIcbRootBytes	policy	NVK's root descriptor table size (raw_gpu.cpp kRootBytes), as the patch macro selects it
 raw_mme.h	kIcbPatchesArguments	policy	the patch macro's call data words
 raw_mme.h	kScratchBuffers	policy	first MME shadow scratch word of an execute's inherited buffers, the top 93 of 128

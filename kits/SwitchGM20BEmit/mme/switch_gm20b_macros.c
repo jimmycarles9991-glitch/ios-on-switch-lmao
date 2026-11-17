@@ -4,7 +4,7 @@
  */
 
 /*
- * The raw path's macros (ABI v6, at the slots and shadow scratch words kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h
+ * The raw path's macros (ABI v7, at the slots and shadow scratch words kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h
  * names: R1 the first argument, constant buffer 0 left selected), built with Mesa's MME builder. The draw macros take
  * the slots NVK's draw macros take, so a push profile that counts NVK's draw calls counts the raw path's too. The
  * instance loops are NVK's pre-Pascal nvk_mme_build_draw_loop and
@@ -296,18 +296,20 @@ static void build_indirect(struct mme_builder *b, bool indexed)
 
 /* Core Animation's colour matrix blend (vcm) on the iterated blend unit, fetch rung 3
  * (drivers/TegraGM20BMetal/raw/pack/iterated/programs_long.py vcm): the program's words, whose 21-word head and 5-word
- * tail its three forms share. The form is the matrix uniform's clamp pair's: none (p3 <= 0), clip (p4 <= 0), scale. */
+ * tail its three forms share. The form is the matrix uniform's clamp pair's: none (p3 <= 0), clip (p4 <= 0), scale.
+ * Its first pass reads the guard constant, which is therefore constant 0: GM20B refuses any other constant there
+ * (INVALID_VALUE at LOAD_ITERATED_BLEND_INSTRUCTION). */
 static const uint32_t vcm_head[] = {
-    0x3200d799, 0x30000e21, 0x0000c201, 0x31009029, 0x1000de01, 0x31809029, 0x100dde41,
-    0x32009029, 0x100dde81, 0x100dd6c1, 0x1068a129, 0x3100d941, 0x318fd941, 0x320fd941,
-    0x310fd781, 0x31e8c1a9, 0x30000e19, 0x20001e11, 0x1000ba01, 0x10003a01, 0x20003c01,
+    0x3200d619, 0x30000fa1, 0x0000c381, 0x310091a9, 0x1000df81, 0x318091a9, 0x100dde41,
+    0x320091a9, 0x100dde81, 0x100dd6c1, 0x1068a129, 0x3100d941, 0x318fd941, 0x320fd941,
+    0x310fd601, 0x31e8c029, 0x30000f99, 0x20001f91, 0x1000bb81, 0x10003b81, 0x20003d81,
 };
-static const uint32_t vcm_clamp_head[] = {0x3200dd99, 0x30000e21, 0x1000ca01};
-static const uint32_t vcm_clip[] = {0x3180d1e9, 0x1000ca19, 0x3100d1e9, 0x1000ca11, 0x1000ba01};
+static const uint32_t vcm_clamp_head[] = {0x3200dc19, 0x30000fa1, 0x1000cb81};
+static const uint32_t vcm_clip[] = {0x3180d1e9, 0x1000cb99, 0x3100d1e9, 0x1000cb91, 0x1000bb81};
 static const uint32_t vcm_scale[] = {
-    0x3080a029, 0x3080ae19, 0x0080ae19, 0xb16891f1, 0x00000826, 0x3100d1ee, 0x0000c806, 0x10009a06, 0x1000ba01,
+    0x3080a1a9, 0x3080af99, 0x0080af99, 0xb16891f1, 0x000009a6, 0x3100d1ee, 0x0000c986, 0x10009b86, 0x1000bb81,
 };
-static const uint32_t vcm_tail[] = {0x30581031, 0x000d5e01, 0x30581031, 0x128e6e01, 0x00009029};
+static const uint32_t vcm_tail[] = {0x305811b1, 0x000d5f81, 0x305811b1, 0x128e6f81, 0x000091a9};
 
 #define VCM_GUARD       0x068e /* half 1.0e-4: QuartzCore's max(Da, e) */
 #define HALF_MINUS_HALF 0xb800
@@ -361,31 +363,32 @@ static struct mme_value high_half(struct mme_builder *b, struct mme_value word)
 
 /* Its 11 arguments are the colour matrix uniform's words, QuartzCore's five half4 rows M0..M4 then the clamp pair
  * (p3, p4), which a non-prefetched GPFIFO entry over the uniform buffer feeds it: the constants become
- * K0..K4 = the rows' rgb, K5 = (M0.a, M1.a, M2.a), K6 = (M3.a, M4.a, e), K7 = (p3, -0.5, 0), then the program the
+ * K6, K1..K4 = the rows' rgb, K5 = (M0.a, M1.a, M2.a), K0 = (M3.a, M4.a, e), K7 = (p3, -0.5, 0), then the program the
  * clamp pair picks is loaded and enabled with its alpha. No CPU reads or writes a uniform for it. */
 static void build_vcm_constants(struct mme_builder *b, bool unused)
 {
     (void)unused;
-    static const uint8_t alpha_slot[5][2] = {{5, 0}, {5, 1}, {5, 2}, {6, 0}, {6, 1}};
+    static const uint8_t rgb_slot[5] = {6, 1, 2, 3, 4};
+    static const uint8_t alpha_slot[5][2] = {{5, 0}, {5, 1}, {5, 2}, {0, 0}, {0, 1}};
     for (uint32_t row = 0; row < 5; row++) {
         struct mme_value rg = mme_load(b);
         struct mme_value half = mme_and(b, rg, mme_imm(0xffff));
-        emit_constant(b, row, 0, half);
+        emit_constant(b, rgb_slot[row], 0, half);
         mme_free_reg(b, half);
         half = high_half(b, rg);
-        emit_constant(b, row, 1, half);
+        emit_constant(b, rgb_slot[row], 1, half);
         mme_free_reg(b, half);
         mme_free_reg(b, rg);
         struct mme_value ba = mme_load(b);
         half = mme_and(b, ba, mme_imm(0xffff));
-        emit_constant(b, row, 2, half);
+        emit_constant(b, rgb_slot[row], 2, half);
         mme_free_reg(b, half);
         half = high_half(b, ba);
         emit_constant(b, alpha_slot[row][0], alpha_slot[row][1], half);
         mme_free_reg(b, half);
         mme_free_reg(b, ba);
     }
-    emit_constant(b, 6, 2, mme_imm(VCM_GUARD));
+    emit_constant(b, 0, 2, mme_imm(VCM_GUARD));
     struct mme_value clamp = mme_load(b);
     struct mme_value p3 = mme_and(b, clamp, mme_imm(0xffff));
     emit_constant(b, 7, 0, p3);
@@ -464,10 +467,10 @@ static void build_icb_draw(struct mme_builder *b, bool indexed)
 }
 
 /* The constant buffer at the two scratch words' address, `bytes` long, selected for the loads after it */
-static void select_scratch_cbuf(struct mme_builder *b, uint32_t hi, uint32_t bytes)
+static void select_scratch_cbuf(struct mme_builder *b, uint32_t hi, struct mme_value bytes)
 {
     mme_mthd(b, NVB197_SET_CONSTANT_BUFFER_SELECTOR_A);
-    mme_emit(b, mme_imm(bytes));
+    mme_emit(b, bytes);
     struct mme_value word = mme_state(b, NVB197_SET_MME_SHADOW_SCRATCH(hi));
     mme_emit(b, word);
     mme_free_reg(b, word);
@@ -490,7 +493,9 @@ static void build_icb_patches(struct mme_builder *b, bool unused)
     struct mme_value instances = mme_load(b);
     mme_and_to(b, instances, instances, inside);
     mme_free_reg(b, inside);
-    select_scratch_cbuf(b, SWITCH_GM20B_SCRATCH_ICB_SET_HI, SWITCH_GM20B_ICB_SET_BYTES);
+    struct mme_value set_bytes = mme_state(b, NVB197_SET_MME_SHADOW_SCRATCH(SWITCH_GM20B_SCRATCH_ICB_SET_BYTES));
+    select_scratch_cbuf(b, SWITCH_GM20B_SCRATCH_ICB_SET_HI, set_bytes);
+    mme_free_reg(b, set_bytes);
     for (uint32_t k = 0; k < SWITCH_GM20B_ICB_PATCH_BUFFERS; k++) {
         struct mme_value entry = mme_state(b, NVB197_SET_MME_SHADOW_SCRATCH(SWITCH_GM20B_SCRATCH_ICB_ENTRY + k));
         struct mme_value lo = mme_load(b);
@@ -511,7 +516,7 @@ static void build_icb_patches(struct mme_builder *b, bool unused)
         mme_free_reg(b, hi);
         mme_free_reg(b, range);
     }
-    select_scratch_cbuf(b, SWITCH_GM20B_SCRATCH_ROOT_HI, SWITCH_GM20B_ICB_ROOT_BYTES);
+    select_scratch_cbuf(b, SWITCH_GM20B_SCRATCH_ROOT_HI, mme_imm(SWITCH_GM20B_ICB_ROOT_BYTES));
     struct mme_value control = mme_state(b, NVB197_SET_MME_SHADOW_SCRATCH(SWITCH_GM20B_SCRATCH_ICB_CONTROL));
     mme_mthd(b, NVB197_LOAD_CONSTANT_BUFFER_OFFSET);
     mme_emit(b, control);

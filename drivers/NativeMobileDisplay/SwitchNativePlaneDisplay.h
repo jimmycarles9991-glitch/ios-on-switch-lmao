@@ -54,25 +54,20 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         switch_native_scanout_release(&scanout);
         return -95;
     }
-    int victim = -1, mapped = -1;
+    int mapped = -1;
     for (unsigned k = 0; k < kPlaneSlots; ++k) {
-        if (int(k) == avoid)
-            continue;
         auto &slot = planeSlots[k];
-        const bool samePages = slot.native && slot.mappedAllocation == allocation.allocation_id &&
-                               slot.mappedGeneration == allocation.allocation_generation && slot.low == image.readLow &&
-                               slot.high == image.readHigh;
-        if (samePages && slot.native->lease &&
-            slot.native->allocation.content_generation == allocation.content_generation) {
+        if (int(k) == avoid || !slot.native || slot.mappedAllocation != allocation.allocation_id ||
+            slot.mappedGeneration != allocation.allocation_generation || slot.low != image.readLow ||
+            slot.high != image.readHigh)
+            continue;
+        if (slot.native->lease && slot.native->allocation.content_generation == allocation.content_generation) {
             slot.used = ++planeSlotUses;
             switch_native_scanout_release(&scanout);
             return int(k);
         }
-        const bool busy = planeSlotBusy(int(k));
-        if (samePages && !busy && mapped < 0)
+        if (mapped < 0 && !planeSlotBusy(int(k)))
             mapped = int(k);
-        if (!busy && (victim < 0 || slot.used < planeSlots[victim].used))
-            victim = int(k);
     }
     if (mapped >= 0) {
         auto &slot = planeSlots[mapped];
@@ -85,37 +80,33 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         slot.used = ++planeSlotUses;
         return mapped;
     }
-    if (victim < 0) {
+    const int placed = planeSlotPlace(image.readLow, image.readHigh, avoid);
+    if (placed < 0) {
         switch_native_scanout_release(&scanout);
-        return -11;
+        return placed;
     }
-    auto &slot = planeSlots[victim];
+    auto &slot = planeSlots[placed];
     if (!slot.native)
         slot.native = IONewZero(SwitchNativeScanout, 1);
-    if (!slot.native) {
-        switch_native_scanout_release(&scanout);
-        return -1;
-    }
-    planeDropSlot(unsigned(victim));
     const uint32_t first = uint32_t(image.readLow >> 12), count = uint32_t((image.readHigh - image.readLow) >> 12);
-    if (!probeDomain.map(planeSlotIova(victim), allocation.pages + first, count, false)) {
-        probeDomain.unmap(planeSlotIova(victim), count);
-        cleanDomain();
+    if (!slot.native || !probeDomain.map(slot.iova, allocation.pages + first, count, false)) {
+        planeDropSlot(unsigned(placed));
         switch_native_scanout_release(&scanout);
         return -1;
     }
     slot.mappedAllocation = allocation.allocation_id;
     slot.mappedGeneration = allocation.allocation_generation;
+    planeForgets.publish(unsigned(placed), slot.mappedAllocation);
+    switch_gpu_backing_note_mapped(scanout.view.native, SWITCH_GPU_ENGINE_DISPLAY);
     *slot.native = scanout;
     scanout = {};
-    slot.low = image.readLow;
-    slot.high = image.readHigh;
     slot.tiled = image.surfaceKind != 0;
     slot.used = ++planeSlotUses;
     cleanDomain();
+    planeNoteMapped(slot.mappedAllocation, slot.mappedGeneration);
     if (stats)
         ++stPlaneMaps;
-    return victim;
+    return placed;
 }
 
 // What the overlay's scanout is ordered after: its picture's (switch_native_scanout_dependencies), then its surface's

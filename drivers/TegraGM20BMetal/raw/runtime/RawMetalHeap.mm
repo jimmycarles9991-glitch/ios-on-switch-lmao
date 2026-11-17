@@ -7,6 +7,7 @@
 #import "RawMetalInternal.h"
 #import "RawMetalMultisample.h"
 
+#include "raw_srgb_pair.h"
 #include "raw_xr.h"
 
 namespace {
@@ -75,12 +76,16 @@ id<MTLTexture> makeArenaTexture(RMHeap *h, MTLTextureDescriptor *d, const raw::T
 
 }  // namespace
 
-// The ask rmNewTexture (RawMetalDevice.mm) makes `d` with, in its order of kinds; false: a texture the raw path keeps none of
-// (m2v's alone, which no job of the raw path names), or one the arena's storage mode does not hold
+// The ask rmNewTexture (RawMetalDevice.mm) makes `d` with, in its order of kinds; false: a texture the raw path keeps
+// none of (m2v's alone, which no job of the raw path names), or one the arena's storage mode does not hold. An
+// extended-range one is a one-level 2D texture's alone: the arena lays a stand-in out beside its codes for that one
+// (Device::arenaTexture); an RG8Unorm_sRGB one none
 bool heapTextureAsk(MTLTextureDescriptor *d, bool blockLinear, raw::TextureAsk &ask)
 {
     bool tiled;
-    if (!arenaKind(d.storageMode, tiled) || tiled != blockLinear)
+    if (!arenaKind(d.storageMode, tiled) || tiled != blockLinear ||
+        (raw::xrForm(uint32_t(d.pixelFormat)) != raw::XrForm::None && !rawShape(d)) ||
+        raw::srgbPair(uint32_t(d.pixelFormat)))
         return false;
     ask = {};
     ask.width = uint32_t(d.width);
@@ -91,6 +96,12 @@ bool heapTextureAsk(MTLTextureDescriptor *d, bool blockLinear, raw::TextureAsk &
     if (chainShape(d)) {
         ask.kind = raw::TextureAsk::Mips;
         ask.levels = uint32_t(d.mipmapLevelCount);
+    } else if (const raw::shapes::TextureShape s = textureShape(d); raw::shapes::blockShape(s)) {
+        ask.kind = raw::TextureAsk::Block;
+        ask.levels = uint32_t(std::max<uint64_t>(s.levels, 1));
+        ask.layers = raw::textureLayers(s.type, uint32_t(std::min<uint64_t>(s.array, 2048)));
+        ask.depth = uint32_t(std::max<uint64_t>(s.depth, 1));
+        ask.type = raw::shapes::headerType(s.type);
     } else if (lineShape(d)) {
         ask.kind = raw::TextureAsk::Line;
     } else if (stored != RMStoredSamples::None) {
@@ -100,7 +111,7 @@ bool heapTextureAsk(MTLTextureDescriptor *d, bool blockLinear, raw::TextureAsk &
     } else if (volumeShape(d)) {
         ask.kind = raw::TextureAsk::Volume;
         ask.depth = uint32_t(d.depth);
-        ask.view2d = volumeRendered(d);
+        ask.view2d = raw::shapes::volumeView2d(textureShape(d));
         ask.levels = uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1));
     } else if (array) {
         const bool cube = array == raw::fx::kTexCube || array == raw::fx::kTexCubeArray;
@@ -108,11 +119,14 @@ bool heapTextureAsk(MTLTextureDescriptor *d, bool blockLinear, raw::TextureAsk &
         ask.type = uint8_t(array);
         ask.layers = uint32_t(std::max<NSUInteger>(d.arrayLength, 1) * (cube ? 6 : 1));
         ask.levels = uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1));
-    } else if (zetaDescriptor(d)) {
+    } else if (const raw::shapes::TextureShape s = textureShape(d); zetaDescriptor(d) && raw::shapes::zetaShape(s)) {
         ask.kind = raw::TextureAsk::Zeta;
-        ask.sampled = (d.usage & MTLTextureUsageShaderRead) != 0;
+        ask.sampled = d.usage == MTLTextureUsageUnknown || (d.usage & MTLTextureUsageShaderRead);
+        ask.type = raw::shapes::headerType(s.type);
+        ask.layers = raw::textureLayers(s.type, uint32_t(std::min<uint64_t>(s.array, 2048)));
+        ask.levels = uint32_t(std::max<uint64_t>(s.levels, 1));
     } else if (rawShape(d)) {
-        ask.tiled = blockLinear;
+        ask.tiled = blockLinear || raw::blockCompressed(raw::formatInfo(ask.format));
         ask.standIn = raw::xrForm(ask.format) != raw::XrForm::None &&
                       (d.usage == MTLTextureUsageUnknown || (d.usage & MTLTextureUsageShaderRead));
     } else {

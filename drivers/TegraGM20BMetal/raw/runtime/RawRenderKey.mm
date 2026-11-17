@@ -52,9 +52,9 @@ bool functionLibrary(id<MTLFunction> function, const void *&bytes, size_t &lengt
 bool renderCacheKey(MTLRenderPipelineDescriptor *descriptor, const std::string &key, bool own, uint64_t stack,
                     CacheKey &out, FunctionSource source)
 {
-    AirHash vertex, fragment;
+    AirHash vertex, fragment{};
     if (!functionAir(descriptor.vertexFunction, source, vertex) ||
-        !functionAir(descriptor.fragmentFunction, source, fragment))
+        (descriptor.fragmentFunction && !functionAir(descriptor.fragmentFunction, source, fragment)))
         return false;
     std::vector<LinkedStageAir> linked;
     const std::pair<char, MTLLinkedFunctions *> stages[] = {{'v', descriptor.vertexLinkedFunctions},

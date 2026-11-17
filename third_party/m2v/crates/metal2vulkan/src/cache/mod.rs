@@ -255,6 +255,12 @@ pub struct VariantKey {
         serde(default, with = "crate::pipeline::serde_pairs")
     )]
     pub extended_range: BTreeMap<SlotRef, crate::metal::format::ExtendedRange>,
+    /// Kernel texture slots of `extended_range` bound to an `RGB10A8_2P_XR10` texture held in
+    /// Metal's two planes (`TextureFacts::two_planes`, `LoweringInputs::two_plane_textures`): the
+    /// function reads and writes the color words and the alpha bytes through two images. The plan
+    /// of a pipeline compiled under it states it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub two_plane_textures: BTreeSet<SlotRef>,
     /// Color attachments of the pass the render pipeline has no pixel format for, the pass's
     /// pixel format of each by color index (`BindShape::zeroed_colors`): plain Metal stores zero
     /// bytes into each at every sample a draw covers. The variant's pipeline has each attachment
@@ -463,6 +469,7 @@ impl VariantKey {
             && self.viewport_compensation.is_none()
             && !self.folded_groups
             && self.extended_range.is_empty()
+            && self.two_plane_textures.is_empty()
             && self.zeroed_colors.is_empty()
             && self.dropped_colors.is_empty()
             && self.kept_imageblock_bytes.is_none()
@@ -568,6 +575,12 @@ impl VariantKey {
             .iter()
             .filter(|(s, _)| s.stage == stage)
             .map(|(s, x)| (*s, *x))
+            .collect();
+        out.two_plane_textures = self
+            .two_plane_textures
+            .iter()
+            .filter(|s| s.stage == stage)
+            .copied()
             .collect();
         out.swizzled_storage = self
             .swizzled_storage

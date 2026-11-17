@@ -16,6 +16,7 @@ struct switch_gpu_bridge {
 
 namespace {
 std::vector<switch_gpu_backing_token> sourceTokens;
+std::vector<int> bridgePhysicalAtRelease;
 std::vector<switch_gpu_backing_token> promiseTokens;  // the uses' pending writer promises
 std::vector<uint32_t> publishedWords;
 uint32_t arena[SWITCH_HOST1X_ARENA_WORDS], reservedWords, submittedSyncpt, submittedThreshold;
@@ -112,6 +113,8 @@ int switch_gpu_backing_token_external_status(const switch_gpu_backing_token *)
 int switch_gpu_backing_token_physical_status(const switch_gpu_backing_token *token, int external)
 {
     EXPECT_EQ(external, 0);
+    if (token->engine == SWITCH_GPU_ENGINE_VIC)
+        return Results::physicalStatus(token);
     const auto at = producerPhysical.find({token->engine, token->value});
     return at == producerPhysical.end() ? 1 : at->second;
 }
@@ -240,6 +243,18 @@ int switch_gpu_bridge_covers(const switch_gpu_bridge *bridge, const switch_gpu_b
     return 0;
 }
 
+int switch_gpu_bridge_source_failure(const switch_gpu_bridge *bridge)
+{
+    for (const auto &token : bridge->tokens) {
+        if (token.engine != SWITCH_GPU_ENGINE_GM20B && token.engine != SWITCH_GPU_ENGINE_PROMISE)
+            continue;
+        const int physical = switch_gpu_backing_token_physical_status(&token, 0);
+        if (physical < 0)
+            return physical;
+    }
+    return 0;
+}
+
 int switch_gpu_bridge_status(const switch_gpu_bridge *)
 {
     return 1;
@@ -277,6 +292,10 @@ void switch_host1x_fence_watch(switch_host1x_fence *, uint32_t boundUs)
 
 void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
 {
+    if (*bridge)
+        for (const auto &job : gQueue.jobs)
+            if (job.bridge == *bridge && job.outcome)
+                bridgePhysicalAtRelease.push_back(job.outcome->physicalResult);
     if (*bridge) {
         EXPECT_FALSE(transactionLocked);
         EXPECT_FALSE(switch_test_queue_locked);
@@ -561,6 +580,7 @@ protected:
         transactionLocked = changeProducer = busyOnce = false;
         changeGeneration = nullptr;
         sourceTokens.clear();
+        bridgePhysicalAtRelease.clear();
         promiseTokens.clear();
         publishedWords.clear();
         gQueue = {};
@@ -731,6 +751,98 @@ TEST_F(SwitchVICJobsTest, PendingNvdecUsesFullWidthWaitWithoutGpuBridge)
     EXPECT_EQ(begins, 1u);
     EXPECT_EQ(publishedWords[1], 0x81234567u);
     EXPECT_EQ(publishedWords[2], 162u);
+}
+
+TEST_F(SwitchVICJobsTest, FailedNvdecInputInvalidatesTheVicChainBeforeHardwareRelease)
+{
+    sourceTokens = {{42, 1, SWITCH_GPU_ENGINE_NVDEC, 162}};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token first = {gQueue.submitted, switch_vic_result_state.generation, SWITCH_GPU_ENGINE_VIC,
+                                            gSyncpt};
+    sourceTokens = {first};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token second = {gQueue.submitted, switch_vic_result_state.generation,
+                                             SWITCH_GPU_ENGINE_VIC, gSyncpt};
+    ASSERT_EQ(fences.size(), 3u);
+    const uint32_t powerDonesBeforeCancel = powerDones;
+    switch_vic_host1x_cancelled(162, 41);
+    EXPECT_EQ(Results::physicalStatus(&first), -5);
+    EXPECT_EQ(Results::physicalStatus(&second), -5);
+    EXPECT_EQ(gQueue.count, 2u);
+    EXPECT_EQ(fences.size(), 3u);
+    EXPECT_EQ(powerDones, powerDonesBeforeCancel);
+}
+
+TEST_F(SwitchVICJobsTest, FailedBridgeInputInvalidatesTheRetainedOutputBeforeRelease)
+{
+    gpu();
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_vic_result_state.generation,
+                                             SWITCH_GPU_ENGINE_VIC, gSyncpt};
+    const uint32_t powerDonesBeforeCancel = powerDones;
+    switch_vic_host1x_cancelled(170, 0x1000000);
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    EXPECT_EQ(gQueue.count, 1u);
+    EXPECT_EQ(released, 0u);
+    EXPECT_EQ(powerDones, powerDonesBeforeCancel);
+}
+
+TEST_F(SwitchVICJobsTest, AConsumerAdmittedAfterFailurePropagationCannotPublishAControllerProducer)
+{
+    sourceTokens = {{42, 1, SWITCH_GPU_ENGINE_NVDEC, 162}};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_vic_result_state.generation,
+                                             SWITCH_GPU_ENGINE_VIC, gSyncpt};
+    switch_vic_host1x_cancelled(162, 41);
+    ASSERT_EQ(Results::physicalStatus(&output), -5);
+    ASSERT_EQ(Results::status(&output), 0);
+    const uint32_t submittedBeforeCancel = submits, committedBeforeCancel = commits;
+    sourceTokens = {output};
+    EXPECT_EQ(submit(), -5);
+    EXPECT_EQ(submits, submittedBeforeCancel);
+    EXPECT_EQ(commits, committedBeforeCancel);
+    EXPECT_EQ(gQueue.count, 1u);
+    EXPECT_EQ(fences.size(), 2u);
+}
+
+TEST_F(SwitchVICJobsTest, FailedOriginalGpuInputIsPublishedBeforeTheBridgeHardwarePointMoves)
+{
+    gpu();
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_vic_result_state.generation,
+                                             SWITCH_GPU_ENGINE_VIC, gSyncpt};
+    producerPhysical[{SWITCH_GPU_ENGINE_GM20B, sourceTokens[0].value}] = -5;
+    EXPECT_TRUE(switch_vic_host1x_cancelled(0, 0));
+    EXPECT_FALSE(switch_vic_host1x_cancelled(0, 0));
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    EXPECT_EQ(Results::status(&output), 0);
+    EXPECT_EQ(gQueue.count, 1u);
+    EXPECT_EQ(released, 0u);
+    EXPECT_TRUE(bridgePhysicalAtRelease.empty());
+}
+
+TEST_F(SwitchVICJobsTest, PhysicalPublicationPrecedesReleasingTheBridgeSlot)
+{
+    gpu();
+    ASSERT_EQ(submit(), 0);
+    bridged(0, 0);
+    EXPECT_TRUE(bridgePhysicalAtRelease.empty());
+    interrupt(0);
+    EXPECT_EQ(bridgePhysicalAtRelease, std::vector<int>{1});
+    EXPECT_EQ(released, 1u);
+    EXPECT_EQ(gQueue.count, 0u);
+}
+
+TEST_F(SwitchVICJobsTest, CompletedOrUnrelatedInputsKeepTheirPendingOutput)
+{
+    sourceTokens = {{42, 1, SWITCH_GPU_ENGINE_NVDEC, 162}};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_vic_result_state.generation,
+                                             SWITCH_GPU_ENGINE_VIC, gSyncpt};
+    switch_vic_host1x_cancelled(163, 0);
+    switch_vic_host1x_cancelled(162, 42);
+    EXPECT_EQ(Results::physicalStatus(&output), 0);
+    EXPECT_EQ(gQueue.count, 1u);
 }
 
 TEST_F(SwitchVICJobsTest, MoreThanInlineDependenciesGrowAndPublishWithoutCpuProducerWait)

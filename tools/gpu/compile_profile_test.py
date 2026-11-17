@@ -1,7 +1,7 @@
 """The build's compile profile held to the m2v runtime device of its shader tools.
 
 The pack generator's offline compile makes its translator devices of the profile
-(drivers/NativeMetal/bridge/compile_profile/<build>.json), which this runtime made them of before.
+(drivers/TegraGM20BMetal/translate/compile_profile/<build>.json), which this runtime made them of before.
 """
 
 import os
@@ -13,7 +13,7 @@ from pathlib import Path
 
 REFREEZE = (
     'freeze it again: raw/compile-profile <libvulkan_nouveau.dylib> <cache dir> '
-    '> drivers/NativeMetal/bridge/compile_profile/<build>.json'
+    '> drivers/TegraGM20BMetal/translate/compile_profile/<build>.json'
 )
 
 

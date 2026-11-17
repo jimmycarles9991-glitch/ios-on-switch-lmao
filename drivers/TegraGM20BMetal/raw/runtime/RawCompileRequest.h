@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: MIT
-// A compile request's descriptor fields read off a descriptor and made into one again, and the pack key of a render request
-// made the way the facade makes a state's (RawPipelineKey.h pipelineKey over the descriptor, RawMetalCubic.mm's variant
-// suffixes): the client and the shader compiler both go through these, so a field the request misses shows as a key that
-// differs instead of a record made for another state.
+// A compile request's descriptor fields made into a descriptor again, and the pack key of a render request made the way the
+// facade makes a state's (RawPipelineKey.h pipelineKey over the request's fields, RawMetalCubic.mm's variant name): the
+// client and the shader compiler both go through these, so a field the request misses shows as a key that differs instead
+// of a record made for another state.
 #pragma once
 #import <Metal/Metal.h>
 #include <string>
 #include "RawDirect.h"
+#include "RawPipelineKey.h"
 #include "raw_compile_request.h"
 
 namespace raw {
@@ -14,7 +15,8 @@ namespace raw {
 // RawPipelineKey.h constantsText read back into values; nil for an item that names no size it can hold
 MTLFunctionConstantValues *constantValuesOf(const std::string &text);
 
-PipelineFields fieldsOf(MTLRenderPipelineDescriptor *d);
+// The descriptor the compiler compiles a request from: its fields (RawPipelineKey.h fieldsOf read back), before its
+// functions
 void applyFields(const PipelineFields &f, MTLRenderPipelineDescriptor *d);
 
 // The pack key `r`'s stages and fields make, with its variant's name, and whether the state is its libraries' own (no

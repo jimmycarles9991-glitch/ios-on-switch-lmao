@@ -1,38 +1,67 @@
 // SPDX-License-Identifier: MIT
 // A library the device makes of a metallib it reads itself (RawMetalLibrary.mm readLibrary): its twin and its functions'
-// are m2v's only once something asks for them. Source, stitching and Core Image's linking are m2v's from the start.
+// are m2v's only once something asks for them. A file, URL, data or bundle library it cannot read fails as Metal's and
+// m2v's do. Source, stitching and Core Image's linking are the system's Metal front end's (RawMetalCompiledLibraries.mm).
 #import "RawMetalInternal.h"
+
+#include <os/log.h>
 
 // The file Metal would read, mapped as the frontend maps it (NSDataReadingMappedIfSafe): its pages are the file's, never
 // this process's footprint
-static NSData *metallibFile(NSString *path)
+static NSData *metallibFile(NSString *path, NSError **error)
 {
-    return path ? [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil] : nil;
+    return path ? [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:error] : nil;
+}
+
+static NSError *libraryError(MTLLibraryError code, NSString *why)
+{
+    return [NSError errorWithDomain:MTLLibraryErrorDomain code:code userInfo:@{NSLocalizedDescriptionKey : why}];
+}
+
+// Bytes that are no metallib Metal loads (no AIR slice it takes, a function list cut short): nil and Metal's error, as m2v's
+// frontend answered them
+static id<MTLLibrary> unread(NSString *from, NSError **error)
+{
+    os_log_error(rawLog(), "raw: %{public}s: no metallib Metal loads in %{public}s", getprogname(),
+                 from.UTF8String ?: "data");
+    if (error)
+        *error = libraryError(MTLLibraryErrorUnsupported,
+                              @"This library does not have a compatible AIR slice for this device");
+    return nil;
+}
+
+static id<MTLLibrary> fileLibrary(id device, NSString *path, NSString *named, NSError **error)
+{
+    NSError *readError = nil;
+    NSData *bytes = metallibFile(path, &readError);
+    if (!bytes) {
+        if (error)
+            *error = readError ?: libraryError(MTLLibraryErrorFileNotFound, @"no library file");
+        return nil;
+    }
+    if (RMLibrary *l = readLibrary(device, named, bytes)) {
+        if (error)
+            *error = nil;
+        return (id<MTLLibrary>)l;
+    }
+    return unread(path, error);
 }
 
 @implementation RMDevice (Libraries)
 
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error
 {
-    if (url.isFileURL)
-        if (RMLibrary *l = readLibrary(self, url.path, metallibFile(url.path))) {
-            if (error)
-                *error = nil;
-            return (id<MTLLibrary>)l;
-        }
-    id<MTLDevice> m2v = RM_M2V(NeedLibraryUrl);
-    return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithURL:url error:error], url.path);
+    if (!url.isFileURL) {
+        if (error)
+            *error = libraryError(MTLLibraryErrorFileNotFound, @"a file URL is required");
+        return nil;
+    }
+    return fileLibrary(self, url.path, url.path, error);
 }
 
 - (id<MTLLibrary>)newLibraryWithFile:(NSString *)path error:(NSError **)error
 {
-    if (RMLibrary *l = readLibrary(self, path, metallibFile(path))) {
-        if (error)
-            *error = nil;
-        return (id<MTLLibrary>)l;
-    }
-    id<MTLDevice> m2v = RM_M2V(NeedLibraryFile);
-    return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithFile:path error:error], path);
+    return fileLibrary(self, path, path, error);
 }
 
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error
@@ -51,7 +80,7 @@ static NSData *metallibFile(NSString *path)
             *error = nil;
         return (id<MTLLibrary>)l;
     }
-    return (id<MTLLibrary>)wrapLibrary(self, [RM_M2V(NeedLibraryData) newLibraryWithData:data error:error], nil);
+    return unread(nil, error);
 }
 
 // The library is named as m2v's was (no path for the main bundle's, the bundle's path for another's), so its framework,
@@ -59,28 +88,18 @@ static NSData *metallibFile(NSString *path)
 - (id<MTLLibrary>)newDefaultLibrary
 {
     NSURL *url = [[NSBundle mainBundle] URLForResource:@"default" withExtension:@"metallib"];
-    if (RMLibrary *l = readLibrary(self, nil, metallibFile(url.path)))
-        return (id<MTLLibrary>)l;
-    return (id<MTLLibrary>)wrapLibrary(self, [RM_M2V(NeedLibraryMainDefault) newDefaultLibrary], nil);
+    return url ? fileLibrary(self, url.path, nil, nil) : nil;
 }
 
 - (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error
 {
     NSURL *url = [bundle URLForResource:@"default" withExtension:@"metallib"];
-    NSString *path = [bundle.bundlePath stringByAppendingString:@"/default.metallib"];
-    if (RMLibrary *l = readLibrary(self, path, metallibFile(url.path))) {
+    if (!url) {
         if (error)
-            *error = nil;
-        return (id<MTLLibrary>)l;
+            *error = libraryError(MTLLibraryErrorFileNotFound, @"the bundle has no default.metallib");
+        return nil;
     }
-    id<MTLDevice> m2v = RM_M2V(NeedLibraryBundleDefault);
-    return (id<MTLLibrary>)wrapLibrary(self, [m2v newDefaultLibraryWithBundle:bundle error:error], path);
-}
-
-- (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error
-{
-    id<MTLDevice> m2v = RM_M2V(NeedLibrarySource);
-    return (id<MTLLibrary>)wrapLibrary(self, [m2v newLibraryWithSource:source options:options error:error], nil);
+    return fileLibrary(self, url.path, [bundle.bundlePath stringByAppendingString:@"/default.metallib"], error);
 }
 
 @end

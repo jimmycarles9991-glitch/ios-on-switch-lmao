@@ -39,12 +39,14 @@ common --incompatible_strict_action_env
 # unsandboxed fallback, so there is none: a new one that tries to read undeclared inputs fails instead of passing.
 build --spawn_strategy=sandboxed
 # One exception: iOS 27's translation attaches and mounts disk images (hdiutil, diskutil), which no sandbox
-# allows, so its two actions (install/translated.bzl) run here.
-build --strategy=Pretranslate=local
-build --strategy=TranslatedCryptex=local
+# allows, so its two actions (install/translated.bzl) run on a build host's worker, or unsandboxed here when there is
+# none (--config=noremote).
+build --strategy=Pretranslate=remote,local
+build --strategy=TranslatedCryptex=remote,local
+build --strategy=InstallPolicy=local
 # And rules_apple's actool (the HW Test apps' asset catalog), which asks CoreSimulator's services for its compile and is
 # marked no-sandbox.
-build --strategy=AssetCatalogCompile=local
+build --strategy=AssetCatalogCompile=remote,local
 # No network inside actions (repository rules fetch; actions never do).
 build --sandbox_default_allow_network=false
 # Reuse sandbox directory trees between actions: faster sandbox setup, the same isolation.
@@ -80,7 +82,10 @@ build --@rules_apple//apple/build_settings:signing_certificate_name=-
 build --ios_multi_cpus=arm64
 # rules_apple tags its bundling, signing and profile-reading actions no-sandbox, for codesign's keychain lookups. An ad
 # hoc identity and an XML profile need neither the keychain nor anything undeclared, so they run sandboxed like the rest.
-build --modify_execution_info=^(BundleApp|BundleTreeApp|ProcessAndSign|SignBinary|ExtractFromProvisioningProfile)$=-no-sandbox
+# It also keeps a device app's ProcessAndSign off remote caches, for teams whose developers sign with their own
+# identities. The ad hoc identity has no key or certificate and codesign stamps no time on it, so the signature is the
+# same on every Mac with the same /usr/bin/codesign and Xcode.
+build --modify_execution_info=^(BundleApp|BundleTreeApp|ProcessAndSign|SignBinary|ExtractFromProvisioningProfile)$=-no-sandbox,^ProcessAndSign$=-no-remote
 
 # --- Output ------------------------------------------------------------------------------------------------------
 build --show_result=30

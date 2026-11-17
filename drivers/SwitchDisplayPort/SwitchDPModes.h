@@ -13,6 +13,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// NOLINTBEGIN(modernize-avoid-c-style-cast,modernize-loop-convert): plain C, compiled by C host tests as well
 #define SWITCH_DP_MAX_WIDTH      1920u
 #define SWITCH_DP_MAX_HEIGHT     1080u
 #define SWITCH_DP_MAX_REFRESH    60500u  // mHz: 60 Hz and 59.94 Hz
@@ -67,7 +68,7 @@ static inline bool switch_dp_edid_header_valid(const uint8_t *edid)
 // An 18-byte detailed timing descriptor; false for display descriptors (pixel clock 0) and interlaced timings.
 static inline bool switch_dp_edid_dtd(const uint8_t *d, struct switch_dp_mode *mode)
 {
-    const uint32_t clock = (uint32_t)(d[0] | (d[1] << 8));
+    const uint32_t clock = d[0] | ((uint32_t)d[1] << 8);
     if (clock == 0 || (d[17] & 0x80u) != 0) {
         return false;
     }
@@ -77,7 +78,7 @@ static inline bool switch_dp_edid_dtd(const uint8_t *d, struct switch_dp_mode *m
     const uint16_t vblank = (uint16_t)(d[6] | ((d[7] & 0x0Fu) << 8));
     const uint16_t hfront = (uint16_t)(d[8] | ((d[11] & 0xC0u) << 2));
     const uint16_t hsync = (uint16_t)(d[9] | ((d[11] & 0x30u) << 4));
-    const uint16_t vfront = (uint16_t)((d[10] >> 4) | ((d[11] & 0x0Cu) << 2));
+    const uint16_t vfront = (uint16_t)(((uint32_t)d[10] >> 4) | ((d[11] & 0x0Cu) << 2));
     const uint16_t vsync = (uint16_t)((d[10] & 0x0Fu) | ((d[11] & 0x03u) << 4));
     if (hfront + hsync >= hblank || vfront + vsync >= vblank || hactive == 0 || vactive == 0) {
         return false;
@@ -150,7 +151,8 @@ static inline void switch_dp_edid_cta(const uint8_t *block, struct switch_dp_mod
         return;
     }
     for (unsigned at = 4; at < dtd_start;) {
-        const unsigned tag = block[at] >> 5, length = block[at] & 0x1Fu;
+        const unsigned tag = block[at] >> 5;
+        const unsigned length = block[at] & 0x1Fu;
         if (at + 1 + length > dtd_start) {
             break;
         }
@@ -195,7 +197,7 @@ static inline void switch_dp_edid_modes(const uint8_t *edid, unsigned blocks, st
     }
     const unsigned extensions = edid[126] < blocks - 1 ? edid[126] : blocks - 1;
     for (unsigned b = 1; b <= extensions; ++b) {
-        const uint8_t *block = edid + 128u * b;
+        const uint8_t *block = edid + (size_t)128 * b;
         if (switch_dp_edid_block_valid(block)) {
             switch_dp_edid_cta(block, list);
         }
@@ -221,11 +223,13 @@ static inline bool switch_dp_mode_better(const struct switch_dp_mode *a, const s
     if (switch_dp_mode_is_1080p60(a) != switch_dp_mode_is_1080p60(b)) {
         return switch_dp_mode_is_1080p60(a);
     }
-    const uint32_t ra = switch_dp_mode_refresh_mhz(a), rb = switch_dp_mode_refresh_mhz(b);
+    const uint32_t ra = switch_dp_mode_refresh_mhz(a);
+    const uint32_t rb = switch_dp_mode_refresh_mhz(b);
     if ((ra >= SWITCH_DP_SMOOTH) != (rb >= SWITCH_DP_SMOOTH)) {
         return ra >= SWITCH_DP_SMOOTH;
     }
-    const uint32_t area_a = (uint32_t)a->hactive * a->vactive, area_b = (uint32_t)b->hactive * b->vactive;
+    const uint32_t area_a = (uint32_t)a->hactive * a->vactive;
+    const uint32_t area_b = (uint32_t)b->hactive * b->vactive;
     if (area_a != area_b) {
         return area_a > area_b;
     }
@@ -248,5 +252,7 @@ static inline int switch_dp_pick_mode(const struct switch_dp_mode_list *list, ui
     }
     return best;
 }
+
+// NOLINTEND(modernize-avoid-c-style-cast,modernize-loop-convert)
 
 #endif

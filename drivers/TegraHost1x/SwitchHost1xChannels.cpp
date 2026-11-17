@@ -20,6 +20,8 @@
 #include "SwitchHost1xArena.h"
 #include "SwitchHost1xChannels.h"
 #include "SwitchHost1xFence.h"
+#include "SwitchHost1xDisplay.h"
+#include "SwitchHost1xFailureRelease.h"
 #include "TegraHost1x.h"
 #include "../../kits/SwitchDMA/SwitchDMABuffer.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
@@ -73,6 +75,7 @@ volatile uint8_t *gChannelHost, *gChannelSync;
 IOLock *gChannelLock;
 Channel gChannels[TEGRA_HOST1X_CHANNELS];
 bool gRunning;
+SwitchHost1xDisplayStream *gDisplayStream;
 uint32_t gFilterStuck;  // channels whose gather filter stayed on when cleared
 #if SWITCH_HOST1X_STATS
 SwitchHost1xGatherStats gGatherStats;
@@ -180,6 +183,23 @@ int gatherLocked(uint32_t channel, const uint32_t *first, uint32_t count, bool f
 #endif
     wake(c);
     return TEGRA_HOST1X_OK;
+}
+
+void teardownLocked(uint32_t channel)
+{
+    syncSet(SYNC_CMDPROC_STOP, syncRead(SYNC_CMDPROC_STOP) | 1u << channel);
+    channelWrite(channel, CH_DMACTRL, DMACTRL_STOP);
+    syncSet(SYNC_CH_TEARDOWN, 1u << channel);
+}
+
+void restartLocked(uint32_t channel)
+{
+    channelWrite(channel, CH_DMACTRL, DMACTRL_STOP);
+    channelWrite(channel, CH_DMAPUT, gChannels[channel].push.put);
+    channelWrite(channel, CH_DMACTRL, DMACTRL_STOP | DMACTRL_GETRST | DMACTRL_INITGET);
+    syncSet(SYNC_CMDPROC_STOP, syncRead(SYNC_CMDPROC_STOP) & ~(1u << channel));
+    channelWrite(channel, CH_DMACTRL, 0);
+    dropJobs(gChannels[channel]);
 }
 
 #if SWITCH_HOST1X_STATS
@@ -416,9 +436,7 @@ extern "C" void tegra_host1x_channel_teardown(uint32_t channel)
         return;
     IOLockLock(gChannelLock);
     if (gRunning) {
-        syncSet(SYNC_CMDPROC_STOP, syncRead(SYNC_CMDPROC_STOP) | 1u << channel);
-        channelWrite(channel, CH_DMACTRL, DMACTRL_STOP);
-        syncSet(SYNC_CH_TEARDOWN, 1u << channel);
+        teardownLocked(channel);
     }
     IOLockUnlock(gChannelLock);
 }
@@ -431,12 +449,9 @@ extern "C" void tegra_host1x_channel_restart(uint32_t channel)
         return;
     IOLockLock(gChannelLock);
     if (gRunning) {
-        channelWrite(channel, CH_DMACTRL, DMACTRL_STOP);
-        channelWrite(channel, CH_DMAPUT, gChannels[channel].push.put);
-        channelWrite(channel, CH_DMACTRL, DMACTRL_STOP | DMACTRL_GETRST | DMACTRL_INITGET);
-        syncSet(SYNC_CMDPROC_STOP, syncRead(SYNC_CMDPROC_STOP) & ~(1u << channel));
-        channelWrite(channel, CH_DMACTRL, 0);
-        dropJobs(gChannels[channel]);
+        restartLocked(channel);
     }
     IOLockUnlock(gChannelLock);
 }
+
+#include "SwitchHost1xDisplayChannel.h"

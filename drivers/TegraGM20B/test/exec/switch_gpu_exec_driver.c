@@ -9,6 +9,7 @@ struct idle_state tgm_idle;
 struct switch_gpu_busy tgm_busy;
 struct wstat_state tgm_wstat;
 struct frame_gpu_state tgm_frame_gpu;
+struct present_state tgm_present;
 struct fences_state tgm_fence_pages;
 struct tgm_gate tgm_sc7_gate;
 DEFINE_MUTEX(tgm_gate_lock);
@@ -28,10 +29,14 @@ uint32_t tgm_chan_completed(struct tgm_chan *chan)
 	return READ_ONCE(*chan->fence_cpu);
 }
 
-void tgm_chan_park_promises(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
-			    u32 count)
+int switch_gpu_promise_park_locked(uint32_t offset, uint32_t value, const char *waiter,
+				   const char *who, const struct switch_gpu_giveup_job *reader,
+				   int display)
 {
+	if (!switch_exec_mutex_held())
+		nvxnu_panic("promise parked outside live owner");
 	++parked;
+	return 1;
 }
 
 uint32_t switch_exec_parked_promises(void)
@@ -95,10 +100,7 @@ void tgm_hold_track(struct nvkm_device *dev, unsigned int chid, int on)
 {
 }
 
-int tgm_order_waits(struct tgm_chan *chan)
-{
-	return 0;
-}
+#include "drivers/TegraGM20B/test/exec/switch_gpu_exec_owned_waits.h"
 
 enum tgm_sched_kick tgm_sched_kicked(struct nvkm_device *dev, unsigned int chid,
 				     struct tgm_sched_queued *queued)

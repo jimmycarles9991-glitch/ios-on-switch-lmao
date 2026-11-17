@@ -33,7 +33,7 @@ TEST(TegraSMMUSource, OneOwnerOfTheGlobalRegisters)
             continue;
         }
         ++units;
-        std::ifstream file(path, std::ios::binary);
+        std::ifstream const file(path, std::ios::binary);
         std::ostringstream text;
         text << file.rdbuf();
         for (const char *global : {"MC_SMMU_PTB_ASID", "MC_SMMU_PTB_DATA", "MC_SMMU_TLB_FLUSH", "MC_SMMU_PTC_FLUSH"})
@@ -48,4 +48,20 @@ TEST(TegraSMMUSource, VicAttachesThroughTheSharedDomain)
     const std::string vic = SourceText("../../TegraVIC/TegraVIC.cpp");
     EXPECT_THAT(vic, HasSubstr("tegra_smmu_attach("));
     EXPECT_THAT(vic, HasSubstr("TegraSMMUDomain"));
+}
+
+// The MC error interrupt starts at once (its own thread waits for the GIC) ahead of every DMA client the board thread
+// starts, USB first among them, so an error they raise is not latched unreported behind a 10 s GIC wait.
+TEST(TegraSMMUSource, TheMcErrorInterruptStartsAheadOfItsClients)
+{
+    const std::string boot = SourceText("../../../diagnostics/switch/SwitchRootBoot.c");
+    const size_t mc = boot.find("if (tegra_mc_errors_start())");
+    ASSERT_NE(mc, std::string::npos);
+    for (const char *client :
+         {"if (switch_usb_start())", "if (tegra_gm20b_probe())", "if (tegra_nvdec_probe())", "if (tegra_nvenc_probe())",
+          "if (tegra_vic_probe())", "if (tegra_nvjpg_probe())", "if (switch_wlan_publish())"}) {
+        const size_t at = boot.find(client);
+        ASSERT_NE(at, std::string::npos) << client;
+        EXPECT_LT(mc, at) << client;
+    }
 }

@@ -101,10 +101,11 @@ std::shared_ptr<RMKernelSet> rmCommandKernels(RMComputeState *pipeline, const RM
 bool rmCommandRegions(const RMKernelSet &kernels, const raw::ComputeDispatch &shape, const RMICBDispatch &c,
                       const raw::ComputeEncoder::IcbBuffer (&buffers)[31], const std::array<uint32_t, 31> &strides,
                       const RMICBBlock &block, raw::icb::ComputeCommand &words, const char **why);
-uint32_t rmCommandBytes(const RMKernelSet &kernels);
+uint32_t rmCommandBytes(const RMKernelSet &kernels, const raw::ComputeDispatch &shape);
 void rmCommandBuffers(const RMICBDispatch &c, raw::ComputeEncoder::IcbBuffer (&out)[31]);
 // Command `c`'s binds of its regions in `block` into c.binds and its masks; false: refused (*why)
-bool rmCommandBinds(const RMKernelSet &kernels, const RMICBBlock &block, RMICBDispatch &c, const char **why);
+bool rmCommandBinds(const RMKernelSet &kernels, const raw::ComputeDispatch &shape, const RMICBBlock &block,
+                    RMICBDispatch &c, const char **why);
 // The bind slot of command `index` of a buffer that inherits the encoder's buffers
 uint32_t *rmBindSlot(RMIndirectComputeBuffer *b, NSUInteger index);
 // `b`'s commands (under its lock) for `pipeline` with `kernels` (each command's at it), made now; null: refused (*why)
@@ -120,4 +121,4 @@ std::shared_ptr<RMICBVariant> rmPipelineVariant(RMIndirectComputeBuffer *b, RMCo
 // RawMetalIndirectExecute.mm: the raw encode of OpExecuteKernels, and a blit's reset or copy of a buffer of dispatches
 // (be null: m2v's replay)
 bool encodeKernelCommands(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMKernelExecute *x, const char **why);
-void encodeKernelCommandsBlit(raw::BlitEncoder *be, const Cmd &c);
+void encodeKernelCommandsBlit(raw::CommandBuffer *rc, raw::BlitEncoder *be, const Cmd &c);

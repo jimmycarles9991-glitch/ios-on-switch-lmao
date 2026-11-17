@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#include "raw_bound_texture.h"
 #include "raw_draw_check.h"
 
 @implementation RMRenderEncoder (Bindings)
@@ -142,14 +143,17 @@ static raw::CheckedTexture checkedTexture(__unsafe_unretained RMTexture *t)
     return t ? raw::CheckedTexture{t->_raw.addressMap != 0, t->_raw.xrPlanes} : raw::CheckedTexture{};
 }
 
-void rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLTexture> t,
+bool rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLTexture> t,
                    NSUInteger index)
 {
     SWITCH_API(ApiBind);
     __unsafe_unretained RMTexture *x = [(id)t isKindOfClass:[RMTexture class]] ? (RMTexture *)t : nil;
-    // an extended-range texture is sampled through its stand-in (raw_xr.h): one without (no ShaderRead usage) is m2v's to sample
-    const bool unsampled = x && !x->_raw.standIn && raw::xrForm(x->_raw.format) != raw::XrForm::None;
-    if (t && (!x || !x->_rawOk || !x->_raw.tic || unsampled || x->_raw.rotation)) {
+    if (x && x->_rawOk && x->_raw.rotation)
+        SWITCH_REFUSE("raw", "tex.turned_bound",
+                      "a %ux%u plane of rotation %u bound as a texture argument, read as it lies (MTLTexture.h "
+                      "framebufferOnly: no texture argument)",
+                      x->_raw.width, x->_raw.height, unsigned(x->_raw.rotation));
+    if (t && (!x || !x->_rawOk || !raw::drawsBound(x->_raw))) {
         [e->_cb takeReason:WhyTexture why:@"a texture the raw path does not keep"];
         if (!x) {
             if (!predLogged(PredTexForeign))
@@ -157,13 +161,20 @@ void rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_u
                         [NSString stringWithFormat:@"class %s", class_getName(object_getClass(t))]);
             hit(e->_cb, PredTexForeign, t.pixelFormat);
         } else
-            hit(e->_cb, RMPred(x->_pred ?: (x->_rawOk && !x->_raw.rotation ? PredEncNoTic : PredTexShape)),
-                x->_descriptor.pixelFormat, x->_kind);
+            hit(e->_cb, RMPred(x->_pred ?: (x->_rawOk ? PredEncNoTic : PredTexShape)), x->_descriptor.pixelFormat,
+                x->_kind);
     }
+    bool formsChanged = false;
     if ((stage == 1 || stage == 2) && index < raw::kStageTextures) {
         const raw::Pipeline *pl = e->_pipe ? e->_pipe->_raw : nullptr;
-        if (raw::textureBindChecks(checkedTexture(e->_tex[stage - 1][index]), checkedTexture(x), e->_cubicMask,
-                                   pl && pl->writtenSlots))
+        __unsafe_unretained RMTexture *old = e->_tex[stage - 1][index];
+        const bool oldPlanes = old && old->_raw.xrPlanes && !old->_raw.memoryless;
+        const bool nextPlanes = x && x->_raw.xrPlanes && !x->_raw.memoryless;
+        formsChanged = oldPlanes != nextPlanes;
+        if (old != x && (raw::hasSlot(e->_cubicTextures[stage - 1], uint32_t(index)) ||
+                         (stage == 2 && pl && raw::writtenSlot(pl->writtenSlots, uint32_t(index)))))
+            formsChanged |= (old ? old->_descriptor.pixelFormat : 0) != (x ? x->_descriptor.pixelFormat : 0);
+        if (formsChanged || raw::textureBindChecks(checkedTexture(old), checkedTexture(x), false, false))
             e->_eligibility++;
         e->_tex[stage - 1][index] = x;
     }
@@ -175,89 +186,122 @@ void rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_u
         rmPipelineVeto(e->_cb, VetoShadows);
         e->_cb->_standIns = true;
     }
+    if (x && x->_raw.xrPlanes)
+        e->_cb->_passes[e->_passAt].xrPlaneBinds = true;
     setBinding(e->_cb, OpTexture, stage, index, t, 0);
+    return formsChanged;
 }
 
 - (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index
 {
-    rmBindTexture(self, 2, t, index);
+    if (rmBindTexture(self, 2, t, index))
+        [self prepareDrawnRecord];
 }
 
 - (void)setVertexTexture:(id<MTLTexture>)t atIndex:(NSUInteger)index
 {
-    rmBindTexture(self, 1, t, index);
+    if (rmBindTexture(self, 1, t, index))
+        [self prepareDrawnRecord];
 }
 
 - (void)setFragmentTextures:(const id<MTLTexture> __unsafe_unretained[])t withRange:(NSRange)r
 {
+    bool changed = false;
     for (NSUInteger k = 0; k < r.length; k++)
-        rmBindTexture(self, 2, t[k], r.location + k);
+        changed |= rmBindTexture(self, 2, t[k], r.location + k);
+    if (changed)
+        [self prepareDrawnRecord];
 }
 
 - (void)setVertexTextures:(const id<MTLTexture> __unsafe_unretained[])t withRange:(NSRange)r
 {
+    bool changed = false;
     for (NSUInteger k = 0; k < r.length; k++)
-        rmBindTexture(self, 1, t[k], r.location + k);
+        changed |= rmBindTexture(self, 1, t[k], r.location + k);
+    if (changed)
+        [self prepareDrawnRecord];
 }
 
-void rmBindSampler(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLSamplerState> s,
+static bool sameCubicSampler(__unsafe_unretained RMSampler *a, __unsafe_unretained RMSampler *b)
+{
+    if (a == b)
+        return true;
+    const bool ac = a && a->_raw.desc.cubic, bc = b && b->_raw.desc.cubic;
+    if (!ac || !bc)
+        return ac == bc;
+    const raw::SamplerDesc &x = a->_raw.desc, &y = b->_raw.desc;
+    return x.sAddress == y.sAddress && x.tAddress == y.tAddress && x.rAddress == y.rAddress && x.pixel == y.pixel &&
+           (a->_descriptor.borderColor & 3) == (b->_descriptor.borderColor & 3);
+}
+
+bool rmBindSampler(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLSamplerState> s,
                    NSUInteger index)
 {
     SWITCH_API(ApiBind);
     __unsafe_unretained RMSampler *r = [(id)s isKindOfClass:[RMSampler class]] ? (RMSampler *)s : nil;
     const uint16_t bit = uint16_t(index < 16 ? 1u << index : 0);
-    if (stage == 2 && bit) {
+    const bool tracked = (stage == 1 || stage == 2) && bit;
+    if (tracked) {
         // Core Animation binds the same sampler with each texture: the plan holds it bound already, and the
         // command buffer retained it
         if (const uint64_t epoch = e->_cb->_plan.stateEpoch(); e->_sampEpoch != epoch) {
             e->_sampEpoch = epoch;
-            e->_sampRecorded = 0;
+            e->_sampRecorded[0] = e->_sampRecorded[1] = 0;
         }
-        if (r && e->_samp[index] == r && (e->_sampRecorded & bit))
-            return;
+        if (r && e->_samp[stage - 1][index] == r && (e->_sampRecorded[stage - 1] & bit))
+            return false;
     }
     if (s && !r) {
         [e->_cb takeReason:WhyCall why:@"a sampler not made by this device"];
         hit(e->_cb, PredCallSamplerForeign, index);
     }
-    // m2v filters through a cubic sampler in the shader, which only the fragment stage's records have variants of
-    // (RawMetalCubic.mm)
-    if (stage == 1 && r && r->_raw.desc.cubic) {
-        [e->_cb takeReason:WhyCall why:@"a cubic vertex sampler"];
-        hit(e->_cb, PredCallVertexSampler, index);
-    }
     if (r && r->_raw.desc.border)
         e->_cb->_borderSamplers = true;
-    if (stage == 2 && bit) {
-        if (raw::samplerBindChecks(e->_cubicMask & bit, r && r->_raw.desc.cubic))
+    bool formsChanged = false;
+    if (tracked) {
+        formsChanged = !sameCubicSampler(e->_samp[stage - 1][index], r) &&
+                       ((e->_formSamplers[stage - 1] & bit) ||
+                        !(e->_cubicMask[0] | e->_cubicMask[1] | e->_formSamplers[0] | e->_formSamplers[1]));
+        if (formsChanged)
             e->_eligibility++;
-        e->_samp[index] = r;
-        e->_cubicMask = uint16_t(r && r->_raw.desc.cubic ? e->_cubicMask | bit : e->_cubicMask & ~bit);
-        e->_sampRecorded = uint16_t(r ? e->_sampRecorded | bit : e->_sampRecorded & ~bit);
+        e->_samp[stage - 1][index] = r;
+        auto &mask = e->_cubicMask[stage - 1];
+        mask = uint16_t(r && r->_raw.desc.cubic ? mask | bit : mask & ~bit);
+        auto &recorded = e->_sampRecorded[stage - 1];
+        recorded = uint16_t(r ? recorded | bit : recorded & ~bit);
     }
     setBinding(e->_cb, OpSampler, stage, index, s, 0);
+    return formsChanged;
 }
 
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)index
 {
-    rmBindSampler(self, 2, s, index);
+    if (rmBindSampler(self, 2, s, index))
+        [self prepareDrawnRecord];
 }
 
 - (void)setVertexSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)index
 {
-    rmBindSampler(self, 1, s, index);
+    if (rmBindSampler(self, 1, s, index))
+        [self prepareDrawnRecord];
 }
 
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s withRange:(NSRange)r
 {
+    bool changed = false;
     for (NSUInteger k = 0; k < r.length; k++)
-        rmBindSampler(self, 2, s[k], r.location + k);
+        changed |= rmBindSampler(self, 2, s[k], r.location + k);
+    if (changed)
+        [self prepareDrawnRecord];
 }
 
 - (void)setVertexSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s withRange:(NSRange)r
 {
+    bool changed = false;
     for (NSUInteger k = 0; k < r.length; k++)
-        rmBindSampler(self, 1, s[k], r.location + k);
+        changed |= rmBindSampler(self, 1, s[k], r.location + k);
+    if (changed)
+        [self prepareDrawnRecord];
 }
 
 // A bind's LOD clamps replace the state's (Metal's rule): the state of its descriptor with those clamps, made once per state and
@@ -289,7 +333,8 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
                   lodMaxClamp:(float)lodMax
                       atIndex:(NSUInteger)index
 {
-    rmBindSampler(self, 1, clampedSampler(s, lodMin, lodMax), index);
+    if (rmBindSampler(self, 1, clampedSampler(s, lodMin, lodMax), index))
+        [self prepareDrawnRecord];
 }
 
 - (void)setFragmentSamplerState:(id<MTLSamplerState>)s
@@ -297,7 +342,8 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
                     lodMaxClamp:(float)lodMax
                         atIndex:(NSUInteger)index
 {
-    rmBindSampler(self, 2, clampedSampler(s, lodMin, lodMax), index);
+    if (rmBindSampler(self, 2, clampedSampler(s, lodMin, lodMax), index))
+        [self prepareDrawnRecord];
 }
 
 - (void)setFragmentSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s
@@ -305,8 +351,11 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
                     lodMaxClamps:(const float[])lodMax
                        withRange:(NSRange)r
 {
+    bool changed = false;
     for (NSUInteger k = 0; k < r.length; k++)
-        rmBindSampler(self, 2, clampedSampler(s[k], lodMin[k], lodMax[k]), r.location + k);
+        changed |= rmBindSampler(self, 2, clampedSampler(s[k], lodMin[k], lodMax[k]), r.location + k);
+    if (changed)
+        [self prepareDrawnRecord];
 }
 
 - (void)setVertexSamplerStates:(const id<MTLSamplerState> __unsafe_unretained[])s
@@ -314,8 +363,11 @@ id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lo
                   lodMaxClamps:(const float[])lodMax
                      withRange:(NSRange)r
 {
+    bool changed = false;
     for (NSUInteger k = 0; k < r.length; k++)
-        rmBindSampler(self, 1, clampedSampler(s[k], lodMin[k], lodMax[k]), r.location + k);
+        changed |= rmBindSampler(self, 1, clampedSampler(s[k], lodMin[k], lodMax[k]), r.location + k);
+    if (changed)
+        [self prepareDrawnRecord];
 }
 
 @end

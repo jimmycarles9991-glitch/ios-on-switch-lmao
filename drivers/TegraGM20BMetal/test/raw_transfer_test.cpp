@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "../raw/runtime/raw_transfer.h"
 #include "../raw/runtime/raw_kit.h"
+#include "../raw/runtime/raw_zeta_cpu.h"
 #include "../raw/fx/fx_image.h"
 #include <IOKit/IOReturn.h>
 #include <gtest/gtest.h>
@@ -41,11 +42,11 @@ struct FakeGpu {
             launches.push_back(value);
             const uint32_t remap = state[0x0708 / 4];
             const uint32_t unit = ((remap >> 16) & 3) + 1;
-            const uint32_t bpp = (((remap >> 20) & 3) + 1) * unit;
-            ASSERT_EQ(bpp, (((remap >> 24) & 3) + 1) * unit);
+            const uint32_t sourceBpp = (((remap >> 20) & 3) + 1) * unit, bpp = (((remap >> 24) & 3) + 1) * unit;
             const uint64_t source = uint64_t(state[0x0400 / 4]) << 32 | state[0x0404 / 4];
             const uint64_t destination = uint64_t(state[0x0408 / 4]) << 32 | state[0x040c / 4];
             auto offset = [&](bool source, uint32_t x, uint32_t y) -> uint64_t {
+                const uint32_t bpp = source ? sourceBpp : (((remap >> 24) & 3) + 1) * unit;
                 const uint32_t pitch = state[(source ? 0x0410 : 0x0414) / 4];
                 if (value & (source ? 1u << 7 : 1u << 8))
                     return uint64_t(y) * pitch + x * bpp;
@@ -72,8 +73,14 @@ struct FakeGpu {
             };
             for (uint32_t y = 0; y < state[0x041c / 4]; ++y)
                 for (uint32_t x = 0; x < state[0x0418 / 4]; ++x)
-                    std::memcpy(reinterpret_cast<void *>(destination + offset(false, x, y)),
-                                reinterpret_cast<const void *>(source + offset(true, x, y)), bpp);
+                    for (uint32_t c = 0; c < bpp / unit; ++c) {
+                        const uint32_t from = remap >> 4 * c & 7;
+                        if (from == 6)  // NO_WRITE
+                            continue;
+                        ASSERT_LT(from * unit, sourceBpp);
+                        std::memcpy(reinterpret_cast<void *>(destination + offset(false, x, y) + c * unit),
+                                    reinterpret_cast<const void *>(source + offset(true, x, y) + from * unit), unit);
+                    }
         };
         const auto *words = reinterpret_cast<const uint32_t *>(job.va);
         for (uint32_t i = 0; i < job.words;) {
@@ -331,6 +338,100 @@ TEST_F(RawTransfer, TiledSubregionRoundTripPreservesOtherTexels)
                     for (uint32_t byte = 0; byte < bpp; ++byte)
                         ASSERT_EQ(tiled[tgm_layout_offset_of(layout.row_bytes, layout.y_log2, x * bpp + byte, y)],
                                   0x91);
+    }
+}
+
+// A shared Depth32Float_Stencil8 texture's CPU copies move its depth alone, a float a texel (Metal's getBytes and
+// replaceRegion on an M4 Max), with NVK's buffer-copy remaps of the depth aspect: into the texel's first word, the
+// stencil word NO_WRITE, and out of it; Depth16Unorm, Depth32Float and Stencil8 move their texels as they are
+TEST_F(RawTransfer, ZetaCopiesAreNvksAspectCopies)
+{
+    raw::ZetaCpuCopy copy;
+    ASSERT_TRUE(raw::zetaCpuCopy(260, copy));
+    EXPECT_EQ(copy.bytes, 4u);
+    // NV90B5_SET_REMAP_COMPONENTS: nvk_remap_insert_aspect's and extract_aspect's DST_X SRC_X, DST_Y..W NO_WRITE,
+    // four-byte components, the buffer's one a texel and the image's two
+    EXPECT_EQ(copy.remapIn, 0x0103'6660u);
+    EXPECT_EQ(copy.remapOut, 0x0013'6660u);
+    for (const auto &[format, bytes] : {std::pair{250u, 2u}, {252u, 4u}, {253u, 1u}}) {
+        ASSERT_TRUE(raw::zetaCpuCopy(format, copy)) << format;
+        EXPECT_EQ(copy.bytes, bytes) << format;
+        EXPECT_EQ(copy.remapIn, raw::copyTexelRemap(bytes)) << format;
+        EXPECT_EQ(copy.remapOut, raw::copyTexelRemap(bytes)) << format;
+    }
+    EXPECT_FALSE(raw::zetaCpuCopy(70, copy));
+
+    tgm_layout layout;
+    ASSERT_TRUE(tgm_layout_tiled(21, 13, 8, &layout));
+    std::vector<uint8_t> zeta(layout.bytes, 0x5a);
+    std::vector<float> depths(9 * 5), back(depths.size(), -1.0f);
+    for (size_t i = 0; i < depths.size(); ++i)
+        depths[i] = float(i) / 64.0f;
+    ASSERT_TRUE(raw::zetaCpuCopy(260, copy));
+    raw::TextureTransfer region;
+    region.texture = {reinterpret_cast<uint64_t>(zeta.data()), layout.row_bytes, 3, 4, 13, true, layout.y_log2};
+    region.width = 9;
+    region.height = 5;
+    region.planes = 1;
+    region.bpp = copy.bytes;
+    region.remapIn = copy.remapIn;
+    region.remapOut = copy.remapOut;
+    ASSERT_TRUE(this->copy(region, depths.data(), 9 * 4, true));
+    ASSERT_TRUE(this->copy(region, back.data(), 9 * 4, false));
+    EXPECT_EQ(back, depths);
+    for (uint32_t y = 0; y < 5; ++y)
+        for (uint32_t x = 0; x < 9; ++x) {
+            float word;
+            const uint64_t at = tgm_layout_offset_of(layout.row_bytes, layout.y_log2, (3 + x) * 8, 4 + y);
+            memcpy(&word, &zeta[at], 4);
+            EXPECT_EQ(word, depths[y * 9 + x]);
+            for (uint32_t b = 4; b < 8; ++b)
+                EXPECT_EQ(zeta[tgm_layout_offset_of(layout.row_bytes, layout.y_log2, (3 + x) * 8 + b, 4 + y)], 0x5a)
+                    << "the stencil word of texel (" << x << ", " << y << ")";
+        }
+}
+
+// A shared multisampled zeta's CPU copies (Metal's rows: pixel p's sample s at texel p * samples + s, an M4 Max's 4x
+// Depth32Float, Depth16Unorm and Depth32Float_Stencil8: probe/hwref/depthms.swift) move each sample to and from its
+// cell of the sample grid NIL lays out (fx::sampleCell), the copy engine copying the grid's rectangle
+TEST_F(RawTransfer, MultisampledZetaSamplesMoveThroughTheirCells)
+{
+    for (uint32_t samples : {2u, 4u}) {
+        SCOPED_TRACE(samples);
+        raw::fx::MipChain grid;
+        ASSERT_TRUE(raw::fx::msLayout(10, 6, samples, 4, grid));
+        std::vector<uint8_t> image(grid.bytes, 0x33);
+        std::vector<uint32_t> metal(3 * 2 * samples), back(metal.size(), 0);
+        for (size_t i = 0; i < metal.size(); ++i)
+            metal[i] = 0x3e000000u + uint32_t(i);
+        raw::TextureTransfer region;
+        region.texture = {reinterpret_cast<uint64_t>(image.data()),
+                          grid.level[0].rowBytes,
+                          4u << grid.sxLog2,
+                          1u << grid.syLog2,
+                          6u << grid.syLog2,
+                          true,
+                          grid.yLog2};
+        region.width = 3;
+        region.height = 2;
+        region.planes = 1;
+        region.bpp = 4;
+        region.samples = uint8_t(samples);
+        region.sxLog2 = grid.sxLog2;
+        region.syLog2 = grid.syLog2;
+        ASSERT_TRUE(copy(region, metal.data(), 3 * samples * 4, true));
+        ASSERT_TRUE(copy(region, back.data(), 3 * samples * 4, false));
+        EXPECT_EQ(back, metal);
+        for (uint32_t y = 0; y < 2; ++y)
+            for (uint32_t p = 0; p < 3; ++p)
+                for (uint32_t k = 0; k < samples; ++k) {
+                    const uint8_t cell = raw::fx::sampleCell(samples, k);
+                    const uint32_t gx = ((4 + p) << grid.sxLog2) + (cell & 3),
+                                   gy = ((1 + y) << grid.syLog2) + (cell >> 2);
+                    uint32_t word;
+                    memcpy(&word, &image[tgm_layout_offset_of(grid.level[0].rowBytes, grid.yLog2, gx * 4, gy)], 4);
+                    EXPECT_EQ(word, metal[(y * 3 + p) * samples + k]) << "pixel " << p << ", " << y << " sample " << k;
+                }
     }
 }
 

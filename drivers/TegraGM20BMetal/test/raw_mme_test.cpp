@@ -206,7 +206,7 @@ TEST(RawMme, TheContextAndTheScratchWritersWriteOnlyMaxwellBsMethods)
     raw::mme::amplification(push, SWITCH_GM20B_AMP_MAX, layers, viewports);
     raw::mme::amplificationWords(push, {0x770, 0x77c, 0x778, 0x774, 1});
     raw::mme::icbRange(push, 7, 9);
-    raw::mme::icbPatchLayout(push, 0x1100000000ull, {0x40, raw::mme::kNoEntry, 0x80}, 0x77c);
+    raw::mme::icbPatchLayout(push, 0x1100000000ull, 0x200, {0x40, raw::mme::kNoEntry, 0x80}, 0x77c);
     ASSERT_LE(push.at, push.end);
     EXPECT_TRUE(switch_gm20b_test::expectPushMethods(words.data(), size_t(push.at - words.data())));
 }

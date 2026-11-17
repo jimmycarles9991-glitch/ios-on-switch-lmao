@@ -13,7 +13,7 @@ f32 (zero and one factors exact), the sum rounded to f32, min and max as FMNMX g
 shader's ALU flushes them. The store's conversion to the format is the model's assumption, not checked here.
 
 Regenerate the dumps: compile rop_blend.metal (xcrun -sdk iphoneos metal ... && metallib), then
-PROBE_LABEL=ropcheck. DIRECTCHECK_DUMP=<dir> directcheck <nvk> <cache> <metallib> <(blendcheck.py --corpus) <pack>.
+PROBE_LABEL=ropcheck. DIRECTCHECK_DUMP=<dir> directcheck <metallib> <(blendcheck.py --corpus) <pack>.
 """
 
 import argparse

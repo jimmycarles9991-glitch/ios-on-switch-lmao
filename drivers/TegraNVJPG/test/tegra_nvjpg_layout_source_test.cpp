@@ -17,7 +17,7 @@ TEST(NVJPGLayoutWiring, TheSeedMovesBeforeTheLayoutIsReadAndTheHoldOutlastsTheDe
     const std::string source = SourceText("../TegraNVJPGUserClient.cpp");
     const std::string run = Body(source, "IOReturn runJob(Job *job)\n{");
     const auto seed = run.find("tegra_vic_surface_written(&job->dst);");
-    const auto layout = run.find("takeLayout(job, gOutList[0], &hold)");
+    const auto layout = run.find("takeLayout(job, addresses[0], &hold)");
     const auto decode = run.find("tegra_nvjpg_run(&job->engine");
     ASSERT_NE(seed, std::string::npos);
     ASSERT_NE(layout, std::string::npos);

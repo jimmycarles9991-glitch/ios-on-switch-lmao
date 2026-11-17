@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 // compiler/compiler_pool.h: one compile per record however many processes ask, at the class of its most urgent waiter
 // (raised while it runs when a more urgent one joins), background for work nobody waits for, and at most two compiles
-// above the background class at once.
+// above the background class at once. Its waiters are answered at that class, and a parked worker wakes at the
+// interactive class: boot 22's compiler answered from a worker already dropped to background, a state compiled in 216 ms
+// reaching its client 8.1 s later while the system was busy.
 #include "../compiler/compiler_pool.h"
 
 #include <gtest/gtest.h>
@@ -41,37 +43,48 @@ public:
     std::map<uint8_t, bool> released;
     std::map<uint8_t, unsigned> runs;
     std::map<uint64_t, int32_t> completed;
-    std::map<uint8_t, Band> startBand;
+    std::map<uint8_t, Band> startBand, pickedAt;
+    std::map<uint64_t, Band> answeredAt;  // the answering thread's class, or a raise on it not yet lowered
+    std::map<uintptr_t, Band> liveRaises;
+    std::vector<Band> idleBands;
     std::vector<uint8_t> started;
     std::vector<Band> raises;
     std::vector<size_t> idles;  // how many waiters were answered at each idle
     unsigned lowered = 0, running = 0, mostRunning = 0, mostForeground = 0, foreground = 0;
     std::unique_ptr<Pool> pool;
-    thread_local static Band band;
+    thread_local static Band band, before;
 
-    Harness()
+    explicit Harness(unsigned workers = Pool::kWorkers)
     {
         Pool::Hooks hooks;
         hooks.setBand = [](Band b) {
+            before = band;
             band = b;
         };
         hooks.raise = [this](pthread_t, Band b) -> void * {
             std::lock_guard<std::mutex> l(lock);
             raises.push_back(b);
+            liveRaises[raises.size()] = b;
             return reinterpret_cast<void *>(uintptr_t(raises.size()));
         };
-        hooks.lower = [this](void *) {
+        hooks.lower = [this](void *token) {
             std::lock_guard<std::mutex> l(lock);
             lowered++;
+            liveRaises.erase(uintptr_t(token));
         };
         hooks.complete = [this](const Waiter &w, int32_t result) {
             std::lock_guard<std::mutex> l(lock);
             completed[w.id] = result;
+            Band in = band;
+            for (const auto &[token, raised] : liveRaises)
+                in = std::max(in, raised);
+            answeredAt[w.id] = in;
             changed.notify_all();
         };
         hooks.idle = [this] {
             std::lock_guard<std::mutex> l(lock);
             idles.push_back(completed.size());
+            idleBands.push_back(band);
             changed.notify_all();
         };
         hooks.run = [this](Work &work, const std::function<void(int32_t)> &primary) {
@@ -81,6 +94,7 @@ public:
                 std::unique_lock<std::mutex> l(lock);
                 runs[n]++;
                 startBand[n] = band;
+                pickedAt[n] = before;
                 started.push_back(n);
                 running++;
                 foreground += above;
@@ -96,7 +110,7 @@ public:
             primary(int32_t(n));
             return int32_t(n) + 100;
         };
-        pool = std::make_unique<Pool>(std::move(hooks));
+        pool = std::make_unique<Pool>(std::move(hooks), workers);
     }
 
     bool submit(uint8_t n, uint64_t waiter, Band b, bool split = false, uint64_t client = 0)
@@ -139,6 +153,7 @@ public:
 };
 
 thread_local Band Harness::band = Band::Background;
+thread_local Band Harness::before = Band::Background;
 
 TEST(ShaderCompilerPool, IdenticalRequestsFromSeveralProcessesAreOneCompile)
 {
@@ -276,6 +291,77 @@ TEST(ShaderCompilerPool, ThePoolIsIdleOnceItsLastJobsWaitersAreAnswered)
     ASSERT_EQ(h.idles.size(), 2u);
     EXPECT_EQ(h.idles[0], 2u);
     EXPECT_EQ(h.idles[1], 3u);
+}
+
+TEST(ShaderCompilerPool, AWaitersAnswerLeavesItsWorkerAtTheWaitersClass)
+{
+    Harness h;
+    h.submit(5, 51, Band::Interactive);
+    h.release(5);
+    h.pool->drain();
+    std::lock_guard<std::mutex> l(h.lock);
+    ASSERT_EQ(h.completed.count(51), 1u);
+    EXPECT_EQ(h.answeredAt[51], Band::Interactive) << "answered from a worker below its waiter's class";
+}
+
+// A raise lent by a more urgent waiter lasts until that waiter is answered
+TEST(ShaderCompilerPool, ARaiseIsLoweredOnlyOnceItsWaiterIsAnswered)
+{
+    Harness h;
+    h.submit(6, 61, Band::Background);
+    h.waitRunning(1);
+    h.submit(6, 62, Band::Interactive);
+    h.release(6);
+    h.pool->drain();
+    std::lock_guard<std::mutex> l(h.lock);
+    ASSERT_EQ(h.raises.size(), 1u);
+    EXPECT_EQ(h.lowered, 1u);
+    EXPECT_EQ(h.answeredAt[62], Band::Interactive) << "the raise was lowered before its waiter was answered";
+}
+
+// A worker that has never run a job, and one parked after a job, pick the next job at the interactive class and only
+// then take its band; the idle housekeeping runs at the background class
+TEST(ShaderCompilerPool, AParkedWorkerPicksItsNextJobAtTheInteractiveClass)
+{
+    Harness h(1);
+    h.submit(7, 71, Band::Utility);
+    h.release(7);
+    h.pool->drain();
+    h.waitIdles(1);
+    h.submit(8, 81, Band::Background);
+    h.release(8);
+    h.pool->drain();
+    h.waitIdles(2);
+    std::lock_guard<std::mutex> l(h.lock);
+    EXPECT_EQ(h.pickedAt[7], Band::Interactive) << "a new worker picked its first job below the interactive class";
+    EXPECT_EQ(h.pickedAt[8], Band::Interactive) << "a parked worker picked its next job below the interactive class";
+    EXPECT_EQ(h.startBand[7], Band::Utility);
+    EXPECT_EQ(h.startBand[8], Band::Background);
+    ASSERT_EQ(h.idleBands.size(), 2u);
+    EXPECT_EQ(h.idleBands[0], Band::Background);
+    EXPECT_EQ(h.idleBands[1], Band::Background);
+}
+
+// Boot 22's queue waits: an urgent request arriving while every worker sits parked after its jobs is picked up at the
+// interactive class, never by a worker still at the background class its last job left it in
+TEST(ShaderCompilerPool, AForegroundRequestToAllParkedWorkersIsPickedAtTheInteractiveClass)
+{
+    Harness h;
+    h.submit(1, 11, Band::Interactive);
+    h.submit(2, 12, Band::Interactive);
+    h.submit(3, 13, Band::Background);
+    h.waitRunning(3);
+    for (uint8_t n : {1, 2, 3})
+        h.release(n);
+    h.pool->drain();
+    h.waitIdles(1);
+    h.submit(4, 14, Band::Interactive);
+    h.release(4);
+    h.pool->drain();
+    std::lock_guard<std::mutex> l(h.lock);
+    EXPECT_EQ(h.pickedAt[4], Band::Interactive) << "a parked worker picked an urgent job below the interactive class";
+    EXPECT_EQ(h.startBand[4], Band::Interactive);
+    EXPECT_EQ(h.answeredAt[14], Band::Interactive);
 }
 
 }  // namespace

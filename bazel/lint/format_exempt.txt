@@ -13,4 +13,3 @@ drivers/TegraGM20BMetal/raw/pack/mock_submission.h
 drivers/TegraGM20BMetal/raw/pack/native_seed.mm
 drivers/TegraGM20BMetal/raw/pack/native_seed_analysis.h
 drivers/TegraGM20BMetal/raw/pack/native_seed_manifest.h
-third_party/mesa/src/nouveau/compiler/BUILD.bazel

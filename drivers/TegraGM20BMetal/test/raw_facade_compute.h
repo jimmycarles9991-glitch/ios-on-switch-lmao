@@ -147,6 +147,16 @@ inline raw::PackKernel kernelRecord(uint32_t i, uint32_t maxThreads)
     return k;
 }
 
+// Kernel `i`'s compute state's answers as the pack holds them (PackComputeFacts), so its creation asks no compiler: those
+// HarnessComputeState gives as m2v's
+inline raw::PackComputeFacts kernelFacts(uint32_t i, uint32_t maxThreads)
+{
+    raw::AirHash air;
+    air.fill(uint8_t(kKernelSeed + i));
+    const std::string key = raw::computeStateKey(air, "", maxThreads, false);
+    return {raw::Pack::fnv(key.data(), key.size()), 1024, 32, 0, 0};
+}
+
 inline uint32_t kernelOfQmd(const uint32_t *qmd)
 {
     return (qmd[kThreadsWord] >> 16) - 1;

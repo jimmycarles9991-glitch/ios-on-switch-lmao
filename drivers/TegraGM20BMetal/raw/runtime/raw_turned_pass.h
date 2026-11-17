@@ -32,7 +32,8 @@ private:
     Texture *standIn(CommandBuffer &rc, const Texture &t, uint32_t tag, const char **why);
     // `t` (loaded: through `load`) into a stand-in held for the pass, put back through `store` where it is stored
     // `reached`: then through that map in the tiles the pass's draws reach
-    Texture *moved(CommandBuffer &rc, Texture &t, uint32_t tag, const TurnMap *load, const TurnMap *store,
+    template <typename Source>
+    Texture *moved(CommandBuffer &rc, Source &t, uint32_t tag, const TurnMap *load, const TurnMap *store,
                    const char **why, const TurnMap *reached = nullptr);
     bool mirrored(CommandBuffer &rc, Texture &t, uint32_t tag, const char **why);
     bool clearAhead(CommandBuffer &rc, const ColorAttachment &a, const Rect &area, bool draws, const char **why);

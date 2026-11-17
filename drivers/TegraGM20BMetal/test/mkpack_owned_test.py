@@ -26,10 +26,11 @@ def state(regs: dict[int, int], key: str = 'samples=1 topo=0 ds=0/0 c0=80:15:0:1
     return {'key': key, 'targets': mkpack.targets(key), 'records': [{'regs': regs}]}
 
 
-def made(key: str, regs: dict[int, int], two_plane: bool) -> dict:
+def made(key: str, regs: dict[int, int], two_plane: bool, raster_ordered: bool = False) -> dict:
     """Give a state as directlink.load_records gives directpack's."""
     fields = {'vs': 0, 'fs': 1, 'blob': [], 'entries': [], 'push': [], 'vbs': [], 'set_size': 0, 'fetch': False}
-    pipeline = packfile.pipeline_bytes({'key': key, 'two_plane': two_plane, **fields}, 0, 0)
+    rec = {'key': key, 'two_plane': two_plane, 'raster_ordered': raster_ordered, **fields}
+    pipeline = packfile.pipeline_bytes(rec, 0, 0)
     return {'key': key, 'form': '', 'pipeline': pipeline, 'regs': regs, 'programs': PROGRAMS, 'samplers': []}
 
 
@@ -98,6 +99,26 @@ class TwoPlaneTest(unittest.TestCase):
         ids = {directlink.program_id(p): i for i, p in enumerate(PROGRAMS)}
         two_plane = directlink.pipeline_of({**states[1], 'probe': probes[1]}, varying, ids, [])
         self.assertEqual(two_plane['blob'], [(0x1A00, 0x7), (0x1A04, 0x1)])
+
+
+class RasterOrderedTest(unittest.TestCase):
+    def test_a_raster_ordered_record_keeps_its_interlock_control_and_its_flag(self) -> None:
+        # gpu.raw.raster_order: its program runs in the pixel interlock with no storage colour (PipelineRasterOrdered),
+        # whose SET_PIXEL_SHADER_INTERLOCK_CONTROL the runtime takes from the record's blob alone
+        states = [
+            made('samples=1 c0=80:15:0', {0x1A00: 0xF}, two_plane=False),
+            made('samples=1 c0=70:0:0', {0x1A00: 0x0, 0x1224: 2}, two_plane=False, raster_ordered=True),
+        ]
+        probes = [directlink.probe_of(rec, i, {}) for i, rec in enumerate(states)]
+        varying = [0x1A00]
+        ids = {directlink.program_id(p): i for i, p in enumerate(PROGRAMS)}
+        ordered = directlink.pipeline_of({**states[1], 'probe': probes[1]}, varying, ids, [])
+        plain = directlink.pipeline_of({**states[0], 'probe': probes[0]}, varying, ids, [])
+        self.assertTrue(ordered['raster_ordered'])
+        self.assertIn((0x1224, 2), ordered['blob'])
+        self.assertFalse(plain['raster_ordered'])
+        self.assertNotIn(0x1224, [m for m, _ in plain['blob']])
+        self.assertEqual(directlink.PIPELINE.unpack_from(states[1]['pipeline'])[-1] & 256, 256)
 
 
 if __name__ == '__main__':

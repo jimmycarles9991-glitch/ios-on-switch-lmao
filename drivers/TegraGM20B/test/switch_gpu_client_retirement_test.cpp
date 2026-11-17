@@ -675,19 +675,84 @@ TEST_F(ClientRetirement, RetirementNeverWaitsForASubmitLock)
 	EXPECT_EQ(client.releases, 1u);
 }
 
-// A resource set member's free ends the set's generation and waits for the jobs inside it: that BoFree alone closes the
-// submit gate; any other leaves it open.
-TEST_F(ClientRetirement, OnlyASetMembersFreeClosesTheGate)
+TEST_F(ClientRetirement, BoundSharedBoFreeWaitsForTheResolvedJobsDoorbell)
+{
+	constexpr uint64_t va = 0x40000;
+	auto bytes = bytesOf(0x6d);
+	client.add(70, va, bytes.size(), &bytes);
+	chan.completed = chan.submitted;
+	IOLockLock(client.lock_);
+	client.publishBindings(AGXDeviceUserClient::BindingTable::prepare(client.nbinds_));
+	IOLockUnlock(client.lock_);
+	ASSERT_TRUE(client.submitGate_.enterFast());
+	IOLockLock(client.submitLocks_[0]);
+	EXPECT_NE(client.bindTable_.find(va, bytes.size()), nullptr);
+	std::mutex progressLock;
+	std::condition_variable progress;
+	bool sleeping = false, finished = false;
+	client.storage.sleeping = [&] {
+		std::lock_guard held(progressLock);
+		sleeping = true;
+		progress.notify_all();
+	};
+	auto freeing = std::async(std::launch::async, [&] {
+		IOLockLock(client.lock_);
+		const TegraGM20BAbiBoFree request{70};
+		const IOReturn result = client.boFree(&request);
+		IOLockUnlock(client.lock_);
+		std::lock_guard held(progressLock);
+		finished = true;
+		progress.notify_all();
+		return result;
+	});
+	{
+		std::unique_lock held(progressLock);
+		EXPECT_TRUE(progress.wait_for(held, 2s, [&] {
+			return sleeping || finished;
+		}));
+	}
+	client.retireBatch();
+	EXPECT_EQ(gpuRead(va), 0x6d);
+	IOLockLock(client.lock_);
+	EXPECT_EQ(client.nbinds_, 1u);
+	IOLockUnlock(client.lock_);
+	const uint32_t submitted = ++chan.submitted;
+	client.submitGate_.leaveFast(client.lock_);
+	IOLockUnlock(client.submitLocks_[0]);
+	EXPECT_EQ(freeing.get(), kIOReturnSuccess);
+	client.storage.sleeping = {};
+	EXPECT_NE(client.retired_, nullptr);
+	if (client.retired_)
+		EXPECT_EQ(client.retired_->snapshots[0].value, submitted);
+	client.retireBatch();
+	EXPECT_EQ(gpuRead(va), 0x6d);
+	EXPECT_EQ(client.releases, 0u);
+	chan.completed = submitted;
+	client.retireBatch();
+	client.releaseLeft();
+	EXPECT_EQ(gpuRead(va), 0u);
+	EXPECT_EQ(client.releases, 1u);
+}
+
+TEST_F(ClientRetirement, FreeDrainsSubmissionsForBindingsOrSetMembership)
 {
 	auto *member = reinterpret_cast<switch_gpu_backing *>(uintptr_t(0x1000));
 	auto *other = reinterpret_cast<switch_gpu_backing *>(uintptr_t(0x2000));
 	client.add(1)->backing = member;
-	client.add(2, 0x20000)->backing = other;
+	auto *unbound = client.add(2, 0x20000);
+	unbound->backing = other;
+	client.add(3, 0x30000)->backing = other;
 	setMembers = {member};
+	chan.completed = chan.submitted;
+	ASSERT_EQ(client.bind(0x20000, 4096, nullptr), kIOReturnSuccess);
+	client.retireBatch();
+	ASSERT_EQ(unbound->bindings, 0u);
 	free(2);
 	EXPECT_EQ(client.submitGate_.mutations, 0u);
-	free(1);
+	free(3);
 	EXPECT_EQ(client.submitGate_.mutations, 1u);
+	free(1);
+	EXPECT_EQ(client.submitGate_.mutations, 2u);
 	EXPECT_FALSE(client.submitGate_.mutating());
 	setMembers.clear();
 }

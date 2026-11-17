@@ -1329,6 +1329,7 @@ gf100_gr_trap_mp(struct gf100_gr *gr, int gpc, int tpc)
 	struct nvkm_device *device = subdev->device;
 	u32 werr = nvkm_rd32(device, TPC_UNIT(gpc, tpc, 0x648));
 	u32 gerr = nvkm_rd32(device, TPC_UNIT(gpc, tpc, 0x650));
+	const u32 pc = nvkm_rd32(device, TPC_UNIT(gpc, tpc, 0x654));
 	const struct nvkm_enum *warp;
 	char glob[128];
 
@@ -1336,8 +1337,8 @@ gf100_gr_trap_mp(struct gf100_gr *gr, int gpc, int tpc)
 	warp = nvkm_enum_find(gf100_mp_warp_error, werr & 0xffff);
 
 	nvkm_error(subdev, "GPC%i/TPC%i/MP trap: "
-			   "global %08x [%s] warp %04x [%s]\n",
-		   gpc, tpc, gerr, glob, werr, warp ? warp->name : "");
+			   "global %08x [%s] warp %04x [%s] pc %08x\n",
+		   gpc, tpc, gerr, glob, werr, warp ? warp->name : "", pc);
 
 	nvkm_wr32(device, TPC_UNIT(gpc, tpc, 0x648), 0x00000000);
 	nvkm_wr32(device, TPC_UNIT(gpc, tpc, 0x650), gerr);
@@ -1731,7 +1732,7 @@ gf100_gr_intr(struct nvkm_inth *inth)
 				   "subc %d class %04x mthd %04x data %08x\n",
 				   chid, inst << 12, name, subc,
 				   class, mthd, data);
-			tgm_gr_fault(chid);
+			switch_gpu_gr_fault_stop(device, &gr->fault_fifo_held, chan, chid);
 		}
 		nvkm_wr32(device, 0x400100, 0x00000010);
 		stat &= ~0x00000010;
@@ -1741,7 +1742,7 @@ gf100_gr_intr(struct nvkm_inth *inth)
 		nvkm_error(subdev, "ILLEGAL_CLASS ch %d [%010llx %s] "
 			   "subc %d class %04x mthd %04x data %08x\n",
 			   chid, inst << 12, name, subc, class, mthd, data);
-		tgm_gr_fault(chid);
+		switch_gpu_gr_fault_stop(device, &gr->fault_fifo_held, chan, chid);
 		nvkm_wr32(device, 0x400100, 0x00000020);
 		stat &= ~0x00000020;
 	}
@@ -1753,7 +1754,7 @@ gf100_gr_intr(struct nvkm_inth *inth)
 				   "subc %d class %04x mthd %04x data %08x\n",
 			   code, en ? en->name : "", chid, inst << 12,
 			   name, subc, class, mthd, data);
-		tgm_gr_fault(chid);
+		switch_gpu_gr_fault_stop(device, &gr->fault_fifo_held, chan, chid);
 		nvkm_wr32(device, 0x400100, 0x00100000);
 		stat &= ~0x00100000;
 	}
@@ -1762,7 +1763,7 @@ gf100_gr_intr(struct nvkm_inth *inth)
 		if (!gf100_gr_trap_tex(gr, chid, name)) {
 			nvkm_error(subdev, "TRAP ch %d [%010llx %s]\n",
 				   chid, inst << 12, name);
-			tgm_gr_fault(chid);
+			switch_gpu_gr_fault_stop(device, &gr->fault_fifo_held, chan, chid);
 			gf100_gr_trap_intr(gr);
 		}
 		nvkm_wr32(device, 0x400100, 0x00200000);
@@ -1780,9 +1781,29 @@ gf100_gr_intr(struct nvkm_inth *inth)
 		nvkm_wr32(device, 0x400100, stat);
 	}
 
-	nvkm_wr32(device, 0x400500, 0x00010001);
+	switch_gpu_gr_fault_access(device, gr->fault_fifo_held);
 	nvkm_chan_put(&chan, flags);
 	return IRQ_HANDLED;
+}
+
+void
+switch_gpu_gr_fault_recovered(struct nvkm_runl *runl)
+{
+	struct nvkm_device *device = runl->fifo->engine.subdev.device;
+	struct gf100_gr *gr = device->gr ? gf100_gr(device->gr) : NULL;
+	struct nvkm_engn *engn;
+	unsigned long flags;
+	bool serves = false;
+
+	if (!gr)
+		return;
+	nvkm_runl_foreach_engn(engn, runl)
+		serves |= engn->engine == &device->gr->engine;
+	if (!serves)
+		return;
+	spin_lock_irqsave(&device->intr.lock, flags);
+	switch_gpu_gr_fault_release(device, &gr->fault_fifo_held, &runl->rc_pending);
+	spin_unlock_irqrestore(&device->intr.lock, flags);
 }
 
 static void

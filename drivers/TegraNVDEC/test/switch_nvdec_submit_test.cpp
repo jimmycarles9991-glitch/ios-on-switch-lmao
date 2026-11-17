@@ -16,6 +16,7 @@ struct switch_gpu_bridge {
 
 namespace {
 std::vector<switch_gpu_backing_token> sourceTokens;
+std::vector<int> bridgePhysicalAtRelease;
 std::vector<switch_gpu_backing_token> promiseTokens;  // the uses' pending writer promises
 std::vector<uint32_t> publishedWords;
 uint32_t arena[SWITCH_HOST1X_ARENA_WORDS], reservedWords, submittedSyncpt, submittedThreshold;
@@ -122,6 +123,8 @@ int switch_gpu_backing_token_external_status(const switch_gpu_backing_token *)
 int switch_gpu_backing_token_physical_status(const switch_gpu_backing_token *token, int external)
 {
     EXPECT_EQ(external, 0);
+    if (token->engine == SWITCH_GPU_ENGINE_NVDEC && token->queue == gSyncpt && token->value > nextTestSequence)
+        return Results::physicalStatus(token);
     const auto at = producerPhysical.find({token->engine, token->value});
     return at == producerPhysical.end() ? 1 : at->second;
 }
@@ -232,6 +235,18 @@ int switch_gpu_bridge_covers(const switch_gpu_bridge *bridge, const switch_gpu_b
     return 0;
 }
 
+int switch_gpu_bridge_source_failure(const switch_gpu_bridge *bridge)
+{
+    for (const auto &token : bridge->tokens) {
+        if (token.engine != SWITCH_GPU_ENGINE_GM20B && token.engine != SWITCH_GPU_ENGINE_PROMISE)
+            continue;
+        const int physical = switch_gpu_backing_token_physical_status(&token, 0);
+        if (physical < 0)
+            return physical;
+    }
+    return 0;
+}
+
 int switch_gpu_bridge_status(const switch_gpu_bridge *)
 {
     return 1;
@@ -269,6 +284,10 @@ void switch_host1x_fence_watch(switch_host1x_fence *, uint32_t boundUs)
 
 void switch_gpu_bridge_release(switch_gpu_bridge **bridge)
 {
+    if (*bridge)
+        for (const auto &job : gQueue.jobs)
+            if (job.bridge == *bridge && job.outcome)
+                bridgePhysicalAtRelease.push_back(job.outcome->physicalResult);
     if (*bridge) {
         EXPECT_FALSE(transactionLocked);
         EXPECT_FALSE(switch_test_queue_locked);
@@ -581,6 +600,7 @@ protected:
             stage = {};
         transactionLocked = changeProducer = busyOnce = semanticCapture = false;
         sourceTokens.clear();
+        bridgePhysicalAtRelease.clear();
         promiseTokens.clear();
         publishedWords.clear();
         gQueue = {};
@@ -764,6 +784,104 @@ TEST_F(SwitchNVDECSubmitTest, OwnQueueDependencyUsesEngineOrderWithoutCpuWait)
     ASSERT_EQ(submit(), 0);
     EXPECT_EQ(bridges, 0u);
     EXPECT_EQ(publishedWords[0], tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_NVDEC, 0, 0));
+}
+
+TEST_F(SwitchNVDECSubmitTest, FailedVicInputInvalidatesTheDecodeChainBeforeHardwareRelease)
+{
+    sourceTokens = {{42, 1, SWITCH_GPU_ENGINE_VIC, 161}};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token first = {gQueue.submitted, switch_nvdec_result_state.generation,
+                                            SWITCH_GPU_ENGINE_NVDEC, gSyncpt};
+    sourceTokens = {first};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token second = {gQueue.submitted, switch_nvdec_result_state.generation,
+                                             SWITCH_GPU_ENGINE_NVDEC, gSyncpt};
+    ASSERT_EQ(fences.size(), 3u);
+    const uint32_t powerDonesBeforeCancel = powerDones;
+    EXPECT_TRUE(switch_nvdec_host1x_cancelled(161, 41));
+    EXPECT_FALSE(switch_nvdec_host1x_cancelled(161, 41));
+    EXPECT_EQ(Results::physicalStatus(&first), -5);
+    EXPECT_EQ(Results::physicalStatus(&second), -5);
+    EXPECT_EQ(Results::status(&second), 0);
+    EXPECT_EQ(gQueue.count, 2u);
+    EXPECT_EQ(fences.size(), 3u);
+    EXPECT_EQ(powerDones, powerDonesBeforeCancel);
+}
+
+TEST_F(SwitchNVDECSubmitTest, FailedBridgeInputInvalidatesTheRetainedDecodeBeforeRelease)
+{
+    gpu();
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_nvdec_result_state.generation,
+                                             SWITCH_GPU_ENGINE_NVDEC, gSyncpt};
+    const uint32_t powerDonesBeforeCancel = powerDones;
+    EXPECT_TRUE(switch_nvdec_host1x_cancelled(170, 0x1000000));
+    EXPECT_FALSE(switch_nvdec_host1x_cancelled(170, 0x1000000));
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    EXPECT_EQ(Results::status(&output), 0);
+    EXPECT_EQ(gQueue.count, 1u);
+    EXPECT_EQ(released, 0u);
+    EXPECT_EQ(powerDones, powerDonesBeforeCancel);
+}
+
+TEST_F(SwitchNVDECSubmitTest, AConsumerAdmittedAfterFailurePropagationCannotPublish)
+{
+    sourceTokens = {{42, 1, SWITCH_GPU_ENGINE_VIC, 161}};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_nvdec_result_state.generation,
+                                             SWITCH_GPU_ENGINE_NVDEC, gSyncpt};
+    ASSERT_TRUE(switch_nvdec_host1x_cancelled(161, 41));
+    ASSERT_EQ(Results::status(&output), 0);
+    sourceTokens = {output};
+    const uint32_t submittedBeforeCancel = submits, committedBeforeCancel = commits;
+    EXPECT_EQ(submit(), -5);
+    EXPECT_EQ(submits, submittedBeforeCancel);
+    EXPECT_EQ(commits, committedBeforeCancel);
+    EXPECT_EQ(gQueue.count, 1u);
+    EXPECT_EQ(fences.size(), 2u);
+}
+
+TEST_F(SwitchNVDECSubmitTest, FailedOriginalGpuInputIsPublishedBeforeTheBridgeHardwarePointMoves)
+{
+    gpu();
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_nvdec_result_state.generation,
+                                             SWITCH_GPU_ENGINE_NVDEC, gSyncpt};
+    producerPhysical[{SWITCH_GPU_ENGINE_GM20B, sourceTokens[0].value}] = -5;
+    EXPECT_TRUE(switch_nvdec_host1x_cancelled(0, 0));
+    EXPECT_FALSE(switch_nvdec_host1x_cancelled(0, 0));
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    EXPECT_EQ(Results::status(&output), 0);
+    EXPECT_EQ(gQueue.count, 1u);
+    EXPECT_EQ(released, 0u);
+    EXPECT_TRUE(bridgePhysicalAtRelease.empty());
+}
+
+TEST_F(SwitchNVDECSubmitTest, PhysicalPublicationPrecedesReleasingTheBridgeSlot)
+{
+    gpu();
+    ASSERT_EQ(submit(), 0);
+    const uint64_t sequence = gQueue.submitted;
+    bridged(0, 0);
+    EXPECT_TRUE(bridgePhysicalAtRelease.empty());
+    interrupt(0);
+    EXPECT_EQ(bridgePhysicalAtRelease, std::vector<int>{1});
+    EXPECT_EQ(released, 1u);
+    EXPECT_EQ(gQueue.count, 1u);
+    semantic(sequence);
+    EXPECT_EQ(gQueue.count, 0u);
+}
+
+TEST_F(SwitchNVDECSubmitTest, CompletedOrUnrelatedInputsKeepTheirPendingDecode)
+{
+    sourceTokens = {{42, 1, SWITCH_GPU_ENGINE_VIC, 161}};
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token output = {gQueue.submitted, switch_nvdec_result_state.generation,
+                                             SWITCH_GPU_ENGINE_NVDEC, gSyncpt};
+    EXPECT_FALSE(switch_nvdec_host1x_cancelled(163, 0));
+    EXPECT_FALSE(switch_nvdec_host1x_cancelled(161, 42));
+    EXPECT_EQ(Results::physicalStatus(&output), 0);
+    EXPECT_EQ(gQueue.count, 1u);
 }
 
 TEST_F(SwitchNVDECSubmitTest, LargeDependencySetGrowsOutsideOwnershipAndPublishes)
@@ -1244,6 +1362,34 @@ TEST_F(SwitchNVDECSubmitTest, AFailedProducersJobCompletesWithItsError)
     semantic(sequence);
     ASSERT_EQ(completed.size(), 1u);
     EXPECT_EQ(completed[0].result, -5);
+}
+
+TEST_F(SwitchNVDECSubmitTest, SuccessfulHardwareAfterEarlyFailureCannotReviveTheDecodeOrMaskItsSemanticError)
+{
+    completed.clear();
+    gpu();
+    uint64_t sequence = nextTestSequence + 1;
+    ASSERT_EQ(submit({recordCompletion, &sequence}), 0);
+    const switch_gpu_backing_token output = {sequence, switch_nvdec_result_state.generation, SWITCH_GPU_ENGINE_NVDEC,
+                                             gSyncpt};
+    ASSERT_TRUE(switch_nvdec_host1x_cancelled(170, 0x1000000));
+    EXPECT_FALSE(Results::physical(gQueue.jobs[0].outcome, 1));
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    interrupt(0);
+    EXPECT_TRUE(completed.empty());
+    bridged(0, 0);
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    EXPECT_EQ(bridgePhysicalAtRelease, std::vector<int>{-5});
+    EXPECT_TRUE(completed.empty());
+    semanticResult = -71;
+    semantic(sequence);
+    ASSERT_EQ(completed.size(), 1u);
+    EXPECT_EQ(completed[0].result, -71);
+    EXPECT_FALSE(completed[0].queueLocked);
+    EXPECT_EQ(Results::physicalStatus(&output), -5);
+    EXPECT_EQ(waitSequence(sequence), -71);
+    EXPECT_EQ(gQueue.count, 0u);
+    EXPECT_FALSE(switch_nvdec_host1x_cancelled(170, 0x1000000));
 }
 
 // The AVD plug-in's pictures of a stalled decode and of the decodes queued behind it fail and none is left unanswered:

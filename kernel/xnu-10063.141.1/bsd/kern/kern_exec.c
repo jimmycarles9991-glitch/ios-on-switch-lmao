@@ -1,3 +1,4 @@
+#include <switch/app_code.h>
 #include "SwitchDiag.h"
 #include <kern/thread_call.h>
 /*
@@ -1434,6 +1435,14 @@ grade:
 	 * Set TPRO flags if enabled
 	 */
 
+	const bool switch_unsigned_app = switch_app_code_image(imgp->ip_vp);
+	if (switch_unsigned_app) {
+		load_result.csflags = SWITCH_APP_CODE_CS_FLAGS | (load_result.csflags & CS_NO_UNTRUSTED_HELPERS);
+		load_result.platform_binary = FALSE;
+		load_result.hardened_runtime_binary = FALSE;
+		imgp->ip_csflags = load_result.csflags;
+	}
+
 	/*
 	 * Set code-signing flags if this binary is signed, or if parent has
 	 * requested them on exec.
@@ -1469,6 +1478,8 @@ grade:
 			imgp->ip_csflags |= CS_NVRAM_UNRESTRICTED;
 		}
 	}
+
+	if (switch_unsigned_app) imgp->ip_csflags = load_result.csflags;
 
 #if __has_feature(ptrauth_calls) && defined(XNU_TARGET_OS_OSX)
 	/*
@@ -6710,6 +6721,8 @@ exec_check_permissions(struct image_params *imgp)
 	imgp->ip_arch_size = (user_size_t)vap->va_data_size;
 #endif
 
+	if (switch_app_code_image(vp)) vap->va_mode &= ~(VSUID | VSGID);
+
 	/* Disable setuid-ness for traced programs or if MNT_NOSUID */
 	if ((vp->v_mount->mnt_flag & MNT_NOSUID) || (p->p_lflag & P_LTRACED)) {
 		vap->va_mode &= ~(VSUID | VSGID);
@@ -7233,6 +7246,7 @@ native_owner_cache_checkpoint(int status, int authorized)
 #include "SwitchRawMount.h"
 #include "SwitchPanicSave.h"
 #include <switch/prefs.h>
+#include <switch/icon_cache.h>
 #endif
 
 static int
@@ -8212,6 +8226,90 @@ native_switch_identity_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	printf("SwitchRawBoot: identity %016llx: MobileGestalt cache dropped (%d)\n", digest, error);
 }
 
+/* IconServices' rendered icons let go once per GPU build a deploy names (<switch/icon_cache.h>), over the Data volume's
+ * files as the other setup steps make them. */
+struct native_switch_icon_cache_data {
+	proc_t p;
+	user_addr_t scratch;
+	mount_t data_mount;
+};
+
+static int
+native_switch_icon_cache_path(char path[256], const char *relative)
+{
+	const int size = snprintf(path, 256, "/private/var/%s", relative);
+	return size < 0 || size >= 256 ? ENAMETOOLONG : 0;
+}
+
+static int
+native_switch_icon_cache_read(void *context, const char *relative, char *buffer, size_t size, size_t *length)
+{
+	const struct native_switch_icon_cache_data *data = context;
+	char path[256], *bytes = NULL;
+	int got = 0, error = native_switch_icon_cache_path(path, relative);
+	if (!error) error = native_switch_read_data_file(data->p, path, data->data_mount, &bytes, &got);
+	if (!error && (size_t)got > size) error = EFBIG;
+	if (!error && got) memcpy(buffer, bytes, (size_t)got);
+	if (!error) *length = (size_t)got;
+	if (bytes) kfree_data(bytes, (vm_size_t)got);
+	return error;
+}
+
+static bool
+native_switch_icon_cache_holds(void *context, const char *relative, const char *bytes, size_t length)
+{
+	const struct native_switch_icon_cache_data *data = context;
+	char path[256];
+	return !native_switch_icon_cache_path(path, relative) &&
+	       native_switch_file_unchanged(path, bytes, (int)length, data->data_mount, 0, 0, 0644);
+}
+
+static int
+native_switch_icon_cache_write(void *context, const char *relative, const char *bytes, size_t length)
+{
+	const struct native_switch_icon_cache_data *data = context;
+	char path[256];
+	int error = native_switch_icon_cache_path(path, relative);
+	if (!error) {
+		error = native_switch_watchdog_file(data->p, data->scratch, path, bytes, (int)length, data->data_mount, 0, 0,
+		    0644);
+	}
+	return error;
+}
+
+static int
+native_switch_icon_cache_unlink(void *context, const char *relative)
+{
+	const struct native_switch_icon_cache_data *data = context;
+	struct unlink_args request = {.path = data->scratch + 0x900};
+	int32_t result = 0;
+	char path[256];
+	int error = native_switch_icon_cache_path(path, relative);
+	if (!error) error = copyout(path, request.path, strlen(path) + 1);
+	if (!error) error = native_switch_unlink(data->p, &request, &result);
+	return error;
+}
+
+static void
+native_switch_icon_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
+{
+	struct native_switch_icon_cache_data data = {.p = p, .scratch = scratch, .data_mount = data_mount};
+	const struct switch_icon_cache_ops ops = {
+		.context = &data, .read = native_switch_icon_cache_read, .holds = native_switch_icon_cache_holds,
+		.write = native_switch_icon_cache_write, .unlink = native_switch_icon_cache_unlink,
+	};
+	struct switch_icon_cache_result result;
+	switch_icon_cache_drop(&ops, &result);
+	if (result.error) {
+		printf("SwitchRawBoot: icon cache for GPU build %s NOT dropped: %d\n", result.build, result.error);
+	}
+#if DEVELOPMENT || DEBUG
+	else if (result.requested) {
+		printf("SwitchRawBoot: icon cache for GPU build %s: %d __cache_info__ dropped\n", result.build, result.dropped);
+	}
+#endif
+}
+
 /* The ambient light sensor (drivers/SwitchBrightness/SwitchALS.cpp): MobileGestalt's ambient-light-sensor is an
  * IOServiceGetMatchingService on {PrimaryUsagePage 0xff00, PrimaryUsage 4}, which the sensor's HID service answers, and
  * Settings' Auto-Brightness switch and CoreBrightness's DisplayBrightnessAuto both gate on it. The answer is precacheable
@@ -8512,6 +8610,7 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		native_switch_watchdogs_release(p, scratch, data_mount);
 		native_switch_gamut_cache(p, scratch, data_mount);
 		native_switch_identity_cache(p, scratch, data_mount);
+		native_switch_icon_cache(p, scratch, data_mount);
 		native_switch_als_cache(p, scratch, data_mount);
 		native_switch_timed_cache(p, scratch, data_mount);
 		native_switch_ui_scale_cache(p, scratch, data_mount);
@@ -9316,6 +9415,14 @@ process_signature(proc_t p, struct image_params *imgp)
 	proc_csflags_update(p, imgp->ip_csflags);
 	proc_unlock(p);
 
+	const bool switch_unsigned_app = switch_app_code_image(imgp->ip_vp);
+	if (switch_unsigned_app) {
+		proc_lock(p);
+		proc_csflags_update(p, SWITCH_APP_CODE_CS_FLAGS | (imgp->ip_csflags & CS_NO_UNTRUSTED_HELPERS));
+		proc_unlock(p);
+		imgp->ip_csflags = SWITCH_APP_CODE_CS_FLAGS | (imgp->ip_csflags & CS_NO_UNTRUSTED_HELPERS);
+	}
+
 	/* Set the switch_protect flag on the map */
 	if (proc_getcsflags(p) & (CS_HARD | CS_KILL)) {
 		vm_map_switch_protect(get_task_map(proc_task(p)), TRUE);
@@ -9400,7 +9507,7 @@ process_signature(proc_t p, struct image_params *imgp)
 
 	/* If the code signature came through the image activation path, we skip the
 	 * taskgated / externally attached path. */
-	if (imgp->ip_csflags & CS_SIGNED) {
+	if (switch_unsigned_app || (imgp->ip_csflags & CS_SIGNED)) {
 		error = 0;
 		goto done;
 	}
@@ -9514,6 +9621,8 @@ done:
 			signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_MACHINE_THREAD);
 		}
 	}
+
+	if (0 == error) switch_app_code_exec(p, switch_unsigned_app);
 
 	if (0 == error) {
 		/* The process's code signature related properties are

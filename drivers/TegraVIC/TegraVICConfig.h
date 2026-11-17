@@ -513,6 +513,14 @@ static inline const char *tegra_vic_check_image(const TegraVICImage *im, uint32_
     return NULL;  // NOLINT(modernize-use-nullptr): C too (vic_host.c)
 }
 
+// The plane of a three-plane image (Y, Cb, Cr) that VIC's chroma pointer of pipeline `channel` takes: the chroma-U
+// pointer feeds channel 1 and the chroma-V pointer channel 2, VIC's U and V. TRM 15.3.12 Table 51 (p.706) names
+// T_Y8___U8V8 NV21, so U is a semi-planar pair's second byte, which the unit measured in channel 1 (kTegraVICTraits).
+static inline uint64_t tegra_vic_planar_chroma(const TegraVICImage *im, const TegraVICChroma *ch, uint32_t channel)
+{
+    return im->base[channel == ch->cbChannel ? 1 : 2];
+}
+
 // A slot's SlotSurfaceConfig size and plane geometry (its format, siting, block kind and cache width apart).
 static inline void tegra_vic_slot_surface(uint8_t *cfg, uint32_t surf, const TegraVICImage *src)
 {
@@ -759,16 +767,20 @@ static inline const char *tegra_vic_build(const TegraVICImage *src, const TegraV
     TEGRA_VIC_METHOD(TEGRA_VIC_M_SET_CONFIG_STRUCT_OFFSET, configAddr >> 8);
     TEGRA_VIC_METHOD(TEGRA_VIC_M_SET_FILTER_STRUCT_OFFSET, filterAddr >> 8);
     TEGRA_VIC_METHOD(TEGRA_VIC_M_OUTPUT_LUMA, dst->base[0] >> 8);
-    if (df->planes > 1)
+    if (df->planes > 2) {
+        TEGRA_VIC_METHOD(TEGRA_VIC_M_OUTPUT_CHROMA_U, tegra_vic_planar_chroma(dst, &t->out, 1) >> 8);
+        TEGRA_VIC_METHOD(TEGRA_VIC_M_OUTPUT_CHROMA_V, tegra_vic_planar_chroma(dst, &t->out, 2) >> 8);
+    } else if (df->planes > 1) {
         TEGRA_VIC_METHOD(TEGRA_VIC_M_OUTPUT_CHROMA_U, dst->base[1] >> 8);
-    if (df->planes > 2)
-        TEGRA_VIC_METHOD(TEGRA_VIC_M_OUTPUT_CHROMA_V, dst->base[2] >> 8);
+    }
     if (!op->fill) {
         TEGRA_VIC_METHOD(TEGRA_VIC_M_SURFACE0_SLOT0_LUMA, src->base[0] >> 8);
-        if (src->format->planes > 1)
+        if (src->format->planes > 2) {
+            TEGRA_VIC_METHOD(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U, tegra_vic_planar_chroma(src, &t->in, 1) >> 8);
+            TEGRA_VIC_METHOD(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V, tegra_vic_planar_chroma(src, &t->in, 2) >> 8);
+        } else if (src->format->planes > 1) {
             TEGRA_VIC_METHOD(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_U, src->base[1] >> 8);
-        if (src->format->planes > 2)
-            TEGRA_VIC_METHOD(TEGRA_VIC_M_SURFACE0_SLOT0_CHROMA_V, src->base[2] >> 8);
+        }
     }
     TEGRA_VIC_METHOD(TEGRA_VIC_M_EXECUTE, TEGRA_VIC_EXECUTE_AWAKEN);
 #undef TEGRA_VIC_METHOD

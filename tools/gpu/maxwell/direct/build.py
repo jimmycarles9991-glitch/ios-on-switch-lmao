@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Build directrun (directrun.mm) and exec.metallib (exec.metal and the counter resolve kernel) into one directory.
+"""Build directrun, linkcheck and neutral_compute with their metallibs into one directory.
 
-usage: build.py --xcode-env <xcode.env> --host-bridge <darwin bridge .a> --metal-abi <MetalABI.h>
-                --raw <shader tools' raw/> --out <dir>
+usage: build.py --xcode-env <xcode.env> --translate <translator .a> --compile <switch_compile.o>
+                --metal-abi <MetalABI.h> --raw <shader tools' raw/> --out <dir>
 
 directrun links the raw runtime's direct compile as the pack generator's directpack does (raw/pack/rawpack.py tool),
-over the frontend and the host bridge, beside the shader tools' mock GM20B (rpath @executable_path). The counter resolve
+over the native translator, beside the shader tools' mock GM20B (rpath @executable_path). The counter resolve
 kernel is the source the raw device compiles for itself (raw/runtime/raw_counter_kernel.h kResolveSource).
 """
 
@@ -19,6 +19,7 @@ from pathlib import Path
 HERE = Path('tools/gpu/maxwell/direct')
 RUNTIME = Path('drivers/TegraGM20BMetal/raw/runtime')
 METAL = Path('drivers/NativeMetal')
+LINKED = Path('drivers/TegraGM20BMetal/raw/test/linked')
 DIRECT_RUNTIME = ('raw_direct', 'raw_direct_compute', 'raw_record_parts', 'raw_emit', 'raw_pack', 'raw_metallib')
 RESOLVE = re.compile(r'kResolveSource = R"\((.*?)\)";', re.DOTALL)
 
@@ -31,7 +32,7 @@ def run(command: list, env: dict[str, str]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    for name in ('xcode-env', 'host-bridge', 'metal-abi', 'raw', 'out'):
+    for name in ('xcode-env', 'translate', 'compile', 'metal-abi', 'raw', 'out'):
         parser.add_argument('--' + name, required=True)
     args = parser.parse_args()
     xcode = dict(line.split('=', 1) for line in Path(args.xcode_env).read_text().splitlines() if '=' in line)
@@ -51,6 +52,15 @@ def main() -> None:
         run(['xcrun', '-sdk', 'iphoneos', 'metal', '-c', source, '-o', air], env)
         airs.append(air)
     run(['xcrun', '-sdk', 'iphoneos', 'metallib', *airs, '-o', out / 'exec.metallib'], env)
+    for source, name, flags in (
+        (LINKED / 'caller.metal', 'linked-caller', []),
+        (LINKED / 'callee.metal', 'linked-callee', []),
+        (METAL / 'test/neutral_compute.metal', 'neutral', ['-fno-fast-math']),
+        (Path('drivers/TegraGM20BMetal/test/grouped_pointer.metal'), 'grouped-pointer', []),
+    ):
+        air = work / (name + '.air')
+        run(['xcrun', '-sdk', 'macosx', 'metal', '-std=macos-metal2.3', *flags, '-c', source, '-o', air], env)
+        run(['xcrun', '-sdk', 'macosx', 'metallib', air, '-o', out / (name + '.metallib')], env)
     shutil.copyfile(Path(args.raw) / 'libmock_iokit.dylib', out / 'libmock_iokit.dylib')
     frameworks = [
         f for name in ('Foundation', 'Metal', 'IOSurface', 'IOKit', 'CoreVideo') for f in ('-framework', name)
@@ -67,40 +77,51 @@ def main() -> None:
     ]
     includes += ['-I', 'third_party/mesa/src/nouveau/headers']
     objcxx = [
-        HERE / 'directrun.mm',
         RUNTIME / 'RawDirect.mm',
+        RUNTIME / 'RawOffline.mm',
+        RUNTIME / 'RawOfflineReflection.mm',
         RUNTIME / 'RawRenderKey.mm',
-        METAL / 'NativeBridgeMetalFrontend.mm',
     ]
-    run(
-        [
-            'xcrun',
-            'clang++',
-            '-O1',
-            '-std=c++17',
-            '-fobjc-arc',
-            '-Wno-deprecated-declarations',
-            *includes,
-            '-x',
-            'objective-c++',
-            *objcxx,
-            '-x',
-            'c++',
-            *(RUNTIME / f'{name}.cpp' for name in DIRECT_RUNTIME),
-            '-x',
-            'none',
-            args.host_bridge,
-            '-L',
-            out,
-            '-lmock_iokit',
-            '-Wl,-rpath,@executable_path',
-            '-lobjc',
-            *frameworks,
-            '-o',
-            out / 'directrun',
-        ],
-        env,
-    )
+    for name, source in (
+        ('directrun', HERE / 'directrun.mm'),
+        ('linkcheck', RUNTIME.parent / 'test/linkcheck.mm'),
+        ('neutral_compute', METAL / 'test/neutral_compute.mm'),
+    ):
+        run(
+            [
+                'xcrun',
+                'clang++',
+                '-O1',
+                '-std=c++17',
+                '-fobjc-arc',
+                '-Wno-deprecated-declarations',
+                *includes,
+                '-x',
+                'objective-c++',
+                source,
+                *objcxx,
+                '-x',
+                'c++',
+                *(RUNTIME / f'{unit}.cpp' for unit in DIRECT_RUNTIME),
+                '-x',
+                'none',
+                args.translate,
+                args.compile,
+                '-L',
+                out,
+                '-lmock_iokit',
+                '-Wl,-rpath,@executable_path',
+                *[
+                    f'-Wl,-U,_native_bridge_metal_{symbol}'
+                    for symbol in ('render_direct', 'compute_direct', 'function_metallib', 'function_library_name')
+                ],
+                '-lobjc',
+                *frameworks,
+                '-o',
+                out / name,
+            ],
+            env,
+        )
     shutil.rmtree(work)
 
 

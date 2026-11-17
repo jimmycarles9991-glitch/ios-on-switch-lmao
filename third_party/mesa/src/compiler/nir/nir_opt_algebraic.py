@@ -759,6 +759,13 @@ optimizations.extend([
    (('iand', ('ilt', a, b), ('ilt', b, a)), False),
    (('iand', ('ult', a, b), ('ult', b, a)), False),
 
+   (('ieq', ('iand', 'a@32', 0x7fffffff), 0x7f800000),
+    ('feq(preserve_nan_inf)', ('fabs(preserve_nan_inf)', a), math.inf)),
+   (('ult', ('iand', 'a@32', 0x7fffffff), 0x00800000),
+    ('flt(preserve_nan_inf)', ('fabs(preserve_nan_inf)', a), math.ldexp(1.0, -126))),
+   (('uge', 0x7f800000, ('umax', ('iand', 'a@32', 0x7fffffff), ('iand', 'b@32', 0x7fffffff))),
+    ('iand', ('feq(preserve_nan_inf)', a, a), ('feq(preserve_nan_inf)', b, b))),
+
    (('ieq', 'a', ('inot', 'a')), False),
    (('ine', 'a', ('inot', 'a')), True),
 
@@ -3461,6 +3468,12 @@ for op in ['flt', 'fge', 'feq']:
 for op in ['fadd', 'fmul', 'fmulz', 'iadd', 'imul']:
    optimizations += [
       ((op, ('bcsel(is_used_once)', a, '#b', c), '#d'), ('bcsel', a, (op, b, d), (op, c, d)))
+   ]
+
+for op in ['ieq', 'ine']:
+   optimizations += [
+      ((op, ('bcsel', a, '#b', c), '#d'), ('bcsel', a, (op, b, d), (op, c, d))),
+      ((op, ('bcsel', a, b, '#c'), '#d'), ('bcsel', a, (op, b, d), (op, c, d))),
    ]
 
 # Some optimizations for ir3-specific instructions.

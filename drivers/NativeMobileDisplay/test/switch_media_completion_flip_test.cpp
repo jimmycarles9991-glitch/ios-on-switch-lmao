@@ -149,6 +149,39 @@ TEST_F(MediaFlip, AFailedProducerLeavesTheLatchAsItWas)
     EXPECT_EQ(d.model.assembly[kStartB], address(1));
 }
 
+TEST_F(MediaFlip, APartiallyWrittenStreamKeepsItsCandidateSlotsUntilTheRestoreLatches)
+{
+    shownByGate(video(1));
+    ASSERT_TRUE(armed(2));
+    for (const auto &[word, value] : gHost.stores)
+        d.model.write(word, value);
+    d.model.write(Display::kDcStateControl, gHost.update);
+    d.model.write(Display::kDcStateControl, gHost.request);
+    d.model.boundary();
+    ASSERT_EQ(d.model.active[kStartB], address(2));
+    d.mediaFlipFromGate();
+    EXPECT_EQ(d.mediaHostHeldSlots, uint64_t(1) << 2);
+    EXPECT_EQ(d.model.assembly[kStartB], address(1));
+    d.complete(0);
+    d.donePass();
+    EXPECT_EQ(d.mediaHostHeldSlots, uint64_t(1) << 2);
+    EXPECT_EQ(d.notShown, 1u);
+    frame();
+    EXPECT_EQ(d.model.active[kStartB], address(1));
+    EXPECT_EQ(d.mediaHostHeldSlots, 0u);
+    EXPECT_EQ(d.completions(seq), 1u);
+}
+
+TEST_F(MediaFlip, AProducerSetBeyondTheExistingFenceCapacityNeverArmsAControllerStream)
+{
+    shownByGate(video(1));
+    switch_gpu_backing_token producers[5] = {};
+    EXPECT_EQ(d.planeFenceWithMediaFlip(video(2), producers, 5), -22);
+    EXPECT_TRUE(d.mediaFlipIdle());
+    EXPECT_FALSE(d.mediaHostStream.queued);
+    EXPECT_EQ(d.planeLatch.armed, Display::PlaneCommits::kNone);
+}
+
 TEST_F(MediaFlip, ARefusedFenceWithdrawsItsSet)
 {
     shownByGate(video(1));
@@ -176,7 +209,8 @@ TEST_F(MediaFlip, AGateWriteOfWindowsBAndCWithdrawsAnArmedSet)
     for (int i = 0; i < 3; ++i)
         ASSERT_NO_THROW(frame());
     EXPECT_EQ(d.shown.back(), armedSeq);
-    EXPECT_EQ(d.model.active[kStartB], address(2));
+    EXPECT_EQ(d.model.active[kStartB], address(3));
+    EXPECT_EQ(d.notShown, 1u);
 }
 
 TEST_F(MediaFlip, TheRecoveryTakesAWrittenSetIntoTheLatchFirst)
@@ -202,7 +236,7 @@ TEST_F(MediaFlip, TheRecoveryWithdrawsAnArmedSetWhichItThenHolds)
     EXPECT_EQ(d.planeRecoveryTarget.seq, seq);
 }
 
-TEST_F(MediaFlip, SuspendWithdrawsAnArmedSetWhichShowsAfterTheResume)
+TEST_F(MediaFlip, SuspendCancelsTheUnwrittenSetAndKeepsTheLastGoodFrame)
 {
     shownByGate(video(1));
     ASSERT_TRUE(armed(2));
@@ -210,11 +244,11 @@ TEST_F(MediaFlip, SuspendWithdrawsAnArmedSetWhichShowsAfterTheResume)
     EXPECT_TRUE(d.mediaFlipIdle());
     d.complete(0);
     d.donePass();
-    EXPECT_TRUE(d.planeHeldSet);
+    EXPECT_FALSE(d.planeHeldSet);
     d.resume();
     frame();
-    EXPECT_EQ(d.model.active[kStartB], address(2));
-    EXPECT_EQ(d.shown.back(), seq);
+    EXPECT_EQ(d.model.active[kStartB], address(1));
+    EXPECT_EQ(d.completions(seq), 1u);
 }
 
 TEST_F(MediaFlip, SuspendTakesAWrittenSetIntoTheLatchFirst)

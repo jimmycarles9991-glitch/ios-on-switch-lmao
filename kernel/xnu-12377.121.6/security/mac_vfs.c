@@ -62,6 +62,7 @@
  *
  */
 
+#include <switch/app_code.h>
 #include <kern/kalloc.h>
 #include <libkern/OSAtomic.h>
 
@@ -796,6 +797,7 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 	kauth_cred_t cred;
 	*disjoint = 0;
 	int error;
+	const bool switch_unsigned_app = switch_app_code_image(vp);
 	posix_cred_t pcred = posix_cred_get(new);
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -828,6 +830,13 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 			}
 
 			mpo_cred_label_update_execve_t *hook = mpc->mpc_ops->mpo_cred_label_update_execve;
+			if (switch_unsigned_app && switch_app_code_amfi(mpc->mpc_name)) {
+				struct label *label = mac_cred_label(new);
+				if (mpc->mpc_ops->mpo_cred_label_destroy) mpc->mpc_ops->mpo_cred_label_destroy(label);
+				if (mpc->mpc_field_off) mac_label_set(label, *mpc->mpc_field_off, 0);
+				if (mpc->mpc_ops->mpo_cred_label_init) mpc->mpc_ops->mpo_cred_label_init(label);
+				*csflags = SWITCH_APP_CODE_CS_FLAGS | (*csflags & CS_NO_UNTRUSTED_HELPERS);
+			}
 			if (hook == NULL) {
 				continue;
 			}
@@ -835,8 +844,11 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 			size_t spawnattrlen = 0;
 			void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
+			u_int switch_amfi_flags = SWITCH_APP_CODE_CS_FLAGS | CS_NO_UNTRUSTED_HELPERS;
+			u_int *hook_csflags = switch_unsigned_app && switch_app_code_amfi(mpc->mpc_name) ?
+			    &switch_amfi_flags : csflags;
 			error = mac_error_select(hook(cred, new, vfs_context_proc(ctx), vp, offset, scriptvp,
-			    mac_vnode_label(vp), scriptvnodelabel, execl, csflags, spawnattr, spawnattrlen, disjoint),
+			    mac_vnode_label(vp), scriptvnodelabel, execl, hook_csflags, spawnattr, spawnattrlen, disjoint),
 			    error);
 		}
 		if (mac_policy_list_conditional_busy() != 0) {
@@ -847,6 +859,13 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 				}
 
 				mpo_cred_label_update_execve_t *hook = mpc->mpc_ops->mpo_cred_label_update_execve;
+				if (switch_unsigned_app && switch_app_code_amfi(mpc->mpc_name)) {
+					struct label *label = mac_cred_label(new);
+					if (mpc->mpc_ops->mpo_cred_label_destroy) mpc->mpc_ops->mpo_cred_label_destroy(label);
+					if (mpc->mpc_field_off) mac_label_set(label, *mpc->mpc_field_off, 0);
+					if (mpc->mpc_ops->mpo_cred_label_init) mpc->mpc_ops->mpo_cred_label_init(label);
+					*csflags = SWITCH_APP_CODE_CS_FLAGS | (*csflags & CS_NO_UNTRUSTED_HELPERS);
+				}
 				if (hook == NULL) {
 					continue;
 				}
@@ -854,8 +873,11 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 				size_t spawnattrlen = 0;
 				void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
+				u_int switch_amfi_flags = SWITCH_APP_CODE_CS_FLAGS | CS_NO_UNTRUSTED_HELPERS;
+				u_int *hook_csflags = switch_unsigned_app && switch_app_code_amfi(mpc->mpc_name) ?
+				    &switch_amfi_flags : csflags;
 				error = mac_error_select(hook(cred, new, vfs_context_proc(ctx), vp, offset, scriptvp,
-				    mac_vnode_label(vp), scriptvnodelabel, execl, csflags, spawnattr, spawnattrlen, disjoint),
+				    mac_vnode_label(vp), scriptvnodelabel, execl, hook_csflags, spawnattr, spawnattrlen, disjoint),
 				    error);
 			}
 			mac_policy_list_unbusy();
@@ -1260,7 +1282,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 			}
 
 			mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
-			if (hook == NULL) {
+			if (hook == NULL || (switch_app_code_image(vp) && switch_app_code_amfi(mpc->mpc_name))) {
 				continue;
 			}
 
@@ -1281,7 +1303,7 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 				}
 
 				mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
-				if (hook == NULL) {
+				if (hook == NULL || (switch_app_code_image(vp) && switch_app_code_amfi(mpc->mpc_name))) {
 					continue;
 				}
 

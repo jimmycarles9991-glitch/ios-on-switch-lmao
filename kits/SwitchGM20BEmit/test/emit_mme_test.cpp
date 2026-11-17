@@ -142,6 +142,33 @@ uint32_t constantMethod(uint32_t j, uint32_t lane)
     return 0x1480 + 16 * j + 4 * lane;  // SET_ITERATED_BLEND_CONSTANT_RED/GREEN/BLUE(j)
 }
 
+constexpr uint32_t kRedToAlpha = 5;  // the R_TO_A swizzle
+
+uint32_t field(uint32_t word, uint32_t low, uint32_t bits)
+{
+    return word >> low & ((1u << bits) - 1);
+}
+
+// Why GM20B refuses a program's first pass (INVALID_VALUE at LOAD_ITERATED_BLEND_INSTRUCTION, the 12 Nov bench:
+// tools/benchloop/ibprogram.py first_pass_refusal): it may read S, D, their alphas, ONE, ZERO, 1 - alpha and constant 0
+const char *firstPassRefusal(uint32_t word)
+{
+    const uint32_t a = field(word, 9, 3), b = field(word, 12, 4), c = field(word, 16, 3), d = field(word, 19, 4);
+    if ((a >= 4 && a <= 7) || (c >= 4 && c <= 7) || (b >= 9 && b <= 12) || (d >= 9 && d <= 12))
+        return "the first pass reads PBR or a temp";
+    if ((b == 13 || d == 13) && field(word, 6, 3))
+        return "the first pass reads a constant other than 0";
+    return nullptr;
+}
+
+bool convertsRedToAlpha(const std::vector<uint32_t> &program)
+{
+    for (uint32_t word : program)
+        if (field(word, 23, 3) == kRedToAlpha)
+            return true;
+    return false;
+}
+
 std::vector<uint32_t> loadedProgram(const std::vector<Method> &methods, uint32_t &passes, uint32_t &enable)
 {
     std::vector<uint32_t> words;
@@ -164,15 +191,16 @@ TEST(EmitMme, TheColourMatrixBecomesTheIteratedBlendsConstants)
     for (const auto &[method, value] : methods)
         if (method >= 0x1480 && method < 0x1500)
             constants[method] = value;
+    const uint32_t rgbSlot[5] = {6, 1, 2, 3, 4};
     for (uint32_t row = 0; row < 5; row++)
         for (uint32_t lane = 0; lane < 3; lane++)
-            EXPECT_EQ(constants[constantMethod(row, lane)], 0x3c00 + 0x100 * row + lane) << row << " " << lane;
+            EXPECT_EQ(constants[constantMethod(rgbSlot[row], lane)], 0x3c00 + 0x100 * row + lane) << row << " " << lane;
     EXPECT_EQ(constants[constantMethod(5, 0)], 0x3c03u);
     EXPECT_EQ(constants[constantMethod(5, 1)], 0x3d03u);
     EXPECT_EQ(constants[constantMethod(5, 2)], 0x3e03u);
-    EXPECT_EQ(constants[constantMethod(6, 0)], 0x3f03u);
-    EXPECT_EQ(constants[constantMethod(6, 1)], 0x4003u);
-    EXPECT_EQ(constants[constantMethod(6, 2)], 0x068eu);
+    EXPECT_EQ(constants[constantMethod(0, 0)], 0x3f03u);
+    EXPECT_EQ(constants[constantMethod(0, 1)], 0x4003u);
+    EXPECT_EQ(constants[constantMethod(0, 2)], 0x068eu);
     EXPECT_EQ(constants[constantMethod(7, 0)], 0x3a66u);
     EXPECT_EQ(constants[constantMethod(7, 1)], 0xb800u);
     EXPECT_EQ(constants[constantMethod(7, 2)], 0u);
@@ -194,9 +222,21 @@ TEST(EmitMme, TheClampPairPicksTheColourMatrixProgram)
         EXPECT_EQ(program.size(), want) << clamp.first << " " << clamp.second;
         EXPECT_EQ(passes, want);
         EXPECT_EQ(enable, 3u);
-        EXPECT_EQ(program.front(), 0x3200d799u);
-        EXPECT_EQ(program.back(), 0x00009029u);
+        EXPECT_EQ(program.front(), 0x3200d619u);
+        EXPECT_EQ(program.back(), 0x000091a9u);
+        EXPECT_EQ(firstPassRefusal(program.front()), nullptr) << std::hex << program.front();
+        EXPECT_TRUE(convertsRedToAlpha(program)) << "ALPHA_ENABLE needs an R_TO_A pass";
+        EXPECT_NE(program.back() >> 23 & 7, kRedToAlpha) << "R_TO_A as the last pass leaves the alpha wrong";
     }
+}
+
+TEST(EmitMme, TheFirstPassRuleRefusesTheWordsTheChipRefused)
+{
+    // boot 21's kill (gr: DATA_ERROR INVALID_VALUE mthd 0df4 data 3200d799), HSL's MAX(alpha, constant 1), PBR, TEMP0
+    for (uint32_t word : {0x3200d799u, 0x3000d659u, 0x3000d459u, 0x0000c029u, 0x00009029u})
+        EXPECT_NE(firstPassRefusal(word), nullptr) << std::hex << word;
+    for (uint32_t word : {0x3200d619u, 0x3000d619u, 0x00001659u, 0x0000d001u})
+        EXPECT_EQ(firstPassRefusal(word), nullptr) << std::hex << word;
 }
 
 // The draw parameters as the raw path wrote them from the CPU before each draw (raw_gpu.cpp prepare), then the draw loop
@@ -257,6 +297,7 @@ TEST(EmitMme, TheScratchRangesAreTheTables)
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_AMP_COUNT, 16);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_AMP_MAPS, 17);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_AMP_END, 25);
+    EXPECT_EQ(SWITCH_GM20B_SCRATCH_ICB_SET_BYTES, 25);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ROOT_HI, 26);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ICB_BUFFERS, 35);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ICB_BUFFERS_END, 128);

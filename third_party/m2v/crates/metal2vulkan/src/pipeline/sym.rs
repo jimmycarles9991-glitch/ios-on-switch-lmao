@@ -319,6 +319,11 @@ pub enum ResourceKind {
     /// sampled image viewing the same image in the UNORM format of its channels, from which a
     /// function reads the raw codes of an 8-bit sRGB texture (`RuntimeFact::SrgbTexture`).
     RawTexture,
+    /// The alpha plane of the `RGB10A8_2P_XR10` texture bound at the stage's texture slot
+    /// `ResourceSlot::index`, held in Metal's two planes (`VariantKey::two_plane_textures`): an
+    /// `R8_UINT` image of the plane's bytes beside the slot's own image of the color words, which
+    /// the function's accesses split each raw texel across and join it from.
+    TexturePlane,
     /// The `half` shadow of extended-range color attachment `n` (`ResourceSlot::index` too) for
     /// the draw's render pass instance (`VariantKey::extended_shadows`): an `RGBA16_SFLOAT` 2D
     /// storage image of the attachment's extent holding Metal's tile value of each texel, which

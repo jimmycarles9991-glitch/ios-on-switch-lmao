@@ -50,7 +50,9 @@ enum : uint32_t {
 // aspect copies too) ship on unread: gpu.raw.stored_depth's d16_compressed and d32fs8_compressed arms judge them; so does
 // one-sample C128_2CR, which gpu.x1.ce_compressed's RGBA32Float cases judge, and the 2x and 4x colour kinds, whose sample
 // grid the copy engine copies when a stored multisampled target moves to plain memory (gpu.x1.ce_compressed's ms cases).
-// Not asked: the multisampled zeta kinds (which read exact only under anti-alias words no context row writes).
+// The multisampled shader-tested zetas, ZF32_MS2/MS4_2CZ and ZF32_X24S8_MS2/MS4_2CSZV, under the context's CSAA_ENABLE
+// (0x15b4) of 0 (context.tsv): gpu.x1.ce_compressed_depth's csaa_off arm on boots 19 and 21, d32f_4x, d32s8_2x and
+// d32s8_4x each 0 wrong over 16 compressed rounds; d32f_2x is the same kind family, asked by the probe's d32f_2x case.
 constexpr bool copyEngineReadsCompressed(uint32_t kind)
 {
     switch (kind) {
@@ -66,6 +68,10 @@ constexpr bool copyEngineReadsCompressed(uint32_t kind)
     case kCompKindZF32:
     case kCompKindZ16:
     case kCompKindZeta:
+    case kCompKindZF32 + 1:  // ZF32_MS2_2CZ
+    case kCompKindZF32 + 2:  // ZF32_MS4_2CZ
+    case kCompKindZeta + 1:  // ZF32_X24S8_MS2_2CSZV
+    case kCompKindZeta + 2:  // ZF32_X24S8_MS4_2CSZV
         return true;
     default:
         return false;
@@ -154,8 +160,8 @@ inline uint32_t backingKind(bool compression, bool blockLinear, uint32_t zeta, u
 }
 
 // A refusal of compressed memory (the BoAlloc's or the VmBind's kern_return_t, kIOReturnNoSpace for no VA) for want of
-// memory: the kernel's pool (its floor, or this client's share), the comptags or the VA. Only memory given back changes
-// that answer. Any other refusal is the request's own fault and has never fired (boot 19 and 21 logged none).
+// memory: the kernel's pool (its floor, or no whole clean 128 KiB chunk), the comptags or the VA. Only memory given back
+// changes that answer. Any other refusal is the request's own fault and has never fired (boot 19 and 21 logged none).
 inline bool compShortage(int kr)
 {
     return kr == kIOReturnNoMemory || kr == kIOReturnNoResources || kr == kIOReturnNoSpace;

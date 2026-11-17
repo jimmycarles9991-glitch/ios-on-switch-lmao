@@ -267,11 +267,15 @@ enum : uint32_t {
     kSurfaceKind = 0x0b,
     kStartAddrHi = 0x0d,
     kStartAddrHiU = 0x0f,
+    kMemfetchDebugStatus = 0x2a,
+    kMemfetchControl = 0x2b,
     kCdeControl = 0x2f,  // DC_WINBUF
     kHFilter0 = 0x101,
     kCscYof = 0x111,
     kVFilter0 = 0x119,  // WINC
 };
+
+constexpr uint32_t kMemfetchReset = 1u << 0;  // MEMFETCH_CONTROL (TRM 24.11.27)
 
 constexpr uint32_t kWinEnable = 1u << 30, kCscEnable = 1u << 18, kHFilterOn = 1u << 8, kVFilterOn = 1u << 10;
 // WINBUF_SURFACE_KIND: BLOCK, with the block height (GOBs, log2) in bits 6:4 (mainline dc.c DC_WINBUF_SURFACE_KIND_*).

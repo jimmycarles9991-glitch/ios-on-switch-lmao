@@ -33,7 +33,8 @@ struct CompilerAliveTest: HWTest {
         metrics.set("priority_error", Self.code(probe.priority_error))
         metrics.set("limits_error", Self.code(probe.limits_error))
 
-        let deliberate = DeliberateCompilerDeaths.shared.count
+        let deliberate = DeliberateCompilerDeaths.tally.count
+        metrics.set("deliberate", deliberate)
         let read = probe.line_error == 0
         let asked = read && probe.pid > 0
         return .judged(

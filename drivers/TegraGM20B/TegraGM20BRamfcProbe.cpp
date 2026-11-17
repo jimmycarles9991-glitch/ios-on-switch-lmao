@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // debug.switch_gpu_ramfc (debug kernels): writing runs tgm_ramfc_probe (each live client channel's RAMFC timeslice
 // against the value last written to it, once it has completed a job since; then the kernel probe channel's changed and
-// changed back, each read after a job); reading gives the last run's line, for HW Test gpu.ramfc_timeslice.
+// changed back, each read after a job); reading gives the last run's line, for HW Tests gpu.ramfc_timeslice and
+// gpu.ramfc_creation.
 #include <IOKit/IOLib.h>
 #include <string.h>
 #include <sys/errno.h>
@@ -14,7 +15,7 @@ namespace
 {
 struct sysctl_oid gOid;
 
-char gLine[288] = "channels=0 why=not_run";
+char gLine[576] = "channels=0 why=not_run";
 bool gProbing;
 
 int ramfcSysctl SYSCTL_HANDLER_ARGS
@@ -39,10 +40,12 @@ int ramfcSysctl SYSCTL_HANDLER_ARGS
 			 "first_ramfc=%08x "
 			 "first_expected=%08x flip_chid=%u flip_from=%08x flip_to=%08x "
 			 "flip_read=%08x "
-			 "back_read=%08x flip_ret=%d",
+			 "back_read=%08x flip_ret=%d created_mismatched=%u kernel_checked=%u "
+			 "kernel_mismatched=%u mismatched_owners=%s",
 			 look.channels, look.checked, look.high, look.mismatched, look.chid,
 			 look.ramfc, look.expected, look.flip_chid, look.flip_from, look.flip_to,
-			 look.flip_read, look.back_read, look.flip_ret);
+			 look.flip_read, look.back_read, look.flip_ret, look.created_mismatched,
+			 look.kernel_checked, look.kernel_mismatched, look.owners);
 	}
 	return SYSCTL_OUT(req, gLine, strlen(gLine) + 1);
 }

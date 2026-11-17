@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdint>
 
+#include "raw_format_standin.h"
+
 namespace raw {
 
 constexpr uint32_t kTransientColorTag = 9;
@@ -21,7 +23,7 @@ inline std::array<uint32_t, 8> transientColorTags(uint8_t scratch)
 template <class Texture> bool fusionTargetEligible(const Texture &texture, uint64_t level)
 {
     return texture.va && !texture.memoryless && !texture.sampled && !texture.standIn && !texture.planarStandIn &&
-           !texture.converted() && !level;
+           !formatStandIn(texture.format) && !texture.converted() && !level;
 }
 
 template <class Texture> uint64_t fusionImageBytes(const Texture &texture)

@@ -7,6 +7,7 @@
 #include "raw_lock.h"
 #include "raw_gpu.h"
 #include <os/log.h>
+#include <algorithm>
 
 namespace raw {
 
@@ -26,6 +27,64 @@ Bo Device::bufferBoLocked(const Buffer &buffer) const
         return index < arenas_.size() && !arenas_[index].purged ? arenas_[index].bo : Bo{};
     const auto &chunks = buffer.wc ? wcChunks_ : chunks_;
     return index < chunks.size() ? chunks[index].bo : Bo{};
+}
+
+bool Device::arenaCpuRangesLocked(const ArenaStorage &storage, const void *cpu, uint64_t bytes,
+                                  std::vector<HostAccess::Range> &ranges) const
+{
+    if (storage.arena >= arenas_.size() || !arenas_[storage.arena].used || arenas_[storage.arena].purged ||
+        !hostRangeContains(storage.cpu, storage.bytes(), cpu, bytes))
+        return false;
+    const Arena &arena = arenas_[storage.arena];
+    const uint64_t first = storage.va() + (uintptr_t(cpu) - uintptr_t(storage.cpu)), last = first + bytes;
+    bool valid = true;
+    storage.each([&](const StoragePiece &piece) {
+        const uint64_t from = std::max(first, piece.va), to = std::min(last, piece.va + piece.bytes);
+        if (!valid || from >= to)
+            return;
+        const uint64_t offset = storage.offset + from - storage.va();
+        Bo bo = arena.bo;
+        if (!bo.handle)
+            for (const auto &[start, part] : arena.parts)
+                if (offset >= start && offset - start < part.bytes && to - from <= part.bytes - (offset - start)) {
+                    bo = part;
+                    break;
+                }
+        uint64_t inBo = 0;
+        if (!bo.handle || !boCpuOffset(bo, arena.cpu + offset, to - from, inBo)) {
+            valid = false;
+            return;
+        }
+        if (!ranges.empty() && ranges.back().bo.handle == bo.handle &&
+            ranges.back().offset + ranges.back().bytes == inBo)
+            ranges.back().bytes += to - from;
+        else
+            ranges.push_back({bo, inBo, to - from});
+    });
+    return valid;
+}
+
+void Device::releaseHostArena(void *owner, uint32_t index)
+{
+    auto &device = *static_cast<Device *>(owner);
+    std::lock_guard<raw::Mutex> lock(device.lock_);
+    Arena &arena = device.arenas_[index];
+    --arena.leases;
+    if (arena.dying && !arena.leases)
+        device.freeArena(arena);
+}
+
+bool Device::hostArenaAccess(const ArenaStorage &storage, const void *cpu, uint64_t bytes, bool write,
+                             HostAccess &access)
+{
+    std::vector<HostAccess::Range> ranges;
+    {
+        std::lock_guard<raw::Mutex> lock(lock_);
+        if (!arenaCpuRangesLocked(storage, cpu, bytes, ranges))
+            return false;
+        ++arenas_[storage.arena].leases;
+    }
+    return access.acquire(k_, std::move(ranges), write, this, storage.arena, releaseHostArena);
 }
 
 CpuCompletion Device::captureCpuCompletion(uint32_t seqno, uint64_t generation,
@@ -49,6 +108,16 @@ CpuCompletion Device::captureCpuCompletion(uint32_t seqno, uint64_t generation,
     for (const Buffer *buffer : buffers) {
         if (!buffer || !buffer->hostVisible || buffer->wc || !buffer->cpu)
             continue;
+        if (buffer->span.storage) {
+            std::vector<HostAccess::Range> ranges;
+            if (!arenaCpuRangesLocked(*buffer->span.storage, buffer->cpu, buffer->length, ranges)) {
+                result.valid = false;
+                break;
+            }
+            for (const HostAccess::Range &range : ranges)
+                result.ranges.push_back({range.bo.handle, range.offset, range.bytes});
+            continue;
+        }
         const Bo bo = bufferBoLocked(*buffer);
         uint64_t offset = 0;
         if (!bo.handle || !buffer->length || !boCpuOffset(bo, buffer->cpu, buffer->length, offset)) {
@@ -70,6 +139,8 @@ bool Device::hostAccess(const Buffer &buffer, const void *cpu, uint64_t bytes, b
 {
     if (!hostRangeContains(buffer.cpu, buffer.length, cpu, bytes))
         return false;
+    if (buffer.span.storage)
+        return hostArenaAccess(*buffer.span.storage, cpu, bytes, write, access);
     Bo bo;
     {
         std::lock_guard<raw::Mutex> lock(lock_);
@@ -86,6 +157,14 @@ bool Device::hostAccess(const Texture &texture, bool write, HostAccess &access)
 bool Device::hostAccess(const Texture &texture, const void *cpu, uint64_t requestedBytes, bool write,
                         HostAccess &access)
 {
+    const auto storage = texture.storageRange();
+    if (storage.arena) {
+        if (!hostRangeContains(storage.arena->cpu, storage.arena->bytes(), cpu, 1))
+            return false;
+        const uint64_t bytes =
+            requestedBytes ? requestedBytes : storage.arena->bytes() - (uintptr_t(cpu) - uintptr_t(storage.arena->cpu));
+        return hostArenaAccess(*storage.arena, cpu, bytes, write, access);
+    }
     Bo bo;
     uint64_t bytes = 0;
     {
@@ -149,6 +228,16 @@ Lease *Device::leaseSpan(Lease *&lease, const Span &span, Memory from)
     return lease;
 }
 
+void Device::makeArenaAliasable(Span &span, Lease *&lease)
+{
+    std::lock_guard<raw::Mutex> l(lock_);
+    Lease *hold = leaseSpan(lease, span, Memory::Arena);
+    arenas_[span.chunk].place.release(span.offset, span.bytes);
+    // Aliasing returns placement, while recorded uses still own the mappings and their storage cuts.
+    hold->placed = false;
+    dropLocked(hold);
+}
+
 void Device::dropLocked(Lease *lease)
 {
     if (--lease->refs)
@@ -170,8 +259,11 @@ void Device::dropLocked(Lease *lease)
         arenas_[lease->span.chunk].leases--;
         if (lease->placed)
             arenaFree(lease->span);
-        else if (arenas_[lease->span.chunk].dying && !arenas_[lease->span.chunk].leases)
-            freeArena(arenas_[lease->span.chunk]);
+        else {
+            delete lease->span.storage;
+            if (arenas_[lease->span.chunk].dying && !arenas_[lease->span.chunk].leases)
+                freeArena(arenas_[lease->span.chunk]);
+        }
         break;
     }
     delete lease;

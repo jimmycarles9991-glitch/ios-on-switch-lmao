@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // raw/fx host proof (r12-cafx) for fx_mip: GPU mip chains on the raw GM20B path.
-//   1. layout: fx's chain layout against Mesa NIL's own (niloracle: the NVK host twin's vkGetImageSubresourceLayout and
-//      vkGetImageMemoryRequirements), every level's offset, row pitch and size, the image size;
+//   1. layout: fx's chain layout against Mesa NIL's own, every level's offset, row pitch and size, the image size;
 //   2. texture header: decoded back field by field; a texture-unit address model built only from the header's fields (base,
 //      level-0 block height, width, height, levels: the hardware's per-LOD block-height clamp) must put every level where NIL does;
 //   3. generation: fx's push words run by the 2D engine model (twod_sim) over host memory; the chain read back through the
@@ -10,12 +9,14 @@
 //   4. teeth: the checks must fail when the stream drops the per-level wait or invalidate, when a level's block height is not
 //      clamped as the hardware does, and the device self-test must fail on a 2D engine that samples without the half-texel offset;
 //   5. copy into a level; 6. CPU cost of encoding.
-// usage: mipcheck <nil oracle output for BGRA8> [<for RGBA16F>]
+// usage: mipcheck <nil oracle output for BGRA8> <for RGBA16F>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <iterator>
 #include <map>
 #include <random>
 #include <sstream>
@@ -115,40 +116,63 @@ struct Nil {
 static std::vector<Nil> readNil(const char *path)
 {
     std::vector<Nil> out;
-    FILE *f = fopen(path, "r");
-    if (!f)
+    std::ifstream f(path);
+    CHECK(f.is_open(), "cannot open NIL oracle %s", path);
+    if (!f.is_open())
         return out;
-    char line[8192];
-    while (fgets(line, sizeof line, f)) {
-        Nil n;
-        unsigned long long s, a;
-        if (sscanf(line, "%u %u %u %llu %llu", &n.w, &n.h, &n.l, &s, &a) != 5)
-            continue;
-        n.size = s;
-        n.align = a;
-        const char *bar = strchr(line, '|');
-        std::istringstream in(bar ? bar + 1 : "");
-        std::string tok;
-        while (in >> tok) {
-            unsigned long long o, r, z;
-            if (sscanf(tok.c_str(), "%llu,%llu,%llu", &o, &r, &z) == 3) {
-                n.off.push_back(o);
-                n.row.push_back(r);
-                n.lsize.push_back(z);
-            }
+    std::string line;
+    while (std::getline(f, line)) {
+        Nil n{};
+        char bar;
+        std::istringstream in(line);
+        const bool header =
+            bool(in >> n.w >> n.h >> n.l >> n.size >> n.align >> bar) && bar == '|' && n.l > 0 && n.l <= fx::kMaxLevels;
+        CHECK(header, "malformed NIL header in %s at image %zu", path, out.size());
+        if (!header)
+            return {};
+        for (uint32_t l = 0; l < n.l; l++) {
+            uint64_t o, r, z;
+            char comma1, comma2;
+            const bool level = bool(in >> o >> comma1 >> r >> comma2 >> z) && comma1 == ',' && comma2 == ',';
+            CHECK(level, "malformed NIL level %u in %s at image %zu", l, path, out.size());
+            if (!level)
+                return {};
+            n.off.push_back(o);
+            n.row.push_back(r);
+            n.lsize.push_back(z);
         }
+        in >> std::ws;
+        CHECK(in.eof(), "extra NIL level data in %s at image %zu", path, out.size());
+        if (!in.eof())
+            return {};
         out.push_back(n);
     }
-    fclose(f);
+    CHECK(f.eof(), "cannot read NIL oracle %s", path);
     return out;
 }
 
 static void testLayout(const char *path, uint32_t bpp, uint32_t mtl)
 {
     const std::vector<Nil> nil = readNil(path);
-    CHECK(!nil.empty(), "no NIL oracle lines in %s", path);
+    const uint32_t expected[][3] = {
+        {1, 1, 1},          {2, 2, 2},       {2, 1, 2},      {3, 5, 3},        {776, 24, 10},    {776, 24, 3},
+        {180, 180, 8},      {180, 180, 1},   {120, 120, 7},  {60, 60, 6},      {40, 40, 6},      {1280, 720, 11},
+        {1280, 720, 1},     {720, 1280, 11}, {1024, 1, 11},  {1, 1024, 11},    {4096, 4096, 13}, {2048, 1536, 12},
+        {97, 3, 7},         {33, 65, 7},     {512, 512, 10}, {1366, 1024, 11}, {256, 8, 9},      {8, 256, 9},
+        {16384, 16384, 15}, {300, 200, 9},   {1, 300, 9},    {640, 480, 10},   {11, 11, 4},      {22, 22, 5},
+        {43, 43, 6},        {86, 86, 7},     {85, 85, 7},    {42, 42, 6},      {21, 21, 5},      {10, 10, 4},
+        {17, 9, 5},
+    };
+    CHECK(nil.size() == std::size(expected), "NIL oracle %s has %zu images, expected %zu", path, nil.size(),
+          std::size(expected));
     uint32_t images = 0, levels = 0;
-    for (const Nil &n : nil) {
+    for (size_t i = 0; i < nil.size(); i++) {
+        const Nil &n = nil[i];
+        const bool shape =
+            i < std::size(expected) && n.w == expected[i][0] && n.h == expected[i][1] && n.l == expected[i][2];
+        CHECK(shape, "unexpected NIL image %zu in %s: %ux%ux%u", i, path, n.w, n.h, n.l);
+        if (!shape)
+            continue;
         fx::MipChain c;
         const bool ok = fx::mipChainLayout(n.w, n.h, n.l, bpp, c);
         CHECK(ok, "layout refused %ux%ux%u", n.w, n.h, n.l);
@@ -157,12 +181,12 @@ static void testLayout(const char *path, uint32_t bpp, uint32_t mtl)
         images++;
         CHECK(c.bytes == n.size, "%ux%ux%u bpp %u: size fx %llu NIL %llu", n.w, n.h, n.l, bpp,
               (unsigned long long)c.bytes, (unsigned long long)n.size);
-        CHECK(n.align % c.align == 0, "%ux%ux%u: NVK alignment %llu not a multiple of fx's %llu", n.w, n.h, n.l,
+        CHECK(n.align == c.align, "%ux%ux%u: NIL alignment %llu differs from fx's %llu", n.w, n.h, n.l,
               (unsigned long long)n.align, (unsigned long long)c.align);
         uint32_t tic[8];
         fx::mipChainTic(c, 0x2000000000ull, 0x54e24908, false, 0, n.l, tic);
         const TicView t = decode(tic);
-        for (uint32_t l = 0; l < n.l && l < n.off.size(); l++) {
+        for (uint32_t l = 0; l < n.l; l++) {
             levels++;
             CHECK(c.level[l].offset == n.off[l], "%ux%ux%u level %u: offset fx %llu NIL %llu", n.w, n.h, n.l, l,
                   (unsigned long long)c.level[l].offset, (unsigned long long)n.off[l]);
@@ -527,10 +551,12 @@ static void bench()
 
 int main(int argc, char **argv)
 {
-    if (argc > 1)
-        testLayout(argv[1], 4, 80);
-    if (argc > 2)
-        testLayout(argv[2], 8, 115);
+    if (argc != 3) {
+        fprintf(stderr, "usage: %s <NIL BGRA8> <NIL RGBA16F>\n", argv[0]);
+        return 2;
+    }
+    testLayout(argv[1], 4, 80);
+    testLayout(argv[2], 8, 115);
     testTic();
     testGenerate();
     testTeeth();

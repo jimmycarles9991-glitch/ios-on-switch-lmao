@@ -10,6 +10,7 @@
 #include <cstring>
 
 #include "raw_pack.h"
+#include "raw_set_entries.h"
 
 namespace raw {
 
@@ -65,25 +66,38 @@ inline uint32_t entryBytes(const PackEntry &e)
 
 }  // namespace setreads
 
-// The entries of `entry[0..entries)` program code `code` reads from set 0's memory, `setSlot` the constant buffer slot it
-// binds set 0 at (0: none)
-inline uint32_t setMemoryReads(const uint8_t *code, size_t bytes, uint32_t setSlot, const PackEntry *entry,
-                               uint32_t entries)
+// The words of a mask of a set's `count` entries: entry k is bit k % 32 of word k / 32
+constexpr uint32_t entryMaskWords(uint32_t count)
+{
+    return count > 32 ? (count + 31) / 32 : 1;
+}
+
+// The entries of `entries` program code `code` reads from set 0's memory, ORed into `read` (entryMaskWords of them),
+// `setSlot` the constant buffer slot it binds set 0 at (0: none)
+inline void setMemoryReads(const uint8_t *code, size_t bytes, uint32_t setSlot, const SetEntries &entries,
+                           uint32_t *read)
 {
     using namespace setreads;
-    const uint32_t all = entries >= 32 ? ~0u : (1u << entries) - 1;
-    uint32_t read = 0;
+    const uint32_t count = entries.size();
+    bool all = false;
+    const auto readAll = [&] {
+        for (uint32_t k = 0; k < count; k++)
+            read[k / 32] |= 1u << k % 32;
+        all = true;
+    };
     const auto reads = [&](uint32_t bank, uint32_t offset, uint32_t width, bool computed) {
         if (bank == 0 && (computed || (offset < kRootSetAddressEnd && offset + width > kRootSetAddress)))
-            read = all;
+            return readAll();
         if (!setSlot || bank != setSlot)
             return;
-        for (uint32_t k = 0; k < entries; k++)
-            if (computed || (offset < entry[k].offset + entryBytes(entry[k]) && offset + width > entry[k].offset))
-                read |= 1u << k;
+        if (computed)
+            return readAll();
+        for (uint32_t k = 0; k < count; k++)
+            if (offset < entries[k].offset + entryBytes(entries[k]) && offset + width > entries[k].offset)
+                read[k / 32] |= 1u << k % 32;
     };
     // four 64-bit words a group, the first the group's scheduling word
-    for (size_t at = 0; at + 8 <= bytes && read != all; at += 8) {
+    for (size_t at = 0; at + 8 <= bytes && !all; at += 8) {
         if (at % 32 == 0)
             continue;
         uint64_t word;
@@ -99,35 +113,40 @@ inline uint32_t setMemoryReads(const uint8_t *code, size_t bytes, uint32_t setSl
                 break;
             }
     }
-    return read;
 }
 
-// The entries of `pp` a program reads from set 0's memory: its constant buffer types `cbufType[0..cbufs)` name the slot
-// it binds set 0 at; its bound texture instructions read their handles at slot `boundTextures - 1` (0: none);
-// `code` is its machine code, after its shader program header
-inline uint32_t programSetReads(const uint8_t *code, size_t bytes, const uint8_t *cbufType, uint32_t cbufs,
-                                uint8_t boundTextures, const PackPipeline &pp)
+// The entries of `entries` a program reads from set 0's memory, ORed into `read` (entryMaskWords of them): its constant
+// buffer types `cbufType[0..cbufs)` name the slot it binds set 0 at; its bound texture instructions read their handles at
+// slot `boundTextures - 1` (0: none); `code` is its machine code, after its shader program header
+inline void programSetReads(const uint8_t *code, size_t bytes, const uint8_t *cbufType, uint32_t cbufs,
+                            uint8_t boundTextures, const SetEntries &entries, uint32_t *read)
 {
     uint32_t setSlot = 0;
     for (uint32_t c = 1; c < cbufs; c++)
         if (cbufType[c] == CbufSet)
             setSlot = c;
-    uint32_t read = setMemoryReads(code, bytes, setSlot, pp.entry, pp.entries);
+    setMemoryReads(code, bytes, setSlot, entries, read);
     if (boundTextures && boundTextures <= cbufs && cbufType[boundTextures - 1] == CbufSet)
-        for (uint32_t k = 0; k < pp.entries; k++)
-            if (pp.entry[k].kind != EntryUbo && pp.entry[k].kind != EntryColorTable &&
-                pp.entry[k].kind != EntrySpillTable)
-                read |= 1u << k;
-    return read;
+        for (uint32_t k = 0; k < entries.size(); k++)
+            if (entries[k].kind != EntryUbo && entries[k].kind != EntryColorTable && entries[k].kind != EntrySpillTable)
+                read[k / 32] |= 1u << k % 32;
 }
 
 // The same of a program of the heap: `header` its shader program header, at its slot's 0x30 (PackProgram)
-inline uint32_t placedSetReads(const uint8_t *header, const PackProgram &program, const PackPipeline &pp)
+inline void placedSetReads(const uint8_t *header, const PackProgram &program, const SetEntries &entries, uint32_t *read)
 {
     constexpr uint32_t kCodeInSlot = 0x80, kHeaderBytes = 0x50;
     const uint32_t end = program.dataBytes ? program.dataOffset : program.bytes;
-    return programSetReads(header + kHeaderBytes, end > kCodeInSlot ? end - kCodeInSlot : 0, program.cbufType,
-                           program.cbufs, program.boundTextures, pp);
+    programSetReads(header + kHeaderBytes, end > kCodeInSlot ? end - kCodeInSlot : 0, program.cbufType, program.cbufs,
+                    program.boundTextures, entries, read);
+}
+
+// placedSetReads of the first 32 entries alone: Pipeline::memoryEntries, which only a draw of 32 or fewer reads
+inline uint32_t placedSetReads(const uint8_t *header, const PackProgram &program, const SetEntries &entries)
+{
+    uint32_t read[entryMaskWords(kSetEntriesMax)] = {};
+    placedSetReads(header, program, entries, read);
+    return read[0];
 }
 
 }  // namespace raw

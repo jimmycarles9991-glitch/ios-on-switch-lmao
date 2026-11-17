@@ -2,6 +2,15 @@
 #import "RawMetalInternal.h"
 #import "RawMetalEventJobs.h"
 
+// An event the command buffer cannot wait for or signal: its first line says why, and which Metal rule or kernel answer
+// stops it
+void eventError(RMCommandBuffer *cb, bool signal, const char *why)
+{
+    if (!predLogged(PredEvent))
+        logPred(PredEvent, signal, 0, @(why));
+    hit(cb, PredEvent, signal);
+}
+
 @implementation RMCommandBuffer (Events)
 
 // `milliseconds`: a wait's own limit (encodeWaitForEvent:value:timeout:), 0 for none
@@ -13,7 +22,9 @@
         ![(id)event respondsToSelector:@selector(setSignaledValue:)] ||
         ![(id)event respondsToSelector:@selector(notifyListener:atValue:block:)]) {
         [self takeWholeReason:WhyEvent why:@"an event the raw path cannot read, set or be notified of"];
-        hit(self, PredEvent, signal);
+        eventError(self, signal,
+                   "an event of another device (MTLEvent.h: the device this event can be used with), not a shared "
+                   "event");
     }
     [self retain:event];
     Cmd m = cmd(signal ? OpSignalEvent : OpWaitEvent);

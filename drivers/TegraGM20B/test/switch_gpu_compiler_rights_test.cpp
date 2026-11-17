@@ -8,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "SwitchGpuShaderCompiler.h"
 #include "SwitchGpuShaderCompilerQueue.h"
@@ -214,6 +215,35 @@ TEST_F(CompilerRights, AStackOtherThanTheCompilersLeavesTheRightToMig)
 		uint64_t(uintptr_t(request_.data())), request_.size(), 1, kStack + 1, 0, 0};
 	EXPECT_EQ(asyncCall(kClientA, kPortA, TegraGM20BMethodCompile, &in, sizeof in),
 		  kIOReturnNotReady);
+}
+
+// A debug compiler's account of a request's wait (TegraGM20BAbiCompileTimes) reaches the asker unread, after the result
+TEST_F(CompilerRights, AnAnswerCarriesTheCompilersTimesToItsAsker)
+{
+	registerCompiler();
+	ASSERT_EQ(compile(kClientA, kPortA, 5), kIOReturnSuccess);
+	std::string buffer(request_.size(), 0);
+	const TegraGM20BAbiCompilerTake take = {uint64_t(uintptr_t(buffer.data())), buffer.size()};
+	TegraGM20BAbiCompilerTakeReply taken = {};
+	ASSERT_EQ(syncCall(kCompiler, &gCompilerTask, TegraGM20BMethodCompilerTake, &take,
+			   sizeof take, &taken, sizeof taken),
+		  kIOReturnSuccess);
+	ASSERT_NE(taken.id, 0u);
+	const TegraGM20BAbiCompilerComplete done = {
+		taken.id, TegraGM20BCompileMade, TegraGM20BCompileCompiled, {11, 22, 33, 37, 0}};
+	ASSERT_EQ(syncCall(kCompiler, &gCompilerTask, TegraGM20BMethodCompilerComplete, &done,
+			   sizeof done, nullptr, 0),
+		  kIOReturnSuccess);
+	ASSERT_EQ(gRights.replies.size(), 1u);
+	const std::vector<io_user_reference_t> &words = gRights.replies[0].arguments;
+	ASSERT_EQ(words.size(), size_t(TegraGM20BCompileAnswerWords));
+	EXPECT_EQ(words[0], 5u);
+	EXPECT_EQ(words[1] & 0xffffffffu, uint64_t(TegraGM20BCompileMade));
+	EXPECT_EQ(words[2], 11u);
+	EXPECT_EQ(words[3], 22u);
+	EXPECT_EQ(words[4], 33u);
+	EXPECT_EQ(words[5], 37u);
+	EXPECT_EQ(gRights.rights[kPortA], 0);
 }
 
 }  // namespace

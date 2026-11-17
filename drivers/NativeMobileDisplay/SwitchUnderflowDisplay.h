@@ -62,6 +62,8 @@ void underflowFrameEnd()
         case Accounting::Edge::kOpened:
             IOLog("SwitchDisplay: window %c underflowed: UFLOW_STATUS %#x, WIN_%c_UF_INT %s, frame end %llu\n", name,
                   count, name, latched ? "latched" : "clear", frameEnds);
+            if (w == 0 && landscapeOn())
+                logColumnScanUnderflow();
             break;
         case Accounting::Edge::kClosed: {
             const Accounting::Totals &episode = underflows.episode(w);
@@ -74,4 +76,23 @@ void underflowFrameEnd()
             break;
         }
     }
+}
+
+// Window A's active words while it column-scans the video (TRM 24.10.1-24.10.10, 24.11.4-24.11.7, 24.11.26-24.11.27):
+// OPTIONS, SIZE, PRESCALED_SIZE, DDA_INCREMENT, H/V_INITIAL_DDA, ADDR_H/V_OFFSET, SURFACE_KIND, MEMFETCH_CONTROL,
+// MEMFETCH_DEBUG_STATUS.
+static constexpr uint32_t kColumnScanWords[] = {0xb80, 0xb85, 0xb86, 0xb89, 0xb87, 0xb88,
+                                                0xbc6, 0xbc8, 0xbcb, 0xbeb, 0xbea};
+
+void logColumnScanUnderflow()
+{
+    uint32_t v[sizeof(kColumnScanWords) / sizeof(kColumnScanWords[0])];
+    const uint32_t access = dc[kDcStateAccess] & ~(kReadMuxActive | kWriteMuxActive);
+    dc[kDcStateAccess] = access | kReadMuxActive;
+    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); ++i)
+        v[i] = dc[kColumnScanWords[i]];
+    dc[kDcStateAccess] = access;
+    IOLog("SwitchDisplay: window A column-scans the video: OPTIONS %#x SIZE %#x PRESCALED %#x DDA %#x INITIAL %#x/%#x "
+          "OFFSET %#x/%#x KIND %#x MEMFETCH_CONTROL %#x MEMFETCH_DEBUG_STATUS %#x\n",
+          v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10]);
 }

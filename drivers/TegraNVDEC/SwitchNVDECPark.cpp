@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <IOKit/IOLib.h>
 #include "SwitchNVDECPark.h"
 #include "SwitchNVDECOutput.h"
 
@@ -12,6 +13,21 @@ void giveBack(SwitchNVDECParked *entry, bool returnMemory)
     if (returnMemory)
         tegra_nvdec_buffer_free(&entry->block);
     *entry = {};
+}
+
+bool grow(SwitchNVDECPark *park)
+{
+    const uint32_t capacity = park->capacity ? park->capacity * 2 : SwitchNVDECPark::kFirstCapacity;
+    auto *grown = IONewZero(SwitchNVDECParked, capacity);
+    if (!grown)
+        return false;
+    for (uint32_t i = 0; i < park->count; ++i)
+        grown[i] = park->parked[i];
+    if (park->parked)
+        IODelete(park->parked, SwitchNVDECParked, park->capacity);
+    park->parked = grown;
+    park->capacity = capacity;
+    return true;
 }
 
 void unpark(SwitchNVDECPark *park, uint32_t index)
@@ -51,7 +67,9 @@ bool switch_nvdec_park_take(SwitchNVDECPark *park, SwitchNVDECBuffer *buffer, Sw
 void switch_nvdec_park_put(SwitchNVDECPark *park, const TegraNVDECBlock &block, IOMemoryMap *map)
 {
     ++park->allocated;
-    if (park->count == SwitchNVDECPark::kCapacity) {
+    if (park->count == park->capacity && !grow(park)) {
+        IOLog("TegraNVDEC: no memory to park more than %u buffers: an exported picture's buffer goes back\n",
+              park->count);
         SwitchNVDECParked replaced = {block, map};
         replaced.map->release();
         tegra_nvdec_buffer_free(&replaced.block);
@@ -67,4 +85,8 @@ void switch_nvdec_park_drop(SwitchNVDECPark *park, bool returnMemory)
     for (uint32_t i = 0; i < park->count; ++i)
         giveBack(&park->parked[i], returnMemory);
     park->count = 0;
+    if (park->parked)
+        IODelete(park->parked, SwitchNVDECParked, park->capacity);
+    park->parked = nullptr;
+    park->capacity = 0;
 }

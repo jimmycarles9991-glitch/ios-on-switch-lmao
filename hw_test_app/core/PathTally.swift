@@ -26,10 +26,10 @@ public struct PathTally: Equatable, Sendable {
     public var onlyM2V: Bool { !paths.isEmpty && paths.keys.allSatisfy { $0.hasPrefix("m2v:") } }
 
     /// The command buffers the facade did not run whole on the raw path, each under its path, which names the refusal
-    /// that took it off raw.
+    /// that took it off raw ("device": a release runtime, which answers no path, is not counted).
     public var offRaw: PathTally {
         var off = PathTally()
-        for (path, count) in paths where path != "raw" { off.paths[path] = count }
+        for (path, count) in paths where path != "raw" && path != "device" { off.paths[path] = count }
         return off
     }
 

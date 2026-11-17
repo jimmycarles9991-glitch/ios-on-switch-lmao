@@ -116,6 +116,16 @@ final class GPUReferenceTests: XCTestCase {
         raw.add("split:2+1:enc.storage")
         raw.add("refused:call.sampler")
         XCTAssertEqual(raw.offRaw.text, "refused:call.sampler/1,split:2+1:enc.storage/1")
+        var release = PathTally()
+        release.add("device")
+        XCTAssertTrue(release.offRaw.isEmpty)
+        let passed = Outcome.pass(Metrics(), proof: "p", detail: "d")
+        XCTAssertEqual(passed.failing(offRaw: PathTally()).verdict, .pass)
+        let failed = passed.failing(offRaw: raw.offRaw)
+        XCTAssertEqual(failed.verdict, .fail)
+        XCTAssertEqual(
+            failed.detail, "command buffers off the raw path: refused:call.sampler/1,split:2+1:enc.storage/1; d")
+        XCTAssertEqual(failed.proof, "p")
         let metrics = PathTally.counterMetrics(
             before: ["raw": 5, "m2v": 1, "pred.state.notpack": 1],
             after: ["raw": 9, "m2v": 4, "pred.state.notpack": 3, "pred.compute": 1])

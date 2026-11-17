@@ -2,6 +2,7 @@
 // The render encoder's state that persists in the channel between draws: a state's registers by its segment or inline
 // (raw_state_segment.h), and the raster state.
 #include "raw_gpu.h"
+#include "raw_depth_bounds.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -30,6 +31,7 @@ void RenderEncoder::bindState(Push &p, const Pipeline &pl)
         RAW_DIAGNOSTIC(cb_->counts_.segmentSkips++);
         return;
     }
+    rasterHeld_.units = Raster::Units::Unknown;
     if (!pl.segment || !bindsBySegment()) {
         RAW_DIAGNOSTIC(cb_->counts_.segmentCopies += pl.segment && !measuringInline());
         p.raw(pl.methods.data(), uint32_t(pl.methods.size()));
@@ -81,6 +83,14 @@ void RenderEncoder::writeRaster(Push &p, const Raster &want)
     }
 }
 
+void RenderEncoder::writeBiasUnits(Push &p, const Raster &want)
+{
+    if (!want.biasConstant || want.units == Raster::Units::Unknown || want.units == rasterHeld_.units)
+        return;
+    p.m(NVB197_SET_DEPTH_BIAS_CONTROL, want.units == Raster::Units::Format);
+    rasterHeld_.units = want.units;
+}
+
 // NVK's clip control for depth clamp without depth clip (nvk_cmd_draw.c nvk_flush_rs_state): the pixel's depth clamped, no
 // [0, 1] clamp of its own, the geometry clipped in x and y only, its depth guardband wide (SET_VIEWPORT_CLIP_CONTROL
 // MIN_Z_ZERO_MAX_Z_ONE 0:0, GEOMETRY_GUARDBAND_Z 2:1, PIXEL_MIN_Z/MAX_Z 3:3/4:4, GEOMETRY_CLIP 13:11)
@@ -89,6 +99,13 @@ static uint32_t floatBits(float f)
     uint32_t u;
     memcpy(&u, &f, 4);
     return u;
+}
+
+static float bitsFloat(uint32_t u)
+{
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
 }
 
 static uint32_t depthClamped(uint32_t clip)
@@ -101,10 +118,11 @@ static uint32_t depthClamped(uint32_t clip)
 // After the state's bind, whose registers hold its own clip control: the encoder's clamp written over it, and the segment
 // the channel holds no longer its registers. Before Volta the pixel clamp is against the viewport's clip depth range, which
 // NVK's MME sets to the viewport's depth range while clamping and to (-inf, +inf) otherwise (nvk_mme_set_z_clamp).
-bool RenderEncoder::writeClipControl(Push &p, const Pipeline &pl, const char **why)
+bool RenderEncoder::writeClipControl(Push &p, const Pipeline &pl, const Raster &raster, const char **why)
 {
     if (depthClamp_ && !pl.namesViewportClip) {
         *why = "a depth clamp on a state whose registers set no clip control";
+        cb_->refusal = {RefClipControl};
         return false;
     }
     const uint32_t want = depthClamp_ ? depthClamped(pl.viewportClip) : pl.viewportClip;
@@ -113,9 +131,15 @@ bool RenderEncoder::writeClipControl(Push &p, const Pipeline &pl, const char **w
         clipHeld_ = want;
         cb_->heldSegment_.lose();
     }
-    if (depthClamp_) {
-        const float lo = std::min(depthRange_[0], depthRange_[1]), hi = std::max(depthRange_[0], depthRange_[1]);
-        const uint32_t range[2] = {floatBits(lo), floatBits(hi)};
+    // Metal's draws store each depth within its bounds (raw_depth_bounds.h) through the pixel clamp, which a float
+    // zeta's clip control (MIN_Z_ZERO_MAX_Z_ONE clear, raw_emit.cpp) and a clamping one leave to the range
+    if (pass_.metalDepth) {
+        const float unit = raster.units == Raster::Units::Unorm24 ? 0x1p-24f : 0x1p-23f;
+        const DepthBounds bounds =
+            metalDepthBounds(depthClamp_, depthRange_, pl.fragmentDepth,
+                             topDepthBias(raster.bias, bitsFloat(raster.biasConstant), bitsFloat(raster.biasSlope),
+                                          bitsFloat(raster.biasClamp), unit));
+        const uint32_t range[2] = {floatBits(bounds.lo), floatBits(bounds.hi)};
         if (!clampRangeHeld_ || memcmp(range, clampRange_, sizeof range)) {
             writeClipDepthRange(p, range);
             memcpy(clampRange_, range, sizeof range);
@@ -131,7 +155,9 @@ void RenderEncoder::writeClipDepthRange(Push &p, const uint32_t range[2])
 {
     p.m(NVB197_SET_VIEWPORT_CLIP_MIN_Z(0), range[0]);
     p.m(NVB197_SET_VIEWPORT_CLIP_MAX_Z(0), range[1]);
-    cb_->heldSegment_.lose();
+    // the channel holds the last drawn state's segment, whose registers hold the range only where it names it
+    if (!emitted_ || emitted_->namesViewportClipRange)
+        cb_->heldSegment_.lose();
 }
 
 void RenderEncoder::unclampDepthRange(Push &p)

@@ -1,6 +1,7 @@
 """raw's frame held to eq's goldens: rawframe over the eq capture, its log against draws_<kind>.tsv (draw_goldens.py).
 
 usage: eq_test.py <rawframe> <pack.bin> <kind> <testdata dir> [--qc27] <the pack's report files>...
+       --test_env=EQ_UBO_WORDS=1 keeps the uniform buffers' words beside raw.log (ubo.txt, draw_goldens.py rebase)
 
 The frame is the one the goldens were written from (the same corpus, arguments and FRAME_* settings); the pack's own
 programs.bin and layouts.txt (its link's report group) name raw's programs and lay out their set 0 for nvdec.
@@ -33,6 +34,8 @@ def main() -> int:
         FRAME_ALL_STATES='1',
         FRAME_STATES='2000',
     )
+    if os.environ.get('EQ_UBO_WORDS'):
+        env['EQ_UBO_WORDS'] = str(kept / 'ubo.txt')
     if '--qc27' in flags:
         env['FRAME_QC27'] = '1'
     run = subprocess.run(

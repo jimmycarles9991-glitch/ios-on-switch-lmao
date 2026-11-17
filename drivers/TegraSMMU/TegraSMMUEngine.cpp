@@ -4,6 +4,7 @@
 #include <IOKit/IOLocks.h>
 #include "TegraSMMU.h"
 #include "TegraSMMUEngine.h"
+#include "TegraSMMUPublish.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchDMA/SwitchHwPage.h"
 
@@ -88,8 +89,7 @@ uint64_t TegraSMMUEngine::map(const uint64_t *pages, uint32_t count, bool writab
     const uint64_t iova = count ? space.alloc(static_cast<uint64_t>(count) * SWITCH_HW_PAGE_SIZE) : 0;
     if (iova) {
         domain.map(iova, pages, count, writable);  // the window's tables are all installed: it cannot fail
-        cleanDirty(domain);
-        tegra_smmu_flush(asid);
+        switch_smmu_publish(domain, asid, SWITCH_DCACHE_CLEAN);
     }
     IOLockUnlock(lock);
     return iova;
@@ -101,8 +101,7 @@ void TegraSMMUEngine::unmap(uint64_t iova, uint32_t count)
         return;
     IOLockLock(lock);
     domain.unmap(iova, count);
-    cleanDirty(domain);
-    tegra_smmu_flush(asid);
+    switch_smmu_publish(domain, asid, SWITCH_DCACHE_CLEAN);
     space.release(iova, static_cast<uint64_t>(count) * SWITCH_HW_PAGE_SIZE);
     IOLockUnlock(lock);
 }

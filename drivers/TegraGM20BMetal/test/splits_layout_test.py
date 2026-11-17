@@ -67,9 +67,17 @@ class LayOutTest(unittest.TestCase):
         self.assertEqual(self.lay_out({'a': split('fa', frontier_cbuf=2)}), [])
 
     def test_a_frontier_the_runtime_refuses_is_left_out(self) -> None:
-        for frontier_bytes in (0, 24, 4112):
+        for frontier_bytes in (0, 24, 0x10000):
             self.assertEqual(self.lay_out({'a': split('fa', frontier_bytes=frontier_bytes)}), [], frontier_bytes)
-        self.assertEqual(self.lay_out({'a': split('fa', frontier_bytes=4096)}), ['a'])
+        for frontier_bytes in (4096, 4112, 8192, 0xFFF0):
+            self.assertEqual(self.lay_out({'a': split('fa', frontier_bytes=frontier_bytes)}), ['a'], frontier_bytes)
+
+    def test_the_frontier_bound_is_the_runtimes_and_nvks(self) -> None:
+        root = Path(os.path.abspath(__file__)).parents[3]
+        runtime = (root / 'drivers/TegraGM20BMetal/raw/runtime/raw_split_metadata.h').read_text()
+        nvk = (root / 'third_party/mesa/src/nouveau/switch_compile/nvk_switch_split.h').read_text()
+        self.assertIn(f'kMaxFrontierBytes = 0x{splits.MAX_FRONTIER_BYTES:X};', runtime)
+        self.assertIn(f'#define SWITCH_SPLIT_MAX_FRONTIER_BYTES 0x{splits.MAX_FRONTIER_BYTES:X}\n', nvk)
 
 
 class SplitIdentityTest(unittest.TestCase):

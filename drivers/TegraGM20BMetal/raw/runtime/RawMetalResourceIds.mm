@@ -4,17 +4,9 @@
 // (raw_heap_tables.h), and its release names none there again. An ID gets into an argument buffer only through its ask
 // (an encoder's setTexture: asks too), so no other object's creation writes the tables.
 #import "RawMetalInternal.h"
-#include "bridge/NativeMetalDirect.h"
+#include "raw_heap_fit.h"
 #include "raw_resource_id.h"
-
-static_assert(sizeof(raw::HeapTextureFacts) == sizeof(NmbHeapTextureFacts) &&
-                  offsetof(raw::HeapTextureFacts, swizzle) == offsetof(NmbHeapTextureFacts, swizzle),
-              "the bridge's texture facts");
-
-bool rmHeapHolds(uint32_t heapClass, const raw::HeapTextureFacts *facts)
-{
-    return switch_nmb_heap_holds(heapClass, reinterpret_cast<const NmbHeapTextureFacts *>(facts));
-}
+#include "raw_sampler_word.h"
 
 static MTLResourceID resourceId(uint64_t word)
 {
@@ -66,8 +58,7 @@ void rmHeapForgetSampler(RMSampler *s)
     const uint64_t word = raw::textureResourceId(_raw.tic);
     if (word && gRM && !_idNamed.exchange(true, std::memory_order_acq_rel)) {
         const raw::HeapTextureFacts facts = heapFacts(self);
-        const uint32_t flags = switch_nmb_heap_texture_flags(reinterpret_cast<const NmbHeapTextureFacts *>(&facts));
-        if (!gRM->raw->nameTexture(_raw, facts, flags))
+        if (!gRM->raw->nameTexture(_raw, facts, raw::heapTextureFlags(facts)))
             heapRefused("texture");
     }
     return resourceId(word);
@@ -82,11 +73,11 @@ void rmHeapForgetSampler(RMSampler *s)
     const uint64_t word = raw::samplerResourceId(_raw.tsc);
     if (word && gRM && !_idNamed.exchange(true, std::memory_order_acq_rel)) {
         MTLSamplerDescriptor *d = _descriptor;
-        const NmbSamplerDescriptor desc = {d.minFilter,     d.magFilter,       d.mipFilter,   d.sAddressMode,
-                                           d.tAddressMode,  d.rAddressMode,    d.borderColor, d.normalizedCoordinates,
-                                           d.maxAnisotropy, d.compareFunction, d.lodAverage,  d.lodMinClamp,
-                                           d.lodMaxClamp};
-        if (!gRM->raw->nameSampler(_raw, switch_nmb_sampler_word(&desc), _normalized))
+        const raw::SamplerFacts facts = {d.minFilter,     d.magFilter,       d.mipFilter,   d.sAddressMode,
+                                         d.tAddressMode,  d.rAddressMode,    d.borderColor, d.normalizedCoordinates,
+                                         d.maxAnisotropy, d.compareFunction, d.lodAverage,  d.lodMinClamp,
+                                         d.lodMaxClamp};
+        if (!gRM->raw->nameSampler(_raw, raw::samplerWord(facts), _normalized))
             heapRefused("sampler");
     }
     return resourceId(word);

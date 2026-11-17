@@ -107,6 +107,7 @@ bool Device::bindArenaPart(Arena &a, uint64_t offset, uint64_t bytes)
 
 void Device::unbindArena(Arena &a)
 {
+    a.holes.clear();
     if (a.parts.empty()) {  // whole, or trimmed to no part at all: then its BO is already gone and counted out
         if (a.bo.handle) {
             RAW_DIAGNOSTIC(stats.poolBytes -= a.bytes);
@@ -119,7 +120,6 @@ void Device::unbindArena(Arena &a)
         k_.free(part);
     }
     a.parts.clear();
-    a.holes.clear();
 }
 
 bool Device::createArena(uint64_t bytes, bool blockLinear, uint32_t &arena, bool explicitPlacement)
@@ -189,6 +189,7 @@ void Device::destroyArena(uint32_t arena)
 void Device::arenaFree(Span &s)
 {
     Arena &a = arenas_[s.chunk];
+    delete s.storage;
     a.place.release(s.offset, s.bytes);
     s = {};
     if (a.dying && !a.leases)
@@ -286,6 +287,7 @@ bool Device::arenaSpan(const ArenaAt &at, uint64_t bytes, uint64_t align, uint32
         return false;
     }
     t.span = {at.arena, offset, bytes, view + offset, a.cpu + offset};
+    t.span.storage = arenaStorage(a, at.arena, offset, bytes, t.span.va);
     t.arena = true;
     t.wc = a.wc;
     return true;
@@ -352,6 +354,7 @@ bool Device::arenaBuffer(uint32_t arena, uint64_t length, Buffer &b, std::option
     }
     b = {};
     b.span = {arena, offset, bytes, a.bufferVa + offset, a.cpu + offset};
+    b.span.storage = arenaStorage(a, arena, offset, bytes, b.span.va);
     b.arena = true;
     b.wc = a.wc;
     b.va = b.span.va;
@@ -506,15 +509,45 @@ bool Device::backPlacement(Arena &a, uint64_t offset, uint64_t bytes)
 {
     if (a.holes.empty())
         return true;
-    for (const ArenaRange &r : takeHoles(a.holes, offset, bytes, kArenaGranule))
-        if (!bindArenaPart(a, r.offset, r.bytes)) {
-            a.holes.push_back(r);
+    const auto taken = takeHoles(a.holes, offset, bytes, kArenaGranule);
+    for (size_t i = 0; i < taken.size(); ++i)
+        if (!bindArenaPart(a, taken[i].offset, taken[i].bytes)) {
+            a.holes.insert(a.holes.end(), taken.begin() + i, taken.end());
             std::sort(a.holes.begin(), a.holes.end(), [](const ArenaRange &x, const ArenaRange &y) {
                 return x.offset < y.offset;
             });
             return false;
         }
     return true;
+}
+
+const ArenaStorage *Device::arenaStorage(const Arena &arena, uint32_t index, uint64_t offset, uint64_t bytes,
+                                         uint64_t va) const
+{
+    auto *storage = new ArenaStorage{index, offset, arena.cpu + offset};
+    if (arena.bo.handle) {
+        storage->first = {va, bytes};
+    } else {
+        const auto include = [&](StoragePiece piece) {
+            if (!storage->first.bytes)
+                storage->first = piece;
+            else if (piece.va < storage->first.va) {
+                storage->rest.push_back(storage->first);
+                storage->first = piece;
+            } else {
+                storage->rest.push_back(piece);
+            }
+        };
+        for (const auto &[start, part] : arena.parts) {
+            const uint64_t first = std::max(offset, start), last = std::min(offset + bytes, start + part.bytes);
+            if (first < last)
+                include({va + first - offset, last - first});
+        }
+        std::sort(storage->rest.begin(), storage->rest.end(), [](const auto &a, const auto &b) {
+            return a.va < b.va;
+        });
+    }
+    return storage;
 }
 
 bool Device::restoreArena(uint32_t arena)

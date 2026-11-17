@@ -21,7 +21,7 @@ def cbuf_code(cbuf: tuple) -> int:
     """Return a constant buffer's code as the pack names it.
 
     The nvk_cbuf_type, and a UBO descriptor's set-0 offset / 16 in bits 3-7; a UBO elsewhere is 7 (runtime/raw_pack.h
-    PackCbufType, nvk_switch_capture.c switch_nvk_cbuf_code).
+    PackCbufType, switch_compile/nvk_switch_stage.c switch_nvk_cbuf_code).
     """
     kind, desc_set, _dynamic, offset = cbuf
     t = TYPES.get(kind, kind) if isinstance(kind, str) else kind

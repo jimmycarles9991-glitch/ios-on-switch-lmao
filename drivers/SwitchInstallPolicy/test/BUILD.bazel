@@ -1,0 +1,116 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+copy_file(
+    name = "policy_source",
+    src = "//drivers/SwitchInstallPolicy:SwitchInstallPolicy.mm",
+    out = "SwitchInstallPolicy.cpp",
+)
+
+copy_file(
+    name = "policy_header",
+    src = "//drivers/SwitchInstallPolicy:SwitchInstallPolicy.h",
+    out = "SwitchInstallPolicy.h",
+)
+
+[copy_file(
+    name = name + "_source",
+    src = "//drivers/SwitchInstallPolicy:" + name + ".mm",
+    out = name + ".cpp",
+) for name in [
+    "BundleDiscovery",
+    "CapabilityPolicy",
+    "EntitlementDER",
+]]
+
+[copy_file(
+    name = name + "_header",
+    src = "//drivers/SwitchInstallPolicy:" + name + ".h",
+    out = name + ".h",
+) for name in [
+    "BundleDiscovery",
+    "CapabilityPolicy",
+    "EntitlementDER",
+]]
+
+copy_file(
+    name = "policy_fixture",
+    src = "PolicyTests.mm",
+    out = "host/PolicyTests.cpp",
+)
+
+[copy_file(
+    name = name,
+    src = name + ".mm",
+    out = "host/" + name + ".cpp",
+) for name in [
+    "CapabilityTests",
+    "DiscoveryTests",
+]]
+
+[host_test(
+    name = "policy" + version + suffix + "_test",
+    srcs = [
+        ":BundleDiscovery_header",
+        ":BundleDiscovery_source",
+        ":CapabilityTests",
+        ":CapabilityPolicy_header",
+        ":CapabilityPolicy_source",
+        ":EntitlementDER_header",
+        ":EntitlementDER_source",
+        ":policy_fixture",
+        ":policy_header",
+        ":policy_source",
+        "//drivers/SwitchInstallPolicy:core_entitlements_" + xnu,
+        "//kernel/switch:include/switch/capabilities.h",
+    ],
+    args = ["bad-abi"] if suffix else [],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-I",
+        "kernel/switch/include",
+        "-idirafter",
+        "kernel/xnu-" + xnu + "/EXTERNAL_HEADERS",
+    ],
+    defines = [
+        "SWITCH_INSTALL_POLICY_TEST=1",
+        "SWITCH_INSTALL_POLICY_IOS27=" + ios27,
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+) for version, ios27, xnu in [
+    ("17", "0", "10063.141.1"),
+    ("27", "1", "12377.121.6"),
+] for suffix in [
+    "",
+    "_bad_abi",
+]]
+
+host_test(
+    name = "discovery_test",
+    srcs = [
+        ":BundleDiscovery_header",
+        ":BundleDiscovery_source",
+        ":DiscoveryTests",
+    ],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)

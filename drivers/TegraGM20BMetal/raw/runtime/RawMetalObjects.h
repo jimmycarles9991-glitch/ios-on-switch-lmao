@@ -28,7 +28,9 @@
 #include "raw_variant.h"
 #include "raw_library_source.h"
 #include "raw_metallib_functions.h"
+#include "raw_render_variant.h"
 #include "raw_obtained.h"
+#include "RawMetalXrShadow.h"
 
 namespace raw {
 template <typename T> class ComputeKernelJob;
@@ -38,6 +40,13 @@ struct ComputeState;
 
 @class RMDevice, RMCommandBuffer, RMCounterSampleBuffer;
 struct SurfaceWriteCount;
+struct RMPassCache;
+
+struct RMPassCacheDelete {
+    void operator()(RMPassCache *cache) const;
+};
+
+using RMPassCachePtr = std::unique_ptr<RMPassCache, RMPassCacheDelete>;
 
 // An m2v twin made outside its object's lock, kept if no other thread kept one first (theirs is returned, this one dropped). The
 // object's lock is never held across a call into m2v: a thread inside m2v holding one of its locks (its handlers run Core
@@ -78,7 +87,7 @@ static inline id twinPublish(id object, __strong id &slot, id made)
 @public
     std::string _framework;  // "QuartzCore", "RenderBox"...; empty: not a framework's default library (never looked up)
     std::shared_ptr<raw::LibrarySource> _source;
-    raw::MetallibFunctions _functions;  // empty: an m2v library from its creation
+    raw::MetallibFunctions _functions;  // none listed: an m2v library from its creation
 }
 - (id)twinOn:(id<MTLDevice>)m2v;
 @end
@@ -93,6 +102,7 @@ static inline id twinPublish(id object, __strong id &slot, id made)
     RMLibrary *_library;       // the library a twin is made of, while none is
     MTLFunctionConstantValues *_values;  // what a specialized twin is made with
     uint32_t _type;                      // MTLFunctionType from the metallib; 0: the twin's
+    MTLFunctionOptions _options;
 }
 @property (nonatomic, copy) NSString *name;
 - (id)twinOn:(id<MTLDevice>)m2v;
@@ -158,6 +168,10 @@ enum class RMShareable : uint8_t {
     IOSurfaceRef _surface;
     SurfaceWriteCount *_surfaceWrites;  // its surface's writes (RawMetalSurfaceWrites.mm), held while it lives
     NSUInteger _plane;
+    // A plane whose offset or rows are off 16: Metal's GPU reads it from both rounded down to 16 (_raw's layout), its CPU
+    // from the plane's own (m2v linear_plan.rs, measured), here; null: the CPU's rows are _raw's
+    uint8_t *_cpuRows;
+    size_t _cpuPitch;
     // a planar texture's image (4:2:0 converted, 4:4:4 codes) holds its surface at this seed (_imageCurrent): converted
     // again only once the surface's seed moves (r8a: a YouTube page's thumbnails converted again at every command buffer)
     uint32_t _imageSeed;
@@ -169,6 +183,9 @@ enum class RMShareable : uint8_t {
     // twin views too; the view's type is its descriptor's
     NSRange _viewLevels, _viewSlices;
     bool _viewPart;
+    // The parent chain keeps this owner alive; absolute subresources are prepared when a view is made.
+    RMTexture *__unsafe_unretained _levelsOwner;
+    uint32_t _levelsBase, _slicesBase;
     RMBuffer *_buffer;  // a texture over a buffer's
     NSUInteger _offset, _rowBytes;
     std::atomic<bool> _gpuDirty;
@@ -184,6 +201,20 @@ enum class RMShareable : uint8_t {
     std::atomic<bool> _freshUnwritten;  // a fresh texture no command wrote yet (RawMetalFresh.mm traceFreshUses)
 #endif
 }
+// Metal's CPU copies as they move this texture's own texels (RawMetalTexture.mm): what replaceRegion and getBytes do
+// past an RGB10A8_2P_XR10 texture's colour words (cpuXrWords)
+- (void)rmReplaceRegion:(MTLRegion)r
+            mipmapLevel:(NSUInteger)level
+                  slice:(NSUInteger)slice
+              withBytes:(const void *)bytes
+            bytesPerRow:(NSUInteger)row
+          bytesPerImage:(NSUInteger)image;
+- (void)rmGetBytes:(void *)bytes
+       bytesPerRow:(NSUInteger)row
+     bytesPerImage:(NSUInteger)image
+        fromRegion:(MTLRegion)r
+       mipmapLevel:(NSUInteger)level
+             slice:(NSUInteger)slice;
 @end
 
 @interface RMSampler : RMObject {
@@ -205,13 +236,14 @@ enum class RMShareable : uint8_t {
     // its record is the pack's, and so are its variants' (RawMetalCubic.mm packedVariants); a record this process made is
     // not, and its variants are made as well
     bool _packed;
-    bool _completable;  // both its functions are this device's (the runtime makes its record if the pack has none)
+    bool _completable;  // its functions, fragment or none, are this device's (made at creation where the pack has none)
     bool _archived;     // an archive its creation listed declares it: its twin is made as a packed one's
     bool _caTransform;
     // its alpha to coverage and alpha to one (raw_alpha_control.h), which its key does not hold
     uint32_t _alphaControl;
     std::string _failure;  // why its creation failed (Completion::makeNow), as Metal's would
     std::string _key;      // its pack key (completable states')
+    uint64_t _packKey;     // the hash the pack finds its records and reflection by (its key's, or its key and AIR's)
     MTLRenderPipelineDescriptor
         *_madeFrom;                  // completable states': what its cubic variants and a later twin are made of
     const char *_m2vMissing;         // what of it m2v has no form of (rmM2vMissingState), null: nothing
@@ -277,6 +309,7 @@ struct RMPass {
         MTLLoadAction load;
         MTLStoreAction store;
         bool resolve;
+        uint32_t sourceTic = 0;
     } zeta[2];
 
     __unsafe_unretained id depthResolve;    // its depth resolve's texture, nil for none
@@ -290,8 +323,10 @@ struct RMPass {
     raw::SamplePositions positions;
     uint8_t compressed = 0;        // colour attachments on compressed memory as the pass was made (raw_private_comp.h)
     bool testsHiddenZeta = false;  // a depth/stencil state set in it tests depth or stencil (raw::testsHiddenZeta)
+    bool xrPlaneBinds = false;     // it binds a two-plane RGB10A8_2P_XR10 texture, which a draw may store through
     bool continues =
         false;  // a parallel encoder's sub-encoder after its first: the pass before it goes on (raw_parallel.h)
+    uint8_t xrShadows = 0;  // the extended-range colours whose half shadow it holds (raw_xr_shadow.h)
 };
 
 // A command buffer's setBytes data, written once where the GPU reads it: write-combined pool chunks the raw encode binds in place
@@ -411,7 +446,7 @@ struct RMSharedEventWait {
     bool _submittedM2v;
     // a drawable present was added (its completion is observed); the range being submitted ends quiet
     // (raw_completion_source.h)
-    bool _presents, _rangeQuiet;
+    bool _presents, _rangeQuiet, _rangeHeld;
     // writer promises (Device::promise) made when it counted as scheduled before its work reached the kernel, under
     // _lock; taken once its last raw range carries them to the kernel or finish() cancels them. _promised: any were
     // asked for, read without the lock by the frame path
@@ -425,8 +460,15 @@ struct RMSharedEventWait {
     // variant for them (raw_xr_pass.h): only these of that format get their stand-in drawn
     std::set<RMTexture *> _xrStandIns;
     RMCommandPlan _plan;
+    bool _recordingReturned;
+    RMPassCachePtr _passCache;
     raw::GrowList<RMPass> _passes;  // OpRender's (Cmd::x)
     uint32_t _recordedPass;         // the OpRender the draws being recorded belong to
+    // extended-range shadows (RawMetalXrShadow.h): the open render encoder's draws, the passes that hold shadows, and the
+    // one the raw encode is in (null: none)
+    RMXrShadowOpen _xrShadowOpen;
+    std::vector<RMXrShadowTwins> _xrShadowPasses;
+    const RMXrShadowTwins *_xrShadowCurrent;
     // compressed attachments a recorded draw binds as storage images with no barrier form: plain before the raw encode
     std::vector<RMTexture *> _plainForStorage;
     bool _scanStorageTargets;  // a pipeline bound in such a pass was a variant still being made
@@ -522,6 +564,7 @@ struct RMSharedEventWait {
     uint64_t _preds;          // every refusal predicate it hit (1 << RMPred)
     uint64_t _predA, _predB;  // the first one's values
     uint8_t _pred0;           // the first one
+    uint8_t _failedBy;        // the predicate that failed it (predFailure), 0: none
 #if SWITCH_FRAME_TIMELINE
     switch_frame::Stamps _frame;
 #endif
@@ -537,9 +580,14 @@ struct RMSharedEventWait {
 - (void)recordBinding:(const Cmd &)cmd __attribute__((objc_direct));
 @end
 
+// `cb` fails with predicate `p`'s error (predFailure): one error line a process and reason, kept in release, naming
+// `detail` where given (RawMetalPredicates.mm)
+void predFails(RMCommandBuffer *cb, RMPred p, uint64_t a, uint64_t b, const char *detail);
+
 // A refusal predicate hit while recording (or encoding) `cb`: into its mask; the first one's values kept; the process's first hit
-// of `p` logged with them
-static inline void hit(__unsafe_unretained RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b = 0)
+// of `p` logged with them; a predicate of predFailure fails the command buffer
+static inline void hit(__unsafe_unretained RMCommandBuffer *cb, RMPred p, uint64_t a = 0, uint64_t b = 0,
+                       const char *detail = nullptr)
 {
     cb->_preds |= 1ull << p;
     if (!cb->_pred0) {
@@ -547,8 +595,10 @@ static inline void hit(__unsafe_unretained RMCommandBuffer *cb, RMPred p, uint64
         cb->_predA = a;
         cb->_predB = b;
     }
+    if (predFailure(p))
+        return predFails(cb, p, a, b, detail);
     if (!predLogged(p))
-        logPred(p, a, b, nil);
+        logPred(p, a, b, detail ? @(detail) : nil);
 }
 
 // Why a command buffer's tape is encoded at its commit, not as its encoders end (RMCommandBuffer::_pipelineVeto, and the
@@ -556,7 +606,7 @@ static inline void hit(__unsafe_unretained RMCommandBuffer *cb, RMPred p, uint64
 enum RMPipelineVeto : uint32_t {
     VetoWhole = 1u << 0,       // a refusal outside any encoder: all of it goes to m2v
     VetoCounters = 1u << 1,    // counter samples
-    VetoShadows = 1u << 2,     // a texture sampled through a pool image, an extended-range stand-in
+    VetoShadows = 1u << 2,     // a texture sampled through a pool image, an extended-range stand-in or half shadow
     VetoStorage = 1u << 3,     // compressed attachments bound as storage images (raw_private_comp.h)
     VetoProbes = 1u << 4,      // HW Test's probes
     VetoParallel = 1u << 5,    // a parallel render encoder's sub-encoders
@@ -606,13 +656,17 @@ uint64_t nextTraceId();
                    [31];  // stage 1 vertex, 2 fragment: the bound buffer's address plus offset (setBytes: 0, aligned)
     __unsafe_unretained RMBuffer *_buf[3][31];
     __unsafe_unretained RMTexture *_tex[2][raw::kStageTextures];  // vertex, fragment textures
-    // fragment samplers; `_cubicMask`: the slots of those that are cubic (raw_cubic.h)
-    __unsafe_unretained RMSampler *_samp[16];
-    uint16_t _cubicMask;
+    __unsafe_unretained RMSampler *_samp[2][16];
+    uint16_t _cubicMask[2];
     // `_samp` slots whose sampler the plan holds bound since `_sampEpoch` (RMCommandPlan::stateEpoch): binding the same
     // one again records nothing
-    uint16_t _sampRecorded;
+    uint16_t _sampRecorded[2];
     uint64_t _sampEpoch;
+    raw::RenderVariant _forms;
+    raw::Variant<raw::Pipeline> *_formVariant, *_sampledVariant;
+    uint16_t _formSamplers[2];  // populated when a cubic binding first needs this pipeline's sampler slots
+    raw::StageTextureMask _cubicTextures[2];
+    std::array<raw::StageTextureMask, 2> _sampledSlots;
     // moves with each bind that can change what checkDraw decides (setBytes and a plain texture's or sampler's cannot);
     // checkDraw's last full check was at `_checkedEligibility`, `_checkedEpoch` and `_checkedPipeline`
     uint32_t _eligibility, _checkedEligibility;
@@ -629,7 +683,7 @@ uint64_t nextTraceId();
     uint32_t _passAt;      // its pass's RMPass (the command buffer's _passes)
     raw::DepthStencilDesc _ds;
     MTLRenderPassDescriptor *_pass;  // the command buffer's copy, which the raw encode and m2v's replay read
-    bool _passShared;                // _pass is the thread's copy for passes of its contents (RawMetalPassCache.h)
+    bool _passShared;                // _pass is the recording bank's immutable copy (RawMetalPassCache.h)
     size_t _renderAt;                // its OpRender in the command buffer's plan
     __unsafe_unretained id<MTLBuffer> _visibility;  // its pass's visibility result buffer (the command buffer holds it)
     bool _drew;                                     // a draw recorded
@@ -703,7 +757,8 @@ static inline void setBinding(__unsafe_unretained RMCommandBuffer *cb, Op op, in
 id<MTLSamplerState> clampedSampler(id<MTLSamplerState> s, float lodMin, float lodMax);
 
 @interface RMRenderEncoder ()
-- (void)checkDraw __attribute__((objc_direct));  // (RawMetalRenderEncoder.mm)
+// (RawMetalRenderEncoder.mm) NO: a draw Apple's driver draws nothing defined for, which is skipped (raw_client_errors.h)
+- (BOOL)checkDraw __attribute__((objc_direct));
 @end
 
 // RawMetalEncoder.mm: the encoder's own copy of its pass, where it shares the thread's, before it changes it
@@ -711,13 +766,14 @@ void rmOwnPass(RMRenderEncoder *e);
 
 // A texture or sampler bound at slot `index` of stage `stage` (1 vertex, 2 fragment), as its setter binds it
 // (RawMetalBindings.mm)
-void rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLTexture> t,
+bool rmBindTexture(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLTexture> t,
                    NSUInteger index);
-void rmBindSampler(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLSamplerState> s,
+bool rmBindSampler(__unsafe_unretained RMRenderEncoder *e, int stage, __unsafe_unretained id<MTLSamplerState> s,
                    NSUInteger index);
 
 @interface RMRenderEncoder (Cubic)
 - (const raw::Pipeline *)drawnRecord __attribute__((objc_direct));  // (RawMetalCubic.mm)
+- (void)prepareDrawnRecord __attribute__((objc_direct));
 @end
 
 #if SWITCH_FRAME_TIMELINE

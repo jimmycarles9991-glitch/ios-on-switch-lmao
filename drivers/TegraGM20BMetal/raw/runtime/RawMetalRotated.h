@@ -9,6 +9,8 @@
 bool rotatedShape(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane, raw::Rotation &out);
 // Such a texture over the plane's own memory, its rotation kept (Texture::rotation)
 bool createRotated(RMTexture *t, MTLTextureDescriptor *d, IOSurfaceRef s, const raw::Rotation &r);
+// Whether `d` asks a rotation of a texture over no surface plane, which Metal makes none of: its line logged
+bool refuseTurnedOffSurface(MTLTextureDescriptor *d);
 
 // Why the raw path does not draw a pass of attachments `pass` straight into its turned planes, None where it does or nothing
 // is turned

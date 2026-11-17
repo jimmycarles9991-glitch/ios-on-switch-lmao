@@ -84,10 +84,10 @@ void copySlots(raw::BlitEncoder *be, RMIndirectCommandBuffer *from, RMIndirectCo
 
 @end
 
-void encodeCommandsBlit(raw::BlitEncoder *be, const Cmd &c)
+void encodeCommandsBlit(raw::CommandBuffer *rc, raw::BlitEncoder *be, const Cmd &c)
 {
     if ([(__bridge id)c.obj2 isKindOfClass:[RMIndirectComputeBuffer class]]) {
-        encodeKernelCommandsBlit(be, c);
+        encodeKernelCommandsBlit(rc, be, c);
         return;
     }
     RMIndirectCommandBuffer *from = (__bridge RMIndirectCommandBuffer *)c.obj;
@@ -95,6 +95,9 @@ void encodeCommandsBlit(raw::BlitEncoder *be, const Cmd &c)
     const uint64_t toBytes = uint64_t(to->_slotWords) * 4;
     const NSUInteger first = NSUInteger(c.c), count = NSUInteger(c.x), into = c.op == OpCopyCommands ? c.a : first;
     if (be) {
+        if (c.op == OpCopyCommands)
+            rc->use(from->_raw, false);
+        rc->use(to->_raw, true, false);
         be->access(c.op == OpCopyCommands ? (__bridge void *)from : nullptr, (__bridge void *)to);
     }
     std::vector<RMICBCommand> commands(count);

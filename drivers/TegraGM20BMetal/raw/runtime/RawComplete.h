@@ -30,6 +30,8 @@ namespace raw {
 class Device;
 struct ComputeRecord;
 struct ComputeState;
+struct MadeLibrary;
+struct PackComputeFacts;
 struct Pipeline;
 
 class Completion {
@@ -65,8 +67,8 @@ public:
     void askVariant(Ask a, Ready ready);
     // The state's pipeline now, on the caller's thread: its record from this process or the disk (a state made in an earlier
     // boot is raw from its first draw), else made while the thread waits, as Metal makes a state at its creation, so its
-    // first draw is raw. Null with `failure` empty: refused (m2v draws it); with it, the creation fails with it as Metal's
-    // does: no compiler comes this boot, its compile could not run, or the shader heap is full.
+    // first draw is raw. Null: the creation fails with `failure` as Metal's does: the compiler refused the state, no request
+    // names it, no compiler comes this boot, its compile could not run, or the shader heap is full.
     Pipeline *makeNow(Ask a, std::string &failure);
 
     // The kernel of compute key `key` (raw_compute_key.h) for `descriptor` (over m2v's functions) at `dispatch`, placed:
@@ -76,6 +78,17 @@ public:
     const ComputeState *kernel(MTLComputePipelineDescriptor *descriptor, const NmbDirectDispatch &dispatch,
                                const std::string &key, bool *retry = nullptr, id facadeFunction = nil,
                                bool *gone = nullptr);
+
+    // The answers of a compute state the pack lacks (raw_pack.h PackComputeFacts): `descriptor`'s over the facade's
+    // `facadeFunction`, of raw_compute_key.h computeStateKey `stateKey`, the shader compiler's from its store or made while
+    // this thread sleeps, as a state's creation waits for its record. False with `failure` as makeNow's: no compiler
+    // comes, or it made none; no process makes them itself.
+    bool facts(id facadeFunction, MTLComputePipelineDescriptor *descriptor, const std::string &stateKey,
+               PackComputeFacts &out, std::string &failure);
+    // The library the system's Metal front end makes of code generation request `bytes` of `type` (raw_codegen_request.h),
+    // the shader compiler's from its store or made while this thread sleeps. False with `failure`: the front end's error
+    // log (`refused`), or why no compiler made it; no process makes one itself.
+    bool library(uint32_t type, const std::string &bytes, MadeLibrary &out, std::string &failure, bool &refused);
 
     void backgroundKernel(std::function<void()> work);
 
@@ -91,6 +104,17 @@ public:
         return remote_->storeMapping(bytes);
     }
 
+    // A state's reflection blob (raw_reflection_blob.h) from the system shader compiler's store, asked of the compiler where
+    // the store lacks it while the calling thread waits: a render state's of `a`, or the compute state's of `function` (this
+    // facade's) under `descriptor`'s limits and its computeStateKey `stateKey`. False with `why`: the compiler gave none
+    bool reflection(Ask a, std::string &blob, std::string &why);
+    bool reflection(id function, MTLComputePipelineDescriptor *descriptor, const std::string &stateKey,
+                    std::string &blob, std::string &why);
+    // The attributes blob (raw_function_attributes.h) of `function` (this facade's), keyed by its functionAttributesKey
+    bool attributes(id function, const std::string &functionKey, std::string &blob, std::string &why);
+    // The buffer encoders blob (raw_buffer_encoders.h) of `function` (this facade's), keyed by its bufferEncodersKey
+    bool bufferEncoders(id function, const std::string &functionKey, std::string &blob, std::string &why);
+
     // What the calling thread's last makeNow got its record by
     static Obtained lastObtained();
     static void noteObtained(const Obtained &o);
@@ -98,8 +122,10 @@ public:
 private:
     struct Pending;
     void request(Ask asked, std::shared_ptr<Pending> pending);
-    std::string failureOf(const CacheKey &k);
-    void place(const CacheKey &key, const RuntimeRecord *record, bool caTransform, std::shared_ptr<Pending> pending);
+    std::string failureOf(const CacheKey &k, bool creation);
+    // `qos`: the asker's class, which the record is placed at (raw_answer_class.h)
+    void place(const CacheKey &key, const RuntimeRecord *record, bool caTransform, uint32_t qos,
+               std::shared_ptr<Pending> pending);
 
     struct Kernel {
         raw::Mutex lock;
@@ -122,8 +148,13 @@ private:
 
     // RawCompleteRemote.mm: the system shader compiler's side
     // `every`: each library's bytes, a system one's too, as a data library
-    bool renderRequest(const Ask &a, const CacheKey &k, bool bytes, CompileRequest &r, Digest &name,
-                       bool every = false);
+    bool renderRequest(const Ask &a, const CacheKey &k, bool bytes, CompileRequest &r, Digest &name, bool every = false,
+                       RequestKind kind = RequestKind::Render);
+    // A reflection entry of `k` from the store, else asked of the compiler with `request`'s (`every`: as renderRequest's)
+    bool storedReflection(const std::function<bool(bool every, CompileRequest &, Digest &)> &request, const CacheKey &k,
+                          std::string &blob, std::string &why);
+    // storedReflection of one function of this facade as a request's one stage tagged `tag`
+    bool functionReflection(const char *tag, id function, const CacheKey &k, std::string &blob, std::string &why);
     RecordCache::Found fromStore(const Digest &name, const CacheKey &k, RuntimeRecord &record, std::string &why);
     // Why a state's creation fails where no compiler makes it (makeNow's `failure`)
     static constexpr const char kNoCompilerComes[] =
@@ -142,7 +173,7 @@ private:
     Compiler::Outcome remoteKernel(id facadeFunction, MTLComputePipelineDescriptor *descriptor,
                                    const NmbDirectDispatch &dispatch, const CacheKey &k, ComputeRecord &record,
                                    std::string &why, bool &taken);
-    void logRemote(const Ask &a, const CacheKey &k, RecordCache::Found found, const char *how, uint64_t waitedUs);
+    void logRemote(const Ask &a, const CacheKey &k, RecordCache::Found found, const char *how, const Obtained &o);
 };
 
 #if SWITCH_RAW_DIAGNOSTICS

@@ -18,9 +18,9 @@ namespace raw {
 inline bool operator<(const BoundTexture &a, const BoundTexture &b)
 {
     return std::tie(a.slot, a.pixelFormat, a.textureType, a.levels, a.arrayLength, a.swizzle[0], a.swizzle[1],
-                    a.swizzle[2], a.swizzle[3]) < std::tie(b.slot, b.pixelFormat, b.textureType, b.levels,
-                                                           b.arrayLength, b.swizzle[0], b.swizzle[1], b.swizzle[2],
-                                                           b.swizzle[3]);
+                    a.swizzle[2], a.swizzle[3], a.planes) < std::tie(b.slot, b.pixelFormat, b.textureType, b.levels,
+                                                                     b.arrayLength, b.swizzle[0], b.swizzle[1],
+                                                                     b.swizzle[2], b.swizzle[3], b.planes);
 }
 
 inline uint32_t computeLodBits(float value)

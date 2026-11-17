@@ -8,7 +8,7 @@
 namespace {
 struct Image {
     uint64_t va = 4096;
-    uint32_t pitch = 256, height = 64, depth = 1, layers = 1;
+    uint32_t pitch = 256, height = 64, depth = 1, layers = 1, format = 80;
     uint64_t layerBytes = 0;
 
     struct Span {
@@ -137,6 +137,19 @@ TEST(AttachmentLifetime, PitchAndShadowTargetsCanKeepTheSameImageAcrossPasses)
         EXPECT_FALSE(raw::fusionTargetEligible(image, 0));
         image.*flag = false;
     }
+}
+
+// A target of a format the GM20B renders none of is rendered through a stand-in each pass fills and puts back
+// (raw_format_standin.h): a pass fused into the one before would neither
+TEST(AttachmentLifetime, AFormatStandInsTargetIsNotFused)
+{
+    Image image;
+    for (uint32_t format : {11u, 41u, 42u, 93u}) {
+        image.format = format;
+        EXPECT_FALSE(raw::fusionTargetEligible(image, 0)) << format;
+    }
+    image.format = 71;
+    EXPECT_TRUE(raw::fusionTargetEligible(image, 0));
 }
 
 TEST(AttachmentLifetime, EverySimultaneousScratchMaskHasDisjointStorage)

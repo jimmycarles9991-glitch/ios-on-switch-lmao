@@ -63,6 +63,9 @@ def _shader_crawl_repository_impl(rctx):
     python = str(rctx.path(rctx.attr._python))
     pins = json.decode(rctx.attr.pins)
     for source in rctx.attr._crawler:
+        # A recorded input: without the watch the repository contents cache keys the crawl by the labels alone, and an
+        # edit to the crawler never crawls again on a Mac that holds an entry.
+        rctx.watch(source)
         rctx.symlink(rctx.path(source), "crawler/tools/gpu/shaders/" + source.name)
     images = [_image(rctx, python, role, pins[role]) for role in ("os", "system_cryptex", "app_cryptex")]
     rctx.report_progress("crawling the images for Metal libraries")

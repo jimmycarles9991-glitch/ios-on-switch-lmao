@@ -99,3 +99,57 @@ struct ReplaceRegionScene: GPUScene {
         return result
     }
 }
+
+/// replaceRegion and getBytes of level 0 of a mipmapped shared texture on the raw facade: the copy engine moves them, as
+/// it moves every later level (a chain's level 0 is the texture itself, which the device refused, so its CPU copies fell
+/// to the CPU's swizzle). The bytes read back are the ones written, every level apart keeps its own, and the facade's
+/// texture_uploads and texture_readbacks count one each.
+struct ChainLevelZeroScene: GPUScene {
+    let id = "gpu.upload.chain_level0"
+    let name = "replaceRegion and getBytes of a mipmapped texture's level 0 by the copy engine"
+
+    func run(_ gpu: GPU) async throws -> SceneResult {
+        var result = SceneResult()
+        let (width, height, format) = (64, 64, TexelFormat.bgra8Unorm)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: format.metal, width: width, height: height, mipmapped: true)
+        descriptor.usage = [.shaderRead]
+        descriptor.storageMode = .shared
+        guard let texture = gpu.device.makeTexture(descriptor: descriptor) else {
+            throw TestFailure("makeTexture of a mipmapped shared 64x64 BGRA8 returned nil")
+        }
+        let before = RawFacade.counters(of: gpu.device)
+        let levelOne = UploadRect(x: 0, y: 0, width: width / 2, height: height / 2)
+        let one = Patterns.bytes(
+            Patterns.busy(width: levelOne.width, height: levelOne.height, channels: format.channels, seed: 9), format)
+        texture.replace(
+            region: levelOne.region, mipmapLevel: 1, withBytes: one, bytesPerRow: levelOne.width * format.bytesPerTexel)
+        let whole = UploadRect(x: 0, y: 0, width: width, height: height)
+        let zero = Patterns.bytes(
+            Patterns.busy(width: width, height: height, channels: format.channels, seed: 3), format)
+        GPU.replace(whole, zero, in: texture, texel: format.bytesPerTexel)
+        let back = GPU.getBytes(whole, from: texture, texel: format.bytesPerTexel)
+        result.compare(
+            "level 0 getBytes", bytes: back, expected: zero, format: format, width: width, height: height, tolerance: 0)
+        var levelOneBack = [UInt8](repeating: 0, count: one.count)
+        texture.getBytes(
+            &levelOneBack, bytesPerRow: levelOne.width * format.bytesPerTexel, from: levelOne.region, mipmapLevel: 1)
+        result.compare(
+            "level 1 kept", bytes: levelOneBack, expected: one, format: format, width: levelOne.width,
+            height: levelOne.height, tolerance: 0)
+        guard RawFacade.kind(of: gpu.device) == "raw" else {
+            result.notes.append("the copy-engine route is the raw facade's")
+            return result
+        }
+        let after = RawFacade.counters(of: gpu.device)
+        for key in ["texture_uploads", "texture_readbacks"] {
+            guard let first = before[key], let last = after[key] else {
+                result.notes.append("\(key) route counters unavailable in this build")
+                continue
+            }
+            result.metrics.set(key, last - first)
+            result.expect(last - first >= 2, "\(key) \(last - first): level 0 did not go through the copy engine")
+        }
+        return result
+    }
+}

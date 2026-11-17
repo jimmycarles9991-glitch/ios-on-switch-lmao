@@ -10,7 +10,7 @@ Tiers, each name in the first that has it:
              makes a generic state (g: the uber shader) only out of its binary archive, failing on a miss; the raw
              runtime answers such a creation from the pack as the device's archive would. QuartzCore 27 asks for every
              generic state of its manifest at boot (17 F "Metal failed to load render pipeline" lines each iOS 27 boot
-             while they were left out); 21H461's are left out until a 17 boot shows the same
+             while they were left out); QuartzCore 17 makes them the same way, so both builds' tiers hold them
   variants   QuartzCore 27's: every member of the texture function families of the two above that a filter picks among
              at draw time (glass variants, blur passes: caspec27.VARIANT_FAMILIES), on the same pipeline
   blend      every fragment state of the tiers above under every blend CA puts in the pipeline (those
@@ -142,7 +142,7 @@ def labels(
     manifest = [
         form
         for m in tables.t['manifest']
-        if m[0][0] == 'P' and (tables.v27 or not caspec.decode(tables, m[0]).flag('g'))
+        if m[0][0] == 'P'
         for form in dict.fromkeys([m[0], *deepcolour.asked(tables, m[0], cif10)])
     ]
     variants = _variant_tier(tables, list(corpus) + manifest)

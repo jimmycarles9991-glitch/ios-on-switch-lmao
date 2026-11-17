@@ -19,12 +19,12 @@ import SwitchTexturePattern
 /// wrote with no lock (its seed still 0) before it sampled it first, whose rows must survive its tiling; and a surface
 /// the app sampled first that NVJPG then decodes a JPEG into (`nvjpg<size>`, read against the picture within
 /// JPEGSurfaceDecode.tolerance): NVJPG writes the blocks GM20B decided. The app-made surfaces must read block-linear
-/// (`<case>_layout=1`). A surface the app makes and hands to the peer to render (`handoff`, the peer keeping its texture)
-/// is mapped by two processes when the peer first writes it, and must stay pitch (`handoff<size>_layout=0`), so the app
-/// reads it as rows with a lock and without one (`bare`). Every case also goes through a CGImage made from the surface
-/// under a read lock, PNG-encoded and decoded by ImageIO, as a widget snapshot is saved and loaded (`image`, its colour
-/// bytes). Two shapes: 256x256 and the 260x260 of the home screen's large widget. A read that matches the pattern laid
-/// out in GOBs reports `<case>_<reader>_gob=1`: block-linear texels seen as rows (the Maps widget's garbage on boot 21).
+/// (`<case>_layout=1`), and so must a surface the app makes and hands to the peer to render (`handoff`, the peer keeping
+/// its texture, as the render server fills a snapshot): its CPU lock reads rows. Every case also goes through a CGImage
+/// made from the surface under a read lock, PNG-encoded and decoded by ImageIO, as a widget snapshot is saved and loaded
+/// (`image`, its colour bytes). Two shapes: 256x256 and the 260x260 of the home screen's large widget. A read that
+/// matches the pattern laid out in GOBs reports `<case>_<reader>_gob=1`: block-linear texels seen as rows (the Maps
+/// widget's garbage on boot 21).
 struct SurfaceCrossProcessTest: HWTest {
     let id = "gpu.iosurface.cross_process"
     let name = "An IOSurface one process renders reads as rows in another, by CPU lock and by GPU import"
@@ -66,9 +66,7 @@ struct SurfaceCrossProcessTest: HWTest {
                 if let gpuConnection = GPUConnection() {
                     let (kr, layout) = gpuConnection.surfaceLayout(surface)
                     metrics.set("\(label)_layout", kr == KERN_SUCCESS ? String(layout) : GPUConnection.hex(kr))
-                    if order == "handoff" {
-                        checks.append(("\(label): pitch", kr == KERN_SUCCESS && layout == 0))
-                    } else if order != "dropped" {
+                    if order != "dropped" {
                         checks.append(("\(label): block-linear", kr == KERN_SUCCESS && layout == 1))
                     }
                 }
@@ -78,7 +76,6 @@ struct SurfaceCrossProcessTest: HWTest {
                 withExtendedLifetime(sampler) {}
                 let jpeg = order == "nvjpg"
                 var reads = [("cpu", cpu, 4), ("gpu", gpuRows, 4)]
-                if order == "handoff" { reads.append(("bare", Self.bareRows(surface), 4)) }
                 if !jpeg { reads.append(("image", Self.imageRows(surface), 3)) }
                 for (reader, got, channels) in reads {
                     let (wrong, first) =
@@ -171,19 +168,6 @@ struct SurfaceCrossProcessTest: HWTest {
         }
         surface.unlock(options: .readOnly, seed: nil)
         return (out, Int((DispatchTime.now().uptimeNanoseconds - start) / 1000))
-    }
-
-    /// Its texels as rows read through the surface's own mapping with no lock, as a reader that skips IOSurfaceLock
-    /// does
-    static func bareRows(_ surface: IOSurface) -> [UInt8] {
-        var out = [UInt8](repeating: 0, count: surface.width * surface.height * 4)
-        for y in 0..<surface.height {
-            out.withUnsafeMutableBytes {
-                $0.baseAddress!.advanced(by: y * surface.width * 4).copyMemory(
-                    from: surface.baseAddress + y * surface.bytesPerRow, byteCount: surface.width * 4)
-            }
-        }
-        return out
     }
 
     /// A CGImage over the surface's bytes under a read lock, PNG-encoded, then decoded by ImageIO and drawn into BGRA

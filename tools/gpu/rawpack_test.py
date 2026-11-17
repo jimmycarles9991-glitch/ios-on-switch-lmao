@@ -1,46 +1,21 @@
-import hashlib
 import os
 import re
-import tempfile
 import unittest
 from pathlib import Path
 
 from tools.gpu.rawpack import (
+    FORMAT_STAND_INS,
     OS_BUILD,
     YCBCR_RENDERED,
     YCBCR_TARGETS,
     app_line,
     app_states,
     framework_line,
-    library_view,
     own_build,
     probe_lines,
+    stand_in,
     stand_in_lines,
-    ycbcr_stand_in,
 )
-
-
-class NativeLibraries(unittest.TestCase):
-    def test_crawled_and_harvested_libraries_share_content_identity(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            sources = []
-            for name, content in [('embedded', b'embedded AIR'), ('device', b'CI AIR'), ('duplicate', b'CI AIR')]:
-                source = root / name
-                source.write_bytes(content)
-                sources.append(source)
-            view = library_view(sources, root / 'view')
-            self.assertEqual(len(list(view.iterdir())), 2)
-            for source in sources:
-                digest = hashlib.sha256(source.read_bytes()).hexdigest()
-                self.assertEqual((view / (digest + '.metallib')).read_bytes(), source.read_bytes())
-
-    def test_missing_declared_input_fails_instead_of_silently_losing_coverage(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with self.assertRaises(FileNotFoundError):
-                library_view([root / 'missing'], root / 'view')
-
 
 STATE = (
     'samples=1 topo=0 ds=260/260 c0=80:15:0:1:0:0:1:0:0 | v a lib=/x/default.metallib  | f b lib=/x/default.metallib | '
@@ -66,6 +41,16 @@ class BuildTags(unittest.TestCase):
         self.assertEqual(taken, [ca])
         self.assertIn('1 Core Animation lines kept for their names', report[0])
 
+    def test_another_builds_core_animation_kernel_is_left_out(self):
+        label = 'label=com.apple.coreanimation.compute_sum_luma'
+        lines = [
+            f'C ok=1 form=d opt=0 {label} os=24B119 | k compute_sum_luma',
+            f'D ok=1 tg=1,1,1 edge=0,0,0 threads=0 os=24B119 | form=d opt=0 {label} | k compute_sum_luma',
+        ]
+        taken, report = own_build(lines, '21H461')
+        self.assertEqual(taken, [])
+        self.assertIn('0 Core Animation lines kept for their names', report[0])
+
     def test_a_line_that_names_no_build_fails_the_step(self):
         with self.assertRaises(SystemExit):
             own_build([f'R ok=1 label=x os=24B119 {STATE}', f'R ok=1 label=x {STATE}'], '24B119')
@@ -74,36 +59,6 @@ class BuildTags(unittest.TestCase):
         line = 'R ok=1 label=x samples=1 topo=0 ds=0/0 | v a os=1  | f b | '
         with self.assertRaises(SystemExit):
             own_build([line], '24B119')
-
-
-class CodeTargetStandIn(unittest.TestCase):
-    """A state of 8-bit two-plane code attachments is the runtime's state of their RGBA32Float stand-in."""
-
-    TAIL = ' a0=29:0:0:8:1:1 | v vertexBlur  | f fragmentBlur #0:53:01 | '
-
-    def test_an_8_bit_code_target_takes_the_stand_in(self):
-        line = 'R ok=1 label=- samples=1 topo=0 ds=0/0 c0=540:15:0:1:0:0:1:0:0 c1=80:15:1:1:5:0:1:5:0' + self.TAIL
-        self.assertEqual(
-            ycbcr_stand_in(line),
-            'R ok=1 label=- samples=1 topo=0 ds=0/0 c0=125:15:0:1:0:0:1:0:0 c1=80:15:1:1:5:0:1:5:0' + self.TAIL,
-        )
-
-    def test_every_rendered_code_format_alone_and_in_a_pair_takes_the_stand_in(self):
-        head = 'R ok=1 label=- samples=1 topo=0 ds=0/0 '
-        for colors, stand_in in (
-            ('c0=543:15:0:1:0:0:1:0:0', 'c0=125:15:0:1:0:0:1:0:0'),
-            ('c0=540:15:0:1:0:0:1:0:0 c1=544:15:0:1:0:0:1:0:0', 'c0=125:15:0:1:0:0:1:0:0 c1=125:15:0:1:0:0:1:0:0'),
-        ):
-            self.assertEqual(ycbcr_stand_in(head + colors + self.TAIL), head + stand_in + self.TAIL)
-
-    def test_a_state_the_runtime_leaves_to_m2v_keeps_its_formats(self):
-        for colors in (
-            'c0=540:15:1:1:5:0:1:5:0',
-            'c0=541:8:0:1:0:0:1:0:0',
-            'c0=80:15:0:1:0:0:1:0:0',
-        ):
-            line = f'R ok=1 label=- samples=1 topo=0 ds=0/0 {colors}' + self.TAIL
-            self.assertEqual(ycbcr_stand_in(line), line)
 
 
 class CorpusTags(unittest.TestCase):
@@ -129,35 +84,72 @@ class YcbcrStandIn(unittest.TestCase):
     def test_every_format_the_runtime_renders_takes_the_stand_in(self):
         for fmt in (500, 503, 507, 508, 520, 527, 530, 540, 541, 543, 544, 545, 546, 547, 548):
             line = f'{self.HEAD}c0={fmt}:15:0:1:0:0:1:0:0 c1=80:15:1:1:5:0:1:5:0' + self.TAIL
-            self.assertEqual(
-                ycbcr_stand_in(line), f'{self.HEAD}c0=125:15:0:1:0:0:1:0:0 c1=80:15:1:1:5:0:1:5:0' + self.TAIL
-            )
+            self.assertEqual(stand_in(line), f'{self.HEAD}c0=125:15:0:1:0:0:1:0:0 c1=80:15:1:1:5:0:1:5:0' + self.TAIL)
         line = f'{self.HEAD}c0=540:15:0:1:0:0:1:0:0 c2=546:14:0:1:0:0:1:0:0' + self.TAIL
-        self.assertEqual(
-            ycbcr_stand_in(line), f'{self.HEAD}c0=125:15:0:1:0:0:1:0:0 c2=125:14:0:1:0:0:1:0:0' + self.TAIL
-        )
-        for fmt, mask, stand_in in ((588, 8, 55), (589, 12, 105)):
+        self.assertEqual(stand_in(line), f'{self.HEAD}c0=125:15:0:1:0:0:1:0:0 c2=125:14:0:1:0:0:1:0:0' + self.TAIL)
+        for fmt, mask, want in ((588, 8, 55), (589, 12, 105)):
             line = f'{self.HEAD}c0={fmt}:{mask}:0:1:0:0:1:0:0' + self.TAIL
-            self.assertEqual(ycbcr_stand_in(line), f'{self.HEAD}c0={stand_in}:{mask}:0:1:0:0:1:0:0' + self.TAIL)
+            self.assertEqual(stand_in(line), f'{self.HEAD}c0={want}:{mask}:0:1:0:0:1:0:0' + self.TAIL)
+
+    def test_an_8_bit_code_target_alone_and_in_a_pair_takes_the_stand_in(self):
+        for colors, want in (
+            ('c0=543:15:0:1:0:0:1:0:0', 'c0=125:15:0:1:0:0:1:0:0'),
+            ('c0=540:15:0:1:0:0:1:0:0 c1=544:15:0:1:0:0:1:0:0', 'c0=125:15:0:1:0:0:1:0:0 c1=125:15:0:1:0:0:1:0:0'),
+        ):
+            self.assertEqual(stand_in(self.HEAD + colors + self.TAIL), self.HEAD + want + self.TAIL)
 
     def test_a_state_the_runtime_leaves_to_m2v_keeps_its_formats(self):
         for colors in (
             'c0=501:15:0:1:0:0:1:0:0',
-            'c0=540:15:1:1:5:0:1:5:0',
-            'c0=543:8:0:1:0:0:1:0:0',
-            'c0=589:8:0:1:0:0:1:0:0',
-            'c0=588:15:1:1:5:0:1:5:0',
             'c0=540:15:0:1:0:0:1:0:0 c1=521:15:0:1:0:0:1:0:0',
             'c0=542:15:0:1:0:0:1:0:0',
             'c0=80:15:0:1:0:0:1:0:0',
         ):
             line = f'{self.HEAD}{colors}' + self.TAIL
-            self.assertEqual(ycbcr_stand_in(line), line)
+            self.assertEqual(stand_in(line), line)
+
+    def test_blended_and_masked_states_take_the_stand_in_reading_a_destination_alpha_of_one(self):
+        for colors, want in (
+            ('c0=540:15:1:1:5:0:1:5:0', 'c0=125:15:1:1:5:0:1:5:0'),
+            ('c0=543:8:0:1:0:0:1:0:0', 'c0=125:8:0:1:0:0:1:0:0'),
+            ('c0=589:8:0:1:0:0:1:0:0', 'c0=105:8:0:1:0:0:1:0:0'),
+            ('c0=588:15:1:1:5:0:1:5:0', 'c0=55:15:1:1:5:0:1:5:0'),
+            ('c0=500:15:1:8:9:0:10:9:0', 'c0=125:15:1:1:0:0:1:0:0'),
+            ('c0=520:14:1:10:8:0:8:10:0 c1=80:15:1:8:9:0:8:9:0', 'c0=125:14:1:0:1:0:1:1:0 c1=80:15:1:8:9:0:8:9:0'),
+        ):
+            line = f'{self.HEAD}{colors}' + self.TAIL
+            self.assertEqual(stand_in(line), f'{self.HEAD}{want}' + self.TAIL)
+
+    def test_formats_the_gm20b_renders_none_of_take_their_stand_ins(self):
+        for colors, stand_in_colors in (
+            ('c0=11:15:1:8:9:0:10:9:0', 'c0=71:15:1:1:0:0:1:0:0'),
+            ('c0=93:7:1:4:5:0:1:5:0', 'c0=125:7:1:4:5:0:1:5:0'),
+            ('c0=41:15:1:8:9:0:8:9:0', 'c0=125:15:1:8:9:0:8:9:0'),
+            ('c0=42:15:0:1:0:0:1:0:0 c1=540:15:0:1:0:0:1:0:0', 'c0=125:15:0:1:0:0:1:0:0 c1=125:15:0:1:0:0:1:0:0'),
+        ):
+            line = f'{self.HEAD}{colors}' + self.TAIL
+            self.assertEqual(stand_in(line), f'{self.HEAD}{stand_in_colors}' + self.TAIL)
+        line = f'{self.HEAD}c0=11:15:0:1:0:0:1:0:0 c1=501:15:0:1:0:0:1:0:0' + self.TAIL
+        self.assertEqual(stand_in(line), line)
+
+    def test_the_format_stand_ins_are_the_runtimes(self):
+        header = Path('drivers/TegraGM20BMetal/raw/runtime/raw_format_standin.h').read_text()
+        constants = dict(re.findall(r'(k\w+) = (\d+)', header[header.index('constexpr uint32_t kR8UnormSrgb') :]))
+        body = header[header.index('constexpr uint32_t formatStandIn') :]
+        body = body[: body.index('default:')]
+        table, cases = {}, []
+        for line in body.splitlines():
+            if m := re.search(r'case (k\w+):', line):
+                cases.append(int(constants[m[1]]))
+            elif m := re.search(r'return (\d+);', line):
+                table.update(dict.fromkeys(cases, int(m[1])))
+                cases = []
+        self.assertEqual(table, FORMAT_STAND_INS)
 
     def test_two_formats_states_are_one_stand_in_state(self):
         lines = [f'{self.HEAD}c0={fmt}:15:0:1:0:0:1:0:0' + self.TAIL for fmt in (540, 80, 543, 546)]
-        stand_in = f'{self.HEAD}c0=125:15:0:1:0:0:1:0:0' + self.TAIL
-        self.assertEqual(stand_in_lines(lines), [stand_in, lines[1]])
+        want = f'{self.HEAD}c0=125:15:0:1:0:0:1:0:0' + self.TAIL
+        self.assertEqual(stand_in_lines(lines), [want, lines[1]])
         self.assertEqual(stand_in_lines([lines[1], lines[1]]), [lines[1], lines[1]])
 
     def test_the_formats_are_the_runtimes(self):

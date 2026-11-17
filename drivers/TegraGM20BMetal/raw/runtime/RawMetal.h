@@ -63,11 +63,10 @@ bool raw_metal_chains_on(void);
 struct RawM2V {
     // Opens the m2v device (the plugin's native_bridge_metal_open), called once; nil: refused, and nothing falls back
     id<MTLDevice> (^open)(void);
-    // The m2v device class's own methods (the frontend's NBDeviceMethods) and the capability queries its class answers
-    // (the bridge's nmb_device_answer_selector): each the raw device has no method of its own for opens the m2v device at
-    // its first use, then runs m2v's method on the raw device as the subclass of m2v's class it was inherited by
+    // The m2v device class's own methods (the frontend's NBDeviceMethods): each the raw device has no method of its own for
+    // opens the m2v device at its first use, then runs m2v's method on the raw device as the subclass of m2v's class it was
+    // inherited by. The bridge's capability queries are the raw device's own answers (raw_device_answers.h).
     Class methods = nil;
-    const char *(*answerSelector)(size_t index, uint32_t *kind) = nullptr;
 };
 
 // A raw device over the pack at `packPath` (its stack key must be `stack`; 0: any, for host tests), an _MTLDevice of its

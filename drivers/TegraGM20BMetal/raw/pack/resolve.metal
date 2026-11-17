@@ -7,6 +7,13 @@
 //    so and encoded by Metal's thresholds, written as the code through the target's UNORM twin;
 //  - a half channel: the mean rounded to a half with a tie toward +infinity (halfMean);
 //  - an RG11B10Float channel: that half mean rounded to the channel's float, ties to even.
+//  - a wider or narrower unorm channel (8 to 16 bits, 10-bit colour and 2-bit alpha): its codes summed with half the count, over
+//    the count, as 8-bit unorm (measured on an M4 Max, macOS 27.2.1);
+//  - a 32-bit float channel: the samples summed in order and scaled by one over the count, every operand and result flushed
+//    to a zero of its sign where it is subnormal (the M4 Max's, NaNs and infinities included);
+//  - a 5- or 6-bit channel (B5G6R5Unorm, BGR5A1Unorm): two samples the floor of their mean, raised a code for the odd sums
+//    kUp5 and kUp6 list (the M4 Max's for every pair; no simpler rule found fits it); four samples their sum plus one, over
+//    four, which leaves 1.7% of 5-bit and 0.15% of 6-bit texels a code under the M4 Max's; a 1-bit alpha as unorm.
 // A depth attachment's resolve writes its fragment's depth, MTLMultisampleDepthResolveFilter's sample 0, the samples' minimum or
 // their maximum, as read: each the stored code of the target's format, written back unchanged. One function a target format
 // and filter: the pack keys an own state by its function's name. The sample count comes in buffer 0, as the
@@ -136,6 +143,134 @@ static float4 smallFloats(Samples s, uint n, uint2 at)
 {
     const float4 h = halfMean(s, n, at);
     return float4(smallFloat(h.x, 6), smallFloat(h.y, 6), smallFloat(h.z, 5), 1.0);
+}
+
+// A unorm channel of `max` (2^bits - 1) codes: its codes summed with half the count, over the count
+static float4 unormOf(Samples s, uint n, uint2 at, float4 max)
+{
+    uint4 sum = uint4(n / 2);
+    for (uint k = 0; k < n; k++)
+        sum += uint4(rint(s.read(at, k) * max));
+    return float4(sum / n) / max;
+}
+
+static float4 flushed(float4 x)
+{
+    const uint4 bits = as_type<uint4>(x);
+    return as_type<float4>(select(bits, bits & 0x80000000u, (bits & 0x7f800000u) == 0u));
+}
+
+static float4 float32Mean(Samples s, uint n, uint2 at)
+{
+    float4 sum = flushed(s.read(at, 0));
+    for (uint k = 1; k < n; k++)
+        sum = flushed(sum + flushed(s.read(at, k)));
+    return flushed(sum * (1.0 / float(n)));
+}
+
+// Bit a x 32 + b: two 5-bit codes a and b of an odd sum resolve to the code above the floor of their mean; bit a x 64 + b
+// of kUp6 the same for 6-bit codes
+constant uint kUp5[32] = {
+    0xaa00a088u, 0x00000000u, 0x00000000u, 0x55005041u,
+    0x00000000u, 0x00000000u, 0xaa00a088u, 0x55005041u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0xaa00a088u, 0x55005041u, 0xaa00a088u, 0x55005041u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0xaa00a088u, 0x55005041u, 0xaa00a088u, 0x55005041u,
+    0xaa00a088u, 0x55005041u, 0xaa00a088u, 0x55005041u};
+
+constant uint kUp6[128] = {
+    0x00000000u, 0xaaaaaaaau, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u,
+    0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u, 0x00000000u, 0x00000000u, 0x00000001u, 0x00000000u};
+
+static uint packed2(uint a, uint b, uint bits, constant uint *up)
+{
+    const uint i = (a << bits) + b;
+    return ((a + b) >> 1) + ((up[i >> 5] >> (i & 31)) & 1u);
+}
+
+// B5G6R5Unorm's and BGR5A1Unorm's channels of `bits` each
+static float4 packedOf(Samples s, uint n, uint2 at, uint4 bits)
+{
+    const float4 max = float4((uint4(1) << bits) - 1u);
+    uint4 c[4];
+    for (uint k = 0; k < n && k < 4; k++)
+        c[k] = uint4(rint(s.read(at, k) * max));
+    uint4 out;
+    for (uint ch = 0; ch < 4; ch++) {
+        if (bits[ch] == 1)
+            out[ch] = n == 2 ? (c[0][ch] + c[1][ch] + 1u) >> 1 : (c[0][ch] + c[1][ch] + c[2][ch] + c[3][ch] + 2u) >> 2;
+        else if (n == 2)
+            out[ch] = packed2(c[0][ch], c[1][ch], bits[ch], bits[ch] == 6 ? kUp6 : kUp5);
+        else
+            out[ch] = (c[0][ch] + c[1][ch] + c[2][ch] + c[3][ch] + 1u) >> 2;
+    }
+    return float4(out) / max;
+}
+
+#define UNORM_RESOLVE(name, r, g, b, a)                                                                                    \
+    fragment float4 resolve_##name##_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]]) \
+    {                                                                                                                      \
+        return unormOf(s, n, uint2(in.position.xy), float4(r, g, b, a));                                                   \
+    }
+
+UNORM_RESOLVE(a8, 255.0, 255.0, 255.0, 255.0)
+UNORM_RESOLVE(r8, 255.0, 255.0, 255.0, 255.0)
+UNORM_RESOLVE(rg8, 255.0, 255.0, 255.0, 255.0)
+UNORM_RESOLVE(r16, 65535.0, 65535.0, 65535.0, 65535.0)
+UNORM_RESOLVE(rg16, 65535.0, 65535.0, 65535.0, 65535.0)
+UNORM_RESOLVE(rgba16, 65535.0, 65535.0, 65535.0, 65535.0)
+UNORM_RESOLVE(rgb10a2, 1023.0, 1023.0, 1023.0, 3.0)
+UNORM_RESOLVE(bgr10a2, 1023.0, 1023.0, 1023.0, 3.0)
+
+fragment float4 resolve_r16f_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return halfMean(s, n, uint2(in.position.xy));
+}
+
+fragment float4 resolve_rg16f_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return halfMean(s, n, uint2(in.position.xy));
+}
+
+fragment float4 resolve_r32f_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return float32Mean(s, n, uint2(in.position.xy));
+}
+
+fragment float4 resolve_rg32f_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return float32Mean(s, n, uint2(in.position.xy));
+}
+
+fragment float4 resolve_rgba32f_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return float32Mean(s, n, uint2(in.position.xy));
+}
+
+fragment float4 resolve_b5g6r5_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return packedOf(s, n, uint2(in.position.xy), uint4(5, 6, 5, 1));
+}
+
+fragment float4 resolve_bgr5a1_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
+{
+    return packedOf(s, n, uint2(in.position.xy), uint4(5, 5, 5, 1));
 }
 
 fragment float4 resolve_rgba8_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])

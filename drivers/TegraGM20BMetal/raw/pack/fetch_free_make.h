@@ -22,12 +22,13 @@ enum class FreeOutcome : uint8_t {
 };
 
 // The colours a record's programs read through a fetch (raw_gpu.cpp Pipeline::fetchBits)
-inline uint32_t fetchedColours(const raw::PackPipeline &p)
+inline uint32_t fetchedColours(const raw::RuntimeRecord &r)
 {
+    const raw::SetEntries entries = raw::entriesOf(r);
     uint32_t colours = 0;
-    for (uint32_t k = 0; k < p.entries && k < raw::kPackEntries; k++)
-        if (p.entry[k].kind == raw::EntryFetch && p.entry[k].slot < 8)
-            colours |= 1u << p.entry[k].slot;
+    for (uint32_t k = 0; k < entries.size(); k++)
+        if (entries[k].kind == raw::EntryFetch && entries[k].slot < 8)
+            colours |= 1u << entries[k].slot;
     return colours;
 }
 
@@ -58,7 +59,7 @@ inline FreeOutcome makeFetchFree(raw::Direct &direct, id<MTLLibrary> qc, const s
     // made under its own key, whose colour fields give its registers their blend, and filed under the state's
     raw::CompileOutcome outcome = direct.make(s.d, s.key, rec, why, textures, registers, true, raw::PackForm::Default);
     const auto readsOthersOnly = [&] {
-        const uint32_t fetched = fetchedColours(rec.pipeline);
+        const uint32_t fetched = fetchedColours(rec);
         return fetched && !(fetched >> form.colour & 1) && writesNone(form.line, fetched);
     };
     if (outcome != raw::CompileOutcome::Made)

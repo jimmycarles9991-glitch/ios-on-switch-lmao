@@ -196,6 +196,7 @@ pub(crate) fn emit(
             swizzle: None,
             // A heap element's access reads no slot's `OffsetBaseAxes`.
             parent: None,
+            plane: None,
         };
         let at = At {
             coord: s.coord,

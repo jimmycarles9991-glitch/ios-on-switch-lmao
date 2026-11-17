@@ -30,8 +30,6 @@ TEST(CompilerRepro, TheLinesStateThroughTheCompileContext)
     setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
     setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
     setenv("NMB_SHADOW_LOG", "0", 0);
-    char nvk[PATH_MAX];
-    ASSERT_NE(realpath(env("SWITCH_NVK").c_str(), nvk), nullptr);
     const std::string root = compiler_test::systemRoot(getenv("SWITCH_QUARTZCORE"));
     compiler_test::Requests made(root, {{"/repro.metallib", library}});
     const std::vector<raw::CompileRequest> asked = made.of({line});
@@ -39,7 +37,7 @@ TEST(CompilerRepro, TheLinesStateThroughTheCompileContext)
     const std::string dir = env("TEST_TMPDIR");
     switch_compiler::Engine engine;
     std::string why;
-    ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir), nvk, root}, why)) << why;
+    ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir), root, {}}, why)) << why;
     switch_compiler::SystemLibraries system(root);
     switch_compiler::Prepared p;
     ASSERT_TRUE(switch_compiler::prepare(raw::encodeRequest(asked[0]), 0, system, p, why)) << why;

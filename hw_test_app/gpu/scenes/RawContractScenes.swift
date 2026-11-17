@@ -192,7 +192,7 @@ struct KernelOffsetScene: GPUScene {
         guard let library = try? gpu.device.makeLibrary(URL: CAState.library),
             let function = library.makeFunction(name: "compute_sum_luma")
         else {
-            result.notes.append("no compute_sum_luma in QuartzCore here")
+            result.unavailable("no compute_sum_luma in QuartzCore here", on: gpu.device)
             return result
         }
         let pipeline = try await gpu.device.makeComputePipelineState(function: function)

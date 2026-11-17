@@ -347,6 +347,45 @@ mod tests {
         assert_eq!(p.argument_table_size, 16);
     }
 
+    /// A render stage's 31 residuals, behind every kind a render function can push that sorts
+    /// before `SlotBindOffset`, end at word 30 of its argument table: the last a raw record names
+    /// a residual by (TegraGM20BMetal raw_pack.h `bufferResidualWord`: root words 1 to 32, table
+    /// words 33 to 63). Past it the bridge marks the residual unnamed and the raw direct compile
+    /// refuses the state (NativeMetalDirect.rs `UNNAMED_RESIDUAL`).
+    #[test]
+    fn a_render_stages_residuals_end_within_thirty_one_table_words() {
+        for stage in [Stage::Vertex, Stage::Fragment] {
+            let ahead = [
+                PushField::RootTableAddress,
+                PushField::ExecutionStatusAddress,
+                PushField::CaptureAddress,
+                PushField::CaptureIndexAddress,
+                PushField::AmplificationId,
+                PushField::AmplificationLayerOffset,
+                PushField::AmplificationViewportOffset,
+                PushField::AmplificationCount,
+                PushField::ReplayRegionAddress,
+                PushField::BaseVertexInstance,
+            ];
+            let mut fields: BTreeSet<PushField> = ahead.into_iter().collect();
+            assert!(fields
+                .iter()
+                .all(|f| *f < PushField::SlotBindOffset(slot(stage, 0))));
+            fields.extend((0..31).map(|i| PushField::SlotBindOffset(slot(stage, i))));
+            let p = check(stage, &fields);
+            let last = p
+                .fields
+                .iter()
+                .filter(|f| matches!(f.field, PushField::SlotBindOffset(_)))
+                .map(|f| match f.loc {
+                    PushLoc::Push { .. } => 0,
+                    PushLoc::ArgumentTable { offset } => offset / 4,
+                })
+                .max();
+            assert!(last.is_some_and(|word| word <= 30), "{stage:?}: {last:?}");
+        }
+    }
+
     /// A synthetic sweep over field sets built from every kind: the invariants hold for each.
     #[test]
     fn placement_invariants_hold_over_synthetic_field_sets() {

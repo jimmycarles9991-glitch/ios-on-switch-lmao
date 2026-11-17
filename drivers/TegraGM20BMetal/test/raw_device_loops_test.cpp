@@ -309,6 +309,7 @@ TEST_F(DeviceLoops, ALoopSpansItsUnitsComputeEncodersAndACopyBetweenThem)
         ASSERT_EQ(e->startWhile(wordVa(0), PredicateCompare::NotEqual, 0), Answer::Done);
         dispatch(*e, 0);
         e->end();
+        cb->use(words, true, false);
         raw::BlitEncoder *copy = cb->blit();
         copy->copyBytes(wordVa(6), wordVa(7), 4);
         copy->end();

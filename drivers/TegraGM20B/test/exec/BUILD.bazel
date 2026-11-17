@@ -41,9 +41,24 @@ host_library(
     copts = GPU_HOST_COPTS + LINUX_RELAXATIONS,
 )
 
+genrule(
+    name = "owned_waits_source",
+    testonly = True,
+    srcs = [
+        "//drivers/TegraGM20B:gpu_sync.c",
+        "//drivers/TegraGM20B:gpu_promise.c",
+    ],
+    outs = ["switch_gpu_exec_owned_waits.h"],
+    cmd = """
+set -e
+awk '/^int switch_gpu_order_waits_locked\\(/ || /^void switch_gpu_chan_park_promises_locked\\(/ { body = 1; count++ } body { print } /^}/ { body = 0 } END { if (count != 2) exit 1 }' $(SRCS) > $@
+""",
+)
+
 host_library(
     name = "exec_driver",
     srcs = [
+        ":owned_waits_source",
         "switch_gpu_exec_channel.c",
         "switch_gpu_exec_driver.c",
         "switch_gpu_exec_fixture.h",
@@ -88,6 +103,7 @@ MUTANTS = [
     "after_doorbell",
     "before_checks",
     "no_empty_commit",
+    "before_finish",
 ]
 
 py_binary(
@@ -111,7 +127,7 @@ py_binary(
     name = "gpu_exec_%s" % mutant,
     srcs = [":gpu_exec_%s_source" % mutant] + GPU_HEADERS,
     c_std = "gnu11",
-    copts = GPU_HOST_COPTS,
+    copts = GPU_HOST_COPTS + ["-DSWITCH_MMIO_HOST_MODEL"],
     tags = ["manual"],
 ) for mutant in MUTANTS]
 
@@ -121,3 +137,40 @@ py_binary(
     tags = ["manual"],
     deps = [":gpu_exec_%s" % mutant] + EXEC_TEST_DEPS,
 ) for mutant in MUTANTS]
+
+# gpu_chan.c's channel creation over a model of the host's RAMFC (switch_gpu_chan_new_driver.c): a new channel's
+# timeslice and acquire timeout hold through the host's load at its runlist insert and its objects' context binds.
+host_library(
+    name = "gpu_chan",
+    srcs = [
+        "//drivers/TegraGM20B:gpu_chan.c",
+        "//drivers/TegraGM20B:gpu_chan_level.c",
+    ] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_COPTS,
+)
+
+host_library(
+    name = "chan_new_driver",
+    srcs = [
+        "switch_gpu_chan_new_driver.c",
+        "switch_gpu_chan_new_harness.h",
+        "//drivers/TegraGM20B:TegraGM20BRamfcOrder.h",
+    ] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_COPTS,
+)
+
+host_test(
+    name = "switch_gpu_chan_new_test",
+    srcs = [
+        "switch_gpu_chan_new_harness.h",
+        "switch_gpu_chan_new_test.cpp",
+        "switch_gpu_exec_fixture.h",
+        "switch_gpu_exec_kernel.cpp",
+    ],
+    deps = [
+        ":chan_new_driver",
+        ":gpu_chan",
+    ],
+)

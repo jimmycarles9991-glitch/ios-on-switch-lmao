@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // raw GM20B path: pack/ycbcr.metal's conversion and raw_ycbcr.cpp's plan of it, run on this Mac's own GPU, against what this Mac's
 // Metal reads of the same two-plane YCbCr textures (8- and 10-bit and packed, video and full range, 4:2:0, 4:2:2 and 4:4:4
-// surfaces and formats, converted, sRGB and codes, no matrix, BT.709 and BT.2020, over plane 0 and plane 1), over CoreVideo
-// surfaces of random codes: every texel's channels must be Metal's. The raw path runs the same conversion on the GM20B.
+// surfaces and formats, converted, sRGB and codes, no matrix, BT.709, BT.2020, P3_D65 and DCI_P3, over plane 0 and plane 1), over CoreVideo
+// surfaces of random codes, and textures smaller than their surface (Metal reads their top-left corner): every texel's channels
+// must be Metal's. The raw path runs the same conversion on the GM20B.
 // usage: ycbcroracle <pack/ycbcr.metal>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
@@ -40,12 +41,23 @@ struct Case {
     OSType fourcc;
     uint32_t format, plane, w, h;
     const char *matrix;
+    uint32_t surfaceWidth = 0, surfaceHeight = 0;  // 0: the texture's
 };
 
 const char *outputName(raw::YcbcrOutput o)
 {
-    static const char *const names[] = {"",        "converted",        "srgb",        "codes8",
-                                        "codes10", "converted packed", "srgb packed", "codes10 packed"};
+    static const char *const names[] = {"",
+                                        "converted",
+                                        "srgb",
+                                        "codes8",
+                                        "codes10",
+                                        "converted packed",
+                                        "srgb packed",
+                                        "codes10 packed",
+                                        "packed plane",
+                                        "codes8 luma first",
+                                        "codes10 luma first",
+                                        "codes10 packed luma first"};
     return names[o];
 }
 
@@ -86,12 +98,41 @@ std::vector<uint32_t> ourTexels(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTL
                                                                                     height:ph
                                                                                  mipmapped:NO];
         id<MTLTexture> t = [dev newTextureWithDescriptor:d];
-        [t replaceRegion:MTLRegionMake2D(0, 0, pw, ph) mipmapLevel:0 withBytes:base + at bytesPerRow:pitch];
+        // each row's bytes from its pitch on, a row longer than the pitch running on into the next, as the copy engine
+        // gathers such a plane on the GM20B
+        const size_t row = pw * (format == 10 ? 1 : format == 20 || format == 30 ? 2 : 4);
+        std::vector<uint8_t> rows(row * ph);
+        for (uint32_t y = 0; y < ph; y++)
+            memcpy(&rows[y * row], base + at + uint64_t(y) * pitch, row);
+        [t replaceRegion:MTLRegionMake2D(0, 0, pw, ph) mipmapLevel:0 withBytes:rows.data() bytesPerRow:row];
         return t;
     };
-    id<MTLTexture> luma = plane(p.lumaFormat, p.luma, p.lumaPitch, p.lumaWidth, h);
-    id<MTLTexture> chroma =
-        p.chromaWidth ? plane(p.chromaFormat, p.chroma, p.chromaPitch, p.chromaWidth, p.chromaHeight) : luma;
+    id<MTLTexture> luma, chroma;
+    if (p.onePlane) {  // Y0 Cb Y1 Cr pairs split into the two images, as BlitEncoder::splitPlane's copies do
+        std::vector<uint8_t> y(size_t(p.lumaWidth) * h), c(size_t(p.chromaWidth) * 2 * h);
+        for (uint32_t r = 0; r < h; r++)
+            for (uint32_t k = 0; k < p.chromaWidth; k++) {
+                const uint8_t *q = base + p.luma + uint64_t(r) * p.lumaPitch + 4 * k;
+                y[r * p.lumaWidth + 2 * k] = q[0];
+                y[r * p.lumaWidth + 2 * k + 1] = q[2];
+                c[(r * p.chromaWidth + k) * 2] = q[1];
+                c[(r * p.chromaWidth + k) * 2 + 1] = q[3];
+            }
+        auto image = [&](uint32_t format, uint32_t pw, const std::vector<uint8_t> &bytes, uint32_t bpp) {
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormat(format)
+                                                                                         width:pw
+                                                                                        height:h
+                                                                                     mipmapped:NO];
+            id<MTLTexture> t = [dev newTextureWithDescriptor:d];
+            [t replaceRegion:MTLRegionMake2D(0, 0, pw, h) mipmapLevel:0 withBytes:bytes.data() bytesPerRow:pw * bpp];
+            return t;
+        };
+        luma = image(p.lumaFormat, p.lumaWidth, y, 1);
+        chroma = image(p.chromaFormat, p.chromaWidth, c, 2);
+    } else {
+        luma = plane(p.lumaFormat, p.luma, p.lumaPitch, p.lumaWidth, h);
+        chroma = p.chromaWidth ? plane(p.chromaFormat, p.chroma, p.chromaPitch, p.chromaWidth, p.chromaHeight) : luma;
+    }
     static const char *const frags[] = {"",
                                         "ycbcr_converted_frag",
                                         "ycbcr_srgb_frag",
@@ -99,6 +140,10 @@ std::vector<uint32_t> ourTexels(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTL
                                         "ycbcr_codes10_frag",
                                         "ycbcr_packed_converted_frag",
                                         "ycbcr_packed_srgb_frag",
+                                        "ycbcr_packed_codes10_frag",
+                                        "ycbcr_packed_plane_frag",
+                                        "ycbcr_codes_frag",
+                                        "ycbcr_codes10_frag",
                                         "ycbcr_packed_codes10_frag"};
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = [lib newFunctionWithName:@"ycbcr_vert"];
@@ -154,6 +199,13 @@ std::vector<uint32_t> ourTexels(id<MTLDevice> dev, id<MTLCommandQueue> q, id<MTL
                 v.push_back(k == 3 ? (word >> 30) / 3u : (word >> (10 * k)) & 1023);
             }
         }
+        if (raw::ycbcrLumaFirst(p.output)) {  // the image's header reads its green, blue and red
+            uint32_t *texel = &v[v.size() - 4];
+            const uint32_t red = texel[0];
+            texel[0] = texel[1];
+            texel[1] = texel[2];
+            texel[2] = red;
+        }
     }
     return v;
 }
@@ -165,12 +217,14 @@ CVPixelBufferRef surfaceOf(const Case &c, std::mt19937 &rng)
         @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{},
           (id)kCVPixelBufferMetalCompatibilityKey : @YES};
     CVPixelBufferRef pb = nullptr;
-    if (CVPixelBufferCreate(nullptr, c.w, c.h, c.fourcc, (__bridge CFDictionaryRef)attrs, &pb))
+    if (CVPixelBufferCreate(nullptr, c.surfaceWidth ?: c.w, c.surfaceHeight ?: c.h, c.fourcc,
+                            (__bridge CFDictionaryRef)attrs, &pb))
         return nullptr;
     IOSurfaceRef s = CVPixelBufferGetIOSurface(pb);
     IOSurfaceLock(s, 0, nullptr);
     uint8_t *b = static_cast<uint8_t *>(IOSurfaceGetBaseAddress(s));
-    for (size_t i = 0; i < IOSurfaceGetAllocSize(s); i++)
+    const size_t mapped = (IOSurfaceGetAllocSize(s) + vm_page_size - 1) & ~(vm_page_size - 1);
+    for (size_t i = 0; i < mapped; i++)  // the allocation's last page past it too, which Metal reads
         b[i] = uint8_t(rng());
     IOSurfaceUnlock(s, 0, nullptr);
     if (c.matrix)
@@ -191,11 +245,14 @@ raw::YcbcrFacts factsOf(const Case &c, IOSurfaceRef s)
     f.surfaceWidth = uint32_t(IOSurfaceGetWidth(s));
     f.surfaceHeight = uint32_t(IOSurfaceGetHeight(s));
     const uintptr_t base = uintptr_t(IOSurfaceGetBaseAddress(s));
-    for (size_t k = 0; k < 2; k++) {
+    for (size_t k = 0; k < 2 && k < f.planes; k++) {
         f.offset[k] = uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, k)) - base;
         f.pitch[k] = uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, k));
     }
+    if (!f.planes)
+        f.pitch[0] = uint32_t(IOSurfaceGetBytesPerRow(s));
     f.allocBytes = IOSurfaceGetAllocSize(s);
+    f.mappedBytes = (f.allocBytes + vm_page_size - 1) & ~uint64_t(vm_page_size - 1);
     f.simple = true;
     f.matrix = c.matrix;
     return f;
@@ -213,23 +270,49 @@ std::vector<Case> cases()
                                 {'444f', 8, 2},  {'x420', 10, 0}, {'xf20', 10, 0}, {'x422', 10, 1}, {'xf22', 10, 1},
                                 {'x444', 10, 2}, {'xf44', 10, 2}, {'p420', 30, 0}, {'pf20', 30, 0}, {'p422', 30, 1},
                                 {'pf22', 30, 1}, {'p444', 30, 2}, {'pf44', 30, 2}};
-    const char *const matrices[] = {nullptr, "ITU_R_709_2", "ITU_R_2020"};
+    const char *const matrices[] = {nullptr, "ITU_R_709_2", "ITU_R_2020", "P3_D65", "DCI_P3"};
     const uint32_t sizes[][2] = {{33, 17}, {64, 48}, {7, 5}};
+    static const uint32_t kCorner[2] = {2, 2}, kTaller[2] = {16, 12}, kTallest[2] = {16, 40}, kWider[2] = {80, 8};
     std::vector<Case> out;
     int n = 0;
     for (const Surface &s : surfaces)
-        for (int sub = 0; sub <= s.sub; sub++)  // the format's chroma no finer than the surface's
+        for (int sub = 0; sub < 3; sub++)  // a format's chroma finer than the surface's reads rows past its plane
             for (int reads = 0; reads < 3; reads++) {
                 static const uint32_t formats[3][3][3] = {{{500, 502, 503}, {505, 506, 507}, {508, 509, 510}},
                                                           {{520, 522, 523}, {525, 526, 527}, {528, 529, 530}},
                                                           {{540, 541, 542}, {543, 544, 545}, {546, 547, 548}}};
                 const uint32_t format = formats[reads][s.bits == 8 ? 0 : s.bits == 10 ? 1 : 2][sub];
                 for (const char *m : matrices) {
+                    // an sRGB format's reads under a P3 matrix differ from process to process on an M4 Max
+                    if (reads == 1 && m && (!strcmp(m, "P3_D65") || !strcmp(m, "DCI_P3")))
+                        continue;
                     const uint32_t *size = sizes[n++ % 3];
                     out.push_back({s.fourcc, format, 0, size[0], size[1], m});
                     if (s.sub && sub == s.sub)  // plane 1 of a surface whose chroma rows are its luma rows
                         out.push_back({s.fourcc, format, 1, size[0], size[1], m});
                 }
+                if (sub > s.sub)
+                    continue;
+                for (const uint32_t *corner : {sizes[2], kCorner}) {
+                    out.push_back({s.fourcc, format, 0, corner[0], corner[1], nullptr, 16, 16});
+                    if (s.sub && sub == s.sub)
+                        out.push_back({s.fourcc, format, 1, corner[0], corner[1], nullptr, 16, 16});
+                }
+                // taller than the surface, and plane 1 of a 4:2:0 surface read as luma: rows past the planes
+                for (const uint32_t *tall : {kTaller, kTallest, kWider}) {
+                    out.push_back({s.fourcc, format, 0, tall[0], tall[1], nullptr, 16, 8});
+                    if (!s.sub && sub == s.sub)
+                        out.push_back({s.fourcc, format, 1, tall[0], tall[1] / 2, nullptr, 16, 8});
+                }
+            }
+    // one-plane 4:2:2 formats over surfaces of no planes, Y0 Cb Y1 Cr whatever the surface's order
+    for (const OSType one : {OSType('2vuy'), OSType('yuvs'), OSType('yuvf')})
+        for (const uint32_t format : {501u, 521u})
+            for (const char *m : matrices) {
+                if (format == 521 && m && (!strcmp(m, "P3_D65") || !strcmp(m, "DCI_P3")))
+                    continue;
+                const uint32_t *size = sizes[n++ % 3];
+                out.push_back({one, format, 0, size[0], size[1], m});
             }
     return out;
 }
@@ -293,8 +376,9 @@ int main(int argc, char **argv)
             const bool ok = !off && ours.size() == metal.size();
             run++;
             failed += !ok;
-            printf("%s %u (%s) over '%s' plane %u %ux%u %s: %zu of %zu channels off", ok ? "OK  " : "FAIL", c.format,
-                   outputName(p.output), fc, c.plane, c.w, c.h, c.matrix ?: "no matrix", off, metal.size());
+            printf("%s %u (%s) over '%s' plane %u %ux%u of %ux%u %s: %zu of %zu channels off", ok ? "OK  " : "FAIL",
+                   c.format, outputName(p.output), fc, c.plane, c.w, c.h, c.surfaceWidth ?: c.w, c.surfaceHeight ?: c.h,
+                   c.matrix ?: "no matrix", off, metal.size());
             if (off)
                 printf(" (first: texel %zu channel %zu, Metal %u, ours %u)", first / 4, first % 4, metal[first],
                        ours[first]);

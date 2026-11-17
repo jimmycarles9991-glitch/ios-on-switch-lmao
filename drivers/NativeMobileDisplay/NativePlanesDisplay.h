@@ -21,11 +21,6 @@ int planeProbeBuffer = kNoBuffer;
 uint32_t planeProbePixel = 0;
 char planeProbeLine[160] = {};
 
-static uint32_t planeSlotIova(int k)
-{
-    return static_cast<uint32_t>(kPlaneSlot0 + static_cast<uint64_t>(k) * kPlaneSlotSpan);
-}
-
 PlaneSet &planeSetOf(int set)
 {
     return planeSets[set >= 0 ? set : static_cast<int>(PlaneCommits::kSlots)];
@@ -111,8 +106,8 @@ static const tgm_layout *surfaceLayout(OSObject *surface, tgm_layout &block)
 // --- IOVA slots ---------------------------------------------------------------------------------------------------------
 bool planeSlotBusy(int k) const
 {
-    if (planeRecovering || (planeBuildingSlots & (1u << unsigned(k))) || planeConversionUses(k) ||
-        planeCompositeUses(k) || planeLatch.uses(k) || planeTarget.uses(k) ||
+    if (planeRecovering || ((planeBuildingSlots | mediaHostHeldSlots) & (uint64_t(1) << unsigned(k))) ||
+        planeConversionUses(k) || planeCompositeUses(k) || planeLatch.uses(k) || planeTarget.uses(k) ||
         (landscapeState.wanted && landscapeState.held.uses(k)) || (planeFencePending && planeFencing.uses(k)) ||
         (planeNextSet && planeNext.uses(k)) || (planeHeldSet && planeHeld.uses(k)))
         return true;
@@ -121,86 +116,6 @@ bool planeSlotBusy(int k) const
             return true;
     }
     return false;
-}
-
-// The slot holding [low, high) of the surface's memory (mapped now into the least recently used slot no set uses, if not
-// yet): -1 when every slot is in use or the pages cannot be had, or the layout the GPU holds the surface in is not the one
-// the window's registers were made for (`tiled`: block-linear). A surface the CPU may have written (RGB: an image decoded
-// in software) is cleaned to DRAM once when it is mapped: DC A does not snoop the CPU's caches. Video comes from VIC (or a
-// CPU copy that cleans) already in DRAM [V: r17-video TegraVICPresent]. surface: the IOSurface the memory is, held with
-// it (none for the display's own buffers).
-int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool clean, OSObject *surface = nullptr,
-                 bool tiled = false)
-{
-    if (!memory || !memory->metaCast("IOMemoryDescriptor") || high <= low || high - low > kPlaneSlotSpan)
-        return -1;
-    int victim = -1;
-    for (unsigned k = 0; k < kPlaneSlots; ++k) {
-        if (planeSlots[k].memory == memory && planeSlots[k].low == low && planeSlots[k].high == high &&
-            planeSlots[k].tiled == tiled) {
-            planeSlots[k].used = ++planeSlotUses;
-            return static_cast<int>(k);
-        }
-        if (!planeSlotBusy(static_cast<int>(k)) && (victim < 0 || planeSlots[k].used < planeSlots[victim].used))
-            victim = static_cast<int>(k);
-    }
-    if (victim < 0)
-        return -1;
-    planeDropSlot(static_cast<unsigned>(victim));
-    if (memory->prepare(kIODirectionOut) != kIOReturnSuccess)
-        return -1;
-    const uint64_t end =
-        high < ((memory->getLength() + 4095) & ~4095ULL) ? high : ((memory->getLength() + 4095) & ~4095ULL);
-    const uint64_t iova = planeSlotIova(victim);
-    uint64_t batch[64];
-    uint64_t at = low;
-    bool ok = end > low;
-    while (ok && at < end) {
-        uint32_t n = 0;
-        const uint64_t from = at;
-        while (n < 64 && at < end) {
-            IOByteCount length = 0;
-            const uint64_t pa = memory->getPhysicalSegment(at, &length, kIOMemoryMapperNone);
-            if (!pa || (pa & 4095)) {
-                ok = false;
-                break;
-            }
-            batch[n++] = pa;
-            at += 4096;
-        }
-        ok = ok && probeDomain.map(iova + (from - low), batch, n, false);
-    }
-    if (!ok) {
-        probeDomain.unmap(iova, static_cast<uint32_t>((at - low) / 4096));
-        cleanDomain();
-        memory->complete(kIODirectionOut);
-        return -1;
-    }
-    if (clean) {
-        if (IOMemoryMap *view = memory->map(kIOMapAnywhere | kIOMapReadOnly)) {
-            if (view->getVirtualAddress() && view->getLength() >= end) {
-                switch_dcache_clean_invalidate(reinterpret_cast<const void *>(view->getVirtualAddress() + low),
-                                               end - low);
-            }
-            view->release();
-        }
-    }
-    memory->retain();
-    if (surface)
-        surface->retain();
-    planeSlots[victim] = {memory, surface, nullptr, low, end, ++planeSlotUses, tiled, planeSlots[victim].native};
-    cleanDomain();
-    int held = 0;
-    IOByteCount length = 0;
-    const addr64_t first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
-    planeSlots[victim].layout = first ? tegra_gm20b_surface_hold(first & ~0xfffULL, &held) : nullptr;
-    if (planeSlots[victim].layout && (held != 0) != tiled) {
-        planeDropSlot(static_cast<unsigned>(victim));
-        return -1;
-    }
-    if (stats)
-        ++stPlaneMaps;
-    return victim;
 }
 
 bool planeWindowIdle() const
@@ -358,6 +273,7 @@ void stopPlanes()
     gPanicRestore.planes = false;
     __atomic_store_n(&planesOn, false, __ATOMIC_RELEASE);
     planeLatch.reset();
+    mediaHostHeldSlots = 0;
     planeRecovering = planeRecoveryStuck = false;
     planeRecoveryTarget = {};
     planeTarget = {};
@@ -533,7 +449,8 @@ void planeProbeStart()
 
 // The domain (the direct probe's, made here when it does not exist yet): everything window A can scan 1:1 (the boot
 // framebuffer, the scan surfaces, the console tape), so window A reads the same bytes should its client's translation bit
-// be set; plane slot 0 onto the probe's copy; then the swgroup with window B's client (display0b) translated.
+// be set; the start of window B's IOVA space (kPlaneSlot0: no slot is placed before planes are on) onto the probe's
+// copy; then the swgroup with window B's client (display0b) translated.
 bool planeDomainAttach()
 {
     if (!directAttached && !planesAttached && !probeDomain.init(probeTables.va, probeTables.pa, kProbeTables)) {
@@ -550,7 +467,7 @@ bool planeDomainAttach()
         uint32_t n = 0;
         for (; n < 64 && off + n * 4096ULL < kNativeBlockBytes; ++n)
             pages[n] = surfaceAddress(planeProbeBuffer) + off + n * 4096ULL;
-        ok = probeDomain.map(planeSlotIova(0) + off, pages, n, false);
+        ok = probeDomain.map(kPlaneSlot0 + off, pages, n, false);
     }
     if (!ok) {
         snprintf(planeProbeLine, sizeof(planeProbeLine), "more than %u SMMU tables needed", kProbeTables);
@@ -571,7 +488,7 @@ bool planeDomainAttach()
 
 void planeProbeScan(bool iova)
 {
-    dc[kWinbufBBase + native_planes::kStartAddr] = iova ? planeSlotIova(0) : surfaceAddress(planeProbeBuffer);
+    dc[kWinbufBBase + native_planes::kStartAddr] = iova ? uint32_t(kPlaneSlot0) : surfaceAddress(planeProbeBuffer);
     dc[kDcStateControl] = kGeneralUpdate | kWinBUpdate;
     dc[kDcStateControl] = kGeneralActReq | kWinBActReq;
 }
@@ -580,16 +497,17 @@ void planeProbeScan(bool iova)
 // probe's mapping goes; the swgroup back to bypass unless direct scanout uses it.
 void planeProbeDetach()
 {
-    probeDomain.unmap(planeSlotIova(0), static_cast<uint32_t>(kNativeBlockBytes / 4096));
+    probeDomain.unmap(kPlaneSlot0, static_cast<uint32_t>(kNativeBlockBytes / 4096));
     if (planeProbe.stage == DisplaySmmuProbe::kDone) {
-        if (probeDomain.reserve(kPlaneSlot0, static_cast<uint64_t>(kPlaneSlots) * kPlaneSlotSpan)) {
+        if (probeDomain.reserve(kPlaneSlot0, kPlaneSpace)) {
             cleanDomain();
             // A swap retires when its frame is seen: the video's previous frame may still be scanned.
             latchRetire = true;
             __atomic_store_n(&planesOn, true, __ATOMIC_RELEASE);
             return;
         }
-        snprintf(planeProbeLine, sizeof(planeProbeLine), "no SMMU tables for %u plane slots", kPlaneSlots);
+        snprintf(planeProbeLine, sizeof(planeProbeLine), "no SMMU tables for window B's %llu MiB",
+                 static_cast<unsigned long long>(kPlaneSpace >> 20));
     }
     cleanDomain();
     if (!directAttached)
@@ -618,10 +536,10 @@ void planeProbeFinish()
             "SwitchDisplay: plane probe ok: window B reads through the SMMU (ASID %u, display0b, "
             "TRANSLATION_ENABLE_0 "
             "%#x): CRC %#x by physical address, 1:1 and at IOVA %#x, %#x with one pixel changed (first CRC latched at "
-            "frame end %u, %u frame ends); planes on (%u slots of %llu MiB)\n",
+            "frame end %u, %u frame ends); planes on (%u slots in %llu MiB)\n",
             static_cast<unsigned>(TEGRA_SMMU_ASID_DISPLAY), tegra_smmu_read(TEGRA_SMMU_TRANSLATION_ENABLE_0),
-            planeProbe.base, planeSlotIova(0), planeProbe.tweaked, planeProbe.firstLatch, planeProbe.frames,
-            kPlaneSlots, static_cast<unsigned long long>(kPlaneSlotSpan >> 20));
+            planeProbe.base, uint32_t(kPlaneSlot0), planeProbe.tweaked, planeProbe.firstLatch, planeProbe.frames,
+            kPlaneSlots, static_cast<unsigned long long>(kPlaneSpace >> 20));
     } else {
         IOLog("SwitchDisplay: plane probe failed at %s: %s%s%s (CRC base %#x again %#x pixel %#x last %#x, first "
               "latched at frame end %u of %u); planes off, Core Animation keeps compositing every layer\n",

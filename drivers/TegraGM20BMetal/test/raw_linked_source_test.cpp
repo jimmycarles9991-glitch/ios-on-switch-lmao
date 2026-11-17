@@ -48,7 +48,7 @@ TEST(RawLinkedSource, ThePacksKeysAreTheRuntimes)
                 HasSubstr("s.key = raw::pipelineKey(d, &vertex, d.fragmentFunction ? &fragment : nullptr, linked,"));
     EXPECT_THAT(Body(SourceText("../raw/pack/probe_states.h"), "inline id<MTLFunction> function("),
                 HasSubstr("key.constants = raw::constantsText(values);"));
-    EXPECT_THAT(Body(SourceText("../raw/runtime/RawMetalLibrary.mm"), "- (RMFunction *)wrap:"),
+    EXPECT_THAT(Body(SourceText("../raw/runtime/RawMetalLibrary.mm"), "- (RMFunction *)function:"),
                 HasSubstr("f->_constants = raw::constantsText(values);"));
 }
 
@@ -56,8 +56,8 @@ TEST(RawLinkedSource, ThePacksKeysAreTheRuntimes)
 // the offline compile's alike (render_descriptor is generic over both).
 TEST(RawLinkedSource, TheBridgeGivesEachStagesLinkedFunctionsToTheTranslator)
 {
-    const std::string bridge = SourceText("../../NativeMetal/bridge/NativeMetalObjects.rs");
-    const std::string convert = Body(bridge, "fn render_descriptor<F: DescriptorFunction>(");
+    const std::string descriptors = SourceText("../translate/NativeMetalDescriptors.rs");
+    const std::string convert = Body(descriptors, "fn render_descriptor<F: DescriptorFunction>(");
     EXPECT_THAT(convert, HasSubstr("stage_function().with_linked(vertex_linked)"));
     EXPECT_THAT(convert, HasSubstr("stage_function().with_linked(fragment_linked)"));
 }
@@ -72,9 +72,9 @@ std::vector<std::string> fields(const std::string &body, const std::regex &field
 
 TEST(RawLinkedSource, TheDescriptorsCAndRustFormsAgree)
 {
-    const std::string c = Between(SourceText("../../NativeMetal/bridge/NativeMetalObjects.h"),
+    const std::string c = Between(SourceText("../translate/NativeMetalTranslate.h"),
                                   "#define NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS(Function)", "\n\n");
-    const std::string rust = Between(SourceText("../../NativeMetal/bridge/NativeMetalObjects.rs"),
+    const std::string rust = Between(SourceText("../translate/NativeMetalDescriptors.rs"),
                                      "pub struct NmbRenderPipelineDescriptorOf<F> {", "\n}");
     const std::vector<std::string> namesC = fields(c, std::regex(R"((\w+_(?:linked|count));)"));
     EXPECT_EQ(namesC, fields(rust, std::regex(R"(pub (\w+_(?:linked|count)):)")));

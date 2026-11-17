@@ -8,6 +8,7 @@ lint_files()
 
 exports_files([
     "deploy.py",
+    "icon_cache.py",
     "pull_logs.py",
 ])
 
@@ -58,6 +59,13 @@ py_test(
 )
 
 py_test(
+    name = "deploy_tail_test",
+    size = "small",
+    srcs = ["deploy_tail_test.py"],
+    deps = [":deploy"],
+)
+
+py_test(
     name = "icon_cache_test",
     size = "small",
     srcs = ["icon_cache_test.py"],
@@ -70,7 +78,10 @@ py_test(
 py_test(
     name = "deployed_test",
     size = "small",
-    srcs = ["deployed_test.py"],
+    srcs = [
+        "deployed_test.py",
+        "//tools/package:snapshot.py",
+    ],
     deps = [":lib"],
 )
 

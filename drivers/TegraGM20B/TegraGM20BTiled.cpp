@@ -15,27 +15,20 @@
 #include "TegraGM20BLayoutFit.h"
 #include "TegraGM20BRelayout.h"
 #include "TegraGM20BTiled.h"
+#include "TegraGM20BTiledDecision.h"
 #include "SwitchGpuPathStats.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
-extern "C" int proc_selfpid(void);
 #if TGM_STATS
 #include <os/log.h>
 extern "C" void proc_selfname(char *buf, int size);
+extern "C" int proc_selfpid(void);
 #endif
+
+using namespace tgm_layout_decision;
 
 namespace
 {
 uint32_t gTiledLive;  // atomic: surfaces block-linear now
-
-enum Decision {
-	DecidedTiled,
-	PitchSampledFirst,
-	PitchShared,
-	PitchShape,
-	PitchMoveFailed,
-	PitchCpuMapped,
-	Decisions
-};
 
 #if TGM_STATS
 uint64_t gDecisions[Decisions], gLive, gLiveBytes;  // atomic
@@ -43,10 +36,6 @@ uint64_t gDecisions[Decisions], gLive, gLiveBytes;  // atomic
 void note(Decision d, uint32_t surfaceId, uint32_t width, uint32_t height, uint32_t bpp,
 	  uint32_t blockRows)
 {
-	static const char *const why[Decisions] = {
-		"block-linear", "pitch: its first GPU import only samples it",
-		"pitch: imported before it asked", "pitch: a shape that does not tile",
-		"pitch: the tiling move failed (decided again at a later import's ask)"};
 	__atomic_fetch_add(&gDecisions[d], 1, __ATOMIC_RELAXED);
 	char name[32];
 	proc_selfname(name, sizeof(name));
@@ -58,7 +47,7 @@ void note(Decision d, uint32_t surfaceId, uint32_t width, uint32_t height, uint3
 	else
 		os_log(OS_LOG_DEFAULT,
 		       "tegra-gm20b: IOSurface %u %ux%u x%u bytes %s (decided by %s[%d])",
-		       surfaceId, width, height, bpp, why[d], name, proc_selfpid());
+		       surfaceId, width, height, bpp, why(d), name, proc_selfpid());
 }
 #else
 void note(Decision, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)
@@ -75,8 +64,6 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 		return PitchSampledFirst;
 	if (!tgm_coh_unshared(c) || !tgm_coh_pinned(c))
 		return PitchShared;
-	if (tgm_coh_cpu_foreign(c, proc_selfpid()))
-		return PitchCpuMapped;
 	const tgm_relayout_pages pages = tgm_coh_pages(c);
 	const uint64_t bytes = static_cast<uint64_t>(pages.npages) << 12;
 	const bool laid =
@@ -256,17 +243,17 @@ extern "C" void tgm_tiled_free(struct tgm_tiled *t)
 	IODelete(t, tgm_tiled, 1);
 }
 
-static_assert(Decisions == 6, "tgm_tiled_take_stats' array (TegraGM20BGpu.h)");
+static_assert(Decisions == 5, "tgm_tiled_take_stats' array (TegraGM20BGpu.h)");
 
-extern "C" void tgm_tiled_take_stats(uint64_t out[10])
+extern "C" void tgm_tiled_take_stats(uint64_t out[9])
 {
-	bzero(out, 10 * sizeof(uint64_t));
+	bzero(out, 9 * sizeof(uint64_t));
 #if TGM_STATS
 	for (uint32_t i = 0; i < Decisions; i++)
 		out[i] = __atomic_exchange_n(&gDecisions[i], 0, __ATOMIC_RELAXED);
-	out[6] = __atomic_load_n(&gLive, __ATOMIC_RELAXED);
-	out[7] = __atomic_load_n(&gLiveBytes, __ATOMIC_RELAXED);
-	tgm_scratch_stats(&out[8], &out[9]);
+	out[5] = __atomic_load_n(&gLive, __ATOMIC_RELAXED);
+	out[6] = __atomic_load_n(&gLiveBytes, __ATOMIC_RELAXED);
+	tgm_scratch_stats(&out[7], &out[8]);
 #endif
 }
 

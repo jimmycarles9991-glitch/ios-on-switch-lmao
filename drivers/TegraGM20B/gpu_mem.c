@@ -60,6 +60,11 @@ int tgm_pool_alloc_chunks(uint64_t bytes, uint64_t *pas)
 	return nvxnu_pool_alloc_chunks(bytes >> TGM_COMP_SHIFT, pas);
 }
 
+uint64_t tgm_pool_clean_chunks(void)
+{
+	return nvxnu_pool_clean_chunks();
+}
+
 void tgm_pool_free_chunks(const uint64_t *pas, uint32_t npages)
 {
 	u64 lo = 0;

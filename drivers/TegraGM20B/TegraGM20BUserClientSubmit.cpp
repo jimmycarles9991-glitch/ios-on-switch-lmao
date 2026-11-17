@@ -321,8 +321,12 @@ IOReturn AGXDeviceUserClient::exec(uint32_t channel, TegraGM20BAbiPush *input, u
 	uint32_t fences = 0;
 	if (switch_gpu_job_fences(pushes, count, &fences))
 		return kIOReturnBadArgument;
+#if TGM_STATS
 	tgm_prof prof;
-	const tgm_prof *profile = scanSubmission(pushes, count, prof, false);
+	const tgm_prof *profile = scanSubmission(channel - 1, fences, pushes, count, prof, false);
+#else
+	const tgm_prof *profile = nullptr;
+#endif
 	uint32_t seqno = 0;
 	uint32_t baseUses = native ? useCount + count : 0;
 	if (!native)
@@ -578,6 +582,6 @@ refresh:
 							   seqno);
 	}
 	out->seqno = seqno;
-	out->reserved = 0;
+	out->flags = 0;
 	return kIOReturnSuccess;
 }

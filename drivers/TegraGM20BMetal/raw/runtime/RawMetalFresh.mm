@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalFresh.h"
 #include "raw_fresh.h"
+#include "raw_fresh_fill.h"
 #include "raw_fresh_queue.h"
 
 namespace {
@@ -21,15 +22,7 @@ std::atomic<uint64_t> gEarlyReads{0};
 
 RMTexture *ownerOf(RMTexture *t)
 {
-    while (t && t->_kind == RMTextureView && t->_parent)
-        t = t->_parent;
-    return t;
-}
-
-void fillLevel(raw::BlitEncoder &b, const raw::Texture &image, const raw::CopyFill &fill, uint32_t planes)
-{
-    for (uint32_t z = 0; z < planes; z++)
-        b.fillTexels(image, z, image.width, image.height, fill);
+    return t ? (t->_levelsOwner ?: t) : nil;
 }
 
 uint64_t writeFresh(raw::BlitEncoder &b, RMTexture *t)
@@ -46,17 +39,7 @@ uint64_t writeFresh(raw::BlitEncoder &b, RMTexture *t)
         return 0;
     const bool hasPattern = patterned && raw::freshPatternTexel(x.format, texel) && texel.size == x.bpp &&
                             raw::copyFillOf(texel.bytes, texel.size, pattern);
-    const uint32_t planes = x.type == raw::fx::kTexThreeD ? x.depth : x.layers;
-    uint64_t bytes = 0;
-    for (uint32_t level = 0; level < levels; level++) {
-        raw::Texture image;
-        if (x.chain && !raw::chainLevelImage(x, level, image))
-            continue;
-        const raw::Texture &target = x.chain ? image : x;
-        fillLevel(b, target, hasPattern && level < patterned ? pattern : zero, planes);
-        bytes += uint64_t(target.width) * target.height * planes * x.bpp;
-    }
-    return bytes;
+    return raw::fillFresh(b, x, hasPattern ? patterned : 0, pattern, zero);
 }
 
 enum class FirstUse {
@@ -106,10 +89,11 @@ FirstUse firstUse(RMCommandBuffer *cb, size_t from, size_t to, RMTexture *t)
                        areaHeight = raw::renderAreaSide(uint32_t(pass.height), smallestHeight);
         for (const RMPass::Color &c : pass.color)
             if (c.texture == t && c.level == 0 &&
-                raw::firstPassWritesAll(x.width, x.height, x.chain ? x.chain->layout.levels : 1,
-                                        x.type == raw::fx::kTexThreeD ? x.depth : x.layers,
-                                        c.load == MTLLoadActionClear, c.store == MTLStoreActionStore,
-                                        access & raw::ResourceUse::Sample, areaWidth, areaHeight))
+                raw::firstPassWritesAll(
+                    x.width, x.height, x.chain ? x.chain->layout.levels : 1,
+                    x.type == raw::fx::kTexThreeD ? x.depth : x.layers, c.load == MTLLoadActionClear,
+                    c.store == MTLStoreActionStore || c.store == MTLStoreActionStoreAndMultisampleResolve,
+                    access & raw::ResourceUse::Sample, areaWidth, areaHeight))
                 return FirstUse::ClearsAll;
         return FirstUse::Other;
     }
@@ -118,10 +102,15 @@ FirstUse firstUse(RMCommandBuffer *cb, size_t from, size_t to, RMTexture *t)
 
 }  // namespace
 
+bool freshFills(RMTexture *t, MTLTextureDescriptor *d)
+{
+    return t->_rawOk && t->_kind == RMTexturePool && !t->_heap && !t->_raw.memoryless && !t->_raw.arena &&
+           !t->_raw.zeta && d.storageMode == MTLStorageModePrivate;
+}
+
 void establishFresh(RMTexture *t, MTLTextureDescriptor *d)
 {
-    if (!t->_rawOk || t->_kind != RMTexturePool || t->_heap || t->_raw.memoryless || t->_raw.arena || t->_raw.zeta ||
-        d.storageMode != MTLStorageModePrivate)
+    if (!freshFills(t, d))
         return;
     gFresh.add({t});
 #if SWITCH_RAW_DIAGNOSTICS
@@ -304,8 +293,7 @@ void traceFreshUses(RMCommandBuffer *cb, size_t begin)
     bool unwritten = false;
     cb->_plan.forEachResource(begin, end, RMResourceKind::Texture, [&](const RMRangeResource &use) {
         RMTexture *__unsafe_unretained t = (__bridge RMTexture *)use.object;
-        while (t && t->_kind == RMTextureView && t->_parent)
-            t = t->_parent;
+        t = t ? (t->_levelsOwner ?: t) : nil;
         unwritten |= t && t->_freshUnwritten.load(std::memory_order_relaxed);
     });
     if (!unwritten)

@@ -29,6 +29,9 @@ SWITCH_OBJECTS = {
     "bsd": [
         ("bsd/kern/bsd_init.c", "boot/bsd_init.c", []),
         ("bsd/kern/kern_exec.c", "boot/prefs.c", []),
+        ("bsd/kern/kern_exec.c", "security/app_code.c", []),
+        ("bsd/kern/kern_exec.c", "security/entitlements_factory.c", []),
+        ("bsd/kern/kern_exec.c", "boot/icon_cache.c", []),
         ("bsd/kern/kern_exit.c", "diag/exit.c", []),
         ("bsd/kern/kern_event.c", "diag/workloop.c", []),
         ("bsd/kern/lockdown_mode.c", "sysctl/lockdown.c", [], ["12377.121.6"]),
@@ -48,8 +51,10 @@ SWITCH_OBJECTS = {
     "iokit": [
         ("iokit/Kernel/IOMemoryDescriptor.cpp", "iokit/memory_attachment.cpp", []),
         ("iokit/Kernel/IOUserClient.cpp", "iokit/iosurface.cpp", []),
+        ("iokit/Kernel/IOUserClient.cpp", "security/app_capabilities.cpp", []),
     ],
     "osfmk": [
+        ("osfmk/vm/vm_map.c", "security/dyld_policy.c", [], ["12377.121.6"]),
         ("osfmk/arm/model_dep.c", "diag/threads.c", []),
         ("osfmk/ipc/ipc_kmsg.c", "diag/frames.c", []),
         ("osfmk/arm64/arm_vm_init.c", "ram/ram.c", [_KERNEL_VIRT_BASE]),

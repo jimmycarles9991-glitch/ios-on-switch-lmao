@@ -23,7 +23,7 @@ const SCALARS: [(&str, &str); 12] = [
 ];
 
 /// The `MTLDataType` of an MSL scalar, vector or matrix type (`float`, `uint4`, `half3x3`,
-/// `packed_float3`), or `None` for any other spelling.
+/// `packed_float3`, `packed_float1`), or `None` for any other spelling.
 pub(super) fn data_type(name: &str) -> Option<DataType> {
     let name = name.strip_prefix("packed_").unwrap_or(name);
     let (base, family) = SCALARS
@@ -33,6 +33,10 @@ pub(super) fn data_type(name: &str) -> Option<DataType> {
     let shape = &name[base.len()..];
     let valid = match shape.as_bytes() {
         [] => true,
+        // Metal reflects a one-component vector (`packed_float1`, `vec<int, 1>`) as
+        // MTLDataTypeNone, and lays it out in a plain buffer's encoder as it does any other
+        // non-integer constant.
+        [b'1'] => return Some(DataType::None),
         [n] => (b'2'..=b'4').contains(n),
         // Matrices exist for float and half only.
         [c, b'x', r] => {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#include "raw_srgb_pair.h"
 
 // Each predicate's refusal key: domain "raw", the predicate's name as the reason (kits/SwitchRefusal)
 static constexpr std::array<uint64_t, PredCount> predKeys()
@@ -13,6 +14,7 @@ static constexpr std::array<uint64_t, PredCount> predKeys()
 static constexpr std::array<uint64_t, PredCount> kPredKeys = predKeys();
 #if SWITCH_RAW_DIAGNOSTICS
 std::atomic<uint64_t> gPredCbs[PredCount], gPredOnly[PredCount];
+std::atomic<uint64_t> gPredFailed[PredCount];
 #endif
 std::atomic<uint64_t> gPredLogged{0};
 
@@ -30,6 +32,22 @@ void logPred(RMPred p, uint64_t a, uint64_t b, NSString *detail)
     fprintf(stderr, "raw: first %s: a=%llu b=%llu %s\n", kPredNames[p], (unsigned long long)a, (unsigned long long)b,
             detail ? detail.UTF8String : "");
 #endif
+}
+
+void predFails(RMCommandBuffer *cb, RMPred p, uint64_t a, uint64_t b, const char *detail)
+{
+    const NSInteger code = predFailure(p);
+    gPredLogged.fetch_or(1ull << p, std::memory_order_relaxed);
+    switch_refusal_k(kPredKeys[p], "raw", kPredNames[p],
+                     "the command buffer fails (MTLCommandBufferErrorDomain %ld) a=%llu (0x%llx) b=%llu (0x%llx)%s%s",
+                     long(code), (unsigned long long)a, (unsigned long long)a, (unsigned long long)b,
+                     (unsigned long long)b, detail ? " " : "", detail ?: "");
+    RAW_DIAGNOSTIC(gPredFailed[p].fetch_add(1, std::memory_order_relaxed));
+    if (!cb->_failedBy)
+        cb->_failedBy = p;
+    failCommandBuffer(
+        cb, [NSString stringWithFormat:@"The raw path refused %s%s%s", kPredNames[p], detail ? ": " : "", detail ?: ""],
+        MTLCommandBufferError(code));
 }
 
 // The type encoding of a selector some MTL* protocol declares (the plugin's answerUnimplemented uses the same lookup), walked
@@ -111,180 +129,77 @@ void answerMissing(id object, NSInvocation *invocation)
     returnZero(invocation);
 }
 
-// A format the raw path has a header for. RGB10A8_2P_XR10 only private or memoryless: its texels are m2v's own layout, not the two
-// planes of Metal's bytes a surface, a buffer or the CPU holds (raw_xr.h); one over a two-plane surface's planes is taken before
-// this (xrPlanesShape)
-static bool keptFormat(MTLTextureDescriptor *d)
+raw::shapes::TextureShape textureShape(MTLTextureDescriptor *d)
 {
-    if (raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::Planes && d.storageMode != MTLStorageModePrivate &&
-        d.storageMode != MTLStorageModeMemoryless)
-        return false;
-    // a block-compressed texture is private: written and read by the copy engine in whole blocks, never by the CPU
-    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
-    return f && (!raw::blockCompressed(f) || d.storageMode == MTLStorageModePrivate);
+    static const SEL rotation = NSSelectorFromString(@"rotation");
+    raw::shapes::TextureShape s;
+    s.type = uint32_t(d.textureType);
+    s.format = uint32_t(d.pixelFormat);
+    s.storage = uint32_t(d.storageMode);
+    s.usage = d.usage;
+    s.width = d.width;
+    s.height = d.height;
+    s.depth = d.depth;
+    s.levels = d.mipmapLevelCount;
+    s.samples = d.sampleCount;
+    s.array = d.arrayLength;
+    s.rotation = [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
+    return s;
 }
 
-// A texture the raw path keeps: 2D, one level, one sample, a format it has a header for, not rotated (the descriptor's rotation SPI:
-// Core Animation's window-server surfaces on a rotated display, CA::OGL::MetalContext::get_surface; m2v renders those rotated)
 bool rawShape(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    return d.textureType == MTLTextureType2D && d.mipmapLevelCount <= 1 && d.sampleCount <= 1 && d.arrayLength <= 1 &&
-           d.depth <= 1 && !turned && keptFormat(d);
+    return raw::shapes::rawShape(textureShape(d));
 }
 
-// A mipmapped texture the raw path keeps as a block-linear chain of its levels (raw::Device::createMipTexture, raw/fx): 2D, one
-// sample, one layer, no rotation, of a format the raw path renders and holds as it is (not extended range). Private, memoryless (r7r: Core Animation makes 776x24 mipmapped surfaces memoryless too, kept here as
-// private ones, a superset) or shared: CA::OGL::MetalContext::update_surface copies IOSurface content it draws with a trilinear
-// minification filter into a texture of the surface texture's descriptor (shared) with every level, then generates them (on
-// the 18:13 boot of 11-06, 49 command buffers of a 1280x720 one went to m2v). A shared one's CPU access reads and writes the
-// chain (cpuLevel).
 bool chainShape(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
-    return d.textureType == MTLTextureType2D && d.mipmapLevelCount > 1 && d.sampleCount <= 1 && d.arrayLength <= 1 &&
-           d.depth <= 1 && !turned &&
-           (d.storageMode == MTLStorageModePrivate || d.storageMode == MTLStorageModeMemoryless ||
-            d.storageMode == MTLStorageModeShared) &&
-           f && f->rt && raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::None;
+    return raw::shapes::chainShape(textureShape(d));
 }
 
-// A 1D texture the raw path keeps (raw::Device::createLine): one level, of a format it has a header for, not extended range.
-// Memory of its own only: a 1D header has no pitch layout, which a buffer's or a surface's rows are.
 bool lineShape(MTLTextureDescriptor *d)
 {
-    return d.textureType == MTLTextureType1D && d.mipmapLevelCount <= 1 && d.sampleCount <= 1 && d.arrayLength <= 1 &&
-           d.height <= 1 && d.depth <= 1 && d.storageMode != MTLStorageModeMemoryless &&
-           raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::None && raw::formatInfo(uint32_t(d.pixelFormat)) &&
-           !raw::blockCompressed(raw::formatInfo(uint32_t(d.pixelFormat)));
+    return raw::shapes::lineShape(textureShape(d));
 }
 
-// m2v makes a 3D texture it may render into 2D-array compatible (image_plan.rs render_3d_flags), which NIL lays out one plane a
-// block; Unknown usage is every usage (texture_descriptor.rs effective_usage)
 bool volumeRendered(MTLTextureDescriptor *d)
 {
-    return d.usage == MTLTextureUsageUnknown || (d.usage & MTLTextureUsageRenderTarget);
+    return raw::shapes::volumeRendered(textureShape(d));
 }
 
-// A 3D texture the raw path keeps (raw::Device::createVolume): of a format it has a header for, not extended range, memory of
-// its own, mipmapped of a format it renders (as a 2D chain is). One m2v would render into must be of a format the raw path
-// renders too: m2v's twin is laid out for rendering exactly where NVK renders the format.
 bool volumeShape(MTLTextureDescriptor *d)
 {
-    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
-    return d.textureType == MTLTextureType3D && d.sampleCount <= 1 && d.arrayLength <= 1 &&
-           d.storageMode != MTLStorageModeMemoryless && raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::None &&
-           f && !raw::blockCompressed(f) && (f->rt || (!volumeRendered(d) && d.mipmapLevelCount <= 1));
+    return raw::shapes::volumeShape(textureShape(d));
 }
 
-// A 2D array, cube or cube array the raw path keeps (raw::Device::createArray): one sample, of a format it has a header for,
-// not extended range, memory of its own, mipmapped of a format it renders (as a 2D chain is); its header's type
-// (fx::kTexTwoDArray, kTexCube, kTexCubeArray), 0: none
 uint32_t arrayType(MTLTextureDescriptor *d)
 {
-    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
-    const bool kept = (d.mipmapLevelCount <= 1 || (f && f->rt)) && d.sampleCount <= 1 && d.depth <= 1 &&
-                      d.storageMode != MTLStorageModeMemoryless &&
-                      raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::None && f && !raw::blockCompressed(f);
-    if (!kept)
-        return 0;
-    switch (d.textureType) {
-    case MTLTextureType1DArray:
-        return d.height <= 1 ? raw::fx::kTexOneDArray : 0;
-    case MTLTextureType2DArray:
-        return raw::fx::kTexTwoDArray;
-    case MTLTextureTypeCube:
-        return d.width == d.height && d.arrayLength <= 1 ? raw::fx::kTexCube : 0;
-    case MTLTextureTypeCubeArray:
-        return d.width == d.height ? raw::fx::kTexCubeArray : 0;
-    default:
-        return 0;
-    }
+    return raw::shapes::arrayType(textureShape(d));
 }
 
-// A depth/stencil texture of a format the raw path renders (raw_zeta.h kZetaFormatInfo), one level, no rotation: memoryless, 2D
-// of one sample or 2D multisampled of 2 or 4; or stored (private), 2D of one sample, a render target that may also be sampled:
-// in the raw path's own zeta memory (makeStoredZeta), a 2D array or cube rendered there a slice at a time or layered, moved
-// into NVK's image only if a replay needs m2v's twin
 bool zetaDescriptor(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    const bool samples = d.textureType == MTLTextureType2D ? d.sampleCount <= 1
-                                                           : d.textureType == MTLTextureType2DMultisample &&
-                                                                 (d.sampleCount == 2 || d.sampleCount == 4);
-    const bool layers = d.textureType == MTLTextureType2DArray || d.textureType == MTLTextureTypeCube;
-    const bool stored = d.storageMode == MTLStorageModePrivate && (d.textureType == MTLTextureType2D || layers) &&
-                        (d.usage & ~MTLTextureUsageShaderRead) == MTLTextureUsageRenderTarget;
-    return (samples || (layers && stored)) && d.mipmapLevelCount <= 1 && (d.arrayLength <= 1 || layers) &&
-           d.depth <= 1 && !turned && raw::zetaFormatIndex(uint32_t(d.pixelFormat)) < raw::kZetaFormats &&
-           (d.storageMode == MTLStorageModeMemoryless || stored);
+    return raw::shapes::zetaShape(textureShape(d));
 }
 
-// A memoryless multisampled color texture, 2D, one level, 2 or 4 samples (the counts the device answers yes for), no rotation, of a
-// format the raw path has a header for (raw::Device::createMemoryless with its samples)
 bool multisampleShape(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    return d.textureType == MTLTextureType2DMultisample && d.mipmapLevelCount <= 1 && d.arrayLength <= 1 &&
-           d.depth <= 1 && (d.sampleCount == 2 || d.sampleCount == 4) && !turned &&
-           d.storageMode == MTLStorageModeMemoryless && keptFormat(d);
+    return raw::shapes::multisampleShape(textureShape(d));
 }
 
-// A memoryless 2D array or cube, one sample and one level, no rotation, of a depth/stencil format the raw path renders or a
-// color format it renders as it is (raw::Device::createMemoryless with its layers): its layers, 0: none
 uint32_t memorylessLayers(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    const uint32_t format = uint32_t(d.pixelFormat);
-    const raw::FormatInfo *f = raw::formatInfo(format);
-    const bool target = raw::zetaFormatIndex(format) < raw::kZetaFormats ||
-                        (f && f->rt && !raw::blockCompressed(f) && raw::xrForm(format) == raw::XrForm::None);
-    const bool layered = d.textureType == MTLTextureType2DArray || d.textureType == MTLTextureTypeCube;
-    if (d.storageMode != MTLStorageModeMemoryless || !layered || d.sampleCount > 1 || d.mipmapLevelCount > 1 ||
-        d.depth > 1 || turned || !target)
-        return 0;
-    return raw::textureLayers(uint32_t(d.textureType), uint32_t(std::min<NSUInteger>(d.arrayLength, 2048)));
+    return raw::shapes::memorylessLayers(textureShape(d));
 }
 
-// A block-compressed 2D texture or 2D array the raw path keeps in block-linear memory of its own (raw::Device::
-// createBlockTexture): any levels and layers, private or shared (the CPU's copies move whole blocks of NIL's image), one
-// sample, no rotation; a private one of one level and one layer is rawShape's
 bool blockShape(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
-    return f && raw::blockCompressed(f) &&
-           (d.textureType == MTLTextureType2D || d.textureType == MTLTextureType2DArray) && d.sampleCount <= 1 &&
-           d.depth <= 1 && !turned &&
-           (d.storageMode == MTLStorageModePrivate || d.storageMode == MTLStorageModeShared) && !rawShape(d);
+    return raw::shapes::blockShape(textureShape(d));
 }
 
-// Diagnostics: which rawShape term fails (1 type, 2 levels, 3 samples, 4 array/depth, 5 rotation, 6 format; 0 none)
 uint32_t rawShapeTerm(MTLTextureDescriptor *d)
 {
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    return d.textureType != MTLTextureType2D    ? 1
-           : d.mipmapLevelCount > 1             ? 2
-           : d.sampleCount > 1                  ? 3
-           : (d.arrayLength > 1 || d.depth > 1) ? 4
-           : turned                             ? 5
-           : !keptFormat(d)                     ? 6
-                                                : 0;
+    return raw::shapes::rawShapeTerm(textureShape(d));
 }
 
 static NSString *describe(MTLTextureDescriptor *d)
@@ -301,11 +216,16 @@ static NSString *describe(MTLTextureDescriptor *d)
                          (unsigned long)d.storageMode];
 }
 
-// A kept extended-range texture's facts (raw_xr.h). Metal keeps it compressed with allowGPUOptimizedContents, 16 texels or more a
-// side and no ShaderWrite, PixelFormatView or ShaderAtomic usage, never over a buffer (m2v heap_tiled.rs metal_compresses); one
-// draws may sample gets its stand-in.
+// A kept extended-range texture's facts (raw_xr.h), or an RG8Unorm_sRGB one's stand-in (raw_srgb_pair.h). Metal keeps
+// it compressed with allowGPUOptimizedContents, 16 texels or more a side and no ShaderWrite, PixelFormatView or
+// ShaderAtomic usage, never over a buffer (m2v heap_tiled.rs metal_compresses); one draws may sample gets its stand-in.
 void keepExtendedRange(MTLTextureDescriptor *d, raw::Texture &t, bool overBuffer)
 {
+    if (raw::srgbPair(t.format)) {
+        if (d.usage == MTLTextureUsageUnknown || (d.usage & MTLTextureUsageShaderRead))
+            gRM->raw->createStandIn(t);
+        return;
+    }
     if (raw::xrForm(t.format) == raw::XrForm::None)
         return;
     const MTLTextureUsage plain =

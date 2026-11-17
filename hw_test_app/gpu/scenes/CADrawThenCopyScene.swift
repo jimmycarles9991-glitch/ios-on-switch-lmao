@@ -26,7 +26,7 @@ struct CADrawThenCopyScene: GPUScene {
             let library = try gpu.device.makeLibrary(URL: CAState.library)
             pipeline = try CAState.pipeline(CACorpus.state("PBGRAXm_A2Xhf")!, library: library, device: gpu.device)
         } catch {
-            result.notes.append("no Core Animation fill state here (\(GPU.describe(error)))")
+            result.unavailable("no Core Animation fill state here (\(GPU.describe(error)))", on: gpu.device)
             return result
         }
         let target = try SurfaceTarget.make(

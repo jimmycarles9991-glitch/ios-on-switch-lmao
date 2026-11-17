@@ -7,7 +7,7 @@
 #include <map>
 #include <string>
 #include <vector>
-#include "bridge/NativeMetalDirect.h"
+#include "raw_direct_abi.h"
 #include "raw_compute_record.h"
 #include "raw_cubic.h"
 #include "raw_direct.h"
@@ -24,7 +24,8 @@ public:
     KernelDispatch(const KernelDispatch &) = delete;
     KernelDispatch &operator=(const KernelDispatch &) = delete;
 
-    void texture(uint32_t slot, MTLTextureDescriptor *d);
+    // `planes`: an RGB10A8_2P_XR10 texture held in Metal's two planes (BoundTexture::planes)
+    void texture(uint32_t slot, MTLTextureDescriptor *d, bool planes = false);
     void sampler(uint32_t slot, MTLSamplerDescriptor *d);
     const NmbDirectDispatch &dispatch();
 
@@ -44,20 +45,20 @@ struct ProbeTextures {
     uint32_t bindStride = 0;  // the attributeStride every vertex buffer is bound at (0: none)
     bool twoPlane = false;    // its RGB10A8_2P_XR10 colours in their two planes (raw_xr_pass.h: its " | xr2p" variant)
     uint16_t xrSlots = 0;     // fragment slots it samples two-plane RGB10A8_2P_XR10 at (its " | xrs=" variant)
+    uint8_t xrShadows = 0;    // colours whose half shadow its pass holds (raw_xr_shadow.h: its " | xrsh=" variant)
     // the formats of the textures it writes at these slots (raw_written_textures.h: its " | wtex=" variant)
     std::vector<WrittenTexture> written;
 };
 
-// What makes a state's or a kernel's translation and finds NVK's exports: the frontend over its m2v runtime device, or
-// the pack generator's offline compile (pack/offline_metal.h), whose descriptors hold its own functions. False with `why`:
-// the translator refused it.
+// What makes a state's or a kernel's translation: the frontend over its m2v runtime device, or the pack generator's
+// offline compile (RawOffline.h), whose descriptors hold its own functions. False with `why`: the translator
+// refused it.
 struct DirectTranslator {
     bool (*render)(id descriptor, bool barrier, NSUInteger textureFormat, NSUInteger textureSamples,
                    const NmbDirectBinds *binds, bool (*each)(const NmbDirectState *, void *), void *ctx,
                    const char **why) = nullptr;
     bool (*compute)(id descriptor, const NmbDirectDispatch *dispatch, bool (*each)(const NmbDirectKernel *, void *),
                     void *ctx, const char **why) = nullptr;
-    void *(*nvkSymbol)(const char *name) = nullptr;
 
     static DirectTranslator frontend();
 };
@@ -92,10 +93,21 @@ public:
         variants_ = on;
     }
 
+    void selectorConfigs(const std::map<uint64_t, SelectorConfigs> *configs)
+    {
+        selectors_ = configs;
+    }
+
     // Why the last make's storage form was refused where it made the barrier form instead; empty where it made none
     const std::string &storageRefusal() const
     {
         return storageRefusal_;
+    }
+
+    // Whether the last make's state is one directRecord splits (splitsFragment)
+    bool splittable() const
+    {
+        return splittable_;
     }
 
     // The pack generator's: each make keeps m2v's bound probe draw of the state it made (boundDraw)
@@ -109,6 +121,13 @@ public:
         return bound_;
     }
 
+    // The pack generator's: the registers of the last make's stride twin (RuntimeRecord::strideTwin), as `registers`
+    // holds the record's
+    const std::map<uint32_t, uint32_t> &strideTwinRegisters() const
+    {
+        return twinRegisters_;
+    }
+
     // The record of `descriptor`'s kernel at a dispatch of `dispatch`'s shape and bindings, whose compute key is `key`
     // (raw_direct_compute.h)
     CompileOutcome kernel(MTLComputePipelineDescriptor *descriptor, const NmbDirectDispatch &dispatch,
@@ -117,11 +136,14 @@ public:
 private:
     PackRules rules_;
     DirectTranslator translator_;
-    DirectNvk nvk_;
+    StageCompile compile_;
     bool variants_ = false;
+    const std::map<uint64_t, SelectorConfigs> *selectors_ = nullptr;
     std::string storageRefusal_;
+    bool splittable_ = false;
     bool keepBound_ = false;
     BoundDraw bound_;
+    std::map<uint32_t, uint32_t> twinRegisters_;
 
     CompileOutcome form(MTLRenderPipelineDescriptor *descriptor, bool barrier, ProbeTextures textures,
                         const std::string &key, const std::vector<uint32_t> &attributes, RuntimeRecord &out,

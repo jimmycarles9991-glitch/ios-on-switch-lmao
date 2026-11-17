@@ -52,13 +52,11 @@ py_binary(
 py_test(
     name = "libpthread_test",
     size = "small",
-    srcs = [
-        "libpthread.py",
-        "libpthread_test.py",
-    ],
+    srcs = ["libpthread_test.py"],
     tags = ["requires-darwin"],
     deps = [
         ":common",
+        ":libpthread",
         ":kernel_names",
         "//tools/common:macho",
     ],

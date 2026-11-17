@@ -77,6 +77,7 @@ bool RenderEncoder::bindPatches(uint32_t controlPoints, const Buffer *patchIndic
     const Pipeline *pl = formFor(pipeline_, {icb::kPatchPrimitive, controlPoints, 1, false, false});
     if (!pl || !tessellates(*pl->rec)) {
         *why = "patches drawn with a state of no post-tessellation vertex function";
+        cb_->refusal = {RefTessellationDraw, icb::kPatchPrimitive, 0};
         return false;
     }
     const PackPipeline &r = *pl->rec;
@@ -84,11 +85,13 @@ bool RenderEncoder::bindPatches(uint32_t controlPoints, const Buffer *patchIndic
         pointIndices = nullptr;
     if (pointIndices && pointIndexOffset % r.controlPointIndexBytes) {
         *why = "control-point indices at an offset that is not a multiple of their size";
+        cb_->refusal = {RefControlPointOffset, uint32_t(pointIndexOffset), r.controlPointIndexBytes};
         return false;
     }
     patchIndexOffset &= ~uint64_t(3);
     if (!tess_.scaleValid) {
         *why = "a tessellation factor scale that is not a positive half";
+        cb_->refusal = {RefTessellationScale};
         return false;
     }
     const Bound patches = boundFrom(patchIndices, patchIndexOffset), points = boundFrom(pointIndices, pointIndexOffset);
@@ -190,22 +193,17 @@ bool RenderEncoder::icbPatchLayout(const char **why)
         *why =
             "patch commands of a state whose control stage reads set 0 by its address, which no constant buffer load "
             "orders";
-        cb_->refusal = {};
-        return false;
-    }
-    if (renderSetBytes(r.setBytes) > mme::kIcbSetBytes) {
-        *why = "patch commands of a state whose set 0 is larger than the patch macro loads it at";
-        cb_->refusal = {};
+        cb_->refusal = {RefPatchCommands};
         return false;
     }
     uint32_t entries[TessBufferCount] = {mme::kNoEntry, mme::kNoEntry, mme::kNoEntry};
-    for (uint32_t i = 0; i < r.entries; i++)
-        if (r.entry[i].kind == EntryTessBuffer && r.entry[i].slot < TessBufferCount)
-            entries[r.entry[i].slot] = r.entry[i].offset;
+    for (uint32_t i = 0; i < pl.entries.size(); i++)
+        if (pl.entries[i].kind == EntryTessBuffer && pl.entries[i].slot < TessBufferCount)
+            entries[pl.entries[i].slot] = pl.entries[i].offset;
     cb_->useAddress(dev_->zero_.va, uint32_t(dev_->zero_.bytes), false);
     if (p_.room() < 16)
         reserve();
-    mme::icbPatchLayout(p_, preparedSet_, entries, 0x700 + 4 * (r.controlWord - 1u));
+    mme::icbPatchLayout(p_, preparedSet_, renderSetBytes(r.setBytes), entries, 0x700 + 4 * (r.controlWord - 1u));
     return true;
 }
 
@@ -218,6 +216,7 @@ void RenderEncoder::icbPatchesDone()
     p_.m(NVB197_LOAD_CONSTANT_BUFFER_OFFSET, 0x700 + 4 * first);
     p_.nonInc(NVB197_LOAD_CONSTANT_BUFFER(0), cb_->rootPush_ + first, kWords);
     descriptors_.forget();
+    wideDescriptors_.forget();
     invalidateDescriptors();
 }
 

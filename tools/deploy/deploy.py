@@ -29,9 +29,9 @@ Steps:
                    plugin's stager, which copies only the files whose sha256 the card does not already hold and
                    reads nothing more when the card's list matches the build (its CDHashes must be in the same
                    build's kernel window: deploy the boot package built with that bundle); --remove-gpu removes it
-  4a icon cache    where the staged GPU build (the stager's list digest) is not the one <Data>/Switch/icon-cache-gpu
-                   names, removes ProductBuildVersion from IconServices' __cache_info__ so iconservicesagent empties its
-                   rendered icons at its next launch, as after an OS update (icon_cache.py), then records the digest
+  4a icon cache    names the staged GPU build (the stager's list digest) in <Data>/Switch/icon-cache-gpu; at the next
+                   boot the kernel removes IconServices' __cache_info__ when it last did so for another build, and
+                   iconservicesagent empties its rendered icons at launch as after an OS update (icon_cache.py)
   4b AWDL          --awdl on|off: creates or removes <Data>/Switch/awdl-enable, the empty file SwitchWLAN's AWDL
                    (AirDrop's Wi-Fi link) is off without (read once per boot, after Data mounts)
   4c gallery tiles --reset-gallery-snapshots BUNDLE...: removes those poster extensions' gallery tiles from
@@ -39,6 +39,10 @@ Steps:
   5 launchd check  --launchd-check LABEL...: read-only, the jobs Data's launchd database disables (exit 1 if a label
                    is not among them; the kernel rewrites that database at every boot)
   6 eject          unmount the iPad volumes, eject the card (--no-eject keeps it)
+
+A step besides the boot entry, the overlay and the GPU bundle that fails logs one line saying so and the deploy goes on
+to the eject; it then ends FAILED, naming what was not done, with exit status 1. Those three stop the deploy with one
+FAILED line, unmounted and not ejected.
 """
 
 import argparse
@@ -47,6 +51,7 @@ import os
 import plistlib
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -162,6 +167,9 @@ def _checked(args: argparse.Namespace, log: host.Log) -> tuple[cards.Card, dict,
     """Check the card and the build; return the card, the spec, its FAT and APFS partitions and its Data volume."""
     host.check_tools(log)
     spec = pull_logs.load_spec(args.spec)
+    source = deployed.provenance(Path(args.boot_package))
+    if source and source.get('build') and source['build'] != _ios_build(args.ipsw):
+        raise cards.RefusedError(f'{args.boot_package}: snapshot is for {source["build"]}, not {_ios_build(args.ipsw)}')
     card = cards.resolve(args.disk)
     fat, target = cards.check_layout_unprivileged(card, spec)
     if target.content != 'Apple_APFS':
@@ -186,7 +194,7 @@ def _plan(args: argparse.Namespace, changes: list, removed: list, pairing: dict 
         controllers = f'stage {len(pairing["controllers"])} controller(s) for host {pairing["host"]}' if pairing else ''
         steps.append('Joy-Con pairing: ' + (controllers or 'remove any staged dump'))
     steps.append('remove the GPU bundle' if args.remove_gpu else 'GPU bundle: stage what changed')
-    steps.append('icon cache: let IconServices re-render where the GPU build changed')
+    steps.append('icon cache: name the GPU build, so the next boot lets IconServices re-render where it changed')
     steps += [f'AWDL {args.awdl} (<Data>/Switch/awdl-enable)'] if args.awdl else []
     steps += ['run the data migration again on the next boot'] if args.rerun_migration else []
     gallery = args.reset_gallery_snapshots
@@ -236,8 +244,30 @@ def _restage_system_apps(system: str | None, data_root: Path, log: host.Log) -> 
         return system_apps.restage(system_root, data_root, log)
 
 
-def _write(args: argparse.Namespace, data_root: Path, volumes: Volumes, pairing: dict | None, log: host.Log) -> bool:
-    """Write the deploy to the mounted Data volume (and the FAT); False when the launchd check fails."""
+class _Steps:
+    """The steps that run once the card is being written, besides the boot entry, the overlay and the GPU bundle.
+
+    One that cannot do its work logs one line and is counted, and the rest, the unmount and the eject still run: a
+    deploy that stopped there left a card whose kernel no longer matched its GPU bundle, or a card never ejected.
+    """
+
+    def __init__(self, log: host.Log) -> None:
+        self.log = log
+        self.not_done: list[str] = []
+
+    def run[T](self, what: str, step: Callable[..., T], *args: object) -> T | None:
+        try:
+            return step(*args)
+        except (OSError, ValueError, host.HostError) as error:
+            self.log(f'{what}: NOT done: {error}')
+            self.not_done.append(what)
+            return None
+
+
+def _write(
+    args: argparse.Namespace, data_root: Path, volumes: Volumes, pairing: dict | None, log: host.Log
+) -> list[str]:
+    """Write the deploy to the mounted Data volume (and the FAT); return the steps not done (a failed launchd check)."""
     renamed.migrate_data(data_root, log)
     out = Path(args.logs_out or paths.state_dir() / 'device-logs' / time.strftime('boot-%m%d-%H%M'))
     if args.pull_logs:
@@ -249,22 +279,37 @@ def _write(args: argparse.Namespace, data_root: Path, volumes: Volumes, pairing:
     with cards.mounted(volumes.fat, log) as fat_root:
         cards.sync_boot_entry(fat_root, args.boot_package, log)
         boot_args = _boot_args(fat_root)
-    apps = system_apps.apps(data_root)
+    steps = _Steps(log)
+    apps = steps.run('system apps registration', system_apps.apps, data_root)
     cards.sync_overlay(data_root, args.boot_package, log)
-    deployed.record(data_root, paths.workspace(), _ios_build(args.ipsw), log)
-    restaged = _restage_system_apps(volumes.system, data_root, log)
-    next_boot = app_journal.NextBoot(_ios_version(args.ipsw), boot_args)
-    system_apps.register(data_root, apps, log, next_boot, force=args.rerun_migration or restaged)
-    remove_stale_logging_profiles(data_root, log)
+    steps.run(
+        'deployed.json',
+        deployed.record,
+        data_root,
+        paths.workspace(),
+        _ios_build(args.ipsw),
+        log,
+        Path(args.boot_package),
+    )
+    restaged = steps.run('system apps restage', _restage_system_apps, volumes.system, data_root, log)
+    if apps is not None:
+        next_boot = app_journal.NextBoot(_ios_version(args.ipsw), boot_args)
+        force = args.rerun_migration or bool(restaged)
+        steps.run('system apps registration', system_apps.register, data_root, apps, log, next_boot, force)
+    steps.run('stale logging profiles', remove_stale_logging_profiles, data_root, log)
     if not args.no_joycon_pairing:
-        joycon_pairing.stage(data_root, pairing, log)
+        steps.run('Joy-Con pairing', joycon_pairing.stage, data_root, pairing, log)
     _stage_gpu(args, data_root, log)
-    icon_cache.present(data_root, log)
+    steps.run('icon cache', icon_cache.present, data_root, log)
     if args.awdl:
-        set_awdl(data_root, args.awdl == 'on', log)
+        steps.run('AWDL', set_awdl, data_root, args.awdl == 'on', log)
     if args.reset_gallery_snapshots:
-        poster_snapshots.reset(data_root, args.reset_gallery_snapshots, log)
-    return launchd_check(data_root, args.launchd_check, log) if args.launchd_check is not None else True
+        steps.run('gallery snapshots', poster_snapshots.reset, data_root, args.reset_gallery_snapshots, log)
+    if args.launchd_check is not None:
+        checked = steps.run('launchd check', launchd_check, data_root, args.launchd_check, log)
+        if checked is False:
+            steps.not_done.append('launchd check')
+    return steps.not_done
 
 
 def _eject(card: cards.Card, target: object, log: host.Log) -> None:
@@ -300,15 +345,18 @@ def main(argv: list[str] | None = None) -> int:
                     renamed.migrate_preboot(preboot_root, spec, log)
             system = pull_logs.data_volume(card, spec['volumes'].get('system', {}).get('uuid', '').upper())
             with cards.mounted(data, log) as data_root:
-                ok = _write(args, data_root, Volumes(fat.identifier, system), pairing, log)
+                not_done = _write(args, data_root, Volumes(fat.identifier, system), pairing, log)
             if not args.no_eject:
                 _eject(card, target, log)
+        if not_done:
+            log('FAILED: not done:', ', '.join(not_done))
+            return 1
         log('deployed')
-        return 0 if ok else 1
+        return 0
     except cards.RefusedError as error:
         log('REFUSED:', error)
         return 2
-    except host.HostError as error:
+    except (host.HostError, OSError) as error:
         log('FAILED:', error)
         return 1
 

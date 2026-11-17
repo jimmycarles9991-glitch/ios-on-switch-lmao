@@ -5,7 +5,7 @@
 #pragma once
 #include <cstring>
 #include <string>
-#include "bridge/NativeMetalDirect.h"
+#include "raw_direct_abi.h"
 #include "raw_direct_encode.h"
 #include "raw_record_parts.h"
 

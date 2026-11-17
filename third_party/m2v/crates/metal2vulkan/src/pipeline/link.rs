@@ -601,6 +601,7 @@ fn binding_source(slot: ResourceSlot) -> BindingSource {
             sampler: CombinedSampler::from_heap_index(sampler, slot.index),
         },
         ResourceKind::RawTexture => BindingSource::RawTexture(metal(SlotClass::Texture)),
+        ResourceKind::TexturePlane => BindingSource::TexturePlane(metal(SlotClass::Texture)),
         ResourceKind::ExtendedShadow(color) => BindingSource::ExtendedShadow(color),
     }
 }

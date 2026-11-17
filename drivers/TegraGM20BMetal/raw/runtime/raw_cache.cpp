@@ -34,6 +34,7 @@ void writeProgram(Writer &w, const CapturedProgram &p)
     w.list(p.image);
     w.list(p.data);
     w.list(p.cbufTypes);
+    w.list(p.farUbos);
     w.value(p.gprs);
     w.value(p.boundTextures);
 }
@@ -45,6 +46,7 @@ CapturedProgram readProgram(Reader &r)
     p.image = r.list<uint8_t>();
     p.data = r.list<uint8_t>();
     p.cbufTypes = r.list<uint8_t>();
+    p.farUbos = r.list<uint16_t>();
     p.gprs = r.value<uint8_t>();
     p.boundTextures = r.value<uint8_t>();
     return p;
@@ -193,8 +195,6 @@ void writeRecord(Writer &w, const RuntimeRecord *record)
     w.list(record->extras);
     w.list(record->restore);
     w.list(record->samplers);
-    w.value(record->amplificationLayerWord);
-    w.value(record->amplificationViewportWord);
     w.value(uint8_t((record->splitTried ? kSplitTried : 0) | (record->split ? kSplit : 0)));
     if (record->split) {
         w.value(record->splitRecord);
@@ -207,6 +207,7 @@ void writeRecord(Writer &w, const RuntimeRecord *record)
         writeProgram(w, v.program);
     }
     w.list(record->spill);
+    w.list(record->far);
     w.value(uint8_t(record->strideTwin != nullptr));
     if (record->strideTwin)
         writeRecord(w, record->strideTwin.get());
@@ -227,8 +228,6 @@ bool readRecord(Reader &r, RuntimeRecord &rec, bool twinned)
     rec.extras = r.list<std::pair<uint32_t, uint32_t>>();
     rec.restore = r.list<std::pair<uint32_t, uint32_t>>();
     rec.samplers = r.list<std::array<uint32_t, 8>>();
-    rec.amplificationLayerWord = r.value<uint8_t>();
-    rec.amplificationViewportWord = r.value<uint8_t>();
     const uint8_t split = r.value<uint8_t>();
     rec.splitTried = split & kSplitTried;
     rec.split = split & kSplit;
@@ -248,6 +247,12 @@ bool readRecord(Reader &r, RuntimeRecord &rec, bool twinned)
     rec.spill = r.list<uint32_t>();
     if (rec.spill.size() != 0u + rec.pipeline.spillWords[0] + rec.pipeline.spillWords[1])
         return false;
+    rec.far = r.list<uint32_t>();
+    if (entryCount(rec.pipeline) > kSetEntriesMax || rec.far.size() != farWords(entryCount(rec.pipeline)))
+        return false;
+    for (const CapturedProgram *p : {&rec.programs[0], &rec.programs[1], &rec.tessPrograms[0], &rec.tessPrograms[1]})
+        if (!p->farUbos.empty() && p->farUbos.size() != p->cbufTypes.size())
+            return false;
     if (r.value<uint8_t>()) {
         auto twin = std::make_shared<RuntimeRecord>();
         if (!twinned || !readRecord(r, *twin, false))

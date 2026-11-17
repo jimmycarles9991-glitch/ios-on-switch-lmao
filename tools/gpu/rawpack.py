@@ -3,10 +3,12 @@
 
 One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl seed_raw_pack runs the rest):
 
-    rawpack.py build --xcode-env F --host-bridge <darwin bridge .a> --metal-abi <MetalABI.h>
-                     --context-header <SwitchGM20BContext.h> --generator <raw/pack/rawpack.py> --tree <tree> --out <dir>
-        the generator's host tools (directpack over the host bridge, the probes through this build's frontend too, the
-        mock GM20B, the raw path's own.metallib) into <dir>, with the context init nvdec ran (context.log)
+    rawpack.py build --xcode-env F [--host-bridge <darwin bridge .a>] --translate <darwin translation .a>
+                     --compile <switch_compile.o> --metal-abi <MetalABI.h> --context-header <SwitchGM20BContext.h>
+                     --generator <raw/pack/rawpack.py> --tree <tree> --out <dir>
+        the generator's host tools (directpack over the translation and the stage compile, the mock GM20B, the raw
+        path's own.metallib; with the host bridge the probe, native-seed and compile-profile through this build's
+        frontend too) into <dir>, with the context init nvdec ran (context.log)
     rawpack.py corpus --corpus corpus.log --build <IPSW build> [--archives <build>.tsv]
                       [--app-states <build>.log] --out <file> --report <file>
         the corpus lines the probe makes (raw/pack/probe.mm: Core Animation's render states, without lib=, and every
@@ -17,18 +19,12 @@ One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl see
         names the OS builds it is a state of (os=<build>[,<build>...] in its head): one of other builds is left out and
         counted in <report>, which the link puts at the end of the pack's report, but for a Core Animation line, kept
         with its tag for its name; one naming none fails the step. A state of two-plane YCbCr attachments is taken as
-        the one the runtime makes for it (ycbcr_stand_in)
+        the one the runtime makes for it (stand_in)
     rawpack.py split --generator <rawpack.py> --qc default.metallib --corpus <file> [--ca-names <file>]
                      [--ca-preferences <stage-tegra-gm20b-metal.py>]
                      --out <bucket corpus>...
         the states of each of the generator's buckets, with the Core Animation states a device's logs named
         (precompile/ca-names/<build>.txt)
-    rawpack.py probe --generator <rawpack.py> --raw <dir> --nvk <twin dylib> --qc default.metallib [--root <dir>]
-                     --lines <bucket corpus> --out <dir named bucket<i>>
-        one bucket's states and kernels made directly through the shader tools (raw/ holds directpack, the probe, the
-        mock, own.metallib and context.log; the NVK twin, whose offline compile directpack calls), with bucket 0's
-        context.log: the channel's context init as nvdec runs it; their libraries'
-        paths under --root (the crawl's root/ with this build's applications in it), else under QuartzCore's crawl
     rawpack.py link --generator <rawpack.py> --out <dir> [--corpus-report <file>] [--archives <build>.tsv]
                     <bucket dir>...
         the pack made from the buckets' records, unstamped: <out>/pack.bin and report.txt, with the archive
@@ -36,14 +32,13 @@ One action per step (gpu/seed/tools.bzl seed_tools builds, gpu/seed/defs.bzl see
     rawpack.py stamp --generator <rawpack.py> --pack <pack.bin> --manifest <MANIFEST.json> --out <dir>
         <out>/pack.bin with the tools' stack key in its header
 
-Only the stamp reads the stack key, which every raw/ source changes: a raw runtime edit reruns the stamp alone (but for
-the direct compile's own sources, which the tools build from), and a bucket runs again only when its states, the tools,
-the NVK twin or QuartzCore's library change. No step but build
-runs a compiler, so the image builder runs them with the release's prebuilt tools.
+Each bucket is its own step and tool (rawprobe.py). Only the stamp reads the stack key, which every raw/ source changes:
+a raw runtime edit reruns the stamp alone (but for the direct compile's own sources, which the tools build from), and a
+bucket runs again only when its states, the tools (directpack holds the stage compile) or QuartzCore's library change.
+No step but build runs a compiler, so the image builder runs them with the release's prebuilt tools.
 """
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -56,25 +51,25 @@ PROBE_LABEL = ' label=com.apple.coreanimation.'
 LIBRARY = re.compile(r' lib=\S+')
 # A function a state links (" | <vl|vp|fl|fp> <function> lib=<library> ..."), which any library may hold
 LINKED_LIBRARY = re.compile(r'( \| [vf][lp] \S+) lib=\S+')
-# What the link reads of a bucket (directlink.py)
-KEPT = ('records.bin', 'context.log')
 FRAMEWORK_LIBRARY = re.compile(r' lib=/System/Library/(?:Private)?Frameworks/(\w+)\.framework/default\.metallib')
 # A bundle's library or a framework's resource library (VideoProcessors' *.bundle, AppleCVAPhoto's Resources/): the
 # runtime keys its states by their functions' AIR
 OS_LIBRARY = re.compile(r' lib=/System/Library/\S+?\.(?:bundle|framework/Resources)/\S+\.metallib')
 QUARTZCORE = '/QuartzCore.framework/'
 STAGE_LIBRARY = re.compile(r' \| [vf] \S+( lib=\S+)')
+# A state of no fragment function (RawMetalStates.mm packs it from its vertex function's library alone)
+NO_FRAGMENT = re.compile(r' \| f - ')
 # Our own apps' libraries (SwitchHWTest's): the runtime keys their states by their functions' AIR, as a bundle's; the
 # pack holds only those precompile/app-states names, since a test of a state made at its creation must find none
 APP_LIBRARY = re.compile(r' lib=/Applications/Switch\w*\.app/default\.metallib')
 # The OS builds a line is a state of, in its head: an R line's (before " | v ") or a D line's
 OS_BUILD = re.compile(r' os=(\S+)')
-# A colour attachment of an R line's head: its index, MTLPixelFormat, write mask and blending
-COLOR = re.compile(r' c(\d)=(\d+):(\d+):(\d+):')
-# raw/runtime/raw_ycbcr_store.h: the formats whose attachments RawMetalYcbcrTargets.mm ycbcrTargetState takes
-# (ycbcrRenderedFormat: two-plane YCbCr, and R10Unorm_PACKED and RG10Unorm_PACKED), those of them it renders into the
-# RGBA32Float stand-in (ycbcrTargetRefusal, kYcbcrTargetStandIn), and the channels each must write (ycbcrTargetWrites:
-# MTLColorWriteMaskRed | Green | Blue, the packed planes' red and green)
+# A colour attachment of an R line's head: its index, MTLPixelFormat, and every field after the format (write mask,
+# blending, the RGB source and destination factors and operation, the alpha ones)
+COLOR_FIELDS = re.compile(r' c(\d)=(\d+):(\d+(?::\d+){7})(?= |$)')
+# raw/runtime/raw_ycbcr_store.h: the formats whose attachments RawMetalYcbcrTargets.mm standInTargetState takes
+# (ycbcrRenderedFormat: two-plane YCbCr, and R10Unorm_PACKED and RG10Unorm_PACKED), and those of them it renders into
+# the RGBA32Float stand-in (ycbcrTargetRefusal, kYcbcrTargetStandIn)
 YCBCR_TARGETS = frozenset(range(500, 549)) - {542} | {588, 589}
 YCBCR_RENDERED = frozenset(
     {500, 502, 503, 505, 506, 507, 508, 509, 510, 520, 522, 523, 525, 526, 527, 528, 529, 530}
@@ -83,14 +78,21 @@ YCBCR_RENDERED = frozenset(
 YCBCR_STAND_IN = 125
 # ycbcrStandInFormat: the packed planes' R32Float and RG32Float, of their fragments' one or two components
 STAND_INS = {588: 55, 589: 105}
-WRITES = {588: 0b1000, 589: 0b1100}
-RGB_WRITES = 0b1110
+# raw/runtime/raw_format_standin.h formatStandIn: the formats the GM20B renders none of that a stand-in of another
+# format renders, and those of them that hold alpha (formatHoldsAlpha)
+FORMAT_STAND_INS = {11: 71, 41: 125, 42: 125, 93: 125}
+HOLDS_ALPHA = frozenset({41, 42})
+# raw/runtime/raw_standin_blend.h alphaOneFactor: MTLBlendFactorDestinationAlpha, OneMinusDestinationAlpha and
+# SourceAlphaSaturated where the destination alpha is 1, of a colour blend and of an alpha blend
+ALPHA_ONE_RGB = {8: 1, 9: 0, 10: 0}
+ALPHA_ONE_ALPHA = {8: 1, 9: 0, 10: 1}
 
 
 def framework_line(line: str) -> bool:
     """Whether the runtime looks the line's state up in the pack (RawMetalStates.mm pipelineFor).
 
-    A vertex and a fragment function of one framework's default.metallib, and every function it links a framework
+    A vertex and a fragment function (or a vertex function and none) of one framework's default.metallib, and every
+    function it links a framework
     library's: under its framework; or of one bundle or framework resource library (OS_LIBRARY), linking none: under
     its functions' AIR (RawRenderKey.h). Not QuartzCore's, whose states the pack makes from their names
     (rawpack.py ca_states).
@@ -98,7 +100,7 @@ def framework_line(line: str) -> bool:
     stages = STAGE_LIBRARY.findall(line)
     frameworks = {m.group(1) for lib in stages if (m := FRAMEWORK_LIBRARY.fullmatch(lib))}
     linked = [lib for lib in LIBRARY.findall(line) if lib not in stages]
-    if len(stages) != 2 or len(set(stages)) != 1:
+    if len(stages) != (1 if NO_FRAGMENT.search(line) else 2) or len(set(stages)) != 1:
         return False
     if not frameworks:
         return not LINKED_LIBRARY.search(line) and bool(OS_LIBRARY.fullmatch(stages[0])) and QUARTZCORE not in stages[0]
@@ -131,37 +133,51 @@ def probe_lines(corpus: str) -> list[str]:
     ]
 
 
-def ycbcr_stand_in(line: str) -> str:
-    """Give the line of the state the runtime makes for a render state of two-plane YCbCr attachments.
+def alpha_one(fields: str) -> str:
+    """Give a colour attachment's key fields after its format as a destination alpha of 1 reads them.
 
-    RawMetalYcbcrTargets.mm ycbcrTargetState makes it with each such attachment's format the stand-in's, where every one
-    is a format it renders (codes, converted, sRGB or packed, 8- or 10-bit, or a packed 10-bit plane), unblended,
-    writing every channel its store reads; m2v alone answers any other (it renders into no YCbCr target), so its line
-    stays the app's. The archives' declared keys stay the app's (raw/pack/archives.py).
+    The fields are its mask, blending, the RGB factors and operation, then the alpha ones; its factors of the
+    destination alpha become the constants they come to (alphaOneFactor).
+    """
+    f = fields.split(':')
+    for k, table in ((2, ALPHA_ONE_RGB), (3, ALPHA_ONE_RGB), (5, ALPHA_ONE_ALPHA), (6, ALPHA_ONE_ALPHA)):
+        f[k] = str(table.get(int(f[k]), int(f[k])))
+    return ':'.join(f)
+
+
+def stand_in(line: str) -> str:
+    """Give the line of the state the runtime makes for a render state of attachments it renders through a stand-in.
+
+    RawMetalYcbcrTargets.mm standInTargetState makes it with each such attachment's format the stand-in's: a two-plane
+    YCbCr attachment's where every one is a format it renders (codes, converted, sRGB or packed, 8- or 10-bit, or a
+    packed 10-bit plane), blended, channel-masked or not, and a format the GM20B renders none of (FORMAT_STAND_INS); the
+    blend factors of the destination alpha of a format that holds none become the constants they come to
+    (rmAlphaOneBlend). m2v alone answers a state of any other YCbCr attachment (it renders into no YCbCr target), so its
+    line stays the app's. The archives' declared keys stay the app's (raw/pack/archives.py).
     """
     head, bar, tail = line.partition(' | ')
-    targets = [m for m in COLOR.finditer(head) if int(m[2]) in YCBCR_TARGETS]
-    if not targets or any(
-        int(m[2]) not in YCBCR_RENDERED
-        or int(m[3]) & WRITES.get(int(m[2]), RGB_WRITES) != WRITES.get(int(m[2]), RGB_WRITES)
-        or m[4] != '0'
-        for m in targets
-    ):
+    targets = [m for m in COLOR_FIELDS.finditer(head) if int(m[2]) in YCBCR_TARGETS | FORMAT_STAND_INS.keys()]
+    if not targets or any(int(m[2]) in YCBCR_TARGETS and int(m[2]) not in YCBCR_RENDERED for m in targets):
         return line
     for m in reversed(targets):
-        head = head[: m.start(2)] + str(STAND_INS.get(int(m[2]), YCBCR_STAND_IN)) + head[m.end(2) :]
+        fmt = int(m[2])
+        if fmt in FORMAT_STAND_INS:
+            fields = FORMAT_STAND_INS[fmt], m[3] if fmt in HOLDS_ALPHA else alpha_one(m[3])
+        else:
+            fields = STAND_INS.get(fmt, YCBCR_STAND_IN), alpha_one(m[3])
+        head = head[: m.start(2)] + f'{fields[0]}:{fields[1]}' + head[m.end(3) :]
     return head + bar + tail
 
 
 def stand_in_lines(lines: list[str]) -> list[str]:
-    """Give `lines` through ycbcr_stand_in, a line it maps left out where an earlier line is already that state's.
+    """Give `lines` through stand_in, a line it maps left out where an earlier line is already that state's.
 
     The archives declare one state for each of a pass's code formats (VideoStabilizationV2's fragmentBlur into
     RGB8_420_2P, RGB10_420_2P and RGB10_420_2P_PACKED), which the stand-in makes one state.
     """
     out, seen = [], set()
     for line in lines:
-        mapped = ycbcr_stand_in(line)
+        mapped = stand_in(line)
         if mapped == line or mapped not in seen:
             out.append(mapped)
             seen.add(mapped)
@@ -181,10 +197,12 @@ def own_build(lines: list[str], build: str) -> tuple[list[str], list[str]]:
     """Give the lines a pack for IPSW `build` takes, without their os= tag, and the report's lines.
 
     A line tagged with other builds only is theirs: its encodings (RenderBox's c1 format, QuartzCore's constant sets)
-    are not this one's, so it is left out; but a Core Animation line of theirs is kept, tag and all, for its name, which
-    names a state this build's QuartzCore makes too (the generator makes it from the name with this IPSW's tables,
-    raw/pack/rawpack.py ca_states). A line with no tag names no build, and none is guessed for it: the step fails
-    (precompile/harvest.py and tools/gpu/logharvest.py tag what they add).
+    are not this one's, so it is left out; but a Core Animation render line of theirs is kept, tag and all, for its
+    name, which names a state this build's QuartzCore makes too (the generator makes it from the name with this IPSW's
+    tables, raw/pack/rawpack.py ca_states). A compute line (C, D) names a kernel, not a state a name makes: another
+    build's is left out like any other line (21H461's QuartzCore has no compute_sum_luma). A line with no tag names no
+    build, and none is guessed for it: the step fails (precompile/harvest.py and tools/gpu/logharvest.py tag what they
+    add).
     """
     taken, named, other, untagged = [], [], {}, []
     for line in lines:
@@ -196,7 +214,7 @@ def own_build(lines: list[str], build: str) -> tuple[list[str], list[str]]:
         if build in builds:
             taken.append(OS_BUILD.sub('', line, count=1))
             continue
-        if PROBE_LABEL in line:
+        if line.startswith('R ') and PROBE_LABEL in line:
             named.append(line)
         for b in builds:
             other[b] = other.get(b, 0) + 1
@@ -245,7 +263,9 @@ def fresh(path: Path) -> Path:
 def build(args: argparse.Namespace, generator: list[str], env: dict[str, str], root: Path) -> None:
     xcode = dict(line.split('=', 1) for line in Path(args.xcode_env).read_text().splitlines() if '=' in line)
     env['DEVELOPER_DIR'] = xcode['DEVELOPER_DIR']
-    arguments = ['--build-only', '--bridge', root / args.host_bridge, '--metal-abi', root / args.metal_abi]
+    arguments = ['--build-only', '--translate', root / args.translate, '--compile', root / args.compile]
+    arguments += ['--bridge', root / args.host_bridge] if args.host_bridge else []
+    arguments += ['--metal-abi', root / args.metal_abi]
     arguments += ['--context-header', root / args.context_header]
     arguments += ['--out', root / args.out]
     generate(generator, arguments, env, "the pack generator's tools")
@@ -263,41 +283,11 @@ def split(args: argparse.Namespace, generator: list[str], env: dict[str, str], w
         shutil.copyfile(bucket / 'corpus.log', out)
 
 
-def probe(args: argparse.Namespace, generator: list[str], env: dict[str, str], work: Path) -> None:
-    out = fresh(Path(args.out).resolve())
-    shutil.copyfile(args.lines, out / 'corpus.log')
-    # The probe opens NVK from a copy of its own: an input is a link to the output base's file, which dyld can name by
-    # another of its links.
-    dylib = work / 'libvulkan_nouveau.dylib'
-    shutil.copyfile(args.nvk, dylib)
-    dylib.chmod(0o755)
-    libraries = [Path(p) for p in args.data]
-    if args.data_dir:
-        libraries += sorted(Path(args.data_dir).glob('*.metallib'))
-    data = library_view(libraries, work / 'data')
-    env = dict(env, PROBE_DATA_LIBS=str(data.resolve()))
-    arguments = ['--probe-bucket', out, '--prebuilt', Path(args.raw).resolve(), '--nvk', dylib]
-    arguments += ['--root', Path(args.root).resolve()] if args.root else []
-    print(generate(generator, [*arguments, '--qc', Path(args.qc).resolve()], env, f'making {out.name}').rstrip())
-    for path in out.iterdir():
-        if path.is_file() and path.name not in KEPT:
-            path.unlink()
-
-
-def library_view(libraries: list[Path], destination: Path) -> Path:
-    destination.mkdir()
-    for source in libraries:
-        digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        target = destination / (digest + '.metallib')
-        if not target.exists():
-            target.symlink_to(source.resolve())
-    return destination
-
-
 def link(args: argparse.Namespace, generator: list[str], env: dict[str, str], work: Path) -> None:
     linked = fresh(work / 'linked')
     inventory = ['--archives', Path(args.archives).resolve()] if args.archives else []
-    arguments = ['--link', '--out', linked, *inventory, *[Path(b).resolve() for b in args.buckets]]
+    selectors = ['--ca-selectors', Path(args.ca_selectors).resolve()] if args.ca_selectors else []
+    arguments = ['--link', '--out', linked, *inventory, *selectors, *[Path(b).resolve() for b in args.buckets]]
     report = generate(generator, arguments, env, 'link')
     if args.corpus_report:
         corpus = Path(args.corpus_report).read_text()
@@ -324,9 +314,17 @@ def stamp(args: argparse.Namespace, generator: list[str], env: dict[str, str], _
 
 
 STEPS = {
-    'build': ('xcode-env', 'host-bridge', 'metal-abi', 'context-header', 'generator', 'tree', 'out'),
+    'build': (
+        'xcode-env',
+        'translate',
+        'compile',
+        'metal-abi',
+        'context-header',
+        'generator',
+        'tree',
+        'out',
+    ),
     'split': ('generator', 'qc', 'corpus'),
-    'probe': ('generator', 'raw', 'nvk', 'qc', 'lines', 'out'),
     'link': ('generator', 'out'),
     'stamp': ('generator', 'pack', 'manifest', 'out'),
 }
@@ -346,15 +344,14 @@ def main() -> None:
         p = steps.add_parser(step)
         for name in names:
             p.add_argument('--' + name, required=True)
+    steps.choices['build'].add_argument('--host-bridge')
     steps.choices['split'].add_argument('--out', nargs='+', required=True)
     steps.choices['split'].add_argument('--ca-names')
     steps.choices['split'].add_argument('--ca-preferences')
-    steps.choices['probe'].add_argument('--data-dir')
-    steps.choices['probe'].add_argument('--root')
-    steps.choices['probe'].add_argument('--data', action='append', default=[])
     steps.choices['link'].add_argument('buckets', nargs='+')
     steps.choices['link'].add_argument('--corpus-report')
     steps.choices['link'].add_argument('--archives')
+    steps.choices['link'].add_argument('--ca-selectors')
     args = parser.parse_args()
     if args.step == 'corpus':
         lines, report = own_build(probe_lines(Path(args.corpus).read_text()), args.build)
@@ -381,7 +378,7 @@ def main() -> None:
         'RAWPACK_TREE': str(root / getattr(args, 'tree', '.')),
     }
     generator = [sys.executable, str(root / args.generator)]
-    {'build': build, 'split': split, 'probe': probe, 'link': link, 'stamp': stamp}[args.step](
+    {'build': build, 'split': split, 'link': link, 'stamp': stamp}[args.step](
         args, generator, env, root if args.step == 'build' else work
     )
     shutil.rmtree(work)

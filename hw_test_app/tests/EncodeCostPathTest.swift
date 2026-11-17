@@ -95,6 +95,11 @@ struct EncodeCostPathTest: HWTest {
             warm += 1
             try await Task.sleep(nanoseconds: 50_000_000)
         }
+        // every count's batch once before any is measured: a process that just began (boot 22's, after a crash) pays its
+        // pools' first growth inside the first arm otherwise
+        for draws in Self.drawCounts {
+            try gpu.finish((0..<Self.buffers).map { _ in try gpu.commit { encode($0, draws) } })
+        }
         var metrics = Metrics()
         metrics.set("warm", warm)
         var arms: [[String: Double]] = []

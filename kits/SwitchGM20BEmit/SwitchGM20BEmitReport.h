@@ -3,6 +3,8 @@
 // later reader takes them from (a copy, a constant, a semaphore release, a predicate on one).
 #pragma once
 
+#include <stdbool.h>
+
 #include "../SwitchGM20B/SwitchGM20B3D.h"
 #include "../SwitchGM20B/SwitchGM20BCopy.h"
 #include "nv_push.h"
@@ -22,6 +24,17 @@ void switch_gm20b_samples_end(struct nv_push *p);
 
 // The counter as 64 bits followed by a 64-bit timestamp: 16 bytes at `va`, 16-byte aligned (NVK's occlusion query end)
 void switch_gm20b_samples_report(struct nv_push *p, uint64_t va);
+
+#define SWITCH_GM20B_SAMPLES_WORD_WORDS 5u
+
+// The counter's low 32 bits as one word at `va` (no timestamp) or, with `reduction` (an
+// NVB197_SET_REPORT_SEMAPHORE_D_REDUCTION_OP_* value, unsigned), the word at `va` made reduction(word, count)
+void switch_gm20b_samples_word(struct nv_push *p, uint64_t va, bool reduce, uint32_t reduction);
+
+#define SWITCH_GM20B_RELEASE_WORD_WORDS 5u
+
+// `payload` as one word at `va` once the 3D engine's work before it has written (NVK's event set)
+void switch_gm20b_release_word(struct nv_push *p, uint64_t va, uint32_t payload);
 
 #define SWITCH_GM20B_COPY_BYTES_WORDS 10u
 

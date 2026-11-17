@@ -7,6 +7,7 @@
 #include "raw_job_words.h"
 #include "raw_scale_frames.h"
 #include "timed_gpu.h"
+#include "../raw/runtime/RawMetalPassCache.h"
 
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -100,6 +101,51 @@ TEST(RawFacadeCommit, ScaleShapedJobWords)
     EXPECT_FALSE(words.empty());
 }
 
+TEST(RawFacadeCommit, ParallelRecordingsSurviveTrimAndReturnTheirBanksAfterSplice)
+{
+    ASSERT_TRUE(opened().device != nil && opened().state != nil);
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    const auto into = scale_frames::targets(opened().device, {1, 4, 1});
+    const int opens = gOpens;
+    for (int frame = 0; frame < 4; frame++) {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+        d.colorAttachments[0].texture = into[0];
+        d.colorAttachments[0].loadAction = MTLLoadActionClear;
+        d.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLParallelRenderCommandEncoder> parallel = [cb parallelRenderCommandEncoderWithDescriptor:d];
+        ASSERT_NE(parallel, nil);
+        std::vector<std::thread> workers;
+        for (int sub = 0; sub < 4; sub++) {
+            id<MTLRenderCommandEncoder> e = [parallel renderCommandEncoder];
+            EXPECT_NE(e, nil);
+            workers.emplace_back([e] {
+                @autoreleasepool {
+                    const float vertices[16] = {-1, -1, 0, 1, 1, -1, 0, 1, -1, 1, 0, 1, 1, 1, 0, 1};
+                    const float transform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+                    const float colour[4] = {1, 0, 0, 1};
+                    [e setRenderPipelineState:opened().state];
+                    [e setVertexBytes:vertices length:sizeof vertices atIndex:0];
+                    [e setVertexBytes:transform length:sizeof transform atIndex:2];
+                    [e setFragmentBytes:colour length:sizeof colour atIndex:0];
+                    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                    [e endEncoding];
+                }
+            });
+        }
+        rmPassTrim();
+        for (std::thread &worker : workers)
+            worker.join();
+        [parallel endEncoding];
+        rmPassTrim();
+        [cb commit];
+        [cb waitUntilCompleted];
+        EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
+        EXPECT_EQ(path(cb), "raw");
+        EXPECT_EQ(gOpens, opens);
+    }
+}
+
 TEST(RawFacadeCommit, EncodersEndedBeforeTheCommitAreEncodedAhead)
 {
     ASSERT_TRUE(opened().device != nil);
@@ -150,26 +196,22 @@ TEST(RawFacadeCommit, PassesBesideAMemorylessColourAreEncodedAhead)
     }
 }
 
-// Pass 9 of 15 into a target whose format the state does not draw: that encoder goes to m2v, refused as it records,
-// after the worker was handed (and may be encoding) the ones before it. The device comes back whole: the next command
-// buffer is encoded ahead as any other.
+// Pass 9 of 15 refused as it records, by the harness through the facade's own refusal (takeReason, as a pass the raw
+// path cannot draw is refused), so the test holds whatever raw comes to draw: that encoder goes to m2v, after the worker
+// was handed (and may be encoding) the ones before it. The device comes back whole: the next command buffer is encoded
+// ahead as any other.
 TEST(RawFacadeCommit, AnEncoderRefusedAfterTheHandOffsGivesTheDeviceBack)
 {
     ASSERT_TRUE(opened().device != nil);
     id<MTLCommandQueue> queue = [opened().device newCommandQueue];
     const scale_frames::Shape shape{15, 90, 4};
     const auto into = scale_frames::targets(opened().device, shape);
-    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                                                  width:shape.width
-                                                                                 height:shape.height
-                                                                              mipmapped:NO];
-    td.storageMode = MTLStorageModePrivate;
-    td.usage = MTLTextureUsageRenderTarget;
-    const id<MTLTexture> other = [opened().device newTextureWithDescriptor:td];
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     for (int p = 0; p < shape.passes; p++) {
         if (p == 9)
-            scale_frames::pass(cb, opened().state, {other}, {1, 6, 1}, 0, 0);
+            scale_frames::pass(cb, opened().state, into, shape, p, 0, nil, ^(id<MTLRenderCommandEncoder>) {
+                [(RMCommandBuffer *)cb takeReason:WhyPass why:@"refused by the harness"];
+            });
         else
             scale_frames::pass(cb, opened().state, into, shape, p, 0);
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -225,6 +267,45 @@ id<MTLTexture> newTarget()
 
 // A new target its first pass clears and stores whole, with no renderTargetWidth set: Metal renders over the attachment
 // whole, so nothing writes its contents first
+// A job the kernel refuses fails its command buffer as Metal fails one its driver could not submit (Internal, the
+// kernel's answer in the description), the path error:enc.kernel, and nothing of it replays on m2v; the next command
+// buffer is raw again. Boot 22's iconservicesagent: `enc.kernel a=0 b=0` with no reason, then a 13.8 s m2v replay.
+TEST(RawFacadeCommit, AJobTheKernelRefusesFailsItsCommandBufferAsMetalDoes)
+{
+    ASSERT_TRUE(opened().device != nil);
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    const scale_frames::Shape shape{3, 6, 1};
+    const auto into = scale_frames::targets(opened().device, shape);
+    id<MTLCommandBuffer> settled = scale_frames::record(queue, opened().state, into, shape, 0);
+    [settled commit];
+    [settled waitUntilCompleted];
+    ASSERT_EQ(settled.status, MTLCommandBufferStatusCompleted);
+    const long long m2vBefore = [counters(opened().device)[@"m2v"] longLongValue];
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        kernel_model::model.refuse = 1000;
+        kernel_model::model.refusal = kIOReturnBadArgument;
+    }
+    id<MTLCommandBuffer> cb = scale_frames::record(queue, opened().state, into, shape, 1);
+    [cb commit];
+    [cb waitUntilCompleted];
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        kernel_model::model.refuse = 0;
+    }
+    EXPECT_EQ(cb.status, MTLCommandBufferStatusError);
+    EXPECT_EQ(cb.error.code, MTLCommandBufferErrorInternal);
+    const std::string described = cb.error.localizedDescription.UTF8String ?: "";
+    EXPECT_NE(described.find("0xe00002c2"), std::string::npos) << described;
+    EXPECT_EQ(path(cb), "error:enc.kernel");
+    EXPECT_EQ([counters(opened().device)[@"m2v"] longLongValue], m2vBefore) << "a range of it replayed on m2v";
+    id<MTLCommandBuffer> after = scale_frames::record(queue, opened().state, into, shape, 2);
+    [after commit];
+    [after waitUntilCompleted];
+    EXPECT_EQ(after.status, MTLCommandBufferStatusCompleted);
+    EXPECT_EQ(path(after), "raw");
+}
+
 TEST(RawFacadeCommit, ANewTargetClearedWholeTakesNoFill)
 {
     ASSERT_TRUE(opened().device != nil);

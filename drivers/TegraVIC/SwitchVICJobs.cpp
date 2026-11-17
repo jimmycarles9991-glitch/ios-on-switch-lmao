@@ -125,8 +125,8 @@ struct Retirement {
     static void physical(uint32_t slot, int result)
     {
         auto &job = gQueue.jobs[slot];
-        switch_gpu_bridge_release(&job.bridge);
         Results::physical(job.outcome, result);
+        switch_gpu_bridge_release(&job.bridge);
         switch_vic_semantics_physical(0);
     }
 
@@ -374,7 +374,8 @@ retry:
     bool bridgeRequired = false;
     for (uint32_t i = 0; i < needed; ++i) {
         auto &dependency = dependencies.tokens[i];
-        const int ready = switch_gpu_backing_token_external_status(&dependency);
+        const int physical = switch_gpu_backing_token_physical_status(&dependency, 0);
+        const int ready = physical < 0 ? physical : switch_gpu_backing_token_external_status(&dependency);
         if (ready == 1) {
             dependency = {};
             continue;
@@ -450,6 +451,8 @@ retry:
             n += tegra_host1x_op_wait_syncpt(words + n, dependencies.tokens[i].queue,
                                              static_cast<uint32_t>(dependencies.tokens[i].value));
             producers.add(dependencies.tokens[i]);
+        } else if (dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_VIC) {
+            producers.add(dependencies.tokens[i]);
         }
     }
     for (uint32_t j = 0; j < count; ++j) {
@@ -496,8 +499,9 @@ retry:
         end = gQueue.last();
         const auto &last = gQueue.jobs[end];
         bridge = last.bridge;
-        if (const int error = Stages::start(end, gSyncpt, static_cast<uint32_t>(last.fence), bridge != nullptr,
-                                            last.semantics != nullptr, boundUs, producers, ahead))
+        if (const int error =
+                Stages::start(end, gSyncpt, static_cast<uint32_t>(last.fence), bridge != nullptr,
+                              last.semantics != nullptr, boundUs, producers, ahead, bridgeSyncpoint, bridgeThreshold))
             Retirement::unarmed(end, error);
         IOLockWakeup(gLock, &gQueue.count, false);
     } else if (useCount) {
@@ -584,6 +588,25 @@ bool switch_vic_jobs_falcon_failed()
         return false;
     switch_vic_job_stalled(fence, TEGRA_HOST1X_EFALCON, submittedUs ? switch_now_us() - submittedUs : 0, 0);
     return true;
+}
+
+extern "C" bool switch_vic_host1x_cancelled(uint32_t syncpt, uint32_t reached)
+{
+    if (!gLock)
+        return false;
+    bool changed = false;
+    IOLockLock(gLock);
+    for (uint32_t i = 0; i < gQueue.count; ++i) {
+        const uint32_t slot = (gQueue.head + i) % SwitchVICQueue::kSlots;
+        const auto &job = gQueue.jobs[slot];
+        if (job.toBatchEnd)
+            continue;
+        const int source = Results::sourceFailure(job.outcome, &job.bridge, switch_gpu_bridge_source_failure);
+        if (Stages::producerCancelled(slot, syncpt, reached, source < 0))
+            changed |= Results::physical(job.outcome, Stages::kCancelled);
+    }
+    IOLockUnlock(gLock);
+    return changed;
 }
 
 uint32_t switch_vic_jobs_cancel(uint32_t reached)

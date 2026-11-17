@@ -2,6 +2,7 @@
 #include "switch_gpu_backing_fixture.h"
 #include "drivers/TegraGM20B/SwitchGpuBackingMemory.h"
 #include <functional>
+#include <vector>
 
 namespace
 {
@@ -36,6 +37,12 @@ void destroyMemory(void *object)
 
 void destroyOther(void *object)
 {
+	destroyMemory(object);
+}
+
+void destroyMapping(void *object)
+{
+	EXPECT_TRUE(ioLocksHeld().empty());
 	destroyMemory(object);
 }
 
@@ -219,5 +226,111 @@ TEST_F(BackingMemory, IncompatibleOwnerAndCompressedPrefixFailWithoutReplacingOb
 	void *other = nullptr;
 	EXPECT_EQ(switch_gpu_backing_memory_acquire(b, 2, createMemory, destroyOther, &other), -95);
 	EXPECT_EQ(other, nullptr);
+	switch_gpu_backing_release(b);
+}
+
+namespace
+{
+std::vector<uint64_t> forgotten;
+
+void forgetVic(uint64_t allocation)
+{
+	forgotten.push_back(allocation);
+}
+}
+
+// An engine's map cache holds no reference on what it maps (SwitchGpuBackingMaps.h): the backing's destruction tells
+// every engine that noted a mapping of it, after its last job and before its pages go back.
+TEST_F(BackingMemory, EnginesThatMappedABackingForgetItBeforeItsPagesGoBack)
+{
+	ASSERT_EQ(switch_gpu_backing_register_forget(SWITCH_GPU_ENGINE_VIC, forgetVic), 0);
+	EXPECT_EQ(switch_gpu_backing_register_forget(SWITCH_GPU_ENGINE_VIC, forgetVic), 0);
+	EXPECT_EQ(switch_gpu_backing_register_forget(SWITCH_GPU_ENGINE_VIC, nullptr), -22);
+	forgotten.clear();
+	const uint64_t page = next_page += 4096;
+	bool released = false;
+	auto *b = switch_gpu_backing_register(&page, 1, 0, &released, [](void *owner) {
+		EXPECT_EQ(forgotten.size(), 1u);
+		*static_cast<bool *>(owner) = true;
+	});
+	switch_gpu_backing_info info{};
+	switch_gpu_backing_describe(b, &info);
+	switch_gpu_backing_note_mapped(b, SWITCH_GPU_ENGINE_VIC);
+	ASSERT_EQ(publish(b, SWITCH_GPU_BACKING_READ, token(702, 4)), 0);
+	switch_gpu_backing_release(b);
+	switch_gpu_backing_retire();
+	EXPECT_TRUE(forgotten.empty()) << "a job still reads it";
+	const auto completed = token(702, 4);
+	timelines[key(&completed)].completed = 4;
+	switch_gpu_backing_completed();
+	switch_gpu_backing_retire();
+	ASSERT_EQ(forgotten.size(), 1u);
+	EXPECT_EQ(forgotten[0], info.allocation_id);
+	EXPECT_TRUE(released);
+
+	auto *unmapped = backing();
+	switch_gpu_backing_release(unmapped);
+	switch_gpu_backing_retire();
+	EXPECT_EQ(forgotten.size(), 1u) << "a backing no engine mapped is forgotten by none";
+}
+
+TEST_F(BackingMemory, EngineMappingSurvivesAliasesAndRetiresBeforeItsPages)
+{
+	const uint64_t page = next_page += 4096;
+	bool released = false;
+	auto *b = switch_gpu_backing_register(&page, 1, 0, &released, [](void *owner) {
+		EXPECT_EQ(destroyed, 1u);
+		*static_cast<bool *>(owner) = true;
+	});
+	switch_gpu_backing_info info{};
+	switch_gpu_backing_describe(b, &info);
+	void *memory = nullptr;
+	uint32_t flags = 0;
+	ASSERT_EQ(createMemory(info.pages, 1, &memory, &flags), 0);
+	ASSERT_EQ(switch_gpu_backing_mapping_install(b, SWITCH_GPU_ENGINE_NVJPG,
+						     info.allocation_generation, memory,
+						     destroyMapping),
+		  0);
+	auto *alias = switch_gpu_backing_register(&page, 1, 0, nullptr, nullptr);
+	ASSERT_EQ(alias, b);
+	EXPECT_EQ(switch_gpu_backing_mapping_context(alias, SWITCH_GPU_ENGINE_NVJPG), memory);
+	EXPECT_EQ(switch_gpu_backing_mapping_install(alias, SWITCH_GPU_ENGINE_NVJPG,
+						     info.allocation_generation, memory,
+						     destroyMapping),
+		  -16);
+	ASSERT_EQ(publish(b, SWITCH_GPU_BACKING_WRITE, token(701, 8)), 0);
+	switch_gpu_backing_release(alias);
+	switch_gpu_backing_release(b);
+	switch_gpu_backing_retire();
+	EXPECT_EQ(destroyed, 0u);
+	EXPECT_FALSE(released);
+	const auto completed = token(701, 8);
+	timelines[key(&completed)].completed = 8;
+	switch_gpu_backing_completed();
+	switch_gpu_backing_retire();
+	EXPECT_EQ(destroyed, 1u);
+	EXPECT_TRUE(released);
+}
+
+TEST_F(BackingMemory, InstalledEngineMappingFixesThePinnedExtent)
+{
+	const std::array<uint64_t, 2> pages{next_page += 4096, next_page += 4096};
+	auto *b = switch_gpu_backing_register(pages.data(), 1, 0, nullptr, nullptr);
+	switch_gpu_backing_info info{};
+	switch_gpu_backing_describe(b, &info);
+	void *memory = nullptr;
+	uint32_t flags = 0;
+	ASSERT_EQ(createMemory(info.pages, 1, &memory, &flags), 0);
+	EXPECT_EQ(switch_gpu_backing_mapping_install(b, SWITCH_GPU_ENGINE_NVJPG,
+						     info.allocation_generation + 1, memory,
+						     destroyMapping),
+		  SWITCH_GPU_BACKING_STALE);
+	EXPECT_EQ(switch_gpu_backing_mapping_context(b, SWITCH_GPU_ENGINE_NVJPG), nullptr);
+	ASSERT_EQ(switch_gpu_backing_mapping_install(b, SWITCH_GPU_ENGINE_NVJPG,
+						     info.allocation_generation, memory,
+						     destroyMapping),
+		  0);
+	EXPECT_EQ(switch_gpu_backing_register(pages.data(), 2, 0, nullptr, nullptr), nullptr);
+	EXPECT_EQ(switch_gpu_backing_mapping_context(b, SWITCH_GPU_ENGINE_NVJPG), memory);
 	switch_gpu_backing_release(b);
 }

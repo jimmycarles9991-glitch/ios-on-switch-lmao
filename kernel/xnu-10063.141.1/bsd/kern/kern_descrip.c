@@ -72,6 +72,7 @@
  * Version 2.0.
  */
 
+#include <switch/app_code.h>
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/filedesc.h>
@@ -3917,7 +3918,7 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 
 		if (cmd == F_ADDFILESIGS_FOR_DYLD_SIM) {
 			blob_add_flags |= MAC_VNODE_CHECK_DYLD_SIM;
-			if ((proc_getcsflags(p) & CS_KILL) == 0) {
+			if ((proc_getcsflags(p) & CS_KILL) == 0 && !switch_app_code_process(p)) {
 				proc_lock(p);
 				proc_csflags_set(p, CS_KILL);
 				proc_unlock(p);
@@ -3947,6 +3948,21 @@ sys_fcntl_nocancel(proc_t p, struct fcntl_nocancel_args *uap, int32_t *retval)
 		}
 
 		if (error) {
+			vnode_put(vp);
+			goto outdrop;
+		}
+
+		if (switch_app_code_process(p) && switch_app_code_image(vp)) {
+			int64_t coverage = 0;
+			error = switch_app_code_coverage(vp, fs.fs_file_start, &coverage);
+			if (!error && (cmd == F_ADDFILESIGS_RETURN || cmd == F_ADDFILESIGS_FOR_DYLD_SIM ||
+			    cmd == F_ADDFILESIGS_INFO)) error = copyout(&coverage, argp, sizeof(coverage));
+			if (!error && cmd == F_ADDFILESIGS_INFO && fs.fs_fsignatures_size >= sizeof(fs)) {
+				const uint8_t cdhash[USER_FSIGNATURES_CDHASH_LEN] = {0};
+				const int hash_type = 0;
+				error = copyout(cdhash, (user_addr_t)argp + offsetof(struct user_fsignatures, fs_cdhash), sizeof(cdhash));
+				if (!error) error = copyout(&hash_type, (user_addr_t)argp + offsetof(struct user_fsignatures, fs_hash_type), sizeof(hash_type));
+			}
 			vnode_put(vp);
 			goto outdrop;
 		}
@@ -4265,6 +4281,16 @@ dropboth:
 
 		error = copyin(argp, &sigsinfo, sizeof(sigsinfo));
 		if (error) {
+			vnode_put(vp);
+			goto outdrop;
+		}
+
+		if (switch_app_code_process(p) && switch_app_code_image(vp) &&
+		    sigsinfo.fg_info_request == GETSIGSINFO_PLATFORM_BINARY) {
+			sigsinfo.fg_sig_is_platform = 0;
+			error = copyout(&sigsinfo.fg_sig_is_platform,
+			    (user_addr_t)argp + offsetof(fgetsigsinfo_t, fg_sig_is_platform),
+			    sizeof(sigsinfo.fg_sig_is_platform));
 			vnode_put(vp);
 			goto outdrop;
 		}

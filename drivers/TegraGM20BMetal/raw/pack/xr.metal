@@ -77,3 +77,53 @@ fragment half4 xr_two_planes_frag(Out in [[stage_in]], texture2d<uint, access::r
     const uint2 at = uint2(in.position.xy);
     return half4(word(words.read(at).r), quotient(int(alphas.read(at).r & 0xff), 255));
 }
+
+// An RGB10A8_2P_XR10 texture held in its two planes that a fragment program stores into (runtime/raw_gpu.cpp, written
+// textures): the program stores through an RG32Uint image of the texels, the word then the alpha byte, which the planes are
+// merged into before its pass and split back out of after it, every texel as it is
+fragment uint4 xr_planes_merge_frag(Out in [[stage_in]], texture2d<uint, access::read> words [[texture(0)]],
+                                    texture2d<uint, access::read> alphas [[texture(1)]])
+{
+    const uint2 at = uint2(in.position.xy);
+    return uint4(words.read(at).r, alphas.read(at).r & 0xff, 0, 0);
+}
+
+struct Planes {
+    uint word [[color(0)]];
+    uint alpha [[color(1)]];
+};
+
+fragment Planes xr_planes_split_frag(Out in [[stage_in]], texture2d<uint, access::read> image [[texture(0)]])
+{
+    const uint2 t = image.read(uint2(in.position.xy)).rg;
+    return {t.x, t.y & 0xff};
+}
+
+// A pass's half shadow of such an attachment (runtime/raw_xr_shadow.h): Metal's tile value of its codes, which holds no colour
+// code past 1022 (a code 1023 reads as 1022 there, where a texture read takes it as 639 / 510)
+static half tileColor(uint code)
+{
+    return color(min(code, 1022u));
+}
+
+static half3 tileWord(uint w)
+{
+    return half3(tileColor(w >> 20 & 0x3ff), tileColor(w >> 10 & 0x3ff), tileColor(w & 0x3ff));
+}
+
+fragment half4 xr_tile_bgr10_frag(Out in [[stage_in]], texture2d<uint, access::read> codes [[texture(0)]])
+{
+    return half4(tileWord(codes.read(uint2(in.position.xy)).r), 1.0h);
+}
+
+fragment half4 xr_tile_bgra10_frag(Out in [[stage_in]], texture2d<uint, access::read> codes [[texture(0)]])
+{
+    const uint4 f = codes.read(uint2(in.position.xy)) >> 6;
+    return half4(tileColor(f.z), tileColor(f.y), tileColor(f.x), color(clamp(f.w, 384u, 894u)));
+}
+
+fragment half4 xr_tile_planes_frag(Out in [[stage_in]], texture2d<uint, access::read> codes [[texture(0)]])
+{
+    const uint2 t = codes.read(uint2(in.position.xy)).rg;
+    return half4(tileWord(t.x), quotient(int(t.y & 0xff), 255));
+}

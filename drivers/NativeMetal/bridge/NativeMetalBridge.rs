@@ -14,12 +14,8 @@ mod arguments;
 pub mod compile;
 #[path = "NativeMetalComputeArtifact.rs"]
 pub mod compute_artifact;
-#[path = "NativeMetalDirect.rs"]
-pub mod direct;
-#[path = "NativeMetalDirectCompute.rs"]
-pub mod direct_compute;
-#[path = "NativeMetalDirectTess.rs"]
-mod direct_tess;
+#[path = "NativeMetalDirectDevice.rs"]
+pub mod direct_device;
 #[path = "NativeMetalFailure.rs"]
 mod failure;
 #[path = "NativeMetalFunctions.rs"]
@@ -28,16 +24,13 @@ mod functions;
 mod heap;
 #[path = "NativeMetalObjects.rs"]
 pub mod objects;
-#[path = "NativeMetalOffline.rs"]
-pub mod offline;
-#[path = "NativeMetalReflection.rs"]
-mod reflection;
 #[path = "NativeMetalTarget.rs"]
 mod target;
-#[path = "NativeMetalTessModes.rs"]
-mod tess_modes;
 #[path = "NativeMetalVariants.rs"]
 mod variants;
+
+pub use native_metal_translate::{air_slice, direct, direct_compute, offline};
+use native_metal_translate::{compile_budget, reflection};
 
 use metal2vulkan::metal::{PixelFormat, PrimitiveType, TextureUsage};
 use metal2vulkan::pipeline::{ColorAttachmentDescriptor, RenderPipelineDescriptor, StageSource};
@@ -327,29 +320,6 @@ fn import(device: &Device, library: &metal2vulkan_runtime::Library) -> Result<u3
     // SAFETY: the buffer and texture over the pages are gone.
     unsafe { libc::munmap(pages, bytes) };
     result
-}
-
-/// The AIR slice of a universal metallib (a fat container, big endian, of an AIR64 metallib and an Apple-GPU binary, as the target's
-/// frameworks ship them), as Metal itself picks it; a thin metallib is returned as it is.
-pub fn air_slice(bytes: &[u8]) -> Option<&[u8]> {
-    const AIR64: u32 = 0x0100_0017;
-    let word = |at: usize| {
-        bytes
-            .get(at..at + 4)
-            .map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
-    };
-    if word(0)? != 0xcafe_babe {
-        return Some(bytes);
-    }
-    let count = word(4)? as usize;
-    for i in 0..count.min(16) {
-        let at = 8 + 20 * i;
-        if word(at)? == AIR64 {
-            let (offset, size) = (word(at + 8)? as usize, word(at + 12)? as usize);
-            return bytes.get(offset..offset.checked_add(size)?);
-        }
-    }
-    None
 }
 
 /// Translates the target's own QuartzCore library: every kernel into a compute pipeline, and the vertex/fragment pairs named

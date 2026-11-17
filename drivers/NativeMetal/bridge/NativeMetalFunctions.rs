@@ -5,7 +5,7 @@
 //! them, from the translator's function, so a state compiled from either keys, reflects and translates alike.
 
 use crate::objects::e;
-use metal2vulkan::Budget;
+
 use metal2vulkan::library::{FunctionConstantValues, LibraryType};
 use metal2vulkan::metal::FunctionType;
 use metal2vulkan::pipeline::{FunctionDescriptor as StageFunction, LinkedFunction};
@@ -86,7 +86,7 @@ fn compiled(
 
 impl CompileFunction {
     fn properties(&self, what: &'static str) -> Result<FunctionProperties, String> {
-        let budget = Budget::standard();
+        let budget = crate::compile_budget();
         if self.specialized {
             self.function
                 .specialized_properties(&self.constants, &budget)

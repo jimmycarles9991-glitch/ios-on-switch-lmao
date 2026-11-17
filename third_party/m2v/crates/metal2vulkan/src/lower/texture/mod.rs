@@ -131,7 +131,8 @@ pub use atomic::TexAtomic;
 pub(crate) use emit::{
     constant_lanes, constant_lanes_by, dispatch, extended_table, float_class, half_by_class,
     half_class, heap_element, heap_float_class, heap_half_class, heap_raw_form, heap_raw_image,
-    live_or_zero, metal_texel_nans, reinterpret, resident_access, slot_image, sparse_spec,
+    joined_planes, live_or_zero, metal_texel_nans, plane_image, reinterpret, resident_access,
+    slot_image, sparse_spec,
     srgb_raw_gather, srgb_raw_tap, srgb_raw_texel, swizzled_float, swizzled_gather, swizzled_held,
     texel_format_const, tile_map, tiled_word, with_word, HalfClass, NullLeaf, TileLevel,
     SRGB_RAW_WORDS, SRGB_TAP_WORDS, SRGB_TEXEL,
@@ -366,7 +367,9 @@ fn read_words(r: &Read) -> u32 {
         + if r.raw || r.srgb_codes {
             SRGB_RAW_WORDS
         } else if r.extended.is_some() {
-            crate::lower::arith::extended_range::DECODE_WORDS + r.texel.read_words()
+            crate::lower::arith::extended_range::DECODE_WORDS
+                + crate::lower::arith::extended_range::plane_words(r.extended)
+                + r.texel.read_words()
         } else if r.texel.conv == TexelConv::F16 {
             half::CALL_WORDS.max(r.texel.read_words())
         } else if r.float_texel {
@@ -883,6 +886,7 @@ impl TextureStrategy {
                     + if w.image.heap() { 40 } else { 0 }
                     + if w.extended.is_some() {
                         crate::lower::arith::extended_range::ENCODE_WORDS
+                            + crate::lower::arith::extended_range::plane_words(w.extended)
                     } else {
                         0
                     }
@@ -1043,6 +1047,9 @@ pub struct Declared {
     /// The raw view of each slot a read of which takes an 8-bit sRGB texel's raw code
     /// (`ResourceKind::RawTexture`): its variable.
     pub raw: BTreeMap<u32, GlobalId>,
+    /// The plane image of each slot holding a two-plane `RGB10A8_2P_XR10` texture's color words
+    /// (`ResourceKind::TexturePlane`, `SlotPlan::plane`): its variable, the alpha bytes.
+    pub planes: BTreeMap<u32, GlobalId>,
     /// The `TexelFormat` specialization constant of each slot whose texels a read, gather, or
     /// sample converts to a `half` result by the bound format's class.
     pub half_format: BTreeMap<u32, ConstId>,
@@ -1224,6 +1231,26 @@ pub fn declare(
                     image,
                 )?;
                 d.raw.insert(*index, r);
+            }
+            if s.plane {
+                let format = match decl.usage {
+                    crate::spirv::ir::ImageUsage::Storage => crate::spv::ImageFormat::R8ui,
+                    _ => crate::spv::ImageFormat::Unknown,
+                };
+                let plane = ImageDecl { format, ..*decl }.declare(mb)?;
+                let p = mb.resource(
+                    crate::pipeline::sym::ResourceSlot {
+                        stage: s.slot.stage,
+                        kind: crate::pipeline::sym::ResourceKind::TexturePlane,
+                        index: s.slot.index,
+                    },
+                    crate::spirv::ir::StorageClass::UniformConstant,
+                    plane,
+                )?;
+                if s.volatile && volatile_decorated(plan) {
+                    mb.volatile(p)?;
+                }
+                d.planes.insert(*index, p);
             }
         }
         if s.presence {

@@ -24,6 +24,9 @@ PIPE = {250: 'Z16_UNORM', 252: 'Z32_FLOAT', 253: 'S8_UINT', 260: 'Z32_FLOAT_S8X2
 STENCIL_ONLY = {'S8_UINT': 'S8_UINT', 'Z32_FLOAT_S8X24_UINT': 'X32_S8X24_UINT'}
 # The extended-range formats' codes as raw renders and fetches them (raw_xr.h; kFormats names them)
 XR_PIPES = {550: 'R32G32_UINT', 552: 'R16G16B16A16_UINT', 554: 'R32_UINT'}
+# RG8Unorm_sRGB's bytes, as R8G8_UNORM's header reads them, with no target (raw_srgb_pair.h: no two-component sRGB
+# target; a draw samples its RGBA8Unorm_sRGB stand-in)
+BYTES_PIPES = {31: 'R8G8_UNORM'}
 
 
 def defines(path: Path) -> dict[str, int]:
@@ -72,7 +75,7 @@ class RawTicWordsTest(unittest.TestCase):
             if line and not line.startswith('#'):
                 metal, _, pipe, *_ = line.split('\t')
                 pipes[int(metal)] = pipe
-        pipes.update(XR_PIPES)
+        pipes.update(XR_PIPES | BYTES_PIPES)
         rows = nil_rows()
         body = FORMATS.read_text().split('const FormatInfo kFormats[] = {', 1)[1].split('};', 1)[0]
         table = re.findall(
@@ -85,7 +88,8 @@ class RawTicWordsTest(unittest.TestCase):
         for metal, target, word, srgb in table:
             row = rows[pipes[int(metal)]]
             with self.subTest(metal=metal, pipe=row[0]):
-                want = 0 if row[1] == 'NONE' else threed['NVB197_SET_COLOR_TARGET_FORMAT_V_' + row[1]]
+                none = row[1] == 'NONE' or int(metal) in BYTES_PIPES
+                want = 0 if none else threed['NVB197_SET_COLOR_TARGET_FORMAT_V_' + row[1]]
                 self.assertEqual(int(target, 16), want)
                 self.assertEqual(int(word, 16), tic0(row, tex))
                 self.assertEqual(srgb == 'true', 'SRGB' in row[0])
@@ -112,6 +116,21 @@ class RawTicWordsTest(unittest.TestCase):
             with self.subTest(metal=metal, pipe=pipe):
                 self.assertEqual(pipe, STENCIL_ONLY[PIPE[int(metal)]])
                 self.assertEqual(int(word, 16), tic0(rows[pipe], tex))
+
+    def test_named_colour_rows_are_nils(self):
+        tex = defines(CLASSES / 'clb197tex.h') | defines(CLASSES / 'cl9097tex.h')
+        threed = defines(CLASSES / 'clb197.h')
+        rows = nil_rows()
+        row_pattern = r'\{(\d+), (0x[0-9a-f]+|0), (0x[0-9a-f]+), \d+, (true|false)\},\s*// \w+: (\w+)'
+        table = re.findall(row_pattern, FORMATS.read_text())
+        self.assertGreaterEqual(len(table), 6)
+        for metal, rt, word, srgb, pipe in table:
+            row = rows[pipe]
+            with self.subTest(metal=metal, pipe=pipe):
+                self.assertEqual(int(word, 16), tic0(row, tex))
+                target = 0 if row[1] == 'NONE' else threed['NVB197_SET_COLOR_TARGET_FORMAT_V_' + row[1]]
+                self.assertEqual(int(rt, 16), target)
+                self.assertEqual(srgb == 'true', 'SRGB' in pipe)
 
     def test_block_compressed_words_are_nils(self):
         tex = defines(CLASSES / 'clb097tex.h') | defines(CLASSES / 'cl9097tex.h')

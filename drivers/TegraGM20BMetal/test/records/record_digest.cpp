@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // See record_digest.h.
 #include "drivers/TegraGM20BMetal/test/records/record_digest.h"
+#include "drivers/TegraGM20BMetal/raw/runtime/raw_set_entries.h"
 
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
@@ -34,15 +35,20 @@ void put(std::vector<uint8_t> &out, const std::string &s)
 // The program's record with its heap placement left out, then its slot's bytes (header, code, shader data)
 void program(std::vector<uint8_t> &out, const Pack &pack, uint32_t index)
 {
-    if (uint64_t(index + 1) * sizeof(PackProgram) > pack.bytes(PackPrograms))
+    if ((uint64_t(index) + 1) * sizeof(PackProgram) > pack.bytes(PackPrograms))
         return put(out, uint32_t(0xFFFFFFFF));
     PackProgram p = pack.section<PackProgram>(PackPrograms)[index];
     const uint32_t at = p.heapOffset;
+    const uint16_t *farUbos = pack.farUbos(p);
     p.program -= p.heapOffset;
     p.heapOffset = 0;
+    memset(p.farUbos, 0, sizeof p.farUbos);
     put(out, p);
     if (uint64_t(at) + p.bytes <= pack.bytes(PackHeap))
         put(out, pack.section<uint8_t>(PackHeap) + at, p.bytes);
+    // a program of uniform buffers past set-0 byte 496 (pack v27): its far table, which no other program has
+    if (farUbos)
+        put(out, farUbos, kProgramCbufs * sizeof *farUbos);
 }
 
 void clearDispatchWords(uint32_t (&q)[64])
@@ -133,8 +139,9 @@ uint32_t traits(const Pack &pack, const PackPipeline &pp)
     uint32_t t = 0, rung = 0;
     if (pp.flags & PipelineFetches)
         t |= TraitFetches;
-    for (uint32_t e = 0; e < pp.entries && e < kPackEntries; e++)
-        if (pp.entry[e].kind == EntryTexture3d)
+    const SetEntries entries(pp, pack.far(pp));
+    for (uint32_t e = 0; e < entries.size(); e++)
+        if (entries[e].kind == EntryTexture3d)
             t |= TraitTexture3d;
     if (pack.split(pp.fs))
         t |= TraitSplit;
@@ -189,15 +196,37 @@ Record pipeline(const Pack &pack, const Context &c, const PackPipeline &pp)
     flat.keyString = flat.vs = flat.fs = flat.blob = flat.blobDwords = flat.variants = flat.variantName = flat.spillAt =
         0;
     flat.iterated = pp.iterated ? 1 : 0;
+    memset(flat.farEntriesAt, 0, sizeof flat.farEntriesAt);
+    const uint32_t *packFar = pack.far(pp);
+    std::vector<uint32_t> far(packFar, packFar ? packFar + farWords(entryCount(pp)) : packFar);
     std::vector<uint8_t> samplers;
-    for (uint32_t e = 0; e < pp.entries && e < kPackEntries; e++)
-        if (handle(pp.entry[e]) && pp.entry[e].samplerKind == SamplerConstexpr) {
-            sampler(samplers, pack, pp.entry[e].sampler);
-            flat.entry[e].sampler = 0;
+    for (uint32_t e = 0; e < entryCount(pp) && (e < kPackEntries || !far.empty()); e++)
+        if (PackEntry &entry =
+                e < kPackEntries ? flat.entry[e] : reinterpret_cast<PackEntry *>(far.data())[e - kPackEntries];
+            handle(entry) && entry.samplerKind == SamplerConstexpr) {
+            sampler(samplers, pack, entry.sampler);
+            entry.sampler = 0;
         }
     std::vector<uint8_t> record;
-    put(record, flat);
+    put(record, &flat, offsetof(PackPipeline, tessPrograms));
     r.sections.push_back({"record", record});
+    // the v24 fields, a section of their own where a record has any: a pack of no such state digests as before them
+    std::vector<uint8_t> tail;
+    if (tessellates(pp))
+        for (const uint32_t index : pp.tessPrograms)
+            program(tail, pack, index);
+    if (pp.strideTwin || pp.amplificationLayerWord || pp.amplificationViewportWord)
+        put(tail, &flat.strideTwin, offsetof(PackPipeline, restoreDwords) - offsetof(PackPipeline, strideTwin));
+    if (pp.restoreDwords && uint64_t(pp.restoreAt + pp.restoreDwords) * 4 <= pack.bytes(PackBlob))
+        put(tail, pack.section<uint32_t>(PackBlob) + pp.restoreAt, size_t(pp.restoreDwords) * 4);
+    if (!tail.empty())
+        r.sections.push_back({"tail", tail});
+    // a record past kPackEntries entries (pack v27): its far block, a section of its own as the v24 fields are
+    if (!far.empty()) {
+        std::vector<uint8_t> farBytes;
+        put(farBytes, far.data(), far.size() * sizeof far[0]);
+        r.sections.push_back({"far", farBytes});
+    }
     r.sections.push_back({"samplers", samplers});
     std::vector<uint8_t> spilled;
     spills(spilled, pack.spills(pp), uint32_t(pp.spillWords[0]) + pp.spillWords[1]);

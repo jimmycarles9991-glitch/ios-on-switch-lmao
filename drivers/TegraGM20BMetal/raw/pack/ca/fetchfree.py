@@ -7,14 +7,18 @@ fragment blend set to none writes the blend's source and fetches nothing; the RO
           one the GPU's macro loads with the matrix uniform of each draw
 A state takes a form only where that is the same arithmetic as the fragment's blend. Not where the blend is one of a
 shader's own reasons: an HDR scale (s) or EDR factor (e) applied around it, a destination function (D) on the colour,
-or a texture function QuartzCore never lifts a blend out of (texture_function_info flag 3). Nor where the host gate
-(tools/gpu/maxwell/rungcheck.py) has not shown the form within rule fetch.blend's bound of the storage form: a line
-whose constants are not those this QuartzCore makes of its name (another build's journal), colour opcodes, the texture
-functions whose programs discard every lane it tries, and the programs and image pairings beyond it
-(iterated/table.py). Rung 2 also needs an
-8-bit unorm target and no extended or unbounded range (the ROP clamps an 8-bit target's source, the fragment does
-not). Rung 3 also needs the state to write its blended colour alone and that colour to be its first: the unit refuses
-a draw of more than one colour target, so the draw narrows the targets to it.
+or a texture function QuartzCore never lifts a blend out of (texture_function_info flag 3). Nor a line whose constants
+are not those this QuartzCore makes of its name (another build's journal), nor where the host gate
+(tools/gpu/maxwell/rungcheck.py) measured the form beyond rule fetch.blend's bound of the storage form: the programs,
+image and texture pairings iterated/table.py names, and colour opcodes, whose storage forms take the colour they
+compute outside [0, 1] or not by opcode, so no one source clamp fits them (with the saturate rung 3's forms carry,
+508 of 674 states beyond on 24B119 and 373 of 504 on 21H461, up to 255 codes). Rung 2 also needs an 8-bit unorm target
+under neither extended nor unbounded range (the ROP clamps an 8-bit target's source, the fragment does not), or an
+RGBA16Float one under any range but extended (the ROP clamps no float target's source, as the fragment does not).
+Rung 3 takes an 8-bit unorm target, or an RGBA16Float one under unbounded range, whose '.u' program needs no store's
+clamp and whose source the form leaves unsaturated. Rung 3 also needs the state to write its blended colour alone and
+that colour to be its first: the unit refuses a draw of more than one colour target, so the draw narrows the targets to
+it.
 
 The form is given as edits of the state's R line (free_tokens), which directpack.mm applies to make it.
 """
@@ -29,10 +33,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import table
 
 FIXED_FUNCTION_BLENDS = range(26)
-UNCOMPARED_TEXTURE_FUNCTIONS = ('kfh', 'dkf')
 # its program and constants come from each draw's uniform (fetchfree_link.py: the GPU's macro loads them)
 COLOUR_MATRIX = 'vcm'
 UNORM8 = (70, 80)  # MTLPixelFormatRGBA8Unorm, MTLPixelFormatBGRA8Unorm
+RGBA16_FLOAT = 115
 
 
 def _image_reads_dest(tables: caspec.Tables, function: int) -> bool:
@@ -46,11 +50,15 @@ def classify(tables: caspec.Tables, name: str, line: str) -> tuple[int, str]:
     except (KeyError, IndexError, ValueError):
         return 0, 'name'
     colors = _colors(line)
-    why = _foreign(tables, line) or _kept_in_fragment(tables, s) or _unproven(tables, s) or _target(s, colors)
+    why = _foreign(tables, line) or _kept_in_fragment(tables, s) or _unproven(s) or _target(s, colors)
     if why:
         return 0, why
     if s.fragB in FIXED_FUNCTION_BLENDS:
-        return (0, 'extended range') if s.flag('x') or s.flag('u') else (2, '')
+        if s.flag('x'):
+            return 0, 'extended range'
+        if s.flag('u') and colors[s.S][0] != RGBA16_FLOAT:
+            return 0, 'unbounded range on an 8-bit target'
+        return 2, ''
     return _iterated(tables, s, colors)
 
 
@@ -63,11 +71,14 @@ def _iterated(tables: caspec.Tables, s: caspec.Spec, colors: dict[int, tuple[int
         return 0, f'no iterated program for {mode}'
     if program in table.BEYOND_BOUND | table.BEYOND_BOUND_ON.get(tables.t['build'], frozenset()):
         return 0, f'{program} beyond the bound on the host gate'
+    saturated = colors[s.S][0] in UNORM8
     names = _image_names(tables, s)
-    if any(program in table.BEYOND_WITH_IMAGE.get(image, ()) for image in names):
+    with_image = [table.BEYOND_WITH_IMAGE] + ([table.BEYOND_SATURATED_WITH_IMAGE] if saturated else [])
+    if any(program in beyond.get(image, ()) for beyond in with_image for image in names):
         return 0, f'{program} beyond the bound on the host gate with its image function'
     texture = {v: k for k, v in tables.dec['TextureFunction'].items()}.get(s.T)
-    if program in table.BEYOND_WITH_TEXTURE.get(texture, ()):
+    with_texture = [table.BEYOND_WITH_TEXTURE] + ([table.BEYOND_SATURATED_WITH_TEXTURE] if saturated else [])
+    if any(program in beyond.get(texture, ()) for beyond in with_texture):
         return 0, f'{program} beyond the bound on the host gate with its texture function'
     if s.S != 0 or any(mask for c, (_fmt, mask) in colors.items() if c != s.S):
         return 0, 'writes another colour'
@@ -92,11 +103,8 @@ def _foreign(tables: caspec.Tables, line: str) -> str:
     return '' if caspec.made_of_name(tables, line) else "constants not this QuartzCore's of its name"
 
 
-def _unproven(tables: caspec.Tables, s: caspec.Spec) -> str:
-    if any(any(image.O) for image in s.images[: _images(s)]):
-        return 'colour opcodes'
-    texture = {v: k for k, v in tables.dec['TextureFunction'].items()}.get(s.T)
-    return f'{texture} discards every lane on the host gate' if texture in UNCOMPARED_TEXTURE_FUNCTIONS else ''
+def _unproven(s: caspec.Spec) -> str:
+    return 'colour opcodes' if any(any(image.O) for image in s.images[: _images(s)]) else ''
 
 
 def _image_names(tables: caspec.Tables, s: caspec.Spec) -> list[str]:
@@ -105,7 +113,13 @@ def _image_names(tables: caspec.Tables, s: caspec.Spec) -> list[str]:
 
 
 def _target(s: caspec.Spec, colors: dict[int, tuple[int, int]]) -> str:
-    return '' if s.S in colors and colors[s.S][0] in UNORM8 else 'blended colour not 8-bit unorm'
+    """Give why the blended colour's format takes no form, '' where it takes one."""
+    if s.S not in colors:
+        return 'blended colour not 8-bit unorm'
+    if colors[s.S][0] in UNORM8 or (colors[s.S][0] == RGBA16_FLOAT and s.fragB in FIXED_FUNCTION_BLENDS):
+        return ''
+    unbounded_iterated = s.S == 0 and s.flag('u') and s.fragB not in FIXED_FUNCTION_BLENDS
+    return '' if colors[s.S][0] == RGBA16_FLOAT and unbounded_iterated else 'blended colour not 8-bit unorm'
 
 
 def free_tokens(tables: caspec.Tables, name: str, line: str, rung: int) -> str:

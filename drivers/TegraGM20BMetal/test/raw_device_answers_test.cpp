@@ -26,6 +26,21 @@ uint64_t argument(const raw::answers::Kind &k, const char *selector, uint64_t a)
     return 0;
 }
 
+// No rasterization rate map on either identity, on purpose: GM20B has no variable-rate unit. The query has an answer of its
+// own, so the device class owns it.
+TEST(RawDeviceAnswers, NoRasterizationRateMapOfAnyLayerCount)
+{
+    for (const raw::answers::Kind &k : raw::answers::kKinds) {
+        bool owned = false;
+        for (size_t i = 0; i < k.argCount; i++)
+            owned |= !strcmp(k.args[i].selector, "supportsRasterizationRateMapWithLayerCount:");
+        EXPECT_TRUE(owned) << k.kind;
+        for (uint64_t layers : {0ull, 1ull, 2ull, 3ull, 8ull, ~0ull})
+            EXPECT_EQ(argument(k, "supportsRasterizationRateMapWithLayerCount:", layers), 0u)
+                << k.kind << " " << layers;
+    }
+}
+
 // The amplify macro keeps SWITCH_GM20B_AMP_MAX mapping words, and both kinds take every count up to it; 24B119's
 // maxVertexAmplificationCount stays its A13's limits table's 2
 TEST(RawDeviceAnswers, AmplificationIsWhatTheAmplifyMacroDraws)

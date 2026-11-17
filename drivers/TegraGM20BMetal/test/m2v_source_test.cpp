@@ -41,12 +41,12 @@ TEST(M2VSource, TheFrontendsPlainEventAnswersASharedEventsSelectors)
 
 TEST(M2VSource, NvksComputeShadersReadTheirWorkgroupBaseFromTheRootTable)
 {
-    const std::string root = SourceText("../../../third_party/mesa/src/nouveau/vulkan/nvk_cmd_buffer.h");
+    const std::string root = SourceText("../../../third_party/mesa/src/nouveau/switch_compile/nvk_root_table.h");
     EXPECT_THAT(
         root, HasSubstr("struct {\n         uint32_t base_group[3];\n         uint32_t group_count[3];\n      } cs;"));
-    EXPECT_THAT(SourceText("../../../third_party/mesa/src/nouveau/vulkan/nvk_shader.c"),
+    EXPECT_THAT(SourceText("../../../third_party/mesa/src/nouveau/switch_compile/nvk_shader_lower.c"),
                 HasSubstr(".has_base_workgroup_id = mesa_shader_stage_is_compute(nir->info.stage),"));
-    EXPECT_THAT(SourceText("../../../third_party/mesa/src/nouveau/vulkan/nvk_nir_lower_descriptors.c"),
+    EXPECT_THAT(SourceText("../../../third_party/mesa/src/nouveau/switch_compile/nvk_nir_lower_descriptors.c"),
                 HasSubstr("return lower_sysval_to_root_table(b, intrin, cs.base_group, ctx);"));
 }
 
@@ -118,10 +118,10 @@ TEST(M2VSource, AFunctionKeepsTheSpecializedNameItWasMadeUnder)
                 HasSubstr("self.0.linked_function().with_link_name(self.1.clone())"));
 }
 
-// A state the pack holds is this device's archive hit: every way the facade asks m2v for its twin (at once, with
-// reflection; a completion handler's creation finishes as the synchronous one does) drops the creation's archives and
+// A state the pack holds is this device's archive hit: every way the facade asks m2v for its twin (at once or later; a
+// completion handler's creation finishes as the synchronous one does) drops the creation's archives and
 // FailOnBinaryArchiveMiss, so a command buffer that falls back never meets a twin m2v refused (device boot 10: "foreign
-// render pipeline", 833 failed frames).
+// render pipeline", 833 failed frames). A state made with reflection has it from the raw path, not a twin.
 TEST(M2VSource, APackedStatesTwinNeverFailsOnTheArchive)
 {
     const std::string states = SourceText("../raw/runtime/RawMetalStates.mm");
@@ -132,7 +132,7 @@ TEST(M2VSource, APackedStatesTwinNeverFailsOnTheArchive)
     EXPECT_THAT(Body(states, "static id<MTLRenderPipelineState> pipelineTwin("),
                 HasSubstr("packedTwinOptions(o, true)"));
     const std::string finish = Body(states, "id<MTLRenderPipelineState> rmFinishState(");
-    EXPECT_THAT(finish, HasSubstr("packedTwinOptions(o, packed)"));
+    EXPECT_THAT(finish, HasSubstr("rmRenderReflection(p, d, o)"));
     EXPECT_THAT(finish, HasSubstr("pipelineTwin(d, o, packed, error)"));
     EXPECT_THAT(Body(states, "static id<MTLRenderPipelineState> makeState("), HasSubstr("rmFinishState(p, d, o"));
     const std::string later = SourceText("../raw/runtime/RawMetalStatesLater.mm");

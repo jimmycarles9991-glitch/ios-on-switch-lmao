@@ -73,6 +73,22 @@ class KindTest(unittest.TestCase):
             kinded = {e['path'] for e in self.manifest['files'] if e.get('kind') == kind}
             self.assertEqual({f['path'] for f in files} - kinded, unkinded, kind)
 
+    def test_install_policy_is_trusted_in_both_profiles_and_kinds(self):
+        expected = {
+            '/usr/libexec/installd': 'build/switch-apps/installd',
+            '/usr/lib/libSwitchInstallPolicy.dylib': 'build/switch-apps/libSwitchInstallPolicy.dylib',
+        }
+        for kind in KINDS:
+            for release in (False, True):
+                with self.subTest(kind=kind, release=release):
+                    plan = self.overlay.plan(self.manifest, False, kind, release=release)
+                    entries = {entry['path']: entry for entry in plan['files']}
+                    for path, source in expected.items():
+                        self.assertEqual(entries[path]['source'], source)
+                        self.assertTrue(entries[path]['trust'])
+                        self.assertEqual(entries[path]['mode'], 0o755)
+                        self.assertIn([entries[path]['directory'], ''], plan['dirs'])
+
     def test_a_debug_package_carries_its_kinds_test_apps(self):
         apps = {
             kind: sorted(f['path'] for f in self.overlay.plan(self.manifest, False, kind)['files'] if f['bundle'])

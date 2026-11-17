@@ -3,10 +3,10 @@
 
 usage: gen_context.py --table context.tsv --macros macros.txt --classes <dir of clb197.h, clb1c0.h> --out <header>
 
-A row's method is a class header name, `NAME(i)` or `NAME(i..j)` for one write per index, or `macro`, whose value
-names the next MME start slot's program in macros.txt. Its value is one word, `v*n` for n writes of v, or `a..b/s`
-for a, a+s, ..., b (per index of a range). A relocated row's value is 0: the method takes the address the channel
-opener supplies. Every row gives its reason.
+A row's method is a class header name, `NAME(i)` or `NAME(i..j)` for one write per index, a method address the class
+header does not name (`0x15b4`), or `macro`, whose value names the next MME start slot's program in macros.txt. Its
+value is one word, `v*n` for n writes of v, or `a..b/s` for a, a+s, ..., b (per index of a range). A relocated row's
+value is 0: the method takes the address the channel opener supplies. Every row gives its reason.
 """
 
 import argparse
@@ -74,6 +74,11 @@ def addresses(method: str, scalars: dict, arrays: dict) -> list[int]:
             raise TableError(f'{method!r} is no method array of the class')
         base, stride = arrays[name]
         return [base + i * stride for i in range(first, last + 1)]
+    if re.fullmatch(r'0x[0-9a-f]{1,4}', method):
+        address = int(method, 16)
+        if address % 4 or address in scalars.values():
+            raise TableError(f'{method!r} is no unnamed method of the class')
+        return [address]
     if method not in scalars:
         raise TableError(f'{method!r} is no method of the class')
     return [scalars[method]]

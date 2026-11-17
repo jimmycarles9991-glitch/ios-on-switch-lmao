@@ -4205,6 +4205,8 @@ ubc_cs_blob_adjust_statistics(struct cs_blob const *blob)
 	}
 }
 
+#include <switch/app_code_blob.h>
+
 static void
 cs_blob_set_cpu_type(struct cs_blob *blob, cpu_type_t cputype)
 {
@@ -5563,6 +5565,9 @@ ubc_cs_blob_revalidate(
 	assert(vp != NULL);
 	assert(blob != NULL);
 
+	if (blob->csb_reconstituted == SWITCH_APP_CODE_METADATA)
+		return (blob->csb_flags & CS_VALID) && switch_app_code_image(vp) ? 0 : EPERM;
+
 	if ((blob->csb_flags & CS_VALID) == 0) {
 		// If the blob attached to the vnode was invalidated, don't try to revalidate it
 		// Blob invalidation only occurs when the file that the blob is attached to is
@@ -5901,6 +5906,7 @@ cs_validate_hash(
 	for (blob = blobs;
 	    blob != NULL;
 	    blob = blob->csb_next) {
+		if (blob->csb_reconstituted == SWITCH_APP_CODE_METADATA) continue;
 		offset = page_offset - blob->csb_base_offset;
 		if (offset < blob->csb_start_offset ||
 		    offset >= blob->csb_end_offset) {

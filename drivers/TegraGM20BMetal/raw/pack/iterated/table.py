@@ -22,27 +22,43 @@ def programs() -> dict[str, Program]:
     return {prog.name: prog for prog in out}
 
 
-# The programs beyond rule fetch.blend's 2 codes of the storage form on the host gate (tools/gpu/maxwell/rungcheck.py
-# over one state of each program, image functions and attachment count; worst codes on 24B119 and 21H461): colour burn
-# 59, divide 235, colour dodge 8, hue 3, colour 128, and every extended and unbounded form (dodge 70, divide 244, linear
-# light 25, subtract 27, darker colour 34)
-BEYOND_BOUND = frozenset(
-    {'cbn', 'cbn.x', 'cbn.u', 'div', 'div.x', 'div.u', 'cdg', 'cdg.x', 'cdg.u', 'hue', 'col', 'dlc.u'}
-    | {'llt.x', 'llt.u', 'sbt.x', 'sbt.u'}
-)
-# by QuartzCore build: 21H461's plus darker, 255 codes in every state
+# The host gate (tools/gpu/maxwell/rungcheck.py over every state of the pack the exclusion covers, the source saturated
+# as raw_fetch_free.h sets it; worst codes against the storage form, 24B119 and 21H461) puts these beyond rule
+# fetch.blend's 2 codes on most of their texture functions: colour burn 255 (on 21 of 22 texture functions), divide 251
+# (21 of 22), colour dodge 24 (10 of 22), hue 168 (15 of 22), colour 225 (9 of 22). Each also costs more passes than the
+# interlocked storage form (raw_chip_facts.h kIteratedProven), so no draw would take its form. The extended forms blend
+# into no 8-bit target (QuartzCore's extended range states are XR formats): dodge 70, divide 244, linear light 25,
+# subtract 27 when an 8-bit unorm one was gated.
+BEYOND_BOUND = frozenset({'cbn', 'cbn.x', 'div', 'div.x', 'cdg', 'cdg.x', 'hue', 'col', 'llt.x', 'sbt.x'})
+# by QuartzCore build: 21H461's plus darker, 255 codes in every state (210 of 210)
 BEYOND_BOUND_ON = {'21H461': frozenset({'pdi'})}
-# by image function: luminosity and saturation over 21H461's sar and ara images, 13 codes
+# by image function: luminosity and saturation over sar and ara images (16 of 38 states, 137 codes)
 BEYOND_WITH_IMAGE = {'sar': frozenset({'lum', 'sat'}), 'ara': frozenset({'lum', 'sat'})}
 # by texture function: the colour matrices, whose source leaves the premultiplied range the unit's programs assume
-# (rungcheck over one state of each texture function, program, memoryless image and attachment count, 24B119 and
-# 21H461: up to 242 codes); hard light, linear light, lighten, pin light and the colour matrix stay within the bound,
-# darker colour too but under c3b
+# (151 of 152 states beyond, up to 255 codes); hard light, linear light, lighten, pin light and the colour matrix stay
+# within the bound, darker colour too but under c3b. Luminosity over the spl, dff and dfg functions' memoryless images,
+# whose colour leaves the premultiplied domain (3 to 20 codes).
 _COLOUR_MATRIX_BEYOND = frozenset(
     {'cli', 'dif', 'drk', 'dso', 'lbn', 'lso', 'lum', 'mpy', 'ovl', 'pdi', 'pld', 'sat', 'sbt', 'sds', 'slt'}
 )
 BEYOND_WITH_TEXTURE = dict.fromkeys(('c33', 'c3s', 'c4b', 'c4p'), _COLOUR_MATRIX_BEYOND) | {
-    'c3b': _COLOUR_MATRIX_BEYOND | {'dlc'}
+    'c3b': _COLOUR_MATRIX_BEYOND | {'dlc'},
+    'spl': frozenset({'lum'}),
+    'dff': frozenset({'lum'}),
+    'dfg': frozenset({'lum'}),
+}
+# On an 8-bit unorm target only, whose form saturates its source: the unbounded forms under 24B119's clr and dgd
+# texture functions and dfr, rsd, scd and usd images (up to 255 codes; over src every one is within). On RGBA16Float,
+# where the source is not saturated, every unbounded state is within (84 of 84 on 24B119, 20 of 20 on 21H461).
+BEYOND_SATURATED_WITH_TEXTURE = {
+    'clr': frozenset({'cbn.u', 'cdg.u', 'div.u'}),
+    'dgd': frozenset({'cdg.u', 'div.u', 'dlc.u'}),
+}
+BEYOND_SATURATED_WITH_IMAGE = {
+    'dfr': frozenset({'cbn.u', 'div.u'}),
+    'rsd': frozenset({'div.u'}),
+    'scd': frozenset({'cbn.u', 'div.u', 'dlc.u', 'sbt.u'}),
+    'usd': frozenset({'div.u', 'sbt.u'}),
 }
 
 

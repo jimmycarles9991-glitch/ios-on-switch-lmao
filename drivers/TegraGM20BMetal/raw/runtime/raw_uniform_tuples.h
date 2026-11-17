@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <vector>
 #include "raw_pack.h"
+#include "raw_set_entries.h"
 
 namespace raw {
 
@@ -18,10 +19,12 @@ struct ReadRange {
 };
 
 // The bytes uniform range `u` of `rec` reads of a buffer bound with `size` bytes past its offset: [first, end) in 16-byte
-// units where the record bounds it, else the function's window on the slot, else the whole bound buffer
-inline ReadRange uniformRead(const PackPipeline &rec, const PackUniformRange &u, size_t size)
+// units where the record bounds it, else the function's window on the slot, else the whole bound buffer. `far`: the record's
+// far block (raw_set_entries.h), null where it has kPackEntries entries or fewer
+inline ReadRange uniformRead(const PackPipeline &rec, const PackUniformRange &u, size_t size,
+                             const uint32_t *far = nullptr)
 {
-    const PackEntry &e = rec.entry[u.entry];
+    const PackEntry &e = SetEntries(rec, far)[u.entry];
     const size_t window = size_t(e.sampler | e.pad << 8) * 16;
     const size_t end = std::min(u.end ? size_t(u.end) * 16 : window ? window : size, size);
     return {std::min(size_t(u.first) * 16, end), end};
@@ -34,16 +37,18 @@ struct BoundBytes {
 
 // The tuple of the bytes `rec`'s uniform ranges read of the buffers `boundAt(stage, slot)` gives; false: a range reads
 // bytes the CPU does not map
-template <class BoundAt> bool uniformTuple(const PackPipeline &rec, BoundAt boundAt, uint64_t &tuple)
+template <class BoundAt>
+bool uniformTuple(const PackPipeline &rec, BoundAt boundAt, uint64_t &tuple, const uint32_t *far = nullptr)
 {
     tuple = 0xcbf29ce484222325ull;
+    const SetEntries entries(rec, far);
     for (uint32_t k = 0; k < kUniformRanges; k++) {
         const PackUniformRange &u = rec.uniform[k];
-        if (u.entry >= rec.entries)
+        if (u.entry >= entries.size() || !entries.complete())
             continue;
-        const PackEntry &e = rec.entry[u.entry];
+        const PackEntry &e = entries[u.entry];
         const BoundBytes b = boundAt(e.stage, e.slot);
-        const ReadRange read = uniformRead(rec, u, b.size);
+        const ReadRange read = uniformRead(rec, u, b.size, far);
         if (read.end > read.first && !b.cpu)
             return false;
         for (size_t i = read.first; i < read.end; i++)

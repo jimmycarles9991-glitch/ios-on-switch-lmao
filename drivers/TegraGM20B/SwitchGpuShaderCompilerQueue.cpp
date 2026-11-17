@@ -120,10 +120,15 @@ void send(Request *sends, uint32_t generation)
 {
 	while (Request *request = sends) {
 		sends = request->next;
-		io_user_reference_t payload[] = {request->cookie,
-						 uint64_t(uint32_t(request->result)) |
-							 uint64_t(generation) << 32};
-		Sender::deliver(request->reference, payload, 2);
+		const TegraGM20BAbiCompileTimes &t = request->times;
+		io_user_reference_t payload[TegraGM20BCompileAnswerWords] = {
+			request->cookie,
+			uint64_t(uint32_t(request->result)) | uint64_t(generation) << 32,
+			t.compile_start,
+			t.compile_end,
+			t.answered,
+			uint64_t(t.answer_priority) | uint64_t(t.reserved) << 32};
+		Sender::deliver(request->reference, payload, TegraGM20BCompileAnswerWords);
 		freeRequest(request);
 	}
 }

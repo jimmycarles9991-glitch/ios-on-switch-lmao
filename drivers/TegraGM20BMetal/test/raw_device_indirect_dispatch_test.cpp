@@ -7,6 +7,7 @@
 #include "raw_device_harness.h"
 #include "../../../kits/SwitchGM20B/SwitchGM20BCompute.h"
 #include "../raw/runtime/raw_compute.h"
+#include <array>
 #include <map>
 #include <vector>
 
@@ -17,16 +18,23 @@ constexpr uint32_t kQmdCbufValid = SWITCH_NVB1C0_QMD_WORD(NVB1C0_QMDV01_07_CONST
                    kQmdRasterWidth = SWITCH_NVB1C0_QMD_WORD(NVB1C0_QMDV01_07_CTA_RASTER_WIDTH),
                    kQmdRasterHeightDepth = SWITCH_NVB1C0_QMD_WORD(NVB1C0_QMDV01_07_CTA_RASTER_HEIGHT);
 
-raw::ComputeRecord kernel(bool stageIn)
+raw::ComputeRecord kernel(bool stageIn, int8_t regionWord = -1)
 {
     raw::ComputeRecord r;
     r.code.assign(64, 0);
     r.cbufType[0] = raw::CbufRoot;
     r.cbufs = 1;
-    r.kernel.regionWord = -1;
+    r.kernel.regionWord = regionWord;
     r.kernel.qmd[kQmdCbufValid] |= 1;
     if (stageIn)
         r.kernel.stageInRegionWord = kRegionWord;
+    return r;
+}
+
+// A kernel that reads a grid builtin: m2v's DispatchRegion field at root push word 12
+const raw::ComputeRecord &gridKernel()
+{
+    static const raw::ComputeRecord r = kernel(false, 12);
     return r;
 }
 
@@ -151,7 +159,8 @@ protected:
     // One indirect dispatch of `r` reading its grid at `offset` in `arguments`, with the stage-in region at `regionOffset`
     // in `region` where given: what the command buffer submitted
     const kernel_model::Job *dispatched(const raw::ComputeRecord &r, const raw::Buffer &arguments, uint64_t offset,
-                                        const raw::Buffer *region = nullptr, uint64_t regionOffset = 0)
+                                        const raw::Buffer *region = nullptr, uint64_t regionOffset = 0,
+                                        std::array<uint32_t, 3> threads = {1, 1, 1})
     {
         const raw::ComputeState *k = raw::placeCompute(dev, r);
         EXPECT_NE(k, nullptr);
@@ -166,7 +175,7 @@ protected:
             e.setStageInRegion({1, 1, 1, 1, 1, 1});
             e.setStageInRegionIndirect(region, regionOffset);
             const char *why = nullptr;
-            EXPECT_TRUE(e.dispatchIndirect(&arguments, offset, &why)) << (why ? why : "");
+            EXPECT_TRUE(e.dispatchIndirect(&arguments, offset, threads, &why)) << (why ? why : "");
             e.end();
         }
         uint32_t seqno = 0;
@@ -254,6 +263,26 @@ TEST_F(DeviceIndirectDispatch, AStageInRegionFromABufferReachesTheRootTablesRegi
         EXPECT_EQ(l.word(root + kRootPush + 4 * (kRegionWord - 1 + i)), want[i]) << "region word " << i;
 }
 
+// gpu.raw.indirect_dispatch's indirect_grid: m2v's MultiRegion 0 compile reads its grid from the group counts, and its
+// DispatchRegion field holds what m2v's binder writes for an indirect dispatch: base 0, the nominal size packed, grid 0
+TEST_F(DeviceIndirectDispatch, AKernelThatReadsItsGridTakesTheRegionRecordOfAnIndirectDispatch)
+{
+    raw::Buffer arguments;
+    ASSERT_TRUE(dev.createBuffer(64, arguments));
+    const uint32_t grid[3] = {3, 2, 2};
+    memcpy(arguments.cpu, grid, sizeof grid);
+    const kernel_model::Job *job = dispatched(gridKernel(), arguments, 0, nullptr, 0, {4, 2, 1});
+    ASSERT_NE(job, nullptr);
+    const Launches l = run(job->words);
+    ASSERT_EQ(l.qmds.size(), 1u);
+    const uint64_t root = rootOf(l, l.qmds[0]);
+    const uint32_t want[8] = {0, 0, 0, 3 | 1 << 10, 0, 0, 0, 0};
+    for (uint32_t i = 0; i < 8; i++)
+        EXPECT_EQ(l.word(root + kRootPush + 4 * (12 + i)), want[i]) << "region word " << i;
+    for (uint32_t a = 0; a < 3; a++)
+        EXPECT_EQ(l.word(root + 12 + 4 * a), grid[a]) << "cs.group_count[" << a << "]";
+}
+
 TEST_F(DeviceIndirectDispatch, ArgumentsPastTheirBufferAreRefused)
 {
     raw::Buffer arguments;
@@ -264,8 +293,8 @@ TEST_F(DeviceIndirectDispatch, ArgumentsPastTheirBufferAreRefused)
     raw::ComputeEncoder e(*cb, dev);
     e.setState(k);
     const char *why = nullptr;
-    EXPECT_FALSE(e.dispatchIndirect(&arguments, 8, &why));
-    EXPECT_FALSE(e.dispatchIndirect(&arguments, 2, &why));
+    EXPECT_FALSE(e.dispatchIndirect(&arguments, 8, {1, 1, 1}, &why));
+    EXPECT_FALSE(e.dispatchIndirect(&arguments, 2, {1, 1, 1}, &why));
     e.end();
 }
 

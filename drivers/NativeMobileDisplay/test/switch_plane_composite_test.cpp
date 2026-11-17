@@ -210,7 +210,8 @@ struct NativeLegacyDisplay : OSObject {
     bool planeHeldSet = false, planeBlending = false, planeFiltersWritten[2] = {};
     bool stats = true, gpuScanout = false, planesOn = true;
     int planeCsc[2][2] = {{-1, -1}, {-1, -1}};
-    uint32_t planeBlendSaved[3] = {}, pitchActControl = UINT32_MAX, planeBuildingSlots = 0;
+    uint32_t planeBlendSaved[3] = {}, pitchActControl = UINT32_MAX;
+    uint64_t planeBuildingSlots = 0;
     uint64_t planeRequestedAt = 0, frameEnds = 10;
     unsigned stPlaneFlips = 0, stPlaneDropped = 0, stPlaneComposited = 0, deadlines = 0, withdrawals = 0, releases = 0,
              planeUnderflowRun = 0, busyBacking = 0;
@@ -347,6 +348,7 @@ struct NativeLegacyDisplay : OSObject {
 #include "../SwitchOverlayRegisters.h"
 #include "../SwitchPlaneAdmissionDrop.h"
 #include "../SwitchCompositionRegisters.h"
+    static inline uint64_t mediaHostHeldSlots = 0;
 #include "../SwitchOverlayRecovery.h"
 #include "../SwitchPlanesResume.h"
 #include "../SwitchPlaneCompositeDisplay.h"

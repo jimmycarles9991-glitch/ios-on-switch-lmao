@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 #include "../fx/fx_image.h"
@@ -336,7 +337,7 @@ void Device::clearZbc(const Texture &t, bool full, const uint32_t v[4])
 
 void Device::clearZbcDepth(const Texture &t, bool full, float depth)
 {
-    if (!t.comptags)
+    if (!t.comptags || std::isnan(depth))
         return;
     bool held = zbcBootDepth(depth);
     TegraGM20BAbiZbc e;

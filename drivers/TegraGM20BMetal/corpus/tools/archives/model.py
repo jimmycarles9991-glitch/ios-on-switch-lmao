@@ -20,20 +20,21 @@ FRAMEWORK_LIBRARY = re.compile(r'^/System/Library/(?:Private)?Frameworks/\w+\.fr
 # A bundle's library or a framework resource library (tools/gpu/rawpack.py OS_LIBRARY), keyed by its functions' AIR
 BUNDLE_LIBRARY = re.compile(r'^/System/Library/\S+?\.(?:bundle|framework/Resources)/\S+\.metallib$')
 STAGE_LIBRARY = re.compile(r' \| [vf] \S+ lib=(\S+)')
+NO_FRAGMENT = re.compile(r' \| f - ')
 LINKED = re.compile(r' \| [vf][lp] \S+(?: lib=(\S+))?')
 
 
 def packable(line: str) -> bool:
     """Whether the raw runtime looks a render state up in the pack (RawMetalStates.mm pipelineFor).
 
-    It has both functions, from one framework's default.metallib, and every function it links is a framework
-    library's; or both from one bundle's or framework resource library, linking none (looked up by their AIR). The
-    direct compile makes any other state when it is created (m2v one with no fragment function).
+    Its functions (a vertex one alone where it has no fragment function) are of one framework's default.metallib, and
+    every function it links is a framework library's; or of one bundle's or framework resource library, linking none
+    (looked up by their AIR). The direct compile makes any other state when it is created.
     """
     stages = STAGE_LIBRARY.findall(line)
     libraries = set(stages)
     linked = LINKED.findall(line)
-    if len(stages) != 2 or len(libraries) != 1:
+    if len(stages) != (1 if NO_FRAGMENT.search(line) else 2) or len(libraries) != 1:
         return False
     library = next(iter(libraries))
     if BUNDLE_LIBRARY.match(library) and '/QuartzCore.framework/' not in library:
@@ -136,6 +137,7 @@ class Pipeline:
     excluded_families: frozenset[int] = frozenset()
     max_threads: int = 0
     multiple_of_width: int = 0
+    rasterize: bool = True  # rasterizationEnabled: a state of NO keys rast=0 (raw/runtime/RawPipelineKey.h)
 
     def for_device(self) -> bool:
         """Whether a device of the raw device's families is one the archive declares the state for."""
@@ -156,6 +158,8 @@ class Pipeline:
             if a.format:
                 lay = self.layouts.get(a.buffer, Layout())
                 head += f' a{a.index}={a.format}:{a.offset}:{a.buffer}:{lay.stride}:{lay.step_function}:{lay.step_rate}'
+        if not self.rasterize:
+            head += ' rast=0'
         if self.kind == TILE:
             return f'T{head[1:]} | t {self.kernel.stage() if self.kernel else "- "} | '
         vertex = self.vertex.stage() if self.vertex else '- '

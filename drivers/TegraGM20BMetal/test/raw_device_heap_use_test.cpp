@@ -35,6 +35,7 @@ std::vector<Kind> kinds(bool blockLinear)
     using K = raw::TextureAsk;
     std::vector<Kind> out = {{"2D", ask(K::Plain, kRGBA8, blockLinear)},
                              {"2D of a format no target takes", ask(K::Plain, kRGB9E5, blockLinear)},
+                             {"block-compressed 2D", ask(K::Plain, kBC1, true)},
                              {"1D", ask(K::Line, kRGBA8)}};
     K mips = ask(K::Mips, kRGBA8), array = ask(K::Array, kRGBA8), cube = ask(K::Array, kRGBA8),
       volume = ask(K::Volume, kRGBA8);
@@ -46,18 +47,38 @@ std::vector<Kind> kinds(bool blockLinear)
     cube.layers = 6;
     volume.depth = 4;
     volume.view2d = true;
-    out.insert(out.end(), {{"mips", mips}, {"2D array", array}, {"cube", cube}, {"3D", volume}});
+    K blockMips = ask(K::Block, kBC1), blockArray = ask(K::Block, kBC1), blockCube = ask(K::Block, kBC1),
+      blockVolume = ask(K::Block, kBC1);
+    blockMips.levels = 5;
+    blockMips.type = raw::fx::kTexTwoD;
+    blockArray.layers = 3;
+    blockArray.type = raw::fx::kTexTwoDArray;
+    blockCube.height = 64;
+    blockCube.layers = 6;
+    blockCube.type = raw::fx::kTexCube;
+    blockVolume.depth = 4;
+    blockVolume.levels = 2;
+    blockVolume.type = raw::fx::kTexThreeD;
+    out.insert(out.end(), {{"mips", mips},
+                           {"2D array", array},
+                           {"cube", cube},
+                           {"3D", volume},
+                           {"block-compressed mips", blockMips},
+                           {"block-compressed 2D array", blockArray},
+                           {"block-compressed cube", blockCube},
+                           {"block-compressed 3D", blockVolume}});
+    K depth = ask(K::Zeta, kDepth32), stencil = ask(K::Zeta, kDepth32Stencil8), depthCube = ask(K::Zeta, kDepth32);
+    depth.sampled = depthCube.sampled = true;
+    depthCube.type = raw::fx::kTexCube;
+    depthCube.height = 64;
+    depthCube.layers = 6;
+    depthCube.levels = 3;
+    out.insert(out.end(), {{"depth", depth}, {"depth-stencil", stencil}, {"depth cube of levels", depthCube}});
     if (!blockLinear)
         return out;
-    K msaa = ask(K::Multisample, kRGBA8), depth = ask(K::Zeta, kDepth32), stencil = ask(K::Zeta, kDepth32Stencil8),
-      msaaDepth = ask(K::Zeta, kDepth32);
+    K msaa = ask(K::Multisample, kRGBA8), msaaDepth = ask(K::Zeta, kDepth32);
     msaa.samples = msaaDepth.samples = 4;
-    depth.sampled = true;
-    out.insert(out.end(), {{"block-compressed 2D", ask(K::Plain, kBC1, true)},
-                           {"MSAA", msaa},
-                           {"depth", depth},
-                           {"depth-stencil", stencil},
-                           {"MSAA depth", msaaDepth}});
+    out.insert(out.end(), {{"MSAA", msaa}, {"MSAA depth", msaaDepth}});
     return out;
 }
 
@@ -82,6 +103,8 @@ protected:
         cb->internalCompletion();
         for (uint32_t i = 0; i < uses; i++)
             cb->useHeap(heap);
+        cb->use(from, false);
+        cb->use(to, true, false);
         raw::BlitEncoder *e = cb->blit();
         e->copyBytes(from.va, to.va, 64);
         e->end();
@@ -183,6 +206,39 @@ TEST_F(DeviceHeapUse, EveryKindIsOneUseOfTheArenaAtFourAndAt404)
         for (const bool placement : {false, true})
             for (const Kind &kind : kinds(blockLinear))
                 everyKindOnce(blockLinear, placement, kind);
+}
+
+// A heap's block-compressed chain is the image one in memory of its own is (createBlockTexture): its layout, and its header
+// but for the address words
+TEST_F(DeviceHeapUse, ABlockCompressedChainInAHeapIsTheImageOfItsOwn)
+{
+    constexpr uint32_t kASTC4x4 = 204;
+    raw::TextureAsk a = ask(raw::TextureAsk::Block, kASTC4x4);
+    a.width = 100;
+    a.height = 60;
+    a.levels = 7;
+    a.type = raw::fx::kTexTwoD;
+    makeArena(true);
+    raw::Texture placed, own;
+    ASSERT_TRUE(dev.arenaTexture(raw::ArenaAt{arena, std::nullopt}, a, placed));
+    ASSERT_TRUE(dev.createBlockTexture(100, 60, 7, 1, kASTC4x4, raw::fx::kTexTwoD, own));
+    ASSERT_NE(placed.chain, nullptr);
+    ASSERT_NE(own.chain, nullptr);
+    EXPECT_TRUE(placed.arena);
+    EXPECT_FALSE(own.arena);
+    uint64_t bytes = 0, align = 0;
+    ASSERT_TRUE(raw::Device::footprint(a, bytes, align));
+    EXPECT_EQ(placed.span.bytes, bytes);
+    EXPECT_EQ(placed.chain->layout.bytes, own.chain->layout.bytes);
+    EXPECT_EQ(placed.chain->va, placed.va);
+    EXPECT_EQ(placed.width, own.width);
+    EXPECT_EQ(placed.pitch, own.pitch);
+    EXPECT_EQ(placed.blockHeight, own.blockHeight);
+    const auto p = raw::DeviceHarness::header(dev, placed.tic), o = raw::DeviceHarness::header(dev, own.tic);
+    for (size_t w : {0, 3, 4, 5, 6, 7})
+        EXPECT_EQ(p[w], o[w]) << "header word " << w;
+    dev.destroyTexture(placed);
+    dev.destroyTexture(own);
 }
 
 TEST_F(DeviceHeapUse, BuffersAreOneUseOfTheArenaAtFourAndAt404)

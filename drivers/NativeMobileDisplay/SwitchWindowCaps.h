@@ -29,9 +29,14 @@ namespace switch_window_caps {
 constexpr uint32_t kSourceWidth = 4096, kSourceHeight = 2304;
 constexpr uint64_t kSourcePixels = static_cast<uint64_t>(kSourceWidth) * kSourceHeight;
 constexpr uint32_t kYuvMinScaleFraction = 6;
-// The IOVA span of one plane slot: the largest source's rows plus a page either side, in whole 4 MiB SMMU tables.
+// The most one plane slot maps: the largest source's rows plus a page either side, in whole 4 MiB SMMU tables.
 constexpr uint64_t kPlaneSlotSpan = 40ULL << 20;
-// The display domain's tables: 8 plane slots of 10 tables, the direct-scanout and probe slots, and the identity maps.
+// Window B's IOVA, which its slots' mappings are placed in at what each reads (rounded to TegraSMMUSpace's 64 KiB). As
+// many slots as a decoder's pool has buffers (AVPlayer's about 24, up to 40), so each is mapped once, plus the GPU
+// surfaces and VIC's outputs; a slot is a record, so the count does not grow the tables.
+constexpr unsigned kPlaneSlots = 48;
+constexpr uint64_t kPlaneSpace = 8 * kPlaneSlotSpan;
+// The display domain's tables: window B's space (80 tables), the direct-scanout and probe slots, and the identity maps.
 constexpr unsigned kDomainTables = 128;
 
 constexpr uint32_t kByteSwapNone = 0, kByteSwap2 = 1;

@@ -41,18 +41,14 @@ struct X1Probe: HWTest {
             base.set("gpu_after", await GPUProbe.answers())
             base.set("stale_emitted", stale)
         }
-        let offRaw = gpu.paths.offRaw
-        if RawFacade.kind(of: gpu.device) == "raw" && !offRaw.isEmpty {
-            failure = "command buffers off the raw path: \(offRaw.text)" + (failure.map { "; \($0)" } ?? "")
-        }
-        guard let finding, failure == nil else {
+        let offRaw = RawFacade.kind(of: gpu.device) == "raw" ? gpu.paths.offRaw : PathTally()
+        guard let finding else {
             var metrics = Metrics()
             metrics.set("probe", probe)
             metrics.merge(base)
-            if let finding { metrics.merge(finding.metrics) }
-            return .fail(failure ?? "no finding", metrics, proof: gpu.proof)
+            return Outcome.fail(failure ?? "no finding", metrics, proof: gpu.proof).failing(offRaw: offRaw)
         }
-        return finding.outcome(probe: probe, base: base, proof: gpu.proof)
+        return finding.outcome(probe: probe, base: base, proof: gpu.proof).failing(offRaw: offRaw)
     }
 }
 

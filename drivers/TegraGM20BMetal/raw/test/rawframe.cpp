@@ -161,6 +161,7 @@ int main(int argc, char **argv)
         if (filling) {
             if (!f)
                 cb->clean(fills.cpu, frame::kFillBytes, true);
+            cb->use(fills, true, false);
             raw::BlitEncoder *be = cb->blit();
             be->fillBytes(fills.va + frame::kFillFrom, frame::kFillBytes - frame::kFillFrom, frame::fillValue(f));
             be->end();

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.deploy import deploy, joycon_pairing, poster_snapshots, pull_logs
+from tools.deploy import deploy, deployed, joycon_pairing, poster_snapshots, pull_logs
 from tools.install import card as cards, renamed
 
 
@@ -361,6 +361,23 @@ class KindTest(unittest.TestCase):
         with mock.patch.object(pull_logs, 'data_volume', return_value=None):
             deploy.check_kind(self.card, str(self.pins))
             deploy.check_kind(self.card, None)
+
+    def test_snapshot_kind_is_checked_before_resolving_or_writing_the_card(self):
+        package = self.pins.parent / 'package'
+        package.mkdir()
+        args = deploy._parser().parse_args(
+            ['disk9', '--boot-package', str(package), '--ipsw', str(self.pins), '--spec', 'unused']
+        )
+        for build, expected in [('21H461', 'snapshot is for 21H461, not 24B119'), ('24B119', 'card resolution')]:
+            (package / deployed.NAME).write_text(json.dumps({'build': build}))
+            with (
+                mock.patch.object(deploy.host, 'check_tools'),
+                mock.patch.object(pull_logs, 'load_spec', return_value={}),
+                mock.patch.object(cards, 'resolve', side_effect=cards.RefusedError('card resolution')) as resolve,
+                self.assertRaisesRegex(cards.RefusedError, expected),
+            ):
+                deploy._checked(args, Log())
+            self.assertEqual(resolve.call_count, int(build == '24B119'))
 
 
 class JoyConPairingTest(unittest.TestCase):

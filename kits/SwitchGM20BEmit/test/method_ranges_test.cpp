@@ -115,6 +115,7 @@ Scratch channelScratch(uint32_t amplifications, uint32_t layer, uint32_t barrier
     for (uint32_t k = 0; k < SWITCH_GM20B_ICB_PATCH_BUFFERS; k++)
         s[SWITCH_GM20B_SCRATCH_ICB_ENTRY + k] = k == 1 ? SWITCH_GM20B_ICB_NO_ENTRY : 0x40 * k;
     s[SWITCH_GM20B_SCRATCH_ICB_CONTROL] = 0x720;
+    s[SWITCH_GM20B_SCRATCH_ICB_SET_BYTES] = 0x200;
     for (uint32_t slot = 0; slot < SWITCH_GM20B_SCRATCH_ICB_BUFFER_SLOTS; slot++) {
         s[SWITCH_GM20B_SCRATCH_ICB_BUFFERS + 3 * slot] = 0x10000 * slot + 4;
         s[SWITCH_GM20B_SCRATCH_ICB_BUFFERS + 3 * slot + 1] = 16u << SWITCH_GM20B_ICB_STRIDE_SHIFT | 1;
@@ -172,6 +173,7 @@ TEST(MethodRanges, EveryScratchWordHasOneOwner)
         {"a patch execute's set", SWITCH_GM20B_SCRATCH_ICB_SET_HI, 2},
         {"a patch execute's entries", SWITCH_GM20B_SCRATCH_ICB_ENTRY, SWITCH_GM20B_ICB_PATCH_BUFFERS},
         {"a patch execute's control word", SWITCH_GM20B_SCRATCH_ICB_CONTROL, 1},
+        {"a patch execute's set size", SWITCH_GM20B_SCRATCH_ICB_SET_BYTES, 1},
         {"an amplifying state's words", SWITCH_GM20B_SCRATCH_AMP_COUNT_WORD, 5},
         {"the amplification count", SWITCH_GM20B_SCRATCH_AMP_COUNT, 1},
         {"the amplification mappings", SWITCH_GM20B_SCRATCH_AMP_MAPS, SWITCH_GM20B_AMP_MAX},

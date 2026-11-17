@@ -1,13 +1,127 @@
 // SPDX-License-Identifier: MIT
 // What a runtime-made state does on raw::Device (raw_device_harness.h) where the heap or local memory had no room for one of
-// its programs: a split twin that found no room is asked again by the next draws that take it.
+// its programs: its turned variant is placed at its first turned draw, and a turned draw that finds no room is refused
+// alone, the next asking again; a split twin that found no room is asked again by the next draws that take it.
 #include "raw_device_harness.h"
 #include "../raw/runtime/raw_pack.h"
 #include "../raw/runtime/raw_record.h"
+#include "../raw/runtime/raw_rotated_pass.h"
 
 namespace {
 
-constexpr uint32_t kRGBA16Float = 115, kStrip = 4;
+constexpr uint32_t kRGBA8 = 70, kRGBA16Float = 115, kTriangle = 3, kStrip = 4;
+
+class DeviceRoom : public harness::DeviceTest {
+protected:
+    raw::Texture target;
+
+    void SetUp() override
+    {
+        DeviceTest::SetUp();
+        ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
+    }
+
+    static raw::CapturedProgram program(uint32_t id, uint32_t localBytes = 0)
+    {
+        raw::CapturedProgram p;
+        p.image.assign(80 + 64, 0);
+        p.image[0] = uint8_t(id);
+        memcpy(p.image.data() + 4, &localBytes, sizeof localBytes);  // SPH SHADER_LOCAL_MEMORY_LOW_SIZE
+        p.id = "program " + std::to_string(id);
+        p.gprs = 8;
+        p.cbufTypes = {raw::CbufRoot, raw::CbufSet};
+        return p;
+    }
+
+    // A state whose fragment program has a turned variant that asks for shader local memory
+    raw::Pipeline *turnedState()
+    {
+        raw::RuntimeRecord r;
+        r.keyString = "samples=1 c0=70 ds=0/0 ";
+        r.programs[0] = program(1);
+        r.programs[1] = program(2);
+        r.pipeline.keyHash = 0xae;
+        r.pipeline.variantCount[1] = 1;
+        r.variants.push_back({raw::AssumeTurned, program(3, 0x400)});
+        r.blob = {0x1a00, 0x1111};
+        std::string why;
+        raw::Pipeline *made = dev.addRecord(r, false, why);
+        EXPECT_NE(made, nullptr) << why;
+        return made;
+    }
+
+    // One draw into the target, turned: its plane rotated a quarter as Metal's rotation 1
+    std::string draw(raw::Pipeline *state, bool turned)
+    {
+        target.rotation = turned ? 1 : 0;
+        raw::CommandBuffer *cb = dev.begin();
+        if (!cb)
+            return "no command buffer";
+        raw::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.count = 1;
+        raw::RenderEncoder *e = cb->render(pass);
+        if (!e) {
+            cb->abandon();
+            return "no pass";
+        }
+        e->setPipeline(state);
+        const char *why = nullptr;
+        const bool ok = e->draw(kTriangle, 0, 3, 1, 0, &why);
+        e->end();
+        uint32_t seqno = 0;
+        if (!ok || !cb->commit(seqno)) {
+            cb->abandon();
+            return why ? why : "not committed";
+        }
+        return "";
+    }
+};
+
+TEST_F(DeviceRoom, ATurnedVariantWithNoRoomAtItsStatesCreationIsPlacedAtItsFirstTurnedDraw)
+{
+    kernel_model::model.refuseAllocs = true;
+    raw::Pipeline *pl = turnedState();
+    kernel_model::model.refuseAllocs = false;
+    ASSERT_NE(pl, nullptr);
+    EXPECT_FALSE(pl->turnRefused);
+    EXPECT_TRUE(pl->turnedVariant);
+    EXPECT_EQ(draw(pl, false), "");
+    EXPECT_EQ(pl->turnedTwin, nullptr) << "an upright draw places no turned variant";
+    EXPECT_EQ(draw(pl, true), "");
+    ASSERT_NE(pl->turnedTwin, nullptr);
+    EXPECT_EQ(draw(pl, true), "");
+}
+
+TEST_F(DeviceRoom, ATurnedDrawThatFindsNoRoomIsRefusedAloneAndTheNextAsksAgain)
+{
+    raw::Pipeline *pl = turnedState();
+    ASSERT_NE(pl, nullptr);
+    ASSERT_EQ(draw(pl, false), "");
+    kernel_model::model.refuseAllocs = true;
+    EXPECT_EQ(draw(pl, true), raw::rotatedRefusalText(raw::RotatedRefusal::Variant));
+    kernel_model::model.refuseAllocs = false;
+    EXPECT_EQ(draw(pl, false), "") << "upright draws go on";
+    EXPECT_EQ(draw(pl, true), "");
+    EXPECT_NE(pl->turnedTwin, nullptr);
+}
+
+// Every turned draw that finds no room is refused alone and places the variant afresh: no count, no latch
+TEST_F(DeviceRoom, EveryTurnedDrawThatFindsNoRoomPlacesTheVariantAfresh)
+{
+    raw::Pipeline *pl = turnedState();
+    ASSERT_NE(pl, nullptr);
+    ASSERT_EQ(draw(pl, false), "");
+    kernel_model::model.refuseAllocs = true;
+    const uint64_t full = dev.stats.heapFull;
+    for (int i = 0; i < 6; ++i)
+        EXPECT_EQ(draw(pl, true), raw::rotatedRefusalText(raw::RotatedRefusal::Variant)) << i;
+    EXPECT_EQ(dev.stats.heapFull - full, 6u);
+    EXPECT_FALSE(pl->turnRefused);
+    kernel_model::model.refuseAllocs = false;
+    EXPECT_EQ(draw(pl, true), "");
+    EXPECT_NE(pl->turnedTwin, nullptr);
+}
 
 // A glass shape state (raw_split_record_test.cpp's) whose split per-pixel program asks for shader local memory: its twin
 // finds no room where the kernel has none to give. `split` false: the same state with no split
@@ -25,7 +139,7 @@ raw::RuntimeRecord splitRecord(bool split = true)
     r.programs[1].cbufTypes = {raw::CbufRoot, ubo};
     raw::PackPipeline &pp = r.pipeline;
     pp.keyHash = split ? 0xb0 : 0xb1;
-    pp.entries = 1;
+    raw::setEntryCount(pp, 1);
     pp.entry[0] = {32, raw::EntryUbo, 2, 1, uint8_t(17 << 2), 0, 0};
     pp.vertexSlot = 0xff;
     pp.pushMask = 1u << 16;

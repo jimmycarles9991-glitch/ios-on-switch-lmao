@@ -170,6 +170,74 @@ TEST(Copy, ABlockLinearDestinationGetsTheRowsAsItsTexels)
 	}
 }
 
+TEST(Copy, ComponentRemapsUseEachSidesStrideAndKeepUnwrittenBytes)
+{
+	struct Remap {
+		uint32_t bits, srcBytes, dstBytes, unit, from, to;
+	};
+
+	for (const Remap c : {Remap{0x01006660, 1, 2, 1, 0, 0}, Remap{0x03016066, 2, 8, 2, 0, 2},
+			      Remap{0x00316662, 8, 2, 2, 2, 0}, Remap{0x00106660, 2, 1, 1, 0, 0}}) {
+		for (const bool srcPitch : {false, true})
+			for (const bool dstPitch : {false, true}) {
+				SCOPED_TRACE(testing::Message() << std::hex << c.bits << " pitch "
+								<< srcPitch << '/' << dstPitch);
+				tgm_layout sl, dl;
+				ASSERT_TRUE(tgm_layout_tiled(13, 11, c.srcBytes, &sl));
+				ASSERT_TRUE(tgm_layout_tiled(13, 11, c.dstBytes, &dl));
+				std::vector<uint8_t> s = pattern(sl.bytes, c.bits),
+						     d(dl.bytes, kUntouched), want = d;
+				const auto offset = [](const tgm_layout &l, bool pitch,
+						       uint32_t bpp, uint32_t x, uint32_t y,
+						       uint32_t byte) {
+					return pitch ? uint64_t(y) * l.row_bytes + x * bpp + byte
+						     : tgm_layout_offset_of(l.row_bytes, l.y_log2,
+									    x * bpp + byte, y);
+				};
+				for (uint32_t y = 0; y < 5; ++y)
+					for (uint32_t x = 0; x < 7; ++x)
+						for (uint32_t byte = 0; byte < c.unit; ++byte)
+							want[offset(dl, dstPitch, c.dstBytes, x + 4,
+								    y + 5, c.to * c.unit + byte)] =
+								s[offset(sl, srcPitch, c.srcBytes,
+									 x + 2, y + 3,
+									 c.from * c.unit + byte)];
+				Memory memory;
+				memory.map(kSrcVa, s, true);
+				memory.map(kDstVa, d);
+				CopyEngine ce(memory);
+				ce.src = {0x1000u | uint32_t(sl.y_log2) << 4,
+					  sl.row_bytes / c.srcBytes,
+					  11,
+					  1,
+					  0,
+					  2u | 3u << 16};
+				ce.dst = {0x1000u | uint32_t(dl.y_log2) << 4,
+					  dl.row_bytes / c.dstBytes,
+					  11,
+					  1,
+					  0,
+					  4u | 5u << 16};
+				ce.m = {{0x0400, uint32_t(kSrcVa >> 32)},
+					{0x0404, srcPitch ? 3 * sl.row_bytes + 2 * c.srcBytes : 0},
+					{0x0408, uint32_t(kDstVa >> 32)},
+					{0x040c, dstPitch ? 5 * dl.row_bytes + 4 * c.dstBytes : 0},
+					{0x0410, sl.row_bytes},
+					{0x0414, dl.row_bytes},
+					{0x0418, 7},
+					{0x041c, 5},
+					{0x0708, c.bits}};
+				ce.method(kCopySubchannel, 0x0300,
+					  2u | 1u << 2 | 1u << 10 | (srcPitch ? 1u << 7 : 0) |
+						  (dstPitch ? 1u << 8 : 0));
+				ASSERT_FALSE(ce.fault);
+				EXPECT_EQ(ce.launches, 1u);
+				EXPECT_EQ(d, want);
+				EXPECT_EQ(s, pattern(sl.bytes, c.bits));
+			}
+	}
+}
+
 // The source's GPU writers and VIC's syncpoint first, then the copy; the increment after the copy and the L2's write-back
 TEST(Copy, WaitsComeFirstAndTheIncrementLast)
 {

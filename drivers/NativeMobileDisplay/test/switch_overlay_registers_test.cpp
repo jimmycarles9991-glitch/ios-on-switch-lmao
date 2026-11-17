@@ -154,6 +154,7 @@ struct Display {
 #include "../SwitchOverlayRegisters.h"
 #include "../SwitchPlaneAdmissionDrop.h"
 #include "../SwitchCompositionRegisters.h"
+    static inline uint64_t mediaHostHeldSlots = 0;
 #include "../SwitchOverlayRecovery.h"
 #include "../SwitchPlanesResume.h"
 

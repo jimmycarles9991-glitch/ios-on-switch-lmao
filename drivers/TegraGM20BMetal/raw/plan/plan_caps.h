@@ -44,9 +44,10 @@ static_assert(sizeof kProbeIds / sizeof *kProbeIds == size_t(Probe::Count), "an 
 // The probes that passed on the chip (stack-F-v1, 11 Nov): ce_compressed for one-sample C32 and C64 colour kinds
 // only (BGRA8, RGBA16F: C128, MS2/MS4 and zeta kinds unproven, so copy.ce_compressed lowers only those), mip_filter,
 // and pass_pixel_barrier's planner form (26 cells held, none failed; the strided reads at 320x180 and 1280x720 were
-// blind and are re-probed; the 0x1288 reading failed)
-constexpr uint32_t kProvenOnChip =
-    1u << uint32_t(Probe::CeCompressed) | 1u << uint32_t(Probe::MipFilter) | 1u << uint32_t(Probe::PassPixelBarrier);
+// blind and are re-probed; the 0x1288 reading failed); iterated_blend on boots 19 and 21 (claim_verdict=PASS,
+// nvn_within_one=5 of nvn_run=5; its two refused arms are the setups the unit refuses by design)
+constexpr uint32_t kProvenOnChip = 1u << uint32_t(Probe::CeCompressed) | 1u << uint32_t(Probe::MipFilter) |
+                                   1u << uint32_t(Probe::IteratedBlend) | 1u << uint32_t(Probe::PassPixelBarrier);
 
 struct RuleEvidence {
     Rule rule;

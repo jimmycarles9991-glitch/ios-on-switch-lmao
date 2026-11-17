@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
-// What a compile request carries of a render pipeline descriptor (raw_compile_request.h), as plain values: every field
-// RawPipelineKey.h's pipelineKey reads (the vertex function's patch type among them), and the ones m2v's translation
-// reads beside them (rasterizationEnabled, the tessellator's state, the amplification count). The client reads them off
-// its descriptor and the shader compiler makes a descriptor of them (RawCompileRequest.mm), then keys it with
-// pipelineKey itself, so the two sides share one key function and a field this list misses shows as a key that differs.
+// What a compile request carries of a render pipeline descriptor (raw_compile_request.h), as plain values: all a render key
+// is made of (RawPipelineKey.h pipelineKey keys these, the vertex function's patch type among them), and what m2v's
+// translation reads beside (rasterizationEnabled, the tessellator's state). The client reads them off its descriptor
+// (fieldsOf) and the shader compiler keys the request's own, so both sides key with one function over the same values.
 // Each struct here goes over the wire whole (raw_compile_request.cpp), so a field added to one is carried.
 #pragma once
 #include <cstdint>

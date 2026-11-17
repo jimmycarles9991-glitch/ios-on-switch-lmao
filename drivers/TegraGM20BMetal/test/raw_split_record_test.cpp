@@ -25,7 +25,7 @@ raw::RuntimeRecord shapeRecord(uint64_t key)
     r.programs[1].cbufTypes = {raw::CbufRoot, ubo};
     raw::PackPipeline &pp = r.pipeline;
     pp.keyHash = key;
-    pp.entries = 1;
+    raw::setEntryCount(pp, 1);
     pp.entry[0] = {kUboSetOffset, raw::EntryUbo, 2, 1, uint8_t((kResidualWord + 1) << 2), 0, 0};
     pp.vertexSlot = 0xff;
     pp.pushMask = 1u << kResidualWord;
@@ -101,6 +101,27 @@ TEST_F(SplitRecords, EachDrawsPrologueReadsItsOwnResidual)
     EXPECT_TRUE(cb->commit(seqno));
 }
 
+// A state that spills into argument tables is offered no split: its twin would be built without the tables' words and
+// refuse its draws (Device::makeSplit), where the state draws whole
+TEST_F(SplitRecords, AStateWithArgumentTablesIsOfferedNoSplit)
+{
+    std::string why;
+    raw::Pipeline *whole = dev.addRecord(shapeRecord(0x618b45175101cd21ull), false, why);
+    ASSERT_NE(whole, nullptr) << why;
+    EXPECT_NE(whole->splitSource, nullptr);
+    raw::RuntimeRecord r = shapeRecord(0x618b45175101cd22ull);
+    raw::setEntryCount(r.pipeline, 2);
+    r.pipeline.entry[1] = {64, raw::EntrySpillTable, 2, 0, 0, 0, 0};
+    r.pipeline.setBytes = 80;
+    r.pipeline.spillEntry[1] = 2;
+    r.pipeline.spillWords[1] = 4;
+    r.spill = {0, 0, 0, 0};
+    raw::Pipeline *spilled = dev.addRecord(r, false, why);
+    ASSERT_NE(spilled, nullptr) << why;
+    ASSERT_NE(spilled->spill[1], nullptr);
+    EXPECT_EQ(spilled->splitSource, nullptr);
+}
+
 // A split prologue runs ahead of all of its command buffer's 3D work, so a draw keeps its whole program only where work
 // before it in the command buffer wrote the uniform memory the prologue reads: a fill of another buffer leaves the twin
 TEST_F(SplitRecords, OnlyAWriteOfTheBoundUniformsKeepsTheWholeProgram)
@@ -132,11 +153,13 @@ TEST_F(SplitRecords, OnlyAWriteOfTheBoundUniformsKeepsTheWholeProgram)
         e->end();
     };
     raw::BlitEncoder *b = cb->blit();
+    cb->use(other, true, false);
     b->fillBytes(other.va, 0x1000, 0x5a);
     b->end();
     drawOnce(0x1040);
     EXPECT_EQ(cb->splitRecords().size(), 1u) << "another buffer's fill";
     b = cb->blit();
+    cb->use(uniforms, true, false);
     b->fillBytes(uniforms.va + 0x1000, 0x100, 0x5a);
     b->end();
     drawOnce(0x10c8);

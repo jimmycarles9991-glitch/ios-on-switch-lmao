@@ -6,10 +6,11 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
-#include "bridge/NativeMetalDirect.h"
+#include "raw_direct_abi.h"
 #include "raw_compute_key.h"
 #include "raw_direct_encode.h"
 #include "raw_direct_nvk.h"
+#include "raw_kernel_pairs.h"
 #include "raw_spill_table.h"
 
 namespace raw {
@@ -23,19 +24,17 @@ constexpr size_t kCbufs = sizeof(ComputeRecord::cbufType);
 
 class Compiled {
 public:
-    explicit Compiled(const DirectNvk &nvk) : nvk_(nvk)
-    {}
+    Compiled() = default;
+    Compiled(const Compiled &) = delete;
+    Compiled &operator=(const Compiled &) = delete;
 
     ~Compiled()
     {
         if (stage.owner)
-            nvk::nakStageFinish(nvk_, stage);
+            switch_compile_stage_finish(&stage);
     }
 
     NvkStage stage = {};
-
-private:
-    const DirectNvk &nvk_;
 };
 
 // The root push words a dispatch writes but m2v's DispatchRegion field, which raw_compute.cpp writes per dispatch, by root offset
@@ -93,7 +92,10 @@ public:
         const uint16_t offset = uint16_t(b.offset + w.element * b.stride);
         if (bufferType(w.type))
             return buffer(w, offset, why);
-        if (w.type == SampledImage || w.type == StorageImage || w.type == CombinedImageSampler) {
+        // NVK's descriptor of a texel buffer view is an image's: its header's index (raw binds the texture's own header,
+        // a texel buffer one of a texture buffer, Device::createTexelBuffer)
+        if (w.type == SampledImage || w.type == StorageImage || w.type == CombinedImageSampler ||
+            w.type == UniformTexelBuffer || w.type == StorageTexelBuffer) {
             if (!texture(kw, offset, why))
                 return false;
             return w.type != CombinedImageSampler || sampler(kw, offset, why);
@@ -145,11 +147,12 @@ private:
             why = "a texture slot the dispatch leaves unbound at " + std::to_string(offset);
             return false;
         }
-        if (!viewWord0(kw.viewFormat, kw.components, w.type == StorageImage, word0)) {
+        const bool storage = w.type == StorageImage || w.type == StorageTexelBuffer;
+        if (!viewWord0(kw.viewFormat, kw.components, storage, word0)) {
             why = "a texture view of VkFormat " + std::to_string(kw.viewFormat) + " NVK has no header for";
             return false;
         }
-        entries.push_back({offset, KernelTexture, uint8_t(w.slot), word0});
+        entries.push_back({offset, kw.plane ? KernelTexturePlane : KernelTexture, uint8_t(w.slot), word0});
         return true;
     }
 
@@ -164,7 +167,9 @@ private:
             why = "a sampler slot the dispatch leaves unbound at " + std::to_string(offset);
             return false;
         }
-        entries.push_back({offset, KernelSampler, samplerSlot(out_, header), 0});
+        const uint32_t pairs = directSamplerWindow(
+            w.type == CombinedImageSampler, w.source == NmbDirectCombined && w.slot != NMB_DIRECT_NEUTRAL, w.slot);
+        entries.push_back({offset, KernelSampler, samplerSlot(out_, header), pairs});
         return true;
     }
 };
@@ -180,7 +185,7 @@ void attachResiduals(const NmbDirectKernel &k, std::vector<PackKernelEntry> &ent
             e.window |= uint32_t(k.residualWord[e.slot]) << 24;
 }
 
-CompileOutcome compile(const NmbDirectKernel &k, const DirectNvk &nvk, Compiled &made, std::string &why)
+CompileOutcome compile(const NmbDirectKernel &k, const StageCompile &compiler, Compiled &made, std::string &why)
 {
     SubgroupSize subgroup;
     subgroup.size = k.stage.subgroupSize;
@@ -211,8 +216,8 @@ CompileOutcome compile(const NmbDirectKernel &k, const DirectNvk &nvk, Compiled 
         why = "a descriptor type NVK lays out by another rule";
         return CompileOutcome::Refused;
     }
-    if (const int32_t result = nvk::nakCompileStage(nvk, nvk.nakTarget, info, layout.layout, made.stage); result != 0) {
-        why = "NVK refused the kernel (VkResult " + std::to_string(result) + ")";
+    if (const int32_t result = compileStage(compiler, info, layout.layout, made.stage); result != 0) {
+        why = "the stage compile refused the kernel (VkResult " + std::to_string(result) + ")";
         return CompileOutcome::Failed;
     }
     if (made.stage.cbufCount > kCbufs) {
@@ -264,14 +269,14 @@ bool recordable(const NmbDirectKernel &k, std::string &why)
 
 }  // namespace
 
-CompileOutcome directKernel(const NmbDirectKernel &k, const DirectNvk &nvk, const std::string &key, ComputeRecord &out,
-                            std::string &why)
+CompileOutcome directKernel(const NmbDirectKernel &k, const StageCompile &compiler, const std::string &key,
+                            ComputeRecord &out, std::string &why)
 {
     out = {};
     if (!recordable(k, why))
         return CompileOutcome::Refused;
-    Compiled made(nvk);
-    if (const CompileOutcome compiled = compile(k, nvk, made, why); compiled != CompileOutcome::Made)
+    Compiled made;
+    if (const CompileOutcome compiled = compile(k, compiler, made, why); compiled != CompileOutcome::Made)
         return compiled;
     Entries entries(k, out);
     for (uint32_t i = 0; i < k.writeCount; i++)
@@ -328,8 +333,9 @@ CompileOutcome directKernel(const NmbDirectKernel &k, const DirectNvk &nvk, cons
         if (entry.slot >= 32)
             continue;
         const uint32_t bit = 1u << entry.slot;
+        const bool texture = entry.kind == KernelTexture || entry.kind == KernelTexturePlane;
         if ((entry.kind == KernelBuffer && (k.bufferReads & bit) && !(k.bufferWrites & bit)) ||
-            (entry.kind == KernelTexture && (k.textureReads & bit) && !(k.textureWrites & bit)))
+            (texture && (k.textureReads & bit) && !(k.textureWrites & bit)))
             r.readOnlyEntries |= 1ull << i;
     }
     for (const auto &[offset, word] : pushWords(k.pushMask, k.push, k.regionWord)) {

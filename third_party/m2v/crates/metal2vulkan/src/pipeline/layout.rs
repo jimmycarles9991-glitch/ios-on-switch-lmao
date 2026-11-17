@@ -119,6 +119,10 @@ pub enum BindingSource {
     /// same image in the UNORM format of its channels, which reads an 8-bit sRGB texture's raw
     /// codes (`RuntimeFact::SrgbTexture`).
     RawTexture(SlotRef),
+    /// The alpha plane of the two-plane `RGB10A8_2P_XR10` texture bound at a Metal
+    /// `[[texture(n)]]` slot (`ResourceKind::TexturePlane`): its `R8_UINT` view, of the slot's own
+    /// descriptor type.
+    TexturePlane(SlotRef),
     /// The `half` shadow of the extended-range color attachment of this color index that the
     /// draw's render pass instance holds (`ResourceKind::ExtendedShadow`), bound as a storage
     /// image.

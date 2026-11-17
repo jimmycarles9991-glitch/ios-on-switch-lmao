@@ -434,7 +434,14 @@ struct TegraGM20BAbiExec {
 
 struct TegraGM20BAbiExecReply {
 	uint32_t seqno; /* fence of this submission; compare with (int32_t)(a - b) >= 0 */
-	uint32_t reserved;
+	uint32_t flags; /* TegraGM20BExecReply* */
+};
+
+/* TegraGM20BAbiExecReply.flags */
+enum {
+	/* SubmitJob: a job asked to end quiet (TegraGM20BJobQuiet) ends with its own interrupt all the same: a semantic
+	 * fence is bound to it, or it closes the writes of a backing the display scans in place */
+	TegraGM20BExecReplyLoud = 1u << 0,
 };
 
 /* TegraGM20BAbiSurfaceUse.access: one or both */

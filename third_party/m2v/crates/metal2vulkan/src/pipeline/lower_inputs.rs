@@ -299,6 +299,13 @@ pub struct LoweringInputs {
         serde(default, with = "crate::pipeline::serde_pairs")
     )]
     pub extended_range: BTreeMap<SlotRef, metal::format::ExtendedRange>,
+    /// Kernel texture slots of `extended_range` bound to an `RGB10A8_2P_XR10` texture held in
+    /// Metal's two planes (`VariantKey::two_plane_textures`): the slot's image holds the color
+    /// words (`R32_UINT`) and a second image beside it (`ResourceKind::TexturePlane`) the alpha
+    /// bytes (`R8_UINT`). A write stores the raw texel's word and byte into each, and a read or a
+    /// sample's fetch joins them into the raw texel the one-image form holds.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub two_plane_textures: BTreeSet<SlotRef>,
     /// The color attachments the fragment function's render pipeline gives one of Apple's
     /// extended-range formats, by color index ([`ExtendedRangeColor`]): each such attachment
     /// holds the format's raw texels (`metal::format::ExtendedRange::raw_format`), so the

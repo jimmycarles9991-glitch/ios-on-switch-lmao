@@ -4,11 +4,12 @@
 // and at every frame end the page window A scans must not be one Core Animation has back, nor may window B have a
 // surface in reach (shown, asked for or replaced) whose use count it does not hold (SwitchPlaneSurfaceUseDisplay.h).
 // kern.switch_scan_{checks,handed,overlaps} count the checks, the pages handed back and the checks that failed, since
-// boot (hw_test_app's display.scan_returned). The first overlap logs one line. Included in the class body after
-// SwitchDirectSlots.h and SwitchCompletionFlipDisplay.h; under the gate.
+// boot (hw_test_app's display.scan_returned). Each of the first kScanOverlapLines overlaps logs one line naming the
+// swap and what it showed. While a colour blank is on screen (SwitchColourBlank.h) window A shows nothing of the page it
+// fetches. Included in the class body after SwitchDirectSlots.h and SwitchCompletionFlipDisplay.h; under the gate.
 
 #if SWITCH_FRAME_TIMELINE
-static constexpr unsigned kScanTotals = 3;
+static constexpr unsigned kScanTotals = 3, kScanOverlapLines = 16;
 static inline uint32_t scanTotals[kScanTotals] = {};  // checks, handed back, overlaps
 static inline struct sysctl_oid scanTotalOids[kScanTotals] = {};
 static inline switch_display::ScanReturn scanReturn;
@@ -47,7 +48,8 @@ const char *scanReach(int entry)
 {
     if (entry == kNoBuffer)
         return nullptr;
-    if (!hwSuspended && !scanoutStopped && surfaceIndex(uiActive(kWinbufStartAddr)) == entry)
+    const bool hidden = colourBlankSwap.hidesWindowA();
+    if (!hidden && !hwSuspended && !scanoutStopped && surfaceIndex(uiActive(kWinbufStartAddr)) == entry)
         return "window A scans the page";
     if (entry == ring.pending)
         return "window A has the page asked for";
@@ -55,7 +57,7 @@ const char *scanReach(int entry)
         return "a replaced flip to the page may have latched";
     if (entry == ring.held)
         return "the page waits for a flip";
-    if (entry == ring.front)
+    if (!hidden && entry == ring.front)
         return "the ring has the page scanned";
     if (!completionFlipIdle() && completionFlip.entry == entry)
         return "the page's completion flip is out";
@@ -67,14 +69,20 @@ static uint32_t scanCount(unsigned which)
     return __atomic_fetch_add(&scanTotals[which], 1u, __ATOMIC_RELAXED);
 }
 
-void scanOverlap(const char *when, int entry, const char *why)
+// `seq` and `shown`: the retiring swap and what it showed on window A (0 and null at a frame end).
+void scanOverlap(const char *when, int entry, const char *why, uint64_t seq = 0, const void *shown = nullptr)
 {
-    if (scanCount(2))
+    const uint32_t overlaps = scanCount(2);
+    if (overlaps >= kScanOverlapLines)
         return;
-    IOLog(
-        "SwitchDisplay: %s, a buffer its owner has back is in reach: %s (%d; window A front %d pending %d replaced %d "
-        "held %d)\n",
-        when, why, entry, ring.front, ring.pending, ring.superseded, ring.held);
+    const char *kind = shown == &scanBlank                             ? "a blank"
+                       : shown == switch_display::ScanReturn::kUnknown ? "unknown"
+                                                                       : "a page";
+    IOLog("SwitchDisplay: %s, a buffer its owner has back is in reach: %s (%d; overlap %u, swap %llu showing %s, "
+          "frame end %llu; window A front %d pending %d replaced %d held %d, colour blank %d)\n",
+          when, why, entry, overlaps + 1, static_cast<unsigned long long>(seq), seq ? kind : "-",
+          static_cast<unsigned long long>(frameEnds), ring.front, ring.pending, ring.superseded, ring.held,
+          blanked ? 1 : 0);
 }
 
 // retireSwap's first step: the page this retirement gives back must be out of window A's reach.
@@ -87,7 +95,7 @@ void scanReturnRetired(const OriginalLegacySwapRequest *request)
     scanCount(0);
     const int entry = scanEntryOf(back);
     if (const char *why = scanReach(entry))
-        scanOverlap("a swap retired", entry, why);
+        scanOverlap("a swap retired", entry, why, seqOf(request), scanReturn.lastShown());
 }
 
 // A frame end with window A rotated, after its latch was read.
@@ -97,7 +105,7 @@ void scanReturnFrameEnd()
         return;
     scanCount(0);
     const int entry = surfaceIndex(uiActive(kWinbufStartAddr));
-    if (entry >= kSlot0 && scanReturn.back(slots[entry - kSlot0].memory))
+    if (entry >= kSlot0 && !colourBlankSwap.hidesWindowA() && scanReturn.back(slots[entry - kSlot0].memory))
         scanOverlap("a frame end", entry, "window A scans a page Core Animation has back");
     if (!planesOn || !planeUses)
         return;

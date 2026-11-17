@@ -228,15 +228,17 @@ inline const char *spanFormName(SpanForm form)
     return names[size_t(form) < std::size(names) ? size_t(form) : 0];
 }
 
-// "<us> us <name> k<key> <instructions> instr x<marks> <kpx>k[m]", and for draws whose boxes are known
+// "<us> us k<key> <name> <instructions> instr x<marks> <kpx>k[m]", and for draws whose boxes are known
 // " <form> <shaded>kpx e<executed instructions a pixel> c0 <format>/<w>x<h>[/bl][+comp]": the executed estimate is the span's
 // time at kLaneInstructionsPerNs over the pixels its draws' boxes hold (where it is the static count, the program ran at
-// the chip's full issue rate). One span for the log and the kernel's note, whose text the target is the end of
+// the chip's full issue rate). One span for the log and the kernel's note, whose text the target is the end of. The key is
+// the third field whatever the name is (a state's own, or its kind's words where it has none), so a reader such as HW
+// Test ui.launch_hitch tells states apart by key and never by name.
 inline int formatSpan(char *out, size_t size, const StateSpan &s)
 {
     const SpanLabel &l = s.label;
-    int at = snprintf(out, size, "%llu us %s k%016llx %u instr x%u %uk%s", (unsigned long long)(s.ns / 1000),
-                      l.name[0] ? l.name : spanKindName(l.kind), (unsigned long long)l.key, l.instructions, s.marks,
+    int at = snprintf(out, size, "%llu us k%016llx %s %u instr x%u %uk%s", (unsigned long long)(s.ns / 1000),
+                      (unsigned long long)l.key, l.name[0] ? l.name : spanKindName(l.kind), l.instructions, s.marks,
                       l.kpx, l.samples > 1 ? "m" : "");
     if (l.kind != SpanKind::Draws || !s.pixels || at < 0 || size_t(at) >= size)
         return at;

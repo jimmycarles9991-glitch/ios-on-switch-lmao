@@ -128,8 +128,14 @@ TEST(RawComp, CopiedBackingsCompressOnlyAtProvenKinds)
     EXPECT_TRUE(raw::copyEngineReadsCompressed(0xf5)) << "C128_2CR, gpu.x1.ce_compressed's RGBA32Float cases";
     for (uint32_t kind : {0xccu, 0xe2u, 0xcdu, 0xf0u, 0xf7u, 0xf9u})
         EXPECT_TRUE(raw::copyEngineReadsCompressed(kind)) << "gpu.x1.ce_compressed's ms cases " << std::hex << kind;
-    for (uint32_t kind : {0x03u, 0x04u, 0x87u, 0x88u, 0xcfu, 0xd0u})
+    // the multisampled shader-tested zetas, under the context's CSAA_ENABLE of 0
+    for (uint32_t kind : {0x87u, 0x88u, 0xcfu, 0xd0u})
+        EXPECT_TRUE(raw::copyEngineReadsCompressed(kind)) << std::hex << kind;
+    for (uint32_t kind : {0x03u, 0x04u})
         EXPECT_FALSE(raw::copyEngineReadsCompressed(kind)) << std::hex << kind;
+    // the multisampled shader-tested zetas, under the context's CSAA_ENABLE of 0
+    for (uint32_t kind : {0x87u, 0x88u, 0xcfu, 0xd0u})
+        EXPECT_TRUE(raw::copyEngineReadsCompressed(kind)) << std::hex << kind;
 
     // memoryless: the copy engine never reaches them
     EXPECT_EQ(raw::backingKind(true, true, 0, 4, 1, false), 0xdbu);
@@ -145,17 +151,19 @@ TEST(RawComp, CopiedBackingsCompressOnlyAtProvenKinds)
     EXPECT_EQ(raw::backingKind(true, true, 0, 16, 1, true), 0xf5u);
     EXPECT_EQ(raw::backingKind(true, true, 0, 4, 2, true), 0xccu);
     EXPECT_EQ(raw::backingKind(true, true, 0, 8, 4, true), 0xf0u);
-    // zetas the shader's depth tests copy with the copy engine: one-sample Depth32Float alone is proven
+    // zetas the shader's depth tests copy with the copy engine: one-sample Depth32Float, and the multisampled ones under
+    // the context's CSAA_ENABLE of 0
     EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false), 0x86u);
-    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 4, false), 0u);
-    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 2, false), 0u);
-    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false), 0u);
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 2, false), 0x87u);
+    EXPECT_EQ(raw::backingKind(true, true, 252, 4, 4, false), 0x88u);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false), 0xcfu);
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 4, false), 0xd0u);
     EXPECT_EQ(raw::backingKind(true, true, 260, 8, 1, true), 0xceu);
 
     // a debug build's gpu.x1.ce_compressed_depth probe gives those zetas their kinds, and nothing else
     EXPECT_EQ(raw::backingKind(true, true, 252, 4, 1, false, true), 0x86u);
     EXPECT_EQ(raw::backingKind(true, true, 260, 8, 2, false, true), 0xcfu);
-    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 4, true, false), 0u) << "a multisampled zeta stays unproven";
+    EXPECT_EQ(raw::backingKind(true, true, 260, 8, 4, true, false), 0xd0u) << "a multisampled zeta under CSAA_ENABLE 0";
 
     EXPECT_EQ(raw::backingKind(true, false, 0, 4, 1, false), 0u);    // pitch
     EXPECT_EQ(raw::backingKind(false, true, 260, 8, 1, false), 0u);  // compression off

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
+#include "raw_sampler_map.h"
 
 namespace raw {
 
@@ -135,21 +136,13 @@ inline void borderHeader(uint32_t w[8], uint8_t texel)
     w[3] = (w[3] & ~0x0ffff000u) | srgb(1) << 12 | srgb(2) << 20;
 }
 
-// TEXSAMP0 ADDRESS_U, ADDRESS_V and ADDRESS_P values (bits 2:0, 5:3, 8:6) samplerHeader and NVK write
-constexpr uint32_t kTscWrap = 0, kTscMirror = 1, kTscClampToEdge = 2, kTscBorder = 3, kTscMirrorOnceClampToEdge = 5;
-
 // Sampler header `w` under a planar texture's address map `map` (Texture::addressMap): 1 sends the wrapping modes to the
 // edge, 2 the clamps to zero and to the border, 3 both. On the header's own fields, so a constexpr sampler's header,
 // which has no descriptor, takes the map as a sampler state's does (Device::samplerVariant).
 inline void mapSamplerAddresses(uint32_t w[8], uint8_t map)
 {
-    const bool wrapped = map == 1 || map == 3, clamps = map == 2 || map == 3;
-    for (uint32_t shift : {0u, 3u, 6u}) {
-        const uint32_t mode = w[0] >> shift & 7;
-        const bool wraps = mode == kTscWrap || mode == kTscMirror || mode == kTscMirrorOnceClampToEdge;
-        if ((wrapped && wraps) || (clamps && mode == kTscBorder))
-            w[0] = (w[0] & ~(7u << shift)) | kTscClampToEdge << shift;
-    }
+    for (uint32_t shift : {0u, 3u, 6u})
+        w[0] = (w[0] & ~(7u << shift)) | mappedHeaderAddress(w[0] >> shift & 7, map) << shift;
 }
 
 inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
@@ -160,9 +153,6 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     if (cubic && (m.mipFilter != 0 || metalAnisotropy(m.maxAnisotropy) != 1 || (m.borderColor & 3) == 3 ||
                   m.sAddress == kAddressMirrorClampToEdge || m.tAddress == kAddressMirrorClampToEdge ||
                   m.rAddress == kAddressMirrorClampToEdge))
-        return false;
-    if (!m.normalizedCoordinates &&
-        (m.sAddress == kAddressMirrorClampToEdge || m.tAddress == kAddressMirrorClampToEdge))
         return false;
     const bool border =
         m.sAddress >= kAddressClampToZero || m.tAddress >= kAddressClampToZero || m.rAddress >= kAddressClampToZero;
@@ -184,10 +174,11 @@ inline bool takeSampler(const MetalSamplerFields &m, SamplerDesc &s)
     s.pixel = !m.normalizedCoordinates;
     s.compare = uint8_t(m.compareFunction);
     s.border = border && borderColor != 3 ? uint8_t(borderColor) : 0;
+    // Metal leaves pixel coordinates sampled with any wrap mode but ClampToEdge undefined (MTLSampler.h
+    // normalizedCoordinates), so each wrapping or mirroring axis clamps to the edge
     if (s.pixel) {
         for (uint8_t *axis : {&s.sAddress, &s.tAddress, &s.rAddress})
-            if (*axis == kAddressRepeat || *axis == kAddressMirrorRepeat ||
-                (axis == &s.rAddress && *axis == kAddressMirrorClampToEdge))
+            if (*axis == kAddressRepeat || *axis == kAddressMirrorRepeat || *axis == kAddressMirrorClampToEdge)
                 *axis = kAddressClampToEdge;
         s.mipFilter = 0;
         s.maxAnisotropy = 1;

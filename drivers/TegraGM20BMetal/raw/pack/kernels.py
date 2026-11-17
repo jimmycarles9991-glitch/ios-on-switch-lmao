@@ -1,16 +1,21 @@
 """The compute kernels directpack.mm made directly, for directlink.py.
 
 A DKRN record holds its PackKernel with program index 0, its program (code, shader data, constant buffer types) and
-sampler headers, which its sampler entries name as CONSTEXPR | n. The pack numbers those headers among its constexpr
-samplers, and a buffer entry's window keeps its residual word + 1 in its top byte (runtime/raw_pack.h).
+sampler headers, which its sampler entries name as CONSTEXPR | n, each with the texture slots it samples in its window.
+The pack numbers those headers among its constexpr samplers, and a buffer entry's window keeps its residual word + 1 in
+its top byte (runtime/raw_pack.h).
 """
 
+import re
 import struct
 
 import packfile
 
 CONSTEXPR = 0x80  # PackKernelEntry.slot of a constexpr sampler: its index in the pack's constexpr samplers
-BUFFER, TEXTURE, SAMPLER = 0, 1, 2  # runtime/raw_pack.h PackKernelEntryKind
+# runtime/raw_pack.h PackKernelEntryKind
+BUFFER, TEXTURE, SAMPLER, TEXTURE_TABLE, SAMPLER_TABLE, SPILL_TABLE, TEXTURE_PLANE = range(7)
+TWO_PLANES = 'xr2p'  # a tex= field's mark of an RGB10A8_2P_XR10 texture held in two planes (runtime/raw_compute_key.h)
+PLANE_BYTES = {TEXTURE: 4, TEXTURE_PLANE: 1}  # a two-plane texture's color words (R32Uint) and alpha bytes (R8Uint)
 HEAD = struct.Struct('<QIIBb')
 ENTRY = struct.Struct('<HBBI')
 ENTRIES = packfile.KERNEL_ENTRIES
@@ -26,6 +31,70 @@ KERNEL_BYTES = (
 )
 
 
+# Header word 0's COMPONENTS (clb097tex.h): a texel's bytes (runtime/raw_view.h texelBytes)
+TEXEL_BYTES = {
+    0x01: 16,
+    0x02: 12,
+    0x03: 8,
+    0x04: 8,
+    0x05: 8,
+    0x07: 4,
+    0x08: 4,
+    0x09: 4,
+    0x0C: 4,
+    0x0D: 4,
+    0x0E: 4,
+    0x0F: 4,
+    0x20: 4,
+    0x21: 4,
+    0x12: 2,
+    0x13: 2,
+    0x14: 2,
+    0x15: 2,
+    0x16: 2,
+    0x18: 2,
+    0x1B: 2,
+    0x1D: 1,
+    0x1E: 1,
+}
+# MTLPixelFormat: a texel's bytes, the uncompressed colour formats a kernel binds
+FORMAT_BYTES = {
+    **dict.fromkeys((10, 11, 12, 13, 14), 1),
+    **dict.fromkeys((20, 22, 23, 24, 25, 30, 31, 32, 33, 34, 40, 41, 42, 43), 2),
+    **dict.fromkeys((53, 54, 55, 60, 62, 63, 64, 65, 70, 71, 72, 73, 74, 80, 81, 90, 91, 92, 93, 94, 554, 555), 4),
+    **dict.fromkeys((103, 104, 105, 110, 112, 113, 114, 115, 552, 553), 8),
+    **dict.fromkeys((123, 124, 125), 16),
+}
+
+
+def views_other_texel_size(key: str, entries: list[dict]) -> list[int]:
+    """Give the texture slots a record views in texels of another size than the format its key binds there.
+
+    A two-plane texture's slot views its planes: its color words at the slot's entry, its alpha bytes at its plane
+    entry. A plane entry at a slot of another texture is named too. The runtime binds no such view (runtime/raw_view.h
+    SlotView::None).
+    """
+    found = re.search(r'\btex=([^ |]*)', key)
+    fields = [t.split(':') for t in found.group(1).split(',') if t] if found else []
+    bound = {int(f[0]): int(f[1]) for f in fields}
+    planes = {int(f[0]) for f in fields if f[-1] == TWO_PLANES}
+    other = []
+    for e in entries:
+        if e['kind'] not in PLANE_BYTES or not e['window']:
+            continue
+        texel = TEXEL_BYTES.get(e['window'] & 0x7F)
+        if e['slot'] in planes:
+            fmt = PLANE_BYTES[e['kind']]
+        elif e['kind'] == TEXTURE_PLANE:
+            other.append(e['slot'])
+            continue
+        else:
+            fmt = FORMAT_BYTES.get(bound.get(e['slot'], -1))
+        if texel and fmt and texel != fmt:
+            other.append(e['slot'])
+    return other
+
+
 def entry(fields: tuple[int, int, int, int], headers: list[list[int]], constexpr_tsc: list[list[int]]) -> dict:
     """Give a record's set-0 entry as packfile.py takes it, its sampler numbered among the pack's."""
     off, kind, slot, window = fields
@@ -33,7 +102,7 @@ def entry(fields: tuple[int, int, int, int], headers: list[list[int]], constexpr
         header = headers[slot & (CONSTEXPR - 1)]
         if header not in constexpr_tsc:
             constexpr_tsc.append(header)
-        return {'off': off, 'kind': kind, 'slot': CONSTEXPR | constexpr_tsc.index(header), 'window': 0}
+        return {'off': off, 'kind': kind, 'slot': CONSTEXPR | constexpr_tsc.index(header), 'window': window}
     if kind == BUFFER:
         residual = (window >> 24) - 1
         return {
@@ -91,12 +160,16 @@ def from_records(records: list[dict], constexpr_tsc: list[list[int]]) -> tuple[l
         if rec['outcome']:
             skipped.append((rec['key'], rec['why']))
             continue
-        kernels.append(kernel(rec, constexpr_tsc))
+        made = kernel(rec, constexpr_tsc)
+        if slots := views_other_texel_size(rec['key'], made['entries']):
+            skipped.append((rec['key'], f'texture slots {slots} viewed in texels of another size'))
+            continue
+        kernels.append(made)
     return kernels, skipped
 
 
 def state_facts(records: list[dict]) -> list[dict]:
-    """Give each compute state's answers (directpack.mm's DKRN facts), once a state: every shape of it names the same."""
+    """Give each compute state's DKRN answers once: every dispatch shape must carry the same answers."""
     facts: dict[int, dict] = {}
     for rec in records:
         if rec['outcome'] or 'facts' not in rec:

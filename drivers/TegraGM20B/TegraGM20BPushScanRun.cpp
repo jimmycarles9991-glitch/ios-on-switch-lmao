@@ -60,7 +60,7 @@ void logWindow(const PushOwner (&window)[kPushOwners])
 					w.setRef,      w.l2Inval,          w.hostWfi,
 					w.ceCopies,    w.ceBytes >> 10,    w.ceWfi,
 					w.blits,       w.dispatches,       w.acquires,
-					w.psBarriers,  w.interlocks};
+					w.psBarriers,  w.interlocks,       w.twinDraws};
 		constexpr size_t kFields = sizeof(per) / sizeof(per[0]);
 		char v[kFields][24];
 		for (size_t k = 0; k < kFields; k++)
@@ -73,69 +73,23 @@ void logWindow(const PushOwner (&window)[kPushOwners])
 			 "shinv+WFI, %s "
 			 "shinv, %s texinv, %s setref, %s L2 inv, %s host WFI; %s CE (%s KiB), %s "
 			 "CE WFI, %s 2D, "
-			 "%s disp, %s acq; %s PS barrier, %s interlock; %llu bad",
+			 "%s disp, %s acq; %s PS barrier, %s interlock, %s twin draws; %llu bad",
 			 i.name, w.scanned, w.submits, v[0],
 			 w.bytes ? w.readBytes * 100 / w.bytes : 0, v[1], v[2], v[3], v[4], v[5],
 			 v[6], v[7], v[8], v[9], v[10], v[11], v[12], v[13], v[14], v[15], v[16],
-			 v[17], v[18], v[19], v[20], v[21], v[22], w.unparsed);
+			 v[17], v[18], v[19], v[20], v[21], v[22], v[23], w.unparsed);
 		os_log(OS_LOG_DEFAULT, "tegra-gm20b: push %s", line); /* log only */
 	}
 }
 
-// Count what a submission's pushes ask of the GPU (`push[i].words` null: not read) into `owner`'s window; every 5 s the
-// window's lines. `rawMacros`: a job's (only the raw path submits jobs), whose macro slots are the raw path's.
-void scanRead(const switch_gpu_scan_words *push, uint32_t count, tgm_prof *prof, bool rawMacros,
-	      const char *owner, bool compositor)
+// Count a submission's read into `owner`'s window and its largest target into the peaks; every 5 s the window's lines.
+void scanCount(const tgm_scan::SubmissionRead &read, const char *owner, bool compositor)
 {
-	PushCounts c = {};
-	PushParse p = {};
-	p.rawMacros = rawMacros;
-	uint64_t budget = kScanMaxBytes;
-	bool whole = true;
-	tgm_scan::TargetImage largest = {};
-	for (uint32_t i = 0; i < count; i++) {
-		if (prof && i < TGM_PROF_MAX) {
-			prof->cls[i] = TGM_PC_SKIP;
-			prof->draws[i] = prof->sampleDraws[i] = prof->kpx[i] = 0;
-			prof->interlocks[i] = 0;
-		}
-		const uint64_t bytes = static_cast<uint64_t>(push[i].dwords) * 4;
-		c.bytes += bytes;
-		if (!push[i].words || bytes > budget) {
-			scanPush(c, p, whole, nullptr, 0);  // not read: no later push is stamped
-			continue;
-		}
-		budget -= bytes;
-		c.readBytes += bytes;
-		const uint64_t drawsBefore = c.draws;
-		const uint64_t clearsBefore = c.clears;
-		const uint64_t sampleBefore = c.sampleDraws;
-		const uint64_t interlocksBefore = c.interlocks;
-		const uint8_t cls = scanPush(c, p, whole, push[i].words, bytes / 4);
-		if (c.draws > drawsBefore || c.clears > clearsBefore) {
-			const tgm_scan::TargetImage drawn = tgm_scan::targetImage(p);
-			if (static_cast<uint64_t>(drawn.width) * drawn.height >
-			    static_cast<uint64_t>(largest.width) * largest.height)
-				largest = drawn;
-		}
-		if (prof && i < TGM_PROF_MAX) {
-			prof->cls[i] = cls;
-			const uint64_t draws = c.draws - drawsBefore;
-			const uint64_t sample = c.sampleDraws - sampleBefore;
-			prof->draws[i] = static_cast<uint16_t>(draws > 0xffff ? 0xffff : draws);
-			prof->sampleDraws[i] =
-				static_cast<uint16_t>(sample > 0xffff ? 0xffff : sample);
-			const uint64_t kpx = tgm_scan::targetPixels(p) / 1000;
-			const uint64_t interlocks = c.interlocks - interlocksBefore;
-			prof->kpx[i] = static_cast<uint16_t>(kpx > 0xffff ? 0xffff : kpx);
-			prof->interlocks[i] =
-				static_cast<uint8_t>(interlocks > 0xff ? 0xff : interlocks);
-		}
-	}
-	c.scanned = 1;
+	tgm_scan::PushCounts c = read.c;
+	const tgm_scan::TargetImage largest = read.largest;
 	c.submits = kScanEvery;  // this connection's submissions since its last one read
 	if (compositor)
-		switch_gpu_compositor_scanned(c.passes, c.draws);
+		switch_gpu_compositor_scanned(c.passes, c.draws, c.interlocks, c.twinDraws);
 	if (!pushLockMade())
 		return;
 	const uint64_t now = nowNs();
@@ -169,18 +123,29 @@ void scanRead(const switch_gpu_scan_words *push, uint32_t count, tgm_prof *prof,
 	if (!log)
 		return;
 	logWindow(window);
-	uint64_t dropped = 0;
+	uint64_t dropped = 0, late = 0;
 	if (Deferral *d = __atomic_load_n(&gDeferral, __ATOMIC_ACQUIRE)) {
 		IOLockLock(d->lock);
 		dropped = gQueue.dropped;
-		gQueue.dropped = 0;
+		late = gQueue.late;
+		gQueue.dropped = gQueue.late = 0;
 		IOLockUnlock(d->lock);
 	}
-	if (dropped)
+	if (dropped || late)
 		os_log(OS_LOG_DEFAULT,
 		       "tegra-gm20b: push scan: %llu submissions not read (every slot waited for "
-		       "the thread call)",
-		       (unsigned long long)dropped);
+		       "the thread call), %llu read too late (their submission may have completed "
+		       "first: not counted)",
+		       (unsigned long long)dropped, (unsigned long long)late);
+}
+
+// Whether the record's submission may have completed: its channel's fence reached its last seqno, or the fence page
+// went to another connection
+bool submissionPassed(const ScanQueue::Record &r)
+{
+	const volatile uint32_t *fence = tgm_fence_word(r.fence);
+	return !fence || static_cast<int32_t>(*fence - r.seqno) >= 0 ||
+	       tgm_fence_owner(r.fence) != r.fenceOwner;
 }
 
 void deferredWork(thread_call_param_t param, thread_call_param_t)
@@ -192,8 +157,16 @@ void deferredWork(thread_call_param_t param, thread_call_param_t)
 		IOLockUnlock(d->lock);
 		if (!r)
 			return;
-		scanRead(r->push, r->count, nullptr, r->rawMacros, r->owner, r->compositor);
+		tgm_scan::SubmissionRead read = {};
+		const bool kept = switch_gpu_scan_record(
+			*r, submissionPassed, [&](const ScanQueue::Record &record) {
+				read = tgm_scan::readSubmission(record.push, record.count, nullptr,
+								record.rawMacros, kScanMaxBytes);
+			});
+		if (kept)
+			scanCount(read, r->owner, r->compositor);
 		IOLockLock(d->lock);
+		gQueue.late += !kept;
 		gQueue.done();
 		IOLockUnlock(d->lock);
 	}
@@ -209,8 +182,9 @@ Deferral *deferral()
 		return nullptr;
 	bzero(fresh, sizeof(*fresh));
 	fresh->lock = IOLockAlloc();
-	fresh->call = fresh->lock ? thread_call_allocate_with_priority(deferredWork, fresh,
-								       THREAD_CALL_PRIORITY_LOW)
+	fresh->call = fresh->lock ? thread_call_allocate_with_options(deferredWork, fresh,
+								      THREAD_CALL_PRIORITY_LOW,
+								      THREAD_CALL_OPTIONS_ONCE)
 				  : nullptr;
 	if (!fresh->call || !__atomic_compare_exchange_n(&gDeferral, &d, fresh, false,
 							 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
@@ -242,7 +216,8 @@ void tgm_uc::tgm_target_peaks_line(char *line, size_t size)
 // By every submission path (exec, SubmitJob), before its kick: every kScanEvery-th submission is read, every
 // kProfileEvery-th of those profiled, whose profile the kick stamps. Channels of one connection submit at once with no
 // connection lock: the counts are atomic.
-const tgm_prof *AGXDeviceUserClient::scanSubmission(const tgm_push *pushes, uint32_t count,
+const tgm_prof *AGXDeviceUserClient::scanSubmission(uint32_t slot, uint32_t fences,
+						    const tgm_push *pushes, uint32_t count,
 						    tgm_prof &prof, bool rawMacros)
 {
 	if (!TGM_STATS || !count ||
@@ -252,7 +227,7 @@ const tgm_prof *AGXDeviceUserClient::scanSubmission(const tgm_push *pushes, uint
 		count <= TGM_PROF_MAX &&
 		__atomic_fetch_add(&pushScans_, 1u, __ATOMIC_RELAXED) % kProfileEvery == 0;
 	if (!profiled) {
-		deferScan(pushes, count, rawMacros);
+		deferScan(slot, fences, pushes, count, rawMacros);
 		return nullptr;
 	}
 	scanPushes(pushes, count, &prof, rawMacros);
@@ -272,12 +247,16 @@ void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm
 		words[i] = {
 			pushView(pushes[i].va, static_cast<uint64_t>(pushes[i].dwords) * 4, hit),
 			pushes[i].dwords};
-	scanRead(words, count, prof, rawMacros, owner_, critical_);
+	scanCount(tgm_scan::readSubmission(words, count, prof, rawMacros, kScanMaxBytes), owner_,
+		  critical_);
 }
 
 // Inside the channel's submit lock (the published bindings it reads stay until it leaves): where each push's words lie in
 // the pool, whose kernel mapping lives as long as the kernel, for the thread call to read. A push in any other BO is not read: its mapping may go first.
-void AGXDeviceUserClient::deferScan(const tgm_push *pushes, uint32_t count, bool rawMacros)
+// The record names the submission's last seqno on its channel's fence (its `fences` internal ones come before it),
+// past which its words may be another's.
+void AGXDeviceUserClient::deferScan(uint32_t slot, uint32_t fences, const tgm_push *pushes,
+				    uint32_t count, bool rawMacros)
 {
 	Deferral *d = deferral();
 	if (!d)
@@ -295,6 +274,9 @@ void AGXDeviceUserClient::deferScan(const tgm_push *pushes, uint32_t count, bool
 						     pushes[i].dwords};
 		});
 		r->compositor = critical_;
+		r->fence = tgm_fence_offset(fence_va_ + static_cast<size_t>(slot) * 16);
+		r->fenceOwner = tgm_fence_owner(r->fence);
+		r->seqno = tgm_chan_submitted(chans_[slot]) + fences + 1;
 		gQueue.publish();
 	}
 	IOLockUnlock(d->lock);

@@ -75,7 +75,7 @@ extern "C" IOReturn tegra_vic_surface_lookup(uint32_t, task_t, TegraVICSurface *
 extern "C" void tegra_vic_surface_release(TegraVICSurface *)
 {}
 
-int switch_native_surface_publish(const TegraVICSurface *, const TegraVICPicture *, const char **, bool *)
+int switch_native_surface_publish(const TegraVICSurface *, const TegraVICPicture *, const char **, bool *, bool *)
 {
     return -22;
 }
@@ -93,6 +93,12 @@ protected:
         gHeld.clear();
         gDecoding.clear();
         gFrees = 0;
+        gParkLogLines = 0;
+    }
+
+    void TearDown() override
+    {
+        switch_nvdec_park_drop(&park, false);
     }
 
     SwitchNVDECBuffer fresh(uint32_t handle, uint64_t bytes = kBytes)
@@ -175,21 +181,57 @@ TEST_F(SwitchNVDECParkTest, AFreeBufferOfAnotherSizeIsGivenBack)
     EXPECT_EQ(park.parked[0].block.size, kBytes);
 }
 
-TEST_F(SwitchNVDECParkTest, AFullParkGivesTheReplacedBufferBackAsBefore)
+// Every buffer an export still holds stays parked, past the first list's 16: none goes back to come again as a new
+// allocation that every engine maps anew.
+TEST_F(SwitchNVDECParkTest, AParkKeepsEveryBufferItsExportsHold)
 {
+    constexpr uint32_t kHeld = 3 * SwitchNVDECPark::kFirstCapacity;
     SwitchNVDECBuffer s = fresh(1);
     std::vector<IOMemoryMap *> maps;
-    for (uint32_t i = 0; i <= SwitchNVDECPark::kCapacity; ++i) {
+    for (uint32_t i = 0; i < kHeld; ++i) {
         gHeld.insert(s.block.backing);
         maps.push_back(s.map);
         ASSERT_EQ(switch_nvdec_output_recycle(&s, gTask, &park), 0);
     }
-    EXPECT_EQ(park.count, SwitchNVDECPark::kCapacity);
-    EXPECT_EQ(maps[0]->unmaps, 0u);
-    EXPECT_EQ(maps.back()->refs, 0u);
-    EXPECT_EQ(gFrees, 1u);
-    EXPECT_EQ(park.allocated, SwitchNVDECPark::kCapacity + 1u);
-    EXPECT_EQ(park.most, SwitchNVDECPark::kCapacity);
+    EXPECT_EQ(park.count, kHeld);
+    EXPECT_EQ(park.most, kHeld);
+    EXPECT_EQ(gFrees, 0u);
+    EXPECT_EQ(gParkLogLines, 0u);
+    for (IOMemoryMap *map : maps)
+        EXPECT_EQ(map->unmaps, 0u);
+    switch_nvdec_park_drop(&park, true);
+    EXPECT_EQ(gFrees, kHeld);
+    EXPECT_EQ(park.parked, nullptr);
+}
+
+// Boot 22's AVPlayer playback: 300 pictures, each exported into a client pool of 24 surfaces that holds its picture
+// until the surface takes another, from a decoder cycling 6 handles. The 16-entry park gave back 96 buffers there and
+// allocated 96 more (`96 allocated one (16 parked at most)`), each a new mapping in NVDEC, VIC, NVENC and the display.
+TEST_F(SwitchNVDECParkTest, PlaybackAllocatesOnlyUntilTheClientsPoolHasGoneRound)
+{
+    constexpr unsigned kHandles = 6, kPool = 24, kFrames = 300, kWarm = kHandles + kPool + 2;
+    std::vector<SwitchNVDECBuffer> handles;
+    for (unsigned i = 0; i < kHandles; ++i)
+        handles.push_back(fresh(i + 1));
+    std::deque<const switch_gpu_backing *> exported;
+    size_t allocatedWarm = 0;
+    for (unsigned frame = 0; frame < kFrames; ++frame) {
+        if (frame == kWarm)
+            allocatedWarm = park.allocated;
+        SwitchNVDECBuffer &h = handles[frame % kHandles];
+        ASSERT_EQ(switch_nvdec_output_recycle(&h, gTask, &park), 0);
+        ASSERT_EQ(gHeld.count(h.block.backing), 0u) << "frame " << frame << " decodes into a held buffer";
+        gHeld.insert(h.block.backing);
+        exported.push_back(h.block.backing);
+        if (exported.size() > kPool) {
+            gHeld.erase(exported.front());
+            exported.pop_front();
+        }
+    }
+    EXPECT_LE(park.allocated, kPool + 1u);
+    EXPECT_EQ(park.allocated, allocatedWarm) << "allocations after the pool went round";
+    EXPECT_EQ(gFrees, 0u);
+    switch_nvdec_park_drop(&park, true);
 }
 
 // A queued job may still read a buffer it holds no reference to: one with engine work recorded stays parked.

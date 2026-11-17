@@ -99,8 +99,19 @@ public enum X1ConversionProbes {
         return ProbeFinding.counted(wrong, paths: paths, metrics: metrics)
     }
 
+    static let listedCodes = 16
+
+    /// A code whose nearest half is subnormal (unorm16 codes 1 to 3) sampled as +0. MSL rounds unorm conversions
+    /// correctly (8.7.1) and keeps the half subnormals a conversion makes (8.6); GM20B and Apple's G16 (M4) do, Apple's
+    /// G13 (M1) samples these three codes as zero.
+    public static func flushedSubnormal(_ have: UInt16, nearest: UInt16) -> Bool {
+        have == 0 && nearest != 0 && nearest & 0x7C00 == 0
+    }
+
     /// Each unorm code sampled as half, against the half nearest code / top (ties to even); a toward-zero count beside
     /// it tells which rounding the lowered sample does. TEXS.F16's own rounding needs the compiler to emit it (keyed).
+    /// <name>_codes: the wrong codes as code:returned/nearest (half bits), the first 16 and +N for the rest;
+    /// <name>_flushed: how many of them are flushedSubnormal, which <name>_wrong counts as wrong too.
     public static func sampler(_ gpu: GPU) async throws -> ProbeFinding {
         var wrong: [String: Int] = [:]
         var metrics = Metrics()
@@ -129,8 +140,10 @@ public enum X1ConversionProbes {
                 }.path)
             let got = out.contents().bindMemory(to: UInt16.self, capacity: count * 4)
             var nearest = 0
+            var flushed = 0
             var towardZero = 0
             var first: String?
+            var codes: [String] = []
             for code in 0..<count {
                 let have = got[code * 4]
                 let exact = Double(code) / top
@@ -139,13 +152,20 @@ public enum X1ConversionProbes {
                 if Double(rz) > exact { rz = rz.nextDown }
                 if have != rne {
                     nearest += 1
+                    if Self.flushedSubnormal(have, nearest: rne) { flushed += 1 }
                     if first == nil { first = "\(code):\(String(have, radix: 16)),want_\(String(rne, radix: 16))" }
+                    if codes.count < Self.listedCodes {
+                        codes.append("\(code):\(String(have, radix: 16))/\(String(rne, radix: 16))")
+                    }
                 }
                 if have != rz.bitPattern { towardZero += 1 }
             }
             wrong[name + "_wrong"] = nearest
             metrics.set(name + "_toward_zero_misses", towardZero)
             if let first { metrics.set(name + "_first", first) }
+            if nearest > codes.count { codes.append("+\(nearest - codes.count)") }
+            if !codes.isEmpty { metrics.set(name + "_codes", codes.joined(separator: ",")) }
+            metrics.set(name + "_flushed", flushed)
         }
         return ProbeFinding.counted(wrong, paths: paths, metrics: metrics)
     }

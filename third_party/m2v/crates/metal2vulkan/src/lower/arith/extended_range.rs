@@ -55,6 +55,19 @@ pub const PADDED_TABLE_WORDS: u32 = TABLE_LEN * 4 + TABLE_LEN + 3 + 8;
 /// exact sequence on four lanes, the signs, and three table reads.
 pub const DECODE_WORDS: u32 = 140 * 6;
 
+/// An upper estimate of the SPIR-V words a texel of a two-plane texture held in two images adds
+/// to its access (`LoweringInputs::two_plane_textures`): the plane image's load, its access, and
+/// the alpha byte's move between the raw texel and the plane's texel.
+pub const PLANE_WORDS: u32 = 32;
+
+/// [`PLANE_WORDS`] for a texel of `form`, 0 for a form that is never held in two images.
+pub fn plane_words(form: Option<ExtendedRange>) -> u32 {
+    match form {
+        Some(ExtendedRange::Planes { .. }) => PLANE_WORDS,
+        _ => 0,
+    }
+}
+
 /// An upper estimate of the SPIR-V words of one texel's [`encode`]: the clean value, the exact
 /// products on four lanes, the codes, three searches of ten steps, and the packing.
 pub const ENCODE_WORDS: u32 = 220 * 6;

@@ -282,6 +282,7 @@ void tgm_eng_reset_intr(struct nvkm_device *device, struct nvkm_runq *runq);
 int tgm_recover_owed(struct nvkm_device *device);
 /* nouveau's nvkm_runl_rc, runl->mutex held, after its wait for the preempt in flight: tgm_recover_owed's ask */
 void tgm_recover_owed_preempt(struct nvkm_runl *runl);
+bool switch_gpu_recover_pending(struct nvkm_runl *runl, uint32_t *target);
 /* As nvkm_runl_rc resets an engine: runlist blocked, the engine reset under a hold, exception state cleared, runlist let
  * go. runl->mutex held, and the engine found holding hardware channel id under it. */
 void tgm_engine_reset_locked(struct nvkm_runl *runl, struct nvkm_engn *engn, int id,

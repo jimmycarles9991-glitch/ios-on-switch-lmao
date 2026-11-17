@@ -42,6 +42,7 @@ def profile_tests(name, source, objcxx_source):
         name = name + "_plugin",
         srcs = [objcxx_source],
         bridge = source,
+        compile = source,
         tags = ["manual"],
     )
     tests = {

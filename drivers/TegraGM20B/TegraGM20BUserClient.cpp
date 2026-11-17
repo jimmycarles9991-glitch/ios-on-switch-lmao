@@ -480,6 +480,8 @@ IOReturn AGXDeviceUserClient::externalMethod(uint32_t selector,
 	if (methods_.enter(lock_)) {
 		ret = externalCall(selector, arguments, asyncReference);
 		methods_.leave(lock_);
+	} else {
+		refuseCall("a GPU call", SwitchGpuRefusal::CallClosed, kIOReturnNotOpen, selector);
 	}
 	return asyncReference.settle(ret);
 }
@@ -490,7 +492,8 @@ IOReturn AGXDeviceUserClient::externalCall(uint32_t selector, IOExternalMethodAr
 	if (!arguments || arguments->structureInputDescriptor ||
 	    arguments->structureOutputDescriptor || arguments->scalarInputCount ||
 	    arguments->scalarOutputCount)
-		return kIOReturnBadArgument;  // every record is inline (<= 4096 bytes)
+		return refuseCall("a GPU call", SwitchGpuRefusal::CallForm, kIOReturnBadArgument,
+				  selector);  // every record is inline (<= 4096 bytes)
 	const uint8_t *in = static_cast<const uint8_t *>(arguments->structureInput);
 	uint32_t inSize = arguments->structureInputSize;
 	const uint32_t outSize = arguments->structureOutputSize;
@@ -509,11 +512,13 @@ IOReturn AGXDeviceUserClient::externalCall(uint32_t selector, IOExternalMethodAr
 	uint64_t small[64];
 	void *copy = small;
 	if (inSize > TegraGM20BMaxPushes * sizeof(TegraGM20BAbiPush) + 8)
-		return kIOReturnBadArgument;
+		return refuseCall("a GPU call", SwitchGpuRefusal::CallSize, kIOReturnBadArgument,
+				  method, inSize);
 	if (inSize > sizeof(small)) {
 		copy = IOMallocData(inSize);
 		if (!copy)
-			return kIOReturnNoMemory;
+			return refuseCall("a GPU call", SwitchGpuRefusal::CallMemory,
+					  kIOReturnNoMemory, method, inSize);
 	}
 	if (inSize) {
 		// NOLINTNEXTLINE(clang-analyzer-unix.cstring.NullArg): a non-zero inSize comes with its buffer

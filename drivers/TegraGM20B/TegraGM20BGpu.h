@@ -84,6 +84,8 @@ void tgm_pool_free(void *va, uint64_t bytes, uint64_t pa);
  * order and adjacent or not; `pas` gets every 4 KiB page. 0, or -ENOMEM with nothing taken.
  * tgm_pool_free_chunks gives them back dirty, for the scrubber. */
 int tgm_pool_alloc_chunks(uint64_t bytes, uint64_t *pas);
+/* The 128 KiB chunks tgm_pool_alloc_chunks could take now */
+uint64_t tgm_pool_clean_chunks(void);
 void tgm_pool_free_chunks(const uint64_t *pas, uint32_t npages);
 
 /* Address spaces: one per user-client connection, which claims it (tgm_vm_claim_connection): only channels made for
@@ -273,8 +275,8 @@ int switch_gpu_chan_exec_job(struct tgm_chan *chan, const struct tgm_push *push,
 			     uint32_t *seqno, const struct tgm_prof *prof, uint32_t visibility,
 			     const struct switch_gpu_release *releases, uint32_t release_count);
 /* switch_gpu_chan_exec_job with acquires on event words as well (SwitchGpuWordWait.h). `owned`, the job's ownership
- * transaction (SwitchGpuBacking.h) or NULL, is committed once nothing can fail the job, before its kick: a return of 0
- * has committed it, an error leaves it for the caller's abort, and the kick holds none of its backings' locks. */
+ * ordered transaction (SwitchGpuBacking.h) or NULL, is published once nothing can fail the job. Its backing locks are
+ * released before GP_PUT, and the ownership order after it. A return of 0 finished it; an error leaves it for abort. */
 struct switch_gpu_word_wait;
 struct switch_gpu_backing_transaction;
 int switch_gpu_chan_exec_events(struct tgm_chan *chan, const struct tgm_push *push, uint32_t count,
@@ -353,8 +355,9 @@ struct tgm_prof {
 	uint8_t cls[TGM_PROF_MAX];
 	/* each push's draws, and those shaded per sample (PushCounts::sampleDraws) */
 	uint16_t draws[TGM_PROF_MAX], sampleDraws[TGM_PROF_MAX];
-	/* its pass's colour target 0 in thousands of samples, and its interlock enables (SwitchGpuProfileSequence.h) */
-	uint16_t kpx[TGM_PROF_MAX];
+	/* its pass's colour target 0 in thousands of samples, its interlock enables and its barrier twin's draws
+	 * (SwitchGpuProfileSequence.h) */
+	uint16_t kpx[TGM_PROF_MAX], twinDraws[TGM_PROF_MAX];
 	uint8_t interlocks[TGM_PROF_MAX];
 };
 
@@ -558,9 +561,8 @@ int tgm_coherency_layout_fitted(struct tgm_coh *c, uint32_t width, uint32_t heig
 
 /* TegraGM20BTiled.cpp's stats, this window's (debug kernels): layouts decided block-linear, then pitch because the first
  * import only samples, because another import or a CPU lock existed, because the shape does not tile, because the
- * tiling move failed, because another process maps it for the CPU; the live block-linear surfaces and their bytes; the
- * CPU views' scratch bytes held now and at most */
-void tgm_tiled_take_stats(uint64_t out[10]);
+ * tiling move failed; the live block-linear surfaces and their bytes; the CPU views' scratch bytes held now and at most */
+void tgm_tiled_take_stats(uint64_t out[9]);
 /* The same window's relayouts (TegraGM20BTiled.h tgm_relayout_count): tiling moves skipped because nothing had written
  * the surface, untiles deferred to a CPU lock, deferred untiles a lock made, deferred surfaces gone block-linear, and the
  * moves made */
@@ -681,6 +683,11 @@ void tgm_rail_cycle_register(void);
  * debug.switch_gpu_ramfc). 0, or -EBUSY before M3. */
 struct tgm_ramfc_look {
 	uint32_t channels, checked, high, mismatched, chid, ramfc, expected;
+	/* client channels mismatched whose last write was their creation's; the kernel channels (present, scrubber), each
+	 * written high at its creation, checked and mismatched; each mismatched channel as "chid:owner:c" (creation) or
+	 * ":l" (level change), comma-separated, "-" for none */
+	uint32_t created_mismatched, kernel_checked, kernel_mismatched;
+	char owners[200];
 	/* the kernel probe channel's timeslice written to flip_to and back to flip_from, each read after a job */
 	uint32_t flip_chid, flip_from, flip_to, flip_read, back_read;
 	int flip_ret;

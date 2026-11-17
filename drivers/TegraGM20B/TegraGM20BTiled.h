@@ -117,9 +117,6 @@ int tgm_tiled_untile_deferred(struct tgm_coh *c);
  * and whether nothing wrote it before this, the first GPU import of it (the entry's first decision may then skip the
  * tiling move: no rows to move) */
 void tgm_coherency_import(struct tgm_coh *c, struct tgm_record *record, int fresh);
-/* Whether a process other than `pid` holds a CPU mapping of the surface (its record's tgm_record_mappers); 0 for an entry
- * without a surface or record */
-int tgm_coh_cpu_foreign(struct tgm_coh *c, int32_t pid);
 /* Entry lock held: whether the first decision moves nothing (tgm_coherency_import's fresh, still no write: no submission,
  * no backing write, the surface's seed unmoved) */
 int tgm_coh_fresh(const struct tgm_coh *c);

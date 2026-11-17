@@ -28,7 +28,7 @@ class UnsupportedError(Exception):
 
 @dataclass
 class Inputs:
-    attribute: Callable[[int], int]  # IPA's attribute word at a byte address
+    attribute: Callable[[int | tuple[int, int, int]], int]  # IPA byte address, or (address, s12 x, s12 y) at an offset
     cbuf: Callable[[int, int], int]  # a 32-bit word of bank, byte offset
     texture: Callable[[tuple], list[int]]  # four result words of a fetch's canonical key (texture.py)
     bound_cbuf: int = -1  # the constant buffer bound textures read handles from (SET_BINDLESS_TEXTURE); -1: none

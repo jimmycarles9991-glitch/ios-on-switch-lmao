@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <gtest/gtest.h>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstring>
 #include <iterator>
 #include "../../../kits/SwitchGM20B/SwitchGM20B.h"
@@ -299,6 +301,67 @@ TEST(DepthStencilState, ADrawThatTestsAHiddenZetaFitsAsRecordedAndAsEncoded)
         EXPECT_FALSE(raw::recordedDepthStencilFits(260, 252, d));
         EXPECT_TRUE(raw::recordedDepthStencilFits(252, 252, d));
     }
+}
+
+// What an M4 Max stores for each clear depth (macOS 27.2, read back by a blit): a NaN of either sign the quiet NaN in a float
+// depth and 0 in Depth16Unorm, every other value clamped to [0, 1]
+TEST(DepthStencilState, AClearDepthIsWhatApplesGpuStores)
+{
+    uint32_t bits;
+    for (double nan : {std::nan(""), -std::nan("")})
+        for (uint32_t format : {252u, 260u}) {
+            const float d = raw::metalClearDepth(nan, format);
+            memcpy(&bits, &d, 4);
+            EXPECT_EQ(bits, 0x7fc00000u) << format;
+        }
+    EXPECT_EQ(raw::metalClearDepth(std::nan(""), 250), 0.0f);
+    EXPECT_EQ(raw::metalClearDepth(1.0, 250), 1.0f);
+    EXPECT_EQ(raw::metalClearDepth(2.0, 252), 1.0f);
+    EXPECT_EQ(raw::metalClearDepth(-1.0, 252), 0.0f);
+    EXPECT_EQ(raw::metalClearDepth(INFINITY, 260), 1.0f);
+    EXPECT_EQ(raw::metalClearDepth(-INFINITY, 260), 0.0f);
+    EXPECT_EQ(raw::metalClearDepth(0.25, 252), 0.25f);
+}
+
+// A Depth16Unorm clear stores Metal's code floor(float(d) x 65535) (0.25: 0x3fff) whether the chip rounds the float it is
+// handed to the nearest code or truncates it, its product exact or rounded to a float: every code's own value and values
+// a tenth, a half and nine tenths of a code above it
+TEST(DepthStencilState, ADepth16ClearIsMetalsCodeUnderEitherRounding)
+{
+    const auto metal = [](double d) {
+        return int64_t(std::floor(double(float(std::clamp(d, 0.0, 1.0))) * 65535.0));
+    };
+    const auto chips = [](float f) {
+        const double exact = double(f) * 65535.0;
+        const float rounded = f * 65535.0f;
+        return std::array<int64_t, 4>{int64_t(std::nearbyint(exact)), int64_t(std::floor(exact)),
+                                      int64_t(std::nearbyint(rounded)), int64_t(std::floor(rounded))};
+    };
+    EXPECT_EQ(metal(0.25), 0x3fff);
+    uint32_t wrong = 0;
+    for (int64_t c = 0; c <= 65535; c++)
+        for (double frac : {0.0, 0.1, 0.5, 0.9}) {
+            const double d = (double(c) + frac) / 65535.0;
+            for (const int64_t stored : chips(raw::metalClearDepth(d, 250)))
+                wrong += stored != metal(d);
+        }
+    EXPECT_EQ(wrong, 0u);
+}
+
+// A Depth16Unorm beside a Stencil8 is drawn through a Depth32Float_Stencil8 (RawMetalRangeForms.mm depth16Zeta): each code
+// in as the float the texture unit reads of it, c / 65535 rounded to a float, and back as a fragment depth the 16-bit zeta
+// rounds to the nearest code (D3D11's FLOAT -> UNORM rule, which NVIDIA's ROP follows): every code returns as itself. A
+// zeta that truncated would lose some, which HW Test gpu.raw.separate_depth16_stencil reads on the chip.
+TEST(DepthStencilState, ADepth16CodeRoundTripsThroughAFloatDepth)
+{
+    uint32_t lostRounding = 0, lostTruncating = 0;
+    for (uint32_t c = 0; c <= 65535; c++) {
+        const float read = float(double(c) / 65535.0);
+        lostRounding += uint32_t(std::nearbyint(double(read) * 65535.0)) != c;
+        lostTruncating += uint32_t(std::floor(double(read) * 65535.0)) != c;
+    }
+    EXPECT_EQ(lostRounding, 0u);
+    EXPECT_GT(lostTruncating, 0u) << "a truncating zeta would keep every code too: the HW Test reads which";
 }
 
 }  // namespace

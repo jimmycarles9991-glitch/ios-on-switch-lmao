@@ -91,13 +91,17 @@ uint32_t gobOffsetFermi(uint32_t xB, uint32_t y);
 
 // TEXHEAD_BL TEXTURE_TYPE (clb097tex.h), NIL pipe_to_nv_texture_type of a view's type
 constexpr uint32_t kTexOneD = 0, kTexTwoD = 1, kTexThreeD = 2, kTexCube = 3, kTexOneDArray = 4, kTexTwoDArray = 5,
-                   kTexCubeArray = 8;
+                   kTexOneDBuffer = 6, kTexCubeArray = 8;
 
 // The texture header of the chain at GPU address `va` (512-byte aligned): word 0 from `tic0` (the format's components, data
 // types and swizzle: raw::formatInfo()->tic0), a view of levels [baseLevel, baseLevel + levelCount). NIL nvb097 for a view of
 // `textureType` (a 1D image is NIL's 2D layout of one row).
 void mipChainTic(const MipChain &c, uint64_t va, uint32_t tic0, bool srgb, uint32_t baseLevel, uint32_t levelCount,
                  uint32_t out[8], uint32_t textureType = kTexTwoD);
+
+// The texture header of `elements` texels from GPU address `va` as a texel buffer (NIL nvb097_nil_fill_buffer_desc:
+// TEXHEAD_1D, HEADER_VERSION SELECT_ONE_D_BUFFER, TEXTURE_TYPE ONE_D_BUFFER), word 0 from `tic0`
+void bufferTic(uint64_t va, uint32_t tic0, bool srgb, uint32_t elements, uint32_t out[8]);
 
 // FERMI_TWOD_A surface format of an MTLPixelFormat the 2D engine filters faithfully (cl902d.h SET_SRC_FORMAT), 0: none (a
 // chain of that format is kept, and its generateMipmaps is not the 2D engine's)

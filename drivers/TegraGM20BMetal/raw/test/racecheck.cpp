@@ -4,6 +4,7 @@
 // a draw reads its own's slot without the device lock: two hundred records, each with a constexpr sampler of its own, are made
 // on one thread while another draws one made before them.
 // usage: racecheck <pack.bin>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <string>
@@ -28,7 +29,9 @@ raw::RuntimeRecord record(const raw::Device &dev, const raw::Pipeline &like, uin
         p.id = key + (&p == r.programs ? " vertex" : " fragment");
         p.image.assign(96, 0);
     }
-    raw::PackEntry &e = r.pipeline.entry[r.pipeline.entries < 16 ? r.pipeline.entries++ : 15];
+    const uint32_t at = std::min(raw::entryCount(r.pipeline), 15u);
+    raw::setEntryCount(r.pipeline, std::min(raw::entryCount(r.pipeline) + 1, 16u));
+    raw::PackEntry &e = r.pipeline.entry[at];
     e = {0xf0, raw::EntryTexture, 2, 0, raw::SamplerConstexpr, 0, 0};
     r.samplers.push_back({0x26092, 0x291, 0xfff000, n, 0, 0, 0, 0});
     return r;
@@ -51,7 +54,7 @@ int main(int argc, char **argv)
     const raw::PackPipeline *recs = dev.pack().section<raw::PackPipeline>(raw::PackPipelines);
     raw::Pipeline *like = nullptr;
     for (uint32_t i = 0; i < dev.pack().header()->pipelines && !like; i++)
-        if (raw::Pipeline *p = dev.pipeline(recs[i].keyHash); p && !p->depthFormat && p->rec->entries < 16)
+        if (raw::Pipeline *p = dev.pipeline(recs[i].keyHash); p && !p->depthFormat && raw::entryCount(*p->rec) < 16)
             like = p;
     raw::Texture targets[8];
     raw::PassDesc pass;

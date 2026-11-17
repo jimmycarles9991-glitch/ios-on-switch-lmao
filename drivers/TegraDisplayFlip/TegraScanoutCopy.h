@@ -83,11 +83,13 @@ int tegra_gm20b_scanout_fence(void *display, uint64_t pa);
 // display armed (an IOSimpleLock and six registers, SwitchCompletionFlipDisplay.h) and signals the display's work loop, and never
 // sleeps.
 void native_legacy_gpu_complete(void *display, int status);
-// Provided by the GPU driver: fn(ctx, 0) runs in the GPU nonstall interrupt's primary filter (interrupts off, under a
-// simple lock) when an accepted watched offer's producer (TEGRA_SCANOUT_COPY_PRODUCER_WATCH) is complete with its
-// writes visible, before its native_legacy_gpu_complete, which follows with status 0 as ever. At most once per offer,
-// never after that offer's completion; offers the producer's own pass cannot finish (a present job, a semantic wait
-// in front) never call it. fn only stores to memory and registers under a simple lock. Registered once.
+// Provided by the GPU driver: fn(ctx, 0) runs in a GPU interrupt's primary filter (interrupts off; the GPU driver takes
+// no lock there) when an accepted watched offer's producer (TEGRA_SCANOUT_COPY_PRODUCER_WATCH) is complete with its
+// writes visible, before its native_legacy_gpu_complete, which follows with status 0 as ever. At most once per offer;
+// a filter run that found the offer's producer visible may still be calling fn on one CPU while the offer's completion
+// is delivered on another, so fn checks the offer it writes for; offers the producer's own pass cannot finish (a present
+// job, a semantic wait in front) never call it. fn only stores to memory and registers under a simple lock of its own.
+// Registered once.
 void tgm_present_filter_callout(void (*fn)(void *ctx, int status), void *ctx);
 // status: the compositor's rendering of the source never finished (its channel faulted or hung and was killed): the source
 // holds a partial frame, and the display shows nothing of it, neither through the copy nor the CPU.

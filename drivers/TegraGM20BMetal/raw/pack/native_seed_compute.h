@@ -63,7 +63,7 @@ inline NSMutableDictionary *computeRow(const std::string &line, uint64_t stack, 
         descriptor.arrayLength = texture.arrayLength;
         descriptor.sampleCount = 1;
         descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
-        dispatch.texture(texture.slot, descriptor);
+        dispatch.texture(texture.slot, descriptor, texture.planes);
     }
     for (const auto &sampler : shape.samplers)
         dispatch.sampler(sampler.slot, probe::samplerDescriptor(sampler));
@@ -88,7 +88,7 @@ inline NSMutableDictionary *computeRow(const std::string &line, uint64_t stack, 
     raw::ComputeRecord loaded;
     if (!cache.storeKernel(key, &record, "") || cache.loadKernel(key, loaded, why) != raw::RecordCache::Found::Record ||
         raw::encodeKernelEntry(key, &record, "") != raw::encodeKernelEntry(key, &loaded, "") ||
-        chmod((output + "/" + relative).c_str(), 0644)) {
+        !withMode(output + "/" + relative, 0644)) {
         row[@"status"] = @"failed";
         row[@"reason"] = @"native compute record write/readback failed";
         return row;

@@ -47,6 +47,8 @@ int main(int argc, char **argv)
         raw::BlitEncoder *e = cb ? cb->blit() : nullptr;
         if (!e)
             return 0u;
+        cb->use(from, false);
+        cb->use(to, true, false);
         e->copyBytes(from.va, to.va, kBytes);
         e->end();
         return cb->commit(seqno) ? seqno : 0u;

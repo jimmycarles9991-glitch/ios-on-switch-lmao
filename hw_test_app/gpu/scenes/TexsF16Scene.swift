@@ -2,10 +2,11 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// Decides raw_chip_facts.h AssumeTexsF16: TEXS.F16 against round-to-nearest-even of TEXS's F32 result, over every
-/// unorm8 code and every half, point sampled and bilinear between neighbours. It also holds bound TEXS's F32 form to
-/// TEX.B's (a compute kernel's textures stay bindless), since bound textures had not run on GM20B before. Every target is
-/// a float format the raw path renders: the F16 form's bits arrive as whole floats, the proof word as a float's bits.
+/// Judges raw_chip_facts.h AssumeTexsF16, which every raw draw holds: TEXS.F16 against round-to-nearest-even of TEXS's
+/// F32 result, over every unorm8 code and every half, point sampled and bilinear between neighbours. It also holds bound
+/// TEXS's F32 form to TEX.B's (a compute kernel's textures stay bindless), since bound textures had not run on GM20B
+/// before. Every target is a float format the raw path renders: the F16 form's bits arrive as whole floats, the proof
+/// word as a float's bits.
 struct TexsF16Scene: GPUScene {
     let id = "gpu.raw.texs_f16"
     let name = "TEXS.F16 against round-to-nearest-even of its F32 form; bound TEXS against TEX.B"

@@ -188,3 +188,18 @@ TEST(Host1xResults, BoundedPoolReusesReturnedRecordsWithoutLosingLiveOnes)
     for (auto *&record : records)
         R::cancel(&record);
 }
+
+TEST(Host1xResults, APhysicalFailureSurvivesLateHardwareSuccessAndKeepsTheSemanticCause)
+{
+    using R = TestResults<120>;
+    switch_gpu_backing_token token{};
+    auto *record = reserve<120>(1, 1, token);
+    EXPECT_TRUE(R::physical(record, -60));
+    EXPECT_FALSE(R::physical(record, 1));
+    EXPECT_FALSE(R::physical(record, -5));
+    EXPECT_EQ(R::physicalStatus(&token), -60);
+    EXPECT_EQ(R::status(&token), 0);
+    R::complete(&record, -71);
+    EXPECT_EQ(R::physicalStatus(&token), -60);
+    EXPECT_EQ(R::status(&token), -71);
+}

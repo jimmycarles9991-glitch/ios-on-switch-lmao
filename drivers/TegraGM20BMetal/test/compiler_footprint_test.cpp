@@ -3,9 +3,8 @@
 // own over the mock GM20B, as compiler_service.mm opens and serves: the pack, the store, the request log an earlier boot
 // left (boot 12's 13 replayed requests), the take buffer and the pool's workers; the log replayed at the background
 // class; the 2 requests clients then asked; the compiler at rest (its libraries let go: compiler_libraries.h), and the
-// heap relieved (malloc_zone_pressure_relief). Once with the m2v device the compiler opened before its compile
-// context (its libraries cached as compiler_engine.mm cached them), once with the engine. Each step's line: the heap in
-// use and allocated (the device's footprint line's figures), phys_footprint and its peak, and what grew, by image and VM
+// heap relieved (malloc_zone_pressure_relief). Each step's line: the heap in use and allocated (the device's footprint
+// line's figures), phys_footprint and its peak, and what grew, by image and VM
 // tag (footprint_breakdown.h). Run by hand: SWITCH_HWTEST_METALLIB names the HW Test app's library (its states are left
 // out without it), SWITCH_PACK a raw pack, and with MallocStackLogging=1, COMPILER_FOOTPRINT_SITES=<dir> keeps
 // malloc_history's allocations by size and vmmap's summary at each step there.
@@ -13,7 +12,6 @@
 #import <Metal/Metal.h>
 #include <malloc/malloc.h>
 #include <pthread/qos.h>
-#include "NativeBridgeMetalFrontend.h"
 #include "bazel/testing/fresh_process.h"
 #include "compiler_requests.h"
 #include "footprint_breakdown.h"
@@ -26,9 +24,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <gtest/gtest.h>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
-#include <mutex>
 #include <thread>
 #include "TegraGM20BCompilerABI.h"
 
@@ -38,13 +36,6 @@ std::string dir()
 {
     const char *tmp = getenv("TEST_TMPDIR");
     return tmp ? tmp : "/tmp";
-}
-
-std::string loader()
-{
-    char path[PATH_MAX];
-    const char *nvk = getenv("SWITCH_NVK");
-    return nvk && realpath(nvk, path) ? path : "";
 }
 
 std::string root()
@@ -108,16 +99,29 @@ std::string logPath()
 // Boot 12's requests (compiler_boot12.log): the request log's, which an earlier boot's compiles left, and the 2 asked
 std::vector<raw::CompileRequest> boot12()
 {
-    compiler_test::Requests made(
-        root(), {{"/Applications/SwitchHWTest.app/default.metallib", getenv("SWITCH_HWTEST_METALLIB") ?: ""}});
-    return made.of(compiler_test::corpusLines(getenv("SWITCH_BOOT12")));
+    const char *hwtest = getenv("SWITCH_HWTEST_METALLIB");
+    const bool withHwtest = hwtest && *hwtest;
+    std::vector<std::string> lines = compiler_test::corpusLines(getenv("SWITCH_BOOT12"));
+    if (!withHwtest)
+        lines.erase(std::remove_if(lines.begin(), lines.end(),
+                                   [](const std::string &line) {
+                                       return line.find("lib=/Applications/SwitchHWTest.app/default.metallib") !=
+                                              std::string::npos;
+                                   }),
+                    lines.end());
+    EXPECT_EQ(lines.size(), withHwtest ? 15u : 5u);
+    compiler_test::Requests made(root(), {{"/Applications/SwitchHWTest.app/default.metallib", hwtest ?: ""}});
+    std::vector<raw::CompileRequest> asked = made.of(lines);
+    EXPECT_EQ(asked.size(), lines.size());
+    return asked;
 }
 
 constexpr size_t kAsked = 2;
 
-std::vector<std::string> clients()
+std::vector<std::string> clients(size_t &total)
 {
     const std::vector<raw::CompileRequest> asked = boot12();
+    total = asked.size();
     std::vector<std::string> out;
     for (size_t i = asked.size() - std::min(kAsked, asked.size()); i < asked.size(); ++i)
         out.push_back(raw::encodeRequest(asked[i]));
@@ -132,6 +136,7 @@ void writeLog()
     switch_compiler::SystemLibraries system(root());
     ASSERT_TRUE(log.open(logPath()));
     const std::vector<raw::CompileRequest> asked = boot12();
+    ASSERT_GT(asked.size(), kAsked);
     for (size_t i = 0; i + kAsked < asked.size(); ++i) {
         switch_compiler::Prepared p;
         std::string why;
@@ -160,8 +165,10 @@ struct Serving {
             Asked &asked = static_cast<Asked &>(work);
             std::string entry, failed;
             const int32_t result = compile(asked.prepared, entry, failed);
+            EXPECT_EQ(result, TegraGM20BCompileMade) << asked.prepared.packKey << ": " << failed;
+            EXPECT_FALSE(entry.empty()) << asked.prepared.packKey;
             if (!entry.empty())
-                store.put(asked.prepared.name, entry);
+                EXPECT_EQ(store.put(asked.prepared.name, entry), switch_compiler::Store::Put::Added);
             if (result == TegraGM20BCompileMade && !asked.request.empty())
                 log.add(asked.prepared.name, asked.request);
             primary(result);
@@ -197,19 +204,24 @@ struct Serving {
     void serve(Steps &steps)
     {
         dispatch_semaphore_t ran = dispatch_semaphore_create(0);
+        size_t replayed = 0;
         log.replay([&](const std::string &request, raw::Digest &name) {
             switch_compiler::Prepared p;
             std::string why;
-            if (!switch_compiler::prepare(request, 0, system, p, why))
+            if (!switch_compiler::prepare(request, 0, system, p, why)) {
+                ADD_FAILURE() << why;
                 return false;
+            }
             name = p.name;
+            ++replayed;
             if (submit(std::move(p), std::string(), switch_compiler::Band::Background, ran))
                 dispatch_semaphore_wait(ran, DISPATCH_TIME_FOREVER);
             return true;
         });
         pool->drain();
         steps.step("replayed the log");
-        for (const std::string &request : clients()) {
+        size_t total = 0;
+        for (const std::string &request : clients(total)) {
             switch_compiler::Prepared p;
             std::string why;
             if (switch_compiler::prepare(request, 0, system, p, why))
@@ -218,6 +230,10 @@ struct Serving {
                 ADD_FAILURE() << why;
         }
         pool->drain();
+        ASSERT_GT(total, kAsked);
+        EXPECT_EQ(replayed, total - kAsked);
+        EXPECT_EQ(pool->stats().jobs, total);
+        EXPECT_EQ(store.entries(), total);
         steps.step("served the clients");
         std::this_thread::sleep_for(std::chrono::seconds(6));
         steps.step("at rest");
@@ -226,59 +242,12 @@ struct Serving {
     }
 };
 
-void environment()
-{
-    setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
-    setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
-    setenv("NMB_SHADOW_LOG", "0", 0);
-}
-
-void withTheDevice()
-{
-    environment();
-    Steps steps{"device"};
-    raw::Pack pack;
-    std::string why;
-    ASSERT_TRUE(pack.load(packPath().c_str(), 0, why)) << why;
-    std::mutex opening, caching;
-    id<MTLDevice> device = nil;
-    std::unique_ptr<raw::Direct> direct;
-    std::map<std::string, id<MTLLibrary>> libraries;
-    Serving serving;
-    const auto compile = [&](const switch_compiler::Prepared &p, std::string &entry, std::string &failed) {
-        {
-            std::lock_guard<std::mutex> l(opening);
-            if (!device) {
-                @autoreleasepool {
-                    device = native_bridge_metal_open(loader().c_str(), nullptr, 0, nullptr);
-                }
-                direct = std::make_unique<raw::Direct>(pack);
-            }
-        }
-        const switch_compiler::Libraries made = compiler_test::deviceLibraries(device, root());
-        const switch_compiler::Libraries cached = [&](const raw::RequestLibrary &l, std::string &missed) {
-            const raw::Digest digest = raw::sha256(l.bytes.data(), l.bytes.size());
-            const std::string name = l.system ? l.path : std::string(digest.begin(), digest.end());
-            std::lock_guard<std::mutex> g(caching);
-            __strong id<MTLLibrary> &library = libraries[name];
-            if (!library)
-                library = made(l, missed);
-            return library;
-        };
-        return switch_compiler::makeEntry(p, cached, *direct, 0, entry, failed);
-    };
-    ASSERT_TRUE(serving.open(raw::sha256("", 0), compile));
-    steps.step("serving");
-    serving.serve(steps);
-}
-
 void withTheEngine()
 {
-    environment();
     Steps steps{"context"};
     switch_compiler::Engine engine;
     std::string why;
-    ASSERT_TRUE(engine.open(0, {packPath(), loader(), root()}, why)) << why;
+    ASSERT_TRUE(engine.open(0, {packPath(), root(), {}}, why)) << why;
     Serving serving;
     ASSERT_TRUE(
         serving.open(engine.rules(), [&](const switch_compiler::Prepared &p, std::string &entry, std::string &failed) {
@@ -298,13 +267,6 @@ TEST(CompilerFootprint, AtLaunch)
         steps.step("launch");
     });
     show("launch");
-}
-
-TEST(CompilerFootprint, ServingBoot12WithTheM2VDevice)
-{
-    writeLog();
-    switch_ios::test::ExpectPassesInFreshProcess(withTheDevice);
-    show("device");
 }
 
 TEST(CompilerFootprint, ServingBoot12WithTheCompileContext)

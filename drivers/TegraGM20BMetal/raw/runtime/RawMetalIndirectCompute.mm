@@ -98,12 +98,19 @@ std::shared_ptr<RMKernelSet> rmCommandKernels(RMComputeState *pipeline, const RM
     return kernels->state() == RMKernelSet::State::Ready ? kernels : nullptr;
 }
 
-uint32_t rmCommandBytes(const RMKernelSet &kernels)
+// A region's launches: its slices within the QMD's grid fields
+static uint64_t rmRegionLaunches(const raw::ComputeRegion &region)
 {
-    uint32_t bytes = 0;
+    return raw::qmdSliceCount({region.groups[0], region.groups[1], region.groups[2]});
+}
+
+uint32_t rmCommandBytes(const RMKernelSet &kernels, const raw::ComputeDispatch &shape)
+{
+    uint64_t bytes = 0;
     for (uint8_t region = 0; region < kernels.count; ++region)
-        bytes += raw::icb::computeRegionBytes(kernels.jobs[region]->value()->rec->setBytes);
-    return bytes;
+        bytes += raw::icb::computeRegionBytes(kernels.jobs[region]->value()->rec->setBytes) *
+                 std::min<uint64_t>(rmRegionLaunches(shape.regions[region]), raw::icb::kComputeRegions);
+    return uint32_t(bytes);
 }
 
 void rmCommandBuffers(const RMICBDispatch &c, raw::ComputeEncoder::IcbBuffer (&out)[31])
@@ -117,7 +124,8 @@ void rmCommandBuffers(const RMICBDispatch &c, raw::ComputeEncoder::IcbBuffer (&o
     }
 }
 
-bool rmCommandBinds(const RMKernelSet &kernels, const RMICBBlock &block, RMICBDispatch &c, const char **why)
+bool rmCommandBinds(const RMKernelSet &kernels, const raw::ComputeDispatch &shape, const RMICBBlock &block,
+                    RMICBDispatch &c, const char **why)
 {
     c.binds.clear();
     c.strideWords.clear();
@@ -125,9 +133,11 @@ bool rmCommandBinds(const RMKernelSet &kernels, const RMICBBlock &block, RMICBDi
     uint32_t at = 0;
     for (uint8_t region = 0; region < kernels.count; ++region) {
         const raw::ComputeState &k = *kernels.jobs[region]->value();
-        if (!raw::ComputeEncoder::icbBinds(k, block.va + at, c.binds, c.strideWords, why))
-            return false;
-        at += raw::icb::computeRegionBytes(k.rec->setBytes);
+        for (uint64_t s = 0; s < rmRegionLaunches(shape.regions[region]); ++s) {
+            if (!raw::ComputeEncoder::icbBinds(k, block.va + at, c.binds, c.strideWords, why))
+                return false;
+            at += raw::icb::computeRegionBytes(k.rec->setBytes);
+        }
     }
     if (!raw::icb::bindsFit(uint32_t(c.binds.size()), uint32_t(c.strideWords.size()))) {
         *why = "more inherited buffer descriptors and strides than a bind slot holds";
@@ -188,14 +198,14 @@ std::shared_ptr<RMICBVariant> rmPipelineVariant(RMIndirectComputeBuffer *b, RMCo
             continue;
         }
         const raw::ComputeDispatch shape = raw::computeDispatch(c.grid, c.threads, c.perThread, pipeline->_threadLimit);
-        const std::shared_ptr<RMICBBlock> block = blockIn(v->chunks, v->chunkUsed, rmCommandBytes(*k));
+        const std::shared_ptr<RMICBBlock> block = blockIn(v->chunks, v->chunkUsed, rmCommandBytes(*k, shape));
         raw::ComputeEncoder::IcbBuffer buffers[31];
         if (!b->_inheritBuffers)
             rmCommandBuffers(c, buffers);
         RMICBDispatch bound;
         raw::icb::ComputeCommand words{};
         if (!block || !rmCommandRegions(*k, shape, c, buffers, c.strides, *block, words, why) ||
-            (bind && !rmCommandBinds(*k, *block, bound, why)))
+            (bind && !rmCommandBinds(*k, shape, *block, bound, why)))
             return nullptr;
         words.barrier = c.barrier;
         raw::icb::dispatch(slot, uint32_t(i), words);
@@ -219,15 +229,25 @@ bool rmCommandRegions(const RMKernelSet &kernels, const raw::ComputeDispatch &sh
     if (c.stageIn)
         stageIn.setRegion({c.stageInRegion.origin.x, c.stageInRegion.origin.y, c.stageInRegion.origin.z,
                            c.stageInRegion.size.width, c.stageInRegion.size.height, c.stageInRegion.size.depth});
+    uint64_t launches = 0;
+    for (uint8_t region = 0; region < kernels.count; ++region)
+        launches += rmRegionLaunches(shape.regions[region]);
+    if (launches > raw::icb::kComputeRegions) {
+        *why = "a grid past the QMD's fields in more slices than an indirect command launches";
+        return false;
+    }
     uint32_t at = 0;
-    words.regions = kernels.count;
+    words.regions = 0;
     for (uint8_t region = 0; region < kernels.count; ++region) {
         const raw::ComputeState &k = *kernels.jobs[region]->value();
-        if (!raw::ComputeEncoder::icbRegion(*gRM->raw, k, shape.regions[region], shape.grid, shape.nominal, buffers,
-                                            stageIn, block.cpu + at, block.va + at, why))
-            return false;
-        words.qmd[region] = block.va + at;
-        at += raw::icb::computeRegionBytes(k.rec->setBytes);
+        const raw::ComputeRegion &part = shape.regions[region];
+        for (uint64_t s = 0; s < rmRegionLaunches(part); ++s) {
+            if (!raw::ComputeEncoder::icbRegion(*gRM->raw, k, part, raw::qmdSlice({{}, part.groups}, s), shape.grid,
+                                                shape.nominal, buffers, stageIn, block.cpu + at, block.va + at, why))
+                return false;
+            words.qmd[words.regions++] = block.va + at;
+            at += raw::icb::computeRegionBytes(k.rec->setBytes);
+        }
     }
     return true;
 }
@@ -264,7 +284,7 @@ bool rmCommandRegions(const RMKernelSet &kernels, const raw::ComputeDispatch &sh
         raw::icb::computeEmpty(computeSlot(self, index));
         return;
     }
-    const uint32_t bytes = rmCommandBytes(*c.kernels);
+    const uint32_t bytes = rmCommandBytes(*c.kernels, shape);
     if (!c.block || c.block.use_count() > 1 || c.block->bytes < bytes)
         c.block = newBlock(self, bytes);
     raw::ComputeEncoder::IcbBuffer buffers[31];
@@ -272,7 +292,7 @@ bool rmCommandRegions(const RMKernelSet &kernels, const raw::ComputeDispatch &sh
         rmCommandBuffers(c, buffers);
     const char *why = nullptr;
     if (!c.block || !rmCommandRegions(*c.kernels, shape, c, buffers, c.strides, *c.block, c.words, &why) ||
-        (_inheritBuffers && !rmCommandBinds(*c.kernels, *c.block, c, &why))) {
+        (_inheritBuffers && !rmCommandBinds(*c.kernels, shape, *c.block, c, &why))) {
         SWITCH_REFUSE_DETAIL("raw", "icb.region", uintptr_t(why), "indirect dispatch command %lu: %s",
                              (unsigned long)index, why ? why : "no memory for its regions");
         raw::icb::computeEmpty(computeSlot(self, index));

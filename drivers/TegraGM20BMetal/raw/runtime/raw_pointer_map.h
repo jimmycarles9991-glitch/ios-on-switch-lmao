@@ -102,7 +102,7 @@ private:
 struct PointerHash {
     size_t operator()(const void *key) const
     {
-        return size_t((uint64_t(reinterpret_cast<uintptr_t>(key)) >> 4) * 0x9e3779b97f4a7c15ull);
+        return size_t((uint64_t(reinterpret_cast<uintptr_t>(key)) * 0x9e3779b97f4a7c15ull) >> 32);
     }
 };
 

@@ -13,3 +13,6 @@ void switch_host1x_channels_program();
 uint32_t switch_host1x_channels_filter_stuck();
 // Suspend: every channel stopped; submits fail until program.
 void switch_host1x_channels_stop();
+
+// Under the submit lock, before a failed producer's syncpoint is released.
+int switch_host1x_channels_cancel_display(uint32_t allocated);

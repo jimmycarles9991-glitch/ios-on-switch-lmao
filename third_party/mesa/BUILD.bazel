@@ -41,7 +41,7 @@ filegroup(
         "//third_party/mesa/src/nouveau/headers",
         "//third_party/mesa/src/nouveau/mme:headers",
         "//third_party/mesa/src/nouveau/nil:headers",
-        "//third_party/mesa/src/nouveau/vulkan:headers",
+        "//third_party/mesa/src/nouveau/switch_compile:headers",
         "//third_party/mesa/src/util:headers",
         "//third_party/mesa/src/util/blake3:headers",
         "//third_party/mesa/src/util/format:headers",

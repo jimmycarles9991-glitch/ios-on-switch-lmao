@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// What NVK's stage compile reads of its physical and logical device (nvk_switch_offline.h struct switch_nak_frozen), as
-// switch_nak_freeze made it of the pack generator's NVK device on the mock GM20B for 24B119's buckets. The direct compile
-// hands it to switch_nak_compile_stage, so no device exists. A change to what NVK's compile reads off its devices
-// (nvk_switch_target.h, the frozen table's fields) needs these bytes made again from a live device.
+// What the stage compile reads of a GM20B device (third_party/mesa/src/nouveau/switch_compile nvk_switch_offline.h struct
+// switch_nak_frozen), frozen once from NVK's device on the mock GM20B for 24B119's buckets. The direct compile hands it to
+// switch_compile_stage, so no device exists. No device is left to freeze it from again: a change to what the compile
+// reads (nvk_switch_target.h, the frozen table's fields) is a change to these bytes.
 #pragma once
 #include <cstdint>
 

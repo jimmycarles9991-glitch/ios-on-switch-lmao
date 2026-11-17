@@ -29,7 +29,7 @@ kit with the kernel toolchain and is never linked.
   on the host.
 - `mesa/nouveau_copy_rect.c` is NVK's `nouveau_copy_rect` on GM20B's copy class only, writing into the caller's push.
   Its origin methods continue the block-size method run, which saves one header word per block-linear side.
-- `mme/switch_gm20b_macros.c` builds the raw path's macro ABI v6 with Mesa's MME builder around NVK's pre-Pascal draw
+- `mme/switch_gm20b_macros.c` builds the raw path's macro ABI v7 with Mesa's MME builder around NVK's pre-Pascal draw
   loops. A zero instance count skips the loop, because Fermi's MME tests a loop's condition at its end. The indirect
   macros free their base registers before the loop, because the builder reuses a live register once all seven are
   taken.

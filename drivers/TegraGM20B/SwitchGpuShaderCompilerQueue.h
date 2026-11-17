@@ -9,6 +9,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOUserClient.h>
+#include "TegraGM20BCompilerABI.h"
 
 namespace switch_gpu_compiler
 {
@@ -22,6 +23,7 @@ struct Request {
 	uint32_t qos, flags, attempts, how;
 	int32_t pid, result;
 	bool async, waiter, taken, copying, done, abandoned;
+	TegraGM20BAbiCompileTimes times;  // the compiler's, at its Complete
 	OSAsyncReference64 reference;
 };
 

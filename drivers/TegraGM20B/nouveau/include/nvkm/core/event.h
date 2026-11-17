@@ -75,4 +75,6 @@ typedef int (*nvkm_uevent_func)(struct nvkm_object *, u64 token, u32 bits);
 
 int nvkm_uevent_new(const struct nvkm_oclass *, void *argv, u32 argc, struct nvkm_object **);
 int nvkm_uevent_add(struct nvkm_uevent *, struct nvkm_event *, int id, u32 bits, nvkm_uevent_func);
+int nvkm_uevent_add_deferred(struct nvkm_uevent *, struct nvkm_event *, int id, u32 bits,
+			     nvkm_uevent_func);
 #endif

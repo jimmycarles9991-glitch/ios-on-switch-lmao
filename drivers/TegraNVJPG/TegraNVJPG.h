@@ -33,7 +33,8 @@ enum {
 };
 
 constexpr uint64_t kTegraNVJPGWindowBase[TEGRA_NVJPG_WINDOWS] = {0x10000000ULL, 0x20000000ULL};
-constexpr uint64_t kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOWS] = {64ULL << 20, 256ULL << 20};
+constexpr uint64_t kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOWS] = {64ULL << 20, 1536ULL << 20};
+constexpr uint64_t kTegraNVJPGOutputBytes = 256ULL << 20;
 
 // What the engine decodes right (TegraNVJPG.cpp kTraits); the service builds every job with it.
 struct TegraNVJPGTraits {
@@ -67,10 +68,9 @@ const TegraNVJPGTraits *tegra_nvjpg_traits(void);
 int tegra_nvjpg_buffer(uint64_t size, TegraNVJPGBuffer *out);  // from the kernel arena; never freed
 void tegra_nvjpg_lock(void);  // held across a job's map, run and unmap (one job at a time)
 void tegra_nvjpg_unlock(void);
-// Maps `count` 4 KiB pages at the start of a window (the rest of the window unmapped); returns the window's IOVA, or 0
-// if they do not fit. `writable` false maps them read-only for the engine. Job lock held.
-uint64_t tegra_nvjpg_window_map(uint32_t window, const uint64_t *pages, uint32_t count, bool writable);
-void tegra_nvjpg_window_clear(uint32_t window);
+// Allocation-lifetime mappings of 4 KiB pages; unmapped only after the engine has finished. Job lock held.
+uint64_t tegra_nvjpg_pages_map(uint32_t window, const uint64_t *pages, uint32_t count, bool writable);
+void tegra_nvjpg_pages_unmap(uint64_t address, uint32_t count);
 // Copies the setup to the kernel's slot, queues the job's methods on host1x channel 3 behind an OP_DONE increment of
 // NVJPG's syncpoint, runs `follow` (another engine's job queued to wait for that increment on the hardware) and sleeps
 // until the increment's interrupt (bounded: past the bound the job is cancelled, -5). Fills the firmware's status. Job

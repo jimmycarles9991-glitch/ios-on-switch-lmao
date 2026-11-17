@@ -184,6 +184,29 @@ TEST(SwitchFrameInfo, PendingSendsTheShownSwapAndDropsReplacedOnes)
     EXPECT_EQ(p.timedUnsent, 1u);
 }
 
+// A swap shown more than half a period before the presentation it asked for counts as early (debug kernels); one shown
+// at it, within half a period of it, or after it does not.
+TEST(SwitchFrameInfo, PendingCountsASwapShownBeforeItsRequestedPresentation)
+{
+    static_assert(SWITCH_FRAME_TIMELINE, "the early count is the debug kernels'");
+    constexpr uint64_t kHalf = 8000;
+    Pending p;
+    Frame f = {};
+    p.take(1, 101, 100000);
+    ASSERT_TRUE(p.shown(1, 100000 - 2 * kHalf, f, kHalf));
+    EXPECT_EQ(p.shownEarly, 1u);
+    p.take(2, 102, 200000);
+    ASSERT_TRUE(p.shown(2, 200000 - kHalf, f, kHalf));
+    p.take(3, 103, 300000);
+    ASSERT_TRUE(p.shown(3, 300000 + 3 * kHalf, f, kHalf));
+    p.take(4, 104, 0);
+    ASSERT_TRUE(p.shown(4, 400000, f, kHalf));
+    p.take(5, 105, 500000);
+    p.take(6, 106, 600000);
+    ASSERT_TRUE(p.shown(6, 600000, f, kHalf));
+    EXPECT_EQ(p.shownEarly, 1u);
+}
+
 TEST(SwitchFrameInfo, PendingEvictsTheOldestWhenFull)
 {
     Pending p;

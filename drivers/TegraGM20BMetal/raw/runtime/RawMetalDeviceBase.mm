@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // What the raw device class inherited from m2v's device class (the frontend's NBDeviceMethods) and answers itself now that it
 // is an _MTLDevice of its own: the four calls Metal's registration makes, the identity and memory queries, a residency set,
-// and the library forms the frontend sent back to the device (to the facade's own methods, which open m2v for what needs it).
+// and the library forms the frontend sent back to the device (to the facade's own methods: RawMetalCompiledLibraries.mm).
 #import "RawMetalInternal.h"
 #include "raw_limits_fill.h"
 
@@ -31,7 +31,7 @@ void fillDeviceLimits(id device)
 #endif
 }
 
-// The facade's own Core Image filter-function linking (RawMetalStates.mm)
+// The facade's own Core Image filter-function linking (RawMetalCompiledLibraries.mm)
 @protocol RMFilterLibraries
 - (id<MTLLibrary>)newLibraryWithCIFilters:(NSArray *)functions
                   imageFilterFunctionInfo:(const void *)info
@@ -85,20 +85,6 @@ API_AVAILABLE(ios(18.0), macos(15.0))
     if (error)
         *error = nil;
     return [[RMResidencySet alloc] initWithDescriptor:descriptor device:self];
-}
-
-// Function stitching from Core Image's DAG form, which m2v refuses
-- (id<MTLLibrary>)newLibraryWithDAG:(id)dag functions:(NSArray *)functions error:(NSError **)error
-{
-    (void)dag;
-    (void)functions;
-    SWITCH_REFUSE("raw", "library.dag", "function stitching (DAG) refused, as m2v refuses it");
-    if (error)
-        *error =
-            [NSError errorWithDomain:@"org.blu-sharky.native-metal"
-                                code:-1
-                            userInfo:@{NSLocalizedDescriptionKey : @"function stitching (DAG) is not implemented"}];
-    return nil;
 }
 
 // _MTLDevice sends Core Image's legacy DAG and a kernel's constants reflection here

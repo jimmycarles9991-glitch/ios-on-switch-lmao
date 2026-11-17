@@ -30,6 +30,9 @@ struct Shape {
     std::string threadgroupMemory;  // "<index>:<length>,..." (raw_compute_key.h)
     std::vector<raw::BoundTexture> textures;
     std::vector<raw::BoundSampler> samplers;
+    // its state's stage input: the line's " | in ..." segment (NativeMetal StageInText.h), as the runtime keys it; "" for
+    // none
+    std::string stageIn;
 };
 
 template <typename Each> void eachRegionShape(const Shape &original, Each each)
@@ -105,25 +108,21 @@ inline id<MTLSamplerState> sampler(id<MTLDevice> dev, const raw::BoundSampler &b
     return [dev newSamplerStateWithDescriptor:samplerDescriptor(b)];
 }
 
-// tex=<slot>:<pixelFormat>:<textureType>:<levels>:<arrayLength>:<swizzle>,... (raw_compute_key.h computeTextures)
+// tex=<slot>:<pixelFormat>:<textureType>:<levels>:<arrayLength>:<swizzle>[:xr2p],... (raw_compute_key.h computeTextures)
 inline bool parseTextures(const std::string &text, std::vector<raw::BoundTexture> &out, std::string &why)
 {
     std::istringstream in(text);
     std::string one;
     while (std::getline(in, one, ',')) {
         raw::BoundTexture t = {};
-        unsigned slot, swizzle;
-        unsigned long long format, type, levels, array;
-        if (sscanf(one.c_str(), "%u:%llu:%llu:%llu:%llu:%x", &slot, &format, &type, &levels, &array, &swizzle) != 6) {
+        if (!raw::parseComputeTexture(one, t)) {
             why = "a tex= field it cannot read";
             return false;
         }
-        if (type != MTLTextureType2D || levels != 1 || array != 1) {
+        if (t.textureType != MTLTextureType2D || t.levels != 1 || t.arrayLength != 1) {
             why = "a texture of another type than a one-level 2D one";
             return false;
         }
-        t = {slot,   format, type,
-             levels, array,  {uint8_t(swizzle >> 24), uint8_t(swizzle >> 16), uint8_t(swizzle >> 8), uint8_t(swizzle)}};
         out.push_back(t);
     }
     return true;
@@ -139,6 +138,35 @@ inline bool field(const std::string &line, const char *name, std::string &out)
     const size_t from = at + tag.size();
     out = line.substr(from, line.find_first_of(" |", from) - from);
     return true;
+}
+
+// A D line's stage-in segment as its state's stage input descriptor; nil where it does not parse
+inline MTLStageInputOutputDescriptor *stageInput(const std::string &segment)
+{
+    MTLStageInputOutputDescriptor *in = [MTLStageInputOutputDescriptor stageInputOutputDescriptor];
+    std::istringstream items(segment.substr(segment.find(" in ") + 4));
+    std::string item;
+    bool attributes = false, index = false;
+    while (items >> item) {
+        unsigned long i = 0, f[6] = {};
+        if (sscanf(item.c_str(), "a%lu=%lu:%lu:%lu:%lu:%lu:%lu", &i, f, f + 1, f + 2, f + 3, f + 4, f + 5) == 7 &&
+            i < 31 && f[2] < 31) {
+            in.attributes[i].format = MTLAttributeFormat(f[0]);
+            in.attributes[i].offset = f[1];
+            in.attributes[i].bufferIndex = f[2];
+            in.layouts[f[2]].stride = f[3] == UINT32_MAX ? MTLBufferLayoutStrideDynamic : f[3];
+            in.layouts[f[2]].stepFunction = MTLStepFunction(f[4]);
+            in.layouts[f[2]].stepRate = f[5];
+            attributes = true;
+        } else if (sscanf(item.c_str(), "i=%lu:%lu", f, f + 1) == 2) {
+            in.indexType = MTLIndexType(f[0]);
+            in.indexBufferIndex = f[1];
+            index = true;
+        } else {
+            return nil;
+        }
+    }
+    return attributes && index ? in : nil;
 }
 
 // A D line: "D ok=1 tg=x,y,z edge=a,b,c threads=t | form=... | k <name> lib=<library> [spec] <constants> | ..."; false where
@@ -190,6 +218,14 @@ inline bool parse(const std::string &line, Shape &s, std::string &why)
             s.multipleOfWidth = item[4] == '1';
     }
     const size_t end = line.find(" | ", k + 5);
+    if (const size_t in = line.find(" | in ", k); in != std::string::npos) {
+        const size_t inEnd = line.find(" | ", in + 3);
+        s.stageIn = line.substr(in, (inEnd == std::string::npos ? line.size() : inEnd) - in);
+        if (s.form != "d" || !stageInput(s.stageIn)) {
+            why = "a stage input it cannot read";
+            return false;
+        }
+    }
     std::istringstream fn(line.substr(k + 5, (end == std::string::npos ? line.size() : end) - k - 5));
     fn >> s.function;
     while (fn >> item && item != "|") {
@@ -274,6 +310,8 @@ inline MTLComputePipelineDescriptor *descriptor(const Shape &s, id<MTLFunction> 
     if (s.form == "d") {
         d.maxTotalThreadsPerThreadgroup = s.maxThreads;
         d.threadGroupSizeIsMultipleOfThreadExecutionWidth = s.multipleOfWidth;
+        if (!s.stageIn.empty())
+            d.stageInputDescriptor = stageInput(s.stageIn);
     }
     return d;
 }
@@ -317,8 +355,9 @@ inline NSArray<MTLTextureDescriptor *> *textures(const std::vector<raw::BoundTex
 
 inline std::string key(const Shape &s, const raw::AirHash &air)
 {
-    return raw::computeKey(air, raw::constantsText(constantValues(s.constants)), s.maxThreads, s.multipleOfWidth,
-                           s.threads, s.threadgroupMemory, raw::computeTextures(s.textures.data(), s.textures.size()),
+    return raw::computeKey(air, raw::constantsText(constantValues(s.constants)) + s.stageIn, s.maxThreads,
+                           s.multipleOfWidth, s.threads, s.threadgroupMemory,
+                           raw::computeTextures(s.textures.data(), s.textures.size()),
                            raw::computeSamplers(s.samplers.data(), s.samplers.size()), s.regionMode);
 }
 

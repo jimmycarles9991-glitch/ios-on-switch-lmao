@@ -371,6 +371,15 @@ extern "C" int switch_gpu_backing_token_status(const switch_gpu_backing_token *t
 	return statuses[key(*token)];
 }
 
+extern "C" int switch_gpu_backing_token_physical_status(const switch_gpu_backing_token *token,
+							int externalVisibility)
+{
+	EXPECT_EQ(externalVisibility, 0);
+	EXPECT_TRUE(token->engine == SWITCH_GPU_ENGINE_GM20B ||
+		    token->engine == SWITCH_GPU_ENGINE_PROMISE);
+	return switch_gpu_backing_token_status(token);
+}
+
 extern "C" int switch_gpu_backing_token_external_status(const switch_gpu_backing_token *token)
 {
 	const auto at = external.find(key(*token));
@@ -958,4 +967,51 @@ TEST_F(BridgeRoom, ASubmissionThatArrivesDuringARoomWaitGoesAfterIt)
 	ASSERT_GE(execOrder.size(), 2u);
 	EXPECT_EQ(execOrder[execOrder.size() - 2], first.value);
 	EXPECT_EQ(execOrder.back(), second.value);
+}
+
+TEST_F(Bridge, OriginalProducerFailureIsVisibleBeforeHardwareOrRetirementCanReleaseTheBridge)
+{
+	const auto source = token(72);
+	statuses[key(source)] = 0;
+	auto *bridge = submit({source});
+	ASSERT_NE(bridge, nullptr);
+	uint32_t syncpoint = 0, threshold = 0;
+	switch_gpu_bridge_syncpoint(bridge, &syncpoint, &threshold);
+	ASSERT_LT(syncpoints[syncpoint], threshold);
+	const auto releasedBefore = failureReleases;
+	EXPECT_EQ(switch_gpu_bridge_source_failure(bridge), 0);
+	statuses[key(source)] = -5;
+	EXPECT_EQ(switch_gpu_bridge_source_failure(bridge), -5);
+	EXPECT_EQ(refs[key(source)], 1);
+	EXPECT_LT(syncpoints[syncpoint], threshold);
+	EXPECT_EQ(failureReleases, releasedBefore);
+	EXPECT_LT(gpu.completed, gpu.submitted);
+}
+
+TEST_F(Bridge, SourceInspectionDoesNotEnterAnotherHostEngine)
+{
+	auto source = token(73, 162);
+	source.engine = SWITCH_GPU_ENGINE_NVDEC;
+	statuses[key(source)] = 0;
+	auto *bridge = submit({source});
+	ASSERT_NE(bridge, nullptr);
+	statuses[key(source)] = -5;
+	EXPECT_EQ(switch_gpu_bridge_source_failure(bridge), 0);
+	EXPECT_EQ(refs[key(source)], 1);
+}
+
+TEST_F(Bridge, AbandonedPromiseIsVisibleBeforeTheBridgeHardwarePointMoves)
+{
+	const switch_gpu_backing_token source = {7, 0, SWITCH_GPU_ENGINE_PROMISE, 2052};
+	statuses[key(source)] = 0;
+	auto *bridge = submit({source});
+	ASSERT_NE(bridge, nullptr);
+	uint32_t syncpoint = 0, threshold = 0;
+	switch_gpu_bridge_syncpoint(bridge, &syncpoint, &threshold);
+	const auto reached = syncpoints[syncpoint];
+	ASSERT_LT(reached, threshold);
+	statuses[key(source)] = -5;
+	EXPECT_EQ(switch_gpu_bridge_source_failure(bridge), -5);
+	EXPECT_EQ(syncpoints[syncpoint], reached);
+	EXPECT_EQ(refs[key(source)], 1);
 }

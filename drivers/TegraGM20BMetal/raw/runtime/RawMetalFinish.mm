@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalInternal.h"
+#include <time.h>
 #include "raw_completion_source.h"
 #include "raw_stamps.h"
 #if SWITCH_RAW_DIAGNOSTICS
@@ -103,10 +104,12 @@ void retireRawRange(RMCommandBuffer *cb, size_t from, size_t to)
     auto signals = publishRawEventSignals(cb);
     RAW_DIAGNOSTIC(gRM->stats.signalsPublished += signals.size());
     const bool quiet = cb->_rangeQuiet;
+    const uint64_t frameDue = quiet && cb->_rangeHeld ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) + raw::kFrameEndNs : 0;
     // before the hand-off: a completion thread that takes this range reads the promise that came with it
     gRM->submitPromised.store(quiet, std::memory_order_release);
     gRM->inflight.push({cb, cb->_seqno, writes, std::move(signals), cb->_gpuEventWaits, cb->_channelGeneration,
-                        std::move(cpu), quiet, std::exchange(cb->_rangeLoopStamp, 0u), uint32_t(from), uint32_t(to)},
+                        std::move(cpu), quiet, std::exchange(cb->_rangeLoopStamp, 0u), uint32_t(from), uint32_t(to),
+                        frameDue},
                        false);
     // A quiet range wakes no one, unless a thread came to wait (waitUntilCompleted) after its end was decided: that
     // waiter's own wake may have found the queue before this push. Push then load here, count then look there, each
@@ -177,8 +180,8 @@ void scheduled(RMCommandBuffer *cb)
 
 // Completed: CPU-signalled events, written resources marked, handlers (on the queue's completion queue when it has one), the
 // objects released, waiters woken.
-// The raw path's empty chunks go back as m2v's blocks do: on memory pressure, and outside the render server once nothing completed
-// for NMB_IDLE_RELEASE_MS (each completion moves the deadline)
+// The raw path's empty chunks go back as m2v's blocks do: on memory pressure, and once nothing completed for a second (each
+// completion moves the deadline)
 GpuMemoryRelease &gRawRelease = *new GpuMemoryRelease;
 
 static void finished(RMCommandBuffer *cb);
@@ -229,14 +232,15 @@ static void completeBuffer(RMCommandBuffer *cb)
     cb->_doneHandlers = nil;
     for (MTLCommandBufferHandler h in handlers)
         h((id<MTLCommandBuffer>)cb);
-    cb->_scheduledDone = true;
-    cb->_completedDone = true;
-    rmChanged(cb);
     cb->_owners.clear();  // the resources may die now: no submission uses them any more (its capacity is recycled)
     rmBytesDone(cb);
     cb->_computeJobs.clear();
     cb->_sharedEventWaits.clear();
     cb->_resourceReady.reset();
+    rmRecordingDone(cb);
+    cb->_scheduledDone = true;
+    cb->_completedDone = true;
+    rmChanged(cb);
     gRM->committed.fetch_sub(1, std::memory_order_acq_rel);
 #if SWITCH_FRAME_TIMELINE
     switch_frame::finished(cb->_frame);
@@ -391,11 +395,21 @@ void completionLoop()
     for (;;) {
         @autoreleasepool {
             std::optional<size_t> target;
-            r.inflight.waitFor([&](const auto &taken) {
-                target = raw::completionTarget(taken, r.submitPromised.load(std::memory_order_acquire),
-                                               r.completionWaiters.load(std::memory_order_acquire) != 0);
-                return target.has_value();
-            });
+            for (;;) {
+                raw::CompletionLook look;
+                r.inflight.waitFor([&](const auto &taken) {
+                    look = raw::completionLook(taken, r.submitPromised.load(std::memory_order_acquire),
+                                               r.completionWaiters.load(std::memory_order_acquire) != 0,
+                                               clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+                    return look.target.has_value() || look.heldUntil;
+                });
+                target = look.target;
+                if (target)
+                    break;
+                const uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+                if (look.heldUntil > now)
+                    r.inflight.sleep(dispatch_time(DISPATCH_TIME_NOW, int64_t(look.heldUntil - now)));
+            }
             if (*target) {
                 const RMRawRetirement &cover = r.inflight.at(*target);
                 (void)r.raw->wait(cover.seqno, cover.generation);

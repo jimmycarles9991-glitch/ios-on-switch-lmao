@@ -4,13 +4,14 @@
 #include "raw_compute_lookup.h"
 #include "raw_kernel_shadow.h"
 #include "raw_kernel_texture.h"
+#include "raw_sampler_map.h"
 #include "raw_view.h"
 
 namespace {
 
 // Which of a texture's terms refused it: compute.image's b, named in its first line
 enum ImageTerm : uint8_t {
-    TermTwoPlanesBare = 2,  // RGB10A8_2P_XR10 read where the record's view is not its stand-in's format
+    TermTwoPlanesBare = 2,  // RGB10A8_2P_XR10 reached through a view neither its planes' nor its stand-in's
     TermConvertedSampler,  // a converted texture beside a sampler its address map would change (draws take its variant)
 };
 
@@ -18,7 +19,7 @@ const char *imageTermName(uint64_t term)
 {
     switch (term) {
     case TermTwoPlanesBare:
-        return "an RGB10A8_2P_XR10 texture read through a view other than its stand-in's";
+        return "an RGB10A8_2P_XR10 texture reached through a view other than its planes' or its stand-in's";
     case TermConvertedSampler:
         return "a converted texture beside a sampler that does not clamp to its edge";
     }
@@ -57,29 +58,32 @@ void noteRefusal(RMCommandBuffer *cb, RMPred pred, uint32_t slot, uint64_t term,
     hit(cb, pred, slot, term);
 }
 
-// Whether a kernel's samplers can take address map `map`: the map changes none of them (Device::samplerVariant's rule), or
-// every texture the kernel binds is under that map
+// Whether a kernel's samplers can take address map `map` of the converted texture at `slot`. A sampler entry that holds
+// its pairs and samples that texture is compiled with its own modes, so only where the map leaves them (raw_sampler_map.h);
+// the others where the map changes none of them, or where every texture the kernel binds is under that map.
 template <typename Plan, typename State, typename Objects>
 bool kernelSamplersMapped(Plan &plan, const State &state, const raw::PackKernel &record, const Objects &textures,
-                          uint8_t map)
+                          uint32_t slot, uint8_t map)
 {
-    bool allMapped = true, unchanged = true, constant = false;
+    bool allMapped = true, unchanged = true, constant = false, kept = true;
     const auto &samplers = plan.samplers[2][state.samplers].objects;
     for (uint32_t i = 0; i < record.entries; ++i) {
         const raw::PackKernelEntry &e = record.entry[i];
+        RMSampler *s = e.kind == raw::KernelSampler && e.slot < 16 ? (__bridge RMSampler *)samplers[e.slot] : nil;
+        const bool leaves =
+            !s || raw::mapLeavesModes(s->_raw.desc.sAddress, s->_raw.desc.tAddress, s->_raw.desc.rAddress, map);
         if (e.kind == raw::KernelTexture && e.slot < 31 && textures[e.slot]) {
             RMTexture *t = (__bridge RMTexture *)textures[e.slot];
             allMapped = allMapped && t->_rawOk && t->_raw.addressMap == map;
+        } else if (e.kind == raw::KernelSampler && raw::kernelSamplerPairsKnown(e)) {
+            if (raw::kernelSamplerPairs(e) >> slot & 1)
+                kept = kept && ((e.slot & 0x80) ? gRM->raw->constexprLeaves(e.slot & 0x7f, map) : leaves);
         } else if (e.kind == raw::KernelSampler) {
-            RMSampler *s = e.slot < 16 ? (__bridge RMSampler *)samplers[e.slot] : nil;
             constant = constant || (e.slot & 0x80);  // a constexpr sampler: its record's header, never mapped
-            if (!s)
-                continue;
-            for (uint8_t m : {s->_raw.desc.sAddress, s->_raw.desc.tAddress, s->_raw.desc.rAddress})
-                unchanged = unchanged && !((map & 1) && m >= 1 && m <= 3) && !((map & 2) && (m == 4 || m == 5));
+            unchanged = unchanged && leaves;
         }
     }
-    return !constant && (unchanged || allMapped);
+    return kept && !constant && (unchanged || allMapped);
 }
 
 raw::KernelUse textureUse(RMTexture *t, bool writes)
@@ -106,21 +110,40 @@ void kernelUses(RMCommandBuffer *cb, size_t at, std::vector<raw::KernelUse> &use
     const auto *kernels = static_cast<const raw::ComputeKernelSet<raw::ComputeState> *>(dispatch.kernel);
     const auto &state = plan.kernelStates[dispatch.state];
     const auto &bindings = plan.buffers[2][state.buffers];
-    const auto &textures = plan.textures[2][state.textures].objects;
+    const auto &textures = plan.kernelTextures[state.textures].objects;
     uses.clear();
+    // a window slot's one window covers what every region's record reaches of it
+    raw::KernelUse windows[31];
     for (uint8_t region = 0; kernels && region < kernels->count; ++region) {
         const auto &record = *kernels->jobs[region]->value()->rec;
         for (uint32_t i = 0; i < record.entries; ++i) {
             const auto &e = record.entry[i];
             const bool writes = raw::kernelEntryWrites(record, i);
-            if (e.kind == raw::KernelTexture && e.slot < 31 && textures[e.slot])
+            const bool buffer = e.kind == raw::KernelBuffer && e.slot < 31 &&
+                                bindings[e.slot].source == raw::BufferBinding::Source::Buffer &&
+                                bindings[e.slot].object;
+            if (e.kind == raw::KernelTexture && e.slot < 31 && textures[e.slot]) {
                 uses.push_back(textureUse((__bridge RMTexture *)textures[e.slot], writes));
-            else if (e.kind == raw::KernelBuffer && e.slot < 31 &&
-                     bindings[e.slot].source == raw::BufferBinding::Source::Buffer && bindings[e.slot].object)
+            } else if (buffer && (dispatch.windowSlots >> e.slot & 1)) {
+                const raw::KernelUse bound =
+                    bufferUse((__bridge RMBuffer *)bindings[e.slot].object, bindings[e.slot].offset, writes);
+                const raw::ByteSpan span =
+                    raw::kernelBufferWindowSpan(bound.span.va, bound.span.bytes, raw::kernelBufferWindow(e));
+                raw::KernelUse &w = windows[e.slot];
+                w = {bound.object,
+                     {span.va, std::max(w.span.bytes, span.bytes)},
+                     true,
+                     w.writes || writes,
+                     int8_t(e.slot)};
+            } else if (buffer) {
                 uses.push_back(
                     bufferUse((__bridge RMBuffer *)bindings[e.slot].object, bindings[e.slot].offset, writes));
+            }
         }
     }
+    for (const raw::KernelUse &w : windows)
+        if (w.windowSlot >= 0)
+            uses.push_back(w);
     for (size_t use = dispatch.encoderBegin; use < at; ++use) {
         if (plan.operation(use).op != OpKernelUse)
             continue;
@@ -141,7 +164,7 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
     const auto &dispatch = plan.dispatch(at);
     const auto &state = plan.kernelStates[dispatch.state];
     const auto &bindings = plan.buffers[2][state.buffers];
-    const auto &textures = plan.textures[2][state.textures].objects;
+    const auto &textures = plan.kernelTextures[state.textures].objects;
     auto textureAt = [&](uint32_t slot) -> RMTexture * {
         return (__bridge RMTexture *)textures[slot];
     };
@@ -157,12 +180,13 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
     };
     if (!kernels || kernels->state() != raw::ComputeKernelSet<raw::ComputeState>::State::Ready)
         return refuse(PredComputeKernel, 0, "a dispatch the raw path has no kernel for");
-    uint32_t shadowSlots = 0;
+    uint32_t shadowSlots = 0, windowSlots = 0;
     for (uint8_t region = 0; region < kernels->count; ++region) {
         const auto *k = kernels->jobs[region]->value();
         for (uint32_t e = 0; e < k->rec->entries; e++) {
             const raw::PackKernelEntry &x = k->rec->entry[e];
-            RMTexture *t = x.kind == raw::KernelTexture && x.slot < 31 ? textureAt(x.slot) : nil;
+            const bool texture = x.kind == raw::KernelTexture || x.kind == raw::KernelTexturePlane;
+            RMTexture *t = texture && x.slot < 31 ? textureAt(x.slot) : nil;
             if (t && !t->_rawOk) {  // m2v's texture, refused as it was made: its own predicate's command buffer
                 hit(cb, RMPred(t->_pred ?: PredTexShape), t->_descriptor.pixelFormat, t->_kind);
                 if (why)
@@ -173,11 +197,11 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
             const raw::KernelTextureForm form = t ? raw::kernelTextureForm(t->_raw) : raw::KernelTextureForm::InPlace;
             if (form == raw::KernelTextureForm::Shadow)
                 shadowSlots |= 1u << x.slot;
-            // a kernel's sampler handles are words of their own, not paired with a texture as a draw's are: its samplers
-            // take a converted texture's address map (raw_compute.cpp) where the map changes none of them, or where every
-            // texture the kernel binds is under that one map
+            // a sampler entry that holds its pairs samples a converted texture with the modes its kernel was compiled with,
+            // right where the texture's map leaves them; the others, not paired with a texture as a draw's handles are,
+            // take its map where it changes none of them, or where every texture the kernel binds is under that one map
             if (form == raw::KernelTextureForm::Converted && t->_raw.addressMap &&
-                !kernelSamplersMapped(plan, state, *k->rec, textures, t->_raw.addressMap)) {
+                !kernelSamplersMapped(plan, state, *k->rec, textures, x.slot, t->_raw.addressMap)) {
                 noteRefusal(cb, PredComputeImage, x.slot, TermConvertedSampler, t, k->rec->keyHash);
                 if (why)
                     *why = imageTermName(TermConvertedSampler);
@@ -202,23 +226,26 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
             };
             // a load of an extended-range texture binds its stand-in where the record's view is the stand-in's own,
             // else its codes (raw_compute.cpp)
-            const bool standIn = t && !writes && t->_raw.standIn && viewOf(*t->_raw.standIn) == raw::SlotView::Own;
-            // RGB10A8_2P_XR10 is made with no usage but ShaderRead and RenderTarget (xrPlanesShape): a kernel's store to
-            // it, or a load of one made without ShaderRead, is outside its usage, which Metal's validation stops
-            const bool outsideUsage = form == raw::KernelTextureForm::TwoPlanes &&
-                                      (writes || !(t->_descriptor.usage & MTLTextureUsageShaderRead));
-            if (outsideUsage) {
+            const bool standIn = t && !writes && x.kind == raw::KernelTexture && t->_raw.standIn &&
+                                 viewOf(*t->_raw.standIn) == raw::SlotView::Own;
+            const bool twoPlanes = form == raw::KernelTextureForm::TwoPlanes;
+            // a load of a texture made without ShaderRead, which Metal's validation stops
+            if (twoPlanes && !writes && !(t->_descriptor.usage & MTLTextureUsageShaderRead)) {
                 NSString *reason =
-                    [NSString stringWithFormat:@"A kernel %@ an RGB10A8_2P_XR10 texture outside its usage 0x%lx: %@",
-                                               writes ? @"stores" : @"loads", (unsigned long)t->_descriptor.usage,
+                    [NSString stringWithFormat:@"A kernel loads an RGB10A8_2P_XR10 texture made without ShaderRead: %@",
                                                textureFacts(t)];
                 os_log_error(rawLog(), "raw: %{public}s", reason.UTF8String);
                 failCommandBuffer(cb, reason, MTLCommandBufferErrorInvalidResource);
                 if (why)
-                    *why = "a kernel reaches an RGB10A8_2P_XR10 texture outside its usage";
+                    *why = "a kernel loads an RGB10A8_2P_XR10 texture made without ShaderRead";
                 return false;
             }
-            if (form == raw::KernelTextureForm::TwoPlanes && !standIn) {
+            // a two-plane texture is reached through its planes (raw_compute.cpp): its color words at the slot's entry,
+            // its alpha bytes at its plane entry, each through a view of its own texel size
+            const raw::Texture *plane = !twoPlanes                          ? nullptr
+                                        : x.kind == raw::KernelTexturePlane ? t->_raw.chroma
+                                                                            : t->_raw.luma;
+            if (twoPlanes && !standIn && (!plane || viewOf(*plane) == raw::SlotView::None)) {
                 const uint64_t term = TermTwoPlanesBare;
                 noteRefusal(cb, PredComputeImage, x.slot, term, t, k->rec->keyHash);
                 if (why)
@@ -230,9 +257,9 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
                 if (t->_raw.xrPlanes)
                     cb->_xrStandIns.insert(t);
             }
-            const raw::SlotView view = !t || !t->_raw.tic ? raw::SlotView::Own
-                                       : standIn          ? raw::SlotView::Own
-                                                          : viewOf(t->_raw);
+            const raw::SlotView view = !t || !t->_raw.tic || standIn ? raw::SlotView::Own
+                                       : twoPlanes                   ? viewOf(*plane)
+                                                                     : viewOf(t->_raw);
             // a record that views a slot in texels of another size is a pack or compiler defect (neither pack holds
             // one): the command buffer fails, naming it
             if (view == raw::SlotView::None) {
@@ -246,12 +273,11 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
                     *why = "a kernel record that views a texture slot in texels of another size";
                 return false;
             }
-            // m2v's descriptor starts at the bind offset rounded down to 16, the rest in a push word the record names
+            // m2v's descriptor starts at the bind offset rounded down to 16, the rest in a push word the record names;
+            // a record that names none reaches the bytes through a window on 16 (raw_kernel_shadow.h)
             if (x.kind == raw::KernelBuffer && raw::kernelResidualWord(x) < 0 && x.slot < 31 && bufferAt(x.slot) &&
-                ((bufferAt(x.slot)->_raw.va + bindings[x.slot].offset) & 15)) {
-                return refuse(PredComputeOff16, x.slot,
-                              "a kernel's buffer bound at an offset that is not a multiple of 16");
-            }
+                ((bufferAt(x.slot)->_raw.va + bindings[x.slot].offset) & 15))
+                windowSlots |= 1u << x.slot;
         }
     }
     plan.setKernelUses(at, kernels, [&](std::vector<raw::ResourceUse> &exact) {
@@ -267,7 +293,7 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
                     if (binding.source == raw::BufferBinding::Source::Buffer)
                         exact.push_back({binding.object, access});
                 } else if (entry.kind == raw::KernelTexture && entry.slot < 31) {
-                    exact.push_back({plan.textures[2][state.textures].objects[entry.slot],
+                    exact.push_back({plan.kernelTextures[state.textures].objects[entry.slot],
                                      uint8_t(access | raw::ResourceUse::Sample)});
                 } else if (entry.kind == raw::KernelSampler && entry.slot < 16) {
                     exact.push_back({plan.samplers[2][state.samplers].objects[entry.slot], raw::ResourceUse::Read});
@@ -278,11 +304,11 @@ bool admitComputeDispatch(RMCommandBuffer *cb, size_t at, const raw::ComputeKern
     if (dispatch.arguments || dispatch.stageInBuffer)
         plan.addUses(at,
                      {{dispatch.arguments, raw::ResourceUse::Read}, {dispatch.stageInBuffer, raw::ResourceUse::Read}});
-    plan.resolveDispatch(at, kernels, shadowSlots);
+    plan.resolveDispatch(at, kernels, shadowSlots, windowSlots);
     return true;
 }
 
-int computeReadiness(RMCommandBuffer *cb, const RMSegment &range)
+int computeReadiness(RMCommandBuffer *cb, const RMSegment &range, const char **why)
 {
     using Job = raw::ComputeKernelSet<raw::ComputeState>;
     const auto &dispatches = cb->_plan.pendingComputes(range.from, range.to);
@@ -301,8 +327,11 @@ int computeReadiness(RMCommandBuffer *cb, const RMSegment &range)
         const auto state = job->observe(std::move(observer));
         if (state == Job::State::Failed)
             return -2;
-        if (state == Job::State::Refused)
+        if (state == Job::State::Refused) {
+            hit(cb, PredComputeKernel, at);
+            *why = "a compute kernel the shader compiler refused";
             return -1;
+        }
         if (state == Job::State::Pending)
             pending = true;
     }
@@ -311,8 +340,7 @@ int computeReadiness(RMCommandBuffer *cb, const RMSegment &range)
     bool accepted = true;
     for (size_t at : dispatches) {
         auto *job = static_cast<Job *>(cb->_plan.dispatch(at).pending);
-        const char *why = nullptr;
-        if (!admitComputeDispatch(cb, at, job, &why)) {
+        if (!admitComputeDispatch(cb, at, job, why)) {
             accepted = false;
             break;
         }

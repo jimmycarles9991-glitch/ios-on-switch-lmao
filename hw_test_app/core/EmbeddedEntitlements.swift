@@ -10,6 +10,17 @@ public enum EmbeddedEntitlements {
     static let entitlementsSlot: UInt32 = 5
     static let headerSize = 32
 
+    public static let userClientKey = "com.apple.security.iokit-user-client-class"
+
+    /// The IOKit user client classes the system policy lets a process with these entitlements open by name
+    public static func userClientClasses(_ entitlements: [String: Any]) -> [String] {
+        switch entitlements[userClientKey] {
+        case let one as String: return [one]
+        case let many as [String]: return many
+        default: return []
+        }
+    }
+
     public static func of(_ image: Data) -> [String: Any]? {
         guard word(image, 0, bigEndian: false) == machO64, let count = word(image, 16, bigEndian: false) else {
             return nil

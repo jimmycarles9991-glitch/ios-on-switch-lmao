@@ -4,9 +4,10 @@ import HWTestCore
 import IOSurface
 import Metal
 
-/// Core Animation's backdrop blur chain, state by state as the corpus has it: the downsamples and narrow blurs into a
-/// 'b3a8' (format 550) surface and the luma boost into it and into BGR10_XR (554), each beside a memoryless 550
-/// colour 1, sampling a BGRA8 picture. The downsamples' and blurs' uniforms are zero (as the raw pack's probe binds them):
+/// Core Animation's backdrop blur chain, state by state as the corpus has it for this IPSW: the downsamples and narrow
+/// blurs into a 'b3a8' (format 550) surface and the luma boost into it and into BGR10_XR (554), each beside a memoryless
+/// colour 1 of the state's own format (550 on iOS 17; iOS 27's QuartzCore makes these names with 115), sampling a BGRA8
+/// picture. The downsamples' and blurs' uniforms are zero (as the raw pack's probe binds them):
 /// what counts there is how long each pass takes on the GPU (t_<state>= in ms, the median of three), which path took it,
 /// and whether it completed. The luma boost fetches its target's colour through a LUT (CAUniforms): the BGR10_XR one
 /// draws over a picture uploaded first, and its result (lub_xr) is held to the Mac's.
@@ -28,7 +29,7 @@ struct CABlurChainScene: GPUScene {
         do {
             library = try gpu.device.makeLibrary(URL: CAState.library)
         } catch {
-            result.notes.append("no QuartzCore library here (\(GPU.describe(error)))")
+            result.unavailable("no QuartzCore library here (\(GPU.describe(error)))", on: gpu.device)
             return result
         }
         let size = Self.size
@@ -43,18 +44,25 @@ struct CABlurChainScene: GPUScene {
         try await gpu.upload(Patterns.bytes(lutPicture, .rgba16Float), to: lut, bytesPerRow: lutPicture.width * 8)
         let before = Patterns.bytes(Patterns.busy(width: size, height: size, channels: 3, seed: 5), .bgr10XR)
         let deep = try? Self.b3a8Texture(gpu)
-        let colour1 = try? gpu.texture(Self.b3a8, size, size, usage: [.renderTarget], storage: .memoryless)
+        var colour1s: [UInt: MTLTexture] = [:]
         if deep == nil { result.notes.append("no b3a8 surface texture") }
-        if colour1 == nil { result.notes.append("no memoryless 550 texture") }
         for label in Self.chain {
             let short = Self.short(label)
             guard let line = CACorpus.state(label) else { continue }
             guard let target = line.colors.first?.format == 554 ? xr : deep else { continue }
+            let second = line.colors.first { $0.index == 1 }?.format ?? Self.b3a8.rawValue
+            if colour1s[second] == nil, let format = MTLPixelFormat(rawValue: second) {
+                colour1s[second] = try? gpu.texture(format, size, size, usage: [.renderTarget], storage: .memoryless)
+            }
+            guard let colour1 = colour1s[second] else {
+                result.notes.append("\(short): no memoryless \(second) texture")
+                continue
+            }
             let pipeline: MTLRenderPipelineState
             do {
                 pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
             } catch {
-                result.notes.append("\(short): no state (\(GPU.describe(error)))")
+                result.unavailable("\(short): no state (\(GPU.describe(error)))", on: gpu.device)
                 continue
             }
             var times: [Double] = []

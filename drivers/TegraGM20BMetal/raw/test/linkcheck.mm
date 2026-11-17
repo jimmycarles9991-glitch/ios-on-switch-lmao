@@ -3,23 +3,18 @@
 // iconservicesagent's custom effects do) made by the direct compile (runtime/RawDirect.h). Its record must be the one of the
 // same function with the callee inline (the translator links the callee's AIR and inlines it), and the state without its linked
 // function refused.
-// usage: linkcheck <nvk dylib> <cache dir> <pack.bin> <caller.metallib> <callee.metallib> (test/linked/*.metal)
+// usage: linkcheck <pack.bin> <caller.metallib> <callee.metallib> (test/linked/*.metal)
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <cstdio>
+#include <cstring>
 #include "../runtime/RawDirect.h"
-#include "NativeBridgeMetalFrontend.h"
-#include "bridge/NativeMetalObjects.h"
-#include "record_compare.h"
+#include "../runtime/RawOffline.h"
+#include "../runtime/raw_pack.h"
 
 namespace {
 
 constexpr const char *kKey = "samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0";
-
-void missing(const char *cls, const char *sel)
-{
-    fprintf(stderr, "MISSING -[%s %s]\n", cls, sel);
-}
 
 MTLRenderPipelineDescriptor *descriptor(id<MTLLibrary> caller, NSString *fragment, id<MTLFunction> linked)
 {
@@ -45,28 +40,26 @@ bool sameProgram(const raw::CapturedProgram &a, const raw::CapturedProgram &b)
 int main(int argc, char **argv)
 {
     @autoreleasepool {
-        if (argc != 6) {
-            fprintf(stderr,
-                    "usage: linkcheck <nvk dylib> <cache dir> <pack.bin> <caller.metallib> <callee.metallib>\n");
+        if (argc != 4) {
+            fprintf(stderr, "usage: linkcheck <pack.bin> <caller.metallib> <callee.metallib>\n");
             return 2;
         }
-        setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
-        id<MTLDevice> dev = native_bridge_metal_open(argv[1], argv[2], 0, missing);
+        id<MTLDevice> dev = (id<MTLDevice>)[RawOfflineDevice new];
         raw::Pack pack;
         std::string err;
-        if (!dev || !pack.load(argv[3], 0, err)) {
-            fprintf(stderr, "linkcheck: %s\n", dev ? err.c_str() : nmb_last_error());
+        if (!pack.load(argv[1], 0, err)) {
+            fprintf(stderr, "linkcheck: %s\n", err.c_str());
             return 1;
         }
         NSError *error = nil;
-        id<MTLLibrary> caller = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[4])] error:&error];
-        id<MTLLibrary> callee = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[5])] error:&error];
+        id<MTLLibrary> caller = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[2])] error:&error];
+        id<MTLLibrary> callee = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[3])] error:&error];
         id<MTLFunction> custom = [callee newFunctionWithName:@"custom_fn"];
         if (!caller || !custom) {
             fprintf(stderr, "linkcheck: libraries unread\n");
             return 1;
         }
-        raw::Direct direct(pack);
+        raw::Direct direct(raw::PackRules::of(pack), false, offline::translator());
         raw::RuntimeRecord linked, inlined, unlinked;
         std::string whyLinked, whyInlined, whyUnlinked;
         const raw::CompileOutcome made =
@@ -86,7 +79,7 @@ int main(int argc, char **argv)
         }
         if (!sameProgram(linked.programs[0], inlined.programs[0]) || linked.blob != inlined.blob ||
             memcmp(linked.pipeline.entry, inlined.pipeline.entry, sizeof linked.pipeline.entry) ||
-            linked.pipeline.entries != inlined.pipeline.entries) {
+            raw::entryCount(linked.pipeline) != raw::entryCount(inlined.pipeline)) {
             printf("FAIL: the linked state's record is not the inline one's\n");
             failed = 1;
         }

@@ -104,6 +104,8 @@ ENGINE_MODEL = [
     "//drivers/TegraNVJPG:nvidia/nvjpg_drv.h",
     "//drivers/TegraSMMU:TegraSMMU.h",
     "//drivers/TegraSMMU:TegraSMMUDomain.h",
+    "//drivers/TegraSMMU:TegraSMMUPublish.h",
+    "//drivers/TegraSMMU:TegraSMMUSpace.h",
     "//kits/SwitchCAR:SwitchCAR.h",
     "//kits/SwitchCAR:SwitchEngineClock.h",
     "//kits/SwitchCAR:SwitchEngineClockPlan.h",
@@ -131,7 +133,8 @@ ENGINE_SOURCES = [
 
 # TegraNVJPG.cpp against a model of the engine: a job after the idle power-off powers the partition on, boots and
 # proves the falcon and runs; a job past its bound is cancelled (channel torn down, engine reset and rebooted) and the
-# next job runs; an engine the reset does not bring back refuses the next job.
+# next job runs; an engine the reset does not bring back refuses the next job. A job window's map flushes only the page
+# entries it wrote.
 host_test(
     name = "switch_nvjpg_gate_test",
     srcs = ["switch_nvjpg_gate_test.cpp"] + ENGINE_MODEL,
@@ -158,5 +161,16 @@ host_test(
     defines = ["DEVELOPMENT=1"],
     linkopts = ["-fsanitize=thread"],
     sanitize = False,
+    deps = [":gate_kernel"],
+)
+
+host_test(
+    name = "switch_nvjpg_mapping_test",
+    srcs = [
+        "switch_nvjpg_mapping_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraNVJPG:TegraNVJPGMapping.h",
+    ] + ENGINE_MODEL,
+    additional_compiler_inputs = ENGINE_SOURCES + ["//drivers/TegraNVJPG:TegraNVJPGMapping.cpp"],
     deps = [":gate_kernel"],
 )

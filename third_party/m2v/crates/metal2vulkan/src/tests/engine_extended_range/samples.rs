@@ -97,7 +97,12 @@ pub(super) fn words(linear: bool, code: u64, pixel: bool, border: u64) -> u64 {
 /// The word of a runtime sampler: linear minification and magnification where `linear`, else
 /// nearest, no mip filter, address mode `mode` on every axis, pixel coordinates where `pixel`, and
 /// border color `border`.
-fn word(linear: bool, mode: SamplerAddressMode, pixel: bool, border: SamplerBorderColor) -> u32 {
+pub(super) fn word(
+    linear: bool,
+    mode: SamplerAddressMode,
+    pixel: bool,
+    border: SamplerBorderColor,
+) -> u32 {
     let mut w = border.as_raw() << SamplerWord::BORDER_SHIFT;
     if linear {
         w |= SamplerWord::LINEAR;

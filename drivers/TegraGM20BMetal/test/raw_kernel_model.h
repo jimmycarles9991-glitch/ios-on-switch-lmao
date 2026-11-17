@@ -142,12 +142,24 @@ struct Model {
     uint32_t compilerFlags = 0;
     std::vector<int32_t> compileResults = {TegraGM20BCompileUnavailable};
     unsigned compiles = 0;
+    // The compiler's store a client maps (TegraGM20BCompilerStoreToken), of stack 0 as the harness's packs are, and the
+    // compiler itself: each request's bytes, answered with its result once it put what it made in the store (unset: the
+    // answers are compileResults'); each answer names a new store generation, which the client maps again
+    const uint8_t *store = nullptr;
+    uint64_t storeBytes = 0;
+    uint32_t storeGeneration = 1;
+    std::function<int32_t(const std::string &request)> compiler;
     std::vector<std::string> compileRequests;  // each compile's request bytes, as the client sent them
     unsigned refuse = 0;                       // submissions refused from now, with `refusal`
+    // a SubmitJob use of no BO the connection holds or binds refused kIOReturnBadArgument, as the kernel refuses it (off:
+    // the tests whose uses name memory the model never bound)
+    bool unknownUsesRefused = false;
     // BoAllocs of control memory (TegraGM20BBoControl) made, and whether they are answered kIOReturnNoMemory
     unsigned controlAllocs = 0;
     bool refuseControl = false;
     bool refuseAllocs = false;  // every BoAlloc answered kIOReturnNoMemory
+    // the next BoAllocs and BoImports refused, kIOReturnNoMemory: memory the kernel has none of, pages it cannot wire
+    unsigned refuseAllocCount = 0, refuseImports = 0;
     // GetInfo's client VA end: a raw::Device's shader heap reserves a 4 GiB program window in its quarter
     uint64_t vaEnd = uint64_t(1) << 40;
     uint32_t infoFlags = 0;  // GetInfo's flags beyond the model's own (TegraGM20BInfoTiledCache)
@@ -211,6 +223,9 @@ struct Model {
         slots[slot].error = 0;
         TegraGM20BAbiFence &f = fence(slot);
         f.killed_first = f.killed_last = f.error = 0;
+        auto *identity = reinterpret_cast<TegraGM20BAbiFenceIdentity *>(
+            fences + slot * kRecordBytes + sizeof(TegraGM20BAbiFence) + sizeof(TegraGM20BAbiFenceSemantic));
+        identity->channel_uid = slots[slot].uid;
         reply = {slot + 1, kFenceToken, slot * kRecordBytes, 0};
         return KERN_SUCCESS;
     }
@@ -221,7 +236,8 @@ struct Model {
         if (!(use.access & TegraGM20BSurfaceGpuAddress))
             return bos.count(use.handle) ? use.handle : 0;
         for (const auto &[va, bound] : binds)
-            if (use.handle >= va && use.handle - va < bound.second)
+            if (use.handle >= va && use.handle - va < bound.second &&
+                (!(use.access & TegraGM20BSurfaceRange) || use.reserved <= bound.second - (use.handle - va)))
                 return bound.first;
         return 0;
     }
@@ -308,7 +324,7 @@ struct Model {
         const auto *shared = reinterpret_cast<const TegraGM20BAbiSurfaceUse *>(
             reinterpret_cast<const uint8_t *>(head + 1) + head->push_count * sizeof(TegraGM20BAbiPush));
         for (uint32_t i = 0; i < head->shared_count; ++i)
-            if (const uint64_t bo = resolve(shared[i]); bo && bos.at(bo).set)
+            if (const uint64_t bo = resolve(shared[i]); (!bo && unknownUsesRefused) || (bo && bos.at(bo).set))
                 return kIOReturnBadArgument;
         const uint32_t admission = head->flags & TegraGM20BJobAdmission;
         const uint64_t cookie =
@@ -549,6 +565,10 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodBoAlloc: {
+        if (model.refuseAllocCount) {
+            model.refuseAllocCount--;
+            return kIOReturnNoMemory;
+        }
         const auto &in = *static_cast<const TegraGM20BAbiBoAlloc *>(input);
         if (in.flags & TegraGM20BBoControl) {
             model.controlAllocs++;
@@ -564,6 +584,10 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodBoImport: {
+        if (model.refuseImports) {
+            model.refuseImports--;
+            return kIOReturnNoMemory;
+        }
         const auto &in = *static_cast<const TegraGM20BAbiBoImport *>(input);
         model.bos[model.nextHandle] = {true, true, false, false, 0, in.address, in.bytes};
         model.imports[model.nextHandle] = {in.address, in.bytes};
@@ -600,6 +624,8 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         auto &reply = *static_cast<TegraGM20BAbiMapReply *>(output);
         if (in.token == kernel_model::kFenceToken)
             reply = {uint64_t(uintptr_t(model.fences)), sizeof model.fences};
+        else if (in.token == TegraGM20BCompilerStoreToken)
+            reply = {uint64_t(uintptr_t(model.store)), model.storeBytes};
         else
             reply = {uint64_t(uintptr_t(model.memory[in.token].data())), model.memory[in.token].size()};
         return KERN_SUCCESS;
@@ -660,6 +686,8 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         auto &info = *static_cast<TegraGM20BAbiCompilerInfoReply *>(output);
         info = {};
         info.flags = model.compilerFlags;
+        info.store_bytes = model.storeBytes;
+        info.generation = model.storeGeneration;
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodCompile: {
@@ -668,6 +696,12 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         const size_t at = std::min<size_t>(model.compiles++, model.compileResults.size() - 1);
         auto &reply = *static_cast<TegraGM20BAbiCompileReply *>(output);
         reply = {};
+        if (model.compiler) {
+            const auto &in = *static_cast<const TegraGM20BAbiCompile *>(input);
+            reply.result = model.compiler(std::string(reinterpret_cast<const char *>(uintptr_t(in.address)), in.bytes));
+            reply.generation = ++model.storeGeneration;
+            return KERN_SUCCESS;
+        }
         reply.result = model.compileResults[at];
         return KERN_SUCCESS;
     }

@@ -136,7 +136,7 @@ def mesa_args(lang, include_dirs, hidden = True, pre = True, proj = True, extra 
         extra = [_shell(f) for f in extra]
     return args + extra + _PREFIX_MAPS
 
-def mesa_cc_library(name, sources, c_args = [], cpp_args = [], **kwargs):
+def mesa_cc_library(name, sources, c_args = [], cpp_args = [], deps = [], **kwargs):
     """One of meson's static_library targets: its objects, one action each, and its archive.
 
     Every Mesa header is an input, pruned per object by its .d file: a header edit recompiles only the objects that
@@ -148,6 +148,7 @@ def mesa_cc_library(name, sources, c_args = [], cpp_args = [], **kwargs):
             buildifier would sort).
         c_args: mesa_args("c", ...).
         cpp_args: mesa_args("cxx", ...).
+        deps: headers of its own package that //third_party/mesa:headers leaves out.
         **kwargs: other cc_library attributes.
     """
     cc_library(
@@ -155,7 +156,7 @@ def mesa_cc_library(name, sources, c_args = [], cpp_args = [], **kwargs):
         srcs = sources,
         conlyopts = c_args,
         cxxopts = cpp_args,
-        deps = ["//third_party/mesa:headers"],
+        deps = ["//third_party/mesa:headers"] + deps,
         linkstatic = True,
         # Mesa's own code: never ios-on-switch-lmao's to lint (clang-tidy skips no-lint targets).
         tags = ["no-lint"],

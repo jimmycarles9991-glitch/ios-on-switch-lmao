@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <switch/app_code.h>
 #include <sys/types.h>
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -344,6 +345,7 @@ cs_process_invalidated(struct proc * __unused p)
 int
 cs_process_enforcement(struct proc *p)
 {
+	if (switch_app_code_process(p ? p : current_proc())) return 0;
 	if (cs_process_enforcement_enable) {
 		return 1;
 	}
@@ -401,6 +403,7 @@ cs_valid(struct proc *p)
 int
 cs_require_lv(struct proc *p)
 {
+	if (switch_app_code_process(p ? p : current_proc())) return 0;
 	if (cs_library_val_enable) {
 		return 1;
 	}

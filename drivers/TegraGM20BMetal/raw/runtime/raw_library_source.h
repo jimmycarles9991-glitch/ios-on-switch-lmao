@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Where a library of the facade came from, as a compile request names it (raw_compile_request.h): a system volume's by its
 // path, any other by its bytes, hashed once at the first request that needs it. The bytes are the AIR slice Metal loads
-// (MetallibSlice.h), the facade's own where it read the metallib itself, else the m2v library's.
+// (MetallibSlice.h), as the facade read it.
 #pragma once
 #include <cstdint>
 #include <memory>
@@ -19,8 +19,8 @@ struct LibrarySource {
 
     const std::string path;  // "": made from data, or from source
     const bool system;
-    // The AIR slice as the facade read it (a file's read-only mapping or the caller's data, held as long as this);
-    // null: the library is m2v's (made from source, stitched, Core Image's linking)
+    // The AIR slice as the facade read it (a file's read-only mapping, the caller's data or the shader compiler's reply,
+    // held as long as this)
     const uint8_t *const bytes;
     const size_t size;
 

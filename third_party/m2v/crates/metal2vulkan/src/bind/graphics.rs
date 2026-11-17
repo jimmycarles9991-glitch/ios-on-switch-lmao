@@ -836,13 +836,10 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     if !p.graphics.storage_attachments.is_empty() && shape.vertex_amplification.count > 1 {
         return Err(not_implemented(Feature::FramebufferFetch));
     }
-    // The shader-side stencil's shadow is one 2D image of the stencil's one layer
-    // (`shadow_stencil.rs`): what a layered pass, or an amplified draw, tests of each layer or view
-    // is not modelled.
+    // The shader-side stencil's shadow holds a layered pass's layers, each fragment's texel at its
+    // layer (`layered_storage` below); what an amplified draw tests of each view is not modelled.
     let shadow = shadow_template(p);
-    if shadow.is_some()
-        && (shape.render_target_array_length > 1 || shape.vertex_amplification.count > 1)
-    {
+    if shadow.is_some() && shape.vertex_amplification.count > 1 {
         return Err(not_implemented(Feature::StencilExport));
     }
     // A fragment function's tile threadgroup memory is the pass's, every tile's in one buffer:
@@ -981,10 +978,13 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     {
         return Err(not_implemented(Feature::FramebufferFetch));
     }
-    // In a pass of more than one layer the storage form's images are arrays of its layers, each
-    // access at its primitive's layer: the variant compiled for it, and only there.
+    // In a pass of more than one layer the storage form's images and the shader-side stencil's
+    // shadow are arrays of its layers, each access at its primitive's layer: the variant compiled
+    // for it, and only there.
     let layered_storage = shape.render_target_array_length > 1
-        && (!p.graphics.storage_attachments.is_empty() || !interlocked_colors.is_empty());
+        && (!p.graphics.storage_attachments.is_empty()
+            || !interlocked_colors.is_empty()
+            || shadow.is_some());
     let compiled_layered_storage = p
         .dependencies
         .iter()
@@ -1087,8 +1087,22 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
     };
     let depth = p.graphics.depth_format.is_some();
     let stencil = p.graphics.stencil_format.is_some();
+    // A shader-side stencil (`RuntimeFact::ShadowStencil`) writes before the device's depth test:
+    // a consumer that states `FragmentTests::Stencil` for its draw (one whose stencil write follows
+    // the depth test, which `shadow_stencil_words` refuses) asks for the variant whose function
+    // runs both tests, its output the stencil test's reference (`lower::fragment::stencil`). That
+    // variant, which stores no color in the storage form, names itself by its stencil test.
+    let shadow_stencil_fn = p.dependencies.iter().any(|d| {
+        matches!(
+            d.fact,
+            RuntimeFact::ShadowStencil { .. } | RuntimeFact::ShaderStencilTest { .. }
+        )
+    });
     let (read_only_tests, shader_tests, window_depth_varying, shader_stencil) =
         match (tested, shape.fragment_tests) {
+            (None, FragmentTests::Stencil) if shadow_stencil_fn && depth && stencil => {
+                in_shader(true)?
+            }
             (Some((_, true)), FragmentTests::Drop | FragmentTests::Depth { writes: false })
                 if tested_attachments =>
             {
@@ -1668,6 +1682,10 @@ fn plan(p: &RenderPipeline, device: &Device, shape: &BindShape) -> Result<Bindin
                 // An 8-bit sRGB texture's raw view.
                 BindingSource::RawTexture(slot) => {
                     resources.raw_texture(set.set, b.binding, b.ty, slot)?
+                }
+                // A two-plane `RGB10A8_2P_XR10` texture's alpha plane.
+                BindingSource::TexturePlane(slot) => {
+                    resources.texture_plane(set.set, b.binding, b.ty, slot)?
                 }
                 // The `half` shadow of an extended-range attachment the draw's instance holds.
                 BindingSource::ExtendedShadow(color_index) => {

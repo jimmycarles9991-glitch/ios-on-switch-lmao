@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Each form of state boot 21's shader compiler refused as "a request whose fields give another key than its own" (Core
-// Animation's blur chain and the solid fill into b3a8, a state's written formats, vertex amplification, a compute stage
-// input), keyed the way the client keys it (RawMetalStates.mm's pipeline key and RawMetalCubic.mm's variant name, the
+// Animation's blur chain and the solid fill into b3a8, a state's written formats, vertex amplification, a tessellation
+// state, a compute stage input), keyed the way the client keys it (RawMetalStates.mm's pipeline key and RawMetalCubic.mm's variant name, the
 // compute state's constants in RawMetalComputeState.mm) and asked with the request the client makes of it
 // (RawCompleteRemote.mm): the compiler makes the client's key of every one, and a request that leaves the form out is
 // refused with the first field the two keys part at and both keys. Every field of a request goes over the wire, and the
@@ -9,6 +9,7 @@
 #include "../raw/runtime/RawCompileRequest.mm"
 #include "../compiler/compiler_request.mm"
 #include "../raw/runtime/raw_compute_key.h"
+#include "StageInText.h"
 #include "made_metallib.h"
 #include "bazel/testing/source_text.h"
 
@@ -68,10 +69,10 @@ struct Asked {
 };
 
 // A state of an app's own library (vertex_fn's AIR 0xA0..., fragment_fn's 0xA1...) as the client keys and asks it
-Asked render(MTLRenderPipelineDescriptor *d, const raw::RenderVariant &variant)
+Asked render(const raw::PipelineFields &fields, const raw::RenderVariant &variant)
 {
     const raw::StageKey vertex{"vertex_fn", ""}, fragment{"fragment_fn", ""};
-    const std::string packKey = raw::pipelineKey(d, &vertex, &fragment, "", "") + variant.name();
+    const std::string packKey = raw::pipelineKey(fields, &vertex, &fragment, "", "") + variant.name();
     raw::AirHash v, f;
     v.fill(0xA0);
     f.fill(0xA1);
@@ -80,11 +81,16 @@ Asked render(MTLRenderPipelineDescriptor *d, const raw::RenderVariant &variant)
     raw::CompileRequest &r = a.request;
     r.stack = kStack;
     r.key = a.key.key;
-    r.fields = raw::fieldsOf(d);
+    r.fields = fields;
     r.variant = variant;
     r.libraries.push_back(data(made_metallib::universal({"vertex_fn", "fragment_fn"})));
     r.stages = {stage("v", "vertex_fn"), stage("f", "fragment_fn")};
     return a;
+}
+
+Asked render(MTLRenderPipelineDescriptor *d, const raw::RenderVariant &variant)
+{
+    return render(raw::fieldsOf(d), variant);
 }
 
 // The compiler's answer to `r`: "" where it takes it with the key it made in `made`, else why it refused it
@@ -162,6 +168,112 @@ TEST(CompileRequestForms, VertexAmplification)
     }
 }
 
+// NativeM2vMissingTest's patch state: a quad patch's post-tessellation vertex function (the patch type fieldsOf reads off
+// it), integer partitioning, factor 16 at most
+TEST(CompileRequestForms, ATessellationState)
+{
+    MTLRenderPipelineDescriptor *d = quad(MTLPixelFormatRGBA8Unorm);
+    MTLVertexDescriptor *v = [MTLVertexDescriptor vertexDescriptor];
+    v.attributes[0].format = MTLVertexFormatFloat4;
+    v.layouts[0].stride = 16;
+    v.layouts[0].stepFunction = MTLVertexStepFunctionPerPatchControlPoint;
+    d.vertexDescriptor = v;
+    d.tessellationPartitionMode = MTLTessellationPartitionModeInteger;
+    d.maxTessellationFactor = 16;
+    raw::PipelineFields fields = raw::fieldsOf(d);
+    fields.patchType = MTLPatchTypeQuad;
+    const Asked a = render(fields, {});
+    EXPECT_NE(a.key.key.find(" t=1:0:0:0:0:16:0 "), std::string::npos) << a.key.key;
+    expectTaken(a);
+    raw::CompileRequest bare = a.request;
+    bare.fields.patchType = 0;
+    expectRefusedAt(bare, "t=1:0:0:0:0:16:0");
+}
+
+// fieldsOf reads the patch type off the vertex function itself: this Mac's Metal makes a quad patch's
+TEST(CompileRequestForms, TheVertexFunctionsPatchTypeIsAField)
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device)
+        GTEST_SKIP() << "no Metal device on this host";
+    NSString *source = @"#include <metal_stdlib>\n"
+                        "using namespace metal;\n"
+                        "struct ControlPoint { float4 position [[attribute(0)]]; };\n"
+                        "struct QuadPatch { patch_control_point<ControlPoint> points; };\n"
+                        "[[patch(quad, 4)]] vertex float4 missing_post(QuadPatch patch [[stage_in]],\n"
+                        "                                              float2 uv [[position_in_patch]]) {\n"
+                        "    return mix(patch.points[0].position, patch.points[2].position, uv.x);\n"
+                        "}\n";
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:source options:nil error:&error];
+    ASSERT_TRUE(library != nil) << (error ? error.localizedDescription.UTF8String : "");
+    MTLRenderPipelineDescriptor *d = quad(MTLPixelFormatRGBA8Unorm);
+    d.vertexFunction = [library newFunctionWithName:@"missing_post"];
+    EXPECT_EQ(raw::fieldsOf(d).patchType, uint64_t(MTLPatchTypeQuad));
+}
+
+// The key text pipelineKey makes of a descriptor's fields is the one it made of the descriptor itself before (pinned from
+// that form's output, boot 21's log and its packs): the blur downsample's is the key iOS 17's pack holds its record under
+TEST(CompileRequestForms, TheKeyTextIsTheDescriptorsOwn)
+{
+    const raw::StageKey v{"downsample_blur_vert_lph", ""}, f{"downsample_4_frag_lph", ""};
+    const std::string blur = raw::pipelineKey(blurDownsample(), &v, &f, "", "QuartzCore");
+    EXPECT_EQ(blur, "samples=1 topo=0 ds=0/0 c0=550:15:0:1:0:0:1:0:0 c1=550:0:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 "
+                    "a1=29:16:1:48:1:1 a2=29:24:1:48:1:1 a3=27:32:1:48:1:1  | v downsample_blur_vert_lph  | f "
+                    "downsample_4_frag_lph");
+    EXPECT_EQ(raw::Pack::fnv(blur.data(), blur.size()), 0x9caf7830314b781eull);
+
+    MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+    d.rasterSampleCount = 4;
+    d.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+    d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+    d.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+    d.colorAttachments[0].blendingEnabled = YES;
+    d.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    d.colorAttachments[0].destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    d.colorAttachments[0].alphaBlendOperation = MTLBlendOperationMax;
+    d.colorAttachments[7].pixelFormat = MTLPixelFormatRGBA16Float;
+    d.colorAttachments[7].writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskAlpha;
+    MTLVertexDescriptor *layout = [MTLVertexDescriptor vertexDescriptor];
+    layout.attributes[0].format = MTLVertexFormatFloat2;
+    layout.attributes[0].bufferIndex = 1;
+    layout.attributes[3].format = MTLVertexFormatUChar4Normalized;
+    layout.attributes[3].offset = 8;
+    layout.attributes[3].bufferIndex = 3;
+    layout.attributes[30].format = MTLVertexFormatFloat4;
+    layout.attributes[30].bufferIndex = 5;
+    layout.layouts[1].stride = 8;
+    layout.layouts[3].stride = 20;
+    layout.layouts[3].stepFunction = MTLVertexStepFunctionPerInstance;
+    layout.layouts[3].stepRate = 2;
+    layout.layouts[5].stride = MTLBufferLayoutStrideDynamic;
+    d.vertexDescriptor = layout;
+    d.maxVertexAmplificationCount = 2;
+    const raw::StageKey cv{"vertex_fn", "#0:33:05000000"}, cf{"fragment_fn", "fc_generic:53:01"};
+    EXPECT_EQ(
+        raw::pipelineKey(d, &cv, &cf, " | fl helper  ", "RenderBox"),
+        "samples=4 topo=3 ds=260/260 c0=80:15:1:4:5:0:1:0:4 c7=115:9:0:1:0:0:1:0:0 a0=29:0:1:8:1:1 a3=9:8:3:20:2:2 "
+        "a30=31:0:5:4294967295:1:1 amp=2  | v vertex_fn #0:33:05000000 | f fragment_fn fc_generic:53:01 | fl "
+        "helper   | l RenderBox");
+    raw::PipelineFields patched = raw::fieldsOf(d);
+    patched.patchType = MTLPatchTypeTriangle;
+    patched.tessellation = {MTLTessellationPartitionModeFractionalEven,
+                            MTLTessellationFactorFormatHalf,
+                            MTLTessellationFactorStepFunctionPerPatchAndPerInstance,
+                            MTLWindingCounterClockwise,
+                            MTLTessellationControlPointIndexTypeUInt16,
+                            32,
+                            1};
+    EXPECT_EQ(
+        raw::pipelineKey(patched, &cv, &cf, "", ""),
+        "samples=4 topo=3 ds=260/260 c0=80:15:1:4:5:0:1:0:4 c7=115:9:0:1:0:0:1:0:0 a0=29:0:1:8:1:1 a3=9:8:3:20:2:2 "
+        "a30=31:0:5:4294967295:1:1 t=3:0:3:1:1:32:1 amp=2  | v vertex_fn #0:33:05000000 | f fragment_fn "
+        "fc_generic:53:01");
+    EXPECT_EQ(raw::pipelineKey(raw::PipelineFields(), nullptr, nullptr, "", ""),
+              "samples=1 topo=0 ds=0/0  | v -  | f -");
+}
+
 // NativeStageInTest's kernel: a float2 per thread from buffer 1 at a static and at the dynamic stride
 TEST(CompileRequestForms, AComputeStageInput)
 {
@@ -233,6 +345,8 @@ TEST(CompileRequestForms, TheCompilersDescriptorCarriesEveryFieldTheClientRead)
     const raw::StageInFields stageBack = raw::stageInFieldsOf(raw::stageInOf(in));
     EXPECT_EQ(memcmp(&stageBack, &in, sizeof in), 0);
     EXPECT_EQ(raw::stageInOf(raw::StageInFields()), nil);
+    // the frontend's journal writes a D line's stage input as the runtime keys it (pack/kernel_shapes.h reads it back)
+    EXPECT_EQ(stageInText(raw::stageInOf(in)), raw::stageInText(in));
 
     raw::RenderVariant v;
     v.cubic.samplers.push_back({1, 2, 2, 0, 1, false});
@@ -274,6 +388,7 @@ TEST(CompileRequestForms, EveryFieldGoesOverTheWire)
     r.variant.twoPlane = true;
     r.variant.xrSlots = 3;
     r.variant.written = {{1, 23}};
+    r.variant.xrShadows = 1;
     r.kernel.stageIn.attributes[0] = {29, 0, 1, 16, 5, 1};
     const std::string bytes = raw::encodeRequest(r);
     raw::CompileRequest back;
@@ -345,13 +460,17 @@ TEST(CompileRequestForms, EveryFieldGoesOverTheWire)
          [](auto &q) {
              q.variant.written[0].format = 63;
          }},
+        {"extended-range shadows",
+         [](auto &q) {
+             q.variant.xrShadows = 6;
+         }},
         {"stage input",
          [](auto &q) {
              q.kernel.stageIn.indexBuffer = 4;
          }},
         {"kernel textures",
          [](auto &q) {
-             q.kernel.textures.push_back({1, 80, 2, 3, 1, 1, 1});
+             q.kernel.textures.push_back({1, 0, 80, 2, 3, 1, 1, 1});
          }},
     };
     for (const auto &[what, change] : changes) {
@@ -387,10 +506,12 @@ TEST(CompileRequestForms, TheClientsRequestsCarryWhatItsKeysAreMadeOf)
     EXPECT_NE(cubic.find("request.variant = forms;"), std::string::npos);
     EXPECT_NE(cubic.find("fallback.key = p->_key + suffix;"), std::string::npos);
     EXPECT_NE(cubic.find("fallback.variant = forms.untested();"), std::string::npos);
-    EXPECT_NE(SourceText("../raw/runtime/RawMetalComputeState.mm")
-                  .find("s->_constants = (f ? f->_constants : \"\") + "
-                        "raw::stageInText(raw::stageInFieldsOf(descriptor.stageInputDescriptor));"),
-              std::string::npos);
+    const std::string computeState = SourceText("../raw/runtime/RawMetalComputeState.mm");
+    EXPECT_NE(
+        computeState.find(
+            "const std::string stageIn = raw::stageInText(raw::stageInFieldsOf(descriptor.stageInputDescriptor));"),
+        std::string::npos);
+    EXPECT_NE(computeState.find("s->_constants = (f ? f->_constants : \"\") + stageIn + linked;"), std::string::npos);
     EXPECT_NE(SourceText("../compiler/compiler_record.mm").find("raw::probeTexturesOf(p.request.variant)"),
               std::string::npos);
 }

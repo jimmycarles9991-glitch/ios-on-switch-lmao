@@ -27,9 +27,9 @@
 // completed on this unit).
 //
 // Why the SMMU: a decode's destination is another process's IOSurface (scattered pages, half of the Switch's RAM above
-// the 32-bit boundary) and NVJPG has no scatter-gather, so each job maps the destination page by page into a window of
-// NVJPG's address space, and the scan's bytes (copied into a kernel buffer the parser bounded) into another; the rest
-// of each window stays unmapped, so the SMMU itself keeps the engine inside the job's memory, behind the checker
+// the 32-bit boundary) and NVJPG has no scatter-gather. Destinations keep their page mappings through backing
+// retirement; a request's copied scan maps for that allocation's lifetime. Unmapped gaps separate allocations, while
+// the checker keeps programmed accesses inside each picture
 // (TegraNVJPGJpeg.h: the extent a decode writes against the destination's planes). switchroot's bl31 leaves every
 // swgroup in bypass with the translation bits set.
 //
@@ -61,6 +61,8 @@
 #include "../TegraHost1x/TegraHost1x.h"
 #include "../TegraSMMU/TegraSMMU.h"
 #include "../TegraSMMU/TegraSMMUDomain.h"
+#include "../TegraSMMU/TegraSMMUPublish.h"
+#include "../TegraSMMU/TegraSMMUSpace.h"
 #include "TegraNVJPG.h"
 #include "TegraNVJPGStats.h"
 #include "nvidia/cle7d0.h"
@@ -133,7 +135,9 @@ constexpr uint32_t kWindowTables[TEGRA_NVJPG_WINDOWS] = {static_cast<uint32_t>(k
 constexpr uint32_t kIdentityTables = 4;  // the arena and the firmware: at most two 4 MiB sections each
 constexpr uint32_t kTables = 1 + kWindowTables[0] + kWindowTables[1] + kIdentityTables;
 TegraSMMUDomain gDomain;  // directory = page 0, the windows' tables pages 1.., then the identity tables
-uint32_t gWindowMapped[TEGRA_NVJPG_WINDOWS];  // pages mapped from each window's start
+TegraSMMUSpace gSpaces[TEGRA_NVJPG_WINDOWS];
+uint32_t gInBitmap[TegraSMMUSpace::bitmapWords(kTegraNVJPGWindowBytes[0])];
+uint32_t gOutBitmap[TegraSMMUSpace::bitmapWords(kTegraNVJPGWindowBytes[1])];
 
 // The job engine. NVJPG has host1x channel 3 to itself and runs one job at a time (gJobLock), so nothing queues ahead
 // of a job: its wait is bounded by kMarginUs (the falcon switching to its decoder app, the completion interrupt) plus
@@ -201,21 +205,6 @@ bool contiguous(uint64_t bytes, switch_dma_buffer *dma, TegraNVJPGBuffer *out)
     return true;
 }
 
-inline uint32_t *table(uint32_t index)
-{
-    return gDomain.table(index);
-}
-
-inline uint32_t windowTable(uint32_t window)
-{
-    return 1 + (window ? kWindowTables[0] : 0);
-}
-
-void smmuFlush()
-{
-    tegra_smmu_flush(kAsid);
-}
-
 // The directory, the windows' tables (fixed, empty; installed first, so they are the consecutive pages 1..) and the
 // identity maps of the kernel buffers.
 bool smmuSetUp()
@@ -231,6 +220,11 @@ bool smmuSetUp()
             return false;
         }
     }
+    if (!gSpaces[0].init(kTegraNVJPGWindowBase[0], kTegraNVJPGWindowBytes[0], gInBitmap,
+                         TegraSMMUSpace::bitmapWords(kTegraNVJPGWindowBytes[0])) ||
+        !gSpaces[1].init(kTegraNVJPGWindowBase[1], kTegraNVJPGWindowBytes[1], gOutBitmap,
+                         TegraSMMUSpace::bitmapWords(kTegraNVJPGWindowBytes[1])))
+        return false;
     const bool identities =
         gDomain.identity(gFirmware.pa, gFirmware.size, false) && gDomain.identity(gArena.pa, gArena.size, true);
     switch_dcache_clean(gTables.va, gTables.size);
@@ -620,32 +614,35 @@ void tegra_nvjpg_lock_counts(uint64_t *waitsUnlocked, uint64_t *stateWaitMaxUs)
 }
 #endif
 
-// Job lock held. The window's tables are fixed; pages past `count` are left (or made) unmapped, so an access beyond
-// the job's memory faults in the SMMU instead of reaching memory.
-extern "C" uint64_t tegra_nvjpg_window_map(uint32_t window, const uint64_t *pages, uint32_t count, bool writable)
+extern "C" uint64_t tegra_nvjpg_pages_map(uint32_t window, const uint64_t *pages, uint32_t count, bool writable)
 {
-    if (window >= TEGRA_NVJPG_WINDOWS || count > (uint32_t)(kTegraNVJPGWindowBytes[window] >> SWITCH_HW_PAGE_SHIFT))
+    if (window >= TEGRA_NVJPG_WINDOWS || !pages || !count)
         return 0;
-    uint32_t *pt = table(windowTable(window));  // the window's tables are consecutive pages
-    for (uint32_t i = 0; i < count; i++)
-        pt[i] = TegraSMMUDomain::entry(pages[i], writable);
-    for (uint32_t i = count; i < gWindowMapped[window]; i++)
-        pt[i] = 0;
-    switch_dcache_clean(pt, (uint64_t)(count > gWindowMapped[window] ? count : gWindowMapped[window]) * 4);
-    gWindowMapped[window] = count;
-    smmuFlush();
-    return kTegraNVJPGWindowBase[window];
+    for (uint32_t i = 0; i < count; ++i) {
+        if (pages[i] >= (1ULL << 34) || (pages[i] & SWITCH_HW_PAGE_MASK))
+            return 0;
+    }
+    const uint64_t address = gSpaces[window].alloc(static_cast<uint64_t>(count) * SWITCH_HW_PAGE_SIZE);
+    if (!address)
+        return 0;
+    gDomain.map(address, pages, count, writable);
+    switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
+    return address;
 }
 
-extern "C" void tegra_nvjpg_window_clear(uint32_t window)
+extern "C" void tegra_nvjpg_pages_unmap(uint64_t address, uint32_t count)
 {
-    if (window >= TEGRA_NVJPG_WINDOWS || !gWindowMapped[window])
+    if (!address || !count)
         return;
-    uint32_t *pt = table(windowTable(window));
-    bzero(pt, (uint64_t)gWindowMapped[window] * 4);
-    switch_dcache_clean(pt, (uint64_t)gWindowMapped[window] * 4);
-    gWindowMapped[window] = 0;
-    smmuFlush();
+    for (uint32_t window = 0; window < TEGRA_NVJPG_WINDOWS; ++window) {
+        if (address < kTegraNVJPGWindowBase[window] ||
+            address >= kTegraNVJPGWindowBase[window] + kTegraNVJPGWindowBytes[window])
+            continue;
+        gDomain.unmap(address, count);
+        switch_smmu_publish(gDomain, kAsid, SWITCH_DCACHE_CLEAN);
+        gSpaces[window].release(address, static_cast<uint64_t>(count) * SWITCH_HW_PAGE_SIZE);
+        return;
+    }
 }
 
 // Job lock held. The setup and status slots are the kernel's (no client maps them); the stream is SETCLASS, the

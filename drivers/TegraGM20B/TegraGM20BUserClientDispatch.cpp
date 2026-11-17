@@ -17,6 +17,13 @@ static IOReturn zbcAdd(const TegraGM20BAbiZbc *in, TegraGM20BAbiZbcReply *out)
 	return kIOReturnSuccess;
 }
 
+static const char *jobCall(uint32_t method)
+{
+	if (method == TegraGM20BMethodSubmitJob)
+		return "SubmitJob";
+	return method == TegraGM20BMethodResourceSetCreate ? "ResourceSetCreate" : nullptr;
+}
+
 template <typename T> static bool reservedZero(const T &v)
 {
 	return v == 0;
@@ -206,10 +213,18 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	default:
 		return kIOReturnUnsupported;
 	}
-	if (inSize != wantIn || *outSize != wantOut || (wantIn && !in) || (wantOut && !out))
+	if (inSize != wantIn || *outSize != wantOut || (wantIn && !in) || (wantOut && !out)) {
+		if (const char *call = jobCall(method))
+			refuseCall(call, SwitchGpuRefusal::RecordSize, kIOReturnBadArgument, inSize,
+				   *outSize);
 		return kIOReturnBadArgument;
-	if (tgm_stage() < 2)
+	}
+	if (tgm_stage() < 2) {
+		if (const char *call = jobCall(method))
+			refuseCall(call, SwitchGpuRefusal::GpuDown, kIOReturnNotReady,
+				   uint64_t(tgm_stage()));
 		return kIOReturnNotReady;
+	}
 
 	switch (method) {
 	case TegraGM20BMethodBoImport:
@@ -379,6 +394,11 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 			switch_gpu_span_line(reply->line, sizeof(reply->line));
 		} else if (op == TegraGM20BPathsOpCounts)
 			switch_gpu_path_line(reply->line, sizeof(reply->line));
+		else if (op == TegraGM20BPathsOpPool)
+			poolLine(reply->line, sizeof(reply->line));
+		else if (op == TegraGM20BPathsOpRefusals)
+			snprintf(reply->line, sizeof(reply->line), "lines=%u",
+				 __atomic_load_n(&refusalLines_, __ATOMIC_RELAXED));
 #if TGM_STATS
 		else if (op == TegraGM20BPathsOpTargetPeaks)
 			tgm_target_peaks_line(reply->line, sizeof(reply->line));

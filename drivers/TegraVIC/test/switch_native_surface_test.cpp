@@ -4,6 +4,7 @@
 #include <vector>
 #include "switch_native_surface_stubs.h"
 #include "../SwitchNativeSurface.cpp"
+#include "../SwitchNativeSurfacePool.cpp"
 #include "../SwitchNativeScanout.cpp"
 #include "../SwitchNativeGpuView.cpp"
 #include "../SwitchVICSurfaceAccess.cpp"
@@ -832,6 +833,56 @@ TEST_F(NativeSurface, RetiredPublicationsAreReusedOnlyOnceNoViewHoldsThem)
     EXPECT_EQ(view.native, &replacement);
     EXPECT_EQ(*view.guard.generation, view.guard.expected);
     switch_native_surface_release(&view);
+}
+
+// A client cycling its pool keeps one publication object a surface (boot 22's decode.native_export made 19 for its
+// pool): the surface's own object takes the next picture when nothing but the attachment holds it, a view kept from
+// its earlier picture stays stale, and that picture's decoder lease goes back.
+TEST_F(NativeSurface, ASurfaceKeepsItsObjectWhileNothingElseHoldsIt)
+{
+    const auto attached = [&] {
+        auto *held = static_cast<SwitchNativeSurface *>(SwitchMemoryAttachment::copy(memory));
+        held->release();
+        return held;
+    };
+    bool fresh = false, first = false;
+    ASSERT_EQ(switch_native_surface_publish(&surface, &picture, nullptr, &fresh, &first), 0);
+    EXPECT_TRUE(first);
+    SwitchNativeSurface *own = attached();
+    const uint64_t generation = own->generation;
+    for (int round = 0; round < 3; ++round) {
+        picture.backing = round % 2 ? &native : &replacement;
+        fresh = first = true;
+        ASSERT_EQ(switch_native_surface_publish(&surface, &picture, nullptr, &fresh, &first), 0);
+        EXPECT_FALSE(fresh);
+        EXPECT_FALSE(first);
+        EXPECT_EQ(attached(), own);
+    }
+    EXPECT_GT(own->generation, generation);
+    EXPECT_EQ(own->generation, own->live);
+    EXPECT_EQ(native.readers, 0u);
+    EXPECT_EQ(replacement.readers, 1u);
+    SwitchNativeSurfaceView view = {};
+    ASSERT_EQ(switch_native_surface_acquire(&surface, &view, false), 0);
+    EXPECT_EQ(view.native, &replacement);
+    EXPECT_EQ(*view.guard.generation, view.guard.expected);
+    switch_native_surface_release(&view);
+}
+
+// A CPU read of the surface that was waiting on its preparation reads the new picture once the object is whole again.
+TEST_F(NativeSurface, ARepublicationInPlaceLeavesTheRowsToBeMadeAgain)
+{
+    ASSERT_EQ(switch_native_surface_publish(&surface, &picture), 0);
+    switch_gpu_backing *backing = nullptr;
+    switch_gpu_cpu_lease *owned = nullptr;
+    ASSERT_EQ(prepareCpu(object, 1, &backing, &owned), 0);
+    finishCpu(object, backing, &owned);
+    const unsigned before = transfers;
+    picture.backing = &replacement;
+    ASSERT_EQ(switch_native_surface_publish(&surface, &picture), 0);
+    ASSERT_EQ(prepareCpu(object, 1, &backing, &owned), 0);
+    EXPECT_EQ(transfers, before + 1);
+    finishCpu(object, backing, &owned);
 }
 
 TEST_F(NativeSurface, FailedReplacementRestoresPreviousAuthority)

@@ -1,8 +1,8 @@
 # NAK question batches
 
-These batches put seven questions NAK's SM50 backend has about GM20B to the Switch. The generators live in
+These batches put eight questions NAK's SM50 backend has about GM20B to the Switch. The generators live in
 `tools/benchloop` (`sm53/affinity.py`, `sm53/int3.py`, `sm53/overlap.py`, `sm53/icache.py`, `store2fma.py`,
-`sm53/hsetp2.py`, `sm53/interlock_spin.py`). After changing one, rewrite the files with
+`sm53/hsetp2.py`, `sm53/interlock_spin.py`, `sm53/powr_native.py`). After changing one, rewrite the files with
 `python3 -m tools.benchloop.nakbatches` from the repo root. `families_test` fails while a file and its generator
 disagree.
 
@@ -11,10 +11,10 @@ disagree.
 Install a HW Test at benchloop/6, open its Bench screen, then from the repo root run all of them in order:
 
 ```sh
-bazel run //tools/benchloop -- run "$PWD"/tools/benchloop/batches/{sr_affinity,int3_xmad,overlap,icache,store2fma,hsetp2,interlock_spin,icache_128k}.json
+bazel run //tools/benchloop -- run "$PWD"/tools/benchloop/batches/{sr_affinity,int3_xmad,overlap,icache,store2fma,hsetp2,interlock_spin,icache_128k,powr_native}.json
 ```
 
-That is 429 experiments, sent as two batches. One batch alone is
+That is 464 experiments, sent as two batches. One batch alone is
 `bazel run //tools/benchloop -- run "$PWD"/tools/benchloop/batches/<name>.json`. Each file opens with a warm-up draw
 that lifts the GPU off its 76.8 MHz idle clock. After the usual status line the run prints one line per answer, and
 `report.json` in the result folder keeps the detail under each family's key.
@@ -175,6 +175,45 @@ operands. The F32 swizzle isn't covered, since the interpreter has no model of i
 
 2 experiments: the icache program at 127 distinct segments, past the 64 KiB of code a program had before benchloop/6.
 Expected: `icache 127.3 KiB <c> cycles/warp-instr`, above the 62.3 KiB line if the trend holds.
+
+### powr_native
+
+35 experiments, 1.9 MB, about 78 MB of readback. `fast::powr` is `exp2(y * log2(x))`, which NAK emits as MUFU.LG2,
+FMUL.FTZ, RRO.EX2 and MUFU.EX2. The translator wraps it in Metal's special-value rules (`fast_powr_special` in
+metal2vulkan's `lower/arith/math.rs`), about 28 issue slots per powr, and state 4c33d27bde9b894a has six powrs. The
+rules can go if the chip's own composition already gives Metal's answers, and this batch records the raw result bits
+that decide it. Its results are 8 times the size of any other batch's (4.2 MB a chain experiment), so run it alone
+first.
+
+The two chain programs (`base`, `exponent`) run the state's own instruction words, which `powr_native_test` holds to
+NAK's: both halves widened by F2F, the four instructions, then the narrowing F2F the state ends with. They put every
+half base against 32 special exponents (the 22 of metal2vulkan's `powr_specials_test` and 10 more), and each of those
+32 as the base against every half exponent. `lg2`, `narrow` and `fmul` run each instruction alone over 68,312 f32
+inputs: every half widened, every f32 exponent field, the 64 ulps either side of 1, the 256 unorm8 texel values and NaN
+payloads. FMUL.FTZ takes them against ±0, ±inf, a NaN, two f32 denormals and 1, in both operand orders. Results come
+back as raw bits through the RGBA32F packing `hsetp2` uses.
+
+If the chip computes the IEEE results the interpreter models, the run prints one `ok` line per check and then:
+
+```text
+powr F2F.F16(0x7fc00000) = <h>
+powr chain base 2097152 pairs, 1079375 special, 0 off fast::powr, 0 off the translation bit for bit, ...
+powr chain exponent 2097152 pairs, 714790 special, 0 off fast::powr, 0 off the translation bit for bit, ...
+powr verdict half (state 4c33d27bde9b894a): native chain is fast::powr yes, bit for bit after the narrowing yes; float form per-op checks hold yes
+```
+
+The state's rules can go when both chain lines read `0 off fast::powr`, where a NaN counts as any NaN.
+`0 off the translation bit for bit` says the narrowed half also equals what the current code gives, since the code's
+own NaN, 0x7fc00000, goes through the same F2F. The chain lines come out that way when these hold:
+
+- LG2(±0) = -inf, LG2(+inf) = +inf, and LG2 of every negative half, -inf included, is a NaN.
+- LG2(1) = 0 exactly, and LG2 of every other positive half is a normal number with the sign of x - 1.
+- FMUL.FTZ(±inf, ±0) is a NaN, FMUL.FTZ(±inf, y) is ±inf for every nonzero y, and a NaN operand gives a NaN.
+- EX2(RRO(-inf)) = +0, EX2(RRO(+inf)) = +inf, and EX2(RRO(NaN)) is a NaN.
+
+When a chain line is off, the check marked OFF names the instruction. No chain runs the float form, so its verdict also
+needs the `[float]` checks: LG2 of an f32 denormal is -inf, FMUL.FTZ(±inf, f32 denormal) is a NaN, and LG2 stays
+nonzero within 64 ulps of 1. `FMUL.FTZ(±0, y) = ±0` is only recorded.
 
 ## What the app does for interlock_spin
 

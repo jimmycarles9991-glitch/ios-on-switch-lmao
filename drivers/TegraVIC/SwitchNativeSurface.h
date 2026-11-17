@@ -39,10 +39,12 @@ struct SwitchNativeSurfaceView {
 int switch_native_surface_acquire(const TegraVICSurface *surface, SwitchNativeSurfaceView *view, bool avoid,
                                   bool turns = false);
 void switch_native_surface_release(SwitchNativeSurfaceView *view);
-// why: on an error, the refusal (a literal) for the caller's one line. fresh: on success, whether the publication
-// needed a new surface object rather than a retired one.
+// why: on an error, the refusal (a literal) for the caller's one line. On success, fresh: whether the publication
+// needed a new surface object rather than the surface's own or a retired one; first: whether the surface had no native
+// picture. A surface keeps its publication object while nothing else holds it, so a client cycling its pool makes one
+// a surface.
 int switch_native_surface_publish(const TegraVICSurface *surface, const TegraVICPicture *picture,
-                                  const char **why = nullptr, bool *fresh = nullptr);
+                                  const char **why = nullptr, bool *fresh = nullptr, bool *first = nullptr);
 // `destination` (a whole NV12 surface) is `source`'s picture turned by `op` (a quarter turn of a source rectangle onto
 // the whole destination): its rows are made by VIC only when something other than the display reads them. `events`
 // (the request's, prepared): taken by the record when it is published, its waits ordered before every reader and its
@@ -66,6 +68,7 @@ extern "C" int switch_native_surface_prepare_gpu(OSObject *surface, uint32_t id,
 extern "C" int switch_native_surface_gpu_admission(OSObject *surface, uint32_t access, switch_gpu_backing *expected);
 
 #if DEVELOPMENT || DEBUG
-// Since boot: native publications, and how many of them needed a new surface object (the rest reused a retired one).
-extern "C" void switch_native_surface_publications(uint64_t *published, uint64_t *allocated);
+// Since boot: native publications, how many of them needed a new surface object, and how many went into a surface
+// with no native picture before.
+extern "C" void switch_native_surface_publications(uint64_t *published, uint64_t *allocated, uint64_t *surfaces);
 #endif

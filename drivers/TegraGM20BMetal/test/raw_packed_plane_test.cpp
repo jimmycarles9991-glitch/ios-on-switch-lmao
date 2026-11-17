@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstring>
 #include <random>
 #include <vector>
@@ -119,9 +120,6 @@ TEST(RawPackedPlane, TheYcbcrPlannerRoutesThem)
     EXPECT_TRUE(raw::ycbcrRenderedFormat(588) && raw::ycbcrRenderedFormat(589));
     EXPECT_EQ(raw::ycbcrTargetRefusal(588), nullptr);
     EXPECT_EQ(raw::ycbcrTargetRefusal(589), nullptr);
-    EXPECT_EQ(raw::ycbcrTargetWrites(588), 8u);
-    EXPECT_EQ(raw::ycbcrTargetWrites(589), 12u);
-    EXPECT_EQ(raw::ycbcrTargetWrites(540), 14u);
     EXPECT_EQ(raw::ycbcrStandInFormat(588), 55u);   // R32Float: R10Unorm_PACKED's fragments return one component
     EXPECT_EQ(raw::ycbcrStandInFormat(589), 105u);  // RG32Float
     EXPECT_EQ(raw::ycbcrStandInFormat(546), raw::kYcbcrTargetStandIn);
@@ -208,6 +206,41 @@ TEST(RawPackedPlane, StoredWordsAreTheTwinsCodesInTheReadLayout)
                     EXPECT_EQ(row[perRow - 1] >> (10 * tail), 0u) << width;
             }
         }
+}
+
+// A pass that loads such a texture and draws nothing stores the words it loaded, on every code of either view: the load state
+// draws each code over 1023 into the stand-in, the store state holds it as the half toward zero and rounds h x 1023 to the
+// nearest code. So does a stand-in value four float steps either side of the quotient (a division the device rounds otherwise)
+TEST(RawPackedPlane, LoadThenStoreGivesBackEveryCode)
+{
+    for (uint32_t channels : {1u, 2u}) {
+        const uint32_t width = 1024 / channels, perRow = raw::packedPlaneWords(1024);
+        std::vector<uint32_t> words(perRow, 0);
+        for (uint32_t n = 0; n < 1024; n++)
+            words[n / 3] |= n << (10 * (n % 3));
+        std::vector<float> rgba(4 * width);
+        for (uint32_t x = 0; x < width; x++) {
+            float value[2];
+            raw::packedPlaneLoad(words.data(), x, channels, value);
+            rgba[4 * x] = value[0];
+            rgba[4 * x + 1] = value[1];
+            rgba[4 * x + 3] = 1.0f;
+        }
+        std::vector<uint32_t> stored(perRow, 0xa5a5a5a5u);
+        raw::packedPlaneDrawn(raw::packedPlaneShape(channels), rgba.data(), width, 1, stored.data());
+        EXPECT_EQ(stored, words) << channels << " codes a texel";
+    }
+    const raw::YcbcrStoreShape shape = raw::packedPlaneShape(1);
+    for (uint32_t code = 0; code < 1024; code++) {
+        float near = float(code) / 1023.0f;
+        float below = near, above = near;
+        for (int step = 0; step < 4; step++) {
+            below = std::nextafter(below, 0.0f);
+            above = std::nextafter(above, 2.0f);
+        }
+        EXPECT_EQ(raw::ycbcrStoreCode(shape, code ? below : near), code);
+        EXPECT_EQ(raw::ycbcrStoreCode(shape, code < 1023 ? above : near), code);
+    }
 }
 
 }  // namespace

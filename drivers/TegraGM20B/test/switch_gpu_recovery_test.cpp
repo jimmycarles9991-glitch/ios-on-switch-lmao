@@ -9,8 +9,8 @@
 namespace
 {
 std::vector<std::string> calls;
-int notifications, locks, resetError, updateError, waitError;
-bool idle, preemptPending;
+int notifications, locks, resetError, updateError, waitError, pendingReads;
+bool idle, preemptPending, owedRequest;
 
 int cxid(nvkm_engn *engine, bool *group)
 {
@@ -48,6 +48,8 @@ int wait(nvkm_runl *)
 bool pending(nvkm_runl *)
 {
 	calls.emplace_back("preempt");
+	if (preemptPending && owedRequest && pendingReads++ > 0)
+		preemptPending = false;
 	return preemptPending;
 }
 
@@ -72,7 +74,8 @@ protected:
 		calls.clear();
 		notifications = locks = resetError = updateError = waitError = 0;
 		idle = true;
-		preemptPending = false;
+		preemptPending = owedRequest = false;
+		pendingReads = 0;
 		run.func = &runlFunctions;
 		run.fifo = &fifo;
 		run.chid = &ids;
@@ -181,6 +184,19 @@ void tgm_recover_preempt_unblock(nvkm_runl *)
 void tgm_recover_owed_preempt(nvkm_runl *)
 {
 	calls.emplace_back("owed");
+	if (owedRequest)
+		preemptPending = true;
+}
+
+bool switch_gpu_recover_pending(nvkm_runl *run, u32 *)
+{
+	return pending(run);
+}
+
+void switch_gpu_gr_fault_recovered(nvkm_runl *)
+{
+	EXPECT_EQ(locks, 0);
+	calls.emplace_back("gr-release");
 }
 
 int nvkm_engine_reset(nvkm_engine *)
@@ -199,6 +215,7 @@ void nvkm_event_ntfy(nvkm_event *, int, int type)
 {
 	EXPECT_EQ(type, NVKM_CHAN_EVENT_ERRORED);
 	EXPECT_EQ(locks, 1);
+	EXPECT_FALSE(preemptPending);
 	++notifications;
 	calls.emplace_back("terminal");
 }
@@ -207,10 +224,11 @@ void nvkm_event_ntfy(nvkm_event *, int, int type)
 TEST_F(Recovery, RemovedChannelsPublishOnlyAfterQuiescence)
 {
 	nvkm_runl_rc(&run);
-	EXPECT_EQ(calls, (std::vector<std::string>{"disable", "remove", "disable", "remove", "idle",
-						   "hold", "reset", "release", "update", "clear",
-						   "allow", "wait", "unblock", "preempt", "owed",
-						   "terminal", "terminal"}));
+	EXPECT_EQ(calls,
+		  (std::vector<std::string>{"disable", "remove", "disable", "remove", "idle",
+					    "hold", "reset", "release", "update", "clear", "allow",
+					    "wait", "unblock", "preempt", "owed", "preempt",
+					    "terminal", "terminal", "gr-release"}));
 	EXPECT_EQ(notifications, 2);
 	EXPECT_EQ(locks, 0);
 	EXPECT_EQ(run.cgrps, nullptr);
@@ -226,6 +244,16 @@ TEST_F(Recovery, TerminalNotificationIsOnceEvenWhenRecoveryRunsAgain)
 	engn.channel = -1;
 	run.rc_pending = 1;
 	nvkm_runl_rc(&run);
+	EXPECT_EQ(notifications, 2);
+	EXPECT_EQ(locks, 0);
+}
+
+TEST_F(Recovery, OwedPreemptCompletesBeforeTerminalPublication)
+{
+	owedRequest = true;
+	nvkm_runl_rc(&run);
+	EXPECT_FALSE(preemptPending);
+	EXPECT_EQ(pendingReads, 2);
 	EXPECT_EQ(notifications, 2);
 	EXPECT_EQ(locks, 0);
 }

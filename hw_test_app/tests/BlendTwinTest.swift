@@ -16,7 +16,11 @@ import Metal
 /// picks the form: the scenes again over 64x64 against the storage form there (worst_rule_<scene>), us_rule_* beside
 /// us_storage_*, rule_twins= the draws the facade counted on the twin by that rule and rule_free= those a fetch-free
 /// rung took first (every rule arm draw is a shape and area the twin rule takes), and verdict=PASS also needs those
-/// within the bound, all counted and none slower than the storage form. Debug builds only (the probe channel).
+/// within the bound, all counted and none slower than the storage form. The bound's shapes are measured, not judged:
+/// mesh<size>_<n>_<state> and quad<size>_<n>_<state> are one draw's GPU time as storage/twin1/rule in us and the form
+/// the rule took (s or t), n triangles as a mesh over about 5% of the target (BlendTwinScene.mesh) or as n/2 overlapping
+/// full quads, at 720p (4-32) and 256x256 (8, 32), where the rule's area threshold is read from. Debug builds only (the
+/// probe channel).
 struct BlendTwinTest: HWTest {
     let id = "gpu.raw.blend_twin"
     let name = "Storage form against barrier twin: codes, ordering and GPU time of Core Animation's fetching states"
@@ -41,6 +45,9 @@ struct BlendTwinTest: HWTest {
     ]
     static let rule = 0
     static let ruleSide = 64
+    static let shapes: [(name: String, width: Int, height: Int, triangles: [Int])] = [
+        ("720p", 1280, 720, [4, 8, 16, 32]), ("256", 256, 256, [8, 32]),
+    ]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
@@ -125,6 +132,30 @@ struct BlendTwinTest: HWTest {
                     }
                     if !(times["rule"]! > 0 && times["rule"]! < times["storage"]!) {
                         slower.append("\(size.name)_\(quads)_\(key)")
+                    }
+                }
+            }
+            for shape in Self.shapes {
+                for triangles in shape.triangles {
+                    let kinds = [
+                        ("mesh", BlendTwinScene.mesh(triangles)), ("quad", BlendTwinScene.overlapping(triangles / 2)),
+                    ]
+                    for (kind, vertices) in kinds {
+                        var us: [Double] = []
+                        var took = "s"
+                        for rung in [BlendTwinScene.storage, BlendTwinScene.twinTriangles, Self.rule] {
+                            let ruleTwins = RawFacade.counters(of: gpu.device)["fetch_twin_rule"] ?? 0
+                            let time = try await FetchRungScene.forcing(rung, gpu.device) {
+                                try await BlendTwinScene.microseconds(
+                                    line, vertices: vertices, width: shape.width, height: shape.height,
+                                    library: library, gpu: gpu, draws: Self.draws, runs: Self.runs)
+                            }
+                            us.append((time ?? nil) ?? 0)
+                            let after = RawFacade.counters(of: gpu.device)["fetch_twin_rule"] ?? 0
+                            if rung == Self.rule && after > ruleTwins { took = "t" }
+                        }
+                        let times = String(format: "%.1f/%.1f/%.1f", us[0], us[1], us[2])
+                        metrics.set("\(kind)\(shape.name)_\(triangles)_\(key)", "\(times):\(took)")
                     }
                 }
             }

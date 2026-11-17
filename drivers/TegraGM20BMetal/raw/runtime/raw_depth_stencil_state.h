@@ -6,13 +6,32 @@
 // dynamic state keeps them; references saturated at 255 (metal2vulkan render_state.rs, as Metal measured).
 #pragma once
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 #include "../../../../kits/SwitchGM20B/SwitchGM20B3D.h"
 #include "raw_state_segment.h"
 #include "raw_zeta.h"
 
 namespace raw {
+
+// The Z_CLEAR_VALUE whose clear stores what Apple's GPU stores for a Clear load's clearDepth (an M4 Max, macOS 27.2, read
+// back by a blit): clamped to [0, 1], a NaN of either sign the quiet NaN 0x7fc00000 in a float depth. A Depth16Unorm holds
+// code floor(f x 65535) of the depth as a float f, the product exact (3,880 clears swept), and 0 for a NaN; it is handed
+// the code's value plus a quarter code, which a chip rounding to nearest and one truncating both store as that code
+inline float metalClearDepth(double clear, uint32_t format)
+{
+    constexpr uint32_t kDepth16Unorm = 250;
+    const bool unorm16 = format == kDepth16Unorm;
+    if (std::isnan(clear))
+        return unorm16 ? 0.0f : std::numeric_limits<float>::quiet_NaN();
+    const float depth = float(std::clamp(clear, 0.0, 1.0));
+    if (!unorm16)
+        return depth;
+    const double code = std::floor(double(depth) * 65535.0);
+    return code >= 65535.0 ? 1.0f : float((code + 0.25) / 65535.0);
+}
 
 // The methods that take `held` (what the GPU holds) to `want`, then held = want
 inline void emitDepthStencil(Push &p, const DepthStencilRegs &want, DepthStencilRegs &held)

@@ -98,7 +98,7 @@ switch_gpu_backing *cached(const TegraVICSurface *surface)
 switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
 {
     const uint64_t length = surface->desc.length;
-    if (!length || length > kSurfaceCacheBytes || !initialize())
+    if (!length || length > (256ULL << 20) || !initialize())
         return nullptr;
     IOLockLock(gLock);
     noteLock();
@@ -127,6 +127,8 @@ switch_gpu_backing *switch_vic_surface_backing(const TegraVICSurface *surface)
         releaseSurface(owner);
         return nullptr;
     }
+    if (length > kSurfaceCacheBytes)
+        return adopt(surface, backing);
     IOLockLock(gLock);
     noteLock();
     auto *existing = cached(surface);

@@ -146,6 +146,14 @@ public struct Outcome: Sendable {
         Outcome(.skip, metrics, detail: detail)
     }
 
+    /// FAIL naming the command buffers of the test's own off the raw path, ahead of whatever else it found; unchanged
+    /// when there are none.
+    public func failing(offRaw: PathTally) -> Outcome {
+        guard !offRaw.isEmpty else { return self }
+        let reason = "command buffers off the raw path: \(offRaw.text)"
+        return Outcome(.fail, metrics, detail: detail.isEmpty ? reason : reason + "; " + detail, proof: proof)
+    }
+
     /// FAIL naming the metric keys the test could not log, ahead of whatever else it found; unchanged without any.
     public var withHarnessFaults: Outcome {
         guard !metrics.faults.isEmpty else { return self }

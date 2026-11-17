@@ -228,7 +228,7 @@ bool encodeKernelCommands(raw::ComputeEncoder &e, raw::CommandBuffer &rc, RMKern
     return e.executeSlots(run, why);
 }
 
-void encodeKernelCommandsBlit(raw::BlitEncoder *be, const Cmd &c)
+void encodeKernelCommandsBlit(raw::CommandBuffer *rc, raw::BlitEncoder *be, const Cmd &c)
 {
     RMIndirectComputeBuffer *from = (__bridge RMIndirectComputeBuffer *)c.obj;
     RMIndirectComputeBuffer *to = (__bridge RMIndirectComputeBuffer *)c.obj2;
@@ -241,6 +241,14 @@ void encodeKernelCommandsBlit(raw::BlitEncoder *be, const Cmd &c)
         std::copy_n(from->_dispatches.begin() + ptrdiff_t(first), count, commands.begin());
     }
     if (be) {
+        if (copy)
+            rc->use(from->_raw, false);
+        rc->use(to->_raw, true, false);
+        if (to->_inheritBuffers) {
+            if (copy && from->_inheritBuffers)
+                rc->use(from->_binds, false);
+            rc->use(to->_binds, true, false);
+        }
         be->access(copy ? (__bridge void *)from : nullptr, (__bridge void *)to);
         if (!copy)
             be->fillWords(to->_raw.va + first * kSlotBytes, count * kSlotBytes, raw::icb::kNop);

@@ -41,17 +41,9 @@ uint64_t rmArchiveKey(const std::string &key)
     return raw::Pack::fnv(key.data(), key.size());
 }
 
-static NSString *archiveLibraryName(id<MTLFunction> function)
-{
-    if ([(id)function isKindOfClass:[RMFunction class]])
-        return [NSString stringWithUTF8String:libraryName((RMFunction *)function).c_str()];
-    return native_bridge_metal_function_library_name(function) ?: function.name;
-}
-
 static std::string computeKey(MTLComputePipelineDescriptor *d, RMFunction *f)
 {
-    return raw::computeArchiveKey(archiveLibraryName((id<MTLFunction>)f).UTF8String ?: "", f->_constants,
-                                  uint32_t(d.maxTotalThreadsPerThreadgroup),
+    return raw::computeArchiveKey(libraryName(f), f->_constants, uint32_t(d.maxTotalThreadsPerThreadgroup),
                                   d.threadGroupSizeIsMultipleOfThreadExecutionWidth);
 }
 
@@ -60,8 +52,8 @@ static std::string tileKey(MTLTileRenderPipelineDescriptor *d, RMFunction *f)
     std::vector<uint32_t> formats;
     for (NSUInteger i = 0; i < 8; i++)
         formats.push_back(uint32_t(d.colorAttachments[i].pixelFormat));
-    return raw::archiveTileKey(archiveLibraryName((id<MTLFunction>)f).UTF8String ?: "", f->_constants, formats,
-                               uint32_t(d.rasterSampleCount), d.threadgroupSizeMatchesTileSize);
+    return raw::archiveTileKey(libraryName(f), f->_constants, formats, uint32_t(d.rasterSampleCount),
+                               d.threadgroupSizeMatchesTileSize);
 }
 
 static RMFunction *own(id<MTLFunction> function)

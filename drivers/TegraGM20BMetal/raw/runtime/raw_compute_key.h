@@ -11,32 +11,56 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 #include <string>
+#include <vector>
 #include "raw_metallib.h"
 #include "raw_pack.h"
 
 namespace raw {
 
-// A texture bound at `slot`, as MTLTexture answers it
+// A texture bound at `slot`, as MTLTexture answers it; `planes`: an RGB10A8_2P_XR10 texture held in Metal's two planes
+// (raw_xr_pass.h), whose kernels read and write the planes apart
 struct BoundTexture {
     uint32_t slot;
     uint64_t pixelFormat, textureType, levels, arrayLength;
     uint8_t swizzle[4];
+    bool planes = false;
 };
 
-// "<slot>:<pixelFormat>:<textureType>:<levels>:<arrayLength>:<swizzle, 4 hex bytes>,..." in slot order
+constexpr char kTwoPlaneTexture[] = ":xr2p";
+
+// "<slot>:<pixelFormat>:<textureType>:<levels>:<arrayLength>:<swizzle, 4 hex bytes>[:xr2p],..." in slot order, ":xr2p"
+// after a texture held in two planes
 inline std::string computeTextures(const BoundTexture *t, size_t count)
 {
     std::string text;
     for (size_t i = 0; i < count; i++) {
         char one[128];
-        snprintf(one, sizeof one, "%s%u:%llu:%llu:%llu:%llu:%02x%02x%02x%02x", text.empty() ? "" : ",", t[i].slot,
+        snprintf(one, sizeof one, "%s%u:%llu:%llu:%llu:%llu:%02x%02x%02x%02x%s", text.empty() ? "" : ",", t[i].slot,
                  (unsigned long long)t[i].pixelFormat, (unsigned long long)t[i].textureType,
                  (unsigned long long)t[i].levels, (unsigned long long)t[i].arrayLength, t[i].swizzle[0],
-                 t[i].swizzle[1], t[i].swizzle[2], t[i].swizzle[3]);
+                 t[i].swizzle[1], t[i].swizzle[2], t[i].swizzle[3], t[i].planes ? kTwoPlaneTexture : "");
         text += one;
     }
     return text;
+}
+
+// One texture of computeTextures' text; false: not one
+inline bool parseComputeTexture(const std::string &one, BoundTexture &t)
+{
+    unsigned slot, swizzle;
+    unsigned long long format, type, levels, array;
+    int end = 0;
+    if (sscanf(one.c_str(), "%u:%llu:%llu:%llu:%llu:%x%n", &slot, &format, &type, &levels, &array, &swizzle, &end) !=
+            6 ||
+        (one[end] && one.compare(end, std::string::npos, kTwoPlaneTexture)))
+        return false;
+    t = {slot,         format,
+         type,         levels,
+         array,        {uint8_t(swizzle >> 24), uint8_t(swizzle >> 16), uint8_t(swizzle >> 8), uint8_t(swizzle)},
+         one[end] != 0};
+    return true;
 }
 
 // A sampler bound at `slot`: its MTLSamplerDescriptor's fields
@@ -69,18 +93,52 @@ inline std::string computeSamplers(const BoundSampler *s, size_t count)
     return text;
 }
 
+inline std::string airText(const AirHash &air)
+{
+    std::string text;
+    char b[4];
+    for (uint8_t x : air) {
+        snprintf(b, sizeof b, "%02x", x);
+        text += b;
+    }
+    return text;
+}
+
 // What a compute state is made from, as its creation names it: every dispatch shape's key starts with it
 inline std::string computeStateKey(const AirHash &air, const std::string &constants, uint32_t maxThreads,
                                    bool multipleOfWidth)
 {
-    std::string key;
     char b[48];
-    for (uint8_t x : air) {
-        snprintf(b, sizeof b, "%02x", x);
-        key += b;
-    }
     snprintf(b, sizeof b, " | max=%u tgm=%d", maxThreads, multipleOfWidth ? 1 : 0);
-    return key + " | " + constants + b;
+    return airText(air) + " | " + constants + b;
+}
+
+// A compute state's linked function by its AIR, constants, list and exported name.
+struct LinkedComputeFunction {
+    bool hidden = false;
+    AirHash air = {};
+    std::string constants;
+    bool binary = false;
+    std::string symbol = {}, name = {};
+    std::optional<std::string> group = std::nullopt;
+};
+
+// Lists retain descriptor order, groups by name. Names distinguish binaries, grouped functions and renamed imports;
+// unchanged kl/kp entries keep their keys.
+inline std::string computeLinkedText(const std::vector<LinkedComputeFunction> &linked)
+{
+    std::string text;
+    for (const LinkedComputeFunction &f : linked) {
+        text += (f.group    ? " | kg " + std::to_string(f.group->size()) + ":" + *f.group + " "
+                 : f.binary ? " | kb "
+                 : f.hidden ? " | kp "
+                            : " | kl ") +
+                airText(f.air) + (f.constants.empty() ? "" : " " + f.constants);
+        if (f.group || f.binary || (!f.name.empty() && f.name != f.symbol))
+            text += " name=" + std::to_string(f.symbol.size()) + ":" + f.symbol + std::to_string(f.name.size()) + ":" +
+                    f.name;
+    }
+    return text;
 }
 
 // A compute state as an archive inventory names it (pack/archives.py): its library function, not its AIR

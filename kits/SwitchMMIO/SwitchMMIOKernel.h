@@ -13,6 +13,7 @@
 extern "C" {
 #endif
 
+// NOLINTNEXTLINE(readability-redundant-declaration): not every XNU header set this includes declares it
 uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t size);
 
 // Uncached (Device-nGnRE) and never unmapped: register pages live as long as the kernel.

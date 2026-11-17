@@ -58,6 +58,7 @@ struct RMPlanPatches {
 struct RMPlanDispatch {
     uint32_t state = 0;
     uint32_t surfaceSlots = 0;
+    uint32_t windowSlots = 0;  // buffer slots reached through a window on 16 (raw_kernel_shadow.h KernelUse)
     const void *kernel = nullptr;
     void *pending = nullptr;
     size_t encoderBegin = 0;
@@ -224,7 +225,8 @@ public:
     }
 
     raw::BufferSnapshots buffers[3];
-    raw::TextureSnapshots textures[3];
+    raw::TextureSnapshots textures[2];  // vertex, fragment
+    raw::KernelTextureSnapshots kernelTextures;
     raw::SamplerSnapshots samplers[3];
     raw::StateSnapshots<raw::RasterState> raster;
     raw::StateSnapshots<raw::KernelState> kernel;
@@ -350,11 +352,12 @@ public:
         return dispatches_[operations_[at].payload];
     }
 
-    void resolveDispatch(size_t at, const void *kernel, uint32_t surfaceSlots)
+    void resolveDispatch(size_t at, const void *kernel, uint32_t surfaceSlots, uint32_t windowSlots)
     {
         auto &dispatch = dispatches_[operations_[at].payload];
         dispatch.kernel = kernel;
         dispatch.surfaceSlots = surfaceSlots;
+        dispatch.windowSlots = windowSlots;
         dispatch.pending = nullptr;
     }
 

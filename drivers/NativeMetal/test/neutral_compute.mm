@@ -1,7 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#include "../NativeBridgeMetalFrontend.h"
-#include "../bridge/NativeMetalDirect.h"
+#include "../../TegraGM20BMetal/raw/runtime/RawOffline.h"
 #include "../../TegraGM20BMetal/raw/runtime/raw_direct_compute.h"
 #include "../../TegraGM20BMetal/raw/runtime/raw_direct_encode.h"
 #include "../../TegraGM20BMetal/raw/runtime/raw_direct_nvk.h"
@@ -20,7 +19,7 @@ static bool record(const NmbDirectKernel *kernel, void *context)
 {
     auto &test = *static_cast<Case *>(context);
     test.called = true;
-    auto compiler = raw::DirectNvk::find(native_bridge_metal_nvk_symbol);
+    const auto compiler = raw::StageCompile::linked();
     raw::ComputeRecord result;
     std::string why;
     if (raw::directKernel(*kernel, compiler, test.name, result, why) != raw::CompileOutcome::Made) {
@@ -62,24 +61,25 @@ static bool record(const NmbDirectKernel *kernel, void *context)
 
 int main(int argc, char **argv)
 {
-    if (argc != 4)
+    if (argc != 2)
         return 2;
     @autoreleasepool {
-        setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
-        id<MTLDevice> device = native_bridge_metal_open(argv[1], argv[2], 0, nullptr);
+        id<MTLDevice> device = (id<MTLDevice>)[RawOfflineDevice new];
         NSError *error = nil;
-        id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(argv[3])] error:&error];
+        id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
         if (!library) {
             fprintf(stderr, "library: %s\n", error.description.UTF8String);
             return 1;
         }
         unsigned failures = 0;
+        const auto translator = offline::translator();
         for (const char *name : {"neutral_read", "neutral_sample", "neutral_store", "neutral_compare"}) {
             for (bool bound : {false, true}) {
                 auto *descriptor = [MTLComputePipelineDescriptor new];
                 descriptor.computeFunction = [library newFunctionWithName:@(name)];
                 bool depth = !strcmp(name, "neutral_compare");
                 NmbDirectBoundTexture texture = {0,
+                                                 0,
                                                  depth ? MTLPixelFormatDepth32Float : MTLPixelFormatRGBA32Float,
                                                  MTLTextureType2D,
                                                  MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite,
@@ -93,7 +93,7 @@ int main(int argc, char **argv)
                 dispatch.textureCount = bound ? 1 : 0;
                 Case test = {name, bound, depth || !strcmp(name, "neutral_sample")};
                 const char *why = nullptr;
-                bool made = native_bridge_metal_compute_direct(descriptor, &dispatch, record, &test, &why);
+                bool made = translator.compute(descriptor, &dispatch, record, &test, &why);
                 printf("%s %s texture=%s sampler=unbound%s%s\n", made && test.called ? "PASS" : "FAIL", name,
                        bound ? "bound" : "unbound", why ? " reason=" : "", why ?: "");
                 failures += !made || !test.called;

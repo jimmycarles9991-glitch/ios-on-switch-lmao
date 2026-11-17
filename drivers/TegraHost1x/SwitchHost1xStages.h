@@ -70,6 +70,7 @@ struct SwitchHost1xStage {
     SwitchHost1xProducers producers;
     SwitchHost1xInputFence produced[SwitchHost1xProducers::kMax];
     uint32_t hardware, inputs, successor, final, boundUs;
+    uint32_t bridgeSyncpt, bridgeThreshold;
     int physical;
     bool ended;
 };
@@ -84,12 +85,17 @@ public:
     // GPU producer that is slow, or killed by the GPU's recovery, fails only its own consumer (D8); it cannot end
     // before bridged() is called.
     static int start(uint32_t slot, uint32_t syncpt, uint32_t threshold, bool bridge, bool semantic, uint32_t boundUs,
-                     const SwitchHost1xProducers &producers, uint32_t ahead)
+                     const SwitchHost1xProducers &producers, uint32_t ahead, uint32_t bridgeSyncpt = 0,
+                     uint32_t bridgeThreshold = 0)
     {
         auto &stage = stages[slot];
         switch_host1x_fence_init(&stage.fence, syncpt, threshold, signaled);
         stage.producers = producers;
-        const uint32_t own = (bridge ? 1 : 0) + producers.count;
+        stage.bridgeSyncpt = bridgeSyncpt;
+        stage.bridgeThreshold = bridgeThreshold;
+        uint32_t own = bridge ? 1 : 0;
+        for (uint32_t i = 0; i < producers.count; ++i)
+            own += producers.tokens[i].queue != syncpt;
         stage.hardware = 1 + own;
         stage.inputs = own + 1;  // and start's own hold on them, given back once every input is armed
         stage.successor = kNoSuccessor;
@@ -117,6 +123,8 @@ public:
         if (const int error = switch_host1x_fence_add(&stage.fence, 0))
             return error;
         for (uint32_t i = 0; i < producers.count; ++i) {
+            if (producers.tokens[i].queue == syncpt)
+                continue;
             auto &input = stage.produced[i];
             input.slot = slot;
             switch_host1x_fence_init(&input.fence, producers.tokens[i].queue,
@@ -162,6 +170,21 @@ public:
             return false;
         __atomic_store_n(&stage.physical, kCancelled, __ATOMIC_RELEASE);
         return true;
+    }
+
+    static bool producerCancelled(uint32_t slot, uint32_t syncpt, uint32_t reached, bool sourceFailed = false)
+    {
+        auto &stage = stages[slot];
+        bool failed = sourceFailed || __atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE) < 0 ||
+                      (stage.bridgeSyncpt == syncpt && static_cast<int32_t>(stage.bridgeThreshold - reached) > 0);
+        for (uint32_t i = 0; i < stage.producers.count && !failed; ++i) {
+            const auto &token = stage.producers.tokens[i];
+            failed = token.queue == syncpt && static_cast<int32_t>(uint32_t(token.value) - reached) > 0;
+        }
+        failed = failed || stage.producers.failure() < 0;
+        if (failed)
+            __atomic_store_n(&stage.physical, kCancelled, __ATOMIC_RELEASE);
+        return failed;
     }
 
 private:
@@ -228,7 +251,7 @@ private:
         if (__atomic_sub_fetch(&stage.hardware, 1u, __ATOMIC_ACQ_REL))
             return;
         foldProducerFailure(stage);
-        Engine::physical(slotOf(stage), stage.physical);
+        Engine::physical(slotOf(stage), __atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE));
         finalStep(stage);
     }
 
@@ -236,6 +259,6 @@ private:
     {
         if (__atomic_sub_fetch(&stage.final, 1u, __ATOMIC_ACQ_REL))
             return;
-        Engine::ended(slotOf(stage), stage.physical);
+        Engine::ended(slotOf(stage), __atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE));
     }
 };

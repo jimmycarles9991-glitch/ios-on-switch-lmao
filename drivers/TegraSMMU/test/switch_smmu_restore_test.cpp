@@ -24,12 +24,14 @@ struct Registers {
     }
 };
 
-struct SmmuRestore : testing::Test {
+class SmmuRestore : public testing::Test {
+public:
     Registers io;
     tegra_smmu_attachments attachments{};
     tegra_smmu_attachment display{126, 0x8000800, 0x240, 0x228, 7};
     char line[160]{};
 
+protected:
     void SetUp() override
     {
         ASSERT_TRUE(tegra_smmu_attachments_note(&attachments, &display));
@@ -50,11 +52,12 @@ TEST_F(SmmuRestore, RestoresRetainedDirectoryAndEveryClientAfterFirmwareStateCha
     EXPECT_EQ(io.words[display.asidReg / 4], (1u << 31) | display.asid);
     EXPECT_EQ(io.words[display.translationReg / 4], (1u << 25) | display.translationBits);
     unsigned flushes = 0;
-    for (const auto &[offset, value] : io.writes)
+    for (const auto &[offset, value] : io.writes) {
         if (offset == switch_smmu::kTlbFlush) {
             ++flushes;
             EXPECT_EQ(value, (1u << 31) | (126u << 24));
         }
+    }
     EXPECT_EQ(flushes, 2u);
 }
 

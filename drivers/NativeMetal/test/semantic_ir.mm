@@ -3,7 +3,7 @@
 #include "../NativeBridgeMetalFrontend.h"
 #include "../bridge/NativeMetalDirect.h"
 #include "device_compile.h"
-#include "../../../third_party/mesa/src/nouveau/vulkan/nvk_switch_ir.h"
+#include "../../../third_party/mesa/src/nouveau/switch_compile/nvk_switch_ir.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -90,7 +90,7 @@ static bool compare(const NmbDirectKernel *kernel, void *context)
                 (execution || sameCode(native, portable));
     bool route = (native.semanticVersion == 1) == c.expected && portable.semanticVersion == 0;
     auto metrics = reinterpret_cast<bool (*)(const raw::NvkStage *, raw::NvkStageMetrics *, size_t)>(
-        native_bridge_metal_nvk_symbol("switch_nvk_stage_metrics"));
+        native_bridge_metal_nvk_symbol("switch_compile_stage_metrics"));
     raw::NvkStageMetrics cost = {};
     bool costValid = metrics && metrics(&native, &cost, sizeof(cost)) && cost.version == 1 &&
                      cost.codeBytes == native.codeBytes && cost.gprs == native.numGprs && cost.instructions > 0 &&
@@ -274,7 +274,7 @@ int main(int argc, char **argv)
             if (!strcmp(name, "semantic_subgroup"))
                 descriptor.threadGroupSizeIsMultipleOfThreadExecutionWidth = YES;
             NmbDirectBoundTexture texture = {
-                0, MTLPixelFormatRGBA32Float, MTLTextureType2D, MTLTextureUsageShaderRead, 1, 1, 1};
+                0, 0, MTLPixelFormatRGBA32Float, MTLTextureType2D, MTLTextureUsageShaderRead, 1, 1, 1};
             NmbDirectDispatch dispatch = {};
             dispatch.threads[0] = 32;
             dispatch.threads[1] = dispatch.threads[2] = 1;

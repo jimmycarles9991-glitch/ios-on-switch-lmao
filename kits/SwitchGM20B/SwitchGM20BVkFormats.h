@@ -9,7 +9,7 @@ struct switch_gm20b_vk_format {
     uint32_t vk, tic0, flags;
 };
 
-#define SWITCH_GM20B_VK_FORMATS 127u
+#define SWITCH_GM20B_VK_FORMATS 129u
 
 // By VkFormat
 static const struct switch_gm20b_vk_format switch_gm20b_vk_formats[SWITCH_GM20B_VK_FORMATS] = {
@@ -140,4 +140,6 @@ static const struct switch_gm20b_vk_format switch_gm20b_vk_formats[SWITCH_GM20B_
     {1000156018, 0x70d2490c, 0},
     {1000340000, 0x54e24912, 0},
     {1000340001, 0x58d24912, 0},
+    {1000470000, 0x58d24914, 0},
+    {1000470001, 0x2002491d, 1},
 };

@@ -46,11 +46,12 @@ int main(int argc, char **argv)
         return 1;
     }
     int failures = 0;
-    auto run = [&](auto encode) {
+    auto run = [&](const raw::Buffer &buffer, bool write, auto encode) {
         raw::CommandBuffer *cb = dev.begin();
         raw::BlitEncoder *e = cb ? cb->blit() : nullptr;
         if (!e)
             return false;
+        cb->use(buffer, write, false);
         encode(e);
         e->end();
         uint32_t seq = 0;
@@ -123,7 +124,7 @@ int main(int argc, char **argv)
                 for (uint32_t x = 0; x < r.w; x++)
                     for (uint32_t b = 0; b < unit; b++)
                         want[y * pitch + x * unit + b] = texelByte(t, r.x + x, r.y + y, offset + b);
-            const bool out1 = run([&](raw::BlitEncoder *e) {
+            const bool out1 = run(out, true, [&](raw::BlitEncoder *e) {
                 e->copyBufferTexels(out.va, pitch, t, r.x, r.y, 0, r.w, r.h, false, aspect);
             });
             expect(out1 && !memcmp(out.cpu, want.data(), want.size()), aspect == raw::kAspectStencil || c.format == 253
@@ -141,7 +142,7 @@ int main(int argc, char **argv)
                 for (uint32_t x = 0; x < r.w; x++)
                     for (uint32_t b = 0; b < unit; b++)
                         texels[r.y + y][(r.x + x) * t.bpp + offset + b] = in.cpu[y * pitch + x * unit + b];
-            const bool in1 = run([&](raw::BlitEncoder *e) {
+            const bool in1 = run(in, false, [&](raw::BlitEncoder *e) {
                 e->copyBufferTexels(in.va, pitch, t, r.x, r.y, 0, r.w, r.h, true, aspect);
             });
             size_t differ = 0;

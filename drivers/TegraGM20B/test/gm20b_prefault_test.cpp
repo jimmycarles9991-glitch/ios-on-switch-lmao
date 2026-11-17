@@ -59,21 +59,6 @@ TEST(GM20BPrefault, OnlyLargeSurfacesAtNormalPressure)
 		EXPECT_FALSE(tegra_gm20b_prefault_wanted(1280 * 720 * 4, level));
 }
 
-// The reply fill every create and lookup ends in: word 0 the client's CPU address, the ID at 0x18
-TEST(GM20BPrefault, AReplyThatMapsTheSurfaceNamesIt)
-{
-	std::vector<uint8_t> reply = output(0xc68, 0x77);
-	const uint64_t address = 0x1'2345'0000;
-	memcpy(reply.data(), &address, sizeof(address));
-	EXPECT_EQ(tegra_gm20b_mapped_surface(0xc68, 0x18, reply.data(), reply.size()), 0x77u);
-	EXPECT_EQ(tegra_gm20b_mapped_surface(0xc68, 0x18, reply.data(), 0xc60), 0u);
-	EXPECT_EQ(tegra_gm20b_mapped_surface(0, 0x18, reply.data(), 0), 0u);
-	EXPECT_EQ(tegra_gm20b_mapped_surface(0xc68, 0x18, nullptr, 0xc68), 0u);
-	const uint64_t none = 0;
-	memcpy(reply.data(), &none, sizeof(none));
-	EXPECT_EQ(tegra_gm20b_mapped_surface(0xc68, 0x18, reply.data(), reply.size()), 0u);
-}
-
 // Boot 21: each new 1280x720 surface Core Animation made on a close frame was cleaned on its render thread at its first
 // import (`imp 1 1.8ms ... clean 3600 KiB 1.6 ms`), its pages already faulted in by the prefault. The prefault cleans them
 // and keeps them wired; the first import of a surface nothing wrote cleans nothing.

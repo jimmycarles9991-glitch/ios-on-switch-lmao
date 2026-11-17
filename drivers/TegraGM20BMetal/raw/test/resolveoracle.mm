@@ -3,7 +3,8 @@
 // textures (MTLStoreActionMultisampleResolve) of random samples, every format the pack resolves at 2 and 4 samples. A format and
 // count whose rule is closed must be Metal's in every byte; four halves (and RG11B10Float's channels, rounded from them) follow
 // the nearest form measured, whose differing texels are counted only. An 8-bit sRGB resolve writes its codes into the format's
-// UNORM twin, as the raw path renders it. usage: resolveoracle <pack/resolve.metal>
+// UNORM twin, as the raw path renders it. 32-bit float channels compare any NaN equal (Metal names no NaN's payload).
+// usage: resolveoracle <pack/resolve.metal>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include <cstring>
@@ -26,6 +27,25 @@ NSString *const kSamples =
     @"/ 255.0; }\n"
     @"fragment float4 half_samples(V in [[stage_in]], uint s [[sample_id]]) {\n"
     @"  float4 o; for (uint c = 0; c < 4; c++) o[c] = float(as_type<half>(ushort(seed(in.p, s, c)))); return o; }\n"
+    @"static float4 codes(float4 p, uint s, uint4 bits) { float4 o; for (uint c = 0; c < 4; c++) { uint m = (1u << "
+    @"bits[c]) - 1u; "
+    @"o[c] = float(seed(p, s, c) & m) / float(m); } return o; }\n"
+    @"fragment float4 unorm16_samples(V in [[stage_in]], uint s [[sample_id]]) { return codes(in.p, s, uint4(16)); }\n"
+    @"fragment float4 unorm10a2_samples(V in [[stage_in]], uint s [[sample_id]]) { return codes(in.p, s, uint4(10, 10, "
+    @"10, 2)); "
+    @"}\n"
+    @"fragment float4 b5g6r5_samples(V in [[stage_in]], uint s [[sample_id]]) { return codes(in.p, s, uint4(5, 6, 5, "
+    @"1)); }\n"
+    @"fragment float4 bgr5a1_samples(V in [[stage_in]], uint s [[sample_id]]) { return codes(in.p, s, uint4(5, 5, 5, "
+    @"1)); }\n"
+    @"fragment float4 float32_samples(V in [[stage_in]], uint s [[sample_id]]) {\n"
+    @"  const float edge[12] = {3.4e38, -3.4e38, 2.0e38, INFINITY, -INFINITY, NAN, 1.0e-40, -1.0e-40, 0.0, -0.0, "
+    @"1.2e-38, -1.1e-38};\n"
+    @"  float4 o; for (uint c = 0; c < 4; c++) { uint x = seed(in.p, s, c);\n"
+    @"    o[c] = (x & 3u) == 0u ? edge[(x >> 2) % 12u] : (x & 1u) ? as_type<float>((x & 0x80000000u) | (0x30000000u + "
+    @"(x >> 1) "
+    @"% 0x1e000000u)) : float(int(x % 2001u) - 1000) / 8.0; }\n"
+    @"  return o; }\n"
     @"fragment float4 small_float_samples(V in [[stage_in]], uint s [[sample_id]]) {\n"
     @"  float4 o; for (uint c = 0; c < 4; c++) o[c] = as_type<float>(0x35800000u + seed(in.p, s, c) % 0x12000000u);\n"
     @"  return o; }\n";
@@ -34,6 +54,8 @@ struct Case {
     MTLPixelFormat format, written;  // the resolve texture's format, and the one the resolve state writes
     const char *function, *samples;
     bool closed2, closed4;  // the rule at 2 and at 4 samples is closed
+    NSUInteger texel = 4;   // bytes
+    bool floats = false;    // 32-bit float channels: any NaN equals any other
 };
 
 const Case kCases[] = {
@@ -43,7 +65,25 @@ const Case kCases[] = {
     {MTLPixelFormatBGRA8Unorm_sRGB, MTLPixelFormatBGRA8Unorm, "resolve_bgra8_srgb_frag", "unorm_samples", true, true},
     {MTLPixelFormatRG11B10Float, MTLPixelFormatRG11B10Float, "resolve_rg11b10f_frag", "small_float_samples", true,
      false},
-    {MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA16Float, "resolve_rgba16f_frag", "half_samples", true, false},
+    {MTLPixelFormatRGBA16Float, MTLPixelFormatRGBA16Float, "resolve_rgba16f_frag", "half_samples", true, false, 8},
+    {MTLPixelFormatA8Unorm, MTLPixelFormatA8Unorm, "resolve_a8_frag", "unorm_samples", true, true, 1},
+    {MTLPixelFormatR8Unorm, MTLPixelFormatR8Unorm, "resolve_r8_frag", "unorm_samples", true, true, 1},
+    {MTLPixelFormatRG8Unorm, MTLPixelFormatRG8Unorm, "resolve_rg8_frag", "unorm_samples", true, true, 2},
+    {MTLPixelFormatR16Unorm, MTLPixelFormatR16Unorm, "resolve_r16_frag", "unorm16_samples", true, true, 2},
+    {MTLPixelFormatRG16Unorm, MTLPixelFormatRG16Unorm, "resolve_rg16_frag", "unorm16_samples", true, true, 4},
+    {MTLPixelFormatRGBA16Unorm, MTLPixelFormatRGBA16Unorm, "resolve_rgba16_frag", "unorm16_samples", true, true, 8},
+    {MTLPixelFormatRGB10A2Unorm, MTLPixelFormatRGB10A2Unorm, "resolve_rgb10a2_frag", "unorm10a2_samples", true, true,
+     4},
+    {MTLPixelFormatBGR10A2Unorm, MTLPixelFormatBGR10A2Unorm, "resolve_bgr10a2_frag", "unorm10a2_samples", true, true,
+     4},
+    {MTLPixelFormatR16Float, MTLPixelFormatR16Float, "resolve_r16f_frag", "half_samples", true, false, 2},
+    {MTLPixelFormatRG16Float, MTLPixelFormatRG16Float, "resolve_rg16f_frag", "half_samples", true, false, 4},
+    {MTLPixelFormatR32Float, MTLPixelFormatR32Float, "resolve_r32f_frag", "float32_samples", true, true, 4, true},
+    {MTLPixelFormatRG32Float, MTLPixelFormatRG32Float, "resolve_rg32f_frag", "float32_samples", true, true, 8, true},
+    {MTLPixelFormatRGBA32Float, MTLPixelFormatRGBA32Float, "resolve_rgba32f_frag", "float32_samples", true, true, 16,
+     true},
+    {MTLPixelFormatB5G6R5Unorm, MTLPixelFormatB5G6R5Unorm, "resolve_b5g6r5_frag", "b5g6r5_samples", true, false, 2},
+    {MTLPixelFormatBGR5A1Unorm, MTLPixelFormatBGR5A1Unorm, "resolve_bgr5a1_frag", "bgr5a1_samples", true, false, 2},
 };
 
 constexpr NSUInteger kWidth = 256, kHeight = 256;
@@ -97,9 +137,9 @@ id<MTLRenderPipelineState> state(id<MTLDevice> dev, id<MTLLibrary> lib, const ch
     return s;
 }
 
-std::vector<uint8_t> bytesOf(id<MTLTexture> t)
+std::vector<uint8_t> bytesOf(id<MTLTexture> t, NSUInteger texel)
 {
-    const NSUInteger row = kWidth * (t.pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4);
+    const NSUInteger row = kWidth * texel;
     std::vector<uint8_t> out(row * kHeight);
     [t getBytes:out.data() bytesPerRow:row fromRegion:MTLRegionMake2D(0, 0, kWidth, kHeight) mipmapLevel:0];
     return out;
@@ -149,11 +189,22 @@ int main(int argc, char **argv)
                 [enc endEncoding];
                 [cb commit];
                 [cb waitUntilCompleted];
-                const std::vector<uint8_t> want = bytesOf(metal), got = bytesOf(ours);
-                const size_t texel = want.size() / (kWidth * kHeight);
+                const std::vector<uint8_t> want = bytesOf(metal, c.texel), got = bytesOf(ours, c.texel);
+                const size_t texel = c.texel;
                 size_t differ = 0;
-                for (size_t i = 0; i < want.size(); i += texel)
-                    differ += memcmp(&want[i], &got[i], texel) != 0;
+                for (size_t i = 0; i < want.size(); i += texel) {
+                    bool same = true;
+                    for (size_t w = 0; w < texel; w += c.floats ? 4 : texel) {
+                        float x = 0, y = 0;
+                        if (c.floats) {
+                            memcpy(&x, &want[i + w], 4);
+                            memcpy(&y, &got[i + w], 4);
+                        }
+                        same &=
+                            (c.floats && x != x && y != y) || !memcmp(&want[i + w], &got[i + w], c.floats ? 4 : texel);
+                    }
+                    differ += !same;
+                }
                 const bool rule = n == 2 ? c.closed2 : c.closed4;
                 printf("%-24s x%lu: %zu of %lu texels differ from Metal's resolve%s\n", c.function, (unsigned long)n,
                        differ, (unsigned long)(kWidth * kHeight), rule ? "" : " (not closed: counted only)");

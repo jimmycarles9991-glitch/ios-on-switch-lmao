@@ -1,5 +1,6 @@
 """Every iterated blend program the pack holds against QuartzCore's formula, and the record packfile.py lays out."""
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -11,6 +12,10 @@ import microcode
 import table
 from reference import apple
 from ucode import ENABLE_RGB, ENABLE_RGBA, OGL
+
+CHIP_FACTS = Path(__file__).resolve().parents[2] / 'runtime/raw_chip_facts.h'
+# raw_chip_facts.h kIteratedProven: 10 passes cost 1,503 us at 720p, level with the cheapest interlocked storage form
+MOST_PASSES = 10
 
 
 class Programs(unittest.TestCase):
@@ -40,6 +45,17 @@ class Names(unittest.TestCase):
         self.assertIsNone(table.program_name('mpy', True, False))
         self.assertIsNone(table.program_name('vcm', False, False))
         self.assertIsNone(table.program_name('cdg', True, True))
+
+
+class Proven(unittest.TestCase):
+    def test_each_program_rung_3_draws_is_written_and_costs_less_than_the_interlock(self):
+        found = re.search(r'std::array<std::string_view, (\d+)> kIteratedProven = \{([^}]*)\}', CHIP_FACTS.read_text())
+        names = re.findall(r'"([^"]+)"', found[2])
+        self.assertEqual(len(names), int(found[1]))
+        for name in names:
+            with self.subTest(name):
+                self.assertIn(name, table.PROGRAMS)
+                self.assertLessEqual(len(table.PROGRAMS[name].words), MOST_PASSES)
 
 
 class Record(unittest.TestCase):

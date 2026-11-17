@@ -5,6 +5,7 @@
 #include <array>
 #include <vector>
 #include "bazel/testing/source_text.h"
+#define SWITCH_MMIO_HOST_MODEL        1
 #define SWITCH_DCACHE_OP(op, address) ((void)(address))
 #define SWITCH_DCACHE_BARRIER()       ((void)0)
 #include "../TegraHost1x.cpp"
@@ -18,6 +19,19 @@ alignas(4096) uint8_t gArenas[TEGRA_HOST1X_CHANNELS][SWITCH_HOST1X_ARENA_WORDS *
 uint32_t gAllocated;
 std::vector<std::array<uint32_t, TEGRA_HOST1X_CHANNELS>> gDemands;  // every channel's DMAPUT at each demand
 std::vector<switch_host1x_fence *> gFencesAdded;
+std::vector<std::pair<uint32_t, uint32_t>> gRegisterWrites;
+bool gCpuIncrements;
+uint32_t gDisplayTeardowns;
+uint32_t gFailedProducer;
+int gProducerPhysical;
+
+struct FailedNode {
+    uint32_t engine, syncpt, source;
+    int physical;
+};
+
+std::vector<FailedNode> gFailedNodes;
+uint32_t gFailurePasses;
 
 constexpr uint64_t kPushPA = 0x80000000u, kArenaPA = 0x90000000u;
 
@@ -42,6 +56,78 @@ uint32_t arenaAddress(uint32_t channel, const uint32_t *words)
                                  (reinterpret_cast<const uint8_t *>(words) - gArenas[channel]));
 }
 }  // namespace
+
+extern "C" uint32_t switch_mmio_model_read32(uintptr_t address)
+{
+    return *reinterpret_cast<uint32_t *>(address);
+}
+
+extern "C" void switch_mmio_model_write32(uintptr_t address, uint32_t bits)
+{
+    *reinterpret_cast<uint32_t *>(address) = bits;
+    const uintptr_t from = reinterpret_cast<uintptr_t>(gHostRegisters);
+    if (address < from || address - from >= sizeof(gHostRegisters))
+        return;
+    const uint32_t offset = uint32_t(address - from);
+    gRegisterWrites.emplace_back(offset, bits);
+    if (offset == kSyncOffset + SYNC_CH_TEARDOWN && (bits & (1u << TEGRA_HOST1X_CHANNEL_DISPLAY)))
+        ++gDisplayTeardowns;
+    if (gCpuIncrements && offset >= kSyncOffset + 0xf60 && offset < kSyncOffset + 0xf78) {
+        const uint32_t first = (offset - kSyncOffset - 0xf60) / 4 * 32;
+        for (uint32_t bit = 0; bit < 32; ++bit)
+            if (bits & (1u << bit))
+                ++syncpoint(first + bit);
+    }
+}
+
+extern "C" int switch_gpu_backing_token_status(const switch_gpu_backing_token *)
+{
+    return 1;
+}
+
+extern "C" int switch_gpu_backing_token_physical_status(const switch_gpu_backing_token *token, int)
+{
+    for (const auto &node : gFailedNodes)
+        if (node.engine == token->engine && node.syncpt == token->queue)
+            return node.physical;
+    return token->queue == gFailedProducer ? gProducerPhysical : 0;
+}
+
+namespace {
+bool failNodes(uint32_t engine, uint32_t syncpt, uint32_t reached)
+{
+    EXPECT_FALSE(gSubmitLock->held);
+    bool changed = false;
+    for (auto &node : gFailedNodes) {
+        if (node.engine != engine || node.physical < 0)
+            continue;
+        bool failed = node.source == syncpt && !reached;
+        for (const auto &source : gFailedNodes)
+            failed |= source.syncpt == node.source && source.physical < 0;
+        if (failed) {
+            node.physical = -5;
+            changed = true;
+        }
+    }
+    return changed;
+}
+}  // namespace
+
+extern "C" bool switch_nvdec_host1x_cancelled(uint32_t syncpt, uint32_t reached)
+{
+    ++gFailurePasses;
+    return failNodes(SWITCH_GPU_ENGINE_NVDEC, syncpt, reached);
+}
+
+extern "C" bool switch_vic_host1x_cancelled(uint32_t syncpt, uint32_t reached)
+{
+    bool changed = failNodes(SWITCH_GPU_ENGINE_VIC, syncpt, reached);
+    if (syncpt == gFailedProducer && gProducerPhysical >= 0) {
+        gProducerPhysical = -5;
+        changed = true;
+    }
+    return changed;
+}
 
 extern "C" uintptr_t ml_io_map(uintptr_t pa, uintptr_t)
 {
@@ -155,6 +241,14 @@ struct Host1xSubmit : testing::Test {
         IOLockUnlock(gSubmitLock);
         gDemands.clear();
         gFencesAdded.clear();
+        gRegisterWrites.clear();
+        gDisplayStream = nullptr;
+        gCpuIncrements = false;
+        gDisplayTeardowns = 0;
+        gFailedProducer = 0;
+        gProducerPhysical = 0;
+        gFailedNodes.clear();
+        gFailurePasses = 0;
         switch_test_sleep = nullptr;
     }
 
@@ -421,4 +515,234 @@ TEST(Host1xSubmitShape, EveryEngineBuildsItsJobsInTheArena)
         EXPECT_THAT(SourceText(source), testing::Not(testing::HasSubstr("tegra_host1x_submit")))
             << source << ": every stream has its fence";
 }
+
+struct DisplayExecution {
+    const uint32_t *commands = reinterpret_cast<const uint32_t *>(gArenas[TEGRA_HOST1X_CHANNEL_DISPLAY]);
+    uint32_t pc = 0, teardown = gDisplayTeardowns;
+    std::vector<std::pair<uint32_t, uint32_t>> controller;
+
+    void run()
+    {
+        while (teardown == gDisplayTeardowns) {
+            const uint32_t word = commands[pc];
+            if (word == tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_HOST1X, 0x4e, 5)) {
+                if (static_cast<int32_t>(syncpoint(commands[pc + 2]) - commands[pc + 1]) < 0)
+                    return;
+                pc += 3;
+            } else if (word == tegra_host1x_op_setclass(TEGRA_HOST1X_CLASS_DC, 0, 0)) {
+                ++pc;
+            } else if (word >> 28 == 1) {
+                controller.emplace_back((word >> 16) & 0xfff, commands[pc + 1]);
+                pc += 2;
+            } else if (word >> 28 == 4) {
+                ++syncpoint(word & 0xff);
+                ++pc;
+                return;
+            } else {
+                throw std::runtime_error("unsupported controller stream opcode");
+            }
+        }
+    }
+};
+
+struct DisplayCompletion {
+    uint32_t calls = 0;
+    int status = 1;
+
+    static void heard(void *context, int status)
+    {
+        auto &done = *static_cast<DisplayCompletion *>(context);
+        EXPECT_FALSE(gSubmitLock->held);
+        ++done.calls;
+        done.status = status;
+    }
+};
+
+TEST_F(Host1xSubmit, DisplayStreamWaitsThenWritesAndCompletesOnlyOnItsOwnSyncpoint)
+{
+    SwitchHost1xDisplayStream stream;
+    uint32_t producer = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&producer), 0);
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const switch_gpu_backing_token token = {1, 1, SWITCH_GPU_ENGINE_VIC, producer};
+    const uint32_t words[2] = {0xdc0, 0xdc2}, values[2] = {0x20000000, 0x21000000};
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, words, values, 2, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    ASSERT_EQ(gFencesAdded.size(), 1u);
+    EXPECT_EQ(gFencesAdded[0]->syncpt, stream.syncpt);
+    EXPECT_EQ(done.calls, 0u);
+    DisplayExecution execution;
+    execution.run();
+    EXPECT_TRUE(execution.controller.empty());
+    syncpoint(producer) = 1;
+    EXPECT_EQ(done.calls, 0u);
+    execution.run();
+    EXPECT_EQ(execution.controller, (std::vector<std::pair<uint32_t, uint32_t>>{
+                                        {words[0], values[0]}, {words[1], values[1]}, {0x041, 0x500}, {0x041, 5}}));
+    EXPECT_EQ(syncpoint(stream.syncpt), stream.fence.threshold);
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.calls, 1u);
+    EXPECT_EQ(done.status, 0);
+    EXPECT_FALSE(stream.queued);
+    EXPECT_EQ(gDisplayStream, nullptr);
+}
+
+TEST_F(Host1xSubmit, AFailedProducerTearsDownTheControllerStreamBeforeEitherSyncpointRelease)
+{
+    SwitchHost1xDisplayStream stream;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&gFailedProducer), 0);
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const switch_gpu_backing_token token = {1, 1, SWITCH_GPU_ENGINE_VIC, gFailedProducer};
+    const uint32_t word = 0xdc0, address = 0x20000000;
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    DisplayExecution execution;
+    execution.run();
+    ASSERT_TRUE(execution.controller.empty());
+    gCpuIncrements = true;
+    gRegisterWrites.clear();
+    ASSERT_EQ(tegra_host1x_syncpt_release_failed(gFailedProducer, 1, 1), 0);
+    execution.run();
+    EXPECT_TRUE(execution.controller.empty());
+    EXPECT_EQ(gProducerPhysical, -5);
+    ASSERT_FALSE(gRegisterWrites.empty());
+    auto teardown = gRegisterWrites.end(), release = gRegisterWrites.end();
+    for (auto it = gRegisterWrites.begin(); it != gRegisterWrites.end(); ++it) {
+        if (it->first == kSyncOffset + SYNC_CH_TEARDOWN)
+            teardown = it;
+        if (it->first >= kSyncOffset + 0xf60 && it->first < kSyncOffset + 0xf78 && release == gRegisterWrites.end())
+            release = it;
+    }
+    ASSERT_NE(teardown, gRegisterWrites.end());
+    ASSERT_NE(release, gRegisterWrites.end());
+    EXPECT_LT(teardown, release);
+    EXPECT_EQ(syncpoint(stream.syncpt), stream.fence.threshold);
+    EXPECT_EQ(done.calls, 0u);
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.calls, 1u);
+    EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
+    EXPECT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        -5);
+    EXPECT_FALSE(stream.queued);
+}
+
+namespace {
+void alternatingFailures(bool vicFirst)
+{
+    SwitchHost1xDisplayStream stream;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&gFailedProducer), 0);
+    uint32_t source = gFailedProducer;
+    gFailedNodes.clear();
+    gFailurePasses = 0;
+    for (uint32_t i = 0; i < 4; ++i) {
+        uint32_t syncpt = 0;
+        ASSERT_EQ(tegra_host1x_syncpt_alloc(&syncpt), 0);
+        const uint32_t engine = (bool(i & 1) == vicFirst) ? SWITCH_GPU_ENGINE_NVDEC : SWITCH_GPU_ENGINE_VIC;
+        gFailedNodes.push_back({engine, syncpt, source, 0});
+        source = syncpt;
+    }
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const switch_gpu_backing_token token = {1, 1, gFailedNodes.back().engine, source};
+    const uint32_t word = 0xdc0, address = 0x20000000;
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    DisplayExecution execution;
+    execution.run();
+    ASSERT_TRUE(execution.controller.empty());
+    gCpuIncrements = true;
+    ASSERT_EQ(tegra_host1x_syncpt_release_failed(gFailedProducer, 1, 1), 0);
+    EXPECT_GE(gFailurePasses, 3u);
+    for (const auto &node : gFailedNodes) {
+        EXPECT_EQ(node.physical, -5);
+        syncpoint(node.syncpt) = 1;
+    }
+    execution.run();
+    EXPECT_TRUE(execution.controller.empty());
+    EXPECT_EQ(done.calls, 0u);
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.calls, 1u);
+    EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
+    EXPECT_FALSE(stream.queued);
+}
+}  // namespace
+
+TEST_F(Host1xSubmit, NvdecThenVicFailuresReachTheDisplayBeforeTheAbandonedBridgeCanRun)
+{
+    alternatingFailures(false);
+}
+
+TEST_F(Host1xSubmit, VicThenNvdecFailuresReachTheDisplayBeforeTheAbandonedBridgeCanRun)
+{
+    alternatingFailures(true);
+}
+
+TEST_F(Host1xSubmit, AnUnrelatedFailedProducerCannotCancelTheControllerStream)
+{
+    SwitchHost1xDisplayStream stream;
+    uint32_t producer = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&producer), 0);
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&gFailedProducer), 0);
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const switch_gpu_backing_token token = {1, 1, SWITCH_GPU_ENGINE_VIC, producer};
+    const uint32_t word = 0xdc0, address = 0x20000000;
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    DisplayExecution execution;
+    execution.run();
+    ASSERT_TRUE(execution.controller.empty());
+    gCpuIncrements = true;
+    ASSERT_EQ(tegra_host1x_syncpt_release_failed(gFailedProducer, 1, 1), 0);
+    EXPECT_EQ(gDisplayTeardowns, 0u);
+    EXPECT_EQ(stream.status, 0);
+    EXPECT_TRUE(stream.queued);
+    EXPECT_EQ(done.calls, 0u);
+    syncpoint(producer) = 1;
+    execution.run();
+    ASSERT_FALSE(execution.controller.empty());
+    EXPECT_EQ(execution.controller.front(), std::make_pair(word, address));
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.calls, 1u);
+    EXPECT_EQ(done.status, 0);
+}
+
+TEST_F(Host1xSubmit, AWithdrawnStreamOwnsItsFenceUntilTheCallbackDrains)
+{
+    SwitchHost1xDisplayStream stream;
+    uint32_t producer = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&producer), 0);
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const switch_gpu_backing_token token = {1, 1, SWITCH_GPU_ENGINE_NVDEC, producer};
+    const uint32_t word = 0xdc0, address = 0x20000000;
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    gCpuIncrements = true;
+    EXPECT_EQ(switch_host1x_display_cancel(&stream), SwitchHost1xDisplayStream::kCancelled);
+    EXPECT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        TEGRA_HOST1X_EAGAIN);
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.calls, 1u);
+    EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
+    const uint32_t generation = stream.generation;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    EXPECT_EQ(stream.generation, generation + 1);
+    syncpoint(stream.syncpt) = stream.fence.threshold;
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.calls, 2u);
+    EXPECT_EQ(done.status, 0);
+}
+
 }  // namespace

@@ -6,12 +6,12 @@ namespace raw {
 
 // Of a table's `count` slots, those worth comparing: the ones edited since the applied snapshot `from`, every one where
 // none was applied (kNoSnapshot)
-inline uint32_t slotsToCompare(uint32_t edited, uint32_t from, size_t count, StateCursor &cursor)
+template <typename Mask> Mask slotsToCompare(const Mask &edited, uint32_t from, size_t count, StateCursor &cursor)
 {
-    const uint32_t all = count >= 32 ? ~0u : (1u << count) - 1;
-    const uint32_t slots = (from == kNoSnapshot ? ~0u : edited) & all;
-    cursor.slotsCompared += uint32_t(__builtin_popcount(slots));
-    cursor.slotsInTables += uint32_t(__builtin_popcount(all));
+    const Mask all = firstSlots<Mask>(count);
+    const Mask slots = (from == kNoSnapshot ? everySlot<Mask>() : edited) & all;
+    cursor.slotsCompared += slotCount(slots);
+    cursor.slotsInTables += slotCount(all);
     return slots;
 }
 
@@ -36,12 +36,12 @@ void applyObjects(const ObjectSnapshots<N> &table, uint32_t from, uint32_t to, S
     const auto bindings = table[to];
     const bool hasOld = from != kNoSnapshot;
     const auto old = table[hasOld ? from : to];
-    const uint32_t edited = hasOld ? table.changedFrom(from, to) : ~0u;
-    for (uint32_t slots = slotsToCompare(edited, from, N, cursor) & bindings.set; slots; slots &= slots - 1) {
-        const uint32_t slot = uint32_t(__builtin_ctz(slots));
-        if (!hasOld || !(old.set & (1u << slot)) || bindings.objects[slot] != old.objects[slot])
+    using Mask = typename ObjectSnapshots<N>::Mask;
+    const Mask edited = hasOld ? table.changedFrom(from, to) : everySlot<Mask>();
+    forEachSlot(slotsToCompare(edited, from, N, cursor) & bindings.set, [&](uint32_t slot) {
+        if (!hasOld || !hasSlot(old.set, slot) || bindings.objects[slot] != old.objects[slot])
             apply(slot, bindings.objects[slot]);
-    }
+    });
 }
 
 // The snapshot's bindings that differ from the applied one's, in the sink, and its raster state where it differs. Only
@@ -87,7 +87,7 @@ void applyKernelState(const RMCommandPlan &plan, uint32_t index, StateCursor &cu
     if (!previous || previous->buffers != next.buffers)
         applyBuffers(plan.buffers[2], previous ? previous->buffers : kNoSnapshot, next.buffers, 3, cursor, sink);
     if (!previous || previous->textures != next.textures)
-        applyObjects(plan.textures[2], previous ? previous->textures : kNoSnapshot, next.textures, cursor,
+        applyObjects(plan.kernelTextures, previous ? previous->textures : kNoSnapshot, next.textures, cursor,
                      [&](uint32_t slot, void *object) {
                          sink.texture(3, slot, object);
                      });

@@ -224,3 +224,17 @@ TEST_F(SwitchVICBacking, FailedColdAdoptionLeavesOnlyBoundedCacheOwnership)
     EXPECT_EQ(surface.object.refs, 1u);
 }
 }  // namespace
+
+TEST_F(SwitchVICBacking, LargerThanTheCacheStillPinsTheDestinationForItsCaller)
+{
+    Surface surface;
+    surface.value.desc.length = kSurfaceCacheBytes + 4096;
+    auto *backing = switch_vic_surface_backing(&surface.value);
+    ASSERT_NE(backing, nullptr);
+    EXPECT_EQ(gBytes, 0u);
+    EXPECT_EQ(preparations, 1u);
+    EXPECT_EQ(completions, 0u);
+    switch_gpu_backing_release(backing);
+    EXPECT_EQ(completions, 1u);
+    EXPECT_EQ(surface.object.refs, 1u);
+}

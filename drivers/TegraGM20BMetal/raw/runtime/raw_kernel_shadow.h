@@ -30,11 +30,21 @@ template <typename Texture> ByteSpan kernelTextureSpan(const Texture &t)
     return {range.va, range.bytes};
 }
 
-// One resource of a dispatch: `shadowed`, a texture it reaches through the texture's image
+// The bytes a kernel's buffer bound at `va` with `bytes` left in its buffer reaches through a window: its record's window
+// of it (0: the whole buffer), at most what is bound
+inline ByteSpan kernelBufferWindowSpan(uint64_t va, uint64_t bytes, uint32_t recordWindow)
+{
+    return {va, recordWindow ? std::min<uint64_t>(recordWindow, bytes) : bytes};
+}
+
+// One resource of a dispatch: `shadowed`, a texture it reaches through the texture's image, or (`windowSlot` >= 0) a
+// buffer bound at that slot at an address off 16 bytes whose record names no residual word for it, reached through a
+// window of its bytes at an address on 16 (raw_residual.h), filled and copied back as an image is
 struct KernelUse {
     const void *object = nullptr;
     ByteSpan span;
     bool shadowed = false, writes = false;
+    int8_t windowSlot = -1;
 };
 
 // A dispatch that stores to the same bytes through a texture's image and through another resource leaves the image's

@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #pragma once
 #include <cstdint>
+#include <new>
+#define IONewZero(type, count)         new (std::nothrow) type[count]()
+#define IODelete(pointer, type, count) delete[] (pointer)
+inline unsigned gParkLogLines;
+#define IOLog(...) (++gParkLogLines)
 using task_t = void *;
 using IOReturn = int32_t;
 using IOOptionBits = uint32_t;

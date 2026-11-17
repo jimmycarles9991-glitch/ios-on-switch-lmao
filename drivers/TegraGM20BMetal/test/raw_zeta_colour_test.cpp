@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: MIT
 // raw/runtime/raw_zeta_colour.h on the host, the one-draw stencil route beside raw_stencil_bits.h's eight draws:
-//  - its colour target is the zeta's memory: the SET_COLOR_TARGET_* words address, size and lay out what SET_ZT_* do for the
-//    same zeta (zetaTargetValues), in RU32_GU32 or RU8, and its pass binds that target loaded and no zeta;
+//  - its colour view is the zeta's memory: the SET_COLOR_TARGET_* words address, size and lay out what SET_ZT_* do for the
+//    same zeta (zetaTargetValues), in RU32_GU32 or RU8; a pass renders it through a pool image (zetaPages), and the route's
+//    pass binds it loaded and no zeta;
 //  - which zetas it takes, and its states: the pack's lines make each with the write mask its draw needs;
 //  - on a model of the ROP over ZF32_X24S8 texels (word 0 the depth's bits, word 1's low byte the stencil) and S8 texels,
 //    its draw, through the mask the pack's line gives it, writes the stencil the eight draws write, a turn copy the depth
 //    with it, a resolve keeps the depth word, and a texel outside a turn copy's source rectangle is kept.
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <regex>
 #include <string>
 #include <vector>
@@ -16,6 +19,7 @@
 #include "../raw/runtime/raw_depth_stencil_state.h"
 #include "../raw/runtime/raw_target.h"
 #include "../raw/runtime/raw_zeta_colour.h"
+#include "../raw/runtime/raw_own_states.h"
 #include "bazel/testing/source_text.h"
 
 namespace {
@@ -29,7 +33,7 @@ struct FakeTexture {
     uint32_t width = 0, height = 0, format = 0, pitch = 0;
     uint8_t bpp = 0, blockHeight = 0, samples = 1;
     uint64_t layerBytes = 0;
-    bool blockLinear = false, zeta = false, renderable = false, comptags = false;
+    bool blockLinear = false, zeta = false, renderable = false, comptags = false, zetaPages = false;
     uint32_t tic = 0;
 };
 
@@ -119,8 +123,9 @@ const std::pair<uint32_t, StencilSample> kForms[] = {
     {4, StencilSample::LeastDepth}, {4, StencilSample::GreatestDepth},
 };
 
-// The route's colour target is the zeta's memory as the zeta target words have it, in its words' format
-TEST(RawZetaColour, TheColourTargetIsTheZetasMemory)
+// The route's colour view is the zeta's memory as the zeta target words have it, in its words' format, rendered through a
+// pool image: the colour ROP's writes through the zeta's PTE kind never reached memory on the device (boot 21)
+TEST(RawZetaColour, TheColourViewIsTheZetasMemoryRenderedThroughAPoolImage)
 {
     const uint32_t sizes[][2] = {{1, 1}, {90, 60}, {96, 64}, {1280, 720}, {720, 1280}, {4096, 4096}};
     for (const uint32_t format : {260u, 253u})
@@ -129,6 +134,8 @@ TEST(RawZetaColour, TheColourTargetIsTheZetasMemory)
             const FakeTexture view = raw::zetaColourView(z);
             EXPECT_FALSE(view.zeta);
             EXPECT_TRUE(view.renderable);
+            EXPECT_TRUE(view.zetaPages);
+            EXPECT_FALSE(z.zetaPages);
             EXPECT_EQ(view.tic, 0u);
             EXPECT_EQ(view.format, format == 260 ? 103u : 13u);
             EXPECT_EQ(view.bpp, z.bpp);
@@ -172,20 +179,19 @@ TEST(RawZetaColour, ThePassBindsTheViewAlone)
     EXPECT_EQ(p.depthStencil.texture, nullptr);
 }
 
-// Taken while the fact or the probe holds, into a one-sample zeta with stencil and without comptags
+// Taken into every one-sample zeta with stencil and without comptags
 TEST(RawZetaColour, WhichZetasItWrites)
 {
     FakeTexture d32s8 = zeta(260, 8, 8), s8 = zeta(253, 8, 8);
-    EXPECT_TRUE(raw::zetaColourWrites(d32s8, true));
-    EXPECT_TRUE(raw::zetaColourWrites(s8, true));
-    EXPECT_FALSE(raw::zetaColourWrites(d32s8, false));
+    EXPECT_TRUE(raw::zetaColourWrites(d32s8));
+    EXPECT_TRUE(raw::zetaColourWrites(s8));
     FakeTexture compressed = d32s8, multisampled = d32s8;
     compressed.comptags = true;
     multisampled.samples = 4;
-    EXPECT_FALSE(raw::zetaColourWrites(compressed, true));
-    EXPECT_FALSE(raw::zetaColourWrites(multisampled, true));
+    EXPECT_FALSE(raw::zetaColourWrites(compressed));
+    EXPECT_FALSE(raw::zetaColourWrites(multisampled));
     for (const uint32_t depthOnly : {250u, 252u})
-        EXPECT_FALSE(raw::zetaColourWrites(zeta(depthOnly, 8, 8), true)) << depthOnly;
+        EXPECT_FALSE(raw::zetaColourWrites(zeta(depthOnly, 8, 8))) << depthOnly;
 }
 
 // A state for each form the eight draws have, none other; the pack's line makes each: from one sample the whole texel, from
@@ -193,7 +199,6 @@ TEST(RawZetaColour, WhichZetasItWrites)
 TEST(RawZetaColour, ThePackMakesEachState)
 {
     const std::string metal = SourceText("../raw/pack/stencil_bits.metal");
-    const std::string keys = SourceText("../raw/runtime/raw_record_parts.cpp");
     for (const uint32_t format : {253u, 260u, 252u})
         for (const auto &[samples, pick] : kForms) {
             const char *colour = raw::stencilColourState(format, samples, pick);
@@ -204,7 +209,9 @@ TEST(RawZetaColour, ThePackMakesEachState)
             const std::string f = function(colour);
             EXPECT_EQ(std::string(colour), "raw.stencil_bits." + f);
             EXPECT_NE(metal.find("fragment uint4 " + f + "("), std::string::npos) << f;
-            EXPECT_NE(keys.find("\"stencil_bits_vert | f " + f + "\""), std::string::npos) << f;
+            EXPECT_TRUE(std::any_of(std::begin(raw::kOwnStates), std::end(raw::kOwnStates), [&](const char *key) {
+                return "stencil_bits_vert | f " + f == key;
+            })) << f;
             EXPECT_EQ(lineMask(f, raw::zetaColourFormat(format)), format == 260 && samples > 1 ? 4u : 15u) << f;
         }
 }

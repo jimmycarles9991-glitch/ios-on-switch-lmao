@@ -89,6 +89,16 @@ fn module() -> Option<Vec<u8>> {
 /// supports everything, and its framebuffer fetch is the pixel interlock (`interlock`) or unordered input attachments,
 /// as the raw path's storage and barrier forms compile; held in two planes where `planes`
 fn device(interlock: bool, planes: bool) -> crate::device::profile::DeviceProfile {
+    let made = gm20b(interlock, false);
+    match planes {
+        true => made.with_two_plane_extended_range().profile().clone(),
+        false => made.profile().clone(),
+    }
+}
+
+/// [`device`]'s device, its attachments held in one image; reading and writing storage images without a format, as
+/// the raw path's NVK does, where `formatless`
+pub(super) fn gm20b(interlock: bool, formatless: bool) -> Device {
     use crate::device::description::FormatProperties;
     use crate::device::profile::Limits;
     use crate::device::FramebufferFetchPolicy;
@@ -146,6 +156,12 @@ fn device(interlock: bool, planes: bool) -> crate::device::profile::DeviceProfil
         VkFeature::ShaderStorageImageExtendedFormats,
         VkFeature::IndependentBlend,
     ]);
+    if formatless {
+        desc.features.extend([
+            VkFeature::ShaderStorageImageReadWithoutFormat,
+            VkFeature::ShaderStorageImageWriteWithoutFormat,
+        ]);
+    }
     let mut policy = DevicePolicy::default();
     if interlock {
         desc.extensions.insert(VkExtension::ExtFragmentShaderInterlock);
@@ -154,11 +170,7 @@ fn device(interlock: bool, planes: bool) -> crate::device::profile::DeviceProfil
     } else {
         policy.framebuffer_fetch = FramebufferFetchPolicy::AcceptUnordered;
     }
-    let made = Device::new(desc, policy).expect("test device");
-    match planes {
-        true => made.with_two_plane_extended_range().profile().clone(),
-        false => made.profile().clone(),
-    }
+    Device::new(desc, policy).expect("test device")
 }
 
 /// Both forms' devices, named

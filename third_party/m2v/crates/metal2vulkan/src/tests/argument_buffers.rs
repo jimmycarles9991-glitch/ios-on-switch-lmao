@@ -7,7 +7,7 @@ use crate::bind::{
     ArgumentBufferLayout, ArgumentDescriptor, ArgumentLayoutError, ArgumentType as T,
 };
 use crate::budget::Budget;
-use crate::library::{FunctionConstantValues, Library};
+use crate::library::{Function, FunctionConstantValues, Library};
 use crate::metal::DataType as D;
 use crate::pipeline::testing::AssembleError;
 
@@ -464,12 +464,8 @@ define void @kP(ptr addrspace(1) %p) {
   !"air.arg_type_name", !"float", !"air.arg_name", !"p"}
 "#;
 
-/// The layout of the argument buffer `kernel` of [`MODULE`] takes at `index`; `None` where
-/// `llvm-as` is missing.
-pub(super) fn function_layout(
-    kernel: &str,
-    index: u32,
-) -> Option<Result<ArgumentBufferLayout, ArgumentLayoutError>> {
+/// Kernel `kernel` of [`MODULE`]; `None` where `llvm-as` is missing.
+pub(super) fn fixture_function(kernel: &str) -> Option<Function> {
     let bitcode = match metal2vulkan_devtools::llvm_assemble_text(MODULE) {
         Ok(bitcode) => bitcode,
         Err(AssembleError::Missing(why)) => {
@@ -479,8 +475,16 @@ pub(super) fn function_layout(
         Err(AssembleError::Rejected(why)) => panic!("llvm-as rejected the module: {why}"),
     };
     let library = Library::from_air(&bitcode).expect("the module decodes");
-    let function = library.function(kernel).expect("the kernel");
-    Some(function.argument_buffer_layout(
+    Some(library.function(kernel).expect("the kernel"))
+}
+
+/// The layout of the argument buffer `kernel` of [`MODULE`] takes at `index`; `None` where
+/// `llvm-as` is missing.
+pub(super) fn function_layout(
+    kernel: &str,
+    index: u32,
+) -> Option<Result<ArgumentBufferLayout, ArgumentLayoutError>> {
+    Some(fixture_function(kernel)?.argument_buffer_layout(
         index,
         &FunctionConstantValues::defaults(),
         &Budget::default(),
@@ -593,12 +597,24 @@ fn struct_arrays_take_their_span_of_indices_per_element() {
     }
 }
 
+/// `array<array<texture2d<float>, 2>, 3>` then a float: one id per innermost element, laid out
+/// flat, as an M4 under macOS 27.2 answers every array of arrays it was asked (textures, samplers,
+/// pointers, constants, three deep, in structs and their arrays).
 #[test]
-fn what_metal_makes_no_function_encoder_for_is_refused() {
+fn an_array_of_arrays_is_laid_out_flat() {
     let Some(aa) = function_layout("kAA", 0) else {
         return;
     };
-    assert_eq!(aa, Err(ArgumentLayoutError::ArrayOfArrays { id: 0 }));
+    let aa = aa.expect("kAA's argument buffer");
+    assert_eq!(sized(&aa), (56, 8));
+    for k in 0..6 {
+        assert_eq!(at(&aa, k), (8 * u64::from(k), T::Texture), "element {k}");
+    }
+    assert_eq!(at(&aa, 6), (48, T::Constant));
+}
+
+#[test]
+fn what_metal_makes_no_function_encoder_for_is_refused() {
     for (kernel, index) in [("kP", 0), ("kA", 1), ("kA", 2), ("kH", 0)] {
         assert_eq!(
             function_layout(kernel, index).expect("assembled"),

@@ -7,7 +7,7 @@ last pass, which is NVN's convention in Ryujinx's AdvancedBlendFunctions.cs.
 
 from collections.abc import Callable
 
-from ucode import Asm, Program, half_bits
+from ucode import Asm, Program, first_pass_on_constant_zero, half_bits
 
 E = 0x068E  # the 1.0e-4 guard QuartzCore uses in every max(x, e)
 W601 = (0x34CD, 0x38B8, 0x2F0A)  # 0.300, 0.590, 0.110: lum() of the HSL modes and dlc
@@ -81,7 +81,8 @@ def program(
 ) -> Program:
     asm = Asm()
     build(asm)
-    return Program(name, asm.code, consts or {}, alpha, frozenset(), note)
+    code, constants = first_pass_on_constant_zero(asm.code, consts or {})
+    return Program(name, code, constants, alpha, frozenset(), note)
 
 
 def separable(name: str, flags: str = '') -> Program:  # noqa: C901, PLR0915  build holds one branch per blend mode

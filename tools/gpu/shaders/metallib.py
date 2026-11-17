@@ -32,16 +32,27 @@ class Function(NamedTuple):
         return tuple(c for c in self.constants if c.required)
 
 
+def slices(data: bytes) -> list[tuple[int, bytes]]:
+    """Return every MTLB slice of `data` with its cpusubtype: a fat file's, in file order, or a thin one as subtype 0.
+
+    A fat file can hold several AIR64 slices that differ in their AIR version (iOS 27's CoreImage.metallib: AIR 2.4 and
+    AIR 2.9), so the first is not all of it.
+    """
+    if data[:4] == FAT_MAGIC and len(data) >= 8:
+        (count,) = struct.unpack_from('>I', data, 4)
+        found = []
+        for i in range(min(count, (len(data) - 8) // 20)):
+            _, subtype, offset, size, _ = struct.unpack_from('>5I', data, 8 + 20 * i)
+            if data[offset : offset + 4] == MAGIC:
+                found.append((subtype, data[offset : offset + size]))
+        return found
+    return [(0, data)] if data[:4] == MAGIC and len(data) >= HEADER else []
+
+
 def thin(data: bytes) -> bytes | None:
     """Return the MTLB bytes of `data`: itself, or the first MTLB slice of a fat file (None: neither)."""
-    if data[:4] == FAT_MAGIC:
-        (count,) = struct.unpack_from('>I', data, 4)
-        for i in range(count):
-            _, _, offset, size, _ = struct.unpack_from('>5I', data, 8 + 20 * i)
-            if data[offset : offset + 4] == MAGIC:
-                return data[offset : offset + size]
-        return None
-    return data if data[:4] == MAGIC and len(data) >= HEADER else None
+    found = slices(data)
+    return found[0][1] if found else None
 
 
 def _tags(data: bytes, at: int, end: int) -> dict[str, bytes]:

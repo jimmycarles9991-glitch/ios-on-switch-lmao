@@ -277,3 +277,9 @@ kernel void threadgroup_span(threadgroup uint *memory [[threadgroup(0)]], device
         x ^= memory[i] + i;
     out[tid] = x;
 }
+
+// metal.native.client_*: the colour Apple's driver was measured drawing with (0.2, 0.4, 0.6, 0.8)
+fragment float4 client_colour_fragment()
+{
+    return float4(0.2f, 0.4f, 0.6f, 0.8f);
+}

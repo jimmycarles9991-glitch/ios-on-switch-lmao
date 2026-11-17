@@ -189,9 +189,21 @@ static int pipelineReadiness(RMCommandBuffer *cb, const RMSegment &range)
     return pending ? 0 : 1;
 }
 
-// A native variant this queue head waits for, made on the raw compiler's two bounded workers: refused, the range goes to m2v at
-// once. No deadline.
-static int variantReadiness(RMCommandBuffer *cb, const RMSegment &range)
+// A native variant this queue head waits for, made on the raw compiler's two bounded workers: refused, its command buffer
+// fails. No deadline.
+// Work the raw path cannot run: its command buffer fails, as Metal's does for a pipeline it could not compile, never handed
+// to another device. Logged for the first few a process meets.
+static NSError *refusedAtReadiness(const char *why)
+{
+    static std::atomic<uint32_t> told{0};
+    if (told.fetch_add(1, std::memory_order_relaxed) < 8)
+        os_log_error(rawLog(), "raw: %{public}s: a command buffer failed: %{public}s", getprogname(), why ?: "");
+    return [NSError errorWithDomain:MTLCommandBufferErrorDomain
+                               code:MTLCommandBufferErrorInternal
+                           userInfo:@{NSLocalizedDescriptionKey : [NSString stringWithFormat:@"%s", why ?: ""]}];
+}
+
+static int variantReadiness(RMCommandBuffer *cb, const RMSegment &range, const char **why)
 {
     using Variant = raw::Variant<raw::Pipeline>;
     bool pending = false;
@@ -207,8 +219,10 @@ static int variantReadiness(RMCommandBuffer *cb, const RMSegment &range)
         const auto state = variant->observe(std::move(observer));
         if (state == Variant::State::Failed)
             return -2;
-        if (state == Variant::State::Refused)
+        if (state == Variant::State::Refused) {
+            *why = "a render state variant the shader compiler refused";
             return -1;
+        }
         if (state == Variant::State::Pending)
             pending = true;
     }
@@ -324,21 +338,19 @@ void submitLoop()
                     blocked = true;
                     dependencies = RMRawProgress;
                 } else if (!range.event && range.raw) {
-                    int ready = variantReadiness(cb, range);
+                    const char *why = "";
+                    int ready = variantReadiness(cb, range, &why);
                     if (ready > 0)
-                        ready = computeReadiness(cb, range);
+                        ready = computeReadiness(cb, range, &why);
+                    if (ready > 0)
+                        ready = rmXrShadowReadiness(cb, range.from, range.to);
                     if (ready == -2) {
                         error = [NSError
                             errorWithDomain:MTLCommandBufferErrorDomain
                                        code:MTLCommandBufferErrorInternal
                                    userInfo:@{NSLocalizedDescriptionKey : @"A render pipeline could not be compiled"}];
                     } else if (ready < 0) {
-                        range.raw = false;
-                        blocked = eventReadiness(cb, deadline) == raw::EventReadiness::blocked;
-                        if (blocked)
-                            wait = eventWait(cb);
-                        std::lock_guard<raw::Mutex> lock(cb->_lock);
-                        error = cb->_segError;
+                        error = refusedAtReadiness(why);
                     } else if (!ready) {
                         blocked = true;
                         wait = raw::HeadWait::compile;

@@ -2,7 +2,8 @@
 // GM20B methods NVIDIA's open class headers do not name, in their naming style with a SWITCH_ prefix.
 //
 // 3D: the tiled cache (Maxwell's binning rasterizer) and the pixel-ordered texture data cache invalidate, as deko3d has
-// them (source/maxwell/engine_3d.def, gpu_3d_base.cpp, MIT) for NVN on the Tegra X1.
+// them (source/maxwell/engine_3d.def, gpu_3d_base.cpp, MIT) for NVN on the Tegra X1; CSAA_ENABLE as envytools names it,
+// which the golden context sets to 1 and NVIDIA's userspace writes 0.
 // Host: Tegra's host1x syncpoint methods, as nvgpu has them (include/nvgpu/hw/gm20b/hw_pbdma_gm20b.h
 // pbdma_syncpoint{a,b}, gk20a/fifo_gk20a.c, MIT). SYNCPOINTB's index is 8 bits: syncpoints 0-255 only.
 #pragma once
@@ -20,6 +21,7 @@
 #define SWITCH_NVB197_TILED_CACHE_BARRIER                         0x0f7c
 #define SWITCH_NVB197_TILED_CACHE_FLUSH                           0x0f80
 #define SWITCH_NVB197_SET_TILED_CACHE_CONFIG_2                    0x1108
+#define SWITCH_NVB197_SET_CSAA_ENABLE                             0x15b4
 
 #define SWITCH_NVB06F_SYNCPOINTA                 0x0070
 #define SWITCH_NVB06F_SYNCPOINTA_PAYLOAD         31 : 0

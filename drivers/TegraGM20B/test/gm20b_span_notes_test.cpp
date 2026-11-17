@@ -43,12 +43,16 @@ TEST(GM20BSpanNotes, TheNewestSixteenAreKept)
 	EXPECT_EQ(line.find("backboardd: s3;"), std::string::npos);
 }
 
-TEST(GM20BSpanNotes, OnlyWholeNotesFit)
+// ui.launch_hitch's whole launch and return can note more spans than one reply holds: boot 22's had four, two of them the
+// generic merge state's, and a note left out of a reply must not be lost
+TEST(GM20BSpanNotes, OnlyWholeNotesFitAndTheRestWaitForTheNextTake)
 {
 	Notes n = {};
 	add(n, "backboardd", "first");
 	add(n, "backboardd", "second");
 	EXPECT_EQ(take(n, 0, 56), "job_max_us=0 sync_subs=0 spans=2; backboardd: first");
+	EXPECT_EQ(take(n, 0, 56), "job_max_us=0 sync_subs=0 spans=1; backboardd: second");
+	EXPECT_EQ(take(n, 0, 56), "job_max_us=0 sync_subs=0 spans=0");
 }
 
 TEST(GM20BSpanNotes, ALongOwnerOrTextIsCut)

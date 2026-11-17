@@ -7,13 +7,14 @@ import UIKit
 /// The display's second window (window B, the hardware plane): Core Animation detaches a playing video's layer onto
 /// it when the display takes it, so the video costs no GPU composite per frame. Plays the H.264 1080p clip in an
 /// AVPlayerLayer and reads the kernel's plane counters around it (kern.switch_planes_*, debug kernels): window B has
-/// to have flipped and latched, and no layer Core Animation detached may have gone unshown.
+/// to have flipped and latched, no layer Core Animation detached may have gone unshown, and no decoder buffer may have
+/// been mapped again after its slot was dropped for room (the pool stays mapped, one mapping a buffer).
 struct PlanesTest: HWTest {
     let id = "display.planes"
     let name = "Video on the display's hardware plane (window B)"
     let subsystem = Subsystem.compositor
 
-    static let counters = ["flips", "latched", "maps", "dropped"]
+    static let counters = ["flips", "latched", "maps", "dropped", "remaps"]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let (before, unread) = Self.totals()
@@ -58,6 +59,11 @@ struct PlanesTest: HWTest {
                 ("window B flipped (d_flips > 0)", delta("flips") > 0),
                 ("window B took its sets (d_latched > 0)", delta("latched") > 0),
                 ("no detached layer went unshown (d_dropped 0)", delta("dropped") == 0),
+                ("the decoder pool reuses mappings across latches", delta("maps") < delta("latched")),
+                (
+                    "window B mapped no buffer twice (d_remaps 0)",
+                    before["remaps"] != nil && after["remaps"] != nil && delta("remaps") == 0
+                ),
             ], metrics)
     }
 

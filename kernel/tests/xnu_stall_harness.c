@@ -1,5 +1,7 @@
 #include "xnu_stall_harness.h"
 
+#include <stdlib.h>
+
 #include "switch_stall.h"
 
 static struct switch_stall_episode episode;
@@ -65,6 +67,36 @@ const char *xnu_stall_wait_name(unsigned hint)
 unsigned xnu_stall_wait_names(void)
 {
     return SWITCH_STALL_WAIT_NAMES;
+}
+
+unsigned xnu_stall_most(const uint64_t *tids, const uint64_t *cpus, unsigned n, bool complete, const uint64_t *now_tids,
+                        const uint64_t *now_cpus, unsigned now_n, unsigned k, uint64_t *top_tids, uint64_t *top_gains)
+{
+    struct switch_stall_used seen[64];
+    struct switch_stall_top top[8] = {{0}};
+    unsigned entered = 0;
+
+    for (unsigned i = 0; i < n; i++) {
+        seen[i].tid = tids[i];
+        seen[i].cpu = cpus[i];
+    }
+    qsort(seen, n, sizeof(seen[0]), switch_stall_used_cmp);
+    for (unsigned i = 0; i < now_n; i++) {
+        const struct switch_stall_top e = {
+            .tid = now_tids[i],
+            .cpu = switch_stall_gained(seen, n, complete, now_tids[i], now_cpus[i]),
+            .ref = &seen[0],
+        };
+        switch_stall_rank(top, k, e);
+    }
+    for (unsigned i = 0; i < k; i++) {
+        top_tids[i] = top[i].ref != NULL ? top[i].tid : 0;
+        top_gains[i] = top[i].ref != NULL ? top[i].cpu : 0;
+        if (top[i].ref != NULL) {
+            entered++;
+        }
+    }
+    return entered;
 }
 
 int xnu_stall_user_where(uint64_t pc, uint64_t sr_base, uint64_t sr_size, uint64_t sr_slide, uint64_t header,

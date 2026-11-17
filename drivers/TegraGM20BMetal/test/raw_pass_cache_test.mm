@@ -47,16 +47,31 @@ struct Key {
 class RawPassCache : public testing::Test {
 protected:
     id<MTLTexture> depth, resolve;
+    RMCommandBuffer *cb;
+
+    static void SetUpTestSuite()
+    {
+        rmPoolCommandBuffers();
+    }
 
     void SetUp() override
     {
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         if (!device)
             GTEST_SKIP() << "no Metal device on this host";
+        rmPassTrim();
+        cb = [RMCommandBuffer new];
+        rmTakeRecording(cb);
         depth = depthTexture(device, 4);
         resolve = depthTexture(device, 1);
         ASSERT_NE(depth, nil);
         ASSERT_NE(resolve, nil);
+    }
+
+    void TearDown() override
+    {
+        if (cb)
+            rmRecordingDone(cb);
     }
 
     Key keyOf(MTLMultisampleDepthResolveFilter filter)
@@ -92,14 +107,13 @@ TEST_F(RawPassCache, PassesOfTwoDepthResolveFiltersAreTwoEntries)
         RMPass facts{};
         facts.depthResolve = resolve;
         facts.depthFilter = uint32_t(filters[i]);
-        rmPassKeep(keys[i].bytes, keys[i].hash, resolvingPass(depth, resolve, filters[i]), facts, e);
+        rmPassKeep(cb, keys[i].bytes, keys[i].hash, resolvingPass(depth, resolve, filters[i]), facts, e);
     }
     const RMPassEntry *kept[2] = {};
     for (int i = 0; i < 2; i++) {
-        kept[i] = rmPassFind(keys[i].bytes, keys[i].hash);
+        kept[i] = rmPassFind(cb, keys[i].bytes, keys[i].hash);
         ASSERT_NE(kept[i], nullptr);
         EXPECT_EQ(kept[i]->facts.depthFilter, uint32_t(filters[i])) << i;
-        rmPassDone();
     }
     EXPECT_NE(kept[0], kept[1]);
 }
@@ -128,30 +142,28 @@ TEST_F(RawPassCache, AFrameOfFortyPassesIsKeptForTheNext)
     std::vector<Key> keys(passes.size());
     for (size_t i = 0; i < passes.size(); i++) {
         ASSERT_TRUE(rmPassKey(passes[i], keys[i].bytes, keys[i].hash));
-        if (rmPassFind(keys[i].bytes, keys[i].hash))
-            rmPassDone();
-        else
-            rmPassKeep(keys[i].bytes, keys[i].hash, [passes[i] copy], RMPass {}, e);
+        if (!rmPassFind(cb, keys[i].bytes, keys[i].hash))
+            rmPassKeep(cb, keys[i].bytes, keys[i].hash, [passes[i] copy], RMPass {}, e);
     }
+    rmRecordingDone(cb);
+    cb = [RMCommandBuffer new];
+    rmTakeRecording(cb);
     size_t found = 0;
     for (const Key &k : keys)
-        if (rmPassFind(k.bytes, k.hash)) {
+        if (rmPassFind(cb, k.bytes, k.hash))
             ++found;
-            rmPassDone();
-        }
     EXPECT_EQ(found, passes.size());
 }
 
-// After an animation the render server's encoding thread may encode nothing for a long while, and its kept passes'
-// copies hold the textures of its last frame: memory pressure's trim (gRawRelease, on its own queue) lets them go with
-// no lookup on that thread.
-TEST_F(RawPassCache, TrimLetsAnIdleThreadsPassesGo)
+TEST_F(RawPassCache, TrimLetsAnIdleRecordingsPassesGo)
 {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     __weak id<MTLTexture> targets[3];
     std::promise<void> kept, done;
     std::thread encoder([&] {
         @autoreleasepool {
+            RMCommandBuffer *cb = [RMCommandBuffer new];
+            rmTakeRecording(cb);
             MTLTextureDescriptor *t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
                                                                                          width:64
                                                                                         height:64
@@ -170,8 +182,9 @@ TEST_F(RawPassCache, TrimLetsAnIdleThreadsPassesGo)
                 ASSERT_TRUE(rmPassKey(d, k.bytes, k.hash));
                 RMPass facts{};
                 facts.color[0].texture = target;
-                rmPassKeep(k.bytes, k.hash, [d copy], facts, e);
+                rmPassKeep(cb, k.bytes, k.hash, [d copy], facts, e);
             }
+            rmRecordingDone(cb);
         }
         kept.set_value();
         done.get_future().wait();
@@ -190,15 +203,15 @@ TEST_F(RawPassCache, TrimLetsAnIdleThreadsPassesGo)
 
 }  // namespace
 
-// A trim that meets a thread inside a pass it found takes nothing of that thread's: the thread is reading the copy. The
-// thread lets its copies go at its next lookup instead.
-TEST_F(RawPassCache, ATrimLeavesAPassItsThreadIsReadingForItsNextLookup)
+TEST_F(RawPassCache, ATrimLeavesAPassItsRecordingOwnsUntilItReturns)
 {
     id<MTLDevice> device = MTLCreateSystemDefaultDevice();
     __weak id<MTLTexture> weakTarget;
     std::promise<void> reading, trimmed, looked;
     std::promise<void> done;
     std::thread encoder([&] {
+        RMCommandBuffer *cb = [RMCommandBuffer new];
+        rmTakeRecording(cb);
         Key k;
         @autoreleasepool {
             MTLTextureDescriptor *t = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
@@ -216,15 +229,14 @@ TEST_F(RawPassCache, ATrimLeavesAPassItsThreadIsReadingForItsNextLookup)
             ASSERT_TRUE(rmPassKey(d, k.bytes, k.hash));
             RMPass facts{};
             facts.color[0].texture = target;
-            rmPassKeep(k.bytes, k.hash, [d copy], facts, [RMRenderEncoder new]);
+            rmPassKeep(cb, k.bytes, k.hash, [d copy], facts, [RMRenderEncoder new]);
         }
-        const RMPassEntry *kept = rmPassFind(k.bytes, k.hash);
+        const RMPassEntry *kept = rmPassFind(cb, k.bytes, k.hash);
         ASSERT_NE(kept, nullptr);
         reading.set_value();
         trimmed.get_future().wait();
         EXPECT_NE(kept->pass, nil) << "the copy this thread reads went under it";
-        rmPassDone();
-        EXPECT_EQ(rmPassFind(k.bytes, k.hash), nullptr) << "the trim's ask is met at the next lookup";
+        rmRecordingDone(cb);
         looked.set_value();
         done.get_future().wait();
     });
@@ -238,7 +250,7 @@ TEST_F(RawPassCache, ATrimLeavesAPassItsThreadIsReadingForItsNextLookup)
     trimmed.set_value();
     trim.wait();
     looked.get_future().wait();
-    EXPECT_EQ(weakTarget, nil) << "the thread let its copies go at its next lookup";
+    EXPECT_EQ(weakTarget, nil) << "the returned recording let its copies go";
     done.set_value();
     encoder.join();
 }

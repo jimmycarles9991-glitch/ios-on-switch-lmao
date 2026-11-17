@@ -2280,6 +2280,9 @@ impl<'a> ShaderFromNir<'a> {
     ) -> MemEvictionPriority {
         if self.sm.sm() >= 70 && access & ACCESS_NON_TEMPORAL != 0 {
             MemEvictionPriority::First
+        } else if self.sm.sm() < 70 && access & ACCESS_ATOMIC != 0 {
+            // An atomic load reads the coherence point: L2 alone (.CG)
+            MemEvictionPriority::NoAllocate
         } else {
             MemEvictionPriority::Normal
         }

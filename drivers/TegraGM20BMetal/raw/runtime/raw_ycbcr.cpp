@@ -2,6 +2,7 @@
 // See raw_ycbcr.h.
 #include "raw_ycbcr.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include "raw_packed_plane.h"
@@ -38,6 +39,7 @@ struct Format {
     Sub sub;
     bool packed;
     Reads reads;
+    bool onePlane = false;
 };
 
 constexpr Format kFormats[] = {
@@ -51,6 +53,9 @@ constexpr Format kFormats[] = {
     {543, 10, Sub420, false, Codes},     {544, 10, Sub422, false, Codes},     {545, 10, Sub444, false, Codes},
     {546, 10, Sub420, true, Codes},      {547, 10, Sub422, true, Codes},      {548, 10, Sub444, true, Codes},
 };
+
+// one plane of Y0 Cb Y1 Cr bytes a texel pair, whatever the surface's order (an M4 Max)
+constexpr Format kOnePlaneFormats[] = {{501, 8, Sub422, false, Converted, true}, {521, 8, Sub422, false, Srgb, true}};
 
 constexpr uint32_t fourcc(const char (&c)[5])
 {
@@ -78,9 +83,17 @@ constexpr Surface kSurfaces[] = {
     {fourcc("_RB4"), 8, false, true, Sub444},
 };
 
+// the one-plane formats' surfaces of no planes
+constexpr Surface kOnePlaneSurfaces[] = {{fourcc("2vuy"), 8, false, false, Sub422},
+                                         {fourcc("yuvs"), 8, false, false, Sub422},
+                                         {fourcc("yuvf"), 8, false, true, Sub422}};
+
 const Format *findFormat(uint32_t mtl)
 {
     for (const Format &f : kFormats)
+        if (f.mtl == mtl)
+            return &f;
+    for (const Format &f : kOnePlaneFormats)
         if (f.mtl == mtl)
             return &f;
     return nullptr;
@@ -92,7 +105,12 @@ constexpr int32_t kCoefficients[2][3][6] = {
     {{-9, 13123, -3218, -6686, 16591, 9}, {-1, 14743, -1753, -4383, 17373, 1}, {0, 13806, -1540, -5349, 17614, -1}},
     {{-8, 11483, -2816, -5850, 14518, 8}, {-1, 12900, -1534, -3835, 15201, 1}, {0, 12080, -1348, -4680, 15412, -1}}};
 
-// none and BT.601 0, BT.709 and SMPTE 240M (Metal reads it as BT.709) 1, BT.2020 2, anything else -1
+constexpr int kLumaFirst = 3;
+
+// none and BT.601 0, BT.709 and SMPTE 240M (Metal reads it as BT.709) 1, BT.2020 2, P3_D65 and DCI_P3 kLumaFirst, anything
+// else -1. Under the P3 matrices an M4 Max converts nothing (raw/test/ycbcroracle.mm): a converted format reads and loads its
+// codes as red Y, green Cb, blue Cr, each code / max, and samples and stores as the codes format of its surface does; an
+// sRGB format's reads differ from process to process there, and it is read as the converted one.
 int matrixIndex(const char *m)
 {
     if (!m || !strcmp(m, "ITU_R_601_4"))
@@ -101,10 +119,12 @@ int matrixIndex(const char *m)
         return 1;
     if (!strcmp(m, "ITU_R_2020"))
         return 2;
+    if (!strcmp(m, "P3_D65") || !strcmp(m, "DCI_P3"))
+        return kLumaFirst;
     return -1;
 }
 
-YcbcrOutput outputOf(const Format &f)
+YcbcrOutput outputOf(const Format &f, bool lumaFirst)
 {
     switch (f.reads) {
     case Converted:
@@ -114,6 +134,8 @@ YcbcrOutput outputOf(const Format &f)
     case Codes:
         break;
     }
+    if (lumaFirst)
+        return f.packed ? YcbcrLumaFirst10Packed : f.bits == 8 ? YcbcrLumaFirst8 : YcbcrLumaFirst10;
     return f.packed ? YcbcrCodes10Packed : f.bits == 8 ? YcbcrCodes8 : YcbcrCodes10;
 }
 
@@ -127,10 +149,13 @@ uint32_t imageFormat(YcbcrOutput o)
     case YcbcrSrgbPacked:
         return 125;  // RGBA32Float
     case YcbcrCodes8:
+    case YcbcrLumaFirst8:
         return 70;  // RGBA8Unorm
     case YcbcrCodes10:
     case YcbcrCodes10Packed:
     case YcbcrPackedPlane:
+    case YcbcrLumaFirst10:
+    case YcbcrLumaFirst10Packed:
         break;
     }
     return 90;  // RGB10A2Unorm
@@ -156,6 +181,13 @@ bool isYcbcrFormat(uint32_t pixelFormat)
     return findFormat(pixelFormat) != nullptr;
 }
 
+bool ycbcrMetalRefuses(uint32_t pixelFormat, uint32_t width, uint32_t height, uint64_t usage)
+{
+    constexpr uint64_t kWrites = 2 | 4;  // ShaderWrite, RenderTarget
+    const Format *f = findFormat(pixelFormat);
+    return f && f->sub != Sub444 && ((width | height) & 1) && (!usage || (usage & kWrites));
+}
+
 const char *planYcbcr(const YcbcrFacts &f, YcbcrPlan &out)
 {
     if (packedPlaneChannels(f.pixelFormat))
@@ -163,68 +195,92 @@ const char *planYcbcr(const YcbcrFacts &f, YcbcrPlan &out)
     const Format *format = findFormat(f.pixelFormat);
     if (!format)
         return "not a two-plane YCbCr format";
-    if (f.planes != 2)
-        return "not two planes";
+    if (format->onePlane ? f.planes > 1 || f.plane : f.planes != 2)
+        return format->onePlane ? "a one-plane format over a plane of a planar surface" : "not two planes";
     const Surface *surface = nullptr;
     for (const Surface &s : kSurfaces)
-        if (s.fourcc == f.fourcc && s.bits == format->bits && s.packed == format->packed)
+        if (s.fourcc == f.fourcc && s.bits == format->bits && s.packed == format->packed && !format->onePlane)
+            surface = &s;
+    for (const Surface &s : kOnePlaneSurfaces)
+        if (s.fourcc == f.fourcc && format->onePlane)
             surface = &s;
     if (!surface)
         return "pixel format";
-    bool planeOne = false;
-    if (f.plane == 0) {
-        const bool fits = (halvedAcross(format->sub) || !halvedAcross(surface->sub)) &&
-                          (halvedDown(format->sub) || !halvedDown(surface->sub));
-        if (!fits)
-            return "chroma finer in the format than in the surface";
-    } else if (f.plane == 1) {
-        if (halvedDown(surface->sub))
-            return "plane 1 of a 4:2:0 surface (Metal reads its rows past the plane)";
-        planeOne = true;
-    } else {
+    if (f.plane > 1)
         return "a plane past 1";
-    }
-    const int matrix = matrixIndex(f.matrix);
+    // Metal reads a plane's rows on past its end where the texture has more (the format's chroma finer than the surface's,
+    // plane 1 of a 4:2:0 surface read as luma, a texture taller than its surface): the bytes there, up to the end of the
+    // allocation's last page, and 0 past it (an M4 Max)
+    const bool planeOne = f.plane == 1;
+    const bool fits = planeOne ? !halvedDown(surface->sub)
+                               : (halvedAcross(format->sub) || !halvedAcross(surface->sub)) &&
+                                     (halvedDown(format->sub) || !halvedDown(surface->sub));
+    const bool pastPlanes = !fits || f.height > f.surfaceHeight;
+    int matrix = matrixIndex(f.matrix);
     if (matrix < 0)
         return "matrix";
+    Format read = *format;
+    const bool lumaFirst = matrix == kLumaFirst && format->reads != Codes;
+    // stored under a P3 matrix as the codes format of its surface stores (an M4 Max, raw/test/ycbcrstoreoracle.mm), measured
+    // for the unpacked 4:2:0 and 4:2:2 converted formats; an sRGB one's stores are no rule's (128 in every plane over 444v)
+    const bool lumaFirstStored = format->reads == Converted && !format->packed && format->sub != Sub444;
+    if (f.target && lumaFirst && !lumaFirstStored)
+        return "a render target under a P3 matrix of an sRGB, packed or 4:4:4 format, whose stores no rule gives";
+    if (matrix == kLumaFirst) {
+        read.reads = Codes;
+        matrix = 0;
+    }
+    format = &read;
     if (!f.simple)
-        return "shape or usage";
-    if (f.width != f.surfaceWidth || f.height != f.surfaceHeight || !f.width || !f.height)
-        return "texture size not the surface's";
+        return "shape";
+    if (!f.width || !f.height)
+        return "an empty texture";
     if (f.target) {
+        if (format->onePlane)
+            return "a one-plane YCbCr render target, whose stores no rule gives";
         if (const char *why = ycbcrTargetRefusal(f.pixelFormat))
             return why;
-        if (planeOne || surface->sub != format->sub || (halvedAcross(format->sub) && (f.width & 1)) ||
+        if (planeOne || pastPlanes || surface->sub != format->sub || (halvedAcross(format->sub) && (f.width & 1)) ||
             (halvedDown(format->sub) && (f.height & 1)))
-            return "a render target over plane 1, of other chroma than its surface's, or of a size its blocks do not "
-                   "tile";
+            return "a render target over plane 1, taller than its surface, of other chroma than its surface's, or of "
+                   "a size its blocks do not tile";
+        // an M4 Max's store into one changed words past the texture, and some of its passes faulted
+        if (format->packed && (f.width != f.surfaceWidth || f.height != f.surfaceHeight))
+            return "a packed render target smaller than its surface";
     }
     const uint32_t bytes = format->bits == 8 ? 1 : 2;
     const uint32_t cw = halvedAcross(format->sub) ? (f.width + 1) / 2 : f.width;
     const uint32_t ch = halvedDown(format->sub) ? (f.height + 1) / 2 : f.height;
-    const uint64_t luma = f.offset[planeOne ? 1 : 0], chroma = f.offset[1];
-    const uint32_t lumaPitch = f.pitch[planeOne ? 1 : 0], chromaPitch = f.pitch[1];
+    const bool onePlane = format->onePlane;
+    const uint64_t luma = f.offset[planeOne ? 1 : 0], chroma = onePlane ? luma : f.offset[1];
+    const uint32_t lumaPitch = f.pitch[planeOne ? 1 : 0], chromaPitch = onePlane ? lumaPitch : f.pitch[1];
     if (((luma | chroma) & 15) || ((lumaPitch | chromaPitch) & 15))
         return "plane offset or row not 16-byte";
-    const uint64_t lumaRow = rowBytes(*format, f.width), chromaRow = rowBytes(*format, 2 * cw);
-    if (lumaPitch < lumaRow || (!planeOne && chromaPitch < chromaRow))
-        return "row shorter than its codes";
+    // a row of more codes than its plane's pitch holds runs on into the next (Metal reads each row at the pitch)
+    const uint64_t lumaRow = onePlane ? 4ull * cw : rowBytes(*format, f.width),
+                   chromaRow = onePlane ? lumaRow : rowBytes(*format, 2 * cw);
+    const bool overlapping = lumaPitch < lumaRow || (!planeOne && chromaPitch < chromaRow);
+    if (f.target && overlapping)
+        return "a render target of more codes a row than its plane's pitch holds";
     const uint64_t lumaEnd = luma + uint64_t(lumaPitch) * (f.height - 1) + lumaRow;
     const uint64_t chromaEnd = chroma + uint64_t(chromaPitch) * (ch - 1) + chromaRow;
-    if (lumaEnd > f.allocBytes || (!planeOne && chromaEnd > f.allocBytes))
-        return "planes past the allocation";
+    const uint64_t readable = std::max(f.allocBytes, f.mappedBytes);
+    if (lumaEnd > readable || (!planeOne && chromaEnd > readable))
+        return "rows past the allocation's last page (an M4 Max reads 0 there)";
 
     out = {};
-    out.nativePlanes = f.fourcc == fourcc("420v") || f.fourcc == fourcc("420f");
+    out.readable = readable;
+    out.onePlane = onePlane;
+    out.nativePlanes = (f.fourcc == fourcc("420v") || f.fourcc == fourcc("420f")) && !pastPlanes && !overlapping;
     out.target = f.target;
-    out.output = outputOf(*format);
+    out.output = outputOf(*format, lumaFirst);
     out.addressMap = addressMapOf(*format);
     out.image = imageFormat(out.output);
     out.lumaFormat = format->packed ? 53 : bytes == 1 ? 10 : 20;    // R32Uint, R8Unorm, R16Unorm
     out.chromaFormat = format->packed ? 53 : bytes == 1 ? 30 : 60;  // R32Uint, RG8Unorm, RG16Unorm
     out.luma = luma;
     out.lumaPitch = lumaPitch;
-    out.lumaWidth = format->packed ? uint32_t(lumaRow / 4) : f.width;
+    out.lumaWidth = format->packed ? uint32_t(lumaRow / 4) : onePlane ? 2 * cw : f.width;
     if (!planeOne) {
         out.chroma = chroma;
         out.chromaPitch = chromaPitch;

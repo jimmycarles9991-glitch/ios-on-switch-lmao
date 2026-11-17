@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-use crate::direct::native_compute_device;
 use crate::direct_compute::{NativeComputePipeline, compiled};
+use crate::direct_device::native_compute_device;
 use crate::objects::{NmbComputePipelineDescriptor, NmbDevice, compute_descriptor, e, get, guard};
 use crate::reflection::{NmbReflectionNode, Reflection};
 use crate::variants::Variants;
@@ -51,7 +51,7 @@ pub unsafe extern "C" fn nmb_compute_artifact_new(
     guard(std::ptr::null_mut(), || {
         let compile = native_compute_device(get(device)?)?;
         let descriptor = compute_descriptor(descriptor)?;
-        let budget = Budget::standard();
+        let budget = crate::compile_budget();
         let base = compiled(&compile, &descriptor, &VariantKey::new(), &budget)?;
         let reflection = reflection
             .then(|| {

@@ -2944,6 +2944,15 @@ fn read(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, r: &Read) -> BResult<
     } else {
         texel_memory(cx, fb, &r.image)?
     };
+    // A two-plane texture's alpha byte, read from its plane image at the same place.
+    let alpha = match plane_image(cx, fb, &r.image)? {
+        Some(_) if spec.is_some() => {
+            return Err(cx.fail("a residency read of a two-plane texture"));
+        }
+        Some(p) if sampled => Some(fb.fetch(p, coord, &ops)?),
+        Some(p) => Some(fb.read(p, coord, &ops, mem)?),
+        None => None,
+    };
     let access = move |fb: &mut FunctionBuilder<'_>, sparse: bool| -> BResult<SValue> {
         match (sampled, sparse) {
             (true, false) => fb.fetch(img, coord, &ops),
@@ -3002,6 +3011,10 @@ fn read(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, r: &Read) -> BResult<
             (texel, Some(word))
         }
         None => (access(fb, false)?, None),
+    };
+    let texel = match alpha {
+        Some(alpha) => joined_planes(fb, texel, alpha)?,
+        None => texel,
     };
     // A heap member of a form a heap reads: its raw texel's value, Metal's out-of-bounds texel
     // selected against its own image, which the float array's test below then leaves.
@@ -3387,8 +3400,11 @@ fn store(
     fb: &mut FunctionBuilder<'_>,
     (img, at, texel): (SValue, SValue, SValue),
     mem: TexelMemory,
-    twin: Option<TwinWrite>,
+    (twin, plane): (Option<TwinWrite>, Option<(SValue, SValue)>),
 ) -> BResult<()> {
+    if let Some((p, alpha)) = plane {
+        fb.write(p, at, alpha, &ImageOperands::default(), mem)?;
+    }
     let Some(t) = twin else {
         return fb.write(img, at, texel, &ImageOperands::default(), mem);
     };
@@ -3402,6 +3418,35 @@ fn store(
     });
     fb.if_(&mut (), t.is_bits, then, Some(other))?;
     Ok(())
+}
+
+/// The plane image of texture slot `image` (`ResourceKind::TexturePlane`), loaded, where the slot
+/// holds a two-plane `RGB10A8_2P_XR10` texture's color words; `None` for any other image.
+pub(crate) fn plane_image(
+    cx: &EmitCx<'_>,
+    fb: &mut FunctionBuilder<'_>,
+    image: &ImageRef,
+) -> BResult<Option<SValue>> {
+    let ImageRef::Slot(index) = *image else {
+        return Ok(None);
+    };
+    let Some(g) = cx.decl.families.texture.planes.get(&index).copied() else {
+        return Ok(None);
+    };
+    let ptr = fb.module().global_value(g)?;
+    Ok(Some(fb.load(ptr, MemAccess::default())?))
+}
+
+/// Raw texel `texel` of a two-plane texture's color-word image with `alpha`, its plane image's
+/// texel at the same place, joined: the alpha byte in the second lane, as the one-image form
+/// (`R32G32_UINT`) holds it.
+pub(crate) fn joined_planes(
+    fb: &mut FunctionBuilder<'_>,
+    texel: SValue,
+    alpha: SValue,
+) -> BResult<SValue> {
+    let byte = fb.composite_extract(alpha, &[0])?;
+    fb.composite_insert(byte, texel, &[1])
 }
 
 /// The table an extended-range texel of `form` converts through: the module's for an `_sRGB`
@@ -3503,18 +3548,23 @@ fn write(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, w: &Write) -> BResul
         _ => None,
     };
     let mem = texel_memory(cx, fb, &w.image)?;
+    // A two-plane texture's alpha byte, stored into its plane image beside the color word.
+    let plane = match plane_image(cx, fb, &w.image)? {
+        Some(p) => Some((p, fb.vector_shuffle(texel, texel, &[1, 1, 1, 1])?)),
+        None => None,
+    };
     // A write to a sparse texture is dropped.
     let kept = sparse_writes_kept(cx, fb, &w.image)?;
     let within = and_kept(fb, within, kept)?;
     if !w.guard {
         // A write through the null heap element, or at a level the texture lacks, is dropped.
         let cond = match (live, within) {
-            (None, None) => return store(fb, (img, coord, texel), mem, twin),
+            (None, None) => return store(fb, (img, coord, texel), mem, (twin, plane)),
             (Some(c), None) | (None, Some(c)) => c,
             (Some(a), Some(b)) => fb.binary(BinOp::LogicalAnd, a, b)?,
         };
         let then: ArmFn<'_, ()> = Box::new(move |fb, _| {
-            store(fb, (img, coord, texel), mem, twin)?;
+            store(fb, (img, coord, texel), mem, (twin, plane))?;
             Ok(ArmEnd::FallThrough(Vec::new()))
         });
         fb.if_(&mut (), cond, then, None)?;
@@ -3531,7 +3581,7 @@ fn write(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, w: &Write) -> BResul
         inb = fb.binary(BinOp::LogicalAnd, inb, within)?;
     }
     let then: ArmFn<'_, ()> = Box::new(move |fb, _| {
-        store(fb, (img, coord, texel), mem, twin)?;
+        store(fb, (img, coord, texel), mem, (twin, plane))?;
         Ok(ArmEnd::FallThrough(Vec::new()))
     });
     fb.if_(&mut (), inb, then, None)?;
@@ -3696,10 +3746,10 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
         if !s.guard {
             // A level the texture lacks drops the slice, as the null heap element does.
             let Some(within) = within else {
-                return store(fb, (img, at, texel), mem, twin);
+                return store(fb, (img, at, texel), mem, (twin, None));
             };
             let then: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
-                store(fb, (img, at, texel), mem, twin)?;
+                store(fb, (img, at, texel), mem, (twin, None))?;
                 Ok(ArmEnd::FallThrough(Vec::new()))
             });
             fb.if_(cx, within, then, None)?;
@@ -3712,7 +3762,7 @@ fn slice<'c>(cx: &mut EmitCx<'c>, fb: &mut FunctionBuilder<'_>, s: &Slice) -> BR
             inb = fb.binary(BinOp::LogicalAnd, inb, within)?;
         }
         let then: ArmFn<'_, EmitCx<'c>> = Box::new(move |fb, _| {
-            store(fb, (img, at, texel), mem, twin)?;
+            store(fb, (img, at, texel), mem, (twin, None))?;
             Ok(ArmEnd::FallThrough(Vec::new()))
         });
         fb.if_(cx, inb, then, None)?;

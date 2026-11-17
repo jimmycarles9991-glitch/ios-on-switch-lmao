@@ -6,8 +6,13 @@
   plugin edit reaches none; it reports the NVK twin unused, keyed on the twin's compiler identity instead;
 - the join reads the buckets' indexes and reports, never their packs or the tools;
 - the bundle check is a validation action, so the GPU bundle is no input of anything that makes the seed;
-- the raw pack's probes read their bucket's states, the probe tools, the twin and QuartzCore's library, and only the
-  stamp reads the tools' manifest (the stack key).
+- the raw pack's probes read their bucket's states, directbucket.py, directpack and the mock (bucket 0 also own.metallib
+  and context.log), the libraries and their own tool, and nothing else: not the stack key, the generator's other
+  modules, rawpack.py's other steps or the tools they do not run, so an edit to any of those reruns no probe; only the
+  stamp reads the tools' manifest (the stack key);
+- a native bucket reads native-seed and the mock of the raw tools, none of the others;
+- of a crawl with our own apps, only the last bucket (the apps' states) reads the tree with their libraries: the others
+  read the tree without them, so an app's shader edit reruns one probe.
 """
 
 load("@bazel_skylib//lib:unittest.bzl", "analysistest", "asserts")
@@ -65,6 +70,12 @@ def _seed_impl(ctx):
         names = _names(bucket)
         asserts.equals(
             env,
+            ["gpu/seed/test/tools/raw/libmock_iokit.dylib", "gpu/seed/test/tools/raw/native-seed"],
+            sorted([p for p in names if "/tools/raw/" in p]),
+            "native compilation reads native-seed and the mock of the raw tools",
+        )
+        asserts.equals(
+            env,
             [],
             [p for p in names if p.endswith("MANIFEST.json")],
             "native compilation does not read the runtime stack",
@@ -91,16 +102,30 @@ _seed_release_test = analysistest.make(_seed_release_impl, config_settings = {
     str(Label("//bazel:profile")): "release",
 })
 
+_PROBE_TOOLS = ["directpack", "libmock_iokit.dylib"]
+
+def _probe_read(path, i):
+    """Whether bucket i's probe may read `path`: what can change the records it makes, and its own tool."""
+    tools = _PROBE_TOOLS + (["own.metallib", "context.log"] if i == 0 else [])
+    return (
+        path.endswith("/split/bucket{}.log".format(i)) or
+        path == "gpu/seed/test/raw/directbucket.py" or
+        path in ["gpu/seed/test/tools/raw/" + t for t in tools] or
+        path.startswith(("gpu/seed/test/crawl/tree/", "gpu/seed/test/device/")) or
+        path.startswith("tools/gpu/") and "rawprobe" in path
+    )
+
 def _raw_impl(ctx):
     env = analysistest.begin(ctx)
     probes = _actions(env, "MetalRawProbe")
-    asserts.equals(env, 16, len(probes))
+    asserts.equals(env, 17, len(probes))
     for i, probe in enumerate(probes):
         names = _ours(_names(probe))
-        lines = [p for p in names if p.endswith(".log")]
+        lines = [p for p in names if "/split/" in p]
         asserts.equals(env, ["bucket{}.log".format(i)], [p.rpartition("/")[2] for p in lines], "one bucket's states")
+        asserts.equals(env, [], [p for p in names if not _probe_read(p, i)], "bucket {} reads beyond its records' makers".format(i))
         asserts.equals(env, [], [p for p in names if p.endswith("MANIFEST.json")], "a probe reads no stack key")
-        asserts.true(env, [p for p in names if p.endswith("libvulkan_nouveau.dylib")] != [], "the twin")
+        asserts.equals(env, [], [p for p in names if p.endswith("libvulkan_nouveau.dylib")], "no NVK")
         for library in (
             "crawl/tree/data/0.metallib",
             "device/1.metallib",
@@ -114,24 +139,40 @@ def _raw_impl(ctx):
         asserts.equals(env, [], [p for p in _names(action) if p.endswith("MANIFEST.json")], mnemonic + " reads no key")
     (link,) = _actions(env, "MetalRawLink")
     asserts.true(env, "gpu/seed/test/raw/splits.py" in _names(link), "the split layout generator")
-    asserts.equals(env, 16, len([f for f in link.inputs.to_list() if f.is_directory]), "every bucket's probe runs")
+    asserts.equals(env, 17, len([f for f in link.inputs.to_list() if f.is_directory]), "every bucket's probe runs")
     (stamp,) = _actions(env, "MetalRawStamp")
     asserts.true(env, [p for p in _names(stamp) if p.endswith("MANIFEST.json")] != [], "the stamp reads the key")
     return analysistest.end(env)
 
 _raw_test = analysistest.make(_raw_impl)
 
-def seed_inputs_tests(name, crawl, raw_pack, seed):
+def _raw_apps_impl(ctx):
+    env = analysistest.begin(ctx)
+    probes = _actions(env, "MetalRawProbe")
+    asserts.equals(env, 17, len(probes))
+    for i, probe in enumerate(probes):
+        trees = sorted([f.basename.rpartition("_")[2] for f in probe.inputs.to_list() if f.is_directory])
+        asserts.equals(env, ["inputs"] if i == 16 else ["base"], trees, "bucket {}'s libraries".format(i))
+    return analysistest.end(env)
+
+_raw_apps_test = analysistest.make(_raw_apps_impl)
+
+def seed_inputs_tests(name, crawl, raw_pack, raw_pack_apps, seed):
     """The tests, as one test_suite.
 
     Args:
         name: the test_suite's name.
         crawl: a shader_crawl over a stand-in tree.
         raw_pack: a seed_raw_pack over stand-in tools and generator.
+        raw_pack_apps: the same over a crawl with an application.
         seed: a metal_seed of four buckets over stand-in inputs.
     """
     _crawl_test(name = name + "_crawl", target_under_test = crawl)
     _seed_test(name = name + "_seed", target_under_test = seed)
     _seed_release_test(name = name + "_release", target_under_test = seed)
     _raw_test(name = name + "_raw", target_under_test = raw_pack)
-    native.test_suite(name = name, tests = [name + "_crawl", name + "_seed", name + "_raw", name + "_release"])
+    _raw_apps_test(name = name + "_raw_apps", target_under_test = raw_pack_apps)
+    native.test_suite(
+        name = name,
+        tests = [name + "_crawl", name + "_seed", name + "_raw", name + "_raw_apps", name + "_release"],
+    )

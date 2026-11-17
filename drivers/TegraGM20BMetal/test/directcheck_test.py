@@ -25,8 +25,6 @@ TWO_PLANE_COLOUR = re.compile(r' c[0-7]=550:')
 SUMMARY = re.compile(
     r'^directcheck: (\d+) states made directly: .* (\d+) differ;.* (\d+) of them two-plane forms$', re.MULTILINE
 )
-# The probe's environment (raw/pack/rawpack.py probe_env) as far as the direct compile reads it
-PROBE_ENV = {'MESA_SHADER_CACHE_DISABLE': 'true', 'NMB_ASYNC_PSO': '0', 'NMB_ASYNC_PSO_API': '0'}
 INPUTS: dict = {}
 
 
@@ -41,20 +39,21 @@ def sample(corpora: list[Path]) -> list[str]:
 class Directcheck(unittest.TestCase):
     def test_records_are_the_packs(self) -> None:
         work = Path(tempfile.mkdtemp(dir=os.environ.get('TEST_TMPDIR')))
+        kept = Path(os.environ.get('TEST_UNDECLARED_OUTPUTS_DIR', work))
         tools = Path(INPUTS['tools'])
-        for name in ('directcheck', 'libmock_iokit.dylib', 'libvulkan_nouveau.dylib', 'own.metallib'):
+        for name in ('directcheck', 'libmock_iokit.dylib', 'own.metallib'):
             shutil.copyfile(tools / name, work / name)
         (work / 'directcheck').chmod(0o755)
         lines = sample([Path(c) for c in INPUTS['corpora']])
         self.assertTrue(any(TWO_PLANE_COLOUR.search(line) for line in lines), 'the corpora name no 550 colour')
-        env = dict(os.environ, **PROBE_ENV, PROBE_LIB_ROOT=str(Path(INPUTS['lib_root']).resolve()))
+        env = dict(os.environ, PROBE_LIB_ROOT=str(Path(INPUTS['lib_root']).resolve()))
+        env['DIRECTCHECK_SELECTORS'] = str(Path(INPUTS['selectors']).resolve())
         runs = []
         for shard in range(SHARDS):
-            corpus, cache = work / f'corpus{shard}.log', work / f'cache{shard}'
+            corpus = work / f'corpus{shard}.log'
             corpus.write_text('\n'.join(lines[shard::SHARDS]) + '\n')
-            cache.mkdir()
             own = {'PROBE_OWN_LIB': str(work / 'own.metallib')} if shard == 0 else {}
-            command = [work / 'directcheck', work / 'libvulkan_nouveau.dylib', cache, INPUTS['qc'], corpus]
+            command = [work / 'directcheck', INPUTS['qc'], corpus]
             runs.append(
                 subprocess.Popen(
                     [str(c) for c in [*command, INPUTS['pack']]],
@@ -68,6 +67,7 @@ class Directcheck(unittest.TestCase):
         report = []
         for shard, run in enumerate(runs):
             stdout, stderr = run.communicate()
+            (kept / f'shard{shard}.log').write_text(stdout + stderr)
             summary = SUMMARY.search(stdout)
             self.assertIsNotNone(summary, f'shard {shard} exited {run.returncode}: {stdout[-2000:]}{stderr[-2000:]}')
             states += int(summary.group(1))

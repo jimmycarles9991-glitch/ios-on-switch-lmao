@@ -3,24 +3,27 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.zeta_colour decides drivers/TegraGM20BMetal/raw/runtime/raw_chip_facts.h kColourRopWritesZeta: whether the
-/// colour ROP writes a zeta's memory (PTE kinds ZF32_X24S8 and S8) as a colour target of its texel, RG32Uint and R8Uint,
-/// and the zeta's depth and stencil tests and its copies by aspect then read what it wrote (Gallium nvc0's route,
-/// raw_zeta_colour.h). ZetaColourCells writes each zeta a pattern, every stencil value and a depth of its own a texel:
+/// gpu.raw.zeta_colour judges the raw path's stencil plane route (drivers/TegraGM20BMetal/raw/runtime/raw_zeta_colour.h):
+/// one draw of the colour ROP writes a zeta's stencil plane, RG32Uint over Depth32Float_Stencil8 and R8Uint over
+/// Stencil8, through a pool image the copy engine fills from the zeta and copies back, and the zeta's depth and stencil
+/// tests and its copies by aspect then read what it wrote. ZetaColourCells writes each zeta a pattern, every stencil value
+/// and a depth of its own a texel:
 ///  - resolve: a 4x zeta resolved by sample 0 into a one-sample one holding another pattern, its depth by the depth
 ///    resolve, its stencil by the route (Depth32Float_Stencil8: word G alone, the depth kept);
 ///  - turn: a zeta beside a drawable of rotation 1, moved into the pass's plane-shaped stand-in and back by the route's
 ///    turn copies (the whole texel), its stencil tested and inverted and its depth made nearer in between;
 /// Depth32Float_Stencil8 and Stencil8 at 90x60, 96x64 and 1280x720, each zeta then read back by aspect and tested as a
-/// zeta (EQUAL against each stencil value and against the pattern's depth). The arms: bits (the build's route) and
-/// colour (switchRawProbeZetaColour: on); each also runs gpu.raw.stored_msaa (every stencil resolve pick) and
-/// gpu.x1.rotated_target's keptStencil at rotations 1 to 4. <arm>_depth, _stencil and _tested count texels off the
-/// pattern, _msaa the scene's failures, _kept the drawable's pixels off Metal's store, _errors the parts that threw (a
-/// command buffer the GPU failed), _bit_draws and _rop_draws the stencil plane draws of each route. INCONCLUSIVE where
-/// the colour arm drew a plane by the eight draws, none by the colour ROP, or left a turn cell out, and where the bits
-/// arm (the control) is off where the colour arm is; FAIL where the colour arm alone is off. claim_verdict=PASS with
-/// reopens=0 and gpu_after=true, and no "fault", "ROP", "LTC" or "TRAP" kernel line in the run, sets
-/// kColourRopWritesZeta; off the facade the arm is the device's own (the test's references held to Metal).
+/// zeta (EQUAL against each stencil value and against the pattern's depth). The arms: bits (raw_stencil_bits.h's eight
+/// draws, switchRawProbeStencilBits: on, the control) and colour (the build's route); each also runs gpu.raw.stored_msaa
+/// (every stencil resolve pick) and gpu.x1.rotated_target's keptStencil at rotations 1 to 4. <arm>_depth, _stencil and
+/// _tested count texels off the pattern, _msaa the scene's failures, _kept the drawable's pixels off Metal's store,
+/// _errors the parts that threw (a command buffer the GPU failed), _bit_draws and _rop_draws the stencil plane draws of
+/// each route, _cells_ms the arm's time over every part (the parts alike but for the route). INCONCLUSIVE where either
+/// arm drew a plane by the other's route or none by its own, the colour arm left a turn cell out, or the control is off
+/// where the colour arm is; FAIL where the colour arm alone is off. The route holds with claim_verdict=PASS, reopens=0,
+/// gpu_after=true and no "fault", "ROP", "LTC" or "TRAP" kernel line in the run; off the facade the arm is the device's
+/// own (the test's references held to Metal). Then a diagnostic outside the claim, after gpu_after
+/// (ZetaColourDirect.swift): the colour ROP straight over the zeta's own pages.
 struct ZetaColourTest: HWTest {
     let id = "gpu.raw.zeta_colour"
     let name = "Stencil planes by the colour ROP over the zeta's memory, read back and tested as a zeta"
@@ -35,8 +38,9 @@ struct ZetaColourTest: HWTest {
         case bits, colour, device
     }
 
-    static func probe(_ device: MTLDevice, _ on: Bool) -> Bool {
-        let selector = NSSelectorFromString("switchRawProbeZetaColour:")
+    /// The facade's switchRawProbe<name>: set to `on`; false where it has none
+    static func probe(_ device: MTLDevice, _ name: String, _ on: Bool) -> Bool {
+        let selector = NSSelectorFromString("switchRawProbe\(name):")
         guard let object = device as? NSObject, object.responds(to: selector) else { return false }
         _ = object.perform(selector, with: NSNumber(value: on))
         return true
@@ -55,10 +59,13 @@ struct ZetaColourTest: HWTest {
         let gpu = try GPU.make()
         let kind = RawFacade.kind(of: gpu.device)
         let raw = kind == "raw"
-        if raw && !Self.probe(gpu.device, false) {
-            return .skip("the facade has no zeta colour probe (a release build)")
+        if raw && !Self.probe(gpu.device, "StencilBits", false) {
+            return .skip("the facade has no eight-draw comparison arm (a release build)")
         }
-        defer { _ = Self.probe(gpu.device, false) }
+        defer {
+            _ = Self.probe(gpu.device, "StencilBits", false)
+            _ = Self.probe(gpu.device, "ZetaDirect", false)
+        }
         let cells = ZetaColourCells(gpu: gpu, rotated: try RotatedStates(gpu))
         let before = RawFacade.counters(of: gpu.device)
         var counts: [Arm: [String: Int]] = [:]
@@ -66,9 +73,11 @@ struct ZetaColourTest: HWTest {
         var notes: [String] = []
         var unengaged: [String] = []
         for arm in raw ? [Arm.bits, .colour] : [.device] {
-            _ = Self.probe(gpu.device, arm == .colour)
+            _ = Self.probe(gpu.device, "StencilBits", arm == .bits)
             let start = RawFacade.counters(of: gpu.device)
+            let started = Date()
             let result = await armRun(gpu, cells, seed: arm == .colour ? 40 : 10)
+            metrics.set("\(arm)_cells_ms", Date().timeIntervalSince(started) * 1000, digits: 0)
             let end = RawFacade.counters(of: gpu.device)
             let delta = { (key: String) in (end[key] ?? 0) - (start[key] ?? 0) }
             let count: [String: Int] = [
@@ -82,10 +91,14 @@ struct ZetaColourTest: HWTest {
             metrics.set("\(arm)_turn_cells", result.turned)
             let found = [result.firstError, result.count.first].compactMap { $0 }.map { "\(arm) \($0)" }
             notes = arm == .colour ? found + notes : notes + found
-            guard arm == .colour else { continue }
-            if delta("zeta_colour_draws") == 0 { unengaged.append("no stencil plane drawn by the colour ROP") }
-            if delta("stencil_bit_draws") != 0 { unengaged.append("stencil planes drawn by the eight draws") }
-            if result.turned != Self.formats.count * Self.sizes.count { unengaged.append("turn cells left out") }
+            if arm == .bits {
+                if delta("stencil_bit_draws") == 0 { unengaged.append("the control drew no plane by the eight draws") }
+                if delta("zeta_colour_draws") != 0 { unengaged.append("the control drew planes by the colour ROP") }
+            } else if arm == .colour {
+                if delta("zeta_colour_draws") == 0 { unengaged.append("no stencil plane drawn by the colour ROP") }
+                if delta("stencil_bit_draws") != 0 { unengaged.append("stencil planes drawn by the eight draws") }
+                if result.turned != Self.formats.count * Self.sizes.count { unengaged.append("turn cells left out") }
+            }
         }
         var (verdict, why) =
             raw
@@ -95,21 +108,31 @@ struct ZetaColourTest: HWTest {
         if verdict == .pass && !offPath.isEmpty {
             verdict = .inconclusive
             why = "not on the raw path: " + offPath.joined(separator: ",")
-        } else if verdict == .pass && !unengaged.isEmpty {
+        } else if verdict != .inconclusive && !unengaged.isEmpty {
             verdict = .inconclusive
-            why = "colour arm: " + unengaged.joined(separator: ", ")
+            why = "arms off their routes: " + unengaged.joined(separator: ", ")
         }
-        let finding = ProbeFinding(
-            verdict, metrics, note: ([why] + notes).filter { !$0.isEmpty }.joined(separator: "; "))
         var base = Metrics()
         base.set("dev", kind)
         base.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
-        base.set("reopens", (RawFacade.counters(of: gpu.device)["reopens"] ?? 0) - (before["reopens"] ?? 0))
+        let claimed = RawFacade.counters(of: gpu.device)
+        base.set("reopens", (claimed["reopens"] ?? 0) - (before["reopens"] ?? 0))
         base.set("gpu_after", await GPUProbe.answers())
+        if raw && Self.probe(gpu.device, "ZetaDirect", true) {
+            _ = Self.probe(gpu.device, "StencilBits", false)
+            let direct = await ZetaColourDirect.run(gpu, cells)
+            direct.report(into: &metrics)
+            if let first = direct.first { notes.append("direct \(first)") }
+            let after = RawFacade.counters(of: gpu.device)
+            metrics.set("direct_reopens", (after["reopens"] ?? 0) - (claimed["reopens"] ?? 0))
+            metrics.set("direct_gpu_after", await GPUProbe.answers())
+        }
+        let finding = ProbeFinding(
+            verdict, metrics, note: ([why] + notes).filter { !$0.isEmpty }.joined(separator: "; "))
         return finding.outcome(probe: "rop.zeta_colour", base: base, proof: gpu.proof)
     }
 
-    /// The claim from the colour arm's counts against the control's (the build's route over the same cells): FAIL where
+    /// The claim from the colour arm's counts against the control's (the eight draws over the same cells): FAIL where
     /// the colour arm is off and the control is not, INCONCLUSIVE where both are (a failure of the cells, not of the
     /// colour ROP), PASS where the colour arm holds
     static func verdict(colour: [String: Int], control: [String: Int]) -> (ClaimVerdict, String) {

@@ -23,7 +23,7 @@ static bool planeSame(const PlaneSet &a, const PlaneSet &b)
     return true;
 }
 
-uint32_t planeBuildingSlots = 0;
+uint64_t planeBuildingSlots = 0;
 
 // Retried at the next frame end, the current frame kept: a slot still scanned (-11), a surface busy with a publication
 // or a CPU writer (-16), a representation replaced under the acquire (STALE), a conversion queued (-115; its completion
@@ -93,7 +93,7 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
     const int selected[2] = {roles.plane, roles.second};
 
     struct BuildingSlots {
-        uint32_t &slots;
+        uint64_t &slots;
 
         ~BuildingSlots()
         {
@@ -123,7 +123,7 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
         overlay.on = true;
         overlay.slot = slot;
         overlay.depth = index + 1;
-        planeBuildingSlots |= 1u << unsigned(slot);
+        planeBuildingSlots |= uint64_t(1) << unsigned(slot);
     }
     if (planeComposeWaits(wanted, selected, width, height)) {
         d.waitSlot = true;
@@ -147,7 +147,7 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
                 overlay = {};
             } else {
                 overlay.slot = slot;
-                planeBuildingSlots |= 1u << unsigned(slot);
+                planeBuildingSlots |= uint64_t(1) << unsigned(slot);
             }
         }
         want.window[assignment.window[index]] = overlay;

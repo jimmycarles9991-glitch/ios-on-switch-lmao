@@ -38,7 +38,7 @@ protected:
         }
         r.programs[1].cbufTypes = {raw::CbufRoot, raw::kCbufHeapSet, raw::CbufSet};
         r.pipeline.keyHash = 0xab;
-        r.pipeline.entries = 2;
+        raw::setEntryCount(r.pipeline, 2);
         r.pipeline.entry[0] = {0, raw::EntryTextureTable, 2, 0, 0, 0, 0};
         r.pipeline.entry[1] = {16, raw::EntrySamplerTable, 2, 0, 0, 0, 0};
         r.pipeline.setBytes = 32;
@@ -114,11 +114,14 @@ protected:
         e->end();
         uint32_t seqno = 0;
         if (!ok || !cb->commit(seqno)) {
+            refused = cb->refusal;
             cb->abandon();
             return why ? why : "not committed";
         }
         return "";
     }
+
+    raw::Refusal refused;  // the last refused draw's
 };
 
 // A state made while the kernel had no control memory for the handle tables: the draw that meets it binds its argument
@@ -172,6 +175,7 @@ protected:
         e->setPipeline(state);
         const char *why = nullptr;
         const bool ok = e->draw(kTriangle, 0, 3, 1, 0, &why);
+        refused = cb->refusal;
         e->end();
         uint32_t seqno = 0;
         if (!ok || !cb->commit(seqno)) {
@@ -180,7 +184,22 @@ protected:
         }
         return "";
     }
+
+    raw::Refusal refused;  // the last draw's
 };
+
+// A draw whose tables the kernel still has no memory for is MTLCommandBufferErrorOutOfMemory, which fails the command
+// buffer (RawMetalDrawErrors.mm)
+TEST_F(DeviceArgumentsWithoutMemory, ADrawWhoseTablesFindNoMemoryIsOutOfMemory)
+{
+    ASSERT_EQ(draw(made(false)), "") << "the command buffers' own control memory, made before the refusals";
+    kernel_model::model.refuseControl = true;
+    raw::Pipeline *pl = made();
+    ASSERT_NE(pl, nullptr);
+    EXPECT_EQ(draw(pl), "no memory for the tables a state reads argument buffers through");
+    EXPECT_EQ(refused.id, raw::RefHeapMemory);
+    kernel_model::model.refuseControl = false;
+}
 
 TEST_F(DeviceArgumentsWithoutMemory, TheDrawThatMeetsAStateWithoutItsTablesBindsThem)
 {

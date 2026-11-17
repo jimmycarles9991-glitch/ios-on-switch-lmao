@@ -35,6 +35,23 @@ struct Cost {
 };
 
 uint64_t next_page = 0x900000000ull;
+uint32_t hostRetains, hostReleases;
+
+int host_status(const switch_gpu_backing_token *)
+{
+	return 0;
+}
+
+int host_retain(const switch_gpu_backing_token *)
+{
+	++hostRetains;
+	return 0;
+}
+
+void host_release(const switch_gpu_backing_token *)
+{
+	++hostReleases;
+}
 
 switch_gpu_backing *surface(uint32_t pages)
 {
@@ -132,7 +149,10 @@ protected:
 								  TegraGM20BMaxJobDependencies,
 								  &needed, 0, 0),
 			  0);
-		switch_gpu_backing_commit(&transaction);
+		switch_gpu_backing_publish(&transaction);
+		EXPECT_EQ(transaction.ordered, 1u);
+		EXPECT_EQ(transaction.locked, 0u);
+		switch_gpu_backing_finish(&transaction);
 		const uint64_t taken = ioLockTakes().load() - all, ownTaken = own_takes() - own;
 		compositor.fence = frame - 1;
 		return {taken - ownTaken, ownTaken, needed};
@@ -326,8 +346,48 @@ TEST_F(SubmitCost, AJobWithNoSharedUseTakesNoOwnershipLock)
 	EXPECT_EQ(switch_gpu_backing_dependencies(&transaction, dependencies.data(),
 						  TegraGM20BMaxJobUses, &needed),
 		  0);
-	switch_gpu_backing_commit(&transaction);
+	switch_gpu_backing_publish(&transaction);
+	switch_gpu_backing_finish(&transaction);
 	EXPECT_EQ(ownership_takes() - owned, 0u);
 	compositor.fence = frame;
+}
+
+TEST_F(SubmitCost, AnEmptyWaitBearingJobUsesTheExistingOrderOnce)
+{
+	switch_gpu_backing_transaction transaction = {};
+	const uint64_t owned = switch_gpu_backing_order()->takes;
+	ASSERT_EQ(switch_gpu_backing_seal(&transaction), 0);
+	EXPECT_EQ(switch_gpu_backing_order()->takes - owned, 1u);
+	EXPECT_EQ(transaction.ordered, 1u);
+	switch_gpu_backing_publish(&transaction);
+	EXPECT_EQ(transaction.ordered, 1u);
+	switch_gpu_backing_finish(&transaction);
+	EXPECT_EQ(transaction.ordered, 0u);
+	EXPECT_EQ(switch_gpu_backing_order()->takes - owned, 1u);
+}
+
+TEST_F(SubmitCost, PartialBeginWithoutATimelineHasNoTimelineReferencesToAbort)
+{
+	const switch_gpu_backing_engine operations = {host_status, host_status, host_retain,
+						      host_release, 32};
+	ASSERT_EQ(switch_gpu_backing_register_engine(SWITCH_GPU_ENGINE_VIC, &operations), 0);
+	hostRetains = hostReleases = 0;
+	target = surface(1);
+	textures.push_back(surface(1));
+	ASSERT_EQ(switch_gpu_backing_cpu_acquire(textures[0], 0, 4096, SWITCH_GPU_BACKING_WRITE),
+		  0);
+	switch_gpu_backing_use hostUses[] = {{target, SWITCH_GPU_BACKING_READ, 0},
+					     {textures[0], SWITCH_GPU_BACKING_READ, 0}};
+	const switch_gpu_backing_token completion = {1, 1, SWITCH_GPU_ENGINE_VIC, 73};
+	switch_gpu_backing_transaction transaction = {};
+	EXPECT_EQ(switch_gpu_backing_begin(hostUses, 2, &completion, &transaction), -16);
+	EXPECT_EQ(hostRetains, 1u);
+	EXPECT_EQ(hostReleases, 1u);
+	EXPECT_EQ(transaction.refs, 0u);
+	EXPECT_EQ(transaction.timeline, nullptr);
+	switch_gpu_backing_abort(&transaction);
+	EXPECT_EQ(hostReleases, 1u);
+	EXPECT_EQ(switch_gpu_backing_cpu_release(textures[0], 0, 4096, SWITCH_GPU_BACKING_WRITE),
+		  0);
 }
 }  // namespace

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #include <atomic>
 #include <cstdint>
 
@@ -14,15 +15,8 @@ enum RMPred : uint8_t {
     PredNone = 0,
     // textures the raw path does not keep, decided when made (a bind hits the texture's own predicate)
     PredTexShape,  // rawShape: a = failing term (1 type, 2 levels, 3 samples, 4 array/depth, 5 rotation, 6 format), b = format
-    PredTexPoolAlloc,  // no pool span or texture header
-    PredTexSurfPlane,  // a plane of a planar surface (not the 4:4:4 one): a = plane, b = plane count
-    PredTexSurfPitch,  // bytesPerRow or plane offset & 15, or short: a = bytesPerRow, b = offset (when off 16) or width x bpp
-    PredTexSurfBounds,  // offset + rows past the allocation
-    PredTexSurfBase,    // base address off a page: a = base & 0xfff
     PredTexSurfImport,  // the import or the header slot refused
     PredTexPlanar,      // the 4:4:4 two-plane texture refused
-    PredTexBufBase,     // (va + offset) & 255: a = that, b = offset
-    PredTexBufPitch,    // bytesPerRow & 31, or short: a = bytesPerRow, b = width x bpp
     PredTexBufOther,    // memoryless, past the buffer, header slot
     PredTexView,  // a view of a texture the raw path does not keep, or of another texel size: a = format, b = parent raw
     PredTexForeign,  // not an RMTexture (m2v's own: over an m2v buffer, or a creation selector the facade does not answer)
@@ -30,7 +24,6 @@ enum RMPred : uint8_t {
     PredPassAttFormat,  // a color attachment not kept or not renderable: a = format, b = attachment index | kind << 8
     PredPassAttLevel,   // slice, depth plane or resolve, or a level of a texture with no chain
     PredPassDepthStencil,  // a = depth format, b = stencil format
-    PredPassOther,         // a = its own sample positions, b = a rasterization rate map
     // states and calls
     PredStateForeign,
     PredStateNotPackable,  // a state whose functions are not this device's (neither in the pack nor made by the runtime)
@@ -38,8 +31,6 @@ enum RMPred : uint8_t {
     PredCallVisibility,
     PredCallBufForeign,      // a = stage << 8 | index (0xffff: an index buffer)
     PredCallSamplerForeign,  // a sampler the raw path does not express (its reason logged when it was made)
-    PredCallVertexSampler,
-    PredCallDepthBias,  // a = bias, b = slope (float bits)
     PredCallBlitOptions,
     PredCallBufCopyRange,
     PredBlitTexCopy,
@@ -48,11 +39,9 @@ enum RMPred : uint8_t {
     PredBlitWholeTexCopy,
     PredBlitTexFill,       // a fillTexture: the raw path does not draw: a = pixel format, b = level or other format
     PredCompute,           // a kernel's buffer, texture or sampler not made by this device
-    PredComputeOff16,      // a buffer off 16 bytes where the kernel's record names no residual word: a = slot
     PredComputeKernel,     // no pack kernel at the dispatch's shape, memory, textures and samplers
     PredComputeImage,      // a texture sampled through an image of its own: a = slot
     PredComputePredicate,  // predication raw cannot run (a misused record, a word outside a raw buffer): the command buffer fails; a = kind or offset
-    PredMipmaps,
     PredMipmapsFormat,  // a mipmapped texture's generateMipmaps in a format neither the 2D engine nor a mip state filters: a = format
     PredEvent,
     // found while encoding (the raw encode ran up to here and was thrown away)
@@ -71,36 +60,27 @@ enum RMPred : uint8_t {
     PredEncGeometry,      // a = primitive, b = count | instances << 32; no native raster-order plan
     PredEncStorageView,  // a = attachment, b = format | width << 32: no storage view and no barrier form to take
     PredPassRotated,     // a = raw::RotatedRefusal, b = the rotation (a pass's, or the state's at encode)
+    PredPassPositions,   // sample positions Metal takes and draws nothing defined for: a = their count, b = the samples
     PredCount
 };
 
 static_assert(PredCount <= 64, "one mask word");
 static constexpr const char *kPredNames[] = {"-",
                                              "tex.shape",
-                                             "tex.pool",
-                                             "tex.surf.plane",
-                                             "tex.surf.pitch",
-                                             "tex.surf.bounds",
-                                             "tex.surf.base",
                                              "tex.surf.imp",
                                              "tex.planar",
-                                             "tex.buf.base",
-                                             "tex.buf.pitch",
                                              "tex.buf.other",
                                              "tex.view",
                                              "tex.foreign",
                                              "pass.fmt",
                                              "pass.level",
                                              "pass.ds",
-                                             "pass.other",
                                              "state.foreign",
                                              "state.notpack",
                                              "state.pack",
                                              "call.vis",
                                              "call.buf",
                                              "call.sampler",
-                                             "call.vsampler",
-                                             "call.dbias",
                                              "call.blitopt",
                                              "call.bufcopy",
                                              "blit.tex",
@@ -109,11 +89,9 @@ static constexpr const char *kPredNames[] = {"-",
                                              "blit.whole",
                                              "blit.fill",
                                              "compute",
-                                             "compute.off16",
                                              "compute.nokernel",
                                              "compute.image",
                                              "compute.predicate",
-                                             "mipmaps",
                                              "mipmaps.fmt",
                                              "event",
                                              "enc.planarcopy",
@@ -130,8 +108,24 @@ static constexpr const char *kPredNames[] = {"-",
                                              "enc.nochannel",
                                              "enc.geometry",
                                              "enc.storage",
-                                             "pass.rotated"};
+                                             "pass.rotated",
+                                             "pass.positions"};
 static_assert(sizeof kPredNames / sizeof *kPredNames == PredCount, "a name for each predicate");
+
+// The predicates whose command buffer fails, its work run nowhere, with MTLCommandBufferErrorDomain's code (0: not one):
+// the kernel refusing a submission or the channel (raw/plan/predicates.tsv cb-error). The client's errors (call.bufcopy,
+// enc.idxrange, enc.colorfmt, enc.samples, pass.positions) complete as Apple's driver completes them
+// (raw_client_errors.h), each logged once.
+constexpr NSInteger predFailure(RMPred p)
+{
+    switch (p) {
+    case PredEncKernel:
+    case PredEncNoChannel:
+        return MTLCommandBufferErrorInternal;
+    default:
+        return 0;
+    }
+}
 
 // What makes a command buffer go to m2v (counted, one log line each kind)
 enum RMReason : uint8_t {
@@ -152,6 +146,7 @@ static const char *const kReasonNames[WhyCount] = {"raw",     "state",   "textur
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 extern std::atomic<uint64_t> gPredCbs[PredCount], gPredOnly[PredCount];
+extern std::atomic<uint64_t> gPredFailed[PredCount];  // command buffers each predicate failed (predFailure)
 #endif
 extern std::atomic<uint64_t> gPredLogged;
 

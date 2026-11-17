@@ -14,6 +14,8 @@
 // attribute stride, the amplification the amplify macro keeps (SWITCH_GM20B_AMP_MAX), 48 KiB of threadgroup memory,
 // eight targets of the widest colour a pixel, tier-2 argument buffers through the handle tables (raw_heap_tables.h),
 // and 128 interpolated components on 21H461 (24B119 keeps Metal 27's ceiling of 124).
+// Below the identity, on purpose (the owner's ruling, 14 Nov): no rasterization rate map of any layer count, as GM20B has no
+// variable-rate unit and none is emulated.
 // An argument answer holds `value` for every argument in [first, last] and 0 elsewhere.
 #pragma once
 #include <cstddef>
@@ -73,6 +75,12 @@ struct Kind {
     // the target's Metal driver (NativeMetalTarget.rs), the domain its errors take: a creation's binary archive miss is code 3
     // in it (an M4 answers AGXMetalG16X)
     const char *driver;
+    // a cube array texture: Apple's feature tables list cube map texture arrays from Apple4, so the A13 makes one and the
+    // A10X none
+    bool cubeArrays;
+    // an ASTC HDR texture (MTLPixelFormatASTC_*_HDR): Apple's feature tables list it from Apple6, so the A13 makes one and
+    // the A10X none
+    bool astcHdr;
 };
 
 inline constexpr Count kCounts21H461[] = {
@@ -207,7 +215,7 @@ inline constexpr ArgRange kArgs21H461[] = {
     {"supportsTextureSampleCount:", true, 1, 2, 1},
     {"supportsTextureSampleCount:", true, 4, 4, 1},
     {"supportsVertexAmplificationCount:", true, 0, SWITCH_GM20B_AMP_MAX, 1},
-    {"supportsRasterizationRateMapWithLayerCount:", true, 1, 2, 1},
+    {"supportsRasterizationRateMapWithLayerCount:", true, 0, ~0ull, 0},
     {"supportsCounterSampling:", true, 0, 0, 1},
     {"supportsFamily:", true, 1001, 1003, 1},
     {"supportsFamily:", true, 3001, 3002, 1},
@@ -346,7 +354,7 @@ inline constexpr ArgRange kArgs24B119[] = {
     {"supportsTextureSampleCount:", true, 1, 2, 1},
     {"supportsTextureSampleCount:", true, 4, 4, 1},
     {"supportsVertexAmplificationCount:", true, 0, SWITCH_GM20B_AMP_MAX, 1},
-    {"supportsRasterizationRateMapWithLayerCount:", true, 1, 2, 1},
+    {"supportsRasterizationRateMapWithLayerCount:", true, 0, ~0ull, 0},
     {"supportsCounterSampling:", true, 0, 0, 1},
     {"supportsFamily:", true, 1001, 1003, 1},
     {"supportsFamily:", true, 3001, 3003, 1},
@@ -356,9 +364,9 @@ inline constexpr ArgRange kArgs24B119[] = {
 
 inline constexpr Kind kKinds[] = {
     {"21H461", kCounts21H461, std::size(kCounts21H461), kArgs21H461, std::size(kArgs21H461), 0x61, "Apple", "A10X",
-     "GPU", "AGXMetalA10"},
+     "GPU", "AGXMetalA10", false, false},
     {"24B119", kCounts24B119, std::size(kCounts24B119), kArgs24B119, std::size(kArgs24B119), 0xd2, "Apple", "A13",
-     "GPU", "AGXMetalA13"},
+     "GPU", "AGXMetalA13", true, true},
 };
 
 // The kind this build is for (MetalABI.h): its table's index, or the table count when it has none
@@ -373,6 +381,24 @@ inline constexpr size_t kindIndex()
 static_assert(kindIndex() < std::size(kKinds), "no device answers for this kind (raw_device_answers.h)");
 inline constexpr const Kind &kThisKind = kKinds[kindIndex()];
 
+// Kind `k`'s answer to count or flag query `selector` (0: none)
+constexpr uint64_t kindCount(const Kind &k, std::string_view selector)
+{
+    for (size_t i = 0; i < k.countCount; i++)
+        if (k.counts[i].selector == selector)
+            return k.counts[i].value;
+    return 0;
+}
+
+// Kind `k`'s answer to argument query `selector` of `argument`
+constexpr uint64_t kindAnswer(const Kind &k, std::string_view selector, uint64_t argument)
+{
+    for (size_t i = 0; i < k.argCount; i++)
+        if (k.args[i].selector == selector && argument >= k.args[i].first && argument <= k.args[i].last)
+            return k.args[i].value;
+    return 0;
+}
+
 // The largest argument this kind answers argument query `selector` YES for (0: none)
 constexpr uint64_t thisKindLastYes(std::string_view selector)
 {
@@ -386,10 +412,7 @@ constexpr uint64_t thisKindLastYes(std::string_view selector)
 // This kind's answer to count or flag query `selector` (0: none)
 constexpr uint64_t thisKindCount(std::string_view selector)
 {
-    for (size_t i = 0; i < kThisKind.countCount; i++)
-        if (kThisKind.counts[i].selector == selector)
-            return kThisKind.counts[i].value;
-    return 0;
+    return kindCount(kThisKind, selector);
 }
 
 }  // namespace raw::answers

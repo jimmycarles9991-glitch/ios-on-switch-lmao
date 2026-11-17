@@ -1,0 +1,109 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//ipsw:defs.bzl", "ipsw_pins")
+load("//kernel/rules:inputs.bzl", "tool_output")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+[filegroup(
+    name = "core_entitlements_" + version,
+    srcs = [
+        "//kernel/xnu-" + version + ":EXTERNAL_HEADERS/CoreEntitlements/" + header + ".h"
+        for header in [
+            "CoreEntitlements",
+            "Entitlements",
+            "Errors",
+            "Index",
+            "QueryHelpers",
+            "Result",
+            "Runtime",
+            "Serialization",
+        ]
+    ],
+) for version in [
+    "10063.141.1",
+    "12377.121.6",
+]]
+
+ios_binary(
+    name = "SwitchInstallPolicy",
+    srcs = [
+        "BundleDiscovery.mm",
+        "CapabilityPolicy.mm",
+        "EntitlementDER.mm",
+        "SwitchInstallPolicy.mm",
+    ],
+    out = "build/switch-apps/libSwitchInstallPolicy.dylib",
+    hdrs = [
+        "BundleDiscovery.h",
+        "CapabilityPolicy.h",
+        "EntitlementDER.h",
+        "SwitchInstallPolicy.h",
+        "//kernel/switch:include/switch/capabilities.h",
+    ] + select({
+        "//ipsw:24B119": [":core_entitlements_12377.121.6"],
+        "//conditions:default": [":core_entitlements_10063.141.1"],
+    }),
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fobjc-arc",
+        "-lc++",
+        "-dynamiclib",
+        "-install_name",
+        "/usr/lib/libSwitchInstallPolicy.dylib",
+        "-framework",
+        "Foundation",
+        "-I",
+        "kernel/switch/include",
+    ] + select({
+        "//ipsw:24B119": [
+            "-DSWITCH_INSTALL_POLICY_IOS27=1",
+            "-idirafter",
+            "kernel/xnu-12377.121.6/EXTERNAL_HEADERS",
+        ],
+        "//conditions:default": [
+            "-DSWITCH_INSTALL_POLICY_IOS27=0",
+            "-idirafter",
+            "kernel/xnu-10063.141.1/EXTERNAL_HEADERS",
+        ],
+    }),
+    sign_identifier = "com.brunostjohn.switch.install-policy",
+)
+
+ipsw_pins(name = "ipsw")
+
+tool_output(
+    name = "installd",
+    srcs = [
+        ":ipsw",
+        "@ipsw//:os",
+    ],
+    outs = ["build/switch-apps/installd"],
+    args = [
+        "--os",
+        "$(execpath @ipsw//:os)",
+        "--pins",
+        "$(execpath :ipsw)",
+        "--out",
+        "{out}",
+    ],
+    binary = "//tools/install_policy:installd",
+    message = "Preparing the selected IPSW's installd policy dependency",
+    mnemonic = "InstallPolicy",
+    requirements = [
+        "no-remote",
+        "no-sandbox",
+        "requires-darwin",
+    ],
+    xcode = False,
+)

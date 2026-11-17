@@ -68,9 +68,11 @@ bool bindsAsWhole(const Pipeline &twin, const Pipeline &whole)
 
 }  // namespace
 
+// A state with argument tables is never split: its twin is built without their words (makeSplit), and the pack keys a
+// split by its fragment program, which a state of other vertex tables may share
 void Device::offerSplit(Pipeline &pl, SplitSource &&source)
 {
-    if (!usableSplitMetadata(source.rec))
+    if (!usableSplitMetadata(source.rec) || spillEntryOf(*source.pp, 0) || spillEntryOf(*source.pp, 1))
         return;
     splitSources_.push_back(std::move(source));
     __atomic_store_n(&pl.splitSource, &splitSources_.back(), __ATOMIC_RELEASE);
@@ -85,6 +87,7 @@ bool Device::placeSplitPrograms(const SplitSource &source, PlacedProgram &fs, ui
             return false;
         fs.record = &progs[source.rec.fs];
         fs.header = pack_.section<uint8_t>(PackHeap) + progs[source.rec.fs].program;
+        fs.farUbos = pack_.farUbos(progs[source.rec.fs]);
         prologueDataBytes = std::min(progs[source.rec.prologue].dataBytes, kMaxCbufBytes);
         return true;
     }
@@ -140,14 +143,16 @@ SplitState *Device::makeSplit(Pipeline &pl)
     s.prologueData = prologueData;
     s.prologueDataBytes = prologueDataBytes;
     // a state with argument tables is never split (raw_direct.cpp directRecord)
-    build(s.pipeline, *source->pp, source->vs, fs, source->blob, source->keyString, source->caTransform, nullptr);
-    s.pipeline.memoryEntries |= placedSetReads(fs.header, *fs.record, *source->pp);
+    build(s.pipeline, *source->pp, source->vs, fs, source->blob, source->keyString, source->caTransform, nullptr,
+          source->far);
+    s.pipeline.memoryEntries |= placedSetReads(fs.header, *fs.record, s.pipeline.entries);
     if (!bindsAsWhole(s.pipeline, pl)) {
         splitStates_.pop_back();
         __atomic_store_n(&pl.splitSource, nullptr, __ATOMIC_RELEASE);
         return nullptr;
     }
     s.pipeline.restore = pl.restore;
+    s.pipeline.strideTwin = pl.strideTwin;
     s.pipeline.splitOf = &s;
     __atomic_store_n(&pl.split, &s, __ATOMIC_RELEASE);
     return &s;
@@ -180,7 +185,7 @@ Pipeline *RenderEncoder::splitTwin(Pipeline *pl, WrittenRegion::Analysis &analys
         const int entry = pixelUboEntry(*pl, source->rec.uboCbuf[k]);
         if (entry < 0)
             return whole(SplitWhole::Unbound);
-        const PackEntry &e = pl->rec->entry[entry];
+        const PackEntry &e = pl->entries[uint32_t(entry)];
         const Bound &b = bufs_[e.stage][e.slot];
         if (!b.va)
             return whole(SplitWhole::Unbound);
@@ -208,7 +213,7 @@ void RenderEncoder::launchSplit(Push &p, const Pipeline &twin, const uint32_t *s
     SplitLaunch l;
     l.split = &s;
     for (uint8_t k = 0; k < s.rec.uboCount; k++) {
-        const uint32_t *desc = set + twin.rec->entry[pixelUboEntry(twin, s.rec.uboCbuf[k])].offset / 4;
+        const uint32_t *desc = set + twin.entries[uint32_t(pixelUboEntry(twin, s.rec.uboCbuf[k]))].offset / 4;
         l.cbuf[1 + k] = desc[0] | uint64_t(desc[1]) << 32;
         l.cbufBytes[1 + k] = std::min(desc[2], kMaxCbufBytes);
     }
@@ -278,8 +283,8 @@ void RenderEncoder::captureSplit(const Pipeline &pl, WrittenRegion::Analysis &an
     const uint64_t vertexBytes = uint64_t(first + count) * rec.vertexStride;
     if (rec.vertexSlot != 0xff && vertexBytes <= kSplitCaptureVertexBytes)
         r.vertices = copy(bufs_[1][rec.vertexSlot], vertexBytes);
-    for (uint32_t k = 0; k < rec.entries && k < kPackEntries && r.blocks.size() < kSplitCaptureBlocks; k++) {
-        const PackEntry &e = rec.entry[k];
+    for (uint32_t k = 0; k < pl.entries.size() && r.blocks.size() < kSplitCaptureBlocks; k++) {
+        const PackEntry &e = pl.entries[k];
         if (e.kind != EntryUbo)
             continue;
         const Bound &b = bufs_[e.stage][e.slot];

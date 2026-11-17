@@ -108,6 +108,9 @@ def tool(args: argparse.Namespace, root: Path, work: Path) -> None:
             Path(args.mock).parent,
             '-lmock_iokit',
             '-Wl,-rpath,@executable_path',
+            # No debug map: its paths name the build's sandbox or worker slot, so every link made other bytes and every
+            # seed bucket keyed on the tool ran again
+            '-Wl,-S',
             '-framework',
             'Foundation',
             '-framework',

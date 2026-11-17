@@ -6,6 +6,7 @@
 #define SWITCH_DIAG_STALL_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* A main thread off core this long, other than idle in its run loop, is stalled. */
@@ -83,6 +84,70 @@ static inline enum switch_stall_event switch_stall_step(struct switch_stall_epis
     e->since = kind == SWITCH_STALL_RUNNABLE ? s->made_runnable : s->last_run;
     e->kind = kind;
     return SWITCH_STALL_BEGAN;
+}
+
+/*
+ * What ran while a stall lasted: every thread's time on a core (mach absolute time) when its first line is written,
+ * sorted by thread id, and at its end the threads that gained the most since. A thread the snapshot never saw began
+ * after it, so all its time counts, unless the snapshot was cut short (`complete` false) and may have missed it.
+ */
+struct switch_stall_used {
+    uint64_t tid;
+    uint64_t cpu;
+};
+
+static inline int switch_stall_used_cmp(const void *a, const void *b)
+{
+    const uint64_t x = ((const struct switch_stall_used *)a)->tid, y = ((const struct switch_stall_used *)b)->tid;
+
+    return x < y ? -1 : x > y ? 1 : 0;
+}
+
+static inline uint64_t switch_stall_gained(const struct switch_stall_used *seen, unsigned int n, bool complete,
+                                           uint64_t tid, uint64_t cpu)
+{
+    unsigned int lo = 0, hi = n;
+
+    while (lo < hi) {
+        const unsigned int mid = lo + (hi - lo) / 2;
+
+        if (seen[mid].tid == tid) {
+            return cpu > seen[mid].cpu ? cpu - seen[mid].cpu : 0;
+        }
+        if (seen[mid].tid < tid) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    return complete ? cpu : 0;
+}
+
+/* One of the threads that gained the most, `ref` the caller's handle for it. */
+struct switch_stall_top {
+    uint64_t tid;
+    uint64_t cpu;
+    void *ref;
+};
+
+/* Keeps top[0..k) the k largest gains, largest first; a gain of 0 never enters. */
+static inline void switch_stall_rank(struct switch_stall_top *top, unsigned int k, struct switch_stall_top entry)
+{
+    unsigned int at = k;
+
+    if (entry.cpu == 0) {
+        return;
+    }
+    while (at > 0 && (top[at - 1].ref == NULL || top[at - 1].cpu < entry.cpu)) {
+        at--;
+    }
+    if (at == k) {
+        return;
+    }
+    for (unsigned int i = k - 1; i > at; i--) {
+        top[i] = top[i - 1];
+    }
+    top[at] = entry;
 }
 
 /* block_hint.h's thread_snapshot_wait_flags, by value. */

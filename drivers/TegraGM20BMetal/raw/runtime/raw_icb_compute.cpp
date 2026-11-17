@@ -21,6 +21,19 @@ bool ComputeEncoder::icbRegion(Device &dev, const ComputeState &k, const Compute
                                const IcbBuffer (&buffers)[31], const StageIn &stageIn, uint8_t *block, uint64_t va,
                                const char **why)
 {
+    return icbRegion(dev, k, region, {{}, region.groups}, grid, nominal, buffers, stageIn, block, va, why);
+}
+
+bool ComputeEncoder::icbRegion(Device &dev, const ComputeState &k, const ComputeRegion &region,
+                               const DispatchPiece &slice, const std::array<uint32_t, 3> &grid,
+                               const std::array<uint32_t, 3> &nominal, const IcbBuffer (&buffers)[31],
+                               const StageIn &stageIn, uint8_t *block, uint64_t va, const char **why)
+{
+    for (uint8_t a = 0; a < 3; ++a)
+        if (slice.groups[a] > kQmdGroups[a]) {
+            *why = "a launch past the QMD's grid fields";
+            return false;
+        }
     if (const char *refusal = icbRefusal(k)) {
         *why = refusal;
         return false;
@@ -70,10 +83,9 @@ bool ComputeEncoder::icbRegion(Device &dev, const ComputeState &k, const Compute
         *why = "a threadgroup m2v's dispatch region cannot name";
         return false;
     }
-    const uint32_t base[3] = {};  // an indirect dispatch is never cut into pieces
-    rootWords(r, base, region.groups.data(), setVa, residualMask, residuals, words, root);
+    rootWords(r, slice.base.data(), region.groups.data(), setVa, residualMask, residuals, words, root);
     stageInWords(r, stageIn, root + kRootPush / 4);
-    return qmdWords(k, region.groups.data(), rootVa, setVa, qmd, why);
+    return qmdWords(k, slice.groups.data(), rootVa, setVa, qmd, why);
 }
 
 void ComputeEncoder::inheritBuffers(IcbBuffer (&out)[31], std::array<uint32_t, 31> &strides)
@@ -86,7 +98,7 @@ void ComputeEncoder::inheritBuffers(IcbBuffer (&out)[31], std::array<uint32_t, 3
             cb_.use(*b.buffer, true);
             if (b.buffer->hostVisible && !b.buffer->wc && b.buffer->cpu)
                 cb_.clean(b.buffer->cpu + b.offset, b.size);
-        } else if (b.va) {
+        } else if (b.va && !b.kernelMemory) {
             cb_.useAddress(b.va, b.size, true);
         }
     }

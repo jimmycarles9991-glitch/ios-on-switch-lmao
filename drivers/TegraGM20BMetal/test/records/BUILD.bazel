@@ -39,6 +39,8 @@ cc_library(
         "golden_files.h",
         "record_digest.h",
         "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack_selectors.h",
+        "//drivers/TegraGM20BMetal:raw/runtime/raw_set_entries.h",
     ],
     copts = [
         "-std=c++17",
@@ -104,7 +106,7 @@ sample_raw_pack(
     crawl = "//gpu/seed:crawl",
     device_libraries = "@gpu_device_data//:libraries",
     generator = GM20B_METAL + ":raw/pack/rawpack.py",
-    tools = "//gpu/seed:tools",
+    tools = "//gpu/seed:default_raw_tools",
 )
 
 GOLDENS = select({
@@ -136,14 +138,12 @@ CORPUS_ARGS = select({
     for kind in KINDS
 })
 
-# The sample pack's tools are the full pack's, NVK's host twin among them (until x1-nomvk replaces its compile): m2v
 cc_test(
     name = "record_sample_test",
     srcs = ["record_check.cpp"],
     args = SAMPLE_ARGS,
     copts = ["-std=c++17"],
     data = GOLDENS + [":sample_pack"],
-    tags = ["m2v"],
     deps = [":records"],
 )
 
@@ -154,7 +154,6 @@ cc_test(
     args = ["$(rootpath :sample_pack)/pack.bin"],
     copts = ["-std=c++17"],
     data = [":sample_pack"],
-    tags = ["m2v"],
     deps = [":records"],
 )
 
@@ -167,6 +166,9 @@ cc_test(
         GM20B_METAL + ":raw/runtime/raw_emit.h",
         GM20B_METAL + ":raw/runtime/raw_pack.cpp",
         GM20B_METAL + ":raw/runtime/raw_pack.h",
+        GM20B_METAL + ":raw/runtime/raw_pack_selectors.h",
+        GM20B_METAL + ":raw/runtime/raw_set_entries.h",
+        GM20B_METAL + ":raw/runtime/raw_slot_mask.h",
         GM20B_METAL + ":raw/runtime/raw_sample_shading.h",
         GM20B_METAL + ":raw/runtime/raw_xr.h",
         GM20B_METAL + ":raw/runtime/raw_xr_pass.h",
@@ -175,7 +177,6 @@ cc_test(
     args = ["$(rootpath :sample_pack)/pack.bin"],
     copts = ["-std=c++17"],
     data = [":sample_pack"],
-    tags = ["m2v"],
 )
 
 # raw_emit's vertex input registers of each QuartzCore state of the sample corpus, its vertex function made with this
@@ -195,10 +196,14 @@ cc_test(
         GM20B_METAL + ":raw/pack/probe_states.h",
         GM20B_METAL + ":raw/runtime/RawPipelineKey.h",
         GM20B_METAL + ":raw/runtime/raw_cubic.h",
+        GM20B_METAL + ":raw/runtime/raw_pipeline_fields.h",
         GM20B_METAL + ":raw/runtime/raw_emit.cpp",
         GM20B_METAL + ":raw/runtime/raw_emit.h",
         GM20B_METAL + ":raw/runtime/raw_pack.cpp",
         GM20B_METAL + ":raw/runtime/raw_pack.h",
+        GM20B_METAL + ":raw/runtime/raw_pack_selectors.h",
+        GM20B_METAL + ":raw/runtime/raw_set_entries.h",
+        GM20B_METAL + ":raw/runtime/raw_slot_mask.h",
         GM20B_METAL + ":raw/runtime/raw_sample_shading.h",
         GM20B_METAL + ":raw/runtime/raw_written_textures.h",
         GM20B_METAL + ":raw/runtime/raw_xr.h",
@@ -229,7 +234,6 @@ cc_test(
         "-framework",
         "Metal",
     ],
-    tags = ["m2v"],
 )
 
 # The full pack (//gpu/seed:raw_pack): manual, run by the gate that packages a build

@@ -2,20 +2,11 @@
 #pragma once
 #import "RawMetalInternal.h"
 
-// A stored multisampled texture the raw path keeps: private, 2D multisampled at a count the device answers yes for (2, 4), one
-// level, no rotation; a colour format it renders (Device::createStoredMultisample), or a depth/stencil one only rendered and
-// sampled (Device::createOwnedZeta)
-enum class RMStoredSamples : uint8_t {
-    None,
-    Colour,
-    Zeta
-};
+// raw_texture_shape.h storedSamples
+using RMStoredSamples = raw::shapes::StoredSamples;
 
 RMStoredSamples storedMultisampleKind(MTLTextureDescriptor *d);
-bool makeStoredMultisample(MTLTextureDescriptor *d, RMStoredSamples kind, raw::Texture &t);
 
-// A stored one-sample depth/stencil texture (zetaDescriptor's, not memoryless) in zeta memory of its own, no m2v twin
-bool makeStoredZeta(MTLTextureDescriptor *d, raw::Texture &t);
 // m2v's twin of stored one-sample depth/stencil texture `t`, made at the first replay that needs it: NVK's image, with
 // `t`'s texels copied into it and `t` over it from then on (raw::Device::moveOwnedZeta); nil, *why, where it cannot be
 id storedZetaTwin(RMTexture *t, id<MTLDevice> m2v, const char **why);

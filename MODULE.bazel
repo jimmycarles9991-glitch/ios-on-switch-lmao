@@ -22,6 +22,7 @@ bazel_dep(name = "googletest", version = "1.17.0.bcr.2", dev_dependency = True)
 
 # libjpeg-turbo, the reference decoder TegraNVJPG's host test compares its parser and planes against (test-only).
 bazel_dep(name = "libjpeg_turbo", version = "3.1.3.bcr.6", dev_dependency = True)
+bazel_dep(name = "spirv_tools", version = "2026.3", dev_dependency = True)
 
 # --- Python: the build's tools and tests run on this interpreter, never the host's ------------------------------
 # No implicit __init__.py in runfiles: tools/ is a namespace package (PEP 420), imported as tools.install etc.

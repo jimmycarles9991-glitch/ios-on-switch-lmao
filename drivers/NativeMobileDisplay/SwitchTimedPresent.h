@@ -25,7 +25,13 @@ enum class Decision {
     Due,
     Early,       // the next frame end is too early for it
     NeedsPhase,  // the frame ends were masked: the next one says which frame end is the target's
+    Ordinary,    // too early for the next frame end, and goes at once as the render server's ordinary frame
 };
+
+inline bool due(Decision d)
+{
+    return d == Decision::Due || d == Decision::Ordinary;
+}
 
 inline Decision decide(uint64_t requestedContinuous, const Clock &c)
 {
@@ -37,12 +43,13 @@ inline Decision decide(uint64_t requestedContinuous, const Clock &c)
     const uint64_t requested = requestedContinuous - asleep;
     if (requested <= c.nowAbsolute + c.period / 2 || requested - c.nowAbsolute > c.horizon)
         return Decision::Due;
-    if (c.accepted && requested <= c.accepted + c.period + c.period / 2)
-        return Decision::Due;
+    const bool ordinary = c.accepted && requested <= c.accepted + c.period + c.period / 2;
     if (!c.lastFrameEnd || c.lastFrameEnd > c.nowAbsolute || c.nowAbsolute - c.lastFrameEnd >= 2 * c.period)
-        return Decision::NeedsPhase;
+        return ordinary ? Decision::Due : Decision::NeedsPhase;
     const uint64_t nextFrameEnd = c.lastFrameEnd + ((c.nowAbsolute - c.lastFrameEnd) / c.period + 1) * c.period;
-    return requested > nextFrameEnd + c.period / 2 ? Decision::Early : Decision::Due;
+    if (requested <= nextFrameEnd + c.period / 2)
+        return Decision::Due;
+    return ordinary ? Decision::Ordinary : Decision::Early;
 }
 
 }  // namespace switch_timed_present

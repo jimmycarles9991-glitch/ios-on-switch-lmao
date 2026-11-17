@@ -9,6 +9,7 @@
 #include "drivers/TegraGM20BMetal/raw/runtime/raw_visibility.h"
 #include "kits/SwitchGM20B/SwitchGM20B.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BPushDecode.h"
+#include "visibility_model.h"
 
 namespace {
 
@@ -73,9 +74,6 @@ TEST(RawVisibility, RefusalsNameTheirReason)
     a.rawBuffer = false;
     EXPECT_NE(raw::visibilityRefusal(a), nullptr);
     a.rawBuffer = true;
-    a.accumulate = true;
-    EXPECT_NE(raw::visibilityRefusal(a), nullptr);
-    a.accumulate = false;
     a.mode = raw::kVisibilityBoolean;
     EXPECT_EQ(raw::visibilityRefusal(a), nullptr) << "Boolean is taken as Counting is";
     a.mode = raw::kVisibilityDisabled;
@@ -194,17 +192,117 @@ TEST(RawVisibility, ABooleanResultIsEachHalfOfTheCountAtMostOne)
     }
 }
 
-TEST(RawVisibility, AnEncoderTakesAtMostItsQueryLimit)
+// Every offset maxVisibilityQueryOffset (65,528) leaves is taken once; one 65,536 bytes on shares a key and is refused
+TEST(RawVisibility, AnEncoderTakesEveryOffsetTheDeviceAnswersOnce)
 {
     Recorder r;
     raw::VisibilityQueries q;
     for (uint32_t i = 0; i < raw::kVisibilityQueriesPerEncoder; i++) {
-        ASSERT_EQ(q.set(r.p, raw::kVisibilityCounting, kResults + 8 * i, kSlot0 + 16 * i),
-                  raw::VisibilityQueries::Set::Done);
+        ASSERT_EQ(q.set(r.p, raw::kVisibilityCounting, kResults + 8 * i, kSlot0 + 32 * i),
+                  raw::VisibilityQueries::Set::Done)
+            << i;
         r.take();
     }
-    EXPECT_EQ(q.set(r.p, raw::kVisibilityCounting, kResults + 8 * raw::kVisibilityQueriesPerEncoder, kSlot0),
-              raw::VisibilityQueries::Set::Full);
+    EXPECT_EQ(raw::kVisibilityQueriesPerEncoder, 8192u);
+    EXPECT_EQ(q.set(r.p, raw::kVisibilityCounting, kResults + 65536, kSlot0), raw::VisibilityQueries::Set::Retaken);
+    q.clear();
+    EXPECT_EQ(q.set(r.p, raw::kVisibilityCounting, kResults, kSlot0), raw::VisibilityQueries::Set::Done)
+        << "a new encoder takes its offsets again";
+}
+
+// One encoder's mode sets and draws run on the model, then its end, each result written where the end puts it
+struct Step {
+    uint32_t mode;  // or a draw of `samples` where `draw`
+    uint32_t offset;
+    uint64_t samples = 0;
+    bool draw = false;
+};
+
+Step at(uint32_t mode, uint32_t offset)
+{
+    return {mode, offset};
+}
+
+Step drawn(uint64_t samples)
+{
+    return {0, 0, samples, true};
+}
+
+std::vector<uint64_t> ran(const std::vector<uint64_t> &preset, const std::vector<Step> &steps, bool accumulate)
+{
+    visibility_model::Gpu gpu;
+    for (size_t i = 0; i < preset.size(); i++)
+        gpu.putDword(kResults + 8 * i, preset[i]);
+    Recorder r;
+    raw::VisibilityQueries q;
+    uint32_t slot = 0;
+    for (const Step &s : steps) {
+        if (s.draw) {
+            gpu.draw(s.samples);
+            continue;
+        }
+        const uint64_t slotVa = s.mode ? kSlot0 + raw::kVisibilitySlotBytes * slot++ : 0;
+        EXPECT_EQ(q.set(r.p, s.mode, s.mode ? kResults + s.offset : 0, slotVa, accumulate),
+                  raw::VisibilityQueries::Set::Done);
+        const auto words = r.take();
+        EXPECT_LE(words.size(), raw::VisibilityQueries::kSetWords);
+        gpu.run(words);
+    }
+    q.finish(r.p);
+    auto words = r.take();
+    EXPECT_LE(words.size(), raw::VisibilityQueries::kFinishWords);
+    gpu.run(words);
+    for (size_t i = 0; i < q.results(); i++) {
+        q.finishResult(r.p, i);
+        words = r.take();
+        EXPECT_LE(words.size(), raw::VisibilityQueries::kResultWords);
+        gpu.run(words);
+    }
+    EXPECT_TRUE(gpu.enabled) << "the copy engine's render enable is put back to always";
+    std::vector<uint64_t> out;
+    for (size_t i = 0; i < preset.size(); i++)
+        out.push_back(gpu.dword(kResults + 8 * i));
+    return out;
+}
+
+constexpr uint32_t kCount = raw::kVisibilityCounting, kBool = raw::kVisibilityBoolean, kOff = 0;
+
+// An M4 Max's answers (macOS 27.2.1): a pass that resets writes the
+// count or 1 or 0 at each offset it set, 0 with no draw
+TEST(RawVisibility, AResettingPassWritesEachOffsetsCountOrWhetherAny)
+{
+    const auto got = ran({1000, 7, 0xabab, 0xdead00000000, 5, 9},
+                         {at(kCount, 0), drawn(10000), at(kCount, 8), at(kCount, 24), drawn(100), at(kBool, 32),
+                          drawn(100), at(kBool, 40), at(kOff, 0), drawn(50)},
+                         false);
+    EXPECT_EQ(got, (std::vector<uint64_t>{10000, 0, 0xabab, 100, 1, 0}));
+}
+
+// Accumulate: Counting adds to the low word modulo 2^32 and keeps the high word; no draw keeps the bytes
+TEST(RawVisibility, AnAccumulatingPassAddsTheCountToTheLowWord)
+{
+    const auto got = ran({1000, 7, 0xabab, 0xfffffffffffffff0, 0xffffffff, 0x100000000},
+                         {at(kCount, 0), drawn(10000), at(kCount, 8), at(kCount, 24), drawn(100), at(kCount, 32),
+                          drawn(1), at(kCount, 40), drawn(16), at(kOff, 0), drawn(50)},
+                         true);
+    EXPECT_EQ(got, (std::vector<uint64_t>{11000, 7, 0xabab, 0xffffffff00000054, 0, 0x100000010}));
+}
+
+// Accumulate: Boolean ORs 1 into the low word where a sample passed, whatever its slot held before
+TEST(RawVisibility, AnAccumulatingPassOrsOneWhereAnySamplePassed)
+{
+    const auto got = ran({5, 2, 0x100000000, 0, 3, 0},
+                         {at(kBool, 0), drawn(100), at(kBool, 8), drawn(100), at(kBool, 16), drawn(1), at(kBool, 24),
+                          drawn(4096), at(kBool, 32), at(kBool, 40), at(kOff, 0), drawn(50)},
+                         true);
+    EXPECT_EQ(got, (std::vector<uint64_t>{5, 3, 0x100000001, 1, 3, 0}));
+}
+
+// A count of 2^32 samples: an M4 Max's counter is 32 bits, so the low word is what any pass sees
+TEST(RawVisibility, AnAccumulatingPassSeesTheCountersLowWord)
+{
+    const auto got = ran({0, 0x10}, {at(kCount, 0), drawn(0x110000000), at(kBool, 8), drawn(0x100000000)}, true);
+    EXPECT_EQ(got, (std::vector<uint64_t>{0x10000000, 0x10}));
 }
 
 }  // namespace

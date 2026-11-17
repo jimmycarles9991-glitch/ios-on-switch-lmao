@@ -129,7 +129,8 @@ def hsl(name: str) -> Program:
 def vcm(m: Sequence[Sequence[float]], p3: float = 0.0, p4: float = 0.0) -> Program:
     """vibrant_color_matrix_sover (IR:6074-6179). m: five RGBA rows of the matrix uniform; p3, p4: its clamp pair.
 
-    K0..K4 = rows' rgb, K5 = (M0.a, M1.a, M2.a), K6 = (M3.a, M4.a, e), K7 = (p3, -0.5, 0).
+    Written with K0..K4 = rows' rgb, K5 = (M0.a, M1.a, M2.a), K6 = (M3.a, M4.a, e), K7 = (p3, -0.5, 0); its first pass
+    reads K6, so program() swaps K0 and K6 (the chip loads it as kits/SwitchGM20BEmit/mme/switch_gm20b_macros.c does).
     The alpha row reaches every lane through RRR/GGG swizzles on K5 and K6.
     """
     h = half_bits

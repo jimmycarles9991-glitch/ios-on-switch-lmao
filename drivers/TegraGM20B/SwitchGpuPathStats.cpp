@@ -3,6 +3,7 @@
 #include "TegraGM20BGpu.h"
 extern "C" {
 #include "TegraGM20BSched.h"
+#include "deadline_stats.h"
 }
 #if SWITCH_GPU_PATH_STATS
 #include <IOKit/IOLib.h>
@@ -160,6 +161,7 @@ switch_gpu_spans::Notes gSpans;
 uint64_t gCompositorJobMax;
 switch_gpu_comp_sync gSyncWindow, gSyncAsked;
 switch_gpu_comp_round gRound;
+switch_gpu_comp_deadline gDeadlineSeen;  // under processLock()
 constexpr uint64_t kPeriodNs = 16666667;
 }  // namespace
 
@@ -204,9 +206,10 @@ extern "C" void switch_gpu_compositor_alloc(uint64_t ns, int cold)
 	switch_gpu_comp_round_alloc(&gRound, ns, cold);
 }
 
-extern "C" void switch_gpu_compositor_scanned(uint64_t passes, uint64_t draws)
+extern "C" void switch_gpu_compositor_scanned(uint64_t passes, uint64_t draws, uint64_t interlocks,
+					      uint64_t twins)
 {
-	switch_gpu_comp_round_scanned(&gRound, passes, draws);
+	switch_gpu_comp_round_scanned(&gRound, passes, draws, interlocks, twins);
 }
 
 extern "C" void switch_gpu_compositor_sync(uint32_t syncs, uint64_t ns, int behind)
@@ -236,12 +239,19 @@ extern "C" void switch_gpu_span_line(char *line, size_t size)
 	switch_gpu_comp_sync_take(&gSyncAsked, &sync);
 	switch_gpu_comp_round round = {};
 	switch_gpu_comp_round_take(&gRound, &round);
+	struct tgm_deadline_counts deadline = {};
+	struct tgm_hold_counts holds = {};
+	const int deadlineUp = tgm_deadline_counts(&deadline);
+	tgm_hold_counts(&holds);
 	char head[320];
+	IOLockLock(held);
+	if (deadlineUp)
+		switch_gpu_comp_round_deadline(&round, &gDeadlineSeen, deadline.windows,
+					       holds.holds);
 	const int put = switch_gpu_comp_round_format(head, sizeof(head), &round);
 	const size_t used =
 		put > 0 && static_cast<size_t>(put) < sizeof(head) ? static_cast<size_t>(put) : 0;
 	switch_gpu_comp_sync_format(head + used, sizeof(head) - used, &sync);
-	IOLockLock(held);
 	switch_gpu_spans::take(gSpans, __atomic_exchange_n(&gCompositorJobMax, 0, __ATOMIC_RELAXED),
 			       head, line, size);
 	IOLockUnlock(held);

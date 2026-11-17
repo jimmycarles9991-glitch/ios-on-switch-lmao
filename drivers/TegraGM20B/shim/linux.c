@@ -850,6 +850,17 @@ int nvxnu_pool_alloc_chunks(unsigned long count, unsigned long long *pas)
 	return 0;
 }
 
+unsigned long nvxnu_pool_clean_chunks(void)
+{
+	unsigned long clean = 0;
+	if (!pool_map)
+		return 0;
+	spin_lock(&pool_lock);
+	clean = (unsigned long)tgm_comp_clean_chunks(pool_map, pool_dirty, pool_npages);
+	spin_unlock(&pool_lock);
+	return clean;
+}
+
 unsigned long nvxnu_pool_claim_dirty(unsigned long max_bytes, unsigned long long *pa)
 {
 	unsigned long first = 0;

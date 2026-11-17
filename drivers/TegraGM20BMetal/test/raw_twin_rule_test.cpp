@@ -32,6 +32,21 @@ TEST(RawTwinRule, PastTheMeasuredTrianglesAndAreasTheStorageFormStays)
     EXPECT_FALSE(raw::twinTaken(measured(3, 0, 64 * 64)));
 }
 
+// The bound over triangle count and render area: one quad at any admitted area; up to 32 triangles only over a pass of at
+// most 4 x 64x64. Boot 22's ui.glass_sidebar meshes (8-10 triangles over 1280x720) keep the storage form.
+TEST(RawTwinRule, MoreThanOneQuadTakesTheTwinOnlyOverASmallPass)
+{
+    constexpr uint64_t kAreas[] = {64 * 64, 128 * 128, 256 * 256, 1280 * 720};
+    for (uint32_t n : {1u, 2u, 3u, 8u, 10u, 16u, 32u, 33u})
+        for (uint64_t area : kAreas) {
+            const bool expected = n <= 2 || (n <= 32 && area <= 4 * 64 * 64);
+            EXPECT_EQ(raw::twinTaken(measured(3, 3 * n, area)), expected) << n << " triangles over " << area;
+        }
+    for (uint32_t n : {8u, 9u, 10u})
+        EXPECT_FALSE(raw::twinTaken(measured(3, 3 * n, 1280 * 720))) << "the sidebar's mesh, " << n << " triangles";
+    EXPECT_FALSE(raw::twinTaken(measured(4, 12, 1280 * 720))) << "a strip of 10 triangles";
+}
+
 // Every shape the twin's per-triangle draw refuses (selfRuns, sequentialRuns) keeps the storage form, which draws it
 TEST(RawTwinRule, NoShapeTheTwinTakesIsOneSelfRunsRefuses)
 {

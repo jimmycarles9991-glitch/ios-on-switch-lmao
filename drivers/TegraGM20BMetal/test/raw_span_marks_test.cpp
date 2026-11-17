@@ -94,9 +94,9 @@ TEST(RawSpanMarks, ConsecutiveDrawsOfOneStateAreOneSpanAndTheTailEndsAtTheEndSta
     EXPECT_EQ(spans[3].label.kind, SpanKind::Tail);
     char line[112];
     formatSpan(line, sizeof line, spans[1]);
-    EXPECT_EQ(std::string(line), "61000 us PBGRAXmw_A3Xghfc k64ed02fd5d7a1865 50401 instr x2 921k");
+    EXPECT_EQ(std::string(line), "61000 us k64ed02fd5d7a1865 PBGRAXmw_A3Xghfc 50401 instr x2 921k");
     formatSpan(line, sizeof line, spans[0]);
-    EXPECT_EQ(std::string(line), "2000 us pass prologue k0000000000000000 0 instr x1 3686km");
+    EXPECT_EQ(std::string(line), "2000 us k0000000000000000 pass prologue 0 instr x1 3686km");
 }
 
 // Boot 21's glass state on an app open: two draws of its split twin over the whole 722 x 1282 target in 5.125 ms. The line
@@ -120,14 +120,28 @@ TEST(RawSpanMarks, ASpanOfDrawsSaysItsFormPixelsExecutedRateAndTarget)
     char line[192];
     formatSpan(line, sizeof line, s);
     EXPECT_EQ(std::string(line),
-              "5125 us PBGRAXm_TimgA2Xhf_IxrgN3Oc3mtc4nlnlnl k4c33d27bde9b894a 560 instr x2 925k twin "
+              "5125 us k4c33d27bde9b894a PBGRAXm_TimgA2Xhf_IxrgN3Oc3mtc4nlnlnl 560 instr x2 925k twin "
               "1851kpx e544 c0 80/722x1282/bl");
     SpanLabel prologue;
     prologue.kind = SpanKind::Prologue;
     prologue.pixels = 1000;
     StateSpan p{prologue, 1, 2'000'000, 1000};
     formatSpan(line, sizeof line, p);
-    EXPECT_EQ(std::string(line), "2000 us pass prologue k0000000000000000 0 instr x1 0k") << "a prologue has no draws";
+    EXPECT_EQ(std::string(line), "2000 us k0000000000000000 pass prologue 0 instr x1 0k") << "a prologue has no draws";
+}
+
+// Boot 22 13:47:09.113: Core Animation's generic merge state drawn with no name on its label, logged as
+// "41339 us draws kb0f4f3daabb01e2e ...". Its key stays the third field, where ui.launch_hitch reads it.
+TEST(RawSpanMarks, AStateWithNoNameKeepsItsKeyTheThirdField)
+{
+    SpanLabel generic;
+    generic.key = 0xb0f4f3daabb01e2eull;
+    generic.instructions = 63696;
+    generic.kpx = 921;
+    StateSpan s{generic, 2, 41'339'000, 0};
+    char line[112];
+    formatSpan(line, sizeof line, s);
+    EXPECT_EQ(std::string(line), "41339 us kb0f4f3daabb01e2e draws 63696 instr x2 921k");
 }
 
 TEST(RawSpanMarks, AMarkTheGpuNeverWroteGivesItsTimeToTheNextAndALaterBufferTakesTheSlot)

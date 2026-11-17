@@ -31,9 +31,18 @@ filegroup(
         "raw/runtime/*.h",
         "raw/fx/*.h",
     ]) + [
+        "translate/NativeMetalTranslate.h",
         "raw/pack/probe_bind.h",  # the probe's bind offsets, which name a record's residual words (raw_record.h)
         "raw/pack/srgb_encode.h",  # the sRGB YCbCr store states' table, the device's copy of it (Device::srgbEncode_)
+        "//drivers/NativeMetal/abi:MetalABI.h",
+        "//drivers/TegraGM20BMetal/precompile/ca-selectors:raw_ca_selector_layout.h",
     ],
+)
+
+# The raw path's translation crate's Rust (//gpu:translate), which the stack key hashes by bytes
+filegroup(
+    name = "translate_rust",
+    srcs = glob(["translate/*.rs"]),
 )
 
 # The raw facade's Objective-C++ units (RawMetal.mm and the RawMetal*.mm beside it, RawAlias.mm, RawComplete.mm, RawDirect.mm)
@@ -58,12 +67,16 @@ filegroup(
         "//kits/SwitchGM20B:class_headers",  # pack/nvdec.cpp's method numbers
         "raw/runtime/raw_srgb_table.h",  # the colour table pack/layouts.py recognises
         "raw/runtime/raw_chip_facts.h",  # the chip facts pack/packfile.py writes into a pack's header
+        "raw/runtime/raw_own_states.h",
         # a kernel's key (pack/kernel_shapes.h)
         "raw/runtime/raw_compute_key.h",
         "raw/runtime/raw_metallib.cpp",
         "raw/runtime/raw_metallib.h",
         "raw/runtime/raw_pack.h",
+        "raw/runtime/raw_pack_selectors.h",
+        "raw/runtime/raw_set_entries.h",
         "raw/runtime/RawPipelineKey.h",  # the runtime's key of a state, which probe_states.h files records under
+        "raw/runtime/raw_pipeline_fields.h",  # the descriptor fields that key reads
     ],
 )
 
@@ -76,27 +89,36 @@ filegroup(
         "precompile/PrecompileInputs.h",
         "raw/runtime/RawDirect.h",
         "raw/runtime/RawDirect.mm",
+        "raw/runtime/RawOffline.h",
+        "raw/runtime/RawOffline.mm",
+        "raw/runtime/RawOfflineReflection.mm",
         "raw/runtime/RawRenderKey.h",
         "raw/runtime/RawRenderKey.mm",
         "raw/runtime/RawPipelineKey.h",
+        "raw/runtime/raw_pipeline_fields.h",
         "raw/runtime/raw_render_key.h",
         "raw/runtime/raw_cache.cpp",
         "raw/runtime/raw_cache.h",
         "raw/runtime/raw_cache_io.h",
+        "raw/runtime/raw_cbuf.h",
         "raw/runtime/raw_kernel_cache.cpp",
         "raw/runtime/raw_compute_key.h",
         "raw/runtime/raw_compute_record.h",
         "raw/runtime/raw_chip_facts.h",
+        "raw/runtime/raw_own_states.h",
         "raw/runtime/raw_cubic.h",
         "raw/runtime/raw_descriptors.h",
         "raw/runtime/raw_direct.cpp",
         "raw/runtime/raw_direct.h",
+        "raw/runtime/raw_direct_abi.h",
+        "translate/NativeMetalTranslate.h",
         "raw/runtime/raw_direct_compute.cpp",
         "raw/runtime/raw_direct_compute.h",
         "raw/runtime/raw_direct_encode.h",
         "raw/runtime/raw_direct_heap.h",
         "raw/runtime/raw_direct_nvk.h",
         "raw/runtime/raw_direct_push.h",
+        "raw/runtime/raw_kernel_pairs.h",
         "raw/runtime/raw_dynamic_push.h",
         "raw/runtime/raw_spill_table.h",
         "raw/runtime/raw_direct_storage.h",
@@ -112,13 +134,18 @@ filegroup(
         "raw/runtime/raw_sample_shading.h",
         "raw/runtime/raw_pack.cpp",
         "raw/runtime/raw_pack.h",
+        "raw/runtime/raw_pack_selectors.h",
         "raw/runtime/raw_push.h",
         "raw/runtime/raw_record.h",
         "raw/runtime/raw_record_parts.cpp",
         "raw/runtime/raw_record_parts.h",
         "raw/runtime/raw_residual.h",
         "raw/runtime/raw_rotation.h",
+        "raw/runtime/raw_selector_variants.h",
+        "raw/runtime/raw_set_entries.h",
         "raw/runtime/raw_set_layout.h",
+        "raw/runtime/raw_slot_mask.h",
+        "raw/runtime/raw_stage_textures.h",
         "raw/runtime/raw_set_reads.h",
         "raw/runtime/raw_written_textures.h",
         "raw/runtime/raw_xr.h",
@@ -155,7 +182,10 @@ filegroup(
 filegroup(
     name = "compiler_srcs",
     srcs = [
+        "compiler/compiler_codegen.mm",
+        "compiler/compiler_debug.mm",
         "compiler/compiler_engine.mm",
+        "compiler/compiler_facts.mm",
         "compiler/compiler_libraries.mm",
         "compiler/compiler_record.mm",
         "compiler/compiler_request.mm",
@@ -262,10 +292,13 @@ ios_binary(
         "raw/runtime/raw_amplification.cpp",
         "raw/runtime/raw_arena.cpp",
         "raw/runtime/raw_comp.cpp",
+        "raw/runtime/raw_completed.cpp",
         "raw/runtime/raw_gpu.cpp",
         "raw/runtime/raw_private_comp.cpp",
+        "raw/runtime/raw_record_parts.cpp",
         "raw/runtime/raw_draw_bands.cpp",
         "raw/runtime/raw_job_uses.cpp",
+        "raw/runtime/raw_mip_passes.cpp",
         "raw/runtime/raw_resolve_twod.cpp",
         "raw/runtime/raw_tessellation.cpp",
         "raw/runtime/raw_transfer.cpp",
@@ -310,6 +343,10 @@ ios_binary(
         "-I",
         "{bin}/kits/SwitchGM20BEmit/gen",
         "-I",
+        "{bin}",
+        "-I",
+        "{bin}/drivers/NativeMetal/abi",
+        "-I",
         "third_party/mesa/src/nouveau/headers",
         "-lc++",
         "-framework",
@@ -339,6 +376,7 @@ py_library(
         "raw/pack/ca/qc-21H461.json",
         "raw/pack/ca/qc-24B119.json",
         "raw/runtime/raw_srgb_table.h",  # pack/layouts.py reads it at import
+        "raw/runtime/raw_own_states.h",  # pack/packfile.py reads it at import
     ],
 )
 
@@ -373,6 +411,7 @@ py_test(
     name = "fetchfree_test",
     srcs = ["raw/pack/ca/fetchfree_test.py"],
     data = [
+        "precompile/corpus.log",
         "raw/pack/ca/qc-21H461.json",
         "raw/pack/ca/qc-24B119.json",
     ],
@@ -402,10 +441,30 @@ py_test(
     deps = [":raw_pack"],
 )
 
+# raw/pack/kernels.py: a kernel record viewing a texture slot in texels of another size is left out of the pack.
+py_test(
+    name = "kernels_view_test",
+    srcs = ["raw/pack/kernels_view_test.py"],
+    main = "raw/pack/kernels_view_test.py",
+    deps = [":raw_pack"],
+)
+
+# raw/pack/kernels.py and packfile.py: a kernel sampler entry's window (the texture slots it samples) reaches the pack.
+py_test(
+    name = "kernels_pairs_test",
+    srcs = ["raw/pack/kernels_pairs_test.py"],
+    main = "raw/pack/kernels_pairs_test.py",
+    deps = [":raw_pack"],
+)
+
 # raw/pack/iterated: every iterated blend program a fetch-free form names, against QuartzCore's formula.
 py_test(
     name = "iterated_table_test",
     srcs = ["raw/pack/iterated/table_test.py"],
+    data = [
+        "raw/runtime/raw_chip_facts.h",
+        "raw/runtime/raw_own_states.h",
+    ],
     main = "raw/pack/iterated/table_test.py",
     deps = [":raw_pack"],
 )
@@ -522,6 +581,7 @@ cc_binary(
         "raw/runtime/raw_heap_tables.h",
         "raw/runtime/raw_pack.h",
         "raw/runtime/raw_resource_id.h",
+        "raw/runtime/raw_set_entries.h",
         "raw/test/rootdump.cpp",
     ],
 )

@@ -176,6 +176,15 @@ void landscapeMoveUi(Window from, Window to)
         static_cast<uint32_t>(dc[windowBase(from) + native_planes::kOptions]);
 }
 
+// L4T window.c writes MEMFETCH_RESET before every T21x update, "to prevent FIFO from taking in stale data after a
+// reset" (TRM 24.11.27: software default ENABLE); hekate never sets it. Window A moving between the UI and a
+// column-scanned planar picture takes it, so neither mode's fetch starts on the other's FIFO state.
+void landscapeMemfetchReset()
+{
+    for (unsigned w = switch_landscape::kA; w <= switch_landscape::kC; ++w)
+        dc[switch_landscape::bufferBase(Window(w)) + native_planes::kMemfetchControl] = native_planes::kMemfetchReset;
+}
+
 void landscapeRequest()
 {
     planeRequestedAt = frameEnds;
@@ -183,6 +192,7 @@ void landscapeRequest()
     armFlipDeadline();
     if (stats)
         ++stPlaneFlips;
+    landscapeMemfetchReset();
     scanoutMemoryBarrier();
     dc[kDcStateControl] = kGeneralUpdate | kWinAUpdate | kWinBUpdate | kWinCUpdate;
     dc[kDcStateControl] = kGeneralActReq | kWinAActReq | kWinBActReq | kWinCActReq;
@@ -303,6 +313,7 @@ void landscapeLeaveNow(const char *why)
     landscapeState.csc[0] = landscapeState.csc[1] = -1;
     gPanicRestore.landscape = false;
     if (!hwSuspended) {
+        landscapeMemfetchReset();
         scanoutMemoryBarrier();
         dc[kDcStateControl] = kGeneralUpdate | kWinAUpdate | kWinBUpdate | kWinCUpdate;
         dc[kDcStateControl] = kGeneralActReq | kWinAActReq | kWinBActReq | kWinCActReq;

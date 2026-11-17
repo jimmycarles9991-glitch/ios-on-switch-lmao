@@ -34,7 +34,8 @@
 //!   tests and writes its depth itself against a stand-in of the depth attachment, inside the
 //!   interlock critical section, at each return; a failing fragment is recorded as discarded and
 //!   killed after the critical section. Compiled for a draw whose stencil test acts too, it runs
-//!   that first, against a stand-in of the stencil attachment.
+//!   that first, against a stand-in of the stencil attachment. A function that returns
+//!   `[[stencil]]` runs both tests so where its draw's stencil write follows the depth test.
 //! - **Coverage at sample rate** (`coverage`): a function that reads `[[sample_mask]]` and that
 //!   Metal runs once per covered sample runs, compiled for a multisampled pipeline, once per pixel,
 //!   and its body once per covered sample from a loop over the pixel's coverage ([`wrap_entry`]),
@@ -333,11 +334,12 @@ pub fn finish(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
     imageblock::finish(cx)?;
     fetch::finish(cx)?;
     stencil::finish(cx)?;
-    // An imageblock, an attachment in the storage form, and the shadow of a shader-side stencil
-    // are read and written inside the critical section whether or not the function names a
-    // raster order group.
-    let shadow = cx.families.fragment.stencil.is_some();
-    let storage = !cx.families.fragment.fetch.is_empty() || shadow;
+    // An imageblock, an attachment in the storage form, the shadow of a shader-side stencil and
+    // the stand-ins of in-shader tests are read and written inside the critical section whether
+    // or not the function names a raster order group.
+    let tests =
+        cx.families.fragment.stencil.is_some() || cx.families.fragment.depth_test.is_some();
+    let storage = !cx.families.fragment.fetch.is_empty() || tests;
     let interlock =
         if rog::declared(cx.entry) || cx.families.fragment.imageblock.is_some() || storage {
             match rog::mode(cx) {
@@ -596,6 +598,7 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
 pub fn plan_entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     cx.families.fragment.two_plane = cx.inputs.two_plane_alphas.clone();
     fetch::plan(cx)?;
+    stencil::plan_tests(cx)?;
     input_blend::plan(cx)?;
     let fp = &cx.families.fragment;
     let fetched = |c: &u32| fp.fetch.contains_key(c) || fp.input_blends.contains_key(c);

@@ -1,42 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include "raw_lock.h"
 #import "RawMetalMultisample.h"
+#import "RawMetalPassCache.h"
 #include "NativeBridgeMetalFrontend.h"
 
 RMStoredSamples storedMultisampleKind(MTLTextureDescriptor *d)
 {
-    if (d.textureType != MTLTextureType2DMultisample)
-        return RMStoredSamples::None;
-    static const SEL rotation = NSSelectorFromString(@"rotation");
-    const NSUInteger turned =
-        [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
-    if ((d.sampleCount != 2 && d.sampleCount != 4) || d.mipmapLevelCount > 1 || d.arrayLength > 1 || d.depth > 1 ||
-        turned || d.storageMode != MTLStorageModePrivate)
-        return RMStoredSamples::None;
-    const uint32_t format = uint32_t(d.pixelFormat);
-    if (raw::zetaFormatIndex(format) < raw::kZetaFormats)
-        return (d.usage & ~MTLTextureUsageShaderRead) == MTLTextureUsageRenderTarget ? RMStoredSamples::Zeta
-                                                                                     : RMStoredSamples::None;
-    const raw::FormatInfo *f = raw::formatInfo(format);
-    return f && f->rt && !raw::blockCompressed(f) && raw::xrForm(format) == raw::XrForm::None ? RMStoredSamples::Colour
-                                                                                              : RMStoredSamples::None;
-}
-
-bool makeStoredMultisample(MTLTextureDescriptor *d, RMStoredSamples kind, raw::Texture &t)
-{
-    const uint32_t width = uint32_t(d.width), height = uint32_t(d.height), format = uint32_t(d.pixelFormat),
-                   samples = uint32_t(d.sampleCount);
-    const bool zeta = kind == RMStoredSamples::Zeta;
-    const bool made =
-        zeta ? gRM->raw->createOwnedZeta(width, height, format, samples, t)
-             : gRM->raw->createStoredMultisample(width, height, format, samples, t, nullptr, privateCompressedKind(d));
-    static std::atomic<bool> said[2];
-    if (made && !said[zeta].exchange(true))
-        os_log(rawLog(), "raw: stored %ux multisampled %{public}s on (first %ux%u format %u: %llu bytes of %{public}s)",
-               samples, zeta ? "depth/stencil" : "colour", width, height, format,
-               (unsigned long long)(zeta ? t.storage.bytes : t.span.bytes),
-               zeta ? "zeta memory, no m2v twin" : "block-linear memory, m2v's twin NVK's image over it");
-    return made;
+    return raw::shapes::storedSamples(textureShape(d));
 }
 
 static const char *zetaMemoryRefusal(int asked)
@@ -61,27 +31,6 @@ static const char *zetaMemoryRefusal(int asked)
     default:
         return "NVK names no image";
     }
-}
-
-bool makeStoredZeta(MTLTextureDescriptor *d, raw::Texture &t)
-{
-    const uint32_t width = uint32_t(d.width), height = uint32_t(d.height), format = uint32_t(d.pixelFormat);
-    const uint32_t layers =
-        raw::textureLayers(uint32_t(d.textureType), uint32_t(std::min<NSUInteger>(d.arrayLength, 2048)));
-    const bool made =
-        gRM->raw->createOwnedZeta(width, height, format, 1, (d.usage & MTLTextureUsageShaderRead) != 0, t, layers);
-    static std::atomic<bool> said{false};
-    if (made && !said.exchange(true))
-        os_log(
-            rawLog(),
-            "raw: stored one-sample depth/stencil on (first %ux%u format %u, %u layers: %llu bytes of %{public}s zeta "
-            "memory, no m2v twin)",
-            width, height, format, layers, (unsigned long long)t.storage.bytes, t.comptags ? "compressed" : "plain");
-    if (!made)
-        SWITCH_REFUSE_DETAIL("raw", "zeta.owned", d.pixelFormat,
-                             "a stored %lux%lu depth/stencil texture of format %lu stays m2v's: no zeta memory",
-                             (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat);
-    return made;
 }
 
 void rmStoredZetaForM2v(RMTexture *t)
@@ -123,6 +72,7 @@ static id storedZetaTwinExcluded(RMTexture *t, id<MTLDevice> m2v, const char **w
         if (!gRM->raw->moveOwnedZeta(t->_raw, z, why))
             return nil;
     }
+    rmPassInvalidate();
     gRM->rawSinceM2v = true;
     // published with submissions excluded, so a caller that waited on them finds this twin rather than moving again
     return twinPublish(t, t->_twin, twin);
@@ -194,19 +144,22 @@ RMTexture *ownedZetaIn(RMCommandBuffer *cb, size_t from, size_t to)
         if ((access & ~raw::ResourceUse::Write) || !transientIn(plan, from, to, object))
             check(object);
     });
-    auto bound = [&](uint32_t stage, uint32_t index) {
-        if (index < plan.textures[stage].size())
-            for (void *object : plan.textures[stage][index].objects)
-                check(object);
+    auto bound = [&](const auto &table, uint32_t index) {
+        if (index >= table.size())
+            return;
+        const auto textures = table[index];
+        raw::forEachSlot(textures.set, [&](uint32_t slot) {
+            check(textures.objects[slot]);
+        });
     };
     for (size_t at = from; at < to && !found; at++) {
         const Op op = plan.operation(at).op;
         if (isPlanDraw(op)) {
             const raw::RenderStateRef &state = plan.renderStates[plan.draw(at).state];
-            bound(0, state.textures[0]);
-            bound(1, state.textures[1]);
+            bound(plan.textures[0], state.textures[0]);
+            bound(plan.textures[1], state.textures[1]);
         } else if (op == OpDispatch) {
-            bound(2, plan.kernelStates[plan.dispatch(at).state].textures);
+            bound(plan.kernelTextures, plan.kernelStates[plan.dispatch(at).state].textures);
         }
     }
     return (__bridge RMTexture *)found;

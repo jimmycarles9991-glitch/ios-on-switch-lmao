@@ -75,4 +75,12 @@ private:
     std::vector<std::function<void()>> observers_;
 };
 
+// Whether a packed state's variant its pack lacks is made at a draw that needs it (RawMetalCubic.mm renderVariant):
+// every form of one, a cubic, two-plane, sampled, written or shadowed (raw_xr_shadow.h) one; a test class alone is
+// drawn by the state's own record instead
+inline bool variantMadeAtDraw(bool packed, bool cubic, bool twoPlane, bool sampled, bool written, bool shadowed)
+{
+    return !packed || cubic || twoPlane || sampled || written || shadowed;
+}
+
 }  // namespace raw

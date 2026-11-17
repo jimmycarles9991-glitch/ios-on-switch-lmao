@@ -38,7 +38,7 @@ struct Display {
     OSObject *planeShownUi = nullptr;
     unsigned stPlaneUnready = 0, stPlaneDropped = 0, conversions = 0;
     int mapError = 0, convertError = 0;
-    uint32_t reservedOnSecond = 0;
+    uint64_t reservedOnSecond = 0;
     PlaneSet planeTarget;
     switch_display::WindowState live[2] = {};
     std::array<int, 4> mapping = {0, 1, 2, 3};
@@ -99,7 +99,7 @@ struct Display {
 
     int composite = -1;
     bool compositeWaits = false;
-    uint32_t composedFrom = 0;
+    uint64_t composedFrom = 0;
 
     bool planeComposeWaits(switch_display::Overlay wanted[2], const int *, uint32_t, uint32_t)
     {
@@ -154,6 +154,21 @@ TEST(PlaneSelection, UiAndTwoDetachedLayersPreserveFamilyStackDepth)
     EXPECT_EQ(display.reservedOnSecond, 1u << 0);
     EXPECT_EQ(display.planeBuildingSlots, 0u);
     EXPECT_EQ(display.stPlaneDropped, 0u);
+}
+
+TEST(PlaneSelection, SlotsAboveThirtyTwoKeepDistinctReservationBits)
+{
+    Display display;
+    const auto request = frame(display);
+    display.mapping[0] = 33;
+    display.mapping[2] = 47;
+    Display::PlaneDecision decision;
+    display.planeDecide(&request, decision);
+    ASSERT_FALSE(decision.waitSlot);
+    EXPECT_TRUE(decision.set.uses(33));
+    EXPECT_TRUE(decision.set.uses(47));
+    EXPECT_EQ(display.reservedOnSecond, uint64_t(1) << 33);
+    EXPECT_EQ(display.planeBuildingSlots, 0u);
 }
 
 TEST(PlaneSelection, ProducerUpdateKeepsUnchangedUiAndOtherOverlay)

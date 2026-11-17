@@ -11,7 +11,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::bind::BindState;
+use crate::bind::{BindState, FragmentTests};
 use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::error::{Error, RuntimeInput};
 use crate::library::Library;
@@ -24,7 +24,9 @@ use crate::pipeline::{FunctionDescriptor, RenderPipelineDescriptor, StageSource}
 use crate::Budget;
 
 /// `slice_vertex` writes its vertex id as `[[render_target_array_index]]`; `slice_reader` returns
-/// the slice it reads, `layered_fetch` adds its position to the color 0 it reads.
+/// the slice it reads, `layered_fetch` adds its position to the color 0 it reads, and
+/// `layered_fetch_discard` does so where that color's red is not negative and discards elsewhere;
+/// `layered_stencil` returns its position and the stencil reference 7.
 const MODULE: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
 target triple = "air64_v28-apple-macosx26.0.0"
 
@@ -50,8 +52,30 @@ entry:
   ret <4 x float> %v
 }
 
+declare void @air.discard_fragment()
+
+define <{ <4 x float>, i32 }> @layered_stencil(<4 x float> %pos) {
+entry:
+  %r0 = insertvalue <{ <4 x float>, i32 }> undef, <4 x float> %pos, 0
+  %r1 = insertvalue <{ <4 x float>, i32 }> %r0, i32 7, 1
+  ret <{ <4 x float>, i32 }> %r1
+}
+
+define <4 x float> @layered_fetch_discard(<4 x float> %pos, <4 x float> %previous) {
+entry:
+  %x = extractelement <4 x float> %previous, i32 0
+  %c = fcmp olt float %x, 0.000000e+00
+  br i1 %c, label %drop, label %keep
+drop:
+  call void @air.discard_fragment()
+  br label %keep
+keep:
+  %v = fadd <4 x float> %pos, %previous
+  ret <4 x float> %v
+}
+
 !air.vertex = !{!0}
-!air.fragment = !{!10, !20}
+!air.fragment = !{!10, !20, !40, !50}
 !0 = !{ptr @slice_vertex, !1, !4}
 !1 = !{!2, !3}
 !2 = !{!"air.position", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
@@ -67,6 +91,11 @@ entry:
 !20 = !{ptr @layered_fetch, !11, !21}
 !21 = !{!14, !22}
 !22 = !{i32 1, !"air.render_target", i32 0, !"air.arg_type_name", !"float4", !"air.arg_name", !"previous"}
+!40 = !{ptr @layered_fetch_discard, !11, !21}
+!50 = !{ptr @layered_stencil, !51, !53}
+!51 = !{!12, !52}
+!52 = !{!"air.stencil", !"air.arg_type_name", !"uint", !"air.arg_name", !"stencil"}
+!53 = !{!14}
 !air.compile_options = !{!30}
 !30 = !{!"air.compile.framebuffer_fetch_enable"}
 !air.version = !{!31}
@@ -229,4 +258,132 @@ fn a_fragment_that_reads_the_slice_compiled_for_another_vertex_function_is_refus
             .err(),
         Some(Error::NeedsInput(RuntimeInput::RenderTargetArrayIndex))
     );
+}
+
+/// Whether each 2D storage image type (`OpTypeImage`) of SPIR-V image format `format` in the
+/// module `words` is arrayed
+fn storage_images(words: &[u32], format: u32) -> Vec<bool> {
+    const TYPE_IMAGE: u32 = 25;
+    const DIM_2D: u32 = 1;
+    const STORAGE: u32 = 2;
+    let mut out = Vec::new();
+    let mut at = 5;
+    while let Some(&word) = words.get(at) {
+        let count = ((word >> 16) as usize).max(1);
+        if word & 0xffff == TYPE_IMAGE && count == 9 {
+            let op = &words[at + 1..at + 9];
+            if op[2] == DIM_2D && op[6] == STORAGE && op[7] == format {
+                out.push(op[4] == 1);
+            }
+        }
+        at += count;
+    }
+    out
+}
+
+/// The SPIR-V image formats of the stand-ins: `R32f` (depth) and `R8ui` (stencil)
+const R32F: u32 = 3;
+const R8UI: u32 = 39;
+
+fn stand_ins(stages: &[crate::pipeline::artifact::StageModule], format: u32) -> Vec<bool> {
+    stages
+        .iter()
+        .flat_map(|m| storage_images(&m.spirv, format))
+        .collect()
+}
+
+/// A slice-choosing state whose fetching fragment function discards, beside a `Depth32Float`
+/// attachment: a draw whose depth test writes runs the variant whose function tests depth itself
+/// against a stand-in of the attachment. In a pass of one layer the stand-in is a 2D image; in a
+/// pass of two the variant is the layered form, the stand-in a 2D array of the pass's layers that
+/// each fragment addresses at its layer (it was refused as not implemented, so the raw path drew
+/// such a state one layer's way, `LAYER_DROPPED`).
+#[test]
+fn a_layered_pass_s_in_shader_depth_test_reads_a_stand_in_of_its_layers() {
+    let Some(bc) = module() else {
+        return;
+    };
+    let lib = Library::from_air(&bc).expect("library");
+    let dev = device();
+    let budget = Budget::standard();
+    let mut d = render(&lib, function(&lib, "layered_fetch_discard"));
+    d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+    d.depth_format = Some(PixelFormat::Depth32Float);
+    let p = dev.compile_render_pipeline(&d, &budget).expect("pipeline");
+    let shape = |layers: u32| {
+        BindState {
+            fragment_tests: FragmentTests::Depth { writes: true },
+            render_target_array_length: layers,
+            ..Default::default()
+        }
+        .shape()
+    };
+    let one = p.plan(&dev, &shape(1)).expect("one layer");
+    assert!(one.variant.shader_tests && !one.variant.layered_storage, "{:?}", one.variant);
+    let flat = dev
+        .compile_render_variant(&d, &one.variant, &budget)
+        .expect("the in-shader depth test");
+    let two = p.plan(&dev, &shape(2)).expect("two layers");
+    assert!(two.variant.shader_tests && two.variant.layered_storage, "{:?}", two.variant);
+    let layered = dev
+        .compile_render_variant(&d, &two.variant, &budget)
+        .expect("the layered in-shader depth test");
+    let facts: Vec<RuntimeFact> = layered.dependencies.iter().map(|d| d.fact).collect();
+    assert!(facts.contains(&RuntimeFact::LayeredStorage), "{facts:?}");
+    assert!(
+        facts.contains(&RuntimeFact::RenderTargetArrayLength {
+            layer_dropped: false
+        }),
+        "{facts:?}"
+    );
+    assert_eq!(stand_ins(&flat.stages, R32F), vec![false], "one 2D stand-in");
+    assert_eq!(stand_ins(&layered.stages, R32F), vec![true], "one 2D-array stand-in");
+    let again = layered.plan(&dev, &shape(2)).expect("the layered variant's plan");
+    assert_eq!(again.variant, two.variant, "a fixed point");
+    assert!(again
+        .descriptors
+        .iter()
+        .any(|w| w.source == crate::bind::WriteSource::DepthStandIn));
+}
+
+/// A slice-choosing state whose fragment function returns `[[stencil]]` on a device without stencil
+/// export: the shader-side stencil, which tests and writes a shadow of the stencil attachment. In a
+/// pass of two layers the variant is the layered form, its shadow a 2D array of the pass's layers
+/// (it was refused as not implemented, so the raw path drew such a state one layer's way,
+/// `LAYER_DROPPED`); in a pass of one it is a 2D image.
+#[test]
+fn a_layered_pass_s_shader_side_stencil_reads_a_shadow_of_its_layers() {
+    let Some(bc) = module() else {
+        return;
+    };
+    let lib = Library::from_air(&bc).expect("library");
+    let dev = device();
+    let budget = Budget::standard();
+    let mut d = render(&lib, function(&lib, "layered_stencil"));
+    d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8Unorm));
+    d.stencil_format = Some(PixelFormat::Stencil8);
+    let p = dev.compile_render_pipeline(&d, &budget).expect("pipeline");
+    let shape = |layers: u32| {
+        BindState {
+            render_target_array_length: layers,
+            ..Default::default()
+        }
+        .shape()
+    };
+    let one = p.plan(&dev, &shape(1)).expect("one layer");
+    assert!(!one.variant.layered_storage, "{:?}", one.variant);
+    let flat = dev
+        .compile_render_variant(&d, &one.variant, &budget)
+        .expect("the shader-side stencil");
+    let two = p.plan(&dev, &shape(2)).expect("two layers");
+    assert!(two.variant.layered_storage, "{:?}", two.variant);
+    let layered = dev
+        .compile_render_variant(&d, &two.variant, &budget)
+        .expect("the layered shader-side stencil");
+    let facts: Vec<RuntimeFact> = layered.dependencies.iter().map(|d| d.fact).collect();
+    assert!(facts.contains(&RuntimeFact::LayeredStorage), "{facts:?}");
+    assert_eq!(stand_ins(&flat.stages, R8UI), vec![false], "one 2D shadow");
+    assert_eq!(stand_ins(&layered.stages, R8UI), vec![true], "one 2D-array shadow");
+    let again = layered.plan(&dev, &shape(2)).expect("the layered variant's plan");
+    assert_eq!(again.variant, two.variant, "a fixed point");
 }

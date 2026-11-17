@@ -1,9 +1,22 @@
 // SPDX-License-Identifier: MIT
 // What the host keeps of each channel's RAMFC timeslice, and of one written through the level change's path, for
-// debug.switch_gpu_ramfc (TegraGM20BRamfcProbe.cpp) and HW Test gpu.ramfc_timeslice: debug kernels only.
+// debug.switch_gpu_ramfc (TegraGM20BRamfcProbe.cpp) and HW Tests gpu.ramfc_timeslice and gpu.ramfc_creation: debug
+// kernels only.
 #include "gpu_internal.h"
 
 #if TGM_STATS
+static void ramfc_owner(struct tgm_ramfc_look *look, const struct tgm_chan *chan, size_t *at)
+{
+	char owner[sizeof(chan->owner)];
+	size_t i = 0;
+
+	for (i = 0; i + 1 < sizeof(owner) && chan->owner[i]; i++)
+		owner[i] = chan->owner[i] == ' ' || chan->owner[i] == ',' ? '_' : chan->owner[i];
+	owner[i] = 0;
+	*at += scnprintf(look->owners + *at, sizeof(look->owners) - *at, "%s%u:%s:%c",
+			 *at ? "," : "", chan->chid, owner, chan->timeslice_created ? 'c' : 'l');
+}
+
 /* Under tgm_gpu_held (the GPU up: nvkm_kmap flushes the L2) and tgm_live_lock (each channel's instance block kept). Only
  * channels with a job completed since the write count: that job's load and save of RAMFC are what a write that raced
  * the host's save loses to. */
@@ -11,6 +24,7 @@ static void ramfc_look(struct nvkm_device *device, void *arg)
 {
 	struct tgm_ramfc_look *look = arg;
 	struct tgm_chan *chan = NULL;
+	size_t at = 0;
 
 	(void)device;
 	mutex_lock(&tgm_live_lock);
@@ -19,19 +33,30 @@ static void ramfc_look(struct nvkm_device *device, void *arg)
 		u32 value = 0;
 
 		look->channels++;
-		if (chan->kernel || READ_ONCE(chan->error) || READ_ONCE(chan->timeslice_due) ||
+		if (READ_ONCE(chan->error) || READ_ONCE(chan->timeslice_due) ||
 		    (s32)(tgm_chan_completed(chan) - chan->timeslice_at) <= 0)
 			continue;
 		value = tgm_ramfc_read(chan->chid, RAMFC_TIMESLICE);
+		if (chan->kernel) {
+			look->kernel_checked++;
+			look->kernel_mismatched += value != chan->timeslice;
+			continue;
+		}
 		look->checked++;
 		look->high += chan->timeslice == RAMFC_TIMESLICE_HIGH;
-		if (value != chan->timeslice && !look->mismatched++) {
+		if (value == chan->timeslice)
+			continue;
+		look->created_mismatched += chan->timeslice_created != 0;
+		ramfc_owner(look, chan, &at);
+		if (!look->mismatched++) {
 			look->chid = chan->chid;
 			look->ramfc = value;
 			look->expected = chan->timeslice;
 		}
 	}
 	mutex_unlock(&tgm_live_lock);
+	if (!at)
+		scnprintf(look->owners, sizeof(look->owners), "-");
 }
 
 struct ramfc_word {

@@ -28,7 +28,8 @@ typedef struct {
     uint64_t allocated;       // of those, a new buffer
     uint64_t exports;         // native exports published
     uint64_t export_objects;  // of them, one that needed a new surface object
-    uint32_t parked_most, reserved;
+    uint32_t parked_most;
+    uint32_t export_surfaces;  // of the exports, one into a surface that had no native picture before
 } SwitchNVDECBufferStats;
 
 #endif

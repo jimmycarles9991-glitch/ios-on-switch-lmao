@@ -78,12 +78,139 @@ inline const char *describe(const Error &e, char *text, size_t size)
     const uint32_t s = e.status;
     const uint64_t address = static_cast<uint64_t>((s >> 20) & 3) << 32 | e.address;
     char page[64] = "";
-    if (((s >> 28) & 7) == 6)
+    if (((s >> 28) & 7) == 6) {
         snprintf(page, sizeof(page), " (page readable %u writable %u nonsecure %u)", (s >> 27) & 1, (s >> 26) & 1,
                  (s >> 25) & 1);
+    }
     snprintf(text, size, "%s: %s%s, a %s by %s (client %#x) at %#llx; INTSTATUS %#x ERR_STATUS %#x ERR_ADR %#x",
              bitNames(e.intstatus, kinds, sizeof(kinds)), errorType(s), page, (s >> 16) & 1 ? "write" : "read",
              client(s & 0xff), s & 0xff, static_cast<unsigned long long>(address), e.intstatus, s, e.address);
+    return text;
+}
+
+// A fault storm, bounded per client: the first kFullLines errors of a client's run print in full and the rest are only
+// counted, and the run ends with one count line naming why: displaced (kQuietErrors errors by other clients since its
+// last, or kOpen other runs open), its swgroup's detach, or SC7 resetting the MC. Nothing here keeps time. The client
+// is ERR_ID for the kinds MC_ERR_STATUS captures, one shared key (kUncaptured) for the others. The action's alone.
+class Runs {
+public:
+    static constexpr uint32_t kFullLines = 4, kQuietErrors = 16, kUncaptured = 0x100;
+    static constexpr unsigned kOpen = 8;
+
+    enum class Cause : uint8_t {
+        kDisplaced,
+        kDetach,
+        kSC7
+    };
+
+    struct Ended {
+        uint32_t client, errors;
+        Error last;
+        Cause cause;
+    };
+
+    static uint32_t clientOf(const Error &e)
+    {
+        constexpr uint32_t kCaptured = 1u << 6 | 1u << 8 | 1u << 10;
+        return e.intstatus & kCaptured ? e.status & 0xff : kUncaptured;
+    }
+
+    // An error: true when it prints in full. The runs it ends (quiet ones, or the least recent when kOpen are open)
+    // with more errors than printed go to `ended` (room for kOpen); their count is returned in `endedCount`.
+    bool error(const Error &e, Ended *ended, unsigned &endedCount)
+    {
+        endedCount = 0;
+        const uint32_t client = clientOf(e);
+        ++seen;
+        Run *run = nullptr;
+        Run *free = nullptr;
+        Run *oldest = nullptr;
+        for (Run &r : runs) {
+            if (!r.open) {
+                free = free ? free : &r;
+                continue;
+            }
+            if (r.client == client) {
+                run = &r;
+                continue;
+            }
+            if (seen - r.lastAt > kQuietErrors) {
+                end(r, Cause::kDisplaced, ended, endedCount);
+                free = free ? free : &r;
+                continue;
+            }
+            oldest = !oldest || r.lastAt < oldest->lastAt ? &r : oldest;
+        }
+        if (!run) {
+            if (!free) {
+                end(*oldest, Cause::kDisplaced, ended, endedCount);
+                free = oldest;
+            }
+            run = free;
+            *run = {client, 0, 0, {}, true};
+        }
+        ++run->errors;
+        run->lastAt = seen;
+        run->last = e;
+        return run->errors <= kFullLines;
+    }
+
+    // The runs of the clients `match` takes end now, by `cause` (a detach, SC7); as error()'s `ended`.
+    template <class Match> unsigned endWhere(Match match, Cause cause, Ended *ended)
+    {
+        unsigned count = 0;
+        for (Run &r : runs) {
+            if (r.open && match(r.client))
+                end(r, cause, ended, count);
+        }
+        return count;
+    }
+
+private:
+    struct Run {
+        uint32_t client, errors;
+        uint64_t lastAt;
+        Error last;
+        bool open;
+    };
+
+    static void end(Run &r, Cause cause, Ended *ended, unsigned &count)
+    {
+        if (r.errors > kFullLines)
+            ended[count++] = {r.client, r.errors, r.last, cause};
+        r.open = false;
+    }
+
+    Run runs[kOpen] = {};
+    uint64_t seen = 0;
+};
+
+inline const char *causeName(Runs::Cause cause)
+{
+    switch (cause) {
+    case Runs::Cause::kDisplaced:
+        return "displaced";
+    case Runs::Cause::kDetach:
+        return "detach";
+    case Runs::Cause::kSC7:
+        return "SC7";
+    }
+    return "displaced";
+}
+
+// The count line of a run that printed only its first kFullLines errors.
+inline const char *describeRun(const Runs::Ended &run, char *text, size_t size)
+{
+    char last[256];
+    describe(run.last, last, sizeof(last));
+    if (run.client == Runs::kUncaptured) {
+        snprintf(text, size,
+                 "%u errors of kinds MC_ERR_STATUS does not capture, the first %u printed, ended by %s; the last %s",
+                 run.errors, Runs::kFullLines, causeName(run.cause), last);
+    } else {
+        snprintf(text, size, "%u errors by %s (client %#x), the first %u printed, ended by %s; the last %s", run.errors,
+                 client(run.client), run.client, Runs::kFullLines, causeName(run.cause), last);
+    }
     return text;
 }
 }  // namespace switch_mc

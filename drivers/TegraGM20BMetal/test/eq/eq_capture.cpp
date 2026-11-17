@@ -4,6 +4,7 @@
 // device, every job it takes is decoded against the model's memory as the device left it, and completes. A binary
 // links this unit to draw raw's side of eq (test/eq): RAWCAP_LOG, RAWCAP_LAYOUTS and NVDEC_REGS as cap.cpp reads them,
 // and RAWCAP_PROGRAMS a colon-separated list (the pack's own programs.bin names raw's programs and their constant buffers).
+// EQ_UBO_WORDS=<path>: each draw's uniform buffers word by word (eq_rebase.py tsc_renumber).
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -12,6 +13,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
 #include "../../raw/pack/nvdec.h"
 #include "../raw_kernel_model.h"
 
@@ -27,6 +29,8 @@ public:
         model.vaEnd = uint64_t(1) << 39;
         if (const char *path = getenv("RAWCAP_LOG"))
             log_ = fopen(path, "w");
+        if (const char *path = getenv("EQ_UBO_WORDS"))
+            words_ = fopen(path, "w");
         model.bound = [this](const TegraGM20BAbiBindOp &op) {
             if (op.kind)
                 kinds_[op.va] = {op.range, op.kind};
@@ -80,9 +84,13 @@ private:
                         fprintf(stderr, "eq_capture: cannot read programs %s\n", path.c_str());
             if (const char *path = getenv("RAWCAP_LAYOUTS"); path && !d->loadLayouts(path))
                 fprintf(stderr, "eq_capture: cannot read layouts %s\n", path);
-            if (getenv("EQ_DUMP_DRAWS"))
-                d->onDraw = [this](nvdec::Decoder &at) {
-                    dumpBindings(at);
+            const bool dumpDraws = getenv("EQ_DUMP_DRAWS") != nullptr;
+            if (dumpDraws || words_)
+                d->onDraw = [this, dumpDraws](nvdec::Decoder &at) {
+                    if (dumpDraws)
+                        dumpBindings(at);
+                    if (words_)
+                        dumpUniforms(at);
                 };
         }
         return *d;
@@ -113,6 +121,48 @@ private:
             }
     }
 
+    // A line per uniform buffer (PackCbufType 5) of a live stage's program, in the order nvdec lists them: "U <stage>
+    // <slot> <words>", then " | <word index>:<sampler header>" for each word that names a texture and sampler header
+    // within the pools' limits (the header's eight words)
+    void dumpUniforms(nvdec::Decoder &d)
+    {
+        constexpr uint8_t kUniformBuffer = 5;
+        const uint32_t texMax = d.reg3d(NVB197_SET_TEX_HEADER_POOL_C),
+                       samplerMax = d.reg3d(NVB197_SET_TEX_SAMPLER_POOL_C);
+        const uint64_t samplers =
+            uint64_t(d.reg3d(NVB197_SET_TEX_SAMPLER_POOL_A) & 0xff) << 32 | d.reg3d(NVB197_SET_TEX_SAMPLER_POOL_B);
+        for (int stage = 0; stage < 6; stage++) {
+            const uint32_t group = d.reg3d(NVB197_SET_PIPELINE_SHADER(stage) + 0x10);
+            if (!(d.reg3d(NVB197_SET_PIPELINE_SHADER(stage)) & 1) || group >= 5)
+                continue;
+            std::string id;
+            const nvdec::ProgramInfo *info = d.boundProgram(stage, id);
+            for (size_t slot = 0; info && slot < info->cbufTypes.size(); slot++) {
+                uint64_t addr = 0;
+                uint32_t bytes = 0;
+                if ((info->cbufTypes[slot] & 7) != kUniformBuffer || !d.bound(group, int(slot), addr, bytes))
+                    continue;
+                std::vector<uint32_t> words(std::min<uint32_t>(bytes, 1 << 16) / 4);
+                d.gpuRead(addr, words.data(), words.size() * 4);
+                fprintf(words_, "U %d %zu", stage, slot);
+                for (const uint32_t w : words)
+                    fprintf(words_, " %x", w);
+                fprintf(words_, " |");
+                for (size_t k = 0; k < words.size(); k++) {
+                    const uint32_t tex = words[k] & 0xfffff, sampler = words[k] >> 20;
+                    uint32_t header[8] = {};
+                    if (!words[k] || tex > texMax || sampler > samplerMax ||
+                        !d.gpuRead(samplers + 32ull * sampler, header, sizeof header))
+                        continue;
+                    fprintf(words_, " %zu:", k);
+                    for (const uint32_t h : header)
+                        fprintf(words_, "%08x", h);
+                }
+                fprintf(words_, "\n");
+            }
+        }
+    }
+
     static std::vector<uint32_t> dump(nvdec::Decoder &d, unsigned draw, const std::string &what, uint64_t va,
                                       uint32_t bytes)
     {
@@ -136,9 +186,11 @@ private:
                 d.push(reinterpret_cast<const uint32_t *>(words), push.dwords);
         d.submitEnd();
         fflush(log_);
+        if (words_)
+            fflush(words_);
     }
 
-    FILE *log_ = nullptr;
+    FILE *log_ = nullptr, *words_ = nullptr;
     unsigned draws_ = 0;
     std::map<uint32_t, std::unique_ptr<nvdec::Decoder>> decoders_;
     std::map<uint64_t, std::pair<uint64_t, uint32_t>> kinds_;  // va: the bind's range and PTE kind

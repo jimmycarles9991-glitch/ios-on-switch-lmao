@@ -209,7 +209,7 @@ static void isolateRefused(RMCommandBuffer *cb, size_t encoder)
 }
 
 // What the range being submitted knows about its end (raw_completion_source.h)
-static raw::RangeEnd rangeEnd(RMCommandBuffer *cb, bool last, bool followed, bool observed)
+static raw::RangeEnd rangeEnd(RMCommandBuffer *cb, bool last, bool followed, bool handlers)
 {
     raw::RangeEnd end;
     end.lastOfBuffer = last;
@@ -220,7 +220,10 @@ static raw::RangeEnd rangeEnd(RMCommandBuffer *cb, bool last, bool followed, boo
         end.signals = next.event;
     }
     end.followed = followed;
-    end.observed = observed || gRM->completionWaiters.load(std::memory_order_relaxed) != 0;
+    const bool waited = cb->_presents || gRM->completionWaiters.load(std::memory_order_relaxed) != 0;
+    end.observed = handlers || waited;
+    end.handlersOnly = handlers && !waited;
+    end.compositor = gRM->raw->role() == raw::Device::Role::RenderServer;
     end.cpuOrdered = !gRM->gpuOrder;
     return end;
 }
@@ -236,7 +239,7 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
         priorError = cb->_segError;
     }
     // a present is added before its command buffer is committed, a completed handler's flag before it is added
-    const bool observed = cb->_hasCompletedHandlers.load() || cb->_presents;
+    const bool handlers = cb->_hasCompletedHandlers.load();
     {
         const bool more = !priorError && cb->_segNext < cb->_segs.size();
         const RMSegment *next = more ? &cb->_segs[cb->_segNext] : nullptr;
@@ -332,7 +335,9 @@ bool submitRange(RMCommandBuffer *cb, bool followed)
         raw::tEncodeProfile = &profile;
 #endif
         size_t refusedEncoder = range.to;
-        cb->_rangeQuiet = raw::quietEnd(rangeEnd(cb, last, followed, observed));
+        const raw::RangeEnd end = rangeEnd(cb, last, followed, handlers);
+        cb->_rangeQuiet = raw::quietEnd(end);
+        cb->_rangeHeld = raw::frameHeld(end);
         rmStorageTargetsPlain(cb, range.from, range.to);
         const bool encoded = encodeRaw(cb, range.from, range.to, &why, &refusedEncoder);
 #if SWITCH_FRAME_TIMELINE

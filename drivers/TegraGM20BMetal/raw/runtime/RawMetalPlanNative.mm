@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "RawMetalPlanAdapters.h"
+#import "RawMetalSplitPlan.h"
 #include "raw_compute.h"
 
 namespace {
@@ -29,7 +30,7 @@ struct NativePlanSink {
             return;
         }
         if (binding.source == raw::BufferBinding::Source::ClockAnchors) {
-            compute->setBytesAt(slot, binding.offset, binding.length);
+            compute->setKernelBytes(slot, binding.offset, binding.length);
             return;
         }
         if (binding.source == raw::BufferBinding::Source::Bytes) {
@@ -87,11 +88,7 @@ struct NativePlanSink {
             rasterChanged(next, previous, R::Pipeline, &R::nativePipeline) ||
             rasterChanged(next, previous, R::Pipeline, &R::nativeVariant)) {
             __unsafe_unretained RMPipeline *pipeline = (__bridge RMPipeline *)next.pipeline;
-            auto *variant = static_cast<raw::Variant<raw::Pipeline> *>(next.nativeVariant);
-            render->setPipeline(variant               ? variant->value()
-                                : next.nativePipeline ? static_cast<raw::Pipeline *>(next.nativePipeline)
-                                : pipeline            ? pipeline->_raw
-                                                      : nullptr);
+            render->setPipeline(nativeOf(next, cb->_xrShadowCurrent));
             render->setAlphaControl(pipeline ? pipeline->_alphaControl : 0);
         }
         if (rasterChanged(next, previous, R::DepthStencil, &R::depthStencil)) {

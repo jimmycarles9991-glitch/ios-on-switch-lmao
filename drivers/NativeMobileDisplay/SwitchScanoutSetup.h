@@ -37,8 +37,8 @@ void attachScanoutDomain()
         ready = probeDomain.identity(surfaceAddress(static_cast<int>(i)), kNativeBlockBytes, false);
     if (ready && tapeAttached)
         ready = probeDomain.identity(tapeAddress, kTapeBytes, false);
-    ready = ready && probeDomain.reserve(kProbeSlot, kSlots * kSlotSpan) &&
-            probeDomain.reserve(kPlaneSlot0, static_cast<uint64_t>(kPlaneSlots) * kPlaneSlotSpan);
+    ready =
+        ready && probeDomain.reserve(kProbeSlot, kSlots * kSlotSpan) && probeDomain.reserve(kPlaneSlot0, kPlaneSpace);
     if (!ready) {
         IOLog("SwitchDisplay: scanout domain refused: insufficient page tables\n");
         return;

@@ -10,12 +10,35 @@
 #include <cstdlib>
 #include <string>
 
+#include "raw_slot_mask.h"
 #include "raw_xr.h"
 
 namespace raw {
 
 constexpr uint32_t kXrWordFormat = 53, kXrAlphaFormat = 13;  // R32Uint, R8Uint
 constexpr char kXrPlanesVariant[] = " | xr2p";
+
+// The fragment slots whose two-plane textures a variant's programs read through header pairs (PackPipeline::xrSlots, 16
+// bits); a two-plane texture a draw samples at any other slot of either stage is sampled through its stand-in
+constexpr uint32_t kXrPairSlots = 16;
+
+inline bool xrPairSlot(uint16_t xrSlots, uint32_t slot)
+{
+    return slot < kXrPairSlots && (xrSlots >> slot & 1);
+}
+
+// Of the fragment slots a draw samples two-plane textures at, those a variant reads through header pairs
+template <typename Mask> uint16_t xrPairSlots(const Mask &fragment)
+{
+    return uint16_t(SlotMaskWords<Mask>::word(fragment, 0));
+}
+
+// ... and the others, sampled through their stand-ins
+template <typename Mask> Mask pastXrPairSlots(Mask fragment)
+{
+    SlotMaskWords<Mask>::word(fragment, 0) &= ~((1u << kXrPairSlots) - 1);
+    return fragment;
+}
 
 // The name of a state's variant whose fragment programs read the two-plane textures at fragment slots `slots` through their
 // header pairs (nvk_switch_xr_planes.h, PackPipeline::xrSlots)

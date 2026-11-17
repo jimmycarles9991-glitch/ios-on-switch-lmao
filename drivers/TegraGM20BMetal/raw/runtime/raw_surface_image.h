@@ -23,6 +23,7 @@ enum TextureType : uint32_t {
     kTypeCube = 5,
     kTypeCubeArray = 6,
     kType3D = 7,
+    kType2DMultisampleArray = 8,
 };
 
 // The layers (slices) of a texture of MTLTextureType `type`: a cube's six faces, a cube array's six a cube, a 1D or 2D

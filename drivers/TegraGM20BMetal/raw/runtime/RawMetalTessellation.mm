@@ -54,7 +54,8 @@ static RMBuffer *ownBuffer(RMCommandBuffer *cb, id<MTLBuffer> buffer)
        argumentOffset:(NSUInteger)argumentOffset
 {
     SWITCH_API(ApiDraw);
-    [self checkDraw];
+    if (![self checkDraw])
+        return;
     if (_tessFactors)
         [_cb retain:_tessFactors];
     Cmd m = cmd(op, uint8_t(raw::icb::kPatchPrimitive));
@@ -188,6 +189,7 @@ bool encodePatches(raw::RenderEncoder *re, raw::CommandBuffer *rc, const RMPlanD
     if (indirect) {
         if (!arguments) {
             *why = "an indirect patch draw without arguments";
+            rc->refusal = {raw::RefIndirectArguments};
             return false;
         }
         return re->drawPatchesIndirect(patches.controlPoints, patchBuffer, draw.indexOffset, pointBuffer,

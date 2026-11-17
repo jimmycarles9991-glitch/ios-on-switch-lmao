@@ -49,6 +49,7 @@ bool ready()
             IOSimpleLockFree(fresh);
     }
     if (!__atomic_load_n(&gMc, __ATOMIC_ACQUIRE)) {
+        // NOLINTNEXTLINE(misc-const-correctness): gMc holds a pointer to non-const registers
         volatile uint8_t *mc = switch_mmio_map(kMcPA, 0x1000);
         // NOLINTNEXTLINE(misc-const-correctness): the compare-exchange writes it
         volatile uint8_t *expected = nullptr;
@@ -60,12 +61,12 @@ bool ready()
 }
 
 struct RegisterAccess {
-    uint32_t read(uint32_t offset) const
+    static uint32_t read(uint32_t offset)
     {
         return r32(offset);
     }
 
-    void write(uint32_t offset, uint32_t value) const
+    static void write(uint32_t offset, uint32_t value)
     {
         w32(offset, value);
     }
@@ -134,6 +135,7 @@ extern "C" void tegra_smmu_detach(uint32_t asid, uint32_t asidReg)
     w32(PTB_DATA, 0);
     flushLocked(asid);
     IOSimpleLockUnlock(gLock);
+    switch_mc_errors_detached(asidReg);
 }
 
 extern "C" void tegra_smmu_flush(uint32_t asid)
@@ -142,6 +144,17 @@ extern "C" void tegra_smmu_flush(uint32_t asid)
         return;
     IOSimpleLockLock(gLock);
     flushLocked(asid);
+    IOSimpleLockUnlock(gLock);
+}
+
+extern "C" void switch_smmu_flush_range(uint32_t asid, uint64_t tablesPa, uint64_t tableBytes, uint64_t iova,
+                                        uint64_t iovaBytes)
+{
+    if (!ready())
+        return;
+    IOSimpleLockLock(gLock);
+    RegisterAccess io;
+    switch_smmu::flushRange(io, asid, tablesPa, tableBytes, iova, iovaBytes);
     IOSimpleLockUnlock(gLock);
 }
 
@@ -160,9 +173,10 @@ extern "C" void tegra_mc_hot_reset(uint32_t ctrl, uint32_t bit, bool on)
     w32(ctrl, wrote);
     const uint32_t now = r32(ctrl);
     IOSimpleLockUnlock(gLock);
-    if ((now ^ wrote) & bit)
+    if ((now ^ wrote) & bit) {
         IOLog("TegraSMMU: MC hot reset %s of %s did not take: MC %#x reads %#x after %#x was written\n",
               on ? "request" : "release", switch_mc::hotResetClient(ctrl, bit), ctrl, now, wrote);
+    }
 }
 
 extern "C" int tegra_smmu_resume(void)

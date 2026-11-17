@@ -1,4 +1,5 @@
 import HWTestCore
+import HWTestGPU
 import Metal
 import QuartzCore
 import UIKit
@@ -16,6 +17,7 @@ final class SmallDrawableRun: NSObject {
     private var link: CADisplayLink?
     private var started: CFTimeInterval = 0
     private(set) var presented = 0
+    nonisolated let paths = CommandPaths()
 
     init(done: Waiter<Bool>) {
         let device = MTLCreateSystemDefaultDevice()
@@ -45,6 +47,7 @@ final class SmallDrawableRun: NSObject {
             pass.colorAttachments[0].storeAction = .store
             commands.makeRenderCommandEncoder(descriptor: pass)?.endEncoding()
             commands.present(drawable)
+            paths.watch(commands)
             commands.commit()
             presented += 1
         }
@@ -99,6 +102,7 @@ struct SmallDrawableTest: HWTest {
                 ("window B flipped (d_flips > 0)", delta("flips") > 0),
                 ("window B took its sets (d_latched > 0)", delta("latched") > 0),
                 ("nothing window B was given went unshown (d_dropped 0)", delta("dropped") == 0),
-            ], metrics)
+            ], metrics
+        ).onRawPath(run.paths, device: MTLCreateSystemDefaultDevice())
     }
 }

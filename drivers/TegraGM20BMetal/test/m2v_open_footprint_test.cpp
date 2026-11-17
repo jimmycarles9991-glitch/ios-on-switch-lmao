@@ -45,7 +45,6 @@ TEST(M2VOpen, ClientFootprint)
     setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
     setenv("NMB_MEMO_MB", "32", 0);
     setenv("M2V_BLOCK_MIB", "4", 0);
-    setenv("NMB_SYSTEM_COMPILER", "1", 0);
     const int64_t start = footprint();
     ASSERT_NE(dlopen(loader, RTLD_NOW | RTLD_LOCAL), nullptr) << dlerror();
     const int64_t loaded = footprint();
@@ -71,4 +70,11 @@ TEST(M2VOpen, ClientFootprint)
            (unsigned long long)(m.mapped.cached >> 10), (long long)(settled - loaded) / 1024,
            (long long)(settled - loaded - backing + charged) / 1024);
     EXPECT_GT(settled, loaded);
+
+    // Every process compiles Metal source in-process, the render server too: no environment turns it on
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:@"kernel void k(device uint *o [[buffer(0)]]) { o[0] = 1; }"
+                                                  options:nil
+                                                    error:&error];
+    EXPECT_TRUE(library != nil) << (error ? error.localizedDescription.UTF8String : "no error");
 }

@@ -76,7 +76,7 @@ raw::RuntimeRecord madeUp(uint32_t n)
     r.pipeline.keyHash = 0x1000 + n;
     r.pipeline.vs = 0;
     r.pipeline.fs = 1;
-    r.pipeline.entries = 2;
+    raw::setEntryCount(r.pipeline, 2);
     r.pipeline.entry[0] = {0, raw::EntryUbo, 1, uint8_t(n), 0, 16, 0};
     r.pipeline.entry[1] = {16, raw::EntryTexture, 2, 3, raw::SamplerSlot, 3, 0};
     r.pipeline.pushMask = 1u << (n % 32);

@@ -71,9 +71,12 @@ protected:
     {
         const uint32_t maxThreads = uint32_t([MTLComputePipelineDescriptor new].maxTotalThreadsPerThreadgroup);
         std::vector<raw::PackKernel> kernels;
-        for (uint32_t i = 0; i < kKernels; i++)
+        std::vector<raw::PackComputeFacts> facts;
+        for (uint32_t i = 0; i < kKernels; i++) {
             kernels.push_back(kernelRecord(i, maxThreads));
-        gDevice = open(writePack(packKey(MTLPixelFormatBGRA8Unorm), kernels), [HarnessM2VMethods class],
+            facts.push_back(kernelFacts(i, maxThreads));
+        }
+        gDevice = open(writePack(packKey(MTLPixelFormatBGRA8Unorm), kernels, facts), [HarnessM2VMethods class],
                        [HarnessComputeM2V class]);
         ASSERT_TRUE(gDevice != nil);
         raw_metal_complete_states(dir().c_str());

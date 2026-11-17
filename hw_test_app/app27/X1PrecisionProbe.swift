@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 
 /// Whether any ROP control our context sets differently from NVIDIA's golden defaults (sw_method_init) moves the
-/// store or the blend: each arm sets controls with the draw and restores NVK's value after it (RawMethods), then the
+/// store or the blend: each arm sets controls with the draw and restores our context's value after it (RawMethods), then the
 /// unorm8 and RGB10A2 stores of all 65,536 halves (MAX blend over zero, as gpu.x1.rop_conversion) and three BGRA8 blend
 /// pairs of gpu.x1.blend_exact are held to the chip's measured rules (X1Reference.store, chipBlend) and to Metal's.
 /// The claim: no arm changes a count, so the rounding is the hardware's and no setting of ours makes it approximate.
@@ -17,7 +17,7 @@ enum X1PrecisionProbe {
 
     static let arms: [Arm] = [
         Arm(name: "base", set: [], restore: []),
-        Arm(name: "csaa_off", set: [(0x15b4, 0)], restore: [(0x15b4, 1)]),
+        Arm(name: "csaa_golden", set: [(0x15b4, 1)], restore: [(0x15b4, 0)]),
         Arm(name: "color_clamp_off", set: [(0x2600, 0)], restore: [(0x2600, 1)]),
         Arm(name: "anti_alias_off", set: [(0x1534, 0)], restore: [(0x1534, 1)]),
         Arm(name: "float_options_golden", set: [(0x19c0, 0), (0x1140, 0)], restore: [(0x19c0, 1), (0x1140, 0x10)]),

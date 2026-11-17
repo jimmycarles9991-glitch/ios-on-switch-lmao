@@ -40,7 +40,7 @@ raw::PackPipeline pipeline()
     State s;
     raw::PackPipeline out = {};
     EXPECT_EQ(raw::qualifyStorage(s.state, header, out), nullptr);
-    out.entries = 1;
+    raw::setEntryCount(out, 1);
     out.entry[0] = {0, raw::EntryFetch, 2, 0, 0, 0, 0};
     return out;
 }
@@ -83,17 +83,17 @@ TEST(RawStorage, ShaderTestsQualifyExactDescriptorsAndDynamicWords)
     p.shaderTests.stencilWord = 5;
     p.flags |= raw::PipelinePushMetadata;
     p.pushMask = 0xff;
-    p.entries = 3;
+    raw::setEntryCount(p, 3);
     p.entry[0] = {0, raw::EntryFetch, 2, 0, 0, 0, 0};
     p.entry[1] = {4, raw::EntryDepthTest, 2, 0, 0, 0, 0};
     p.entry[2] = {8, raw::EntryStencilTest, 2, 0, 0, 0, 0};
     const uint32_t blob[] = {0x1224, 2, 0x1a00, 0, 0x0210, 0};
-    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6));
+    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6, nullptr));
     EXPECT_TRUE(raw::usableDynamicPush(p, "ds=260/260"));
     EXPECT_TRUE(raw::validDynamicPush(s.state));
     EXPECT_EQ(raw::constantPushWords(s.state), 0u);
     p.entry[2].stage = 1;
-    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 6));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 6, nullptr));
     p.entry[2].stage = 2;
     p.shaderTests.stencilWord = 4;
     EXPECT_FALSE(raw::usableDynamicPush(p, "ds=260/260"));
@@ -174,17 +174,17 @@ TEST(RawStorage, ReadOnlyDrawVariantRequiresExplicitEarlyTests)
     auto p = pipeline();
     p.storageTests = 2;
     uint32_t blob[] = {0x1224, 2, 0x1a00, 0, 0x0210, 1};
-    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4));
-    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr));
+    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6, nullptr));
     blob[5] = 0;
-    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 6));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 6, nullptr));
     p.storageTests = 1;
-    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6));
+    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6, nullptr));
     for (uint8_t tests : {3, 4}) {
         p.storageTests = tests;
-        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 6));
+        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 6, nullptr));
         blob[5] = 1;
-        EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6));
+        EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 6, nullptr));
         blob[5] = 0;
     }
 }
@@ -209,6 +209,37 @@ TEST(RawStorage, PreservesActualViewAndReadOnlyContract)
     EXPECT_EQ(out.storageSamples, 1);
     EXPECT_EQ(out.storageTic[0], 0x24912u);
     EXPECT_EQ(out.flags, raw::PipelineStorageMetadata);
+}
+
+// A slice-choosing state's layered form tests depth in its program against stand-ins of the pass's layers: its draws bind
+// them as 2D arrays, as its storage attachments, and a record of one layer as one 2D layer
+TEST(RawStorage, ALayeredRecordsStandInsAreArraysOfThePassLayers)
+{
+    for (const bool layered : {false, true}) {
+        State s;
+        s.state.storage.fragmentTests = 3;
+        s.state.storage.depthFormat = 100;
+        s.state.storage.testSamples = 1;
+        const int32_t view = layered ? 5 : 1;
+        s.write.viewType = view;
+        std::array<NmbDirectWrite, 2> writes = {s.write, s.write};
+        writes[1].source = NmbDirectDepthStandIn;
+        for (auto &draw : s.state.draws) {
+            draw.writes = writes.data();
+            draw.writeCount = writes.size();
+            draw.arrayLengthWord = layered ? 3 : 0;
+        }
+        const auto formats = [](uint32_t format, uint32_t &word) {
+            word = format;
+            return true;
+        };
+        raw::PackPipeline p = {};
+        EXPECT_EQ(raw::qualifyStorage(s.state, formats, p), nullptr) << layered;
+        EXPECT_EQ(p.shaderTests.flags, 1u) << layered;
+        writes[1].viewType = layered ? 1 : 5;
+        p = {};
+        EXPECT_NE(raw::qualifyStorage(s.state, formats, p), nullptr) << layered;
+    }
 }
 
 TEST(RawStorage, RejectsIncompatibleContractBeforeHeaderWork)
@@ -270,15 +301,15 @@ TEST(RawStorage, MultisampledViewsRequireExactPerSampleInvocationState)
         s.state.storage.samples = samples;
         raw::PackPipeline out = {};
         ASSERT_EQ(raw::qualifyStorage(s.state, header, out), nullptr);
-        out.entries = 1;
+        raw::setEntryCount(out, 1);
         out.entry[0] = {0, raw::EntryFetch, 2, 0, 0, 0, 0};
         uint32_t blob[] = {0x1224, 2, 0x1a00, 0, 0x0754, raw::sampleShadingControl(samples)};
-        EXPECT_TRUE(raw::usableStorageMetadata(out, blob, 6));
-        EXPECT_FALSE(raw::usableStorageMetadata(out, blob, 4));
+        EXPECT_TRUE(raw::usableStorageMetadata(out, blob, 6, nullptr));
+        EXPECT_FALSE(raw::usableStorageMetadata(out, blob, 4, nullptr));
         blob[5] = 1;
-        EXPECT_FALSE(raw::usableStorageMetadata(out, blob, 6));
+        EXPECT_FALSE(raw::usableStorageMetadata(out, blob, 6, nullptr));
         blob[5] = raw::sampleShadingControl(samples == 2 ? 4 : 2);
-        EXPECT_FALSE(raw::usableStorageMetadata(out, blob, 6));
+        EXPECT_FALSE(raw::usableStorageMetadata(out, blob, 6, nullptr));
     }
 }
 
@@ -336,19 +367,52 @@ TEST(RawStorage, RequiresOrderedControlAndExplicitRopExclusion)
     auto p = pipeline();
     const uint32_t pixel[] = {0x1224, 2, 0x1a00, 0};
     const uint32_t sample[] = {0x1224, 1, 0x1a00, 0};
-    EXPECT_TRUE(raw::usableStorageMetadata(p, pixel, 4));
-    EXPECT_TRUE(raw::usableStorageMetadata(p, sample, 4));
+    EXPECT_TRUE(raw::usableStorageMetadata(p, pixel, 4, nullptr));
+    EXPECT_TRUE(raw::usableStorageMetadata(p, sample, 4, nullptr));
     for (uint32_t control : {0u, 3u, 6u, 9u, 10u, 0xffffffffu}) {
         uint32_t blob[] = {0x1224, control, 0x1a00, 0};
-        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4)) << control;
+        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr)) << control;
     }
-    EXPECT_FALSE(raw::usableStorageMetadata(p, pixel, 2));
-    EXPECT_FALSE(raw::usableStorageMetadata(p, pixel + 2, 2));
-    EXPECT_FALSE(raw::usableStorageMetadata(p, pixel, 3));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, pixel, 2, nullptr));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, pixel + 2, 2, nullptr));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, pixel, 3, nullptr));
     for (uint32_t component : {1u, 16u, 256u, 4096u}) {
         uint32_t blob[] = {0x1224, 2, 0x1a00, component};
-        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4));
+        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr));
     }
+}
+
+// The bridge hands a shadowed variant's draws the colour's storage image and its half shadow (NmbDirectExtendedShadow), a
+// second fragment storage image the storage form's contract does not count
+TEST(RawStorage, AShadowedVariantsDrawsQualifyBesideTheirShadow)
+{
+    State s;
+    NmbDirectWrite writes[2] = {s.write, s.write};
+    writes[1].binding = 1;
+    writes[1].source = NmbDirectExtendedShadow;
+    for (auto &draw : s.state.draws) {
+        draw.writes = writes;
+        draw.writeCount = 2;
+    }
+    raw::PackPipeline out = {};
+    EXPECT_EQ(raw::qualifyStorage(s.state, header, out), nullptr);
+    EXPECT_EQ(out.storageMask, 1);
+}
+
+// A " | xrsh=" variant's record (raw_xr_shadow.h): the shadow of a colour it holds in its storage form is usable, one of a
+// colour it does not, or out of the fragment stage, is malformed
+TEST(RawStorage, AnExtendedRangeShadowIsBoundBesideItsColoursStorageForm)
+{
+    const uint32_t blob[] = {0x1224, 2, 0x1a00, 0};
+    auto p = pipeline();
+    raw::setEntryCount(p, 2);
+    p.entry[1] = {16, raw::EntryXrShadow, 2, 0, 0, 0, 0};
+    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 4, nullptr));
+    p.entry[1].slot = 1;
+    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr));
+    p.entry[1].slot = 0;
+    p.entry[1].stage = 1;
+    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr));
 }
 
 TEST(RawStorage, RejectsMalformedArtifact)
@@ -376,10 +440,10 @@ TEST(RawStorage, RejectsMalformedArtifact)
             p.storageTic[1] = 42;
             break;
         case 6:
-            p.entries = 0;
+            raw::setEntryCount(p, 0);
             break;
         case 7:
-            p.entries = 255;
+            raw::setEntryCount(p, 255);
             break;
         case 8:
             p.flags |= raw::PipelineBarrierForm;
@@ -391,28 +455,28 @@ TEST(RawStorage, RejectsMalformedArtifact)
             p.entry[0].stage = 1;
             break;
         case 11:
-            p.entries = 2;
+            raw::setEntryCount(p, 2);
             p.entry[1] = {4, raw::EntryFetch, 1, 0, 0, 0, 0};
             break;
         case 12:
-            p.entries = 2;
+            raw::setEntryCount(p, 2);
             p.entry[1] = {4, raw::EntryFetch, 2, 8, 0, 0, 0};
             break;
         }
-        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4)) << mutation;
+        EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr)) << mutation;
     }
 }
 
 TEST(RawStorage, OrdinaryArtifactCannotCarryStorageMetadata)
 {
     raw::PackPipeline p = {};
-    EXPECT_TRUE(raw::usableStorageMetadata(p, nullptr, 0));
+    EXPECT_TRUE(raw::usableStorageMetadata(p, nullptr, 0, nullptr));
     p.storageTests = 1;
-    EXPECT_FALSE(raw::usableStorageMetadata(p, nullptr, 0));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, nullptr, 0, nullptr));
     p.storageTests = 0;
     for (uint32_t i = 0; i < 8; i++) {
         p.storageTic[i] = 42;
-        EXPECT_FALSE(raw::usableStorageMetadata(p, nullptr, 0)) << i;
+        EXPECT_FALSE(raw::usableStorageMetadata(p, nullptr, 0, nullptr)) << i;
         p.storageTic[i] = 0;
     }
 }
@@ -457,4 +521,186 @@ TEST(RawStorage, PerSamplePassesDrawSampleConflictDetection)
     }
     EXPECT_EQ(raw::legalInterlockControl(pixel | tile8, raw::sampleShadingControl(1)), pixel | tile8);
     EXPECT_EQ(raw::legalInterlockControl(pixel, 0), pixel);
+}
+
+// A fragment function's [[stencil]] output (m2v ShadowStencilUse) and no storage attachment: its record binds the stencil
+// stand-in alone, as an R8Uint storage view in a pass with a stencil and empty in one without, and carries its
+// ShadowStencilState word in PackShaderTests::reserved
+// A shader-side stencil's layered form binds its shadow as a 2D array of the pass's layers; a record of one layer as one
+// 2D layer
+TEST(RawStorage, ALayeredShaderSideStencilsShadowIsAnArrayOfThePassLayers)
+{
+    for (const bool layered : {false, true}) {
+        State s;
+        s.state.storageForm = false;
+        s.state.storage = {};
+        s.state.storage.shadowFormat = 13;
+        s.state.storage.shadowSamples = 1;
+        NmbDirectWrite shadow = s.write;
+        shadow.source = NmbDirectStencilStandIn;
+        shadow.viewType = layered ? 5 : 1;
+        for (auto &draw : s.state.draws) {
+            draw.writes = &shadow;
+            draw.writeCount = 1;
+            draw.arrayLengthWord = layered ? 3 : 0;
+        }
+        const auto formats = [](uint32_t format, uint32_t &word) {
+            word = format;
+            return true;
+        };
+        raw::PackPipeline p = {};
+        EXPECT_EQ(raw::qualifyStorage(s.state, formats, p), nullptr) << layered;
+        shadow.viewType = layered ? 1 : 5;
+        p = {};
+        EXPECT_NE(raw::qualifyStorage(s.state, formats, p), nullptr) << layered;
+    }
+}
+
+TEST(RawStorage, AShaderSideStencilQualifiesItsStandInAndWord)
+{
+    State s;
+    s.state.storageForm = false;
+    s.state.storage = {};
+    s.state.storage.shadowFormat = 13;
+    s.state.storage.shadowSamples = 1;
+    NmbDirectWrite shadow = s.write;
+    shadow.source = NmbDirectStencilStandIn;
+    for (auto &draw : s.state.draws) {
+        draw.writes = &shadow;
+        draw.writeCount = 1;
+        draw.shadowStencilWord = 5;
+        draw.pushMask = 0x30;
+    }
+    const auto formats = [](uint32_t format, uint32_t &word) {
+        word = format;
+        return true;
+    };
+    raw::PackPipeline p = {};
+    ASSERT_EQ(raw::qualifyStorage(s.state, formats, p), nullptr);
+    EXPECT_EQ(p.shaderTests.flags, raw::kShaderTestStencil);
+    EXPECT_EQ(p.shaderTests.stencilTic, 13u);
+    EXPECT_EQ(p.storageMask, 0u);
+    EXPECT_TRUE(raw::validDynamicPush(s.state));
+    EXPECT_EQ(raw::constantPushWords(s.state) & 0x30, 0u) << "the words each draw writes";
+    p.shaderTests.reserved = 5;
+    p.flags |= raw::PipelinePushMetadata;
+    p.pushMask = 0x30;
+    raw::setEntryCount(p, 1);
+    p.entry[0] = {0, raw::EntryStencilTest, 2, 0, 0, 0, 0};
+    EXPECT_TRUE(raw::usableDynamicPush(p, "ds=260/260"));
+    const uint32_t interlocked[] = {0x1224, 2};
+    EXPECT_TRUE(raw::usableStorageMetadata(p, interlocked, 2, nullptr));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, nullptr, 0, nullptr)) << "its program tests in the ordered interlock";
+    p.shaderTests.stencilWord = 9;
+    EXPECT_FALSE(raw::usableDynamicPush(p, "ds=260/260")) << "no encoder reference beside the function's";
+    p.shaderTests.stencilWord = 0;
+
+    s.state.storage.shadowFormat = 0;
+    raw::PackPipeline unattached = {};
+    ASSERT_EQ(raw::qualifyStorage(s.state, formats, unattached), nullptr);
+    EXPECT_EQ(unattached.shaderTests.flags, 0u) << "a pass without a stencil: nothing to test";
+    s.state.draws[2].shadowStencilWord = 7;
+    EXPECT_FALSE(raw::validDynamicPush(s.state)) << "every draw's word in one place";
+
+    s.state.storage.shadowFormat = 13;
+    s.state.storage.depthFormat = 100;
+    EXPECT_NE(raw::qualifyStorage(s.state, formats, p), nullptr) << "the in-shader tests take the output themselves";
+    s.state.storage.depthFormat = 0;
+    std::array<NmbDirectWrite, 2> twice = {shadow, shadow};
+    s.state.draws[1].writes = twice.data();
+    s.state.draws[1].writeCount = 2;
+    EXPECT_NE(raw::qualifyStorage(s.state, formats, p), nullptr);
+}
+
+// The same function compiled for a draw whose stencil write follows its depth test (m2v lower/fragment/stencil.rs
+// plan_tests): no storage attachment, its program running the depth and stencil tests on both stand-ins, for draws
+// whose tests are StencilWrite; the frontend draws that variant (" | tests=4") of a shader-side stencil exactly where its
+// stencil write depends on the depth test
+TEST(RawStorage, AShaderSideStencilsDepthDependentDrawsRunBothTestsInItsVariant)
+{
+    State s;
+    s.state.storageForm = false;
+    s.state.storage = {};
+    s.state.storage.fragmentTests = 4;
+    s.state.storage.depthFormat = 100;
+    s.state.storage.stencilFormat = 13;
+    s.state.storage.testSamples = 1;
+    std::array<NmbDirectWrite, 2> standIns = {s.write, s.write};
+    standIns[0].source = NmbDirectDepthStandIn;
+    standIns[1].source = NmbDirectStencilStandIn;
+    for (auto &draw : s.state.draws) {
+        draw.writes = standIns.data();
+        draw.writeCount = 2;
+        draw.depthTestWord = 1;
+        draw.stencilTestWord = 5;
+        draw.pushMask = 0xff;
+    }
+    const auto formats = [](uint32_t format, uint32_t &word) {
+        word = format;
+        return true;
+    };
+    raw::PackPipeline p = {};
+    ASSERT_EQ(raw::qualifyStorage(s.state, formats, p), nullptr);
+    EXPECT_EQ(p.shaderTests.flags, raw::kShaderTestDepth | raw::kShaderTestStencil);
+    EXPECT_EQ(p.storageTests, 4u);
+    EXPECT_EQ(p.storageMask, 0u);
+    EXPECT_TRUE(raw::validDynamicPush(s.state));
+    p.shaderTests.depthWord = 1;
+    p.shaderTests.stencilWord = 5;
+    p.flags |= raw::PipelinePushMetadata;
+    p.pushMask = 0xff;
+    raw::setEntryCount(p, 2);
+    p.entry[0] = {0, raw::EntryDepthTest, 2, 0, 0, 0, 0};
+    p.entry[1] = {4, raw::EntryStencilTest, 2, 0, 0, 0, 0};
+    EXPECT_TRUE(raw::usableDynamicPush(p, "ds=260/260"));
+    const uint32_t interlocked[] = {0x1224, 2};
+    EXPECT_TRUE(raw::usableStorageMetadata(p, interlocked, 2, nullptr));
+    EXPECT_FALSE(raw::usableStorageMetadata(p, nullptr, 0, nullptr));
+    p.storageTests = 3;
+    EXPECT_FALSE(raw::usableStorageMetadata(p, interlocked, 2, nullptr)) << "its draws' tests are the stencil's";
+
+    s.state.draws[2].writeCount = 1;
+    EXPECT_NE(raw::qualifyStorage(s.state, formats, p), nullptr) << "every draw binds both stand-ins";
+    s.state.draws[2].writeCount = 2;
+    s.state.storage.fragmentTests = 3;
+    EXPECT_NE(raw::qualifyStorage(s.state, formats, p), nullptr);
+
+    raw::PackShaderTests shadow = {0, 0, raw::kShaderTestStencil, 5, 0, 13, 0};
+    raw::DepthStencilDesc d;
+    d.depthCompare = 1;
+    d.front = {3, 1, 3, 2, 0xff, 0xff};
+    d.back = {7, 0, 0, 0, 0xff, 0xff};
+    constexpr uint32_t kDepthStencil = 260, kStencilOnly = 253;
+    EXPECT_EQ(raw::drawnTests(false, shadow, d, kDepthStencil), uint8_t(raw::FragmentTests::StencilWrite));
+    EXPECT_EQ(raw::drawnTests(false, shadow, d, kStencilOnly), 0u) << "no depth test to follow";
+    d.front.writeMask = 0;
+    EXPECT_EQ(raw::drawnTests(false, shadow, d, kDepthStencil), 0u) << "no stencil write to depend on it";
+    d.front.writeMask = 0xff;
+    d.front.depthFail = d.front.pass;
+    EXPECT_EQ(raw::drawnTests(false, shadow, d, kDepthStencil), 0u);
+    d.front.depthFail = 3;
+    d.depthCompare = 7;
+    EXPECT_EQ(raw::drawnTests(false, shadow, d, kDepthStencil), 0u) << "a depth test that drops nothing";
+    d.depthCompare = 1;
+    EXPECT_EQ(raw::drawnTests(false, raw::PackShaderTests{}, d, kDepthStencil), 0u);
+    EXPECT_EQ(raw::drawnTests(true, raw::PackShaderTests{}, d, kDepthStencil),
+              uint8_t(raw::fragmentTests(d, kDepthStencil)));
+}
+
+// A storage form whose function also returns [[stencil]]: its record keeps the draw's test class beside the stencil stand-in
+TEST(RawStorage, AStorageFormBesideAShaderSideStencilKeepsItsTestClass)
+{
+    raw::PackPipeline p = pipeline();
+    p.flags |= raw::PipelinePushMetadata;
+    raw::setEntryCount(p, 2);
+    p.entry[1] = {4, raw::EntryStencilTest, 2, 0, 0, 0, 0};
+    p.shaderTests = {0, 0, raw::kShaderTestStencil, 5, 0, 13, 0};
+    p.pushMask = 0x30;
+    p.storageTests = 3;
+    const uint32_t blob[] = {0x1224, 2, 0x1a00, 0};
+    EXPECT_TRUE(raw::usableStorageMetadata(p, blob, 4, nullptr));
+    p.flags &= ~raw::PipelineStorageMetadata;
+    p.storageMask = p.storageWriteMask = p.storageSamples = 0;
+    p.storageTic[0] = 0;
+    EXPECT_FALSE(raw::usableStorageMetadata(p, blob, 4, nullptr)) << "no storage form: no test class to keep";
 }

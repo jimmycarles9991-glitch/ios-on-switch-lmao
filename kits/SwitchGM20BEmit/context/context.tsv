@@ -97,7 +97,8 @@ b197	SET_POLY_SMOOTH	0x0	-	no polygon smoothing
 b197	SET_VIEWPORT_PIXEL	0x0	-	pixel centres at half integers, as Metal's
 b197	SET_MME_SHADOW_SCRATCH(25)	0x0	-	NVK macro state: shading rate control
 b197	SET_MME_SHADOW_SCRATCH(24)	0xf	-	NVK macro state: anti-alias state as nvk_mme_anti_alias_init makes it
-b197	SET_ANTI_ALIAS_ENABLE	0x1	-	multisample rasterization even at one sample, for strict lines. The golden context holds 0, and NVIDIA's userspace also writes 0x15b4 = 0, which no row writes: a lead for the DATA_ERROR 0x134 (INVALID_A_A_COMBINATION03) kills, unchanged until a device run decides it
+b197	SET_ANTI_ALIAS_ENABLE	0x1	-	multisample rasterization even at one sample, for strict lines. The golden context holds 0
+b197	0x15b4	0x0	-	CSAA_ENABLE (envytools; no class header name) off, as NVIDIA's userspace writes it; the golden context holds 1. Under it the copy engine moves multisampled compressed zetas exact (HW Test gpu.x1.ce_compressed_depth csaa_off arm, boots 19 and 21: d32f_4x, d32s8_2x and d32s8_4x 0 wrong over 16 rounds each), where the context's 1 died on DATA_ERROR 0x134 INVALID_A_A_COMBINATION03 (T-v2)
 b197	SET_POST_PS_INITIAL_COVERAGE	0x1	-	coverage after the fragment shader starts from the rasterized coverage
 b197	SET_OFFSET_RENDER_TARGET_INDEX	0x0	-	the render target array index is not offset by the viewport index
 b197	SET_WINDOW_ORIGIN	0x0	-	upper-left origin, no flip, as Metal's

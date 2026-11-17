@@ -6,16 +6,17 @@ import Metal
 /// RenderBox's icon and widget quads on the raw path (boot 21 iconservicesagent: enc.geometry a=4 b=0x100000004 for
 /// filter_color and uber, then the command buffer failed): a state that fetches the colour it writes, drawn as an indexed
 /// strip of four over a private target on compressed memory, its corners set as vertex bytes before the encoder's first
-/// draw. Its barrier form cannot order an indexed strip's triangles, so the target moves to plain memory and the
-/// storage form draws it inside the pixel interlock. FixedBlendRule.metal rule_fetch_fragment blends source-over its
-/// destination four times. The control draws a vertex strip, which the barrier form takes over the compressed target
-/// (a compressed fallback counted, the target still compressed): it shows the state has the barrier form the indexed
-/// strip would otherwise be refused by. A target that never compresses (ShaderWrite) is the reference. PASS: every arm
-/// raw, bytes alike, the indexed arm's target plain after, and (debug builds, which answer a texture's facts and count
-/// fallbacks) both compressed targets compressed before.
+/// draw. Rule storage.compressed (raw_storage_form.h storageReadsCompressed): the storage form's surface loads and stores
+/// reach the target through its compressible kind, so the L2 decompresses for them as for any other client, and the
+/// storage form draws inside the pixel interlock over the compressed memory itself: no barrier form taken, no move to
+/// plain memory, for the indexed strip and for the control's vertex strip alike. FixedBlendRule.metal rule_fetch_fragment
+/// blends source-over its destination four times. A target that never compresses (ShaderWrite) is the reference: a
+/// storage access that read or wrote compressed bytes as plain ones differs from it. PASS: every arm raw, bytes alike,
+/// no compressed fallback in either compressed arm, and (debug builds, which answer a texture's facts) both compressed
+/// targets compressed before and after.
 struct StripOverCompressedTest: HWTest {
     let id = "gpu.raw.strip_over_compressed"
-    let name = "A fetching indexed strip over a compressed private target takes the storage form on the raw path"
+    let name = "A fetching strip over a compressed private target draws its storage form over the compressed memory"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
 
@@ -87,17 +88,14 @@ struct StripOverCompressedTest: HWTest {
             metrics.set("\(arm)_bytes_differ", differ)
             if differ > 0 { wrong.append("\(arm)_bytes_differ") }
         }
-        if metrics["indexed_compressed_fallbacks"] != .integer(0) { wrong.append("indexed_fell_back") }
+        for arm in ["control", "indexed"] where metrics["\(arm)_compressed_fallbacks"] != .integer(0) {
+            wrong.append("\(arm)_fell_back")
+        }
         if debug {
-            for arm in ["control", "indexed"] where metrics["\(arm)_compressed_before"] != .integer(1) {
-                wrong.append("\(arm)_target_not_compressed")
+            for arm in ["control", "indexed"] {
+                if metrics["\(arm)_compressed_before"] != .integer(1) { wrong.append("\(arm)_target_not_compressed") }
+                if metrics["\(arm)_compressed_after"] != .integer(1) { wrong.append("\(arm)_target_moved_plain") }
             }
-            if metrics["control_compressed_fallbacks"] == .integer(0)
-                || metrics["control_compressed_after"] != .integer(1)
-            {
-                wrong.append("control_took_no_barrier_form")
-            }
-            if metrics["indexed_compressed_after"] != .integer(0) { wrong.append("indexed_target_still_compressed") }
         }
         return wrong.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(wrong.joined(separator: ","), metrics)
     }

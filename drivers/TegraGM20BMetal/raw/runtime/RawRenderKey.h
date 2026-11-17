@@ -5,7 +5,7 @@
 #include "raw_render_key.h"
 
 // A function that holds its library's AIR slice and its entry there itself (the pack generator's offline functions:
-// pack/offline_metal.h); the frontend answers for its own
+// RawOffline.h); the frontend answers for its own
 @protocol RawLibraryFunction
 - (const void *)libraryBytes:(size_t *)length;
 - (NSString *)libraryFunctionName;

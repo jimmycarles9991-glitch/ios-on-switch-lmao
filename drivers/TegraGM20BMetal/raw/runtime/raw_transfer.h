@@ -28,8 +28,15 @@ enum class TextureTransferResult : uint8_t {
 
 struct TextureTransfer {
     CopySurface texture;
-    uint32_t width = 0, height = 0, planes = 0, bpp = 0;
+    uint32_t width = 0, height = 0, planes = 0, bpp = 0;  // bpp: a texel's bytes in the caller's rows
     uint64_t layerBytes = 0;
+    // SET_REMAP_COMPONENTS into the texture and out of it where a texel there is not the caller's (raw_zeta_cpu.h); 0:
+    // the texel copy of bpp
+    uint32_t remapIn = 0, remapOut = 0;
+    // A multisampled texture's: `width` x `height` pixels of `samples` samples, its image their cells of the sample
+    // grid (fx::msLayout, 1 << sxLog2 x 1 << syLog2 a pixel, `texture` the grid's), the caller's rows each pixel's
+    // samples in turn (Metal's getBytes and replaceRegion)
+    uint8_t samples = 1, sxLog2 = 0, syLog2 = 0;
 };
 
 class TextureTransfers {

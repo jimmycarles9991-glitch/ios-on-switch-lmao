@@ -73,6 +73,34 @@ TEST(DispatchPieces, AMeasuredKernelIsCutByItsTime)
     EXPECT_EQ(raw::pieceCount(raw::estimatedNs(rate, threads, staticNs), TGM_APP_BAND_NS, 4096, 64), 6u);
 }
 
+// A grid past the QMD's grid fields (2^31 - 1 across, 65535 down and deep) is launched in slices within them that cover
+// each threadgroup once, each based where it starts within its piece
+TEST(DispatchPieces, QmdSlicesCoverAGridPastTheQmdOnce)
+{
+    for (const std::array<uint32_t, 3> &groups :
+         {std::array<uint32_t, 3>{3, 70000, 1}, {1, 65535, 65536}, {2, 131071, 3}, {0x80000000u, 1, 1}, {5, 5, 5}}) {
+        const raw::DispatchPiece piece{{7, 11, 13}, groups};
+        const uint64_t count = raw::qmdSliceCount({groups[0], groups[1], groups[2]});
+        std::array<uint64_t, 3> covered{};
+        for (uint64_t i = 0; i < count; i++) {
+            const raw::DispatchPiece s = raw::qmdSlice(piece, i);
+            for (uint8_t a = 0; a < 3; a++) {
+                EXPECT_GT(s.groups[a], 0u);
+                EXPECT_LE(s.groups[a], raw::kQmdGroups[a]);
+                EXPECT_EQ((s.base[a] - piece.base[a]) % raw::kQmdGroups[a], 0u);
+                EXPECT_LE(s.base[a] - piece.base[a] + s.groups[a], groups[a]);
+            }
+            covered[0] += uint64_t(s.groups[0]) * s.groups[1] * s.groups[2];
+        }
+        EXPECT_EQ(covered[0], uint64_t(groups[0]) * groups[1] * groups[2]);
+    }
+    EXPECT_EQ(raw::qmdSliceCount({5, 5, 5}), 1u);
+    EXPECT_EQ(raw::qmdSliceCount({3, 70000, 1}), 2u);
+    EXPECT_EQ(raw::qmdSliceCount({1, 65535, 65536}), 2u);
+    EXPECT_EQ(raw::qmdSliceCount({1, 0xffffffffull, 1}), raw::kMaxQmdSlices);
+    EXPECT_EQ(raw::kMaxQmdSlices, 65537u);
+}
+
 // A launch writes the piece's base and the whole grid's count into the root table's first words, where the kernel's
 // compile reads its workgroup base (m2v_source_test holds NVK's compile to reading it there)
 TEST(DispatchPieces, ThePiecesBaseIsTheKernelsWorkgroupBase)

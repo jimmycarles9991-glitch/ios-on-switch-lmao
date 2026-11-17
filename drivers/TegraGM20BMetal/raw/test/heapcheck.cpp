@@ -116,8 +116,10 @@ int main(int argc, char **argv)
         made++;
         named.insert({pl->rec->vs, pl->rec->fs});
         uint32_t vs = 0, fs = 0;
-        programsRight += methodValue(pl->methods, kVertexProgram, vs) && methodValue(pl->methods, kPixelProgram, fs) &&
-                         programAt(pack, region, pl->rec->vs, vs) && programAt(pack, region, pl->rec->fs, fs);
+        const bool pixel = raw::pixelStage(*pl->rec);
+        programsRight +=
+            methodValue(pl->methods, kVertexProgram, vs) && programAt(pack, region, pl->rec->vs, vs) &&
+            (!pixel || (methodValue(pl->methods, kPixelProgram, fs) && programAt(pack, region, pl->rec->fs, fs)));
     }
     std::printf(
         "%u of %u states made, %u with both programs the pack's at their GPU VA (%u with the prefetch past a heap "

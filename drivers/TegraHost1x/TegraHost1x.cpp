@@ -223,10 +223,27 @@ extern "C" uint32_t tegra_host1x_syncpt_read(uint32_t id)
     return gHost && id < kSyncpts ? sync(SYNC_SYNCPT + 4 * id) : 0;
 }
 
+extern "C" bool switch_nvdec_host1x_cancelled(uint32_t syncpt, uint32_t reached) __attribute__((weak));
+extern "C" bool switch_vic_host1x_cancelled(uint32_t syncpt, uint32_t reached) __attribute__((weak));
+
 extern "C" int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t max_increments)
 {
-    if (!gHost || !gSubmitLock)
+    if (!gHost || !gSubmitLock || gState != 1)
         return TEGRA_HOST1X_ENODEV;
+    if (id < kFirstOwn || id >= kSyncpts || id >= __atomic_load_n(&gNextSyncpt, __ATOMIC_ACQUIRE) || !max_increments ||
+        max_increments > 2)
+        return TEGRA_HOST1X_EINVAL;
+    const uint32_t reached = tegra_host1x_syncpt_read(id);
+    const int32_t distance = static_cast<int32_t>(threshold - reached);
+    if (distance <= 0)
+        return TEGRA_HOST1X_OK;
+    if (static_cast<uint32_t>(distance) > max_increments)
+        return TEGRA_HOST1X_EINVAL;
+    bool changed = false;
+    do {
+        changed = switch_nvdec_host1x_cancelled != nullptr && switch_nvdec_host1x_cancelled(id, reached);
+        changed |= switch_vic_host1x_cancelled != nullptr && switch_vic_host1x_cancelled(id, reached);
+    } while (changed);
     IOLockLock(gSubmitLock);
 
     struct Registers {
@@ -246,9 +263,10 @@ extern "C" int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshol
         }
     } registers;
 
-    const int result = gState == 1 ? switch_host1x_release_failed(registers, id, threshold, max_increments,
-                                                                  __atomic_load_n(&gNextSyncpt, __ATOMIC_ACQUIRE))
-                                   : TEGRA_HOST1X_ENODEV;
+    const uint32_t allocated = __atomic_load_n(&gNextSyncpt, __ATOMIC_ACQUIRE);
+    const int cancelled = gState == 1 ? switch_host1x_channels_cancel_display(allocated) : TEGRA_HOST1X_ENODEV;
+    const int result =
+        cancelled ? cancelled : switch_host1x_release_failed(registers, id, threshold, max_increments, allocated);
     IOLockUnlock(gSubmitLock);
     return result;
 }

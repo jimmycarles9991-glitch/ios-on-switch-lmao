@@ -63,7 +63,9 @@ def seed_view(meta: Path, packs: list[Path], view: Path) -> None:
     (view / 'packs').mkdir(parents=True)
     for path in meta.rglob('*'):
         if path.is_file():
-            (view / path.relative_to(meta)).symlink_to(path.absolute())
+            target = view / path.relative_to(meta)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(path.absolute())
     for number, pack in enumerate(packs):
         (view / 'packs' / f'{number:03d}').symlink_to(pack.absolute())
 

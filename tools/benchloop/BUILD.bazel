@@ -206,6 +206,18 @@ py_binary(
     deps = [":rung3_lib"],
 )
 
+# Every program the pack and the colour matrix macro load, under the chip's first-pass and alpha rules
+py_test(
+    name = "ibprogram_pack_test",
+    size = "small",
+    srcs = ["ibprogram_pack_test.py"],
+    data = ["//kits/SwitchGM20BEmit:mme/switch_gm20b_macros.c"],
+    deps = [
+        ":protocol",
+        "//drivers/TegraGM20BMetal:raw_pack",
+    ],
+)
+
 py_test(
     name = "rung3_test",
     size = "small",

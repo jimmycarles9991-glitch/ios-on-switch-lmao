@@ -127,8 +127,9 @@ protected:
     static void SetUpTestSuite()
     {
         const uint32_t maxThreads = uint32_t([MTLComputePipelineDescriptor new].maxTotalThreadsPerThreadgroup);
-        gDevice = open(writePack(packKey(MTLPixelFormatBGRA8Unorm), {conversionRecord(maxThreads)}),
-                       [HarnessM2VMethods class], [HarnessComputeM2V class]);
+        gDevice = open(
+            writePack(packKey(MTLPixelFormatBGRA8Unorm), {conversionRecord(maxThreads)}, {kernelFacts(0, maxThreads)}),
+            [HarnessM2VMethods class], [HarnessComputeM2V class]);
         ASSERT_TRUE(gDevice != nil);
         raw_metal_complete_states(dir().c_str());
         const std::string bytes = kernelLibrary();

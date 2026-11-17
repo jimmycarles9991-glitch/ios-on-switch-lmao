@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The context init (gen/SwitchGM20BContext.h) against the one NVK's queue made on the pack generator's mock GM20B
 // (testdata/context_capture.txt): the same methods in the same order, every fixed word the same, and every relocated
-// word one address that each of its methods took on the mock.
+// word one address that each of its methods took on the mock; less raw's own words, which NVK's init does not write.
 #include <cstdint>
 #include <map>
 #include <sstream>
@@ -10,6 +10,7 @@
 
 #include <gtest/gtest.h>
 
+#include "../../SwitchGM20B/SwitchGM20BTegra.h"
 #include "SwitchGM20BContext.h"
 #include "bazel/testing/source_text.h"
 
@@ -34,13 +35,30 @@ std::vector<Captured> capture()
     return out;
 }
 
+// NVIDIA's userspace's CSAA_ENABLE of 0 (context.tsv), where NVK keeps the golden context's 1
+bool rawOwn(const switch_gm20b_context_method &m)
+{
+    return m.subc == 0 && m.mthd == SWITCH_NVB197_SET_CSAA_ENABLE && m.data == 0;
+}
+
+std::vector<switch_gm20b_context_method> nvkShared()
+{
+    std::vector<switch_gm20b_context_method> out;
+    for (const switch_gm20b_context_method &m : switch_gm20b_context)
+        if (!rawOwn(m))
+            out.push_back(m);
+    return out;
+}
+
 TEST(Context, IsTheCapturedInit)
 {
     const std::vector<Captured> captured = capture();
-    ASSERT_EQ(captured.size(), SWITCH_GM20B_CONTEXT_METHODS);
+    const std::vector<switch_gm20b_context_method> shared = nvkShared();
+    ASSERT_EQ(captured.size(), shared.size());
+    ASSERT_EQ(shared.size() + 1, SWITCH_GM20B_CONTEXT_METHODS);
     std::map<uint32_t, uint32_t> address;
     for (size_t i = 0; i < captured.size(); i++) {
-        const switch_gm20b_context_method &m = switch_gm20b_context[i];
+        const switch_gm20b_context_method &m = shared[i];
         ASSERT_EQ(m.subc, captured[i].subc) << "method " << i;
         ASSERT_EQ(m.mthd, captured[i].mthd) << "method " << i;
         if (m.reloc == SWITCH_GM20B_CONTEXT_FIXED) {

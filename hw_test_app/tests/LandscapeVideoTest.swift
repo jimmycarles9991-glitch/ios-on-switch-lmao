@@ -50,6 +50,18 @@ struct LandscapeVideoTest: HWTest {
             return (item, AVPlayer(playerItem: item))
         }
         let video = player
+        defer {
+            _ = session.call(LandscapeSample.request(op: LandscapeSample.force, value: 0), replyBytes: 0)
+            _ = session.call(
+                LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size)
+            _ = session.call(
+                LandscapeSample.request(op: LandscapeSample.fail, value: 0), replyBytes: LandscapeSample.size)
+        }
+        // Before the stage: with V3 shipped, the clip's first frame would take the landscape route.
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: LandscapeSample.portraitFrames),
+            replyBytes: LandscapeSample.size
+        ).get()
         await context.onStage(fullScreen: true) { stage in
             let view = PlayerView(frame: stage.bounds)
             view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -57,14 +69,7 @@ struct LandscapeVideoTest: HWTest {
             view.playerLayer.videoGravity = .resizeAspect
             stage.addSubview(view)
         }
-        defer {
-            _ = session.call(LandscapeSample.request(op: LandscapeSample.force, value: 0), replyBytes: 0)
-            _ = session.call(LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: 0)
-            _ = session.call(LandscapeSample.request(op: LandscapeSample.fail, value: 0), replyBytes: 0)
-        }
         let held = Held(frame: Self.heldFrame, clip: duration)
-        _ = session.call(
-            LandscapeSample.request(op: LandscapeSample.portrait, value: LandscapeSample.portraitFrames), replyBytes: 0)
         await MainActor.run { video.play() }
         try? await Task.sleep(nanoseconds: 1_000_000_000)
 
@@ -72,9 +77,12 @@ struct LandscapeVideoTest: HWTest {
         await held.show(video)
         guard case .success(let vicHeld) = await sample(session, frames: 30) else { return .fail("no VIC sample") }
         samples.vicHeld = vicHeld
-        _ = session.call(
-            LandscapeSample.request(op: LandscapeSample.force, value: LandscapeSample.columnScanYuv), replyBytes: 0)
-        _ = session.call(LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: 0)
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.force, value: LandscapeSample.columnScanYuv), replyBytes: 0
+        ).get()
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
+        ).get()
         guard case .success(let (enter, enterSamples)) = await change(session, video, held) else {
             return .fail("no sample of the change")
         }
@@ -91,14 +99,18 @@ struct LandscapeVideoTest: HWTest {
             return .fail("no held landscape sample")
         }
         samples.landscapeHeld = landscapeHeld
-        _ = session.call(
-            LandscapeSample.request(op: LandscapeSample.portrait, value: LandscapeSample.portraitFrames), replyBytes: 0)
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: LandscapeSample.portraitFrames),
+            replyBytes: LandscapeSample.size
+        ).get()
         guard case .success(let (leave, leaveSamples)) = await change(session, video, held, fresh: false) else {
             return .fail("no sample of the change back")
         }
-        _ = session.call(LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: 0)
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
+        ).get()
         samples.leave = leave
-        let (forcedChecks, forcedMetrics) = await forcedFailure(session, video, held)
+        let (forcedChecks, forcedMetrics) = try await forcedFailure(session, video, held)
         await MainActor.run { video.pause() }
 
         var (checks, metrics) = LandscapeJudge.judge(samples, dropped: dropped)
@@ -114,16 +126,19 @@ struct LandscapeVideoTest: HWTest {
     /// kernel's count over the arm.
     func forcedFailure(
         _ session: VICKernelTest.Session, _ video: AVPlayer, _ held: Held
-    ) async
+    ) async throws
         -> ([(String, Bool)], Metrics)
     {
         var metrics = Metrics()
         guard case .success(let before) = await sample(session, frames: 2) else {
             return ([("the forced-failure arm sampled", false)], metrics)
         }
-        _ = session.call(
-            LandscapeSample.request(op: LandscapeSample.force, value: LandscapeSample.columnScanYuv), replyBytes: 0)
-        _ = session.call(LandscapeSample.request(op: LandscapeSample.fail, value: 1), replyBytes: 0)
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.force, value: LandscapeSample.columnScanYuv), replyBytes: 0
+        ).get()
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.fail, value: 1), replyBytes: LandscapeSample.size
+        ).get()
         await MainActor.run { video.play() }
         var entered = false
         var last = before
@@ -135,11 +150,15 @@ struct LandscapeVideoTest: HWTest {
                 break
             }
         }
-        _ = session.call(LandscapeSample.request(op: LandscapeSample.force, value: 0), replyBytes: 0)
-        _ = session.call(
-            LandscapeSample.request(op: LandscapeSample.portrait, value: LandscapeSample.portraitFrames), replyBytes: 0)
+        _ = try session.call(LandscapeSample.request(op: LandscapeSample.force, value: 0), replyBytes: 0).get()
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: LandscapeSample.portraitFrames),
+            replyBytes: LandscapeSample.size
+        ).get()
         await held.show(video)
-        _ = session.call(LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: 0)
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
+        ).get()
         metrics.set("forced_failures", last.failures - before.failures)
         metrics.set("forced_entered", entered)
         return (

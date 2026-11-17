@@ -48,7 +48,13 @@ struct CompileFirstDrawTest: HWTest {
         checks.append(("the compiler's death armed for this app's next request", armed))
         let survived = try pipeline(gpu, salt: salt + 2)
         switch_compiler_probe(&probe)
-        if probe.generation > generation { DeliberateCompilerDeaths.shared.add() }
+        if probe.generation > generation {
+            do {
+                try DeliberateCompilerDeaths.tally.add()
+            } catch {
+                checks.append(("the death recorded for system.compiler_alive (\(error))", false))
+            }
+        }
         metrics.set("generations", Int(probe.generation) - Int(generation))
         checks.append(("the compiler died holding the request and the next one made it", probe.generation > generation))
         if let answer = RawFacade.compile(of: survived) {
@@ -121,21 +127,11 @@ struct CompileFirstDrawTest: HWTest {
     }
 }
 
-/// The compiler deaths a test caused on purpose this run, which system.compiler_alive counts as no loss
-final class DeliberateCompilerDeaths: @unchecked Sendable {
-    static let shared = DeliberateCompilerDeaths()
-    private let lock = NSLock()
-    private var deaths = 0
-
-    func add() {
-        lock.lock()
-        deaths += 1
-        lock.unlock()
-    }
-
-    var count: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return deaths
+/// The compiler deaths a test caused on purpose this boot, which system.compiler_alive counts as no loss. On the card,
+/// so a Run All resumed after the app's process ended still counts the deaths its earlier process caused.
+enum DeliberateCompilerDeaths {
+    static var tally: BootTally {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return BootTally(url: documents.appendingPathComponent("hwtest/compiler-deaths"), boot: DeviceInfo.bootUUID)
     }
 }

@@ -605,7 +605,7 @@ MTLDevice	newFence	newFence	I	21H461,24B119	raw
 MTLDevice	newHeapWithDescriptor:	newHeapWithDescriptor:	I	21H461,24B119	raw
 MTLDevice	newIndirectCommandBufferWithDescriptor:maxCommandCount:options:	newIndirectCommandBufferWithDescriptor:maxCommandCount:options:	I	21H461,24B119	raw
 MTLDevice	newLibraryWithData:error:	newLibraryWithData:error:	I	21H461,24B119	raw
-MTLDevice	newRasterizationRateMapWithDescriptor:	newRasterizationRateMapWithDescriptor:	I	21H461,24B119	base
+MTLDevice	newRasterizationRateMapWithDescriptor:	newRasterizationRateMapWithDescriptor:	I	21H461,24B119	raw
 MTLDevice	newRenderPipelineStateWithDescriptor:completionHandler:	newRenderPipelineStateWithDescriptor:completionHandler:	I	21H461,24B119	raw
 MTLDevice	newRenderPipelineStateWithDescriptor:error:	newRenderPipelineStateWithDescriptor:error:	I	21H461,24B119	raw
 MTLDevice	newRenderPipelineStateWithDescriptor:options:completionHandler:	newRenderPipelineStateWithDescriptor:options:completionHandler:	I	21H461,24B119	raw

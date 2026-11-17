@@ -7,21 +7,23 @@ import Metal
 /// A connection's SubmitJob beside its BoImport (drivers/TegraGM20B/TegraGM20BUserClientDispatch.cpp): an import's
 /// wiring, zero-fill faults, page walk and clean run before the connection's lock and submit gate, so a command buffer
 /// committed while another thread makes textures over fresh IOSurfaces is scheduled without waiting for them. One
-/// thread makes textures over new 720x1280 surfaces back to back; this one commits fills of a private buffer meanwhile,
+/// thread makes textures over new 4096x2048 surfaces back to back; this one commits fills of a private buffer meanwhile,
 /// timing each from commit to waitUntilScheduled, and the same with no imports first. A submission is beside the
 /// imports when its time overlaps one. An import's own wiring is timed on the test's own connection: a fresh surface's
 /// BoImport less a second BoImport of it, which adopts the first's wiring (TegraGM20BUserClientBo.cpp sharedWiringFind)
-/// and so skips the zero-fill, page walk, nvkm memory and clean (`wire_ms`; both imports' times are logged). Fails when
-/// imports add more than that to the submissions' p99. The fills are private because the raw runtime holds its device
-/// lock across a surface texture's import (raw_gpu.cpp createSurfaceTexture) and takes it again before a command buffer
-/// that wrote a CPU-cached buffer is scheduled (raw_alias.cpp captureCpuCompletion); a private fill's encode and
-/// submission never take it, so the two threads meet only in the kernel.
+/// and so skips the zero-fill, page walk, nvkm memory and clean (`wire_ms`; both imports' times are logged). The
+/// surfaces are 32 MiB so that half a wiring stands clear of the run's contention (ImportBesideVerdict: 3.5 MiB wired in
+/// 0.28 ms on boot 22, too short to tell, makes about 2.6 ms); four of them, 128 MiB, are held. Fails when imports add
+/// half a wiring or more to the submissions' p99. The fills are private because the raw runtime holds its device lock across a surface
+/// texture's import (raw_gpu.cpp createSurfaceTexture) and takes it again before a command buffer that wrote a
+/// CPU-cached buffer is scheduled (raw_alias.cpp captureCpuCompletion); a private fill's encode and submission never take
+/// it, so the two threads meet only in the kernel.
 struct ImportBesideSubmitsTest: GPUPathTest {
     let id = "gpu.path.import_beside_submits"
     let name = "Command buffers are scheduled without waiting for another thread's IOSurface imports"
     let counters = ["submit_jobs"]
-    static let width = 720, height = 1280, rowBytes = 3072, imports = 16, quiet = 160, minimumBeside = 40
-    static let calibrations = 3, fillBytes = 256, shortestWireMs = 0.5, warmFills = 8
+    static let width = 4096, height = 2048, rowBytes = 16384, imports = 4, quiet = 160, minimumBeside = 40
+    static let calibrations = 3, fillBytes = 256, warmFills = 8
     static let boImportGpuReads: UInt32 = 1
 
     /// One timed span on DispatchTime's clock, in ms
@@ -106,8 +108,8 @@ struct ImportBesideSubmitsTest: GPUPathTest {
         while importer.isRunning { during.append(try Self.submit(gpu, target)) }
         importer.wait()
         let beside = during.filter { submission in importer.spans.contains { $0.overlaps(submission) } }
-        let quietP99 = Self.p99(quiet), besideP99 = Self.p99(beside)
-        let added = besideP99 - quietP99
+        let quietMs = quiet.map(\.ms), besideMs = beside.map(\.ms)
+        let quietP99 = Stats.percentile(quietMs, 0.99), besideP99 = Stats.percentile(besideMs, 0.99)
         metrics.set("wire_ms", wireMs, digits: 2)
         metrics.set("boimport_ms", firstMs, digits: 2)
         metrics.set("boimport_again_ms", secondMs, digits: 2)
@@ -118,23 +120,11 @@ struct ImportBesideSubmitsTest: GPUPathTest {
         metrics.set("quiet_worst_ms", quiet.map(\.ms).max() ?? 0, digits: 2)
         metrics.set("beside_p99_ms", besideP99, digits: 2)
         metrics.set("beside_worst_ms", beside.map(\.ms).max() ?? 0, digits: 2)
-        metrics.set("added_p99_ms", added, digits: 2)
+        metrics.set("added_p99_ms", ImportBesideVerdict.addedP99(quiet: quietMs, beside: besideMs), digits: 2)
         withExtendedLifetime(importer.made) {}
-        var failures: [String] = []
-        if let failure = importer.failure { failures.append(failure) }
-        if wireMs < Self.shortestWireMs {
-            failures.append(String(format: "an import's wiring took %.2f ms: too short to tell", wireMs))
-        }
-        if beside.count < Self.minimumBeside {
-            failures.append("\(beside.count) submissions beside the imports (at least \(Self.minimumBeside))")
-        }
-        if added > wireMs {
-            failures.append(
-                String(
-                    format: "imports added %.2f ms to the p99 submission, more than an import's %.2f ms wiring", added,
-                    wireMs))
-        }
-        return failures
+        return (importer.failure.map { [$0] } ?? [])
+            + ImportBesideVerdict.failures(
+                wireMs: wireMs, quiet: quietMs, beside: besideMs, minimumBeside: Self.minimumBeside)
     }
 
     /// One fill of the private buffer: commit to scheduled, then waited for to completion outside the span.
@@ -186,12 +176,6 @@ struct ImportBesideSubmitsTest: GPUPathTest {
     }
 
     static func halves(_ value: UInt64) -> [UInt32] { [UInt32(truncatingIfNeeded: value), UInt32(value >> 32)] }
-
-    static func p99(_ spans: [Span]) -> Double {
-        let sorted = spans.map(\.ms).sorted()
-        guard !sorted.isEmpty else { return 0 }
-        return sorted[min(sorted.count - 1, Int((Double(sorted.count) * 0.99).rounded(.up)) - 1)]
-    }
 
     static func median(_ values: [Double]) -> Double {
         let sorted = values.sorted()

@@ -1,10 +1,5 @@
 // SPDX-License-Identifier: MIT
-// raw/runtime/raw_uniform_tuples.h, the DEVELOPMENT line that counts the uniform value tuples Core Animation's generic merge
-// states are drawn with: a tuple is the bytes the record's uniform ranges read (boot 21's line hashed 1024 bytes of each
-// bound arena, so every draw was a new tuple and its 64-tuple cap was full within a second), each 5 s window's draws per
-// tuple are counted in bounded memory, and only a generic merge state's draw is counted, in DEVELOPMENT builds alone.
 #include "../raw/runtime/raw_uniform_tuples.h"
-#include "bazel/testing/source_text.h"
 
 #include <gtest/gtest.h>
 #include <algorithm>
@@ -18,7 +13,7 @@ namespace {
 raw::PackPipeline record()
 {
     raw::PackPipeline r = {};
-    r.entries = 3;
+    raw::setEntryCount(r, 3);
     r.entry[0] = {0, raw::EntryUbo, 1, 0, 4, 16, 0};
     r.entry[1] = {16, raw::EntryUbo, 1, 2, 12, 0, 0};
     r.entry[2] = {32, raw::EntryUbo, 2, 1, 68, 0, 1};
@@ -148,31 +143,6 @@ TEST(RawUniformTuples, ItsMemoryIsBounded)
     EXPECT_EQ(first->tuples, raw::UniformTuples::kTuplesPerState);
     EXPECT_EQ(first->beyond, 500u);
     EXPECT_EQ(first->draws, many);
-}
-
-// Counted for a generic merge state's draw alone, and in DEVELOPMENT builds alone: a release build carries none of it
-TEST(RawUniformTuples, OnlyAGenericMergeStatesDrawIsCountedInADevelopmentBuild)
-{
-    const std::string gpu = switch_ios::test::SourceText("../raw/runtime/raw_gpu.cpp");
-    const size_t prepare = gpu.find("bool RenderEncoder::prepare(Pipeline *pl,");
-    ASSERT_NE(prepare, std::string::npos);
-    const size_t taken = gpu.find("#if SWITCH_RAW_DIAGNOSTICS\n"
-                                  "    const bool genericMerge = pl->genericState;\n"
-                                  "#endif",
-                                  prepare);
-    const size_t logged = gpu.find("#if SWITCH_RAW_DIAGNOSTICS\n"
-                                   "    if (genericMerge)\n"
-                                   "        logUniformTuple(*pl);\n"
-                                   "#endif",
-                                   prepare);
-    EXPECT_NE(taken, std::string::npos);
-    EXPECT_NE(logged, std::string::npos);
-    EXPECT_EQ(gpu.find("logUniformTuple(", logged + 60), std::string::npos);
-    const std::string variants = switch_ios::test::SourceText("../raw/runtime/raw_variants.cpp");
-    const size_t defined = variants.find("void RenderEncoder::logUniformTuple(");
-    ASSERT_NE(defined, std::string::npos);
-    EXPECT_LT(variants.rfind("#if SWITCH_RAW_DIAGNOSTICS", defined), defined);
-    EXPECT_GT(variants.find("#endif", defined), defined);
 }
 
 }  // namespace

@@ -25,7 +25,7 @@ constexpr uint64_t kChainVa = 0x2000000000ull;
 std::vector<MipRun> runs(const MipChain &c, bool twod, bool threeD, bool *routed = nullptr)
 {
     std::vector<MipRun> out;
-    const bool ok = raw::fx::eachMipRun(c, twod, threeD, [&](const MipRun &r) {
+    const bool ok = raw::fx::eachMipRun(c, 0, c.levels - 1, twod, threeD, [&](const MipRun &r) {
         out.push_back(r);
     });
     if (routed)
@@ -93,18 +93,19 @@ TEST(MipRoute, CoreAnimationStripChain)
     EXPECT_FALSE(raw::fx::mipRoutable(c, false, false));
 }
 
-// Each 2D format's unproven steps have an engine: the pack's mip state where it has one (sRGB), else the 2D engine
+// Each 2D format's unproven steps are its mip state's, which takes Metal's taps (pack/mip.metal)
 TEST(MipRoute, TwoDFormatsAndTheirThreeDStates)
 {
     const struct {
         uint32_t mtl, fmt2d;
-        bool threeD;
-    } formats[] = {{80, 0xcf, false}, {70, 0xd5, false}, {115, 0xca, false}, {10, 0xf3, false},
-                   {30, 0xea, false}, {81, 0xd0, true},  {71, 0xd6, true}};
+    } formats[] = {{80, 0xcf}, {70, 0xd5}, {115, 0xca}, {10, 0xf3}, {30, 0xea}, {81, 0xd0}, {71, 0xd6}};
 
     for (const auto &f : formats) {
         EXPECT_EQ(raw::fx::twodFormat(f.mtl), f.fmt2d) << f.mtl;
-        EXPECT_EQ(raw::mipState(f.mtl) != nullptr, f.threeD) << f.mtl;
+        EXPECT_NE(raw::mipState(f.mtl), nullptr) << f.mtl;
+        const MipChain c = chain(776, 24);
+        for (const MipRun &r : runs(c, true, raw::mipState(f.mtl) != nullptr))
+            EXPECT_EQ(r.unproven, 0u) << f.mtl << ": 97 -> 48 on the 2D engine";
     }
     for (uint32_t mtl : {1u, 20u, 25u, 40u, 43u, 55u, 60u, 65u, 90u, 92u, 94u, 105u, 110u, 125u}) {
         EXPECT_EQ(raw::fx::twodFormat(mtl), 0u) << mtl;
@@ -118,7 +119,7 @@ TEST(MipRoute, ChainFormatsHalveOnTheTwoDEngineAtProvenStepsOnly)
 {
     const struct {
         uint32_t mtl, fmt2d;
-    } formats[] = {{80, 0xcf}, {70, 0xd5}, {115, 0xca}, {10, 0xf3},  {30, 0xea},  {81, 0xd0},  {71, 0xd6},
+    } formats[] = {{80, 0xcf}, {70, 0xd5}, {115, 0xca}, {10, 0xf3},  {30, 0xea},  {81, 0},     {71, 0},
                    {1, 0xf7},  {20, 0xee}, {25, 0xf2},  {40, 0xe8},  {55, 0xe5},  {60, 0xda},  {65, 0xde},
                    {90, 0xd1}, {92, 0xe0}, {94, 0xdf},  {105, 0xcb}, {110, 0xc6}, {125, 0xc0}, {43, 0xe9}};
 
@@ -135,6 +136,13 @@ TEST(MipRoute, ChainFormatsHalveOnTheTwoDEngineAtProvenStepsOnly)
         twod |= run.engine == MipEngine::TwoD;
     }
     EXPECT_TRUE(twod) << "15 -> 7 ... 3 -> 1 are proven";
+
+    for (uint32_t srgb : {71u, 81u}) {
+        const std::vector<MipRun> all =
+            runs(chain(512, 512), raw::fx::twodChainFormat(srgb) != 0, raw::mipState(srgb) != nullptr);
+        ASSERT_EQ(all.size(), 1u) << srgb;
+        EXPECT_EQ(all[0].engine, MipEngine::ThreeD) << srgb << ": every step of an sRGB chain is its mip state's";
+    }
 }
 
 TEST(MipRoute, PowerOfTwoChainsAreOneTwoDRun)
@@ -177,27 +185,27 @@ std::vector<uint8_t> level(const std::vector<uint8_t> &mem, const MipChain &c, u
 
 // emitGenerateLayers of levels first + 1 .. last through the model: each such level is the reference step from the level above
 // as the model left it, the levels outside the run keep their bytes, and the run is ordered and ends sampleable
-void checkRun(const MipChain &c, uint32_t first, uint32_t last)
+void checkRun(const MipChain &c, uint32_t first, uint32_t last, uint32_t firstLayer, uint32_t layers)
 {
     std::vector<uint8_t> mem(c.bytes * c.layers, 0);
     for (uint32_t layer = 0; layer < c.layers; layer++)
         for (uint32_t l = 0; l < c.levels; l++)
             fill(mem, c, layer, l, layer * 16 + l);
     const std::vector<uint8_t> before = mem;
-    std::vector<uint32_t> push(raw::fx::twodInitWords() + raw::fx::generateLayersWords(c, first, last));
+    std::vector<uint32_t> push(raw::fx::twodInitWords() + raw::fx::generateWords(c, first, last) * layers);
     raw::Push p{push.data(), push.data() + push.size()};
     raw::fx::emitTwodInit(p);
-    raw::fx::emitGenerateLayers(p, c, kChainVa, kBgra8, first, last);
+    raw::fx::emitGenerateLayers(p, c, kChainVa, kBgra8, first, last, firstLayer, layers);
     ASSERT_LE(p.at, push.data() + push.size());
     twodsim::Sim sim;
     sim.map(kChainVa, mem);
     ASSERT_TRUE(sim.run(push.data(), size_t(p.at - push.data()))) << sim.error();
     EXPECT_TRUE(sim.endsSampleable);
-    EXPECT_EQ(sim.launches, (last - first) * c.layers);
+    EXPECT_EQ(sim.launches, (last - first) * layers);
     for (uint32_t layer = 0; layer < c.layers; layer++)
         for (uint32_t l = 0; l < c.levels; l++) {
             const std::vector<uint8_t> got = level(mem, c, layer, l);
-            if (l <= first || l > last) {
+            if (layer < firstLayer || layer >= firstLayer + layers || l <= first || l > last) {
                 EXPECT_EQ(got, level(before, c, layer, l))
                     << "layer " << layer << " level " << l << " outside the run changed";
                 continue;
@@ -214,16 +222,16 @@ void checkRun(const MipChain &c, uint32_t first, uint32_t last)
 TEST(MipRoute, TwoDRunsWriteOnlyTheirLevels)
 {
     const MipChain c = chain(20, 12);
-    checkRun(c, 0, c.levels - 1);
-    checkRun(c, 1, 3);
-    checkRun(c, 2, 3);
+    checkRun(c, 0, c.levels - 1, 0, c.layers);
+    checkRun(c, 1, 3, 0, c.layers);
+    checkRun(c, 2, 3, 0, c.layers);
 }
 
 TEST(MipRoute, TwoDRunsAroundAThreeDRun)
 {
     const MipChain c = chain(776, 24);
-    checkRun(c, 0, 3);
-    checkRun(c, 4, 9);
+    checkRun(c, 0, 3, 0, c.layers);
+    checkRun(c, 4, 9, 0, c.layers);
 }
 
 TEST(MipRoute, EveryLayerOfAnArrayChain)
@@ -231,8 +239,32 @@ TEST(MipRoute, EveryLayerOfAnArrayChain)
     MipChain c;
     ASSERT_TRUE(raw::fx::arrayLayout(16, 8, 3, 5, 4, c));
     ASSERT_EQ(c.layers, 3u);
-    checkRun(c, 0, 4);
-    checkRun(c, 1, 2);
+    checkRun(c, 0, 4, 0, c.layers);
+    checkRun(c, 1, 2, 0, c.layers);
+}
+
+TEST(MipRoute, AViewWritesOnlyItsLaterLevelsAndSelectedLayers)
+{
+    MipChain c;
+    ASSERT_TRUE(raw::fx::arrayLayout(32, 16, 4, 6, 4, c));
+    checkRun(c, 1, 3, 1, 2);
+    checkRun(c, 2, 4, 3, 1);
+}
+
+TEST(MipRoute, AViewRoutesOnlyItsLevelInterval)
+{
+    const MipChain c = chain(776, 24);
+    std::vector<MipRun> selected;
+    ASSERT_TRUE(raw::fx::eachMipRun(c, 3, 6, true, true, [&](const MipRun &r) {
+        selected.push_back(r);
+    }));
+    ASSERT_EQ(selected.size(), 2u);
+    EXPECT_EQ(selected[0].engine, MipEngine::ThreeD);
+    EXPECT_EQ(selected[0].first, 3u);
+    EXPECT_EQ(selected[0].last, 4u);
+    EXPECT_EQ(selected[1].engine, MipEngine::TwoD);
+    EXPECT_EQ(selected[1].first, 4u);
+    EXPECT_EQ(selected[1].last, 6u);
 }
 
 }  // namespace

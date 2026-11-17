@@ -27,7 +27,7 @@ struct FirstTiledSurfaceScene: GPUScene {
             let library = try gpu.device.makeLibrary(URL: CAState.library)
             pipeline = try CAState.pipeline(CACorpus.state("PBGRAXm_A2Xhf")!, library: library, device: gpu.device)
         } catch {
-            result.notes.append("clear only: no Core Animation fill state here (\(GPU.describe(error)))")
+            result.unavailable("clear only: no Core Animation fill state here (\(GPU.describe(error)))", on: gpu.device)
         }
         var hashes: Set<UInt64> = []
         for round in 0..<3 {

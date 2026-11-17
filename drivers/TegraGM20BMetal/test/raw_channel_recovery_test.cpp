@@ -18,7 +18,8 @@ class ChannelRecovery : public testing::Test {
 protected:
     raw::Kernel kernel;
     raw::Bo zero, tickets, root;
-    uint32_t channel = 0, last = 0;
+    uint32_t channel = 0;
+    std::atomic<uint32_t> last{0};
     const volatile uint32_t *fence = &kNoFence;
 
     void SetUp() override

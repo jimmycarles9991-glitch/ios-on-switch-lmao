@@ -3,7 +3,6 @@
 #import "RawMetalRotated.h"
 #import "RawMetalXrPlanes.h"
 #import "RawMetalFresh.h"
-#include "raw_nonfinite.h"
 #include "raw_surface_note.h"
 #include <mach/vm_page_size.h>
 #include "NativeBridgeMetalFrontend.h"
@@ -27,7 +26,8 @@
 // sealed_encoders (encoders the worker encoded ahead of their commit, of all it sealed), pipeline_handoffs and
 // pipeline_handoff_wakes (hand-offs to the worker as encoders ended, and those that found it asleep: a wake each),
 // pipeline_abandons.<reason>,
-// m2v.<reason>, pred.<predicate> (nonzero only).
+// m2v.<reason>, pred.<predicate> and failed.<predicate> (the command buffers a predicate of predFailure failed;
+// nonzero only).
 - (NSDictionary<NSString *, NSNumber *> *)switchRawCounters
 {
     const Stats &s = gRM->stats;
@@ -62,11 +62,18 @@
     d[@"split_prologues"] = @(gRM->raw->stats.splitLaunches.load());
     d[@"split_room_refusals"] = @(gRM->raw->stats.splitRoomRefusals.load());
     d[@"heap_full"] = @(gRM->raw->stats.heapFull.load());
+    d[@"pack_slots_in_bound_grains"] = @(gRM->raw->stats.packSlotsInBoundGrains.load());
+    d[@"store_slots_placed"] = @(gRM->raw->stats.storeSlotsPlaced.load());
+    d[@"slot_cleans"] = @(gRM->raw->stats.slotCleans.load());
+    d[@"clears_narrowed"] = @(gRM->raw->stats.clearsNarrowed.load());
+    d[@"clear_pixels_left"] = @(gRM->raw->stats.clearPixelsLeft.load());
     d[@"interlock_draws"] = @(gRM->raw->stats.interlockDraws.load());
+    d[@"raster_ordered_draws"] = @(gRM->raw->stats.rasterOrderedDraws.load());
     d[@"banded_draws"] = @(gRM->raw->stats.bandedDraws.load());
     d[@"bands"] = @(gRM->raw->stats.bands.load());
     d[@"learned_draws"] = @(gRM->raw->stats.learnedDraws.load());
     d[@"banded_dispatches"] = @(gRM->raw->stats.bandedDispatches.load());
+    d[@"kernel_windows"] = @(gRM->raw->stats.kernelWindows.load());
     d[@"storage_barriers"] = @(gRM->raw->stats.storageBarriers.load());
     d[@"texture_uploads"] = @(gRM->raw->stats.textureUploads.load());
     d[@"fused_passes"] = @(gRM->raw->stats.fusedPasses.load());
@@ -129,9 +136,12 @@
     for (int r = 1; r < WhyCount; r++)
         if (const uint64_t n = s.reasons[r].load())
             d[[NSString stringWithFormat:@"m2v.%s", kReasonNames[r]]] = @(n);
-    for (int p = 1; p < PredCount; p++)
+    for (int p = 1; p < PredCount; p++) {
         if (const uint64_t n = gPredCbs[p].load(std::memory_order_relaxed))
             d[[NSString stringWithFormat:@"pred.%s", kPredNames[p]]] = @(n);
+        if (const uint64_t n = gPredFailed[p].load(std::memory_order_relaxed))
+            d[[NSString stringWithFormat:@"failed.%s", kPredNames[p]]] = @(n);
+    }
 #if SWITCH_RAW_DIAGNOSTICS
     // states created that the pack lacked: found in this build's record cache or compiled (states_compiled)
     if (gRM->completion) {
@@ -253,15 +263,10 @@
     // GPU (its buffer pool, its gamma and weight tables: QuartzCore MetalBufferPool::allocate_buffer, options 0): nothing to clean
     // before a draw reads it, nothing to scan for the vertices an indexed draw reads (r16: 600-1300 KB cleaned a command buffer)
     const bool wc = (o & MTLResourceStorageModeMask) == MTLResourceStorageModeShared;
-    if (!gRM->raw->createBuffer(n ? n : 16, b->_raw,
-                                wc)) {  // the pool could not grow: m2v's buffer (its users go to m2v)
-        SWITCH_REFUSE("raw", "buffer.pool", "no raw memory for a %lu-byte buffer: m2v's", (unsigned long)n);
-        if (!predLogged(PredCallBufForeign))
-            logPred(PredCallBufForeign, 0, n, @"(made: the pool had no room)");
-        RMTwinObject *t = [RMTwinObject new];
-        t->_device = self;
-        t->_twin = [RM_M2V(NeedBufferPoolFull) newBufferWithLength:n options:o];
-        return t->_twin ? (id<MTLBuffer>)t : nil;
+    if (!gRM->raw->createBuffer(n ? n : 16, b->_raw, wc)) {
+        os_log_error(rawLog(), "raw: %{public}s: no memory for a %lu-byte buffer: none made", getprogname(),
+                     (unsigned long)n);
+        return nil;
     }
     b->_raw.hostVisible = (o & MTLResourceStorageModeMask) != MTLResourceStorageModePrivate;
     return (id<MTLBuffer>)b;
@@ -273,11 +278,6 @@
     id<MTLBuffer> b = [self newBufferWithLength:n options:o];
     if (!b || !p || !n)
         return b;
-    if (![(id)b isKindOfClass:[RMBuffer class]]) {  // the pool had no room: m2v's buffer, made with the bytes
-        RMTwinObject *t = (RMTwinObject *)b;
-        t->_twin = [RM_M2V(NeedBufferPoolFull) newBufferWithBytes:p length:n options:o];
-        return t->_twin ? b : nil;
-    }
     RMBuffer *buffer = (RMBuffer *)b;
     raw::HostAccess access;
     if (!buffer->_raw.hostVisible && !gRM->raw->hostAccess(buffer->_raw, true, access))
@@ -297,14 +297,12 @@
     RMBuffer *b = [RMBuffer new];
     b->_device = self;
     b->_options = o;
-    if (!gRM->raw->createBufferNoCopy(p, n, b->_raw)) {  // (the import refused): m2v's, as today
-        if (!predLogged(PredCallBufForeign))
-            logPred(PredCallBufForeign, uintptr_t(p) & 0xfff, n, @"(made: a no-copy buffer the raw path refused)");
-        RMTwinObject *t = [RMTwinObject new];
-        t->_device = self;
-        id<MTLDevice> m2v = RM_M2V(NeedNoCopyBuffer);
-        t->_twin = [m2v newBufferWithBytesNoCopy:p length:n options:o deallocator:deallocator];
-        return t->_twin ? (id<MTLBuffer>)t : nil;
+    // The kernel wires pages the task maps read-only for GPU reads (TegraGM20BUserClientBo.cpp boImport): what it refuses
+    // no device of this GPU imports
+    if (!gRM->raw->createBufferNoCopy(p, n, b->_raw)) {
+        os_log_error(rawLog(), "raw: %{public}s: the kernel imported no %lu bytes at %p: no no-copy buffer made",
+                     getprogname(), (unsigned long)n, p);
+        return nil;
     }
     b->_deallocator = [deallocator copy];
     return (id<MTLBuffer>)b;
@@ -325,15 +323,12 @@
     b->_device = self;
     b->_options = MTLResourceStorageModeShared;
     bool tiled = false;
-    if (!gRM->raw->createSurfaceBuffer(IOSurfaceGetID(s), base, allocation, (allocation + page - 1) & ~(page - 1), s,
-                                       b->_raw, tiled)) {
-        if (tiled)
-            return nil;
-        RMTwinObject *t = [RMTwinObject new];
-        t->_device = self;
-        id<RMDeviceSPI> m2v = (id<RMDeviceSPI>)RM_M2V(NeedSurfaceBuffer);
-        t->_twin = [m2v newBufferWithIOSurface:s];
-        return t->_twin ? (id<MTLBuffer>)t : nil;
+    if (!gRM->raw->createSurfaceBuffer(IOSurfaceGetID(s), base, (allocation + page - 1) & ~(page - 1), s, b->_raw,
+                                       tiled)) {
+        if (!tiled)
+            os_log_error(rawLog(), "raw: %{public}s: the kernel imported no IOSurface %u: no buffer over it made",
+                         getprogname(), IOSurfaceGetID(s));
+        return nil;
     }
     if (!gRM->raw->surfaceGpuWrites(IOSurfaceGetID(s)))
         os_log_error(rawLog(),
@@ -368,145 +363,115 @@
                     d.swizzle);
 }
 
-#if SWITCH_RAW_DIAGNOSTICS
-// A new render target of a float format laid over memory holding NaN or infinity: what a pass reads of it before
-// writing it (outside its render area, a level not rendered yet) is then non-finite. Each line is sampled from memory
-// (the GPU may have written it last), one in sixteen.
-static void reportNonFiniteStart(RMTexture *t, MTLTextureDescriptor *d)
+// Metal's, the identity's and GM20B's refusal of a descriptor's texture: one error line per rule, and nil
+static bool refusedTexture(const raw::shapes::TextureShape &s)
 {
-    const uint32_t component = raw::floatComponentBytes(uint32_t(d.pixelFormat));
-    const uint8_t *memory = t->_raw.cpu;
-    const uint64_t bytes = t->_raw.chain ? t->_raw.chain->layout.bytes : t->_raw.span.bytes;
-    if (!component || !memory || !(d.usage & MTLTextureUsageRenderTarget))
-        return;
-    const uint32_t found = raw::sampledNonFinite(memory, bytes, component, 1024, [](const uint8_t *line) {
-        cacheLines(line, 64, true);
-    });
-    static std::atomic<uint32_t> seen{0};
-    const uint32_t n = found ? seen.fetch_add(1, std::memory_order_relaxed) + 1 : 0;
-    if (found && (n <= 32 || n % 64 == 0))
-        os_log(rawLog(),
-               "raw: new %lux%lu format %lu texture (%lu levels, %llu bytes) starts on non-finite values: %u "
-               "components in its sampled lines (#%u)",
-               (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat,
-               (unsigned long)d.mipmapLevelCount, (unsigned long long)bytes, found, n);
+    char shape[160];
+    snprintf(shape, sizeof shape,
+             "%llux%llux%llu of format %u, type %u, %llu levels, %llu samples, array %llu, storage %u",
+             (unsigned long long)s.width, (unsigned long long)s.height, (unsigned long long)s.depth, s.format, s.type,
+             (unsigned long long)s.levels, (unsigned long long)s.samples, (unsigned long long)s.array, s.storage);
+    if (const char *why = raw::shapes::metalRefusal(s)) {
+        SWITCH_REFUSE_DETAIL("raw", "tex.metal", uintptr_t(why),
+                             "no %s texture: nil, as Metal makes none (%s; MTLDevice.h newTextureWithDescriptor:, "
+                             "nullable)",
+                             shape, why);
+        return true;
+    }
+    if (const char *why = raw::shapes::identityRefusal(s, raw::answers::kThisKind)) {
+        SWITCH_REFUSE_DETAIL("raw", "tex.identity", uintptr_t(why),
+                             "no %s texture: nil, as the identity's Metal makes none (%s; MTLDevice.h "
+                             "newTextureWithDescriptor:, nullable)",
+                             shape, why);
+        return true;
+    }
+    if (const char *why = raw::shapes::hardwareRefusal(s)) {
+        SWITCH_REFUSE_DETAIL("raw", "tex.gm20b", uintptr_t(why),
+                             "no %s texture: nil (%s; MTLDevice.h newTextureWithDescriptor:, nullable)", shape, why);
+        return true;
+    }
+    return false;
 }
-#endif
+
+// The first texture of a kind the raw path holds in memory of its own, once per process
+static void announceTexture(raw::shapes::Route route, const raw::shapes::TextureShape &s, const raw::Texture &t)
+{
+    using Route = raw::shapes::Route;
+    if (route == Route::Chain) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true))
+            os_log(rawLog(), "raw: mip chain on (%llu levels of %llux%llu, %llu bytes)", (unsigned long long)s.levels,
+                   (unsigned long long)s.width, (unsigned long long)s.height,
+                   (unsigned long long)t.chain->layout.bytes);
+    } else if (route == Route::StoredSamples) {
+        const bool zeta = raw::shapes::storedSamples(s) == raw::shapes::StoredSamples::Zeta;
+        static std::atomic<bool> said[2];
+        if (!said[zeta].exchange(true))
+            os_log(rawLog(),
+                   "raw: stored %llux multisampled %{public}s on (first %llux%llu format %u: %llu bytes of %{public}s)",
+                   (unsigned long long)s.samples, zeta ? "depth/stencil" : "colour", (unsigned long long)s.width,
+                   (unsigned long long)s.height, s.format, (unsigned long long)(zeta ? t.storage.bytes : t.span.bytes),
+                   zeta ? "zeta memory, no m2v twin" : "block-linear memory, m2v's twin NVK's image over it");
+    } else if (route == Route::StoredZeta) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true))
+            os_log(rawLog(),
+                   "raw: stored one-sample depth/stencil on (first %llux%llu format %u, %u layers: %llu bytes of "
+                   "%{public}s zeta memory, no m2v twin)",
+                   (unsigned long long)s.width, (unsigned long long)s.height, s.format, unsigned(t.layers),
+                   (unsigned long long)t.storage.bytes, t.comptags ? "compressed" : "plain");
+    }
+}
 
 - (id<MTLTexture>)rmNewTexture:(MTLTextureDescriptor *)d tiled:(bool)tiled
 {
-    if (chainShape(d)) {  // mipmapped: level 0 of a block-linear chain of its levels (raw/fx)
-        RMTexture *t = [RMTexture new];
-        t->_device = self;
-        t->_descriptor = [d copy];
-        t->_kind = RMTexturePool;
-        t->_rawOk =
-            gRM->raw->createMipTexture(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat),
-                                       uint32_t(d.mipmapLevelCount), t->_raw, nullptr, privateCompressedKind(d));
-        if (t->_rawOk) {
-#if SWITCH_RAW_DIAGNOSTICS
-            reportNonFiniteStart(t, d);
-#endif
-            static std::atomic<bool> said{false};
-            if (!said.exchange(true))
-                os_log(rawLog(), "raw: mip chain on (%u levels of %ux%u, %llu bytes)", unsigned(d.mipmapLevelCount),
-                       unsigned(d.width), unsigned(d.height), (unsigned long long)t->_raw.chain->layout.bytes);
-            establishFresh(t, d);
-            return (id<MTLTexture>)t;
-        }
-    }
-    if (blockShape(d)) {
-        RMTexture *t = [RMTexture new];
-        t->_device = self;
-        t->_descriptor = [d copy];
-        t->_kind = RMTexturePool;
-        const bool array = d.textureType == MTLTextureType2DArray;
-        t->_rawOk = gRM->raw->createBlockTexture(
-            uint32_t(d.width), uint32_t(d.height), uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1)),
-            uint32_t(array ? std::max<NSUInteger>(d.arrayLength, 1) : 1), uint32_t(d.pixelFormat),
-            uint8_t(array ? raw::fx::kTexTwoDArray : raw::fx::kTexTwoD), t->_raw);
-        if (t->_rawOk)
-            return (id<MTLTexture>)t;
-        id<MTLDevice> m2v = RM_M2V(NeedTextureNoMemory);
-        RMTexture *w = (RMTexture *)[self wrapTwin:[m2v newTextureWithDescriptor:d] descriptor:d];
-        if (w)
-            refuseTexture(w, PredTexPoolAlloc, d.width, d.height, @"twin-only (pool)", nil);
-        return (id<MTLTexture>)w;
-    }
-    const bool line = lineShape(d), volume = volumeShape(d), multisampled = multisampleShape(d);
-    const uint32_t array = arrayType(d), transientLayers = memorylessLayers(d);
-    const RMStoredSamples stored = storedMultisampleKind(d);
-    if (!rawShape(d) && !zetaDescriptor(d) && !line && !volume && !array && !multisampled && !transientLayers &&
-        stored == RMStoredSamples::None) {
+    if (refuseTurnedOffSurface(d))
+        return nil;
+    using Route = raw::shapes::Route;
+    raw::shapes::TextureShape s = textureShape(d);
+    s.ownMemory = true;
+    if (refusedTexture(s))
+        return nil;
+    const Route route = raw::shapes::route(s);
+    if (route == Route::None) {
         id<MTLDevice> m2v = RM_M2V(NeedTextureShape);
         RMTexture *w = (RMTexture *)[self wrapTwin:[m2v newTextureWithDescriptor:d] descriptor:d];
         if (w)
-            refuseTexture(w, PredTexShape, rawShapeTerm(d), d.pixelFormat, @"twin-only", nil);
+            refuseTexture(w, PredTexShape, raw::shapes::rawShapeTerm(s), d.pixelFormat, @"twin-only", nil);
         return (id<MTLTexture>)w;
     }
     RMTexture *t = [RMTexture new];
     t->_device = self;
     t->_descriptor = [d copy];
-    if (line) {
-        t->_kind = RMTexturePool;
-        t->_rawOk = gRM->raw->createLine(uint32_t(d.width), uint32_t(d.pixelFormat), t->_raw);
-    } else if (stored != RMStoredSamples::None) {
-        t->_kind = RMTexturePool;
-        t->_rawOk = makeStoredMultisample(d, stored, t->_raw);
-    } else if (volume) {
-        t->_kind = RMTexturePool;
-        t->_rawOk =
-            gRM->raw->createVolume(uint32_t(d.width), uint32_t(d.height), uint32_t(d.depth), uint32_t(d.pixelFormat),
-                                   volumeRendered(d), t->_raw, uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1)));
-    } else if (array) {
-        t->_kind = RMTexturePool;
-        t->_rawOk = gRM->raw->createArray(
-            uint32_t(d.width), uint32_t(d.height),
-            raw::textureLayers(uint32_t(d.textureType), uint32_t(std::min<NSUInteger>(d.arrayLength, 2048))),
-            uint32_t(d.pixelFormat), array, t->_raw, uint32_t(std::max<NSUInteger>(d.mipmapLevelCount, 1)), nullptr,
-            privateCompressedKind(d));
-    } else if (d.storageMode != MTLStorageModeMemoryless && zetaDescriptor(d)) {
-        t->_kind = RMTexturePool;
-        t->_rawOk = makeStoredZeta(d, t->_raw);
-    } else if (d.storageMode == MTLStorageModeMemoryless) {
-        t->_kind = RMTextureMemoryless;
-        t->_rawOk =
-            gRM->raw->createMemoryless(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat), t->_raw,
-                                       std::max<uint32_t>(uint32_t(d.sampleCount), 1), std::max(transientLayers, 1u));
-        if (t->_rawOk && raw::xrForm(uint32_t(d.pixelFormat)) == raw::XrForm::Planes)
-            t->_rawOk = gRM->raw->createXrMemoryless(t->_raw);
-    } else {
-        t->_kind = RMTexturePool;
-        // a shared texture of a shape that does not tile (the CPU writes it: replaceRegion) in write-combined memory: its
-        // rows need no clean after
-        const uint32_t kind = tiled ? privateCompressedKind(d) : 0;
-        t->_rawOk = (kind && gRM->raw->createCompressedTexture(uint32_t(d.width), uint32_t(d.height),
-                                                               uint32_t(d.pixelFormat), kind, t->_raw)) ||
-                    gRM->raw->createTexture(uint32_t(d.width), uint32_t(d.height), uint32_t(d.pixelFormat), t->_raw,
-                                            d.storageMode == MTLStorageModeShared, tiled);
-        if (t->_rawOk)
-            keepExtendedRange(d, t->_raw, false);
-#if SWITCH_RAW_DIAGNOSTICS
-        if (t->_rawOk && tiled)
-            reportNonFiniteStart(t, d);
-#endif
-    }
+    t->_kind = route == Route::Memoryless ? RMTextureMemoryless : RMTexturePool;
+    const uint32_t kind = tiled || route != Route::Plain ? privateCompressedKind(d) : 0;
+    t->_rawOk = raw::shapes::create(*gRM->raw, s, route, tiled, kind, t->_raw);
+    if (t->_rawOk)
+        announceTexture(route, s, t->_raw);
+    else if (route == Route::StoredZeta)
+        SWITCH_REFUSE_DETAIL("raw", "zeta.owned", d.pixelFormat,
+                             "a stored %lux%lu depth/stencil texture of format %lu: no zeta memory for it",
+                             (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat);
+    if (t->_rawOk && route != Route::Memoryless)
+        keepExtendedRange(d, t->_raw, false);
     if (!t->_rawOk) {
-        id twin = t->_twin ?: [RM_M2V(NeedTextureNoMemory) newTextureWithDescriptor:d];
-        RMTexture *w = (RMTexture *)[self wrapTwin:twin descriptor:d];
-        if (w)
-            refuseTexture(w, PredTexPoolAlloc, d.width, d.height, @"twin-only (pool)", nil);
-        return (id<MTLTexture>)w;
+        os_log_error(rawLog(), "raw: %{public}s: no memory for a %lux%lux%lu format %lu texture: none made",
+                     getprogname(), (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.depth,
+                     (unsigned long)d.pixelFormat);
+        return nil;
     }
-    establishFresh(t, d);
+    if (route != Route::Block)
+        establishFresh(t, d);
     return (id<MTLTexture>)t;
 }
 
 // RGB8_444_2P (542) over plane 0 of a two-plane 4:4:4 surface of one byte a luma texel and two a chroma pair (CoreVideo's
 // '_RB4', the widget and poster snapshots Core Animation samples): Metal reads its codes, red Cr, green Y, blue Cb, alpha 1
 // (m2v ycbcr.rs), which the raw path holds in an RGBA8 image it writes from the planes with the copy engine before the work that
-// samples it (raw::BlitEncoder::convertPlanar). A 2D texture of the surface's size, one level, no view, no rotation, sampled
-// or rendered (WidgetRenderer's snapshots: through its stand-in, raw::Texture::planarStandIn).
+// samples it (raw::BlitEncoder::convertPlanar). A 2D texture no taller than the surface and as wide as its rows hold (the
+// planes' top-left corner, as Metal reads and stores it), one level, no rotation, sampled or rendered (WidgetRenderer's
+// snapshots: through its stand-in, raw::Texture::planarStandIn), of any usage. Its stand-in is pool memory (8 bytes a texel),
+// made for a render target usage alone: an Unknown usage's would hold one under every snapshot Core Animation samples.
 static bool planar444(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane)
 {
     constexpr MTLPixelFormat kRGB8_444_2P = MTLPixelFormat(542);
@@ -515,9 +480,8 @@ static bool planar444(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane)
         [d respondsToSelector:rotation] ? ((NSUInteger (*)(id, SEL))objc_msgSend)(d, rotation) : 0;
     return d.pixelFormat == kRGB8_444_2P && plane == 0 && IOSurfaceGetPlaneCount(s) == 2 &&
            d.textureType == MTLTextureType2D && d.mipmapLevelCount == 1 && d.sampleCount == 1 && !turned &&
-           !(d.usage & ~(MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView | MTLTextureUsageRenderTarget)) &&
-           IOSurfaceGetWidthOfPlane(s, 0) == d.width && IOSurfaceGetHeightOfPlane(s, 0) == d.height &&
-           IOSurfaceGetWidthOfPlane(s, 1) == d.width && IOSurfaceGetHeightOfPlane(s, 1) == d.height &&
+           IOSurfaceGetBytesPerRowOfPlane(s, 0) >= d.width && IOSurfaceGetHeightOfPlane(s, 0) >= d.height &&
+           IOSurfaceGetBytesPerRowOfPlane(s, 1) >= 2 * d.width && IOSurfaceGetHeightOfPlane(s, 1) >= d.height &&
            IOSurfaceGetBytesPerElementOfPlane(s, 0) == 1 && IOSurfaceGetBytesPerElementOfPlane(s, 1) == 2;
 }
 
@@ -543,10 +507,12 @@ const char *ycbcrPlan(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane,
         f.offset[k] = uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, k)) - base;
         f.pitch[k] = uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, k));
     }
+    if (!f.planes)  // a one-plane format's surface of no planes ('2vuy', 'yuvs')
+        f.pitch[0] = uint32_t(IOSurfaceGetBytesPerRow(s));
     f.allocBytes = IOSurfaceGetAllocSize(s);
-    f.simple = d.textureType == MTLTextureType2D && d.mipmapLevelCount == 1 && d.sampleCount == 1 && !turned &&
-               !(d.usage & ~(MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView | MTLTextureUsageRenderTarget));
-    f.target = d.usage & MTLTextureUsageRenderTarget;
+    f.mappedBytes = (f.allocBytes + vm_page_size - 1) & ~uint64_t(vm_page_size - 1);
+    f.simple = d.textureType == MTLTextureType2D && d.mipmapLevelCount == 1 && d.sampleCount == 1 && !turned;
+    f.target = raw::ycbcrUsageRenders(d.usage);
     char matrix[32] = "";
     if (CFTypeRef value = IOSurfaceCopyValue(s, CFSTR("IOSurfaceYCbCrMatrix"))) {
         if (CFGetTypeID(value) == CFStringGetTypeID())
@@ -554,13 +520,36 @@ const char *ycbcrPlan(MTLTextureDescriptor *d, IOSurfaceRef s, NSUInteger plane,
         CFRelease(value);
         f.matrix = matrix;
     }
-    return raw::planYcbcr(f, out);
+    const char *why = raw::planYcbcr(f, out);
+    if (why && d.usage == MTLTextureUsageUnknown) {  // sampled, and refused only once a pass renders into it
+        f.target = false;
+        why = raw::planYcbcr(f, out);
+    }
+    return why;
 }
 
 // Whether the GPU may write a texture of this descriptor (Unknown: any use)
 static bool writesTexture(MTLTextureDescriptor *d)
 {
     return d.usage == MTLTextureUsageUnknown || (d.usage & (MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite));
+}
+
+// A plane's rows as Metal's GPU reads them: its bytesPerRow rounded down to 16 (a single row's whatever covers it)
+static size_t gpuRows(size_t pitch, MTLTextureDescriptor *d)
+{
+    const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
+    const size_t packed = d.width * (f ? f->bpp : 0);
+    return d.height == 1 ? std::max(pitch & ~size_t(15), (packed + 15) & ~size_t(15)) : pitch & ~size_t(15);
+}
+
+// A plane whose offset or rows are off 16, made at Metal's GPU layout (both rounded down to 16): its CPU's rows are the
+// plane's own
+static void keepCpuRows(RMTexture *t, uint8_t *rows, size_t pitch)
+{
+    if (t->_rawOk && !t->_raw.blockLinear && ((uintptr_t(rows) | pitch) & 15)) {
+        t->_cpuRows = rows;
+        t->_cpuPitch = pitch;
+    }
 }
 
 // Whether a texture of this descriptor is made to be rendered into or stored to, as the kernel's layout decision takes it
@@ -602,6 +591,15 @@ static void noteCompositorTarget(MTLTextureDescriptor *d, const void *frame)
     SWITCH_API(ApiObject);
     if (!s)
         return nil;
+    if (raw::ycbcrMetalRefuses(uint32_t(d.pixelFormat), uint32_t(d.width), uint32_t(d.height), d.usage)) {
+        SWITCH_REFUSE_DETAIL(
+            "raw", "ycbcr.odd", d.pixelFormat,
+            "no %lux%lu texture of format %lu and usage 0x%lx: nil, as Metal answers for a subsampled "
+            "YCbCr texture of an odd size it may write (MTLDevice.h newTextureWithDescriptor:iosurface:"
+            "plane:, nullable)",
+            (unsigned long)d.width, (unsigned long)d.height, (unsigned long)d.pixelFormat, (unsigned long)d.usage);
+        return nil;
+    }
 #if SWITCH_FRAME_TIMELINE
     gSurfaceTextures.fetch_add(1, std::memory_order_relaxed);
     noteCompositorSurface(d, s, __builtin_frame_address(0));
@@ -650,20 +648,23 @@ static void noteCompositorTarget(MTLTextureDescriptor *d, const void *frame)
         const bool one = IOSurfaceGetPlaneCount(s) == 1;
         const uint64_t offset = one ? uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, 0)) - uintptr_t(base) : 0;
         const size_t pitch = one ? IOSurfaceGetBytesPerRowOfPlane(s, 0) : IOSurfaceGetBytesPerRow(s);
-        t->_rawOk = gRM->raw->createSurfaceTexture(IOSurfaceGetID(s), base, IOSurfaceGetAllocSize(s), s, offset,
-                                                   uint32_t(d.width), uint32_t(d.height), uint32_t(pitch),
-                                                   uint32_t(d.pixelFormat), t->_raw, producesTexture(d));
+        const size_t gpuPitch = one ? gpuRows(pitch, d) : pitch;
+        t->_rawOk = gRM->raw->createSurfaceTexture(
+            IOSurfaceGetID(s), base, IOSurfaceGetAllocSize(s), s, offset & ~15ull, uint32_t(d.width),
+            uint32_t(d.height), uint32_t(gpuPitch), uint32_t(d.pixelFormat), t->_raw, producesTexture(d));
+        keepCpuRows(t, static_cast<uint8_t *>(base) + offset, pitch);
         if (t->_rawOk)
             keepExtendedRange(d, t->_raw, false);
     } else if (rawShape(d) && plane < IOSurfaceGetPlaneCount(s)) {
         // a plane as a texture of its own (a video player's R8 luma and RG8 chroma): the plane's bytes, pitch, as CoreVideo
         // lays its planes out for every other reader (never a block-linear layout the kernel would decide for the surface)
         void *base = IOSurfaceGetBaseAddress(s);
+        const uint64_t offset = uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, plane)) - uintptr_t(base);
+        const size_t pitch = IOSurfaceGetBytesPerRowOfPlane(s, plane);
         t->_rawOk = gRM->raw->createSurfaceTexture(
-            IOSurfaceGetID(s), base, IOSurfaceGetAllocSize(s), s,
-            uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, plane)) - uintptr_t(base), uint32_t(d.width),
-            uint32_t(d.height), uint32_t(IOSurfaceGetBytesPerRowOfPlane(s, plane)), uint32_t(d.pixelFormat), t->_raw,
-            false);
+            IOSurfaceGetID(s), base, IOSurfaceGetAllocSize(s), s, offset & ~15ull, uint32_t(d.width),
+            uint32_t(d.height), uint32_t(gpuRows(pitch, d)), uint32_t(d.pixelFormat), t->_raw, false);
+        keepCpuRows(t, static_cast<uint8_t *>(base) + offset, pitch);
         const OSType fourcc = IOSurfaceGetPixelFormat(s);
         if (t->_rawOk && (fourcc == 0x34323076 || fourcc == 0x34323066))
             t->_raw.nativePlane = uint32_t(plane);
@@ -675,33 +676,41 @@ static void noteCompositorTarget(MTLTextureDescriptor *d, const void *frame)
     if (!t->_rawOk) {  // a surface the raw path does not take: m2v's texture over it, made now (it may refuse: nil, as today)
         // which term (createSurfaceTexture's, recomputed here: a creation, not the hot path)
         const size_t planes = IOSurfaceGetPlaneCount(s),
-                     pitch = planes == 1 ? IOSurfaceGetBytesPerRowOfPlane(s, 0) : IOSurfaceGetBytesPerRow(s);
+                     pitch = planes ? IOSurfaceGetBytesPerRowOfPlane(s, plane) : IOSurfaceGetBytesPerRow(s);
         const uintptr_t base = uintptr_t(IOSurfaceGetBaseAddress(s));
-        const uintptr_t offset = planes == 1 ? uintptr_t(IOSurfaceGetBaseAddressOfPlane(s, 0)) - base : 0;
         const raw::FormatInfo *f = raw::formatInfo(uint32_t(d.pixelFormat));
         const uint64_t packed = uint64_t(d.width) * (f ? f->bpp : 0);
         const OSType fourcc = IOSurfaceGetPixelFormat(s);
-        NSString *extra =
-            [NSString stringWithFormat:@"surface %ux%u '%c%c%c%c' bytesPerRow %lu planes %lu plane %lu alloc %lu "
-                                       @"base&0xfff 0x%lx",
-                                       unsigned(IOSurfaceGetWidth(s)), unsigned(IOSurfaceGetHeight(s)),
-                                       char(fourcc >> 24), char(fourcc >> 16), char(fourcc >> 8), char(fourcc),
-                                       (unsigned long)pitch, (unsigned long)planes, (unsigned long)plane,
-                                       (unsigned long)IOSurfaceGetAllocSize(s), (unsigned long)(base & 0xfff)];
+        NSString *extra = [NSString
+            stringWithFormat:@"surface %u %ux%u '%c%c%c%c' bytesPerRow %lu planes %lu plane %lu alloc %lu "
+                             @"base&0xfff 0x%lx",
+                             IOSurfaceGetID(s), unsigned(IOSurfaceGetWidth(s)), unsigned(IOSurfaceGetHeight(s)),
+                             char(fourcc >> 24), char(fourcc >> 16), char(fourcc >> 8), char(fourcc),
+                             (unsigned long)pitch, (unsigned long)planes, (unsigned long)plane,
+                             (unsigned long)IOSurfaceGetAllocSize(s), (unsigned long)(base & 0xfff)];
         if (planar444(d, s, plane))
             refuseTexture(t, PredTexPlanar, d.width, d.height, @"surface", extra);
         else if (uint32_t term = rawShapeTerm(d))
             refuseTexture(t, PredTexShape, term, d.pixelFormat, @"surface", extra);
-        else if (plane || planes > 1)
-            refuseTexture(t, PredTexSurfPlane, plane, planes, @"surface", extra);
-        else if ((pitch & 15) || (offset & 15) || pitch < packed)  // (its plane's offset: as its pitch)
-            refuseTexture(t, PredTexSurfPitch, pitch, offset & 15 ? offset : packed, @"surface", extra);
-        else if (uint64_t(pitch) * d.height > IOSurfaceGetAllocSize(s))
-            refuseTexture(t, PredTexSurfBounds, uint64_t(pitch) * d.height, IOSurfaceGetAllocSize(s), @"surface",
-                          extra);
-        else if (base & (size_t(getpagesize()) - 1))
-            refuseTexture(t, PredTexSurfBase, base & 0xfff, 0, @"surface", extra);
-        else
+        else if (plane >= std::max<size_t>(planes, 1)) {
+            os_log_error(rawLog(), "raw: %{public}s: no texture over IOSurface %u: it has no plane %lu: %{public}@",
+                         getprogname(), IOSurfaceGetID(s), (unsigned long)plane, extra);
+            return nil;
+        } else if (planes ? (pitch & ~size_t(15)) < packed && d.height > 1 : (pitch & 15) || pitch < packed) {
+            // Metal asserts on a surface without planes whose rows are not 16 bytes apart; a plane's rows rounded down to 16
+            // overlap on its GPU. m2v refused both (linear_plan.rs).
+            os_log_error(
+                rawLog(),
+                "raw: %{public}s: no texture over IOSurface %u: rows off 16 that Metal does not take: %{public}@",
+                getprogname(), IOSurfaceGetID(s), extra);
+            return nil;
+        } else if (uint64_t(pitch) * d.height > IOSurfaceGetAllocSize(s)) {
+            os_log_error(
+                rawLog(),
+                "raw: %{public}s: no texture over IOSurface %u: %lu rows of %zu bytes past its %zu: %{public}@",
+                getprogname(), IOSurfaceGetID(s), (unsigned long)d.height, pitch, IOSurfaceGetAllocSize(s), extra);
+            return nil;
+        } else
             refuseTexture(t, PredTexSurfImport, 1, 0, @"surface", extra);
         if (![t rmTwin])
             return nil;

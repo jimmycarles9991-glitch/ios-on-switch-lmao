@@ -3,7 +3,7 @@
 #include "../NativeBridgeMetalFrontend.h"
 #include "../bridge/NativeMetalDirect.h"
 #include "device_compile.h"
-#include "../../../third_party/mesa/src/nouveau/vulkan/nvk_switch_ir.h"
+#include "../../../third_party/mesa/src/nouveau/switch_compile/nvk_switch_ir.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -185,6 +185,7 @@ int main(int argc, char **argv)
             auto *descriptor = [MTLComputePipelineDescriptor new];
             descriptor.computeFunction = [library newFunctionWithName:@(test.name)];
             NmbDirectBoundTexture texture = {0,
+                                             0,
                                              test.format,
                                              test.type,
                                              MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite,

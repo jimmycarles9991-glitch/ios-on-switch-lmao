@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-or-later OR LGPL-3.0-or-later
-// MTLArgumentEncoder over a layout of argument descriptors, or of a function's argument buffer as its AIR lays it out
-// (raw_argument_layout.h), whose writes and refusals are raw::ArgumentEncoder's (raw_argument_encoder.h). Each argument is
-// the 8 bytes a program could write itself: a buffer's GPU address plus its offset, any other object's gpuResourceID
-// (raw_resource_id.h); a constant is the program's own bytes (constantDataAtIndex:). A refusal writes nothing and is one line.
+// MTLArgumentEncoder over a layout of argument descriptors, or of a function's buffer as its AIR lays it out (the
+// shader compiler's answer, raw_buffer_encoders.h), whose writes and refusals are raw::ArgumentEncoder's
+// (raw_argument_encoder.h). Each argument is the 8 bytes a program could write itself: a buffer's GPU address plus its
+// offset, any other object's gpuResourceID (raw_resource_id.h); a constant is the program's own bytes
+// (constantDataAtIndex:). A refusal writes nothing and is one line.
+#import "RawMetalFunctionTags.h"
 #import "RawMetalInternal.h"
-#include "NativeBridgeMetalFrontend.h"
-#include "bridge/NativeMetalObjects.h"
 #include "raw_argument_encoder.h"
 
 // MTLDataTypeDepthStencilState (iOS 26): spelled as its value, so the iOS 17 build names no constant its SDK floor lacks
@@ -436,23 +436,32 @@ static bool refused(const char *call, raw::ArgumentRefusal why, NSUInteger index
 
 @end
 
-static bool collectLayouts(const NmbArgumentLayout *layouts, uint32_t count, void *ctx)
+static bool encoderOf(const raw::BufferEncoder &e, raw::ArgumentEncoder &out)
 {
-    static_assert(sizeof(raw::ArgumentRun) == sizeof(NmbArgumentRun), "the bridge's runs");
-    std::vector<raw::ArgumentRuns> runs(count);
-    for (uint32_t i = 0; i < count; i++)
-        runs[i] = {layouts[i].encoded_length, layouts[i].alignment,
-                   reinterpret_cast<const raw::ArgumentRun *>(layouts[i].runs), layouts[i].run_count};
-    return raw::ArgumentEncoder::fromRuns(runs.data(), count, *static_cast<raw::ArgumentEncoder *>(ctx));
+    std::vector<raw::ArgumentRuns> runs;
+    for (const raw::FlatArgumentLayout &l : e.layouts)
+        runs.push_back({l.encodedLength, l.alignment, l.runs.data(), uint32_t(l.runs.size())});
+    return raw::ArgumentEncoder::fromRuns(runs.data(), uint32_t(runs.size()), out);
 }
 
 id<MTLArgumentEncoder> rmFunctionArgumentEncoder(RMFunction *function, NSUInteger index)
 {
+    raw::BufferEncoders encoders;
     raw::ArgumentEncoder made;
-    const char *why = "";
-    id twin = function->_twin ?: [function twinOn:RM_M2V(NeedFunctionArgumentEncoder)];
-    if (!native_bridge_metal_argument_layouts(twin, index, collectLayouts, &made, &why)) {
-        refuse("creation", [NSString stringWithFormat:@"buffer %lu: %s", (unsigned long)index, why ?: ""]);
+    std::string why;
+    if (rmBufferEncoders(function, encoders, why)) {
+        const raw::BufferEncoder *e =
+            index < raw::kBufferEncoderLimit ? raw::bufferEncoderAt(encoders, uint32_t(index)) : nullptr;
+        if (!e)
+            why = "the function declares no buffer there";
+        else if (!e->refusal.empty())
+            why = e->refusal;
+        else if (!encoderOf(*e, made))
+            why = "a layout of no argument kind";
+    }
+    if (!why.empty()) {
+        refuse("creation",
+               [NSString stringWithFormat:@"buffer %lu of %@: %s", (unsigned long)index, function.name, why.c_str()]);
         return nil;
     }
     RMArgumentEncoder *encoder = [RMArgumentEncoder new];

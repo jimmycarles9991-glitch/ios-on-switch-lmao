@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "raw_pack.h"
+#include "raw_set_entries.h"
 #include <cstdio>
 #include <cstring>
 
@@ -64,14 +65,19 @@ inline bool keyUsesBlendColor(const char *key)
 inline bool usableDynamicPush(const PackPipeline &p, const char *key)
 {
     const auto &tests = p.shaderTests;
-    const DynamicField fields[] = {
-        {tests.depthWord, 4}, {tests.stencilWord, 4}, {p.blendColorWord, 8}, {p.halfBlendColorWord, 4}};
-    if (tests.reserved || tests.reservedTail || (tests.flags & ~3u) || bool(tests.flags & 1) != bool(tests.depthWord) ||
-        bool(tests.flags & 2) != bool(tests.stencilWord) ||
-        !dynamicFieldsPlaced(fields, p.pushMask, p.spillEntry[1] ? p.spillWords[1] : 0))
+    const DynamicField fields[] = {{tests.depthWord, 4},
+                                   {tests.stencilWord, 4},
+                                   {p.blendColorWord, 8},
+                                   {p.halfBlendColorWord, 4},
+                                   {tests.reserved, 2}};
+    // a shader-side stencil (its word in `reserved`) tests the stencil alone, against the encoder's faces
+    const bool shadow = tests.reserved;
+    if (tests.reservedTail || (tests.flags & ~3u) || bool(tests.flags & 1) != bool(tests.depthWord) ||
+        (shadow ? tests.stencilWord || (tests.flags & 1) : bool(tests.flags & 2) != bool(tests.stencilWord)) ||
+        !dynamicFieldsPlaced(fields, p.pushMask, spillEntryOf(p, 1) ? p.spillWords[1] : 0))
         return false;
     if (!(p.flags & PipelinePushMetadata))
-        return !p.blendColorWord && !p.halfBlendColorWord && !tests.flags && !keyUsesBlendColor(key);
+        return !p.blendColorWord && !p.halfBlendColorWord && !tests.flags && !shadow && !keyUsesBlendColor(key);
     return true;
 }
 

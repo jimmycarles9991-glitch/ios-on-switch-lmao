@@ -19,7 +19,8 @@ inline bool rawAttachmentPart(RMTexture *t, uint32_t level, uint32_t slice, raw:
 {
     RMTexture *o = rawLevelsOwner(t);
     const raw::FormatInfo *f = raw::formatInfo(t->_raw.format);
-    if (!f || !f->rt || f->bpp != o->_raw.bpp || !raw::attachmentTarget(o->_raw, level, slice, part))
+    if (!f || !(f->rt || raw::formatStandIn(t->_raw.format)) || f->bpp != o->_raw.bpp ||
+        !raw::attachmentTarget(o->_raw, level, slice, part))
         return false;
     part.format = t->_raw.format;
     return true;

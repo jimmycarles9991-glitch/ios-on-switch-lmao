@@ -8,6 +8,7 @@
 #include "../runtime/raw_emit.h"
 #include "../runtime/raw_cache_io.h"
 #include "NativeBridgeMetalFrontend.h"
+#include "bridge/NativeMetalObjects.h"
 #include <cerrno>
 #include <fstream>
 #include <sys/stat.h>
@@ -63,7 +64,7 @@ bool compile(raw::Direct &direct, raw::RecordCache &cache, const precompile::Ren
     raw::RuntimeRecord loaded;
     if (!cache.store(result.key, &record, "") ||
         cache.load(result.key, loaded, why) != raw::RecordCache::Found::Record ||
-        loaded.keyString != record.keyString || chmod((output + "/" + relative).c_str(), 0644) != 0 ||
+        loaded.keyString != record.keyString || !rawseed::withMode(output + "/" + relative, 0644) ||
         !rawseed::writeSlots(record, result.key.stack, output, result.slots)) {
         result.status = @"failed";
         result.reason = @"native record write/readback failed";
@@ -93,8 +94,10 @@ int main(int argc, char **argv)
         char *end = nullptr;
         errno = 0;
         const uint64_t stack = strtoull(argv[first + 3], &end, 16);
-        if (errno || !*argv[first + 3] || !end || *end)
+        if (errno || !*argv[first + 3] || !end || *end) {
+            fprintf(stderr, "native-seed: the stack key %s is not hexadecimal\n", argv[first + 3]);
             return 2;
+        }
         const std::string output = argv[first + 4];
         raw::RecordCache cache;
         if (!rawseed::openOutput(output, stack, cache))
@@ -102,8 +105,11 @@ int main(int argc, char **argv)
         setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
         precompile::gQuartzCore = argv[first + 2];
         precompile::gDevice = native_bridge_metal_open(argv[first], argv[first + 1], 0, missing);
-        if (!precompile::gDevice)
+        if (!precompile::gDevice) {
+            fprintf(stderr, "native-seed: open the m2v device over %s (cache %s): %s\n", argv[first], argv[first + 1],
+                    nmb_last_error() ?: "-");
             return 1;
+        }
         raw::PackRules rules;
         rules.varying = raw::emittableMethods();
         raw::Direct direct(rules, true);
@@ -186,11 +192,15 @@ int main(int argc, char **argv)
                     [rows addObject:row];
                 }
             }
-            if (!stream.eof())
+            if (!stream.eof()) {
+                rawseed::failed("read", argv[arg], errno);
                 return 1;
+            }
         }
         if (!rawseed::writeManifest(output, stack, rows))
             return 1;
+        if (failed)
+            fprintf(stderr, "native-seed: native records failed: their rows in %s/manifest.json\n", output.c_str());
         return failed ? 1 : 0;
     }
 }

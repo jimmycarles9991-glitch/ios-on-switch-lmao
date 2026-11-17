@@ -55,7 +55,7 @@ nvkm_uchan_uevent(struct nvkm_object *object, void *argv, u32 argc, struct nvkm_
 		return nvkm_uevent_add(uevent, &runl->fifo->nonstall.event, runl->id,
 				       NVKM_FIFO_NONSTALL_EVENT, NULL);
 	case NVIF_CHAN_EVENT_V0_KILLED:
-		return nvkm_uevent_add(uevent, &runl->chid->event, chan->id,
+		return nvkm_uevent_add_deferred(uevent, &runl->chid->event, chan->id,
 				       NVKM_CHAN_EVENT_ERRORED, NULL);
 	default:
 		break;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // The 3D engine's macro slots (CALL_MME_MACRO(j)) and MME shadow scratch words as the GM20B's two drivers use them: the
-// one table of the raw path's macro ABI v6. NVK's context loads its macros at slots 0..NVK_MME_COUNT-1 in nvk_mme.h's
+// one table of the raw path's macro ABI v7. NVK's context loads its macros at slots 0..NVK_MME_COUNT-1 in nvk_mme.h's
 // order, and the raw path's context replays that load before it loads its own, so the kernel's push profile reads NVK's
 // clear and anti-alias macros by NVK's numbers. The raw path's draw macros take NVK's draw macros' slots, so the
 // profile counts both drivers' draws as one, and every other raw macro takes a slot past them, where NVK's streams call
@@ -73,6 +73,8 @@ enum {
     SWITCH_GM20B_SCRATCH_AMP_COUNT,
     SWITCH_GM20B_SCRATCH_AMP_MAPS,
     SWITCH_GM20B_SCRATCH_AMP_END = SWITCH_GM20B_SCRATCH_AMP_MAPS + 8,
+    // a patch execute's set 0 size in bytes, which the patch macro selects it at (the state's own, whole 256-byte blocks)
+    SWITCH_GM20B_SCRATCH_ICB_SET_BYTES = SWITCH_GM20B_SCRATCH_AMP_END,
     // a command's bound buffers: ICB_BUFFERS + 3 x index (address low, address high, size), index < 31; the address-high
     // word holds the buffer's bind stride above its address's bits (SWITCH_GM20B_ICB_STRIDE_SHIFT). They take the top of
     // the scratch, where the context init writes only zeros, so a slot no execute has written yet reads as no buffer.
@@ -81,11 +83,10 @@ enum {
     SWITCH_GM20B_SCRATCH_ICB_BUFFERS_END = SWITCH_GM20B_SCRATCH_WORDS,
 };
 
-// What the patch macro's words name: a layout entry of no buffer, the constant buffer sizes it selects (NVK's
-// descriptor set slot and root descriptor table), its control-stage buffers and push words
+// What the patch macro's words name: a layout entry of no buffer, the constant buffer size it selects the root table at
+// (NVK's root descriptor table), its control-stage buffers and push words
 enum {
     SWITCH_GM20B_ICB_NO_ENTRY = 0x3fff,
-    SWITCH_GM20B_ICB_SET_BYTES = 0x100,
     SWITCH_GM20B_ICB_ROOT_BYTES = 0x800,
     SWITCH_GM20B_ICB_PATCH_BUFFERS = 3,
     SWITCH_GM20B_ICB_PATCH_CONTROL_WORDS = 6,
@@ -126,11 +127,11 @@ SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_MACRO_VCM_CONSTANTS > SWITCH_GM20B_MACRO_
                           "every raw macro but NVK's draw slots' takes a slot past them");
 SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_MACRO_RAW_END <= SWITCH_GM20B_MACRO_SLOTS, "every raw slot is a CALL_MME_MACRO");
 SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_SCRATCH_ICB_LOCATION >= SWITCH_GM20B_SCRATCH_FECS_END &&
-                              SWITCH_GM20B_SCRATCH_AMP_END <= SWITCH_GM20B_SCRATCH_ROOT_HI,
+                              SWITCH_GM20B_SCRATCH_ICB_SET_BYTES < SWITCH_GM20B_SCRATCH_ROOT_HI,
                           "the raw path's words below the root table's address leave FECS's mailbox alone");
 SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_SCRATCH_ICB_BUFFERS >= SWITCH_GM20B_SCRATCH_ROOT_HI + 2,
                           "the inherited buffers lie past the root table's address");
-SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_ICB_SET_BYTES % 256 == 0 && SWITCH_GM20B_ICB_ROOT_BYTES % 256 == 0,
+SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_ICB_ROOT_BYTES % 256 == 0,
                           "the patch macro binds whole 256-byte constant buffers, as NVK does before Turing");
 SWITCH_GM20B_SLOTS_ASSERT(SWITCH_GM20B_SCRATCH_AMP_END - SWITCH_GM20B_SCRATCH_AMP_MAPS == SWITCH_GM20B_AMP_MAX,
                           "a mapping word for each amplification");

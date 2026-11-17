@@ -13,8 +13,11 @@
 #include <set>
 #include <vector>
 #include "raw_compute.h"
+#include "raw_kernel_windows.h"
 #include "raw_pass_fusion.h"
+#include "raw_reach.h"
 #include "raw_turned_pass.h"
+#include "raw_xr_parts.h"
 
 class RMRangeEncode {
 public:
@@ -89,7 +92,8 @@ private:
         uint64_t writes, nativeGeneration;
     };
 
-    bool fail(RMPred p, const char *w, uint64_t a = 0, uint64_t b = 0);
+    bool fail(RMPred p, const char *w, uint64_t a = 0, uint64_t b = 0, const char *detail = nullptr);
+    bool passRefused(uint64_t a);
     bool refused();
     bool stop(uint32_t veto);
     uint32_t ineligible(size_t from, size_t until);
@@ -101,6 +105,14 @@ private:
     int standInPass(RMTexture *t, bool store);
     void standInBackings();
     bool storeStandIns();
+    bool loadPlanes(raw::PassDesc &p);
+    bool formatStandIns(const RMPass &pass, raw::PassDesc &p);
+    bool storeFormatTargets();
+    void separateZeta(const RMPass &pass, RMTexture *depth, RMTexture *stencil, raw::PassDesc &p);
+    bool depth16Zeta(const RMPass &pass, raw::PassDesc &p);
+    bool depth16Back();
+    bool imagePlanes(size_t pass, raw::PassDesc &p);
+    bool writtenBack();
     bool resolvePasses();
     void refresh(size_t pass);
     bool standIns(size_t pass);
@@ -112,6 +124,7 @@ private:
     bool beginPass(size_t at);
     bool endEncoder(size_t at);
     bool endEncoders();
+    bool closeEncoders();
 
     __unsafe_unretained RMCommandBuffer *cb_ = nil;
     raw::Device *d_ = nullptr;
@@ -133,6 +146,7 @@ private:
     std::optional<raw::ComputeEncoder> ce_;
     bool serialCompute_ = false, computeUnit_ = false;
     raw::KernelShadows kernelShadows_;  // the open compute encoder's (raw_kernel_shadow.h)
+    raw::KernelWindows kernelWindows_;  // the command buffer's buffer windows (raw_kernel_windows.h)
     std::vector<raw::KernelUse> dispatchUses_, encoderUses_;
     bool encoderShadows_ = false;
     raw::StateCursor stateCursor_;
@@ -148,6 +162,15 @@ private:
     std::vector<__unsafe_unretained RMTexture *> standInLoads_, planesWritten_;
     std::vector<std::pair<__unsafe_unretained RMTexture *, uint32_t>> standInStores_;  // and their attachment slots
     std::array<const raw::Texture *, 8> backings_{};
+    // The open pass's loaded two-plane YCbCr targets and their slots, the tiles its draws reach (raw_ycbcr_load.h) and the
+    // targets whose stores write those tiles alone
+    std::vector<std::pair<__unsafe_unretained RMTexture *, uint32_t>> planeLoads_;
+    raw::PassReach loadedReach_;
+    uint8_t loadedTargets_ = 0;
+    // Targets of a format the GM20B renders none of (raw_format_standin.h): the open pass's and their slots, then each
+    // stored attachment's image and its stand-in, put back after the pass
+    std::vector<std::pair<__unsafe_unretained RMTexture *, uint32_t>> formatTargets_;
+    std::vector<std::pair<raw::Texture *, raw::Texture *>> formatStores_;
     std::vector<Resolve> resolves_;
     std::deque<raw::Texture> resolveTargets_;  // the encoder reads them until its end()
     raw::TurnedPass turned_;                   // the open pass's turn copies (raw_turned_pass.h)
@@ -158,8 +181,20 @@ private:
     std::set<RMTexture *> fresh_;
     raw::Texture levelTargets_[8];  // the open pass's level targets: the encoder reads them until its end()
     raw::Texture zetaPart_;         // and its depth/stencil attachment's layer
+    raw::Texture separatePart_[2];  // a separate depth and stencil texture's layers from their slices
+    // a separate depth or stencil texture a resolve reads: the pass stores the aspect back into it, whose own resolve state
+    // reads it
+    const raw::Texture *separateResolved_[2] = {};
+    // a stored Depth16Unorm beside a Stencil8, rendered through a Depth32Float_Stencil8 scratch: converted back at the end
+    raw::Texture *depth16Scratch_ = nullptr;
+    // Textures the open pass's draws store into: through a sampled shadow, copied back after the pass; under a stand-in,
+    // drawn again before later work samples it; two-plane RGB10A8_2P_XR10 ones through an image of their texels, merged
+    // from the planes before the pass and split back after it (RawMetalXrPlanes.mm)
+    std::vector<__unsafe_unretained RMTexture *> shadowsWritten_, standInsWritten_;
+    std::vector<std::pair<__unsafe_unretained RMTexture *, raw::Texture *>> planesImaged_;
     std::set<RMTexture *> standInFresh_;
     std::deque<raw::Texture> codes_;  // the XR conversions' sources: the codes' headers (read until the encoder's end)
+    std::deque<raw::XrPart> codeParts_;  // a layered, mipmapped, 3D or multisampled one's 2D images (raw_xr_parts.h)
 #if SWITCH_RAW_DIAGNOSTICS
     uint64_t levelPasses_ = 0;
 #endif
@@ -167,3 +202,5 @@ private:
 
 // The submit worker's one range encode
 RMRangeEncode &rmRangeEncode();
+// The refusal predicate of an encode-time refusal or skip (raw_gpu.h RefusalId)
+RMPred refusalPred(uint8_t id);

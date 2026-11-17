@@ -248,12 +248,120 @@ class LogHarvestTest(unittest.TestCase):
         self.assertEqual(logharvest.untested(IMAGE + CUBIC + ' | tests=2 | xr2p | xrs=2'), IMAGE + CUBIC + ' | xrs=2')
         self.assertEqual(logharvest.untested(IMAGE + ' | xr2p'), IMAGE)
 
+    def test_a_framework_only_the_crawl_names_takes_the_crawls_path(self):
+        tungsten = f'{HEAD} | v tungsten_vertex  | f tungsten_fragment  | l Tungsten'
+        records = [record(BOOT, 'Photos', 'OS version: 24B119'), made(BOOT, 'Photos', '0000000000000009', tungsten)]
+        boots = logharvest.read_boots(records)
+        _, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'))
+        self.assertEqual(report.left['Photos', 'no library path for Tungsten'], 1)
+        with tempfile.TemporaryDirectory() as scratch:
+            crawl = Path(scratch) / 'inventory.json'
+            library = 'System/Library/PrivateFrameworks/Tungsten.framework/default.metallib'
+            crawl.write_text(json.dumps({'libraries': [library]}))
+            new, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'), crawl)
+        self.assertEqual(report.added['Photos'], 1)
+        self.assertIn(' lib=/System/Library/PrivateFrameworks/Tungsten.framework/default.metallib ', new[0])
+
+    def test_a_part_whose_trailing_space_the_log_dropped_rejoins_whole(self):
+        head = f'label={CA_LABEL} '
+        key = 'k' * (699 - len(head)) + ' fc_has_premultiply:53:00'
+        text = head + key
+        chunks = [text[i : i + 700] for i in range(0, len(text), 700)]
+        logged = [
+            record(BOOT, 'backboardd', f'raw: harvest 000000000000000a {i + 1}/{len(chunks)} {chunk.rstrip()}')
+            for i, chunk in enumerate(chunks)
+        ]
+        boot = logharvest.read_boots(logged)[BOOT]
+        self.assertEqual(logharvest.whole(boot, 'backboardd', '000000000000000a'), (CA_LABEL, key))
+
     def test_left_out_states_are_counted_by_reason(self):
         boots = logharvest.read_boots(boot_records())
         _, report = logharvest.harvest(boots, CORPUS.splitlines(), None, Path('/nonexistent'))
         self.assertEqual(report.left['SwitchHWTest', 'our own app'], 1)
         self.assertEqual(report.left['cameracaptured', 'refused on the device'], 1)
         self.assertEqual(report.left['backboardd', 'key cut at 400 characters, no whole parts'], 1)
+
+
+IR = '/System/Library/PrivateFrameworks/IconRendering.framework/default.metallib'
+VS = '/System/Library/VideoProcessors/VideoStabilizationV2.bundle/default.metallib'
+CLAMPED = ' | fp clampedPlusL_v1 as=custom_blend #2:33:00000000'
+LINKED = IMAGE.replace(' | l RenderBox', CLAMPED + ' | l RenderBox')
+BLUR = 'samples=1 topo=0 ds=0/0 c0=125:15:0:1:0:0:1:0:0 a0=29:0:0:8:1:1  | v vertexBlur  | f fragmentBlur #0:53:01'
+AIR = ' | air 227093b20fef2e1d 021ea2f6f5187e8c'
+BLUR_ROW = (
+    'unspecialized\tVideoStabilizationV2.bundle\t-\tdevice\tR ok=1 label=- samples=1 topo=0 ds=0/0'
+    f' c0=125:15:0:1:0:0:1:0:0 a0=29:0:0:8:1:1 | v vertexBlur lib={VS}  | f fragmentBlur lib={VS} #0:53:01 | '
+)
+LINKED_MADE = LINKED + ' | linked f3f5e961c3369477d'
+
+
+def specialization(library: str, function: str) -> str:
+    return f'S ok=1 lib={library} name={function} k= | '
+
+
+class CacheTailTest(unittest.TestCase):
+    """States whose made line carries the cache key's tails: a linked function's AIR, or the stages' AIR."""
+
+    def harvest(self, key: str, extra: list[str] = (), rows: list[str] = ()) -> tuple[list[str], logharvest.Report]:
+        records = [record(BOOT, 'x', 'OS version: 24B119'), made(BOOT, 'cameracaptured', '000000000000000c', key)]
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / 'archives').mkdir()
+            (Path(scratch) / 'archives' / '24B119.tsv').write_text(''.join(row + '\n' for row in rows))
+            boots = logharvest.read_boots(records)
+            return logharvest.harvest(boots, [*CORPUS.splitlines(), *extra], None, Path(scratch))
+
+    def test_a_framework_state_linking_a_framework_function_names_the_functions_library(self):
+        added, _ = self.harvest(LINKED_MADE, [specialization(IR, 'clampedPlusL_v1')])
+        self.assertEqual([logharvest.rawpack.state_key(line) for line in added], [LINKED])
+        self.assertIn(f' | fp clampedPlusL_v1 lib={IR} as=custom_blend ', added[0])
+        self.assertEqual(added[0].count(f' lib={RB}'), 2)
+
+    def test_a_linked_state_harvested_once_is_held_the_next_time(self):
+        corpus = [specialization(IR, 'clampedPlusL_v1')]
+        added, _ = self.harvest(LINKED_MADE, corpus)
+        again, report = self.harvest(LINKED_MADE, corpus + added)
+        self.assertEqual(again, [])
+        self.assertEqual(report.present['cameracaptured'], 1)
+
+    def test_an_air_keyed_state_takes_the_library_an_archive_row_names_its_functions_in(self):
+        added, _ = self.harvest(BLUR + AIR, rows=[BLUR_ROW])
+        self.assertEqual([logharvest.rawpack.state_key(line) for line in added], [BLUR])
+        self.assertEqual(added[0].count(f' lib={VS} '), 2)
+
+    def test_an_air_keyed_state_takes_the_library_the_specializations_name(self):
+        extra = [specialization(VS, 'vertexBlur'), specialization(VS, 'fragmentBlur')]
+        added, _ = self.harvest(BLUR + AIR, extra)
+        self.assertEqual([logharvest.rawpack.state_key(line) for line in added], [BLUR])
+        self.assertTrue(added[0].startswith('R ok=1 label=- os=24B119 '))
+
+    def test_a_function_two_libraries_are_named_for_is_left_out(self):
+        other = VS.replace('VideoStabilizationV2', 'MetalFilter')
+        extra = [
+            specialization(VS, 'vertexBlur'),
+            specialization(VS, 'fragmentBlur'),
+            specialization(other, 'vertexBlur'),
+        ]
+        added, report = self.harvest(BLUR + AIR, extra)
+        self.assertEqual(added, [])
+        why = "an AIR-keyed state whose functions' one library no corpus line or archive row names"
+        self.assertEqual(report.left['cameracaptured', why], 1)
+
+    def test_a_framework_state_keyed_by_its_air_is_left_out(self):
+        added, report = self.harvest(LINKED_MADE + AIR, [specialization(IR, 'clampedPlusL_v1')])
+        self.assertEqual(added, [])
+        why = 'a framework state keyed by its AIR: it links a function no framework library holds'
+        self.assertEqual(report.left['cameracaptured', why], 1)
+
+    def test_an_air_keyed_state_that_links_is_left_out(self):
+        extra = [specialization(VS, f) for f in ('vertexBlur', 'fragmentBlur', 'clampedPlusL_v1')]
+        added, report = self.harvest(BLUR + CLAMPED + ' | linked f3f5e961c3369477d' + AIR, extra)
+        self.assertEqual(added, [])
+        self.assertEqual(report.left['cameracaptured', 'an AIR-keyed state that links functions'], 1)
+
+    def test_a_linked_function_no_framework_library_is_named_for_is_left_out(self):
+        added, report = self.harvest(LINKED_MADE, [specialization(VS, 'clampedPlusL_v1')])
+        self.assertEqual(added, [])
+        self.assertEqual(report.left['cameracaptured', 'links a function no one framework library is named for'], 1)
 
 
 if __name__ == '__main__':

@@ -797,6 +797,54 @@ impl ResourcePlanner<'_> {
         Ok(write)
     }
 
+    /// The write of slot `slot`'s alpha plane, binding `(set, binding)` of type `ty`
+    /// (`BindingSource::TexturePlane`): the bound two-plane `RGB10A8_2P_XR10` texture through an
+    /// `R8_UINT` view of its alpha bytes, of the slot's own view type and layout, or the slot's
+    /// neutral where its own binding takes one.
+    pub fn texture_plane(
+        &mut self,
+        set: u32,
+        binding: u32,
+        ty: vk::DescriptorType,
+        slot: SlotRef,
+    ) -> Result<WriteSource, BindError> {
+        let (write, _) = self.plain_texture(set, binding, ty, slot, false)?;
+        Ok(match write {
+            WriteSource::Texture { slot, view } => WriteSource::Texture {
+                slot,
+                view: ImageViewDesc {
+                    format: vk::Format::R8_UINT,
+                    ..view
+                },
+            },
+            neutral => neutral,
+        })
+    }
+
+    /// Whether the texture `shape` binds at kernel slot `slot`, of extended-range form `form`, is
+    /// an `RGB10A8_2P_XR10` texture held in two planes, which joins the variant
+    /// (`VariantKey::two_plane_textures`): the slot's own view is then of its color words alone.
+    fn two_planes(
+        &mut self,
+        slot: SlotRef,
+        form: Option<ExtendedRange>,
+        shape: Option<&TextureShape>,
+    ) -> bool {
+        let held = slot.stage == Stage::Kernel
+            && matches!(form, Some(ExtendedRange::Planes { .. }))
+            && matches!(
+                shape,
+                Some(TextureShape::Texture {
+                    two_planes: true,
+                    ..
+                })
+            );
+        if held {
+            self.variant.two_plane_textures.insert(slot);
+        }
+        held
+    }
+
     /// The level count of the texture the shape binds at `slot`.
     fn bound_levels(&self, slot: SlotRef) -> u32 {
         match self.texture_shape(slot) {
@@ -958,6 +1006,7 @@ impl ResourcePlanner<'_> {
             },
             None => None,
         };
+        let two_planes = self.two_planes(slot, extended, compat.as_ref());
         let base = match extended {
             Some(_) => ImageHandleClass {
                 sampled_type: SampledType::Uint,
@@ -1191,6 +1240,7 @@ impl ResourcePlanner<'_> {
                         Some(c) if c.alias.is_some() => c.vk_format,
                         // The write shadow's own format.
                         Some(c) if c.class == StorageImageClass::YCbCrWrite => c.vk_format,
+                        _ if two_planes => vk::Format::R32_UINT,
                         _ => direct_format(pixel_format)
                             .ok_or_else(|| internal("a storage texture without a format"))?,
                     };
@@ -1206,6 +1256,11 @@ impl ResourcePlanner<'_> {
                     }
                 } else {
                     match self.texel_view(slot, pixel_format, &class, depth_twin, raw)? {
+                        Some((view, _)) if two_planes => ImageViewDesc {
+                            format: vk::Format::R32_UINT,
+                            shader_swizzle,
+                            ..view
+                        },
                         Some((view, _)) => ImageViewDesc {
                             shader_swizzle,
                             ..view
@@ -1600,6 +1655,7 @@ impl ResourcePlanner<'_> {
             }) if ExtendedRange::of(pixel_format).is_some() => {
                 if let Some(form) = ExtendedRange::of(pixel_format) {
                     self.variant.extended_range.insert(texture, form);
+                    self.two_planes(texture, Some(form), shape.as_ref());
                 }
                 // A swizzled one's function swizzles the decoded texels (`plain_texture`, which
                 // the variant's slot takes).

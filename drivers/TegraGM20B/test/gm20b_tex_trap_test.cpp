@@ -157,23 +157,24 @@ TEST(Gm20bTexTrap, NouveauReportsTexAloneWithoutATrapError)
 TEST(Gm20bGrFault, EveryChannelErrorIsChargedBeforeGrGoesOn)
 {
 	const std::string intr = Body(Text(GF100_C), "gf100_gr_intr(struct nvkm_inth *inth)\n{");
+	const char *handoff = "switch_gpu_gr_fault_stop(device, &gr->fault_fifo_held, chan, chid);";
 	for (const char *ack : {"nvkm_wr32(device, 0x400100, 0x00000010);",
 				"nvkm_wr32(device, 0x400100, 0x00000020);",
 				"nvkm_wr32(device, 0x400100, 0x00100000);",
 				"nvkm_wr32(device, 0x400100, 0x00200000);"}) {
 		const size_t at = intr.find(ack);
 		ASSERT_NE(at, std::string::npos) << ack;
-		const size_t fault = intr.rfind("tgm_gr_fault(chid);", at);
+		const size_t fault = intr.rfind(handoff, at);
 		ASSERT_NE(fault, std::string::npos) << ack;
 		EXPECT_EQ(intr.find("nvkm_wr32(device, 0x400100", fault), at)
 			<< ack << ": charged before its own ack";
 	}
 	const size_t sw = intr.find("if (!gf100_gr_mthd_sw(device, class, mthd, data)) {");
-	EXPECT_LT(sw, intr.find("tgm_gr_fault(chid);")) << "a software method is no error";
+	EXPECT_LT(sw, intr.find(handoff)) << "a software method is no error";
 	const size_t tex = intr.find("if (!gf100_gr_trap_tex(gr, chid, name)) {");
-	EXPECT_LT(tex, intr.rfind("tgm_gr_fault(chid);")) << "a TEX-only trap is no error";
-	EXPECT_LT(intr.rfind("tgm_gr_fault(chid);"),
-		  intr.find("nvkm_wr32(device, 0x400500, 0x00010001);"));
+	EXPECT_LT(tex, intr.rfind(handoff)) << "a TEX-only trap is no error";
+	EXPECT_LT(intr.rfind(handoff),
+		  intr.find("switch_gpu_gr_fault_access(device, gr->fault_fifo_held);"));
 	const std::string fault = Body(Text(GPU_FAULT_C), "void tgm_gr_fault(int chid)\n{");
 	EXPECT_NE(fault.find("chan->fault_seqno = tgm_chan_completed(chan) + 1;"),
 		  std::string::npos);

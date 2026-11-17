@@ -186,8 +186,8 @@ fragment float4 sampled_fragment(TexturedVertex in [[stage_in]], texture2d<float
     return texture.sample(bound, in.uv, level(0));
 }
 
-/// NAK takes TEXS's F16 forms for a shader holding this value in debug builds, whatever the chip facts say
-/// (nak_nir_lower_tex_sm50.c), and stamps TEXS_F16_PROOF_MARKER with 0x5346 << 16 | the fetches it folded
+/// NAK stamps TEXS_F16_PROOF_MARKER with 0x5346 << 16 | the fetches it folded into TEXS's F16 forms under the chip fact
+/// (raw_chip_facts.h AssumeTexsF16, nak_nir_lower_tex_sm50.c); the probe marker only keeps the proof output's select
 constant uint TEXS_F16_PROBE_MARKER = 0x7fa55346u;
 constant uint TEXS_F16_PROOF_MARKER = 0x7fa55347u;
 

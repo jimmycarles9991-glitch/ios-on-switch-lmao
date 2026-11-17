@@ -55,7 +55,7 @@ static_assert(kDraw > SWITCH_GM20B_MACRO_NVK_SET_ANTI_ALIAS && kDraw > SWITCH_GM
 constexpr uint32_t kScratchLocation = SWITCH_GM20B_SCRATCH_ICB_LOCATION,
                    kScratchLength = SWITCH_GM20B_SCRATCH_ICB_LENGTH, kScratchBuffers = SWITCH_GM20B_SCRATCH_ICB_BUFFERS,
                    kScratchSetHi = SWITCH_GM20B_SCRATCH_ICB_SET_HI, kNoEntry = SWITCH_GM20B_ICB_NO_ENTRY,
-                   kIcbSetBytes = SWITCH_GM20B_ICB_SET_BYTES, kIcbRootBytes = SWITCH_GM20B_ICB_ROOT_BYTES;
+                   kScratchSetBytes = SWITCH_GM20B_SCRATCH_ICB_SET_BYTES, kIcbRootBytes = SWITCH_GM20B_ICB_ROOT_BYTES;
 constexpr uint32_t kMacroCall = NVB197_CALL_MME_MACRO(0), kRamPointer = NVB197_LOAD_MME_INSTRUCTION_RAM_POINTER,
                    kRam = NVB197_LOAD_MME_INSTRUCTION_RAM, kStartPointer = NVB197_LOAD_MME_START_ADDRESS_RAM_POINTER,
                    kStart = NVB197_LOAD_MME_START_ADDRESS_RAM;
@@ -158,12 +158,13 @@ inline void icbPatchesHeader(Push &push)
 }
 
 // An execute's layout of the inherited tessellation state for its patch commands, as scratch words: set 0's address, each
-// control-stage buffer's set-0 byte offset (kNoEntry: none) and the root byte offset of the control stage's first push
-// word. The root table's address is install()'s.
-inline void icbPatchLayout(Push &push, uint64_t set, const uint32_t (&entries)[3], uint32_t control)
+// control-stage buffer's set-0 byte offset (kNoEntry: none), the root byte offset of the control stage's first push word
+// and set 0's size, which the patch macro selects it at. The root table's address is install()'s.
+inline void icbPatchLayout(Push &push, uint64_t set, uint32_t setBytes, const uint32_t (&entries)[3], uint32_t control)
 {
     push.inc(NVB197_SET_MME_SHADOW_SCRATCH(kScratchSetHi),
              {uint32_t(set >> 32), uint32_t(set), entries[0], entries[1], entries[2], control});
+    push.m(NVB197_SET_MME_SHADOW_SCRATCH(kScratchSetBytes), setBytes);
 }
 
 // A dispatch command's gate: its index is the call's one data word
@@ -265,12 +266,21 @@ inline void amplify(Push &push, DrawParams &held, bool indexed, uint32_t first, 
 // The amplify macros' scratch words: the count and each amplification's mapping word (its render target and viewport
 // offsets), and the bound state's words (root byte offsets, 0: none), its layer (SWITCH_GM20B_AMP_LAYER_* or its word's
 // offset) and whether two amplifications need a pixel barrier between them
+// A view mapping's offset in its 16-bit half of a map word. An index at or past the pass's layers (2048 at most) or the
+// encoder's viewports (16) draws into slice or viewport 0 (an M4 Max's, as m2v's ArrayLength and ViewportCount words
+// do), so an offset past 0xFFFF draws as 0xFFFF does: alike unless the vertex function's own index wraps the 32-bit sum
+// back into range, which only an offset within 2^16 of 2^32 can
+constexpr uint32_t mappedOffset(uint32_t offset)
+{
+    return offset < 0xffff ? offset : 0xffff;
+}
+
 inline void amplification(Push &push, uint32_t count, const uint32_t (&layers)[SWITCH_GM20B_AMP_MAX],
                           const uint32_t (&viewports)[SWITCH_GM20B_AMP_MAX])
 {
     uint32_t words[1 + SWITCH_GM20B_AMP_MAX] = {count};
     for (uint32_t a = 0; a < SWITCH_GM20B_AMP_MAX; a++)
-        words[1 + a] = (layers[a] & 0xffff) | viewports[a] << SWITCH_GM20B_AMP_MAP_VIEWPORT_SHIFT;
+        words[1 + a] = mappedOffset(layers[a]) | mappedOffset(viewports[a]) << SWITCH_GM20B_AMP_MAP_VIEWPORT_SHIFT;
     push.incArray(NVB197_SET_MME_SHADOW_SCRATCH(SWITCH_GM20B_SCRATCH_AMP_COUNT), words, 1 + SWITCH_GM20B_AMP_MAX);
 }
 

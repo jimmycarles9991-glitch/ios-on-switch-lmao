@@ -1,3 +1,7 @@
+/// What a device's compiles target
+/// ([`Device::with_native_target`](crate::device::Device::with_native_target)): Vulkan, or a
+/// compile-only native backend (`Sm53`, half instructions included) whose artifacts are never
+/// submitted to Vulkan.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum NativeShaderTarget {
     #[default]

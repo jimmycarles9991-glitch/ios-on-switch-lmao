@@ -44,6 +44,28 @@ TEST(RawClear, NormalizedChannelsAreTheNearestCode)
     EXPECT_EQ(v[3], float(2.0 / 3.0));
 }
 
+// The codes an M4 stored for these clears (clear_value.rs metal_clears_are_reproduced), as the ROP rounds the value handed
+TEST(RawClear, SignedNormalizedChannelsAreMetalsCodes)
+{
+    const auto codes = [](uint32_t format, float r, float g, float b, float a, int bits, const int expect[4]) {
+        float v[4];
+        clear(format, r, g, b, a, v);
+        const double max = double((1 << (bits - 1)) - 1);
+        for (int i = 0; i < 4; i++)
+            EXPECT_EQ(int(std::nearbyint(double(v[i]) * max)), expect[i]) << format << " channel " << i;
+    };
+    const int halves[4] = {-127, -64, 64, 1};
+    codes(72, -1.5f, -0.5f, 0.5f, 1.5f / 127.0f, 8, halves);
+    const int small[4] = {-127, 0, 0, 64};
+    codes(72, -1.0f, -0.0039f, 0.0039f, 0.502f, 8, small);
+    const int odd[4] = {0, 127, -127, 0};
+    codes(72, NAN, INFINITY, -INFINITY, -0.0f, 8, odd);
+    const int wide[4] = {-32767, 16384, 0, 0};
+    codes(62, -1.5f, 0.5f, 0.0f, 0.0f, 16, wide);
+    const int edge[4] = {0, 32767, 0, 0};
+    codes(62, -1e-5f, 0.99999f, 0.0f, 0.0f, 16, edge);
+}
+
 TEST(RawClear, AnAlphaFormatClearsAlphaAlone)
 {
     float v[4];

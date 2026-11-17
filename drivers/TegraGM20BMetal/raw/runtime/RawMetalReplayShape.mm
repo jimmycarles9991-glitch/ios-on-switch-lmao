@@ -20,6 +20,12 @@ void mixPass(raw::ReplayShape &shape, const RMPass &pass)
     shape.mix(raw::ReplayShape::sizeClass(pass.width) << 8 | raw::ReplayShape::sizeClass(pass.height));
 }
 
+template <typename Mask> void mixSlots(raw::ReplayShape &shape, const Mask &slots)
+{
+    for (size_t w = 0; w < raw::SlotMaskWords<Mask>::kWords; ++w)
+        shape.mix(raw::SlotMaskWords<Mask>::word(slots, w));
+}
+
 void mixBindings(raw::ReplayShape &shape, const RMCommandPlan &plan, const raw::RenderStateRef &state)
 {
     for (uint32_t stage = 0; stage < 2; ++stage) {
@@ -27,7 +33,7 @@ void mixBindings(raw::ReplayShape &shape, const RMCommandPlan &plan, const raw::
         for (const raw::BufferBinding &b : plan.buffers[stage][state.buffers[stage]])
             kinds = kinds << 2 | uint64_t(b.source);
         shape.mix(kinds);
-        shape.mix(plan.textures[stage][state.textures[stage]].set);
+        mixSlots(shape, plan.textures[stage][state.textures[stage]].set);
         shape.mix(plan.samplers[stage][state.samplers[stage]].set);
     }
 }

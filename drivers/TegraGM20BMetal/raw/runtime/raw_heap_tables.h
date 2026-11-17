@@ -76,7 +76,7 @@ inline void writeDrawRoots(RootEntry *table, uint64_t va, uint32_t slots, const 
     }
 }
 
-// A texture as the bridge asks whether an image array holds it (switch_nmb_heap_holds): its MTLTextureDescriptor's
+// A texture as heapHolds (raw_heap_fit.h) asks whether an image array holds it: its MTLTextureDescriptor's
 struct HeapTextureFacts {
     uint32_t pixelFormat, textureType, sampleCount, usage, arrayLength, levels;
     uint8_t swizzle[4];

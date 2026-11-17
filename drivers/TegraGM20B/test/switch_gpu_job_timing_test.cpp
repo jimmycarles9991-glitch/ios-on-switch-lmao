@@ -104,9 +104,9 @@ TEST(SwitchGpuProfileSequence, TheSlowestProfileIsKeptPushByPush)
 	run.last = 52;
 	run.n = run.pushes = 3;
 	run.ns = 9000000;
-	run.push[0] = {TGM_PC_DRAW + 2, 0, 21, 921, 450};
-	run.push[1] = {TGM_PC_SYNC, 0, 0, 0, 12};
-	run.push[2] = {TGM_PC_DRAW + 8, 2, 3, 40, 1300};
+	run.push[0] = {TGM_PC_DRAW + 2, 0, 21, 921, 0, 450};
+	run.push[1] = {TGM_PC_SYNC, 0, 0, 0, 0, 12};
+	run.push[2] = {TGM_PC_DRAW + 8, 2, 3, 40, 0, 1300};
 	switch_gpu_prof_seq_offer(&slow, &run);
 	run.ns = 1000;
 	switch_gpu_prof_seq_offer(&slow, &run);
@@ -116,4 +116,20 @@ TEST(SwitchGpuProfileSequence, TheSlowestProfileIsKeptPushByPush)
 	EXPECT_STREQ(buf, "backboardd seqno 40-52, 9000 us: D921kp/21 450 S 12 D40k/3i2 1300");
 	switch_gpu_prof_seq_take(&slow, &taken);
 	EXPECT_EQ(taken.n, 0u);
+}
+
+// A push of the barrier twin's draws (a triangle a draw, each after a pixel shader barrier) beside one inside the interlock
+TEST(SwitchGpuProfileSequence, APushNamesItsTwinDrawsBesideItsInterlocks)
+{
+	switch_gpu_prof_seq slow{}, run{}, taken{};
+	run.first = run.last = 7;
+	run.n = run.pushes = 2;
+	run.ns = 2000000;
+	run.push[0] = {TGM_PC_DRAW, 0, 40, 921, 38, 1308};
+	run.push[1] = {TGM_PC_DRAW, 4, 4, 921, 0, 55};
+	switch_gpu_prof_seq_offer(&slow, &run);
+	switch_gpu_prof_seq_take(&slow, &taken);
+	char buf[256];
+	ASSERT_TRUE(switch_gpu_prof_seq_format(buf, sizeof(buf), "backboardd", &taken));
+	EXPECT_STREQ(buf, "backboardd seqno 7-7, 2000 us: D921k/40b38 1308 D921k/4i4 55");
 }

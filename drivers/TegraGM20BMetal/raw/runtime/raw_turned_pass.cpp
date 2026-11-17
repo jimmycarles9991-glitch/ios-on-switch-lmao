@@ -9,7 +9,8 @@
 namespace raw {
 namespace {
 
-// The scratch backings' tags: a mirror's at + slot, a colour stand-in's at + 8 + slot, the depth stand-in's at + 16
+// The scratch backings' tags: a mirror's at + slot, a colour stand-in's at + 8 + slot, the depth stand-in's at + 16, a
+// separate stencil's at + 17
 constexpr uint32_t kTurnTag = 48;
 
 Rotation quarterFrame(const Texture &t)
@@ -53,11 +54,21 @@ Texture *TurnedPass::standIn(CommandBuffer &rc, const Texture &t, uint32_t tag, 
     return s;
 }
 
-Texture *TurnedPass::moved(CommandBuffer &rc, Texture &t, uint32_t tag, const TurnMap *load, const TurnMap *store,
+template <typename Source>
+Texture *TurnedPass::moved(CommandBuffer &rc, Source &t, uint32_t tag, const TurnMap *load, const TurnMap *store,
                            const char **why, const TurnMap *reached)
 {
     Texture *s = standIn(rc, t, tag, why);
-    if (!s || (load && !rc.turnCopy(*s, t, *load, why)))
+    if (!s)
+        return nullptr;
+    // a turn copy reads `t` through its texture header, which for rows 16 but not 32 bytes apart is its pool image's
+    // (Texture::sampled): the attachment's texels go there first, as the pass's own shadow copy-in takes them
+    if (t.sampled && (load || reached)) {
+        BlitEncoder *b = rc.blit();
+        b->copyTexels(t, 0, 0, 0, *t.sampled, 0, 0, 0, t.width, t.height);
+        b->end();
+    }
+    if (load && !rc.turnCopy(*s, t, *load, why))
         return nullptr;
     if (const TurnMask mask = turnMask(reach_, frameToPlane(rot_));
         reached && mask.mask && !rc.turnCopy(*s, t, *reached, why, &mask))
@@ -162,6 +173,21 @@ bool TurnedPass::begin(CommandBuffer &rc, PassDesc &p, DrawReplay &replay, const
             return false;
     }
     DepthStencilAttachment &z = p.depthStencil;
+    if (SeparateZeta &pair = p.separate; pair.stencil) {
+        // each texture of a Depth32Float or Depth16Unorm and Stencil8 pair into a stand-in of the plane's, which the pass's
+        // Depth32Float_Stencil8 is laid out from and copies its aspects in from and out to (a Depth16Unorm's is the
+        // pass's converted scratch, z, moved below)
+        const auto movedAspect = [&](const Texture *t, uint32_t tag, bool loaded, bool stored) {
+            return moved(rc, *t, tag, loaded ? &intoPlane : nullptr, stored ? &outOfPlane : nullptr, why);
+        };
+        if (!(pair.stencil = movedAspect(pair.stencil, kTurnTag + 17, pair.loadStencil, pair.storeStencil)))
+            return false;
+        if (pair.depth) {
+            Texture *depth = movedAspect(pair.depth, kTurnTag + 16, pair.loadDepth, pair.storeDepth);
+            pair.depth = z.texture = depth;
+            return depth != nullptr;
+        }
+    }
     if (z.texture && !z.texture->memoryless && (z.loaded || z.stored) &&
         !(z.texture = moved(rc, *z.texture, kTurnTag + 16, z.loaded ? &intoPlane : nullptr,
                             z.stored ? &outOfPlane : nullptr, why)))
@@ -171,9 +197,11 @@ bool TurnedPass::begin(CommandBuffer &rc, PassDesc &p, DrawReplay &replay, const
 
 bool TurnedPass::end(CommandBuffer &rc, const char **why)
 {
-    for (const Back &b : backs_)
-        if (!rc.turnCopy(*b.into, *b.standIn, b.map, why))
+    for (const Back &b : backs_) {
+        const Texture &source = *b.standIn;
+        if (!rc.turnCopy(*b.into, source, b.map, why))
             return false;
+    }
     backs_.clear();
     held_.clear();
     return true;

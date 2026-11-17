@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: MIT
-// The direct compile's copies of NVK's stage compile ABI (third_party/mesa/src/nouveau/vulkan/nvk_switch_compile.h), with
-// Vulkan's handles as pointers (this build has no Vulkan headers), and the calls through the exports DirectNvk found.
+// The direct compile's copies of the stage compile's ABI (third_party/mesa/src/nouveau/switch_compile: switch_compile.h,
+// nvk_switch_offline.h), with Vulkan's handles as pointers (this build has no Vulkan headers), and its entry points, which
+// the image links (switch_compile.o).
 #pragma once
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include "raw_direct.h"
 
 namespace raw {
+
+// switch_compile.h SWITCH_XR_PLANE_WORDS: bit b % 64 of word b / 64, set-0 binding b
+constexpr uint32_t kXrPlaneWords = 6;
+using XrPlaneBindings = std::array<uint64_t, kXrPlaneWords>;
 
 struct NvkStageInfo {
     const uint32_t *spirv;
@@ -29,7 +35,12 @@ struct NvkStageInfo {
     bool (*portable)(const void *context, const uint32_t **words, size_t *bytes);
     bool texsF16 = false;
     bool turned = false;
-    uint64_t xrPlaneBindings = 0;  // nvk_switch_xr_planes.h: set-0 bindings read through a header pair
+    XrPlaneBindings xrPlaneBindings = {};  // nvk_switch_xr_planes.h: set-0 bindings read through a header pair
+    // nvk_switch_ubo_fold.h: the set-0 uniform buffer at descriptor byte uboFoldDesc, its bytes in uboFoldMask held as
+    // uboFoldBytes
+    uint32_t uboFoldDesc = 0;
+    uint64_t uboFoldMask = 0;
+    uint8_t uboFoldBytes[64] = {};
 };
 
 struct NvkStage {
@@ -53,6 +64,7 @@ struct NvkStage {
     uint16_t smemSize;
     uint32_t slmSize, crsSize;
     uint8_t cbufSets[16];
+    uint32_t cbufOffsets[16];  // a uniform buffer descriptor's offset in its set (cbuf_offsets)
 };
 
 struct NvkStageMetrics {
@@ -94,6 +106,8 @@ enum DescriptorType : int32_t {
     CombinedImageSampler = 1,
     SampledImage = 2,
     StorageImage = 3,
+    UniformTexelBuffer = 4,
+    StorageTexelBuffer = 5,
     UniformBuffer = 6,
     StorageBuffer = 7,
     UniformBufferDynamic = 8,
@@ -113,20 +127,41 @@ inline void *handle(uint64_t h)
     return reinterpret_cast<void *>(uintptr_t(h));
 }
 
-namespace nvk {
+// nvk_switch_split.h switch_nvk_split_layout, switch_compile.h switch_nvk_split_parts
+struct NvkSplitLayout {
+    uint32_t frontierBytes;
+    uint8_t frontierCbuf, prologueCbufs, shaderDataCbuf, uboCount;
+    uint8_t uboCbuf[6];
+    uint16_t batchVersion, batchThreads;
+    uint32_t frontierValues, prologueInstrs;
+};
 
-// switch_nak_compile_stage: the stage compiled with no device, from the frozen table and the layout as data
-inline int32_t nakCompileStage(const DirectNvk &n, const void *frozen, const NvkStageInfo &info,
-                               const NakLayout &layout, NvkStage &out)
-{
-    return reinterpret_cast<int32_t (*)(const void *, const NvkStageInfo *, const NakLayout *, NvkStage *)>(
-        n.nakCompileStage)(frozen, &info, &layout, &out);
+struct NvkSplitParts {
+    NvkStage fs, prologue;
+    NvkSplitLayout layout;
+    uint32_t qmd[64];
+    uint32_t thresholdPixels;
+    SplitCost cost;
+};
+
+}  // namespace raw
+
+extern "C" {
+int32_t switch_compile_stage(const void *frozen, const raw::NvkStageInfo *info, const raw::NakLayout *layout,
+                             raw::NvkStage *out);
+int32_t switch_compile_ranked_stage(const void *frozen, const raw::NvkStageInfo *info, const raw::NakLayout *layout,
+                                    raw::NvkStage *out);
+void switch_compile_stage_finish(raw::NvkStage *stage);
+void switch_compile_split_parts(const void *split, raw::NvkSplitParts *out);
+void switch_compile_abi(uint32_t sizes[3]);
 }
 
-inline void nakStageFinish(const DirectNvk &n, NvkStage &stage)
-{
-    reinterpret_cast<void (*)(NvkStage *)>(n.nakStageFinish)(&stage);
-}
+namespace raw {
 
-}  // namespace nvk
+// The stage compiled with no device, from the frozen table and the layout as data (the native seed's rank mode: the
+// cheaper of its native and portable programs)
+inline int32_t compileStage(const StageCompile &c, const NvkStageInfo &info, const NakLayout &layout, NvkStage &out)
+{
+    return (c.ranked ? switch_compile_ranked_stage : switch_compile_stage)(c.target, &info, &layout, &out);
+}
 }  // namespace raw

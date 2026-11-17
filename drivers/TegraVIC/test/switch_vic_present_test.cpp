@@ -27,6 +27,7 @@ switch_gpu_cpu_lease *declaredLease;
 void (*queuedCompletion)(void *, int);
 void *queuedContext;
 bool inlineCompletion;
+uint32_t describedPages = 1024;
 }
 
 extern "C" bool tegra_vic_ready()
@@ -93,7 +94,7 @@ extern "C" void switch_gpu_backing_retain(switch_gpu_backing *backing)
 extern "C" void switch_gpu_backing_describe(switch_gpu_backing *, switch_gpu_backing_info *info)
 {
     *info = {};
-    info->page_count = 1024;
+    info->page_count = describedPages;
 }
 
 int switch_vic_surface_access(const TegraVICSurface *surface, bool write, SwitchVICSurfaceAccess *access, bool,
@@ -126,6 +127,12 @@ SwitchVICMapping *switch_vic_mapping_acquire(switch_gpu_backing *backing, bool w
     EXPECT_EQ(writable, backing == &destinationBacking);
     ++mappings;
     return new SwitchVICMapping{writable ? 0x40000000u : 0x30000000u};
+}
+
+SwitchVICMapping *switch_vic_mapping_acquire_described(switch_gpu_backing *backing, const switch_gpu_backing_info &,
+                                                       bool writable)
+{
+    return switch_vic_mapping_acquire(backing, writable);
 }
 
 SwitchVICMapping *switch_vic_mapping_acquire_range(switch_gpu_backing *backing, bool writable, uint32_t firstPage,
@@ -217,6 +224,7 @@ protected:
         queuedCompletion = nullptr;
         queuedContext = nullptr;
         inlineCompletion = false;
+        describedPages = 1024;
         ranges.clear();
         admissionError = completionError = mappings = lookups = presentWaits = 0;
         picture.backing = &sourceBacking;
@@ -267,6 +275,17 @@ TEST_F(SwitchVICPresent, OwnsBothAllocationsAndPublishesSeedOnlyAfterCompletion)
     ASSERT_NE(queuedCompletion, nullptr);
     queuedCompletion(queuedContext, 0);
     EXPECT_EQ(events, (std::vector<int>{1, 3}));
+    EXPECT_TRUE(ranges.empty()) << "a client surface maps whole, once for its allocation's life";
+}
+
+// A surface inside an allocation larger than any client surface maps only the rows the picture covers.
+TEST_F(SwitchVICPresent, ADestinationInAHugeAllocationMapsOnlyThePicturesRows)
+{
+    describedPages = (64u << 20) / 4096 + 1;
+    const char *why = nullptr;
+    ASSERT_EQ(tegra_vic_present(&picture, nullptr, &why), 0) << (why ? why : "");
+    ASSERT_NE(queuedCompletion, nullptr);
+    queuedCompletion(queuedContext, 0);
     ASSERT_EQ(ranges.size(), 2u);
     EXPECT_EQ(ranges[0][0], 0u);
     EXPECT_EQ(ranges[1][0], uint32_t(destinationDesc.planeOffset[1] >> 12));
@@ -373,7 +392,7 @@ TEST_F(SwitchVICPresent, QueuedMaterializationRetainsMappingsUntilCompletionWith
     const char *why = nullptr;
     ASSERT_EQ(switch_vic_present_surface_queue(&picture, &surface, lease, &why), 0);
     EXPECT_EQ(events, (std::vector<int>{1}));
-    EXPECT_EQ(mappings, 3);
+    EXPECT_EQ(mappings, 2) << "the picture and the whole destination";
     EXPECT_EQ(surfaceObject.refs, 2u);
     EXPECT_EQ(destinationBacking.refs, 2u);
     ASSERT_NE(queuedCompletion, nullptr);

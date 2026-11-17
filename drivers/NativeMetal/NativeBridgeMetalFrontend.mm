@@ -35,12 +35,12 @@
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <os/proc.h>
-#include "bridge/NativeMetalCompile.h"
 #include "bridge/NativeMetalDirect.h"
 #include "bridge/NativeMetalObjects.h"
 #include "NativeBridgeMetalFrontend.h"
 #include "NativeComputeReflection.h"
 #include "NativeComputeArtifactStorage.h"
+#include "StageInText.h"
 #include "SwitchCompileReply.h"
 #include "AsyncPipelines.h"
 #include "GpuMemoryRelease.h"
@@ -64,7 +64,6 @@
 #endif
 
 static NmbDevice *gDevice;
-static NmbCompileContext *gCompile;
 static NativeComputeArtifactStorage gNativeArtifactStorage;
 static std::atomic<uint32_t> gNativeArtifactWrites{0};
 // Never destroyed: its dispatch sources' handlers may still run while the process exits.
@@ -1798,7 +1797,6 @@ static uint64_t constantBytes(uint64_t type)
 #if SWITCH_FRAME_TIMELINE
 static std::string quartzCoreCallers();
 #endif
-static bool systemCompiler();
 @implementation NBLibrary {
     std::once_flag _externsRead;
     NSArray<NSString *> *_externs;
@@ -1861,8 +1859,8 @@ static id functionNotFound(NSString *name, NSError **error)
 {
     if (name && ![self.entries containsObject:name])
         return functionNotFound(name, error);
-    // No values are no constants set (Core Image asks its stitched kernels so), where Core Image's kernels are compiled.
-    if (!values && systemCompiler())
+    // No values are no constants set (Core Image asks its stitched kernels so)
+    if (!values)
         values = [MTLFunctionConstantValues new];
     if (!name || !values || !methodABI(values, @selector(newIndexedConstantArray), "@16@0:8") ||
         !methodABI(values, @selector(newNamedConstantArray), "@16@0:8")) {
@@ -3353,7 +3351,7 @@ NB_RESIDENCY_SETS(use)
     if (const std::shared_ptr<nbasync::Making> making = ((NBRenderPipeline *)state).making;
         making && !nbasync::ready(making)) {
         _skipDraws = true;
-        [self.commandBuffer refuse:@"render pipeline compilation failed or timed out"];
+        [self.commandBuffer refuse:@"render pipeline compilation failed"];
         return;
     }
     [self check:nmb_render_set_pipeline(self.handle, [(NBRenderPipeline *)state handle]) what:"setRenderPipelineState"];
@@ -5269,6 +5267,7 @@ static std::string journalComputePipeline(MTLComputePipelineDescriptor *d, NBFun
         state += " | l " + stageText([l isKindOfClass:[NBFunction class]] ? (NBFunction *)l : nil);
     for (id l in d.linkedFunctions.privateFunctions)
         state += " | p " + stageText([l isKindOfClass:[NBFunction class]] ? (NBFunction *)l : nil);
+    state += stageInText(d.stageInputDescriptor);
     for (char &c : state)
         if (c == '\n')
             c = ' ';
@@ -5729,13 +5728,11 @@ extern "C" bool native_bridge_metal_render_direct(id descriptor, bool barrier, N
     NmbRenderPipelineDescriptor p = {};
     std::vector<NmbFunction *> linked;
     NSError *error = nil;
-    if ((!gDevice && !gCompile) || !renderDescriptor((MTLRenderPipelineDescriptor *)descriptor, &p, linked, &error)) {
-        *why = gDevice || gCompile ? "a function of another device" : "no device";
+    if (!gDevice || !renderDescriptor((MTLRenderPipelineDescriptor *)descriptor, &p, linked, &error)) {
+        *why = gDevice ? "a function of another device" : "no device";
         return false;
     }
-    const uint32_t samples = uint32_t(textureSamples);
-    if (gDevice ? nmb_render_pipeline_direct(gDevice, &p, barrier, textureFormat, samples, binds, each, ctx)
-                : nmb_compile_render_direct(gCompile, &p, barrier, textureFormat, samples, binds, each, ctx))
+    if (nmb_render_pipeline_direct(gDevice, &p, barrier, textureFormat, uint32_t(textureSamples), binds, each, ctx))
         return true;
     *why = nmb_last_error();
     return false;
@@ -5863,13 +5860,11 @@ extern "C" bool native_bridge_metal_compute_direct(id descriptor, const struct N
     NmbComputePipelineDescriptor p = {};
     std::vector<NmbFunction *> linked;
     NSError *error = nil;
-    if ((!gDevice && !gCompile) || !computeDescriptor((MTLComputePipelineDescriptor *)descriptor, &p, linked, &error)) {
-        *why =
-            gDevice || gCompile ? "a function of another device, or what the frontend does not represent" : "no device";
+    if (!gDevice || !computeDescriptor((MTLComputePipelineDescriptor *)descriptor, &p, linked, &error)) {
+        *why = gDevice ? "a function of another device, or what the frontend does not represent" : "no device";
         return false;
     }
-    if (gDevice ? nmb_compute_pipeline_direct(gDevice, &p, dispatch, each, ctx)
-                : nmb_compile_compute_direct(gCompile, &p, dispatch, each, ctx))
+    if (nmb_compute_pipeline_direct(gDevice, &p, dispatch, each, ctx))
         return true;
     *why = nmb_last_error();
     return false;
@@ -6263,17 +6258,6 @@ static void refuseLibrary(NSString *what)
         NBLOG(@"native-metal: %@ refused (not implemented)", what);
 }
 
-// Whether this process compiles Metal source and stitched libraries (NMB_SYSTEM_COMPILER=1, which the plugin sets in every process but the
-// render server: its requests stay refused, so it never loads the compiler or waits for one).
-static bool systemCompiler()
-{
-    static const bool on = [] {
-        const char *v = getenv("NMB_SYSTEM_COMPILER");
-        return v && strcmp(v, "0");
-    }();
-    return on;
-}
-
 // The target's own _MTLDevice method that writes stitching graphs as the DAG text Metal's compiler reads (the device's base class).
 @protocol NBOriginalStitching
 - (NSString *)newDagStringWithGraphs:(NSArray<MTLFunctionStitchingGraph *> *)graphs;
@@ -6526,11 +6510,6 @@ static uint64_t askAnswer(SEL cmd, NSUInteger arg);
 // stay refused.
 - (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error
 {
-    if (!systemCompiler()) {
-        if (error)
-            *error = nbError(@"Metal source is not compiled here (AIR libraries only)");
-        return nil;
-    }
     if (!source) {
         if (error)
             *error = nbError(@"no source");
@@ -6583,11 +6562,6 @@ static uint64_t askAnswer(SEL cmd, NSUInteger arg);
 // texture and builtin nodes) is the same class family; the base class's newDagStringWithGraphs: writes its DAG text.
 - (id<MTLLibrary>)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)d error:(NSError **)error
 {
-    if (!systemCompiler()) {
-        if (error)
-            *error = nbError(@"function stitching is not implemented");
-        return nil;
-    }
     if (![d respondsToSelector:@selector(functionGraphs)] || ![d respondsToSelector:@selector(functions)]) {
         if (error)
             *error = nbError(@"not a stitched library descriptor");
@@ -6698,13 +6672,6 @@ static uint64_t askAnswer(SEL cmd, NSUInteger arg);
                   imageFilterFunctionInfo:(const switch_metal::ImageFilterFunctionInfo *)info
                                     error:(NSError **)error
 {
-    if (!systemCompiler()) {
-        refuseLibrary(@"Core Image filter-function linking");
-        if (error)
-            *error = nbError(
-                @"Core Image filter-function linking needs the system compiler, which this process does not load");
-        return nil;
-    }
     if (!functions.count || !info) {
         if (error)
             *error = nbError(@"Core Image filter-function linking needs functions and their infos");
@@ -7182,8 +7149,7 @@ static uint64_t askAnswer(SEL cmd, NSUInteger arg);
 
 // A library of a metallib's AIR slice, the one this IPSW's Metal takes (MetallibSlice.h): its functions, and the bytes their
 // bitcode and extern entries are read from. `storage` keeps the file's bytes.
-static NBLibrary *metallibLibrary(id storage, const uint8_t *file, size_t length, NSError **error,
-                                  bool compileOnly = false)
+static NBLibrary *metallibLibrary(id storage, const uint8_t *file, size_t length, NSError **error)
 {
     size_t offset = 0, size = 0;
     if (!switch_metal::airSlice(file, length, offset, size)) {
@@ -7197,8 +7163,7 @@ static NBLibrary *metallibLibrary(id storage, const uint8_t *file, size_t length
         return nil;
     }
     SWITCH_METAL_DIAGNOSTIC(const uint64_t libraryBegan = nowUs());
-    NmbLibrary *handle = compileOnly ? nmb_compile_library_new(file + offset, size, false)
-                                     : nmb_library_new(gDevice, file + offset, size, false);
+    NmbLibrary *handle = nmb_library_new(gDevice, file + offset, size, false);
     SWITCH_METAL_DIAGNOSTIC(gTimeLibrary.add(libraryBegan));
     if (!handle)
         return failWith<NBLibrary *>(error, @"library", nil);
@@ -7655,7 +7620,11 @@ extern "C" id native_bridge_metal_open(const char *loader, const char *cache, ui
         NBLOG(@"native-metal: device refused: %s", nmb_last_error());
         return nil;
     }
-    gMemoryRelease.start(gDevice);
+    gMemoryRelease.start(
+        [](void *d) {
+            nmb_device_release_idle_memory(static_cast<NmbDevice *>(d));
+        },
+        gDevice);
     if (cache) {
         gCompileCache = std::string(cache) + "/msl";
         gNativeArtifactStorage.cache = std::string(cache) + "/native-analysis";
@@ -7739,32 +7708,6 @@ extern "C" id native_bridge_metal_library_with_air(const void *bytes, size_t len
     NBLibrary *library = [NBLibrary new];
     library.handle = handle;
     return library;
-}
-
-extern "C" bool native_bridge_metal_compile_open(const char *loader)
-{
-    if (!gCompile) {
-        gNvkPath = loader ? loader : "";
-        gCompile = nmb_compile_context_open(loader);
-    }
-    return gCompile != nullptr;
-}
-
-extern "C" id native_bridge_metal_compile_library(const char *path, dispatch_data_t data, NSError **error)
-{
-    if (!gCompile) {
-        if (error)
-            *error = nbError(@"no compile context");
-        return nil;
-    }
-    if (path) {
-        NSData *bytes = [NSData dataWithContentsOfFile:@(path) options:NSDataReadingMappedIfSafe error:error];
-        return bytes ? metallibLibrary(bytes, (const uint8_t *)bytes.bytes, bytes.length, error, true) : nil;
-    }
-    const void *bytes = nullptr;
-    size_t size = 0;
-    dispatch_data_t mapped = dispatch_data_create_map(data, &bytes, &size);
-    return metallibLibrary(mapped, (const uint8_t *)bytes, size, error, true);
 }
 
 extern "C" bool native_bridge_metal_shader_cache_stats(NmbShaderCacheStats *out)

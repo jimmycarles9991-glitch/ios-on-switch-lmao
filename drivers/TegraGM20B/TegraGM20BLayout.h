@@ -11,16 +11,22 @@
 // DRAM: what the CPU sees (the raw path's device self-test) and what DC A scans.
 //
 // Which IOSurfaces are block-linear (the kernel decides once per surface, TegraGM20BTiled.cpp, at its first GPU import that
-// asks; every process, driver and engine reads that decision): those the GPU produces. A surface is tiled when its first
-// asking import will write it on the GPU (a render target, a store, a blit destination), its shape tiles, and no other
-// import of it exists yet. It stays pitch for good when:
-//  - its first GPU import only samples it: the CPU produces it (a CG-drawn backing store, a CPU-decoded frame) and may
-//    rewrite it every frame, and a tiled surface pays a copy-engine move and a remap of the locker's mapping at every CPU
-//    lock and unlock (more than the GPU saves on one sampled read);
-//  - it lies in a client's own memory (IOSurface created over the app's pages): the app reads and writes those pages
-//    without IOSurfaceLock, so they must hold rows;
+// asks; every process, driver and engine reads that decision): those the GPU produces and those nothing has written yet. A
+// surface is tiled when its shape tiles, no other import of it exists yet, and its first asking import either will write it
+// on the GPU (a render target, a store, a blit destination) or only samples it while nothing has written it (seed 0, not
+// over its creator's memory, no parent, no memory regions); a sampler's first ask moves what the pages hold into the tiled
+// layout. It stays pitch when:
+//  - its first GPU import only samples it and the CPU has written it (a CG-drawn backing store, a CPU-decoded frame): the
+//    CPU may rewrite it every frame, and a tiled surface pays a copy-engine move and a remap of the locker's mapping at
+//    every CPU lock and unlock (more than the GPU saves on one sampled read);
+//  - a process other than the asking one maps it for the CPU (every IOSurfaceClient maps its surface at create or
+//    lookup): a load through that mapping outside IOSurfaceLock reads the pages as stored, and tiled pages hold GOBs;
+//  - it lies in a client's own memory (IOSurface created over the app's pages) or is planar: the app reads and writes
+//    those pages without IOSurfaceLock, so they must hold rows;
 //  - another import made before it asked, or its texel size or extent, rules it out.
-// A GPU-produced surface is CPU-read rarely (a snapshot's encoder), and its lock sees rows.
+// A surface whose tiling move failed (no scratch, the copy engine's move failing) is pitch until a later import that holds
+// it alone asks for the first time and decides again. A GPU-produced surface is CPU-read rarely (a snapshot's encoder), and
+// its lock sees rows.
 #pragma once
 #include <stdint.h>
 

@@ -65,6 +65,11 @@ void planeUseHoldScanned()
             planeUseHold(k);
 }
 
+bool planeUseNotes(unsigned k) const
+{
+    return planeUses && planeUses[k].noted;
+}
+
 void planeUseRelease(unsigned k)
 {
     if (!planeUses)

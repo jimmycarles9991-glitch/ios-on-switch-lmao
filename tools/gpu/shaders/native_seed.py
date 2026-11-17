@@ -20,9 +20,13 @@ def run(command: list[Path | str], work: Path) -> None:
         'DYLD_LIBRARY_PATH': str(work),
         'MESA_SHADER_CACHE_DISABLE': 'true',
     }
-    result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=3600, check=False)
+    try:
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=3600, check=False)
+    except OSError as error:
+        raise RuntimeError(f'run the native seed tool {command[0]}: {error.strerror} (errno {error.errno})') from error
     if result.returncode:
-        raise RuntimeError(f'native seed tool failed ({result.returncode}):\n{(result.stdout + result.stderr)[-6000:]}')
+        output = (result.stdout + result.stderr)[-6000:] or '(it printed nothing)'
+        raise RuntimeError(f'native seed tool {command[0]} failed ({result.returncode}) in {work}:\n{output}')
 
 
 def native_lines(lines: list[str]) -> list[str]:

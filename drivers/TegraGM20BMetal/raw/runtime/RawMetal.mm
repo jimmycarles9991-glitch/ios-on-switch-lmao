@@ -21,9 +21,9 @@
 #import "RawMetalIndirect.h"
 #import "RawMetalPassCache.h"
 #include "raw_device_answers.h"
+#include "raw_heap_fit.h"
 #include "raw_limits_fill.h"
 
-#include <dlfcn.h>
 #include <malloc/malloc.h>
 
 #if SWITCH_FRAME_TIMELINE
@@ -175,7 +175,7 @@ static raw::Device *openDevice(const char *packPath, uint64_t stack, raw::Device
 {
     raw::Device *dev = new raw::Device;
     dev->indexZeroPastLimit = raw::answers::chipFeature(SWITCH_GM20B_FEATURE_3D_B11);
-    dev->heapHolds(rmHeapHolds);
+    dev->heapHolds(raw::heapHolds);
     if (!dev->open(packPath, stack, err, role)) {
         failure = dev->openFailure();
         delete dev;  // its connection closes: the kernel frees what it held
@@ -211,7 +211,7 @@ void raw_metal_prepare(const char *packPath, uint64_t stack)
 
 void raw_metal_complete_states(const char *cacheDir, const char *nativeSeed)
 {
-    if (gRM && gRM->m2v.open && !gRM->completion)
+    if (gRM && !gRM->completion)
         gRM->completion =
             std::make_unique<raw::Completion>(*gRM->raw, cacheDir, gRM->raw->pack().header()->stack, nativeSeed);
 }
@@ -283,15 +283,12 @@ static Class deviceClass(const RawM2V &m2v, NSString **error)
 
 id<MTLDevice> raw_metal_device_open(const char *packPath, uint64_t stack, id<MTLDevice> fallback, NSString **error)
 {
-    static const auto answerSelector =
-        reinterpret_cast<const char *(*)(size_t, uint32_t *)>(dlsym(RTLD_DEFAULT, "nmb_device_answer_selector"));
     RawM2V m2v;
     if (fallback)
         m2v.open = ^{
             return fallback;
         };
     m2v.methods = NSClassFromString(@"NBDeviceMethods");
-    m2v.answerSelector = answerSelector;
     static const SEL registry = NSSelectorFromString(@"registryID");
     const uint64_t registryID = [fallback respondsToSelector:registry] ? [fallback registryID] : 0;
     return raw_metal_device_open_lazy(packPath, stack, registryID, m2v, error);

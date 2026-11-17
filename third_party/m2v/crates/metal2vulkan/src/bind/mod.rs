@@ -159,7 +159,7 @@ pub use acceleration::{
 };
 pub use argument_buffer::{
     ArgumentBufferLayout, ArgumentDescriptor, ArgumentLayoutError, ArgumentMember, ArgumentPlace,
-    ArgumentType, ARGUMENT_HANDLE_BYTES,
+    ArgumentType, BufferEncoder, ARGUMENT_HANDLE_BYTES,
 };
 pub use argument_runs::{flat_layouts, ArgumentRun, FlatLayout};
 pub use block_decode::{block_decode_module, BlockDecode, BlockDecodeModule};

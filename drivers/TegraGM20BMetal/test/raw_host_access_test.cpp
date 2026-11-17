@@ -14,6 +14,7 @@ struct Call {
 
 std::vector<Call> calls;
 bool acquireFails, releaseFails;
+uint64_t refusedAcquireHandle;
 uint32_t reports;
 std::array<uint8_t, 128> cpu, memory;
 }  // namespace
@@ -29,7 +30,7 @@ void reportCpuReleaseFailure()
 bool Kernel::cpuAccess(const Bo &bo, uint64_t offset, uint64_t bytes, uint32_t access, bool acquire)
 {
     calls.push_back({bo.handle, offset, bytes, access, acquire});
-    if (acquire ? acquireFails : releaseFails)
+    if (acquire ? acquireFails || bo.handle == refusedAcquireHandle : releaseFails)
         return false;
     const uint64_t begin = offset & ~uint64_t(63), end = (offset + bytes + 63) & ~uint64_t(63);
     if (acquire)
@@ -49,6 +50,7 @@ protected:
     {
         calls.clear();
         acquireFails = releaseFails = false;
+        refusedAcquireHandle = 0;
         reports = 0;
         cpu.fill(0x19);
         memory.fill(0xa7);
@@ -157,4 +159,60 @@ TEST_F(RawHostAccess, InvalidImportedBaseCannotWrapBeforeAcquire)
     EXPECT_FALSE(raw::hostRangeContains(cpu.data() + 64, 64, cpu.data(), 1));
     EXPECT_FALSE(raw::hostRangeContains(cpu.data(), 128, cpu.data() + 127, UINT64_MAX));
     EXPECT_TRUE(calls.empty());
+}
+
+TEST_F(RawHostAccess, MultipartAcquireFailureUnwindsBeforeReleasingTheArena)
+{
+    raw::Bo second = bo, third = bo;
+    second.handle = 8;
+    third.handle = 9;
+    refusedAcquireHandle = second.handle;
+    std::vector<size_t> unpins;
+    raw::HostAccess access;
+    EXPECT_FALSE(access.acquire(kernel, {{bo, 1, 1}, {second, 2, 1}, {third, 3, 1}}, true, &unpins, 9,
+                                [](void *owner, uint32_t arena) {
+                                    EXPECT_EQ(arena, 9u);
+                                    static_cast<std::vector<size_t> *>(owner)->push_back(calls.size());
+                                }));
+    ASSERT_EQ(calls.size(), 3u);
+    EXPECT_EQ(calls[0].handle, bo.handle);
+    EXPECT_TRUE(calls[0].acquire);
+    EXPECT_EQ(calls[1].handle, second.handle);
+    EXPECT_TRUE(calls[1].acquire);
+    EXPECT_EQ(calls[2].handle, bo.handle);
+    EXPECT_FALSE(calls[2].acquire);
+    EXPECT_EQ(unpins, (std::vector<size_t>{3}));
+    EXPECT_TRUE(access.finish());
+    EXPECT_EQ(unpins.size(), 1u);
+}
+
+TEST_F(RawHostAccess, MultipartReleaseKeepsTheArenaUntilEveryLeaseIsReleased)
+{
+    raw::Bo second = bo, third = bo;
+    second.handle = 8;
+    third.handle = 9;
+    std::vector<size_t> unpins;
+    raw::HostAccess access;
+    ASSERT_TRUE(access.acquire(kernel, {{bo, 1, 1}, {second, 2, 1}, {third, 3, 1}}, false, &unpins, 9,
+                               [](void *owner, uint32_t arena) {
+                                   EXPECT_EQ(arena, 9u);
+                                   static_cast<std::vector<size_t> *>(owner)->push_back(calls.size());
+                               }));
+    releaseFails = true;
+    EXPECT_FALSE(access.finish());
+    EXPECT_TRUE(unpins.empty());
+    ASSERT_EQ(calls.size(), 4u);
+    EXPECT_EQ(calls.back().handle, third.handle);
+    EXPECT_FALSE(calls.back().acquire);
+    releaseFails = false;
+    ASSERT_TRUE(access.finish());
+    ASSERT_EQ(calls.size(), 7u);
+    EXPECT_EQ(calls[4].handle, third.handle);
+    EXPECT_EQ(calls[5].handle, second.handle);
+    EXPECT_EQ(calls[6].handle, bo.handle);
+    for (size_t i = 3; i < calls.size(); ++i)
+        EXPECT_FALSE(calls[i].acquire);
+    EXPECT_EQ(unpins, (std::vector<size_t>{7}));
+    EXPECT_TRUE(access.finish());
+    EXPECT_EQ(unpins.size(), 1u);
 }

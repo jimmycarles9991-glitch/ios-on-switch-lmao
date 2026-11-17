@@ -5,13 +5,14 @@
 //! handed to NVK's stage compile as data. Its libraries and functions are the translator's own
 //! (NativeMetalFunctions.rs) behind the NmbLibrary and NmbFunction handles.
 
-use crate::direct::{NmbDirectBinds, NmbDirectState, native_compute_device, render_offline, specialized_device};
+use crate::direct::{NmbDirectBinds, NmbDirectState, render_offline};
 use crate::direct_compute::{NmbDirectDispatch, NmbDirectKernel, compute_offline};
+use crate::direct_device::{native_compute_device, nmb_compile_profile_check, specialized_device};
 use crate::functions::LibraryOf;
 use crate::objects::{
     NmbComputePipelineDescriptor, NmbDevice, NmbLibrary, NmbRenderPipelineDescriptor, e, get, guard, library_handle,
 };
-use crate::offline::{Devices, nmb_compile_profile_check, offline_devices};
+use crate::offline::{Devices, offline_devices};
 use std::ffi::{CStr, c_char, c_void};
 use std::os::unix::ffi::OsStrExt;
 

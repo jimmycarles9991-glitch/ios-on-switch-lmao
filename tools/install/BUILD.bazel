@@ -91,7 +91,20 @@ py_binary(
 py_binary(
     name = "artifacts",
     srcs = ["artifacts.py"],
+    deps = [":artifacts_lib"],
+)
+
+py_library(
+    name = "artifacts_lib",
+    srcs = ["artifacts.py"],
     deps = ["//tools/common:hashing"],
+)
+
+py_test(
+    name = "artifacts_test",
+    size = "small",
+    srcs = ["artifacts_test.py"],
+    deps = [":artifacts_lib"],
 )
 
 py_binary(
@@ -285,6 +298,13 @@ py_test(
         ":lib",
         ":sii_fixture",
     ],
+)
+
+py_test(
+    name = "disks_test",
+    size = "small",
+    srcs = ["disks_test.py"],
+    deps = [":lib"],
 )
 
 py_test(

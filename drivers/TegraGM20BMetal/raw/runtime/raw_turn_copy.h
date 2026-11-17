@@ -16,6 +16,10 @@
 
 namespace raw {
 
+// The backing tag of a Depth16Unorm's Depth32Float_Stencil8 scratch (CommandBuffer::depthConvert's), past the turned
+// passes' (48 to 64) and the reach's (72, 73)
+constexpr uint32_t kDepthConvertTag = 74;
+
 struct TurnMap {
     int32_t ax = 1, ay = 0, cx = 0, bx = 0, by = 1, cy = 0;
     int32_t x0 = 0, y0 = 0, x1 = INT32_MAX,
@@ -110,9 +114,20 @@ inline const char *turnCopyState(uint32_t bpp)
     }
 }
 
-// The pack's turn copy state of a depth format's depth (Depth16Unorm, Depth32Float, Depth32Float_Stencil8); null for none
-inline const char *turnDepthState(uint32_t format)
+// The pack's turn copy state of a depth format's depth (Depth16Unorm, Depth32Float, Depth32Float_Stencil8); null for none.
+// A multisampled Depth16Unorm's and Depth32Float_Stencil8's (2 or 4 samples) copy each sample's depth into that sample of
+// the other's (pack/turn.metal turn_depth*_ms*), one state a sample count
+inline const char *turnDepthState(uint32_t format, uint32_t samples = 1)
 {
+    if (samples == 2 || samples == 4) {
+        if (format == 250)
+            return samples == 2 ? "raw.turn.turn_depth16_ms2_frag" : "raw.turn.turn_depth16_ms4_frag";
+        if (format == 260)
+            return samples == 2 ? "raw.turn.turn_depth32fs8_ms2_frag" : "raw.turn.turn_depth32fs8_ms4_frag";
+        return nullptr;
+    }
+    if (samples != 1)
+        return nullptr;
     switch (format) {
     case 250:
         return "raw.turn.turn_depth16_frag";

@@ -364,4 +364,7 @@ private:
     mutable raw::Mutex errorLock_;
 };
 
+// Whether the calling thread's last Kernel::submitJob, asked to end quiet, ends with its own interrupt all the same
+bool jobKeptLoud();
+
 }  // namespace raw

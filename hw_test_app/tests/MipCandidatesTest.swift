@@ -6,9 +6,10 @@ import Metal
 /// The probe cells of rule mip.twod (drivers/TegraGM20BMetal/raw/fx/fx_mip_probe.h), debug builds: the formats the pack's
 /// mip states make, every step recorded on the 2D engine (switchRawProbeMipCandidates:) against MipReference, and level 1
 /// against the same chain by the shipping route (the 2D engine at the proven steps of fx::twodChainFormat's formats, the
-/// format's 3D passes at the others). `candidates=<fmt>:<proven steps>/<odd steps>/<level 1 against the route>`, each
-/// exact, near (within one code) or wrong: a format near or exact at the proven steps chains on the 2D engine there. It
-/// reports; it fails only when the work left the raw path.
+/// format's mip state at the others). `candidates=<fmt>:<proven steps>/<odd steps>/<level 1 against the route>`, each
+/// exact, near (within one code) or wrong: a format near or exact at the proven steps chains on the 2D engine there.
+/// cand_<fmt>_route_* and cand_<fmt>_route_odd_* hold the shipping route's steps against MipReference. It reports; it fails only when the work
+/// left the raw path.
 struct MipCandidatesTest: HWTest {
     let id = "gpu.raw.mip_twod_candidates"
     let name =
@@ -29,11 +30,12 @@ struct MipCandidatesTest: HWTest {
         let before = RawFacade.counters(of: gpu.device)
         for f in MipFormats.candidates {
             let chains = MipChains(gpu: gpu, format: f)
-            var proven = MipTally(), odd = MipTally(), level1 = MipTally()
+            var proven = MipTally(), odd = MipTally(), level1 = MipTally(), route = MipTally(), routeOdd = MipTally()
             do {
                 for (w, h) in MipTwodTest.sizes {
                     _ = MipChains.probe(gpu.device, false)
                     let (passes, _) = try await chains.generated(w, h)
+                    chains.compare(passes, w, h, proven: &route, odd: &routeOdd, rounding: nil)
                     _ = MipChains.probe(gpu.device, true)
                     let (twod, path) = try await chains.generated(w, h)
                     paths.insert(path)
@@ -48,6 +50,8 @@ struct MipCandidatesTest: HWTest {
             MipTwodTest.report(&detail, "cand_" + f.name, proven)
             MipTwodTest.report(&detail, "cand_\(f.name)_odd", odd)
             MipTwodTest.report(&detail, "cand_\(f.name)_l1", level1)
+            MipTwodTest.report(&detail, "cand_\(f.name)_route", route)
+            MipTwodTest.report(&detail, "cand_\(f.name)_route_odd", routeOdd)
         }
         let after = RawFacade.counters(of: gpu.device)
         var metrics = Metrics()

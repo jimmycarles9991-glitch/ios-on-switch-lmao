@@ -119,6 +119,7 @@ bool planeRecoveryFrameEnd()
     }
     // Only observed inactive windows permit replacing their live CSC/filter state or releasing old snapshots.
     planeLatch.reset();
+    mediaHostHeldSlots = 0;
     planeForgetUnshadowed();
     planeUnderflowRun = 0;
     planeRecovering = false;

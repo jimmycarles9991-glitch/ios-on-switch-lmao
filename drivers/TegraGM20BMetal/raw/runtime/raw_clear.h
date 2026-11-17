@@ -13,6 +13,7 @@ enum class ClearChannel : uint8_t {
     Unused,
     Unorm,      // through float, clamped, the nearest of `bits` (ties to even), handed as k / max
     HalfUnorm,  // as Unorm, of the float's nearest half
+    Snorm,      // as Unorm, clamped to [-1, 1]: the nearest of k / max, max 2^(bits - 1) - 1
     Srgb,       // the 8-bit sRGB code of the float, handed as the linear value that encodes to it exactly
     Half,       // the float's nearest half
     Float,
@@ -50,6 +51,13 @@ inline float unorm(float x, unsigned bits)
     return float(std::nearbyint(v * max) / max);
 }
 
+inline float snorm(float x, unsigned bits)
+{
+    const double max = double((1u << (bits - 1)) - 1);
+    const double v = std::isnan(x) ? 0.0 : std::clamp(double(x), -1.0, 1.0);
+    return float(std::nearbyint(v * max) / max);
+}
+
 inline float half(float x)
 {
     return float(_Float16(x));
@@ -82,8 +90,9 @@ inline float ufloat(float v, unsigned mantissa)
 }  // namespace clear_detail
 
 constexpr ClearChannel kNone = ClearChannel::Unused, kUnorm = ClearChannel::Unorm, kHalfUnorm = ClearChannel::HalfUnorm,
-                       kSrgb = ClearChannel::Srgb, kHalf = ClearChannel::Half, kFloat = ClearChannel::Float,
-                       kUfloat = ClearChannel::Ufloat, kUint = ClearChannel::Uint, kSint = ClearChannel::Sint;
+                       kSnorm = ClearChannel::Snorm, kSrgb = ClearChannel::Srgb, kHalf = ClearChannel::Half,
+                       kFloat = ClearChannel::Float, kUfloat = ClearChannel::Ufloat, kUint = ClearChannel::Uint,
+                       kSint = ClearChannel::Sint;
 
 inline constexpr ClearFormat kClearFormats[] = {
     {1, {kNone, kNone, kNone, kUnorm}, {0, 0, 0, 8}},                      // A8Unorm
@@ -107,6 +116,12 @@ inline constexpr ClearFormat kClearFormats[] = {
     {110, {kUnorm, kUnorm, kUnorm, kUnorm}, {16, 16, 16, 16}},             // RGBA16Unorm
     {115, {kHalf, kHalf, kHalf, kHalf}, {0, 0, 0, 0}},                     // RGBA16Float
     {125, {kFloat, kFloat, kFloat, kFloat}, {0, 0, 0, 0}},                 // RGBA32Float
+    {12, {kSnorm, kNone, kNone, kNone}, {8, 0, 0, 0}},                     // R8Snorm
+    {22, {kSnorm, kNone, kNone, kNone}, {16, 0, 0, 0}},                    // R16Snorm
+    {32, {kSnorm, kSnorm, kNone, kNone}, {8, 8, 0, 0}},                    // RG8Snorm
+    {62, {kSnorm, kSnorm, kNone, kNone}, {16, 16, 0, 0}},                  // RG16Snorm
+    {72, {kSnorm, kSnorm, kSnorm, kSnorm}, {8, 8, 8, 8}},                  // RGBA8Snorm
+    {112, {kSnorm, kSnorm, kSnorm, kSnorm}, {16, 16, 16, 16}},             // RGBA16Snorm
     {13, {kUint, kNone, kNone, kNone}, {8, 0, 0, 0}},                      // R8Uint
     {14, {kSint, kNone, kNone, kNone}, {8, 0, 0, 0}},                      // R8Sint
     {23, {kUint, kNone, kNone, kNone}, {16, 0, 0, 0}},                     // R16Uint
@@ -156,6 +171,9 @@ inline bool clearValue(uint32_t format, const float in[4], uint32_t out[4])
             break;
         case ClearChannel::HalfUnorm:
             out[i] = bitsOf(unorm(half(x), f->bits[i]));
+            break;
+        case ClearChannel::Snorm:
+            out[i] = bitsOf(snorm(x, f->bits[i]));
             break;
         case ClearChannel::Srgb:
             out[i] = bitsOf(srgb(x));
