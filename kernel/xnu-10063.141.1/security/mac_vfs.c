@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2007-2016 Apple Inc. All rights reserved.
  *
@@ -808,6 +809,8 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 	*disjoint = 0;
 	int error;
 	const bool switch_unsigned_app = switch_app_code_image(vp);
+	const bool switch_sandbox_target = switch_bootstrap_tool_image(vp, offset);
+	bool switch_sandbox_transitioned = false;
 	posix_cred_t pcred = posix_cred_get(new);
 
 #if SECURITY_MAC_CHECK_ENFORCE
@@ -854,12 +857,21 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 			size_t spawnattrlen = 0;
 			void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
+			const bool switch_clear_sandbox = !strcmp(mpc->mpc_name, "Sandbox") &&
+			    mpc->mpc_field_off && mpc->mpc_ops->mpo_cred_label_destroy &&
+			    (switch_sandbox_target &&
+			     !mac_label_get(mac_cred_label(cred), *mpc->mpc_field_off));
+
 			u_int switch_amfi_flags = SWITCH_APP_CODE_CS_FLAGS | CS_NO_UNTRUSTED_HELPERS;
 			u_int *hook_csflags = switch_unsigned_app && switch_app_code_amfi(mpc->mpc_name) ?
 			    &switch_amfi_flags : csflags;
 			error = mac_error_select(hook(cred, new, vfs_context_proc(ctx), vp, offset, scriptvp,
 			    mac_vnode_label(vp), scriptvnodelabel, execl, hook_csflags, spawnattr, spawnattrlen, disjoint),
 			    error);
+			if (!error && switch_clear_sandbox && mac_label_get(mac_cred_label(new), *mpc->mpc_field_off)) {
+				mpc->mpc_ops->mpo_cred_label_destroy(mac_cred_label(new));
+				switch_sandbox_transitioned = true;
+			}
 		}
 		if (mac_policy_list_conditional_busy() != 0) {
 			for (; i <= mac_policy_list.maxindex; i++) {
@@ -883,16 +895,26 @@ mac_cred_label_update_execve(vfs_context_t ctx, kauth_cred_t new, struct vnode *
 				size_t spawnattrlen = 0;
 				void *spawnattr = exec_spawnattr_getmacpolicyinfo(macextensions, mpc->mpc_name, &spawnattrlen);
 
+				const bool switch_clear_sandbox = !strcmp(mpc->mpc_name, "Sandbox") &&
+				    mpc->mpc_field_off && mpc->mpc_ops->mpo_cred_label_destroy &&
+				    (switch_sandbox_target &&
+				     !mac_label_get(mac_cred_label(cred), *mpc->mpc_field_off));
+
 				u_int switch_amfi_flags = SWITCH_APP_CODE_CS_FLAGS | CS_NO_UNTRUSTED_HELPERS;
 				u_int *hook_csflags = switch_unsigned_app && switch_app_code_amfi(mpc->mpc_name) ?
 				    &switch_amfi_flags : csflags;
 				error = mac_error_select(hook(cred, new, vfs_context_proc(ctx), vp, offset, scriptvp,
 				    mac_vnode_label(vp), scriptvnodelabel, execl, hook_csflags, spawnattr, spawnattrlen, disjoint),
 				    error);
+				if (!error && switch_clear_sandbox && mac_label_get(mac_cred_label(new), *mpc->mpc_field_off)) {
+					mpc->mpc_ops->mpo_cred_label_destroy(mac_cred_label(new));
+					switch_sandbox_transitioned = true;
+				}
 			}
 			mac_policy_list_unbusy();
 		}
 	}
+	if (switch_sandbox_transitioned) *disjoint = 1;
 	*labelupdateerror = error;
 	VFS_KERNEL_DEBUG_END1(27, vp);
 }
@@ -986,7 +1008,9 @@ mac_vnode_check_access(vfs_context_t ctx, struct vnode *vp,
 	/* Convert {R,W,X}_OK values to V{READ,WRITE,EXEC} for entry points */
 	mask = ACCESS_MODE_TO_VNODE_MASK(acc_mode);
 	VFS_KERNEL_DEBUG_START1(29, vp);
-	MAC_CHECK(vnode_check_access, cred, vp, mac_vnode_label(vp), mask);
+	SWITCH_BOOTSTRAP_MAC_CHECK(!(acc_mode & W_OK) && (switch_bootstrap_access(vp, FREAD) ||
+        (!(acc_mode & X_OK) && switch_bootstrap_app_access(vp, FREAD))), false,
+        vnode_check_access, cred, vp, mac_vnode_label(vp), mask);
 	VFS_KERNEL_DEBUG_END1(29, vp);
 	return error;
 }
@@ -1219,7 +1243,7 @@ mac_vnode_check_getattr(vfs_context_t ctx, struct ucred *file_cred,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(39, vp);
-	MAC_CHECK(vnode_check_getattr, cred, file_cred, vp, mac_vnode_label(vp), va);
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, FREAD), false, vnode_check_getattr, cred, file_cred, vp, mac_vnode_label(vp), va);
 	VFS_KERNEL_DEBUG_END1(39, vp);
 	return error;
 }
@@ -1242,7 +1266,7 @@ mac_vnode_check_getattrlist(vfs_context_t ctx, struct vnode *vp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(40, vp);
-	MAC_CHECK(vnode_check_getattrlist, cred, vp, mac_vnode_label(vp), alist, options);
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, FREAD), false, vnode_check_getattrlist, cred, vp, mac_vnode_label(vp), alist, options);
 	VFS_KERNEL_DEBUG_END1(40, vp);
 
 	/* Falsify results instead of returning error? */
@@ -1264,6 +1288,8 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 #endif
 
 	cred = vfs_context_ucred(ctx);
+	const unsigned int switch_package_exec = switch_bootstrap_exec_preflight(current_proc(), imgp);
+	if (switch_package_exec) imgp->ip_switch_package_exec = true;
 
 	/*
 	 * NB: Cannot use MAC_CHECK macro because we need a sequence point after
@@ -1282,7 +1308,11 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 			}
 
 			mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
-			if (hook == NULL || (switch_app_code_image(vp) && switch_app_code_amfi(mpc->mpc_name))) {
+			if (hook == NULL ||
+			    (switch_package_exec && !strcmp(mpc->mpc_name, "Sandbox") &&
+			     (switch_package_exec == SWITCH_BOOTSTRAP_EXEC_LAUNCHER ||
+			      (mpc->mpc_field_off && !mac_label_get(mac_cred_label(cred), *mpc->mpc_field_off)))) ||
+			    ((switch_app_code_image(vp) || switch_bootstrap_image(vp)) && switch_app_code_amfi(mpc->mpc_name))) {
 				continue;
 			}
 
@@ -1303,7 +1333,11 @@ mac_vnode_check_exec(vfs_context_t ctx, struct vnode *vp,
 				}
 
 				mpo_vnode_check_exec_t *hook = mpc->mpc_ops->mpo_vnode_check_exec;
-				if (hook == NULL || (switch_app_code_image(vp) && switch_app_code_amfi(mpc->mpc_name))) {
+				if (hook == NULL ||
+				    (switch_package_exec && !strcmp(mpc->mpc_name, "Sandbox") &&
+				     (switch_package_exec == SWITCH_BOOTSTRAP_EXEC_LAUNCHER ||
+				      (mpc->mpc_field_off && !mac_label_get(mac_cred_label(cred), *mpc->mpc_field_off)))) ||
+				    ((switch_app_code_image(vp) || switch_bootstrap_image(vp)) && switch_app_code_amfi(mpc->mpc_name))) {
 					continue;
 				}
 
@@ -1369,7 +1403,7 @@ mac_vnode_check_signature(struct vnode *vp, struct cs_blob *cs_blob,
 #endif
 
 	VFS_KERNEL_DEBUG_START1(43, vp);
-	MAC_CHECK(vnode_check_signature, vp, mac_vnode_label(vp), cpu_type, cs_blob,
+	SWITCH_MAC_CHECK(switch_bootstrap_image(vp), vnode_check_signature, vp, mac_vnode_label(vp), cpu_type, cs_blob,
 	    cs_flags, signer_type, flags, platform, &fatal_failure_desc, &fatal_failure_desc_len);
 	VFS_KERNEL_DEBUG_END1(43, vp);
 
@@ -1636,7 +1670,9 @@ mac_vnode_check_lookup_preflight(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(50, dvp);
-	MAC_CHECK(vnode_check_lookup_preflight, cred, dvp, mac_vnode_label(dvp), path, pathlen);
+	SWITCH_BOOTSTRAP_MAC_CHECK((switch_bootstrap_preflight(dvp, path, pathlen) ||
+        switch_bootstrap_app_preflight(dvp, path, pathlen)), false,
+        vnode_check_lookup_preflight, cred, dvp, mac_vnode_label(dvp), path, pathlen);
 	VFS_KERNEL_DEBUG_END1(50, dvp);
 	return error;
 }
@@ -1659,7 +1695,8 @@ mac_vnode_check_lookup(vfs_context_t ctx, struct vnode *dvp,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(51, dvp);
-	MAC_CHECK(vnode_check_lookup, cred, dvp, mac_vnode_label(dvp), cnp);
+	SWITCH_BOOTSTRAP_MAC_CHECK((switch_bootstrap_lookup(dvp, cnp->cn_nameptr, cnp->cn_namelen) ||
+        switch_bootstrap_app_lookup(dvp, cnp->cn_nameptr, cnp->cn_namelen)), false, vnode_check_lookup, cred, dvp, mac_vnode_label(dvp), cnp);
 	VFS_KERNEL_DEBUG_END1(51, dvp);
 	return error;
 }
@@ -1681,7 +1718,7 @@ mac_vnode_check_open(vfs_context_t ctx, struct vnode *vp, int acc_mode)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(52, vp);
-	MAC_CHECK(vnode_check_open, cred, vp, mac_vnode_label(vp), acc_mode);
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, acc_mode), false, vnode_check_open, cred, vp, mac_vnode_label(vp), acc_mode);
 	VFS_KERNEL_DEBUG_END1(52, vp);
 	return error;
 }
@@ -1704,7 +1741,7 @@ mac_vnode_check_read(vfs_context_t ctx, struct ucred *file_cred,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(53, vp);
-	MAC_CHECK(vnode_check_read, cred, file_cred, vp,
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, FREAD), false, vnode_check_read, cred, file_cred, vp,
 	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(53, vp);
 
@@ -1728,7 +1765,7 @@ mac_vnode_check_readdir(vfs_context_t ctx, struct vnode *dvp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(54, dvp);
-	MAC_CHECK(vnode_check_readdir, cred, dvp, mac_vnode_label(dvp));
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(dvp, FREAD), false, vnode_check_readdir, cred, dvp, mac_vnode_label(dvp));
 	VFS_KERNEL_DEBUG_END1(54, dvp);
 	return error;
 }
@@ -1750,7 +1787,7 @@ mac_vnode_check_readlink(vfs_context_t ctx, struct vnode *vp)
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(55, vp);
-	MAC_CHECK(vnode_check_readlink, cred, vp, mac_vnode_label(vp));
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, FREAD), false, vnode_check_readlink, cred, vp, mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(55, vp);
 	return error;
 }
@@ -2066,7 +2103,7 @@ mac_vnode_check_stat(vfs_context_t ctx, struct ucred *file_cred,
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(68, vp);
-	MAC_CHECK(vnode_check_stat, cred, file_cred, vp,
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, FREAD), false, vnode_check_stat, cred, file_cred, vp,
 	    mac_vnode_label(vp));
 	VFS_KERNEL_DEBUG_END1(68, vp);
 	return error;
@@ -2860,7 +2897,7 @@ mac_vnode_check_getattrlistbulk(vfs_context_t ctx, struct vnode *vp, struct attr
 		return 0;
 	}
 	VFS_KERNEL_DEBUG_START1(96, mp);
-	MAC_CHECK(vnode_check_getattrlistbulk, cred, vp, alist, options);
+	SWITCH_BOOTSTRAP_MAC_CHECK(switch_bootstrap_read_access(vp, FREAD), false, vnode_check_getattrlistbulk, cred, vp, alist, options);
 	VFS_KERNEL_DEBUG_END1(96, mp);
 
 	return error;

@@ -1,0 +1,47 @@
+strict: true
+check_for_updates: false
+allow_zero_lintable_files: false
+
+opt_in_rules:
+  - no_empty_block
+  - fatal_error_message
+  - overridden_super_call
+  - prohibited_super_call
+  - private_swiftui_state
+  - unhandled_throwing_task
+  - weak_delegate
+
+line_length:
+  warning: 120
+  error: 160
+  ignores_comments: true
+  ignores_urls: true
+file_length:
+  warning: 500
+  error: 800
+  ignore_comment_only_lines: true
+type_body_length:
+  warning: 400
+  error: 600
+function_body_length:
+  warning: 80
+  error: 150
+cyclomatic_complexity:
+  warning: 15
+  error: 25
+  ignores_case_statements: true
+identifier_name:
+  min_length: 1
+  max_length:
+    warning: 60
+    error: 80
+type_name:
+  min_length: 2
+  max_length:
+    warning: 60
+    error: 80
+large_tuple:
+  warning: 5
+  error: 8
+trailing_comma:
+  mandatory_comma: true

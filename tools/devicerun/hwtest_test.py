@@ -1,4 +1,4 @@
-"""hwtest.py's checks over synthetic app lines, and its test IDs against hw_test_app's sources."""
+"""hwtest.py's checks over synthetic app lines, and its test IDs against apps/hwtest's sources."""
 
 import plistlib
 import re
@@ -8,7 +8,7 @@ from pathlib import Path
 from tools.devicerun import devicerun, hwtest
 from tools.devicerun.rules import FAIL, INFO, NA, NO_DATA, PASS
 
-APP = Path(__file__).resolve().parents[2] / 'hw_test_app'
+APP = Path(__file__).resolve().parents[2] / 'apps/hwtest'
 SHARED = (APP / 'tests', APP / 'gpu/scenes')
 BY_IOS = {'17': (APP / 'app17',), '27': (APP / 'app27', APP / 'gpu/scenes27')}
 PARAMETERIZED = re.compile(

@@ -4,9 +4,60 @@
 #
 # buildifier runs with every warning category (.buildifier.json "all"): the optional ones (unsorted dict items,
 # docstrings, native rules without a load, ...) are cheap to satisfy in a repository this size.
+load("@rules_python//python:py_test.bzl", "py_test")
+load("@rules_swift_tidy//swifttidy/toolchains:toolchain.bzl", "swiftformat_toolchain")
+load("@xcode//:defs.bzl", "DEVELOPER_DIR")
 load("//bazel/lint:defs.bzl", "lint_files")
+load(":swift.bzl", "swift_sources")
 
 lint_files()
 
 # //:format_test reads it
-exports_files(["format_exempt.txt"])
+exports_files([
+    "format_exempt.txt",
+    "swiftformat.BUILD.bazel",
+    "swiftformat-shift.patch",
+])
+
+# Upstream's tokenizer mistakes a left shift in a ternary for nested generic scopes.
+swiftformat_toolchain(
+    name = "swiftformat",
+    tool = "@swiftformat",
+)
+
+toolchain(
+    name = "swiftformat_toolchain",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+    toolchain = ":swiftformat",
+    toolchain_type = "@rules_swift_tidy//swifttidy:toolchain",
+)
+
+swift_sources(
+    name = "swift_sources",
+    srcs = ["//:lint_files"],
+)
+
+py_test(
+    name = "swift_tools_test",
+    size = "small",
+    srcs = ["swift_tools_test.py"],
+    data = [
+        ":swift_sources",
+        "//:.swiftformat",
+        "//:.swiftlint.yml",
+        "@swiftformat",
+        "@swiftlint",
+    ],
+    env = {
+        "DEVELOPER_DIR": DEVELOPER_DIR,
+        "SWIFT_SOURCES": "$(rlocationpaths :swift_sources)",
+        "SWIFTFORMAT": "$(rlocationpath @swiftformat//:swiftformat)",
+        "SWIFTFORMAT_CONFIG": "$(rlocationpath //:.swiftformat)",
+        "SWIFTLINT": "$(rlocationpath @swiftlint//:swiftlint)",
+        "SWIFTLINT_CONFIG": "$(rlocationpath //:.swiftlint.yml)",
+    },
+    deps = ["@rules_python//python/runfiles"],
+)

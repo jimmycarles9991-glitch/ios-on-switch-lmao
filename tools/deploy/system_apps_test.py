@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from tools.deploy import app_journal, system_apps
-from tools.install import card as cards
+from tools.install import bootstrap_migration, card as cards
 
 
 class Log:
@@ -204,6 +204,29 @@ class SystemAppsTest(unittest.TestCase):
     def test_ios_17_with_bluetooth_registers_at_boot(self):
         self.assertFalse(self.deploy({'code': b'v1'}, ios='17.7.11', boot_args='switch-no-bt=0'))
         self.assertTrue(self.registered())
+
+    def test_managed_packages_preserve_completed_and_pending_native_migrations(self):
+        base = self.data / 'Switch/bootstrap/24B119'
+        base.mkdir(parents=True)
+        self.journal.write_bytes(b'pending system app registration')
+        store = (
+            self.data / 'mobile/Containers/Data/InternalDaemon/UUID/Library/Caches/com.apple.LaunchServices-0.csstore'
+        )
+        store.parent.mkdir(parents=True)
+        store.write_bytes(b'existing LaunchServices store')
+        marker = self.data / system_apps.MARKER
+        marker.touch()
+
+        self.assertTrue(bootstrap_migration.schedule(self.data, '24B119', 'd' * 64, Log(), None))
+        self.assertTrue(marker.is_file())
+        self.assertFalse(self.sentinel.exists())
+        self.assertEqual(self.journal.read_bytes(), b'pending system app registration')
+        self.assertEqual(store.read_bytes(), b'existing LaunchServices store')
+        self.sentinel.parent.mkdir()
+        self.sentinel.touch()
+        self.assertFalse(bootstrap_migration.schedule(self.data, '24B119', 'd' * 64, Log(), None))
+        self.assertTrue(marker.is_file())
+        self.assertTrue(self.sentinel.is_file())
 
     def test_a_requested_migration_clears_the_kernels_one_try_marker_and_the_journal(self):
         self.deploy({'code': b'v1'})

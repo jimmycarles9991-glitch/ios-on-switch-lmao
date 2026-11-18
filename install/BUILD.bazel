@@ -358,6 +358,9 @@ release_tree(
         "//gpu:base": "gpu",
         "//boot:loader": "loader/loader.uboot.bin",
         "//boot:loader_constants": "loader/constants.json",
+        "//bootstrap:payload": "bootstrap/payload.tar",
+        "//bootstrap:manifest": "bootstrap/manifest.json",
+        "//bootstrap:packages": "bootstrap/packages",
     } | {target: "overlay/" + source for target, source in OVERLAY_BINARIES.items()},
     tags = ["manual"],
 )

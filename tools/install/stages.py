@@ -89,6 +89,7 @@ def key_inputs(args: argparse.Namespace, spec: dict, pins: dict) -> dict:
             'cryptexes': [members[m]['content_sha256'] for m in ('system_cryptex', 'app_cryptex')],
             'spec': spec['cryptexes'],
             'overlay': keys.tree_digest(Path(args.boot_package) / 'overlay'),
+            'bootstrap': keys.tree_digest(Path(args.boot_package) / 'bootstrap'),
             'gpu': keys.tree_digest(args.gpu_base),
             'seed': keys.tree_digest(getattr(args, 'shader_seed', None)),
             'pretranslated_pins': keys.tree_digest(getattr(args, 'pretranslated_pins', None)),
@@ -212,6 +213,7 @@ class Stages:
             gpu_stager=self.args.gpu_stager,
             gpu_base=self.args.gpu_base,
             shader_seed=getattr(self.args, 'shader_seed', None),
+            pins=self.pins,
         )
         fill.fill(partial, self.state()['offset'], inputs, self.log)
 
@@ -282,5 +284,6 @@ def boot_record(args: argparse.Namespace) -> dict[str, str | None]:
     trust = Path(args.gpu_base) / 'TegraGM20BMetal.trustcache'
     return {
         'overlay': cards.tree_digest(package / 'overlay'),
+        'bootstrap': keys.tree_digest(package / 'bootstrap'),
         'gpu_trustcache': hashing.sha256_file(trust) if trust.is_file() else None,
     }

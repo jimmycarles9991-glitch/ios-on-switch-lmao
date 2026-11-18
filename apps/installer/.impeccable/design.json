@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-16T14:48:38Z",
+  "title": "Design System: Installer",
+  "extensions": {
+    "colorMeta": {
+      "amber-light": { "role": "primary", "displayName": "Amber tint, light appearance" },
+      "amber-dark": { "role": "primary", "displayName": "Amber tint, dark appearance" },
+      "icon-background-light": { "role": "neutral", "displayName": "Icon background, light appearance" },
+      "icon-background-dark": { "role": "neutral", "displayName": "Icon background, dark appearance" }
+    },
+    "typographyMeta": {
+      "large-title": {
+        "displayName": "Large title",
+        "purpose": "System navigation title; Dynamic Type supplies metrics."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Package names, progress titles, status labels and primary actions use .headline."
+      },
+      "subheadline": {
+        "displayName": "Subheadline",
+        "purpose": "Versions and byte counts use .subheadline; byte counts add .monospacedDigit()."
+      },
+      "body": { "displayName": "Body", "purpose": "Form text and controls inherit system defaults." },
+      "caption": { "displayName": "Caption", "purpose": "Technical details use .caption." }
+    },
+    "shadows": [
+      {
+        "name": "icon-package",
+        "value": "kind: neutral; opacity: 0.3",
+        "purpose": "Package group in AppIcon.icon/icon.json."
+      },
+      {
+        "name": "icon-tray",
+        "value": "kind: neutral; opacity: 0.35",
+        "purpose": "Installation tray group in AppIcon.icon/icon.json."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Source action",
+      "kind": "button",
+      "refersTo": "source-action",
+      "description": "SwiftUI excerpt from InstallerView.swift; displayed as native source.",
+      "html": "<pre><code>Button {\n    choosingFile = true\n} label: {\n    Label(\"Choose IPA\", systemImage: \"folder\")\n}</code></pre>",
+      "css": ""
+    },
+    {
+      "name": "Primary action",
+      "kind": "button",
+      "refersTo": "primary-action",
+      "description": "Install or Update confirmation; the same native treatment is used for Open.",
+      "html": "<pre><code>Button {\n    model.install()\n} label: {\n    Text(model.package?.isUpdate == true ? \"Update App\" : \"Install App\")\n        .foregroundStyle(Color(uiColor: .systemBackground))\n}\n.font(.headline)\n.frame(maxWidth: .infinity, minHeight: 44)\n.buttonStyle(.borderedProminent)</code></pre>",
+      "css": ""
+    },
+    {
+      "name": "Download link",
+      "kind": "input",
+      "refersTo": "download-link",
+      "description": "Native URL field with system keyboard and submission behavior.",
+      "html": "<pre><code>TextField(\"https://example.com/app.ipa\", text: $link, axis: .vertical)\n    .keyboardType(.URL)\n    .textInputAutocapitalization(.never)\n    .autocorrectionDisabled()\n    .focused($focused)\n    .submitLabel(.go)\n    .onSubmit { submit() }\n    .accessibilityLabel(\"IPA download link\")</code></pre>",
+      "css": ""
+    },
+    {
+      "name": "Navigation workspace",
+      "kind": "nav",
+      "refersTo": "navigation",
+      "description": "Native Form modifiers inside NavigationStack; excerpt from InstallerView.swift.",
+      "html": "<pre><code>.frame(maxWidth: 720)\n.frame(maxWidth: .infinity)\n.background(Color(uiColor: .systemGroupedBackground))\n.navigationTitle(\"Installer\")</code></pre>",
+      "css": ""
+    },
+    {
+      "name": "Package summary",
+      "kind": "custom",
+      "refersTo": "package-summary",
+      "description": "Native package name and version stack; the artwork uses @ScaledMetric with a 64 pt base.",
+      "html": "<pre><code>VStack(alignment: .leading, spacing: 4) {\n    Text(package.info.name).font(.headline).textSelection(.enabled)\n    Text(\"Version \\(package.info.version)\").font(.subheadline).foregroundStyle(.secondary)\n}</code></pre>",
+      "css": ""
+    },
+    {
+      "name": "Progress",
+      "kind": "custom",
+      "refersTo": "progress",
+      "description": "Indeterminate native progress row; download progress is determinate when size is known.",
+      "html": "<pre><code>HStack(spacing: 12) {\n    ProgressView()\n    Text(title).font(.headline)\n}\n.padding(.vertical, 8)\nif model.phase.canCancel {\n    Button(\"Cancel\", role: .cancel) { model.cancel() }\n}</code></pre>",
+      "css": ""
+    },
+    {
+      "name": "Technical details",
+      "kind": "custom",
+      "refersTo": "technical-details",
+      "description": "Native disclosure keeps selectable diagnostics below the failure message.",
+      "html": "<pre><code>DisclosureGroup(\"Technical details\") {\n    Text(model.technicalDetails).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)\n}</code></pre>",
+      "css": ""
+    }
+  ],
+  "narrative": {
+    "overview": "System navigation and grouped forms keep package identity, actions and installation state in one workspace.",
+    "keyCharacteristics": [
+      "Adaptive amber tint on native controls.",
+      "System text styles and SF Symbols."
+    ],
+    "rules": [],
+    "dos": [],
+    "donts": []
+  }
+}

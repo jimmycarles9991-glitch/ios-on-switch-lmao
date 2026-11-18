@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
@@ -13452,6 +13453,7 @@ vm_map_fork(
 
 	/* inherit cs_enforcement */
 	new_map->switch_app_code = old_map->switch_app_code;
+	new_map->switch_tweaks = old_map->switch_tweaks;
 	vm_map_cs_enforcement_set(new_map, old_map->cs_enforcement);
 
 	vm_map_lock(new_map);
@@ -21443,7 +21445,7 @@ boolean_t
 vm_map_cs_enforcement(
 	vm_map_t map)
 {
-	if (map->switch_app_code) return FALSE;
+	if (map->switch_app_code || map->switch_tweaks) return FALSE;
 	if (cs_process_enforcement_enable) {
 		return TRUE;
 	}
@@ -21489,6 +21491,24 @@ vm_map_cs_debugged_set(
 }
 
 bool
+switch_bootstrap_map_enabled(vm_map_t map)
+{
+    return map->switch_tweaks;
+}
+
+void
+switch_bootstrap_map(vm_map_t map)
+{
+    vm_map_lock(map);
+    map->switch_tweaks = TRUE;
+    map->cs_enforcement = FALSE;
+    map->switch_protect = FALSE;
+    map->cs_debugged = TRUE;
+    pmap_set_vm_map_cs_enforced(map->pmap, FALSE);
+    vm_map_unlock(map);
+}
+
+bool
 switch_app_code_map_enabled(vm_map_t map)
 {
 	return map->switch_app_code;
@@ -21510,7 +21530,7 @@ vm_map_cs_enforcement_set(
 	boolean_t val)
 {
 	vm_map_lock(map);
-	if (map->switch_app_code) val = FALSE;
+	if (map->switch_app_code || map->switch_tweaks) val = FALSE;
 	map->cs_enforcement = val;
 	pmap_set_vm_map_cs_enforced(map->pmap, val);
 	vm_map_unlock(map);

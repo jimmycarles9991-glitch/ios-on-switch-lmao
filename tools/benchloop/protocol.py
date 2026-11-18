@@ -1,7 +1,7 @@
 """The batch and result files the host and HW Test's bench loop exchange (benchloop/6).
 
 A batch is one JSON object; each experiment in it is validated here before it is written, and again by the app
-(hw_test_app/bench) before it runs. Byte strings travel as base64. Limits keep every command buffer far below the
+(apps/hwtest/bench) before it runs. Byte strings travel as base64. Limits keep every command buffer far below the
 kernel's stuck-channel rule (500 ms without a completed fence), which bounds a hung experiment instead of a CPU timeout.
 """
 
@@ -64,7 +64,7 @@ FORMATS = {
 
 # MAXWELL_B methods a readback experiment may set around its draw: the blend, iterated blend and colour write state, and
 # every ROP option that could trade colour precision (the owner's question: is an inexact result our configuration).
-# The raw path owns everything else (raw_owned.h); hw_test_app/bench/switch_bench_methods.h holds the same ranges.
+# The raw path owns everything else (raw_owned.h); apps/hwtest/bench/switch_bench_methods.h holds the same ranges.
 METHOD_RANGES = (
     (0x02E0, 0x02E4),  # DECOMPRESS_SURFACE
     (0x02F4, 0x02F8),  # SET_ITERATED_BLEND_OPTIMIZATION
@@ -156,9 +156,9 @@ PICTURE = ('bgra8unorm', 64, 64)
 # compare: the same operation again through another unit, both results and their difference returned
 COMPARES = {'twod': ('program', 'copy', 'resolve3d', 'sampled3d'), 'readback': ('plain',)}
 MAX_OUTPUT = 64 * 1024
-# QMDs a compute experiment's own one may name dependent, one after another (hw_test_app/bench switch_bench.h)
+# QMDs a compute experiment's own one may name dependent, one after another (apps/hwtest/bench switch_bench.h)
 MAX_CHAIN = 3
-# A pack experiment (hw_test_app/bench/bench_pack.cpp): a pack state drawn with its own programs, quads in one command
+# A pack experiment (apps/hwtest/bench/bench_pack.cpp): a pack state drawn with its own programs, quads in one command
 # buffer, each with uniform blocks at offsets in a 64 KiB region of its own, in one form of a split draw
 PACK_KEYS = {'form', 'ca', 'quads'}
 QUAD_KEYS = {'rect', 'ubos', 'vertices', 'primitive', 'first', 'count'}

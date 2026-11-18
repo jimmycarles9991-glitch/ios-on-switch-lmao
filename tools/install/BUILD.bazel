@@ -16,6 +16,8 @@ py_library(
     srcs = [
         "apfs.py",
         "apfs_tree.py",
+        "bootstrap.py",
+        "bootstrap_migration.py",
         "card.py",
         "compose.py",
         "cryptex.py",
@@ -40,6 +42,7 @@ py_library(
         "room.py",
         "space.py",
         "stages.py",
+        "staged_apps.py",
         "target.py",
         "to_card.py",
     ],
@@ -48,6 +51,7 @@ py_library(
         "//tools/common:files",
         "//tools/common:hashing",
         "//tools/common:paths",
+        "//tools/common:seed_manifest",
         "//tools/common:sudo",
     ],
 )
@@ -97,7 +101,10 @@ py_binary(
 py_library(
     name = "artifacts_lib",
     srcs = ["artifacts.py"],
-    deps = ["//tools/common:hashing"],
+    deps = [
+        ":lib",
+        "//tools/common:hashing",
+    ],
 )
 
 py_test(
@@ -190,8 +197,19 @@ py_library(
     "pretranslate",
     "progress",
     "space",
+    "staged_apps",
     "to_card",
 ]]
+
+py_test(
+    name = "bootstrap_test",
+    size = "small",
+    srcs = [
+        "artifacts.py",
+        "bootstrap_test.py",
+    ],
+    deps = [":lib"],
+)
 
 py_test(
     name = "card_test",

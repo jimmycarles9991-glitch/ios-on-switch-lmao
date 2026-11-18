@@ -628,7 +628,8 @@ struct _vm_map {
 	/* boolean_t */ corpse_source:1,          /* map is being used to create a corpse for diagnostics.*/
 	/* reserved */ res0:1,
 	switch_app_code:1,
-	/* reserved  */pad:8;
+	switch_tweaks:1,
+	/* reserved  */pad:7;
 	unsigned int            timestamp;        /* Version number */
 };
 

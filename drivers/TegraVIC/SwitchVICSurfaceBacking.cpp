@@ -21,7 +21,9 @@ struct CachedSurface {
 CachedSurface gSurfaces[kSurfaceCacheCount];
 IOLock *gLock;
 uint64_t gClock, gBytes;
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 uint64_t gLockTakes;  // debug kernels: written under gLock
+#endif
 
 void noteLock()
 {

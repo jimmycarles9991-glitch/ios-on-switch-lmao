@@ -141,6 +141,10 @@ TEST(DisplayPlanesSource, DriverFollowsTheRules)
 TEST(DisplayPlanesSource, TheConsoleHoldKeepsTheScreen)
 {
     const std::string source = Display(), planes = Planes();
+    const CodeText release(Configured(source, "(defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)", false));
+    EXPECT_FALSE(release.has("extern \"C\" __attribute__((weak)) volatile int switch_console_hold"));
+    EXPECT_FALSE(release.has("if (consoleHolds())"));
+    EXPECT_FALSE(release.has("void kickHeld("));
     EXPECT_EQ(CodeText(source).count("switch_console_hold"), 4u);  // the declaration, consoleHolds and its comment
     EXPECT_TRUE(Block(source, "bool consoleHolds() const")
                     .before("if (rotated || &switch_console_hold == nullptr) return false;",

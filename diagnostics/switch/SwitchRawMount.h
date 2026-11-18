@@ -241,6 +241,10 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
  * without root); code in them still needs its CDHash in the trust cache, which the packager adds as a module of its
  * own. A directory with nothing deployed is skipped; a failed union is logged and boot continues. */
 #include <pexpert/device_tree.h>
+#if XNU_10063_141_1
+#include <IOKit/IOLib.h>
+#include "SwitchLaunchdCatalog.h"
+#endif
 
 static void native_switch_raw_overlay(proc_t p, user_addr_t scratch)
 {
@@ -276,6 +280,15 @@ static void native_switch_raw_overlay(proc_t p, user_addr_t scratch)
             if (off)
                 continue;
         }
+#if XNU_10063_141_1
+        if (!strcmp(directory, "/System/Library/xpc")) {
+            const int error = switch_launchd_catalog_pair(p, chosen);
+            if (error) {
+                IOLog("SwitchOverlay: launchd catalog verification failed (%d), using sealed catalog\n", error);
+                continue;
+            }
+        }
+#endif
         snprintf(source, sizeof(source), "/private/var/Switch/overlay%s", directory);
         vnode_t probe = NULLVP;
         int error = vnode_lookup(source, 0, &probe, vfs_context_current());

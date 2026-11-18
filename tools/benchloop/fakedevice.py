@@ -1,6 +1,6 @@
 """HW Test's bench loop played on the Mac over a folder, so the whole loop runs without a Switch.
 
-The folder side is hw_test_app/kit/BenchLoop.swift's: batches from inbox/, a journal line before and after each
+The folder side is apps/hwtest/kit/BenchLoop.swift's: batches from inbox/, a journal line before and after each
 experiment, one result file each, done.json, the batch moved beside its results. The GPU side is fakegpu.py's model.
 Result files have the app's fields (core/BenchResult.swift), so the host reads them with the same code.
 """

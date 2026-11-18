@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2000-2012 Apple Inc. All rights reserved.
  *
@@ -345,7 +346,7 @@ cs_process_invalidated(struct proc * __unused p)
 int
 cs_process_enforcement(struct proc *p)
 {
-	if (switch_app_code_process(p ? p : current_proc())) return 0;
+	if (switch_app_code_process(p ? p : current_proc()) || switch_bootstrap_process(p ? p : current_proc())) return 0;
 	if (cs_process_enforcement_enable) {
 		return 1;
 	}

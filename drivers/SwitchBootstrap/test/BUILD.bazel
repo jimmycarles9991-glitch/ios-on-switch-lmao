@@ -1,0 +1,314 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+
+lint_files()
+
+exports_files(
+    ["core_manifest.json"],
+    visibility = ["//drivers/SwitchBootstrap:__pkg__"],
+)
+
+copy_file(
+    name = "daemon_jobs_source",
+    src = "daemon_jobs_test.mm",
+    out = "daemon_jobs_test.cpp",
+)
+
+host_test(
+    name = "daemon_jobs_test",
+    srcs = [
+        ":daemon_jobs_source",
+        "//bootstrap/launchctl:daemon_result.h",
+        "//drivers/SwitchBootstrap:daemon_jobs.h",
+        "//drivers/SwitchBootstrap:process.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:daemon_jobs.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-I.",
+        "-Wno-deprecated-declarations",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)
+
+host_test(
+    name = "process_test",
+    srcs = [
+        "process_test.cpp",
+        "//drivers/SwitchBootstrap:process.h",
+        "//drivers/SwitchBootstrap:process_wait.h",
+        "//bootstrap/launchctl:daemon_result.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:process.c"],
+    copts = [
+        "-UNDEBUG",
+        "-I.",
+        "-Wno-writable-strings",
+    ],
+    gtest_main = False,
+)
+
+host_test(
+    name = "payload_test",
+    srcs = [
+        "archive_fixture.h",
+        "payload_test.cpp",
+        "//drivers/SwitchBootstrap:archive.h",
+        "//drivers/SwitchBootstrap:payload.h",
+    ],
+    copts = ["-UNDEBUG"],
+    gtest_main = False,
+    linkopts = ["-larchive.2"],
+    deps = [":payload"],
+)
+
+host_library(
+    name = "payload",
+    srcs = ["//drivers/SwitchBootstrap:payload.c"],
+    hdrs = [
+        "//drivers/SwitchBootstrap:archive.h",
+        "//drivers/SwitchBootstrap:payload.h",
+    ],
+)
+
+copy_file(
+    name = "seed_source",
+    src = "seed_test.mm",
+    out = "seed_test.cpp",
+)
+
+host_test(
+    name = "seed_test",
+    srcs = [
+        ":seed_source",
+        ":configuration",
+        ":hash",
+        "archive_fixture.h",
+        "//drivers/SwitchBootstrap:archive.h",
+        "//drivers/SwitchBootstrap:payload.h",
+        "//drivers/SwitchBootstrap:seed.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:seed.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-Wno-deprecated-declarations",
+        "-UNDEBUG",
+        "-I.",
+        "-I$(GENDIR)/drivers/SwitchBootstrap/test",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+        "-larchive.2",
+    ],
+    deps = [":payload"],
+)
+
+copy_file(
+    name = "activation_source",
+    src = "activation_test.mm",
+    out = "activation_test.cpp",
+)
+
+host_test(
+    name = "activation_test",
+    srcs = [
+        ":activation_source",
+        ":configuration",
+        ":hash",
+        "//drivers/SwitchBootstrap:core_update.h",
+        "//drivers/SwitchBootstrap:daemon_jobs.h",
+        "//drivers/SwitchBootstrap:migration_boot.h",
+        "//drivers/SwitchBootstrap:migration_state.h",
+        "//drivers/SwitchBootstrap:payload.h",
+        "//drivers/SwitchBootstrap:process.h",
+        "//drivers/SwitchBootstrap:seed.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:bootstrap.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-Wno-deprecated-declarations",
+        "-UNDEBUG",
+        "-I.",
+        "-I$(GENDIR)/drivers/SwitchBootstrap/test",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)
+
+copy_file(
+    name = "core_update_source",
+    src = "core_update_test.mm",
+    out = "core_update_test.cpp",
+)
+
+host_test(
+    name = "core_update_test",
+    srcs = [
+        ":core_update_source",
+        ":hash",
+        "//drivers/SwitchBootstrap:core_update.h",
+        "//drivers/SwitchBootstrap:payload.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:core_update.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-I.",
+        "-I$(GENDIR)/drivers/SwitchBootstrap/test",
+        "-Wno-deprecated-declarations",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)
+
+write_file(
+    name = "configuration",
+    out = "build_configuration.h",
+    content = [
+        '#define SWITCH_BOOTSTRAP_BUILD "TEST1"',
+        '#define SWITCH_BOOTSTRAP_FIRMWARE "17.7.11"',
+        '#define SWITCH_BOOTSTRAP_ROOT "/unused/root"',
+        '#define SWITCH_BOOTSTRAP_BASE "/unused"',
+        '#define SWITCH_BOOTSTRAP_HELPER "/unused/switch-bootstrap"',
+    ],
+)
+
+genrule(
+    name = "hash",
+    srcs = ["core_manifest.json"],
+    outs = ["payload_hash.h"],
+    cmd = "$(execpath //drivers/SwitchBootstrap:configuration) --manifest $(execpath :core_manifest.json) --out $@",
+    tools = ["//drivers/SwitchBootstrap:configuration"],
+)
+
+copy_file(
+    name = "runtime_source",
+    src = "runtime_test.mm",
+    out = "runtime_test.cpp",
+)
+
+host_test(
+    name = "runtime_test",
+    srcs = [
+        ":runtime_source",
+        ":configuration",
+        ":hash",
+        "archive_fixture.h",
+        "//drivers/SwitchBootstrap:archive.h",
+        "//drivers/SwitchBootstrap:core_update.h",
+        "//drivers/SwitchBootstrap:daemon_jobs.h",
+        "//drivers/SwitchBootstrap:migration_boot.h",
+        "//drivers/SwitchBootstrap:migration_state.h",
+        "//drivers/SwitchBootstrap:seed.h",
+        "//drivers/SwitchBootstrap:payload.h",
+        "//drivers/SwitchBootstrap:process.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = [
+        "//drivers/SwitchBootstrap:bootstrap.mm",
+        "//drivers/SwitchBootstrap:core_update.mm",
+        "//drivers/SwitchBootstrap:seed.mm",
+    ],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-Wno-deprecated-declarations",
+        "-UNDEBUG",
+        "-Idrivers/SwitchBootstrap/test",
+        "-I$(GENDIR)/drivers/SwitchBootstrap/test",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+        "-larchive.2",
+    ],
+    deps = [":payload"],
+)
+
+copy_file(
+    name = "migration_state_source",
+    src = "migration_state_test.mm",
+    out = "migration_state_test.cpp",
+)
+
+host_test(
+    name = "migration_state_test",
+    srcs = [
+        ":configuration",
+        ":migration_state_source",
+        "//drivers/SwitchBootstrap:migration_state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:migration_state.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-I$(GENDIR)/drivers/SwitchBootstrap/test",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)
+
+copy_file(
+    name = "migration_boot_source",
+    src = "migration_boot_test.mm",
+    out = "migration_boot_test.cpp",
+)
+
+host_test(
+    name = "migration_boot_test",
+    srcs = [
+        ":migration_boot_source",
+        "//drivers/SwitchBootstrap:daemon_jobs.h",
+        "//drivers/SwitchBootstrap:migration_boot.h",
+        "//drivers/SwitchBootstrap:migration_state.h",
+        "//drivers/SwitchBootstrap:process.h",
+        "//drivers/SwitchBootstrap:state.h",
+    ],
+    additional_compiler_inputs = ["//drivers/SwitchBootstrap:migration_boot.mm"],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-I.",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)

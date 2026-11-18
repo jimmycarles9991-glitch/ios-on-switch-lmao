@@ -1,0 +1,55 @@
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:checks.bzl", "lint_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+lint_test(
+    name = "style_test",
+    srcs = [
+        "BUILD.bazel",
+        "signing_test.py",
+    ],
+    checks = [
+        "buildifier",
+        "buildifier_format",
+        "ruff",
+        "ruff_format",
+    ],
+)
+
+exports_files([
+    "adhoc.mobileprovision",
+    "rules_apple.patch",
+])
+
+filegroup(
+    name = "signing_apps",
+    testonly = True,
+    srcs = [
+        "//apps/hwtest:SwitchHWTest17",
+        "//apps/hwtest:SwitchHWTest27",
+        "//apps/installer:SwitchInstaller17",
+        "//apps/installer:SwitchInstaller27",
+    ],
+)
+
+py_test(
+    name = "signing_test",
+    size = "small",
+    srcs = ["signing_test.py"],
+    data = [":signing_apps"],
+    env = select({
+        "//bazel:debug": {
+            "APPS": "$(rootpaths :signing_apps)",
+            "IMPORT_DIAGNOSTICS": "1",
+        },
+        "//conditions:default": {
+            "APPS": "$(rootpaths :signing_apps)",
+            "IMPORT_DIAGNOSTICS": "0",
+        },
+    }),
+    deps = ["//tools/deploy:lib"],
+)

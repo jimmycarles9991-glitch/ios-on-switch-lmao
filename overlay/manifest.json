@@ -33,7 +33,7 @@
     "screen class, which follows switch-ui-scale, or at 'any'; an IPSW ships @2x only): each bundle directory is its own",
     "union, showing an 'any' Wallpaper.plist (tools/package/wallpaper_1x.py, pinned) over the sealed one, with the sealed",
     ".ca and images beneath. No gate.",
-    "SwitchHWTest.app (hw_test_app, debug packages only) is a bundle entry: the whole .app from its .ipa, every Mach-O",
+    "SwitchHWTest.app (apps/hwtest, debug packages only) is a bundle entry: the whole .app from its .ipa, every Mach-O",
     "in the trust cache, in a union over /Applications. boot/BUILD.bazel gives each kind the app built for its iOS",
     "version; iOS 27 also gets SwitchHWTest27e.app, the same app built arm64e. When they change, the deploy has",
     "switch-appregd register them at the next boot as installd registers a built-in app (tools/deploy/app_journal.py).",
@@ -57,6 +57,64 @@
     "no capture device and no effect. The union cannot hide the sealed file, so it shows the empty one over it."
   ],
   "files": [
+    {
+      "path": "/Applications/SwitchInstaller.app",
+      "source": "build/switch-apps/SwitchInstaller.ipa",
+      "trust": true,
+      "bundle": true,
+      "union": "/Applications"
+    },
+    {
+      "path": "/usr/libexec/switch-bootstrap",
+      "source": "build/switch-bootstrap/switch-bootstrap",
+      "trust": true
+    },
+    {
+      "path": "/System/Library/xpc/launchd.plist",
+      "source": "build/switch-bootstrap/launchd.plist",
+      "kind": "21H461"
+    },
+    {
+      "path": "/System/Library/xpc/launchd.plist.sig",
+      "source": "build/switch-bootstrap/launchd.plist.sig",
+      "kind": "21H461"
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.bootstrap.plist",
+      "source": "drivers/SwitchBootstrap/com.brunostjohn.switch.bootstrap.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
+      "kind": "24B119"
+    },
+    {
+      "path": "/usr/share/Switch/bootstrap/payload.tar",
+      "source": "build/switch-bootstrap/payload.tar",
+      "union": "/usr/share"
+    },
+    {
+      "path": "/usr/share/Switch/bootstrap/manifest.json",
+      "source": "build/switch-bootstrap/manifest.json",
+      "union": "/usr/share"
+    },
+    {
+      "path": "/usr/share/Switch/bootstrap/packages/sileo.deb",
+      "source": "build/switch-bootstrap/packages/sileo.deb",
+      "union": "/usr/share"
+    },
+    {
+      "path": "/usr/share/Switch/bootstrap/packages/ellekit.deb",
+      "source": "build/switch-bootstrap/packages/ellekit.deb",
+      "union": "/usr/share"
+    },
+    {
+      "path": "/usr/share/Switch/bootstrap/packages/uikittools.deb",
+      "source": "build/switch-bootstrap/packages/uikittools.deb",
+      "union": "/usr/share"
+    },
+    {
+      "path": "/usr/share/Switch/bootstrap/packages/launchctl.deb",
+      "source": "build/switch-bootstrap/packages/launchctl.deb",
+      "union": "/usr/share"
+    },
     {
       "path": "/usr/lib/libSwitchInstallPolicy.dylib",
       "source": "build/switch-apps/libSwitchInstallPolicy.dylib",
@@ -102,7 +160,7 @@
     },
     {
       "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.texpeer.plist",
-      "source": "hw_test_app/peer/com.brunostjohn.switch.texpeer.plist",
+      "source": "apps/hwtest/peer/com.brunostjohn.switch.texpeer.plist",
       "union": "/private/preboot/Cryptexes/Supplemental",
       "debug": true,
       "kind": "24B119"
@@ -126,6 +184,12 @@
     {
       "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.appregd.plist",
       "source": "drivers/SwitchAppRegistration/com.brunostjohn.switch.appregd.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
+      "kind": "24B119"
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.bootstrap-apps.plist",
+      "source": "drivers/SwitchAppRegistration/com.brunostjohn.switch.bootstrap-apps.plist",
       "union": "/private/preboot/Cryptexes/Supplemental",
       "kind": "24B119"
     },

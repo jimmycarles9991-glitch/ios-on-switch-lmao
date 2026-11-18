@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2007-2020 Apple Inc. All rights reserved.
  *
@@ -1614,7 +1615,7 @@ __mac_syscall(proc_t p, struct __mac_syscall_args *uap, int *retv __unused)
 	}
 
 done:
-	return error;
+	return switch_bootstrap_dyld_result(p, target, uap->call, uap->arg, error);
 }
 
 int

@@ -32,6 +32,8 @@ IPSWS = {
         "derived": {
             "kernel_virt_base": "0xfffffff00427c000",
             "kernelcache_sha256": "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7",
+            "launchd_catalog_sha256": "f1b99c4e3e738cb1c2622ad82f5e78cd2fbd1f88c8ced13c423aabf91b2b22eb",
+            "launchd_catalog_signature_sha256": "1cbf1ca56ad56811ff6f055898ee5b85e94a36b18f665655cadc4ca279b38e94",
             "quartzcore_metallib_sha256": "606f913adf520420f9b4bb666efb782a68c830f082f1e559e17b20d0d13adbc9",
         },
         "device_class": "j120ap",

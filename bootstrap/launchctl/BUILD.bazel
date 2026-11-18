@@ -1,0 +1,159 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//kernel/rules:inputs.bzl", "tool_output")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+lint_files()
+
+py_binary(
+    name = "adapt",
+    srcs = ["adapt.py"],
+)
+
+tool_output(
+    name = "adapted_bootstrap",
+    srcs = ["@bootstrap_launchctl//:bootstrap.c"],
+    outs = ["bootstrap.c"],
+    args = [
+        "bootstrap",
+        "$(execpath @bootstrap_launchctl//:bootstrap.c)",
+        "{out}",
+    ],
+    binary = ":adapt",
+    xcode = False,
+)
+
+tool_output(
+    name = "adapted_userswitch",
+    srcs = ["@bootstrap_launchctl//:userswitch.c"],
+    outs = ["userswitch.c"],
+    args = [
+        "userswitch",
+        "$(execpath @bootstrap_launchctl//:userswitch.c)",
+        "{out}",
+    ],
+    binary = ":adapt",
+    xcode = False,
+)
+
+_PROC_INFO_HEADERS = {
+    "//kernel:xnu_12377_121_6": "//kernel/xnu-12377.121.6/bsd:sys/proc_info.h",
+    "//conditions:default": "//kernel/xnu-10063.141.1/bsd:sys/proc_info.h",
+}
+
+tool_output(
+    name = "adapted_procinfo",
+    srcs = ["@bootstrap_launchctl//:procinfo.c"] + select({key: [header] for key, header in _PROC_INFO_HEADERS.items()}),
+    outs = ["procinfo.c"],
+    args = [
+        "procinfo",
+        "$(execpath @bootstrap_launchctl//:procinfo.c)",
+        "{out}",
+    ] + select({
+        key: ["$(execpath " + header + ")"]
+        for key, header in _PROC_INFO_HEADERS.items()
+    }),
+    binary = ":adapt",
+    xcode = False,
+)
+
+ios_binary(
+    name = "launchctl",
+    srcs = [
+        ":adapted_bootstrap",
+        ":adapted_procinfo",
+        ":adapted_userswitch",
+        "daemon_result.c",
+    ] + ["@bootstrap_launchctl//:" + name + ".c" for name in [
+        "attach",
+        "blame",
+        "dumpjpcategory",
+        "enable",
+        "env",
+        "error",
+        "examine",
+        "kickstart",
+        "kill",
+        "launchctl",
+        "limit",
+        "list",
+        "load",
+        "manager",
+        "plist",
+        "print",
+        "reboot",
+        "rem",
+        "remove",
+        "resolveport",
+        "runstats",
+        "start_stop",
+        "version",
+        "xpc_helper",
+    ]],
+    out = "ios/launchctl",
+    hdrs = ["daemon_result.h"] + ["@bootstrap_launchctl//:" + name for name in [
+        "Info.plist",
+        "launchctl.h",
+        "os_alloc_once.h",
+        "vproc_priv.h",
+        "xpc_private.h",
+    ]],
+    copts = [
+        "-O2",
+        "-fblocks",
+        "-I.",
+        "-Iexternal/+bootstrap_dependencies+bootstrap_launchctl",
+        "-Wl,-sectcreate,__TEXT,__info_plist,external/+bootstrap_dependencies+bootstrap_launchctl/Info.plist",
+    ],
+    entitlements = "@bootstrap_launchctl//:launchctl.xml",
+    pagesize = "4096",
+    sign_identifier = "com.brunostjohn.switch.launchctl",
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "package",
+    srcs = ["package.py"],
+    visibility = ["//bootstrap:__pkg__"],
+    deps = ["//bootstrap:packages_lib"],
+)
+
+py_test(
+    name = "compatibility_test",
+    size = "small",
+    srcs = ["compatibility_test.py"],
+    data = [
+        "daemon_result.c",
+        "daemon_result.h",
+        "@bootstrap_launchctl//:bootstrap.c",
+        "@bootstrap_launchctl//:userswitch.c",
+    ],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [
+        ":adapt",
+        ":package",
+    ],
+)
+
+exports_files(
+    ["daemon_result.h"],
+    visibility = ["//visibility:public"],
+)
+
+host_library(
+    name = "daemon_result",
+    srcs = ["daemon_result.c"],
+    hdrs = ["daemon_result.h"],
+    copts = ["-fblocks"],
+)
+
+host_test(
+    name = "daemon_result_test",
+    srcs = ["daemon_result_test.cpp"],
+    copts = ["-UNDEBUG"],
+    gtest_main = False,
+    deps = [":daemon_result"],
+)

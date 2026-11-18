@@ -175,6 +175,16 @@ def h(n: int) -> bytes:
 
 
 class CdhashLists(unittest.TestCase):
+    def test_launchd_catalogue_keeps_both_raw_digests_in_order(self):
+        adt_edit = load_adt_edit()
+        adt = adt_edit.ipad_adt(switch_tree())
+        digest = bytes(range(64))
+        result = adt_edit.with_launchd_catalog_sha256(adt, digest)
+        chosen = properties(find(adt_edit.adt_parse(result)[0], 'chosen'))
+        self.assertEqual(chosen['switch-launchd-catalog-sha256'], digest)
+        with self.assertRaisesRegex(SystemExit, 'two SHA-256 digests'):
+            adt_edit.with_launchd_catalog_sha256(adt, digest[:32])
+
     def test_each_role_lists_its_modules_cdhashes_ascending_and_once(self):
         adt_edit = load_adt_edit()
         system, translated = trust_module([h(9), h(3)]), trust_module([h(3), h(5)])

@@ -68,10 +68,12 @@ from tools.deploy import (
     system_apps,
 )
 from tools.install import (
+    bootstrap,
     card as cards,
     host,
     progress,
     renamed,
+    staged_apps,
 )
 
 # Logging profiles put on Data by hand during bring-up, which nothing else removes: com.apple.SystemConfiguration at
@@ -282,6 +284,8 @@ def _write(
     steps = _Steps(log)
     apps = steps.run('system apps registration', system_apps.apps, data_root)
     cards.sync_overlay(data_root, args.boot_package, log)
+    pins = json.loads(Path(args.ipsw).read_text()) if args.ipsw else {}
+    steps.run('bootstrap migration', bootstrap.stage, data_root, args.boot_package, pins, log)
     steps.run(
         'deployed.json',
         deployed.record,
@@ -344,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
                 with cards.mounted(preboot, log) as preboot_root:
                     renamed.migrate_preboot(preboot_root, spec, log)
             system = pull_logs.data_volume(card, spec['volumes'].get('system', {}).get('uuid', '').upper())
+            if staged_apps.stage_on_card(data, Path(args.boot_package), log):
+                args.rerun_migration = True
             with cards.mounted(data, log) as data_root:
                 not_done = _write(args, data_root, Volumes(fat.identifier, system), pairing, log)
             if not args.no_eject:

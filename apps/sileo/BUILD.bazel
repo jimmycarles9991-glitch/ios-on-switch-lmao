@@ -1,0 +1,127 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bootstrap:rules.bzl", "xcode_source_product")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+py_library(
+    name = "adaptation",
+    srcs = [
+        "sileo_scene.py",
+        "sileo_popup.py",
+        "sileo_ui.py",
+        "adapt.py",
+    ],
+    data = [
+        "SwitchBarAppearance.h",
+        "SwitchBarAppearance.m",
+        "SwitchSceneDelegate.swift",
+    ],
+    deps = ["//bootstrap:xcode"],
+)
+
+py_test(
+    name = "sileo_scene_test",
+    size = "small",
+    srcs = ["sileo_scene_test.py"],
+    data = [
+        "sileo_scene_test.swift",
+        "@bootstrap_sileo//:Sileo/AppDelegate.swift",
+        "@bootstrap_sileo//:Sileo/Base.lproj/Main.storyboard",
+        "@bootstrap_sileo//:Sileo/Info.plist",
+    ],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [":adaptation"],
+)
+
+py_test(
+    name = "sileo_ui_test",
+    size = "small",
+    srcs = ["sileo_ui_test.py"],
+    data = [
+        "sileo_ui_test.swift",
+        "sileo_bars_test.m",
+        "sileo_geometry_test.swift",
+        "@bootstrap_sileo//:Sileo/UI/NewsViewController/NewsViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/PackageListViewController/ListHeader/PackageListHeader.swift",
+        "@bootstrap_sileo//:Sileo/UI/PackageViewController/DepictionView/DepictionScreenshotsView/DepictionScreenshotsViewController/DepictionScreenshotsViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/PackageViewController/PackageViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/NativePackageViewController/NativePackageViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/SourcesViewController/SourcesSplitViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/SettingsViewController/Root/SettingsViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/SettingsViewController/Themes/ThemePickerView.swift",
+        "@bootstrap_sileo//:Sileo/UI/WhiteBlur/WhiteBlur.h",
+        "@bootstrap_sileo//:Sileo/UI/WhiteBlur/WhiteBlur.m",
+        "@bootstrap_sileo//:Sileo/UI/TabBarController/TabBar.swift",
+        "@bootstrap_sileo//:Sileo/UI/TabBarController/TabBarController.swift",
+        "@bootstrap_sileo//:Sileo/AppDelegate.swift",
+        "@bootstrap_sileo//:Sileo/Info.plist",
+        "@bootstrap_sileo//:Sileo/Sileo-Bridging-Header.h",
+        "@bootstrap_sileo//:Sileo/UI/FeaturedViewController/FeaturedViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/PackageListViewController/PackageListViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/SettingsViewController/Root/SettingsIconHeaderView.swift",
+        "@bootstrap_sileo//:Sileo/UI/SourcesViewController/SourcesViewController.swift",
+        "@bootstrap_sileo//:Sileo/UI/Utils/PackageIconView.swift",
+    ],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [":adaptation"],
+)
+
+py_test(
+    name = "sileo_popup_test",
+    size = "small",
+    srcs = ["sileo_popup_test.py"],
+    data = [
+        "sileo_popup_test.swift",
+        "sileo_popup_geometry_test.m",
+        "@bootstrap_sileo//:Sileo/UI/TabBarController/TabBarController.swift",
+        "@bootstrap_sileo_lnpopupcontroller//:LNPopupController/LNPopupController/Private/LNPopupController.m",
+        "@bootstrap_sileo_lnpopupcontroller//:LNPopupController/LNPopupController/Private/UIViewController+LNPopupSupport.m",
+    ],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [":adaptation"],
+)
+
+py_test(
+    name = "sileo_respring_test",
+    size = "small",
+    srcs = ["sileo_respring_test.py"],
+    data = ["@bootstrap_sileo//:Sileo/UI/DownloadsViewController/DownloadsTableViewController.swift"],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [":adaptation"],
+)
+
+py_binary(
+    name = "build",
+    srcs = ["build.py"],
+    deps = [
+        ":adaptation",
+        "//bootstrap:xcode",
+    ],
+)
+
+xcode_source_product(
+    name = "Sileo",
+    srcs = "@bootstrap_sileo//:source_tree",
+    dependencies = {
+        "@bootstrap_sileo_alderis//:source_tree": "alderis",
+        "@bootstrap_sileo_cosmos//:source_tree": "cosmos",
+        "@bootstrap_sileo_depictionkit//:source_tree": "depictionkit",
+        "@bootstrap_sileo_down//:source_tree": "down",
+        "@bootstrap_sileo_evander//:source_tree": "evander",
+        "@bootstrap_sileo_jjliso8601dateformatter//:source_tree": "jjliso8601dateformatter",
+        "@bootstrap_sileo_lnpopupcontroller//:source_tree": "lnpopupcontroller",
+        "@bootstrap_sileo_lnztreeview//:source_tree": "lnztreeview",
+        "@bootstrap_sileo_onboarding//:source_tree": "onboarding",
+        "@bootstrap_sileo_sqlite_swift//:source_tree": "sqlite.swift",
+        "@bootstrap_sileo_swipecellkit//:source_tree": "swipecellkit",
+        "@bootstrap_sileo_zippyjson//:source_tree": "zippyjson",
+        "@bootstrap_sileo_zippyjsoncfamily//:source_tree": "zippyjsoncfamily",
+    },
+    project = "Sileo",
+    tool = ":build",
+)

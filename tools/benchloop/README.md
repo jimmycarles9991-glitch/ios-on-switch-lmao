@@ -83,7 +83,7 @@ sample mode, filter and origin instead of the driver's resolve. A fill, a scale 
 ROP3 code (`rop`), and a by-scale resolve can complement its sample grid in place first (`invertGrid`). While a draw
 with `compete` runs, a second raw device of the app's draws on its own GPU channel; the result's `competitor` says how
 many command buffers it finished. A result's `form` says what the app did, so a cell proves its own setup. Unknown
-fields make an experiment invalid on both sides, and `hw_test_app:core_test` decodes every generated batch with the
+fields make an experiment invalid on both sides, and `apps/hwtest:core_test` decodes every generated batch with the
 app's own decoder.
 
 The generated code follows two rules learned from traps on the device. A wait on a barrier must come at least two cycles

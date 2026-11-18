@@ -1,0 +1,11 @@
+--swiftversion 5
+--indent 4
+--maxwidth 120
+--linebreaks lf
+--wraparguments preserve
+--wrapparameters preserve
+--wrapcollections preserve
+--wrapconditions preserve
+--commas always
+--xcodeindentation enabled
+--rules blankLinesAtEndOfScope,consecutiveBlankLines,consecutiveSpaces,indent,linebreakAtEndOfFile,linebreaks,sortImports,spaceAroundBraces,spaceAroundBrackets,spaceAroundOperators,spaceAroundParens,spaceInsideBraces,spaceInsideBrackets,spaceInsideParens,trailingCommas,trailingSpace,wrap,wrapArguments

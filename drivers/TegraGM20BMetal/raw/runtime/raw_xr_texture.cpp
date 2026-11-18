@@ -104,7 +104,7 @@ const char *xrPlanesPass(const Texture *const color[8], bool &planes)
     return nullptr;
 }
 
-const char *expandXrPlanes(PassDesc &p, Device &d)
+const char *expandXrPlanes(PassDesc &p, [[maybe_unused]] Device &d)
 {
     const Texture *color[8] = {};
     uint32_t formats[8] = {};

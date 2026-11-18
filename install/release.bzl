@@ -5,7 +5,7 @@ The version, not git, names the release: a Mac with only Bazelisk has no git, an
 SHA256SUMS from a local directory instead (CI, before the release is published).
 """
 
-load("//boot:overlay.bzl", "OVERLAY_BINARIES")
+load("//boot:overlay.bzl", "BOOTSTRAP_PACKAGES", "OVERLAY_BINARIES")
 
 REPO = "brunostjohn/ios-on-switch-lmao"
 ASSETS = {
@@ -31,7 +31,12 @@ _FILES = {
     "install_payload": "sd/bootloader/payloads/install-ios.bin",
     "apfs_tool": "host_tools/apfs_tool",
     "lz4": "host_tools/lz4",
-} | {"overlay/" + source: "inputs/overlay/" + source for source in OVERLAY_BINARIES.values()}
+    "bootstrap_payload": "inputs/bootstrap/payload.tar",
+    "bootstrap_manifest": "inputs/bootstrap/manifest.json",
+} | {"overlay/" + source: "inputs/overlay/" + source for source in OVERLAY_BINARIES.values()} | {
+    "bootstrap/packages/" + package + ".deb": "inputs/bootstrap/packages/" + package + ".deb"
+    for package in BOOTSTRAP_PACKAGES
+}
 
 _BUILD = "\n\n".join(
     ['package(default_visibility = ["//visibility:public"])'] +

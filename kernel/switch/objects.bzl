@@ -29,7 +29,13 @@ SWITCH_OBJECTS = {
     "bsd": [
         ("bsd/kern/bsd_init.c", "boot/bsd_init.c", []),
         ("bsd/kern/kern_exec.c", "boot/prefs.c", []),
+        ("bsd/kern/kern_exec.c", "boot/migration_home.c", []),
         ("bsd/kern/kern_exec.c", "security/app_code.c", []),
+        ("bsd/kern/kern_exec.c", "security/bootstrap.c", ["-include", "{owner_header}"]),
+        ("bsd/kern/kern_exec.c", "security/bootstrap_apps.c", ["-include", "{owner_header}"]),
+        ("bsd/kern/kern_exec.c", "security/bootstrap_persona.c", []),
+        ("bsd/kern/kern_exec.c", "security/bootstrap_dyld.c", ["-include", "{owner_header}"]),
+        ("bsd/kern/ubc_subr.c", "security/bootstrap_signature.c", []),
         ("bsd/kern/kern_exec.c", "security/entitlements_factory.c", []),
         ("bsd/kern/kern_exec.c", "boot/icon_cache.c", []),
         ("bsd/kern/kern_exit.c", "diag/exit.c", []),

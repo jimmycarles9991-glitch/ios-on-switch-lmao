@@ -15,6 +15,11 @@ using switch_ui_scale_sites::BranchTarget;
 using switch_ui_scale_sites::TextMapping;
 using switch_ui_scale_sites::Word;
 
+TEST(XnuUiScaleSites24B119, NativeCanvasRequiresIPadSupportAndKeepsPhoneCompatibility)
+{
+    switch_ui_scale_sites::ExpectNativeCanvas(switch_us_cache_24B119, 0x2270c42f4, 0x2270c43f8, 0x2271b1d94);
+}
+
 namespace {
 // 24B119's subcaches with a patched page. SwitchTimebase's pager (switch_timebase_24B119.h) answers .01's slot 1; the
 // other cache text pagers are keyed to 21H461.
@@ -493,7 +498,7 @@ TEST(XnuUiScaleSites24B119, TableReloadUsesEffectiveFocusAndKeepsItsResetAndDrag
     ASSERT_EQ(site->edits, 2u);
     EXPECT_EQ(site->slot, 3u);
     EXPECT_EQ(switch_ui_scale_sites::TextSlots("../xnu-12377.121.6/osfmk/vm/vm_shared_region.c"), 4u);
-    EXPECT_EQ(switch_ui_scale_sites::TextSlots("../xnu-10063.141.1/osfmk/vm/vm_shared_region.c"), 3u);
+    EXPECT_EQ(switch_ui_scale_sites::TextSlots("../xnu-10063.141.1/osfmk/vm/vm_shared_region.c"), 5u);
     const switch_us_edit &first = site->edit[0], &second = site->edit[1];
     EXPECT_EQ(AddressOf(*site, first, 0), 0x184c56508u);
     EXPECT_EQ(AddressOf(*site, second, 0), AddressOf(*site, first, 32));
@@ -531,7 +536,7 @@ TEST(XnuUiScaleSites24B119, TableReloadUsesEffectiveFocusAndKeepsItsResetAndDrag
     EXPECT_EQ(BranchTarget(AddressOf(*site, second, 28), Word(second.stock + 28)), 0x188053c80u);
 }
 
-TEST(XnuUiScaleSites24B119, OnlyTheGridWidgetKitTimebaseAndTableFocusApplyAtScaleOne)
+TEST(XnuUiScaleSites24B119, OnlyHardwareAndCompatibilitySitesApplyAtScaleOne)
 {
     for (size_t i = 0; i < kCache.count; i++) {
         const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
@@ -539,6 +544,8 @@ TEST(XnuUiScaleSites24B119, OnlyTheGridWidgetKitTimebaseAndTableFocusApplyAtScal
                                  name == "WidgetKit placeholder batch deadline (n + 10) x 5 s" ||
                                  name == "WidgetKit archived image limit of a 2x screen" ||
                                  name == "SampleAnalysis mach timebase of a 19.2 MHz counter" ||
+                                 name == "SpringBoard iPad native canvas selection" ||
+                                 name == "SpringBoard iPad native canvas eligibility" ||
                                  name == "UIKitCore table reload focus request only when effective focus is allowed";
         EXPECT_EQ(kCache.sites[i].every_scale, every_scale) << name;
     }

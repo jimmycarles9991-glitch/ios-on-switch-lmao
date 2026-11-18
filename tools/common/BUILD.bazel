@@ -7,11 +7,14 @@ package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
+exports_files(["seed_manifest.py"])
+
 MODULES = {
     "files": [],
     "hashing": [],
     "macho": [],
     "paths": ["@rules_python//python/runfiles"],
+    "seed_manifest": [":hashing"],
     "sudo": [],
 }
 

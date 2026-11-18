@@ -21,13 +21,13 @@ M2V = (
 
 BINARIES = {
     "bundle": "//gpu:base",
-    "hwtest17": "//hw_test_app:SwitchHWTest17",
-    "hwtest27": "//hw_test_app:SwitchHWTest27",
-    "hwtest27e": "//hw_test_app:SwitchHWTest27e",
+    "hwtest17": "//apps/hwtest:SwitchHWTest17",
+    "hwtest27": "//apps/hwtest:SwitchHWTest27",
+    "hwtest27e": "//apps/hwtest:SwitchHWTest27e",
     "pack_tools": "//gpu/seed:local_tools",
     "plugin": "//gpu:plugin",
     "shader_compiler": "//drivers/TegraGM20BMetal:SwitchShaderCompiler",
-    "texpeer": "//hw_test_app:switch-texpeer",
+    "texpeer": "//apps/hwtest:switch-texpeer",
 }
 
 # The m2v rules in the binary's graph, and the frontend's and bridge's own files it compiles

@@ -1,4 +1,4 @@
-"""Every generated command's batches as the device receives them, for the app's decoder test (hw_test_app core_test).
+"""Every generated command's batches as the device receives them, for the app's decoder test (apps/hwtest core_test).
 
 The app refuses an experiment its decoder rejects (an `invalid` result); decoding these here makes a first run's
 `invalid` a device fact, never a generator's mistake.

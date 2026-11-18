@@ -9,7 +9,7 @@ from tools.gpu.maxwell import isa
 from tools.gpu.maxwell.execute import run
 from tools.gpu.maxwell.interp import Inputs
 
-HEADER = Path(__file__).resolve().parents[2] / 'hw_test_app' / 'bench' / 'bench_known.h'
+HEADER = Path(__file__).resolve().parents[2] / 'apps/hwtest' / 'bench' / 'bench_known.h'
 
 
 class KnownTest(unittest.TestCase):

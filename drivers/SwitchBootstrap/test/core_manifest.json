@@ -1,0 +1,32 @@
+{
+  "archive_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "managed_generation": "a81182d81f619b53a798f4effe0b5a0caa3ab315df3ff916d3a5bbada6467b28",
+  "managed_packages": {
+    "ellekit": {
+      "file": "ellekit.deb",
+      "sha256": "9e220dbe1062e6a4635b36d8727945846897e01522ea4a5c830b9e0f2d3c33b9",
+      "size": 15,
+      "version": "1"
+    },
+    "launchctl": {
+      "file": "launchctl.deb",
+      "sha256": "58ffd7c39502009aa613bfe3c3aa230cb1542389cc8a5a405e41922ec90bbc97",
+      "size": 17,
+      "version": "1:1.2.0+switch1"
+    },
+    "org.coolstar.sileo": {
+      "file": "sileo.deb",
+      "sha256": "994b8b410a83f38bfc0f26489b0bd464491785eb2a0ebb6fe4783bb1eccca805",
+      "size": 13,
+      "version": "1"
+    },
+    "uikittools": {
+      "file": "uikittools.deb",
+      "sha256": "7d76bf0180a7d0521f11e70f2c27df2ef3fa0b2000777709e6927ff270544b72",
+      "size": 18,
+      "version": "1"
+    }
+  },
+  "schema_version": 1,
+  "sileo_executable_sha256": "14719265a8166baae973aef4852db92435525b04bb8161db86b64f84ac0f708b"
+}

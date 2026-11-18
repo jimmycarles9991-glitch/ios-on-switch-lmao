@@ -198,19 +198,17 @@ static id switch_signing_info(id<SwitchInstallObject> bundle, NSError **error)
 static id switch_bundle_info(id self, SEL selector, BOOL resources, BOOL online, BOOL cached, BOOL trust, BOOL profile,
                              NSError **error)
 {
-    if (switch_candidate(self))
-        return switch_signing_info(self, error);
-    return ((id (*)(id, SEL, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_original(self, selector))(
+    id info = ((id (*)(id, SEL, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_original(self, selector))(
         self, selector, resources, online, cached, trust, profile, error);
+    return !info && switch_candidate(self) ? switch_signing_info(self, error) : info;
 }
 
 static id switch_validate_bundle(id self, SEL selector, id bundle, BOOL resources, BOOL online, BOOL trust, BOOL free,
                                  BOOL profile, NSError **error)
 {
-    if (switch_candidate(bundle))
-        return switch_signing_info(bundle, error);
-    return ((id (*)(id, SEL, id, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_original(self, selector))(
+    id info = ((id (*)(id, SEL, id, BOOL, BOOL, BOOL, BOOL, BOOL, NSError **))switch_original(self, selector))(
         self, selector, bundle, resources, online, trust, free, profile, error);
+    return !info && switch_candidate(bundle) ? switch_signing_info(bundle, error) : info;
 }
 
 static BOOL switch_allow0(id self, SEL selector, NSError **error)

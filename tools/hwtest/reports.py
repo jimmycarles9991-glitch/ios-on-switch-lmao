@@ -1,4 +1,4 @@
-"""HW Test's run reports (hw_test_app/core/Report.swift, schema 2) and the sidecar the Mac writes beside each one.
+"""HW Test's run reports (apps/hwtest/core/Report.swift, schema 2) and the sidecar the Mac writes beside each one.
 
 The device writes <boot uuid>-<stamp>.json before and after every test; fetch.py copies it into the history folder and
 adds <boot uuid>-<stamp>.mac.json: the commit deployed to the card, and the crashes and panics of that boot.

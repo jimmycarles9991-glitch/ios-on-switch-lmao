@@ -11,7 +11,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.install import card as cards, compose, delta, disks, host, owners, populate, pretranslate, space
+from tools.install import bootstrap, card as cards, compose, delta, disks, host, owners, populate, pretranslate, space, staged_apps
 
 VAR = '/private/var'
 
@@ -26,6 +26,7 @@ class Inputs:
     gpu_stager: str
     gpu_base: str
     shader_seed: str | None
+    pins: dict | None = None
 
 
 def _volumes(attachment: disks.Attachment, spec: dict) -> dict[str, str]:
@@ -75,6 +76,8 @@ def _write(image: Path, volumes: dict[str, str], inputs: Inputs, log: host.Log) 
             inputs.deltas.overlay_system(data, originals.__getitem__, tree_entries(entries), data_owners)
         populate.stage_cryptexes(preboot, inputs.spec, inputs.images, preboot_owners, log)
         cards.sync_overlay(data, inputs.boot_package, log)
+        staged_apps.stage(data, data_owners, log, package=Path(inputs.boot_package))
+        bootstrap.stage(data, inputs.boot_package, inputs.pins or {}, log, data_owners)
         populate.stage_gpu(data, inputs.gpu_stager, inputs.gpu_base, log)
         if inputs.shader_seed:
             populate.merge_tree(inputs.shader_seed, data, data_owners, log, 'shader seed')

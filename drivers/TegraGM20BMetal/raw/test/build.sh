@@ -254,6 +254,6 @@ echo "built $OUT/mip3doracle"
 xcrun clang++ "${OBJC[@]}" -Wall -Wextra -x objective-c++ "$HERE/viewframe.mm" "${FACADE[@]}" "$FRONT/NativeBridgeMetalFrontend.mm" \
     -x c++ "$RAW/runtime/raw_gpu.cpp" "$RAW/runtime/raw_draw_bands.cpp" "$RAW/runtime/raw_job_uses.cpp" "$RAW/runtime/raw_transfer.cpp" "$RAW/runtime/raw_split.cpp" "$RAW/runtime/raw_variants.cpp" "$RAW/fx/fx_mip.cpp" "$RAW/fx/fx_image.cpp" "$RAW/runtime/raw_kernel.cpp" "$RAW/runtime/raw_kernel_job.cpp" "$RAW/runtime/raw_resource_set.cpp" "$RAW/runtime/raw_state_segment.cpp" "$RAW/runtime/raw_encoder_state.cpp" "$RAW/runtime/raw_shared_events.cpp" "$RAW/runtime/raw_alias.cpp" "$RAW/runtime/raw_arena.cpp" "$RAW/runtime/raw_pack.cpp" "$RAW/runtime/raw_ycbcr.cpp" "$RAW/runtime/raw_zeta.cpp" "$RAW/runtime/raw_comp.cpp" "$RAW/runtime/raw_completed.cpp" "$RAW/runtime/raw_compute.cpp" "$RAW/runtime/raw_predication.cpp" "$RAW/runtime/raw_icb_compute.cpp" "$RAW/runtime/raw_compute_loops.cpp" "$RAW/runtime/raw_loop_copies.cpp" "$RAW/runtime/raw_predicate_loops.cpp" "${COMPLETION[@]}" "${FACADE_RUNTIME[@]}" "$TREE/kits/SwitchRefusal/SwitchRefusal.c" -x none "$BRIDGE" "${LIBS[@]}" \
     -o "$OUT/viewframe" 2>&1 | awk '!/duplicate libraries/'
-xcrun -sdk iphoneos metal -c "$TREE/hw_test_app/shaders/HWTest.metal" -o "$OUT/HWTest.air"
+xcrun -sdk iphoneos metal -c "$TREE/apps/hwtest/shaders/HWTest.metal" -o "$OUT/HWTest.air"
 xcrun -sdk iphoneos metallib "$OUT/HWTest.air" -o "$OUT/HWTest.metallib"
 echo "built $OUT/viewframe $OUT/HWTest.metallib"

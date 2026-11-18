@@ -1,3 +1,5 @@
+#include <switch/bootstrap.h>
+#include <switch/migration_home.h>
 #include <switch/app_code.h>
 #include "SwitchDiag.h"
 #include <kern/thread_call.h>
@@ -116,6 +118,7 @@
 #include <sys/spawn.h>
 #include <sys/spawn_internal.h>
 #include <sys/process_policy.h>
+#include <switch/identity.h>
 #include <sys/codesign.h>
 #include <sys/random.h>
 #include <crypto/sha1.h>
@@ -934,7 +937,7 @@ extern char panic_on_proc_spawn_fail[];
 extern int use_panic_on_proc_spawn_fail;
 #endif
 
-#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && (DEVELOPMENT || DEBUG)
 void native_switch_migration_process(proc_t p, int exited, int status);
 #endif
 
@@ -958,7 +961,7 @@ set_proc_name(struct image_params *imgp, proc_t p)
 	bcopy((caddr_t)imgp->ip_ndp->ni_cnd.cn_nameptr, (caddr_t)p->p_comm,
 	    (unsigned)imgp->ip_ndp->ni_cnd.cn_namelen);
 	p->p_comm[imgp->ip_ndp->ni_cnd.cn_namelen] = '\0';
-#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && (DEVELOPMENT || DEBUG)
 	native_switch_migration_process(p, 0, 0);
 #endif
 
@@ -1330,6 +1333,9 @@ grade:
 	}
 #endif
 
+	imgp->ip_switch_tweaks =
+	    !((imgp->ip_vattr->va_mode | imgp->ip_origvattr->va_mode) & (VSUID | VSGID)) &&
+	    switch_bootstrap_target(imgp->ip_vp);
 	/* Copy in arguments/environment from the old process */
 	error = exec_extract_strings(imgp);
 	if (error) {
@@ -1386,6 +1392,12 @@ grade:
 
 		exec_failure_reason->osr_flags |= OS_REASON_FLAG_CONSISTENT_FAILURE;
 
+		goto badtoolate;
+	}
+
+	if ((error = switch_bootstrap_exec_check(imgp))) {
+		imgp->ip_free_map = map;
+		map = VM_MAP_NULL;
 		goto badtoolate;
 	}
 
@@ -3285,15 +3297,19 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
 		}
 	}
 
+	const bool bootstrap = switch_bootstrap_persona_request(px_persona);
+	if (bootstrap && (error = switch_bootstrap_persona_init()) != 0) {
+		return error;
+	}
+
 	persona = persona_lookup(px_persona->pspi_id);
 	if (!persona) {
 		return ESRCH;
 	}
 
-	// non-root process should not be allowed to set persona with uid/gid 0
-	if (!kauth_cred_issuser(mycred) &&
+	if (!kauth_cred_issuser(mycred) && !bootstrap &&
 	    (px_persona->pspi_uid == 0 || px_persona->pspi_gid == 0)) {
-		return EPERM;
+		error = EPERM;
 	}
 
 	persona_put(persona);
@@ -3346,10 +3362,14 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
 		return ESRCH;
 	}
 
-	return persona_proc_adopt(p, persona,
-	           ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
+	const bool update_same_persona = p->p_persona == persona && switch_bootstrap_persona_request(px_persona);
+	kauth_cred_derive_t derive = ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
 		return kauth_cred_model_setpersona(model, px_persona);
-	});
+	};
+	const int error = persona_proc_adopt(p, persona, derive);
+	/* Native same-persona adoption skips credential derivation. */
+	if (!error && update_same_persona) kauth_cred_proc_update(p, PROC_SETTOKEN_SETUGID, derive);
+	return error;
 }
 #endif
 
@@ -5917,6 +5937,43 @@ native_switch_disabled(const char *name)
 	uint32_t value = 0;
 	return PE_parse_boot_argn(name, &value, sizeof(value)) && value;
 }
+static int
+switch_bootstrap_environment(struct image_params *imgp, int pointer_size)
+{
+	if (!imgp->ip_switch_tweaks) return 0;
+	const char *library = SWITCH_BOOTSTRAP_INJECTOR;
+    static const char prefix[] = "DYLD_INSERT_LIBRARIES=";
+    const size_t capacity = (size_t)(imgp->ip_strendp - imgp->ip_endargv) + sizeof(prefix) + strlen(library) + 2;
+    char *value = kalloc_data(capacity, Z_WAITOK | Z_NOFAIL);
+    memcpy(value, prefix, sizeof(prefix));
+    char *entry = imgp->ip_endargv;
+    while (entry < imgp->ip_strendp) {
+        const size_t size = strlen(entry) + 1;
+        if (strncmp(entry, prefix, sizeof(prefix) - 1)) {
+            entry += size;
+            continue;
+        }
+        if (value[sizeof(prefix) - 1] && entry[sizeof(prefix) - 1]) strlcat(value, ":", capacity);
+        strlcat(value, entry + sizeof(prefix) - 1, capacity);
+        memmove(entry, entry + size, (size_t)(imgp->ip_strendp - entry) - size);
+        imgp->ip_strendp -= size;
+        imgp->ip_strspace += size;
+        imgp->ip_argspace += size + pointer_size;
+        imgp->ip_envc--;
+    }
+    if (!switch_bootstrap_env_has(value + sizeof(prefix) - 1, library)) {
+        if (value[sizeof(prefix) - 1]) strlcat(value, ":", capacity);
+        strlcat(value, library, capacity);
+    }
+    int error = exec_add_user_string(imgp, CAST_USER_ADDR_T(value), UIO_SYSSPACE, TRUE);
+    kfree_data(value, capacity);
+    if (error) return error;
+    if (imgp->ip_argspace < pointer_size) return E2BIG;
+    imgp->ip_argspace -= pointer_size;
+    imgp->ip_envc++;
+    return 0;
+}
+
 static const char *const native_switch_bluetoothd_environment[] = {
 	"BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,3000000", NULL
 };
@@ -6190,6 +6247,9 @@ exec_extract_strings(struct image_params *imgp)
 		imgp->ip_envc++;
 	}
 
+	error = switch_bootstrap_environment(imgp, new_ptr_size);
+	if (error) goto bad;
+
 	/* Save space for envv[] NULL terminator */
 	if (imgp->ip_argspace < new_ptr_size) {
 		error = E2BIG;
@@ -6446,7 +6506,8 @@ exec_add_apple_strings(struct image_params *imgp,
 		imgp->ip_applec++;
 	}
 
-	if (imgp->ip_vattr) {
+	/* dyld prefers this ID over executable_path. On a boot union it names the private backing path. */
+	if (imgp->ip_vattr && !bindfs_boot_union_host(vnode_mount(imgp->ip_vp))) {
 		uint64_t fsid    = vnode_get_va_fsid(imgp->ip_vattr);
 		uint64_t fsobjid = imgp->ip_vattr->va_fileid;
 
@@ -6721,6 +6782,7 @@ exec_check_permissions(struct image_params *imgp)
 	imgp->ip_arch_size = (user_size_t)vap->va_data_size;
 #endif
 
+	if ((error = switch_bootstrap_validate(vp))) return error;
 	if (switch_app_code_image(vp)) vap->va_mode &= ~(VSUID | VSGID);
 
 	/* Disable setuid-ness for traced programs or if MNT_NOSUID */
@@ -7807,6 +7869,7 @@ native_switch_mkdir(proc_t p, user_addr_t scratch, const char *path, uid_t owner
 	return error;
 }
 
+#if DEVELOPMENT || DEBUG
 /* The migration on XNU's console, where the user watches it: DataMigrator's processes as they start and end, a status line
  * every 15 s, and its end (the sentinel gone: DataMigrator removes it when the migration is over). Until then
  * switch_console_hold keeps the console on screen instead of backboardd's progress bar (drivers/NativeMobileDisplay retires
@@ -7867,6 +7930,8 @@ native_migration_tick(thread_call_param_t p0 __unused, thread_call_param_t p1 __
 static void
 native_migration_start(void)
 {
+	uint32_t console = 0;
+	if (!PE_parse_boot_argn("switch-migration-console", &console, sizeof(console)) || !console) return;
 	native_migration.started = mach_absolute_time();
 	native_migration.tick = thread_call_allocate(native_migration_tick, NULL);
 	if (!native_migration.tick) return;
@@ -7902,6 +7967,8 @@ native_switch_migration_process(proc_t p, int exited, int status)
 		printf("SwitchMigration: %llum%02llus %s[%d] started\n", s / 60, s % 60, name, proc_getpid(p));
 }
 
+#endif
+
 /* The data migration the first boot after a restore runs, once. The com.apple.migration prefs below record 21H461 as
  * migrated (UniXNU's skip-setup seed), so DataMigrator always answered "System build version unchanged" and
  * SystemAppMigrator.migrator never installed the 29 removable apps a restore leaves in /private/var/staged_system_apps
@@ -7936,7 +8003,10 @@ native_switch_system_app_migration(proc_t p, user_addr_t scratch, mount_t data_m
 	if (error) printf("SwitchRawBoot: data migration request failed: %d\n", error);
 	else {
 		printf("SwitchRawBoot: data migration requested (staged system apps)\n");
+		switch_migration_home_requested();
+#if DEVELOPMENT || DEBUG
 		native_migration_start();
+#endif
 	}
 }
 
@@ -8946,6 +9016,7 @@ load_init_program(proc_t p)
 	(void)switch_nvram_data_mounted();
 	/* Owner overlay unions over sealed directories (SwitchRawMount.h), now that Data is mounted. */
 	native_switch_raw_overlay(p, (user_addr_t)scratch_addr);
+	switch_bootstrap_capture();
 #endif
 #endif
 #if CONFIG_MEMORYSTATUS
@@ -9423,6 +9494,15 @@ process_signature(proc_t p, struct image_params *imgp)
 		imgp->ip_csflags = SWITCH_APP_CODE_CS_FLAGS | (imgp->ip_csflags & CS_NO_UNTRUSTED_HELPERS);
 	}
 
+	if (imgp->ip_switch_tweaks) {
+        proc_lock(p);
+        proc_csflags_clear(p, CS_HARD | CS_KILL | CS_RESTRICT | CS_REQUIRE_LV | CS_FORCED_LV);
+        proc_csflags_set(p, CS_DEBUGGED);
+        imgp->ip_csflags = proc_getcsflags(p);
+        proc_unlock(p);
+        switch_bootstrap_map(get_task_map(proc_task(p)));
+    }
+
 	/* Set the switch_protect flag on the map */
 	if (proc_getcsflags(p) & (CS_HARD | CS_KILL)) {
 		vm_map_switch_protect(get_task_map(proc_task(p)), TRUE);
@@ -9622,7 +9702,10 @@ done:
 		}
 	}
 
-	if (0 == error) switch_app_code_exec(p, switch_unsigned_app);
+	if (0 == error) {
+		switch_app_code_exec(p, switch_unsigned_app);
+		switch_bootstrap_exec(p, imgp->ip_switch_tweaks);
+	}
 
 	if (0 == error) {
 		/* The process's code signature related properties are

@@ -30,7 +30,7 @@ Every row carries a mechanism, a grade, a citation and a HW Test:
   (shown on this chip by a device run).
 - citation: `path[:line]` in this repository or `ext: <source>`. `caps_report` checks that every cited file and line
   exists.
-- hwtest: an id in `hw_test_app`, or `planned:<id>` for a probe still to be written.
+- hwtest: an id in `apps/hwtest`, or `planned:<id>` for a probe still to be written.
 
 A format is `chip` when raw's format tables (`kFormats`, `raw_zeta.h`) have it and the device's format checks
 (`metal.formats`, `gpu.clear.formats`, `metal.compressed`) run raw over it; BC formats stay `source`, since raw never

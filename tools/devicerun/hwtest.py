@@ -1,4 +1,4 @@
-"""hw_test_app's results: one check per test over its `HWTEST <id> <PASS|FAIL|SKIP> <k=v...>` lines.
+"""HW Test's results: one check per test over its `HWTEST <id> <PASS|FAIL|SKIP> <k=v...>` lines.
 
 A test's row is PASS when the suite ran (its summary line is in the log) and the test logged no FAIL, FAIL when it
 did, NO-DATA when the app never finished a run. A test only one iOS version's app has (BY_IOS) is N/A in a log whose
@@ -13,13 +13,13 @@ from tools.devicerun.rules import REPORT, Check
 
 OWNER = 'r36-hwtest'
 SUBSYSTEM = 'com.brunostjohn.switch.hwtest'
-SOURCE = 'hw_test_app/core/LogLine.swift'
+SOURCE = 'apps/hwtest/core/LogLine.swift'
 SUITE = 'hwtest.suite'
 LITERAL = 'HWTEST '
 
 CODECS = ('h264', 'hevc', 'hevc_main10', 'vp9')
 SIZES = ('720p', '1080p', '4k')
-# hw_test_app/core/Media.swift's Clip.all: every codec at every size; MPEG-4 Part 2 and MPEG-2 without 4K, MPEG-1 at
+# apps/hwtest/core/Media.swift's Clip.all: every codec at every size; MPEG-4 Part 2 and MPEG-2 without 4K, MPEG-1 at
 # 720p only, interlaced H.264 in field pictures (PAFF) and in MBAFF frames at one size each
 CLIPS = (
     *(f'{codec}_{size}' for codec in CODECS for size in SIZES),
@@ -465,7 +465,7 @@ TESTS: dict[str, bool] = {
     'gpu.raw.fetch_rung3': False,
 }
 
-# The tests only one iOS version's app runs (hw_test_app/app<version>), by that version.
+# The tests only one iOS version's app runs (apps/hwtest/app<version>), by that version.
 BY_IOS: dict[str, dict[str, bool]] = {
     '27': {
         'gpu.ca.glass': False,

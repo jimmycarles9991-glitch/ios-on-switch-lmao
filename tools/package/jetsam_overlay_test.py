@@ -15,7 +15,7 @@ import jetsam_overlay
 PROFILE = os.environ['SWITCH_PROFILE']
 OVERLAY = Path('overlay/supplemental/com.apple.jetsamproperties.cryptex.plist')
 COMPILER = Path('overlay/supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist')
-PEER = Path('hw_test_app/peer/com.brunostjohn.switch.texpeer.jetsam.plist')
+PEER = Path('apps/hwtest/peer/com.brunostjohn.switch.texpeer.jetsam.plist')
 MANIFEST = Path('overlay/manifest.json')
 COMPILER_LABEL = 'com.brunostjohn.switch.shadercompiler'
 PEER_LABEL = 'com.brunostjohn.switch.texpeer'

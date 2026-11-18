@@ -225,9 +225,11 @@ extern "C" __attribute__((weak)) int vc_tape_attach(vm_offset_t, uint32_t, uint3
 extern "C" __attribute__((weak)) void vc_tape_detach(void)
 {}
 
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 // XNU (kern_exec.c) while the one-time data migration runs: the console stays on screen and the UI's frames retire undrawn
 // (kickHeld), so the user watches the migration's progress lines. Weak: absent, never held.
 extern "C" __attribute__((weak)) volatile int switch_console_hold;
+#endif
 // XNU (spec_vnops.c, temporary): ends the boot I/O census at the first client frame; it prints from a thread call.
 extern "C" __attribute__((weak)) void switch_boot_io_report(void);
 
@@ -3601,10 +3603,12 @@ public:
             kickDeferred = true;
             return;
         }
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
         if (consoleHolds()) {
             kickHeld(request, mach_absolute_time());
             return;
         }
+#endif
         if (!pd.uiNew) {
             scanReturnKick(request, switch_display::ScanReturn::kUnchanged);
             kickPlaneOnly(request, pd, mach_absolute_time());
@@ -3907,6 +3911,7 @@ public:
         finishTransfer(request);
     }
 
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
     // XNU's console keeps the screen until window A first shows a client frame, and the data migration holds it there
     // (switch_console_hold). Released (native_legacy_prepare_scanout), the console stops drawing, so no kick may release it
     // while the hold lasts.
@@ -3938,6 +3943,7 @@ public:
         }
         rekick = true;  // the next swap may already be queued behind this one: take it in the same kick
     }
+#endif
 
     // A swap the kick has finished with (copied, filled or handed to the GPU), before it retires: its queue time and flip wait.
     void noteTaken(const OriginalLegacySwapRequest *request, uint64_t kickAt)

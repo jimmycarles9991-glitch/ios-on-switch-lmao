@@ -1,0 +1,115 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//ipsw:pins.bzl", "IPSWS")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+filegroup(
+    name = "overlay_files",
+    srcs = ["com.brunostjohn.switch.bootstrap.plist"],
+)
+
+exports_files(glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+))
+
+py_binary(
+    name = "configuration",
+    srcs = ["configuration.py"],
+)
+
+py_test(
+    name = "configuration_test",
+    srcs = [
+        "configuration.py",
+        "configuration_test.py",
+    ],
+    data = [
+        "com.brunostjohn.switch.bootstrap.plist",
+        "//drivers/SwitchBootstrap/test:core_manifest.json",
+        "//overlay:manifest.json",
+        "//overlay:supplemental/com.brunostjohn.switch.bootstrap.jetsam.plist",
+    ],
+    imports = ["."],
+    main = "configuration_test.py",
+)
+
+write_file(
+    name = "build_configuration",
+    out = "build_configuration.h",
+    content = select({
+        "//ipsw:" + build: [
+            '#define SWITCH_BOOTSTRAP_BUILD "' + pins["build"] + '"',
+            '#define SWITCH_BOOTSTRAP_FIRMWARE "' + pins["version"] + '"',
+            '#define SWITCH_BOOTSTRAP_BASE "/private/var/Switch/bootstrap/' + pins["build"] + '"',
+            '#define SWITCH_BOOTSTRAP_ROOT "/private/var/Switch/bootstrap/' + pins["build"] + '/root"',
+            '#define SWITCH_BOOTSTRAP_HELPER "/usr/libexec/switch-bootstrap"',
+        ]
+        for build, pins in IPSWS.items()
+        if pins
+    }),
+)
+
+genrule(
+    name = "payload_hash",
+    srcs = ["//bootstrap:manifest"],
+    outs = ["payload_hash.h"],
+    cmd = "$(execpath :configuration) --manifest $(execpath //bootstrap:manifest) --out $@",
+    tools = [":configuration"],
+)
+
+ios_binary(
+    name = "switch-bootstrap",
+    srcs = [
+        "bootstrap.mm",
+        "core_update.mm",
+        "daemon_jobs.mm",
+        "payload.c",
+        "process.c",
+        "seed.mm",
+        "migration_boot.mm",
+        "migration_state.mm",
+    ],
+    out = "build/switch-bootstrap/switch-bootstrap",
+    hdrs = [
+        ":build_configuration",
+        ":payload_hash",
+        "archive.h",
+        "core_update.h",
+        "migration_boot.h",
+        "migration_state.h",
+        "daemon_jobs.h",
+        "payload.h",
+        "process.h",
+        "process_wait.h",
+        "state.h",
+        "seed.h",
+        "//bootstrap/launchctl:daemon_result.h",
+    ],
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-Wno-deprecated-declarations",
+        "-fobjc-arc",
+        "-lc++",
+        "-I.",
+        "-I{bin}/drivers/SwitchBootstrap",
+        "-framework",
+        "Foundation",
+        "-larchive.2",
+    ] + select({
+        "//bazel:debug": ["-DSWITCH_DEBUG=1"],
+        "//conditions:default": ["-DSWITCH_DEBUG=0"],
+    }),
+    entitlements = "bootstrap.entitlements",
+    pagesize = "4096",
+    sign_identifier = "com.brunostjohn.switch.bootstrap",
+)

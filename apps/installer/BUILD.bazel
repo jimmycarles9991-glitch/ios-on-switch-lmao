@@ -1,0 +1,421 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_apple//apple:ios.bzl", "ios_application", "ios_unit_test", "ios_xctestrun_runner")
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_swift//swift:swift_interop_hint.bzl", "swift_interop_hint")
+load("@rules_swift//swift:swift_library.bzl", "swift_library")
+load("@rules_swift//swift:swift_test.bzl", "swift_test")
+load("//bazel/lint:checks.bzl", "lint_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load(":simulator.bzl", "ios_simulator", "ios_simulator_test")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files([
+    "SwitchInstaller.entitlements",
+    "SwitchInstaller27.entitlements",
+    "native/SwitchInstallClient.h",
+    "native/SwitchInstallClient.mm",
+])
+
+lint_test(
+    name = "swift_style_test",
+    size = "small",
+    srcs = [":lint_files"],
+    checks = [
+        "swiftformat",
+        "swift_lint",
+    ],
+)
+
+swift_interop_hint(
+    name = "native_module",
+    module_name = "SwitchInstallerNative",
+)
+
+objc_library(
+    name = "install_client",
+    srcs = ["native/SwitchInstallClient.mm"],
+    hdrs = ["native/SwitchInstallClient.h"],
+    copts = [
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    sdk_frameworks = ["Foundation"],
+)
+
+objc_library(
+    name = "native",
+    srcs = [
+        "native/SwitchArchive.h",
+        "native/SwitchExecutable.mm",
+        "native/SwitchImportDiagnostics.mm",
+        "native/SwitchInstallation.mm",
+        "native/SwitchPackage.mm",
+    ],
+    hdrs = [
+        "native/SwitchImportDiagnostics.h",
+        "native/SwitchInstallation.h",
+        "native/SwitchPackage.h",
+    ],
+    aspect_hints = [":native_module"],
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+    ],
+    defines = select({
+        "//bazel:debug": ["DEVELOPMENT=1"],
+        "//conditions:default": [],
+    }),
+    sdk_dylibs = ["archive"],
+    sdk_frameworks = ["Foundation"],
+    deps = [":install_client"],
+)
+
+swift_library(
+    name = "input",
+    srcs = [
+        "InstallerDownload.swift",
+        "InstallerError.swift",
+        "InstallerImport.swift",
+        "InstallerInput.swift",
+        "InstallerPhase.swift",
+    ],
+    copts = [
+        "-swift-version",
+        "5",
+    ],
+    module_name = "SwitchInstallerInput",
+)
+
+UI_SOURCES = [
+    "DownloadLinkView.swift",
+    "InstallerFilePicker.swift",
+    "InstallerModel.swift",
+    "InstallerReviewView.swift",
+    "InstallerStatusView.swift",
+    "InstallerView.swift",
+]
+
+swift_library(
+    name = "app",
+    srcs = UI_SOURCES + ["SwitchInstallerApp.swift"],
+    copts = [
+        "-O",
+        "-swift-version",
+        "5",
+    ] + select({
+        "//bazel:debug": ["-DDEBUG"],
+        "//conditions:default": [],
+    }),
+    module_name = "SwitchInstaller",
+    target_compatible_with = ["@platforms//os:ios"],
+    deps = [
+        ":input",
+        ":native",
+    ],
+)
+
+bool_flag(
+    name = "render_icons",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "exporting_icons",
+    flag_values = {":render_icons": "true"},
+)
+
+[py_binary(
+    name = tool,
+    srcs = [
+        "icon_renders.py",
+        "prepare_bundle.py",
+    ] + (["prepare_icon_export.py"] if tool == "prepare_icon_export" else []),
+    data = ["//apps:adhoc.mobileprovision"] + (glob(["AppIcon.icon/**"]) + [
+        "artwork/icon-renders.json",
+        "artwork/icon-renders.tar.xz",
+    ] if tool == "prepare_bundle" else []),
+    imports = ["."],
+    deps = ["@rules_python//python/runfiles"],
+) for tool in [
+    "prepare_bundle",
+    "prepare_icon_export",
+]]
+
+[ios_application(
+    name = "SwitchInstaller" + version,
+    app_icons = glob(["AppIcon.icon/**"]),
+    bundle_id = "com.brunostjohn.switch.installer",
+    bundle_name = "SwitchInstaller",
+    entitlements = "SwitchInstaller27.entitlements" if version == "27" else "SwitchInstaller.entitlements",
+    entitlements_validation = "skip",
+    families = ["ipad"],
+    infoplists = ["Info.plist"],
+    ipa_post_processor = select({
+        ":exporting_icons": ":prepare_icon_export",
+        "//conditions:default": ":prepare_bundle",
+    }),
+    minimum_os_version = minimum,
+    provisioning_profile = "//apps:adhoc.mobileprovision",
+    deps = [":app"],
+) for version, minimum in [
+    ("17", "17.4"),
+    ("27", "27.0"),
+]]
+
+alias(
+    name = "SwitchInstaller",
+    actual = select({
+        "//ipsw:21H461": ":SwitchInstaller17",
+        "//ipsw:24B119": ":SwitchInstaller27",
+    }),
+)
+
+label_flag(
+    name = "image_ipa",
+    build_setting_default = ":SwitchInstaller",
+)
+
+ios_simulator(
+    name = "simulator27",
+    testonly = True,
+    app = ":SwitchInstaller27",
+    tags = ["manual"],
+)
+
+FIXTURES = [
+    "valid",
+    "arm64e",
+    "fat",
+    "fat64",
+    "fat_overlap",
+    "encrypted",
+    "simulator",
+    "x86",
+    "missing_binary",
+    "missing_plist",
+    "unsafe_path",
+    "escaping_link",
+    "corrupt_plist",
+    "duplicate",
+    "apple_id",
+    "self_id",
+    "future_os",
+    "large_info",
+    "bad_commands",
+    "nested_bundles",
+    "multiple_apps",
+    "internal_link",
+    "invalid_version",
+    "self_id_uppercase",
+]
+
+py_binary(
+    name = "make_fixtures",
+    testonly = True,
+    srcs = ["tests/fixtures.py"],
+    main = "tests/fixtures.py",
+)
+
+genrule(
+    name = "fixtures",
+    testonly = True,
+    outs = ["testdata/" + name + ".ipa" for name in FIXTURES],
+    cmd = "$(execpath :make_fixtures) $(RULEDIR)/testdata",
+    tools = [":make_fixtures"],
+)
+
+swift_test(
+    name = "package_test",
+    size = "small",
+    srcs = ["tests/PackageTests.swift"],
+    copts = [
+        "-swift-version",
+        "5",
+    ],
+    data = ["testdata/" + name + ".ipa" for name in FIXTURES],
+    env = {"FIXTURE": "$(rlocationpath testdata/valid.ipa)"},
+    deps = [":native"],
+)
+
+swift_test(
+    name = "input_test",
+    size = "small",
+    srcs = ["tests/InputTests.swift"],
+    copts = [
+        "-swift-version",
+        "5",
+    ],
+    deps = [":input"],
+)
+
+py_binary(
+    name = "download_server",
+    testonly = True,
+    srcs = ["tests/download_server.py"],
+    main = "tests/download_server.py",
+)
+
+swift_test(
+    name = "download_test",
+    size = "small",
+    srcs = ["tests/DownloadTests.swift"],
+    copts = [
+        "-swift-version",
+        "5",
+    ],
+    data = [":download_server"],
+    env = {"DOWNLOAD_SERVER": "$(rootpath :download_server)"},
+    deps = [":input"],
+)
+
+swift_library(
+    name = "picker_test_lib",
+    testonly = True,
+    srcs = [
+        "InstallerFilePicker.swift",
+        "tests/PickerTests.swift",
+    ],
+    copts = [
+        "-swift-version",
+        "5",
+    ],
+    deps = [":input"],
+)
+
+ios_xctestrun_runner(
+    name = "picker_test_runner",
+    device_type = "iPad (9th generation)",
+    os_version = "27.0",
+)
+
+ios_unit_test(
+    name = "picker_test_bundle",
+    minimum_os_version = "17.4",
+    runner = ":picker_test_runner",
+    tags = ["manual"],
+    deps = [":picker_test_lib"],
+)
+
+ios_simulator_test(
+    name = "picker_test",
+    bundle = ":picker_test_bundle",
+    tags = ["manual"],
+)
+
+objc_library(
+    name = "install_fixture_lib",
+    testonly = True,
+    srcs = ["tests/InstallationFixture.mm"],
+    sdk_frameworks = ["UIKit"],
+)
+
+ios_application(
+    name = "install_fixture",
+    testonly = True,
+    bundle_id = "com.brunostjohn.switch.installfixture",
+    bundle_name = "SwitchInstallFixture",
+    families = ["ipad"],
+    infoplists = ["tests/InstallationFixture.plist"],
+    minimum_os_version = "27.0",
+    tags = ["manual"],
+    deps = [":install_fixture_lib"],
+)
+
+ios_simulator(
+    name = "install_fixture_simulator",
+    testonly = True,
+    app = ":install_fixture",
+    tags = ["manual"],
+)
+
+objc_library(
+    name = "installation_test_lib",
+    testonly = True,
+    srcs = ["tests/InstallationTests.mm"],
+    sdk_frameworks = ["XCTest"],
+    deps = [
+        ":install_client",
+        ":native",
+    ],
+)
+
+ios_unit_test(
+    name = "installation_test_bundle",
+    minimum_os_version = "27.0",
+    resources = [":install_fixture_simulator"],
+    runner = ":picker_test_runner",
+    tags = ["manual"],
+    deps = [":installation_test_lib"],
+)
+
+ios_simulator_test(
+    name = "installation_test",
+    bundle = ":installation_test_bundle",
+    tags = ["manual"],
+)
+
+swift_library(
+    name = "ui_test_lib",
+    testonly = True,
+    srcs = UI_SOURCES + ["tests/NavigationTests.swift"],
+    copts = [
+        "-swift-version",
+        "5",
+    ],
+    deps = [
+        ":input",
+        ":native",
+    ],
+)
+
+ios_xctestrun_runner(
+    name = "ui_test_runner",
+    attachment_lifetime = "keepAlways",
+    create_xcresult_bundle = True,
+    device_type = "iPad (9th generation)",
+    os_version = "27.0",
+)
+
+ios_unit_test(
+    name = "ui_test_bundle",
+    minimum_os_version = "27.0",
+    resources = ["testdata/valid.ipa"],
+    runner = ":ui_test_runner",
+    tags = ["manual"],
+    test_host = ":install_fixture",
+    deps = [":ui_test_lib"],
+)
+
+ios_simulator_test(
+    name = "ui_test",
+    bundle = ":ui_test_bundle",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "icon_previews",
+    srcs = glob(["AppIcon.icon/**"]) + ["@xcode//:xcode.env"],
+    outs = [
+        "icon-default.png",
+        "icon-dark.png",
+        "icon-tinted.png",
+    ],
+    cmd = """
+export DEVELOPER_DIR="$$(/usr/bin/sed -n 's/^DEVELOPER_DIR=//p' $(execpath @xcode//:xcode.env))"
+composer="$${DEVELOPER_DIR%/Contents/Developer}/Contents/Applications/Icon Composer.app/Contents/Executables/ictool"
+"$$composer" apps/installer/AppIcon.icon --export-image --output-file $(execpath icon-default.png) --platform iOS --rendition Default --width 512 --height 512 --scale 1
+"$$composer" apps/installer/AppIcon.icon --export-image --output-file $(execpath icon-dark.png) --platform iOS --rendition Dark --width 512 --height 512 --scale 1
+"$$composer" apps/installer/AppIcon.icon --export-image --output-file $(execpath icon-tinted.png) --platform iOS --rendition TintedDark --width 512 --height 512 --scale 1 --tint-color 0.12 --tint-strength 0.5
+""",
+    tags = [
+        "manual",
+        "requires-darwin",
+    ],
+)

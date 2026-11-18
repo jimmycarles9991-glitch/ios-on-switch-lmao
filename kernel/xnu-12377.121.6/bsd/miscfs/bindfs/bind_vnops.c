@@ -98,20 +98,32 @@ bindfs_getattr(struct vnop_getattr_args * args)
 	BINDFSDEBUG("%s %p\n", __FUNCTION__, args->a_vp);
 
 	struct vnode * lowervp = BINDVPTOLOWERVP(args->a_vp);
+	const int boot_overlay = MOUNTTOBINDMOUNT(vnode_mount(args->a_vp))->bindm_flags & BINDM_FORCE_ROOT;
 
 	error = vnode_getwithref(lowervp);
 	if (error == 0) {
 		error = VNOP_GETATTR(lowervp, args->a_vap, args->a_context);
+		if (error == 0 && boot_overlay) {
+			if (VATTR_NOT_RETURNED(args->a_vap, va_fsid)) {
+				VATTR_RETURN(args->a_vap, va_fsid, vfs_statfs(vnode_mount(lowervp))->f_fsid.val[0]);
+			}
+			if (VATTR_NOT_RETURNED(args->a_vap, va_fsid64)) {
+				VATTR_RETURN(args->a_vap, va_fsid64, vfs_statfs(vnode_mount(lowervp))->f_fsid);
+			}
+			args->a_vap->va_vaflags |= VA_USEFSID;
+		}
 		vnode_put(lowervp);
 
 		if (error == 0) {
-			if (MOUNTTOBINDMOUNT(vnode_mount(args->a_vp))->bindm_flags & BINDM_FORCE_ROOT) {
+			if (boot_overlay) {
 				if (VATTR_IS_ACTIVE(args->a_vap, va_uid)) {
 					VATTR_RETURN(args->a_vap, va_uid, 0);
 				}
 				if (VATTR_IS_ACTIVE(args->a_vap, va_gid)) {
 					VATTR_RETURN(args->a_vap, va_gid, 0);
 				}
+				/* Keep the backing inode and its volume together for file-reference URLs. */
+				return 0;
 			}
 			if (VATTR_IS_ACTIVE(args->a_vap, va_fsid)) {
 				/* fix up fsid so it doesn't say the underlying fs*/
@@ -332,7 +344,8 @@ bindfs_readdir(struct vnop_readdir_args * ap)
 		goto lb_end;
 	}
 
-	if (vnode_isvroot(vp) || (dvp != NULL && vnode_isvroot(dvp))) {
+	if (!(MOUNTTOBINDMOUNT(vnode_mount(vp))->bindm_flags & BINDM_FORCE_ROOT) &&
+	    (vnode_isvroot(vp) || (dvp != NULL && vnode_isvroot(dvp)))) {
 		size_t bufsize;
 		void * bufptr;
 		uio_t auio;

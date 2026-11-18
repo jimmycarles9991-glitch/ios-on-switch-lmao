@@ -101,7 +101,6 @@ tool_output(
     message = "Preparing the selected IPSW's installd policy dependency",
     mnemonic = "InstallPolicy",
     requirements = [
-        "no-remote",
         "no-sandbox",
         "requires-darwin",
     ],

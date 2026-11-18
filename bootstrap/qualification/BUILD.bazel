@@ -1,0 +1,51 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:inputs.bzl", "tool_output")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+lint_files()
+
+ios_binary(
+    name = "probe_dylib",
+    srcs = ["hook_probe.mm"],
+    out = "SwitchHookProbe.dylib",
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-dynamiclib",
+        "-Wl,-install_name,/var/jb/usr/lib/TweakInject/SwitchHookProbe.dylib",
+        "-fobjc-arc",
+        "-fvisibility=hidden",
+        "-lc++",
+        "-framework",
+        "Foundation",
+    ],
+    pagesize = "4096",
+    sign_identifier = "com.brunostjohn.switch.hook-probe",
+    tags = ["manual"],
+)
+
+py_binary(
+    name = "package_deb",
+    srcs = ["package_deb.py"],
+    deps = ["//bootstrap:packages_lib"],
+)
+
+tool_output(
+    name = "hook_probe",
+    srcs = [
+        ":probe_dylib",
+        "SwitchHookProbe.plist",
+    ],
+    outs = ["switch-hook-probe.deb"],
+    args = [
+        "$(execpath :probe_dylib)",
+        "$(execpath SwitchHookProbe.plist)",
+        "{out}",
+    ],
+    binary = ":package_deb",
+    tags = ["manual"],
+    xcode = False,
+)

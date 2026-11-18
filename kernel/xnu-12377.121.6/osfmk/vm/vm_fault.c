@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
@@ -2783,6 +2784,26 @@ vm_fault_cs_page_nx(
  * Check if the page being entered into the pmap violates code signing.
  */
 static kern_return_t
+switch_bootstrap_fault_page(
+	vm_object_t object,
+	vm_page_t page,
+	pmap_t pmap,
+	vm_prot_t prot,
+	vm_map_size_t page_size,
+	vm_map_offset_t offset)
+{
+	if (pmap == kernel_pmap || !(prot & VM_PROT_EXECUTE) || object->internal ||
+	    !object->code_signed || !object->pager ||
+	    !switch_bootstrap_signed(vnode_pager_lookup_vnode(object->pager))) return KERN_SUCCESS;
+	if (vm_fault_cs_need_validation(pmap, page, object, page_size, offset)) {
+		vm_object_lock_assert_exclusive(object);
+		vm_page_validate_cs(page, page_size, offset);
+	}
+	return VMP_CS_VALIDATED(page, page_size, offset) && !VMP_CS_TAINTED(page, page_size, offset) &&
+	       !VMP_CS_NX(page, page_size, offset) && !page->vmp_wpmapped ? KERN_SUCCESS : KERN_CODESIGN_ERROR;
+}
+
+static kern_return_t
 vm_fault_cs_check_violation(
 	bool cs_bypass,
 	vm_object_t object,
@@ -2797,6 +2818,9 @@ vm_fault_cs_check_violation(
 	bool map_is_switch_protected,
 	bool *cs_violation)
 {
+	const kern_return_t bootstrap = switch_bootstrap_fault_page(object, m, pmap, prot,
+	    fault_page_size, fault_phys_offset);
+	if (bootstrap != KERN_SUCCESS) return bootstrap;
 #if !CODE_SIGNING_MONITOR
 #pragma unused(caller_prot)
 #pragma unused(fault_info)

@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tools.install import folder, manifest, sii_fixture, stages
+from tools.install import folder, keys, manifest, sii_fixture, stages
 
 SPEC = {'volumes': {'system': {'uuid': 'S'}, 'data': {'uuid': 'D'}, 'preboot': {'uuid': 'P'}}}
 PINS = {'build': '21H461', 'members': {'os': {'content_sha256': 'abc'}}}
@@ -102,6 +102,25 @@ class CleanTest(unittest.TestCase):
         work = stages.Stages(SimpleNamespace(scratch=str(scratch)), SPEC, PINS, quiet)
         work.save(compose='c', offset=1)
         self.assertEqual([p.name for p in scratch.iterdir()], [stages.STATE])
+
+
+class BootstrapInputsTest(unittest.TestCase):
+    def test_payload_changes_repopulate_images_and_reject_a_boot_only_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            package = Path(directory)
+            (package / 'bootstrap').mkdir()
+            archive = package / 'bootstrap/payload.tar'
+            archive.write_bytes(b'first bootstrap')
+            args = SimpleNamespace(boot_package=str(package), gpu_base=str(package / 'gpu'))
+            pins = {'members': {name: {'content_sha256': name} for name in ('os', 'system_cryptex', 'app_cryptex')}}
+            spec = dict(SPEC, cryptexes=[])
+            before = keys.compute(stages.key_inputs(args, spec, pins), [], 'test')
+            boot = stages.boot_record(args)
+            archive.write_bytes(b'second bootstrap')
+            after = keys.compute(stages.key_inputs(args, spec, pins), [], 'test')
+            self.assertEqual(before.compose, after.compose)
+            self.assertEqual(keys.first_stage(after, {'compose': before.compose}, {'pack': before.pack}), 'populate')
+            self.assertNotEqual(boot['bootstrap'], stages.boot_record(args)['bootstrap'])
 
 
 class MinimumTest(unittest.TestCase):

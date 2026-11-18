@@ -1,6 +1,6 @@
 """Batch qmdchain1: the compute class's dependent QMDs, the GPU-side way for one dispatch to start the next.
 
-Only the experiment's own QMD is launched (hw_test_app/bench switch_bench.h chain). Each QMD the chain lists after it
+Only the experiment's own QMD is launched (apps/hwtest/bench switch_bench.h chain). Each QMD the chain lists after it
 sits in a buffer of the bench's, and QMD i names QMD i + 1 dependent where `schedule` says so: DEPENDENT_QMD_POINTER,
 SCHEDULE_ENABLE, TYPE GRID and FIELD_COPY, NAK's QMD 1.7 form (qmd.rs set_dependent_qmd_schedule_pre_v02_04), which
 its hardware test test_qmd_dependencies_simple runs from Kepler B on. Every QMD's RELEASE0 adds 1 to the output's last

@@ -466,6 +466,14 @@ def with_boot_manifest_hash_slot(data: bytes) -> bytes:
     return adt_serialize(tree)
 
 
+def with_launchd_catalog_sha256(data: bytes, digest: bytes) -> bytes:
+    if len(digest) != 64:
+        raise SystemExit('launchd catalogue needs two SHA-256 digests')
+    tree, _ = adt_parse(data)
+    put(child(tree, 'chosen'), 'switch-launchd-catalog-sha256', digest)
+    return adt_serialize(tree)
+
+
 def with_a64x_cache_pretranslated(data: bytes, cache: bytes) -> bytes:
     """Return the ADT with iOS 27's /chosen/a64x-cache-pretranslated.
 
@@ -510,6 +518,7 @@ def main() -> None:
     parser.add_argument('--smp', action='store_true')
     parser.add_argument('--boot-manifest-hash', action='store_true', help='a zeroed slot the layout step fills')
     parser.add_argument('--a64x-cache-pretranslated', type=Path)
+    parser.add_argument('--launchd-catalog-sha256', type=Path)
     parser.add_argument(
         '--cdhashes', action='append', default=[], metavar='ROLE=MODULE', help='a trust module of a role, repeatable'
     )
@@ -526,6 +535,8 @@ def main() -> None:
     adt = with_root_volume(adt, args.root_volume_uuid)
     if args.boot_manifest_hash:
         adt = with_boot_manifest_hash_slot(adt)
+    if args.launchd_catalog_sha256:
+        adt = with_launchd_catalog_sha256(adt, args.launchd_catalog_sha256.read_bytes())
     if args.a64x_cache_pretranslated:
         adt = with_a64x_cache_pretranslated(adt, args.a64x_cache_pretranslated.read_bytes())
     if args.cdhashes:

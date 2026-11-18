@@ -93,6 +93,16 @@ class DeployTailTest(unittest.TestCase):
         self.assertEqual(self.order, [])
         self.assertEqual(lines[-1], f'FAILED: {error}')
 
+    def test_an_unreadable_bootstrap_receipt_reports_failure_after_gpu_and_eject(self):
+        with mock.patch.object(
+            deploy.bootstrap, 'stage', side_effect=denied('Switch/bootstrap/<build>/migration.state')
+        ):
+            status, lines = self.deploy()
+        self.assertEqual(status, 1)
+        self.assertIn('_stage_gpu', self.order)
+        self.assertEqual(self.order[-1], '_eject')
+        self.assertEqual(lines[-1], 'FAILED: not done: bootstrap migration')
+
     def test_a_failed_gpu_bundle_still_stops_the_deploy(self):
         status, lines = self.deploy(_stage_gpu=deploy.host.HostError('GPU bundle NOT staged'))
         self.assertEqual(status, 1)

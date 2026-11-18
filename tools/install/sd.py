@@ -35,12 +35,14 @@ if __package__ in (None, ''):
 from tools.common import paths, sudo
 from tools.install import (
     apfs,
+    bootstrap,
     card as cards,
     compose as composer,
     gpt,
     host,
     owners as ownership,
     populate,
+    staged_apps,
     target as targets,
 )
 
@@ -254,6 +256,8 @@ class Installer:
             )
             if self.args.boot_package:
                 cards.sync_overlay(data, self.args.boot_package, self.log)
+                staged_apps.stage(data, owners, self.log, package=Path(self.args.boot_package))
+                bootstrap.stage(data, self.args.boot_package, self.pins, self.log, owners)
 
     def boot_entry(self) -> None:
         if not self.args.boot_package:

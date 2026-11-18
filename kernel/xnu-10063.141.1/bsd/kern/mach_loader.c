@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
@@ -510,6 +511,7 @@ load_machfile(
 	    vm_compute_max_offset(result->is_64bit_addr),
 	    VM_MAP_CREATE_PAGEABLE);
 	if (switch_app_code_image(vp)) switch_app_code_map(map);
+	if (imgp->ip_switch_tweaks) switch_bootstrap_map(map);
 
 #if defined(__arm64__)
 	if (result->is_64bit_addr) {

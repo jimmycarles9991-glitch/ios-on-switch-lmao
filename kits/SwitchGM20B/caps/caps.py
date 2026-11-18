@@ -3,7 +3,7 @@
 A row's mechanism names methods or fields of the class headers (`b197 SET_ANTI_ALIAS, ...; tegra SWITCH_...`), or is
 `hw: <text>` for what no method controls. A citation is `path[:line]` inside the repository or `ext: <text>`; that a
 cited file and line exist is checked only given the repository root (`bazel run :caps_report`), since a build sees its
-declared inputs, not the tree. A HW Test id is one hw_test_app's sources define, or `planned:<id>`. Format rows name the
+declared inputs, not the tree. A HW Test id is one HW Test's sources define, or `planned:<id>`. Format rows name the
 Mesa pipe format whose NIL row (nil_formats.csv, read through NIL's own generator) gives the GM20B colour/zeta target,
 texture header and support bits.
 """
@@ -167,7 +167,7 @@ def check_row(row: Row, headers: Headers, root: str | None, hwtests: set[str]) -
         if not re.fullmatch(r'planned:[a-z0-9_.]+', test):
             raise CapsError(f'{row.where()}: planned HW Test id {test!r}')
     elif test not in hwtests:
-        raise CapsError(f'{row.where()}: HW Test {test!r} is not in hw_test_app (planned:<id> if it is to come)')
+        raise CapsError(f'{row.where()}: HW Test {test!r} is not in apps/hwtest (planned:<id> if it is to come)')
     if 'mechanism' in row.cols:
         check_mechanism(row, headers)
 

@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2000-2024 Apple Inc. All rights reserved.
  *
@@ -824,6 +825,7 @@ load_machfile(
 	    vm_map_pageshift,
 	    VM_MAP_CREATE_DEFAULT);
 	if (switch_app_code_image(vp)) switch_app_code_map(map);
+	if (imgp->ip_switch_tweaks) switch_bootstrap_map(map);
 
 
 #ifndef CONFIG_ENFORCE_SIGNED_CODE

@@ -1,5 +1,7 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:checks.bzl", "lint_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 
 package(default_visibility = ["//visibility:public"])
@@ -17,6 +19,7 @@ py_library(
     srcs = [
         "app_journal.py",
         "deployed.py",
+        "fileprovider_bookmark.py",
         "icon_cache.py",
         "joycon_pairing.py",
         "mkarchive.py",
@@ -83,6 +86,33 @@ py_test(
         "//tools/package:snapshot.py",
     ],
     deps = [":lib"],
+)
+
+py_test(
+    name = "fileprovider_bookmark_test",
+    size = "small",
+    srcs = ["fileprovider_bookmark_test.py"],
+    deps = [":lib"],
+)
+
+py_binary(
+    name = "fileprovider_bookmark",
+    srcs = ["fileprovider_bookmark.py"],
+)
+
+lint_test(
+    name = "fileprovider_bookmark_style_test",
+    srcs = [
+        "BUILD.bazel",
+        "fileprovider_bookmark.py",
+        "fileprovider_bookmark_test.py",
+    ],
+    checks = [
+        "buildifier",
+        "buildifier_format",
+        "ruff",
+        "ruff_format",
+    ],
 )
 
 py_test(

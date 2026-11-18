@@ -106,10 +106,10 @@ tools_archive(
 shader_crawl(
     name = "crawl",
     applications = select({
-        "//ipsw:ios17": ["//hw_test_app:SwitchHWTest17"],
+        "//ipsw:ios17": ["//apps/hwtest:SwitchHWTest17"],
         "//ipsw:ios27": [
-            "//hw_test_app:SwitchHWTest27",
-            "//hw_test_app:SwitchHWTest27e",
+            "//apps/hwtest:SwitchHWTest27",
+            "//apps/hwtest:SwitchHWTest27e",
         ],
     }),
     embedded = [METAL + ":TwoPlaneStandIn.h"],

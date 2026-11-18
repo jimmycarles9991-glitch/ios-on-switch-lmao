@@ -21,6 +21,7 @@ PATTERNS = [
     "BUILD.bazel",
     "MODULE.bazel",
     "REPO.bazel",
+    "**/*.BUILD.bazel",
     "**/*.bzl",
     # Python
     "**/*.py",

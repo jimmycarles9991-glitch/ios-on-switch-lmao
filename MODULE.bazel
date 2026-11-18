@@ -10,6 +10,30 @@ module(
     version = "0.1.0",
 )
 
+bootstrap = use_extension("//bootstrap:repositories.bzl", "bootstrap_dependencies")
+use_repo(
+    bootstrap,
+    "bootstrap_ellekit",
+    "bootstrap_launchctl",
+    "bootstrap_procursus_bootstrap",
+    "bootstrap_sileo",
+    "bootstrap_sileo_alderis",
+    "bootstrap_sileo_cosmos",
+    "bootstrap_sileo_depictionkit",
+    "bootstrap_sileo_down",
+    "bootstrap_sileo_evander",
+    "bootstrap_sileo_jjliso8601dateformatter",
+    "bootstrap_sileo_lnpopupcontroller",
+    "bootstrap_sileo_lnztreeview",
+    "bootstrap_sileo_onboarding",
+    "bootstrap_sileo_release",
+    "bootstrap_sileo_sqlite_swift",
+    "bootstrap_sileo_swipecellkit",
+    "bootstrap_sileo_zippyjson",
+    "bootstrap_sileo_zippyjsoncfamily",
+    "bootstrap_zstd",
+)
+
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "bazel_skylib", version = "1.9.2")
 bazel_dep(name = "rules_cc", version = "0.2.27")
@@ -67,6 +91,37 @@ uv.configure(
 # --- Lint and format tools (//bazel/lint): release binaries pinned in bazel/lint/tools.bzl ----------------------
 lint_tools = use_extension("//bazel/lint:tools.bzl", "lint_tools")
 use_repo(lint_tools, "actionlint", "buildifier", "dprint", "dprint_plugin_json", "dprint_plugin_toml", "dprint_plugin_yaml", "ruff", "rumdl", "shellcheck", "shfmt")
+
+bazel_dep(name = "rules_swift_tidy", version = "0.0.0", dev_dependency = True)
+
+# Upstream's Bzlmod toolchain is unreleased; the published rules_swiftformat release uses WORKSPACE.
+git_override(
+    module_name = "rules_swift_tidy",
+    commit = "eb94b3f2d2cf7470019a1a6e855b585230731fb0",
+    remote = "https://github.com/cgrindel/rules_swiftformat.git",
+)
+
+swiftformat_source = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+swiftformat_source(
+    name = "swiftformat",
+    build_file = "//bazel/lint:swiftformat.BUILD.bazel",
+    patch_args = ["-p1"],
+    patches = ["//bazel/lint:swiftformat-shift.patch"],
+    sha256 = "1ab244207e2d15dbfbe61646be26513fa9060799792fb44ce0a180845fc8d971",
+    strip_prefix = "SwiftFormat-0.64.7",
+    urls = ["https://github.com/nicklockwood/SwiftFormat/archive/refs/tags/0.64.7.tar.gz"],
+)
+
+register_toolchains("//bazel/lint:swiftformat_toolchain")
+
+bazel_dep(name = "swiftlint", version = "0.65.1", dev_dependency = True)
+
+# rules_swift_tidy's starlib dependency selects Go rules that predate Bazel 9's CcInfo removal.
+single_version_override(
+    module_name = "rules_go",
+    version = "0.65.0",
+)
 
 # --- LLVM 23.1.4 (the Homebrew version the CMake flow used): ld.lld/objcopy/readelf/objdump for the loader, llvm-objcopy
 # for late kernel objects, clang-format/clang-tidy for lint. Only those binaries of the release are extracted. --------
@@ -266,11 +321,11 @@ use_repo(ipsw, "ipsw")
 release = use_extension("//install:release.bzl", "release")
 use_repo(release, "switch_release")
 
-# --- hw_test_app: the debug images' hardware test app (rules_apple + rules_swift); libvpx only for its media generator
+# Apps use rules_apple and rules_swift; libvpx is only for HW Test's media generator.
 bazel_dep(name = "rules_swift", version = "4.2.2")
 bazel_dep(name = "rules_apple", version = "5.4.0")
 
-# hw_test_app/rules_apple.patch: the environment plist rules_apple merges into an app's Info.plist leaves out
+# apps/rules_apple.patch: the environment plist rules_apple merges into an app's Info.plist leaves out
 # BuildMachineOSBuild (sw_vers), which no action key holds: the app's bytes, and its CDHash in the boot package's trust
 # cache, came from whichever Mac (or macOS build) ran that action first. And MetalCompile reads each shader from stdin:
 # the Metal frontend records the resolved path of a file it opens, so every .air named the checkout or the worker's
@@ -278,7 +333,7 @@ bazel_dep(name = "rules_apple", version = "5.4.0")
 single_version_override(
     module_name = "rules_apple",
     patch_strip = 1,
-    patches = ["//hw_test_app:rules_apple.patch"],
+    patches = ["//apps:rules_apple.patch"],
 )
 
 bazel_dep(name = "libvpx", version = "1.16.0.bcr.beta.3", dev_dependency = True)

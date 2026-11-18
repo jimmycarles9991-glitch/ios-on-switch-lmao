@@ -1,6 +1,6 @@
 """The app checks a batch with the limits, formats and method ranges protocol.py checks it with.
 
-hw_test_app/core/BenchProtocol.swift (the app's decoder) and hw_test_app/bench/bench_records.cpp (the GPU side's own
+apps/hwtest/core/BenchProtocol.swift (the app's decoder) and apps/hwtest/bench/bench_records.cpp (the GPU side's own
 method check) are read as text, since neither runs on the host's Python.
 """
 
@@ -11,8 +11,8 @@ from pathlib import Path
 from tools.benchloop import protocol
 
 TREE = Path(__file__).resolve().parents[2]
-SWIFT = TREE / 'hw_test_app' / 'core' / 'BenchProtocol.swift'
-RECORDS = TREE / 'hw_test_app' / 'bench' / 'bench_records.cpp'
+SWIFT = TREE / 'apps/hwtest' / 'core' / 'BenchProtocol.swift'
+RECORDS = TREE / 'apps/hwtest' / 'bench' / 'bench_records.cpp'
 LIMITS = {
     'maxExperiments': 'MAX_EXPERIMENTS',
     'maxSide': 'MAX_SIDE',

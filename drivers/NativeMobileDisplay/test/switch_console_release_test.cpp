@@ -141,6 +141,9 @@ TEST(ConsoleReleaseSource, BothKernelsKickTheDisplayWhereTheHoldDrops)
     for (const char *tree : {"../../../kernel/xnu-10063.141.1/bsd/kern/kern_exec.c",
                              "../../../kernel/xnu-12377.121.6/bsd/kern/kern_exec.c"}) {
         const std::string exec = SourceText(tree);
+        const std::string start = Between(exec, "native_migration_start(void)", "\n}\n");
+        ASSERT_NE(start.find("switch_console_hold = 1"), std::string::npos) << tree;
+        EXPECT_LT(start.find("switch-migration-console"), start.find("switch_console_hold = 1"));
         const std::string tick = Between(exec, "native_migration_tick(thread_call_param_t", "\n}\n");
         const std::string hook = "switch_console_hold = 0;\n\t\tnative_legacy_console_released();";
         size_t drops = 0;

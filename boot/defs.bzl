@@ -34,6 +34,7 @@ refuses it unless this window's constants.json (everything the loader compiles i
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("//ipsw:defs.bzl", "PretranslatedPinsInfo")
 load("//ipsw:ipsw.bzl", "ios_version", "kernel_virt_base", "os_volume_uuid")
+load("//ipsw:pins.bzl", "IPSWS")
 
 # Xcode's tools: macOS only, here or on a Mac remote worker with the same Xcode (the key includes @xcode//:identity).
 _XCODE_EXECUTION = {"requires-darwin": ""}
@@ -180,6 +181,54 @@ def _boot_package_impl(ctx):
     for target, source in ctx.attr.overlay_data.items():
         files[source] = _one(target, "overlay file")
 
+    helper = binaries["build/switch-bootstrap/switch-bootstrap"]
+    bootstrap_manifest = out("bootstrap-manifest.json")
+    pins = IPSWS[ctx.attr._kind[BuildSettingInfo].value]
+    args = ctx.actions.args()
+    args.add("--manifest", ctx.file.bootstrap_manifest)
+    args.add("--helper", helper)
+    args.add("--build", pins["build"])
+    args.add("--firmware", pins["version"])
+    args.add("--out", bootstrap_manifest)
+    _run(ctx, ctx.executable._bootstrap_configuration, [args], [ctx.file.bootstrap_manifest, helper], [bootstrap_manifest], "BootstrapManifest", "Pinning the bootstrap activation helper")
+    files["build/switch-bootstrap/payload.tar"] = ctx.file.bootstrap_payload
+    files["build/switch-bootstrap/manifest.json"] = bootstrap_manifest
+
+    catalog_trust = []
+    catalog_outputs = []
+    catalog_digest = None
+    if ctx.file.launchd_catalog_os:
+        catalog = out("launchd/launchd.plist")
+        signature = out("launchd/launchd.plist.sig")
+        trust = out("launchd/launchd.trustcache")
+        catalog_digest = out("launchd/launchd.sha256")
+        job = ctx.file._bootstrap_job
+        apps_job = ctx.file._bootstrap_apps_job
+        args = ctx.actions.args()
+        args.add("--os", ctx.file.launchd_catalog_os)
+        args.add("--job", job)
+        args.add("--apps-job", apps_job)
+        args.add("--volume-uuid", pins["volumes"]["os_volume_uuid"])
+        args.add("--catalog-sha256", pins["derived"]["launchd_catalog_sha256"])
+        args.add("--signature-sha256", pins["derived"]["launchd_catalog_signature_sha256"])
+        args.add("--catalog", catalog)
+        args.add("--signature", signature)
+        args.add("--trust", trust)
+        args.add("--digest", catalog_digest)
+        catalog_outputs = [catalog, signature, trust, catalog_digest]
+        ctx.actions.run(
+            executable = ctx.attr._launchd_catalog[DefaultInfo].files_to_run,
+            arguments = [args],
+            inputs = [ctx.file.launchd_catalog_os, job, apps_job],
+            outputs = catalog_outputs,
+            mnemonic = "LaunchdCatalog",
+            progress_message = "Preparing the %s native launchd catalogue" % pins["build"],
+            execution_requirements = {"requires-darwin": "", "no-sandbox": ""},
+        )
+        files["build/switch-bootstrap/launchd.plist"] = catalog
+        files["build/switch-bootstrap/launchd.plist.sig"] = signature
+        catalog_trust.append(trust)
+
     # Source files the manifest names by their path in the kernel tree (the manifest's ../): no mapping to keep.
     parent = ctx.file.overlay_manifest.short_path.rpartition("/")[0].rpartition("/")[0]
     tree = parent + "/" if parent else ""
@@ -217,6 +266,9 @@ def _boot_package_impl(ctx):
         args.add("--boot-manifest-hash")
     pretranslated = ctx.attr.pretranslated[PretranslatedPinsInfo]
     adt_inputs = [ctx.file.adt, ctx.file._apple_adt, plan, ctx.file.bt_patch, ctx.file.portrait_header]
+    if catalog_digest:
+        args.add("--launchd-catalog-sha256", catalog_digest)
+        adt_inputs.append(catalog_digest)
     if pretranslated.cache_list:
         args.add("--a64x-cache-pretranslated", pretranslated.cache_list)
         adt_inputs.append(pretranslated.cache_list)
@@ -247,7 +299,7 @@ def _boot_package_impl(ctx):
     if len(gpu) > 1:
         fail("the GPU trust cache must be one file")
     bundle = out("trustcache.bundle")
-    modules = [ctx.file.system_trust, ctx.file.app_trust, overlay_trust] + gpu + pretranslated.trust
+    modules = [ctx.file.system_trust, ctx.file.app_trust, overlay_trust] + catalog_trust + gpu + pretranslated.trust
     args = ctx.actions.args()
     args.add("--static", ctx.file.static_trust)
     args.add_all(modules, before_each = "--module")
@@ -352,20 +404,31 @@ def _boot_package_impl(ctx):
         "bootlogo.bmp": ctx.file.bootlogo,
     }
     package = ctx.actions.declare_directory(ctx.attr.out)
+    seed_pin = None
+    seed = binaries.get("build/switch-apps/SwitchInstaller.ipa")
+    if seed:
+        seed_pin = out("installer-bundle.json")
+        policy = ctx.file.installer_entitlements
+        _run(ctx, ctx.executable._installer_seed_pin, [seed.path, seed_pin.path, policy.path, profile], [seed, policy], [seed_pin], "InstallerSeedPin", "Pinning the signed Installer bundle")
     commands = [
         'set -e; out="$1"',
         '/bin/mkdir -p "$out/switchroot/ios" "$out/bootloader/ini" "$out/bootloader/res"',
         '/bin/cp -R -L "%s" "$out/overlay"' % overlay.path,
+        '/bin/mkdir -p "$out/bootstrap"',
+        '/bin/cp -L "%s" "$out/bootstrap/payload.tar"' % ctx.file.bootstrap_payload.path,
+        '/bin/cp -L "%s" "$out/bootstrap/manifest.json"' % bootstrap_manifest.path,
         '/bin/cp -L "%s" "$out/bootloader/ini/ios.ini"' % ctx.file.ini.path,
         '/bin/cp -L "%s" "$out/bootloader/res/icon_ios_hue.bmp"' % ctx.file.icon.path,
     ] + [
         '/bin/cp -L "%s" "$out/switchroot/ios/%s"' % (f.path, n)
         for n, f in sorted(switchroot.items())
     ]
+    if seed_pin:
+        commands.append('/bin/cp -L "%s" "$out/installer-bundle.json"' % seed_pin.path)
     ctx.actions.run_shell(
         command = "\n".join(commands),
         arguments = [package.path],
-        inputs = [overlay, ctx.file.ini, ctx.file.icon] + switchroot.values(),
+        inputs = [overlay, ctx.file.ini, ctx.file.icon, ctx.file.bootstrap_payload, bootstrap_manifest, helper] + switchroot.values() + ([seed_pin] if seed_pin else []),
         outputs = [package],
         mnemonic = "BootPackage",
         progress_message = "Assembling the iOS boot entry",
@@ -377,6 +440,8 @@ def _boot_package_impl(ctx):
             boot_script = depset([script_text]),
             constants = depset([constants]),
             kernel_window = depset([window, layout_h, runs_h, constants, window_plan]),
+            installer_seed = depset([seed_pin] if seed_pin else []),
+            launchd_catalog = depset(catalog_outputs),
             loader = depset([loader]),
             overlay = depset([plan, overlay_trust, overlay]),
             trust = depset([bundle]),
@@ -409,7 +474,12 @@ boot_package = rule(
         "icon": attr.label(mandatory = True, allow_single_file = True),
         "exporter": attr.label(mandatory = True, allow_single_file = True),
         "bt_patch": attr.label(mandatory = True, allow_single_file = True),
+        "bootstrap_payload": attr.label(mandatory = True, allow_single_file = True),
+        "bootstrap_manifest": attr.label(mandatory = True, allow_single_file = True),
+        "launchd_catalog_os": attr.label(allow_single_file = True),
         "overlay_manifest": attr.label(mandatory = True, allow_single_file = True),
+        "installer_entitlements": attr.label(allow_single_file = True),
+        "_installer_seed_pin": _tool("//tools/package:installer_seed_pin"),
         "portrait_header": attr.label(mandatory = True, allow_single_file = True),
         "overlay_binaries": attr.label_keyed_string_dict(allow_files = True, doc = "built Mach-O -> its manifest source"),
         "overlay_data": attr.label_keyed_string_dict(allow_files = True, doc = "other overlay file -> its manifest source"),
@@ -449,6 +519,10 @@ boot_package = rule(
         "xcode_env": attr.label(allow_single_file = True, doc = "@xcode//:xcode.env, unless the loader is prebuilt"),
         "xcode_identity": attr.label(allow_single_file = True, doc = "@xcode//:identity, unless the loader is prebuilt"),
         "_boot_args": _tool("//tools/package:boot_args"),
+        "_bootstrap_configuration": _tool("//drivers/SwitchBootstrap:configuration"),
+        "_bootstrap_job": attr.label(default = "//drivers/SwitchBootstrap:com.brunostjohn.switch.bootstrap.plist", allow_single_file = True),
+        "_bootstrap_apps_job": attr.label(default = "//drivers/SwitchAppRegistration:com.brunostjohn.switch.bootstrap-apps.plist", allow_single_file = True),
+        "_launchd_catalog": _tool("//tools/package:launchd_catalog"),
         "_overlay": _tool("//tools/package:overlay"),
         "_adt_edit": _tool("//tools/package:adt_edit"),
         "_trust": _tool("//tools/package:trust"),

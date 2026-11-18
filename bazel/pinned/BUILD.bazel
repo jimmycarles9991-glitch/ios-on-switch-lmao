@@ -21,7 +21,7 @@
 #   firmware/BCM4356A3.hcd
 #       The Bluetooth controller's patch RAM (gitlab.com/switchroot/android/nx-firmware).
 #   hw_test_app/media/*
-#       The hardware test app's clips and images (debug images only), from `bazel run //hw_test_app:media_tool`: the
+#       The hardware test app's clips and images (debug images only), from `bazel run --config=remote //apps/hwtest:media_tool`: the
 #       Mac's hardware encoder spreads 4K frames over however many engines are free, so they cannot be remade
 #       byte for byte, and pinning them keeps every build off the encoders.
 #   overlay/wallpaper-1x/<kind>/*.plist

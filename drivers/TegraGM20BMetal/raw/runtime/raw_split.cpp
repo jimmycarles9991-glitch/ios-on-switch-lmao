@@ -163,7 +163,7 @@ Pipeline *RenderEncoder::splitTwin(Pipeline *pl, WrittenRegion::Analysis &analys
     const SplitSource *source = __atomic_load_n(&pl->splitSource, __ATOMIC_ACQUIRE);
     if (!source)
         return pl;
-    [[maybe_unused]] const auto whole = [&](SplitWhole why) {
+    const auto whole = [&]([[maybe_unused]] SplitWhole why) {
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
         cb_->counts_.splitWhole[size_t(why)]++;
 #endif

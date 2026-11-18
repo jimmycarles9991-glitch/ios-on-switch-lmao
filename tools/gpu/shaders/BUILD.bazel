@@ -15,7 +15,7 @@ py_library(
     visibility = [
         "//drivers/TegraGM20BMetal:__pkg__",
         "//gpu:__subpackages__",
-        "//hw_test_app:__pkg__",
+        "//apps/hwtest:__pkg__",
     ],
 )
 

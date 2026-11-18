@@ -90,6 +90,7 @@ static NSError *failure(void)
     uint64_t _codeSignatureVerificationState;
 }
 @property MICodeSigningInfo *codeSigningInfo;
+@property MICodeSigningInfo *nativeSigningInfo;
 - (id)codeSigningInfoByValidatingResources:(BOOL)resources performingOnlineAuthorization:(BOOL)online
                    ignoringCachedSigningInfo:(BOOL)cached checkingTrustCacheIfApplicable:(BOOL)trust
                     skippingProfileIDValidation:(BOOL)profile error:(NSError **)error;
@@ -100,6 +101,13 @@ static NSError *failure(void)
                     skippingProfileIDValidation:(BOOL)profile error:(NSError **)error
 {
     (void)resources; (void)online; (void)cached; (void)trust; (void)profile;
+    if (self.nativeSigningInfo) {
+        self.codeSigningInfo = self.nativeSigningInfo;
+        _codeSignatureVerificationState = 2;
+        if (error)
+            *error = nil;
+        return self.codeSigningInfo;
+    }
     if (error)
         *error = failure();
     return nil;
@@ -223,11 +231,11 @@ static NSError *failure(void)
     checkingTrustCacheIfApplicable:(BOOL)trust allowingFreeProfileValidation:(BOOL)free
      skippingProfileIDValidation:(BOOL)profile error:(NSError **)error
 {
-    (void)bundle; (void)resources; (void)online; (void)trust; (void)free; (void)profile;
+    (void)free;
     ++self.nativeValidationCalls;
-    if (error)
-        *error = failure();
-    return nil;
+    return [bundle codeSigningInfoByValidatingResources:resources performingOnlineAuthorization:online
+        ignoringCachedSigningInfo:NO checkingTrustCacheIfApplicable:trust
+        skippingProfileIDValidation:profile error:error];
 }
 - (BOOL)_installEmbeddedProfilesWithError:(NSError **)error { (void)error; return NO; }
 - (BOOL)_validateApplicationIdentifierForNewBundleSigningInfo:(id)info error:(NSError **)error
@@ -288,6 +296,36 @@ static MIExecutableBundle *bundle(Class type, NSURL *root, NSString *name, NSStr
     return result;
 }
 
+static void switch_native_signing_test(NSURL *root)
+{
+    MIInstaller *installer = [MIInstaller new];
+    installer.options = [SwitchFixtureOptions new];
+    installer.stagingRoot = root;
+    installer.installable = [MIInstallableBundle new];
+    MIExecutableBundle *app = bundle(MIExecutableBundle.class, root, @"Trusted.app", @"org.example.trusted");
+    NSDictionary *rights = @{
+        @"application-identifier" : @"TEAM.org.example.trusted",
+        @"com.apple.private.mobileinstall.allowedSPI" : @[@"InstallForInstallCoordination"],
+        @"com.apple.private.security.container-required" : @YES,
+    };
+    MICodeSigningInfo *info = [[MICodeSigningInfo alloc] initWithDictionaryRepresentation:@{
+        @"CodeInfoIdentifier" : app.identifier,
+        @"com.apple.MobileContainerManager.Entitlements" : rights,
+    }];
+    app.nativeSigningInfo = info;
+    installer.installable.bundle = app;
+    NSError *error = nil;
+    assert([installer performInstallationWithError:&error]);
+    assert(!error);
+    assert(app.codeSigningInfo == info);
+    assert(app->_codeSignatureVerificationState == 2);
+    assert([app.codeSigningInfo.dictionary[@"com.apple.MobileContainerManager.Entitlements"] isEqual:rights]);
+    assert(![[NSFileManager defaultManager] fileExistsAtPath:
+        [app.bundleURL.path stringByAppendingPathComponent:@".SwitchUnsigned"]]);
+    assert(![[NSFileManager defaultManager] fileExistsAtPath:
+        [app.executableURL.path stringByAppendingString:@".SwitchEntitlements"]]);
+}
+
 
 int main(int argc, char **argv)
 {
@@ -308,6 +346,7 @@ int main(int argc, char **argv)
         NSURL *root = [NSURL fileURLWithPath:@(temporary) isDirectory:YES];
         switch_policy_capability_tests(root);
         switch_policy_source_tests(root);
+        switch_native_signing_test(root);
         MIInstaller *installer = [MIInstaller new];
         installer.options = [SwitchFixtureOptions new];
         installer.stagingRoot = root;

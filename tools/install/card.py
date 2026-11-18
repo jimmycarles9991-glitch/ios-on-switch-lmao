@@ -18,7 +18,9 @@ to the paths the caller names.
 import argparse
 import contextlib
 import hashlib
+import json
 import os
+import plistlib
 import re
 import shutil
 import sys
@@ -27,7 +29,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.common import files, hashing
+from tools.common import files, hashing, seed_manifest
 from tools.install import disks, gpt, host, renamed, target as targets
 
 LINUX_MBR = 0x83
@@ -258,15 +260,14 @@ def mounted(identifier: str, log: host.Log, read_only: bool = False, owners: boo
         info = host.disk_info(identifier) or {}
         if not read_only and not info.get('WritableVolume'):
             raise host.HostError(f'{identifier} is mounted read-only at {current}')
-        if owners or not info.get('GlobalPermissionsEnabled'):
+        if owners == bool(info.get('GlobalPermissionsEnabled')):
             yield Path(current)
             return
-        # macOS's own mount of a card enforces owners, which closes root's 0700 folders to the user
         disks.unmount(identifier, log)
     with tempfile.TemporaryDirectory(prefix='switch-', ignore_cleanup_errors=True) as directory:
         mode = ['readOnly'] if read_only else []
         disks.mount_at(
-            identifier, directory, [*mode, '-mountOptions', 'nobrowse' if owners else 'nobrowse,noowners'], log
+            identifier, directory, [*mode, '-mountOptions', 'nobrowse,owners' if owners else 'nobrowse,noowners'], log
         )
         try:
             if owners and os.geteuid() == 0:
@@ -388,16 +389,54 @@ def tree_digest(root: Path) -> str | None:
     return digest.hexdigest()
 
 
+def _builtin_pin(package: Path) -> dict | None:
+    manifest = package / seed_manifest.BUILTIN_MANIFEST
+    app = package / 'overlay/Applications' / seed_manifest.APP
+    if not manifest.exists() and not app.exists():
+        return None
+    try:
+        pin = json.loads(manifest.read_bytes())
+        seed_manifest.verify(app, pin)
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        raise host.HostError(f'cannot verify built-in Installer: {error}') from error
+    return pin
+
+
+def _pending_installer(data: Path) -> list[Path]:
+    parent = data / 'staged_system_apps'
+    if parent.is_symlink():
+        raise host.HostError(f'unexpected linked staging directory: {parent}')
+    found = []
+    for name in (seed_manifest.APP, f'.{seed_manifest.APP}.partial'):
+        path = parent / name
+        if not path.exists() and not path.is_symlink():
+            continue
+        info = path / 'Info.plist'
+        if path.is_symlink() or info.is_symlink() or not info.is_file():
+            raise host.HostError(f'cannot identify old Installer migration copy: {path}')
+        try:
+            metadata = plistlib.loads(info.read_bytes())
+        except (OSError, plistlib.InvalidFileException) as error:
+            raise host.HostError(f'cannot read old Installer metadata: {path}') from error
+        if not isinstance(metadata, dict) or metadata.get('CFBundleIdentifier') != seed_manifest.IDENTIFIER:
+            raise host.HostError(f'unexpected app in Installer migration slot: {path}')
+        found.append(path)
+    return found
+
+
 def sync_overlay(data_root: Path, package: str | Path, log: host.Log, dry_run: bool = False) -> bool:
     """<Data>/Switch/overlay := the package's overlay/ (whole tree, like the old deploy script)."""
     source, target = Path(package) / 'overlay', Path(data_root) / renamed.DATA_FOLDER / 'overlay'
     if not source.is_dir():
         log('overlay: the boot package has none; left as is')
         return False
-    if tree_digest(source) == tree_digest(target):
+    pin = _builtin_pin(Path(package))
+    pending = _pending_installer(data_root) if pin else []
+    unchanged = tree_digest(source) == tree_digest(target)
+    if unchanged and not pending:
         log('overlay: unchanged')
         return False
-    if not dry_run:
+    if not dry_run and not unchanged:
         if target.exists():
             shutil.rmtree(target)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -411,5 +450,11 @@ def sync_overlay(data_root: Path, package: str | Path, log: host.Log, dry_run: b
         for leftover in target.rglob('._*'):
             leftover.unlink()
         host.run('sync')
-    log('overlay: replaced ({} files)'.format(sum(1 for p in source.rglob('*') if p.is_file())))
+    if not dry_run and pin:
+        seed_manifest.verify(target / 'Applications' / seed_manifest.APP, pin)
+        for old in pending:
+            shutil.rmtree(old)
+            log(f'retired Installer migration copy: {old.name}')
+    action = 'unchanged' if unchanged else 'updated'
+    log(f'overlay: {action} ({sum(p.is_file() for p in source.rglob("*"))} files)')
     return True

@@ -13,7 +13,7 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/rules:inputs.bzl", "tool_output")
 load(":defs.bzl", "boot_package")
-load(":overlay.bzl", "OVERLAY_BINARIES")
+load(":overlay.bzl", "BOOTSTRAP_PACKAGES", "OVERLAY_BINARIES")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -63,7 +63,7 @@ selects.config_setting_group(
     ],
 )
 
-# Each IPSW kind's debug image carries the hardware test app built for its iOS version (hw_test_app/BUILD.bazel).
+# Each IPSW kind's debug image carries the hardware test app built for its iOS version (apps/hwtest/BUILD.bazel).
 [
     selects.config_setting_group(
         name = "local_debug_" + kind,
@@ -124,15 +124,31 @@ boot_package(
     bl31 = "//bazel/pinned:firmware/bl31.bin",
     bl33 = "//bazel/pinned:firmware/bl33.bin",
     bootlogo = "//boot/logo:bootlogo.bmp",
+    bootstrap_manifest = select({
+        "//install:from_release": "@switch_release//:bootstrap_manifest",
+        "//conditions:default": "//bootstrap:manifest",
+    }),
+    bootstrap_payload = select({
+        "//install:from_release": "@switch_release//:bootstrap_payload",
+        "//conditions:default": "//bootstrap:payload",
+    }),
     bt_patch = "//bazel/pinned:firmware/BCM4356A3.hcd",
     data_seed = "//bazel/pinned:data-seed/data-v10.dbr",
     dtb = "//bazel/pinned:firmware/oled-sku3.dtb",
     exporter = "//bazel/pinned:firmware/exporter.uimg",
     icon = "//boot/logo:icon_ios_hue.bmp",
     ini = ":ios_ini",
+    installer_entitlements = select({
+        "//ipsw:21H461": "//apps/installer:SwitchInstaller.entitlements",
+        "//ipsw:24B119": "//apps/installer:SwitchInstaller27.entitlements",
+    }),
     kernel = select({
         "//install:from_release": "//install:release_kernel",
         "//conditions:default": "//kernel:prelinked",
+    }),
+    launchd_catalog_os = select({
+        "//ipsw:21H461": "@ipsw//:os",
+        "//conditions:default": None,
     }),
     linker_script = ":loader/link.ld",
     loader_hdrs = [
@@ -188,20 +204,29 @@ boot_package(
     } | select({
         ":local_debug": {
             "//drivers/TegraGM20BMetal:fetchform": "build/switch-gpu/fetchform",
-            "//hw_test_app:switch-texpeer": "build/switch-hwtest/switch-texpeer",
+            "//apps/hwtest:switch-texpeer": "build/switch-hwtest/switch-texpeer",
         },
         "//conditions:default": {},
     }) | select({
-        ":local_debug_21H461": {"//hw_test_app:SwitchHWTest17": "build/switch-hwtest/SwitchHWTest.ipa"},
+        ":local_debug_21H461": {"//apps/hwtest:SwitchHWTest17": "build/switch-hwtest/SwitchHWTest.ipa"},
         ":local_debug_24B119": {
-            "//hw_test_app:SwitchHWTest27": "build/switch-hwtest/SwitchHWTest.ipa",
-            "//hw_test_app:SwitchHWTest27e": "build/switch-hwtest/SwitchHWTest27e.ipa",
+            "//apps/hwtest:SwitchHWTest27": "build/switch-hwtest/SwitchHWTest.ipa",
+            "//apps/hwtest:SwitchHWTest27e": "build/switch-hwtest/SwitchHWTest27e.ipa",
         },
         "//conditions:default": {},
     }),
     overlay_data = {
         "//boot/logo:apple-logo~ipad.png": "build/progressui/apple-logo~ipad.png",
     } | select({
+        "//install:from_release": {
+            "@switch_release//:bootstrap/packages/" + package + ".deb": source
+            for package, source in BOOTSTRAP_PACKAGES.items()
+        },
+        "//conditions:default": {
+            "//bootstrap:managed_" + package: source
+            for package, source in BOOTSTRAP_PACKAGES.items()
+        },
+    }) | select({
         "//ipsw:21H461": {
             "//bazel/pinned:overlay/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist": "build/wallpaper-1x/21H461/7570.iPadOS_17_Flat.plist",
             "//bazel/pinned:overlay/wallpaper-1x/21H461/7560.Lake_Flat.plist": "build/wallpaper-1x/21H461/7560.Lake_Flat.plist",

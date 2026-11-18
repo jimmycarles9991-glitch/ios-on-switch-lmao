@@ -135,6 +135,8 @@ struct image_params {
 	unsigned int    ip_simulator_binary;    /* simulator binary flags */
 	int             ip_switch_band;       /* SwitchBootBand class, set while the path still exists
 	                                         * (exec_activate_image; switch_boot_band.c) */
+	bool            ip_switch_tweaks;
+	bool            ip_switch_package_exec;
 };
 
 /*

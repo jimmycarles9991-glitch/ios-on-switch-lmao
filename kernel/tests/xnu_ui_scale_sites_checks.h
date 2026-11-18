@@ -73,6 +73,40 @@ inline uint64_t AddressOf(const switch_us_site &site, const switch_us_edit &edit
     return site.page_vmaddr + (edit.fileoff - site.page_fileoff) + at;
 }
 
+inline void ExpectNativeCanvas(const switch_us_cache &cache, uint64_t none_return, uint64_t phone_path,
+                               uint64_t eligibility_address)
+{
+    const switch_us_site *selection = Named(cache, "SpringBoard iPad native canvas selection");
+    const switch_us_site *eligibility = Named(cache, "SpringBoard iPad native canvas eligibility");
+    ASSERT_NE(selection, nullptr);
+    ASSERT_NE(eligibility, nullptr);
+    EXPECT_TRUE(selection->every_scale);
+    EXPECT_TRUE(eligibility->every_scale);
+    ASSERT_EQ(selection->edits, 1u);
+    ASSERT_EQ(eligibility->edits, 1u);
+    const auto &choose = selection->edit[0];
+    EXPECT_EQ(choose.kind, SWITCH_US_FIXED);
+    ASSERT_EQ(choose.length, 16u);
+    EXPECT_EQ(Word(choose.stock), 0x52800042u);
+    EXPECT_EQ(Word(choose.stock + 4) >> 26, 0x25u);
+    EXPECT_EQ(Word(choose.stock + 8) & 0xfff8001fu, 0x36000000u);
+    EXPECT_EQ(BranchTarget(AddressOf(*selection, choose, 8), Word(choose.stock + 8)), phone_path);
+    ASSERT_EQ(choose.at, 12u);
+    ASSERT_EQ(choose.size, 4u);
+    EXPECT_EQ(Word(choose.patched) >> 26, 0x5u);
+    EXPECT_EQ(BranchTarget(AddressOf(*selection, choose, 12), Word(choose.patched)), none_return);
+    const auto &allow = eligibility->edit[0];
+    EXPECT_EQ(allow.kind, SWITCH_US_FIXED);
+    EXPECT_EQ(AddressOf(*eligibility, allow, 0), eligibility_address);
+    ASSERT_EQ(allow.length, 16u);
+    EXPECT_EQ(Word(allow.stock), 0xaa1303e0u);
+    EXPECT_EQ(Word(allow.stock + 12), 0xaa1303e0u);
+    ASSERT_EQ(allow.at, 4u);
+    ASSERT_EQ(allow.size, 8u);
+    EXPECT_EQ(Word(allow.patched), 0xd503201fu);
+    EXPECT_EQ(Word(allow.patched + 4), Word(choose.stock));
+}
+
 inline unsigned TextSlots(const char *vm_shared_region)
 {
     const std::string source = switch_ios::test::SourceText(vm_shared_region);

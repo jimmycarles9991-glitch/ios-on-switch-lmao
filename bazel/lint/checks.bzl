@@ -6,18 +6,16 @@
     format_runner(name, srcs)        `bazel run`: formats srcs in the working copy (or only the paths given as
                                      arguments), with the same tools, versions and configs the checks use.
 
-The tools (bazel/lint/tools.bzl, @llvm, the Rust toolchain) and their configs (repository root) are declared inputs:
-nothing comes from the host or from a user's own config files. swift-format is the one exception: Xcode's own
-(the pinned host input, bazel/host/xcode.bzl), as rules_swift's compiler is.
+The tools and their configs are declared inputs. SwiftLint's SourceKit comes from the pinned Xcode host input.
 """
 
-load("@xcode//:defs.bzl", "XCODE_TOOLCHAIN")
+load("@xcode//:defs.bzl", "DEVELOPER_DIR")
 
 C_FAMILY = ["c", "cc", "cpp", "h", "hpp", "inc", "m", "mm"]
 STARLARK_NAMES = ["BUILD", "BUILD.bazel", "MODULE.bazel", "REPO.bazel"]
 
 def _is_starlark(f):
-    return f.basename in STARLARK_NAMES or f.extension == "bzl"
+    return f.basename in STARLARK_NAMES or f.basename.endswith(".BUILD.bazel") or f.extension == "bzl"
 
 def _is_c(f):
     return f.extension in C_FAMILY
@@ -80,8 +78,9 @@ def _tools(ctx):
         dprint_config = ctx.file._dprint_config,
         rustfmt_config = ctx.file._rustfmt_config,
         shellcheck_config = ctx.file._shellcheck_config,
-        swift_format = XCODE_TOOLCHAIN + "/swift-format",
+        swift_format = ctx.toolchains["@rules_swift_tidy//swifttidy:toolchain"].swiftformat_info.executable,
         swift_format_config = ctx.file._swift_format_config,
+        swift_lint_config = ctx.file._swift_lint_config,
         xcode = ctx.file._xcode,
     )
 
@@ -145,15 +144,13 @@ def _check_dprint(t, f, _):
     argv.extend([p.path for p in t.dprint_plugins])
     return argv, [t.dprint, t.dprint_config] + t.dprint_plugins
 
-# swift-format's own format check is `lint`, which also reports its style rules; formatting alone is the diff between
-# the file and what `format` makes of it. It skips symbolic links (every sandboxed input is one) unless told not to.
 def _check_swift_format(t, f, _):
-    command = 'out="$(mktemp)" && "$0" format --follow-symlinks --configuration "$1" "$2" > "$out" && diff -u "$2" "$out"'
-    return ["/bin/sh", "-c", command, t.swift_format, t.swift_format_config.path, f.path], [t.swift_format_config, t.xcode]
+    argv = [t.swift_format.path, "--lint", "--cache", "ignore", "--symlinks", "follow", "--config", t.swift_format_config.path, f.path]
+    return argv, [t.swift_format, t.swift_format_config]
 
-def _check_swift_lint(t, f, _):
-    argv = [t.swift_format, "lint", "--strict", "--follow-symlinks", "--configuration", t.swift_format_config.path, f.path]
-    return argv, [t.swift_format_config, t.xcode]
+def _check_swift_lint(t, f, ctx_files):
+    argv = [ctx_files.swift_lint.path, "lint", "--strict", "--quiet", "--no-cache", "--config", t.swift_lint_config.path, f.path]
+    return argv, [ctx_files.swift_lint, t.swift_lint_config, t.xcode]
 
 CHECKS = {
     "actionlint": (_is_workflow, _check_actionlint),
@@ -168,7 +165,7 @@ CHECKS = {
     "rustfmt": (_is_rs, _check_rustfmt),
     "shellcheck": (_is_sh, _check_shellcheck),
     "shfmt": (_is_sh, _check_shfmt),
-    "swift_format": (_is_swift, _check_swift_format),
+    "swiftformat": (_is_swift, _check_swift_format),
     "swift_lint": (_is_swift, _check_swift_lint),
 }
 
@@ -230,6 +227,7 @@ def _lint_test_impl(ctx):
         clang_format_configs = [f for f in files if f.basename == ".clang-format"],
         rust = [f for f in files if _is_rs(f)] + ctx.files.rust_modules,
         github_yaml = [f for f in files if _is_github_yaml(f)],
+        swift_lint = ctx.executable._swift_lint,
     )
     reports = []
     for check in ctx.attr.checks:
@@ -248,6 +246,7 @@ def _lint_test_impl(ctx):
                 outputs = [report],
                 mnemonic = "Lint" + "".join([p.capitalize() for p in check.split("_")]),
                 progress_message = "{} %{{label}}: {}".format(check, f.short_path),
+                env = {"DEVELOPER_DIR": DEVELOPER_DIR} if check == "swift_lint" else {},
             )
             reports.append((report, f))
     manifest = ctx.actions.declare_file(ctx.label.name + ".reports")
@@ -282,7 +281,8 @@ _TOOL_ATTRS = {
     "_shellcheck": attr.label(default = "@shellcheck//:shellcheck", executable = True, cfg = "exec", allow_single_file = True),
     "_shellcheck_config": attr.label(default = "//:.shellcheckrc", allow_single_file = True),
     "_shfmt": attr.label(default = "@shfmt//file", executable = True, cfg = "exec", allow_single_file = True),
-    "_swift_format_config": attr.label(default = "//:.swift-format", allow_single_file = True),
+    "_swift_format_config": attr.label(default = "//:.swiftformat", allow_single_file = True),
+    "_swift_lint_config": attr.label(default = "//:.swiftlint.yml", allow_single_file = True),
     "_xcode": attr.label(default = "@xcode//:identity", allow_single_file = True),
 }
 
@@ -294,8 +294,10 @@ lint_test = rule(
         "exempt": attr.label(allow_single_file = True, doc = "workspace paths, one a line, whose checks must fail"),
         "rust_modules": attr.label_list(allow_files = [".rs"], doc = "files outside srcs that a Rust file of srcs declares as a module, which rustfmt reads but does not check"),
         "srcs": attr.label_list(allow_files = True, mandatory = True, doc = "lint_files() groups"),
+        "_swift_lint": attr.label(default = "@swiftlint//:swiftlint", executable = True, cfg = "exec"),
     }),
     test = True,
+    toolchains = ["@rules_swift_tidy//swifttidy:toolchain"],
 )
 
 # The formatters in fix mode, each over its files (relative to the workspace root, the working directory).
@@ -313,7 +315,7 @@ RUSTFMT="$runfiles/{rustfmt}"
 RUMDL="$runfiles/{rumdl}"
 DPRINT="$runfiles/{dprint}"
 DPRINT_PLUGINS=({dprint_plugins})
-SWIFT_FORMAT="{swift_format}"
+SWIFT_FORMAT="$runfiles/{swift_format}"
 export DPRINT_CACHE_DIR="$(mktemp -d)" RUMDL_CACHE_DIR="$(mktemp -d)" NO_COLOR=1
 trap 'rm -rf "$DPRINT_CACHE_DIR" "$RUMDL_CACHE_DIR"' EXIT
 cd "$BUILD_WORKSPACE_DIRECTORY"
@@ -357,7 +359,7 @@ run buildifier STARLARK_FILES "$BUILDIFIER" -mode=fix -lint=off -config=.buildif
 run shfmt SH_FILES "$SHFMT" -w {shfmt_style}
 run rustfmt RS_FILES "$RUSTFMT" --config-path rustfmt.toml
 run rumdl MD_FILES "$RUMDL" fmt --silent --color never --config .rumdl.toml
-run swift-format SWIFT_FILES "$SWIFT_FORMAT" format --in-place --configuration .swift-format
+run SwiftFormat SWIFT_FILES "$SWIFT_FORMAT" --quiet --cache ignore --symlinks follow --config .swiftformat
 # dprint takes the plugins after the files.
 run dprint DATA_FILES bash -c 'exec "$0" fmt --config dprint.json "$@" --plugins '"${{DPRINT_PLUGINS[*]}}" "$DPRINT"
 """
@@ -381,7 +383,7 @@ def _format_runner_impl(ctx):
         dprint = rlocation(t.dprint),
         dprint_plugins = " ".join(['"$runfiles/{}"'.format(rlocation(p)) for p in t.dprint_plugins]),
         shfmt_style = " ".join(SHFMT_STYLE),
-        swift_format = t.swift_format,
+        swift_format = rlocation(t.swift_format),
         c_files = _quote([f.short_path for f in files if _is_c(f)]),
         py_files = _quote([f.short_path for f in files if _is_py(f)]),
         starlark_files = _quote([f.short_path for f in files if _is_starlark(f)]),
@@ -391,7 +393,7 @@ def _format_runner_impl(ctx):
         data_files = _quote([f.short_path for f in files if _is_data(f)]),
         swift_files = _quote([f.short_path for f in files if _is_swift(f)]),
     ), is_executable = True)
-    tools = [t.clang_format, t.ruff, t.buildifier, t.shfmt, t.rustfmt, t.rumdl, t.dprint] + t.dprint_plugins
+    tools = [t.clang_format, t.ruff, t.buildifier, t.shfmt, t.rustfmt, t.rumdl, t.dprint, t.swift_format] + t.dprint_plugins
     return [DefaultInfo(
         executable = script,
         runfiles = ctx.runfiles(files = tools, transitive_files = t.rustfmt_files),
@@ -404,4 +406,5 @@ format_runner = rule(
         "srcs": attr.label_list(allow_files = True, mandatory = True, doc = "lint_files() groups"),
     }),
     executable = True,
+    toolchains = ["@rules_swift_tidy//swifttidy:toolchain"],
 )

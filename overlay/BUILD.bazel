@@ -8,6 +8,7 @@ lint_files()
 exports_files([
     "manifest.json",
     "supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
+    "supplemental/com.brunostjohn.switch.bootstrap.jetsam.plist",
 ])
 
 # The jetsam properties overlay iOS 27's launchd reads for our daemons in the Supplemental cryptex's LaunchDaemons, one
@@ -15,8 +16,11 @@ exports_files([
 # manifest stages in debug alone.
 genrule(
     name = "jetsam_properties",
-    srcs = ["supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist"] + select({
-        "//bazel:debug": ["//hw_test_app:peer/com.brunostjohn.switch.texpeer.jetsam.plist"],
+    srcs = [
+        "supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",
+        "supplemental/com.brunostjohn.switch.bootstrap.jetsam.plist",
+    ] + select({
+        "//bazel:debug": ["//apps/hwtest:peer/com.brunostjohn.switch.texpeer.jetsam.plist"],
         "//conditions:default": [],
     }),
     outs = ["supplemental/com.apple.jetsamproperties.cryptex.plist"],
@@ -32,10 +36,11 @@ filegroup(
         ":jetsam_properties",
         "//drivers/NativeMobileDisplay:overlay_files",
         "//drivers/SwitchAppRegistration:overlay_files",
+        "//drivers/SwitchBootstrap:overlay_files",
         "//drivers/SwitchAudio:overlay_files",
         "//drivers/SwitchCapture:overlay_files",
         "//drivers/SwitchJoyCon:overlay_files",
         "//drivers/TegraGM20BMetal:overlay_files",
-        "//hw_test_app:overlay_files",
+        "//apps/hwtest:overlay_files",
     ],
 )

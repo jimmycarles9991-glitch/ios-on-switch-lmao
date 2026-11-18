@@ -38,12 +38,11 @@ common --incompatible_strict_action_env
 # Every action runs sandboxed (darwin-sandbox: read-only declared inputs, declared outputs only). No action needs an
 # unsandboxed fallback, so there is none: a new one that tries to read undeclared inputs fails instead of passing.
 build --spawn_strategy=sandboxed
-# One exception: iOS 27's translation attaches and mounts disk images (hdiutil, diskutil), which no sandbox
-# allows, so its two actions (install/translated.bzl) run on a build host's worker, or unsandboxed here when there is
-# none (--config=noremote).
+# These actions mount disk images. They run on a build host's worker, or unsandboxed under --config=noremote.
 build --strategy=Pretranslate=remote,local
 build --strategy=TranslatedCryptex=remote,local
-build --strategy=InstallPolicy=local
+build --strategy=InstallPolicy=remote,local
+build --strategy=LaunchdCatalog=remote,local
 # And rules_apple's actool (the HW Test apps' asset catalog), which asks CoreSimulator's services for its compile and is
 # marked no-sandbox.
 build --strategy=AssetCatalogCompile=remote,local
@@ -75,17 +74,16 @@ common --noexperimental_check_output_files
 # path); the script starts the hermetic interpreter at once. The same interpreter, venv and program.
 common --@rules_python//python/config_settings:bootstrap_impl=script
 
-# hw_test_app (debug images) is signed ad hoc, like the overlay's other user-space code: the boot package's trust cache
+# The apps are signed ad hoc, like the overlay's other user-space code: the boot package's trust cache
 # holds its CDHashes. With this identity rules_apple signs without the stand-in profile it requires for device builds.
 build --@rules_apple//apple/build_settings:signing_certificate_name=-
 # The app is for the device: rules_apple otherwise builds an Apple silicon host's iOS targets for the simulator.
 build --ios_multi_cpus=arm64
 # rules_apple tags its bundling, signing and profile-reading actions no-sandbox, for codesign's keychain lookups. An ad
-# hoc identity and an XML profile need neither the keychain nor anything undeclared, so they run sandboxed like the rest.
-# It also keeps a device app's ProcessAndSign off remote caches, for teams whose developers sign with their own
-# identities. The ad hoc identity has no key or certificate and codesign stamps no time on it, so the signature is the
-# same on every Mac with the same /usr/bin/codesign and Xcode.
-build --modify_execution_info=^(BundleApp|BundleTreeApp|ProcessAndSign|SignBinary|ExtractFromProvisioningProfile)$=-no-sandbox,^ProcessAndSign$=-no-remote
+# hoc identity and an XML profile need neither the keychain nor anything undeclared. The minus prefixes REMOVE the
+# restrictions, allowing these actions to run remotely and sandboxed.
+build --modify_execution_info=^(BundleApp|BundleTreeApp|ProcessAndSign|SignBinary|ExtractFromProvisioningProfile)$=-no-sandbox
+build --modify_execution_info=^(BundleApp|BundleTreeApp|ProcessAndSign|SignBinary|ExtractFromProvisioningProfile)$=-no-remote
 
 # --- Output ------------------------------------------------------------------------------------------------------
 build --show_result=30
@@ -141,16 +139,15 @@ build:remote --config=rbe
 # The per-user file names the executor (`build:rbe --remote_executor=grpc://host:port`); without one the remote
 # strategy is skipped and actions build here.
 build:rbe --spawn_strategy=remote,sandboxed
-# A worker that is gone, or a scheduler with none left, costs one failed request per action, then it builds here.
-# Bazel runs that fallback unsandboxed and has no flag to sandbox it; tools/remote/README.md keeps its results out of
-# the shared cache on the Macs that name an executor (every cache user expands rbe through remote, executor or not).
-build:rbe --remote_local_fallback
+build:rbe --strategy=AssetCatalogCompile=remote
+# A failed remote action must not silently fall back to local execution.
+build:rbe --noremote_local_fallback
 build:rbe --remote_download_outputs=toplevel
 
 # nom2v: the m2v deletion's dry run. Bazel loads m2v's runtime crate, Mesa's NVK and its dylibs (//gpu/nvk) as deleted
 # packages, and leaves out the tests tagged m2v (they test the fallback itself, or still need it). With --keep_going,
 # whatever else fails to load, build or pass is what the deletion still has to move:
-#   bazel test --config=nom2v //drivers/... //kits/... //hw_test_app/... //tools/... //gpu/...
+#   bazel test --config=remote --config=nom2v //drivers/... //kits/... //apps/... //tools/... //gpu/...
 common:nom2v --deleted_packages=third_party/m2v/crates/metal2vulkan-runtime,third_party/mesa/src/nouveau/vulkan,gpu/nvk
 test:nom2v --build_tests_only
 test:nom2v --test_tag_filters=-m2v

@@ -117,7 +117,7 @@
 struct vnode;
 extern memory_object_t switch_shared_cache_text_pager(vm_object_t file_object, uint64_t file_offset, uint64_t size,
     uint64_t unslid_address, struct vnode *vp, unsigned slot, uint64_t *range_offset, uint64_t *range_size);
-#define SWITCH_TEXT_SLOTS 3   /* the most patched ranges one mapping holds (.11, .03, .25: switch_ui_scale_sites.h) */
+#define SWITCH_TEXT_SLOTS 5   /* .25: home grid, switcher, battery, native canvas selection and eligibility */
 
 /*
  * Switch: replace a few pages of an executable cache mapping, just entered in the shared region, with apple_protect

@@ -20,6 +20,7 @@
 #include <libkern/c++/OSIterator.h>
 #include <pexpert/pexpert.h>
 #include "../../kits/SwitchDT/SwitchDTProperty.h"
+#include "SwitchNVRAM.h"
 
 // Observation counters describe actual published nubs, not started drivers.
 extern "C" {
@@ -97,14 +98,7 @@ void ArmDTPlatform::setUTCTimeOfDay(clock_sec_t secs, clock_nsec_t nsecs)
 
 bool ArmDTPlatform::hasNVRAMProxy(IOService *provider)
 {
-    const IORegistryEntry *chosen = provider->childFromPath("chosen", gIODTPlane);
-    if (chosen == nullptr) {
-        return false;
-    }
-    const bool valid = switch_dt_length(chosen, "nvram-bank-size") == sizeof(uint32_t) &&
-                       switch_dt_length(chosen, "nvram-proxy-data") != 0;
-    chosen->release();
-    return valid;
+    return switch_platform_nvram_ready(provider);
 }
 
 bool ArmDTPlatform::createDeviceNubs(IOService *provider)

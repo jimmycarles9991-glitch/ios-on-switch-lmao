@@ -56,6 +56,13 @@ py_binary(
     srcs = ["boot_args.py"],
 )
 
+py_binary(
+    name = "installer_seed_pin",
+    srcs = ["//tools/common:seed_manifest.py"],
+    main = "//tools/common:seed_manifest.py",
+    deps = ["//tools/common:hashing"],
+)
+
 # //boot:adt: the native OLED board's ADT with the pinned /chosen/random-seed.
 py_binary(
     name = "adt",
@@ -89,6 +96,30 @@ py_binary(
     name = "trust",
     srcs = ["trust.py"],
     deps = ["//tools/trustcache"],
+)
+
+py_binary(
+    name = "launchd_catalog",
+    srcs = ["launchd_catalog.py"],
+    deps = [
+        "//tools/install:lib",
+        "//tools/trustcache",
+    ],
+)
+
+py_test(
+    name = "launchd_catalog_test",
+    size = "small",
+    srcs = [
+        "launchd_catalog.py",
+        "launchd_catalog_test.py",
+    ],
+    data = ["//drivers/SwitchAppRegistration:com.brunostjohn.switch.bootstrap-apps.plist"],
+    imports = ["."],
+    deps = [
+        "//tools/install:lib",
+        "//tools/trustcache",
+    ],
 )
 
 py_binary(
@@ -183,7 +214,7 @@ py_test(
         "jetsam_overlay_test.py",
     ],
     data = [
-        "//hw_test_app:peer/com.brunostjohn.switch.texpeer.jetsam.plist",
+        "//apps/hwtest:peer/com.brunostjohn.switch.texpeer.jetsam.plist",
         "//overlay:manifest.json",
         "//overlay:supplemental/com.apple.jetsamproperties.cryptex.plist",
         "//overlay:supplemental/com.brunostjohn.switch.shadercompiler.jetsam.plist",

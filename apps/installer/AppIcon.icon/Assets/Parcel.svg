@@ -1,0 +1,31 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="rose" gradientUnits="userSpaceOnUse" x1="172" y1="164" x2="322" y2="235">
+      <stop stop-color="#FAD6F0" />
+      <stop offset=".32" stop-color="#F2B9E3" />
+      <stop offset=".60" stop-color="#EDB1DE" />
+      <stop offset=".84" stop-color="#C59BD9" />
+      <stop offset="1" stop-color="#AA8CD1" />
+    </linearGradient>
+    <linearGradient id="roseTurn" gradientUnits="userSpaceOnUse" x1="236" y1="215" x2="322" y2="225">
+      <stop stop-color="#EABDDE" stop-opacity="0" />
+      <stop offset=".19" stop-color="#C6A0D2" stop-opacity=".76" />
+      <stop offset="1" stop-color="#A68DC8" stop-opacity=".66" />
+    </linearGradient>
+    <linearGradient id="roseTop" gradientUnits="userSpaceOnUse" x1="211" y1="129" x2="273" y2="202">
+      <stop stop-color="#FFFAFC" />
+      <stop offset=".28" stop-color="#FFE2F1" />
+      <stop offset=".49" stop-color="#FFF2F9" />
+      <stop offset=".74" stop-color="#F4D6F2" />
+      <stop offset="1" stop-color="#EAD1F3" />
+    </linearGradient>
+  </defs>
+  <g transform="translate(256 259) scale(1.045) translate(-254 -258)">
+    <g id="rose-parcel">
+      <path fill="url(#rose)" d="M157 184C157 170 163 162 176 155L236 123C253 114 265 112 282 120L319 138C338 147 347 156 347 175V242C347 254 339 264 324 271L268 300C252 308 238 307 222 299L172 273C161 267 157 259 157 245Z" />
+      <path fill="url(#roseTurn)" d="M229 203C242 208 250 207 262 201L329 168C336 164 342 160 344 159C346 163 347 168 347 175V242C347 254 339 264 324 271L268 300C252 308 238 307 222 299Z" />
+      <path fill="url(#roseTop)" d="M159.8 170.7C162.3 164.4 167.6 159.5 176 155L236 123C253 114 265 112 282 120L319 138C328.8 142.6 335.7 147.3 340.1 152.5C346.3 161.2 333 167 318 174.4L267 199C252 207 241 209 225 202L174 180C165 176 161 174 159.8 170.7Z" />
+    </g>
+  </g>
+</svg>

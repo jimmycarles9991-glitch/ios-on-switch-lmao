@@ -1,0 +1,14 @@
+diff --git a/Sources/Tokenizer.swift b/Sources/Tokenizer.swift
+--- a/Sources/Tokenizer.swift
++++ b/Sources/Tokenizer.swift
+@@ -1006,6 +1006,10 @@ extension UnicodeScalarView {
+             }
+         }
+ 
++        if readString("<<") {
++            return .operator("<<", .none)
++        }
++
+         // `::` is always parsed as a single operator.
+         // `:` is not a valid operator head, so it must be handled specially here.
+         if readString("::") {

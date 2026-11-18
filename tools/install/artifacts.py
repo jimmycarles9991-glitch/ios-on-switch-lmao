@@ -18,6 +18,7 @@ import shutil
 from pathlib import Path
 
 from tools.common import hashing
+from tools.install import bootstrap
 
 DATA_PLAN = """\
 Data volume ({name}, UUID {uuid}, role Data, case-sensitive, unencrypted) is seeded once, by //install:sd:
@@ -90,6 +91,7 @@ def main() -> None:
         'overlay_files': sorted(p.relative_to(overlay).as_posix() for p in overlay.rglob('*') if p.is_file())
         if overlay.is_dir()
         else [],
+        'bootstrap': bootstrap.payload(package, pins).manifest if (package / 'bootstrap').exists() else None,
     }
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
 

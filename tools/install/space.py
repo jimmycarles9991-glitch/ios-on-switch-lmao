@@ -14,7 +14,7 @@ import json
 import os
 from pathlib import Path
 
-from tools.install import disks, host, progress
+from tools.install import bootstrap, disks, host, progress
 
 # The Mac's own working room: swap files, logs and the Bazel server write to the same disk while an image is built,
 # and a run that took the last byte would stall them. It is policy, not an estimate of anything //:image writes.
@@ -62,6 +62,7 @@ def populate_bytes(args: object, cryptex_images: list[str | Path]) -> int:
         sum(allocated(image) for image in cryptex_images),
         delta_bytes(getattr(args, 'delta_os', None)),
         allocated(Path(args.boot_package) / 'overlay'),
+        bootstrap.unpacked_bytes(args.boot_package),
         allocated(args.gpu_base),
         seed_bytes,
     ]

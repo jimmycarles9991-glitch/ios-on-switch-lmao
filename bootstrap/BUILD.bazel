@@ -1,0 +1,219 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//kernel/rules:inputs.bzl", "tool_output")
+load(":rules.bzl", "bootstrap_payload", "xcode_source_product")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(["sources.json"])
+
+py_library(
+    name = "xcode",
+    srcs = ["xcode.py"],
+)
+
+py_library(
+    name = "upstream",
+    srcs = ["upstream.py"],
+    deps = [":xcode"],
+)
+
+test_suite(
+    name = "sileo_scene_test",
+    tests = ["//apps/sileo:sileo_scene_test"],
+)
+
+test_suite(
+    name = "sileo_ui_test",
+    tests = ["//apps/sileo:sileo_ui_test"],
+)
+
+test_suite(
+    name = "sileo_popup_test",
+    tests = ["//apps/sileo:sileo_popup_test"],
+)
+
+py_library(
+    name = "packages_lib",
+    srcs = ["packages.py"],
+)
+
+py_library(
+    name = "signing",
+    srcs = ["signing.py"],
+    deps = [
+        "//tools/common:macho",
+        "//tools/install_policy:installd",
+    ],
+)
+
+py_test(
+    name = "signing_test",
+    size = "small",
+    srcs = ["signing_test.py"],
+    exec_compatible_with = ["@platforms//os:macos"],
+    deps = [":signing"],
+)
+
+py_binary(
+    name = "build_sources",
+    srcs = ["build_sources.py"],
+    deps = [
+        ":upstream",
+        ":xcode",
+    ],
+)
+
+py_binary(
+    name = "assemble",
+    srcs = ["assemble.py"],
+    deps = [
+        ":packages_lib",
+        ":signing",
+        "//bootstrap/launchctl:package",
+        "//tools/common:macho",
+        "//tools/install_policy:installd",
+    ],
+)
+
+tool_output(
+    name = "zstd",
+    srcs = ["@bootstrap_zstd//:source_tree"],
+    outs = ["libzstd.dylib"],
+    args = [
+        "--xcode-env={xcode_env}",
+        "--out={out}",
+        "--flag=-dynamiclib",
+        "--flag=-DZSTD_DISABLE_ASM=1",
+        "--flag=-DZSTD_LEGACY_SUPPORT=0",
+        "--flag=-Iexternal/+bootstrap_dependencies+bootstrap_zstd/lib",
+    ] + ["external/+bootstrap_dependencies+bootstrap_zstd/" + path for path in [
+        "lib/common/debug.c",
+        "lib/common/entropy_common.c",
+        "lib/common/error_private.c",
+        "lib/common/fse_decompress.c",
+        "lib/common/xxhash.c",
+        "lib/common/zstd_common.c",
+        "lib/decompress/huf_decompress.c",
+        "lib/decompress/zstd_ddict.c",
+        "lib/decompress/zstd_decompress.c",
+        "lib/decompress/zstd_decompress_block.c",
+    ]],
+    message = "Building the pinned zstd bootstrap decoder",
+    tool = "host_c_binary.py",
+)
+
+xcode_source_product(
+    name = "ellekit_product",
+    srcs = "@bootstrap_ellekit//:source_tree",
+    project = "ellekit",
+    tool = ":build_sources",
+)
+
+bootstrap_payload(
+    name = "payload",
+    base = "@bootstrap_procursus_bootstrap//file",
+    built = ":ellekit_product",
+    sileo_built = "//apps/sileo:Sileo",
+    sileo_deb = "@bootstrap_sileo_release//file",
+)
+
+filegroup(
+    name = "manifest",
+    srcs = [":payload"],
+    output_group = "manifest",
+)
+
+filegroup(
+    name = "packages",
+    srcs = [":payload"],
+    output_group = "packages",
+)
+
+filegroup(
+    name = "managed_sileo",
+    srcs = [":payload"],
+    output_group = "managed_sileo",
+)
+
+filegroup(
+    name = "managed_ellekit",
+    srcs = [":payload"],
+    output_group = "managed_ellekit",
+)
+
+filegroup(
+    name = "managed_uikittools",
+    srcs = [":payload"],
+    output_group = "managed_uikittools",
+)
+
+filegroup(
+    name = "managed_launchctl",
+    srcs = [":payload"],
+    output_group = "managed_launchctl",
+)
+
+py_test(
+    name = "packages_test",
+    size = "small",
+    srcs = ["packages_test.py"],
+    deps = [":packages_lib"],
+)
+
+py_test(
+    name = "zstd_test",
+    size = "small",
+    srcs = ["zstd_test.py"],
+    data = [":zstd"],
+    deps = [":packages_lib"],
+)
+
+py_test(
+    name = "control_test",
+    size = "small",
+    srcs = ["control_test.py"],
+    data = ["@bootstrap_sileo_release//file"],
+    deps = [":assemble"],
+)
+
+py_test(
+    name = "ellekit_test",
+    size = "small",
+    srcs = ["upstream_test.py"],
+    data = [
+        "@bootstrap_ellekit//:ellekit/Assembler/Branches.swift",
+        "@bootstrap_ellekit//:ellekit/Assembler/Rebind.swift",
+        "@bootstrap_ellekit//:ellekit/Languages/C/Hook.swift",
+        "@bootstrap_ellekit//:ellekit/Languages/C/Orig.swift",
+        "@bootstrap_ellekit//:injector/injector.c",
+        "@bootstrap_ellekit//:sb/tweak.swift",
+    ],
+    exec_compatible_with = ["@platforms//os:macos"],
+    main = "upstream_test.py",
+    deps = [":upstream"],
+)
+
+test_suite(
+    name = "upstream_test",
+    tests = [
+        ":ellekit_test",
+        "//apps/sileo:sileo_respring_test",
+    ],
+)
+
+py_test(
+    name = "bootstrap_test",
+    size = "small",
+    srcs = ["bootstrap_test.py"],
+    data = [
+        ":sources.json",
+        ":zstd",
+        "@bootstrap_procursus_bootstrap//file",
+    ],
+    deps = [":assemble"],
+)

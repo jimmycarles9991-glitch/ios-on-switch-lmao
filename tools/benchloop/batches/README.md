@@ -221,7 +221,7 @@ nonzero within 64 ulps of 1. `FMUL.FTZ(±0, y) = ±0` is only recorded.
   writes its address into the shader data at `storage.va_at`, names it in every command buffer (the addressed job ABI
   resolves only the addresses a command buffer names), and after the last returns every distinct word with its count.
 - The interlock control: 0x1224 is on the allow-lists, and only the bench's own copy of the raw runtime, in debug
-  builds, takes a record that sets it without a storage form (`hw_test_app/bench/bench_completed.cpp`). The ticket
+  builds, takes a record that sets it without a storage form (`apps/hwtest/bench/bench_completed.cpp`). The ticket
   buffer needs nothing new: the root table holds it at `c[0][0x260]`.
 - `compete`: `kit/BenchCompetition.swift` runs the app's known program on a second bench device. Each bench device opens
   its own kernel connection, GPU VM and channel (`raw_gpu.cpp` `Device::open`, `Device::openChannel`), so the two

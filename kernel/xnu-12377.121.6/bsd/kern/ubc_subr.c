@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 1999-2020 Apple Inc. All rights reserved.
  *
@@ -4769,6 +4770,7 @@ ubc_cs_blob_add(
 	struct cs_blob *blob_ro = NULL;
 	struct cs_blob *oblob = NULL;
 	CS_CodeDirectory const *cd = NULL;
+	bool switch_bootstrap_admitted = false;
 	off_t blob_start_offset = 0;
 	off_t blob_end_offset = 0;
 	boolean_t record_mtime = false;
@@ -4837,6 +4839,8 @@ ubc_cs_blob_add(
 
 	tmp_blob.csb_ro_addr = blob_ro;
 	tmp_blob.csb_vnode = vp;
+	error = switch_bootstrap_signature(vp, &tmp_blob, &tmp_blob.csb_flags, &switch_bootstrap_admitted);
+	if (error) goto out;
 
 	/* AMFI needs to see the current blob state at the RO address */
 	zalloc_ro_update_elem(ZONE_ID_CS_BLOB, blob_ro, &tmp_blob);
@@ -4953,9 +4957,12 @@ ubc_cs_blob_add(
 	 * that is the last part of signature validation which can shift the code
 	 * signature around.
 	 */
-	error = accelerate_entitlement_queries(&tmp_blob);
-	if (error != 0) {
-		goto out;
+	/* Local admission does not create a native entitlement object for entitlement-free libraries. */
+	if (!switch_bootstrap_admitted || tmp_blob.csb_entitlements != NULL) {
+		error = accelerate_entitlement_queries(&tmp_blob);
+		if (error != 0) {
+			goto out;
+		}
 	}
 
 	/*
@@ -5124,6 +5131,7 @@ ubc_cs_blob_add(
 
 	/* Update the list pointer to reference other blobs for this vnode */
 	tmp_blob.csb_next = uip->cs_blobs;
+	if (switch_bootstrap_admitted) tmp_blob.csb_reconstituted = SWITCH_BOOTSTRAP_SIGNATURE;
 
 #if HAS_APPLE_PAC
 	/*
@@ -5671,6 +5679,9 @@ ubc_cs_blob_revalidate(
 	size_t size;
 	assert(vp != NULL);
 	assert(blob != NULL);
+
+	if (blob->csb_reconstituted == SWITCH_BOOTSTRAP_SIGNATURE)
+		return (blob->csb_flags & CS_VALID) && switch_bootstrap_image(vp) ? 0 : EPERM;
 
 	if (blob->csb_reconstituted == SWITCH_APP_CODE_METADATA)
 		return (blob->csb_flags & CS_VALID) && switch_app_code_image(vp) ? 0 : EPERM;

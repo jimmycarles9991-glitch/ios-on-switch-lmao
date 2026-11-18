@@ -1,0 +1,40 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+load("//kernel/rules:package.bzl", "ios_binary")
+
+package(default_visibility = ["//visibility:public"])
+
+lint_files()
+
+exports_files(["sbreload.entitlements"])
+
+ios_binary(
+    name = "sbreload",
+    srcs = ["sbreload.mm"],
+    out = "sbreload",
+    hdrs = [
+        ":respring.h",
+        "//drivers/SwitchBootstrap:process_wait.h",
+    ],
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-fobjc-arc",
+        "-lc++",
+        "-framework",
+        "Foundation",
+    ],
+    entitlements = "sbreload.entitlements",
+    pagesize = "4096",
+    sign_identifier = "com.brunostjohn.switch.sbreload",
+)
+
+host_test(
+    name = "respring_test",
+    srcs = [
+        "respring.h",
+        "respring_test.cpp",
+    ],
+)

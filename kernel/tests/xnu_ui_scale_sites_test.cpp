@@ -243,6 +243,11 @@ TEST(XnuUiScaleSites, NoTwoSitesOfAMappingShareAPage)
     switch_ui_scale_sites::ExpectNoTwoSitesOfAMappingShareAPage(kCache, kMappings);
 }
 
+TEST(XnuUiScaleSites, NativeCanvasRequiresIPadSupportAndKeepsPhoneCompatibility)
+{
+    switch_ui_scale_sites::ExpectNativeCanvas(kCache, 0x1cfa4631c, 0x1cfa4643c, 0x1cfa4268c);
+}
+
 TEST(XnuUiScaleSites, SystemStatusUiRowIsIconSize15OfTheBatteryTables)
 {
     // +[STUIStatusBarStaticBatteryView _lineWidthAndInterspaceForIconSize:] and _batterySizeForIconSize:'s height:
@@ -288,10 +293,13 @@ TEST(XnuUiScaleSites, CoreUiRowBytes)
     }
 }
 
-TEST(XnuUiScaleSitesSource, BothTreesAndNoPagerAtScaleOne)
+TEST(XnuUiScaleSitesSource, BothTreesAndOnlyNativeCanvasAtScaleOne)
 {
     for (size_t i = 0; i < kCache.count; i++) {
-        EXPECT_FALSE(kCache.sites[i].every_scale) << switch_ui_scale_sites::NameOf(kCache.sites[i]);
+        const std::string name = switch_ui_scale_sites::NameOf(kCache.sites[i]);
+        const bool native_canvas =
+            name == "SpringBoard iPad native canvas selection" || name == "SpringBoard iPad native canvas eligibility";
+        EXPECT_EQ(kCache.sites[i].every_scale, native_canvas) << name;
     }
     for (const char *header :
          {"switch_ui_scale_sites.h", "switch_ui_scale_sites_21H461.h", "switch_ui_scale_sites_24B119.h"}) {
@@ -305,7 +313,7 @@ TEST(XnuUiScaleSitesSource, BothTreesAndNoPagerAtScaleOne)
         const std::string vm_unix = switch_ios::test::SourceText(tree);
         const std::string pager =
             switch_ios::test::Body(vm_unix, "switch_ui_scale_pager(const struct switch_us_site *site");
-        // only an every_scale site maps a pager at scale 1; 21H461 has none
+        // Only an every_scale site maps a pager at scale 1.
         const size_t unit = pager.find("if (switch_ui_scale_is_unit(switch_ui_scale()) && !site->every_scale) {");
         ASSERT_NE(unit, std::string::npos);
         EXPECT_LT(unit, pager.find("vn_rdwr("));

@@ -24,6 +24,7 @@ Ahead &ahead()
     return *a;
 }
 
+#if SWITCH_RAW_DIAGNOSTICS
 uint32_t encodersBefore(RMCommandBuffer *cb, size_t position)
 {
     uint32_t n = 0;
@@ -31,6 +32,7 @@ uint32_t encodersBefore(RMCommandBuffer *cb, size_t position)
         n += RMCommandPlan::isEncoderBegin(cb->_plan.operation(at).op);
     return n;
 }
+#endif
 
 // The encode ahead given back for `veto` (the first reason counted): the device's command buffer abandoned, and the
 // command buffer encoded at its commit

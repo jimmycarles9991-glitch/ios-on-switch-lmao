@@ -1,0 +1,21 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="farPaper" gradientUnits="userSpaceOnUse" x1="224" y1="144" x2="249" y2="217">
+      <stop stop-color="#FFF7FF" />
+      <stop offset=".48" stop-color="#E3D7F4" />
+      <stop offset="1" stop-color="#B19FCE" />
+    </linearGradient>
+    <linearGradient id="lining" x2="85%" y2="100%">
+      <stop stop-color="#776290" />
+      <stop offset=".65" stop-color="#8B72AA" />
+      <stop offset="1" stop-color="#BA9FC7" />
+    </linearGradient>
+  </defs>
+  <g transform="translate(256 259) scale(1.045) translate(-254 -258)">
+    <g id="carton-interior">
+      <path fill="url(#farPaper)" d="M143 222L127 185C119 167 122 159 138 152L183 132C200 125 210 124 222 137L252 170L290 140C303 130 312 132 325 138L373 160C389 167 393 176 385 190L361 221L244 270Z" />
+      <path fill="url(#lining)" d="M142 218C146 211 159 205 172 198L223 171C240 162 249 161 269 169L343 200C351 204 360 209 365 216L343 256L244 299L155 255Z" />
+    </g>
+  </g>
+</svg>

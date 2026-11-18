@@ -845,10 +845,16 @@ host_test(
     srcs = ["//kernel/xnu-" + xnu + "/security:mac_internal.h"],
     outs = ["app_code_mac_" + version + ".h"],
     cmd = """awk '
-        /^#define SWITCH_MAC_CHECK\\(/ { on = 1 }
-        on { sub(/SWITCH_MAC_CHECK\\(/, "SWITCH_MAC_CHECK_%s("); print }
-        on && /^} while \\(0\\)/ { exit }
-    ' $< > $@""" % version,
+        /^#define SWITCH_BOOTSTRAP_MAC_CHECK/ { on = 1 }
+        /^#define SWITCH_MAC_CHECK\\(/ { stock = 1 }
+        on || stock {
+            gsub(/SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED\\(/, "SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED_%s(")
+            gsub(/SWITCH_BOOTSTRAP_MAC_CHECK\\(/, "SWITCH_BOOTSTRAP_MAC_CHECK_%s(")
+            gsub(/SWITCH_MAC_CHECK\\(/, "SWITCH_MAC_CHECK_%s(")
+            print
+        }
+        stock && /^} while \\(0\\)/ { exit }
+    ' $< > $@""" % (version, version, version),
 ) for version, xnu in [
     ("17", "10063.141.1"),
     ("27", "12377.121.6"),
@@ -891,7 +897,10 @@ host_library(
         ":app_code_model_cs_blobs",
     ],
     additional_compiler_inputs = ["//kernel/switch:include/switch/app_code_blob.h"],
-    copts = ["-Wno-deprecated-declarations"],
+    copts = [
+        "-UNDEBUG",
+        "-Wno-deprecated-declarations",
+    ],
     includes = ["."],
 )
 
@@ -971,8 +980,12 @@ genrule(
 
 host_library(
     name = "entitlements_decode_model",
-    srcs = ["switch_entitlements_decode_model.c", ":app_entitlements_decode"],
+    srcs = [
+        "switch_entitlements_decode_model.c",
+        ":app_entitlements_decode",
+    ],
     additional_compiler_inputs = ["//kernel/switch:include/switch/capabilities.h"],
+    copts = ["-UNDEBUG"],
     includes = ["."],
 )
 
@@ -997,6 +1010,433 @@ host_test(
     srcs = [
         "switch_vfs_identity_test.cpp",
         ":vfs_identity",
+    ],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_membership",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_membership.h"],
+    cmd = """awk '
+        /^static bool switch_bootstrap_attributes/ { on = 1 }
+        /^bool switch_bootstrap_image/ { last = 1 }
+        on { print }
+        last && /^}/ { exit }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "launchd_catalog_guard",
+    srcs = ["//diagnostics/switch:SwitchLaunchdCatalog.h"],
+    outs = ["launchd_catalog_guard.h"],
+    cmd = """awk '
+        /^static int switch_launchd_catalog_file/ { on = 1 }
+        /^#endif/ { exit }
+        on { print }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_launchd_catalog_guard_test",
+    srcs = [
+        "switch_launchd_catalog_guard_test.cpp",
+        ":launchd_catalog_guard",
+    ],
+    copts = ["-Wno-deprecated-declarations"],
+    includes = ["."],
+)
+
+host_test(
+    name = "switch_migration_home_test",
+    srcs = [
+        "switch_migration_home_test.cpp",
+        ":migration_home_impl",
+    ],
+    includes = ["."],
+)
+
+genrule(
+    name = "migration_home_impl",
+    srcs = ["//kernel/switch:boot/migration_home.c"],
+    outs = ["migration_home_impl.h"],
+    cmd = "sed '/^#include /d' $< > $@",
+)
+
+host_test(
+    name = "switch_bootstrap_test",
+    srcs = [
+        "switch_bootstrap_test.cpp",
+        ":bootstrap_membership",
+        ":bootstrap_process",
+        ":bootstrap_access",
+        ":bootstrap_persona_caller",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/bootstrap_rules.h"],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_apps",
+    srcs = ["//kernel/switch:security/bootstrap_apps.c"],
+    outs = ["bootstrap_apps.h"],
+    cmd = """awk '
+        /^static bool switch_bootstrap_native_service/ { on = 1 }
+        on { print }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "bootstrap_app_alias",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_app_alias.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_alias/ { on = 1 }
+        on { print }
+        on && /^}/ { exit }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "bootstrap_app_signature",
+    srcs = ["//kernel/switch:security/bootstrap_signature.c"],
+    outs = ["bootstrap_app_signature.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_sandbox_target/ { on = 1 }
+        on { print }
+        on && /^}/ { exit }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "bootstrap_tool_image",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_tool_image.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_tool_image/ { on = 1 }
+        on { print }
+        on && /^}/ { exit }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_bootstrap_apps_test",
+    srcs = [
+        "switch_bootstrap_apps_test.cpp",
+        ":bootstrap_membership",
+        ":bootstrap_apps",
+        ":bootstrap_app_alias",
+        ":bootstrap_app_signature",
+        ":bootstrap_tool_image",
+        ":bootstrap_persona_caller",
+        ":bootstrap_service_caller",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/bootstrap_rules.h"],
+    data = [
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//kernel/xnu-10063.141.1/bsd:sys/imgact.h",
+        "//kernel/xnu-12377.121.6/bsd:sys/imgact.h",
+    ],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_persona_caller",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_persona_caller.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_persona_caller/ { on = 1 }
+        on { print }
+        on && /^}/ { exit }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "bootstrap_service_caller",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_service_caller.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_service_caller/ { on = 1 }
+        on { print }
+        on && /^}/ { exit }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_bootstrap_helper_test",
+    srcs = [
+        "switch_bootstrap_helper_test.cpp",
+        ":bootstrap_readiness",
+        ":bootstrap_service_caller",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/bootstrap_rules.h"],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_readiness",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_readiness.h"],
+    cmd = """awk '
+        /^static int switch_bootstrap_ready_sysctl/ { on = 1 }
+        on { print }
+        on && /^}/ { exit }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "bootstrap_persona",
+    srcs = ["//kernel/switch:security/bootstrap_persona.c"],
+    outs = ["bootstrap_persona.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_persona_request/ { on = 1 }
+        /^#endif/ { exit }
+        on { print }
+    ' $< > $@""",
+)
+
+[genrule(
+    name = "bootstrap_persona_validate_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/bsd:kern/kern_exec.c"],
+    outs = ["bootstrap_persona_validate_" + version + ".h"],
+    cmd = """awk '
+        /^spawn_validate_persona\\(/ { on = 1; print "static int" }
+        on { sub(/spawn_validate_persona\\(/, "spawn_validate_persona_%s("); print }
+        on && /^}/ { exit }
+    ' $< > $@""" % version,
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+[genrule(
+    name = "bootstrap_persona_adopt_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/bsd:kern/kern_exec.c"],
+    outs = ["bootstrap_persona_adopt_" + version + ".h"],
+    cmd = """awk '
+        /^kauth_cred_model_setpersona\\(/ { on = 1; print "static bool" }
+        on && /^#endif/ { exit }
+        on {
+            gsub(/kauth_cred_model_setpersona/, "kauth_cred_model_setpersona_%s")
+            gsub(/spawn_persona_adopt/, "spawn_persona_adopt_%s")
+            print
+        }
+    ' $< > $@""" % (version, version),
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_bootstrap_persona_test",
+    srcs = [
+        "switch_bootstrap_persona_test.cpp",
+        ":bootstrap_persona",
+        ":bootstrap_persona_validate_17",
+        ":bootstrap_persona_validate_27",
+        ":bootstrap_persona_adopt_17",
+        ":bootstrap_persona_adopt_27",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/bootstrap_rules.h"],
+    copts = ["-fblocks"],
+    includes = ["."],
+)
+
+[genrule(
+    name = "bootstrap_fault_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/osfmk:vm/vm_fault.c"],
+    outs = ["bootstrap_fault_" + version + ".h"],
+    cmd = """awk '
+        /^switch_bootstrap_fault_page\\(/ { on = 1; print "static kern_return_t" }
+        on && /^#if !CODE_SIGNING_MONITOR/ { print "return KERN_SUCCESS;\\n}"; exit }
+        on {
+            gsub(/switch_bootstrap_fault_page/, "switch_bootstrap_fault_page_%s")
+            gsub(/vm_fault_cs_check_violation/, "vm_fault_cs_check_violation_%s")
+            print
+        }
+    ' $< > $@""" % (version, version),
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_bootstrap_fault_test",
+    srcs = [
+        "switch_bootstrap_fault_test.cpp",
+        ":bootstrap_fault_17",
+        ":bootstrap_fault_27",
+    ],
+    copts = ["-Wno-unused-parameter"],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_process",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_process.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_process/ { on = 1 }
+        on { print }
+        /^void switch_bootstrap_exec/ { last = 1 }
+        last && /^}/ { exit }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "bootstrap_access",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_access.h"],
+    cmd = """awk '
+        /^bool switch_bootstrap_alias/ { on = 1 }
+        /^static int switch_bootstrap_ready_sysctl/ { exit }
+        on { print }
+    ' $< > $@""",
+)
+
+[genrule(
+    name = "bootstrap_environment_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/bsd:kern/kern_exec.c"],
+    outs = ["bootstrap_environment_" + version + ".h"],
+    cmd = """awk '
+        /imgp->ip_switch_tweaks =$$/ {
+            print "static void switch_bootstrap_snapshot_%s(struct image_params *imgp) {"
+            snapshot = 1
+        }
+        snapshot {
+            print
+            if (/;$$/) { print "}"; snapshot = 0 }
+        }
+        /^switch_bootstrap_environment\\(/ { on = 1; print "static int" }
+        on { sub(/switch_bootstrap_environment\\(/, "switch_bootstrap_environment_%s("); print }
+        on && /^}/ { exit }
+    ' $< > $@""" % (version, version),
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_bootstrap_environment_test",
+    srcs = [
+        "switch_bootstrap_environment_test.cpp",
+        ":bootstrap_environment_17",
+        ":bootstrap_environment_27",
+    ],
+    additional_compiler_inputs = ["//kernel/switch:include/switch/bootstrap_rules.h"],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_dyld",
+    srcs = ["//kernel/switch:security/bootstrap_dyld.c"],
+    outs = ["bootstrap_dyld.h"],
+    cmd = """awk '
+        /^int switch_bootstrap_dyld_result/ { on = 1 }
+        on { print }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_bootstrap_dyld_test",
+    srcs = [
+        "switch_bootstrap_dyld_test.cpp",
+        ":bootstrap_dyld",
+    ],
+    additional_compiler_inputs = [
+        "//kernel/switch:include/switch/bootstrap_rules.h",
+        "//kernel/switch:include/switch/bootstrap_policy_21H461.h",
+    ],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_signature",
+    srcs = ["//kernel/switch:security/bootstrap_signature.c"],
+    outs = ["bootstrap_signature.h"],
+    cmd = """awk '
+        /^int switch_bootstrap_validate/ { on = 1 }
+        on { print }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_bootstrap_signature_test",
+    srcs = [
+        "switch_bootstrap_signature_test.cpp",
+        ":bootstrap_signature",
+    ],
+    additional_compiler_inputs = [
+        "//kernel/switch:include/switch/bootstrap_rules.h",
+        "//kernel/xnu-12377.121.6/osfmk:kern/cs_blobs.h",
+    ],
+    copts = ["-Wno-c99-designator"],
+    includes = ["."],
+)
+
+genrule(
+    name = "bootstrap_capture",
+    srcs = ["//kernel/switch:security/bootstrap.c"],
+    outs = ["bootstrap_capture.h"],
+    cmd = """awk '
+        /^static bool switch_bootstrap_migration_file/ { on = 1 }
+        /^void switch_bootstrap_capture/ { capture = 1 }
+        on { print }
+        capture && /^}/ { exit }
+    ' $< > $@""",
+)
+
+host_test(
+    name = "switch_bootstrap_capture_test",
+    srcs = [
+        "switch_bootstrap_capture_test.cpp",
+        ":bootstrap_capture",
+    ],
+    includes = ["."],
+)
+
+[genrule(
+    name = "bootstrap_apps_exec_mac_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/security:mac_vfs.c"],
+    outs = ["bootstrap_apps_exec_mac_" + version + ".h"],
+    cmd = """awk '
+        /^mac_vnode_check_exec\\(/ { on = 1; print "static int" }
+        on { sub(/mac_vnode_check_exec\\(/, "mac_vnode_check_exec_%s("); print }
+        on && /^}/ { exit }
+    ' $< > $@""" % version,
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+[genrule(
+    name = "bootstrap_apps_mmap_mac_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/security:mac_file.c"],
+    outs = ["bootstrap_apps_mmap_mac_" + version + ".h"],
+    cmd = """awk '
+        /^mac_file_check_mmap\\(/ { on = 1; print "static int" }
+        on {
+            sub(/mac_file_check_mmap\\(/, "mac_file_check_mmap_%s(")
+            print
+        }
+        on && /^}/ { exit }
+    ' $< > $@""" % version,
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_bootstrap_apps_mac_test",
+    srcs = [
+        "switch_bootstrap_apps_mac_test.cpp",
+        ":app_code_mac_17",
+        ":app_code_mac_27",
+        ":bootstrap_apps_exec_mac_17",
+        ":bootstrap_apps_exec_mac_27",
+        ":bootstrap_apps_mmap_mac_17",
+        ":bootstrap_apps_mmap_mac_27",
     ],
     includes = ["."],
 )

@@ -17,7 +17,7 @@ exports_files(
         "testdata/golden_batch.json",
         "testdata/split_capture_batch.json",
     ],
-    visibility = ["//hw_test_app:__pkg__"],
+    visibility = ["//apps/hwtest:__pkg__"],
 )
 
 exports_files(
@@ -126,13 +126,13 @@ py_binary(
     deps = [":lib"],
 )
 
-# Every generated command's batches, for the app's decoder to hold to (hw_test_app:core_test)
+# Every generated command's batches, for the app's decoder to hold to (apps/hwtest:core_test)
 genrule(
     name = "generated_batches",
     outs = ["generated_batches.json"],
     cmd = "$(execpath :emit_batches) > $@",
     tools = [":emit_batches"],
-    visibility = ["//hw_test_app:__pkg__"],
+    visibility = ["//apps/hwtest:__pkg__"],
 )
 
 # Three fake engines run over the whole batch, every sample pair and sum of it
@@ -145,9 +145,9 @@ py_test(
 
 # The app's side of the format: its decoder's limits (Swift), its GPU side's method ranges (C++), its known program
 APP_SOURCES = [
-    "//hw_test_app:bench/bench_known.h",
-    "//hw_test_app:bench/bench_records.cpp",
-    "//hw_test_app:test_sources",
+    "//apps/hwtest:bench/bench_known.h",
+    "//apps/hwtest:bench/bench_records.cpp",
+    "//apps/hwtest:test_sources",
 ]
 
 [

@@ -1,6 +1,6 @@
 # hwtest
 
-Compares HW Test runs (`hw_test_app`) across boots. `pull_logs` handles it: it copies every report from the app's data
+Compares HW Test runs (`apps/hwtest`) across boots. `pull_logs` handles it: it copies every report from the app's data
 container on the card into `~/Library/Application Support/switch-ios/device-logs/hwtest/`, writes a `.mac.json`
 sidecar next to each new report, and prints the newest new run of each app against the runs before it. The same text
 goes to `hwtest-summary.txt` in that pull's folder.

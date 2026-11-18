@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*
  * Copyright (c) 2007-2010 Apple Inc. All rights reserved.
  *
@@ -531,7 +532,7 @@ mac_proc_check_mprotect(proc_t proc,
 		return 0;
 	}
 
-	MAC_CHECK(proc_check_mprotect, current_cached_proc_cred(proc),
+	SWITCH_MAC_CHECK(switch_bootstrap_process(proc), proc_check_mprotect, current_cached_proc_cred(proc),
 	    proc, addr, size, prot);
 
 	return error;
@@ -549,7 +550,7 @@ mac_proc_check_run_cs_invalid(proc_t proc)
 	}
 #endif
 
-	MAC_CHECK(proc_check_run_cs_invalid, proc);
+	SWITCH_MAC_CHECK(switch_bootstrap_process(proc), proc_check_run_cs_invalid, proc);
 
 	return error;
 }
@@ -919,7 +920,7 @@ mac_proc_check_launch_constraints(proc_t curp, struct image_params *imgp, os_rea
 
 	MAC_POLICY_ITERATE({
 		mpo_proc_check_launch_constraints_t *hook = mpc->mpc_ops->mpo_proc_check_launch_constraints;
-		if (hook == NULL || (switch_app_code_image(vp) && switch_app_code_amfi(mpc->mpc_name))) {
+		if (hook == NULL || ((switch_app_code_image(vp) || switch_bootstrap_image(vp)) && switch_app_code_amfi(mpc->mpc_name))) {
 		        continue;
 		}
 

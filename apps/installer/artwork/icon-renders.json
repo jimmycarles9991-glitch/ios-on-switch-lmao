@@ -1,0 +1,53 @@
+{
+  "archives": {
+    "17.4": {
+      "CFBundleIcons": {
+        "CFBundlePrimaryIcon": {
+          "CFBundleIconFiles": [
+            "AppIcon60x60"
+          ]
+        }
+      },
+      "CFBundleIcons~ipad": {
+        "CFBundlePrimaryIcon": {
+          "CFBundleIconFiles": [
+            "AppIcon60x60",
+            "AppIcon76x76"
+          ],
+          "CFBundleIconName": "AppIcon"
+        }
+      },
+      "DTSDKBuild": "24B8118",
+      "DTXcodeBuild": "27B52"
+    },
+    "27.0": {
+      "CFBundleIcons": {
+        "CFBundlePrimaryIcon": {
+          "CFBundleIconFiles": [
+            "AppIcon60x60"
+          ]
+        }
+      },
+      "CFBundleIcons~ipad": {
+        "CFBundlePrimaryIcon": {
+          "CFBundleIconFiles": [
+            "AppIcon60x60",
+            "AppIcon76x76"
+          ],
+          "CFBundleIconName": "AppIcon"
+        }
+      },
+      "DTSDKBuild": "24B8118",
+      "DTXcodeBuild": "27B52"
+    }
+  },
+  "sha256": "a3cbbdc3a7c12139b0fd46244760b58242d6de5213c200accf395dd6b6cd31c4",
+  "source": {
+    "Assets/Carton.svg": "758d2d6d9a8bb31f2153dad0ab05873f090f1177bdf1917922c334ca3e0c50ea",
+    "Assets/ContactShadow.svg": "a69d0db1a083477bee389e07f7556c9507e87cfcc7d7a95baab4ba53d1ad191b",
+    "Assets/Parcel.svg": "d9487f021fc09270260f250152438d0dc1cb1fef3f16a666e25cd980208b6cdf",
+    "Assets/RearFolds.svg": "c6bde6708614f371e162f1b7236a3f8fa3b57f0815d1c5ebbcf46616416ab193",
+    "Assets/Violet.svg": "8166dc752e850c39ee6605295b754be0f2719f093056fd522e3af1b10adf97c3",
+    "icon.json": "5956c6fc58b11bf74d802527f9cf803162a6768d3590484c2e87b6d4ed1ec34a"
+  }
+}

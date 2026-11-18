@@ -34,7 +34,7 @@ SWITCH_GM20B_CAPS_INPUTS = [
     "//third_party/mesa/src/nouveau/nil:nil_formats.csv",
     "//third_party/mesa/src/nouveau/nil:nil_format_table_gen.py",
     "//third_party/mesa/src/util/format:u_format.yaml",
-    "//hw_test_app:test_sources",
+    "//apps/hwtest:test_sources",
 ] + SWITCH_GM20B_MESA_HEADERS + [_CLASSES + c + ".h" for c in ["cl9097", "cl9097tex", "clb097", "clb097tex"]]
 
 def caps_args(location = "execpath"):
@@ -57,5 +57,5 @@ def caps_args(location = "execpath"):
         "--nil-csv " + loc("//third_party/mesa/src/nouveau/nil:nil_formats.csv"),
         "--nil-gen " + loc("//third_party/mesa/src/nouveau/nil:nil_format_table_gen.py"),
         "--u-format " + loc("//third_party/mesa/src/util/format:u_format.yaml"),
-        "$$(for f in $({}s //hw_test_app:test_sources); do echo --hwtest-source $$f; done)".format(location),
+        "$$(for f in $({}s //apps/hwtest:test_sources); do echo --hwtest-source $$f; done)".format(location),
     ])

@@ -26,11 +26,14 @@ name>/ becomes the directory at path, and "trust" covers every Mach-O inside it.
 import argparse
 import hashlib
 import json
+import plistlib
 import posixpath
 import re
 import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import zipfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -51,6 +54,14 @@ SUPPLEMENTAL = '/private/preboot/Cryptexes/Supplemental'
 SUPPLEMENTAL_ROOTS = (SUPPLEMENTAL, '/System/Cryptexes/Supplemental')
 SUPPLEMENTAL_DAEMON = re.compile(re.escape(SUPPLEMENTAL) + r'/System/Library/LaunchDaemons/[A-Za-z0-9._-]+\.plist')
 SUPPLEMENTAL_JETSAM = SUPPLEMENTAL + '/System/Library/JetsamProperties/com.apple.jetsamproperties.cryptex.plist'
+
+
+def _validate_bundle_entry(entry: dict) -> None:
+    path = entry['path']
+    if entry.get('bundle-info') and (entry.get('trust') or entry.get('bundle') or not path.endswith('.app/Info.plist')):
+        raise SystemExit(f'overlay: invalid bundle-info entry {path}')
+    if entry.get('bundle-signature') and (entry.get('trust') or entry.get('bundle') or entry.get('bundle-info')):
+        raise SystemExit(f'overlay: invalid bundle-signature entry {path}')
 
 
 def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None = None, release: bool = False) -> dict:
@@ -89,6 +100,7 @@ def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None 
         if gates.setdefault(directory, gate) != gate:
             raise SystemExit(f'overlay: files in {directory} need the same boot-arg')
         trust = bool(entry.get('trust'))
+        _validate_bundle_entry(entry)
         files.append(
             {
                 'path': path,
@@ -97,6 +109,8 @@ def plan(manifest: dict, portrait: bool, kind: str, given: Iterable[str] | None 
                 'mode': int(entry.get('mode', '0755' if trust else '0644'), 8),
                 'directory': directory,
                 'bundle': bool(entry.get('bundle')),
+                'bundle-info': bool(entry.get('bundle-info')),
+                'bundle-signature': entry.get('bundle-signature'),
             }
         )
     used = {f['directory'] for f in files}
@@ -143,6 +157,11 @@ def bundle_files(ipa: Path, path: str) -> list[tuple[str, bytes]]:
         ]
     if not files:
         raise SystemExit(f'overlay: {ipa.name} has no {prefix}')
+    names = {name for name, _ in files}
+    if len(names) != len(files) or any(
+        '\\' in name or any(part in ('', '.', '..') for part in name.split('/')) for name in names
+    ):
+        raise SystemExit(f'overlay: invalid bundle paths in {ipa.name}')
     return files
 
 
@@ -151,6 +170,67 @@ def code_of(entry: dict, source: Path) -> list[bytes]:
     if not entry['bundle']:
         return [source.read_bytes()]
     return [data for _, data in bundle_files(source, entry['path']) if data[:4] == MACHO_64]
+
+
+def _placeholder(ipa: Path, target: Path, mode: int) -> None:
+    contents = dict(bundle_files(ipa, target.parent.name))
+    info = plistlib.loads(contents['Info.plist'])
+    icon_names = {
+        name.removesuffix('.png')
+        for key in ('CFBundleIcons', 'CFBundleIcons~ipad')
+        for name in info.get(key, {}).get('CFBundlePrimaryIcon', {}).get('CFBundleIconFiles', [])
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    for name, data in contents.items():
+        if '/' in name:
+            continue
+        stem = re.sub(r'(?:@\d+x)?(?:~(?:iphone|ipad))?\.png$', '', name)
+        if name == 'Assets.car' or (name.endswith('.png') and stem in icon_names):
+            icon = target.parent / name
+            icon.write_bytes(data)
+            icon.chmod(mode)
+    target.write_bytes(plistlib.dumps(info | {'LSInstallByDefault': True, '_LSSupportsRemoval': True}))
+    target.chmod(mode)
+
+
+def detached_signature(ipa: Path, bundle: str, target: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix='switch-app-signature-') as temporary:
+        app = Path(temporary) / bundle
+        for name, data in bundle_files(ipa, bundle):
+            member = app / name
+            member.parent.mkdir(parents=True, exist_ok=True)
+            member.write_bytes(data)
+            member.chmod(0o755 if data[:4] == MACHO_64 else 0o644)
+        info = plistlib.loads((app / 'Info.plist').read_bytes())
+        if info.get('CFBundleIdentifier') != target.name:
+            raise SystemExit(f'overlay: detached signature identifier does not match {target.name}')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(['/usr/bin/codesign', '--verify', '--deep', '--strict', str(app)], check=True)
+        with zipfile.ZipFile(ipa) as archive:
+            sidecars = [member for member in archive.infolist() if member.filename == f'AppSignatures/{target.name}']
+            if sidecars:
+                if len(sidecars) != 1:
+                    raise SystemExit(f'overlay: ambiguous detached signature for {target.name}')
+                target.write_bytes(archive.read(sidecars[0]))
+            else:
+                details = subprocess.run(['/usr/bin/codesign', '-dvvv', str(app)], check=True, capture_output=True)
+                if b'Signature=adhoc' not in details.stderr.splitlines():
+                    raise SystemExit(f'overlay: signed seed requires the signer-supplied AppSignatures/{target.name}')
+                subprocess.run(
+                    [
+                        '/usr/bin/codesign',
+                        '--force',
+                        '--sign',
+                        '-',
+                        '--detached',
+                        str(target),
+                        '--preserve-metadata=identifier,entitlements,flags,requirements',
+                        '--timestamp=none',
+                        str(app),
+                    ],
+                    check=True,
+                )
+        subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '--detached', str(target), str(app)], check=True)
 
 
 def _files(specs: Iterable[str]) -> dict[str, Path]:
@@ -204,6 +284,13 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     for entry in entries:
         target = args.out / entry['path'].lstrip('/')
+        if entry.get('bundle-signature'):
+            detached_signature(_need(files, entry), entry['bundle-signature'], target)
+            target.chmod(entry['mode'])
+            continue
+        if entry.get('bundle-info'):
+            _placeholder(_need(files, entry), target, entry['mode'])
+            continue
         if entry['bundle']:
             for name, data in bundle_files(_need(files, entry), entry['path']):
                 member = target / name

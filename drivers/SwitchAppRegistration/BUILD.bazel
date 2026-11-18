@@ -1,14 +1,91 @@
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
 load("//kernel/rules:package.bzl", "ios_binary")
 
 package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
+genrule(
+    name = "registration_repair",
+    srcs = ["appregd.mm"],
+    outs = ["registration_repair.h"],
+    cmd = """awk '
+        /^@interface SwitchSaveObserver/ || /^@implementation SwitchSaveObserver/ { on = 1 }
+        /^static unsigned repairRegistrations\\(/ { on = 1; repair = 1 }
+        on { print }
+        /^@end/ { on = 0 }
+        repair && /^}/ { done = 1; exit }
+        END { if (!done) exit 1 }
+    ' $< > $@""",
+)
+
+objc_library(
+    name = "registration_repair_test_lib",
+    testonly = True,
+    srcs = [
+        "app_registration.h",
+        "registration_repair_test.mm",
+        ":registration_repair",
+    ],
+    copts = ["-std=c++20"],
+    includes = ["."],
+    sdk_frameworks = ["Foundation"],
+    deps = ["@googletest//:gtest"],
+    alwayslink = True,
+)
+
+host_test(
+    name = "registration_repair_test",
+    srcs = [],
+    sanitize = False,
+    deps = [":registration_repair_test_lib"],
+)
+
 exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
+
+[
+    objc_library(
+        name = "registration_api" + version + "_test_lib",
+        testonly = True,
+        srcs = ["registration_api_test.mm"],
+        hdrs = [
+            "app_registration.h",
+            "app_registration.mm",
+        ],
+        copts = [
+            "-std=c++20",
+            "-fobjc-arc",
+            "-DSWITCH_APPREGD_INSTALLATION_RECORDS=" + records,
+        ],
+        includes = ["."],
+        sdk_frameworks = ["Foundation"],
+        deps = ["@googletest//:gtest"],
+        alwayslink = True,
+    )
+    for version, records in [
+        ("17", "0"),
+        ("27", "1"),
+    ]
+]
+
+[
+    host_test(
+        name = "registration_api" + version + "_test",
+        srcs = [],
+        sanitize = False,
+        deps = [":registration_api" + version + "_test_lib"],
+    )
+    for version in [
+        "17",
+        "27",
+    ]
+]
 
 # Registers the overlay's changed apps with LaunchServices at boot (appregd.mm). 21H461 hands LaunchServices info
 # dictionaries, 24B119 installation records, as each one's installd does.
@@ -17,27 +94,82 @@ ios_binary(
     srcs = [
         "app_registration.mm",
         "appregd.mm",
+        "installer_handler.mm",
+        "bootstrap_apps.mm",
+        "bootstrap_registration.mm",
+        "package_records.mm",
     ],
     out = "build/switch-apps/switch-appregd",
-    hdrs = ["app_registration.h"],
+    hdrs = [
+        "app_registration.h",
+        "installer_handler.h",
+        "bootstrap_registration.h",
+        "package_records.h",
+        "uicache_options.h",
+        "//drivers/SwitchBootstrap:build_configuration",
+    ],
     copts = [
         "-O2",
         "-Wall",
         "-Wextra",
         "-Werror",
         "-fobjc-arc",
+        "-I{bin}/drivers/SwitchBootstrap",
         "-lc++",
         "-framework",
         "Foundation",
+        "-framework",
+        "Security",
     ] + select({
         "//ipsw:24B119": ["-DSWITCH_APPREGD_INSTALLATION_RECORDS=1"],
         "//conditions:default": [],
     }),
     entitlements = "appregd.entitlements",
+    pagesize = "4096",
 )
 
 # The overlay files of this package that overlay/manifest.json names.
 filegroup(
     name = "overlay_files",
-    srcs = ["com.brunostjohn.switch.appregd.plist"],
+    srcs = [
+        "com.brunostjohn.switch.appregd.plist",
+        "com.brunostjohn.switch.bootstrap-apps.plist",
+    ],
+)
+
+copy_file(
+    name = "bootstrap_apps_test_source",
+    src = "bootstrap_apps_test.mm",
+    out = "bootstrap_apps_test.cpp",
+)
+
+host_test(
+    name = "bootstrap_apps_test",
+    srcs = [
+        ":bootstrap_apps_test_source",
+        "app_registration.h",
+        "installer_handler.h",
+        "bootstrap_registration.h",
+        "uicache_options.h",
+        "package_records.h",
+        "//drivers/SwitchBootstrap:build_configuration",
+    ],
+    additional_compiler_inputs = [
+        "bootstrap_apps.mm",
+        "bootstrap_registration.mm",
+        "package_records.mm",
+    ],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-UNDEBUG",
+        "-Idrivers/SwitchAppRegistration",
+        "-I$(GENDIR)/drivers/SwitchBootstrap",
+    ],
+    gtest_main = False,
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
 )

@@ -1,0 +1,118 @@
+{
+  "sources": [
+    {
+      "name": "launchctl",
+      "url": "https://github.com/ProcursusTeam/launchctl/archive/refs/tags/v1.2.0.tar.gz",
+      "sha256": "69fc0c14c38d3f92f121518caff1115fe34fe84607f7707004637fdaa59252c8",
+      "prefix": "launchctl-1.2.0"
+    },
+    {
+      "name": "sileo",
+      "url": "https://github.com/Sileo/Sileo/archive/c9f70158a037dc76b91c450e72af2de0514dd3ee.tar.gz",
+      "sha256": "13e37cd98df1ad4a929be03567c9c3038ee6568f362bd04e507f7e2fb47f27c3",
+      "prefix": "Sileo-c9f70158a037dc76b91c450e72af2de0514dd3ee"
+    },
+    {
+      "name": "ellekit",
+      "url": "https://github.com/tealbathingsuit/ellekit/archive/1017a0d09606ea49ba8bc4d6cccc530d372e640e.tar.gz",
+      "sha256": "859236aa8fce6dc2f5da075b59a3f8b2f3d75488dcf5150c64a3c98c958709f5",
+      "prefix": "ellekit-1017a0d09606ea49ba8bc4d6cccc530d372e640e"
+    },
+    {
+      "name": "sileo_alderis",
+      "url": "https://github.com/elihwyma/Alderis/archive/95030bfc6afc5d58a22aaa013e0f4c77317b57a1.tar.gz",
+      "sha256": "cb826c34890728b29b2337516fa33e25b1c46733c3724762a4b9772e682941b9",
+      "prefix": "Alderis-95030bfc6afc5d58a22aaa013e0f4c77317b57a1"
+    },
+    {
+      "name": "sileo_cosmos",
+      "url": "https://github.com/evgenyneu/Cosmos/archive/cce521e734d0090494bd4afab5fd2e2f2465c1af.tar.gz",
+      "sha256": "51e077ce9c7e238a57ccf7cc760479e126c6bbd627e028be601fec07f17c5659",
+      "prefix": "Cosmos-cce521e734d0090494bd4afab5fd2e2f2465c1af"
+    },
+    {
+      "name": "sileo_down",
+      "url": "https://github.com/johnxnguyen/Down/archive/f34b166be1f1db4aa8f573067e901d72f2a6be57.tar.gz",
+      "sha256": "017fb44929aa0e892ef8a2395015ba4d40cba5541bfe3bbf4576caca6151b754",
+      "prefix": "Down-f34b166be1f1db4aa8f573067e901d72f2a6be57"
+    },
+    {
+      "name": "sileo_evander",
+      "url": "https://github.com/elihwyma/Evander/archive/0059e74d91e8574bee454e748ea6cc188e8b43db.tar.gz",
+      "sha256": "b80e80da89e505bb0e1f844c85caea23269308a6c7c1de6272604fb51956af08",
+      "prefix": "Evander-0059e74d91e8574bee454e748ea6cc188e8b43db"
+    },
+    {
+      "name": "sileo_jjliso8601dateformatter",
+      "url": "https://github.com/michaeleisel/JJLISO8601DateFormatter/archive/741a9e45db01148a8ac60c5e12f7c978181a22d3.tar.gz",
+      "sha256": "9d6a857fba61627258ba7852f960a3862652b11e3d5b14024a5c156f87176320",
+      "prefix": "JJLISO8601DateFormatter-741a9e45db01148a8ac60c5e12f7c978181a22d3"
+    },
+    {
+      "name": "sileo_lnpopupcontroller",
+      "url": "https://github.com/elihwyma/LNPopupController/archive/6cdb4a977b8e0253305cd5009e33028d90631788.tar.gz",
+      "sha256": "cf0cdb080c8ef70f26d03db9813c9df5e18d03f98a2aa44dd0ff668aade9fdba",
+      "prefix": "LNPopupController-6cdb4a977b8e0253305cd5009e33028d90631788"
+    },
+    {
+      "name": "sileo_lnztreeview",
+      "url": "https://github.com/elihwyma/LNZTreeView/archive/bb7f9b77989e1c07460319e7bd4d1fcbf7cb26ae.tar.gz",
+      "sha256": "bc24c236b6daf84c3ab8eedb3e537347ff12196a18488c8cd30feace25c6742e",
+      "prefix": "LNZTreeView-bb7f9b77989e1c07460319e7bd4d1fcbf7cb26ae"
+    },
+    {
+      "name": "sileo_onboarding",
+      "url": "https://github.com/elihwyma/Onboarding/archive/0cc79de9709878187d942d22a64dfd4c2c55a528.tar.gz",
+      "sha256": "53a494969615f5d9c5edbab8f09bad0f363798914ec0f7e1f96277af7d6e00c7",
+      "prefix": "Onboarding-0cc79de9709878187d942d22a64dfd4c2c55a528"
+    },
+    {
+      "name": "sileo_sqlite_swift",
+      "url": "https://github.com/stephencelis/SQLite.swift/archive/a95fc6df17d108bd99210db5e8a9bac90fe984b8.tar.gz",
+      "sha256": "797159cdcb300a62d440253127fe39ca6cffccbad36f7bdaa20dfc244e692cea",
+      "prefix": "SQLite.swift-a95fc6df17d108bd99210db5e8a9bac90fe984b8"
+    },
+    {
+      "name": "sileo_swipecellkit",
+      "url": "https://github.com/SwipeCellKit/SwipeCellKit/archive/7219cad3098637176ace311510d11467dbfb9bb0.tar.gz",
+      "sha256": "e1d34f1d837441b2a57cded3fa59f89424abe296758ea95f2221fac0e3baa9c4",
+      "prefix": "SwipeCellKit-7219cad3098637176ace311510d11467dbfb9bb0"
+    },
+    {
+      "name": "sileo_zippyjson",
+      "url": "https://github.com/michaeleisel/ZippyJSON/archive/ddbbc024ba5a826f9676035a0a090a0bc2d40755.tar.gz",
+      "sha256": "37136b9e99376c0b71c54462847acc90d4789b34f4d0942b8bb8161e6b683e5b",
+      "prefix": "ZippyJSON-ddbbc024ba5a826f9676035a0a090a0bc2d40755"
+    },
+    {
+      "name": "sileo_zippyjsoncfamily",
+      "url": "https://github.com/michaeleisel/ZippyJSONCFamily/archive/c1c0f88977359ea85b81e128b2d988e8250dfdae.tar.gz",
+      "sha256": "6326240b50f83f59e5b9f5b52c4de351ef12ce4f5b91792783cfad48ebca3e11",
+      "prefix": "ZippyJSONCFamily-c1c0f88977359ea85b81e128b2d988e8250dfdae"
+    },
+    {
+      "name": "sileo_depictionkit",
+      "url": "https://github.com/RepositoryStandards/DepictionKit/archive/1ae6ad6ad6f8a7fc3194683c865d3f4b5a4072f9.tar.gz",
+      "sha256": "bbddbdd59b4ace18789e60fb76b4564e584a8729dcfad99e23292f8d96914217",
+      "prefix": "DepictionKit-1ae6ad6ad6f8a7fc3194683c865d3f4b5a4072f9"
+    },
+    {
+      "name": "zstd",
+      "url": "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.tar.gz",
+      "sha256": "37d7284556b20954e56e1ca85b80226768902e2edabd3b649e9e72c0c9012ee3",
+      "prefix": "zstd-1.5.7"
+    }
+  ],
+  "files": [
+    {
+      "name": "procursus_bootstrap",
+      "url": "https://apt.procurs.us/bootstraps/1900/bootstrap-iphoneos-arm64.tar.zst",
+      "sha256": "8354c3aa1ecdad8ebc47d9a76dfca6f830a2b757278068bd33b98bf1d638a9cb"
+    },
+    {
+      "name": "sileo_release",
+      "url": "https://github.com/Sileo/Sileo/releases/download/2.5.1/org.coolstar.sileo_2.5.1_iphoneos-arm64.deb",
+      "sha256": "8e3c90e5a7d32f4ca207a0ac30d3cfa8a13dca86a2b4e11cb3f9e5c68d7bc97a"
+    }
+  ]
+}

@@ -47,10 +47,10 @@ py_test(
     size = "small",
     srcs = ["hwtest_test.py"],
     data = [
-        "//hw_test_app:SwitchHWTest.entitlements",
-        "//hw_test_app:SwitchHWTest27.entitlements",
-        "//hw_test_app:swift_sources",
-        "//hw_test_app:test_sources",
+        "//apps/hwtest:SwitchHWTest.entitlements",
+        "//apps/hwtest:SwitchHWTest27.entitlements",
+        "//apps/hwtest:swift_sources",
+        "//apps/hwtest:test_sources",
     ],
     deps = [":lib"],
 )

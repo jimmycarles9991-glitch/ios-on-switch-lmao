@@ -122,7 +122,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def runfiles_args(root: str | None = None) -> argparse.Namespace:
     """Name the inputs where a py_binary's or py_test's runfiles put them (the working directory)."""
     m = 'third_party/mesa/src/'
-    swift = sorted(glob.glob('hw_test_app/**/*.swift', recursive=True))
+    swift = sorted(glob.glob('apps/hwtest/**/*.swift', recursive=True))
     return parse_args(
         [
             '--tables',

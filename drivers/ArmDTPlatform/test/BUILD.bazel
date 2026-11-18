@@ -1,0 +1,27 @@
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+
+lint_files()
+
+host_shims(
+    name = "kernel",
+    headers = [
+        "IOKit/IONVRAM.h",
+        "IOKit/IODeviceTreeSupport.h",
+        "IOKit/IORegistryEntry.h",
+        "libkern/c++/OSData.h",
+        "libkern/c++/OSIterator.h",
+        "libkern/c++/OSNumber.h",
+    ],
+    stubs = "nvram_stubs.h",
+)
+
+host_test(
+    name = "nvram_test",
+    srcs = [
+        "nvram_test.cpp",
+        "//drivers/ArmDTPlatform:SwitchNVRAM.h",
+        "//kits/SwitchDT:SwitchDTProperty.h",
+    ],
+    deps = [":kernel"],
+)

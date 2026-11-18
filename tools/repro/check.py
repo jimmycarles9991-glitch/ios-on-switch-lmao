@@ -21,14 +21,14 @@ import tempfile
 from pathlib import Path
 
 
-def outputs(bazel: str, base: str, workspace: str, targets: list[str]) -> dict[str, str]:
+def outputs(bazel: str, base: str, workspace: str, targets: list[str], flags: list[str]) -> dict[str, str]:
     files = {}
     query = subprocess.run(
         [
             bazel,
             '--output_base=' + base,
             'cquery',
-            '--config=reproducible-check',
+            *flags,
             '--output=files',
             ' + '.join(targets),
         ],
@@ -52,15 +52,35 @@ def outputs(bazel: str, base: str, workspace: str, targets: list[str]) -> dict[s
     return files
 
 
+def compare(a: dict[str, str], b: dict[str, str]) -> int:
+    differ = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+    print(f'{len(a)} output files, {len(differ)} differ')
+    for k in differ[:50]:
+        print('  differs:', k)
+    if not differ:
+        for k, digest in sorted(a.items())[:50]:
+            print(digest, k)
+    return int(bool(differ))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('targets', nargs='*', default=['//:kernel', '//:boot', '//:gpu'])
     parser.add_argument('--keep', action='store_true')
+    parser.add_argument('--remote-only', action='store_true', help='use remote workers for both cold builds')
     args = parser.parse_args()
     workspace = os.environ.get('BUILD_WORKSPACE_DIRECTORY') or sys.exit('run with bazel run')
     bazel = os.environ.get('BAZEL', 'bazel')
     scratch = Path(tempfile.mkdtemp(prefix='switch-repro-'))
     results = []
+    flags = ['--config=reproducible-check', '--experimental_convenience_symlinks=ignore']
+    if args.remote_only:
+        flags += [
+            '--config=agent',
+            '--spawn_strategy=remote',
+            '--strategy=AssetCatalogCompile=remote',
+            '--noremote_local_fallback',
+        ]
     try:
         for n in (1, 2):
             base = str(scratch / f'base{n}')
@@ -69,8 +89,8 @@ def main() -> None:
                     bazel,
                     '--output_base=' + base,
                     'build',
-                    '--config=reproducible-check',
-                    '--experimental_convenience_symlinks=ignore',
+                    *flags,
+                    '--execution_log_compact_file=' + str(scratch / f'exec{n}.zst'),
                     *args.targets,
                 ],
                 cwd=workspace,
@@ -83,22 +103,21 @@ def main() -> None:
                     print(f'build {n}: {line}')
             if build.returncode:
                 sys.exit(build.stderr[-4000:])
-            results.append(outputs(bazel, base, workspace, args.targets))
-        a, b = results
-        differ = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
-        print(f'{len(a)} output files, {len(differ)} differ')
-        for k in differ[:50]:
-            print('  differs:', k)
-        sys.exit(1 if differ else 0)
+            results.append(outputs(bazel, base, workspace, args.targets, flags))
+            if not args.keep:
+                subprocess.run([bazel, '--output_base=' + base, 'shutdown'], cwd=workspace, check=True)
+                shutil.rmtree(base)
+        sys.exit(compare(*results))
     finally:
         if not args.keep:
             for n in (1, 2):
-                subprocess.run(
-                    [bazel, '--output_base=' + str(scratch / f'base{n}'), 'clean', '--expunge'],
-                    cwd=workspace,
-                    capture_output=True,
-                    check=False,
-                )
+                if (scratch / f'base{n}').exists():
+                    subprocess.run(
+                        [bazel, '--output_base=' + str(scratch / f'base{n}'), 'shutdown'],
+                        cwd=workspace,
+                        capture_output=True,
+                        check=False,
+                    )
             shutil.rmtree(scratch, ignore_errors=True)
 
 

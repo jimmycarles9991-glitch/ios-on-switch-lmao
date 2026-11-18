@@ -1,6 +1,6 @@
 """Files to and from the bench loop's folders on the Switch, over USB: libimobiledevice's afcclient.
 
-Two roots, as hw_test_app/kit/BenchLoop.swift watches them:
+Two roots, as apps/hwtest/kit/BenchLoop.swift watches them:
   documents  HW Test's Documents through house_arrest (afcclient --documents <bundle id>): /Documents/benchloop
   media      the AFC root, /private/var/mobile/Media on the device: /Switch/benchloop
 `doctor` tries the first, then the second. A local folder stands in for either in the tests and for the fake device.

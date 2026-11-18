@@ -2329,7 +2329,7 @@ skipcheck:
 void
 proc_exit(proc_t p)
 {
-#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && (DEVELOPMENT || DEBUG)
 	extern void native_switch_migration_process(proc_t, int, int);
 	native_switch_migration_process(p, 1, p->p_xstat);
 #endif

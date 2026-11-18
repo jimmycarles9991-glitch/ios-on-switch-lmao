@@ -1,6 +1,6 @@
 """A batch with one experiment of every kind, kept as testdata/golden_batch.json.
 
-golden_test.py checks protocol.encode_batch still writes these bytes; hw_test_app/host_tests/BenchProtocolTests.swift
+golden_test.py checks protocol.encode_batch still writes these bytes; apps/hwtest/host_tests/BenchProtocolTests.swift
 checks the app decodes every experiment of the same file, so the two sides cannot drift apart unnoticed.
 """
 

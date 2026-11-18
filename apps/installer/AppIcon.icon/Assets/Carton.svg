@@ -1,0 +1,44 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512">
+  <defs>
+    <clipPath id="withinCarton">
+      <path d="M142 214C150 213 156 217 166 222L216 248C230 255 236 258 244 258C252 258 260 254 271 249L341 214C353 208 361 205 371 210C377 213 383 218 392 226L413 244C425 255 421 265 406 273L364 295L361 321C359 341 353 348 335 357L273 387C253 397 239 398 220 388L173 363C152 352 148 344 146 324L144 302L103 279C88 271 84 264 90 252C95 242 109 230 123 220C129 216 135 214 142 214Z" />
+    </clipPath>
+    <linearGradient id="carton" gradientUnits="userSpaceOnUse" x1="144" y1="291" x2="361" y2="329">
+      <stop stop-color="#E1D7F6" />
+      <stop offset=".28" stop-color="#DACAF4" />
+      <stop offset=".43" stop-color="#CEBDEB" />
+      <stop offset=".55" stop-color="#BFAAE1" />
+      <stop offset=".77" stop-color="#B59DDC" />
+      <stop offset="1" stop-color="#B09ADB" />
+    </linearGradient>
+    <linearGradient id="underfold" gradientUnits="userSpaceOnUse" x1="244" y1="290" x2="251" y2="366">
+      <stop stop-color="#65518E" stop-opacity=".25" />
+      <stop offset=".4" stop-color="#9177AF" stop-opacity=".11" />
+      <stop offset="1" stop-color="#B296D2" stop-opacity="0" />
+    </linearGradient>
+    <linearGradient id="leftFold" gradientUnits="userSpaceOnUse" x1="189" y1="233" x2="150" y2="305">
+      <stop stop-color="#FFFCFF" />
+      <stop offset=".25" stop-color="#F8F1FF" />
+      <stop offset=".71" stop-color="#EDE5FA" />
+      <stop offset="1" stop-color="#D5C5EC" />
+    </linearGradient>
+    <linearGradient id="rightFold" gradientUnits="userSpaceOnUse" x1="306" y1="226" x2="345" y2="305">
+      <stop stop-color="#FCF7FF" />
+      <stop offset=".27" stop-color="#F0E7FC" />
+      <stop offset=".72" stop-color="#DED0F3" />
+      <stop offset="1" stop-color="#C3B1E3" />
+    </linearGradient>
+  </defs>
+  <g transform="translate(256 259) scale(1.045) translate(-254 -258)">
+    <g id="folded-carton">
+      <path fill="url(#carton)" d="M142 214C150 213 156 217 166 222L216 248C230 255 236 258 244 258C252 258 260 254 271 249L341 214C353 208 361 205 371 210C377 213 383 218 392 226L413 244C425 255 421 265 406 273L364 295L361 321C359 341 353 348 335 357L273 387C253 397 239 398 220 388L173 363C152 352 148 344 146 324L144 302L103 279C88 271 84 264 90 252C95 242 109 230 123 220C129 216 135 214 142 214Z" />
+      <g clip-path="url(#withinCarton)">
+        <path fill="url(#underfold)" d="M142 214C150 213 156 217 166 222L216 248C230 255 236 258 244 258C252 258 260 254 271 249L341 214C353 208 361 205 371 210C377 213 383 218 392 226L413 244C425 255 421 265 406 273L364 295L361 321C359 341 353 348 335 357L273 387C253 397 239 398 220 388L173 363C152 352 148 344 146 324L144 302L103 279C88 271 84 264 90 252C95 242 109 230 123 220C129 216 135 214 142 214Z" />
+        <path fill="url(#leftFold)" d="M86 254C94 237 114 220 130 213C143 208 154 215 166 222L216 248C230 255 236 258 244 258C233 261 226 269 216 281L199 298C190 308 179 314 165 311C157 309 149 305 140 300L102 279C90 273 83 265 86 254Z" />
+        <path fill="url(#rightFold)" d="M244 258C252 258 260 254 271 249L341 214C354 207 362 204 372 208C380 211 391 221 401 230L417 244C430 256 423 267 408 274L319 318C304 326 293 324 282 313C275 306 268 294 260 280C253 269 249 262 244 258Z" />
+      </g>
+      <path fill="#8066A8" opacity=".56" d="M291 341L321 326C324 324.5 326 325.5 325.8 329L325.5 331C325.3 333.5 323.6 335 321 336.3L291.5 351C288.7 352.4 287 351.4 287.3 348.4L287.5 346.3C287.7 343.8 288.8 342.1 291 341Z" />
+    </g>
+  </g>
+</svg>

@@ -1,4 +1,4 @@
-"""The app's own known-answer program (hw_test_app/bench/bench_known.h), built here the same way.
+"""The app's own known-answer program (apps/hwtest/bench/bench_known.h), built here the same way.
 
 known_test.py holds the header to these formulas and runs the words through the host's Maxwell interpreter, so the
 device's self-check program is checked by the tools that check every other program.

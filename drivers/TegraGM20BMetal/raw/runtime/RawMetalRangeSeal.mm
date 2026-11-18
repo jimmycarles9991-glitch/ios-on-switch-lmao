@@ -225,7 +225,6 @@ bool RMRangeEncode::seal(size_t to, bool &stale)
     const Encoding encoding;
     RMCommandBuffer *cb = cb_;
     raw::CommandBuffer *rc = rc_;
-    raw::Device &d = *d_;
     to_ = to;
     sealed_ = true;
     RAW_ENCODE_SPAN(Tail);
@@ -305,8 +304,8 @@ bool RMRangeEncode::seal(size_t to, bool &stale)
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     cb->_probeTaken.add(rc->probeTaken());
     noteReplayShape(cb, from_, to);
-    d.stats.slotsCompared += stateCursor_.slotsCompared;
-    d.stats.slotsInTables += stateCursor_.slotsInTables;
+    d_->stats.slotsCompared += stateCursor_.slotsCompared;
+    d_->stats.slotsInTables += stateCursor_.slotsInTables;
 #endif
     for (const Conversion &c : converted_) {  // (submitted: their images hold the surfaces at these seeds)
         c.t->_imageSeed = c.seed;
@@ -322,7 +321,7 @@ bool RMRangeEncode::seal(size_t to, bool &stale)
     cb->_channelGeneration = generation_;
     cb->_stamp = cb->_segs.size() == 1 && cb->_segs.front().raw ? rc->stamp : 0;
     cb->_rangeLoopStamp = rc->loopsLaid ? rc->stamp : 0;
-    RAW_DIAGNOSTIC(d.stats.levelPasses += levelPasses_);
+    RAW_DIAGNOSTIC(d_->stats.levelPasses += levelPasses_);
     RAW_DIAGNOSTIC(gRM->stats.draws += rc->draws);
     RAW_DIAGNOSTIC(gRM->stats.passes += rc->passes);
     RAW_DIAGNOSTIC(gRM->stats.copies += rc->blits);

@@ -1,3 +1,4 @@
+#include <switch/bootstrap.h>
 /*-
  * Copyright (c) 2002, 2003 Networks Associates Technology, Inc.
  * Copyright (c) 2006 SPARTA, Inc.
@@ -160,8 +161,11 @@ mac_file_check_library_validation(struct proc *proc,
 {
 	int error;
 
-	SWITCH_MAC_CHECK(switch_app_code_process(proc) && FILEGLOB_DTYPE(fg) == DTYPE_VNODE &&
-	    switch_app_code_image((struct vnode *)fg_get_data(fg)),
+	SWITCH_BOOTSTRAP_MAC_CHECK(FILEGLOB_DTYPE(fg) == DTYPE_VNODE &&
+        switch_bootstrap_access((struct vnode *)fg_get_data(fg), FREAD),
+        FILEGLOB_DTYPE(fg) == DTYPE_VNODE &&
+	    ((switch_app_code_process(proc) && switch_app_code_image((struct vnode *)fg_get_data(fg))) ||
+	     (switch_bootstrap_process(proc) && switch_bootstrap_image((struct vnode *)fg_get_data(fg)))),
 	    file_check_library_validation, proc, fg, slice_offset, error_message, error_message_size);
 	return error;
 }
@@ -181,11 +185,24 @@ mac_file_check_mmap(struct ucred *cred, struct fileglob *fg, int prot,
 {
 	int error;
 	int maxp;
+	struct vnode *vp = FILEGLOB_DTYPE(fg) == DTYPE_VNODE ? fg_get_data(fg) : NULL;
+	if (vp && (error = switch_bootstrap_validate(vp))) {
+		return error;
+	}
 
 	if ((error = switch_pretranslated_mmap(fg, flags, prot, *maxprot))) return error;
 	maxp = *maxprot;
-	SWITCH_MAC_CHECK(switch_app_code_process(current_proc()) && FILEGLOB_DTYPE(fg) == DTYPE_VNODE &&
-	    switch_app_code_image((struct vnode *)fg_get_data(fg)),
+	proc_t p = current_proc();
+	const bool tweak_read = vp && (!(flags & MAP_SHARED) || !(prot & VM_PROT_WRITE)) &&
+	    switch_bootstrap_access(vp, FREAD);
+	kauth_cred_t mapping_cred = !tweak_read && vp &&
+	    switch_bootstrap_exec_mapping(p, vp, offset, prot) ? cred : NULL;
+	const bool package_read = vp && !(prot & (VM_PROT_WRITE | VM_PROT_EXECUTE)) &&
+	    switch_bootstrap_app_access(vp, FREAD);
+	if (package_read && !tweak_read && !mapping_cred) maxp &= VM_PROT_READ;
+	SWITCH_BOOTSTRAP_MAC_CHECK_WITH_CRED(tweak_read || package_read, mapping_cred,
+	    vp && ((switch_app_code_process(p) && switch_app_code_image(vp)) ||
+	    (switch_bootstrap_process(p) && switch_bootstrap_image(vp))),
 	    file_check_mmap, cred, fg, NULL, prot, flags, offset, &maxp);
 	if ((maxp | *maxprot) != *maxprot) {
 		panic("file_check_mmap increased max protections");
