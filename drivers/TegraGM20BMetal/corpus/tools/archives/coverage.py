@@ -1,9 +1,9 @@
-"""How much of what Apple declares (declared.py's inventory) the raw pack holds and the device was seen making.
+"""How much of what Apple declares (declared.py's inventory) the pack holds and the device was seen making.
 
 usage: coverage.py --inventory <declared.tsv> --pack <the pack's states> [--harvest <corpus.log>...] [--missing <out>]
 
---pack: the R lines the pack generator makes its records of (rawpack.py --split's buckets, concatenated). A render
-state is the pack's when its key is: rawpack.py state_key, which is the key the raw runtime looks a state up by. Per
+--pack: the R lines the pack generator makes its records of (make_pack.py --split's buckets, concatenated). A render
+state is the pack's when its key is: make_pack.py state_key, which is the key the runtime looks a state up by. Per
 owner, every distinct declared state (one per line, whichever GPU's directory or archive declares it) is one of:
   pack      its key is the pack's
   near      its key is the pack's once each constant is written at its type's size (the pack's line writes it shorter,
@@ -28,7 +28,7 @@ from pathlib import Path
 
 from drivers.TegraGM20BMetal.corpus.tools.archives.gpubin import type_width
 from drivers.TegraGM20BMetal.corpus.tools.archives.model import packable
-from drivers.TegraGM20BMetal.raw.pack.rawpack import state_key
+from drivers.TegraGM20BMetal.pack.make_pack import state_key
 
 CONSTANT = re.compile(r'(\S+):(\d+):([0-9a-f]*)(?= |$)')
 COLUMNS = ('declared', 'device', 'pack', 'near', 'packable', 'creation', 'unspecialized', 'compute', 'tile')

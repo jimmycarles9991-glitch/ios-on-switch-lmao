@@ -31,6 +31,8 @@ struct Display {
         OSObject *ui;
         bool uiNew, blank, planeChange;
         bool waitSlot;
+        const char *waitWhy;
+        int waitCode;
         PlaneSet set;
     };
 
@@ -203,6 +205,8 @@ TEST(PlaneSelection, BusySourceKeepsTheCurrentFrameForTheNextFrameEnd)
         Display::PlaneDecision decision;
         display.planeDecide(&request, decision);
         EXPECT_TRUE(decision.waitSlot) << busy;
+        EXPECT_EQ(decision.waitCode, busy);  // what the held-head line reports
+        EXPECT_NE(decision.waitWhy, nullptr);
         EXPECT_FALSE(decision.planeChange);
         EXPECT_EQ(display.planeBuildingSlots, 0u);
     }
@@ -252,6 +256,14 @@ TEST(PlaneSelection, LiveCscConflictQueuesConversionAndKeepsOldComposition)
     display.planeDecide(&request, decision);
     EXPECT_EQ(display.conversions, 1u);
     EXPECT_TRUE(decision.waitSlot);
+    EXPECT_EQ(decision.waitCode, -115);
+    Display busy;
+    const auto again = frame(busy);
+    busy.mapError = -115;
+    Display::PlaneDecision mapped;
+    busy.planeDecide(&again, mapped);
+    ASSERT_TRUE(mapped.waitSlot);
+    EXPECT_STRNE(decision.waitWhy, mapped.waitWhy);  // the line tells a conversion's wait from a slot's
     EXPECT_FALSE(decision.planeChange);
     EXPECT_EQ(display.planeBuildingSlots, 0u);
 }

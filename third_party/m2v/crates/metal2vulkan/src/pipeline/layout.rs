@@ -123,10 +123,6 @@ pub enum BindingSource {
     /// `[[texture(n)]]` slot (`ResourceKind::TexturePlane`): its `R8_UINT` view, of the slot's own
     /// descriptor type.
     TexturePlane(SlotRef),
-    /// The `half` shadow of the extended-range color attachment of this color index that the
-    /// draw's render pass instance holds (`ResourceKind::ExtendedShadow`), bound as a storage
-    /// image.
-    ExtendedShadow(u32),
 }
 
 /// One push-constant range of a [`PipelineLayout`]: a stage's fixed window (vertex `[0, 64)`,

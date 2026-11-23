@@ -525,7 +525,8 @@ TEST(DisplayPlanes, WindowSitingDecidesConversionAndNoColourTagRefusesTheSwap)
     EXPECT_TRUE(switch_surface_dc_siting(0, 0));
     EXPECT_TRUE(switch_surface_dc_siting(1, 1));
     EXPECT_FALSE(switch_surface_dc_siting(2, 2));
-    EXPECT_FALSE(switch_surface_dc_siting(1, 3));
+    EXPECT_TRUE(switch_surface_dc_siting(1, 3));
+    EXPECT_TRUE(switch_surface_dc_siting(switch_surface_chroma_code(7), switch_surface_chroma_code(7)));
     Layer l;
     l.kind = kKindNv12Video;
     l.surface = makeSurface(l.kind, 1920, 1080);
@@ -542,7 +543,7 @@ TEST(DisplayPlanes, WindowSitingDecidesConversionAndNoColourTagRefusesTheSwap)
         EXPECT_EQ(checkDetached(l, W, H), kAccepted) << tag[0] << " " << tag[1] << " " << tag[3];
         Image image;
         ASSERT_TRUE(imageOf(l, W, H, image));
-        EXPECT_EQ(image.convert, tag[3] != 1 || tag[4] != 1);
+        EXPECT_EQ(image.convert, tag[3] == tag[4] && tag[3] > 1);
         EXPECT_EQ(image.matrix, tag[2] == 3 ? kBt2020 : tag[2] == 2 ? kBt709 : kBt601);
     }
     l.kind = kKindBgra;

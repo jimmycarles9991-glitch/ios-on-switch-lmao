@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-// What raw::Device submits, decoded by nvdec as raw/pack's mock kernel (mock_iokit.c, cap.cpp) decodes NVK's
-// submissions for nvkframe: the kernel model (raw_kernel_model.h, whose IOKit calls replace the framework's) answers the
+// What gm20b::Device submits, decoded by nvdec as pack's mock kernel (mock_iokit.c, cap.cpp) decodes NVK's
+// submissions for nvkframe: the kernel model (kernel_model.h, whose IOKit calls replace the framework's) answers the
 // device, every job it takes is decoded against the model's memory as the device left it, and completes. A binary
 // links this unit to draw raw's side of eq (test/eq): RAWCAP_LOG, RAWCAP_LAYOUTS and NVDEC_REGS as cap.cpp reads them,
 // and RAWCAP_PROGRAMS a colon-separated list (the pack's own programs.bin names raw's programs and their constant buffers).
@@ -14,8 +14,8 @@
 #include <string>
 #include <vector>
 #include "../../../../kits/SwitchGM20B/SwitchGM20B.h"
-#include "../../raw/pack/nvdec.h"
-#include "../raw_kernel_model.h"
+#include "../../pack/nvdec.h"
+#include "../kernel_model.h"
 
 namespace {
 

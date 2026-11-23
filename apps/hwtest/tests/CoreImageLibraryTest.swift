@@ -46,7 +46,8 @@ struct CoreImageLibraryTest: HWTest {
             [
                 ("Core Image's ci_stdlib is there", present.contains(Self.stdlib)),
                 ("every library opens", refused.isEmpty),
-            ], metrics, proof: device.name)
+            ], metrics, proof: device.name
+        )
     }
 
     var timeout: TimeInterval { 20 }

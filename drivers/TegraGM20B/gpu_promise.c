@@ -3,27 +3,7 @@
 // given up, and the one a direct present watches (SwitchGpuPresentWatch.h).
 #include "gpu_internal.h"
 
-/* The reader's job (its acquires pushed, nothing to roll them back) parks on a pending promise its acquires include */
-int tgm_chan_note_promise(struct tgm_chan *chan, uint32_t offset, uint32_t value)
-{
-	const struct switch_gpu_giveup_job reader = {(u32)chan->id, chan->submitted + 1};
-
-	return tgm_promise_park(offset, value, chan->owner,
-				chan == tgm_present.chan ? "a present job" : "a GPU job", &reader,
-				0);
-}
-
-void tgm_chan_park_promises(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
-			    u32 count)
-{
-	u32 i;
-
-	for (i = 0; i < count; i++)
-		if (tokens[i].engine == SWITCH_GPU_ENGINE_PROMISE &&
-		    !switch_gpu_backing_token_status(&tokens[i]))
-			tgm_chan_note_promise(chan, tokens[i].queue, (u32)tokens[i].value);
-}
-
+/* The reader's job (its acquires pushed, nothing to roll them back) parks on the pending promises it acquires */
 void switch_gpu_chan_park_promises_locked(struct tgm_chan *chan,
 					  const struct switch_gpu_backing_token *tokens, u32 count,
 					  const u32 *unsettled)

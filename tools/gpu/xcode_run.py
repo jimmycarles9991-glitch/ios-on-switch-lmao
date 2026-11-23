@@ -37,7 +37,7 @@ def main() -> None:
         arg = original
         for key, value in replace.items():
             arg = arg.replace(key, value)
-        # @FILE:<path>@ is the file's content (stripped): a value an earlier action computed, e.g. the raw stack key.
+        # @FILE:<path>@ is the file's content (stripped): a value an earlier action computed, e.g. the stack key.
         while '@FILE:' in arg:
             start = arg.index('@FILE:')
             end = arg.index('@', start + 6)

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <gtest/gtest.h>
+#include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <stdexcept>
 #include <vector>
+#include "../../TegraDisplayFlip/TegraScanoutCopy.h"
 #include "../../TegraVIC/SwitchNativeScanout.h"
 using IOReturn = int;
 constexpr int kIOReturnSuccess = 0, kIOReturnNotReady = -10, kIOReturnNoMemory = -12, kIOReturnAborted = -14;
-constexpr int TEGRA_SCANOUT_SOURCE_LOST = -5;
 #define IONewZero(type, count) static_cast<type *>(calloc(count, sizeof(type)))
 #define OSSafeReleaseNULL(object) \
     do {                          \
@@ -30,12 +33,14 @@ public:
     }
 };
 
-struct OriginalLegacySwapRequest {};
+struct OriginalLegacySwapRequest {
+    uint32_t swap = 0;
+};
 
 namespace {
 unsigned leases, waits, cpuWaits, observations, producerWaits;
 int promisedNow;  // the surface's writer promises pending (SwitchGpuWriterPromise.h)
-int waitError, producerError, producerVisible;
+int waitError, producerError, producerVisible, producerWhy;
 switch_gpu_backing_token producer;
 std::function<void()> waiting;
 
@@ -67,6 +72,14 @@ void native_legacy_transfer_observed(int, const OriginalLegacySwapRequest *, uin
     ++observations;
 }
 
+void IOLog(const char *, ...)
+{}
+
+[[noreturn]] void panic(const char *, ...)
+{
+    throw std::runtime_error("panic");
+}
+
 struct Event {
     unsigned fires = 0;
 
@@ -86,8 +99,9 @@ struct Loop {
 struct NativeLegacyDisplay : OSObject {
     static constexpr int kNoBuffer = -1;
     static constexpr bool stats = true;
+    static constexpr size_t swapId = offsetof(OriginalLegacySwapRequest, swap);
     bool copyStopping = false, copyQueued = false, transferred = false, latchRetire = true, planeNextSet = true;
-    unsigned kicks = 0, lost = 0, taken = 0;
+    unsigned kicks = 0, unshown = 0, taken = 0;
     Event event;
     Event *copySource = &event;
     Loop loop;
@@ -104,9 +118,14 @@ struct NativeLegacyDisplay : OSObject {
         return request;
     }
 
-    const OriginalLegacySwapRequest *pendingSwapRequest()
+    const OriginalLegacySwapRequest *pendingSwapRequest() const
     {
         return request;
+    }
+
+    static const OriginalLegacySwapRequest *queuedAfter(const OriginalLegacySwapRequest *)
+    {
+        return nullptr;
     }
 
     void kickSwapQueue()
@@ -121,9 +140,9 @@ struct NativeLegacyDisplay : OSObject {
         ++taken;
     }
 
-    void dropLostFrame(const OriginalLegacySwapRequest *, int)
+    void retireSwapUnshown(const OriginalLegacySwapRequest *, int)
     {
-        ++lost;
+        ++unshown;
     }
 
     void watchSource()
@@ -131,6 +150,7 @@ struct NativeLegacyDisplay : OSObject {
         copySource->interruptOccurred(nullptr, nullptr, 0);
     }
 
+#include "../SwitchUnshownSource.h"
 #include "../SwitchSourceWaitDisplay.h"
 
     ~NativeLegacyDisplay()
@@ -176,6 +196,12 @@ extern "C" int switch_gpu_backing_token_external_wait(const switch_gpu_backing_t
     return producerError ? producerError : producerVisible;
 }
 
+extern "C" int switch_gpu_backing_token_failure(const switch_gpu_backing_token *token)
+{
+    EXPECT_EQ(token->value, producer.value);
+    return producerWhy;
+}
+
 void switch_native_scanout_release(SwitchNativeScanout *read)
 {
     if (read->lease) {
@@ -196,6 +222,7 @@ protected:
     {
         leases = waits = cpuWaits = observations = producerWaits = 0;
         waitError = producerError = promisedNow = 0;
+        producerWhy = TEGRA_SCANOUT_SOURCE_GONE;
         producerVisible = 1;
         cleanInvalidates.clear();
         invalidates.clear();
@@ -249,15 +276,42 @@ TEST_F(SourceWait, CpuFallbackKeepsSnapshotUntilTheActualCopyCompletes)
     EXPECT_EQ(surface.refs, 1u);
 }
 
-TEST_F(SourceWait, FailedProducerNeverRetriesOrCopiesItsPixels)
+// A source whose writer's client is gone, or whose write was never accepted, retires its swap unshown: never tried again,
+// never copied.
+TEST_F(SourceWait, AGoneOrRefusedSourceRetiresItsSwapUnshown)
+{
+    for (const int why : {TEGRA_SCANOUT_SOURCE_GONE, TEGRA_SCANOUT_SOURCE_REFUSED}) {
+        display->planeNextSet = true;
+        defer();
+        waitError = why;
+        display->sourceWaitWork();
+        EXPECT_FALSE(display->planeNextSet) << why;
+    }
+    EXPECT_EQ(display->kicks, 0u);
+    EXPECT_EQ(display->unshown, 2u);
+    EXPECT_EQ(display->taken, 2u);
+    EXPECT_EQ(observations, 0u);
+}
+
+// Accepted work for the frame failed on the GPU: the kernel's own failure, which no frame hides.
+TEST_F(SourceWait, ALostSourcePanics)
 {
     defer();
-    waitError = -5;
-    display->sourceWaitWork();
+    waitError = TEGRA_SCANOUT_SOURCE_LOST;
+    EXPECT_THROW(display->sourceWaitWork(), std::runtime_error);
+    EXPECT_EQ(display->unshown, 0u);
     EXPECT_EQ(display->kicks, 0u);
-    EXPECT_EQ(display->lost, 1u);
-    EXPECT_EQ(display->taken, 1u);
-    EXPECT_FALSE(display->planeNextSet);
+}
+
+// The one reading of an accepted frame's end: shown; retired unshown, its source gone or refused; and any other failure,
+// LOST or a status that names no source, the display's or the kernel's own.
+TEST_F(SourceWait, AnAcceptedFrameEndsShownUnshownOrInAPanic)
+{
+    EXPECT_FALSE(display->acceptedUnshown(0, &request, "test"));
+    EXPECT_TRUE(display->acceptedUnshown(TEGRA_SCANOUT_SOURCE_GONE, &request, "test"));
+    EXPECT_TRUE(display->acceptedUnshown(TEGRA_SCANOUT_SOURCE_REFUSED, &request, "test"));
+    EXPECT_THROW(display->acceptedUnshown(TEGRA_SCANOUT_SOURCE_LOST, &request, "test"), std::runtime_error);
+    EXPECT_THROW(display->acceptedUnshown(-12, &request, "test"), std::runtime_error);
 }
 
 TEST_F(SourceWait, DiscardedRequestAndStopReleaseWithoutPresenting)
@@ -345,8 +399,10 @@ TEST_F(SourceWait, OnlyCpuFallbackWaitsTheExactProducerAndRejectsItsFailure)
     EXPECT_EQ(producerWaits, 0u);
     ASSERT_TRUE(display->holdCopySource(&surface));
     producerError = -5;
-    EXPECT_EQ(display->waitCopySource(), -5);
-    EXPECT_EQ(producerWaits, 1u);
+    EXPECT_EQ(display->waitCopySource(), TEGRA_SCANOUT_SOURCE_GONE) << "the producer's plain failure, read for why";
+    producerWhy = TEGRA_SCANOUT_SOURCE_LOST;
+    EXPECT_EQ(display->waitCopySource(), TEGRA_SCANOUT_SOURCE_LOST);
+    EXPECT_EQ(producerWaits, 2u);
     EXPECT_EQ(leases, 1u);
 }
 
@@ -374,7 +430,7 @@ TEST_F(SourceWait, CpuCopyCleansAndInvalidatesItsReadOnlySourceOnlyAfterItsProdu
     EXPECT_EQ(cleanInvalidates[0].afterWaits, 1u);
     EXPECT_TRUE(invalidates.empty());
     producerError = -5;
-    EXPECT_EQ(display->readyCopySource(pixels, sizeof(pixels), gpu, cache), -5);
+    EXPECT_EQ(display->readyCopySource(pixels, sizeof(pixels), gpu, cache), TEGRA_SCANOUT_SOURCE_GONE);
     EXPECT_EQ(cleanInvalidates.size(), 1u);
     EXPECT_TRUE(invalidates.empty());
 }

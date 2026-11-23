@@ -1,8 +1,8 @@
 import Foundation
 
-/// The Core Animation states gpu.raw.fetch_rung2/3 draw (raw/pack/ca/fetchfree.py makes their fetch-free forms; their
-/// lines are the raw pack corpus's, tagged with each IPSW's build). `key` names the state's metrics ([a-z0-9_]),
-/// `program` the iterated program raw_chip_facts.h kIteratedProven names it by, `passes` its length.
+/// The Core Animation states gpu.gm20b.fetch_rung2/3 draw (pack/ca/fetchfree.py makes their fetch-free forms; their
+/// lines are the pack corpus's, tagged with each IPSW's build). `key` names the state's metrics ([a-z0-9_]),
+/// `program` the iterated program chip_facts.h kIteratedProven names it by, `passes` its length.
 enum FetchRungStates {
     struct State {
         let label: String
@@ -62,17 +62,17 @@ enum FetchRungStates {
     ]
 
     static let plain: [Int: [(label: String, key: String)]] = [
-        2: [("PBGRAXm_TimgBclrA2Xhf_Isrc", "clr"), ("PBGRAXm_TimgBclrA2Xhf_IsrcM1", "clr_m1")]
+        2: [("PBGRAXm_TimgBclrA2Xhf_Isrc", "clr"), ("PBGRAXm_TimgBclrA2Xhf_IsrcM1", "clr_m1")],
     ]
 
     /// Whether the pack holds no fetch-free form of the state on this IPSW: 21H461's plus darker
-    /// (raw/pack/iterated/table.py BEYOND_BOUND_ON)
+    /// (pack/iterated/table.py BEYOND_BOUND_ON)
     static func formless(_ state: State) -> Bool {
         state.program == "pdi" && ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27
     }
 
-    /// The program raw_chip_facts.h names a state's by on this IPSW: QuartzCore 21H461's colour matrix has no clamp pair,
-    /// so its form is vcm.rows (raw/pack/fetchfree_link.py)
+    /// The program chip_facts.h names a state's by on this IPSW: QuartzCore 21H461's colour matrix has no clamp pair,
+    /// so its form is vcm.rows (pack/fetchfree_link.py)
     static func program(_ state: State) -> String {
         state.program == "vcm" && ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27
             ? "vcm.rows" : state.program

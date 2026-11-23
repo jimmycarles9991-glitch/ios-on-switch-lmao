@@ -53,7 +53,8 @@ struct MediaMapCounters {
         var checks = [("no buffer mapped again after eviction (maps_steady 0)", remaps + planeRemaps == 0)]
         if judgeObjects {
             checks.append(
-                ("one publication object a client surface (surface_objects <= surfaces)", objects <= surfaces))
+                ("one publication object a client surface (surface_objects <= surfaces)", objects <= surfaces)
+            )
         }
         return checks
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// A render pipeline state as the Metal frontend journals it and the raw pack's corpus keeps it
+/// A render pipeline state as the Metal frontend journals it and the pack's corpus keeps it
 /// (drivers/TegraGM20BMetal/precompile/corpus.log: "R ok=1 label=... samples=1 topo=0 ds=0/0 c0=... a0=... | v <name>
 /// <constants> | f <name> <constants> |"), so a test can make the exact state Core Animation made.
 public struct PipelineLine: Equatable, Sendable {
@@ -67,7 +67,7 @@ public struct PipelineLine: Equatable, Sendable {
         }
         let depths = (fields["ds"] ?? "0/0").split(separator: "/").compactMap { UInt($0) }
         guard colors.allSatisfy({ $0.fields.count == 9 }), attributes.allSatisfy({ $0.fields.count == 6 }),
-            depths.count == 2, let vertex = Self.function(parts[1], "v"), let fragment = Self.function(parts[2], "f")
+              depths.count == 2, let vertex = Self.function(parts[1], "v"), let fragment = Self.function(parts[2], "f")
         else { return nil }
         label = fields["label"] ?? "-"
         samples = Int(fields["samples"] ?? "1") ?? 1
@@ -89,7 +89,7 @@ public struct PipelineLine: Equatable, Sendable {
             guard pieces.count == 3, let type = UInt(pieces[1]), pieces[2].count % 2 == 0 else { return nil }
             let hex = Array(pieces[2])
             let bytes = stride(from: 0, to: hex.count, by: 2).compactMap {
-                UInt8(String(hex[$0..<($0 + 2)]), radix: 16)
+                UInt8(String(hex[$0 ..< ($0 + 2)]), radix: 16)
             }
             guard bytes.count * 2 == hex.count else { return nil }
             constants.append(Constant(name: pieces[0], type: type, bytes: bytes))

@@ -735,7 +735,9 @@ TEST_F(Backing, CpuWriteInvalidatesTheOldExportProducer)
 	switch_gpu_backing_release(allocation);
 }
 
-TEST_F(Backing, FailedProducerExportsUndefinedContentsWithNothingToWaitFor)
+// An engine reader (VIC, NVJPG, a native surface's export) of what a failed producer wrote is refused with why, an
+// engine that cannot tell being the kernel's own failure, and holds nothing.
+TEST_F(Backing, AnExportOfWhatAFailedProducerWroteIsRefused)
 {
 	auto *allocation = backing();
 	const auto writer = token(79);
@@ -743,13 +745,13 @@ TEST_F(Backing, FailedProducerExportsUndefinedContentsWithNothingToWaitFor)
 	timelines[key(&writer)].error = -5;
 	switch_gpu_cpu_lease *lease = nullptr;
 	switch_gpu_backing_token producer = token(5);
-	EXPECT_EQ(switch_gpu_backing_export_read(allocation, &producer, &lease), 0);
-	EXPECT_NE(lease, nullptr);
+	EXPECT_EQ(switch_gpu_backing_export_read(allocation, &producer, &lease),
+		  SWITCH_GPU_BACKING_WRITER_FAILED);
+	EXPECT_EQ(lease, nullptr);
 	EXPECT_EQ(producer.engine, 0u);
 	switch_gpu_backing_info info = {};
 	switch_gpu_backing_describe(allocation, &info);
-	EXPECT_EQ(info.cpu_locks, 1u);
-	EXPECT_EQ(switch_gpu_backing_cpu_release_owned(&lease, 0), 0);
+	EXPECT_EQ(info.cpu_locks, 0u);
 	switch_gpu_backing_release(allocation);
 }
 
@@ -896,7 +898,7 @@ TEST_F(Backing, PhysicalSnapshotRetainsPendingWriterWithoutCpuWait)
 	switch_gpu_backing_release(allocation);
 }
 
-TEST_F(Backing, PhysicalSnapshotRefusesCpuWritersAndGoesOnOverFailedGpuWriters)
+TEST_F(Backing, PhysicalSnapshotRefusesCpuWritersAndFailedGpuWriters)
 {
 	auto *allocation = backing();
 	ASSERT_EQ(switch_gpu_backing_cpu_acquire(allocation, 0, 4096, SWITCH_GPU_BACKING_WRITE), 0);
@@ -912,9 +914,10 @@ TEST_F(Backing, PhysicalSnapshotRefusesCpuWritersAndGoesOnOverFailedGpuWriters)
 	ASSERT_EQ(publish(allocation, SWITCH_GPU_BACKING_WRITE, writer), 0);
 	timelines[key(&writer)].error = -5;
 	producer = writer;
-	EXPECT_EQ(switch_gpu_backing_snapshot_read(allocation, &producer, &lease), 0);
+	EXPECT_EQ(switch_gpu_backing_snapshot_read(allocation, &producer, &lease),
+		  SWITCH_GPU_BACKING_WRITER_FAILED);
 	EXPECT_EQ(producer.engine, 0u);
-	EXPECT_EQ(switch_gpu_backing_cpu_release_owned(&lease, 0), 0);
+	EXPECT_EQ(lease, nullptr);
 	switch_gpu_backing_release(allocation);
 }
 

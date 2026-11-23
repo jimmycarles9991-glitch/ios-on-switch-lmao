@@ -7,14 +7,14 @@ import HWTestGPU
 /// back in the kernel through the Tegra block-linear law, against pitch-linear copies of both. <case>_laws names every
 /// layout the destination reads back under exactly: the case's own (bl<k> or pitch) is the claim.
 enum X1VICLayoutProbe {
-    static let magic: UInt32 = 0x5642_4C4B  // 'VBLK'
+    static let magic: UInt32 = 0x5642_4C4B // 'VBLK'
     static let cases = 6
     static let caseWords = 11
     static let controls = 2
     static let replyBytes = 16 + 4 * caseWords * cases
 
     static func laws(_ mask: UInt32) -> String {
-        let names = (0..<6).filter { mask >> $0 & 1 != 0 }.map { "bl\($0)" } + (mask >> 8 & 1 != 0 ? ["pitch"] : [])
+        let names = (0 ..< 6).filter { mask >> $0 & 1 != 0 }.map { "bl\($0)" } + (mask >> 8 & 1 != 0 ? ["pitch"] : [])
         return names.isEmpty ? "none" : names.joined(separator: "+")
     }
 
@@ -29,8 +29,8 @@ enum X1VICLayoutProbe {
         case .success(let words): reply = words
         }
         var wrong: [String: Int] = [:]
-        for i in 0..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 0 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = X1VICKernelTest.name(r[0]) + (r[1] == 0xff ? "_pitch" : "_bl\(r[1])")
             metrics.set(name + "_status", Int(Int32(bitPattern: r[2])))
             metrics.set(name + "_laws", laws(r[8]))

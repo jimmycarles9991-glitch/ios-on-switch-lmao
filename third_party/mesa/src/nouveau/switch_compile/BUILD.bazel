@@ -10,7 +10,6 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("@xcode//:defs.bzl", "IPHONEOS_SDK", "MACOSX_SDK", "XCODE_TOOLCHAIN")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "mesa_args", "mesa_cc_library", "mesa_files")
-load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
 load("//third_party/mesa/bazel:link.bzl", "mesa_relocatable")
 load("//third_party/mesa/src/nouveau/compiler:fs_depth_test.bzl", "fs_depth_test_binary")
 
@@ -25,8 +24,6 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
-
-mesa_identity_files()
 
 filegroup(
     name = "headers",

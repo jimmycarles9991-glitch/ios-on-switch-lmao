@@ -3,8 +3,8 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.resolve_twod's read arm: a resolve whose target a blit copies out later in the same command buffer, which
-/// the rules see when the tape is encoded and send to the pack's resolve pass (raw_resolve_rule.h), against Metal's
+/// gpu.gm20b.resolve_twod's read arm: a resolve whose target a blit copies out later in the same command buffer, which
+/// the rules see when the tape is encoded and send to the pack's resolve pass (resolve_rule.h), against Metal's
 /// rule computed here from the samples resolve_twod_fragment shades: (sum + n/2) / n per channel.
 extension ResolveTwodTest {
     static func sampleHash(_ x: Int, _ y: Int, _ sample: Int) -> UInt32 {
@@ -20,10 +20,10 @@ extension ResolveTwodTest {
         var out = [UInt8](repeating: 0, count: width * height * 4)
         let n = UInt32(samples), half = UInt32(samples / 2)
         out.withUnsafeMutableBufferPointer { o in
-            for y in 0..<height {
-                for x in 0..<width {
+            for y in 0 ..< height {
+                for x in 0 ..< width {
                     var b: UInt32 = 0, g: UInt32 = 0, r: UInt32 = 0, a: UInt32 = 0
-                    for s in 0..<samples {
+                    for s in 0 ..< samples {
                         let h = sampleHash(x, y, s)
                         r += h & 255
                         g += (h >> 8) & 255
@@ -41,14 +41,14 @@ extension ResolveTwodTest {
         return out
     }
 
-    /// The 2D engine's 2x box of the pattern and its complement as raw_resolve_rule.h reads the chip, BGRA8 rows
+    /// The 2D engine's 2x box of the pattern and its complement as resolve_rule.h reads the chip, BGRA8 rows
     static func engineReading() -> (box: [UInt8], complement: [UInt8]) {
         var box = [UInt8](repeating: 0, count: width * height * 4), complement = box
         let shift: [UInt32] = [16, 8, 0, 24]
-        for y in 0..<height {
-            for x in 0..<width {
+        for y in 0 ..< height {
+            for x in 0 ..< width {
                 let h0 = sampleHash(x, y, 0), h1 = sampleHash(x, y, 1)
-                for c in 0..<4 {
+                for c in 0 ..< 4 {
                     let a = (h0 >> shift[c]) & 255, b = (h1 >> shift[c]) & 255
                     box[(y * width + x) * 4 + c] = UInt8(X1TwodResolveReading.box(a, b))
                     complement[(y * width + x) * 4 + c] = UInt8(X1TwodResolveReading.complement(a, b))
@@ -67,17 +67,18 @@ extension ResolveTwodTest {
         let into = try gpu.texture(format, Self.width, Self.height, usage: [.renderTarget, .shaderRead])
         let row = Self.width * bytesPerTexel
         let out = try gpu.buffer(row * Self.height)
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         let timing = try await gpu.run { commands in
             draw(commands, pass(ms, into: into, load: .clear, store: .multisampleResolve), state)
             let blit = commands.makeBlitCommandEncoder()!
             blit.copy(
                 from: into, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                 sourceSize: MTLSize(width: Self.width, height: Self.height, depth: 1), to: out,
-                destinationOffset: 0, destinationBytesPerRow: row, destinationBytesPerImage: row * Self.height)
+                destinationOffset: 0, destinationBytesPerRow: row, destinationBytesPerImage: row * Self.height
+            )
             blit.endEncoding()
         }
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         var read = Resolved()
         read.gpuMs = timing.gpuMilliseconds
         read.path = timing.path

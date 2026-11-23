@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// setDepthBias:slopeScale:clamp: with infinite and NaN factors on the raw path, against the depths an M4 Max stores
+/// setDepthBias:slopeScale:clamp: with infinite and NaN factors on the driver, against the depths an M4 Max stores
 /// (macOS 27.2.1): an unbounded +inf or NaN bias puts a triangle's depth at the top of its clamp ([0, 1], or the viewport's
 /// range in clamp mode) and -inf at the bottom; a clamp bounds an infinite bias to the depth plus the clamp; a NaN bias
 /// takes the clamp's side; an infinite slope leaves a flat triangle NaN and a sloped one infinite; a tessellated quad
@@ -11,8 +11,8 @@ import Metal
 /// without judging it, what the chip stores for a Depth32Float flat triangle at depth 0 under a -inf constant: Metal's unit
 /// there is 0, so its bias is NaN and it stores 1, which no finite polygon offset gives (the raw form's answer is 0).
 struct NonFiniteDepthBiasTest: HWTest {
-    let id = "gpu.raw.nonfinite_depth_bias"
-    let name = "Infinite and NaN depth bias factors store Metal's depths on the raw path"
+    let id = "gpu.gm20b.nonfinite_depth_bias"
+    let name = "Infinite and NaN depth bias factors store Metal's depths on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -20,15 +20,15 @@ struct NonFiniteDepthBiasTest: HWTest {
 
     enum Expect {
         case depth(Double)
-        case offset(Double)  // the unbiased depth plus this
+        case offset(Double) // the unbiased depth plus this
     }
 
     struct Arm {
         let label: String
         var format: MTLPixelFormat = .depth32Float
-        var z: (Float, Float) = (0.5, 0.5)  // left and right edges: equal for a flat triangle
-        var clampRange: (Double, Double)? = nil  // MTLDepthClipModeClamp through this viewport range
-        var patches = false  // one quad patch over the target in place of the strip
+        var z: (Float, Float) = (0.5, 0.5) // left and right edges: equal for a flat triangle
+        var clampRange: (Double, Double)? = nil // MTLDepthClipModeClamp through this viewport range
+        var patches = false // one quad patch over the target in place of the strip
         // A Depth16Unorm pair renders through a converted scratch.
         var stencil = false
         let bias: (Float, Float, Float)
@@ -36,17 +36,17 @@ struct NonFiniteDepthBiasTest: HWTest {
     }
 
     static let patchSource = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct ControlPoint { float4 position [[attribute(0)]]; };
-        struct QuadPatch { patch_control_point<ControlPoint> points; };
-        [[patch(quad, 4)]] vertex float4 bias_patch(QuadPatch patch [[stage_in]], float2 uv [[position_in_patch]]) {
-            const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
-            const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
-            return mix(low, high, uv.y);
-        }
-        fragment float4 bias_patch_red() { return float4(1, 0, 0, 1); }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct ControlPoint { float4 position [[attribute(0)]]; };
+    struct QuadPatch { patch_control_point<ControlPoint> points; };
+    [[patch(quad, 4)]] vertex float4 bias_patch(QuadPatch patch [[stage_in]], float2 uv [[position_in_patch]]) {
+        const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
+        const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
+        return mix(low, high, uv.y);
+    }
+    fragment float4 bias_patch_red() { return float4(1, 0, 0, 1); }
+    """
 
     static let sloped: (Float, Float) = (0.2, 0.8)
     static let arms: [Arm] = [
@@ -68,18 +68,20 @@ struct NonFiniteDepthBiasTest: HWTest {
         Arm(label: "d16+s8/c+inf", format: .depth16Unorm, stencil: true, bias: (.infinity, 0, 0), expect: .depth(1)),
         Arm(
             label: "d16+s8/k+inf/cl-.125/sloped", format: .depth16Unorm, z: sloped, stencil: true,
-            bias: (0, .infinity, -0.125), expect: .depth(1)),
+            bias: (0, .infinity, -0.125), expect: .depth(1)
+        ),
         Arm(
             label: "d16+s8/knan/cl.125", format: .depth16Unorm, stencil: true, bias: (0, .nan, 0.125),
-            expect: .offset(0.125)),
+            expect: .offset(0.125)
+        ),
         Arm(label: "patch/c+inf", patches: true, bias: (.infinity, 0, 0), expect: .depth(1)),
         Arm(label: "patch/k-inf/sloped", z: sloped, patches: true, bias: (0, -.infinity, 0), expect: .depth(0)),
     ]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = Self.n
         let colour = try gpu.texture(.rgba8Unorm, n, n)
         let d = MTLDepthStencilDescriptor()
@@ -119,7 +121,8 @@ struct NonFiniteDepthBiasTest: HWTest {
             if states[stateKey] == nil {
                 states[stateKey] = try gpu.render(
                     fragment: "solid_fragment", format: .rgba8Unorm, depth: arm.format,
-                    stencil: arm.stencil ? .stencil8 : .invalid)
+                    stencil: arm.stencil ? .stencil8 : .invalid
+                )
             }
             let state = arm.patches ? try await patchPipeline() : states[stateKey]!
             let stencil = arm.stencil ? try gpu.texture(.stencil8, n, n, usage: [.renderTarget]) : nil
@@ -150,7 +153,9 @@ struct NonFiniteDepthBiasTest: HWTest {
                     e.setViewport(
                         MTLViewport(
                             originX: 0, originY: 0, width: Double(n), height: Double(n),
-                            znear: range.0, zfar: range.1))
+                            znear: range.0, zfar: range.1
+                        )
+                    )
                     e.setDepthClipMode(.clamp)
                 }
                 e.setDepthBias(bias.0, slopeScale: bias.1, clamp: bias.2)
@@ -159,7 +164,8 @@ struct NonFiniteDepthBiasTest: HWTest {
                     e.setTessellationFactorBuffer(factors, offset: 0, instanceStride: 0)
                     e.drawPatches(
                         numberOfPatchControlPoints: 4, patchStart: 0, patchCount: 1, patchIndexBuffer: nil,
-                        patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0)
+                        patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0
+                    )
                 } else {
                     var corners: [SIMD4<Float>] = [
                         [-1, -1, arm.z.0, 1], [1, -1, arm.z.1, 1], [-1, 1, arm.z.0, 1], [1, 1, arm.z.1, 1],
@@ -174,7 +180,8 @@ struct NonFiniteDepthBiasTest: HWTest {
                 b.copy(
                     from: depth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                     sourceSize: MTLSize(width: n, height: n, depth: 1), to: out, destinationOffset: 0,
-                    destinationBytesPerRow: n * texel, destinationBytesPerImage: n * n * texel)
+                    destinationBytesPerRow: n * texel, destinationBytesPerImage: n * n * texel
+                )
                 b.endEncoding()
             }.path
             paths.append(path)
@@ -200,12 +207,13 @@ struct NonFiniteDepthBiasTest: HWTest {
         }
         let corner = try await stored(
             Arm(label: "corner", z: (0, 0), bias: (-.infinity, 0, 0), expect: .depth(1)),
-            (-.infinity, 0, 0))
+            (-.infinity, 0, 0)
+        )
         var metrics = Metrics()
         metrics.set("values", values.joined(separator: " "))
         metrics.set("zero_corner", String(format: "%.5f (Metal 1)", corner))
         metrics.set("paths", Set(paths).sorted().joined(separator: ","))
-        if paths.contains(where: { $0 != "raw" }) { failures.append("a pass went off the raw path") }
+        if paths.contains(where: { $0 != "gm20b" }) { failures.append("a pass went off the driver") }
         return failures.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics)
     }
 }

@@ -29,13 +29,14 @@ enum VICGate {
         -> Result<Reply, TestFailure>
     {
         let request = [magic, op, source, destination].flatMap { word in
-            (0..<4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) }
+            (0 ..< 4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) }
         }
         return session.call(request, replyBytes: replyBytes).flatMap { bytes in
-            let word = { (at: Int) in (0..<4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) } }
+            let word = { (at: Int) in (0 ..< 4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) } }
             guard word(0) == magic else { return .failure(TestFailure("malformed gate reply")) }
             return .success(
-                Reply(state: word(4), error: Int32(bitPattern: word(8)), status: Int32(bitPattern: word(12))))
+                Reply(state: word(4), error: Int32(bitPattern: word(8)), status: Int32(bitPattern: word(12)))
+            )
         }
     }
 }
@@ -61,12 +62,14 @@ final class GatedRun {
         for luma in Self.luma {
             var buffer: CVPixelBuffer?
             CVPixelBufferCreate(
-                nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer)
+                nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer
+            )
             guard let buffer else { continue }
             CVBufferSetAttachment(
-                buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+                buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate
+            )
             CVPixelBufferLockBaseAddress(buffer, [])
-            for plane in 0..<2 {
+            for plane in 0 ..< 2 {
                 guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { continue }
                 let bytes =
                     CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane)
@@ -77,7 +80,8 @@ final class GatedRun {
         }
         if let first = buffers.first {
             CMVideoFormatDescriptionCreateForImageBuffer(
-                allocator: nil, imageBuffer: first, formatDescriptionOut: &format)
+                allocator: nil, imageBuffer: first, formatDescriptionOut: &format
+            )
         }
         layer.videoGravity = .resizeAspect
     }
@@ -90,19 +94,22 @@ final class GatedRun {
         guard let format, index < buffers.count else { return }
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 30),
-            presentationTimeStamp: CMTime(value: Int64(frame), timescale: 30), decodeTimeStamp: .invalid)
+            presentationTimeStamp: CMTime(value: Int64(frame), timescale: 30), decodeTimeStamp: .invalid
+        )
         var sample: CMSampleBuffer?
         CMSampleBufferCreateReadyWithImageBuffer(
             allocator: nil, imageBuffer: buffers[index], formatDescription: format, sampleTiming: &timing,
-            sampleBufferOut: &sample)
+            sampleBufferOut: &sample
+        )
         guard let sample else { return }
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
-            CFArrayGetCount(attachments) > 0
+           CFArrayGetCount(attachments) > 0
         {
             let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
             CFDictionarySetValue(
                 dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+            )
         }
         layer.sampleBufferRenderer.enqueue(sample)
     }
@@ -154,7 +161,7 @@ struct MediaCompletionFlipGatedTest: HWTest {
         guard ids.count == 3 else { return .fail("three IOSurface buffers (\(ids.count) made)") }
         var frame = 0
         for index in [GatedRun.gated, GatedRun.shown] {
-            for _ in 0..<10 {
+            for _ in 0 ..< 10 {
                 let at = frame
                 await MainActor.run { run.enqueue(index, frame: at) }
                 frame += 1
@@ -166,10 +173,11 @@ struct MediaCompletionFlipGatedTest: HWTest {
         let before = MediaCompletionFlipTest.totals().values
         var onScreen = GatedRun.shown
         var rounds: [Round] = []
-        for _ in 0..<Self.rounds {
+        for _ in 0 ..< Self.rounds {
             let target = onScreen == GatedRun.shown ? GatedRun.gated : GatedRun.shown
             let round = try await gatedRound(
-                session, run, source: ids[GatedRun.source], target: target, ids: ids, frame)
+                session, run, source: ids[GatedRun.source], target: target, ids: ids, frame
+            )
             rounds.append(round)
             frame += 1
             onScreen = target
@@ -203,7 +211,8 @@ struct MediaCompletionFlipGatedTest: HWTest {
                 ("the display armed one for its producer's completion (d_armed > 0)", delta("armed") > 0),
                 ("the copy's completion wrote it (d_completion > 0)", delta("completion") > 0),
                 ("windows B and C latched it as written (d_refused 0)", delta("refused") == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// One gated copy into `target` (off screen), presented, released once armed or after a second, run to its end.
@@ -218,7 +227,7 @@ struct MediaCompletionFlipGatedTest: HWTest {
         guard round.armError == 0 else { return round }
         let presented = DispatchTime.now()
         await MainActor.run { run.enqueue(target, frame: frame) }
-        for _ in 0..<100 {
+        for _ in 0 ..< 100 {
             try await Task.sleep(nanoseconds: 10_000_000)
             if (MediaCompletionFlipTest.totals().values["armed"] ?? 0) > before {
                 round.armWaitMs = Double(DispatchTime.now().uptimeNanoseconds - presented.uptimeNanoseconds) / 1e6
@@ -226,7 +235,7 @@ struct MediaCompletionFlipGatedTest: HWTest {
             }
         }
         if case .success(let released) = VICGate.call(session, VICGate.release) { round.releaseError = released.error }
-        for _ in 0..<100 {
+        for _ in 0 ..< 100 {
             guard case .success(let reply) = VICGate.call(session, VICGate.query) else { break }
             round.copy = reply
             if reply.state == VICGate.done { break }

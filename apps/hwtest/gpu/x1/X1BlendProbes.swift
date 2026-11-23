@@ -26,13 +26,14 @@ public enum X1BlendProbes {
         Pair(name: "sat", source: (.destinationAlpha, .da), destination: (.oneMinusSourceAlpha, .oneMinusSa)),
         Pair(
             name: "xor", source: (.oneMinusDestinationAlpha, .oneMinusDa),
-            destination: (.oneMinusSourceAlpha, .oneMinusSa)),
+            destination: (.oneMinusSourceAlpha, .oneMinusSa)
+        ),
         Pair(name: "add", source: (.one, .one), destination: (.one, .one)),
     ]
 
-    static let halves: [Float16] = (0..<256).map { Float16(Double($0) / 255) }
-    static let texels = (0..<256).map { X1Reference.texel($0, top: 255) }
-    static let cases: [(UInt16, UInt16)] = (0..<256).flatMap { a in (0...a).map { (UInt16($0), UInt16(a)) } }
+    static let halves: [Float16] = (0 ..< 256).map { Float16(Double($0) / 255) }
+    static let texels = (0 ..< 256).map { X1Reference.texel($0, top: 255) }
+    static let cases: [(UInt16, UInt16)] = (0 ..< 256).flatMap { a in (0 ... a).map { (UInt16($0), UInt16(a)) } }
 
     /// The probe's target, its destination codes and the cases' buffers; one pair's draw (after the destination's
     /// copy) and its comparison
@@ -44,7 +45,7 @@ public enum X1BlendProbes {
         public init(_ gpu: GPU) throws {
             self.gpu = gpu
             var initial = [UInt8](repeating: 0, count: width * height * 4)
-            for p in 0..<width * height {
+            for p in 0 ..< width * height {
                 let (b, g, r, a) = destination(p)
                 initial[p * 4] = UInt8(b)
                 initial[p * 4 + 1] = UInt8(g)
@@ -73,7 +74,8 @@ public enum X1BlendProbes {
             blit.copy(
                 from: staging, sourceOffset: 0, sourceBytesPerRow: width * 4, sourceBytesPerImage: 0,
                 sourceSize: MTLSize(width: width, height: height, depth: 1), to: target, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin())
+                destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
             blit.endEncoding()
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = target
@@ -162,7 +164,7 @@ public enum X1BlendProbes {
     static func compare(_ pair: Pair, _ bytes: [UInt8]) -> Counts {
         var counts = Counts()
         let halfValues = halves.map(Double.init)
-        for p in 0..<(cases.count * 256) {
+        for p in 0 ..< (cases.count * 256) {
             let (si, ai) = cases[p >> 8]
             let (s, sa) = (halfValues[Int(si)], halfValues[Int(ai)])
             let (b, g, r, a) = destination(p)

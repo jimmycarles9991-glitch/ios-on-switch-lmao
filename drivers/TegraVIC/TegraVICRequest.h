@@ -95,17 +95,23 @@ enum {
     SWITCH_VIC_MATRIX_UNSUPPORTED
 };
 
-static inline uint32_t switch_vic_matrix_tag(const char *tag)
+// A YCbCr matrix code point (ITU-T H.273, as IOSurface's bulk attachments hold it): 5 and 6 are BT.601's two systems.
+static inline uint32_t switch_vic_matrix_code(uint32_t code)
 {
-    if (!tag)
+    switch (code) {
+    case 0:
+    case 2:
         return SWITCH_VIC_MATRIX_UNTAGGED;
-    if (!strcmp(tag, "ITU_R_601_4"))
-        return SWITCH_VIC_MATRIX_601;
-    if (!strcmp(tag, "ITU_R_709_2"))
+    case 1:
         return SWITCH_VIC_MATRIX_709;
-    if (!strcmp(tag, "ITU_R_2020"))
+    case 5:
+    case 6:
+        return SWITCH_VIC_MATRIX_601;
+    case 9:
         return SWITCH_VIC_MATRIX_2020;
-    return SWITCH_VIC_MATRIX_UNSUPPORTED;
+    default:
+        return SWITCH_VIC_MATRIX_UNSUPPORTED;
+    }
 }
 
 // Bytes of the surface's memory the engine may touch: the end of its furthest plane.
@@ -148,7 +154,10 @@ static inline const char *tegra_vic_image_from(const TegraVICSurfaceDesc *d, uin
     }
     if (im->format->kind != TEGRA_VIC_KIND_RGB && d->colorMatrix >= SWITCH_VIC_MATRIX_UNSUPPORTED)
         return "unsupported YCbCr matrix attachment";
-    // Untagged surfaces use BT.601; dimensions never override producer color metadata.
+    // An untagged side converts as BT.601 whatever its size, as Apple's scaler converts it (an M4 Max's
+    // IOSurfaceAccelerator, macOS 27.2.1, 640x480 to 3840x2160, widths and heights apart): an encode by the destination's
+    // matrix, a decode by the source's. VideoToolbox gives a destination its source's matrix before it converts, an
+    // untagged RGB source's as BT.709, so its transfers arrive tagged.
     im->standard = d->colorMatrix ? d->colorMatrix - 1 : TEGRA_VIC_YCC_601;
     im->transfer = d->transfer;
     im->primaries = d->primaries;
@@ -278,6 +287,15 @@ static inline const char *tegra_vic_plan(const TegraVICRequest *r, const TegraVI
         o->alphaOverride = (f & TEGRA_VIC_REQ_ALPHA_OVERRIDE) ? 1 : 0;
         o->alphaOverride8 = r->alpha_override;
         plan->readsSource = 1;
+        const TegraVICFormat *sf = tegra_vic_format(src->fourcc);
+        const int rgb8 = (sf->vic == TEGRA_VIC_T_A8R8G8B8 || sf->vic == TEGRA_VIC_T_A8B8G8R8) &&
+                         (df->vic == TEGRA_VIC_T_A8R8G8B8 || df->vic == TEGRA_VIC_T_A8B8G8R8);
+        const char *why =
+            tegra_vic_color_plan(src->transfer, src->primaries, dst->transfer, dst->primaries, rgb8, &o->gamut);
+        if (why) {
+            *kind = TEGRA_VIC_PLAN_UNSUPPORTED;
+            return why;
+        }
     }
     plan->callback = (r->cb_fn != 0 && (f & TEGRA_VIC_REQ_SKIP_CALLBACK) == 0) ? 1 : 0;
     *kind = TEGRA_VIC_PLAN_OK;

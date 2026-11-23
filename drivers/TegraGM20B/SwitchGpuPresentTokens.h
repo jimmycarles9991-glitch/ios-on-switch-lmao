@@ -75,22 +75,45 @@ static inline int switch_gpu_present_tokens_prepare(struct switch_gpu_present_to
 		return -16;
 	if (count > SWITCH_GPU_PRESENT_MAX_DEPENDENCIES || (count && !tokens))
 		return -22;
-	for (i = 0; i < count; ++i) {
-		/* A producer that failed before the present leaves nothing to wait for (its bytes are undefined, the
-		 * present goes on); one that fails while the present waits makes it TEGRA_SCANOUT_SOURCE_LOST. */
+	for (i = 0; !result && i < count; ++i) {
+		/* A producer that failed before the present left no frame to show: the present is refused with why. */
 		if (switch_gpu_backing_token_status(&tokens[i]) < 0)
-			continue;
-		result = switch_gpu_backing_token_retain(&tokens[i]);
-		if (result)
-			break;
-		held->tokens[held->count++] = tokens[i];
+			result = switch_gpu_backing_token_failure(&tokens[i]);
+		else
+			result = switch_gpu_backing_token_retain(&tokens[i]);
+		if (!result)
+			held->tokens[held->count++] = tokens[i];
 	}
 	if (result)
 		switch_gpu_present_tokens_drop(held);
 	return result;
 }
 
-/* These callbacks may lock engine timelines; only the deferred completion worker calls this. */
+/* A finished present's token: 0 complete, else why the present ends unshown. One neither complete nor failed is the
+ * kernel's own failure: the present's acquire of it on the GPU had passed. */
+static inline int switch_gpu_present_token_verdict(const struct switch_gpu_backing_token *token,
+						   int status)
+{
+	return status == 1  ? 0
+	       : status < 0 ? switch_gpu_backing_token_failure(token)
+			    : SWITCH_GPU_BACKING_WRITER_FAILED;
+}
+
+static inline int
+switch_gpu_present_tokens_promote(const struct switch_gpu_present_tokens *held,
+				  int (*promote)(const struct switch_gpu_backing_token *))
+{
+	uint32_t i;
+	int result = 0;
+	for (i = 0; !result && promote && i < held->count; ++i)
+		if (held->tokens[i].engine == SWITCH_GPU_ENGINE_GM20B)
+			result = switch_gpu_present_token_verdict(&held->tokens[i],
+								  promote(&held->tokens[i]));
+	return result;
+}
+
+/* These callbacks may lock engine timelines; only the deferred completion worker calls this. A result already set (why
+ * the present's watched producer failed) stays the present's. */
 static inline int
 switch_gpu_present_tokens_finish_visible(struct switch_gpu_present_tokens *held, int result,
 					 int (*promote)(const struct switch_gpu_backing_token *))
@@ -100,15 +123,11 @@ switch_gpu_present_tokens_finish_visible(struct switch_gpu_present_tokens *held,
 		int status = switch_gpu_backing_token_status(&held->tokens[i]);
 		if (!status)
 			status = switch_gpu_backing_token_wait(&held->tokens[i]);
-		if (status != 1)
-			result = -5;
+		if (!result)
+			result = switch_gpu_present_token_verdict(&held->tokens[i], status);
 	}
-	if (!result && promote) {
-		for (i = 0; i < held->count; ++i)
-			if (held->tokens[i].engine == SWITCH_GPU_ENGINE_GM20B &&
-			    promote(&held->tokens[i]) != 1)
-				result = -5;
-	}
+	if (!result)
+		result = switch_gpu_present_tokens_promote(held, promote);
 	switch_gpu_present_tokens_drop(held);
 	return result;
 }
@@ -121,15 +140,11 @@ switch_gpu_present_tokens_finish_ready(struct switch_gpu_present_tokens *held,
 {
 	uint32_t i;
 	int result = 0;
-	for (i = 0; i < held->count; ++i)
-		if (switch_gpu_backing_token_status(&held->tokens[i]) != 1)
-			result = -5;
-	if (!result && promote) {
-		for (i = 0; i < held->count; ++i)
-			if (held->tokens[i].engine == SWITCH_GPU_ENGINE_GM20B &&
-			    promote(&held->tokens[i]) != 1)
-				result = -5;
-	}
+	for (i = 0; !result && i < held->count; ++i)
+		result = switch_gpu_present_token_verdict(
+			&held->tokens[i], switch_gpu_backing_token_status(&held->tokens[i]));
+	if (!result)
+		result = switch_gpu_present_tokens_promote(held, promote);
 	switch_gpu_present_tokens_drop(held);
 	return result;
 }
@@ -138,4 +153,15 @@ static inline int switch_gpu_present_tokens_finish(struct switch_gpu_present_tok
 						   int result)
 {
 	return switch_gpu_present_tokens_finish_visible(held, result, 0);
+}
+
+/* A claimed completion handed to its callback. The claim (`completing`, counted while tgm_present_outstanding is still
+ * 1) ends before the callback: the callback's signal lets the display offer its next frame at once on its own thread,
+ * which must not find this one outstanding. The display's snapshot stays active until it is called back
+ * (SwitchGpuScanoutSnapshot::complete), so the present is outstanding to the display until then all the same. */
+static inline void switch_gpu_present_deliver(uint32_t *completing, void (*done)(void *, int),
+					      void *arg, int status)
+{
+	__atomic_fetch_sub(completing, 1u, __ATOMIC_SEQ_CST);
+	done(arg, status);
 }

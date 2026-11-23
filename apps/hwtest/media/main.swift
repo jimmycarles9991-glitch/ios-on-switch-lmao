@@ -37,7 +37,8 @@ func run(_ arguments: [String]) async throws {
             // The Mac's hardware encoder spreads a 4K frame over however many encode engines are free, so a 4K clip's
             // bytes differ from run to run; the frames it decodes to do not. That is why the clips are pinned.
             let compressed = try Compressor.encode(
-                CompressorSettings(clip, requireHardware: false), pattern: clip.pattern, frames: clip.frames)
+                CompressorSettings(clip, requireHardware: false), pattern: clip.pattern, frames: clip.frames
+            )
             try MP4Writer.write(compressed, to: url)
         }
         try printPin(url)
@@ -71,10 +72,12 @@ func verify(_ directory: URL) async throws {
         do {
             let result = try Decompressor.decode(
                 demuxed.samples, format: demuxed.format, pattern: clip.pattern, bitDepth: clip.codec.bitDepth,
-                fps: clip.fps, requireHardware: false)
+                fps: clip.fps, requireHardware: false
+            )
             print(
                 clip.file, "\(result.matched)/\(clip.frames) frames match", result.firstMismatch ?? "",
-                String(format: "luma %.1f chroma %.1f", result.worstLumaError, result.worstChromaError))
+                String(format: "luma %.1f chroma %.1f", result.worstLumaError, result.worstChromaError)
+            )
         } catch {
             print(clip.file, "not decoded here: \(error)")
         }
@@ -84,27 +87,30 @@ func verify(_ directory: URL) async throws {
         let demuxed = try await Demux.mp4(alpha)
         let result = try AlphaVideo.decode(
             demuxed.samples, format: demuxed.format,
-            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing])
+            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing]
+        )
         print(
             AlphaClip.file, "\(result.matched)/\(AlphaClip.frames) frames match", result.firstMismatch ?? "",
             "\(result.outOfDisplayOrder) out of display order",
-            String(format: "luma %.1f chroma %.1f alpha %.1f", result.worstLuma, result.worstChroma, result.worstAlpha))
+            String(format: "luma %.1f chroma %.1f alpha %.1f", result.worstLuma, result.worstChroma, result.worstAlpha)
+        )
     }
     for image in StillImage.all {
         let url = directory.appendingPathComponent(image.file)
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-            let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { continue }
         let context = CGContext(
             data: nil, width: decoded.width, height: decoded.height, bitsPerComponent: 8,
             bytesPerRow: decoded.width * 4,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
         context.draw(decoded, in: CGRect(x: 0, y: 0, width: decoded.width, height: decoded.height))
         let base = context.data!.assumingMemoryBound(to: UInt8.self)
         let result = PatternChecker(image.pattern).checkRGB { region in
             var sum = (0.0, 0.0, 0.0)
-            for y in region.y..<(region.y + region.height) {
-                for x in region.x..<(region.x + region.width) {
+            for y in region.y ..< (region.y + region.height) {
+                for x in region.x ..< (region.x + region.width) {
                     let at = (y * decoded.width + x) * 4
                     sum = (sum.0 + Double(base[at]), sum.1 + Double(base[at + 1]), sum.2 + Double(base[at + 2]))
                 }

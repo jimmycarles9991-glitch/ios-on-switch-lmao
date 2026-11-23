@@ -77,6 +77,7 @@ pub mod ops;
 pub mod output_precision;
 pub(crate) mod reassoc;
 pub(crate) mod regroup;
+mod residual_round;
 pub mod srgb;
 pub mod texel_round;
 pub mod wide;

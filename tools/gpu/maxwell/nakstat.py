@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""The raw path's shader scoreboard: what each state's fragment program costs a pixel, from its machine code.
+"""The driver's shader scoreboard: what each state's fragment program costs a pixel, from its machine code.
 
 usage: nakstat.py (--pack pack.bin | --dump <directcheck DIRECTCHECK_DUMP dir>) [--corpus <R lines>]... [--json]
 
-A pack (raw/runtime/raw_pack.h) or a directcheck dump gives each state's programs and the register count its pipeline
+A pack (pack.h) or a directcheck dump gives each state's programs and the register count its pipeline
 sets. Each state the corpora name gets a row: instructions by class, GPRs, warps per SM, the time a 1280x720 draw
 takes if the program is instruction-bound (the hot-state scenes measure 8-22% above that), and the same from GM20B's
 measured issue cycles (cost.py: `cyc`/`ms_c` adding them, `cyc_o`/`ms_o` overlapping them, `unm` instructions of
@@ -141,17 +141,21 @@ def fnv(b: bytes) -> int:
 # A framework's default library other than QuartzCore's: its states' keys end with " | l <framework>"
 FRAMEWORK_LIBRARY = re.compile(r' lib=/System/Library/(?:Private)?Frameworks/(\w+)\.framework/default\.metallib')
 LIBRARY = re.compile(r' lib=\S+')
-# The segments after a line's functions that name one of its state's variants, kept in its key (raw/pack/rawpack.py)
-VARIANT_SEGMENTS = ('cubic ', 'xrs=', 'wtex=')
+# What the journal names a stage's function with besides its library function: as=<specialized name>, spec
+STAGE_NAMES = re.compile(r'( \| [vf] \S+)(?: as=\S+)?(?: spec(?= ))?')
+LINKED = ('vl ', 'vp ', 'fl ', 'fp ')
 
 
 def state_key(line: str) -> str:
-    """Give the pack key of a corpus R line (raw/pack/rawpack.py state_key, for lines that link no function)."""
+    """Give the key the pack files a corpus R line's state under (TegraGM20BMetalPipelineKey.h pipelineKey).
+
+    Its stages are named by their library functions (a stage's as= specialized name is not in it), its linked functions
+    by theirs with the names they are specialized under. A cubic, xrs= or wtex= segment names a variant, which the pack
+    holds as a variant record under the state's own key, so none is in it.
+    """
     found = FRAMEWORK_LIBRARY.search(line)
     framework = found[1] if found and found[1] != 'QuartzCore' else ''
-    line = LIBRARY.sub('', line.rstrip('\n')).rstrip()
-    if line.endswith('|'):
-        line = line[:-1].rstrip()
+    line = LIBRARY.sub('', line.rstrip('\n'))
     bar1, bar2 = line.find(' | v '), line.find(' | f ')
     if bar1 < 0 or bar2 < 0:
         return ''
@@ -161,13 +165,18 @@ def state_key(line: str) -> str:
         for h in line[:bar1].split()
         if h.startswith(('samples=', 'topo=', 'ds=')) or (len(h) > 1 and h[0] in 'ca' and h[1].isdigit())
     ] + [h for h in line[:bar1].split() if h == 'rast=0']
-    key = (' '.join(fields) + ' ' + line[bar1 : bar3 if bar3 >= 0 else len(line)]).strip()
-    segments = line[bar3 + 3 :].split(' | ') if bar3 >= 0 else []
-    variant = ''.join(' | ' + ' '.join(t.split()) for t in segments if t.startswith(VARIANT_SEGMENTS))
-    return key + (f' | l {framework}' if framework else '') + variant
+    stages = STAGE_NAMES.sub(r'\1', line[bar1 : bar3 if bar3 >= 0 else len(line)])
+    key = ' '.join(fields) + ' ' + stages
+    for segment in line[bar3 + 3 :].split(' | ') if bar3 >= 0 else ():
+        if segment.startswith(LINKED):
+            tokens = segment.split()
+            named = [t for t in tokens[2:] if t.startswith('as=')]
+            values = [t for t in tokens[2:] if not t.startswith('as=') and t != 'spec']
+            key += ' | ' + ' '.join(tokens[:2] + named) + ' ' + ' '.join(values)
+    return (f'{key} | l {framework}' if framework else key).strip()
 
 
-# raw_pack.h by version: PackPipeline and PackProgram sizes, sections, and the pipeline's head (key hash, key string,
+# pack.h by version: PackPipeline and PackProgram sizes, sections, and the pipeline's head (key hash, key string,
 # vs, fs, blob, blob dwords, ..., flags). From 15 a program's register count is its own; from 16 program indices are
 # 32-bit.
 LAYOUTS = {
@@ -183,6 +192,8 @@ LAYOUTS = {
     23: (696, 44, 14, struct.Struct('<QIIIIIBBBBHHI')),
     24: (720, 44, 14, struct.Struct('<QIIIIIBBBBHHI')),
     25: (720, 44, 15, struct.Struct('<QIIIIIBBBBHHI')),
+    28: (720, 44, 16, struct.Struct('<QIIIIIBBBBHHI')),
+    29: (728, 44, 16, struct.Struct('<QIIIIIBBBBHHI')),
 }
 # PackProgram's constant buffer slots by its size: the count at byte 20, the slots' types from 21, then the registers
 # and the bound textures' slot + 1
@@ -196,7 +207,7 @@ def program_fields(p: bytes, at: int, program_bytes: int) -> tuple[int, bytes, i
 
 
 VARIANT_RECORD = 16  # PackPipelineFlags PipelineVariantRecord: a variant's record under its state's key
-NO_PROGRAM = 0xFFFFFFFF  # raw_pack.h kNoProgram: a state of no fragment program
+NO_PROGRAM = 0xFFFFFFFF  # pack.h kNoProgram: a state of no fragment program
 FETCH_FREE_FORM = 32  # PipelineFetchFreeForm: the state drawn with no framebuffer fetch, under its state's key
 
 

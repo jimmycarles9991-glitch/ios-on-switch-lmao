@@ -10,9 +10,9 @@
 #include "compiler_facts.h"
 #include "compiler_libraries.h"
 #include "compiler_record.h"
-#include "../raw/runtime/RawDirect.h"
-#include "../raw/runtime/RawOffline.h"
-#include "../raw/runtime/raw_pack.h"
+#include "../TegraGM20BMetalDirect.h"
+#include "../TegraGM20BMetalOffline.h"
+#include "../pack.h"
 
 namespace switch_compiler {
 namespace {
@@ -35,7 +35,7 @@ std::string besidePlugin(const char *name, bool up = false)
     return path + "/" + name;
 }
 
-raw::Digest rulesDigest(const raw::PackRules &r)
+gm20b::Digest rulesDigest(const gm20b::PackRules &r)
 {
     std::string bytes;
     const auto word = [&](uint32_t v) {
@@ -51,7 +51,7 @@ raw::Digest rulesDigest(const raw::PackRules &r)
             word(value);
         }
     }
-    return raw::sha256(bytes.data(), bytes.size());
+    return gm20b::sha256(bytes.data(), bytes.size());
 }
 
 }  // namespace
@@ -60,9 +60,9 @@ struct Engine::State {
     std::mutex making;
     EngineInputs inputs;
     uint64_t stack = 0;
-    raw::Pack pack;
-    raw::Digest rules{};
-    std::unique_ptr<raw::Direct> direct;
+    gm20b::Pack pack;
+    gm20b::Digest rules{};
+    std::unique_ptr<gm20b::Direct> direct;
     std::shared_ptr<LibraryCache> libraries;
     std::unique_ptr<CodeGen> codeGen;
 };
@@ -74,8 +74,8 @@ Engine::~Engine() = default;
 
 EngineInputs EngineInputs::installed()
 {
-    EngineInputs inputs = {besidePlugin("TegraGM20BMetal.raw/pack.bin", true), "", {}};
-    inputs.codeGen.seed = besidePlugin("TegraGM20BMetal.m2v-seed/shared/msl", true);
+    EngineInputs inputs = {besidePlugin("TegraGM20BMetal.pack/pack.bin", true), "", {}};
+    inputs.codeGen.seed = besidePlugin("TegraGM20BMetal.seed/shared/msl", true);
     return inputs;
 }
 
@@ -85,14 +85,14 @@ bool Engine::open(uint64_t stack, const EngineInputs &inputs, std::string &why)
     s.stack = stack;
     s.inputs = inputs;
     if (!s.pack.load(inputs.pack.c_str(), stack, why))
-        return why = "the raw pack: " + why, false;
-    s.rules = rulesDigest(raw::PackRules::of(s.pack));
+        return why = "the pack: " + why, false;
+    s.rules = rulesDigest(gm20b::PackRules::of(s.pack));
     s.libraries = std::make_shared<LibraryCache>(inputs.systemRoot);
     s.codeGen = std::make_unique<CodeGen>(inputs.codeGen);
     return true;
 }
 
-raw::Direct &Engine::compiler()
+gm20b::Direct &Engine::compiler()
 {
     State &s = *state_;
     std::lock_guard<std::mutex> l(s.making);
@@ -101,7 +101,7 @@ raw::Direct &Engine::compiler()
 #if SWITCH_DEBUG
     const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
 #endif
-    s.direct = std::make_unique<raw::Direct>(raw::PackRules::of(s.pack), false, offline::translator());
+    s.direct = std::make_unique<gm20b::Direct>(gm20b::PackRules::of(s.pack), false, offline::translator());
 #if SWITCH_DEBUG
     os_log(logger(), "SwitchShaderCompiler: compiler made for its first compile in %llu ms",
            (unsigned long long)((clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - began) / 1000000));
@@ -109,32 +109,32 @@ raw::Direct &Engine::compiler()
     return *s.direct;
 }
 
-raw::Digest Engine::rules() const
+gm20b::Digest Engine::rules() const
 {
     return state_->rules;
 }
 
 int32_t Engine::compile(const Prepared &p, std::string &entry, std::string &why)
 {
-    if (p.request.kind == raw::RequestKind::Facts)
+    if (p.request.kind == gm20b::RequestKind::Facts)
         return makeFacts(p, state_->inputs.systemRoot, entry, why);
-    if (raw::functionAttributes(p.request))
+    if (gm20b::functionAttributes(p.request))
         return makeAttributes(p, state_->inputs.systemRoot, entry, why);
-    if (raw::bufferEncoders(p.request))
+    if (gm20b::bufferEncoders(p.request))
         return makeBufferEncoders(p, state_->inputs.systemRoot, entry, why);
-    if (p.request.kind == raw::RequestKind::Library)
+    if (p.request.kind == gm20b::RequestKind::Library)
         return state_->codeGen->make(p, entry, why);
     State &s = *state_;
-    if (p.request.kind == raw::RequestKind::Reflection) {
+    if (p.request.kind == gm20b::RequestKind::Reflection) {
         const std::string &root = s.inputs.systemRoot;
-        const Libraries offline = [&root](const raw::RequestLibrary &l, std::string &failed) {
+        const Libraries offline = [&root](const gm20b::RequestLibrary &l, std::string &failed) {
             return offlineLibrary(l, root, failed);
         };
         return makeReflectionEntry(p, offline, s.stack, entry, why);
     }
-    raw::Direct &direct = compiler();
+    gm20b::Direct &direct = compiler();
     LibraryCache &cache = *s.libraries;
-    const Libraries libraries = [&cache](const raw::RequestLibrary &l, std::string &failed) {
+    const Libraries libraries = [&cache](const gm20b::RequestLibrary &l, std::string &failed) {
         return cache.library(l, failed);
     };
     cache.began();

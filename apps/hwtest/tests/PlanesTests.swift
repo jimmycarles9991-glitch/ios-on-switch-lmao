@@ -64,7 +64,8 @@ struct PlanesTest: HWTest {
                     "window B mapped no buffer twice (d_remaps 0)",
                     before["remaps"] != nil && after["remaps"] != nil && delta("remaps") == 0
                 ),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// kern.switch_planes_* by name, and the errno of the first that could not be read.

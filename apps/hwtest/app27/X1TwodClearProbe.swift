@@ -41,12 +41,12 @@ extension X1TwodProbes {
     /// sRGB target is filled through its UNORM view (unormView) with the colour encoded, words and floats alike.
     /// The first boots' fill (bare state, four floats, no waits around it after a clear-only pass, the last GR work
     /// before the tail) left GR busy until a context-switch timeout, and on 12 Nov four floats into BGRA8 passed their
-    /// waits, then GR could not save the channel's context and the kernel panicked (x1-bench3 BENCH3.md): the raw path
-    /// refuses a fill in any colour format but its destination's own (raw_probe_ops.h probeSolidFill), so the probe
+    /// waits, then GR could not save the channel's context and the kernel panicked (x1-bench3 BENCH3.md): the driver
+    /// refuses a fill in any colour format but its destination's own (probe_ops.h probeSolidFill), so the probe
     /// runs the word forms only. It bisects one command buffer a step, journaled, safest first, every format by each
     /// form between the production 2D path's waits: the reference word, the bare word; then position alone: a
     /// known-good scaled copy and the reference word fill each with no waits in the fill's slot (position=). The
-    /// first step a command buffer fails on ends the probe and is named (failed_at=); cells off the raw path are
+    /// first step a command buffer fails on ends the probe and is named (failed_at=); cells off the driver are
     /// listed apart.
     static let clear = X1Probe(
         id: "gpu.x1.twod_clear", name: "2D-engine solid fills, bisected, against the colour's codes per format",
@@ -67,14 +67,15 @@ extension X1TwodProbes {
                 let batch = try await gpu.run(forms: "") { commands in
                     let pass = X1RawProbes.pass(target, load: .clear)
                     pass.colorAttachments[0].clearColor = MTLClearColor(
-                        red: 0.125, green: 0.375, blue: 0.625, alpha: 0.875)
+                        red: 0.125, green: 0.375, blue: 0.625, alpha: 0.875
+                    )
                     commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
                     let blit = commands.makeBlitCommandEncoder()!
-                    try RawProbe.engine(commands, op)
+                    try GM20BProbe.engine(commands, op)
                     blit.endEncoding()
                 }
                 ops += batch.taken["ops"] ?? 0
-                if batch.path != "raw" { offPath.append("\(label):\(batch.path)") }
+                if batch.path != "gm20b" { offPath.append("\(label):\(batch.path)") }
                 return batch.path
             } catch {
                 failedAt = label
@@ -106,7 +107,7 @@ extension X1TwodProbes {
                 failedStep = step
                 return false
             }
-            guard path == "raw" else { return true }
+            guard path == "gm20b" else { return true }
             let bytes: [UInt8]
             do {
                 bytes = try await gpu.read(target, bytesPerPixel: format.bytesPerTexel)
@@ -120,14 +121,15 @@ extension X1TwodProbes {
                 step.word ? channel.value(codes[c]) : exactValue(channel, Double(color[c]))
             }
             let border = format.codes(bytes, 0)
-            for t in 0..<w * h {
+            for t in 0 ..< w * h {
                 let (x, y) = (t % w, t / w)
                 if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
                     if format.codes(bytes, t) != border { borders += 1 }
                     continue
                 }
                 tally.add(
-                    format.codes(bytes, t), exact: exact, channels: format.channels, metal: format.metalRounding, at: t)
+                    format.codes(bytes, t), exact: exact, channels: format.channels, metal: format.metalRounding, at: t
+                )
             }
             cells.append((label, tally))
             return true
@@ -153,7 +155,8 @@ extension X1TwodProbes {
             let source = try gpu.texture(.bgra8Unorm, w, h, usage: [.renderTarget, .shaderRead])
             let target = try gpu.texture(.bgra8Unorm, w, h, usage: [.renderTarget, .shaderRead])
             let scaled = await run(
-                "bgra8_scale_open", target, ["kind": "scale", "read": source, "written": target, "unbracketed": 1])
+                "bgra8_scale_open", target, ["kind": "scale", "read": source, "written": target, "unbracketed": 1]
+            )
             position = scaled == nil ? "scale_hung" : "scale_ran"
             if scaled != nil {
                 let filled = try await fill(bgra8, FillStep(reference: true, word: true, bracketed: false), colors[2])

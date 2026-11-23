@@ -27,7 +27,7 @@ Every batch goes out as benchloop/6 (`protocol.py`). An app from before it refus
 ### sr_affinity
 
 5 experiments, 12 KB. Each pixel of a full-screen draw stores SR_AFFINITY. NAK's interlock puts a warp's ticket word at
-`(affinity & 0xff) * 256 + ticket id`, and the raw path's ticket buffer is 4 KiB, room for affinities 0 to 3. GM20B has
+`(affinity & 0xff) * 256 + ticket id`, and the driver's ticket buffer is 4 KiB, room for affinities 0 to 3. GM20B has
 one GPC, so every line should read max 0:
 
 ```text
@@ -220,9 +220,9 @@ nonzero within 64 ulps of 1. `FMUL.FTZ(±0, y) = ±0` is only recorded.
 - Storage: before the first command buffer the bench allocates `storage.bytes` of zeroed write-combined GPU memory,
   writes its address into the shader data at `storage.va_at`, names it in every command buffer (the addressed job ABI
   resolves only the addresses a command buffer names), and after the last returns every distinct word with its count.
-- The interlock control: 0x1224 is on the allow-lists, and only the bench's own copy of the raw runtime, in debug
+- The interlock control: 0x1224 is on the allow-lists, and only the bench's own copy of the runtime, in debug
   builds, takes a record that sets it without a storage form (`apps/hwtest/bench/bench_completed.cpp`). The ticket
   buffer needs nothing new: the root table holds it at `c[0][0x260]`.
 - `compete`: `kit/BenchCompetition.swift` runs the app's known program on a second bench device. Each bench device opens
-  its own kernel connection, GPU VM and channel (`raw_gpu.cpp` `Device::open`, `Device::openChannel`), so the two
+  its own kernel connection, GPU VM and channel (`gpu.cpp` `Device::open`, `Device::openChannel`), so the two
   channels time-slice the GPU as two apps' would.

@@ -39,7 +39,8 @@ public enum Decompressor {
     ) throws -> DecodeResult {
         let session = try makeSession(
             format: format, width: pattern.width, height: pattern.height, bitDepth: bitDepth,
-            requireHardware: requireHardware)
+            requireHardware: requireHardware
+        )
         defer { VTDecompressionSessionInvalidate(session) }
         if probeDisplayBuffer {
             VTSessionSetProperty(session, key: "SwitchDisplayBufferProbe" as CFString, value: kCFBooleanTrue)
@@ -48,7 +49,7 @@ public enum Decompressor {
         let start = CFAbsoluteTimeGetCurrent()
         var flags: VTDecodeFrameFlags = [._EnableAsynchronousDecompression]
         if temporal { flags.insert(._EnableTemporalProcessing) }
-        for pass in 0..<passes {
+        for pass in 0 ..< passes {
             for (index, sample) in samples.enumerated() {
                 let status = VTDecompressionSessionDecodeFrame(
                     session, sampleBuffer: sample, flags: flags, infoFlagsOut: nil
@@ -68,12 +69,14 @@ public enum Decompressor {
         var result = collector.result(
             expected: samples.count * passes, seconds: max(0, wall - collector.checkSeconds),
             usingHardware: Compressor.readFlag(
-                session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder))
+                session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder
+            )
+        )
         result.routes = pictureRoutes(session)
         if probeDisplayBuffer {
             result.displayBufferProbe =
                 (Compressor.read(session, "SwitchDisplayBufferProbe" as CFString)
-                as? [String: NSNumber])?.mapValues(\.intValue)
+                    as? [String: NSNumber])?.mapValues(\.intValue)
         }
         return result
     }
@@ -84,7 +87,8 @@ public enum Decompressor {
         _ samples: [CMSampleBuffer], format: CMVideoFormatDescription, width: Int, height: Int, bitDepth: Int
     ) throws -> (pictures: [CVPixelBuffer], routes: [String: Int]?) {
         let session = try makeSession(
-            format: format, width: width, height: height, bitDepth: bitDepth, requireHardware: true)
+            format: format, width: width, height: height, bitDepth: bitDepth, requireHardware: true
+        )
         defer { VTDecompressionSessionInvalidate(session) }
         let kept = Pictures()
         for (index, sample) in samples.enumerated() {
@@ -135,14 +139,16 @@ public enum Decompressor {
         format: CMVideoFormatDescription, width: Int, height: Int, bitDepth: Int, requireHardware: Bool
     ) throws -> VTDecompressionSession {
         let specification: [CFString: Any] = [
-            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: requireHardware
+            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: requireHardware,
         ]
         let destination = PatternPixels.attributes(
-            width: width, height: height, format: PatternPixels.format(bitDepth: bitDepth))
+            width: width, height: height, format: PatternPixels.format(bitDepth: bitDepth)
+        )
         var session: VTDecompressionSession?
         let status = VTDecompressionSessionCreate(
             allocator: nil, formatDescription: format, decoderSpecification: specification as CFDictionary,
-            imageBufferAttributes: destination as CFDictionary, outputCallback: nil, decompressionSessionOut: &session)
+            imageBufferAttributes: destination as CFDictionary, outputCallback: nil, decompressionSessionOut: &session
+        )
         guard status == noErr, let session else { throw VideoError.status("VTDecompressionSessionCreate", status) }
         return session
     }
@@ -201,7 +207,8 @@ public enum Decompressor {
                 frames: frames, matched: matched,
                 firstMismatch: firstMismatch ?? (missing > 0 ? "\(missing) frames never came out" : nil),
                 usingHardware: usingHardware, decodeSeconds: seconds, worstLumaError: worstLuma,
-                worstChromaError: worstChroma, displayOrdered: ordered)
+                worstChromaError: worstChroma, displayOrdered: ordered
+            )
         }
     }
 }

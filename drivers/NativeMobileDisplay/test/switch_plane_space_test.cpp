@@ -169,6 +169,26 @@ TEST_F(PlaneSpace, AGpuSurfaceTakesItsIovaFromTheSameSpaceAndGivesItBack)
     d->expectSpaceConsistent();
 }
 
+// The slot maps only the pages the memory has; the next frame's range, the same one, finds that slot again.
+TEST_F(PlaneSpace, ARangePastTheSurfacesMemoryIsMappedOnce)
+{
+    auto d = std::make_unique<Shipped>();
+    IOMemoryDescriptor memory;
+    memory.length = 2 * TegraSMMUSpace::kGranule;
+    const uint64_t high = 3 * TegraSMMUSpace::kGranule;
+    const int k = d->planeSlotFor(&memory, 0, high, false);
+    ASSERT_GE(k, 0);
+    EXPECT_EQ(d->planeSlots[k].high, memory.length);
+    EXPECT_EQ(d->planeSlotFor(&memory, 0, high, false), k);
+    EXPECT_EQ(memory.prepares, 1u);
+    EXPECT_EQ(d->probeDomain.unmaps, 0u);
+    d->expectSpaceConsistent();
+    d->windowIdle = true;
+    d->planeReleaseIdle();
+    EXPECT_EQ(memory.completes, 1u);
+    EXPECT_EQ(d->planeSpace.bytesFree(), d->planeSpace.bytesTotal());
+}
+
 TEST_F(PlaneSpace, AFreedAllocationsSlotGoesAtTheNextLatch)
 {
     auto d = std::make_unique<Shipped>();
@@ -217,7 +237,6 @@ TEST_F(PlaneSpace, TheRetirementThreadQueuesOnlyWhatASlotMaps)
         Shipped::planeForgotten(id);
     for (uint64_t id = 1; id <= Shipped::kPlaneSlots; ++id)
         Shipped::planeForgotten(id);
-    EXPECT_FALSE(Shipped::planeForgetsLost);
     d->planeReleaseIdle();
     EXPECT_EQ(d->planeSpace.bytesFree(), d->planeSpace.bytesTotal());
     EXPECT_EQ(d->probeDomain.pages.size(), 0u);
@@ -235,7 +254,7 @@ TEST(PlaneForgets, OneProducerAndOneConsumerLoseNothing)
             while (round.load(std::memory_order_acquire) != r)
                 std::this_thread::yield();
             for (unsigned k = 0; k < kSlots; ++k)
-                EXPECT_TRUE(forgets->forget(uint64_t(r) * kSlots + (k * 7) % kSlots));
+                forgets->forget(uint64_t(r) * kSlots + (k * 7) % kSlots);
         }
     });
     for (unsigned r = 1; r <= kRounds; ++r) {

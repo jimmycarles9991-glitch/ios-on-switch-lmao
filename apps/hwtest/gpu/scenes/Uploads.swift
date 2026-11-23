@@ -20,18 +20,18 @@ struct TexelImage {
 
     mutating func write(_ rect: UploadRect, _ source: [UInt8]) {
         let texel = format.bytesPerTexel
-        for row in 0..<rect.height {
+        for row in 0 ..< rect.height {
             let from = row * rect.width * texel
             let to = (rect.y + row) * rowBytes + rect.x * texel
-            bytes.replaceSubrange(to..<(to + rect.width * texel), with: source[from..<(from + rect.width * texel)])
+            bytes.replaceSubrange(to ..< (to + rect.width * texel), with: source[from ..< (from + rect.width * texel)])
         }
     }
 
     func read(_ rect: UploadRect) -> [UInt8] {
         let texel = format.bytesPerTexel
-        return (0..<rect.height).flatMap { row -> ArraySlice<UInt8> in
+        return (0 ..< rect.height).flatMap { row -> ArraySlice<UInt8> in
             let at = (rect.y + row) * rowBytes + rect.x * texel
-            return bytes[at..<(at + rect.width * texel)]
+            return bytes[at ..< (at + rect.width * texel)]
         }
     }
 }
@@ -77,8 +77,8 @@ extension GPU {
             staging += [UInt8](repeating: 0xEE, count: (16 - staging.count % 16) % 16 + texel * 3)
             let rowBytes = (rect.width + 3) * texel
             places.append((staging.count, rowBytes))
-            for row in 0..<rect.height {
-                staging += source[(row * rect.width * texel)..<((row + 1) * rect.width * texel)]
+            for row in 0 ..< rect.height {
+                staging += source[(row * rect.width * texel) ..< ((row + 1) * rect.width * texel)]
                 staging += [UInt8](repeating: 0xEE, count: 3 * texel)
             }
         }
@@ -90,7 +90,8 @@ extension GPU {
                     from: buffer, sourceOffset: place.offset, sourceBytesPerRow: place.rowBytes,
                     sourceBytesPerImage: 0, sourceSize: MTLSize(width: rect.width, height: rect.height, depth: 1),
                     to: texture, destinationSlice: 0, destinationLevel: 0,
-                    destinationOrigin: MTLOrigin(x: rect.x, y: rect.y, z: 0))
+                    destinationOrigin: MTLOrigin(x: rect.x, y: rect.y, z: 0)
+                )
             }
             blit.endEncoding()
         }
@@ -100,10 +101,11 @@ extension GPU {
     static func replace(_ rect: UploadRect, _ source: [UInt8], in texture: MTLTexture, texel: Int) {
         let rowBytes = (rect.width + 3) * texel
         var padded = [UInt8](repeating: 0xEE, count: rowBytes * rect.height)
-        for row in 0..<rect.height {
+        for row in 0 ..< rect.height {
             padded.replaceSubrange(
-                (row * rowBytes)..<(row * rowBytes + rect.width * texel),
-                with: source[(row * rect.width * texel)..<((row + 1) * rect.width * texel)])
+                (row * rowBytes) ..< (row * rowBytes + rect.width * texel),
+                with: source[(row * rect.width * texel) ..< ((row + 1) * rect.width * texel)]
+            )
         }
         texture.replace(region: rect.region, mipmapLevel: 0, withBytes: padded, bytesPerRow: rowBytes)
     }
@@ -123,11 +125,13 @@ extension SceneResult {
         let blit = try await gpu.read(texture, bytesPerPixel: format.bytesPerTexel)
         compare(
             label + " blit", bytes: blit, expected: model.bytes, format: format, width: model.width,
-            height: model.height, tolerance: format.step() * 1.01)
+            height: model.height, tolerance: format.step() * 1.01
+        )
         guard !format.isDepthOrStencil, texture.usage.contains(.shaderRead) else { return }
         let shader = try await gpu.computeRaster(texture, format)
         compare(
             label + " shader", shader, format.raster(model.bytes, width: model.width, height: model.height),
-            tolerance: format.step(near: 1) * 1.01)
+            tolerance: format.step(near: 1) * 1.01
+        )
     }
 }

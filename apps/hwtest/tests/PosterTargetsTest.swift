@@ -23,11 +23,12 @@ struct PosterTargetsTest: HWTest {
         metrics.set("panel", "\(width)x\(height)")
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection", metrics) }
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: 512)
+            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: 512
+        )
         guard kr == KERN_SUCCESS else {
             let why =
                 kr == GPUConnection.kIOReturnUnsupported
-                ? "a release kernel keeps no target peaks" : "target peaks unreadable (\(GPUConnection.hex(kr)))"
+                    ? "a release kernel keeps no target peaks" : "target peaks unreadable (\(GPUConnection.hex(kr)))"
             return .skip(why, metrics)
         }
         let peaks = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))
@@ -41,6 +42,7 @@ struct PosterTargetsTest: HWTest {
                     "\($0.owner) drew a \($0.width)x\($0.height) image, past the panel",
                     $0.fits(width: width, height: height)
                 )
-            }, metrics)
+            }, metrics
+        )
     }
 }

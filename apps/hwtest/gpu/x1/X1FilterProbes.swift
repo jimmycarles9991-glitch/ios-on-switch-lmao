@@ -20,7 +20,8 @@ public enum X1FilterProbes {
             encoder.setBytes(&uv, length: 8, index: 0)
             encoder.setBuffer(out, offset: 0, index: 1)
             encoder.dispatchThreads(
-                MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }.path
         let value = out.contents().load(as: Float.self)
@@ -65,9 +66,9 @@ public enum X1FilterProbes {
             let texture = try gpu.texture(f.format, size, size, usage: [.shaderRead, .renderTarget], mipmaps: 2)
             let unit = f.half ? 2 : 1
             var bytes = [UInt8](repeating: 0, count: size * size * f.channels * unit)
-            for y in 0..<size {
-                for x in 0..<size {
-                    for c in 0..<f.channels {
+            for y in 0 ..< size {
+                for x in 0 ..< size {
+                    for c in 0 ..< f.channels {
                         let at = ((y * size + x) * f.channels + c) * unit
                         let value = code(x, y, c)
                         if f.half {
@@ -86,15 +87,16 @@ public enum X1FilterProbes {
                     let blit = commands.makeBlitCommandEncoder()!
                     blit.generateMipmaps(for: texture)
                     blit.endEncoding()
-                }.path)
+                }.path
+            )
             let level = try await gpu.read(texture, bytesPerPixel: f.channels * unit, level: 1)
             var exact = 0
             var beyondOne = 0
             var maxDiff = 0.0
             let half = size / 2
-            for y in 0..<half {
-                for x in 0..<half {
-                    for c in 0..<f.channels {
+            for y in 0 ..< half {
+                for x in 0 ..< half {
+                    for c in 0 ..< f.channels {
                         let quad = [(0, 0), (1, 0), (0, 1), (1, 1)].map { code(2 * x + $0.0, 2 * y + $0.1, c) }
                         let sum = quad.reduce(0, +)
                         let at = ((y * half + x) * f.channels + c) * unit

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// A GPU for the kernel model (raw_kernel_model.h) that takes a set time for each job (setPerJob), in submission order, and
+// A GPU for the kernel model (kernel_model.h) that takes a set time for each job (setPerJob), in submission order, and
 // stamps when each job was submitted: work in flight for a measure of the submitting side. A WaitFence waits for it.
 #pragma once
-#include "raw_kernel_model.h"
+#include "kernel_model.h"
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>

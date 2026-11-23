@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'raw', 'pack'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pack'))
 import directlink
 import eqsplit
 import packfile
@@ -74,7 +74,7 @@ class LayOutTest(unittest.TestCase):
 
     def test_the_frontier_bound_is_the_runtimes_and_nvks(self) -> None:
         root = Path(os.path.abspath(__file__)).parents[3]
-        runtime = (root / 'drivers/TegraGM20BMetal/raw/runtime/raw_split_metadata.h').read_text()
+        runtime = (root / 'drivers/TegraGM20BMetal/split_metadata.h').read_text()
         nvk = (root / 'third_party/mesa/src/nouveau/switch_compile/nvk_switch_split.h').read_text()
         self.assertIn(f'kMaxFrontierBytes = 0x{splits.MAX_FRONTIER_BYTES:X};', runtime)
         self.assertIn(f'#define SWITCH_SPLIT_MAX_FRONTIER_BYTES 0x{splits.MAX_FRONTIER_BYTES:X}\n', nvk)

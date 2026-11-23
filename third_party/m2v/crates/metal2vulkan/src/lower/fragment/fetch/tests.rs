@@ -538,73 +538,32 @@ fn a_missing_attachment_is_a_descriptor_error() {
     );
 }
 
-/// An extended-range format's blend (`extended_range_blend`): taken where the device orders fetch
-/// through the pixel interlock alone and the storage form holds, for every form Metal's model
-/// blends and its `_sRGB` twin, and where it orders fetch through rasterization-order input
-/// attachments, over which the function blends; the interlock named where it has neither; refused
-/// for a padded form, whose blends are not measured, and for any other format.
+/// An extended-range attachment takes no storage form on a device that orders fetch through the
+/// pixel interlock alone: one of Apple's 10-bit forms renders only through its stand-in and a
+/// padded one's tile value is not measured (`NotImplemented(FramebufferFetch)`), and a bfloat
+/// one's fetch is `NotImplemented(Format)`, read or written.
 #[test]
-fn an_extended_range_blend_follows_the_ordered_storage_form() {
-    let blended = [
-        PixelFormat::BGR10XR,
-        PixelFormat::BGR10XRSRGB,
-        PixelFormat::BGRA10XR,
-        PixelFormat::BGRA10XRSRGB,
-        PixelFormat::RGB10A82PXR10,
-        PixelFormat::RGB10A82PXR10SRGB,
-    ];
-    for stem in [
-        "moltenvk-m3",
-        "moltenvk-m4",
-        "amd-rdna3-radv",
-        "amd-780m-radv",
-        "intel-arl-anv",
-        "intel-irisxe-anv",
-        "nvidia-rtx5080-laptop",
-        "nvidia-pascal-linux",
-    ] {
+fn an_extended_range_attachment_takes_no_storage_form() {
+    for stem in ["moltenvk-m3", "amd-rdna3-radv", "nvidia-rtx5080-laptop"] {
         let p = profile(stem, &[]);
         assert!(interlock_orders(&p), "{stem}");
-        for pf in blended {
-            assert_eq!(extended_range_blend(pf, &p), Ok(()), "{stem}: {pf:?}");
+        for (pf, feature) in [
+            (PixelFormat::BGR10XR, Feature::FramebufferFetch),
+            (PixelFormat::BGRA10XRSRGB, Feature::FramebufferFetch),
+            (PixelFormat::RGB10A82PXR10, Feature::FramebufferFetch),
+            (PixelFormat::RGBA16Bfloat, Feature::Format),
+        ] {
+            for use_ in [READS, WRITES] {
+                assert_eq!(
+                    storage_form(0, &state(pf, |_| {}), false, use_, &p),
+                    Ok(Err(Unsupported::not_implemented(feature.clone()))),
+                    "{stem}: {pf:?}"
+                );
+            }
         }
         for pf in [PixelFormat::R10UnormX6, PixelFormat::RG10UnormX12] {
-            assert!(extended_range_blend(pf, &p).is_err(), "{stem}: {pf:?}");
-        }
-        assert_eq!(
-            extended_range_blend(PixelFormat::RGBA16Float, &p),
-            Err(Unsupported::not_implemented(Feature::Format)),
-            "{stem}"
-        );
-    }
-    for stem in ["lavapipe", "gate-lavapipe-x86_64", "swiftshader"] {
-        let p = profile(stem, &[]);
-        assert!(!interlock_orders(&p), "{stem}");
-        for pf in blended {
-            assert_eq!(extended_range_blend(pf, &p), Ok(()), "{stem}: {pf:?}");
-        }
-        for pf in [PixelFormat::R10UnormX6, PixelFormat::RG10UnormX12] {
-            assert_eq!(
-                extended_range_blend(pf, &p),
-                Err(Unsupported::not_implemented(Feature::Format)),
-                "{stem}: {pf:?}"
-            );
+            let form = storage_form(0, &state(pf, |_| {}), false, READS, &p);
+            assert!(!matches!(form, Ok(Ok(_))), "{stem}: {pf:?}");
         }
     }
-    let interlock = Unsupported::needs(
-        Feature::FramebufferFetch,
-        Capability::Feature(VkFeature::FragmentShaderPixelInterlock),
-    );
-    for stem in ["vk12-bare", "roadmap-2022"] {
-        let p = profile(stem, &[]);
-        assert_eq!(
-            extended_range_blend(PixelFormat::BGRA10XR, &p),
-            Err(interlock.clone()),
-            "{stem}"
-        );
-    }
-    // The storage form's own device needs, named where the device lacks one.
-    let p = profile("moltenvk-m4", &[VkFeature::FragmentStoresAndAtomics]);
-    assert!(extended_range_blend(PixelFormat::BGRA10XR, &p)
-        .is_err_and(|u| u.feature == Feature::FramebufferFetch));
 }

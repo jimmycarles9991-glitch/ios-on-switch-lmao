@@ -38,7 +38,7 @@ bool_setting(
     build_setting_default = SMP,
 )
 
-# The GPU bundle's trust cache module, appended to the kernel's static trust cache so the plugin and NVK may run.
+# The GPU bundle's trust cache module, appended to the kernel's static trust cache so the plugin may run.
 # --//boot:gpu_trustcache=//boot:no_gpu packages without it (what the CMake flow did when out/gpu was absent).
 label_flag(
     name = "gpu_trustcache",

@@ -16,8 +16,8 @@ struct LockBetweenJobsPathTest: GPUPathTest {
     let counters = ["submit_jobs"]
     static let rounds = 6, draws = 18_000, side = 64, rowBytes = 256
     static let start: [UInt8] = [0x40, 0x40, 0x40, 0xff]
-    static let first: [UInt8] = [0, 0, 0xff, 0xff]  // red, as BGRA bytes
-    static let last: [UInt8] = [0xff, 0, 0, 0xff]  // blue
+    static let first: [UInt8] = [0, 0, 0xff, 0xff] // red, as BGRA bytes
+    static let last: [UInt8] = [0xff, 0, 0, 0xff] // blue
 
     /// What the locking thread saw, written by it and read once it stopped.
     final class Seen: @unchecked Sendable {
@@ -56,7 +56,8 @@ struct LockBetweenJobsPathTest: GPUPathTest {
         ]
         guard let surface = IOSurface(properties: properties) else { throw TestFailure("IOSurface creation failed") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: Self.side, height: Self.side, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: Self.side, height: Self.side, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {
             throw TestFailure("no texture over the IOSurface")
@@ -65,7 +66,7 @@ struct LockBetweenJobsPathTest: GPUPathTest {
         let connection = GPUConnection()
         guard case .counts(let before) = GPUPaths.read(connection) else { throw TestFailure("no path counters") }
         var locks = 0, halfDrawn = 0
-        for _ in 0..<Self.rounds {
+        for _ in 0 ..< Self.rounds {
             _ = try await gpu.run { commands in
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = texture
@@ -108,7 +109,7 @@ struct LockBetweenJobsPathTest: GPUPathTest {
                 for colour in [[Float(1), 0, 0, 1], [Float(0), 0, 1, 1]] {
                     var rgba = colour
                     encoder.setFragmentBytes(&rgba, length: MemoryLayout<Float>.stride * 4, index: 0)
-                    for _ in 0..<Self.draws {
+                    for _ in 0 ..< Self.draws {
                         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     }
                 }
@@ -120,8 +121,8 @@ struct LockBetweenJobsPathTest: GPUPathTest {
         let jobs = after.taken("submit_jobs", since: before)
         guard surface.lock(options: .readOnly, seed: nil) == 0 else { throw TestFailure("IOSurfaceLock failed") }
         var wrong = 0
-        for y in 0..<Self.side {
-            for x in 0..<Self.side where Self.pixel(surface, x, y) != Self.last { wrong += 1 }
+        for y in 0 ..< Self.side {
+            for x in 0 ..< Self.side where Self.pixel(surface, x, y) != Self.last { wrong += 1 }
         }
         surface.unlock(options: .readOnly, seed: nil)
         metrics.set("rounds", Self.rounds)

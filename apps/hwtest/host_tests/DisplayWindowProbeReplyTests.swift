@@ -7,7 +7,7 @@ final class DisplayWindowProbeReplyTests: XCTestCase {
     func reply(verdict: UInt32, steps: [(String, UInt32, UInt8, UInt8)], why: String = "") -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: DisplayWindowProbeReply.size)
         func put(_ word: UInt32, _ at: Int) {
-            for i in 0..<4 { bytes[at + i] = UInt8(truncatingIfNeeded: word >> (8 * i)) }
+            for i in 0 ..< 4 { bytes[at + i] = UInt8(truncatingIfNeeded: word >> (8 * i)) }
         }
         put(DisplayWindowProbeReply.magic, 0)
         put(3, 4)
@@ -31,12 +31,14 @@ final class DisplayWindowProbeReplyTests: XCTestCase {
     func testTheRequestIsMagicOpProbeAndZero() {
         XCTAssertEqual(
             DisplayWindowProbeReply.request(op: 1, probe: 3),
-            [0x52, 0x50, 0x57, 0x44, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0])
+            [0x52, 0x50, 0x57, 0x44, 1, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0]
+        )
     }
 
     func testAPassCarriesEveryStepsCrcAndItsComparison() throws {
         let bytes = reply(
-            verdict: 0, steps: [("ref_hv", 0xabc, 0, 0), ("crop_hv", 0xabc, 1, 0), ("control", 0x123, 2, 1)])
+            verdict: 0, steps: [("ref_hv", 0xabc, 0, 0), ("crop_hv", 0xabc, 1, 0), ("control", 0x123, 2, 1)]
+        )
         let parsed = try XCTUnwrap(DisplayWindowProbeReply(bytes))
         XCTAssertEqual(parsed.probe, 3)
         XCTAssertEqual(parsed.state, DisplayWindowProbeReply.done)
@@ -52,7 +54,8 @@ final class DisplayWindowProbeReplyTests: XCTestCase {
 
     func testAFailCarriesTheKernelsReason() throws {
         let bytes = reply(
-            verdict: 1, steps: [("pitch", 1, 0, 0), ("block2", 2, 1, 0)], why: "a step's CRC is not its reference's")
+            verdict: 1, steps: [("pitch", 1, 0, 0), ("block2", 2, 1, 0)], why: "a step's CRC is not its reference's"
+        )
         let finding = try XCTUnwrap(DisplayWindowProbeReply(bytes)).finding
         XCTAssertEqual(finding.verdict, .fail)
         XCTAssertEqual(finding.note, "a step's CRC is not its reference's")

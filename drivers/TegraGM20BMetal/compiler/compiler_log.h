@@ -12,7 +12,7 @@
 #include <set>
 #include <string>
 #include <vector>
-#include "../raw/runtime/raw_compile_request.h"
+#include "../compile_request.h"
 
 namespace switch_compiler {
 
@@ -29,10 +29,10 @@ public:
     // Its requests found; false: none kept (a request is then only compiled)
     bool open(const std::string &path);
     // `request` kept under `name` unless it is kept already or too large; a full log drops its oldest first
-    void add(const raw::Digest &name, const std::string &request);
+    void add(const gm20b::Digest &name, const std::string &request);
     // The requests read at open, then the log written again with only those `keep` returns true for (and every one added
     // since): what a replay calls once
-    void replay(const std::function<bool(const std::string &request, raw::Digest &name)> &keep);
+    void replay(const std::function<bool(const std::string &request, gm20b::Digest &name)> &keep);
 
 private:
     std::mutex lock_;
@@ -40,9 +40,9 @@ private:
     int fd_ = -1;
     uint64_t bytes_ = 0, generation_ = 0;  // generation_: the file's rewrites, which move its spans
     bool replayed_ = false;
-    std::set<raw::Digest> names_;
+    std::set<gm20b::Digest> names_;
     std::vector<Span> read_;
-    std::vector<std::pair<raw::Digest, Span>> added_;  // before the replay, which keeps them
+    std::vector<std::pair<gm20b::Digest, Span>> added_;  // before the replay, which keeps them
 
     bool append(int fd, const std::string &request);
     bool rewriteLocked(const std::vector<Span> &spans);

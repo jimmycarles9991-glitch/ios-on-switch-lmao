@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// The kit's 3D state sequences and barriers against the raw path's, for the same inputs. raw_emit.cpp's blend
-// registers are driven directly. The sequences raw_gpu.cpp wrote inline before it moved onto the kit (and raw_target.h's
-// target words) are kept here as replays through raw::Push with raw_gpu.cpp's constants (driver_constants.h reads
-// them from its text); raw_gpu.cpp is checked to call the kit where it wrote them.
+// The kit's 3D state sequences and barriers against the driver's, for the same inputs. emit.cpp's blend
+// registers are driven directly. The sequences gpu.cpp wrote inline before it moved onto the kit (and target.h's
+// target words) are kept here as replays through gm20b::Push with gpu.cpp's constants (driver_constants.h reads
+// them from its text); gpu.cpp is checked to call the kit where it wrote them.
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -13,9 +13,9 @@
 #include <gtest/gtest.h>
 
 #include "bazel/testing/source_text.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_emit.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_push.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_target.h"
+#include "drivers/TegraGM20BMetal/emit.h"
+#include "drivers/TegraGM20BMetal/push.h"
+#include "drivers/TegraGM20BMetal/target.h"
 #include "kits/SwitchGM20B/test/driver_constants.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BEmit3D.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BEmitBarrier.h"
@@ -23,22 +23,23 @@
 
 namespace {
 
-namespace g = driver::raw_gpu_cpp;
+namespace g = driver::gm20b_gpu_internal_h;
 using switch_gm20b_test::Method;
 using switch_gm20b_test::Methods;
 using switch_gm20b_test::Words;
 using testing::HasSubstr;
 
-const std::string &rawGpu()
+const std::string &gm20bGpu()
 {
-    static const std::string text =
-        switch_ios::test::SourceText("../../../drivers/TegraGM20BMetal/raw/runtime/raw_gpu.cpp");
+    static const std::string text = switch_ios::test::SourceText("../../../drivers/TegraGM20BMetal/draw.cpp") +
+                                    switch_ios::test::SourceText("../../../drivers/TegraGM20BMetal/draw_prepare.cpp") +
+                                    switch_ios::test::SourceText("../../../drivers/TegraGM20BMetal/pass_end.cpp");
     return text;
 }
 
 void expectRawSays(const char *line)
 {
-    EXPECT_THAT(rawGpu(), HasSubstr(line)) << "raw_gpu.cpp changed: replay its new form here";
+    EXPECT_THAT(gm20bGpu(), HasSubstr(line)) << "gpu.cpp changed: replay its new form here";
 }
 
 uint32_t bits(float f)
@@ -61,7 +62,7 @@ template <typename F> std::vector<uint32_t> ours(F emit)
 template <typename F> std::vector<uint32_t> theirs(F emit)
 {
     std::vector<uint32_t> words(256);
-    raw::Push p{words.data(), words.data() + words.size()};
+    gm20b::Push p{words.data(), words.data() + words.size()};
     emit(p);
     words.resize(size_t(p.at - words.data()));
     return words;
@@ -80,7 +81,7 @@ TEST(Emit3D, ViewportAndScissorAsRawWritesThem)
                   switch_gm20b_viewport(p, 0, &v);
                   switch_gm20b_scissor(p, 0, 10, 200, 20, 300);
               })),
-              Words(theirs([&](raw::Push &p) {
+              Words(theirs([&](gm20b::Push &p) {
                   p.incArray(uint32_t(g::c_VIEWPORT_SCALE_X), viewport, 6);
                   p.inc(uint32_t(g::c_VIEWPORT_CLIP_H), {viewport[6], viewport[7]});
                   p.inc(uint32_t(g::c_SCISSOR_ENABLE), {1, scissor[0], scissor[1]});
@@ -94,7 +95,7 @@ TEST(Emit3D, ViewportSwizzleAsRawWritesIt)
         EXPECT_EQ(Words(ours([&](nv_push *p) {
                       switch_gm20b_viewport_swizzle(p, 0, word);
                   })),
-                  Words(theirs([&](raw::Push &p) {
+                  Words(theirs([&](gm20b::Push &p) {
                       p.m(0x0a18, word);
                   })));
 }
@@ -107,7 +108,7 @@ TEST(Emit3D, BlendConstantAsRawWritesIt)
     EXPECT_EQ(Words(ours([&](nv_push *p) {
                   switch_gm20b_blend_constant(p, rgba);
               })),
-              Words(theirs([&](raw::Push &p) {
+              Words(theirs([&](gm20b::Push &p) {
                   p.incArray(uint32_t(g::c_BLEND_CONST_RED), words, 4);
               })));
 }
@@ -123,7 +124,7 @@ TEST(Emit3D, ClearAsRawWritesIt)
         EXPECT_EQ(Words(ours([&](nv_push *p) {
                       switch_gm20b_clear(p, &c);
                   })),
-                  Words(theirs([&](raw::Push &p) {
+                  Words(theirs([&](gm20b::Push &p) {
                       p.inc(uint32_t(g::c_COLOR_CLEAR_VALUE), {c.value[0], c.value[1], c.value[2], c.value[3]});
                       p.inc(uint32_t(g::c_CLEAR_RECT_H),
                             {uint32_t(c.xmax) << 16 | c.xmin, uint32_t(c.ymax) << 16 | c.ymin});
@@ -144,7 +145,7 @@ TEST(Emit3D, LayeredClearCallsTheLayerLoop)
         EXPECT_EQ(Methods(ours([&](nv_push *p) {
                       switch_gm20b_clear(p, &c);
                   })),
-                  Methods(theirs([&](raw::Push &p) {
+                  Methods(theirs([&](gm20b::Push &p) {
                       p.inc(uint32_t(g::c_COLOR_CLEAR_VALUE), {c.value[0], c.value[1], c.value[2], c.value[3]});
                       p.inc(uint32_t(g::c_CLEAR_RECT_H),
                             {uint32_t(c.xmax) << 16 | c.xmin, uint32_t(c.ymax) << 16 | c.ymin});
@@ -157,10 +158,10 @@ TEST(Emit3D, LayeredClearCallsTheLayerLoop)
     }
 }
 
-// raw_target.h's colorTargetWords and disabledTargetWords, the raw path's target words before the kit's
+// target.h's colorTargetWords and disabledTargetWords, the driver's target words before the kit's
 constexpr uint32_t kColorTargetWords = 9;
 
-void handTargetWords(const raw::ColorTargetDesc &d, uint32_t w[kColorTargetWords])
+void handTargetWords(const gm20b::ColorTargetDesc &d, uint32_t w[kColorTargetWords])
 {
     w[0] = uint32_t(d.va >> 32);
     w[1] = uint32_t(d.va);
@@ -193,27 +194,27 @@ TEST(Emit3D, RenderTargetsAsRawWritesThem)
                   "t.comptags);");
     expectRawSays("kit(p, switch_gm20b_color_target, index, &k, true);");
     expectRawSays("kit(p, switch_gm20b_render_area, count, planeArea().x1, planeArea().y1);");
-    raw::ColorTargetDesc pitch;
+    gm20b::ColorTargetDesc pitch;
     pitch.va = 0x1234560000;
     pitch.pitch = 5120;
     pitch.height = 720;
     pitch.bpp = 4;
     pitch.rtFormat = NVB197_SET_COLOR_TARGET_FORMAT_V_A8R8G8B8;
-    raw::ColorTargetDesc level = pitch;
+    gm20b::ColorTargetDesc level = pitch;
     level.blockLinear = true;
     level.pitch = 2560;
     level.height = 360;
     level.blockHeight = 3;
     level.layerBytes = 0x500000;
     for (uint32_t j : {0u, 3u}) {
-        for (const raw::ColorTargetDesc &d : {pitch, level}) {
-            const switch_gm20b_target t = raw::kitTarget(d);
+        for (const gm20b::ColorTargetDesc &d : {pitch, level}) {
+            const switch_gm20b_target t = gm20b::kitTarget(d);
             uint32_t w[kColorTargetWords];
             handTargetWords(d, w);
             EXPECT_EQ(Words(ours([&](nv_push *p) {
                           switch_gm20b_color_target(p, j, &t, false);
                       })),
-                      Words(theirs([&](raw::Push &p) {
+                      Words(theirs([&](gm20b::Push &p) {
                           p.incArray(uint32_t(g::c_COLOR_TARGET) + 0x40 * j, w, kColorTargetWords);
                           p.m(uint32_t(g::c_COLOR_COMPRESSION) + 4 * j, 0);
                       })));
@@ -226,7 +227,7 @@ TEST(Emit3D, RenderTargetsAsRawWritesThem)
         EXPECT_EQ(Words(ours([&](nv_push *p) {
                       switch_gm20b_color_target(p, j, &off, true);
                   })),
-                  Words(theirs([&](raw::Push &p) {
+                  Words(theirs([&](gm20b::Push &p) {
                       p.incArray(uint32_t(g::c_COLOR_TARGET) + 0x40 * j, w, kColorTargetWords);
                       p.m(uint32_t(g::c_COLOR_COMPRESSION) + 4 * j, 1);
                   })));
@@ -238,7 +239,7 @@ TEST(Emit3D, RenderTargetsAsRawWritesThem)
         EXPECT_EQ(Words(ours([&](nv_push *p) {
                       switch_gm20b_render_area(p, count, 1280, 720);
                   })),
-                  Words(theirs([&](raw::Push &p) {
+                  Words(theirs([&](gm20b::Push &p) {
                       p.m(uint32_t(g::c_CT_SELECT), ct | count);
                       p.inc(uint32_t(g::c_SURFACE_CLIP_H), {1280u << 16, 720u << 16});
                   })));
@@ -254,9 +255,9 @@ TEST(Emit3D, BarriersAsRawWritesThem)
         EXPECT_EQ(Words(ours([&](nv_push *p) {
                       switch_gm20b_pass_barrier(p, tiled);
                   })),
-                  Words(theirs([&](raw::Push &p) {
+                  Words(theirs([&](gm20b::Push &p) {
                       if (tiled)
-                          p.m(uint32_t(driver::raw_tiled_cache_h::c_TILED_CACHE_FLUSH), 0);
+                          p.m(uint32_t(driver::tiled_cache_h::c_TILED_CACHE_FLUSH), 0);
                       p.m(uint32_t(g::c_WAIT_FOR_IDLE), 0);
                       p.m(uint32_t(g::c_INVALIDATE_SHADER_CACHES),
                           uint32_t(g::c_kFlushData | g::c_kInvalidateData | g::c_kInvalidateConstant));
@@ -266,23 +267,23 @@ TEST(Emit3D, BarriersAsRawWritesThem)
     EXPECT_EQ(Words(ours([&](nv_push *p) {
                   switch_gm20b_pixel_shader_barrier(p);
               })),
-              Words(theirs([&](raw::Push &p) {
+              Words(theirs([&](gm20b::Push &p) {
                   p.m(uint32_t(g::c_PIXEL_SHADER_BARRIER), 0);
                   p.m(uint32_t(g::c_INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED), 0);
               })));
 }
 
-// raw_emit.cpp's blend registers for a key, as (method, value) pairs the hardware reads
-std::vector<Method> rawBlend(const std::string &key, uint32_t first, uint32_t last)
+// emit.cpp's blend registers for a key, as (method, value) pairs the hardware reads
+std::vector<Method> gm20bBlend(const std::string &key, uint32_t first, uint32_t last)
 {
     std::array<uint8_t, 80> header = {};
     header[72] = 0xff;  // the fragment program writes all four components of targets 0 and 1
-    raw::EmitProgram fs = {header.data(), 16, false, 0};
-    std::vector<raw::EmitRegister> regs;
+    gm20b::EmitProgram fs = {header.data(), 16, false, 0};
+    std::vector<gm20b::EmitRegister> regs;
     std::string why;
-    EXPECT_TRUE(raw::emitState(key, {}, fs, regs, why)) << why;
+    EXPECT_TRUE(gm20b::emitState(key, {}, fs, regs, why)) << why;
     std::vector<Method> out;
-    for (const raw::EmitRegister &r : regs)
+    for (const gm20b::EmitRegister &r : regs)
         if (r.method >= first && r.method < last)
             out.push_back({SUBC_NVB197, r.method, r.value});
     return out;
@@ -306,19 +307,19 @@ TEST(Emit3D, BlendAsRawEmitsIt)
                                           NVB197_SET_BLEND_PER_TARGET_ALPHA_SOURCE_COEFF_V_OGL_ONE,
                                           NVB197_SET_BLEND_PER_TARGET_ALPHA_DEST_COEFF_V_OGL_ONE};
     const uint32_t perTarget1 = NVB197_SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(1);
-    std::vector<Method> raw1 = rawBlend(key, NVB197_SET_BLEND(1), NVB197_SET_BLEND(2));
-    std::vector<Method> rawPer1 = rawBlend(key, perTarget1, perTarget1 + 0x20);
-    raw1.insert(raw1.end(), rawPer1.begin(), rawPer1.end());
+    std::vector<Method> raw1 = gm20bBlend(key, NVB197_SET_BLEND(1), NVB197_SET_BLEND(2));
+    std::vector<Method> gm20bPer1 = gm20bBlend(key, perTarget1, perTarget1 + 0x20);
+    raw1.insert(raw1.end(), gm20bPer1.begin(), gm20bPer1.end());
     EXPECT_EQ(Methods(ours([&](nv_push *p) {
                   switch_gm20b_blend(p, 1, &over);
               })),
               raw1);
 
     // Target 0: raw leaves SEPARATE_FOR_ALPHA(0) to the context's baseline; the kit writes it, as NVK does
-    std::vector<Method> raw0 = rawBlend(key, NVB197_SET_BLEND(0), NVB197_SET_BLEND(1));
-    std::vector<Method> rawPer0 = rawBlend(key, NVB197_SET_BLEND_PER_TARGET_COLOR_OP(0), perTarget1);
+    std::vector<Method> raw0 = gm20bBlend(key, NVB197_SET_BLEND(0), NVB197_SET_BLEND(1));
+    std::vector<Method> gm20bPer0 = gm20bBlend(key, NVB197_SET_BLEND_PER_TARGET_COLOR_OP(0), perTarget1);
     raw0.push_back({SUBC_NVB197, NVB197_SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(0), 1});
-    raw0.insert(raw0.end(), rawPer0.begin(), rawPer0.end());
+    raw0.insert(raw0.end(), gm20bPer0.begin(), gm20bPer0.end());
     EXPECT_EQ(Methods(ours([&](nv_push *p) {
                   switch_gm20b_blend(p, 0, &max);
               })),
@@ -327,7 +328,7 @@ TEST(Emit3D, BlendAsRawEmitsIt)
     EXPECT_EQ(Methods(ours([&](nv_push *p) {
                   switch_gm20b_ct_write(p, 1, 0xf);
               })),
-              rawBlend(key, NVB197_SET_CT_WRITE(1), NVB197_SET_CT_WRITE(2)));
+              gm20bBlend(key, NVB197_SET_CT_WRITE(1), NVB197_SET_CT_WRITE(2)));
 }
 
 }  // namespace

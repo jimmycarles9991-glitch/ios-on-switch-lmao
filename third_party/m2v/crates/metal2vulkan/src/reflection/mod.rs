@@ -316,6 +316,7 @@ fn descriptor_buffers(
             index,
             used,
             false,
+            1,
             BindingKind::Buffer(buffer),
         ));
     }
@@ -473,6 +474,7 @@ pub struct Binding {
     pub(crate) index: u32,
     pub(crate) used: bool,
     pub(crate) argument: bool,
+    pub(crate) array_length: u32,
     pub(crate) kind: BindingKind,
 }
 
@@ -497,6 +499,7 @@ impl Binding {
         index: u32,
         used: bool,
         argument: bool,
+        array_length: u32,
         kind: BindingKind,
     ) -> Binding {
         Binding {
@@ -506,6 +509,7 @@ impl Binding {
             index,
             used,
             argument,
+            array_length,
             kind,
         }
     }
@@ -538,6 +542,11 @@ impl Binding {
     /// `isArgument`: whether the function declares the binding as an argument.
     pub fn is_argument(&self) -> bool {
         self.argument
+    }
+
+    /// `arrayLength` (`MTLArgument`): `N` for an `array<T, N>` of textures or samplers, else 1.
+    pub fn array_length(&self) -> u32 {
+        self.array_length
     }
 
     /// The `MTLBufferBinding` fields, for a buffer.

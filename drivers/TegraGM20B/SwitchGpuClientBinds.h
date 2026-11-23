@@ -19,12 +19,14 @@ IOReturn AGXDeviceUserClient::cutOverlaps(uint64_t va, uint64_t range, bool now,
 			continue;
 		}
 		auto *record = b.retirement;
+		tgm_mem *const mem = b.bo ? b.bo->mem : nullptr;
+		const int readOnly = int(b.bo && b.bo->readOnly);
 		const bool wasPending = switch_gpu_mapping_pending(record->mapping);
 		switch_gpu_mapping *below = nullptr, *taken = record->mapping, *above = nullptr;
 		if (b.va < va || b.va + b.range > end) {
-			const int error = switch_gpu_vm_split(
-				vm_, &record->mapping, b.bo->mem, record->kind, int(b.bo->readOnly),
-				record->vol, va, range, &below, &taken, &above);
+			const int error = switch_gpu_vm_split(vm_, &record->mapping, mem,
+							      record->kind, readOnly, record->vol,
+							      va, range, &below, &taken, &above);
 			if (error)
 				return ioreturn(error);
 		}
@@ -38,7 +40,8 @@ IOReturn AGXDeviceUserClient::cutOverlaps(uint64_t va, uint64_t range, bool now,
 			*spare++ = nullptr;
 			*kept = {nullptr, from,         bytes,       b.bo, part,
 				 {},      record->kind, record->vol, 0,    false};
-			++b.bo->bindings;
+			if (b.bo)
+				++b.bo->bindings;
 			const uint32_t at = switch_gpu_binding_upper(binds_, nbinds_, from);
 			memmove(&binds_[at + 1], &binds_[at], sizeof(Binding) * (nbinds_ - at));
 			binds_[at] = {from, bytes, b.bo, b.bo_offset + (from - b.va), kept};
@@ -60,8 +63,8 @@ IOReturn AGXDeviceUserClient::cutOverlaps(uint64_t va, uint64_t range, bool now,
 			switch_gpu_mapping *const parts[] = {below, above};
 			for (auto *part : parts)
 				if (switch_gpu_mapping_pending(part))
-					switch_gpu_vm_install(vm_, part, b.bo->mem, record->kind,
-							      int(b.bo->readOnly), record->vol);
+					switch_gpu_vm_install(vm_, part, mem, record->kind,
+							      readOnly, record->vol);
 		} else if (switch_gpu_mapping_pending(below) || switch_gpu_mapping_pending(above)) {
 			const uint32_t epoch = issueBind();
 			for (auto *part : kept)
@@ -75,36 +78,53 @@ IOReturn AGXDeviceUserClient::cutOverlaps(uint64_t va, uint64_t range, bool now,
 
 // lock_ held; [op.va, op.va + op.range) is free of bindings. The new binding's PTEs go in now, or with queued, in
 // retirement after the work queued before this Map completes, its submissions from now on waiting for the bind epoch.
-// record is consumed either way.
+// No bo: a MapSparse, a binding of no BO whose pages read 0. record is consumed either way.
 IOReturn AGXDeviceUserClient::mapRange(const TegraGM20BAbiBindOp &op, Bo *bo,
 				       RetiredBinding *record, bool queued)
 {
-	const uint8_t kind = uint8_t(op.kind), vol = op.op == TegraGM20BBindMapVolatile;
+	const uint8_t kind = bo ? uint8_t(op.kind) : 0, vol = op.op == TegraGM20BBindMapVolatile;
+	const uint64_t offset = bo ? op.bo_offset : 0;
 	switch_gpu_mapping *mapping = nullptr;
 	if (!queued)
 		takeRetiredOverlaps(op.va, op.range);
 	const int err =
-		!switch_gpu_vm_volatile_kind_ok(kind, vol) ? -22
+		!bo ? switch_gpu_vm_sparse(vm_, op.va, op.range, int(!queued), &mapping)
+		: !switch_gpu_vm_volatile_kind_ok(kind, vol) ? -22
 		: queued ? switch_gpu_vm_prepare(vm_, op.va, op.range, bo->mem, op.bo_offset, kind,
 						 &mapping)
 			 : switch_gpu_vm_map_volatile(vm_, op.va, op.range, bo->mem, op.bo_offset,
 						      kind, int(bo->readOnly), vol, &mapping);
-	noteBind(err ? TGM_BIND_REFUSED : TGM_BIND_MAP, op.va, op.range, bo, op.bo_offset, kind);
+	noteBind(err ? TGM_BIND_REFUSED : TGM_BIND_MAP, op.va, op.range, bo, offset, kind);
 	if (err) {
 		IODelete(record, RetiredBinding, 1);
 		return ioreturn(err);
 	}
 	*record = {nullptr, op.va, op.range, bo, mapping, {}, kind, vol, 0, false};
-	++bo->bindings;
+	if (bo)
+		++bo->bindings;
 	const uint32_t at = switch_gpu_binding_upper(binds_, nbinds_, op.va);
 	memmove(&binds_[at + 1], &binds_[at], sizeof(Binding) * (nbinds_ - at));
-	binds_[at] = {op.va, op.range, bo, op.bo_offset, record};
+	binds_[at] = {op.va, op.range, bo, offset, record};
 	++nbinds_;
 	if (queued) {
 		record->epoch = issueBind();
 		scheduleRetirement();
 	}
 	return kIOReturnSuccess;
+}
+
+// Whether `binding` is already what `op` asks for, `bo` being the op's BO: none for a MapSparse, whose handle, offset
+// and kind mean nothing.
+bool AGXDeviceUserClient::bindingIs(const Binding &binding, const TegraGM20BAbiBindOp &op,
+				    const Bo *bo)
+{
+	const bool sparse = op.op == TegraGM20BBindMapSparse;
+	if (op.op == TegraGM20BBindUnmap || binding.va != op.va || binding.range != op.range ||
+	    binding.bo != bo || (bo == nullptr) != sparse)
+		return false;
+	return sparse ||
+	       (binding.bo_offset == op.bo_offset && binding.retirement->kind == op.kind &&
+		binding.retirement->vol == (op.op == TegraGM20BBindMapVolatile));
 }
 
 // lock_ held. Whether [va, va + range) has PTEs, live or retiring, that work queued now could still use (a killed or
@@ -188,8 +208,9 @@ void AGXDeviceUserClient::installPendingBinds()
 		// waiting for it would otherwise run on a VA with no PTEs and fault in a process told the bind succeeded.
 		// Retirements free page tables and comptag lines, so each one tries the install again; a bind that never maps
 		// leaves its waiter on the GPU acquire, which the hang rule kills with a report.
-		if (!switch_gpu_vm_install(vm_, mapping, b.bo->mem, b.retirement->kind,
-					   int(b.bo->readOnly), b.retirement->vol))
+		if (!switch_gpu_vm_install(vm_, mapping, b.bo ? b.bo->mem : nullptr,
+					   b.retirement->kind, int(b.bo && b.bo->readOnly),
+					   b.retirement->vol))
 			continue;
 		if (!b.retirement->unmapped)
 			IOLog("tegra-gm20b: %s: bind %#llx+%#llx could not be mapped yet; the work "
@@ -218,15 +239,17 @@ void AGXDeviceUserClient::logFaultBindings()
 		if (!fault)
 			continue;
 		const Binding *binding = switch_gpu_binding_find(binds_, nbinds_, fault, 1);
-		char pages[160] = "";
+		char pages[160] = "", handle[32] = "sparse";
 		if (binding)
 			switch_gpu_mapping_describe(binding->retirement->mapping, pages,
 						    sizeof(pages));
+		if (binding && binding->bo)
+			snprintf(handle, sizeof(handle), "handle %llu",
+				 static_cast<unsigned long long>(binding->bo->handle));
 		if (binding)
-			IOLog("tegra-gm20b: channel %u fault at %#llx: binding %#llx+%#llx (handle "
-			      "%llu, pages %s)\n",
-			      slot + 1, fault, binding->va, binding->range, binding->bo->handle,
-			      pages);
+			IOLog("tegra-gm20b: channel %u fault at %#llx: binding %#llx+%#llx (%s, "
+			      "pages %s)\n",
+			      slot + 1, fault, binding->va, binding->range, handle, pages);
 		else
 			IOLog("tegra-gm20b: channel %u fault at %#llx: binding none\n", slot + 1,
 			      fault);
@@ -253,6 +276,7 @@ void AGXDeviceUserClient::noteBind(uint8_t op, uint64_t va, uint64_t range, cons
 	n.ns = nowNs();
 	n.op = op;
 	n.kind = kind;
+	n.origin = TGM_BIND_NO_BO;
 	if (bo) {
 		n.handle = bo->handle;
 		n.bo_bytes = bo->bytes;
@@ -280,11 +304,16 @@ void AGXDeviceUserClient::describeFault(uint32_t slot, uint64_t va)
 	for (uint32_t side = 0; side < 2; side++) {
 		const Binding *b = side == 0 ? (after ? &binds_[after - 1] : nullptr)
 					     : (after < nbinds_ ? &binds_[after] : nullptr);
-		if (b && !(side == 0 && va < b->va + b->range))
+		if (!b || (side == 0 && va < b->va + b->range))
+			continue;
+		if (b->bo)
 			snprintf(sides[side], sizeof(sides[side]),
 				 "%#llx+%#llx of BO %llu (%llu bytes at %#llx), kind %#x", b->va,
 				 b->range, b->bo->handle, b->bo->bytes, b->bo_offset,
 				 b->retirement->kind);
+		else
+			snprintf(sides[side], sizeof(sides[side]), "%#llx+%#llx sparse", b->va,
+				 b->range);
 	}
 	IOLog("tegra-gm20b: %s channel %u fault VA %#llx (jobs %u-%u failed): below: %s; above: "
 	      "%s\n",

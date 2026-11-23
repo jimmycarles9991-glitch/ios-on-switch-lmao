@@ -11,7 +11,7 @@ b197	macro	SET_VB_STRIDE	-	NVK's vertex stride; no raw stream calls its slot
 b197	macro	SET_TESS_PARAMS	-	NVK's tessellation state; no raw stream calls its slot
 b197	macro	SET_SHADING_RATE_CONTROL	-	NVK's shading rate (Turing only, two words of no-op here)
 b197	macro	SET_ANTI_ALIAS	-	NVK's sample-shading state; no raw stream calls its slot
-b197	macro	DRAW	-	NVK's draw; slot 11, which raw's own draw macro takes over (raw_mme.h install)
+b197	macro	DRAW	-	NVK's draw; slot 11, which raw's own draw macro takes over (mme.h install)
 b197	macro	DRAW_INDEXED	-	NVK's indexed draw; slot 12, which raw's own macro takes over
 b197	macro	DRAW_INDIRECT	-	NVK's indirect draw; slot 13, which raw's own macro takes over
 b197	macro	DRAW_INDEXED_INDIRECT	-	NVK's indexed indirect draw; slot 14, which raw's own macro takes over

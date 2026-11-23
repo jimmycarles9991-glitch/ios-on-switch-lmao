@@ -85,7 +85,7 @@ void intMaskDead()
 template <class Self> static bool vblankFilter(OSObject *owner, IOFilterInterruptEventSource *source)
 {
     Self self = static_cast<Self>(owner);
-    const uint32_t status = self->dc[kDcIntStatus] & (kVblankInt | kFrameEndInt | kVpulse2Int);
+    const uint32_t status = self->dc[kDcIntStatus] & (kVblankInt | kFrameEndInt);
     if (!status)
         return false;
     self->dc[kDcIntStatus] = status;
@@ -95,10 +95,6 @@ template <class Self> static bool vblankFilter(OSObject *owner, IOFilterInterrup
     if (status & kVblankInt) {
         self->vblankTime = mach_absolute_time();
         self->vblankContinuous = mach_continuous_time();
-    }
-    if (status & kVpulse2Int) {  // r17-touch: the vsync phase's line
-        self->vpulseTime = mach_absolute_time();
-        self->vpulseContinuous = mach_continuous_time();
     }
     // The panel's DSI command steps, timed from the frame end as hekate does (the line is already low; the last step takes ~620 us).
     // A console waiting to scroll (waitTapeFrame) wakes at every frame end while it draws on the tape.
@@ -134,8 +130,6 @@ template <class Self> static bool vblankFilter(OSObject *owner, IOFilterInterrup
     // Last, with release: the action that reads a count sees the stamps and times stored before it.
     if (status & kVblankInt)
         bump(self->vblankTaken, 1u);
-    if (status & kVpulse2Int)
-        bump(self->vpulseTaken, 1u);
     if (status & kFrameEndInt)
         bump(self->feTaken, 1u);
     source->signalInterrupt();
@@ -150,8 +144,8 @@ template <typename Count, typename By> static void bump(Count &count, By by)
 }
 
 // What the filter took per cause, and what the gate has handled of it (the gate's own words, read by the console).
-static inline uint32_t feTaken = 0, vblankTaken = 0, vpulseTaken = 0;
-static inline uint32_t feHandled = 0, vblankHandled = 0, vpulseHandled = 0;
+static inline uint32_t feTaken = 0, vblankTaken = 0;
+static inline uint32_t feHandled = 0, vblankHandled = 0;
 
 static uint32_t newSince(const uint32_t &taken, uint32_t &handled, uint32_t &folded)
 {
@@ -167,8 +161,6 @@ static uint32_t newSince(const uint32_t &taken, uint32_t &handled, uint32_t &fol
 uint32_t takeFrameEndStatus()
 {
     uint32_t folded = 0, status = 0;
-    if (newSince(vpulseTaken, vpulseHandled, folded))
-        status |= kVpulse2Int;
     if (const uint32_t vblanks = newSince(vblankTaken, vblankHandled, folded)) {
         status |= kVblankInt;
         if (stats && vsyncArmed) {
@@ -191,8 +183,7 @@ bool frameEndPending(uint32_t bits) const
         return __atomic_load_n(&taken, __ATOMIC_ACQUIRE) != __atomic_load_n(&handled, __ATOMIC_RELAXED);
     };
     return ((bits & kFrameEndInt) && pending(feTaken, feHandled)) ||
-           ((bits & kVblankInt) && pending(vblankTaken, vblankHandled)) ||
-           ((bits & kVpulse2Int) && pending(vpulseTaken, vpulseHandled));
+           ((bits & kVblankInt) && pending(vblankTaken, vblankHandled));
 }
 
 // Under the gate: what the filter took of these causes so far is stale (latched while masked, or before a stop).
@@ -203,6 +194,4 @@ void dropFrameEndStatus(uint32_t bits)
         (void)newSince(feTaken, feHandled, folded);
     if (bits & kVblankInt)
         (void)newSince(vblankTaken, vblankHandled, folded);
-    if (bits & kVpulse2Int)
-        (void)newSince(vpulseTaken, vpulseHandled, folded);
 }

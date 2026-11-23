@@ -251,12 +251,12 @@ pub enum RuntimeFact {
     /// the write takes from the texel it reads first (all four where the mask covers none of the
     /// format's channels, so it stores nothing; empty where it covers every one, or the function
     /// does not write the attachment); a pipeline of another mask is `NeedsInput(FramebufferFetch)`
-    /// too. `blend`: the blend the function computes in the shader, from the texel it reads first,
-    /// for an extended-range attachment it writes under blending, which the function then need not
-    /// read; a pipeline of another blend there is `NeedsInput(FramebufferFetch)` too. `rounded`:
-    /// that blend is computed without fast math, each product rounded to `half` before the sum
-    /// (`lower::arith::extended_range::blend::BlendMath::Rounded`), whose model holds blends the
-    /// fast one refuses; link checks the blend under that math.
+    /// too. `blend`: the blend the function computes in the shader, from the texel it reads first
+    /// (Metal's 16-bit float blend, or the device's by its model); a pipeline of another blend
+    /// there is `NeedsInput(FramebufferFetch)` too. `rounded`: that blend is computed without fast
+    /// math, each product rounded to `half` before the sum
+    /// (`lower::arith::extended_range::blend::BlendMath::Rounded`); link checks the blend under
+    /// that math.
     InterlockedFramebufferFetch {
         color: u32,
         format: crate::vk::Format,
@@ -495,12 +495,11 @@ pub enum RuntimeFact {
     /// requires it ordered (`FramebufferFetchPolicy::RequireOrdered`), the fragment function writes
     /// a color through its first output and does not declare early fragment tests, and it
     /// discards, writes other memory, or returns depth, stencil, or a sample mask. A draw may move
-    /// such a color into the interlocked storage form (`BindShape::interlocked_colors`, or an
-    /// extended-range color's `BindShape::extended_shadows`), whose variant then stores before the
-    /// depth and stencil tests and states [`TestedStorageWrites`](Self::TestedStorageWrites) with
-    /// this `early_variant`, where the write stores something. So the plan of a pipeline that
-    /// writes no color so selects the tests of such a draw from this as from that fact, and the
-    /// variant it names plans itself.
+    /// such a color into the interlocked storage form (`BindShape::interlocked_colors`), whose
+    /// variant then stores before the depth and stencil tests and states
+    /// [`TestedStorageWrites`](Self::TestedStorageWrites) with this `early_variant`, where the
+    /// write stores something. So the plan of a pipeline that writes no color so selects the tests
+    /// of such a draw from this as from that fact, and the variant it names plans itself.
     ///
     /// The plan reads it only for a draw that moves a color the function writes as an ordinary
     /// output under a write mask that names some of the attachment's components (and only where
@@ -509,7 +508,7 @@ pub enum RuntimeFact {
     /// no store before the tests, and the plan selects none for it, as for a draw that moves
     /// nothing. A draw whose tests neither the early-tests variant nor the function's own tests
     /// serve (tests the draw does not state) is refused, as any draw whose variant is refused: the
-    /// runtime keeps the color out of the storage form there (the pass splits, or the shadow ends).
+    /// runtime keeps the color out of the storage form there (the pass splits).
     MovableStorageWrites { early_variant: bool },
     /// On a device that samples through Metal's own sampler (`VkProperty::MetalSampler`:
     /// MoltenVK on Apple's GPU), the function samples the texture bound to the slot through a
@@ -574,11 +573,14 @@ pub enum RuntimeFact {
     /// (`GraphicsState::shader_tests`). `formatless`: the module declares the stand-in without a
     /// format (`Unknown`), else as `R32f`. `multisampled`: compiled for a pipeline of more than
     /// one sample, the stand-in holds each sample, `planes` as a single-sample 2D array of one
-    /// layer per sample, else as a multisampled image.
+    /// layer per sample, else as a multisampled image. `unorm16`: compiled for a `Depth16Unorm`
+    /// attachment (`LoweringInputs::shader_tests_unorm16`), the stand-in holds its codes as floats
+    /// and the function tests and writes the code Metal stores for the fragment's depth.
     ShaderTests {
         formatless: bool,
         multisampled: bool,
         planes: bool,
+        unorm16: bool,
     },
     /// The function writes `half` texels to the storage texture bound to the slot, whose storage
     /// choice declares no format, and reads whether its channels are 16-bit floats
@@ -622,19 +624,6 @@ pub enum RuntimeFact {
     /// `formatless`: the module declares the stand-in without a format (`Unknown`), else as
     /// `R8ui`. The stand-in holds the pipeline's samples as a multisampled image at more than one.
     ShaderStencilTest { formatless: bool },
-    /// On a device that orders framebuffer fetch through rasterization-order input attachments,
-    /// the function computes Metal's blend `blend` into extended-range color attachment `color`
-    /// in the shader: it reads the attachment's raw texel through its input attachment
-    /// (`RuntimeFact::FramebufferFetch`), blends its output over the texel's tile value, and
-    /// writes the encode of the result through its first output, the channels `kept` (the
-    /// format's channels the descriptor's write mask leaves out) taken from the texel. Link
-    /// gives the attachment no Vulkan blend and writes every raw component, and a pipeline of
-    /// another blend or write mask there is `NeedsInput(FramebufferFetch)`.
-    ExtendedRangeInputBlend {
-        color: u32,
-        blend: crate::pipeline::lower_inputs::BlendEquation,
-        kept: crate::vk::ColorComponentFlags,
-    },
     /// The function reads, samples or gathers the sampled color texture (not a texture buffer,
     /// a multisampled or a depth texture) bound to the slot only with `float`, `half` or 32-bit
     /// integer results: bound to a texture of a color format whose numeric class is not the

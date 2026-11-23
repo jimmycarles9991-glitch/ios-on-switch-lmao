@@ -44,7 +44,8 @@ struct VideoEncodeTest: HWTest {
         let pattern = Pattern(width: width, height: height, clip: realTime ? 0x7001 : 0x7002)
         let settings = CompressorSettings(
             codec: codec, width: width, height: height, fps: fps, bitrate: realTime ? 8_000_000 : 12_000_000,
-            realTime: realTime, requireHardware: true)
+            realTime: realTime, requireHardware: true
+        )
         let encoded: CompressedClip
         do {
             encoded = try Compressor.encode(settings, pattern: pattern, frames: Self.frames, clientPool: clientPool)
@@ -52,7 +53,8 @@ struct VideoEncodeTest: HWTest {
             return .skip("no hardware HEVC encoder: none listed, and \(call) returned \(status)")
         }
         let decoded = try Decompressor.decode(
-            encoded.samples, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps)
+            encoded.samples, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps
+        )
         let seconds = Double(Self.frames) / Double(fps)
         var metrics = Metrics()
         metrics.set("listed", listed.isEmpty ? "-" : listed.joined(separator: ","))
@@ -78,7 +80,8 @@ struct VideoEncodeTest: HWTest {
                     "every input written by VIC, none copied or refused",
                     Self.allByVIC(encoded.routes, Self.frames)
                 ),
-            ], metrics, proof: encoded.usingHardware ? "encoder=\(encoded.encoderID)" : "")
+            ], metrics, proof: encoded.usingHardware ? "encoder=\(encoded.encoderID)" : ""
+        )
     }
 
     /// The AVE plug-in's input routes (debug builds): VIC wrote every picture's input, the CPU copied none.

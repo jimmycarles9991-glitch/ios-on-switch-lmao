@@ -71,7 +71,7 @@ class Record(unittest.TestCase):
         seed.write_text(json.dumps({'ipsw': '24B119'}))
         manifest.write_text(
             '# gpu stage 1 _main/gpu/bundle.stage\n'
-            'ngpu/addons/TegraGM20BMetal.m2v-seed/shared/MANIFEST.json\tunused\t20\t644\t_main/seed/MANIFEST.json\n'
+            'ngpu/addons/TegraGM20BMetal.seed/shared/MANIFEST.json\tunused\t20\t644\t_main/seed/MANIFEST.json\n'
         )
         kernel = self.root / 'kernel.macho'
         kernel.write_bytes(b'kernel')

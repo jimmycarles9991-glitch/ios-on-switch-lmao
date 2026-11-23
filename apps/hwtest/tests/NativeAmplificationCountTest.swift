@@ -10,24 +10,24 @@ import Metal
 /// one amplify call a draw, every command buffer raw.
 struct NativeAmplificationCountTest: NativeObjectTest {
     let id = "metal.native.amplification_count"
-    let name = "[[amplification_count]] is each draw's count on the raw path"
+    let name = "[[amplification_count]] is each draw's count on the driver"
 
     static let size = 32
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct Out { float4 position [[position]]; float4 color; };
-        vertex Out counted_quad(uint v [[vertex_id]], ushort a [[amplification_id]], ushort n [[amplification_count]]) {
-            const float2 corner = float2(v & 1, v >> 1);
-            const float width = 2.0 / n;
-            Out o;
-            o.position = float4(-1 + (corner.x + a) * width, corner.y * 2 - 1, 0, 1);
-            o.color = n == 1 ? float4(0, 0, 1, 1) : a ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-            return o;
-        }
-        fragment float4 counted_color(Out in [[stage_in]]) { return in.color; }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct Out { float4 position [[position]]; float4 color; };
+    vertex Out counted_quad(uint v [[vertex_id]], ushort a [[amplification_id]], ushort n [[amplification_count]]) {
+        const float2 corner = float2(v & 1, v >> 1);
+        const float width = 2.0 / n;
+        Out o;
+        o.position = float4(-1 + (corner.x + a) * width, corner.y * 2 - 1, 0, 1);
+        o.color = n == 1 ? float4(0, 0, 1, 1) : a ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+        return o;
+    }
+    fragment float4 counted_color(Out in [[stage_in]]) { return in.color; }
+    """
 
     static func expected(_ x: Int, count: Int) -> [UInt8] {
         count == 1 ? [0, 0, 255, 255] : x < size / 2 ? [255, 0, 0, 255] : [0, 255, 0, 255]
@@ -71,7 +71,7 @@ struct NativeAmplificationCountTest: NativeObjectTest {
             }
             work.paths.append(timing.path)
             let pixels = try await gpu.read(target, bytesPerPixel: 4)
-            let wrong = (0..<Self.size * Self.size).filter { i in
+            let wrong = (0 ..< Self.size * Self.size).filter { i in
                 let x = i % Self.size
                 return Array(pixels.pixel(x, i / Self.size, width: Self.size)) != Self.expected(x, count: count)
             }.count

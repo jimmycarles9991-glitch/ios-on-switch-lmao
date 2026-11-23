@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* The render server's long GPU spans (debug kernels): its raw path names each stretch of kLongSpanNs or more of one state
- * (drivers/TegraGM20BMetal/raw/runtime/raw_span_marks.h) and notes it here (TegraGM20BMethodPaths' note-span op), beside
+ * (drivers/TegraGM20BMetal/span_marks.h) and notes it here (TegraGM20BMethodPaths' note-span op), beside
  * the compositor's longest job, so a HW Test that made the compositor work (ui.launch_hitch) reads what it cost and which
  * states drew it. The newest notes are kept. Plain C++ for the host test (test/gm20b_span_notes_test.cpp). */
 #pragma once

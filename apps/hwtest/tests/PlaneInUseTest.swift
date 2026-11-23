@@ -22,15 +22,17 @@ final class PlaneInUseRun {
             kCVPixelBufferWidthKey: 1280, kCVPixelBufferHeightKey: 720,
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
         ]
-        for index in 0..<3 {
+        for index in 0 ..< 3 {
             var buffer: CVPixelBuffer?
             CVPixelBufferCreate(
-                nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer)
+                nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer
+            )
             guard let buffer else { continue }
             CVBufferSetAttachment(
-                buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+                buffer, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate
+            )
             CVPixelBufferLockBaseAddress(buffer, [])
-            for plane in 0..<2 {
+            for plane in 0 ..< 2 {
                 guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { continue }
                 let rows = CVPixelBufferGetHeightOfPlane(buffer, plane)
                 let bytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * rows
@@ -41,7 +43,8 @@ final class PlaneInUseRun {
         }
         if let first = buffers.first {
             CMVideoFormatDescriptionCreateForImageBuffer(
-                allocator: nil, imageBuffer: first, formatDescriptionOut: &format)
+                allocator: nil, imageBuffer: first, formatDescriptionOut: &format
+            )
         }
         layer.videoGravity = .resizeAspect
     }
@@ -50,19 +53,22 @@ final class PlaneInUseRun {
         guard let format, !buffers.isEmpty else { return }
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: 30),
-            presentationTimeStamp: CMTime(value: Int64(frame), timescale: 30), decodeTimeStamp: .invalid)
+            presentationTimeStamp: CMTime(value: Int64(frame), timescale: 30), decodeTimeStamp: .invalid
+        )
         var sample: CMSampleBuffer?
         CMSampleBufferCreateReadyWithImageBuffer(
             allocator: nil, imageBuffer: buffers[frame % buffers.count], formatDescription: format,
-            sampleTiming: &timing, sampleBufferOut: &sample)
+            sampleTiming: &timing, sampleBufferOut: &sample
+        )
         guard let sample else { return }
         if let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true),
-            CFArrayGetCount(attachments) > 0
+           CFArrayGetCount(attachments) > 0
         {
             let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
             CFDictionarySetValue(
                 dictionary, Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+            )
         }
         layer.sampleBufferRenderer.enqueue(sample)
     }
@@ -92,14 +98,14 @@ struct PlaneInUseTest: HWTest {
             return run
         }
         let frames = 60
-        for frame in 0..<frames {
+        for frame in 0 ..< frames {
             await MainActor.run { run.enqueue(frame) }
             try await Task.sleep(nanoseconds: 33_000_000)
         }
         try await Task.sleep(nanoseconds: 300_000_000)
         let shown = (frames - 1) % 3
         let (count, shownInUse, othersInUse) = await MainActor.run {
-            (run.buffers.count, run.inUse(shown), (0..<3).filter { $0 != shown && run.inUse($0) }.count)
+            (run.buffers.count, run.inUse(shown), (0 ..< 3).filter { $0 != shown && run.inUse($0) }.count)
         }
         let after = PlanesTest.totals().values
         let delta = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
@@ -114,6 +120,7 @@ struct PlaneInUseTest: HWTest {
                 ("three IOSurface buffers", count == 3),
                 ("window B flipped (d_flips > 0)", delta("flips") > 0),
                 ("the buffer on screen reads in use (shown_in_use 1)", shownInUse),
-            ], metrics)
+            ], metrics
+        )
     }
 }

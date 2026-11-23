@@ -2,8 +2,8 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// Every kind of texture a heap holds lies in the heap's own memory (raw::Device::arenaTexture): making 64 of a kind
-/// grows none of the device's own (RawFacade.memory's pool), the GPU's writes to the first read back exactly, and a
+/// Every kind of texture a heap holds lies in the heap's own memory (gm20b::Device::arenaTexture): making 64 of a kind
+/// grows none of the device's own (GM20BFacade.memory's pool), the GPU's writes to the first read back exactly, and a
 /// command buffer that used the heap names as much with 4 of them as with 64 (the encode profile's uses and use_adds,
 /// a debug runtime's). <kind>_cost: "constant" or the two counts; <kind>_own_bytes: the pool's growth; <kind>_read:
 /// exact, wrong, or - for a kind read back no way the blit engine reads it.
@@ -45,13 +45,17 @@ struct HeapKindsScene: GPUScene {
                     label: "mips_\(suffix)",
                     descriptor: descriptor(
                         .type2D, .rgba8Unorm, storage, width: 32, height: 32,
-                        levels: 3), read: .texels),
+                        levels: 3
+                    ), read: .texels
+                ),
                 Kind(
                     label: "array_\(suffix)", descriptor: descriptor(.type2DArray, .rgba8Unorm, storage, layers: 4),
-                    read: .texels),
+                    read: .texels
+                ),
                 Kind(
                     label: "volume_\(suffix)", descriptor: descriptor(.type3D, .rgba8Unorm, storage, depth: 4),
-                    read: .texels),
+                    read: .texels
+                ),
             ]
         }
         let target: MTLTextureUsage = [.renderTarget, .shaderRead]
@@ -59,18 +63,23 @@ struct HeapKindsScene: GPUScene {
             Kind(label: "cube", descriptor: descriptor(.typeCube, .rgba8Unorm, .private), read: .texels),
             Kind(
                 label: "line", descriptor: descriptor(.type1D, .rgba8Unorm, .private, width: 64, height: 1),
-                read: .texels),
+                read: .texels
+            ),
             Kind(
                 label: "msaa",
                 descriptor: descriptor(
                     .type2DMultisample, .rgba8Unorm, .private, samples: 4,
-                    usage: .renderTarget), read: .none),
+                    usage: .renderTarget
+                ), read: .none
+            ),
             Kind(label: "depth", descriptor: descriptor(.type2D, .depth32Float, .private, usage: target), read: .depth),
             Kind(
                 label: "depth_stencil",
                 descriptor: descriptor(
                     .type2D, .depth32Float_stencil8, .private,
-                    usage: .renderTarget), read: .none),
+                    usage: .renderTarget
+                ), read: .none
+            ),
             Kind(label: "bc1", descriptor: descriptor(.type2D, .bc1_rgba, .private), read: .none),
             Kind(label: "rgb9e5", descriptor: descriptor(.type2D, .rgb9e5Float, .private), read: .texels),
         ]
@@ -78,7 +87,7 @@ struct HeapKindsScene: GPUScene {
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
-        let raw = RawFacade.kind(of: gpu.device) == "raw"
+        let raw = GM20BFacade.kind(of: gpu.device) == "gm20b"
         let target = try gpu.texture(.rgba8Unorm, 8, 8)
         for kind in Self.kinds {
             let need = gpu.device.heapTextureSizeAndAlign(descriptor: kind.descriptor)
@@ -90,9 +99,9 @@ struct HeapKindsScene: GPUScene {
             }
             var grown = 0
             let make = { (count: Int) -> [MTLTexture] in
-                let before = RawFacade.memory(of: gpu.device)["pool"] ?? 0
-                let made = (0..<count).compactMap { _ in heap.makeTexture(descriptor: kind.descriptor) }
-                grown += (RawFacade.memory(of: gpu.device)["pool"] ?? 0) - before
+                let before = GM20BFacade.memory(of: gpu.device)["pool"] ?? 0
+                let made = (0 ..< count).compactMap { _ in heap.makeTexture(descriptor: kind.descriptor) }
+                grown += (GM20BFacade.memory(of: gpu.device)["pool"] ?? 0) - before
                 return made
             }
             let few = make(4)
@@ -117,7 +126,8 @@ struct HeapKindsScene: GPUScene {
                     same
                         ? "constant"
                         : "\(fewCost)|\(manyCost)"
-                            .replacingOccurrences(of: " ", with: ""))
+                        .replacingOccurrences(of: " ", with: "")
+                )
                 result.expect(same, "\(kind.label): a command buffer of 64 named more than one of 4")
             }
             let read = try await readBack(gpu, kind, many[0])
@@ -129,7 +139,7 @@ struct HeapKindsScene: GPUScene {
 
     /// The encode profile's uses and use_adds of an empty pass that used the heap
     func cost(_ gpu: GPU, _ heap: MTLHeap, _ target: MTLTexture) async throws -> [String: Double] {
-        let before = RawFacade.encodeProfile(of: gpu.device)
+        let before = GM20BFacade.encodeProfile(of: gpu.device)
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = target
@@ -139,7 +149,7 @@ struct HeapKindsScene: GPUScene {
             render.useHeap(heap, stages: .fragment)
             render.endEncoding()
         }
-        let after = RawFacade.encodeProfile(of: gpu.device)
+        let after = GM20BFacade.encodeProfile(of: gpu.device)
         return ["uses", "use_adds"].reduce(into: [:]) { $0[$1] = (after[$1] ?? 0) - (before[$1] ?? 0) }
     }
 
@@ -170,7 +180,8 @@ struct HeapKindsScene: GPUScene {
                     from: source, sourceOffset: 0, sourceBytesPerRow: width * 4,
                     sourceBytesPerImage: width * height * 4,
                     sourceSize: MTLSize(width: width, height: height, depth: 1), to: texture, destinationSlice: 0,
-                    destinationLevel: 0, destinationOrigin: MTLOrigin())
+                    destinationLevel: 0, destinationOrigin: MTLOrigin()
+                )
                 blit.endEncoding()
             }
             return try await gpu.read(texture, bytesPerPixel: 4) == pattern ? "exact" : "wrong"
@@ -180,7 +191,7 @@ struct HeapKindsScene: GPUScene {
     /// The bytes a read-back writes into a texture of `format`: RGB9E5 texels in the one encoding of their value that a
     /// GPU keeping the format by value (Apple's) reads back.
     static func pattern(_ format: MTLPixelFormat, count: Int) -> [UInt8] {
-        let bytes = (0..<count).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
+        let bytes = (0 ..< count).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
         return format == .rgb9e5Float ? SharedExponent.encodings(bytes) : bytes
     }
 }

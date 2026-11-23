@@ -10,10 +10,10 @@ struct JPEGMappingLifetimeTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let size = 256
         guard let file = JPEGSurfaceDecode.file(size),
-            let surface = IOSurface(properties: [
-                .width: size, .height: size, .bytesPerElement: 4,
-                .bytesPerRow: size * 4, .pixelFormat: UInt32(0x4247_5241),
-            ])
+              let surface = IOSurface(properties: [
+                  .width: size, .height: size, .bytesPerElement: 4,
+                  .bytesPerRow: size * 4, .pixelFormat: UInt32(0x4247_5241),
+              ])
         else { return .fail("could not create JPEG or destination surface") }
         let first = try JPEGRoute.decodes().get()
         if let failure = JPEGSurfaceDecode.decode(file, into: surface) {
@@ -22,7 +22,7 @@ struct JPEGMappingLifetimeTest: HWTest {
         let warm = try JPEGRoute.decodes().get()
         let repeats = 4
         var wrong = 0
-        for _ in 0..<repeats {
+        for _ in 0 ..< repeats {
             if let failure = JPEGSurfaceDecode.decode(file, into: surface) {
                 return .fail(failure.description)
             }
@@ -44,6 +44,7 @@ struct JPEGMappingLifetimeTest: HWTest {
                 ("retained destination makes no new mapping", steadyMaps == 0),
                 ("every repeated decode uses NVJPG", decodes == UInt64(repeats)),
                 ("every destination read matches the JPEG", wrong == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 }

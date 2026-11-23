@@ -4,8 +4,8 @@
 // the host test (test/gm20b_push_scan_test.cpp) runs the same code over NVK's streams.
 // Encoding: NV906F DMA headers (opcode 31:29, count or immediate 28:16, subchannel 15:13, dword method 11:0); NVK's
 // subchannels (Mesa nv_push.h: 0 3D, 1 compute, 3 2D, 4 copy) and MME macros at the slots both drivers load them at
-// (SwitchGM20BMacroSlots.h: NVK's clear and anti-alias, and the draws, NVK's and the raw path's); method numbers from
-// Mesa's clb197.h, clb1c0.h, clb06f.h, cl902d.h and cla0b5.h. The raw GM20B path writes SET_ANTI_ALIAS directly, not
+// (SwitchGM20BMacroSlots.h: NVK's clear and anti-alias, and the draws, NVK's and the driver's); method numbers from
+// Mesa's clb197.h, clb1c0.h, clb06f.h, cl902d.h and cla0b5.h. The driver writes SET_ANTI_ALIAS directly, not
 // through NVK's macro; its jobs' channels also call its own macros past the draw slots, at slots NVK puts others in.
 #pragma once
 #include <stdint.h>
@@ -47,7 +47,7 @@ struct PushParse {
 	uint32_t op, subc, mthd,
 		left;  // the method in progress (it may continue in the next push of the submission)
 	uint32_t ceLine, ceCount;  // the copy engine's LINE_LENGTH_IN / LINE_COUNT
-	// the push profile's pass state (scanPushes), and that state as the last draw or clear found it: the raw path's pass
+	// the push profile's pass state (scanPushes), and that state as the last draw or clear found it: the driver's pass
 	// sets SET_ANTI_ALIAS back to 1X1 after its last draw, in the same push
 	Target rt, drawn;
 	// NVK's ANTI_ALIAS scratch as the SET_ANTI_ALIAS macro keeps it (nvk_mme_set_anti_alias: masked writes; bits 7:4
@@ -56,10 +56,10 @@ struct PushParse {
 	bool shadingKnown;
 	// the last method parsed for an engine (method 0x100 and up), subchannel << 16 | method; 0 before any
 	uint32_t lastEngine;
-	// a raw job's stream (scanPushes): the slots past the draw slots are the raw path's own macros. An indirect command
+	// a raw job's stream (scanPushes): the slots past the draw slots are the driver's own macros. An indirect command
 	// buffer's gated draw or patch draws where its index lies in the executed range the shadow scratch holds, which the
 	// stream wrote or the GPU reads (icbRangeRead: every gated one counts)
-	bool rawMacros;
+	bool metalMacros;
 	bool icbRangeRead;
 	// whether the pass drew yet, and a PIXEL_SHADER_BARRIER came since its last draw (PushCounts::twinDraws)
 	bool passDrawn, barrierSinceDraw;
@@ -112,9 +112,9 @@ inline void countDraw(PushCounts &c, PushParse &p)
 	p.drawn = p.rt;
 }
 
-// A raw job's call of one of the raw path's own macros, `first` its first argument. An amplified draw is one draw of all
+// A raw job's call of one of the driver's own macros, `first` its first argument. An amplified draw is one draw of all
 // its amplifications and a layered clear one clear of all its layers, as NVK's multiview draw and clear macros are.
-inline void rawMacro(PushCounts &c, PushParse &p, uint32_t slot, uint32_t first)
+inline void metalMacro(PushCounts &c, PushParse &p, uint32_t slot, uint32_t first)
 {
 	switch (slot) {
 	case SWITCH_GM20B_MACRO_ICB_RANGE:
@@ -128,6 +128,8 @@ inline void rawMacro(PushCounts &c, PushParse &p, uint32_t slot, uint32_t first)
 		break;
 	case SWITCH_GM20B_MACRO_AMPLIFY:
 	case SWITCH_GM20B_MACRO_AMPLIFY_INDEXED:
+	case SWITCH_GM20B_MACRO_FETCH_DRAW:
+	case SWITCH_GM20B_MACRO_FETCH_DRAW_INDEXED:
 		countDraw(c, p);
 		break;
 	case SWITCH_GM20B_MACRO_CLEAR_LAYERS:
@@ -197,15 +199,16 @@ inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd
 			c.linearTargets += static_cast<uint64_t>(pitch);
 			if (mthd == 0x0814)
 				p.rt.pitch = pitch;
-		} else if (p.rawMacros && mthd == 0x3400 + 4 * SWITCH_GM20B_SCRATCH_ICB_LOCATION) {
+		} else if (p.metalMacros &&
+			   mthd == 0x3400 + 4 * SWITCH_GM20B_SCRATCH_ICB_LOCATION) {
 			p.icbLocation = data;  // SET_MME_SHADOW_SCRATCH(j)
 			p.icbRangeRead = false;
-		} else if (p.rawMacros && mthd == 0x3400 + 4 * SWITCH_GM20B_SCRATCH_ICB_LENGTH) {
+		} else if (p.metalMacros && mthd == 0x3400 + 4 * SWITCH_GM20B_SCRATCH_ICB_LENGTH) {
 			p.icbLength = data;
-		} else if (p.rawMacros && mthd >= 0x3800 && mthd < 0x3c00 && !(mthd & 7) &&
+		} else if (p.metalMacros && mthd >= 0x3800 && mthd < 0x3c00 && !(mthd & 7) &&
 			   (mthd - 0x3800) / 8 > SWITCH_GM20B_MACRO_DRAWS_LAST &&
-			   (mthd - 0x3800) / 8 < SWITCH_GM20B_MACRO_RAW_END) {
-			rawMacro(c, p, (mthd - 0x3800) / 8, data);
+			   (mthd - 0x3800) / 8 < SWITCH_GM20B_MACRO_METAL_END) {
+			metalMacro(c, p, (mthd - 0x3800) / 8, data);
 		} else if (mthd >= 0x3800 && mthd < 0x3c00 && !(mthd & 7)) {  // CALL_MME_MACRO(j)
 			static_assert((0x3c00 - 0x3800) / 8 == SWITCH_GM20B_MACRO_SLOTS,
 				      "a call per slot");
@@ -370,13 +373,13 @@ struct SubmissionRead {
 };
 
 // A submission's pushes (`push[i].words` null: not read), `budget` bytes of them at most, and with `prof` each push's
-// profile class and marks. `rawMacros`: a raw job's stream (PushParse).
+// profile class and marks. `metalMacros`: a raw job's stream (PushParse).
 inline SubmissionRead readSubmission(const switch_gpu_scan_words *push, uint32_t count,
-				     tgm_prof *prof, bool rawMacros, uint64_t budget)
+				     tgm_prof *prof, bool metalMacros, uint64_t budget)
 {
 	SubmissionRead r = {};
 	PushParse p = {};
-	p.rawMacros = rawMacros;
+	p.metalMacros = metalMacros;
 	bool whole = true;
 	for (uint32_t i = 0; i < count; i++) {
 		if (prof && i < TGM_PROF_MAX) {

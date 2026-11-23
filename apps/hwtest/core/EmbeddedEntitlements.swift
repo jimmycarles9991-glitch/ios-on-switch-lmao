@@ -26,9 +26,9 @@ public enum EmbeddedEntitlements {
             return nil
         }
         var at = headerSize
-        for _ in 0..<count {
+        for _ in 0 ..< count {
             guard let command = word(image, at, bigEndian: false), let size = word(image, at + 4, bigEndian: false),
-                size >= 8
+                  size >= 8
             else { return nil }
             if command == codeSignature {
                 return word(image, at + 8, bigEndian: false).flatMap { signature(image, at: Int($0)) }
@@ -41,17 +41,17 @@ public enum EmbeddedEntitlements {
     static func signature(_ image: Data, at start: Int) -> [String: Any]? {
         guard word(image, start, bigEndian: true) == superBlob, let count = word(image, start + 8, bigEndian: true)
         else { return nil }
-        for index in 0..<Int(count) {
+        for index in 0 ..< Int(count) {
             let entry = start + 12 + 8 * index
             guard let slot = word(image, entry, bigEndian: true), let offset = word(image, entry + 4, bigEndian: true)
             else { return nil }
             let blob = start + Int(offset)
             guard slot == entitlementsSlot else { continue }
             guard word(image, blob, bigEndian: true) == entitlementsBlob,
-                let length = word(image, blob + 4, bigEndian: true).map(Int.init), length >= 8,
-                blob + length <= image.count
+                  let length = word(image, blob + 4, bigEndian: true).map(Int.init), length >= 8,
+                  blob + length <= image.count
             else { return nil }
-            let plist = image.subdata(in: (image.startIndex + blob + 8)..<(image.startIndex + blob + length))
+            let plist = image.subdata(in: (image.startIndex + blob + 8) ..< (image.startIndex + blob + length))
             return (try? PropertyListSerialization.propertyList(from: plist, format: nil)) as? [String: Any]
         }
         return [:]
@@ -60,7 +60,7 @@ public enum EmbeddedEntitlements {
     static func word(_ data: Data, _ at: Int, bigEndian: Bool) -> UInt32? {
         guard at >= 0, at + 4 <= data.count else { return nil }
         let start = data.startIndex + at
-        let value = data[start..<(start + 4)].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
+        let value = data[start ..< (start + 4)].reduce(UInt32(0)) { $0 << 8 | UInt32($1) }
         return bigEndian ? value : value.byteSwapped
     }
 }

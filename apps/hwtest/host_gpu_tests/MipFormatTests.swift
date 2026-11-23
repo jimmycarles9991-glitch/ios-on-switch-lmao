@@ -31,7 +31,8 @@ final class MipFormatTests: XCTestCase {
             layout.put(layout.code(of: 1, last), &bytes, texel: 0, field: last)
             let texture = try gpu.texture(format.pixel, 1, 1, usage: [.shaderRead], storage: .shared)
             texture.replace(
-                region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: bytes, bytesPerRow: layout.bytes)
+                region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: bytes, bytesPerRow: layout.bytes
+            )
             let texel = try await gpu.texels(texture)[0]
             XCTAssertEqual(texel.w, 1, "\(format.name) alpha")
             XCTAssertEqual(texel.x + texel.y + texel.z, 0, "\(format.name) colour")

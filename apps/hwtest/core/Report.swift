@@ -110,7 +110,8 @@ public struct Report: Codable, Equatable {
         let stamp = Self.stamp(started)
         run = Run(
             id: "\(bootUUID)-\(stamp)", bootUUID: bootUUID, ios: ios, started: Self.timestamp(started), status: .done,
-            current: nil, finished: nil, order: [], interruption: nil)
+            current: nil, finished: nil, order: [], interruption: nil
+        )
         self.identity = identity
         results = []
         summary = Summary(pass: 0, fail: 0, skip: 0)
@@ -209,7 +210,8 @@ public struct Report: Codable, Equatable {
         let count = { (verdict: Verdict) in results.filter { $0.verdict == verdict }.count }
         summary = Summary(
             pass: count(.pass), fail: count(.fail), skip: count(.skip), crashed: results.filter(\.crashed).count,
-            planned: run.order.count)
+            planned: run.order.count
+        )
     }
 
     public func encoded() throws -> Data {

@@ -169,12 +169,32 @@ pub trait LegalizeBuildHelpers: SSABuilder {
         src.src_ref = val.into();
     }
 
+    /// A GPR an earlier copy in this block left holding `u`, if one is near
+    fn held_imm(&mut self, _u: u32) -> Option<SSAValue> {
+        None
+    }
+
+    fn hold_imm(&mut self, _u: u32, _ssa: SSAValue) {}
+
     fn copy_alu_src(
         &mut self,
         src: &mut Src,
         reg_file: RegFile,
         src_type: SrcType,
     ) {
+        let imm = match src.src_ref {
+            SrcRef::Imm32(u)
+                if reg_file == RegFile::GPR && src_type != SrcType::F64 =>
+            {
+                Some(u)
+            }
+            _ => None,
+        };
+        if let Some(held) = imm.and_then(|u| self.held_imm(u)) {
+            src.src_ref = held.into();
+            return;
+        }
+
         let val = match src_type {
             SrcType::GPR
             | SrcType::ALU
@@ -198,6 +218,9 @@ pub trait LegalizeBuildHelpers: SSABuilder {
             std::mem::replace(&mut src.src_ref, val.clone().into());
         if val.comps() == 1 {
             self.copy_to(val[0].into(), old_src_ref.into());
+            if let Some(u) = imm {
+                self.hold_imm(u, val[0]);
+            }
         } else {
             match old_src_ref {
                 SrcRef::Imm32(u) => {
@@ -398,9 +421,52 @@ pub trait LegalizeBuildHelpers: SSABuilder {
     }
 }
 
+/// The GPR copies of 32-bit immediates legalize made in the block it is in,
+/// by value. A later source of the same value within `REACH` instructions
+/// reads the earlier copy: on SM50 most ALU forms take no 32-bit immediate, so
+/// every such source would cost a MOV32I of its own. The reach bounds how much
+/// longer a copy stays live, and with it the register pressure it adds.
+pub(crate) struct HeldImms {
+    copies: FxHashMap<u32, (SSAValue, usize)>,
+    ip: usize,
+}
+
+impl HeldImms {
+    pub(crate) const REACH: usize = 16;
+
+    pub(crate) fn new() -> Self {
+        HeldImms {
+            copies: Default::default(),
+            ip: 0,
+        }
+    }
+
+    pub(crate) fn start_block(&mut self) {
+        self.copies.clear();
+    }
+
+    pub(crate) fn set_ip(&mut self, ip: usize) {
+        self.ip = ip;
+    }
+
+    fn reuse(&mut self, u: u32) -> Option<SSAValue> {
+        let (ssa, last) = self.copies.get_mut(&u)?;
+        if self.ip - *last > Self::REACH {
+            return None;
+        }
+        *last = self.ip;
+        Some(*ssa)
+    }
+
+    fn record(&mut self, u: u32, ssa: SSAValue) {
+        self.copies.insert(u, (ssa, self.ip));
+    }
+}
+
 pub struct LegalizeBuilder<'a> {
     b: SSAInstrBuilder<'a>,
     const_tracker: &'a mut ConstTracker,
+    held_imms: Option<&'a mut HeldImms>,
 }
 
 impl<'a> LegalizeBuilder<'a> {
@@ -412,6 +478,20 @@ impl<'a> LegalizeBuilder<'a> {
         LegalizeBuilder {
             b: SSAInstrBuilder::new(sm, alloc),
             const_tracker,
+            held_imms: None,
+        }
+    }
+
+    pub(crate) fn sharing_imms(
+        sm: &'a ShaderModelInfo,
+        alloc: &'a mut SSAValueAllocator,
+        const_tracker: &'a mut ConstTracker,
+        held_imms: &'a mut HeldImms,
+    ) -> Self {
+        LegalizeBuilder {
+            b: SSAInstrBuilder::new(sm, alloc),
+            const_tracker,
+            held_imms: Some(held_imms),
         }
     }
 
@@ -456,7 +536,17 @@ impl<'a> SSABuilder for LegalizeBuilder<'a> {
     }
 }
 
-impl LegalizeBuildHelpers for LegalizeBuilder<'_> {}
+impl LegalizeBuildHelpers for LegalizeBuilder<'_> {
+    fn held_imm(&mut self, u: u32) -> Option<SSAValue> {
+        self.held_imms.as_mut()?.reuse(u)
+    }
+
+    fn hold_imm(&mut self, u: u32, ssa: SSAValue) {
+        if let Some(held) = self.held_imms.as_mut() {
+            held.record(u, ssa);
+        }
+    }
+}
 
 fn legalize_instr(
     sm: &ShaderModelInfo,
@@ -599,13 +689,16 @@ impl Shader<'_> {
             let live = SimpleLiveness::for_function(f);
             let mut pinned: FxHashSet<_> = Default::default();
             let mut const_tracker = ConstTracker::new();
+            let mut held_imms = HeldImms::new();
 
             for (bi, b) in f.blocks.iter_mut().enumerate() {
                 let bl = live.block_live(bi);
                 let bu = b.uniform;
+                held_imms.start_block();
 
                 let mut instrs = Vec::new();
                 for (ip, mut instr) in b.instrs.drain(..).enumerate() {
+                    held_imms.set_ip(ip);
                     match &instr.op {
                         Op::Pin(pin) => {
                             if let Dst::SSA(ssa) = &pin.dst {
@@ -618,10 +711,11 @@ impl Shader<'_> {
                         _ => (),
                     }
 
-                    let mut b = LegalizeBuilder::new(
+                    let mut b = LegalizeBuilder::sharing_imms(
                         sm,
                         &mut f.ssa_alloc,
                         &mut const_tracker,
+                        &mut held_imms,
                     );
                     legalize_instr(sm, &mut b, bl, bu, &pinned, ip, &mut instr);
                     b.push_instr(instr);

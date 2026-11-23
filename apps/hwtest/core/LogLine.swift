@@ -9,11 +9,12 @@ import Foundation
 public enum LogLine {
     public static let prefix = "HWTEST"
     public static let suiteID = "suite"
+    public static let rollUpID = "suite.reds"
     public static let reservedKeys: Set<String> = ["hw", "ms", "why"]
 
     public static func isValidKey(_ key: String) -> Bool {
         !key.isEmpty
-            && key.unicodeScalars.allSatisfy { ("a"..."z").contains($0) || ("0"..."9").contains($0) || $0 == "_" }
+            && key.unicodeScalars.allSatisfy { ("a" ... "z").contains($0) || ("0" ... "9").contains($0) || $0 == "_" }
     }
 
     public static func isValidID(_ id: String) -> Bool {
@@ -61,6 +62,12 @@ public enum LogLine {
         metrics.set("ios", ios)
         let failed = records.contains { $0.outcome.verdict == .fail }
         return format(id: suiteID, outcome: Outcome(failed ? .fail : .pass, metrics), milliseconds: milliseconds)
+    }
+
+    /// The run's first red per failed predicate and its skipped calls (FailedRollUp), `records` in run order: FAIL when
+    /// a failed command buffer reddened a test.
+    public static func rollUp(_ records: [TestRecord], milliseconds: Double) -> String {
+        format(id: rollUpID, outcome: FailedRollUp(records).outcome, milliseconds: milliseconds)
     }
 
     public struct Parsed: Equatable {

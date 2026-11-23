@@ -120,6 +120,7 @@ struct switch_gpu_mapping_entry {
 
 struct switch_gpu_mapping {
 	u32 count;
+	u8 sparse;
 	switch_gpu_mapping_entry entries[];
 };
 
@@ -229,6 +230,7 @@ struct Call {
 	bool deferred;
 	nvif_mem *memory;
 	unsigned vol, kind;
+	bool sparse;
 };
 
 std::vector<Call> calls;
@@ -266,10 +268,15 @@ int nvif_vmm_raw_map(nvif_vmm *vm, u64 va, u64 bytes, u8 shift, void *args, size
 	return mapCount++ == failMap ? -5 : 0;
 }
 
-int nvif_vmm_raw_unmap(nvif_vmm *vm, u64 va, u64 bytes, u8 shift, bool)
+// A removal is synchronous; a sparse PTE (nvkm writes it through its unmap) goes where nothing was, as a map's PTEs do.
+int nvif_vmm_raw_unmap(nvif_vmm *vm, u64 va, u64 bytes, u8 shift, bool sparse)
 {
 	record(vm, 'u', va, bytes, shift);
-	EXPECT_FALSE(ordered.active(owner()));
+	{
+		std::lock_guard held(callsMutex);
+		calls.back().sparse = sparse;
+	}
+	EXPECT_EQ(ordered.active(owner()), sparse);
 	return 0;
 }
 

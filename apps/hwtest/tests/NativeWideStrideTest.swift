@@ -11,7 +11,7 @@ import Metal
 /// and the right half at 4112 in one pass, the second from its stride twin. Every texel exact.
 struct NativeWideStrideTest: NativeObjectTest {
     let id = "metal.native.wide_stride"
-    let name = "Vertex layout strides past a vertex stream's 12 bits draw on the raw path"
+    let name = "Vertex layout strides past a vertex stream's 12 bits draw on the driver"
 
     static let size = 32
     static let positionStride = 2052
@@ -19,17 +19,17 @@ struct NativeWideStrideTest: NativeObjectTest {
     static let wideBind = 4112
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct In { float2 position [[attribute(0)]]; float4 colour [[attribute(1)]]; float4 tint [[attribute(2)]]; };
-        struct Out { float4 position [[position]]; float4 colour [[flat]]; };
-        vertex Out wide_vertex(In in [[stage_in]]) { return {float4(in.position, 0, 1), in.colour * in.tint}; }
-        struct Plain { float2 position [[attribute(0)]]; };
-        vertex Out dynamic_vertex(Plain in [[stage_in]], constant float4 &colour [[buffer(2)]]) {
-            return {float4(in.position, 0, 1), colour};
-        }
-        fragment float4 wide_fragment(Out in [[stage_in]]) { return in.colour; }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct In { float2 position [[attribute(0)]]; float4 colour [[attribute(1)]]; float4 tint [[attribute(2)]]; };
+    struct Out { float4 position [[position]]; float4 colour [[flat]]; };
+    vertex Out wide_vertex(In in [[stage_in]]) { return {float4(in.position, 0, 1), in.colour * in.tint}; }
+    struct Plain { float2 position [[attribute(0)]]; };
+    vertex Out dynamic_vertex(Plain in [[stage_in]], constant float4 &colour [[buffer(2)]]) {
+        return {float4(in.position, 0, 1), colour};
+    }
+    fragment float4 wide_fragment(Out in [[stage_in]]) { return in.colour; }
+    """
 
     static let quads: [(x0: Float, x1: Float, colour: SIMD4<Float>)] = [
         (-1, 0, SIMD4(1, 0, 0, 1)), (0, 1, SIMD4(0, 0, 1, 1)),
@@ -103,7 +103,7 @@ struct NativeWideStrideTest: NativeObjectTest {
         let vertices = MTLVertexDescriptor()
         vertices.attributes[0].format = .float2
         vertices.attributes[0].bufferIndex = 1
-        vertices.layouts[1].stride = Int(bitPattern: UInt.max)  // MTLBufferLayoutStrideDynamic
+        vertices.layouts[1].stride = Int(bitPattern: UInt.max) // MTLBufferLayoutStrideDynamic
         let pipeline = try await makeState(gpu, library, "dynamic_vertex", vertices)
         work.objects.append(pipeline)
         let target = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
@@ -154,7 +154,7 @@ struct NativeWideStrideTest: NativeObjectTest {
         async throws
     {
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let wrong = (0..<Self.size * Self.size).filter {
+        let wrong = (0 ..< Self.size * Self.size).filter {
             let x = $0 % Self.size
             let expected: [UInt8] = x < Self.size / 2 ? [255, 0, 0, 255] : [0, 0, 255, 255]
             return Array(pixels.pixel(x, $0 / Self.size, width: Self.size)) != expected

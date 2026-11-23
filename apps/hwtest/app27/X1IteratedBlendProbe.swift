@@ -10,12 +10,14 @@ import Metal
 /// every arm draws into one target, clears per-target blend and gives the common blend block (0x133c-0x1358) the alpha blend
 /// NVN pairs with the program. Programs are NVN's, as Ryujinx's AdvancedBlendFunctions table records them; each ends by
 /// writing TEMP0, which is the blend's result. Each program arm sets SET_ITERATED_BLEND_OPTIMIZATION (0x02f4) to NEVER:
-/// the facade's source-over states set NOOP_SOURCE_RGBA_0000 (raw_blend_kill.h), whose drop of a zero source is right for
+/// the facade's source-over states set NOOP_SOURCE_RGBA_0000 (blend_kill.h), whose drop of a zero source is right for
 /// the common block's source-over but not for a program that ignores the destination (T-v2's pass arm kept the
 /// destination on its row of zero source, 510 fields up to 255 codes off). One arm a command buffer, journaled before it
-/// runs, NVN's own sequences first and the arms expected to be refused last; a refusal ends the arm, not the probe. The
-/// kernel reports no class error for those arms on the chip, so their pixels say what ran (`pixels=`): the destination
-/// untouched (dst), the common block's blend alone (common), the program's pass (pass), or none of them (other).
+/// runs, NVN's own sequences first; a refusal ends the arm, not the probe. An arm whose words the class may refuse reports
+/// what its pixels say ran (`pixels=`): the destination untouched (dst), the common block's blend alone (common), the
+/// program's pass (pass), or none of them (other). Per-target blend left on and the common block without a separate alpha
+/// are class errors at the draw, which kill the channel: 0x5d ITERATED_BLEND_WITH_PER_TARGET_BLEND and 0x5c
+/// ITERATED_BLEND_WITHOUT_SEPERATE_ALPHA at DRAW_VERTEX_ARRAY (seen on the device), so no arm sends them.
 enum X1IteratedBlendProbe {
     static let size = 256
     static let maxRefusals = 3
@@ -31,8 +33,6 @@ enum X1IteratedBlendProbe {
         var enable: UInt32 = 1
         var alphaDestFactor: UInt32 = oneMinusSourceAlpha
         var constants: [UInt16] = []
-        var perTargetOff = true
-        var separate: UInt32 = 1
         /// Whether the claim rests on this arm: its words decoded field by field against clb197.h here (overlay's and
         /// plus-clamped's are Ryujinx's words with formulas of ours: reported, not judged)
         var judged = true
@@ -47,13 +47,16 @@ enum X1IteratedBlendProbe {
         Arm(name: "pass", program: [0x0000_2029], rgb: { s, _, _, _ in s }),
         Arm(
             name: "plus", program: [0x0010_5029], alphaDestFactor: one, rgb: { s, _, d, _ in s + d },
-            alpha: { sa, da in sa + da }),
+            alpha: { sa, da in sa + da }
+        ),
         Arm(
             name: "multiply", program: [0x0000_5001, 0x3021_7001, 0x0060_9029],
-            rgb: { s, sa, d, da in s * d + s * (1 - da) + d * (1 - sa) }),
+            rgb: { s, sa, d, da in s * d + s * (1 - da) + d * (1 - sa) }
+        ),
         Arm(
             name: "screen", program: [0x3019_6001, 0x0028_1e09, 0x3021_7001, 0x0060_9029],
-            rgb: { s, _, d, _ in s + d - s * d }),
+            rgb: { s, _, d, _ in s + d - s * d }
+        ),
         Arm(
             name: "overlay",
             program: [
@@ -63,23 +66,22 @@ enum X1IteratedBlendProbe {
             constants: [0x3800, 0x3800, 0x3800], judged: false,
             rgb: { s, sa, d, da in
                 (2 * d <= da ? 2 * s * d : sa * da - 2 * (da - d) * (sa - s)) + s * (1 - da) + d * (1 - sa)
-            }),
+            }
+        ),
         Arm(
             name: "plus_clamped_rgba", program: [0x3010_5029, 0x0000_1e11, 0x3030_3029, 0x1280_1e11, 0x0000_9029],
-            enable: 3, judged: false, rgb: { s, _, d, _ in min(s + d, 1) }, alpha: { sa, da in min(sa + da, 1) }),
+            enable: 3, judged: false, rgb: { s, _, d, _ in min(s + d, 1) }, alpha: { sa, da in min(sa + da, 1) }
+        ),
         Arm(
             name: "multiply_two", program: [0x0038_5001, 0x000c_4201],
-            rgb: { s, sa, d, da in s * d + s * (1 - da) + d * (1 - sa) }),
+            rgb: { s, sa, d, da in s * d + s * (1 - da) + d * (1 - sa) }
+        ),
         Arm(name: "ends_in_pbr", program: [0x3000_1001], rgb: nil),
-        Arm(name: "per_target_left", program: [0x0000_2029], perTargetOff: false, rgb: nil),
-        Arm(name: "no_separate_alpha", program: [0x0000_2029], separate: 0, rgb: nil),
     ]
 
     static func words(_ arm: Arm) -> [(UInt32, UInt32)] {
-        var w: [(UInt32, UInt32)] = []
-        if arm.perTargetOff { w.append((perTarget, 0)) }
-        w += [
-            (separateAlpha, arm.separate), (colorOp, add), (colorSource, one), (colorDest, oneMinusSourceAlpha),
+        var w: [(UInt32, UInt32)] = [
+            (perTarget, 0), (separateAlpha, 1), (colorOp, add), (colorSource, one), (colorDest, oneMinusSourceAlpha),
             (alphaOp, add), (alphaSource, one), (alphaDest, arm.alphaDestFactor),
         ]
         for (j, c) in arm.constants.enumerated() {
@@ -115,11 +117,11 @@ enum X1IteratedBlendProbe {
 
     static func judge(_ arm: Arm, _ got: [UInt8], rgb: (Double, Double, Double, Double) -> Double) -> Judged {
         var j = Judged()
-        for p in 0..<(size * size) {
+        for p in 0 ..< (size * size) {
             let (x, y) = (p % size, p / size)
             let s = source(x, y)
             let d = destination(x, y).map { Double($0) / 255 }
-            for c in 0..<4 {
+            for c in 0 ..< 4 {
                 let value = c == 3 ? arm.alpha(s[3], d[3]) : rgb(s[c], s[3], d[c], d[3])
                 let diff = abs(Int(got[p * 4 + c]) - X1Reference.unorm(value, top: 255))
                 if diff > 0 { j.inexact += 1 }
@@ -145,7 +147,7 @@ enum X1IteratedBlendProbe {
         probe: "d14", risky: true, timeout: 180
     ) { gpu in
         let journal = ProbeJournal(probe: "gpu.x1.iterated_blend")
-        let initial = (0..<size * size).flatMap { destination($0 % size, $0 / size).map(UInt8.init) }
+        let initial = (0 ..< size * size).flatMap { destination($0 % size, $0 / size).map(UInt8.init) }
         let state = try gpu.render(fragment: "x1_ramp_source", format: .bgra8Unorm, configure: X1RawProbes.sourceOver)
         var metrics = Metrics()
         metrics.set("rule", "fetch.iterated")
@@ -159,13 +161,14 @@ enum X1IteratedBlendProbe {
                 continue
             }
             journal.starting(
-                "\(arm.name) words=\(words(arm).map { String(format: "%04x=%x", $0.0, $0.1) }.joined(separator: ","))")
+                "\(arm.name) words=\(words(arm).map { String(format: "%04x=%x", $0.0, $0.1) }.joined(separator: ","))"
+            )
             let target = try gpu.texture(.bgra8Unorm, size, size, usage: [.renderTarget, .shaderRead])
             try await gpu.upload(initial, to: target, bytesPerRow: size * 4)
             let isNVN = !arm.program.isEmpty && arm.rgb != nil && arm.judged
             if isNVN { nvnRun += 1 }
             do {
-                let drawn = try await RawMethods.draw(gpu, before: words(arm), after: restore) { commands in
+                let drawn = try await GM20BMethods.draw(gpu, before: words(arm), after: restore) { commands in
                     let encoder = commands.makeRenderCommandEncoder(descriptor: X1RawProbes.pass(target, load: .load))!
                     encoder.setRenderPipelineState(state)
                     var corners = GPU.fullScreen
@@ -197,16 +200,16 @@ enum X1IteratedBlendProbe {
         metrics.set("nvn_within_one", nvnWithinOne)
         metrics.set("refusals", refusals)
         metrics.set("arms", outcomes.joined(separator: ","))
-        let offPath = paths.filter { $0 != "raw" }
+        let offPath = paths.filter { $0 != "gm20b" }
         let verdict: ClaimVerdict =
             emitted == 0 || !offPath.isEmpty
-            ? .inconclusive : nvnAccepted == nvnRun && nvnWithinOne == nvnRun ? .pass : .fail
+                ? .inconclusive : nvnAccepted == nvnRun && nvnWithinOne == nvnRun ? .pass : .fail
         metrics.set("emitted", emitted)
         let note =
             emitted == 0
-            ? "the probe's methods reached no draw"
-            : !offPath.isEmpty
-                ? "not on the raw path: \(offPath.joined(separator: ","))"
+                ? "the probe's methods reached no draw"
+                : !offPath.isEmpty
+                ? "not on the driver: \(offPath.joined(separator: ","))"
                 : verdict == .fail ? "NVN's programs refused or beyond one code: see arms" : ""
         return ProbeFinding(verdict, metrics, note: note)
     }

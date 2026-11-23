@@ -6,7 +6,7 @@ import XCTest
 
 /// The X1 probes that need only Metal, on this Mac's GPU: each must run to its finding, and its numbers are Apple's
 /// answers for the probes whose reference is an Apple GPU (which E4 model, d17's second pass, the sRGB and unorm16
-/// rules). Their verdicts here are INCONCLUSIVE, since nothing runs on the raw path.
+/// rules). Their verdicts here are INCONCLUSIVE, since nothing runs on the driver.
 final class X1ProbeTests: XCTestCase {
     private func makeGPU() throws -> GPU {
         let directory =
@@ -55,6 +55,8 @@ final class X1ProbeTests: XCTestCase {
         try await check("blend_exact", X1BlendProbes.exact)
         try await check("f32_filter", X1FilterProbes.f32Filter)
         try await check("mip_filter", X1FilterProbes.mipFilter)
+        try await check("filter_weight_bits", X1FilterProbes.filterWeights)
+        try await check("rop_unorm10_rounding", X1Unorm10Probe.rounding)
         try await check("visibility", X1PassProbes.visibility)
     }
 }

@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
-// raw::BlitEncoder::fillTexels's words: the remap constants, then the kit's rectangle copy of a block-linear level onto itself
-// with every destination component a constant (raw_fresh.h copyFillOf), as the copy engine takes them.
+// gm20b::BlitEncoder::fillTexels's words: the remap constants, then the kit's rectangle copy of a block-linear level onto itself
+// with every destination component a constant (fresh.h copyFillOf), as the copy engine takes them.
 #include <cstdint>
 #include <vector>
 
 #include <gtest/gtest.h>
 
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_fresh.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_kit.h"
+#include "drivers/TegraGM20BMetal/fresh.h"
+#include "drivers/TegraGM20BMetal/kit.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BEmitCopy.h"
 #include "push_words.h"
 
@@ -18,22 +18,22 @@ using switch_gm20b_test::Methods;
 
 std::vector<Method> fill(uint32_t format, uint32_t width, uint32_t height, uint32_t pitch, uint8_t blockHeight)
 {
-    raw::FreshTexel texel;
-    raw::CopyFill f;
-    EXPECT_TRUE(raw::freshPatternTexel(format, texel));
-    EXPECT_TRUE(raw::copyFillOf(texel.bytes, texel.size, f));
+    gm20b::FreshTexel texel;
+    gm20b::CopyFill f;
+    EXPECT_TRUE(gm20b::freshPatternTexel(format, texel));
+    EXPECT_TRUE(gm20b::copyFillOf(texel.bytes, texel.size, f));
     std::vector<uint32_t> words(256);
-    raw::Push p{words.data(), words.data() + words.size()};
-    p.m(NVB0B5_SET_REMAP_CONST_A, f.constA, raw::SUBC_COPY);
-    p.m(NVB0B5_SET_REMAP_CONST_B, f.constB, raw::SUBC_COPY);
-    raw::CopySurface side;
+    gm20b::Push p{words.data(), words.data() + words.size()};
+    p.m(NVB0B5_SET_REMAP_CONST_A, f.constA, gm20b::SUBC_COPY);
+    p.m(NVB0B5_SET_REMAP_CONST_B, f.constB, gm20b::SUBC_COPY);
+    gm20b::CopySurface side;
     side.va = 0x40000000;
     side.pitch = pitch;
     side.blockLinear = true;
     side.height = height;
     side.depth = 1;
     side.blockHeight = blockHeight;
-    raw::emitCopy(p, side, side, width, height, f.remap, false);
+    gm20b::emitCopy(p, side, side, width, height, f.remap, false);
     words.resize(size_t(p.at - words.data()));
     return Methods(words);
 }
@@ -41,7 +41,7 @@ std::vector<Method> fill(uint32_t format, uint32_t width, uint32_t height, uint3
 uint32_t value(const std::vector<Method> &methods, uint32_t method)
 {
     for (const Method &m : methods)
-        if (m.subchannel == raw::SUBC_COPY && m.method == method)
+        if (m.subchannel == gm20b::SUBC_COPY && m.method == method)
             return m.value;
     ADD_FAILURE() << "no method 0x" << std::hex << method;
     return 0;

@@ -75,7 +75,8 @@ struct NativeBinaryArchiveTest: NativeObjectTest {
         work.objects.append(again)
         let reread = Self.miss {
             _ = try device.makeRenderPipelineState(
-                descriptor: Self.render(gpu, again), options: .failOnBinaryArchiveMiss)
+                descriptor: Self.render(gpu, again), options: .failOnBinaryArchiveMiss
+            )
         }
         metrics.set("reopened", reread)
         if reread != "made" { work.failures.append("a serialized archive lost its state") }

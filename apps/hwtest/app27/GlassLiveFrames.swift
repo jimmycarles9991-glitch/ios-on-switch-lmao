@@ -15,8 +15,8 @@ struct LiveImage {
     /// The buffer's rectangle for a region of the UI given as fractions of its width and height, centred.
     func rect(uiX: ClosedRange<Double>, uiY: ClosedRange<Double>) -> (x: Range<Int>, y: Range<Int>) {
         let (across, down) = turned ? (uiY, uiX) : (uiX, uiY)
-        let x = Int(across.lowerBound * Double(width))..<Int(across.upperBound * Double(width))
-        let y = Int(down.lowerBound * Double(height))..<Int(down.upperBound * Double(height))
+        let x = Int(across.lowerBound * Double(width)) ..< Int(across.upperBound * Double(width))
+        let y = Int(down.lowerBound * Double(height)) ..< Int(down.upperBound * Double(height))
         return (x, y)
     }
 
@@ -52,11 +52,11 @@ struct LiveImage {
 
     /// FNV-1a over the region's rows (all of the buffer without one).
     func hash(_ region: (x: Range<Int>, y: Range<Int>)? = nil) -> UInt64 {
-        let (xs, ys) = region ?? (0..<width, 0..<height)
+        let (xs, ys) = region ?? (0 ..< width, 0 ..< height)
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for y in ys {
             let row = base + (y * width + xs.lowerBound) * 4
-            for i in 0..<(xs.count * 4 / 8) {
+            for i in 0 ..< (xs.count * 4 / 8) {
                 hash = (hash ^ row.loadUnaligned(fromByteOffset: i * 8, as: UInt64.self)) &* 0x100_0000_01b3
             }
         }
@@ -68,10 +68,11 @@ struct LiveImage {
     static func png(_ bgra: Data, width: Int, height: Int) -> Data? {
         let info = CGBitmapInfo.byteOrder32Little.rawValue | CGImageAlphaInfo.noneSkipFirst.rawValue
         guard let provider = CGDataProvider(data: bgra as CFData),
-            let image = CGImage(
-                width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
-                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: info),
-                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+              let image = CGImage(
+                  width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGBitmapInfo(rawValue: info),
+                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              )
         else { return nil }
         let out = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil)

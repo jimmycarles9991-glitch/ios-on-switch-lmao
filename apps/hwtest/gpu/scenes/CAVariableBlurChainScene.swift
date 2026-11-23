@@ -13,10 +13,11 @@ import Metal
 /// Per chain (f16, u8) one count per level, slash-separated ("0" when every level has none): <c>_nan=, <c>_inf=,
 /// <c>_oor= (f16: finite but outside [0, 1]), <c>_mag= (R and B over 200/255, G under 80/255), <c>_stale= (the
 /// sentinel: texels the level's pass never wrote), <c>_top= and <c>_bottom= (texels of those kinds in the level's
-/// first and last row); <c>_mean= each level's mean over its channels x 255, to set the raw facade's run beside m2v's;
-/// <c>_path= the chain command buffer's path. Any such texel fails the scene, naming the chain and level.
+/// first and last row); <c>_mean= each level's mean over its channels x 255; <c>_path= the chain command buffer's
+/// path. Any such texel fails the scene, naming the chain and level.
 struct CAVariableBlurChainScene: GPUScene {
     let id = "gpu.blur_chain_nan"
+    let framework = true
     let name = "CA variable blur chain, 776x24 in 10 levels: NaN, magenta and stale texels per level"
 
     static let width = 776
@@ -62,16 +63,16 @@ struct CAVariableBlurChainScene: GPUScene {
                 Patterns.bytes(picture, chain.format), to: texture, bytesPerRow: Self.width * chain.format.bytesPerTexel
             )
             try await gpu.run { commands in
-                for level in 1..<Self.levels { Self.clear(commands, texture, level: level, to: chain.sentinel) }
+                for level in 1 ..< Self.levels { Self.clear(commands, texture, level: level, to: chain.sentinel) }
             }
             let timing = try await gpu.run(tolerateError: true) { commands in
-                for level in 1..<Self.levels {
+                for level in 1 ..< Self.levels {
                     Self.downsample(commands, pipeline, texture, level: level, colour1: chain.format.metal, gpu: gpu)
                 }
             }
             result.metrics.set(chain.key + "_path", timing.path)
             var tallies: [LevelTally] = []
-            for level in 0..<Self.levels {
+            for level in 0 ..< Self.levels {
                 let (w, h) = Self.extent(level)
                 let bytes = try await gpu.read(texture, bytesPerPixel: chain.format.bytesPerTexel, level: level)
                 tallies.append(LevelTally(bytes, chain, width: w, height: h))
@@ -90,7 +91,8 @@ struct CAVariableBlurChainScene: GPUScene {
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[0].clearColor = MTLClearColor(
-            red: Double(colour[0]), green: Double(colour[1]), blue: Double(colour[2]), alpha: Double(colour[3]))
+            red: Double(colour[0]), green: Double(colour[1]), blue: Double(colour[2]), alpha: Double(colour[3])
+        )
         commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
     }
 
@@ -106,19 +108,21 @@ struct CAVariableBlurChainScene: GPUScene {
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
         pass.colorAttachments[1].texture = try? gpu.texture(
-            colour1, w, h, usage: [.renderTarget], storage: .memoryless)
+            colour1, w, h, usage: [.renderTarget], storage: .memoryless
+        )
         pass.colorAttachments[1].loadAction = .dontCare
         pass.colorAttachments[1].storeAction = .dontCare
         let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
         encoder.setRenderPipelineState(pipeline)
         CAState.bind(
             encoder, vertices: CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(1, 1, 1, 1)),
-            source: texture)
+            source: texture
+        )
         var texmat = SIMD4<Float>(1, 1, 0, 0)
         var u: [Float] = [Float(level - 1), 1 / Float(sw), 1 / Float(sh), 0, 0, 0, 1, 1]
         encoder.setVertexBytes(&texmat, length: MemoryLayout<SIMD4<Float>>.size, index: 3)
         encoder.setFragmentBytes(&u, length: u.count * 4, index: 1)
-        for slot in 2..<4 { encoder.setFragmentTexture(texture, index: slot) }
+        for slot in 2 ..< 4 { encoder.setFragmentTexture(texture, index: slot) }
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
     }
@@ -136,7 +140,8 @@ struct CAVariableBlurChainScene: GPUScene {
             result.metrics.set("\(chain.key)_\(name)", text)
         }
         result.metrics.set(
-            chain.key + "_mean", tallies.map { String(Int(($0.mean * 255).rounded())) }.joined(separator: "/"))
+            chain.key + "_mean", tallies.map { String(Int(($0.mean * 255).rounded())) }.joined(separator: "/")
+        )
         for (level, tally) in tallies.enumerated() where tally.bad > 0 {
             result.expect(false, "\(chain.key) level \(level) (\(tally.width)x\(tally.height)): \(tally.summary)")
         }
@@ -156,10 +161,10 @@ struct LevelTally {
         let size = chain.format.bytesPerTexel
         var sum = 0.0
         var finite = 0
-        for y in 0..<height {
-            for x in 0..<width {
+        for y in 0 ..< height {
+            for x in 0 ..< width {
                 let at = (y * width + x) * size
-                let v = chain.format.decode(bytes[at..<(at + size)])
+                let v = chain.format.decode(bytes[at ..< (at + size)])
                 let bad: Bool
                 if v.contains(where: \.isNaN) {
                     nan += 1

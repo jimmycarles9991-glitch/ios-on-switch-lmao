@@ -425,11 +425,8 @@ fn render_state(
     let shadow = stencil::shadow_stencil(r, fragment, p)?;
     // The fragment's own depth test against this pipeline's state.
     let shader_tests = shader_tests::shader_tests(r, fragment, p)?;
-    // The extended-range blends the fragment computes over input attachments, against this
-    // pipeline's attachments.
-    let input_blends = fetch::input_blends(r, fragment, p)?;
     let fs = fragment.map(|f| &f.interface);
-    let mut gs = graphics::graphics_state(r, (geometry, fs), vi, ts, &input_blends, p)?;
+    let mut gs = graphics::graphics_state(r, (geometry, fs), vi, ts, p)?;
     // The color writes the fragment rounds against this pipeline's attachments, once the
     // descriptor's checks of its outputs passed.
     crate::pipeline::color_writes::check(
@@ -438,10 +435,6 @@ fn render_state(
         (r.alpha_to_coverage, r.texture_write_rounding_mode),
         p,
     )?;
-    crate::pipeline::two_plane::check(fragment, &r.color_attachments, p)?;
-    let alphas = crate::pipeline::two_plane::alphas(&r.color_attachments, p);
-    crate::pipeline::two_plane::split_colors(&mut gs.color_attachments, &alphas);
-    let storage = crate::pipeline::two_plane::split_storage(storage, &alphas);
     gs.fragment_imageblock = ib;
     gs.color_outputs = color_outputs(fs, &storage)?;
     gs.storage_attachments = storage;
@@ -602,7 +595,6 @@ fn binding_source(slot: ResourceSlot) -> BindingSource {
         },
         ResourceKind::RawTexture => BindingSource::RawTexture(metal(SlotClass::Texture)),
         ResourceKind::TexturePlane => BindingSource::TexturePlane(metal(SlotClass::Texture)),
-        ResourceKind::ExtendedShadow(color) => BindingSource::ExtendedShadow(color),
     }
 }
 

@@ -24,7 +24,8 @@ struct PromiseVICPathTest: GPUPathTest {
         guard
             CVPixelBufferCreate(
                 nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary,
-                &buffer) == kCVReturnSuccess, let buffer
+                &buffer
+            ) == kCVReturnSuccess, let buffer
         else { throw TestFailure("no \(width)x\(height) NV12 pixel buffer") }
         return buffer
     }
@@ -48,9 +49,9 @@ struct PromiseVICPathTest: GPUPathTest {
         guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 0) else { return -1 }
         let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0)
         var wrong = 0
-        for row in 0..<CVPixelBufferGetHeightOfPlane(buffer, 0) {
+        for row in 0 ..< CVPixelBufferGetHeightOfPlane(buffer, 0) {
             let line = (base + row * rowBytes).assumingMemoryBound(to: UInt8.self)
-            for x in 0..<CVPixelBufferGetWidthOfPlane(buffer, 0) where abs(Int(line[x]) - Int(luma)) > 2 {
+            for x in 0 ..< CVPixelBufferGetWidthOfPlane(buffer, 0) where abs(Int(line[x]) - Int(luma)) > 2 {
                 wrong += 1
             }
         }
@@ -74,7 +75,8 @@ struct PromiseVICPathTest: GPUPathTest {
         let (handle, promise) = try PromiseCancelPathTest.promise(unsafeBitCast(backing, to: IOSurface.self), maker)
         defer {
             _ = maker.call(
-                PromiseCancelPathTest.boFree, GPUConnection.words(PromiseCancelPathTest.halves(handle)), outputSize: 0)
+                PromiseCancelPathTest.boFree, GPUConnection.words(PromiseCancelPathTest.halves(handle)), outputSize: 0
+            )
         }
         let start = DispatchTime.now()
         let cancel = TransferCancel()
@@ -103,7 +105,8 @@ struct PromiseVICPathTest: GPUPathTest {
         }
         if afterMs > Self.goesOnMs {
             failures.append(
-                String(format: "the transfer returned %.1f ms after the cancel (at most %.0f)", afterMs, Self.goesOnMs))
+                String(format: "the transfer returned %.1f ms after the cancel (at most %.0f)", afterMs, Self.goesOnMs)
+            )
         }
         if wrong != 0 { failures.append("\(wrong) scaled luma samples are off the surface's fill \(Self.luma)") }
         return failures

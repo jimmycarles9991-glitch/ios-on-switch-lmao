@@ -5,7 +5,7 @@ public enum Gaussian {
     /// Normalised weights from -radius to +radius; radius ceil(3 sigma) unless given.
     public static func weights(sigma: Double, radius: Int? = nil) -> [Double] {
         let r = radius ?? Int((3 * sigma).rounded(.up))
-        let raw = (-r...r).map { exp(-Double($0 * $0) / (2 * sigma * sigma)) }
+        let raw = (-r ... r).map { exp(-Double($0 * $0) / (2 * sigma * sigma)) }
         let sum = raw.reduce(0, +)
         return raw.map { $0 / sum }
     }

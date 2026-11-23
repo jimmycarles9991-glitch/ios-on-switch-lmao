@@ -94,8 +94,8 @@ public enum VideoAlpha {
     public static func decode(_ c: Codes, range: Range) -> SIMD3<Float> {
         let (luma, pb, pr): (Float, Float, Float) =
             range == .video
-            ? ((Float(c.y) - 16) / 219, (Float(c.cb) - 128) / 224, (Float(c.cr) - 128) / 224)
-            : (Float(c.y) / 255, (Float(c.cb) - 128) / 255, (Float(c.cr) - 128) / 255)
+                ? ((Float(c.y) - 16) / 219, (Float(c.cb) - 128) / 224, (Float(c.cr) - 128) / 224)
+                : (Float(c.y) / 255, (Float(c.cb) - 128) / 255, (Float(c.cr) - 128) / 255)
         let r = luma + 2 * (1 - kr) * pr
         let b = luma + 2 * (1 - kb) * pb
         let g = (luma - kr * r - kb * b) / kg

@@ -14,28 +14,23 @@ def index(packs: int, observed: int, magic: bytes = b'SWSEEDPK') -> bytes:
 
 
 class StageManifestTest(unittest.TestCase):
-    def test_packed_native_records_and_analysis_reach_the_runtime_lookup_paths(self):
+    def test_packed_native_records_reach_the_runtime_lookup_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            records = 'raw-0123456789abcdef/'
-            analysis = 'native-analysis/'
+            records = 'rec-0123456789abcdef/'
+            reply = 'msl/' + 'a' * 64 + '.reply'
             inputs = {
                 'base/ngpu/addons/TegraGM20BMetal.bundle/TegraGM20BMetal': b'plugin',
-                'seed/SEED': b'compatible seed',
+                'seed/' + reply: b'compiler reply',
                 'seed/MANIFEST.json': b'{}',
-                'pack': b'compatibility records',
                 'raw/pack.bin': b'raw pipeline pack',
                 'native/' + records + 'index': index(2, 1),
                 'native/' + records + 'packs/000': b'native records',
-                'native/' + analysis + 'index': index(3, 2),
-                'native/' + analysis + 'packs/000': b'native analyses',
-                'native/' + analysis + 'packs/001': b'more native analyses',
             }
             host = {
                 'native/manifest.json': b'native manifest',
                 'native/coverage.json': b'{"complete":false}',
                 'native/' + records + 'packs/001': b'derived native records',
-                'native/' + analysis + 'packs/002': b'derived native analyses',
             }
             for name, data in (inputs | host).items():
                 path = root / name
@@ -45,7 +40,6 @@ class StageManifestTest(unittest.TestCase):
             args = ['stage_manifest.py', '--self', 'bundle.stage', '--out', str(output)]
             for name in ('base', 'seed', 'raw', 'native'):
                 args += ['--' + name, str(root / name), '--' + name + '-rlocation', name]
-            args += ['--pack', str(root / 'pack'), '--pack-rlocation', 'pack']
             with mock.patch.object(sys, 'argv', args):
                 stage_manifest.main()
             lines = output.read_text().splitlines()
@@ -55,21 +49,14 @@ class StageManifestTest(unittest.TestCase):
             expected = {
                 stage_manifest.RAW + '/native/' + records + 'index': 'native/' + records + 'index',
                 stage_manifest.RAW + '/native/' + records + 'packs/000': 'native/' + records + 'packs/000',
-                stage_manifest.SEED + '/' + analysis + 'index': 'native/' + analysis + 'index',
-                stage_manifest.SEED + '/' + analysis + 'packs/000': 'native/' + analysis + 'packs/000',
-                stage_manifest.SEED + '/' + analysis + 'packs/001': 'native/' + analysis + 'packs/001',
                 stage_manifest.RAW + '/pack.bin': 'raw/pack.bin',
-                stage_manifest.SEED + '/packs/000': 'pack',
+                stage_manifest.SEED + '/' + reply: 'seed/' + reply,
             }
             for target, source in expected.items():
                 data = inputs[source]
                 self.assertEqual(files[target], [hashlib.sha256(data).hexdigest(), str(len(data)), '644', source])
             self.assertFalse([target for target in files if target.endswith(('manifest.json', 'coverage.json'))])
-            derived = [
-                stage_manifest.RAW + '/native/' + records + 'packs/001',
-                stage_manifest.SEED + '/' + analysis + 'packs/002',
-            ]
-            self.assertFalse([target for target in derived if target in files])
+            self.assertNotIn(stage_manifest.RAW + '/native/' + records + 'packs/001', files)
             plugin = 'ngpu/addons/TegraGM20BMetal.bundle/TegraGM20BMetal'
             self.assertEqual(files[plugin][2], '755')
             for digest, length, _, source in files.values():
@@ -82,15 +69,14 @@ class StageManifestTest(unittest.TestCase):
             root = Path(directory)
             for name, data in {
                 'base/ngpu/addons/TegraGM20BMetal.bundle/TegraGM20BMetal': b'plugin',
-                'seed/SEED': b'seed',
-                'pack': b'records',
+                'seed/MANIFEST.json': b'{}',
                 'raw/pack.bin': b'raw pipeline pack',
-                'native/native-analysis/index': index(1, 1),
-                'native/native-analysis/packs/000': b'analyses',
+                'native/rec-0123456789abcdef/index': index(1, 1),
+                'native/rec-0123456789abcdef/packs/000': b'records',
             }.items():
                 (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_bytes(data)
-            seed = ['--pack', str(root / 'pack'), '--pack-rlocation', 'pack']
+            seed = []
             for name in ('seed', 'raw', 'native'):
                 seed += ['--' + name, str(root / name), '--' + name + '-rlocation', name]
             base = ['--self', 'bundle.stage', '--base', str(root / 'base'), '--base-rlocation', 'base']
@@ -103,19 +89,16 @@ class StageManifestTest(unittest.TestCase):
                 with mock.patch.object(sys, 'argv', ['stage_manifest.py', *args]):
                     stage_manifest.main()
             self.assertEqual((root / 'joined.stage').read_text(), (root / 'once.stage').read_text())
-            self.assertEqual(len((root / 'once.stage').read_text().splitlines()), 1 + 6)
+            self.assertEqual(len((root / 'once.stage').read_text().splitlines()), 1 + 5)
 
     def test_a_packed_directory_without_a_seed_pack_index_is_refused(self):
         with tempfile.TemporaryDirectory() as directory:
             native = Path(directory)
-            for name, data in (
-                ('raw-0123456789abcdef/index', index(2, 1, b'NOTASEED')),
-                ('native-analysis/index', b''),
-            ):
-                (native / name).parent.mkdir(parents=True)
-                (native / name).write_bytes(data)
-                with self.assertRaisesRegex(ValueError, 'seed pack'):
-                    stage_manifest.native_target(native, name.replace('index', 'packs/000'))
+            name = 'rec-0123456789abcdef/index'
+            (native / name).parent.mkdir(parents=True)
+            (native / name).write_bytes(index(2, 1, b'NOTASEED'))
+            with self.assertRaisesRegex(ValueError, 'seed pack'):
+                stage_manifest.native_target(native, 'rec-0123456789abcdef/packs/000')
 
 
 if __name__ == '__main__':

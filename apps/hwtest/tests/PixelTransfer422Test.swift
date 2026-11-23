@@ -21,14 +21,15 @@ struct PixelTransfer422Test: HWTest {
         defer { VTPixelTransferSessionInvalidate(session) }
         let clip: UInt16 = 0x71C
         let source = try PatternPixels.make(
-            Pattern(width: 1920, height: 1080, clip: clip), frame: 5, bitDepth: 8, pool: nil)
+            Pattern(width: 1920, height: 1080, clip: clip), frame: 5, bitDepth: 8, pool: nil
+        )
         let (width, height) = (960, 540)
         let format = kCVPixelFormatType_422YpCbCr8BiPlanarVideoRange
         var destination: CVPixelBuffer?
         let attributes = PatternPixels.attributes(width: width, height: height, format: format)
         guard
             CVPixelBufferCreate(nil, width, height, format, attributes as CFDictionary, &destination)
-                == kCVReturnSuccess,
+            == kCVReturnSuccess,
             let destination
         else { return .fail("CVPixelBufferCreate \(width)x\(height) 422v") }
         let start = CFAbsoluteTimeGetCurrent()
@@ -36,11 +37,13 @@ struct PixelTransfer422Test: HWTest {
         let milliseconds = (CFAbsoluteTimeGetCurrent() - start) * 1000
         guard status == noErr else { return .fail("VTPixelTransferSessionTransferImage: \(status)") }
         let check = PatternPixels.check(
-            destination, pattern: Pattern(width: width, height: height, clip: clip), expected: 5)
+            destination, pattern: Pattern(width: width, height: height, clip: clip), expected: 5
+        )
         var metrics = Metrics()
         metrics.set("convert_1080p_422v_ms", milliseconds, digits: 2)
         metrics.set("convert_err", max(check.lumaError, check.chromaError), digits: 1)
         return .judged(
-            [("1080p NV12 -> 960x540 422v keeps the pattern", check.matches(frame: 5, tolerance: 12))], metrics)
+            [("1080p NV12 -> 960x540 422v keeps the pattern", check.matches(frame: 5, tolerance: 12))], metrics
+        )
     }
 }

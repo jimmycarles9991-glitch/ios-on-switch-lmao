@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-/// gpu.raw.argument_array_of_arrays and gpu.raw.plain_struct_encoder: buffers whose layout each function's own encoder
+/// gpu.gm20b.argument_array_of_arrays and gpu.gm20b.plain_struct_encoder: buffers whose layout each function's own encoder
 /// gives (newArgumentEncoderWithBufferIndex:). The cases' expected lengths, alignments and offsets are Metal's for
 /// these structs on an M4 Max under macOS 27.2, and their pixels and words what the same draw and dispatch gave there.
 struct GridInner {

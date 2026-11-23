@@ -11,14 +11,16 @@ final class PeerEntitlementsTests: XCTestCase {
         let root = environment["TEST_SRCDIR"].map { $0 + "/" } ?? ""
         let data = try Data(contentsOf: URL(fileURLWithPath: root + path))
         let entitlements = try XCTUnwrap(
-            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+            PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        )
         XCTAssertTrue(EmbeddedEntitlements.userClientClasses(entitlements).contains("IOSurfaceRootUserClient"))
     }
 
     func testOneClassNamedAloneIsRead() {
         XCTAssertEqual(
             EmbeddedEntitlements.userClientClasses([EmbeddedEntitlements.userClientKey: "IOSurfaceRootUserClient"]),
-            ["IOSurfaceRootUserClient"])
+            ["IOSurfaceRootUserClient"]
+        )
         XCTAssertEqual(EmbeddedEntitlements.userClientClasses([:]), [])
     }
 }

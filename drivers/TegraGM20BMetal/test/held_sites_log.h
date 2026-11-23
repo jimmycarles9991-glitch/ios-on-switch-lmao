@@ -10,7 +10,8 @@ extern "C" {
 #endif
 
 enum {
-    kHeldSitesFrames = 24
+    kHeldSitesFrames = 24,
+    kHeldSitesThreadName = 48
 };
 
 // One allocation, free or realloc, in the order the hook ran (a block's free is logged before it can be handed out again)
@@ -21,6 +22,8 @@ struct held_sites_event {
     uint32_t frames;
     uint32_t ready;                     // written last, with __atomic release
     uintptr_t frame[kHeldSitesFrames];  // the allocation's return addresses, innermost first
+    bool encoding;                      // the allocation ran on the thread that started the window
+    char thread[kHeldSitesThreadName];  // otherwise its thread's name, or the label of the queue it ran
 };
 
 void held_sites_start(void);

@@ -410,8 +410,9 @@ fn a_linked_function_that_cannot_resolve_the_reference_is_a_typed_descriptor_err
     );
 }
 
-/// A linked module whose constants, static initializer, or linkage signature linking does not
-/// bind yet is refused at the surviving call, naming the linked function.
+/// A linked module whose constants or static initializer linking does not bind yet, or a
+/// linked-constants module that still declares a constant, is refused at the surviving call, naming
+/// the linked function.
 #[test]
 fn linked_module_features_not_implemented_are_refused_at_the_call() {
     let at = Location::function(DiagName::new("k"), Some(0), Some(0));
@@ -435,6 +436,20 @@ fn linked_module_features_not_implemented_are_refused_at_the_call() {
         type_name: DiagName::new("int"),
     }];
     let mut signature = callee("f", &[]);
+    let i32s = code(&mut signature)
+        .module
+        .types()
+        .lookup(&Type::Int(32))
+        .unwrap();
+    code(&mut signature).abi.function_constants = vec![FunctionConstantDecl {
+        index: 0,
+        global: GlobalId::new(0),
+        ty: i32s,
+        flag: None,
+        data_type: None,
+        name: DiagName::new("c"),
+        type_name: DiagName::new("int"),
+    }];
     code(&mut signature).abi.linkage_signature = Some(crate::abi::LinkageSignature {
         kind: crate::abi::LinkageSignatureKind::LinkedConstants,
         operands: 0,
@@ -454,6 +469,29 @@ fn linked_module_features_not_implemented_are_refused_at_the_call() {
         assert_eq!(u.symbol, Some(DiagName::new("f")), "{u}");
         assert_eq!(u.location, Some(at.clone()), "{u}");
     }
+}
+
+/// A linked module the front end closed links as any module does: MPS links its kernels with the
+/// front end's specialization of a visible function (a linked-constants signature, renamed to the
+/// specialized name), which references a stitched library's function (a stitching signature).
+/// Both calls resolve and both bodies are inlined.
+#[test]
+fn a_linked_module_with_a_signature_links_as_any_other() {
+    use crate::abi::{LinkageSignature, LinkageSignatureKind};
+    let mut specialized = callee("f", &["g"]);
+    code(&mut specialized).abi.linkage_signature = Some(LinkageSignature {
+        kind: LinkageSignatureKind::LinkedConstants,
+        operands: 2,
+    });
+    let mut stitched = callee("g", &[]);
+    code(&mut stitched).abi.linkage_signature = Some(LinkageSignature {
+        kind: LinkageSignatureKind::StitchingModules,
+        operands: 2,
+    });
+    let e = link(&[specialized, stitched]).unwrap_or_else(|e| panic!("{e}"));
+    let t = text(&e);
+    assert!(!t.contains("call "), "{t}");
+    assert_eq!(t.matches("mul i32").count(), 2, "{t}");
 }
 
 /// A linked module whose visible function `name` is `i32 (i32 x)`: `x * k`, `k` its uint

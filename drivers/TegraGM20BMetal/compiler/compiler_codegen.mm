@@ -18,8 +18,8 @@
 #include "MetalABI.h"
 #include "SwitchCompileReply.h"
 #include "TegraGM20BCompilerABI.h"
-#include "../raw/runtime/raw_codegen_request.h"
-#include "../raw/runtime/raw_library_entry.h"
+#include "../codegen_request.h"
+#include "../library_entry.h"
 
 namespace switch_compiler {
 namespace {
@@ -74,7 +74,7 @@ std::string replyName(const uint8_t uuid[16], uint32_t type, const std::string &
     return switch_compile_reply::hex(digest, sizeof digest) + ".reply";
 }
 
-bool readReply(const std::string &dir, const std::string &name, raw::MadeLibrary &out)
+bool readReply(const std::string &dir, const std::string &name, gm20b::MadeLibrary &out)
 {
     if (dir.empty())
         return false;
@@ -110,7 +110,7 @@ std::string osBuild()
 
 // Written beside its name and renamed in, then its request and provenance (SwitchCompileReply.h) as the harvest reads them
 void keepReply(const std::string &dir, const std::string &name, const uint8_t uuid[16], uint32_t type,
-               const std::string &request, const raw::MadeLibrary &made)
+               const std::string &request, const gm20b::MadeLibrary &made)
 {
     ReplyHeader h = {kReplyMagic, uint32_t(made.warnings.size()), made.metallib.size(), {}};
     NSMutableData *file = [NSMutableData dataWithCapacity:sizeof h + made.warnings.size() + made.metallib.size()];
@@ -162,7 +162,7 @@ bool onLargeStack(const std::function<void()> &work)
 struct Answer {
     bool called = false, refused = false;
     std::string log;
-    raw::MadeLibrary made;
+    gm20b::MadeLibrary made;
 };
 
 // The reply, to a block called before the request returns: a header whose u32s at 8 and 12 are its own size and that of
@@ -236,9 +236,10 @@ CodeGen::~CodeGen() = default;
 int32_t CodeGen::make(const Prepared &p, std::string &entry, std::string &why)
 {
     State &s = *state_;
-    const raw::CompileRequest &r = p.request;
-    const std::string request =
-        r.codeGenType == raw::kCodeGenSource ? raw::codegen::withModuleCache(r.codeGen, s.paths.modules) : r.codeGen;
+    const gm20b::CompileRequest &r = p.request;
+    const std::string request = r.codeGenType == gm20b::kCodeGenSource
+                                    ? gm20b::codegen::withModuleCache(r.codeGen, s.paths.modules)
+                                    : r.codeGen;
     if (request.empty())
         return why = "a library request the front end cannot read", TegraGM20BCompileUnavailable;
     // One code generation service, asked one request at a time as Apple's MTLCompilerService and m2v's frontend ask it:
@@ -247,9 +248,9 @@ int32_t CodeGen::make(const Prepared &p, std::string &entry, std::string &why)
     if (!s.load(why))
         return TegraGM20BCompileUnavailable;
     const std::string name = replyName(s.uuid, r.codeGenType, request);
-    raw::MadeLibrary kept;
+    gm20b::MadeLibrary kept;
     if (readReply(s.paths.replies, name, kept) || readReply(s.paths.seed, name, kept)) {
-        entry = raw::encodeLibraryEntry(p.key, &kept, "");
+        entry = gm20b::encodeLibraryEntry(p.key, &kept, "");
         return TegraGM20BCompileMade;
     }
     if (!s.service && !(s.service = s.create("SwitchShaderCompiler")))
@@ -267,11 +268,11 @@ int32_t CodeGen::make(const Prepared &p, std::string &entry, std::string &why)
     if (!a.called)
         return why = "the system's Metal compiler did not answer", TegraGM20BCompileFailed;
     if (a.refused) {
-        entry = raw::encodeLibraryEntry(p.key, nullptr, a.log);
+        entry = gm20b::encodeLibraryEntry(p.key, nullptr, a.log);
         return TegraGM20BCompileRefused;
     }
     keepReply(s.paths.replies, name, s.uuid, r.codeGenType, request, a.made);
-    entry = raw::encodeLibraryEntry(p.key, &a.made, "");
+    entry = gm20b::encodeLibraryEntry(p.key, &a.made, "");
     return TegraGM20BCompileMade;
 }
 

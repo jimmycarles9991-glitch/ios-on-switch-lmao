@@ -135,7 +135,7 @@ def mesa_rust_library(
         **kwargs
     )
     if crate_type == "staticlib":
-        # The same crate as an rlib, for the release profile's single staticlib (nvk_release_rs).
+        # The same crate as an rlib, which a rust_test takes as its crate (nak_sm53_half_test).
         rust_library(
             name = name + "_rlib",
             crate_name = crate_name,
@@ -145,27 +145,3 @@ def mesa_rust_library(
             toolchains = _TOOLCHAINS,
             **kwargs
         )
-
-def mesa_rust_release_staticlib(name, crate_root, deps):
-    """The release profile's one Rust staticlib for NVK: NAK, NIL and nvk_rs (as rlibs) in a single staticlib.
-
-    meson links three staticlibs, each with its own copy of the standard library and of the crates they share; without
-    LTO the linker takes each object once, but fat LTO makes each staticlib one object, and two of them would define
-    the same symbols. One staticlib over all three crates has one copy of everything, and LTO sees all of NVK's Rust.
-
-    Args:
-        name: the target (lib<name>.a).
-        crate_root: the crate that names the three (extern crate).
-        deps: their _rlib targets.
-    """
-    rust_static_library(
-        name = name,
-        srcs = [crate_root],
-        crate_name = name,
-        crate_root = crate_root,
-        edition = "2021",
-        rustc_flags = _BUILDTYPE + ["-Cmetadata=switch-ios@@{}@sta".format(name)] + _EMBED + _LTO + _REMAP,
-        target_compatible_with = _RUST_1_96_1,
-        toolchains = _TOOLCHAINS,
-        deps = deps,
-    )

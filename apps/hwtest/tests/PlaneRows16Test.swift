@@ -6,13 +6,13 @@ import Metal
 
 /// A surface plane at offset 388 with rows of 52 bytes, both off 16 (IOSurface makes a plane at any offset and rows that
 /// cover it). Metal's GPU reads such a plane from its offset and rows rounded down to 16 (384, 48 apart), and the CPU's
-/// replaceRegion and getBytes use the plane's own (m2v linear_plan.rs, measured on an M3 Max and an M4). The raw path makes
-/// the texture at that GPU layout and keeps the CPU rows apart (drivers/TegraGM20BMetal/raw/runtime RawMetalDevice.mm,
-/// RawMetalTexture.mm). A plane whose rows overlap once rounded (13 texels in rows of 60) is nil, as m2v refused it.
-/// Nothing may ask for the m2v device (m2v_needs_asked).
+/// replaceRegion and getBytes use the plane's own (m2v linear_plan.rs, measured on an M3 Max and an M4). The driver makes
+/// the texture at that GPU layout and keeps the CPU rows apart (drivers/TegraGM20BMetal TegraGM20BMetalDevice.mm,
+/// TegraGM20BMetalTexture.mm). A plane whose rows overlap once rounded (13 texels in rows of 60) is made, as an M4 Max
+/// makes it, and getBytes reads it at its own rows (facade_texture_rows_test). No command buffer may fail (failed_cbs=).
 struct PlaneRows16Test: HWTest {
-    let id = "gpu.raw.plane_rows16"
-    let name = "A surface plane off 16 is read at Metal's GPU layout and written at its own rows, without m2v"
+    let id = "gpu.gm20b.plane_rows16"
+    let name = "A surface plane off 16 is read at Metal's GPU layout and written at its own rows"
     let subsystem = Subsystem.metal
 
     static func plane(width: Int, offset: Int, rowBytes: Int) -> [IOSurfacePropertyKey: Any] {
@@ -24,9 +24,9 @@ struct PlaneRows16Test: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
-        let before = OwnAnswersTest.needs(gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
+        let before = GM20BFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var wrong: [String] = []
 
@@ -43,15 +43,22 @@ struct PlaneRows16Test: HWTest {
         }
         let surface = unsafeBitCast(made, to: IOSurfaceRef.self)
         let base = made.baseAddress.bindMemory(to: UInt8.self, capacity: 4096)
-        for i in 0..<4096 { base[i] = UInt8((i * 29 + 7) & 255) }
+        for i in 0 ..< 4096 { base[i] = UInt8((i * 29 + 7) & 255) }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = [.shaderRead]
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 1) else {
             return .fail("no texture over plane 1", metrics)
         }
         descriptor.width = 13
-        if gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 2) != nil {
+        if let overlapping = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 2) {
+            var row = [UInt8](repeating: 0, count: 13 * 4)
+            overlapping.getBytes(&row, bytesPerRow: 13 * 4, from: MTLRegionMake2D(0, 2, 13, 1), mipmapLevel: 0)
+            if row != Array(UnsafeBufferPointer(start: base + 1024 + 2 * 60, count: 13 * 4)) {
+                wrong.append("overlapping_cpu_rows")
+            }
+        } else {
             wrong.append("overlapping_rows")
         }
 
@@ -73,10 +80,10 @@ struct PlaneRows16Test: HWTest {
         if drawn.status != .completed { wrong.append("draw") }
         let out = try await gpu.read(target, bytesPerPixel: 4)
         var mismatched = 0
-        for y in 0..<height {
-            for x in 0..<width {
+        for y in 0 ..< height {
+            for x in 0 ..< width {
                 let at = 384 + y * 48 + x * 4, pixel = (y * width + x) * 4
-                if Array(out[pixel..<(pixel + 4)]) != Array(UnsafeBufferPointer(start: base + at, count: 4)) {
+                if Array(out[pixel ..< (pixel + 4)]) != Array(UnsafeBufferPointer(start: base + at, count: 4)) {
                     mismatched += 1
                 }
             }
@@ -84,9 +91,10 @@ struct PlaneRows16Test: HWTest {
         metrics.set("wrong_texels", mismatched)
         if mismatched != 0 { wrong.append("gpu_layout") }
 
-        let asked = OwnAnswersTest.needs(gpu.device).filter { $0.value > (before[$0.key] ?? 0) }.keys.sorted()
-        metrics.set("m2v_needs_asked", asked.isEmpty ? "-" : asked.joined(separator: ","))
-        if !asked.isEmpty { wrong.append("m2v") }
+        let failed = FailedCounts.judged(
+            before: before, after: GM20BFacade.counters(of: gpu.device), own: gpu.paths, &metrics
+        )
+        if !failed.1 { wrong.append(failed.0) }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 }

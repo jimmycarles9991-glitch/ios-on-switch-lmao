@@ -12,11 +12,11 @@ struct CAGlassSplitTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("requires the raw facade to exercise native whole and split programs")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("requires the facade to exercise native whole and split programs")
         }
-        guard RawFacade.counters(of: gpu.device)["split_prologues"] != nil else {
-            return .skip("requires development split attribution; route coverage is unverified")
+        guard GM20BFacade.counters(of: gpu.device)["split_prologues"] != nil else {
+            return .skip(GM20BFacade.missing("split_prologues", on: gpu.device))
         }
         return try await GPUSceneTest(scene: scene).run(context)
     }

@@ -7,7 +7,7 @@ import HWTestGPU
 /// themselves 1:1, even-sized (the controls), then odd across, down and both, then mirrored across even and odd (_t1),
 /// compared in the kernel byte for byte. <case>_last counts the wrong bytes in the last column, row or chroma pair.
 enum X1VICOddProbe {
-    static let magic: UInt32 = 0x564F_4444  // 'VODD'
+    static let magic: UInt32 = 0x564F_4444 // 'VODD'
     static let cases = 8
     static let caseWords = 12
     static let controls = 2
@@ -24,8 +24,8 @@ enum X1VICOddProbe {
         case .success(let words): reply = words
         }
         var wrong: [String: Int] = [:]
-        for i in 0..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 0 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = "\(X1VICKernelTest.name(r[0]))_\(r[1])x\(r[2])" + (r[3] != 0 ? "_t\(r[3])" : "")
             metrics.set(name + "_status", Int(Int32(bitPattern: r[4])))
             metrics.set(name + "_last", Int(r[6]))

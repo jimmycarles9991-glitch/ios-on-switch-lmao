@@ -394,10 +394,7 @@ pub fn specialize_dynamic(
     // lists and declares none. What the module still needs from outside is what any module needs
     // (constants, linked functions), refused or bound as usual. A linked-constants module that
     // still declares constants has no reading.
-    let linked_constants = abi
-        .linkage_signature
-        .is_some_and(|s| s.kind == crate::abi::LinkageSignatureKind::LinkedConstants);
-    if linked_constants && !abi.function_constants.is_empty() {
+    if abi.signature_unreadable() {
         let at = Location::metadata(None, None, Some("air.signature"));
         return Err(Unsupported::not_implemented(Feature::Linking).at(at).into());
     }

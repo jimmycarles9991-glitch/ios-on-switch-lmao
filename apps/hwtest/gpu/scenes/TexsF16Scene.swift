@@ -2,13 +2,13 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// Judges raw_chip_facts.h AssumeTexsF16, which every raw draw holds: TEXS.F16 against round-to-nearest-even of TEXS's
+/// Judges chip_facts.h AssumeTexsF16, which every raw draw holds: TEXS.F16 against round-to-nearest-even of TEXS's
 /// F32 result, over every unorm8 code and every half, point sampled and bilinear between neighbours. It also holds bound
 /// TEXS's F32 form to TEX.B's (a compute kernel's textures stay bindless), since bound textures had not run on GM20B
-/// before. Every target is a float format the raw path renders: the F16 form's bits arrive as whole floats, the proof
+/// before. Every target is a float format the driver renders: the F16 form's bits arrive as whole floats, the proof
 /// word as a float's bits.
 struct TexsF16Scene: GPUScene {
-    let id = "gpu.raw.texs_f16"
+    let id = "gpu.gm20b.texs_f16"
     let name = "TEXS.F16 against round-to-nearest-even of its F32 form; bound TEXS against TEX.B"
 
     /// (name, bilinear, offset in texels from the pixel's centre). metal2vulkan fetches a nearest pixel-coordinate sample
@@ -28,7 +28,7 @@ struct TexsF16Scene: GPUScene {
     /// Every code in each channel, in a different order per channel
     private func unorm8Texels() -> [UInt8] {
         var out = [UInt8]()
-        for k in 0..<256 {
+        for k in 0 ..< 256 {
             out += [UInt8(k), UInt8(255 - k), UInt8((k * 37) & 255), UInt8((k * 101) & 255)]
         }
         return out
@@ -38,7 +38,7 @@ struct TexsF16Scene: GPUScene {
     private func halfTexels() -> [UInt8] {
         var out = [UInt8]()
         out.reserveCapacity(65536 * 8)
-        for v in 0..<65536 {
+        for v in 0 ..< 65536 {
             let swapped: Int = ((v << 8) | (v >> 8)) & 0xFFFF
             let words: [UInt16] = [UInt16(v), UInt16(v) ^ 0x8000, UInt16((v &* 40503) & 0xFFFF), UInt16(swapped)]
             for w in words {
@@ -57,7 +57,8 @@ struct TexsF16Scene: GPUScene {
         let source = try gpu.texture(format, width, height, usage: [.shaderRead], storage: .shared)
         source.replace(
             region: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0, withBytes: texels,
-            bytesPerRow: width * texelBytes)
+            bytesPerRow: width * texelBytes
+        )
         let bindless = try gpu.compute("texs_f16_bindless")
         for (sampling, linear, offset) in Self.samplings {
             let pipeline = try gpu.render(
@@ -97,7 +98,8 @@ struct TexsF16Scene: GPUScene {
                 compute.setBytes(&filter, length: 4, index: 2)
                 compute.dispatchThreads(
                     MTLSize(width: width, height: height, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: min(width, 16), height: min(height, 16), depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: min(width, 16), height: min(height, 16), depth: 1)
+                )
                 compute.endEncoding()
             }
             let name = "\(label)_\(sampling)"
@@ -108,12 +110,13 @@ struct TexsF16Scene: GPUScene {
             let proofWord = stamp.withUnsafeBytes { $0.load(as: UInt32.self) }
             let bindlessFloats = UnsafeBufferPointer(
                 start: reference.contents().bindMemory(to: UInt32.self, capacity: width * height * 4),
-                count: width * height * 4)
+                count: width * height * 4
+            )
             var f16Wrong = 0, boundWrong = 0, nanPayloadOnly = 0
             var firstWrong: String?
             floats.withUnsafeBytes { f in
                 halves.withUnsafeBytes { h in
-                    for i in 0..<(width * height * 4) {
+                    for i in 0 ..< (width * height * 4) {
                         let bits = f.load(fromByteOffset: 4 * i, as: UInt32.self)
                         if bits != bindlessFloats[i] { boundWrong += 1 }
                         guard let half = UInt16(exactly: h.load(fromByteOffset: 4 * i, as: Float.self)) else {
@@ -140,9 +143,9 @@ struct TexsF16Scene: GPUScene {
             // an unstamped marker is a signalling NaN's bits, which a store may quiet
             let marker = proofWord & ~0x0040_0000 == 0x7FA5_5347
             result.expect(stamped || marker, "\(name): the proof output was not written")
-            if !RawFacade.counters(of: gpu.device).isEmpty {
+            if !GM20BFacade.counters(of: gpu.device).isEmpty {
                 result.expect(stamped, "\(name): NAK did not fold the F16 fetch")
-                result.expect(timing.path == "raw", "\(name) left raw: \(timing.path)")
+                result.expect(timing.path == "gm20b", "\(name) left raw: \(timing.path)")
             }
             result.expect(boundWrong == 0, "\(name): bound TEXS differs from TEX.B on \(boundWrong) components")
         }

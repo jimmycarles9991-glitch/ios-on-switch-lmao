@@ -3,82 +3,77 @@
 #include "TegraNVJPG.h"
 #include "TegraNVJPGMapping.h"
 #include "TegraNVJPGStats.h"
+#include "../TegraSMMU/TegraSMMUSpace.h"
 #include "../../kits/SwitchDMA/SwitchHwPage.h"
+#include "../../kits/SwitchMath/SwitchMath.h"
 
 namespace {
-constexpr uint32_t kSinkPages = (1U << 20) / SWITCH_HW_PAGE_SIZE;
-uint64_t gSink;
-
+// The GPU driver's backing retirement, before the pages go back (no job holds the backing). It takes the map lock
+// only: every engine's backing frees wait behind it, so it never waits for a decode.
 void destroy(void *context)
 {
     auto *mapping = static_cast<SwitchNVJPGMapping *>(context);
-    tegra_nvjpg_lock();
     while (mapping) {
         auto *next = mapping->next;
-        tegra_nvjpg_pages_unmap(mapping->address, mapping->mapped);
+        tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_OUT, mapping->address, mapping->mapped);
         IODelete(mapping, SwitchNVJPGMapping, 1);
         mapping = next;
     }
-    tegra_nvjpg_unlock();
 }
 }  // namespace
 
-void switch_nvjpg_mapping_start(uint64_t sink)
+SwitchNVJPGBacking switch_nvjpg_backing(switch_gpu_backing *backing)
 {
-    gSink = sink;
+    SwitchNVJPGBacking target = {};
+    target.backing = backing;
+    target.head =
+        static_cast<SwitchNVJPGMapping *>(switch_gpu_backing_mapping_context(backing, SWITCH_GPU_ENGINE_NVJPG));
+    if (target.head) {
+        target.pages = target.head->pages;
+        target.count = target.head->available;
+        return target;
+    }
+    switch_gpu_backing_info info = {};
+    switch_gpu_backing_describe(backing, &info);
+    target.pages = info.pages;
+    target.count = info.page_count;
+    target.generation = info.allocation_generation;
+    return target;
 }
 
-SwitchNVJPGMapping *switch_nvjpg_mapping(switch_gpu_backing *backing, uint32_t extent, int pid)
+SwitchNVJPGMapping *switch_nvjpg_mapping(const SwitchNVJPGBacking &target, uint32_t extent, uint64_t writeEnd,
+                                         const char **why, int pid)
 {
-    if (!backing)
-        return nullptr;
-    auto *head =
-        static_cast<SwitchNVJPGMapping *>(switch_gpu_backing_mapping_context(backing, SWITCH_GPU_ENGINE_NVJPG));
-    for (auto *mapping = head; mapping; mapping = mapping->next) {
-        if (mapping->count == extent)
+    const uint32_t mapped =
+        SWITCH_MAX(extent, static_cast<uint32_t>(switch_div_round_up(writeEnd, SWITCH_HW_PAGE_SIZE)));
+    for (auto *mapping = target.head; mapping; mapping = mapping->next) {
+        if (mapping->count == extent && mapping->mapped >= mapped)
             return mapping;
     }
-    if (!extent || extent > kTegraNVJPGOutputBytes / SWITCH_HW_PAGE_SIZE - kSinkPages)
-        return nullptr;
-    switch_gpu_backing_info info = {};
-    if (head) {
-        info.pages = head->pages;
-        info.page_count = head->available;
-    } else {
-        switch_gpu_backing_describe(backing, &info);
-    }
-    if (extent > info.page_count)
-        return nullptr;
-    const uint32_t count = extent + kSinkPages;
     auto *mapping = IONewZero(SwitchNVJPGMapping, 1);
-    uint64_t *pages = IONewData(uint64_t, count);
-    if (!mapping || !pages) {
-        if (mapping)
-            IODelete(mapping, SwitchNVJPGMapping, 1);
-        if (pages)
-            IODeleteData(pages, uint64_t, count);
+    if (!mapping) {
+        *why = "no memory for a destination mapping";
         return nullptr;
     }
-    memcpy(pages, info.pages, static_cast<uint64_t>(extent) * sizeof(*pages));
-    for (uint32_t i = extent; i < count; ++i)
-        pages[i] = gSink;
-    tegra_nvjpg_lock();
-    mapping->address = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_OUT, pages, count, true);
-    tegra_nvjpg_unlock();
-    IODeleteData(pages, uint64_t, count);
-    mapping->pages = info.pages;
+    mapping->address = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_OUT, target.pages, extent, mapped - extent, true);
+    if (!mapping->address) {
+        IODelete(mapping, SwitchNVJPGMapping, 1);
+        *why = "output window full";
+        return nullptr;
+    }
+    mapping->pages = target.pages;
     mapping->count = extent;
-    mapping->mapped = count;
-    mapping->available = info.page_count;
-    if (!mapping->address ||
-        (!head && switch_gpu_backing_mapping_install(backing, SWITCH_GPU_ENGINE_NVJPG, info.allocation_generation,
-                                                     mapping, destroy))) {
+    mapping->mapped = mapped;
+    mapping->available = target.count;
+    if (!target.head && switch_gpu_backing_mapping_install(target.backing, SWITCH_GPU_ENGINE_NVJPG, target.generation,
+                                                           mapping, destroy)) {
         destroy(mapping);
+        *why = "destination backing changed before it was mapped";
         return nullptr;
     }
-    if (head) {
-        mapping->next = head->next;
-        head->next = mapping;
+    if (target.head) {
+        mapping->next = target.head->next;
+        target.head->next = mapping;
     }
 #if TEGRA_NVJPG_STATS
     if (pid)
@@ -87,4 +82,34 @@ SwitchNVJPGMapping *switch_nvjpg_mapping(switch_gpu_backing *backing, uint32_t e
     (void)pid;
 #endif
     return mapping;
+}
+
+uint32_t switch_nvjpg_scan_pick(const SwitchNVJPGScan *scans, uint32_t freeSlots, uint64_t bytes)
+{
+    uint32_t pick = static_cast<uint32_t>(__builtin_ctz(freeSlots));
+    for (uint32_t rest = freeSlots & (freeSlots - 1); rest; rest &= rest - 1) {
+        const uint32_t i = static_cast<uint32_t>(__builtin_ctz(rest));
+        const uint64_t size = scans[i].buffer.size, best = scans[pick].buffer.size;
+        const bool fits = size >= bytes, bestFits = best >= bytes;
+        if (fits != bestFits ? fits : (fits ? size < best : size > best))
+            pick = i;
+    }
+    return pick;
+}
+
+int switch_nvjpg_scan_fit(SwitchNVJPGScan *scan, uint64_t bytes)
+{
+    if (scan->buffer.size >= bytes)
+        return 0;
+    if (scan->address)
+        tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_IN, scan->address, scan->buffer.count + 1);
+    switch_dma_pages_free(&scan->buffer);
+    scan->address = 0;
+    if (!switch_dma_pages_alloc(&scan->buffer, switch_align_up(bytes, TegraSMMUSpace::kGranule)))
+        return -12;
+    scan->address = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_IN, scan->buffer.pages, scan->buffer.count, 1, false);
+    if (scan->address)
+        return 0;
+    switch_dma_pages_free(&scan->buffer);
+    return -28;
 }

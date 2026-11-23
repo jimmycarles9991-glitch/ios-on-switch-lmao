@@ -3,6 +3,7 @@
 #include "TegraGM20BUserClientInternal.h"
 #include "TegraGM20BRecord.h"
 #include "TegraGM20BSurfacePrefault.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
 extern "C" IOMemoryDescriptor *tegra_gm20b_prefault_take(OSObject *surface);
 
@@ -102,8 +103,13 @@ private:
 IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 				       TegraGM20BAbiBoAllocReply *out)
 {
-	if (!in->bytes || ((in->address | in->bytes) & 0xfff) || in->bytes > kMaxBoBytes)
+	if (!in->bytes || ((in->address | in->bytes) & 0xfff) || in->bytes > kMaxBoBytes) {
+		switch_refusal(
+			"bo-import", "arguments",
+			"IOSurface %u: %llu bytes at %#llx are not whole pages, or past %llu",
+			in->surface_id, in->bytes, in->address, uint64_t(kMaxBoBytes));
 		return kIOReturnBadArgument;
+	}
 	// before this import's own wiring, which sets the pages' modified bits
 	const CreationWiring creation(in->surface_id, task_);
 	const uint64_t start = statsNowNs();
@@ -115,8 +121,12 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 		mark = now;
 	};
 	Bo *bo = IONew(Bo, 1);
-	if (!bo)
+	if (!bo) {
+		switch_refusal("bo-import", "memory",
+			       "IOSurface %u: no memory for the BO of %llu bytes at %#llx",
+			       in->surface_id, in->bytes, in->address);
 		return kIOReturnNoMemory;
+	}
 	bzero(bo, sizeof(*bo));
 	bo->bytes = in->bytes;
 	bo->npages = static_cast<uint32_t>(in->bytes >> 12);
@@ -204,8 +214,17 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 				    : 0;
 	const int tracked = !pinned && !adopted ? switch_gpu_backing_cpu_track(bo->backing) : 0;
 	if (pinned || adopted || tracked) {
+		// backing: its pages registered for no backing; pin: the coherency entry holds another backing; adopt: the
+		// surface's CPU leases hold another; track: no room to track its CPU writes
+		const char *step = !bo->backing ? "backing"
+				   : pinned     ? "pin"
+				   : adopted    ? "adopt"
+						: "track";
+		const int refused = pinned ? pinned : adopted ? adopted : tracked;
+		switch_refusal("bo-import", step, "IOSurface %u: %llu bytes at %#llx refused (%d)",
+			       in->surface_id, in->bytes, in->address, refused);
 		releaseBo(bo);
-		return ioreturn(pinned ? pinned : adopted ? adopted : tracked);
+		return ioreturn(refused);
 	}
 	int fresh = 0;
 	if (bo->surface) {
@@ -237,11 +256,13 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 	const bool critical = critical_;
 	if (!published) {
 		tgm_stats_import(static_cast<int64_t>(in->bytes), first);
-		// this connection may draw into what it imports (the GPU present asks)
-		tgm_vm_import_note(vm_, first, 1);
 	}
 	IOLockUnlock(lock_);
 	if (published) {
+		// NotOpen: the connection's submissions are shut; NoMemory: no room in its BO table
+		switch_refusal("bo-import", "publish",
+			       "IOSurface %u: %llu bytes at %#llx imported, not published (%#x)",
+			       in->surface_id, in->bytes, in->address, published);
 		releaseBo(bo);
 		return published;
 	}

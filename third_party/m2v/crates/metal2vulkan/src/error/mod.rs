@@ -1265,10 +1265,10 @@ pub enum Feature {
     /// Metal's) set to a value whose effect the translation has not built: the property it names
     /// ([`PrivateRenderField`]). Metal's answer for each was measured; building it is open work.
     PrivateRenderState(PrivateRenderField),
-    /// Metal's blend into an extended-range attachment (`BGRA10_XR`, `BGR10_XR`,
-    /// `RGB10A8_2P_XR10` and their `_sRGB` twins), which the function computes in the shader in
-    /// the interlocked storage form, where Metal's measured model does not hold the part it names
-    /// ([`ExtendedRangeBlend`]). Every other such blend is Metal's arithmetic, bit for bit.
+    /// Metal's 16-bit float blend of a `half4` output, which the function computes in the shader
+    /// in the interlocked storage form (`DevicePolicy::half_blend`), where Metal's measured model
+    /// does not hold the part it names ([`ExtendedRangeBlend`]). Every other such blend is Metal's
+    /// arithmetic, bit for bit.
     ExtendedRangeBlend(ExtendedRangeBlend),
     /// The tiles a render pass's primitives reach, binned on the device
     /// ([`tile_reach_module`](crate::bind::tile_reach_module)), on a device without what the
@@ -1296,34 +1296,14 @@ pub enum Feature {
     SeqCstFence,
 }
 
-/// The part of a blend into an extended-range attachment that [`Feature::ExtendedRangeBlend`]
-/// refuses: what the measured model of Metal's blend does not hold.
+/// The part of Metal's 16-bit float blend that [`Feature::ExtendedRangeBlend`] refuses: what the
+/// measured model of Metal's blend does not hold.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ExtendedRangeBlend {
-    /// Under fast math, a factor of the second source (`Source1Color`, `Source1Alpha` and their
-    /// one-minus forms): dual-source blending into such an attachment is not built. (Without fast
-    /// math it is, but for a function that writes no second output to the attachment.)
+    /// A factor of the second source (`Source1Color`, `Source1Alpha` and their one-minus forms):
+    /// the second output is not planned beside the storage form's write.
     DualSource,
-    /// Under fast math, the color channels' `BlendColor` with `OneMinusBlendColor` (either as
-    /// the source factor) under `Subtract` or `ReverseSubtract`: Metal's result there follows
-    /// none of the model's forms for every blend color the sweeps drew, so no rule is known.
-    /// (Without fast math it is built.)
-    ConstantColorDifference,
-    /// Under fast math, a write mask of exactly one color channel: Metal blends that channel
-    /// otherwise than the two or three it blends as one vector, by a rule not known. (Without
-    /// fast math it is built.)
-    OneColorChannel,
-    /// Under fast math, a `float4` output into an `_sRGB` form under a blend other than the whose
-    /// color channels take one term alone, or under a write mask: not measured. (Into a linear form
-    /// it takes its own model; without fast math it is rounded to `half` first.)
-    FloatOutput,
-    /// Under fast math, an `_sRGB` form's blend other than the measured one, or under a write mask:
-    /// not measured. Without fast math every one is built.
-    SrgbForm,
-    /// An output other than four `half` or `float` lanes, or a second output other than those the
-    /// blend reads: not measured.
-    Output,
 }
 
 /// A private property of Metal's render pipeline descriptor that

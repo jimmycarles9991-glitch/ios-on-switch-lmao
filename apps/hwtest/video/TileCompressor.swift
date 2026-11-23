@@ -57,12 +57,12 @@ public enum TileCompressor {
 
         init?() {
             guard let vt = dlopen("/System/Library/Frameworks/VideoToolbox.framework/VideoToolbox", RTLD_NOW),
-                let create = dlsym(vt, "VTTileCompressionSessionCreate"),
-                let prepare = dlsym(vt, "VTTileCompressionSessionPrepareToEncodeTiles"),
-                let encode = dlsym(vt, "VTTileCompressionSessionEncodeTile"),
-                let complete = dlsym(vt, "VTTileCompressionSessionCompleteTiles"),
-                let copy = dlsym(vt, "VTTileCompressionSessionCopyProperty"),
-                let invalidate = dlsym(vt, "VTTileCompressionSessionInvalidate")
+                  let create = dlsym(vt, "VTTileCompressionSessionCreate"),
+                  let prepare = dlsym(vt, "VTTileCompressionSessionPrepareToEncodeTiles"),
+                  let encode = dlsym(vt, "VTTileCompressionSessionEncodeTile"),
+                  let complete = dlsym(vt, "VTTileCompressionSessionCompleteTiles"),
+                  let copy = dlsym(vt, "VTTileCompressionSessionCopyProperty"),
+                  let invalidate = dlsym(vt, "VTTileCompressionSessionInvalidate")
             else { return nil }
             self.create = unsafeBitCast(create, to: Create.self)
             self.prepare = unsafeBitCast(prepare, to: Prepare.self)
@@ -121,8 +121,10 @@ public enum TileCompressor {
                 guard let refcon else { return }
                 Unmanaged<Collector>.fromOpaque(refcon).takeUnretainedValue().add(
                     Int(bitPattern: source) - 1, status, flags,
-                    sample.map { Unmanaged<CMSampleBuffer>.fromOpaque($0).takeUnretainedValue() })
-            }, Unmanaged.passUnretained(collector).toOpaque(), &raw)
+                    sample.map { Unmanaged<CMSampleBuffer>.fromOpaque($0).takeUnretainedValue() }
+                )
+            }, Unmanaged.passUnretained(collector).toOpaque(), &raw
+        )
         guard created == noErr, let raw else { throw VideoError.status("VTTileCompressionSessionCreate", created) }
         let session = Unmanaged<CFTypeRef>.fromOpaque(raw).takeRetainedValue()
         // Every call after the property batch goes through `raw`: the session must outlive them all.
@@ -139,12 +141,14 @@ public enum TileCompressor {
         var prepared: UInt64 = 0
         _ = calls.prepare(raw, 0, &prepared)
         let regions = regions(
-            width: CVPixelBufferGetWidth(source), height: CVPixelBufferGetHeight(source), tile: tile)
+            width: CVPixelBufferGetWidth(source), height: CVPixelBufferGetHeight(source), tile: tile
+        )
         let start = CFAbsoluteTimeGetCurrent()
         for (index, region) in regions.enumerated() {
             let status = calls.encode(
                 raw, source, pack(region.x, region.y), pack(region.width, region.height), nil,
-                UnsafeMutableRawPointer(bitPattern: index + 1), nil)
+                UnsafeMutableRawPointer(bitPattern: index + 1), nil
+            )
             guard status == noErr else {
                 throw VideoError.status("VTTileCompressionSessionEncodeTile \(index)", status)
             }
@@ -165,7 +169,8 @@ public enum TileCompressor {
             usingHardware: (read(kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder) as? Bool) ?? false,
             routes: (read("SwitchEncoderRoutes" as CFString) as? [String: NSNumber])?.mapValues(\.intValue),
             bytes: samples.values.reduce(0) { $0 + CMSampleBufferGetTotalSampleSize($1) }, decoded: check.decoded,
-            worstLumaError: check.worst, seconds: seconds)
+            worstLumaError: check.worst, seconds: seconds
+        )
     }
 
     final class Picture: @unchecked Sendable {
@@ -180,7 +185,8 @@ public enum TileCompressor {
             return (0, 0)
         }
         let session = try Decompressor.makeSession(
-            format: format, width: tile, height: tile, bitDepth: 8, requireHardware: true)
+            format: format, width: tile, height: tile, bitDepth: 8, requireHardware: true
+        )
         defer { VTDecompressionSessionInvalidate(session) }
         var decoded = 0
         var worst = 0.0
@@ -206,13 +212,13 @@ public enum TileCompressor {
             CVPixelBufferUnlockBaseAddress(source, .readOnly)
         }
         guard let out = CVPixelBufferGetBaseAddressOfPlane(decoded, 0)?.assumingMemoryBound(to: UInt8.self),
-            let into = CVPixelBufferGetBaseAddressOfPlane(source, 0)?.assumingMemoryBound(to: UInt8.self)
+              let into = CVPixelBufferGetBaseAddressOfPlane(source, 0)?.assumingMemoryBound(to: UInt8.self)
         else { return .infinity }
         let outRow = CVPixelBufferGetBytesPerRowOfPlane(decoded, 0)
         let inRow = CVPixelBufferGetBytesPerRowOfPlane(source, 0)
         var sum = 0
-        for y in 0..<region.height {
-            for x in 0..<region.width {
+        for y in 0 ..< region.height {
+            for x in 0 ..< region.width {
                 sum += abs(Int(out[y * outRow + x]) - Int(into[(region.y + y) * inRow + region.x + x]))
             }
         }

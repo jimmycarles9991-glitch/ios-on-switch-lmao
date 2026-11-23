@@ -8,12 +8,12 @@
 #include <map>
 #include <vector>
 
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_loop_ranges.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_predication.h"
+#include "drivers/TegraGM20BMetal/loop_ranges.h"
+#include "drivers/TegraGM20BMetal/predication.h"
 
 namespace loop_tape {
 
-using raw::PredicateCompare;
+using gm20b::PredicateCompare;
 
 constexpr uint32_t kWordCount = 8;
 
@@ -74,7 +74,7 @@ inline void effect(const Op &op, Words &words)
 
 inline bool holds(const Op &op, const Words &words)
 {
-    return raw::predicateRuns(raw::predicateTest(op.compare, op.reference), words[op.w]);
+    return gm20b::predicateRuns(gm20b::predicateTest(op.compare, op.reference), words[op.w]);
 }
 
 // The indices of the dispatches Metal runs, in order
@@ -133,17 +133,17 @@ inline std::vector<uint32_t> metal(const Tape &tape, Words &words)
     return ran;
 }
 
-inline raw::LoopTapeEntry entry(const Op &op)
+inline gm20b::LoopTapeEntry entry(const Op &op)
 {
-    using Records = raw::PredicateRecords;
+    using Records = gm20b::PredicateRecords;
     static const Records::Kind kinds[] = {Records::StartIf,      Records::StartIf,    Records::StartElse,
                                           Records::EndIf,        Records::StartWhile, Records::EndWhile,
                                           Records::StartDoWhile, Records::EndDoWhile};
     if (op.kind == Op::Dispatch)
         return {};
     if (op.kind == Op::Encoder)
-        return {raw::LoopTapeEntry::Compute, 0};
-    return {raw::LoopTapeEntry::Predicate, uint32_t(kinds[op.kind])};
+        return {gm20b::LoopTapeEntry::Compute, 0};
+    return {gm20b::LoopTapeEntry::Predicate, uint32_t(kinds[op.kind])};
 }
 
 }  // namespace loop_tape

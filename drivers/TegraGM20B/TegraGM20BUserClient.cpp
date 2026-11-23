@@ -8,14 +8,54 @@
 // so does one that never completes.
 #include <IOKit/IOKitKeys.h>
 #include "TegraGM20BUserClientInternal.h"
+#include "SwitchGpuChannelEpoch.h"
+#include "SwitchGpuConnectionQuota.h"
 #include "SwitchGpuShaderCompiler.h"
 #include "TegraGM20BCompilerABI.h"
+#include "TegraGM20BZcullABI.h"
 
 namespace
 {
 // Connections system-wide: 16, or 64 with every process on the GPU (gpu_internal.h TGM_FENCE_USER_PAGES: one fence page each).
 constexpr uint32_t kMaxConnections = 16, kMaxConnectionsAll = 64;
-volatile uint32_t gConnections;
+static_assert(kMaxConnectionsAll <= SwitchGpuConnectionQuota::kTasks, "an entry per connection");
+IOLock *gConnectionLock;
+SwitchGpuConnectionQuota gConnections;  // under gConnectionLock
+
+IOLock *connectionLock()
+{
+	if (IOLock *lock = __atomic_load_n(&gConnectionLock, __ATOMIC_ACQUIRE))
+		return lock;
+	IOLock *made = IOLockAlloc();
+	IOLock *none = nullptr;
+	if (made && !__atomic_compare_exchange_n(&gConnectionLock, &none, made, false,
+						 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+		IOLockFree(made);
+		return none;
+	}
+	return made;
+}
+
+bool takeConnection(task_t task, int pid)
+{
+	const bool critical = switch_gpu_task_entitled(task, kSwitchGpuUiCriticalEntitlement);
+	IOLock *lock = connectionLock();
+	if (!lock)
+		return false;
+	IOLockLock(lock);
+	const bool taken = gConnections.take(
+		pid, critical, tgm_all_clients() ? kMaxConnectionsAll : kMaxConnections);
+	IOLockUnlock(lock);
+	return taken;
+}
+
+void giveConnection(int pid)
+{
+	IOLock *lock = __atomic_load_n(&gConnectionLock, __ATOMIC_ACQUIRE);
+	IOLockLock(lock);
+	gConnections.give(pid);
+	IOLockUnlock(lock);
+}
 
 // A cached BO's view up to this size is mapped into its task with every page entered at once (kIOMapPrefault: one
 // vm_map_enter_mem_object_prefault over the wired page list), not one page fault per 4 KiB page as the task first touches
@@ -83,6 +123,7 @@ IOReturn AGXDeviceUserClient::clientClose()
 	IOLockUnlock(lock_);
 	switch_gpu_compiler_close(this);
 	drainResources();
+	switch_gpu_channel_epoch_move();
 	terminate();
 	return kIOReturnSuccess;
 }
@@ -99,7 +140,6 @@ void AGXDeviceUserClient::free()
 			thread_call_free(releaseCall_);
 		if (binds_)
 			IODelete(binds_, Binding, cap_binds_);
-		freeJob(job_);
 		for (auto &job : channelJobs_)
 			freeJob(job);
 		boIndex_.destroy();
@@ -130,7 +170,7 @@ void AGXDeviceUserClient::free()
 #endif
 	methods_.destroy();
 	if (counted_)
-		__atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
+		giveConnection(ownerPid_);
 	IOUserClient::free();
 }
 
@@ -207,7 +247,6 @@ void AGXDeviceUserClient::releaseBo(Bo *bo)
 	if (bo->wired) {
 		if (bo->handle) {
 			tgm_stats_import(-static_cast<int64_t>(bo->bytes), bo->pas[0]);
-			tgm_vm_import_note(vm_, bo->pas[0], 0);
 		}
 		tgm_coherency_put(bo->coh);
 		if (bo->wiring) {
@@ -371,7 +410,7 @@ IOReturn AGXDeviceUserClient::mapToken(const TegraGM20BAbiMap *in, TegraGM20BAbi
 }
 
 // IOKit hands a second Map of the same token (no kIOMapUnique) the first one's IOMemoryMap, retained: every channel's Map of
-// the connection's one fence page, which NVK and the raw path share, is the same map. Unmap drops this caller's reference and
+// the connection's one fence page, which NVK and the driver share, is the same map. Unmap drops this caller's reference and
 // tears the map down only when no other Map holds it, or one channel's teardown unmaps every other channel's fence word.
 IOReturn AGXDeviceUserClient::unmapToken(const TegraGM20BAbiUnmap *in)
 {
@@ -422,17 +461,20 @@ extern "C" uint32_t switch_gpu_info_flags(void)
 {
 	tgm_info info;
 	tgm_get_info(&info);
-	uint32_t flags = static_cast<uint32_t>(TegraGM20BInfoHostImport) | TegraGM20BInfoKernelMap |
-			 TegraGM20BInfoOrder | TegraGM20BInfoSurfaceWrites |
-			 TegraGM20BInfoSurfaceLayout | TegraGM20BInfoExecSurfaces |
-			 TegraGM20BInfoPriority | TegraGM20BInfoKillRecord | TegraGM20BInfoSubmit |
-			 TegraGM20BInfoCpuAccess | TegraGM20BInfoSubmitAddress |
-			 TegraGM20BInfoCpuPreserveDirty | TegraGM20BInfoCanonicalSurfaceLayout |
+	uint32_t flags = static_cast<uint32_t>(TegraGM20BInfoSparse) | TegraGM20BInfoHostImport |
+			 TegraGM20BInfoKernelMap | TegraGM20BInfoSurfaceWrites |
+			 TegraGM20BInfoSurfaceLayout | TegraGM20BInfoPriority |
+			 TegraGM20BInfoKillRecord | TegraGM20BInfoCpuAccess |
+			 TegraGM20BInfoSubmitAddress | TegraGM20BInfoCpuPreserveDirty |
+			 TegraGM20BInfoCanonicalSurfaceLayout | TegraGM20BInfoChannelEpoch |
 			 TegraGM20BInfoPushFences;
 	if (info.comptag_lines && switch_gpu_compression_on())
 		flags |= TegraGM20BInfoCompression;
 	if (switch_tiled_cache_on())
 		flags |= TegraGM20BInfoTiledCache;
+	TegraGM20BAbiZcullInfo zcull = {};
+	if (!tgm_zcull_info(&zcull))
+		flags |= TegraGM20BInfoZcull;
 	return flags;
 }
 
@@ -453,11 +495,17 @@ IOReturn AGXDeviceUserClient::getInfo(TegraGM20BAbiInfo *out)
 	out->cls_m2mf = 0xa140;
 	out->cls_compute = 0xb1c0;
 	out->cls_gpfifo = 0xb06f;
+	out->fence_token = kFenceToken;
 	out->va_start = TGM_USER_VA_START;
 	out->va_end = TGM_KERNEL_VA;
 	out->page_size = 4096;
 	out->big_page_size = 0x20000;
 	out->max_bo_bytes = kMaxBoBytes;
+	static_assert(sizeof(out->zcull) == sizeof(TegraGM20BAbiZcullInfo),
+		      "zcull[] is method 'ZC's record");
+	TegraGM20BAbiZcullInfo zcull = {};
+	if (!tgm_zcull_info(&zcull))
+		memcpy(out->zcull, &zcull, sizeof(out->zcull));
 	strlcpy(out->chip_name, "GM20B", sizeof(out->chip_name));
 	strlcpy(out->device_name, "NVIDIA Tegra X1 (GM20B)", sizeof(out->device_name));
 	return kIOReturnSuccess;
@@ -508,10 +556,10 @@ IOReturn AGXDeviceUserClient::externalCall(uint32_t selector, IOExternalMethodAr
 		inSize -= 8;
 	}
 	// copy the input: records are naturally aligned structs and the caller's buffer may not be. Small records use the
-	// stack; VmBind/Exec (up to 4 KiB) a heap buffer, keeping kernel stack use small.
+	// stack; VmBind (up to 4 KiB) a heap buffer, keeping kernel stack use small.
 	uint64_t small[64];
 	void *copy = small;
-	if (inSize > TegraGM20BMaxPushes * sizeof(TegraGM20BAbiPush) + 8)
+	if (inSize > kMaxRecordBytes)
 		return refuseCall("a GPU call", SwitchGpuRefusal::CallSize, kIOReturnBadArgument,
 				  method, inSize);
 	if (inSize > sizeof(small)) {
@@ -618,19 +666,17 @@ extern "C" IOReturn tegra_gm20b_new_user_client(IOService *provider, task_t task
 		return kIOReturnBadArgument;
 	if (tgm_stage() < 2)
 		return kIOReturnNotReady;
-	if (__atomic_add_fetch(&gConnections, 1, __ATOMIC_SEQ_CST) >
-	    (tgm_all_clients() ? kMaxConnectionsAll : kMaxConnections)) {
-		__atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
+	const int pid = proc_selfpid();
+	if (!takeConnection(task, pid))
 		return kIOReturnNoResources;
-	}
 	AGXDeviceUserClient *client = OSTypeAlloc(AGXDeviceUserClient);
 	if (!client) {
-		__atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
+		giveConnection(pid);
 		return kIOReturnNoMemory;
 	}
 	if (!client->initWithTask(task, securityID, type, properties)) {
 		client->release();
-		__atomic_sub_fetch(&gConnections, 1, __ATOMIC_SEQ_CST);
+		giveConnection(pid);
 		return kIOReturnError;
 	}
 	client->countConnection();  // from here free() gives the connection slot back

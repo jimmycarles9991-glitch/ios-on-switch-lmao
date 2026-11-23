@@ -33,14 +33,17 @@ struct SM53ProbeScene: GPUScene {
             encoder.setBuffer(echo, offset: 0, index: 3)
             encoder.dispatchThreadgroups(
                 MTLSize(width: a.count / 256, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+            )
             encoder.setComputePipelineState(pipeline)
             encoder.setBuffer(out, offset: 0, index: 3)
             encoder.setBuffer(proof, offset: 0, index: 4)
             encoder.dispatchThreads(
                 MTLSize(width: a.count, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(
-                    width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1
+                )
+            )
             encoder.endEncoding()
         }
         result.metrics.set("alu_path", timing.path)
@@ -48,9 +51,9 @@ struct SM53ProbeScene: GPUScene {
         let attested = proofWord & 0xFFFF_0000 == 0x5353_0000 && proofWord & 0xFF00 != 0
         result.metrics.set("alu_rewrite_proof", hex(proofWord))
         result.expect(attested || proofWord == 0x7FA5_5354, "ALU proof output was not written correctly")
-        if !RawFacade.counters(of: gpu.device).isEmpty {
+        if !GM20BFacade.counters(of: gpu.device).isEmpty {
             result.expect(attested, "SM53 ALU probe rewrites were not attested")
-            result.expect(timing.path == "raw", "SM53 ALU probe left raw: \(timing.path)")
+            result.expect(timing.path == "gm20b", "SM53 ALU probe left raw: \(timing.path)")
         }
         let echoed = echo.contents().bindMemory(to: UInt32.self, capacity: a.count * 4)
         var transportWrong = 0
@@ -65,7 +68,8 @@ struct SM53ProbeScene: GPUScene {
         result.expect(transportWrong == 0, "SM53 operand/output transport failed for \(transportWrong) inputs")
         let got = UnsafeBufferPointer(
             start: out.contents().bindMemory(to: UInt32.self, capacity: a.count * Self.forms.count),
-            count: a.count * Self.forms.count)
+            count: a.count * Self.forms.count
+        )
         var first = [String?](repeating: nil, count: Self.forms.count)
         var wrong = [Int](repeating: 0, count: Self.forms.count)
         var halfFtzWrong = [Int](repeating: 0, count: Self.forms.count)
@@ -92,7 +96,8 @@ struct SM53ProbeScene: GPUScene {
         result.metrics.set("alu_model", halfFtzWrong.allSatisfy { $0 == 0 } ? "half_round_output_ftz" : "unclassified")
         if attested {
             result.expect(
-                halfFtzWrong.allSatisfy { $0 == 0 }, "SM53 ALU does not match half-round/output-FTZ: \(halfFtzWrong)")
+                halfFtzWrong.allSatisfy { $0 == 0 }, "SM53 ALU does not match half-round/output-FTZ: \(halfFtzWrong)"
+            )
         } else {
             result.notes.append("ALU instructions unmodified; this run cannot qualify SM53 forms")
             result.expect(wrong.allSatisfy { $0 == 0 }, "Unmodified ALU reference failed: \(wrong)")
@@ -127,7 +132,8 @@ struct SM53ProbeScene: GPUScene {
             encoder.setBuffer(proof, offset: 0, index: 4)
             encoder.dispatchThreadgroups(
                 MTLSize(width: count / threads, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }
         result.metrics.set("f32_source_path", timing.path)
@@ -135,14 +141,16 @@ struct SM53ProbeScene: GPUScene {
         let attested = proofWord & 0xFFFF_0000 == 0x5353_0000 && proofWord & 0xFF != 0
         result.metrics.set("f32_source_rewrite_proof", hex(proofWord))
         result.expect(attested || proofWord == 0x7FA5_5354, "F32 source proof output was not written correctly")
-        if !RawFacade.counters(of: gpu.device).isEmpty {
+        if !GM20BFacade.counters(of: gpu.device).isEmpty {
             result.expect(attested, "SM53 F32 source probe rewrites were not attested")
-            result.expect(timing.path == "raw", "SM53 source probe left raw: \(timing.path)")
+            result.expect(timing.path == "gm20b", "SM53 source probe left raw: \(timing.path)")
         }
         let halves = UnsafeBufferPointer(
-            start: narrowed.contents().bindMemory(to: UInt16.self, capacity: x.count), count: x.count)
+            start: narrowed.contents().bindMemory(to: UInt16.self, capacity: x.count), count: x.count
+        )
         let floats = UnsafeBufferPointer(
-            start: roundTrip.contents().bindMemory(to: UInt32.self, capacity: x.count), count: x.count)
+            start: roundTrip.contents().bindMemory(to: UInt32.self, capacity: x.count), count: x.count
+        )
         var wrong = [0, 0, 0]
         var truncationWrong = [0, 0]
         var first: [String?] = [nil, nil, nil]
@@ -169,13 +177,15 @@ struct SM53ProbeScene: GPUScene {
         }
         result.metrics.set("f32_inputs", x.count)
         result.metrics.set(
-            "f32_source_model", truncationWrong.allSatisfy { $0 == 0 } ? "truncate_ftz_finite_clamp" : "unclassified")
+            "f32_source_model", truncationWrong.allSatisfy { $0 == 0 } ? "truncate_ftz_finite_clamp" : "unclassified"
+        )
         result.metrics.set("f32_source_model_half_wrong", truncationWrong[0])
         result.metrics.set("f32_source_model_float_wrong", truncationWrong[1])
         if attested {
             result.expect(
                 truncationWrong.allSatisfy { $0 == 0 },
-                "SM53 source conversion does not match truncate/FTZ/clamp: \(truncationWrong)")
+                "SM53 source conversion does not match truncate/FTZ/clamp: \(truncationWrong)"
+            )
         } else {
             result.notes.append("F32 source instructions unmodified; this run cannot qualify SM53 forms")
             result.expect(wrong[0] == 0 && wrong[1] == 0, "Unmodified conversion reference failed: \(wrong)")
@@ -189,7 +199,7 @@ struct SM53ProbeScene: GPUScene {
 
     static func narrowingSweep() -> [Float] {
         var x: [Float] = []
-        for bits in UInt16(0)...0x7BFF {
+        for bits in UInt16(0) ... 0x7BFF {
             let h = Float16(bitPattern: bits), v = Float(h), mid = (v + Float(h.nextUp)) / 2
             for p in [v, v.nextUp, v.nextDown, mid, mid.nextUp, mid.nextDown] { x += [p, -p] }
         }
@@ -223,7 +233,7 @@ struct SM53ProbeScene: GPUScene {
         let bytes = try await gpu.read(target, bytesPerPixel: 4)
         var wrong = 0
         var first: String?
-        for i in 0..<(width * height) {
+        for i in 0 ..< (width * height) {
             let bits: UInt16 = i == 32767 ? 0x7E00 : i < 16384 ? UInt16(i) : 0x8000 | UInt16(i - 16384)
             let want = Self.metalUnorm8(Float16(bitPattern: bits))
             let have = bytes[4 * i]

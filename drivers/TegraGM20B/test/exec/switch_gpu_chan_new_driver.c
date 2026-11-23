@@ -5,6 +5,7 @@
 // before its first submission; a loaded channel's RAMFC lives in the PBDMA and goes back to memory when a preempt
 // switches it out, as each engine object's context bind does (nvkm_chan_cctx_bind: block, preempt, allow).
 #include "gpu_internal.h"
+#include "SwitchGpuChannelEpoch.h"
 #include "TegraGM20BRamfcOrder.h"
 #include "switch_gpu_chan_new_harness.h"
 
@@ -32,6 +33,7 @@ static struct tgm_chan *made;
 static u32 push_words[1024];
 static u32 userd[128];
 static int timeline;
+static int isolated_critical = -1;
 
 __attribute__((constructor)) static void switch_chan_new_device(void)
 {
@@ -59,6 +61,31 @@ uint32_t switch_chan_new_recorded_timeslice(void)
 void switch_chan_new_delete(void)
 {
 	tgm_chan_del(&made);
+}
+
+void switch_chan_new_leave_running(void)
+{
+	made->submitted = tgm_chan_completed(made) + 1;
+}
+
+int switch_chan_new_isolated_critical(void)
+{
+	return isolated_critical;
+}
+
+void switch_chan_new_set_level(int high, int critical)
+{
+	tgm_chan_set_level(made, high ? TGM_LEVEL_HIGH : TGM_LEVEL_FOREGROUND, critical);
+}
+
+int switch_chan_new_high(void)
+{
+	return made->high;
+}
+
+int switch_chan_new_critical(void)
+{
+	return made->critical;
 }
 
 static void host_save(void)
@@ -373,6 +400,10 @@ void tgm_fault_unpublish(struct tgm_chan *chan)
 {
 }
 
+void switch_gpu_chan_named(const struct tgm_chan *chan)
+{
+}
+
 void tgm_stats_gr_bind(struct tgm_chan *chan)
 {
 }
@@ -438,8 +469,11 @@ void tgm_chan_hung(struct tgm_chan *chan, const char *who, uint32_t seqno, uint6
 	nvxnu_panic("tgm_chan_hung: %s", who);
 }
 
+/* nvkm's kill reads the channel's criticality (tgm_chan_killed); the model's kill is immediate */
 void tgm_chan_isolate(struct tgm_chan *chan, const char *report, u64 now)
 {
+	isolated_critical = chan->critical;
+	chan->error = 4;
 }
 
 int tgm_chan_killed(struct nvif_event *event, void *repv, u32 repc)
@@ -461,6 +495,16 @@ int tgm_chan_wait_ready(struct tgm_chan *chan, u32 gpfifo_nr, u32 push_nr)
 }
 
 void tgm_clock_anchors_fill(u32 page)
+{
+}
+
+uint32_t switch_gpu_channel_memory_refused, switch_gpu_channel_creates;
+
+void switch_gpu_channel_epoch_move(void)
+{
+}
+
+void switch_gpu_channel_epoch_fill(volatile uint32_t *page)
 {
 }
 

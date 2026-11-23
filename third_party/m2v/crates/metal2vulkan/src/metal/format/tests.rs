@@ -2162,8 +2162,8 @@ fn explicit_imageblock_sample_lengths_are_metals() {
 /// [`ycbcr_format`] describes exactly the 69 two-plane YCbCr formats, each as its Metal name
 /// states (`MTLPixelFormat{YCBCR|RGB}{bits}_{420|422|444}_2P[_PACKED][_{sRGB|PQ|HLG|XR}]`), and
 /// this crate holds a texture of the ones of unpacked 8- and 10-bit codes read converted, through
-/// the sRGB curve or as codes, and of packed 10-bit codes read converted or through the sRGB
-/// curve, whose texels read three channels and alpha 1.
+/// the sRGB curve or as codes, and of packed 10-bit codes read converted, through the sRGB curve
+/// or as codes, whose texels read three channels and alpha 1.
 #[test]
 fn ycbcr_formats_are_the_two_plane_family_as_named() {
     let mut described = 0;
@@ -2242,6 +2242,9 @@ fn ycbcr_formats_are_the_two_plane_family_as_named() {
                 | PixelFormat::YCBCR104202PPACKEDSRGB
                 | PixelFormat::YCBCR104222PPACKEDSRGB
                 | PixelFormat::YCBCR104442PPACKEDSRGB
+                | PixelFormat::RGB104202PPACKED
+                | PixelFormat::RGB104222PPACKED
+                | PixelFormat::RGB104442PPACKED
         );
         assert_eq!(ycbcr(pf), held, "{name}");
         assert_eq!(
@@ -2309,7 +2312,10 @@ fn a_pass_renders_only_the_ycbcr_formats_whose_store_is_matched() {
             P::YCBCR104442PPACKED,
             P::YCBCR104202PPACKEDSRGB,
             P::YCBCR104222PPACKEDSRGB,
-            P::YCBCR104442PPACKEDSRGB
+            P::YCBCR104442PPACKEDSRGB,
+            P::RGB104202PPACKED,
+            P::RGB104222PPACKED,
+            P::RGB104442PPACKED
         ]
     );
     for (stem, dev) in committed_devices() {
@@ -2345,69 +2351,6 @@ fn a_pass_renders_only_the_ycbcr_formats_whose_store_is_matched() {
             );
         }
     }
-}
-
-/// A clear's halves are what its stored codes read back, rounded to `half`, only where each
-/// channel's `half` is the `half` of its code's value: `0.1`'s (code 435 reads 51/510, whose
-/// `half` is `half` 0.1's), not `0.25`'s (code 512 reads 0.25098) or `0.0012345`'s (code 385);
-/// the two-plane formats' alpha byte reads `0.5` as `128 / 255`, a `BGRA10_XR` alpha code exactly;
-/// `BGR10_XR` has no alpha; the padded and bfloat forms' tile memory is unmeasured.
-#[test]
-fn clears_read_back_where_their_halves_are_their_codes_values() {
-    let planes = ExtendedRange::Planes { srgb: false };
-    let bgra = ExtendedRange::Bgra10 { srgb: false };
-    let bgr = ExtendedRange::Bgr10 { srgb: false };
-    for form in [planes, bgra, bgr, ExtendedRange::Bgra10 { srgb: true }] {
-        assert_eq!(form.clear_read_back([0.0; 4]), Some(true), "{form:?}");
-        assert_eq!(form.clear_read_back([1.0; 4]), Some(true), "{form:?}");
-    }
-    assert_eq!(bgra.clear_read_back([0.1, 0.3, 1.0 / 3.0, 0.7]), Some(true));
-    assert_eq!(
-        planes.clear_read_back([0.1, 0.3, 1.0 / 3.0, 0.7]),
-        Some(false)
-    );
-    assert_eq!(bgra.clear_read_back([0.25, 0.5, 0.0, 1.0]), Some(false));
-    assert_eq!(
-        bgra.clear_read_back([0.0012345, 0.0, 0.0, 1.0]),
-        Some(false)
-    );
-    assert_eq!(bgra.clear_read_back([0.0, 0.0, 0.0, 0.5]), Some(true));
-    assert_eq!(planes.clear_read_back([0.0, 0.0, 0.0, 0.5]), Some(false));
-    assert_eq!(bgr.clear_read_back([0.0, 0.0, 0.0, 0.5]), Some(true));
-    assert_eq!(ExtendedRange::R10X6.clear_read_back([0.0; 4]), None);
-    assert_eq!(ExtendedRange::Rgba16Bfloat.clear_read_back([0.0; 4]), None);
-}
-
-/// A clear's tile holds each channel through `float` and then `half`, nearest even, unclamped:
-/// `0.1` as `half` 0.1 (`0x2e66`), `1/3` as `0x3555`, `5.0` past the codes' range as 5, a value
-/// halfway between two `float`s rounding twice; `BGR10_XR`'s alpha reads 1 whatever the clear's;
-/// the padded and bfloat forms' tile memory is unmeasured.
-#[test]
-fn a_clears_tile_holds_its_colors_halves() {
-    let h = crate::float16::f16_bits_to_f32;
-    let bgra = ExtendedRange::Bgra10 { srgb: true };
-    assert_eq!(
-        bgra.clear_tile_value([0.1, 1.0 / 3.0, 5.0, -0.75]),
-        Some([h(0x2e66), h(0x3555), 5.0, -0.75])
-    );
-    let planes = ExtendedRange::Planes { srgb: false };
-    assert_eq!(
-        planes.clear_tile_value([0.0, -0.0, 1.0, 0.5]),
-        Some([0.0, -0.0, 1.0, 0.5])
-    );
-    let bgr = ExtendedRange::Bgr10 { srgb: false };
-    assert_eq!(
-        bgr.clear_tile_value([0.25, 0.5, 2.0, 0.0]),
-        Some([0.25, 0.5, 2.0, 1.0])
-    );
-    // 1 + 2^-11 + 2^-40 is 1 + 2^-11 as a `float`, a tie, which `half` rounds to 1.
-    let twice = 1.0 + 2f64.powi(-11) + 2f64.powi(-40);
-    assert_eq!(
-        bgr.clear_tile_value([twice, 0.0, 0.0, 1.0]).map(|v| v[0]),
-        Some(1.0)
-    );
-    assert_eq!(ExtendedRange::R10X6.clear_tile_value([0.0; 4]), None);
-    assert_eq!(ExtendedRange::Rgba16Bfloat.clear_tile_value([0.0; 4]), None);
 }
 
 /// The probe's clear colors (EV XSH-clr3-m4): each 10-bit code's value and each tie between two

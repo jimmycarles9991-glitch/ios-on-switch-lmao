@@ -22,7 +22,8 @@ public struct RasterDiff: Equatable, Sendable {
     public static func compare(_ got: Raster, _ want: Raster, tolerance: Float) -> RasterDiff {
         precondition(
             got.width == want.width && got.height == want.height && got.channels == want.channels,
-            "comparing \(got.width)x\(got.height)x\(got.channels) with \(want.width)x\(want.height)x\(want.channels)")
+            "comparing \(got.width)x\(got.height)x\(got.channels) with \(want.width)x\(want.height)x\(want.channels)"
+        )
         let (w, h) = (got.width, got.height)
         var mask = [Bool](repeating: false, count: w * h)
         var columns = [Int](repeating: 0, count: w)
@@ -31,10 +32,10 @@ public struct RasterDiff: Equatable, Sendable {
         var (wrong, maxError) = (0, Float(0))
         var first: [Int] = []
         var box = [Int.max, Int.max, -1, -1]
-        for y in 0..<h {
-            for x in 0..<w {
+        for y in 0 ..< h {
+            for x in 0 ..< w {
                 var bad = false
-                for c in 0..<got.channels {
+                for c in 0 ..< got.channels {
                     let (g, e) = (got[x, y, c], want[x, y, c])
                     if e.isNaN { continue }
                     let error = g.isNaN ? Float.infinity : abs(g - e)
@@ -52,7 +53,7 @@ public struct RasterDiff: Equatable, Sendable {
             }
         }
         let map = stride(from: 0, to: 64, by: 4).map { at in
-            String(cells[at..<(at + 4)].reduce(0) { $0 << 1 | ($1 ? 1 : 0) }, radix: 16)
+            String(cells[at ..< (at + 4)].reduce(0) { $0 << 1 | ($1 ? 1 : 0) }, radix: 16)
         }.joined()
         return RasterDiff(
             width: w, height: h, wrong: wrong, maxError: maxError, first: first,
@@ -60,7 +61,8 @@ public struct RasterDiff: Equatable, Sendable {
             firstWant: first.isEmpty ? "" : want.shown(want.pixel(first[0], first[1])),
             box: wrong == 0 ? [] : box, map: map,
             streakColumns: columns.filter { $0 >= max(4, h / 2) }.count,
-            streakRows: rows.filter { $0 >= max(4, w / 2) }.count, mask: mask)
+            streakRows: rows.filter { $0 >= max(4, w / 2) }.count, mask: mask
+        )
     }
 
     /// One phrase for the log's why=: "37_wrong_of_4096_at_3,5_got_..._want_..._box_..._map_..."

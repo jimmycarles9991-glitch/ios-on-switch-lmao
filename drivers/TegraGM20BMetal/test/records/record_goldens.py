@@ -6,13 +6,13 @@ write_goldens writes testdata/records_<kind>.bin, _sample.tsv and _sample_states
 pack's corpus, testdata/records_<kind>_sample.corpus, is the pack's split lines of the sampled states. --out writes the
 four files to <dir> instead of the workspace's testdata (`bazel run ... -- --out <dir>`), for a run in a checkout
 other than the one that takes them. A bucket begins
-with the warm-up state (rawpack.py split_buckets), which the probe draws first, so the first bucket's first line leads.
-Then every R line whose state key, less a variant's name, hashes (packfile.fnv of rawpack.state_key) to a sampled state,
-or to no state of the pack, and every D line (the kernels' dispatch shapes, a few dozen), each once.
+with the warm-up state (make_pack.py split_buckets), which the probe draws first, so the first bucket's first line
+leads. Then every R line whose state key, less a variant's name, hashes (packfile.fnv of make_pack.state_key) to a
+sampled state, or to no state of the pack, and every D line (the kernels' dispatch shapes, a few dozen), each once.
 
 A line's text names its state's key only where the descriptor made of it prints the same: a bundle library's state is
-filed under its functions' AIR (runtime/RawRenderKey.h), and some fields come back narrower (an index of -1 as 32
-bits). Such a line's key is no state's of the pack, and it is taken whatever state it makes.
+filed under its functions' AIR (runtime/TegraGM20BMetalRenderKey.h), and some fields come back narrower (an index of -1
+as 32 bits). Such a line's key is no state's of the pack, and it is taken whatever state it makes.
 """
 
 import os
@@ -22,9 +22,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'raw/pack'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'pack'))
+import make_pack
 import packfile
-import rawpack
 
 
 def pick(states: set[int], known: set[int], logs: list[Path]) -> list[str]:
@@ -35,7 +35,7 @@ def pick(states: set[int], known: set[int], logs: list[Path]) -> list[str]:
             lead = n == 0 and i == 0
             if not lead and line.startswith('R '):
                 # a variant's line (cubic binds) is its state's: its record files under the state's key
-                state = packfile.fnv(packfile.VARIANT_NAME.sub('', rawpack.state_key(line)).encode())
+                state = packfile.fnv(packfile.VARIANT_NAME.sub('', make_pack.state_key(line)).encode())
                 if state not in states and state in known:
                     continue
             elif not lead and not line.startswith('D '):

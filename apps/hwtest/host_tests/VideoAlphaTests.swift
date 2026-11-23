@@ -7,10 +7,12 @@ import XCTest
 final class VideoAlphaTests: XCTestCase {
     func testCodesAreBT709VideoRange() {
         XCTAssertEqual(
-            VideoAlpha.encode(SIMD3(1, 1, 1), alpha: 255), VideoAlpha.Codes(y: 235, cb: 128, cr: 128, a: 255))
+            VideoAlpha.encode(SIMD3(1, 1, 1), alpha: 255), VideoAlpha.Codes(y: 235, cb: 128, cr: 128, a: 255)
+        )
         XCTAssertEqual(VideoAlpha.encode(SIMD3(0, 0, 0), alpha: 0), VideoAlpha.Codes(y: 16, cb: 128, cr: 128, a: 0))
         XCTAssertEqual(
-            VideoAlpha.encode(SIMD3(0.75, 0.25, 0.2), alpha: 64), VideoAlpha.Codes(y: 93, cb: 110, cr: 185, a: 64))
+            VideoAlpha.encode(SIMD3(0.75, 0.25, 0.2), alpha: 64), VideoAlpha.Codes(y: 93, cb: 110, cr: 185, a: 64)
+        )
     }
 
     func testTheGridSeparatesEveryWrongModel() {

@@ -3,14 +3,19 @@ import HWTestCore
 import Metal
 
 /// What every Metal test needs: the device, its library, pipelines, command buffers awaited with their GPU timestamps
-/// and the path the raw facade sent each down, and readback of private (tiled) textures through the blit engine, the
+/// and the path the facade sent each down, and readback of private (tiled) textures through the blit engine, the
 /// way apps do it.
 public final class GPU: @unchecked Sendable {
     public let device: MTLDevice
     public let queue: MTLCommandQueue
     public let library: MTLLibrary
+    /// The facade's counters as this GPU was made (GM20BFacade.counters; empty off the facade): onRawPath's failures
+    /// are counted from them.
+    public let startCounters: [String: Int]
     private let lock = NSLock()
     private var recorded = PathTally()
+    /// `commit`'s command buffers no `finish` has recorded: their paths count once they complete.
+    private var unfinished: [MTLCommandBuffer] = []
     private var failures: [String] = []
     private var hostClocked = 0
 
@@ -31,6 +36,7 @@ public final class GPU: @unchecked Sendable {
         self.device = device
         self.queue = queue
         self.library = library
+        startCounters = GM20BFacade.counters(of: device)
     }
 
     public struct Timing: Sendable {
@@ -38,20 +44,34 @@ public final class GPU: @unchecked Sendable {
         /// From the commit to the completed handler, on the host's clock.
         public let wallMilliseconds: Double
         public let path: String
-        /// The CPU's part: the encode closure, and the commit call (the raw path encodes and submits inside it).
+        /// The CPU's part: the encode closure, and the commit call (the driver encodes and submits inside it).
         public var encodeMilliseconds = 0.0
         public var commitMilliseconds = 0.0
-        /// The raw facade's clock of gpuMilliseconds (RawFacade.gpuClock); nil off the facade.
+        /// The facade's clock of gpuMilliseconds (GM20BFacade.gpuClock); nil off the facade.
         public var gpuClock: String?
+        /// The facade's own path of the command buffer (GM20BFacade.path): error:<predicate> where `path` holds Metal's
+        /// error.
+        public var facadePath = "device"
 
         /// GPU timestamps that advance prove the work ran on the GPU's clock, not a CPU fallback.
         public var gpuTimed: Bool { gpuMilliseconds > 0 }
     }
 
-    /// Every command buffer `run` committed, by the path the raw facade reports for it ("device" elsewhere).
-    public var paths: PathTally { locked { recorded } }
+    /// Every command buffer `run` and `commit` committed and `finish` waited for, by the path the facade reports
+    /// for it ("device" elsewhere): the test's own command buffers (FailedAttribution). `commit`'s count once they
+    /// complete, whoever waited for them. No completed handler records them: a handler makes the facade ask for the
+    /// interrupt at the end of their range, which the path tests count.
+    public var paths: PathTally {
+        locked {
+            var all = recorded
+            for buffer in unfinished where buffer.status == .completed || buffer.status == .error {
+                all.add(GM20BFacade.path(of: buffer))
+            }
+            return all
+        }
+    }
 
-    /// Runs whose GPU time on the raw facade is the host's window, for want of a GPU stamp (RawFacade.gpuClock).
+    /// Runs whose GPU time on the facade is the host's window, for want of a GPU stamp (GM20BFacade.gpuClock).
     public var hostClockedRuns: Int { locked { hostClocked } }
 
     /// Command buffers that completed with an error, in order (their error's domain, code and text).
@@ -95,7 +115,7 @@ public final class GPU: @unchecked Sendable {
         let wall = (completed - start) * 1000
         let encodeMs = (start - began) * 1000
         let commitMs = (min(committed, completed) - start) * 1000
-        let path = RawFacade.path(of: buffer)
+        let path = GM20BFacade.path(of: buffer)
         locked { recorded.add(path) }
         if buffer.status == .error {
             let error = buffer.error.map(Self.describe) ?? "no error"
@@ -103,13 +123,15 @@ public final class GPU: @unchecked Sendable {
             if !tolerateError { throw TestFailure("command buffer failed: \(error)") }
             return Timing(
                 gpuMilliseconds: 0, wallMilliseconds: wall, path: "error:" + error, encodeMilliseconds: encodeMs,
-                commitMilliseconds: commitMs)
+                commitMilliseconds: commitMs, facadePath: path
+            )
         }
-        let clock = RawFacade.gpuClock(of: buffer)
+        let clock = GM20BFacade.gpuClock(of: buffer)
         if clock == "host" { locked { hostClocked += 1 } }
         return Timing(
             gpuMilliseconds: max(0, buffer.gpuEndTime - buffer.gpuStartTime) * 1000, wallMilliseconds: wall, path: path,
-            encodeMilliseconds: encodeMs, commitMilliseconds: commitMs, gpuClock: clock)
+            encodeMilliseconds: encodeMs, commitMilliseconds: commitMs, gpuClock: clock, facadePath: path
+        )
     }
 
     /// Commits one command buffer without waiting: `finish` waits for a batch of them, so work queued back to back
@@ -117,6 +139,7 @@ public final class GPU: @unchecked Sendable {
     public func commit(_ encode: (MTLCommandBuffer) throws -> Void) throws -> MTLCommandBuffer {
         guard let buffer = queue.makeCommandBuffer() else { throw TestFailure("makeCommandBuffer returned nil") }
         try encode(buffer)
+        locked { unfinished.append(buffer) }
         buffer.commit()
         return buffer
     }
@@ -125,8 +148,11 @@ public final class GPU: @unchecked Sendable {
         var errors: [String] = []
         for buffer in buffers {
             buffer.waitUntilCompleted()
-            let path = RawFacade.path(of: buffer)
-            locked { recorded.add(path) }
+            let path = GM20BFacade.path(of: buffer)
+            locked {
+                unfinished.removeAll { $0 === buffer }
+                recorded.add(path)
+            }
             if buffer.status == .error { errors.append(buffer.error.map(Self.describe) ?? "no error") }
         }
         locked { failures += errors }
@@ -141,6 +167,7 @@ public final class GPU: @unchecked Sendable {
 
     /// An error as "domain/code text", short enough for a log field.
     public static func describe(_ error: Error) -> String {
+        if let failure = error as? TestFailure { return failure.description }
         let ns = error as NSError
         return "\(ns.domain)/\(ns.code) \(ns.localizedDescription)"
     }
@@ -163,7 +190,8 @@ public final class GPU: @unchecked Sendable {
         samples: Int = 1, storage: MTLStorageMode = .private, mipmaps: Int = 1
     ) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format, width: width, height: height, mipmapped: false)
+            pixelFormat: format, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = usage
         descriptor.storageMode = storage
         descriptor.sampleCount = samples
@@ -193,12 +221,14 @@ public final class GPU: @unchecked Sendable {
             if options.isEmpty {
                 blit.copy(
                     from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: origin, sourceSize: size,
-                    to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0)
+                    to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0
+                )
             } else {
                 blit.copy(
                     from: texture, sourceSlice: slice, sourceLevel: level, sourceOrigin: origin, sourceSize: size,
                     to: out, destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0,
-                    options: options)
+                    options: options
+                )
             }
             blit.endEncoding()
         }
@@ -212,12 +242,13 @@ public final class GPU: @unchecked Sendable {
         -> Raster
     {
         let bytes = try await read(
-            texture, bytesPerPixel: format.bytesPerTexel, level: level, slice: slice, plane: plane)
+            texture, bytesPerPixel: format.bytesPerTexel, level: level, slice: slice, plane: plane
+        )
         return format.raster(bytes, width: max(1, texture.width >> level), height: max(1, texture.height >> level))
     }
 
-    /// The same texels read by a compute kernel instead of the blit engine (a command buffer m2v draws whole on the
-    /// raw facade): where the two readbacks disagree, the readback is what is broken, not the scene.
+    /// The same texels read by a compute kernel instead of the blit engine: where the two readbacks disagree, the
+    /// readback is what is broken, not the scene.
     public func texels(_ texture: MTLTexture) async throws -> [SIMD4<Float>] {
         let count = texture.width * texture.height
         let out = try buffer(count * 16)
@@ -229,11 +260,13 @@ public final class GPU: @unchecked Sendable {
             encoder.setBuffer(out, offset: 0, index: 0)
             encoder.dispatchThreads(
                 MTLSize(width: texture.width, height: texture.height, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+            )
             encoder.endEncoding()
         }
         return Array(
-            UnsafeBufferPointer(start: out.contents().bindMemory(to: SIMD4<Float>.self, capacity: count), count: count))
+            UnsafeBufferPointer(start: out.contents().bindMemory(to: SIMD4<Float>.self, capacity: count), count: count)
+        )
     }
 
     /// The compute readback as a raster of `channels` (texels' first channels; alpha alone for A8).
@@ -259,7 +292,8 @@ public final class GPU: @unchecked Sendable {
             blit.copy(
                 from: staging, sourceOffset: 0, sourceBytesPerRow: bytesPerRow, sourceBytesPerImage: 0,
                 sourceSize: MTLSize(width: width, height: height, depth: 1), to: texture, destinationSlice: slice,
-                destinationLevel: level, destinationOrigin: MTLOrigin())
+                destinationLevel: level, destinationOrigin: MTLOrigin()
+            )
             blit.endEncoding()
         }
     }
@@ -294,7 +328,7 @@ public final class GPU: @unchecked Sendable {
 extension Array where Element == UInt8 {
     public func pixel(_ x: Int, _ y: Int, width: Int, bytesPerPixel: Int = 4) -> ArraySlice<UInt8> {
         let at = (y * width + x) * bytesPerPixel
-        return self[at..<(at + bytesPerPixel)]
+        return self[at ..< (at + bytesPerPixel)]
     }
 
     public func loaded<T>(as type: T.Type, at index: Int) -> T {

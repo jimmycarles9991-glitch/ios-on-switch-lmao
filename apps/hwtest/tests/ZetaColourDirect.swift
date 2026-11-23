@@ -3,8 +3,8 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.zeta_colour's diagnostic arm, outside its claim and run after it (a wrong write here can kill the channel):
-/// the route's draw with the colour ROP straight over the zeta's own pages (switchRawProbeZetaDirect:), the tiled cache
+/// gpu.gm20b.zeta_colour's diagnostic arm, outside its claim and run after it (a wrong write here can kill the channel):
+/// the route's draw with the colour ROP straight over the zeta's own pages (switchMetalProbeZetaDirect:), the tiled cache
 /// off for the draw, the configuration Gallium nvc0 draws into a ZF32_X24S8 zeta in. Boot 21 drew over those pages with
 /// the tiled cache on and nothing it wrote reached memory. direct_<format>_* at 0: the tiled cache lost those writes;
 /// off: they are lost untiled too, which leaves the zeta kind or the integer format (nvc0 draws R32G32_FLOAT where this
@@ -18,7 +18,7 @@ struct ZetaColourDirect {
 
     static func run(_ gpu: GPU, _ cells: ZetaColourCells) async -> ZetaColourDirect {
         var arm = ZetaColourDirect()
-        let start = RawFacade.counters(of: gpu.device)
+        let start = GM20BFacade.counters(of: gpu.device)
         var n: UInt32 = 0
         for format in ZetaColourTest.formats {
             let label = ZetaColourCells.name(format)
@@ -37,7 +37,7 @@ struct ZetaColourDirect {
             if arm.first == nil, let miss = count.first { arm.first = miss }
             arm.counts[label] = count
         }
-        let end = RawFacade.counters(of: gpu.device)
+        let end = GM20BFacade.counters(of: gpu.device)
         arm.draws = (end["zeta_colour_draws"] ?? 0) - (start["zeta_colour_draws"] ?? 0)
         return arm
     }

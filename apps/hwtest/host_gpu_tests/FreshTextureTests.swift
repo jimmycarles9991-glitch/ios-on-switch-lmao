@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 import XCTest
 
-/// gpu.texture.fresh on this Mac's GPU: the first contents the raw path writes are the ones Apple's GPUs read.
+/// gpu.texture.fresh on this Mac's GPU: the first contents the driver writes are the ones Apple's GPUs read.
 final class FreshTextureTests: XCTestCase {
     private func makeGPU() throws -> GPU {
         let directory =

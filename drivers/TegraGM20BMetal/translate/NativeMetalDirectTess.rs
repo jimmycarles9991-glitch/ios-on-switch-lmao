@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
-//! A tessellation state's probe draw for the raw path's direct compile (NativeMetalDirect.rs): four patches of the
-//! function's control points, read through a bound factor buffer (the raw path binds its zero buffer where the encoder set
+//! A tessellation state's probe draw for the driver's direct compile (NativeMetalDirect.rs): four patches of the
+//! function's control points, read through a bound factor buffer (the driver binds its zero buffer where the encoder set
 //! none, as m2v's binder does).
 
 use metal2vulkan::bind::{BindState, DrawCall, IndexBufferRef, TessellationFactorBuffer, TessellationFactors};
@@ -42,7 +42,7 @@ pub fn probe_draw(tess: Option<&TessellationState>) -> DrawCall {
     }
 }
 
-/// The probe's factor buffer, which a tessellation state's draws read (the raw path binds its zero buffer where the encoder
+/// The probe's factor buffer, which a tessellation state's draws read (the driver binds its zero buffer where the encoder
 /// set none)
 pub fn bind_factors(state: &mut BindState) {
     state.tessellation_factors =

@@ -34,7 +34,7 @@ constexpr uint16_t kTextureOffset = 0x20;
 constexpr uint32_t kRgbaFloat32 = 125;
 
 template <class T>
-void put(std::vector<uint8_t> &out, raw::PackHeader &h, raw::PackSectionId s, const T *items, size_t n)
+void put(std::vector<uint8_t> &out, gm20b::PackHeader &h, gm20b::PackSectionId s, const T *items, size_t n)
 {
     out.resize((out.size() + 0xff) & ~size_t(0xff));
     h.section[s] = {out.size(), n * sizeof(T)};
@@ -46,22 +46,22 @@ class BenchRecords : public testing::Test {
 protected:
     void SetUp() override
     {
-        raw::PackHeader h = {};
+        gm20b::PackHeader h = {};
         memcpy(h.magic, "GM20BPK1", 8);
-        h.version = raw::kPackVersion;
+        h.version = gm20b::kPackVersion;
         h.programs = 2;
         h.pipelines = 2;
-        raw::PackProgram programs[2] = {};
+        gm20b::PackProgram programs[2] = {};
         for (uint32_t i = 0; i < 2; i++) {
             programs[i].heapOffset = i * 0x100;
             programs[i].program = i * 0x100 + 0x30;
             programs[i].bytes = 0x100;
             programs[i].cbufs = 1;
-            programs[i].cbufType[0] = raw::CbufRoot;
+            programs[i].cbufType[0] = gm20b::CbufRoot;
             programs[i].gprs = kTemplateGprs[i];
         }
         programs[0].boundTextures = kVertexBoundTextures;
-        raw::PackPipeline pipeline = {};
+        gm20b::PackPipeline pipeline = {};
         pipeline.keyHash = kTemplateKey;
         pipeline.vs = 0;
         pipeline.fs = 1;
@@ -69,18 +69,18 @@ protected:
         pipeline.vertexSlot = 1;
         pipeline.vertexStride = 48;
         // the same state with a sampled texture: the template of a program that samples
-        raw::PackPipeline textured = pipeline;
+        gm20b::PackPipeline textured = pipeline;
         textured.keyHash = kTexturedKey;
-        raw::setEntryCount(textured, 1);
-        textured.entry[0] = {kTextureOffset, raw::EntryTexture, 2, 0, raw::SamplerSlot, 0, 0};
-        const raw::PackPipeline both[2] = {pipeline, textured};
+        gm20b::setEntryCount(textured, 1);
+        textured.entry[0] = {kTextureOffset, gm20b::EntryTexture, 2, 0, gm20b::SamplerSlot, 0, 0};
+        const gm20b::PackPipeline both[2] = {pipeline, textured};
         std::vector<uint8_t> heap(0x200, 0x5a);
         std::vector<uint8_t> out(sizeof h);
-        put(out, h, raw::PackPrograms, programs, 2);
-        put(out, h, raw::PackPipelines, both, 2);
-        put(out, h, raw::PackBlob, kTemplateBlob, sizeof kTemplateBlob / 4);
-        put(out, h, raw::PackStrings, kTemplateKeyString, sizeof kTemplateKeyString);
-        put(out, h, raw::PackHeap, heap.data(), heap.size());
+        put(out, h, gm20b::PackPrograms, programs, 2);
+        put(out, h, gm20b::PackPipelines, both, 2);
+        put(out, h, gm20b::PackBlob, kTemplateBlob, sizeof kTemplateBlob / 4);
+        put(out, h, gm20b::PackStrings, kTemplateKeyString, sizeof kTemplateKeyString);
+        put(out, h, gm20b::PackHeap, heap.data(), heap.size());
         memcpy(out.data(), &h, sizeof h);
         const char *dir = getenv("TEST_TMPDIR");
         path_ = std::string(dir ? dir : "/tmp") + "/bench_records_test.pack";
@@ -118,7 +118,7 @@ protected:
         return p;
     }
 
-    static std::vector<uint32_t> words(const raw::RuntimeRecord &r, uint32_t method)
+    static std::vector<uint32_t> words(const gm20b::RuntimeRecord &r, uint32_t method)
     {
         std::vector<uint32_t> found;
         for (size_t k = 0; k + 1 < r.blob.size(); k += 2)
@@ -127,20 +127,20 @@ protected:
         return found;
     }
 
-    raw::Pack pack_;
+    gm20b::Pack pack_;
     std::string path_;
 };
 
 TEST_F(BenchRecords, TheDevicesTemplateIsTaken)
 {
-    const raw::PackPipeline *tpl = bench::fragmentTemplate(pack_);
+    const gm20b::PackPipeline *tpl = bench::fragmentTemplate(pack_);
     ASSERT_NE(tpl, nullptr);
     EXPECT_EQ(tpl->keyHash, kTemplateKey);
 }
 
 TEST_F(BenchRecords, ColourZeroIsWrittenWholeWhateverTheTemplateWrote)
 {
-    raw::RuntimeRecord r;
+    gm20b::RuntimeRecord r;
     std::string why;
     ASSERT_TRUE(bench::fragmentRecord(pack_, *bench::fragmentTemplate(pack_), known(), kRgbaFloat32,
                                       0xbe7c000000000001ull, {}, {}, r, why))
@@ -155,14 +155,14 @@ TEST_F(BenchRecords, ColourZeroIsWrittenWholeWhateverTheTemplateWrote)
 // of 0 is ILLEGAL_SHADER_REGISTER_COUNT at the draw (class error 0xb5 for the vertex program)
 TEST_F(BenchRecords, BothProgramsCarryTheirRegisterCounts)
 {
-    raw::RuntimeRecord r;
+    gm20b::RuntimeRecord r;
     std::string why;
     ASSERT_TRUE(bench::fragmentRecord(pack_, *bench::fragmentTemplate(pack_), known(), kRgbaFloat32,
                                       0xbe7c000000000003ull, {}, {}, r, why))
         << why;
-    raw::PackProgram vertex, pixel;
-    raw::programSlot(r.programs[0], vertex);
-    raw::programSlot(r.programs[1], pixel);
+    gm20b::PackProgram vertex, pixel;
+    gm20b::programSlot(r.programs[0], vertex);
+    gm20b::programSlot(r.programs[1], pixel);
     EXPECT_EQ(vertex.gprs, kTemplateGprs[0]);
     EXPECT_EQ(vertex.boundTextures, kVertexBoundTextures);
     EXPECT_EQ(pixel.gprs, bench::kKnownGprs);
@@ -174,11 +174,11 @@ TEST_F(BenchRecords, ASamplingProgramReadsItsTemplatesTextureFromSetZero)
 {
     EXPECT_FALSE(bench::samplesTexture(known()));
     ASSERT_TRUE(bench::samplesTexture(sampling()));
-    const raw::PackPipeline *tpl = bench::textureTemplate(pack_);
+    const gm20b::PackPipeline *tpl = bench::textureTemplate(pack_);
     ASSERT_NE(tpl, nullptr);
     EXPECT_EQ(tpl->keyHash, kTexturedKey);
     EXPECT_EQ(bench::fragmentTemplate(pack_)->keyHash, kTemplateKey);
-    raw::RuntimeRecord r;
+    gm20b::RuntimeRecord r;
     std::string why;
     ASSERT_TRUE(
         bench::fragmentRecord(pack_, *tpl, sampling(), kRgbaFloat32, 0xbe7c000000000004ull, {}, {}, r, why, true))
@@ -188,7 +188,7 @@ TEST_F(BenchRecords, ASamplingProgramReadsItsTemplatesTextureFromSetZero)
     EXPECT_EQ(placed >> 36 & 0x1fff, kTextureOffset / 4);
     EXPECT_EQ(placed & ~(0x1fffull << 36),
               0xc038ull << 48 | 7ull << 16 | 4ull << 8 | 255ull << 20 | 2ull << 28 | 0xfull << 31 | 1ull << 55);
-    EXPECT_EQ(r.programs[1].cbufTypes.back(), raw::CbufSet);
+    EXPECT_EQ(r.programs[1].cbufTypes.back(), gm20b::CbufSet);
     EXPECT_EQ(r.programs[1].boundTextures, r.programs[1].cbufTypes.size());
     EXPECT_FALSE(bench::fragmentRecord(pack_, *bench::fragmentTemplate(pack_), sampling(), kRgbaFloat32,
                                        0xbe7c000000000005ull, {}, {}, r, why));
@@ -206,7 +206,7 @@ TEST_F(BenchRecords, FirstColourOnlyDropsTheOtherColours)
         bench::withoutOtherColours("samples=1 topo=0 ds=0/0 c0=554:15:0:1:0:0:1:0:0 c1=115:0:0:1:0:0:1:0:0 a0=31"),
         "samples=1 topo=0 ds=0/0 c0=554:15:0:1:0:0:1:0:0 a0=31");
     EXPECT_EQ(bench::withoutOtherColours("c0=80:15:0 c1=115:0:0 c2=55:0:0"), "c0=80:15:0");
-    raw::RuntimeRecord r;
+    gm20b::RuntimeRecord r;
     std::string why;
     ASSERT_TRUE(bench::fragmentRecord(pack_, *bench::fragmentTemplate(pack_), known(), kRgbaFloat32,
                                       0xbe7c000000000002ull, {}, {}, r, why, true))

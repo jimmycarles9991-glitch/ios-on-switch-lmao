@@ -11,7 +11,8 @@
 // on one, fails it; only a semantic failure filed after that is not seen (the bridge fence would have seen it).
 
 // True: armed, or refused for a producer that already failed (whose error is completed here): one completion comes.
-// False: a producer is the GPU's, or every flip slot is in use; the bridge fence takes the set.
+// False: a producer is the GPU's, every flip slot is in use, or host1x refused the stream as invalid (logged where it
+// was submitted); the bridge fence takes the set.
 bool planeMediaFence(const PlaneSet &p)
 {
     switch_gpu_backing_token producers[kPlaneDependencies] = {};

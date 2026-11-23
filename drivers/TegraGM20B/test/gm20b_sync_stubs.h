@@ -27,8 +27,6 @@ typedef unsigned int gfp_t;
 
 #define READ_ONCE(x) __atomic_load_n(&(x), __ATOMIC_RELAXED)
 #define WRITE_ONCE(x, v) __atomic_store_n(&(x), (v), __ATOMIC_RELAXED)
-#define upper_32_bits(n) ((u32)((n) >> 32))
-#define lower_32_bits(n) ((u32)(n))
 
 struct list_head {
 	struct list_head *next, *prev;
@@ -52,42 +50,17 @@ void *kmalloc_array(size_t n, size_t size, gfp_t flags);
 void kfree(const void *p);
 void nvxnu_log(const char *format, ...);
 
-struct nvif_push {
-	u32 *cur;
-};
-
-void switch_sync_push(struct nvif_push *push);
-#define PUSH_MTHD(push, ...) switch_sync_push(push)
-#define PUSH_KICK(push) switch_sync_push(push)
-
 struct tgm_vm {
 	u64 fences_va, bind_va;
 	u32 bind_target;
 	const volatile u32 *bind_cpu;
 };
 
-struct tgm_order {
-	u64 va;
-	const volatile u32 *cpu;
-	u64 id;
-	u32 seqno;
-	u32 chid;
-};
-
 struct tgm_chan {
-	struct tgm_vm *vm;
-
-	struct {
-		struct nvif_push push;
-	} chan;
 	struct list_head live;
 	u64 id, fault_va, killed_ns;
 	volatile u32 *fence_cpu;
-	u32 submitted, error, chid, norder;
-	int kernel, high;
-	void *group;
-	struct tgm_order order[TGM_ORDER_MAX];
-	struct tgm_order waited;
+	u32 submitted, error, chid;
 };
 
 struct fences_state {
@@ -121,8 +94,6 @@ int tgm_chan_announced_id(u64 id, u32 seqno);
 int tgm_chan_announced_uid(u32 uid, u32 seqno);
 void tgm_chan_wanted(u32 uid, u32 seqno);
 enum tgm_hang tgm_hang_recover(struct tgm_chan *late, const char *who, u32 seqno, u64 waited_ns);
-void tgm_hold_need(struct nvkm_device *device, unsigned int chid);
-int vm_imports(struct tgm_vm *vm, u64 pa);
 
 static inline struct tgm_chan *live_by(u64 id, int chid)
 {

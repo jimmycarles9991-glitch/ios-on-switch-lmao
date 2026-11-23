@@ -2,7 +2,7 @@
 
 usage: gate.py --selectors <dump> [--invocations N] [--seed S] [--bound B]
 
-A dump is directcheck's DIRECTCHECK_DUMP with DIRECTCHECK_SELECTORS (runtime/raw_selector_variants.h): per state its
+A dump is directcheck's DIRECTCHECK_DUMP with DIRECTCHECK_SELECTORS (runtime/selector_variants.h): per state its
 generic fragment program, its uniform bind residual words and, per config of its selector table, the config's value and
 program. Each config runs both programs on the same seeded inputs with the config's compared bytes pinned at its
 constant buffer from byte 0 and the residual words 0 (what a draw that selects it binds), bit for bit as gate.py

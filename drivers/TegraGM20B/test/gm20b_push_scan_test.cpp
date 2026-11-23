@@ -2,7 +2,7 @@
 // drivers/TegraGM20B/TegraGM20BPushScan.h on the host: the kernel's stats method-stream reader over streams laid out
 // as NVK writes them for GM20B (a Core Animation-like submission: the command buffer prologue, a pass into a pitch-linear
 // 720x1280 target, its draws in a push of their own, barriers, NVK's copy-engine WFI, a method continued across two pushes;
-// a multisampled pass; a push the kernel cannot read) and the raw path's, checking every counter and each push's profile
+// a multisampled pass; a push the kernel cannot read) and the driver's, checking every counter and each push's profile
 // class and target image. A push the
 // profile may stamp after must end on a method boundary: the stamp would otherwise land inside a method's data.
 #include <gtest/gtest.h>
@@ -146,7 +146,7 @@ TEST(GM20BPushScan, MultisampledPassCopyClearDispatch)
 
 // A framebuffer fetch's barrier as NVIDIA orders it (PIXEL_SHADER_BARRIER, then the texture invalidate 0x0f74 it
 // orders), and a state that turns the pixel interlock on (pixel conflicts, ordered) and one that turns it off.
-// The raw path's 4x pass as it writes one: no NVK macro, SET_ANTI_ALIAS 2X2 itself in the pass's prologue and 1X1 again
+// The driver's 4x pass as it writes one: no NVK macro, SET_ANTI_ALIAS 2X2 itself in the pass's prologue and 1X1 again
 // after its last draw, in that draw's push; the target is the 720x1280 image's 1440x2560 sample grid. Its resolve pass
 // draws the 720x1280 one-sample image.
 static void raw_target(Push &p, uint32_t width, uint32_t height)
@@ -164,7 +164,7 @@ static void raw_draw(Push &p)
 	p.push_back(immd(0, 0x1614, 0));
 }
 
-TEST(GM20BPushScan, RawMultisampledPassAndItsResolve)
+TEST(GM20BPushScan, GM20BMultisampledPassAndItsResolve)
 {
 	Push t0, t1, t2, t3;
 	raw_target(t0, 1440, 2560);
@@ -240,7 +240,7 @@ TEST(GM20BPushScan, PixelShaderBarrierAndInterlock)
 	CHECK(e.c.twinDraws == 0);
 }
 
-// The raw path's barrier twin (rule fetch.twin): a triangle a draw, each after a PIXEL_SHADER_BARRIER and the texture
+// The driver's barrier twin (rule fetch.twin): a triangle a draw, each after a PIXEL_SHADER_BARRIER and the texture
 // invalidate it orders. A pass's first draw has no draw of its pass to wait for, so a barrier before it (a pixel-ordered
 // pass opening) is no twin's, and neither is a draw with no barrier since the one before. NVK's macro draws count the same.
 static void twin_triangle(Push &p)
@@ -344,7 +344,7 @@ TEST(GM20BPushScan, PerSampleDraws)
 	CHECK(f.c.draws == 4 && f.c.sampleDraws == 0);
 }
 
-// An indirect command buffer's command as the raw path writes it (raw/runtime/raw_icb.h): its topology, then the gated
+// An indirect command buffer's command as the driver writes it (icb.h): its topology, then the gated
 // draw macro with its index and Metal's indirect draw arguments
 static void icb_command(Push &p, uint32_t index, bool indexed)
 {
@@ -360,7 +360,7 @@ static void icb_command(Push &p, uint32_t index, bool indexed)
 static PushCounts scan_raw(const std::vector<const Push *> &pushes, bool raw)
 {
 	PushParse p = {};
-	p.rawMacros = raw;
+	p.metalMacros = raw;
 	PushCounts c = {};
 	bool whole = true;
 	for (const Push *push : pushes)
@@ -370,7 +370,7 @@ static PushCounts scan_raw(const std::vector<const Push *> &pushes, bool raw)
 
 // A raw job's indirect command buffer draws count where their gate admits them: inside the range the execute wrote to the
 // shadow scratch, every one where the GPU reads the range. NVK's macros at the same slots are no draws.
-TEST(GM20BPushScan, RawIndirectCommandBufferDrawsInTheirRange)
+TEST(GM20BPushScan, GM20BIndirectCommandBufferDrawsInTheirRange)
 {
 	Push range, slots;
 	range.push_back(inc(0, 0x3400 + 4 * SWITCH_GM20B_SCRATCH_ICB_LOCATION, 2));
@@ -392,7 +392,7 @@ TEST(GM20BPushScan, RawIndirectCommandBufferDrawsInTheirRange)
 	CHECK(scan_raw({&range, &slots}, false).draws == 0);
 }
 
-// A call of macro `slot` with its arguments, as the raw path writes one (raw/runtime/raw_mme.h)
+// A call of macro `slot` with its arguments, as the driver writes one (mme.h)
 static Push macro_call(uint32_t slot, const std::vector<uint32_t> &arguments)
 {
 	Push p = {one_inc(0, 0x3800 + 8 * slot, uint32_t(arguments.size()))};
@@ -400,9 +400,10 @@ static Push macro_call(uint32_t slot, const std::vector<uint32_t> &arguments)
 	return p;
 }
 
-// One raw job per kind of draw and clear the raw path writes, into a 1280x720 one-sample block-linear target, an indirect
+// One raw job per kind of draw and clear the driver writes, into a 1280x720 one-sample block-linear target, an indirect
 // command buffer's commands inside their execute's range: each counts once as a draw or a clear and latches that target,
-// which its push's profile class names. An Exec's stream reads the raw path's own slots as NVK's macros there: no draws.
+// which its push's profile class names. A stream read without metalMacros reads the driver's own slots as NVK's
+// macros there: no draws.
 TEST(GM20BPushScan, EachRawDrawAndClearCountsOnceAndLatchesItsTarget)
 {
 	constexpr uint32_t kIndex = 7;
@@ -414,7 +415,7 @@ TEST(GM20BPushScan, EachRawDrawAndClearCountsOnceAndLatchesItsTarget)
 	struct Kind {
 		const char *name;
 		Push call;
-		bool clear, rawSlot;
+		bool clear, metalSlot;
 	};
 
 	const Kind kinds[] = {
@@ -443,12 +444,12 @@ TEST(GM20BPushScan, EachRawDrawAndClearCountsOnceAndLatchesItsTarget)
 	for (const Kind &k : kinds) {
 		for (const bool raw : {true, false}) {
 			PushParse p = {};
-			p.rawMacros = raw;
+			p.metalMacros = raw;
 			PushCounts c = {};
 			bool whole = true;
 			scanPush(c, p, whole, pass.data(), pass.size());
 			const uint8_t cls = scanPush(c, p, whole, k.call.data(), k.call.size());
-			const bool counted = raw || !k.rawSlot;
+			const bool counted = raw || !k.metalSlot;
 			EXPECT_EQ(c.draws, counted && !k.clear ? 1u : 0u)
 				<< k.name << (raw ? " (job)" : " (Exec)");
 			EXPECT_EQ(c.clears, counted && k.clear ? 1u : 0u)

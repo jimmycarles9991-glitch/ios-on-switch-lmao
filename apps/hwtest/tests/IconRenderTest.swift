@@ -6,9 +6,9 @@ import UIKit
 /// An icon render the way a helper asks for one: IconServices draws Settings' icon at the home screen's size in
 /// iconservicesagent (ISIcon -prepareImageForDescriptor:, which crosses to the agent), timed cold and warm, with the
 /// agent's phys_footprint, resident size and lifetime peak before and after (proc_pid_rusage), and once more when its
-/// GPU's idle memory went back (the raw device's give-back, a second after its GPU idles), against its jetsam
+/// GPU's idle memory went back (the device's give-back, a second after its GPU idles), against its jetsam
 /// InactiveHard limit of 15 MB. A settled footprint above the limit fails: the agent would be killed as soon as it goes
-/// inactive. The agent's own log line ("raw: idle memory given back: footprint ...") names each term's owner.
+/// inactive. The agent's own log line ("SwitchMetal: idle memory given back: footprint ...") names each term's owner.
 struct IconRenderTest: HWTest {
     let id = "ui.icon_render"
     let name = "An icon render keeps iconservicesagent within its inactive memory limit"
@@ -44,7 +44,8 @@ struct IconRenderTest: HWTest {
         if settled.footprintMB > Double(Self.inactiveHardMB) {
             return .fail(
                 "\(Self.agent) holds \(Int(settled.footprintMB)) MB once its GPU memory went back after an icon render, "
-                    + "over its \(Self.inactiveHardMB) MB inactive limit", metrics)
+                    + "over its \(Self.inactiveHardMB) MB inactive limit", metrics
+            )
         }
         return .pass(metrics)
     }
@@ -59,7 +60,7 @@ struct IconRenderTest: HWTest {
     /// peak footprint; nil when it is not running or its rusage is refused
     static func footprint(_ process: String) -> Reading? {
         guard let pid = RunningProcesses.pid(named: process, in: RunningProcesses.list(sysctl: "kern.proc.all")),
-            let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "proc_pid_rusage")
+              let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "proc_pid_rusage")
         else { return nil }
         let rusage = unsafeBitCast(symbol, to: Rusage.self)
         var info = rusage_info_v4()
@@ -67,7 +68,8 @@ struct IconRenderTest: HWTest {
         let mb = { (v: UInt64) in Double(v) / 1_048_576 }
         return Reading(
             footprintMB: mb(info.ri_phys_footprint), residentMB: mb(info.ri_resident_size),
-            peakMB: mb(info.ri_lifetime_max_phys_footprint))
+            peakMB: mb(info.ri_lifetime_max_phys_footprint)
+        )
     }
 
     static func icon(_ bundle: String) -> NSObject? {

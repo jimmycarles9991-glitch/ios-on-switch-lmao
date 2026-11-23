@@ -1,4 +1,4 @@
-load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_flag")
 load("//bazel/lint:defs.bzl", "lint_files")
 load(":profile_test.bzl", "profile_tests")
 
@@ -30,6 +30,20 @@ config_setting(
 config_setting(
     name = "release",
     flag_values = {":profile": "release"},
+)
+
+# --//bazel:diagnostics=false compiles our debug-only code out (SWITCH_DEBUG=0 in user space, no DEVELOPMENT in kernel
+# drivers) and changes nothing else: the profile's optimisation and XNU's DEVELOPMENT recipes and SDK stay. A compile
+# check of the release shape of our code, not a build to run: no kernel archive takes such drivers (kernel/rules).
+bool_flag(
+    name = "diagnostics",
+    build_setting_default = True,
+    scope = "target",
+)
+
+config_setting(
+    name = "diagnostics_off",
+    flag_values = {":diagnostics": "false"},
 )
 
 profile_tests(

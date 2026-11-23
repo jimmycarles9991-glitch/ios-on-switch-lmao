@@ -13,11 +13,11 @@
 #include <vector>
 #include "../compiler/compiler_record.h"
 #include "../compiler/compiler_request.h"
-#include "../raw/pack/kernel_shapes.h"
-#include "../raw/pack/probe_states.h"
-#include "../raw/runtime/RawCompileRequest.h"
-#include "../raw/runtime/RawDirect.h"
-#include "../raw/runtime/raw_render_key.h"
+#include "../pack/kernel_shapes.h"
+#include "../pack/probe_states.h"
+#include "../TegraGM20BMetalCompileRequest.h"
+#include "../TegraGM20BMetalDirect.h"
+#include "../render_key.h"
 
 namespace compiler_test {
 
@@ -44,7 +44,7 @@ public:
     {}
 
     // An R line's state; false with `why` for one no client could ask of these libraries
-    bool render(const std::string &line, raw::CompileRequest &r, std::string &why)
+    bool render(const std::string &line, gm20b::CompileRequest &r, std::string &why)
     {
         r = {};
         const size_t v = line.find(" | v ");
@@ -62,13 +62,9 @@ public:
                 return why = "a cubic segment it cannot read", false;
             } else if (tag.rfind("tests=", 0) == 0) {
                 r.variant.fragmentTests = uint8_t(atoi(tag.c_str() + 6));
-            } else if (tag.rfind("xrsh=", 0) == 0) {
-                r.variant.xrShadows = uint8_t(strtoul(tag.c_str() + 5, nullptr, 10));
-            } else if (tag == "xr2p") {
-                r.variant.twoPlane = true;
             } else if (tag.rfind("xrs=", 0) == 0) {
                 r.variant.xrSlots = uint16_t(strtoul(tag.c_str() + 4, nullptr, 10));
-            } else if (tag.rfind("wtex=", 0) == 0 && !raw::parseWritten(tag, r.variant.written)) {
+            } else if (tag.rfind("wtex=", 0) == 0 && !gm20b::parseWritten(tag, r.variant.written)) {
                 return why = "a wtex segment it cannot read", false;
             }
             at = next;
@@ -79,43 +75,43 @@ public:
     }
 
     // A D line's kernel at each region shape its dispatch has
-    bool kernels(const std::string &line, std::vector<raw::CompileRequest> &out, std::string &why)
+    bool kernels(const std::string &line, std::vector<gm20b::CompileRequest> &out, std::string &why)
     {
         probe::Shape shape;
         if (!probe::parse(line, shape, why))
             return false;
-        raw::CompileRequest r;
-        r.kind = raw::RequestKind::Kernel;
+        gm20b::CompileRequest r;
+        r.kind = gm20b::RequestKind::Kernel;
         if (!addLibrary(r, shape.library, why))
             return false;
-        raw::RequestStage s;
+        gm20b::RequestStage s;
         s.tag = "k";
         s.function = s.name = shape.function;
-        s.constants = raw::constantsText(probe::constantValues(shape.constants));
+        s.constants = gm20b::constantsText(probe::constantValues(shape.constants));
         s.specialized = shape.specialized || !s.constants.empty();
         r.stages.push_back(s);
         const auto air = hashes_[shape.library].find(shape.function);
         if (air == hashes_[shape.library].end())
             return why = "no AIR for " + shape.function, false;
         probe::eachRegionShape(shape, [&](const probe::Shape &region, uint8_t) {
-            raw::CompileRequest k = r;
+            gm20b::CompileRequest k = r;
             std::map<uint32_t, uint32_t> memory;
             std::istringstream text(region.threadgroupMemory);
             for (std::string pair; std::getline(text, pair, ',');)
                 memory[uint32_t(strtoul(pair.c_str(), nullptr, 10))] =
                     uint32_t(strtoul(pair.c_str() + pair.find(':') + 1, nullptr, 10));
-            raw::KernelDispatch dispatch(region.threads, memory, region.regionMode);
-            for (const raw::BoundTexture &t : region.textures) {
+            gm20b::KernelDispatch dispatch(region.threads, memory, region.regionMode);
+            for (const gm20b::BoundTexture &t : region.textures) {
                 MTLTextureDescriptor *d = [MTLTextureDescriptor new];
                 d.pixelFormat = MTLPixelFormat(t.pixelFormat);
                 d.textureType = MTLTextureType(t.textureType);
                 d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
                 dispatch.texture(t.slot, d, t.planes);
             }
-            for (const raw::BoundSampler &b : region.samplers)
+            for (const gm20b::BoundSampler &b : region.samplers)
                 dispatch.sampler(b.slot, probe::samplerDescriptor(b));
             const NmbDirectDispatch &d = dispatch.dispatch();
-            raw::KernelRequest &q = k.kernel;
+            gm20b::KernelRequest &q = k.kernel;
             q.maxThreads = region.maxThreads;
             q.multipleOfWidth = region.multipleOfWidth;
             q.regionMode = region.regionMode;
@@ -130,11 +126,11 @@ public:
     }
 
     // Every request `lines` names, in order, each line's either way
-    std::vector<raw::CompileRequest> of(const std::vector<std::string> &lines)
+    std::vector<gm20b::CompileRequest> of(const std::vector<std::string> &lines)
     {
-        std::vector<raw::CompileRequest> out;
+        std::vector<gm20b::CompileRequest> out;
         for (const std::string &line : lines) {
-            raw::CompileRequest r;
+            gm20b::CompileRequest r;
             std::string why;
             if (line.rfind("R ", 0) == 0 && render(line, r, why))
                 out.push_back(std::move(r));
@@ -147,9 +143,9 @@ public:
 private:
     std::string root_;
     std::map<std::string, std::string> data_;
-    std::map<std::string, std::map<std::string, raw::AirHash>> hashes_;
+    std::map<std::string, std::map<std::string, gm20b::AirHash>> hashes_;
 
-    static bool fields(const std::string &head, raw::PipelineFields &f)
+    static bool fields(const std::string &head, gm20b::PipelineFields &f)
     {
         for (const std::string &h : probe::split(head)) {
             unsigned i = 0, x[9] = {};
@@ -173,14 +169,14 @@ private:
         return true;
     }
 
-    bool addLibrary(raw::CompileRequest &r, const std::string &path, std::string &why)
+    bool addLibrary(gm20b::CompileRequest &r, const std::string &path, std::string &why)
     {
         for (uint32_t i = 0; i < r.libraries.size(); ++i)
             if (r.libraries[i].path == path)
                 return true;
-        raw::RequestLibrary library;
+        gm20b::RequestLibrary library;
         library.path = path;
-        library.system = raw::systemLibraryPath(path);
+        library.system = gm20b::systemLibraryPath(path);
         if (!library.system) {
             const auto copy = data_.find(path);
             if (copy == data_.end())
@@ -189,11 +185,11 @@ private:
             library.bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
         if (!hashes_.count(path)) {
-            std::map<std::string, raw::AirHash> read;
+            std::map<std::string, gm20b::AirHash> read;
             const bool parsed = library.system
-                                    ? raw::metallibAirHashes(root_ + path, read)
-                                    : raw::metallibAirHashes(reinterpret_cast<const uint8_t *>(library.bytes.data()),
-                                                             library.bytes.size(), read);
+                                    ? gm20b::metallibAirHashes(root_ + path, read)
+                                    : gm20b::metallibAirHashes(reinterpret_cast<const uint8_t *>(library.bytes.data()),
+                                                               library.bytes.size(), read);
             if (!parsed)
                 return why = "no library " + path, false;
             hashes_[path] = std::move(read);
@@ -203,12 +199,12 @@ private:
     }
 
     // A stage segment's tokens: its function, lib=, as=, spec and its constants
-    bool stage(raw::CompileRequest &r, const std::string &tag, const std::string &text, std::string &why)
+    bool stage(gm20b::CompileRequest &r, const std::string &tag, const std::string &text, std::string &why)
     {
         const std::vector<std::string> tokens = probe::split(text);
         if (tokens.empty())
             return why = "an empty stage", false;
-        raw::RequestStage s;
+        gm20b::RequestStage s;
         s.tag = tag;
         s.function = s.name = tokens[0];
         std::string path = kQuartzCore, constants;
@@ -223,10 +219,10 @@ private:
                 constants += (constants.empty() ? "" : " ") + tokens[i];
         }
         if (!constants.empty()) {
-            MTLFunctionConstantValues *values = raw::constantValuesOf(constants);
+            MTLFunctionConstantValues *values = gm20b::constantValuesOf(constants);
             if (!values)
                 return why = "constants it cannot read", false;
-            s.constants = raw::constantsText(values);
+            s.constants = gm20b::constantsText(values);
             s.specialized = true;
         }
         if (!addLibrary(r, path, why))
@@ -241,22 +237,22 @@ private:
     }
 
     // compiler_request.mm renderKey's key, which the client sends as its own
-    bool renderKey(raw::CompileRequest &r, std::string &why)
+    bool renderKey(gm20b::CompileRequest &r, std::string &why)
     {
-        const auto air = [&](const raw::RequestStage &s) {
+        const auto air = [&](const gm20b::RequestStage &s) {
             return hashes_[r.libraries[s.library].path][s.function];
         };
-        std::vector<raw::LinkedStageAir> linked;
-        for (size_t i = raw::firstLinked(r); i < r.stages.size(); ++i)
+        std::vector<gm20b::LinkedStageAir> linked;
+        for (size_t i = gm20b::firstLinked(r); i < r.stages.size(); ++i)
             linked.push_back({r.stages[i].tag[0], air(r.stages[i])});
-        const size_t f = raw::fragmentStage(r);
-        const raw::AirHash fragment = f == raw::kNoStage ? raw::AirHash{} : air(r.stages[f]);
+        const size_t f = gm20b::fragmentStage(r);
+        const gm20b::AirHash fragment = f == gm20b::kNoStage ? gm20b::AirHash{} : air(r.stages[f]);
         bool own = false;
         std::string packKey;
         @autoreleasepool {
-            packKey = raw::requestPackKey(r, own);
+            packKey = gm20b::requestPackKey(r, own);
         }
-        r.key = raw::renderCacheKey(r.stack, packKey, air(r.stages[0]), fragment, linked, own).key;
+        r.key = gm20b::renderCacheKey(r.stack, packKey, air(r.stages[0]), fragment, linked, own).key;
         return !r.key.empty() || (why = "no key", false);
     }
 };
@@ -275,7 +271,7 @@ inline std::vector<std::string> corpusLines(const std::string &path)
 // A request's libraries as an m2v device makes them: what the compiler made them of before its compile context
 inline switch_compiler::Libraries deviceLibraries(id<MTLDevice> device, const std::string &root)
 {
-    return [device, root](const raw::RequestLibrary &l, std::string &why) -> id<MTLLibrary> {
+    return [device, root](const gm20b::RequestLibrary &l, std::string &why) -> id<MTLLibrary> {
         NSError *error = nil;
         std::string real;
         if (l.system && !switch_compiler::SystemLibraries::resolve(root, l.path, real, why))
@@ -291,13 +287,13 @@ inline switch_compiler::Libraries deviceLibraries(id<MTLDevice> device, const st
     };
 }
 
-// A raw pack of no states, which a host's stack (0) takes: rules of nothing (raw_record.h PackRules)
+// A raw pack of no states, which a host's stack (0) takes: rules of nothing (record.h PackRules)
 inline std::string emptyPack(const std::string &dir)
 {
     std::vector<uint8_t> file(0x400, 0);
-    raw::PackHeader h = {};
+    gm20b::PackHeader h = {};
     memcpy(h.magic, "GM20BPK1", 8);
-    h.version = raw::kPackVersion;
+    h.version = gm20b::kPackVersion;
     memcpy(file.data(), &h, sizeof h);
     const std::string path = dir + "/pack.bin";
     std::ofstream(path, std::ios::binary).write(reinterpret_cast<const char *>(file.data()), file.size());

@@ -20,7 +20,7 @@ std::vector<int> bridgePhysicalAtRelease;
 std::vector<switch_gpu_backing_token> promiseTokens;  // the uses' pending writer promises
 std::vector<uint32_t> publishedWords;
 uint32_t arena[SWITCH_HOST1X_ARENA_WORDS], reservedWords, submittedSyncpt, submittedThreshold;
-uint32_t arenaShort, arenaWaits;
+uint32_t arenaShort, arenaWaits, reservedCapacity;
 uint32_t begins, aborts, commits, retained, bridges, released, roomWaits, submits, powerUses, powerDones;
 int bridgeError, submitError, retainError, statusError, powerError, semanticResult = 1, batchSettled = 1;
 switch_gpu_event_waits *preparedBatch;
@@ -93,6 +93,22 @@ int switch_gpu_backing_register_engine(uint32_t, const switch_gpu_backing_engine
 }
 
 int switch_gpu_backing_register_filter_status(uint32_t, switch_gpu_backing_filter_status)
+{
+    return 0;
+}
+
+int switch_gpu_backing_register_failure(uint32_t, switch_gpu_backing_failure)
+{
+    return 0;
+}
+
+// A job's why (SwitchHost1xStages why): none of its producers failed
+int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *, uint32_t)
+{
+    return 0;
+}
+
+int switch_gpu_bridge_why(const switch_gpu_bridge *)
 {
     return 0;
 }
@@ -322,7 +338,7 @@ int switch_host1x_job_reserve(uint32_t channel, uint32_t capacity, uint32_t **wo
         --arenaShort;
         return TEGRA_HOST1X_EAGAIN;
     }
-    reservedWords = capacity;
+    reservedWords = reservedCapacity = capacity;
     *words = arena;
     return 0;
 }
@@ -403,7 +419,7 @@ int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t
 {
     EXPECT_EQ(id, gSyncpt);
     const auto distance = static_cast<int32_t>(threshold - hardware);
-    if (distance > static_cast<int32_t>(maxIncrements) || maxIncrements > 2)
+    if (distance > static_cast<int32_t>(maxIncrements))
         return -22;
     if (distance > 0)
         hardware = threshold;
@@ -568,7 +584,7 @@ protected:
     void SetUp() override
     {
         begins = aborts = commits = retained = bridges = released = roomWaits = submits = powerUses = powerDones = 0;
-        reservedWords = submittedSyncpt = submittedThreshold = arenaShort = arenaWaits = 0;
+        reservedWords = submittedSyncpt = submittedThreshold = arenaShort = arenaWaits = reservedCapacity = 0;
         bridgeError = submitError = retainError = statusError = powerError = 0;
         semanticResult = batchSettled = 1;
         preparedBatch = nullptr;
@@ -751,6 +767,56 @@ TEST_F(SwitchVICJobsTest, PendingNvdecUsesFullWidthWaitWithoutGpuBridge)
     EXPECT_EQ(begins, 1u);
     EXPECT_EQ(publishedWords[1], 0x81234567u);
     EXPECT_EQ(publishedWords[2], 162u);
+}
+
+// A decoder's syncpoint passes its jobs in order, so a hundred of them are one wait on the newest, and the arena holds
+// only the words written.
+TEST_F(SwitchVICJobsTest, ManyPicturesOfOneDecoderAreOneWaitOnTheNewest)
+{
+    for (uint64_t value = 100; value >= 1; --value)
+        sourceTokens.push_back({0x100000000ULL + value, 1, SWITCH_GPU_ENGINE_NVDEC, 162});
+    ASSERT_EQ(submit(), 0);
+    EXPECT_EQ(publishedWords.size(), SWITCH_HOST1X_WAIT_WORDS + 2u + 3u);
+    EXPECT_EQ(reservedCapacity, publishedWords.size());
+    EXPECT_EQ(publishedWords[1], 100u);
+    EXPECT_EQ(publishedWords[2], 162u);
+    ASSERT_EQ(fences.size(), 2u) << "the job's fence and the newest picture's";
+    EXPECT_EQ(fences[1]->threshold, 100u);
+}
+
+TEST_F(SwitchVICJobsTest, AJobWaitsOnEachOtherEnginesNewestJobAndNeverOnItsOwn)
+{
+    ASSERT_EQ(submit(), 0);
+    const switch_gpu_backing_token own = {gQueue.submitted, switch_vic_result_state.generation, SWITCH_GPU_ENGINE_VIC,
+                                          gSyncpt};
+    sourceTokens = {own,
+                    {40, 1, SWITCH_GPU_ENGINE_NVDEC, 162},
+                    {7, 1, SWITCH_GPU_ENGINE_NVENC, 163},
+                    {41, 1, SWITCH_GPU_ENGINE_NVDEC, 162}};
+    ASSERT_EQ(submit(), 0);
+    EXPECT_EQ(publishedWords.size(), 2 * SWITCH_HOST1X_WAIT_WORDS + 2u + 3u);
+    EXPECT_EQ(reservedCapacity, publishedWords.size());
+    EXPECT_EQ((std::vector<uint32_t>{publishedWords[1], publishedWords[2], publishedWords[4], publishedWords[5]}),
+              (std::vector<uint32_t>{41, 162, 7, 163}));
+}
+
+TEST(SwitchHost1xProducersTest, EachEngineKeepsItsNewestJobInItsOwnSlot)
+{
+    SwitchHost1xProducers producers;
+    EXPECT_TRUE(producers.add({5, 1, SWITCH_GPU_ENGINE_VIC, 161}));
+    EXPECT_TRUE(producers.add({7, 1, SWITCH_GPU_ENGINE_NVDEC, 162}));
+    EXPECT_TRUE(producers.add({9, 1, SWITCH_GPU_ENGINE_NVENC, 163}));
+    EXPECT_TRUE(producers.add({8, 1, SWITCH_GPU_ENGINE_NVDEC, 162}));
+    EXPECT_TRUE(producers.add({4, 1, SWITCH_GPU_ENGINE_VIC, 161}));
+    EXPECT_FALSE(producers.add({11, 1, SWITCH_GPU_ENGINE_GM20B, 3}));
+    EXPECT_FALSE(producers.add({12, 0, SWITCH_GPU_ENGINE_PROMISE, 2052}));
+    std::map<uint32_t, uint64_t> held;
+    for (uint32_t i = 0; i < SwitchHost1xProducers::kMax; ++i)
+        if (producers.held(i))
+            held[producers.tokens[i].engine] = producers.tokens[i].value;
+    EXPECT_EQ(held, (std::map<uint32_t, uint64_t>{
+                        {SWITCH_GPU_ENGINE_VIC, 5}, {SWITCH_GPU_ENGINE_NVDEC, 8}, {SWITCH_GPU_ENGINE_NVENC, 9}}));
+    EXPECT_EQ(producers.foreignCount(161), 2u) << "VIC's own job is ordered by its channel";
 }
 
 TEST_F(SwitchVICJobsTest, FailedNvdecInputInvalidatesTheVicChainBeforeHardwareRelease)
@@ -1222,10 +1288,9 @@ TEST_F(SwitchVICJobsTest, AStalledFrameIsCancelledAndTheNextFrameRuns)
     EXPECT_THROW(submit(), std::runtime_error) << "new jobs wait for the cancellation";
     IOLockUnlock(gLock);
     runCancellation();
-    EXPECT_EQ(engineSteps,
-              (std::vector<std::string>{"teardown", "reset", "release " + std::to_string(uint32_t(behind) - 1),
-                                        "release " + std::to_string(uint32_t(behind)), "restart", "boot"}))
-        << "two increments at a time, through the cancelled batch's last job";
+    EXPECT_EQ(engineSteps, (std::vector<std::string>{"teardown", "reset", "release " + std::to_string(uint32_t(behind)),
+                                                     "restart", "boot"}))
+        << "one release through the cancelled batch's last job";
     EXPECT_EQ(behindFrame, 1) << "the cancelled batch ends on its released fence";
     reachedInterrupts();
     EXPECT_EQ(behindFrame, -5);

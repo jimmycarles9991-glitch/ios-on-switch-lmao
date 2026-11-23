@@ -7,7 +7,7 @@ import HWTestGPU
 /// colour a 32x32 block; <case>_checked output pixels sit wholly inside one, <case>_wrong of them are off it,
 /// <case>_unwritten still hold the poison. A 64x64 copy is the control.
 enum X1VICLargeProbe {
-    static let magic: UInt32 = 0x5642_494B  // 'VBIK'
+    static let magic: UInt32 = 0x5642_494B // 'VBIK'
     static let cases = 5
     static let caseWords = 12
     static let replyBytes = 16 + 4 * caseWords * cases
@@ -24,8 +24,8 @@ enum X1VICLargeProbe {
         case .success(let words): reply = words
         }
         var wrong: [String: Int] = [:]
-        for i in 0..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 0 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = names[i]
             let count = Int(r[5]) + Int(r[6]) + Int(r[7]) + (r[3] != 0 ? 1 : 0)
             metrics.set(name + "_status", Int(Int32(bitPattern: r[3])))

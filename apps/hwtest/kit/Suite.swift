@@ -1,7 +1,7 @@
 import Foundation
 import HWTestCore
-import UIKit
 import os
+import UIKit
 
 /// Runs tests one at a time off the main thread (benchmarks never share the machine with each other) and sends each
 /// result to the list, the log and the run's report (RunStore). The report is written before each test and after it:
@@ -94,7 +94,9 @@ public final class Suite: ObservableObject {
             continued.record(
                 TestRecord(
                     id: id, subsystem: "", name: id, interactive: false,
-                    outcome: .skip("test is not available in this build"), milliseconds: 0, finished: Date()))
+                    outcome: .skip("test is not available in this build"), milliseconds: 0, finished: Date()
+                )
+            )
         }
         var rest = continued.remaining.compactMap { byID[$0] }
         if restarted, let index = rest.firstIndex(where: { $0.id == current }) {
@@ -144,7 +146,7 @@ public final class Suite: ObservableObject {
         var batch = tests.filter { !$0.interactive }
         notice = ""
         if let stopped = Report.lastBootStoppedIn(store.reports(), boot: DeviceInfo.bootUUID),
-            let index = batch.firstIndex(where: { $0.id == stopped })
+           let index = batch.firstIndex(where: { $0.id == stopped })
         {
             notice = "The last boot went down while \(batch[index].name) ran: it runs last this time."
             batch.append(batch.remove(at: index))
@@ -171,7 +173,8 @@ public final class Suite: ObservableObject {
         save()
         let context = TestContext(
             media: Bundle.main.resourceURL!.appendingPathComponent("media"), documents: documents, ios: ios,
-            prompter: prompter, stage: stage)
+            prompter: prompter, stage: stage
+        )
         Task.detached(priority: .userInitiated) { [weak self] in
             let start = CFAbsoluteTimeGetCurrent()
             for test in batch {
@@ -220,7 +223,11 @@ public final class Suite: ObservableObject {
         UIApplication.shared.isIdleTimerDisabled = false
         settle()
         if summarize {
-            let records = rows.compactMap(\.record)
+            let ran = Dictionary(
+                (report?.results ?? []).enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first }
+            )
+            let records = rows.compactMap(\.record).sorted { (ran[$0.id] ?? .max) < (ran[$1.id] ?? .max) }
+            logger.notice("\(LogLine.rollUp(records, milliseconds: milliseconds), privacy: .public)")
             logger.notice("\(LogLine.summary(records, ios: self.ios, milliseconds: milliseconds), privacy: .public)")
         }
     }
@@ -239,7 +246,8 @@ public final class Suite: ObservableObject {
             rows[index].record = entries[rows[index].id].map { entry in
                 TestRecord(
                     id: entry.id, subsystem: entry.subsystem, name: entry.name, interactive: entry.interactive,
-                    outcome: Outcome(entry), milliseconds: entry.milliseconds, finished: Date())
+                    outcome: Outcome(entry), milliseconds: entry.milliseconds, finished: Date()
+                )
             }
         }
     }
@@ -252,7 +260,8 @@ public final class Suite: ObservableObject {
         guard let test = tests.first(where: { $0.id == id }) else {
             return TestRecord(
                 id: id, subsystem: "", name: id, interactive: false, outcome: Report.crashOutcome(id), milliseconds: 0,
-                finished: Date())
+                finished: Date()
+            )
         }
         return Suite.record(test, Report.crashOutcome(id), 0)
     }
@@ -263,7 +272,8 @@ public final class Suite: ObservableObject {
             try store.save(report)
         } catch {
             logger.error(
-                "\(report.fileName, privacy: .public) not written: \(String(describing: error), privacy: .public)")
+                "\(report.fileName, privacy: .public) not written: \(String(describing: error), privacy: .public)"
+            )
         }
     }
 }

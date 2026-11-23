@@ -23,25 +23,6 @@ TEST(JobAbi, MethodsFollowTheHashedHeadersOnes)
 	}
 }
 
-TEST(JobAbi, SetGenerationsLieInTheFencePagesUnusedWords)
-{
-	constexpr uint32_t slots = 8 * 16, visibility = 128 + 8, bindEpoch = 256;
-	EXPECT_GE(uint32_t(TegraGM20BSetGenerationWord), slots);
-	EXPECT_GE(uint32_t(TegraGM20BSetGenerationWord), visibility);
-	EXPECT_GT(uint32_t(TegraGM20BSetGenerationWord), bindEpoch);
-	EXPECT_LE((TegraGM20BSetGenerationWord + TegraGM20BMaxResourceSets) * 4u, 4096u);
-}
-
-// An imported event's word (method 40) sits after the client bind epoch and below the writer promises
-TEST(JobAbi, EventWordsLieBetweenTheBindEpochAndThePromises)
-{
-	constexpr uint32_t bindEpoch = 256;
-	EXPECT_GT(uint32_t(TegraGM20BEventWordFirst), bindEpoch);
-	EXPECT_EQ(uint32_t(TegraGM20BEventWordFirst + TegraGM20BEventWords),
-		  uint32_t(TegraGM20BPromiseWord));
-	EXPECT_GE(uint32_t(TegraGM20BEventWords), 128u);
-}
-
 TEST(JobAbi, RecordsKeepTheirLayout)
 {
 	EXPECT_EQ(offsetof(TegraGM20BAbiJob, set), 8u);
@@ -52,8 +33,6 @@ TEST(JobAbi, RecordsKeepTheirLayout)
 	EXPECT_EQ(offsetof(TegraGM20BAbiWriterPromise, channel), 20u);
 	EXPECT_EQ(sizeof(TegraGM20BAbiWriterPromise) % 8, 0u);
 	EXPECT_EQ(offsetof(TegraGM20BAbiJobPromises, promise), 8u);
-	EXPECT_LT(uint32_t(TegraGM20BPromiseWord + TegraGM20BMaxPromises),
-		  uint32_t(TegraGM20BSetGenerationWord));
 }
 
 TEST(JobAbi, TheHashedAbiHeaderNeverIncludesIt)

@@ -8,7 +8,7 @@ from tools.hwtest import fromlog, hwtest
 from tools.hwtest.reports import history
 
 LINES = [
-    'HWTEST gpu.clear.formats PASS dev=raw raw_checks=228 raw_paths=raw/392 hw=NVIDIA_Tegra_X1 ms=43632.9',
+    'HWTEST gpu.clear.formats PASS dev=gm20b gm20b_checks=228 gm20b_paths=gm20b/392 hw=NVIDIA_Tegra_X1 ms=43632.9',
     'HWTEST metal.rgba16f_rounding FAIL halves=3800_3800_37ff_37ff hw=NVIDIA ms=28.5 why=reads_3800_3800_37ff_3800',
     'HWTEST decode.vp9_4k SKIP ms=31.9 why=VTIsHardwareDecodeSupported(VP9)_is_false',
     'noise',
@@ -21,7 +21,7 @@ class FromLog(unittest.TestCase):
         entries = {e['id']: e for e in report['results']}
         self.assertEqual(list(entries), ['gpu.clear.formats', 'metal.rgba16f_rounding', 'decode.vp9_4k'])
         clear = entries['gpu.clear.formats']
-        self.assertEqual(clear['metrics'], {'dev': 'raw', 'raw_checks': 228, 'raw_paths': 'raw/392'})
+        self.assertEqual(clear['metrics'], {'dev': 'gm20b', 'gm20b_checks': 228, 'gm20b_paths': 'gm20b/392'})
         self.assertEqual(
             (clear['proof'], clear['milliseconds'], clear['subsystem']), ('NVIDIA_Tegra_X1', 43632.9, 'Metal / GPU')
         )

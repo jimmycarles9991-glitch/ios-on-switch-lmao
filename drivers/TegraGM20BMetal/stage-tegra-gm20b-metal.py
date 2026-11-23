@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage the TegraGM20B Metal plugin onto the SD card's iPadOS Data volume, mounted on the Mac.
 
-usage: stage-tegra-gm20b-metal.py <Data mount point> (--build <manifest or dir> | --remove) [--no-raw] [--progress]
+usage: stage-tegra-gm20b-metal.py <Data mount point> (--build <manifest or dir> | --remove) [--progress]
 
 --build is //gpu:bundle's manifest (bazel-bin/gpu/bundle.stage, in //deploy:sd's runfiles: tools/gpu/stage_manifest.py),
 or a directory laid out as //gpu:base (bazel-bin/gpu/base, an lkg snapshot's gpu/). Exit status 0 on success, else one
@@ -14,10 +14,10 @@ and eject the card before it goes back into the Switch.
 What it stages, on the live volume (as vendor/unixnu/scripts/add-gpu-plugin-data.py --publish did on a seed image):
   * <Data>/ngpu/addons/TegraGM20BMetal.bundle. The kernel shows /private/var/ngpu/addons over
     /System/Library/Extensions;
-  * <Data>/ngpu/addons/TegraGM20BMetal.m2v-seed beside it, when the build has one (the shader cache seed);
-  * <Data>/ngpu/addons/TegraGM20BMetal.raw beside it, when the build has one (the raw GM20B path's pipeline pack: with
-    it staged, backboardd draws through the raw path; --no-raw, or TEGRA_RAW_STAGE=0 in the environment, leaves it
-    out, and the render server keeps the m2v device);
+  * <Data>/ngpu/addons/TegraGM20BMetal.seed beside it, when the build has one (the Metal compiler's replies the
+    shader compiler reads);
+  * <Data>/ngpu/addons/TegraGM20BMetal.pack beside it (the driver's pipeline pack: a process that cannot read
+    it gets no Metal device);
   * CAEnableDeepFramebuffer, CAEnableFramebufferCompression and CAEnableIOSurfaceCompression = false merged into the
     preferences backboardd reads when it starts, before any plugin code runs (its own domain and the global one, for
     mobile and root): the GPU and the display driver take plain 8-bit rows.
@@ -46,13 +46,15 @@ from pathlib import Path
 DATA_UUID = 'D1B1D053-D0A6-496C-8625-A947A3DA863E'
 ADDONS = 'ngpu/addons'
 BUNDLE = ADDONS + '/TegraGM20BMetal.bundle'
-SEED = ADDONS + '/TegraGM20BMetal.m2v-seed'
-RAW = ADDONS + '/TegraGM20BMetal.raw'
+SEED = ADDONS + '/TegraGM20BMetal.seed'
+RAW = ADDONS + '/TegraGM20BMetal.pack'
 OWNED = (BUNDLE, SEED, RAW)
+# What builds before the driver left raw/ staged in their place: a card staged then still holds them
+RENAMED_FROM = (ADDONS + '/TegraGM20BMetal.m2v-seed', ADDONS + '/TegraGM20BMetal.raw')
 STATE = 'ngpu/stage.tsv.gz'
 PENDING = 'ngpu/stage.pending'
 MANIFEST_HEADER = '# gpu stage 1 '
-EXECUTABLES = ('TegraGM20BMetal', 'libvulkan_nouveau.dylib')
+EXECUTABLES = ('TegraGM20BMetal',)
 PREFS = {
     'CAEnableDeepFramebuffer': False,
     'CAEnableFramebufferCompression': False,
@@ -63,11 +65,10 @@ PREFS = {
 Wanted = dict[str, tuple[Path, str, int, int]]
 
 
-def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool, bool]:
+def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool]:
     remove = '--remove' in argv
-    raw = '--no-raw' not in argv and os.environ.get('TEGRA_RAW_STAGE', '1') != '0'
     progress = '--progress' in argv
-    argv = [a for a in argv if a not in ('--no-raw', '--progress')]
+    argv = [a for a in argv if a != '--progress']
     build = None
     if '--build' in argv[:-1]:
         build = Path(os.path.abspath(argv[argv.index('--build') + 1]))
@@ -75,7 +76,7 @@ def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool, bool]:
     args = [a for a in argv if a != '--remove']
     if len(args) != 1 or (build is None and not remove):
         sys.exit(__doc__)
-    return Path(args[0]).resolve(), build, remove, raw, progress
+    return Path(args[0]).resolve(), build, remove, progress
 
 
 def _check_volume(data: Path) -> None:
@@ -166,6 +167,14 @@ def _remove(data: Path, paths: list[str]) -> None:
             empty = empty.parent
 
 
+def _remove_renamed(data: Path) -> list[str]:
+    """Remove the folders RENAMED_FROM names; return those there were."""
+    removed = [old for old in RENAMED_FROM if (data / old).is_dir()]
+    for old in removed:
+        shutil.rmtree(data / old)
+    return removed
+
+
 def _copy_all(data: Path, wanted: Wanted, changed: list[str], report: Callable[[str], None]) -> None:
     total, done = sum(wanted[p][2] for p in changed), 0
     report(f'{done}/{total} bytes')
@@ -188,8 +197,9 @@ def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
         directory.chmod(0o755)
     whole = digest(wanted)
     known = read_state(data, whole)
+    renamed = ''.join(f'; removed {old}, which the rename replaced' for old in _remove_renamed(data))
     if known is True:
-        return f'unchanged ({len(wanted)} files)'
+        return f'unchanged ({len(wanted)} files){renamed}'
     if known is None:
         for top in OWNED:
             shutil.rmtree(data / top, ignore_errors=True)
@@ -212,7 +222,10 @@ def sync(data: Path, wanted: Wanted, report: Callable[[str], None]) -> str:
     _write_atomically(data / STATE, write_state)
     (data / PENDING).unlink()
     copied = sum(wanted[p][2] for p in changed)
-    return f'{len(changed)} copied ({copied >> 20} MiB), {len(stale)} removed, {len(wanted) - len(changed)} unchanged'
+    return (
+        f'{len(changed)} copied ({copied >> 20} MiB), {len(stale)} removed, {len(wanted) - len(changed)} unchanged'
+        + renamed
+    )
 
 
 def _merge_preferences(data: Path) -> None:
@@ -242,12 +255,14 @@ def _report(what: str) -> None:
 
 
 def main() -> None:
-    data, build, remove, raw, progress = _arguments(sys.argv[1:])
+    data, build, remove, progress = _arguments(sys.argv[1:])
     report = _report if progress else _silent
     _check_volume(data)
     if remove:
         for top in OWNED:
             shutil.rmtree(data / top, ignore_errors=True)
+        for old in _remove_renamed(data):
+            print('removed', data / old)
         for name in (STATE, PENDING):
             (data / name).unlink(missing_ok=True)
         print('removed', data / BUNDLE)
@@ -257,8 +272,6 @@ def main() -> None:
     wanted = from_manifest(build) if build.is_file() else from_directory(build)
     if BUNDLE + '/TegraGM20BMetal' not in wanted:
         sys.exit(f'stage-tegra-gm20b-metal: no plugin build in {build} (bazel build //gpu:bundle)')
-    if not raw:
-        wanted = {p: w for p, w in wanted.items() if not p.startswith(RAW + '/')}
     done = sync(data, wanted, report)
     _merge_preferences(data)
     report('flushing to the card')

@@ -25,7 +25,7 @@ final class EmbeddedEntitlementsTests: XCTestCase {
         }
         let superBlob =
             bigEndian(0xFADE_0CC0) + bigEndian(UInt32(offset)) + bigEndian(UInt32(blobs.count)) + index
-            + payload
+                + payload
         let code: [UInt8] = Array(repeating: 0xAA, count: 16)
         let header = [0xFEED_FACF, 0x0100_000C, 0, 2, 1, 16, 0, 0].flatMap { littleEndian($0) }
         let command = [0x1D, 16, UInt32(48 + code.count), UInt32(superBlob.count)].flatMap { littleEndian($0) }

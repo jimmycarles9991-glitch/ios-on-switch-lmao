@@ -22,6 +22,7 @@
 # IN THE SOFTWARE.
 
 import argparse
+import itertools
 import sys
 
 a = 'a'
@@ -172,6 +173,37 @@ algebraic_lowering += [
     (('f2f16_rtne', ('bcsel', c, ('f2f32', ('f2f16_rtne', 'a@32')), a)), ('f2f16_rtne', a)),
 ]
 
+# ios-on-switch-lmao: a float output to a 16-bit float colour target reaches
+# NAK as f2f32(f2f16_rtz(x)) (nvk_switch_round.c). GM20B's ROP and Apple's GPU
+# (textureWriteRoundingMode 0) both store a float there rounded toward zero,
+# so the pair changes nothing the target holds: where it folds into x, the
+# output was a half all along; where it does not, it goes again
+# (nak_nir_strip_half_rounding.c). It folds into a half held widened, a
+# texel metal2vulkan rounded to half (its NaN guarded, which the rounding
+# needs no guard for: a NaN narrows to a NaN either way) and a select of
+# those or of half constants. Each rule leaves no more conversions than it
+# found, and what it leaves is the value itself, so a blend reads it as before.
+def nan_guarded_texel(x, fneu):
+    nan = ('fneu', x, x) if fneu else ('ult', 0x7f800000, ('iand', x, 0x7fffffff))
+    return ('bcsel', nan, x, ('f2f32', ('f2f16_rtne', x)))
+
+rtz_arms = {
+    'const': lambda v: ('#' + v + '@32(is_representable_as_f16)', ('f2f16_rtz', v)),
+    'widened': lambda v: (('f2f32', v + '@16'), v),
+    'texel': lambda v: (nan_guarded_texel(v + '@32', False), ('f2f16_rtne', v)),
+    'texel_fneu': lambda v: (nan_guarded_texel(v + '@32', True), ('f2f16_rtne', v)),
+}
+for kind in ['widened', 'texel', 'texel_fneu']:
+    search, replace = rtz_arms[kind]('a')
+    algebraic_lowering += [(('f2f16_rtz', search), replace, half_denorms_kept)]
+for x_kind, y_kind in itertools.product(rtz_arms, repeat=2):
+    if x_kind == y_kind == 'const':
+        continue
+    (x, x16), (y, y16) = rtz_arms[x_kind]('a'), rtz_arms[y_kind]('b')
+    algebraic_lowering += [
+        (('f2f16_rtz', ('bcsel', c, x, y)), ('bcsel', c, x16, y16), half_denorms_kept),
+    ]
+
 # ios-on-switch-lmao: metal2vulkan flushes a float's denormal to a signed zero
 # with integer ops wherever Metal does. An FTZ instruction (fp32 unless the
 # shader keeps denormals) flushes its float sources itself: those take the float
@@ -256,6 +288,49 @@ for op in ['fcos_normalized_2_pi', 'fexp2', 'flog2', 'frcp', 'frsq', 'fsin_norma
             (('f2f32(contract)', (op + '(is_used_once)', (f2f16, 'a@32'))), (op, a)),
     ]
 
+# ios-on-switch-lmao: metal2vulkan tests a float for NaN, infinity or a
+# magnitude bound on its bits: |x|'s bits (x & 0x7fffffff) against a constant K
+# from the smallest normal (0x00800000) up to infinity, unsigned. Non-negative
+# floats order as their bits do and a NaN's magnitude lies above infinity's,
+# so each test is one float compare of |x| and K, a NaN unordered wherever the
+# integer test puts it above K: one FSETP (K an immediate where its low 12 bits
+# are 0) for a LOP, a MOV32I and an ISETP. A denormal an FTZ compare flushes
+# to 0 stays below every such K. This runs after the late rules, which match
+# these tests inside metal2vulkan's half conversions (m2v_half_bits).
+float_bound_preamble = '''
+#include "nir_search.h"
+
+/* A 32-bit constant from the smallest positive normal float to +inf */
+static inline bool
+is_nak_float_bound(UNUSED const nir_search_state *state,
+                   const nir_alu_instr *instr, unsigned src,
+                   unsigned num_components, const uint8_t *swizzle)
+{
+   if (!nir_src_is_const(instr->src[src].src))
+      return false;
+   for (unsigned i = 0; i < num_components; i++) {
+      const uint64_t k = nir_src_comp_as_uint(instr->src[src].src, swizzle[i]);
+      if (k < 0x00800000 || k > 0x7f800000)
+         return false;
+   }
+   return true;
+}
+'''
+
+mag = ('iand', 'a@32', 0x7fffffff)
+bound = '#b(is_nak_float_bound)'
+abs_a = ('fabs(preserve_nan_inf)', a)
+float_tests = [
+    (('ult', 0x7f800000, mag), ('fneu(preserve_nan_inf)', a, a)),
+    (('uge', 0x7f800000, mag), ('feq(preserve_nan_inf)', a, a)),
+    (('ult', mag, bound), ('flt(preserve_nan_inf)', abs_a, b)),
+    (('uge', mag, bound), ('fgeu(preserve_nan_inf)', abs_a, b)),
+    (('ult', bound, mag), ('fltu(preserve_nan_inf)', b, abs_a)),
+    (('uge', bound, mag), ('fge(preserve_nan_inf)', b, abs_a)),
+    (('ieq', mag, bound), ('feq(preserve_nan_inf)', abs_a, b)),
+    (('ine', mag, bound), ('fneu(preserve_nan_inf)', abs_a, b)),
+]
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', required=True, help='Output file.')
@@ -268,12 +343,15 @@ def main():
     try:
         with open(args.out, 'w', encoding='utf-8') as f:
             f.write('#include "nak_private.h"')
+            f.write(float_bound_preamble)
             f.write(nir_algebraic.AlgebraicPass(
                 "nak_nir_lower_algebraic_late",
                 algebraic_lowering,
                 [
                     ("const struct nak_compiler *", "nak"),
                 ]).render())
+            f.write(nir_algebraic.AlgebraicPass(
+                "nak_nir_lower_float_tests", float_tests).render())
     except Exception:
         sys.exit(1)
 

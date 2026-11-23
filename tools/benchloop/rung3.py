@@ -1,21 +1,22 @@
 """Fetch rung 3's iterated blend programs as bench tables, each against QuartzCore's formula.
 
-The pack's microcode (raw/pack/iterated/table.py) is drawn on the chip over the bench's source and destination colours.
+The pack's microcode (pack/iterated/table.py) is drawn on the chip over the bench's source and destination colours.
 
     bazel run //tools/benchloop:rung3 -- <out dir>    writes <out dir>/<program>.json, an iterated-blend/1 table each
     bazel run //tools/benchloop -- blend <out dir>/*.json
 
-Each table sets the program as a fetch-free form's draw does (raw_fetch_free.h iteratedBlendWords): the per-target blend
+Each table sets the program as a fetch-free form's draw does (fetch_free.h iteratedBlendWords): the per-target blend
 off, the common block's colour ADD ONE ZERO and the program's alpha factors, SET_BLEND(0) on, then the program. A
 program whose formula needs a per-lane condition the formula language lacks (overlay, hard and pin light, colour burn,
-the HSL modes, darker colour, the clip constant) is left out: gpu.raw.fetch_rung3 draws those against the storage form.
+the HSL modes, darker colour, the clip constant) is left out: gpu.gm20b.fetch_rung3 draws those against the storage
+form.
 """
 
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'drivers/TegraGM20BMetal/raw/pack/iterated'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'drivers/TegraGM20BMetal/pack/iterated'))
 
 import table
 

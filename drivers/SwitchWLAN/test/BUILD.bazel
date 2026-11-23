@@ -128,3 +128,22 @@ host_library(
     )
     for kind in ("21H461", "24B119")
 ]
+
+# APPLE80211_IOC_SCAN_RESULT as each IPSW kind's framework reads it (SwitchWLANScan.h), one test per kind.
+host_library(
+    name = "scan",
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANScan.h",
+        "//drivers/SwitchWLAN:SwitchWLANStation.h",
+    ],
+)
+
+[
+    host_test(
+        name = "switch_wlan_scan_{}_test".format(kind),
+        srcs = ["switch_wlan_scan_test.cpp"],
+        defines = ["SWITCH_IPSW_KIND_{}=1".format(kind)],
+        deps = [":scan"],
+    )
+    for kind in ("21H461", "24B119")
+]

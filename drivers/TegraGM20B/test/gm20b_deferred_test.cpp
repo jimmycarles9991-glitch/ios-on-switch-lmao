@@ -129,7 +129,7 @@ TEST_F(Deferred, AnyWriteBeforeTheDecisionBringsTheTilingMoveBack)
 		tgm_record record{nullptr, 302};
 		tgm_coh *c = import(p, 302, record, k.fresh);
 		if (k.submitted)
-			tgm_coherency_wrote(c, 1, 9, 1);
+			tgm_coherency_wrote(c, 9, 1);
 		gGpu.completed[9] = 1;
 		EXPECT_EQ(ask(c), 1) << k.what;
 		EXPECT_EQ(movesOf(TGM_RELAYOUT_TILE_IN_PLACE), 1) << k.what;
@@ -308,7 +308,7 @@ TEST_F(Deferred, AnAvoidSyncLockBehindRunningWritersIsRefusedAndMovesNothing)
 	tgm_record record{nullptr, 309};
 	tgm_coh *c = import(p, 309, record, 1);
 	EXPECT_EQ(ask(c), 1);
-	tgm_coherency_wrote(c, 1, 11, 5);
+	tgm_coherency_wrote(c, 11, 5);
 	gGpu.completed[11] = 4;
 	tgm_coherency_put(c);
 	ASSERT_EQ(record.deferred, c);

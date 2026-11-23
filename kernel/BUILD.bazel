@@ -76,7 +76,7 @@ alias(
 # Headers every driver may include besides its own (kernel/rules/kernel.bzl EXTRA_HEADERS).
 cc_library(
     name = "hdrs_extra",
-    hdrs = ["//drivers/NativeMetal:OriginalAcceleratorABI.h"],
+    hdrs = ["//drivers/TegraGM20B:OriginalAcceleratorABI.h"],
     tags = ["kernel"],
     target_compatible_with = ["//bazel/platforms:kernel"],
 )

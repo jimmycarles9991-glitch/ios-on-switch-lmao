@@ -683,6 +683,10 @@ pub struct ColorAttachmentDescriptor {
     pub destination_alpha_blend_factor: metal::BlendFactor,
     pub alpha_blend_operation: metal::BlendOperation,
     pub write_mask: metal::ColorWriteMask,
+    /// The extended-range format the attachment stands in for where it is that format's
+    /// `RGBA16Float` stand-in, Metal's tile (`LoweringInputs::stand_in_colors`); `None` for any
+    /// other attachment.
+    pub stand_in: Option<metal::format::ExtendedRange>,
 }
 
 impl ColorAttachmentDescriptor {
@@ -699,6 +703,7 @@ impl ColorAttachmentDescriptor {
             destination_alpha_blend_factor: metal::BlendFactor::Zero,
             alpha_blend_operation: metal::BlendOperation::Add,
             write_mask: metal::ColorWriteMask::ALL,
+            stand_in: None,
         }
     }
 }

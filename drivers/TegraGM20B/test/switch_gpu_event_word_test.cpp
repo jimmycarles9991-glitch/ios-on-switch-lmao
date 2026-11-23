@@ -135,9 +135,9 @@ TEST_F(EventWords, JobEndWithoutTheReleaseMovesTheWordAndPoisonsBelowIt)
 	switch_gpu_event_signal_commit(&s);
 	finish(t, -5);
 	EXPECT_EQ(memory, 6u);
-	EXPECT_EQ(native->value, 0u);
+	EXPECT_EQ(native->value, 6u);
 	switch_gpu_backing_token none{};
-	EXPECT_EQ(switch_gpu_event_resolve(event, 6, &none), -5);
+	EXPECT_EQ(switch_gpu_event_resolve(event, 6, &none), 1) << "the failure ends the wait";
 	auto u = token();
 	s = prepare(6, u);
 	EXPECT_EQ(switch_gpu_event_signal_release(s, word, 1, 6), -22);
@@ -145,13 +145,13 @@ TEST_F(EventWords, JobEndWithoutTheReleaseMovesTheWordAndPoisonsBelowIt)
 	s = released(7, u, 7);
 	switch_gpu_event_signal_commit(&s);
 	pump();
-	EXPECT_EQ(native->value, 0u);
+	EXPECT_EQ(native->value, 6u);
 	gpuWrites(7);
 	EXPECT_EQ(native->value, 7u);
 	finish(u);
 }
 
-TEST_F(EventWords, ProducersFailureFailsTheReleasedSignal)
+TEST_F(EventWords, ProducersFailureEndsTheReleasedSignalsWait)
 {
 	arm();
 	auto producer = token(), consumer = token();
@@ -166,9 +166,9 @@ TEST_F(EventWords, ProducersFailureFailsTheReleasedSignal)
 	gpuWrites(4);
 	EXPECT_EQ(native->value, 0u);
 	finish(producer, -5);
-	EXPECT_EQ(native->value, 0u);
+	EXPECT_EQ(native->value, 4u);
 	finish(consumer);
-	EXPECT_EQ(native->value, 0u);
+	EXPECT_EQ(native->value, 4u);
 	switch_gpu_event_waits_release(&b);
 }
 

@@ -3,7 +3,7 @@
 // the pool's live numbers, test/gm20b_pool_policy_test.cpp with a model of the pool.
 //
 // The GPU pool (256 MiB of write-combined memory outside the VM) serves coherent BOs (NVK's HOST_COHERENT memory: its
-// event heap and upload chunks, Metal's shared storage through m2v, the raw path's write-combined chunks), and nvkm's own
+// event heap and upload chunks, Metal's shared storage through m2v, the driver's write-combined chunks), and nvkm's own
 // page tables and channels, unpoliced. Its tiers keep room for the compositor and nvkm. A BO the tiers keep out of the pool,
 // or one the pool has no room for, is not refused (VectorKit aborts on a nil newBuffer): it is served from ordinary
 // pages, wired and zeroed, mapped write-combined into the task as a pool BO is (CONTRACT §3 (b): its CPU writes are in

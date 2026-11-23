@@ -11,24 +11,24 @@ import Metal
 /// and stage-in region. Each result is compared with the CPU's; every command buffer stays raw.
 struct NativeStageInTest: NativeObjectTest {
     let id = "metal.native.stage_in"
-    let name = "Compute stage-in from static and per-bind strides on the raw path"
+    let name = "Compute stage-in from static and per-bind strides on the driver"
 
     static let count = 64
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct In { float2 value [[attribute(0)]]; };
-        kernel void stage_sum(In in [[stage_in]], device float *out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
-            out[i] = in.value.x + in.value.y;
-        }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct In { float2 value [[attribute(0)]]; };
+    kernel void stage_sum(In in [[stage_in]], device float *out [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+        out[i] = in.value.x + in.value.y;
+    }
+    """
 
     /// Element k's (k, 2k + 1) `stride` bytes apart, junk between
     static func elements(_ stride: Int) -> [Float] {
         let floats = stride / 4
         var out = [Float](repeating: -1e6, count: floats * (count + 1))
-        for k in 0...count {
+        for k in 0 ... count {
             out[k * floats] = Float(k)
             out[k * floats + 1] = Float(2 * k + 1)
         }
@@ -56,7 +56,7 @@ struct NativeStageInTest: NativeObjectTest {
         let make = { (d: MTLComputePipelineDescriptor) throws -> MTLComputePipelineState in
             try device.makeComputePipelineState(descriptor: d, options: []).0
         }
-        let dynamicStride = Int(bitPattern: UInt.max)  // MTLBufferLayoutStrideDynamic
+        let dynamicStride = Int(bitPattern: UInt.max) // MTLBufferLayoutStrideDynamic
         let dynamic =
             (device as AnyObject as! NSObject).value(forKey: "supportsDynamicAttributeStride") as? Bool ?? false
         metrics.set("dynamic_stride", dynamic ? "yes" : "no")
@@ -81,7 +81,7 @@ struct NativeStageInTest: NativeObjectTest {
                     if let commands {
                         encoder.useResource(input, usage: .read)
                         encoder.useResource(output, usage: .write)
-                        encoder.executeCommandsInBuffer(commands, range: 0..<1)
+                        encoder.executeCommandsInBuffer(commands, range: 0 ..< 1)
                     } else {
                         encoder.setComputePipelineState(state)
                         encoder.setBuffer(output, offset: 0, index: 0)
@@ -97,7 +97,7 @@ struct NativeStageInTest: NativeObjectTest {
                 }
                 work.paths.append(timing.path)
                 let results = output.contents().bindMemory(to: Float.self, capacity: Self.count + 1)
-                let wrong = (0...Self.count).filter { results[$0] != Float(3 * $0 + 1) }.count
+                let wrong = (0 ... Self.count).filter { results[$0] != Float(3 * $0 + 1) }.count
                 let name = indirect ? "icb_\(label)" : label
                 metrics.set("\(name)_wrong", wrong)
                 if wrong != 0 { work.failures.append("\(name): \(wrong) of \(Self.count + 1) elements wrong") }
@@ -130,7 +130,8 @@ struct NativeStageInTest: NativeObjectTest {
         command.setStageInRegion(MTLRegionMake1D(0, count + 1))
         command.concurrentDispatchThreadgroups(
             MTLSize(width: count + 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
         return commands
     }
 }

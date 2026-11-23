@@ -41,7 +41,8 @@ struct RailTest: HWTest {
             }
             rails[String(letter)] = Rail(
                 running: values["running"] == "1", dma: values["dma"] == "on",
-                counters: values.compactMapValues { Int($0) })
+                counters: values.compactMapValues { Int($0) }
+            )
         }
         return .value(rails)
     }

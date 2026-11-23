@@ -5,7 +5,7 @@
 
 namespace
 {
-// An abandoned promise is a failed producer: a reader goes on without it, and a present of it is dropped.
+// An abandoned promise is a failed producer: a reader goes on without it, and a present of it is refused.
 int status(const switch_gpu_backing_token *token)
 {
 	if (tgm_promise_abandoned(token->queue, uint32_t(token->value)))
@@ -39,6 +39,13 @@ void release(const switch_gpu_backing_token *token)
 	if (const volatile uint32_t *word = tgm_fence_word(token->queue))
 		switch_gpu_fence_put(word);
 }
+
+// A promise given up (the give-up, its job's refused submission) is a write that never came. The abandoned set keeps no
+// cause, so one a close or a kill of its job's channel let go reads the same.
+int failure(const switch_gpu_backing_token *)
+{
+	return SWITCH_GPU_BACKING_WRITE_REFUSED;
+}
 }  // namespace
 
 extern "C" int switch_gpu_promise_engine(void)
@@ -48,7 +55,9 @@ extern "C" int switch_gpu_promise_engine(void)
 		return -12;
 	const int result =
 		switch_gpu_backing_register_engine(SWITCH_GPU_ENGINE_PROMISE, &operations);
-	return result == -16 ? 0 : result;
+	if (result && result != -16)
+		return result;
+	return switch_gpu_backing_register_failure(SWITCH_GPU_ENGINE_PROMISE, failure);
 }
 
 extern "C" int switch_gpu_backing_promise_add(switch_gpu_backing *backing,

@@ -26,13 +26,13 @@ enum CoherenceBench {
             tally.failure = "the bench did not open: \(error)"
             return tally
         }
-        for round in 0..<rounds {
+        for round in 0 ..< rounds {
             let cpu = CoherenceRewriteTest.cpuBytes(round)
             let (write, fill) = try experiments(cpu)
             let wrote = runner.run(write)
             let filled = runner.run(fill)
             guard wrote.status == "ok", filled.status == "ok", let first = wrote.texels, let out = filled.texels,
-                first.count == cpu.count, out.count == cpu.count
+                  first.count == cpu.count, out.count == cpu.count
             else {
                 tally.failure = "round \(round): \(wrote.status) \(wrote.why) / \(filled.status) \(filled.why)"
                 return tally
@@ -40,13 +40,14 @@ enum CoherenceBench {
             let gpu = [UInt8](first)
             tally.cpuStale +=
                 stride(from: 0, to: gpu.count, by: 4).filter { at in
-                    !(0..<4).allSatisfy { abs(Int(gpu[at + $0]) - 16) <= 1 }
+                    !(0 ..< 4).allSatisfy { abs(Int(gpu[at + $0]) - 16) <= 1 }
                 }.count
             // the GPU's last write to the span: the first experiment's draw (D = its colour), or the empty clearing pass
             // the bench's liveness check ends a fill-less experiment with (D = 0)
             tally.count(
                 [UInt8](out), cpu: cpu, added: { p, c in Int(gpu[p * 4 + c]) },
-                older: [{ p, c in min(255, 2 * Int(gpu[p * 4 + c])) }, { p, c in Int(gpu[p * 4 + c]) }])
+                older: [{ p, c in min(255, 2 * Int(gpu[p * 4 + c])) }, { p, c in Int(gpu[p * 4 + c]) }]
+            )
         }
         return tally
     }
@@ -96,10 +97,10 @@ struct CoherenceTally {
             return
         }
         var stale = 0
-        for p in 0..<(cpu.count / 4) {
+        for p in 0 ..< (cpu.count / 4) {
             var fresh = true
             var old = [Bool](repeating: true, count: older.count)
-            for c in 0..<4 {
+            for c in 0 ..< 4 {
                 let v = Int(out[p * 4 + c])
                 fresh = fresh && abs(v - min(255, Int(cpu[p * 4 + c]) + added(p, c))) <= 1
                 for (k, earlier) in older.enumerated() { old[k] = old[k] && abs(v - earlier(p, c)) <= 1 }
@@ -113,7 +114,7 @@ struct CoherenceTally {
     }
 
     static func differing(_ bytes: [UInt8], from texel: [UInt8]) -> Int {
-        stride(from: 0, to: bytes.count, by: 4).filter { at in !(0..<4).allSatisfy { bytes[at + $0] == texel[$0] } }
+        stride(from: 0, to: bytes.count, by: 4).filter { at in !(0 ..< 4).allSatisfy { bytes[at + $0] == texel[$0] } }
             .count
     }
 

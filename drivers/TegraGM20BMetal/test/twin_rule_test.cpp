@@ -1,0 +1,91 @@
+// SPDX-License-Identifier: MIT
+// twin_rule.h: which draws of a storage form its barrier twin takes, a triangle at a time.
+#include <gtest/gtest.h>
+
+#include "drivers/TegraGM20BMetal/fetch_order.h"
+#include "drivers/TegraGM20BMetal/twin_rule.h"
+
+namespace {
+
+gm20b::TwinAsk measured(uint32_t primitive, uint32_t count, uint64_t area)
+{
+    gm20b::TwinAsk a;
+    a.shape = {primitive, count, 1, false, false};
+    a.areaPixels = area;
+    return a;
+}
+
+TEST(GM20BTwinRule, TheMeasuredDrawsTakeTheTwin)
+{
+    for (uint32_t quads : {1u, 4u, 16u})
+        EXPECT_TRUE(gm20b::twinTaken(measured(3, 6 * quads, 64 * 64))) << quads;
+    EXPECT_TRUE(gm20b::twinTaken(measured(3, 6, 1280 * 720)));
+    EXPECT_TRUE(gm20b::twinTaken(measured(4, 4, 320 * 180)));
+    EXPECT_TRUE(gm20b::twinTaken(measured(3, 3, 64 * 64)));
+}
+
+TEST(GM20BTwinRule, PastTheMeasuredTrianglesAndAreasTheStorageFormStays)
+{
+    EXPECT_FALSE(gm20b::twinTaken(measured(3, 3 * 33, 64 * 64)));
+    EXPECT_FALSE(gm20b::twinTaken(measured(3, 6, 63 * 64)));
+    EXPECT_FALSE(gm20b::twinTaken(measured(3, 6, 1280 * 721)));
+    EXPECT_FALSE(gm20b::twinTaken(measured(3, 0, 64 * 64)));
+}
+
+// The bound over triangle count and render area: one quad at any admitted area; up to 32 triangles only over a pass of at
+// most 4 x 64x64. Boot 22's ui.glass_sidebar meshes (8-10 triangles over 1280x720) keep the storage form.
+TEST(GM20BTwinRule, MoreThanOneQuadTakesTheTwinOnlyOverASmallPass)
+{
+    constexpr uint64_t kAreas[] = {64 * 64, 128 * 128, 256 * 256, 1280 * 720};
+    for (uint32_t n : {1u, 2u, 3u, 8u, 10u, 16u, 32u, 33u})
+        for (uint64_t area : kAreas) {
+            const bool expected = n <= 2 || (n <= 32 && area <= 4 * 64 * 64);
+            EXPECT_EQ(gm20b::twinTaken(measured(3, 3 * n, area)), expected) << n << " triangles over " << area;
+        }
+    for (uint32_t n : {8u, 9u, 10u})
+        EXPECT_FALSE(gm20b::twinTaken(measured(3, 3 * n, 1280 * 720))) << "the sidebar's mesh, " << n << " triangles";
+    EXPECT_FALSE(gm20b::twinTaken(measured(4, 12, 1280 * 720))) << "a strip of 10 triangles";
+}
+
+// Every shape the twin takes is one fetchRefusal calls cheap for the barrier form: a short list or strip of one instance
+TEST(GM20BTwinRule, EveryShapeTheTwinTakesIsACheapOne)
+{
+    for (uint32_t primitive = 0; primitive <= 4; primitive++)
+        for (uint32_t count = 0; count <= 3 * 40; count++)
+            for (uint32_t instances : {1u, 2u})
+                for (bool indirect : {false, true})
+                    for (bool indexed : {false, true})
+                        for (bool primitiveId : {false, true}) {
+                            gm20b::TwinAsk a;
+                            a.shape = {primitive, count, instances, indirect, indexed};
+                            a.primitiveId = primitiveId;
+                            a.areaPixels = 640 * 360;
+                            if (!gm20b::twinTaken(a))
+                                continue;
+                            EXPECT_EQ(gm20b::fetchRefusal(true, primitiveId, a.shape), gm20b::FetchRefusal::None)
+                                << primitive << " " << count << " " << instances << " " << indexed;
+                        }
+}
+
+TEST(GM20BTwinRule, RefusedShapesKeepTheStorageForm)
+{
+    gm20b::TwinAsk a = measured(3, 6, 64 * 64);
+    a.shape.instances = 2;
+    EXPECT_FALSE(gm20b::twinTaken(a));
+    a = measured(4, 6, 64 * 64);
+    a.shape.indexed = true;
+    EXPECT_FALSE(gm20b::twinTaken(a)) << "an indexed strip restarts where only its indices say";
+    a = measured(3, 6, 64 * 64);
+    a.shape.indirect = true;
+    EXPECT_FALSE(gm20b::twinTaken(a));
+    a = measured(3, 6, 64 * 64);
+    a.primitiveId = true;
+    EXPECT_FALSE(gm20b::twinTaken(a));
+    a = measured(3, 6, 64 * 64);
+    a.amplified = true;
+    EXPECT_FALSE(gm20b::twinTaken(a));
+    EXPECT_FALSE(gm20b::twinTaken(measured(1, 2, 64 * 64))) << "lines";
+    EXPECT_FALSE(gm20b::twinTaken(measured(0, 1, 64 * 64))) << "a point";
+}
+
+}  // namespace

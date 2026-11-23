@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The ROP's zero-source pixel kill (drivers/TegraGM20BMetal/raw/runtime/raw_blend_kill.h): a source-over state draws
+/// The ROP's zero-source pixel kill (drivers/TegraGM20BMetal/blend_kill.h): a source-over state draws
 /// a zero colour over RGBA16F holding -0, NaN, infinities and denormals and over BGRA8, and no bit changes; the same
 /// state still blends a non-zero colour as source-over says; the facade counts the state made with the kill and its
 /// binds; and the same draws with the kill forced off through the probe channel give the GPU time it saves. The zeta
@@ -12,7 +12,7 @@ import Metal
 /// (zeta_<depth|stencil>_wrong= texels other than Metal's, zeta_<...>_colour_changed_bytes=, zeta_<...>_kill_binds= the
 /// binds the facade made with the kill on).
 struct BlendKillTest: HWTest {
-    let id = "gpu.raw.blend_kill"
+    let id = "gpu.gm20b.blend_kill"
     let name = "Zero-source pixels are dropped by the ROP, bits kept, blending unchanged"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
@@ -53,18 +53,18 @@ struct BlendKillTest: HWTest {
             var value = colour
             encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
             encoder.setFragmentBytes(&value, length: 16, index: 0)
-            for _ in 0..<count { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+            for _ in 0 ..< count { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
             encoder.endEncoding()
         }
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         var metrics = Metrics()
         var wrong: [String] = []
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         var paths: [String] = []
         var onMs = 0.0
         var offMs = 0.0
@@ -75,15 +75,15 @@ struct BlendKillTest: HWTest {
             let count = Self.size * Self.size * 4
             let initial: [UInt8] =
                 half
-                ? (0..<count).flatMap { i -> [UInt8] in
-                    let h = Self.specials[i % Self.specials.count]
-                    return [UInt8(h & 0xff), UInt8(h >> 8)]
-                } : (0..<count).map { UInt8(($0 * 53 + 7) & 255) }
+                    ? (0 ..< count).flatMap { i -> [UInt8] in
+                        let h = Self.specials[i % Self.specials.count]
+                        return [UInt8(h & 0xff), UInt8(h >> 8)]
+                    } : (0 ..< count).map { UInt8(($0 * 53 + 7) & 255) }
             let target = try gpu.texture(format, Self.size, Self.size, usage: [.renderTarget, .shaderRead])
             try await gpu.upload(initial, to: target, bytesPerRow: initial.count / Self.size)
             let state = try gpu.render(fragment: "exact_fragment", format: format, configure: Self.sourceOver)
             let zero = Self.draw(state, target, colour: .zero, count: Self.draws, load: .load)
-            for _ in 0..<Self.rounds {
+            for _ in 0 ..< Self.rounds {
                 let on = try await gpu.run(zero)
                 paths.append(on.path)
                 onMs += on.gpuMilliseconds
@@ -92,8 +92,8 @@ struct BlendKillTest: HWTest {
             let changed = zip(killed, initial).filter { $0 != $1 }.count
             metrics.set("\(label)_changed_bytes", changed)
             if changed != 0 { wrong.append("\(label)_changed_bytes") }
-            for _ in 0..<Self.rounds {
-                let off = try await RawMethods.draw(gpu, before: [(0x02f4, 0)], after: [(0x02f4, 1)], zero)
+            for _ in 0 ..< Self.rounds {
+                let off = try await GM20BMethods.draw(gpu, before: [(0x02f4, 0)], after: [(0x02f4, 1)], zero)
                 paths.append(off.path)
                 offMs += off.gpuMilliseconds
                 emitted += off.emitted
@@ -104,12 +104,13 @@ struct BlendKillTest: HWTest {
             paths.append(
                 try await gpu.run(
                     Self.draw(state, control, colour: SIMD4(0.5, 0.25, 0.125, 0.5), count: 1, load: .clear)
-                ).path)
+                ).path
+            )
             let worst = try await Self.controlError(gpu, control, half: half)
             metrics.set("\(label)_control_max_diff", worst, digits: 4)
             if worst > (half ? 1.0 / 1024 : 1.0) { wrong.append("\(label)_control") }
         }
-        let counters = RawFacade.counters(of: gpu.device)
+        let counters = GM20BFacade.counters(of: gpu.device)
         let states = (counters["blend_kill_states"] ?? 0) - (before["blend_kill_states"] ?? 0)
         let binds = (counters["blend_kill_binds"] ?? 0) - (before["blend_kill_binds"] ?? 0)
         metrics.set("kill_states", states)
@@ -120,17 +121,17 @@ struct BlendKillTest: HWTest {
         metrics.set("off_emitted", emitted)
         for stencil in [false, true] {
             let label = stencil ? "zeta_stencil" : "zeta_depth"
-            let binds = RawFacade.counters(of: gpu.device)["blend_kill_binds"] ?? 0
+            let binds = GM20BFacade.counters(of: gpu.device)["blend_kill_binds"] ?? 0
             let arm = try await Self.zetaArm(gpu, stencil: stencil)
             metrics.set("\(label)_wrong", arm.wrong)
             metrics.set("\(label)_colour_changed_bytes", arm.colourChanged)
-            metrics.set("\(label)_kill_binds", (RawFacade.counters(of: gpu.device)["blend_kill_binds"] ?? 0) - binds)
+            metrics.set("\(label)_kill_binds", (GM20BFacade.counters(of: gpu.device)["blend_kill_binds"] ?? 0) - binds)
             paths.append(contentsOf: arm.paths)
             if arm.wrong != 0 { wrong.append("\(label)_wrong") }
             if arm.colourChanged != 0 { wrong.append("\(label)_colour_changed_bytes") }
         }
-        metrics.set("paths", paths.filter { $0 != "raw" }.isEmpty ? "raw" : paths.joined(separator: ","))
-        if paths.contains(where: { $0 != "raw" }) { wrong.append("paths") }
+        metrics.set("paths", paths.filter { $0 != "gm20b" }.isEmpty ? "gm20b" : paths.joined(separator: ","))
+        if paths.contains(where: { $0 != "gm20b" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -144,7 +145,8 @@ struct BlendKillTest: HWTest {
         let zetaFormat: MTLPixelFormat = stencil ? .stencil8 : .depth32Float
         let state = try gpu.render(
             fragment: "exact_fragment", format: .bgra8Unorm, depth: stencil ? .invalid : zetaFormat,
-            stencil: stencil ? zetaFormat : .invalid, configure: sourceOver)
+            stencil: stencil ? zetaFormat : .invalid, configure: sourceOver
+        )
         let zetaState = MTLDepthStencilDescriptor()
         zetaState.depthCompareFunction = .always
         zetaState.isDepthWriteEnabled = !stencil
@@ -165,7 +167,8 @@ struct BlendKillTest: HWTest {
         pass.colorAttachments[0].texture = colour
         pass.colorAttachments[0].loadAction = .clear
         pass.colorAttachments[0].clearColor = MTLClearColor(
-            red: zetaClear[0], green: zetaClear[1], blue: zetaClear[2], alpha: zetaClear[3])
+            red: zetaClear[0], green: zetaClear[1], blue: zetaClear[2], alpha: zetaClear[3]
+        )
         pass.colorAttachments[0].storeAction = .store
         if stencil {
             pass.stencilAttachment.texture = zeta
@@ -187,7 +190,7 @@ struct BlendKillTest: HWTest {
             var value = SIMD4<Float>.zero
             encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
             encoder.setFragmentBytes(&value, length: 16, index: 0)
-            for _ in 0..<4 { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+            for _ in 0 ..< 4 { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
             encoder.endEncoding()
         }
         let texels = try await gpu.read(zeta, bytesPerPixel: stencil ? 1 : 4)
@@ -200,9 +203,10 @@ struct BlendKillTest: HWTest {
             }
         }
         let cleared = [UInt8](
-            (0..<side * side).flatMap { _ in
+            (0 ..< side * side).flatMap { _ in
                 [2, 1, 0, 3].map { UInt8((zetaClear[$0] * 255).rounded()) }
-            })
+            }
+        )
         let bytes = try await gpu.read(colour, bytesPerPixel: 4)
         let changed = zip(bytes, cleared).filter { $0 != $1 }.count
         return (wrong, changed, [drawn.path])
@@ -215,8 +219,8 @@ struct BlendKillTest: HWTest {
         let source: [Double] = [0.5, 0.25, 0.125, 0.5]
         let bytes = try await gpu.read(texture, bytesPerPixel: half ? 8 : 4)
         var worst = 0.0
-        for texel in 0..<(texture.width * texture.height) {
-            for c in 0..<4 {
+        for texel in 0 ..< (texture.width * texture.height) {
+            for c in 0 ..< 4 {
                 if half {
                     let bits = UInt16(bytes[texel * 8 + 2 * c]) | UInt16(bytes[texel * 8 + 2 * c + 1]) << 8
                     let got = Double(Float(Float16(bitPattern: bits)))

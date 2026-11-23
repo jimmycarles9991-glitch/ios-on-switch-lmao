@@ -183,6 +183,7 @@ fn every_fact() -> Vec<RuntimeFact> {
             formatless: false,
             multisampled: true,
             planes: true,
+            unorm16: false,
         },
         RuntimeFact::StorageTextureHalfChannels { slot },
         RuntimeFact::StorageTextureIntegerChannels { slot },
@@ -194,17 +195,6 @@ fn every_fact() -> Vec<RuntimeFact> {
             sampler: Some(1),
         },
         RuntimeFact::ShaderStencilTest { formatless: true },
-        RuntimeFact::ExtendedRangeInputBlend {
-            color: 0,
-            blend: {
-                let mut c = crate::pipeline::ColorAttachmentDescriptor::new(
-                    crate::metal::PixelFormat::BGRA10XR,
-                );
-                c.blending_enabled = true;
-                crate::pipeline::lower_inputs::BlendEquation::of(&c).expect("a blend")
-            },
-            kept: crate::vk::ColorComponentFlags::empty(),
-        },
         RuntimeFact::CrossClassReads { slot },
         RuntimeFact::StorageTextureWriteRounding { slot, halves: true },
         RuntimeFact::HeapWriteRounding {
@@ -320,16 +310,15 @@ fn variant(f: &RuntimeFact) -> usize {
         RuntimeFact::CapturedPositions { .. } => 72,
         RuntimeFact::HeapRawSamples { .. } => 73,
         RuntimeFact::ShaderStencilTest { .. } => 74,
-        RuntimeFact::ExtendedRangeInputBlend { .. } => 75,
-        RuntimeFact::CrossClassReads { .. } => 76,
-        RuntimeFact::StorageTextureWriteRounding { .. } => 77,
-        RuntimeFact::HeapWriteRounding { .. } => 78,
-        RuntimeFact::HeapCrossClassNeutral { .. } => 79,
-        RuntimeFact::AnisotropicSampler { .. } => 80,
-        RuntimeFact::StorageTextureIntegerChannels { .. } => 81,
-        RuntimeFact::HeapHalfTexelWrites { .. } => 82,
-        RuntimeFact::MovableStorageWrites { .. } => 83,
-        RuntimeFact::LayeredStorage => 84,
+        RuntimeFact::CrossClassReads { .. } => 75,
+        RuntimeFact::StorageTextureWriteRounding { .. } => 76,
+        RuntimeFact::HeapWriteRounding { .. } => 77,
+        RuntimeFact::HeapCrossClassNeutral { .. } => 78,
+        RuntimeFact::AnisotropicSampler { .. } => 79,
+        RuntimeFact::StorageTextureIntegerChannels { .. } => 80,
+        RuntimeFact::HeapHalfTexelWrites { .. } => 81,
+        RuntimeFact::MovableStorageWrites { .. } => 82,
+        RuntimeFact::LayeredStorage => 83,
     }
 }
 
@@ -337,7 +326,7 @@ fn variant(f: &RuntimeFact) -> usize {
 fn mechanism_is_total_over_every_fact_and_profile() {
     let facts = every_fact();
     let covered: std::collections::BTreeSet<usize> = facts.iter().map(variant).collect();
-    assert_eq!(covered, (0..85).collect(), "every_fact misses a variant");
+    assert_eq!(covered, (0..84).collect(), "every_fact misses a variant");
     for (stem, _) in super::committed_profiles() {
         let dev = device(&stem);
         let p = dev.profile();
@@ -449,8 +438,7 @@ fn mechanism_is_total_over_every_fact_and_profile() {
                 | RuntimeFact::ShadowStencil { .. }
                 | RuntimeFact::ShaderTests { .. }
                 | RuntimeFact::ShaderStencilTest { .. }
-                | RuntimeFact::TileImageblock { .. }
-                | RuntimeFact::ExtendedRangeInputBlend { .. } => Mechanism::RenderPassContract,
+                | RuntimeFact::TileImageblock { .. } => Mechanism::RenderPassContract,
                 RuntimeFact::ExecutionStatus => match f.buffer_access {
                     crate::device::profile::BufferAccess::Addressed => Mechanism::PushConstant,
                     _ => Mechanism::SyntheticBinding,

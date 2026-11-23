@@ -7,14 +7,13 @@
 namespace switch_gpu_ownership
 {
 constexpr uint32_t kAccessMask = SWITCH_GPU_BACKING_READ | SWITCH_GPU_BACKING_WRITE;
-constexpr uint32_t kBesideCpu = SWITCH_GPU_BACKING_UNLISTED | SWITCH_GPU_BACKING_NO_CPU_EXCLUSION;
+constexpr uint32_t kBesideCpu = SWITCH_GPU_BACKING_NO_CPU_EXCLUSION;
 constexpr uint32_t kUseMask = kAccessMask | kBesideCpu;
 
 inline uint32_t access_kind(uint32_t access)
 {
-	return (access & SWITCH_GPU_BACKING_WRITE ? SWITCH_GPU_BACKING_WRITE
-						  : SWITCH_GPU_BACKING_READ) |
-	       (access & SWITCH_GPU_BACKING_UNLISTED);
+	return access & SWITCH_GPU_BACKING_WRITE ? SWITCH_GPU_BACKING_WRITE
+						 : SWITCH_GPU_BACKING_READ;
 }
 
 inline uint32_t access_slot(const switch_gpu_backing *backing,

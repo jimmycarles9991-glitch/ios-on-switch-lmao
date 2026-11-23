@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // See compiler_store.h.
 #include "compiler_store.h"
-#include "../raw/runtime/raw_compute_slot.h"
-#include "../raw/runtime/raw_program_pages.h"
+#include "../compute_slot.h"
+#include "../program_pages.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -14,9 +14,9 @@
 namespace switch_compiler {
 namespace {
 
-constexpr char kPrefix[] = "raw-";
+constexpr char kPrefix[] = "rec-";
 
-void identityOf(uint64_t stack, const raw::Digest &rules, uint8_t identity[switch_seed_pack::kIdentityBytes])
+void identityOf(uint64_t stack, const gm20b::Digest &rules, uint8_t identity[switch_seed_pack::kIdentityBytes])
 {
     static_assert(switch_seed_pack::kIdentityBytes == 32, "the stack and 24 bytes of the rules' digest");
     memcpy(identity, &stack, sizeof stack);
@@ -47,7 +47,7 @@ void removeOthers(const std::string &root, const std::string &ours)
 
 }  // namespace
 
-std::string storeDirectory(uint64_t stack, const raw::Digest &rules)
+std::string storeDirectory(uint64_t stack, const gm20b::Digest &rules)
 {
     char name[48];
     uint64_t r = 0;
@@ -57,7 +57,7 @@ std::string storeDirectory(uint64_t stack, const raw::Digest &rules)
     return name;
 }
 
-bool Store::open(const std::string &root, uint64_t stack, const raw::Digest &rules, std::string &error)
+bool Store::open(const std::string &root, uint64_t stack, const gm20b::Digest &rules, std::string &error)
 {
     const std::string ours = storeDirectory(stack, rules), dir = root + "/" + ours;
     if ((mkdir(root.c_str(), 0755) && errno != EEXIST) || (mkdir(dir.c_str(), 0755) && errno != EEXIST))
@@ -81,7 +81,7 @@ bool Store::open(const std::string &root, uint64_t stack, const raw::Digest &rul
     return writer_.open(path_, identity, kSlots, kDataBytes, error);
 }
 
-bool Store::find(const raw::Digest &name, std::string &bytes) const
+bool Store::find(const gm20b::Digest &name, std::string &bytes) const
 {
     std::lock_guard<std::mutex> l(lock_);
     switch_seed_pack::Bytes found;
@@ -91,13 +91,13 @@ bool Store::find(const raw::Digest &name, std::string &bytes) const
     return true;
 }
 
-void Store::retire(const raw::Digest &name)
+void Store::retire(const gm20b::Digest &name)
 {
     std::lock_guard<std::mutex> l(lock_);
     writer_.retire(name.data());
 }
 
-Store::Put Store::put(const raw::Digest &name, const std::string &entry)
+Store::Put Store::put(const gm20b::Digest &name, const std::string &entry)
 {
     std::lock_guard<std::mutex> l(lock_);
     if (entry.size() > UINT32_MAX)
@@ -112,33 +112,33 @@ Store::Put Store::put(const raw::Digest &name, const std::string &entry)
     }
 }
 
-// The slots a record's or a kernel's entry holds, as the client lays each out to place it (raw_completed.cpp, raw_compute.cpp)
-static std::vector<std::vector<uint8_t>> entrySlots(const raw::CacheKey &key, const std::string &entry)
+// The slots a record's or a kernel's entry holds, as the client lays each out to place it (completed.cpp, compute.cpp)
+static std::vector<std::vector<uint8_t>> entrySlots(const gm20b::CacheKey &key, const std::string &entry)
 {
     std::vector<std::vector<uint8_t>> slots;
     std::string refusal;
-    raw::RuntimeRecord record;
-    if (raw::decodeEntry(entry, key, record, refusal) == raw::RecordCache::Found::Record) {
-        for (const raw::CapturedProgram *program : raw::slotPrograms(record)) {
-            raw::PackProgram info;
+    gm20b::RuntimeRecord record;
+    if (gm20b::decodeEntry(entry, key, record, refusal) == gm20b::RecordCache::Found::Record) {
+        for (const gm20b::CapturedProgram *program : gm20b::slotPrograms(record)) {
+            gm20b::PackProgram info;
             if (!program->image.empty())
-                slots.push_back(raw::programSlot(*program, info));
+                slots.push_back(gm20b::programSlot(*program, info));
         }
         return slots;
     }
-    raw::ComputeRecord kernel;
-    if (raw::decodeKernelEntry(entry, key, kernel, refusal) == raw::RecordCache::Found::Record)
-        slots.push_back(raw::computeSlot(kernel));
+    gm20b::ComputeRecord kernel;
+    if (gm20b::decodeKernelEntry(entry, key, kernel, refusal) == gm20b::RecordCache::Found::Record)
+        slots.push_back(gm20b::computeSlot(kernel));
     return slots;
 }
 
-Store::Put Store::putProgramSlots(const raw::CacheKey &key, const std::string &entry)
+Store::Put Store::putProgramSlots(const gm20b::CacheKey &key, const std::string &entry)
 {
     for (std::vector<uint8_t> &slot : entrySlots(key, entry)) {
-        if (slot.size() < raw::kProgramSlotPage)
+        if (slot.size() < gm20b::kProgramSlotPage)
             continue;
-        const raw::Digest name = raw::programSlotName(slot.data(), slot.size());
-        slot.resize(raw::programSlotEntryBytes(slot.size()));
+        const gm20b::Digest name = gm20b::programSlotName(slot.data(), slot.size());
+        slot.resize(gm20b::programSlotEntryBytes(slot.size()));
         std::lock_guard<std::mutex> l(lock_);
         if (writer_.put(name.data(), slot.data(), uint32_t(slot.size())) == switch_seed_pack::StoreWriter::Put::Full)
             return Put::Full;

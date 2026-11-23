@@ -5,7 +5,7 @@ import re
 import unittest
 from pathlib import Path
 
-from tools.devicerun import devicerun, hwtest
+from tools.devicerun import devicerun, hwtest, reports
 from tools.devicerun.rules import FAIL, INFO, NA, NO_DATA, PASS
 
 APP = Path(__file__).resolve().parents[2] / 'apps/hwtest'
@@ -53,12 +53,16 @@ class Verdicts(unittest.TestCase):
 
     def test_gpu_paths_and_pacing_are_reported(self):
         results = run(
-            'HWTEST gpu.clear.formats PASS dev=raw raw_checks=228 raw_paths=raw/230,m2v:compute:compute/2 ms=9.0',
+            (
+                'HWTEST gpu.clear.formats PASS dev=gm20b gm20b_checks=228 '
+                'gm20b_paths=gm20b/230,error:compute.nokernel/2 '
+                'ms=9.0'
+            ),
             'HWTEST pacing.blur_over FAIL link_frames=300 link_missed=0 link_hist=299/0/0/0 late=0 '
             'present_frames=290 present_missed=12 present_hist=280/9/1/0 ms=6000.0 why=the_display_missed',
             'HWTEST suite FAIL pass=1 fail=1 skip=0 ms=1.0',
         )
-        self.assertIn('raw/230,m2v:compute:compute/2', results['hwtest.gpu-paths'].observed)
+        self.assertIn('gm20b/230,error:compute.nokernel/2', results['hwtest.gpu-paths'].observed)
         self.assertIn('280/9/1/0', results['hwtest.pacing'].observed)
         self.assertEqual(results['hwtest.pacing.blur_over'].verdict, FAIL)
 
@@ -101,6 +105,85 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(results['hwtest.metal.render.depth_stencil'].verdict, PASS)
         results = run('HWTEST metal.compute FAILED ms=1.0', 'HWTEST suite PASS pass=1 fail=0 skip=0 ms=1.0')
         self.assertEqual(results['hwtest.metal.compute'].verdict, PASS)
+
+
+class MissingKeys(unittest.TestCase):
+    def test_a_debug_skip_names_its_key_and_fails_a_release_skip_passes(self):
+        got = run(
+            'HWTEST gpu.recover.kill_one SKIP ms=1.0 why=missing_key_reopen_us_in_a_debug_runtime',
+            'HWTEST gpu.path.state_segments SKIP ms=1.0 why=no_state_segment_binds:_a_release_runtime',
+        )['hwtest.missing-key']
+        self.assertEqual(got.verdict, FAIL)
+        self.assertIn('gpu.recover.kill_one/reopen_us', got.observed)
+        self.assertNotIn('state_segments', got.observed)
+        self.assertEqual(
+            run('HWTEST gpu.path.state_segments SKIP ms=1.0 why=a_release_runtime')['hwtest.missing-key'].verdict, PASS
+        )
+
+
+class OpenCases(unittest.TestCase):
+    def test_every_open_id_is_a_test_whose_row_names_its_gap(self):
+        ids = set(hwtest.TESTS) | {test_id for tests in hwtest.BY_IOS.values() for test_id in tests}
+        self.assertLessEqual(set(hwtest.OPEN), ids)
+        notes = {check.name: check.note for check in hwtest.HWTEST}
+        for test_id, gap in hwtest.OPEN.items():
+            self.assertIn(f'open: {gap}', notes[f'hwtest.{test_id}'])
+        self.assertNotIn('open:', notes['hwtest.gpu.gm20b.planes_blits'])
+
+
+class RollUp(unittest.TestCase):
+    def rows(self, *messages: str) -> dict:
+        records = [line(m, i) for i, m in enumerate(messages)]
+        results, _ = devicerun.run_checks(records, hwtest.HWTEST)
+        return {r.check.name: r for r in reports.rolled_up(results)}
+
+    def test_reds_name_the_first_and_count_tests_per_predicate(self):
+        rows = self.rows(
+            'HWTEST gpu.gm20b.a PASS failed_cbs=1 failed_why=compute/1 ms=1.0',
+            'HWTEST gpu.gm20b.b FAIL failed_cbs=1 own_failed=1 own_why=enc.pass/1 ms=1.0 why=x_own_why=none/9',
+            'HWTEST gpu.ca.c FAIL failed_cbs=3 foreign_failed=3 foreign_why=none/2,enc.pass/1 ms=1.0 why=foreign',
+            'HWTEST gpu.ca.c FAIL foreign_failed=1 foreign_why=none/1 ms=1.0 why=foreign',
+            'HWTEST gpu.gm20b.d FAIL wrong=3 ms=1.0 why=pixels',
+        )
+        self.assertNotIn(hwtest.REDS, rows)
+        self.assertEqual(rows['hwtest.first-red'].verdict, INFO)
+        self.assertEqual(rows['hwtest.first-red'].observed, 'boot B00T: gpu.gm20b.b (own enc.pass/1)')
+        self.assertEqual(rows['hwtest.red.enc.pass'].observed, '2 tests reddened, first gpu.gm20b.b (own)')
+        self.assertEqual(rows['hwtest.red.none'].observed, '1 test reddened, first gpu.ca.c (foreign)')
+        self.assertNotIn('hwtest.red.compute', rows)
+        headline = reports.headline([('hwtest', list(rows.values()))])
+        self.assertIn('first-red: boot B00T: gpu.gm20b.b (own enc.pass/1); red.enc.pass: 2 tests', headline)
+
+    def test_skips_count_every_test_that_ran_one(self):
+        rows = self.rows(
+            'HWTEST gpu.gm20b.invalid_requests PASS skipped_calls=5 skipped_why=call.blit/5 ms=1.0',
+            'HWTEST gpu.ca.blur_chain FAIL skipped_calls=1 skipped_why=call.blit/1 ms=1.0 why=raw:_skipped',
+            'HWTEST gpu.gm20b.e PASS samples_skipped_why=call.icb/1 ms=1.0',
+        )
+        self.assertEqual(
+            rows['hwtest.skipped-calls.call.blit'].observed, 'boot B00T: 2 tests, first gpu.gm20b.invalid_requests'
+        )
+        self.assertNotIn('hwtest.skipped-calls.call.icb', rows)
+        self.assertEqual(rows['hwtest.first-red'].verdict, NO_DATA)
+        self.assertEqual(self.rows('HWTEST gpu.gm20b.a PASS ms=1.0')['hwtest.skipped-calls'].verdict, NO_DATA)
+
+    def test_a_kill_test_window_runs_back_from_its_line_by_its_duration(self):
+        results = run(
+            'HWTEST gpu.recover.kernel_second_timeout FAIL state=4 killed=2 kill_ms=3.0 ms=2500.5 why=ms=7',
+            'HWTEST gpu.recover.kernel_second_timeout SKIP state=1 killed=0 ms=900.0 why=direct_scanout',
+            'HWTEST gpu.recover.kill_one PASS killed=1 ms=900.0',
+        )
+        self.assertEqual([f['ms'] for f in results[hwtest.KILL_WINDOWS].matches], ['2500.5'])
+
+    def test_a_clean_boot_after_a_red_one_rolls_up_clean(self):
+        older = line('HWTEST gpu.gm20b.b FAIL own_failed=1 own_why=enc.pass/1 skipped_why=call.blit/1 ms=1.0 why=x', 0)
+        newer = {**line('HWTEST suite PASS pass=1 fail=0 skip=0 ms=1.0', 9), 'bootUUID': 'B00T2'}
+        results, _ = devicerun.run_checks([older, newer], hwtest.HWTEST)
+        rows = {r.check.name: r for r in reports.rolled_up(results)}
+        self.assertEqual(rows['hwtest.first-red'].verdict, NO_DATA)
+        self.assertIn('boot B00T2', rows['hwtest.first-red'].observed)
+        self.assertNotIn('hwtest.red.enc.pass', rows)
+        self.assertEqual(rows['hwtest.skipped-calls'].verdict, NO_DATA)
 
 
 class AppSources(unittest.TestCase):

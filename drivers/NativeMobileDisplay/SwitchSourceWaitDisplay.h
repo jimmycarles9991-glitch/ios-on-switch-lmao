@@ -69,7 +69,7 @@ int waitCopySource()
     if (!producer.engine)
         return 0;
     const int visible = switch_gpu_backing_token_external_wait(&producer);
-    return visible == 1 ? 0 : visible < 0 ? visible : -11;
+    return visible == 1 ? 0 : visible < 0 ? switch_gpu_backing_token_failure(&producer) : -11;
 }
 
 // The copy reads through a read-only cached mapping: DC IVAC needs write permission there and would drop a line
@@ -96,10 +96,10 @@ void sourceWaitFinished()
     if (!copyStopping && (latchRetire ? firstUntaken() : pendingSwapRequest()) == sourceWait->request) {
         if (!sourceWait->status) {
             kickSwapQueue();
-        } else if (sourceWait->status == TEGRA_SCANOUT_SOURCE_LOST) {
+        } else if (sourceUnshown(sourceWait->status, sourceWait->request, "busy surface")) {
             noteTaken(sourceWait->request, mach_absolute_time());
             planeNextSet = false;
-            dropLostFrame(sourceWait->request, kNoBuffer);
+            retireSwapUnshown(sourceWait->request, kNoBuffer);
         } else {
             native_legacy_transfer_observed(kIOReturnNotReady, sourceWait->request, 0);
         }

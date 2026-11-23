@@ -44,8 +44,8 @@ extension NativeArgumentEncoderTest {
         }
         let arguments = try gpu.buffer(max(encoder.encodedLength, 16))
         encoder.setArgumentBuffer(arguments, offset: 0)
-        encoder.setTextures(textures, range: 0..<3)
-        encoder.setSamplerStates(samplers, range: 3..<5)
+        encoder.setTextures(textures, range: 0 ..< 3)
+        encoder.setSamplerStates(samplers, range: 3 ..< 5)
         let pipeline = try gpu.render(fragment: "argument_array_fragment", format: .rgba8Unorm)
         let target = try gpu.texture(.rgba8Unorm, 3, 2)
         let drawn = try await gpu.run { commands in
@@ -54,9 +54,9 @@ extension NativeArgumentEncoderTest {
             Self.cover(render, pipeline, arguments)
         }
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let exact = (0..<3).allSatisfy { k in
-            Array(pixels.pixel(k, 0, width: 3)) == Array(Self.arrayTexels[k][4..<8])
-                && Array(pixels.pixel(k, 1, width: 3)) == Array(Self.arrayTexels[k][0..<4])
+        let exact = (0 ..< 3).allSatisfy { k in
+            Array(pixels.pixel(k, 0, width: 3)) == Array(Self.arrayTexels[k][4 ..< 8])
+                && Array(pixels.pixel(k, 1, width: 3)) == Array(Self.arrayTexels[k][0 ..< 4])
         }
         return "\(drawn.path)/\(exact ? "exact" : "wrong")"
     }
@@ -82,7 +82,7 @@ extension NativeArgumentEncoderTest {
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
         let exact =
             Array(pixels.pixel(0, 0, width: 2)) == [0, 0, 255, 255]
-            && Array(pixels.pixel(1, 0, width: 2)) == [255, 0, 255, 255]
+                && Array(pixels.pixel(1, 0, width: 2)) == [255, 0, 255, 255]
         return "\(drawn.path)/\(exact ? "exact" : "wrong")"
     }
 
@@ -115,7 +115,7 @@ extension NativeArgumentEncoderTest {
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
         let exact =
             Array(pixels.pixel(0, 0, width: 2)) == [255, 255, 0, 255]
-            && Array(pixels.pixel(1, 0, width: 2)) == [0, 255, 255, 255]
+                && Array(pixels.pixel(1, 0, width: 2)) == [0, 255, 255, 255]
         return "\(drawn.path)/\(exact ? "exact" : "wrong")"
     }
 }

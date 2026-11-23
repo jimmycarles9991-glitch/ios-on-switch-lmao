@@ -66,7 +66,7 @@ def main() -> None:
     source = deployed.provenance(Path(boot))
     if source is None:
         source = deployed.describe(paths.workspace())
-        manifest = target / 'gpu/ngpu/addons/TegraGM20BMetal.m2v-seed/shared/MANIFEST.json'
+        manifest = target / 'gpu/ngpu/addons/TegraGM20BMetal.seed/shared/MANIFEST.json'
         source['build'] = json.loads(manifest.read_text())['ipsw'] if args.gpu and not args.no_gpu else ''
     (target / deployed.NAME).write_text(json.dumps(source, indent=1) + '\n')
     for path in target.rglob('*'):

@@ -32,7 +32,7 @@ enum Audio {
         var phase = 0.0
         let source = AVAudioSourceNode(format: format) { _, _, count, buffers in
             let list = UnsafeMutableAudioBufferListPointer(buffers)
-            for frame in 0..<Int(count) {
+            for frame in 0 ..< Int(count) {
                 let sample = Float(sin(phase) * 0.1)
                 phase += 2 * .pi * 1000 / rate
                 for buffer in list { buffer.mData!.assumingMemoryBound(to: Float.self)[frame] = sample }
@@ -60,7 +60,8 @@ enum Audio {
     static func activate(category: AVAudioSession.Category, rate: Double? = nil, buffer: Double? = nil) throws {
         let session = AVAudioSession.sharedInstance()
         try session.setCategory(
-            category, mode: .default, options: category == .playAndRecord ? [.defaultToSpeaker] : [])
+            category, mode: .default, options: category == .playAndRecord ? [.defaultToSpeaker] : []
+        )
         if let rate { try session.setPreferredSampleRate(rate) }
         if let buffer { try session.setPreferredIOBufferDuration(buffer) }
         try session.setActive(true)
@@ -115,7 +116,8 @@ struct AudioPlaybackTest: HWTest {
                     "frames consumed at the session rate (within 2%)",
                     abs(played.rate - session.sampleRate) <= session.sampleRate * 0.02
                 ),
-            ], metrics, proof: "route=\(Audio.outputs())")
+            ], metrics, proof: "route=\(Audio.outputs())"
+        )
     }
 }
 
@@ -140,7 +142,8 @@ struct AudioLatencyTest: HWTest {
             [
                 ("an IO buffer of 512 frames or fewer", frames <= 512),
                 ("the engine keeps up (within 2%)", abs(played.rate - session.sampleRate) <= session.sampleRate * 0.02),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -165,7 +168,8 @@ struct AudioRouteTest: HWTest {
         ]
         // 27 plays as J181, whose built-in input is its Digital Mic: the Built-In Microphone port.
         if ProcessInfo.processInfo.isOperatingSystemAtLeast(
-            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
+            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+        )
         {
             let builtIn = session.availableInputs?.contains { $0.portType == .builtInMic } ?? false
             checks.append(("the built-in microphone is an input", builtIn))
@@ -178,7 +182,8 @@ struct AudioRouteTest: HWTest {
                 (
                     "input frames arrive at the input's rate (within 5%)",
                     abs(captured.measured - captured.rate) <= captured.rate * 0.05
-                ))
+                )
+            )
         }
         return .judged(checks, metrics)
     }
@@ -206,7 +211,8 @@ struct HeadsetTest: HWTest {
                 forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main
             ) { note in
                 let reason = (note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).flatMap(
-                    AVAudioSession.RouteChangeReason.init)
+                    AVAudioSession.RouteChangeReason.init
+                )
                 if reason == .newDeviceAvailable || reason == .oldDeviceUnavailable { waiter.resume(Audio.outputs()) }
             }
         }
@@ -241,8 +247,9 @@ struct MicrophoneTest: HWTest {
             counter.add(Int(buffer.frameLength))
             guard let samples = buffer.floatChannelData?[0] else { return }
             let rms = sqrt(
-                (0..<Int(buffer.frameLength)).reduce(Float(0)) { $0 + samples[$1] * samples[$1] }
-                    / Float(max(1, buffer.frameLength)))
+                (0 ..< Int(buffer.frameLength)).reduce(Float(0)) { $0 + samples[$1] * samples[$1] }
+                    / Float(max(1, buffer.frameLength))
+            )
             loudest = max(loudest, rms)
             if counter.snapshot.frames >= Int(format.sampleRate * 3) { peak.resume(loudest) }
         }
@@ -268,6 +275,7 @@ struct MicrophoneTest: HWTest {
                     abs(Double(frames) / elapsed - format.sampleRate) <= format.sampleRate * 0.05
                 ),
                 ("something above -60 dBFS was heard", level > 0.001),
-            ], metrics)
+            ], metrics
+        )
     }
 }

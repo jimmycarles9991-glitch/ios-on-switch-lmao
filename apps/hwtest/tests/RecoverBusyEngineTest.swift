@@ -24,8 +24,8 @@ struct RecoverBusyEngineTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         let runner: BenchRunner
         let probeBench: BenchRunner
@@ -49,7 +49,7 @@ struct RecoverBusyEngineTest: HWTest {
         await MainActor.run { compositor.measure() }
 
         var statuses: [String] = []
-        for _ in 0..<Self.rounds {
+        for _ in 0 ..< Self.rounds {
             for fill in fills {
                 let outcome = runner.run(fill)
                 statuses.append("\(fill.id):\(outcome.status)")
@@ -76,7 +76,8 @@ struct RecoverBusyEngineTest: HWTest {
                 ("every bench run returned", statuses.count == Self.rounds * fills.count),
                 ("the compositor kept presenting within the bound", shown.frames > 0 && gapMs <= Self.gapBoundMs),
                 ("the probe's own raw device filled every frame", fillErrors == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     static func experiments() throws -> [BenchExperiment] {

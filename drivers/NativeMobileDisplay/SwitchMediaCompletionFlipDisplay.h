@@ -3,8 +3,7 @@
 // then DC A increments the display fence. Its filter and completion adopt that request without CPU register stores.
 // The gate restores the newest requested addresses while the set is staged: this unit promotes another window's
 // assembly copy at UPDATE, so an unrelated request must never expose a frame its producer is still writing.
-// Failed producer releases stop a dependent stream first. A gate withdrawal can meet partial controller stores;
-// its candidate slots remain held until the existing latch observes the restored last-good set.
+// Failed producer releases stop a dependent stream first.
 
 // Static, as window A's completion flip: the instance is at the 16 KiB a kalloc_type class may have.
 static inline SwitchPlaneCompletionFlip mediaFlip;
@@ -124,12 +123,17 @@ void writeEarlyMediaFlip(uint32_t generation)
         noteMediaFlipTotal(5, 1);
 }
 
-// completionFlipVerdict's: a set host1x's filter wrote is on screen, so its completion is a success. A failure breaks
-// the producers' contract: one error line.
+// completionFlipVerdict's: a set host1x's filter wrote is on screen. A producer's client's failure dated back to its job
+// leaves it shown with one line; a lost producer, or a failure none of them reports, is the kernel's own.
 int mediaFlipVerdict(int status)
 {
     if (!status || !mediaFlip.early())
         return status;
+    const int why = switch_gpu_backing_tokens_failure(mediaHostStream.producers, mediaHostStream.count);
+    if (!why || why == SWITCH_GPU_BACKING_WRITER_FAILED)
+        panic("SwitchDisplay: windows B and C's set was written from host1x's syncpoint filter, and its frame was then "
+              "lost (%d, its producers' %d)",
+              status, why);
     IOLog(
         "SwitchDisplay: windows B and C's set was written from host1x's syncpoint filter, whose completion then failed "
         "(%d): shown as done\n",
@@ -172,7 +176,6 @@ void mediaFlipFromGate()
 {
     cancelMediaHostFlip();
     takeMediaFlip();
-    restoreCancelledMediaHostFlip();
     withdrawMediaFlip();
 }
 
@@ -180,7 +183,6 @@ void mediaFlipFromGate()
 // before the offer (a failed producer, a panic) and the set goes out through planeOut.
 void mediaFlipPass()
 {
-    restoreCancelledMediaHostFlip();
     if (mediaFlipIdle() && planeLatch.armedRequested)
         return;
     mediaFlip.withdraw();
@@ -234,12 +236,8 @@ bool planeLatchedAtFrameEnd()
     for (;;) {
         const bool out = (dc[kDcStateControl] & landscapeRequestBits()) != 0u;
         const int scanned = planeScannedSet();
-        if (!mediaFlipRefused(out, scanned)) {
-            const bool latched = planeLatch.latched(out, scanned);
-            if (latched && mediaHostHeldSlots)
-                mediaHostHeldSlots = 0;
-            return latched;
-        }
+        if (!mediaFlipRefused(out, scanned))
+            return planeLatch.latched(out, scanned);
     }
 }
 

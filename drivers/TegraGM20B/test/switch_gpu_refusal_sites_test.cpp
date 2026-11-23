@@ -11,6 +11,7 @@
 
 #include "bazel/testing/source_text.h"
 #include "drivers/TegraGM20B/SwitchGpuRefusalSites.h"
+#include "drivers/TegraGM20B/TegraGM20BSchedPolicy.h"
 
 using switch_ios::test::Block;
 using switch_ios::test::CodeText;
@@ -62,6 +63,38 @@ TEST(SwitchGpuRefusalSites, OnlyTheTwoFlowControlAnswersAreSilent)
 		  (std::set<SwitchGpuRefusal>{SwitchGpuRefusal::StaleSet, SwitchGpuRefusal::Busy}));
 	EXPECT_EQ(line(note(SwitchGpuRefusal::StaleSet, 1, 7), kNotReady), "(silent)");
 	EXPECT_EQ(line(note(SwitchGpuRefusal::Busy), kCannotLock), "(silent)");
+}
+
+// The compositor's (a critical client's) refused job loses its frame, which panics at the refusal: every site but the
+// two the runtime resubmits, and neither Aborted (a -5 at admission) nor NotOpen (the process closing). No other
+// client's refusal does.
+TEST(SwitchGpuRefusalSites, OnlyTheCompositorsRefusalsLoseItsFrame)
+{
+	constexpr int32_t kAborted = kIOReturnAborted, kNotOpen = kIOReturnNotOpen;
+	for (size_t i = 0; i < size_t(SwitchGpuRefusal::Count); ++i) {
+		const auto site = SwitchGpuRefusal(i);
+		const bool resubmitted =
+			site == SwitchGpuRefusal::StaleSet || site == SwitchGpuRefusal::Busy;
+		for (const int32_t ret : {kBadArgument, kNotReady, kCannotLock, kNotResponding}) {
+			EXPECT_EQ(switch_gpu_refusal_loses_frame(true, site, ret), !resubmitted)
+				<< "site " << i << " ret " << std::hex << ret;
+			EXPECT_FALSE(switch_gpu_refusal_loses_frame(false, site, ret))
+				<< "site " << i;
+		}
+		EXPECT_FALSE(switch_gpu_refusal_loses_frame(true, site, kAborted)) << "site " << i;
+		EXPECT_FALSE(switch_gpu_refusal_loses_frame(true, site, kNotOpen)) << "site " << i;
+	}
+}
+
+// An app that asks for priority 0 is scheduled high but is not the compositor (tgm_compositor): its refused job loses
+// no frame; the compositor's, which also holds graphics-restart-no-kill, does
+TEST(SwitchGpuRefusalSites, AnAppAtTheTopPriorityLosesNoFrame)
+{
+	const enum tgm_level top = tgm_priority_level(uint32_t(tgm_priority_granted(0)), 4, 0);
+	EXPECT_FALSE(switch_gpu_refusal_loses_frame(tgm_compositor(top, 0) != 0,
+						    SwitchGpuRefusal::Push, kBadArgument));
+	EXPECT_TRUE(switch_gpu_refusal_loses_frame(tgm_compositor(top, 1) != 0,
+						   SwitchGpuRefusal::Push, kBadArgument));
 }
 
 // metal.native.counters' refusal as the next boot's line reads it, and a dead channel's

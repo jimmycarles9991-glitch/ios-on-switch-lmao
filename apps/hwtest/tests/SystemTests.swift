@@ -1,7 +1,7 @@
 import Foundation
 import HWTestCore
-import UIKit
 import notify
+import UIKit
 
 struct IdentityTest: HWTest {
     let id = "system.identity"
@@ -19,7 +19,8 @@ struct IdentityTest: HWTest {
                 ("UIDevice says iPad", info["model"] == "iPad" && idiom == .pad),
                 ("hw.machine is an iPad identity", info["machine"]?.hasPrefix("iPad") == true),
                 ("a build version", info["build"]?.isEmpty == false),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -46,7 +47,8 @@ struct PowerStateTest: HWTest {
                 ("battery state known", state != .unknown),
                 ("battery level in 0...1", level >= 0 && level <= 1),
                 ("not thermally critical", thermal != .critical),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -79,6 +81,7 @@ struct ThermalTest: HWTest {
                 ("thermal pressure published", pressure != nil),
                 ("thermal pressure nominal", pressure == 0),
                 ("thermal state nominal", thermal == .nominal),
-            ], metrics)
+            ], metrics
+        )
     }
 }

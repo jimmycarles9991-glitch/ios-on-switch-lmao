@@ -45,7 +45,7 @@ public struct ArmTally: Sendable, Equatable {
         mismatchedTrials += 1
         var wrong = abs(got.count - want.count)
         var firstAt = -1
-        for i in 0..<count where got[i] != want[i] {
+        for i in 0 ..< count where got[i] != want[i] {
             wrong += 1
             if firstAt < 0 { firstAt = i }
         }
@@ -54,7 +54,7 @@ public struct ArmTally: Sendable, Equatable {
             let texel = firstAt / bytesPerTexel
             let start = texel * bytesPerTexel
             let hex = { (b: UnsafeRawBufferPointer) in
-                (start..<min(start + bytesPerTexel, b.count)).map { String(format: "%02x", b[$0]) }.joined()
+                (start ..< min(start + bytesPerTexel, b.count)).map { String(format: "%02x", b[$0]) }.joined()
             }
             first = "\(trial):\(texel % width),\(texel / width):\(hex(got))>\(hex(want))"
         }
@@ -108,7 +108,7 @@ public struct IterationPlan: Sendable {
 
     /// (cell, round) in the order they run: round by round across the cells.
     public var order: [(cell: Int, round: Int)] {
-        (0..<rounds).flatMap { round in (0..<cells).map { (cell: $0, round: round) } }
+        (0 ..< rounds).flatMap { round in (0 ..< cells).map { (cell: $0, round: round) } }
     }
 }
 

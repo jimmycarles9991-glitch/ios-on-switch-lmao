@@ -28,7 +28,6 @@ enum switch_gpu_path {
 	SWITCH_GPU_PATH_SUBMIT_JOB, /* SubmitJob (TegraGM20BJobABI.h): a job it ran */
 	SWITCH_GPU_PATH_SET_JOB, /* SubmitJob: a job it ran that named a resource set at its current generation */
 	SWITCH_GPU_PATH_STALE_SET, /* SubmitJob: kIOReturnNotReady for a resource set's ended generation */
-	SWITCH_GPU_PATH_ADDRESS_JOB, /* SubmitAddress: a job it ran */
 	SWITCH_GPU_PATH_SHARED_USE, /* SubmitJob: a use a job named beside its set (no member of it) */
 	SWITCH_GPU_PATH_RELAYOUT_FRESH, /* a block-linear decision that moved nothing: no one had written the surface */
 	SWITCH_GPU_PATH_RELAYOUT_DEFERRED, /* a last import that left the surface block-linear for a CPU lock to untile */

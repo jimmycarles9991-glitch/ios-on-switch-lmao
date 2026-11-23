@@ -21,29 +21,31 @@ struct PlacementHeapScene: GPUScene {
             let unit = max(256, gpu.device.heapBufferSizeAndAlign(length: 1024, options: options).align)
             let offset = unit * 2, length = unit * 4
             guard let first = heap.makeBuffer(length: length, options: options, offset: offset),
-                let twin = heap.makeBuffer(length: length, options: options, offset: offset),
-                let middle = heap.makeBuffer(length: unit * 2, options: options, offset: offset + unit),
-                let readback = gpu.device.makeBuffer(length: length, options: .storageModeShared)
+                  let twin = heap.makeBuffer(length: length, options: options, offset: offset),
+                  let middle = heap.makeBuffer(length: unit * 2, options: options, offset: offset + unit),
+                  let readback = gpu.device.makeBuffer(length: length, options: .storageModeShared)
             else { throw TestFailure("\(label) placement buffers returned nil") }
             result.expect(
                 first.heapOffset == offset && twin.heapOffset == offset && middle.heapOffset == offset + unit,
-                "\(label) buffer offsets were ignored")
+                "\(label) buffer offsets were ignored"
+            )
             result.expect(first.isAliasable() && twin.isAliasable(), "\(label) placement buffers were not aliasable")
             if storage == .shared {
                 first.contents().initializeMemory(as: UInt8.self, repeating: 0x5A, count: length)
                 let aliasBytes = UnsafeBufferPointer(
-                    start: twin.contents().assumingMemoryBound(to: UInt8.self), count: length)
+                    start: twin.contents().assumingMemoryBound(to: UInt8.self), count: length
+                )
                 result.expect(aliasBytes.allSatisfy { $0 == 0x5A }, "shared buffer CPU addresses did not alias")
             }
             try await gpu.run { commands in
                 let blit = commands.makeBlitCommandEncoder()!
-                blit.fill(buffer: first, range: 0..<length, value: 0x3C)
+                blit.fill(buffer: first, range: 0 ..< length, value: 0x3C)
                 blit.endEncoding()
             }
             first.makeAliasable()
             try await gpu.run { commands in
                 let blit = commands.makeBlitCommandEncoder()!
-                blit.fill(buffer: middle, range: 0..<(unit * 2), value: 0x99)
+                blit.fill(buffer: middle, range: 0 ..< (unit * 2), value: 0x99)
                 blit.endEncoding()
             }
             let timing = try await gpu.run { commands in
@@ -53,14 +55,17 @@ struct PlacementHeapScene: GPUScene {
             }
             result.metrics.set("buffer_path_\(label)", timing.path)
             let bytes = Array(
-                UnsafeBufferPointer(start: readback.contents().assumingMemoryBound(to: UInt8.self), count: length))
-            let expected = (0..<length).map { UInt8($0 >= unit && $0 < unit * 3 ? 0x99 : 0x3C) }
+                UnsafeBufferPointer(start: readback.contents().assumingMemoryBound(to: UInt8.self), count: length)
+            )
+            let expected = (0 ..< length).map { UInt8($0 >= unit && $0 < unit * 3 ? 0x99 : 0x3C) }
             result.compare(
                 "\(label) overlapping buffers", bytes: bytes, expected: expected,
-                format: .r8Unorm, width: length, height: 1, tolerance: 0)
+                format: .r8Unorm, width: length, height: 1, tolerance: 0
+            )
 
             let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .rgba8Unorm, width: 61, height: 37, mipmapped: false)
+                pixelFormat: .rgba8Unorm, width: 61, height: 37, mipmapped: false
+            )
             textureDescriptor.storageMode = storage
             textureDescriptor.usage = [.renderTarget, .shaderRead]
             let need = gpu.device.heapTextureSizeAndAlign(descriptor: textureDescriptor)
@@ -70,9 +75,11 @@ struct PlacementHeapScene: GPUScene {
             else { throw TestFailure("\(label) placement textures returned nil") }
             result.expect(
                 writer!.heapOffset == textureOffset && reader.heapOffset == textureOffset,
-                "\(label) texture offsets were ignored")
+                "\(label) texture offsets were ignored"
+            )
             result.expect(
-                writer!.isAliasable() && reader.isAliasable(), "\(label) placement textures were not aliasable")
+                writer!.isAliasable() && reader.isAliasable(), "\(label) placement textures were not aliasable"
+            )
             try await gpu.run { commands in
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = writer
@@ -89,10 +96,12 @@ struct PlacementHeapScene: GPUScene {
             }
             result.compare(
                 "\(label) aliased texture after writer release", bytes: image, expected: expectedImage,
-                format: .rgba8Unorm, width: 61, height: 37, tolerance: 1.0 / 255)
+                format: .rgba8Unorm, width: 61, height: 37, tolerance: 1.0 / 255
+            )
             result.expect(
                 heap.usedSize == 0 && heap.maxAvailableSize(alignment: 256) == 0,
-                "\(label) placement heap reported automatic allocation occupancy")
+                "\(label) placement heap reported automatic allocation occupancy"
+            )
         }
         return result
     }

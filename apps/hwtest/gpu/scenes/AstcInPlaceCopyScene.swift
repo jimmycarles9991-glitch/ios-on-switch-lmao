@@ -17,7 +17,7 @@ struct AstcInPlaceCopyScene: GPUScene {
     func run(_ gpu: GPU) async throws -> SceneResult {
         let run = try AstcLayoutRun(gpu)
         guard run.onRaw else {
-            run.result.notes.append("off the raw facade: only raw takes the no-copy paths")
+            run.result.notes.append("off the facade: only raw takes the no-copy paths")
             return run.finish()
         }
         guard let layout = TextureLayoutSPI(gpu.device, AstcLayoutRun.descriptor(.shared)) else {
@@ -73,7 +73,8 @@ extension AstcLayoutRun {
         layout.copy(Self.grid.bytes, rowBytes: Self.grid.rowBytes, region: Self.region, slice: 1, to: memory.base)
         guard
             let texture = TextureLayoutSPI.noCopyTexture(
-                gpu.device, memory.base, length: memory.bytes, descriptor, deallocator: memory.deallocator)
+                gpu.device, memory.base, length: memory.bytes, descriptor, deallocator: memory.deallocator
+            )
         else {
             memory.release()
             throw TestFailure("newTextureWithBytesNoCopy of the array returned nil")

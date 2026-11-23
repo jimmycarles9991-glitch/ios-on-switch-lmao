@@ -9,15 +9,16 @@ enum ViewportTiles {
     static let size = 64, tile = 16, count = 16
 
     static func viewports() -> [MTLViewport] {
-        (0..<count).map {
+        (0 ..< count).map {
             MTLViewport(
                 originX: Double($0 % 4 * tile), originY: Double($0 / 4 * tile), width: Double(tile),
-                height: Double(tile), znear: 0, zfar: 1)
+                height: Double(tile), znear: 0, zfar: 1
+            )
         }
     }
 
     static func scissors() -> [MTLScissorRect] {
-        (0..<count).map {
+        (0 ..< count).map {
             MTLScissorRect(x: $0 % 4 * tile + 1, y: $0 / 4 * tile + 1, width: tile - 2, height: tile - 2)
         }
     }
@@ -26,7 +27,7 @@ enum ViewportTiles {
     static func tile(_ x: Int, _ y: Int) -> (index: Int, inside: Bool) {
         let i = y / tile * 4 + x / tile
         let (u, v) = (x % tile, y % tile)
-        return (i, (1..<(tile - 1)).contains(u) && (1..<(tile - 1)).contains(v))
+        return (i, (1 ..< (tile - 1)).contains(u) && (1 ..< (tile - 1)).contains(v))
     }
 
     static func color(_ i: Int) -> [UInt8] { [UInt8(15 * i), 255 - UInt8(15 * i), UInt8(i % 2 * 255), 255] }
@@ -45,8 +46,8 @@ enum ViewportTiles {
     static func wrong(_ gpu: GPU, _ t: MTLTexture, _ want: (Int, Int) -> [UInt8]) async throws -> Int {
         let pixels = try await gpu.read(t, bytesPerPixel: 4)
         var wrong = 0
-        for y in 0..<size {
-            for x in 0..<size where Array(pixels.pixel(x, y, width: size)) != want(x, y) { wrong += 1 }
+        for y in 0 ..< size {
+            for x in 0 ..< size where Array(pixels.pixel(x, y, width: size)) != want(x, y) { wrong += 1 }
         }
         return wrong
     }
@@ -94,7 +95,8 @@ struct NativeViewportIndexTest: NativeObjectTest {
         let pipeline = try gpu.render(vertex: "viewport_vertex", fragment: "flat_color_fragment", format: .rgba8Unorm)
         var work = NativeWork(objects: [t])
         if let wrong = NativeAnswers.check(
-            gpu.device, "maxViewportCount", NativeAnswers.viewports, field: "max_viewports", &metrics)
+            gpu.device, "maxViewportCount", NativeAnswers.viewports, field: "max_viewports", &metrics
+        )
         {
             work.failures.append(wrong)
         }
@@ -104,7 +106,7 @@ struct NativeViewportIndexTest: NativeObjectTest {
             e.setViewports(ViewportTiles.viewports())
             e.setScissorRects(ViewportTiles.scissors())
             var corners = GPU.fullScreen
-            var colors = (0..<ViewportTiles.count).map { Layering.rgba(ViewportTiles.color($0)) }
+            var colors = (0 ..< ViewportTiles.count).map { Layering.rgba(ViewportTiles.color($0)) }
             e.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
             e.setVertexBytes(&colors, length: MemoryLayout<SIMD4<Float>>.stride * colors.count, index: 1)
             e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: ViewportTiles.count)

@@ -19,7 +19,8 @@ enum ResolveArms {
         let rowBytes = width * 2 * 4
         let linear = try gpu.buffer(rowBytes * height * 2)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width * 2, height: height * 2, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: width * 2, height: height * 2, mipmapped: false
+        )
         descriptor.usage = [.shaderRead, .renderTarget]
         descriptor.storageMode = .shared
         guard let pitch = linear.makeTexture(descriptor: descriptor, offset: 0, bytesPerRow: rowBytes) else {
@@ -57,7 +58,7 @@ enum ResolveArms {
         async throws -> Double
     {
         var times: [Double] = []
-        for _ in 0..<ResolveCostTest.runs {
+        for _ in 0 ..< ResolveCostTest.runs {
             let timing = try await gpu.run { commands in
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = target

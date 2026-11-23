@@ -9,6 +9,12 @@
   "fields": {},
   "constants": {
     "baseOffset": "0x168",
+    "bulkChromaBottom": "0x3e",
+    "bulkChromaTop": "0x3d",
+    "bulkColorPrimaries": "0x3b",
+    "bulkSize": "0x84",
+    "bulkTransferFunction": "0x3c",
+    "bulkYCbCrMatrix": "0x3a",
     "clientMemory": "0x150",
     "clientTask": "0x170",
     "memoryRegions": "0x370",
@@ -17,6 +23,7 @@
   },
   "addresses": {
     "alloc_size": "0xfffffff009aeb438",
+    "bulk_attachments": "0xfffffff009af26c8",
     "bytes_per_element": "0xfffffff009aee628",
     "bytes_per_row": "0xfffffff009aee61c",
     "complete": "0xfffffff009aefca4",
@@ -44,6 +51,13 @@
   "found": {
     "alloc_size": "ldr x0, [x0, #0x90] as in 21H461",
     "baseOffset": "value shown by f940b400 at 0xfffffff009aee6a4",
+    "bulkChromaBottom": "value shown by 3940fa88 at 0xfffffff009af2350",
+    "bulkChromaTop": "value shown by 3940f688 at 0xfffffff009af2320",
+    "bulkColorPrimaries": "value shown by 3940ee88 at 0xfffffff009af22c0",
+    "bulkSize": "value shown by d2801088 at 0xfffffff009af281c",
+    "bulkTransferFunction": "value shown by 3940f288 at 0xfffffff009af22f0",
+    "bulkYCbCrMatrix": "value shown by 3940ea88 at 0xfffffff009af2290",
+    "bulk_attachments": "IOSurface::getBulkAttachments(out, size), as in 21H461: the lock at +0x50, the shared entry (+0x178, signed, discriminator 0xa39b) from +0x34 copied, min(*size, 0x84) bytes out, the rest zeroed, *size written back; IOSurfaceRootUserClient calls it at 0xfffffff009b09b20",
     "bytes_per_element": "ldrh w0, [x0, #0x70]: IOSurfaceBytesPerElement; constructor stores the parsed property at this field",
     "bytes_per_row": "ldr x0, [x0, #0x68]: the field the plane-bytes-per-row accessor falls back to",
     "clientMemory": "value shown by f940a808 at 0xfffffff009af7f44",
@@ -194,6 +208,11 @@
         "at": "0xfffffff009af6940",
         "body": "f940bc10 9105e011 f2f47371 dac11a30 aa1003f1 dac147f1 eb11021f 54000040 d4388e40 b9400e00 d65f03c0",
         "why": "IOSurface::getSeed(): the shared entry (+0x178, signed, discriminator 0xa39b) authenticated, ldr w0, [x16, #0xc]; IOGPUFamily's GOT entry 0xfffffff007fcdd30 holds it. IOSurface::lock (0xfffffff009aecc48) adds 1 at 0xfffffff009aecd60 unless kIOSurfaceLockReadOnly, the device write end at 0xfffffff009af1a8c, the allocation over client memory at 0xfffffff009aeaef8, the increment pair at 0xfffffff009aecb50 and 0xfffffff009aecbec; AGXG12P imports neither the lock nor the device write end. The 0xd0-byte shared entry is zeroed when made (0xfffffff009b02b10..2c)"
+      },
+      "bulk_attachments": {
+        "at": "0xfffffff009af26c8",
+        "body": "d503237f d10343ff a9095ff8 a90a57f6 a90b4ff4 a90c7bfd 910303fd aa0203f3 aa0103f4 aa0003f5",
+        "why": "IOSurface::getBulkAttachments(out, size), as in 21H461: the lock at +0x50, the shared entry (+0x178, signed, discriminator 0xa39b) from +0x34 copied, min(*size, 0x84) bytes out, the rest zeroed, *size written back; IOSurfaceRootUserClient calls it at 0xfffffff009b09b20"
       }
     },
     "constants": {
@@ -232,6 +251,42 @@
         "at": "0xfffffff009aeab84",
         "word": "f941ba68",
         "why": "ldr x8, [x19, #0x370] in the memory allocation when clientMemory is 0, the range count at +0x3b4, as in 21H461 (+0x350): the descriptor is made over the creating task's ranges with no seed move"
+      },
+      "bulkSize": {
+        "value": "0x84",
+        "at": "0xfffffff009af281c",
+        "word": "d2801088",
+        "why": "mov x8, #0x84 after cmp x23, #0x84 in getBulkAttachments: the most it copies (21H461: 0x70)"
+      },
+      "bulkYCbCrMatrix": {
+        "value": "0x3a",
+        "at": "0xfffffff009af2290",
+        "word": "3940ea88",
+        "why": "ldrb w8, [x20, #0x3a] in setBulkAttachments, stored to the shared entry's +0x6e (21H461: +0x6a): kIOSurfaceYCbCrMatrix, as in 21H461"
+      },
+      "bulkColorPrimaries": {
+        "value": "0x3b",
+        "at": "0xfffffff009af22c0",
+        "word": "3940ee88",
+        "why": "ldrb w8, [x20, #0x3b] in setBulkAttachments, stored to the shared entry's +0x6f (21H461: +0x6b): kIOSurfaceColorPrimaries, as in 21H461"
+      },
+      "bulkTransferFunction": {
+        "value": "0x3c",
+        "at": "0xfffffff009af22f0",
+        "word": "3940f288",
+        "why": "ldrb w8, [x20, #0x3c] in setBulkAttachments, stored to the shared entry's +0x70 (21H461: +0x6c): kIOSurfaceTransferFunction, as in 21H461"
+      },
+      "bulkChromaTop": {
+        "value": "0x3d",
+        "at": "0xfffffff009af2320",
+        "word": "3940f688",
+        "why": "ldrb w8, [x20, #0x3d] in setBulkAttachments, stored to the shared entry's +0x71 (21H461: +0x6d): kIOSurfaceChromaLocationTopField, as in 21H461"
+      },
+      "bulkChromaBottom": {
+        "value": "0x3e",
+        "at": "0xfffffff009af2350",
+        "word": "3940fa88",
+        "why": "ldrb w8, [x20, #0x3e] in setBulkAttachments, stored to the shared entry's +0x72 (21H461: +0x6e): kIOSurfaceChromaLocationBottomField, as in 21H461"
       }
     }
   }

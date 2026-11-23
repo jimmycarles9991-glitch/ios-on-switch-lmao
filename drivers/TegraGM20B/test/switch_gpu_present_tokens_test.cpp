@@ -6,6 +6,7 @@
 namespace
 {
 std::array<int, 64> references, states, physicalStates;
+std::array<int, 64> whys;  // why a failed token's engine says it failed; 0: it cannot tell
 uint32_t waits, retainCalls, releaseCalls, refuse, promotions;
 
 switch_gpu_backing_token token(uint32_t queue, uint32_t engine = SWITCH_GPU_ENGINE_NVDEC)
@@ -23,6 +24,7 @@ protected:
 		references.fill(0);
 		states.fill(0);
 		physicalStates.fill(0);
+		whys.fill(0);
 		waits = retainCalls = releaseCalls = refuse = promotions = 0;
 	}
 
@@ -92,6 +94,13 @@ extern "C" int switch_gpu_backing_token_wait(const switch_gpu_backing_token *val
 	return states[value->queue] = 1;
 }
 
+// SwitchGpuBackingRefs.cpp's answer: an engine that cannot tell is the kernel's failure
+extern "C" int switch_gpu_backing_token_failure(const switch_gpu_backing_token *value)
+{
+	EXPECT_LT(states[value->queue], 0);
+	return whys[value->queue] ? whys[value->queue] : int(SWITCH_GPU_BACKING_WRITER_FAILED);
+}
+
 TEST_F(PresentTokens, AdmissionRetainsEveryExactPendingProducerWithoutWaiting)
 {
 	const auto producers = std::array{token(1), token(2)};
@@ -122,17 +131,47 @@ TEST_F(PresentTokens, PartialRetainFailureUnwindsEarlierTokens)
 	EXPECT_EQ(retainCalls, 2u);
 }
 
-// A producer that failed before the present left undefined bytes and nothing to wait for; the present goes on.
-TEST_F(PresentTokens, InputFailedBeforeThePresentIsNothingToWaitFor)
+// A producer that failed before the present left no frame: the present is refused with why, holding nothing.
+TEST_F(PresentTokens, AProducerFailedBeforeThePresentRefusesItWithWhy)
 {
-	const auto producers = std::array{token(1), token(2)};
-	states[2] = -5;
-	EXPECT_EQ(switch_gpu_present_tokens_prepare(&held, producers.data(), producers.size()), 0);
-	EXPECT_EQ(held.count, 1u);
-	EXPECT_EQ(references[1], 1);
-	EXPECT_EQ(references[2], 0);
-	switch_gpu_present_tokens_drop(&held);
-	EXPECT_EQ(references[1], 0);
+	const auto producers = std::array{token(1), token(2), token(3)};
+	for (const int why :
+	     {int(SWITCH_GPU_BACKING_WRITER_GONE), int(SWITCH_GPU_BACKING_WRITE_REFUSED),
+	      int(SWITCH_GPU_BACKING_WRITER_FAILED)}) {
+		states[2] = -5;
+		whys[2] = why;
+		EXPECT_EQ(switch_gpu_present_tokens_prepare(&held, producers.data(),
+							    producers.size()),
+			  why);
+		EXPECT_EQ(held.count, 0u);
+		EXPECT_EQ(references[1], 0);
+		EXPECT_EQ(references[3], 0);
+	}
+}
+
+// One that fails while the present waits ends it with why it failed, the first failed token's; why the watched producer
+// failed, given by the watch's claim, stays the present's.
+TEST_F(PresentTokens, AProducerThatFailsWhileThePresentWaitsEndsItWithWhy)
+{
+	const auto producers = std::array{token(1), token(2), token(3)};
+	ASSERT_EQ(switch_gpu_present_tokens_prepare(&held, producers.data(), producers.size()), 0);
+	states.fill(1);
+	states[2] = states[3] = -5;
+	whys[2] = SWITCH_GPU_BACKING_WRITE_REFUSED;
+	whys[3] = SWITCH_GPU_BACKING_WRITER_GONE;
+	EXPECT_EQ(switch_gpu_present_tokens_finish_visible(&held, 0, nullptr),
+		  SWITCH_GPU_BACKING_WRITE_REFUSED);
+	EXPECT_EQ(held.count, 0u);
+	ASSERT_EQ(switch_gpu_present_tokens_prepare(&held, producers.data(), 1), 0);
+	states[1] = -5;
+	EXPECT_EQ(switch_gpu_present_tokens_finish_visible(&held, SWITCH_GPU_BACKING_WRITER_GONE,
+							   nullptr),
+		  SWITCH_GPU_BACKING_WRITER_GONE);
+	states[3] = 0;
+	ASSERT_EQ(switch_gpu_present_tokens_prepare(&held, producers.data() + 2, 1), 0);
+	states[3] = -5;
+	EXPECT_EQ(switch_gpu_present_tokens_finish_ready(&held, nullptr),
+		  SWITCH_GPU_BACKING_WRITER_GONE);
 }
 
 TEST_F(PresentTokens, ExternalCompletionJoinsLaggingSoftwareRetirementOnlyAfterHardwareFence)
@@ -333,4 +372,24 @@ TEST(PresentPending, RecoveryRechecksFenceProgressAcrossSequenceWrap)
 	EXPECT_TRUE(switch_gpu_present_pending_matches(&value, 1, 0xfffffff0));
 	value.token.value = 0xfffffff0;
 	EXPECT_FALSE(switch_gpu_present_pending_matches(&value, 1, 0x10));
+}
+
+// A claimed completion's callback signals the display, whose work loop may offer its next frame before the callback
+// returns: by then the claim is over, so that offer does not find this present outstanding (kIOReturnBusy).
+TEST(PresentDeliver, TheClaimEndsBeforeTheCallback)
+{
+	static uint32_t completing;
+	static int claimedInCallback, delivered;
+	completing = 1;
+	claimedInCallback = -1;
+	switch_gpu_present_deliver(
+		&completing,
+		[](void *, int status) {
+			claimedInCallback = int(__atomic_load_n(&completing, __ATOMIC_SEQ_CST));
+			delivered = status;
+		},
+		nullptr, SWITCH_GPU_BACKING_WRITER_GONE);
+	EXPECT_EQ(claimedInCallback, 0);
+	EXPECT_EQ(delivered, SWITCH_GPU_BACKING_WRITER_GONE);
+	EXPECT_EQ(completing, 0u);
 }

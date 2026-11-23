@@ -21,7 +21,9 @@ public enum ImportBesideVerdict {
             failures.append(
                 String(
                     format: "an import's wiring took %.2f ms: half of it is under %.2f ms, too short to tell", wireMs,
-                    max(shortestHalfWireMs, 2 * spread)))
+                    max(shortestHalfWireMs, 2 * spread)
+                )
+            )
         }
         if beside.count < minimumBeside {
             failures.append("\(beside.count) submissions beside the imports (at least \(minimumBeside))")
@@ -31,7 +33,9 @@ public enum ImportBesideVerdict {
             failures.append(
                 String(
                     format: "imports added %.2f ms to the p99 submission, half or more of an import's %.2f ms wiring",
-                    added, wireMs))
+                    added, wireMs
+                )
+            )
         }
         return failures
     }

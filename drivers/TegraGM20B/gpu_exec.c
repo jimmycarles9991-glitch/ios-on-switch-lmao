@@ -95,7 +95,6 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 	struct switch_gpu_kicked_job *job = NULL;
 	const int announce = switch_gpu_quiet_announces(&chan->quiet, quiet);
 	u32 s = 0;
-	idle_wake(); /* backstop: tgm_chan_exec and tgm_present_copy_dependencies raise it before their first kick */
 	if (external && (l2_on() || chan->kernel)) {
 		/* engines idle, their writes committed to the L2 (FB flush: nvgpu gk20a_mm_fb_flush), the L2's dirty lines
 		 * written to DRAM, and those writes committed before the release below. Always on the present channel: its
@@ -159,14 +158,18 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 			__atomic_fetch_add(&tgm_wstat.quiet, 1, __ATOMIC_RELAXED);
 	}
 	WRITE_ONCE(chan->submitted, next);
+	/* The ownership order goes no earlier: a kill of the channel releases its fence word only up to chan->submitted
+	 * (tgm_chan_killed), so a reader that found the job's records before this store could acquire a seqno no kill
+	 * releases. */
+	if (owned)
+		switch_gpu_backing_finish(owned);
+	idle_wake(); /* backstop for a drop since the caller's own raise: a PLL switch, so outside the ownership order */
 	switch_gpu_busy_kick(&tgm_busy, chan->chid, next);
 	switch_emc_gpu_submit();
 	chan->chan.defer_kick = true;
 	PUSH_KICK(push);
 	chan->chan.defer_kick = false;
 	chan_doorbell(chan);
-	if (owned)
-		switch_gpu_backing_finish(owned);
 	if (chan->high) {
 		struct tgm_sched_queued queued;
 		enum tgm_sched_kick kick = tgm_sched_kicked(tgm_gpu.device, chan->chid, &queued);
@@ -261,41 +264,35 @@ void tegra_gm20b_frame_take(struct SwitchFrameGpu *out)
  * from its snapshot of the user channels to its kick, so every user submission is either in a present's snapshot (the
  * copy waits for it) or kicked after that present (it waits for the copy). */
 
-/* One unsettled dependency's acquire; tgm_live_lock held when it names a GM20B channel. */
-static int backing_dependency(struct tgm_chan *chan, const struct switch_gpu_backing_token *token,
-			      int emit)
+/* One unsettled dependency's acquire; tgm_live_lock held when it names a GM20B channel. A refusal leaves the acquires
+ * already pushed for earlier tokens in the job's room, which the caller's rollback takes back with the rest. */
+static int backing_dependency(struct tgm_chan *chan, const struct switch_gpu_backing_token *token)
 {
 	if (token->engine == SWITCH_GPU_ENGINE_GM20B) {
 		struct tgm_chan *source = live_by_uid(token->queue);
 		u64 va;
 
-		if (!chan->vm->fences_va || token->value > UINT32_MAX)
+		if (!chan->vm->fences_va || token->value > UINT32_MAX || !source ||
+		    token->reset_generation != (source->id >> 32) + 1)
 			return -ENODEV;
-		if (!source || token->reset_generation != (source->id >> 32) + 1)
-			return emit ? 0 : -ENODEV;
 		va = chan->vm->fences_va +
 		     ((uintptr_t)source->fence_cpu - (uintptr_t)tgm_fence_pages.va);
-		if (emit) {
-			PUSH_MTHD(&chan->chan.push, NV906F, SEMAPHOREA, upper_32_bits(va),
-				  SEMAPHOREB, lower_32_bits(va), SEMAPHOREC, (u32)token->value,
-				  SEMAPHORED,
-				  NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
-					  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
-			if (chan->high)
-				tgm_hold_need(tgm_gpu.device, source->chid);
-		}
+		PUSH_MTHD(&chan->chan.push, NV906F, SEMAPHOREA, upper_32_bits(va), SEMAPHOREB,
+			  lower_32_bits(va), SEMAPHOREC, (u32)token->value, SEMAPHORED,
+			  NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
+				  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
+		if (chan->high)
+			tgm_hold_need(tgm_gpu.device, source->chid);
 	} else if (token->engine == SWITCH_GPU_ENGINE_PROMISE) {
 		const u64 va = chan->vm->fences_va + token->queue;
 
 		if (!chan->vm->fences_va || token->queue >= TGM_FENCE_BYTES ||
 		    token->value > UINT32_MAX)
 			return -ENODEV;
-		if (emit)
-			PUSH_MTHD(&chan->chan.push, NV906F, SEMAPHOREA, upper_32_bits(va),
-				  SEMAPHOREB, lower_32_bits(va), SEMAPHOREC, (u32)token->value,
-				  SEMAPHORED,
-				  NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
-					  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
+		PUSH_MTHD(&chan->chan.push, NV906F, SEMAPHOREA, upper_32_bits(va), SEMAPHOREB,
+			  lower_32_bits(va), SEMAPHOREC, (u32)token->value, SEMAPHORED,
+			  NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
+				  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
 	} else if (token->engine == SWITCH_GPU_ENGINE_VIC ||
 		   token->engine == SWITCH_GPU_ENGINE_NVDEC ||
 		   token->engine == SWITCH_GPU_ENGINE_DISPLAY ||
@@ -304,11 +301,9 @@ static int backing_dependency(struct tgm_chan *chan, const struct switch_gpu_bac
 		u32 n;
 		if (token->queue > 255)
 			return -EINVAL;
-		if (emit) {
-			tgm_syncpt_wait(words, token->queue, (u32)token->value);
-			for (n = 0; n < TGM_SYNCPT_WAIT_DWORDS; ++n)
-				PUSH_DATA(&chan->chan.push, words[n]);
-		}
+		tgm_syncpt_wait(words, token->queue, (u32)token->value);
+		for (n = 0; n < TGM_SYNCPT_WAIT_DWORDS; ++n)
+			PUSH_DATA(&chan->chan.push, words[n]);
 	} else {
 		return -EOPNOTSUPP;
 	}
@@ -331,14 +326,14 @@ static u32 backing_unsettled(const struct switch_gpu_backing_token *tokens, u32 
 }
 
 static int backing_waits(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
-			 u32 count, const u32 *unsettled, int emit)
+			 u32 count, const u32 *unsettled)
 {
 	u32 i;
 	int ret = 0;
 
 	for (i = 0; !ret && i < count; ++i)
 		if (unsettled[i / 32] & (1u << (i % 32)))
-			ret = backing_dependency(chan, &tokens[i], emit);
+			ret = backing_dependency(chan, &tokens[i]);
 	return ret;
 }
 
@@ -352,11 +347,9 @@ int tgm_backing_dependencies(struct tgm_chan *chan, const struct switch_gpu_back
 	const u32 channels = backing_unsettled(tokens, count, unsettled);
 	if (channels)
 		mutex_lock(&tgm_live_lock);
-	const int ret = backing_waits(chan, tokens, count, unsettled, 0);
-	if (!ret) {
-		backing_waits(chan, tokens, count, unsettled, 1);
+	const int ret = backing_waits(chan, tokens, count, unsettled);
+	if (!ret)
 		switch_gpu_chan_park_promises_locked(chan, tokens, count, unsettled);
-	}
 	if (channels)
 		mutex_unlock(&tgm_live_lock);
 	return ret;
@@ -417,10 +410,10 @@ static void chan_job_fence(void *context, u32 seqno)
 
 /* The room chan_exec reserves, and the one a waiter for it (switch_gpu_chan_wait_submission_room) waits for: one
  * computation, so a waiter that returns leaves room the retried submission finds. nouveau_exec_job_run(): every user
- * entry plus our fence push and, each kicked as its own entry before them, a present wait, the task order's acquires
- * and (stats) a start stamp, one more nvif GET semaphore with each. A profile's stamps: an entry each, a stamp and a GET
- * semaphore. A profile is given up (*prof NULL) where chan_exec gives it up; one whose completion the stats' interrupt
- * pass no longer looks at (more than CHAN_NSTAMPS behind) does not hold the channel's. */
+ * entry plus our fence push and, each kicked as its own entry before them, a present wait and (stats) a start stamp,
+ * one more nvif GET semaphore with each. A profile's stamps: an entry each, a stamp and a GET semaphore. A profile is
+ * given up (*prof NULL) where chan_exec gives it up; one whose completion the stats' interrupt pass no longer looks at
+ * (more than CHAN_NSTAMPS behind) does not hold the channel's. */
 static void chan_submission_room(struct tgm_chan *chan, const struct tgm_push *pushes, u32 count,
 				 u32 dependency_count, u32 job_fences, const struct tgm_prof **prof,
 				 u32 *entries, u32 *words)
@@ -437,7 +430,7 @@ static void chan_submission_room(struct tgm_chan *chan, const struct tgm_push *p
 		stamps += switch_gpu_prof_stamped(chan->critical, &pushes[i], i, count,
 						  (*prof)->cls[i]);
 	*entries = count + 6 + stamps + job_fences + CHAN_WAKE_ENTRIES + 1;
-	*words = CHAN_FENCE_DWORDS + 64 + 5 * (TGM_ORDER_MAX + dependency_count + 1) + 16 * stamps +
+	*words = CHAN_FENCE_DWORDS + 64 + 5 * (dependency_count + 1) + 16 * stamps +
 		 SWITCH_GPU_FENCE_POINT_DWORDS * job_fences + CHAN_WAKE_DWORDS + 16 +
 		 5 * SWITCH_GPU_MAX_RELEASES;
 }
@@ -501,7 +494,8 @@ static int words_valid(const struct tgm_chan *chan, const struct switch_gpu_word
 	return 1;
 }
 
-/* Private control words stay behind GP_PUT until publication. The ownership order spans both. */
+/* An ordered `owned` keeps the ownership order from its begin: its records go up once nothing can fail the job, and
+ * the order goes once the channel's submitted seqno names the job (chan_fence_job). Nothing else here takes the order. */
 static inline __attribute__((always_inline)) int
 chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t count,
 	       uint32_t *seqno, const struct tgm_prof *prof,
@@ -519,10 +513,8 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	struct switch_gpu_job_emitter emitter = {&job, chan_job_entry, chan_job_fence};
 	int ret = 0;
 	int tlb = 0;
-	u32 waits = 0;
 	u32 unsettled[(TegraGM20BMaxJobDependencies + 31) / 32] = {0};
 	u32 channels = 0;
-	struct switch_gpu_backing_transaction seal;
 	u32 ring_cur;
 	int ring_free;
 	u32 *push_bgn, *push_cur, *push_end, *push_seg;
@@ -599,28 +591,16 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	ret = nvif_chan_gpfifo_wait(&chan->chan, entries, words);
 	if (ret)
 		goto rollback;
-	channels = READ_ONCE(chan->norder) != 0;
-	if ((dependency_count || sibling_count || word_wait_count || channels) &&
-	    (!owned || !owned->ordered)) {
-		if (!owned) {
-			memset(&seal, 0, sizeof(seal));
-			owned = &seal;
-		}
-		ret = switch_gpu_backing_seal(owned);
-		if (ret)
-			goto rollback;
-	}
-	channels += backing_unsettled(dependencies, dependency_count, unsettled);
+	channels = backing_unsettled(dependencies, dependency_count, unsettled);
 	channels += word_wait_count && chan->high;
 	if (channels)
 		mutex_lock(&tgm_live_lock);
-	ret = backing_waits(chan, dependencies, dependency_count, unsettled, 0);
+	ret = backing_waits(chan, dependencies, dependency_count, unsettled);
 	if (ret) {
 		if (channels)
 			mutex_unlock(&tgm_live_lock);
 		goto rollback;
 	}
-	backing_waits(chan, dependencies, dependency_count, unsettled, 1);
 	chan_sibling_waits(chan, siblings, sibling_count);
 	chan_word_waits(chan, word_waits, word_wait_count);
 	/* a VA rebound over work still queued: nothing after the bind runs before retirement switched its PTEs; the TLB
@@ -633,11 +613,6 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 				  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
 	PUSH_KICK(&chan->chan.push);
 	switch_gpu_chan_park_promises_locked(chan, dependencies, dependency_count, unsettled);
-	if (channels && chan->norder) {
-		/* the task's other channels' work it follows (tgm_chan_order), first, so the start stamp below times the work
-		 * itself */
-		waits = (u32)switch_gpu_order_waits_locked(chan);
-	}
 	if (channels)
 		mutex_unlock(&tgm_live_lock);
 	if (owned)
@@ -650,7 +625,7 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 				   nvkm_timer_read(tgm_gpu.device->timer));
 		}
 		if (chan->high)
-			WRITE_ONCE(switch_gpu_jobs_next(&chan->jobs)->waits, waits);
+			WRITE_ONCE(switch_gpu_jobs_next(&chan->jobs)->waits, 0);
 		push_stamp(&chan->chan.push,
 			   chan_stamps_va(chan, next) + offsetof(struct tgm_stamps, start), next);
 		PUSH_KICK(&chan->chan.push);
@@ -727,8 +702,6 @@ rollback:
 	chan->chan.push.end = push_end;
 	chan->chan.push.seg = push_seg;
 	chan->chan.defer_kick = false;
-	if (owned == &seal)
-		switch_gpu_backing_abort(owned);
 	return ret;
 }
 

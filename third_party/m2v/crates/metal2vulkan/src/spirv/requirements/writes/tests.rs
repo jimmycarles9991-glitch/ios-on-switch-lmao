@@ -244,20 +244,15 @@ fn the_shadow_stencils_writes_are_not_the_functions() {
     assert!(writes_memory(&image_write(imageblock)).expect("another image"));
 }
 
-/// A color's interlocked storage form and an extended-range color's `half` shadow are the
-/// product's, carrying Metal's color attachment write, so their writes are not the function's; a
-/// texture's write is.
+/// A color's interlocked storage form is the product's, carrying Metal's color attachment write,
+/// so its writes are not the function's; a texture's write is.
 #[test]
-fn a_colors_storage_form_and_half_shadow_writes_are_not_the_functions() {
-    for kind in [
-        ResourceKind::TileAttachment(2),
-        ResourceKind::ExtendedShadow(0),
-    ] {
-        assert!(
-            !writes_memory(&image_write(kind)).expect("color"),
-            "{kind:?}"
-        );
-    }
+fn a_colors_storage_form_writes_are_not_the_functions() {
+    let kind = ResourceKind::TileAttachment(2);
+    assert!(
+        !writes_memory(&image_write(kind)).expect("color"),
+        "{kind:?}"
+    );
     assert!(writes_memory(&image_write(ResourceKind::Texture)).expect("a texture"));
 }
 

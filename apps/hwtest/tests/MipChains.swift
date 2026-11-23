@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.mip_twod's chains of one format: made by generateMipmaps, or drawn by 3D passes (mip_step_fragment) one
+/// gpu.gm20b.mip_twod's chains of one format: made by generateMipmaps, or drawn by 3D passes (mip_step_fragment) one
 /// one-level texture a level, from the same level 0, and each step compared with MipReference
 final class MipChains {
     let gpu: GPU
@@ -31,7 +31,7 @@ final class MipChains {
 
     /// The facade's debug switch of 2D-engine mips for the 3D engine's formats: what it was, nil without one
     static func probe(_ device: MTLDevice, _ on: Bool) -> Bool? {
-        let selector = NSSelectorFromString("switchRawProbeMipCandidates:")
+        let selector = NSSelectorFromString("switchMetalProbeMipCandidates:")
         guard let object = device as? NSObject, object.responds(to: selector) else { return nil }
         return (object.perform(selector, with: NSNumber(value: on))?.takeUnretainedValue() as? NSNumber)?.boolValue
             ?? false
@@ -39,8 +39,8 @@ final class MipChains {
 
     func pattern(_ w: Int, _ h: Int, seed: Int) -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: w * h * layout.bytes)
-        for y in 0..<h {
-            for x in 0..<w {
+        for y in 0 ..< h {
+            for x in 0 ..< w {
                 for (i, f) in layout.fields.enumerated() {
                     var v =
                         UInt32(truncatingIfNeeded: x &* 73_856_093) ^ UInt32(truncatingIfNeeded: y &* 19_349_663)
@@ -67,7 +67,7 @@ final class MipChains {
             blit.endEncoding()
         }
         var levels: [[UInt8]] = []
-        for l in 0..<dims.count { levels.append(try await gpu.read(chain, bytesPerPixel: layout.bytes, level: l)) }
+        for l in 0 ..< dims.count { levels.append(try await gpu.read(chain, bytesPerPixel: layout.bytes, level: l)) }
         return (levels, timing.path)
     }
 
@@ -85,7 +85,7 @@ final class MipChains {
         d.usage = [.shaderRead, .renderTarget]
         d.storageMode = .private
         guard let chain = gpu.device.makeTexture(descriptor: d) else { throw TestFailure("makeTexture returned nil") }
-        for k in 0..<layers {
+        for k in 0 ..< layers {
             try await gpu.upload(pattern(w, h, seed: k), to: chain, bytesPerRow: w * layout.bytes, slice: k)
         }
         let timing = try await gpu.run { commands in
@@ -94,9 +94,9 @@ final class MipChains {
             blit.endEncoding()
         }
         var out: [[[UInt8]]] = []
-        for k in 0..<layers {
+        for k in 0 ..< layers {
             var levels: [[UInt8]] = []
-            for l in 0..<dims.count {
+            for l in 0 ..< dims.count {
                 levels.append(try await gpu.read(chain, bytesPerPixel: layout.bytes, level: l, slice: k))
             }
             out.append(levels)
@@ -125,14 +125,15 @@ final class MipChains {
         try await gpu.upload(level0, to: textures[0], bytesPerRow: size * layout.bytes)
         let state = try pipeline()
         var twod = Double.infinity, passes = Double.infinity
-        for _ in 0..<3 {
+        for _ in 0 ..< 3 {
             twod = min(
                 twod,
                 try await gpu.run { commands in
                     let blit = commands.makeBlitCommandEncoder()!
                     blit.generateMipmaps(for: chain)
                     blit.endEncoding()
-                }.gpuMilliseconds)
+                }.gpuMilliseconds
+            )
             passes = min(passes, try await gpu.run { draw($0, textures, state) }.gpuMilliseconds)
         }
         return (twod, passes)
@@ -144,7 +145,7 @@ final class MipChains {
         _ levels: [[UInt8]], _ w: Int, _ h: Int, proven: inout MipTally, odd: inout MipTally, rounding: MipRounding?
     ) {
         let dims = Self.dims(w, h)
-        for l in 1..<min(dims.count, levels.count) {
+        for l in 1 ..< min(dims.count, levels.count) {
             let (sw, sh) = dims[l - 1], (dw, dh) = dims[l]
             let want = MipReference.step(levels[l - 1], sw, sh, dw, dh, layout)
             if Self.proven(sw, dw) && Self.proven(sh, dh) {
@@ -168,7 +169,7 @@ final class MipChains {
     }
 
     private func draw(_ commands: MTLCommandBuffer, _ textures: [MTLTexture], _ state: MTLRenderPipelineState) {
-        for l in 1..<textures.count {
+        for l in 1 ..< textures.count {
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = textures[l]
             pass.colorAttachments[0].loadAction = .dontCare

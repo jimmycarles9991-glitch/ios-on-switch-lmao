@@ -52,7 +52,8 @@ struct VideoDecodeTest: HWTest {
         do {
             result = try Decompressor.decode(
                 demuxed.samples, format: demuxed.format, pattern: clip.pattern, bitDepth: clip.codec.bitDepth,
-                fps: clip.fps)
+                fps: clip.fps
+            )
         } catch VideoError.status(let call, let status) where clip.height >= 2160 && Self.unsupported.contains(status) {
             return .skip("the hardware decoder does not take \(clip.label): \(call) \(status)")
         }
@@ -79,7 +80,8 @@ struct VideoDecodeTest: HWTest {
                 (
                     "every frame an NVDEC picture (SwitchPictureRoutes)",
                     routes["frames"] == clip.frames && routes["errors"] == 0
-                ))
+                )
+            )
             proof += " SwitchPictureRoutes frames=\(routes["frames"] ?? 0)"
         }
         return .judged(checks, metrics, proof: proof)

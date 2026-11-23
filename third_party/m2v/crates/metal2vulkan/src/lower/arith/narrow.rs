@@ -379,12 +379,13 @@ pub fn round_texel_words(f: Form) -> u32 {
 /// ([`native_rounding`]) the rounding's own NaN stands instead: the note the module records bounds
 /// a NaN's encoding to the device's, so the keep's four instructions a texel are left out, but
 /// where the NaN switch asks for Metal's NaN (`NanMinMaxPolicy::Exact`;
-/// `ModuleBuilder::texel_nans`), which keeps them. Another form is [`round`]ed.
+/// `ModuleBuilder::texel_nans`), which keeps them. The Sm53 target's conversion pair leaves them out
+/// on the same terms: it is Metal's rounding but for a NaN's bits, which are the device's, as the
+/// access's `PrecisionNote::DeviceNanEncoding` already states. Another form is [`round`]ed.
 pub fn round_texel(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
+    let native = fb.module().native_half() || fb.module().native_half_conversions();
     match f.held {
-        Held::Float(FloatFmt::Half) if fb.module().native_half() && !fb.module().texel_nans() => {
-            round(fb, f, x)
-        }
+        Held::Float(FloatFmt::Half) if native && !fb.module().texel_nans() => round(fb, f, x),
         Held::Float(FloatFmt::Half) => {
             let r = round(fb, f, x)?;
             let u = u32_form(f);

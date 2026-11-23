@@ -27,8 +27,6 @@
 #include <nouveau/nvkm/engine/fifo/runq.h>
 #include <subdev/timer.h>
 
-void switch_gpu_gr_fault_recovered(struct nvkm_runl *);
-
 void tgm_recover_reset_hold(struct nvkm_engine *);
 void tgm_recover_reset_release(struct nvkm_engine *);
 void tgm_recover_preempt_unblock(struct nvkm_runl *);
@@ -69,7 +67,7 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 	unsigned long flags;
 	int rc, state, i;
 	bool reset, owed = false;
-	u32 preempt = ~0U;
+	u32 preempt_from = 0;
 
 	/* Runlist is blocked before scheduling recovery - fetch count. */
 	BUG_ON(!mutex_is_locked(&runl->mutex));
@@ -136,7 +134,7 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 	if (runl->func->preempt_pending) {
 		tgm_recover_preempt_unblock(runl);
 		BUG_ON(nvkm_msec(fifo->engine.subdev.device, 2000,
-			if (switch_gpu_recover_pending(runl, &preempt))
+			if (switch_gpu_recover_pending(runl, &preempt_from))
 				continue;
 			if (!owed) {
 				tgm_recover_owed_preempt(runl);
@@ -161,6 +159,5 @@ nvkm_runl_rc(struct nvkm_runl *runl)
 			nvkm_event_ntfy(&runl->chid->event, chan->id, NVKM_CHAN_EVENT_ERRORED);
 		nvkm_chan_put(&chan, flags);
 	}
-	switch_gpu_gr_fault_recovered(runl);
 }
 

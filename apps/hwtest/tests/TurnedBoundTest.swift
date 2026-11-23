@@ -5,24 +5,24 @@ import IOSurface
 import Metal
 
 /// A texture of the rotation SPI bound as a texture argument. Such a texture is framebuffer-only (MTLTexture.h: no
-/// texture argument), and an M4 Max reads one bound anyway as its memory lies, unturned. The raw path draws it from the
+/// texture argument), and an M4 Max reads one bound anyway as its memory lies, unturned. The driver draws it from the
 /// plane as it lies and logs `raw tex.turned_bound` once; before, the binding sent the command buffer to m2v, which has
-/// no texture of a turned plane. Each rotation's draw must complete on the raw path within the timeout.
+/// no texture of a turned plane. Each rotation's draw must complete on the driver within the timeout.
 struct TurnedBoundTest: HWTest {
-    let id = "gpu.raw.turned_bound"
-    let name = "A rotated plane bound as a texture argument draws on the raw path"
+    let id = "gpu.gm20b.turned_bound"
+    let name = "A rotated plane bound as a texture argument draws on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 30 }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         let state = try gpu.render(fragment: "texel_read", format: .rgba32Float)
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
-        for turn in 1...4 {
+        for turn in 1 ... 4 {
             let quarter = turn != 2
             let (w, h) = (24, 16)
             let (pw, ph) = quarter ? (h, w) : (w, h)
@@ -32,7 +32,8 @@ struct TurnedBoundTest: HWTest {
             ]
             guard let surface = IOSurface(properties: properties) else { throw TestFailure("no surface") }
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+                pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false
+            )
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .shared
             guard descriptor.responds(to: NSSelectorFromString("setRotation:")) else {
@@ -59,7 +60,7 @@ struct TurnedBoundTest: HWTest {
                 encoder.endEncoding()
             }
             metrics.set("path_r\(turn)", timing.path)
-            checks.append(("rotation \(turn): the draw that reads it completes on the raw path", timing.path == "raw"))
+            checks.append(("rotation \(turn): the draw that reads it completes on the driver", timing.path == "gm20b"))
         }
         return .judged(checks, metrics, proof: gpu.proof)
     }

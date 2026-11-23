@@ -822,7 +822,7 @@ fn plan(
 ) -> Result<Result<Plan, Error>, Error> {
     let name = &*f.name;
     let symbol = &*f.symbol;
-    if l.abi.linkage_signature.is_some() {
+    if l.abi.signature_unreadable() {
         return Ok(Err(not_implemented(name, "air.signature")));
     }
     let constants = match &f.constants {

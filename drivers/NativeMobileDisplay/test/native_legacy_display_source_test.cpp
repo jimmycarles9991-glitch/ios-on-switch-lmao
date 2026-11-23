@@ -1,7 +1,7 @@
 // Guards on NativeLegacyDisplay.cpp for how it drives the code the other tests here and in TegraDisplayFlip/test
-// exercise: those tests run TegraScanoutRing.h, VsyncPhase.h and DisplaySmmuProbe.h against models of DC A, but the
-// display's own wiring (when direct scanout starts, where swaps retire, which registers the vsync phase writes, how the
-// probe is held and aborted) only exists in the driver's source.
+// exercise: those tests run TegraScanoutRing.h and DisplaySmmuProbe.h against models of DC A, but the display's own
+// wiring (when direct scanout starts, where swaps retire, how the probe is held and aborted) only exists in the
+// driver's source.
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -61,7 +61,7 @@ TEST(DirectScanoutSource, FenceOnlyPresentNoRetireAtTheOffer)
 {
     const CodeText offer = method("bool offerDirect(");
     EXPECT_TRUE(offer.has("TEGRA_SCANOUT_COPY_FENCE_ONLY"));
-    EXPECT_FALSE(offer.has("retireSwap"));
+    EXPECT_FALSE(offer.has("retireSwap("));
 }
 
 TEST(DirectScanoutSource, RetireAtTheLatchInQueueOrder)
@@ -93,19 +93,13 @@ TEST(DirectScanoutSource, NoEarlyRetireOrCollapseOnceRetiringAtTheLatch)
     EXPECT_TRUE(method("void finishTransfer(").before("if (latchRetire)", "retireSwap"));
 }
 
-// The GPU driver owns an accepted offer's deadline (TegraScanoutCopy.h): the display waits while the driver holds it, and a
-// frame whose rendering was lost is neither flipped to nor copied on the CPU.
-TEST(DirectScanoutSource, LateOffersAreTheDriversAndLostFramesAreNotShown)
+// The GPU driver owns an accepted offer's deadline (TegraScanoutCopy.h): the display's one deadline names whether the driver
+// still holds it.
+TEST(DirectScanoutSource, LateOffersAreTheDrivers)
 {
     const CodeText deadline = method("void gpuDeadlineCheck()");
     EXPECT_TRUE(deadline.before("tegra_gm20b_scanout_outstanding(this)", "panic("));
     EXPECT_TRUE(deadline.has("fence only, direct slot"));
-    EXPECT_TRUE(method("void finishGpuCopy(int status)")
-                    .before("if (status == TEGRA_SCANOUT_SOURCE_LOST) {", "gpuBypass = true;"));
-    const CodeText drop = method("void dropLostFrame(");
-    EXPECT_TRUE(drop.has("retireUnshown(seqOf(request));"));
-    EXPECT_FALSE(drop.has("gpuBypass"));
-    EXPECT_FALSE(drop.has("presentEntry"));
 }
 
 // A direct slot keeps what window A may scan from it until the slot is dropped: the surface, its wired memory and its
@@ -173,39 +167,6 @@ TEST(ScanoutRingSource, DisplayUsesTheRing)
     EXPECT_TRUE(check.has("if (!ring.replace)"));
 }
 
-// The vsync phase (r17-touch, NativeMobileDisplay/test:vsync_phase_test runs VsyncPhase.h): V_PULSE2 programmed as L4T's
-// tegra_dc_init_vpulse2_int does, through assembly registers only (the flips' own GENERAL_ACT_REQ latches them), at most
-// one vsync a frame, V_BLANK carrying it until V_PULSE2 has fired, a never-firing V_PULSE2 turning the phase off with
-// one line (no panic), and the pacing line's "rate" cause for promptly answered swaps.
-TEST(VsyncPhaseSource, Vpulse2RegistersAsL4T)
-{
-    // L4T dc_reg.h / tegra_dc_init_vpulse2_int (T21x).
-    for (const char *line :
-         {"kVpulse2Int = 1u << 5", "kDcDispSignalOptions0 = 0x400", "kVpulse2Enable = 1u << 19",
-          "kDcDispVpulse2Control = 0x422", "kDcDispVpulse2Position = 0x423", "kVpulse2Last = 1u << 8"})
-        EXPECT_TRUE(code().has(line));
-    const CodeText registers = method("void writePhaseRegisters()");
-    for (const CodeText &phase : {method("void programPhase(uint32_t leadUs)"), registers}) {
-        EXPECT_FALSE(phase.has("kDcStateControl")) << "the phase never asks for a latch of its own";
-        EXPECT_FALSE(phase.has("kDcRegActControl"));
-    }
-    EXPECT_TRUE(registers.has("phaseLine | (phaseLine + 1) << 16"));
-}
-
-TEST(VsyncPhaseSource, OneVsyncAFrame)
-{
-    const CodeText deliver = method("void deliverVsync(uint64_t stamp, uint64_t continuous, uint32_t lead)");
-    EXPECT_TRUE(deliver.has("if (deliveredFrame == frameEnds) return;"));
-    EXPECT_TRUE(method("void vblankNotify()").has("if (phaseDelivering()) return;"));
-    EXPECT_TRUE(method("bool phaseDelivering() const").has("vpulseSeen"));
-    // The irregular gap at a source or line change is never passed on as the interval.
-    EXPECT_TRUE(deliver.has("!moved && vblankLast"));
-    // A folded action (V_PULSE2 and the frame end together) counts the vsync against that frame, not the next.
-    EXPECT_TRUE(method("void vblankTick()")
-                    .before("if (status & kVpulse2Int) vpulseNotify();",
-                            "if (status & kFrameEndInt) frameEnds = frameEnds + 1;"));
-}
-
 // A failed change of mode, a refused completion flip or an underflow run holds no route off: whether landscape, direct
 // scanout and completion flips are tried reads no failure state.
 TEST(DisplayRoutesSource, NoFailureHoldsARouteOff)
@@ -215,46 +176,6 @@ TEST(DisplayRoutesSource, NoFailureHoldsARouteOff)
     EXPECT_TRUE(
         CodeText(SourceText("../SwitchScanoutStart.h")).has("bool directScanChosen() const { return directOn; }"));
     EXPECT_FALSE(code().has("Hold.on()"));
-}
-
-TEST(VsyncPhaseSource, NeverFiringVpulse2CostsOneLine)
-{
-    const CodeText present = method("void notePhasePresent(uint64_t stamp, const FrameMark &mark)");
-    EXPECT_TRUE(present.has("if (vpulseProgrammed && !vpulseSeen && dc && !hwSuspended) {"))
-        << "DC A read only while probing, and never powered down";
-    EXPECT_TRUE(present.has("phaseProbe.flip(true, vpulse2Routed(), false)"));
-    EXPECT_TRUE(present.has("phaseProbeEnded(step);"));
-    EXPECT_FALSE(present.has("panic(")) << "a V_PULSE2 that never fired costs one line, not the boot";
-    const CodeText ended = method("void phaseProbeEnded(VsyncPhaseProbe::Step step)");
-    EXPECT_TRUE(ended.has("vsync at V_BLANK"));
-    EXPECT_TRUE(ended.has("dropVpulse2();"));
-    EXPECT_TRUE(method("void dropVpulse2()").has("vpulseProgrammed = false;"));
-    EXPECT_TRUE(method("unsigned noteLong(uint32_t frames, const FrameMark &mark)").has("kLongRate"));
-}
-
-// The probe asks whether V_PULSE2 reaches the CPU, so it only counts flips with V_PULSE2 routed (enabled and unmasked):
-// V_PULSE2 is programmed only with a vsync client and unmasked in the same step, and goes with the last client, so a
-// masked V_PULSE2 never fails a probe.
-TEST(VsyncPhaseSource, Vpulse2IsProbedOnlyWhileRouted)
-{
-    const CodeText program = method("void programPhase(uint32_t leadUs)");
-    EXPECT_TRUE(program.has("(!vpulseProgrammed && !vsyncArmed)"));
-    EXPECT_TRUE(program.before("dc[kDcIntEnable] = dc[kDcIntEnable] | kVpulse2Int;", "writeIntMask(0, kVpulse2Int);"));
-    EXPECT_FALSE(program.has("else armVsync unmasks it"));
-    EXPECT_TRUE(method("bool vpulse2Routed()").has("dc[kDcIntEnable] & dc[kDcIntMask] & kVpulse2Int"));
-    const CodeText notify = method("void vblankNotify()");
-    EXPECT_TRUE(notify.before("writeIntMask(kVblankInt, 0);", "dropVpulse2();"));
-    EXPECT_TRUE(method("bool phaseDelivering() const").has("vpulseProgrammed"));
-}
-
-TEST(VsyncPhaseSource, ReplacementsAndResume)
-{
-    // noteStatsWindow zeroes stReplaced each window: that is no replacement.
-    EXPECT_TRUE(method("void notePresent(uint64_t stamp, uint64_t latchedAt, const FrameMark &mark)")
-                    .before("if (stReplaced < phaseReplacedSeen) phaseReplacedSeen = 0;",
-                            "if (stReplaced != phaseReplacedSeen)"));
-    // SC7 resets the DC: the phase's registers go back before finishResume's latch request.
-    EXPECT_TRUE(method("bool finishResume()").before("writePhaseRegisters()", "kGeneralActReq | kWinAActReq"));
 }
 
 // The display's SMMU probe runs through the same DisplaySmmuProbe::perform that display_probe_test drives, is held but
@@ -426,11 +347,11 @@ TEST(LegacyFramebufferTable, ContractSlotsOverridden)
 TEST(DirectScanoutSource, FailedExactProducerNeverFallsThroughToCpuCopy)
 {
     for (const char *name : {"bool offerDirect(", "bool offerGpuCopy("}) {
-        const CodeText lost = method(name).between("if (offered == TEGRA_SCANOUT_SOURCE_LOST)", "if (stats)");
+        const CodeText lost = method(name).between("if (sourceUnshown(offered, request,", "if (stats)");
         EXPECT_TRUE(lost.has("noteTaken(request, kickAt);"));
         EXPECT_TRUE(lost.has("planeNextSet = false;"));
         EXPECT_TRUE(lost.has("kIOReturnAborted"));
-        EXPECT_TRUE(lost.has("dropLostFrame(request,"));
+        EXPECT_TRUE(lost.has("retireSwapUnshown(request,"));
         EXPECT_TRUE(lost.has("return true;"));
     }
 }
@@ -486,7 +407,7 @@ TEST(FrameEndSource, TheFilterHandsOffWithoutReadModifyWrites)
         EXPECT_FALSE(filter.has(rmw)) << rmw;
     EXPECT_FALSE(method("uint32_t takeFrameEndStatus()").has("__atomic_exchange"));
     EXPECT_FALSE(code().has("dcPending"));
-    EXPECT_TRUE(method("int waitTapeFrame()").has("frameEndPending(kVblankInt | kFrameEndInt | kVpulse2Int)"));
+    EXPECT_TRUE(method("int waitTapeFrame()").has("frameEndPending(kVblankInt | kFrameEndInt)"));
     EXPECT_TRUE(method("void checkFlipDeadline()").has("frameEndPending(kFrameEndInt)"));
 }
 

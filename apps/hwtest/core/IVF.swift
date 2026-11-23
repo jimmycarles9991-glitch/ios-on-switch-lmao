@@ -58,10 +58,10 @@ public enum IVF {
 
     public static func parse(_ data: Data) throws -> (Header, [Frame]) {
         let bytes = [UInt8](data)
-        guard bytes.count >= 32, bytes[0..<4] == [0x44, 0x4B, 0x49, 0x46] else { throw ParseError.notIVF }
+        guard bytes.count >= 32, bytes[0 ..< 4] == [0x44, 0x4B, 0x49, 0x46] else { throw ParseError.notIVF }
         let headerSize = Int(read(bytes, 6, as: UInt16.self))
         let header = Header(
-            fourcc: String(decoding: bytes[8..<12], as: UTF8.self),
+            fourcc: String(decoding: bytes[8 ..< 12], as: UTF8.self),
             width: Int(read(bytes, 12, as: UInt16.self)),
             height: Int(read(bytes, 14, as: UInt16.self)),
             rate: Int(read(bytes, 16, as: UInt32.self)),
@@ -75,7 +75,7 @@ public enum IVF {
             let size = Int(read(bytes, at, as: UInt32.self))
             let pts = read(bytes, at + 4, as: UInt64.self)
             guard at + 12 + size <= bytes.count else { throw ParseError.truncated(frame: frames.count) }
-            frames.append(Frame(pts: pts, data: Data(bytes[(at + 12)..<(at + 12 + size)])))
+            frames.append(Frame(pts: pts, data: Data(bytes[(at + 12) ..< (at + 12 + size)])))
             at += 12 + size
         }
         return (header, frames)
@@ -87,7 +87,7 @@ public enum IVF {
 
     static func read<T: FixedWidthInteger>(_ bytes: [UInt8], _ at: Int, as: T.Type) -> T {
         var value: T = 0
-        for index in (0..<MemoryLayout<T>.size).reversed() { value = value << 8 | T(bytes[at + index]) }
+        for index in (0 ..< MemoryLayout<T>.size).reversed() { value = value << 8 | T(bytes[at + index]) }
         return value
     }
 }

@@ -5,15 +5,15 @@ import Metal
 import MetalPerformanceShaders
 
 /// A function's functionConstantsDictionary, vertexAttributes and stageInputAttributes come from its metallib's public
-/// metadata (drivers/TegraGM20BMetal/raw/runtime/raw_function_tags.h), never from an m2v twin. The expected answers for
+/// metadata (drivers/TegraGM20BMetal/function_tags.h), never from an m2v twin. The expected answers for
 /// shaders/FunctionTags.metal are what an M-series Mac's Metal gives for the same source built for iOS. A function made
 /// with constant values answers no constants, and the attributes its constants leave (tags_has_normal false drops
-/// normal), which the shader compiler reads from its specialized AIR. MPS reads its kernels' constants before specializing
-/// them, so a Gaussian blur is encoded too. The case fails on a wrong answer, or if any of this asked for the m2v device
-/// (m2v_needs_asked).
+/// normal), which the shader compiler reads from its specialized AIR. MPS reads its kernels' constants before
+/// specializing them, so a Gaussian blur is encoded too. The case fails on a wrong answer, or on any command buffer
+/// that failed, MPS's included (failed_cbs=, failed_why=).
 struct FunctionTagsTest: HWTest {
-    let id = "gpu.raw.function_tags"
-    let name = "Function constants and attributes from the metallib, without m2v"
+    let id = "gpu.gm20b.function_tags"
+    let name = "Function constants and attributes from the metallib"
     let subsystem = Subsystem.metal
 
     static let measured: [(function: String, constants: String, vertex: String, stageInput: String)] = [
@@ -44,7 +44,8 @@ struct FunctionTagsTest: HWTest {
         guard let list else { return "nil" }
         return list.map {
             attribute(
-                $0.name, $0.attributeIndex, $0.attributeType, $0.isActive, $0.isPatchData, $0.isPatchControlPointData)
+                $0.name, $0.attributeIndex, $0.attributeType, $0.isActive, $0.isPatchData, $0.isPatchControlPointData
+            )
         }.joined()
     }
 
@@ -52,15 +53,16 @@ struct FunctionTagsTest: HWTest {
         guard let list else { return "nil" }
         return list.map {
             attribute(
-                $0.name, $0.attributeIndex, $0.attributeType, $0.isActive, $0.isPatchData, $0.isPatchControlPointData)
+                $0.name, $0.attributeIndex, $0.attributeType, $0.isActive, $0.isPatchData, $0.isPatchControlPointData
+            )
         }.joined()
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
-        let before = OwnAnswersTest.needs(gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
+        let before = GM20BFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var wrong: [String] = []
 
@@ -102,9 +104,10 @@ struct FunctionTagsTest: HWTest {
             blur.encode(commandBuffer: commands, sourceTexture: source, destinationTexture: destination)
         }
 
-        let asked = OwnAnswersTest.needs(gpu.device).filter { $0.value > (before[$0.key] ?? 0) }.keys.sorted()
-        metrics.set("m2v_needs_asked", asked.isEmpty ? "-" : asked.joined(separator: ","))
-        if !asked.isEmpty { wrong.append("m2v") }
+        let failed = FailedCounts.judged(
+            before: before, after: GM20BFacade.counters(of: gpu.device), own: gpu.paths, &metrics
+        )
+        if !failed.1 { wrong.append(failed.0) }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 }

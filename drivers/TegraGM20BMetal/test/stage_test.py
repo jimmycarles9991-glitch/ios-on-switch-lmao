@@ -17,7 +17,7 @@ stage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(stage)
 
 SELF = '_main/gpu/bundle.stage'
-SEED = 'ngpu/addons/TegraGM20BMetal.m2v-seed/shared'
+SEED = 'ngpu/addons/TegraGM20BMetal.seed/shared'
 
 
 class StageTest(unittest.TestCase):
@@ -67,6 +67,16 @@ class StageTest(unittest.TestCase):
         self.assertEqual(self.card(), self.files)
         self.assertEqual((self.data / stage.BUNDLE / 'TegraGM20BMetal').stat().st_mode & 0o777, 0o755)
         self.assertFalse((self.data / stage.PENDING).exists())
+
+    def test_the_folders_from_before_the_rename_go_where_the_new_ones_are_staged(self):
+        for old in stage.RENAMED_FROM:
+            (self.data / old / 'native/raw-0123456789abcdef').mkdir(parents=True)
+            (self.data / old / 'native/raw-0123456789abcdef/index').write_bytes(b'old')
+        done = self.sync()
+        self.assertEqual(self.card(), self.files)
+        for old in stage.RENAMED_FROM:
+            self.assertIn(f'removed {old}', done)
+            self.assertFalse((self.data / old).exists())
 
     def test_an_unchanged_build_reads_nothing_but_the_lists_first_line(self):
         self.sync()

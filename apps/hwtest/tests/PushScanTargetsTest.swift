@@ -17,11 +17,12 @@ struct PushScanTargetsTest: HWTest {
         var metrics = Metrics()
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection", metrics) }
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([PosterTargetsTest.targetPeaksOp, 0]), outputSize: 512)
+            GPUPaths.method, GPUConnection.words([PosterTargetsTest.targetPeaksOp, 0]), outputSize: 512
+        )
         guard kr == KERN_SUCCESS else {
             let why =
                 kr == GPUConnection.kIOReturnUnsupported
-                ? "a release kernel keeps no target peaks" : "target peaks unreadable (\(GPUConnection.hex(kr)))"
+                    ? "a release kernel keeps no target peaks" : "target peaks unreadable (\(GPUConnection.hex(kr)))"
             return .skip(why, metrics)
         }
         let peaks = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))
@@ -32,6 +33,7 @@ struct PushScanTargetsTest: HWTest {
         guard !peaks.isEmpty else { return .skip("no process has drawn since boot", metrics) }
         return .judged(
             [("every process's largest target has no side past \(Self.maxSide) (outside = -)", outside.isEmpty)],
-            metrics)
+            metrics
+        )
     }
 }

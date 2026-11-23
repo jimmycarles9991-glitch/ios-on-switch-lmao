@@ -1795,6 +1795,37 @@ fn texel_buffer_writes_out_of_bounds_are_dropped() {
     assert_eq!(ran, [Class::Device, Class::Shader]);
 }
 
+/// Without containment a texel buffer's write is the access the function spells, as every access
+/// is: no image-size guard, whether or not the profile's robustness would discard it.
+#[test]
+fn without_containment_a_texel_buffer_write_is_unguarded() {
+    let Some(bc) = assemble() else {
+        return;
+    };
+    let unsafe_off = DevicePolicy {
+        containment: ContainmentPolicy::UnsafeOff,
+        isolation: GuestIsolation::Off,
+        ..Default::default()
+    };
+    let mut ran = 0;
+    for stem in ["moltenvk-m3", "lavapipe"] {
+        let p = profile(stem, unsafe_off).expect("profile");
+        let a = match compile(&bc, "oob_buffer_write", &p) {
+            Ok(a) => a,
+            Err(Error::NeedsInput(_)) => continue,
+            Err(e) => panic!("{stem}: {e}"),
+        };
+        let uses = |name: &str| a.strategies.entries.get(name).map_or(0, |u| u.uses);
+        assert_eq!(
+            (uses("texture.write"), uses("texture.write_guarded")),
+            (1, 0),
+            "{stem}"
+        );
+        ran += 1;
+    }
+    assert!(ran > 0);
+}
+
 /// A thread that writes a texel out of bounds and then reads that location reads Metal's zero
 /// texel. Vulkan's robustness discards the write, but lets the read return "the value of the last
 /// store to the same out-of-bounds location in the same shader invocation" unless the load is

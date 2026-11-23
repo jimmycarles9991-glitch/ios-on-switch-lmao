@@ -1522,25 +1522,20 @@ pub(crate) fn unattached_colors_written(
 /// The framebuffer-fetch state of pass `d` for the specialized fragment entry `spec` on `p`
 /// (`LoweringInputs::framebuffer_fetch`): on a device that orders fetch only through the pixel
 /// interlock, the state of every attachment the entry declares a `[[color(n)]]` input of a constant
-/// index for, of every extended-range attachment it writes that the pass blends (whose blend the
-/// function computes from the texel it reads), and of every attachment variant `v`'s instance keeps
-/// out of its subpass that the entry writes through its first output
-/// (`VariantKey::interlocked_colors`); `None` on another device or for an entry that declares none
-/// of them. On a device that orders fetch through rasterization-order input attachments, the state
-/// of every extended-range attachment the entry writes that the pass blends (whose blend the
-/// function computes over its input attachment, `lower::fragment`'s `input_blend`). Where the
-/// profile asks for Metal's 16-bit float blend of a `half4` output (`DevicePolicy::half_blend`) on
-/// a device that orders fetch through the interlock, also every such attachment the entry writes,
-/// those it names for that alone in `FramebufferFetchInputs::half_blends`.
+/// index for, and of every attachment variant `v`'s instance keeps out of its subpass that the
+/// entry writes through its first output (`VariantKey::interlocked_colors`); `None` on another
+/// device or for an entry that declares none of them. Where the profile asks for Metal's 16-bit
+/// float blend of a `half4` output (`DevicePolicy::half_blend`), also every such attachment the
+/// entry writes, those it names for that alone in `FramebufferFetchInputs::half_blends`.
 pub(crate) fn fetch_inputs(
     spec: &air::Entry,
     d: FragmentPass<'_>,
     v: &VariantKey,
     p: &DeviceProfile,
 ) -> Option<crate::pipeline::lower_inputs::FramebufferFetchInputs> {
-    let interlock = crate::lower::fragment::interlock_orders(p);
-    let inputs = crate::lower::fragment::blends_through_inputs(p);
-    if !matches!(spec.ep.stage, AbiStage::Fragment { .. }) || !(interlock || inputs) {
+    if !matches!(spec.ep.stage, AbiStage::Fragment { .. })
+        || !crate::lower::fragment::interlock_orders(p)
+    {
         return None;
     }
     // Each 16-bit float attachment a `half4` output of a module without fast math blends into,
@@ -1564,16 +1559,6 @@ pub(crate) fn fetch_inputs(
             .collect(),
         false => BTreeSet::new(),
     };
-    let blended = |color: u32| {
-        d.color_attachments
-            .get(color as usize)
-            .copied()
-            .flatten()
-            .is_some_and(|c| {
-                c.blending_enabled
-                    && crate::metal::format::ExtendedRange::of(c.pixel_format).is_some()
-            })
-    };
     let read: BTreeSet<u32> = spec
         .ep
         .params
@@ -1582,29 +1567,17 @@ pub(crate) fn fetch_inputs(
             ParamRole::ColorInput {
                 index: AbiInt::Const(color),
                 ..
-            } if interlock => Some(color),
+            } => Some(color),
             _ => None,
         })
         .chain(spec.ep.outputs.iter().filter_map(|o| match o.role {
-            OutputRole::RenderTarget {
-                attachment: AbiInt::Const(color),
-                index: 0,
-                ..
-            } if blended(color) => Some(color),
             // A color the draw's instance keeps out of its subpass, written through the storage
             // form as a fetched one is.
             OutputRole::RenderTarget {
                 attachment: AbiInt::Const(color),
                 index: 0,
                 ..
-            } if interlock && v.interlocked_colors.contains(&color) => Some(color),
-            // An extended-range color whose `half` shadow the draw's instance holds, written
-            // through the storage form against it.
-            OutputRole::RenderTarget {
-                attachment: AbiInt::Const(color),
-                index: 0,
-                ..
-            } if interlock && v.extended_shadows.contains(&color) => Some(color),
+            } if v.interlocked_colors.contains(&color) => Some(color),
             _ => None,
         }))
         .collect();
@@ -1615,26 +1588,15 @@ pub(crate) fn fetch_inputs(
     if read.is_empty() {
         return None;
     }
-    // The blend over an input attachment depends on the attachments' state alone: its write is
-    // the fixed function's, which the tests, coverage and views take as any other's.
-    Some(match interlock {
-        true => crate::pipeline::lower_inputs::FramebufferFetchInputs {
-            half_blends: optional,
-            ..crate::pipeline::lower_inputs::FramebufferFetchInputs::of(
-                read,
-                d.color_attachments,
-                d.depth_or_stencil,
-                d.alpha_to_coverage,
-                d.max_vertex_amplification_count,
-            )
-        },
-        false => crate::pipeline::lower_inputs::FramebufferFetchInputs::of(
+    Some(crate::pipeline::lower_inputs::FramebufferFetchInputs {
+        half_blends: optional,
+        ..crate::pipeline::lower_inputs::FramebufferFetchInputs::of(
             read,
             d.color_attachments,
-            false,
-            false,
-            1,
-        ),
+            d.depth_or_stencil,
+            d.alpha_to_coverage,
+            d.max_vertex_amplification_count,
+        )
     })
 }
 
@@ -1661,7 +1623,19 @@ pub(crate) fn fragment_inputs(
         d.color_attachments,
         d.texture_write_rounding_mode,
     );
-    out.two_plane_alphas = crate::pipeline::two_plane::alphas(d.color_attachments, p);
+    out.stand_in_colors = d
+        .color_attachments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let c = c.as_ref()?;
+            let blended = c.blending_enabled;
+            Some((
+                i as u32,
+                crate::pipeline::lower_inputs::StandInColor::new(c.stand_in?, blended),
+            ))
+        })
+        .collect();
     out.rotated_colors = crate::pipeline::color_writes::rotated_colors(d.color_attachments);
     out.rotated_factors = crate::pipeline::color_writes::rotated_factors(d.color_attachments, p);
     out.rotated_blends = crate::pipeline::color_writes::rotated_blends(d.color_attachments, p);

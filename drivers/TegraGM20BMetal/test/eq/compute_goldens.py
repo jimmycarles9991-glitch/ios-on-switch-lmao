@@ -10,7 +10,7 @@ NVK's draws of its own (m2v's internal copies) and its early clears are not raw'
   passstart  CE_COPY, NVK's upload at its submission's start
   placed     ICINV, the instruction caches raw invalidates in a submission that placed a program in the heap
              (the harness places NVK's program for every run)
-  slm        WFI before the channel's local memory grows for a kernel that asks for more (raw_slm.h emitSlm)
+  slm        WFI before the channel's local memory grows for a kernel that asks for more (slm.h emitSlm)
 A golden row: <kernel> <digest of the fields> <barriers> <tags>; a log passes with the same fields and barriers.
 """
 
@@ -22,7 +22,7 @@ import eq_fields
 
 eqcheck = eq_fields.eqcheck
 NVK_ONLY = {'CE_COPY'}
-RAW_ONLY = {'ICINV'}
+SWITCH_METAL_ONLY = {'ICINV'}
 
 
 def dispatch(log: str) -> dict:
@@ -54,7 +54,7 @@ def compare(nvk: dict, raw: dict) -> tuple[set[str], list[str]]:
     if 'WFI' in extra and ' slm=0/0 ' not in raw.get('qmd', ''):
         tags.add('slm')
         extra -= {'WFI'}
-    if extra <= RAW_ONLY:
+    if extra <= SWITCH_METAL_ONLY:
         tags.update({'placed'} if extra else set())
     else:
         refused.append(f'barriers only raw has: {sorted(extra)}')

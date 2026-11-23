@@ -3,39 +3,45 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Private render targets on compressed memory (drivers/TegraGM20BMetal/raw/runtime/raw_private_comp.h): a glass-like
+/// Private render targets on compressed memory (drivers/TegraGM20BMetal/private_comp.h): a glass-like
 /// chain (a 512x512 BGRA8 pattern, a 256x256 RGBA16Float and a 128x128 BGRA8 2:1 reduction of it) and a 256x256
 /// RGBA32Float pattern (C128), each pass cleared to a ZBC value first, drawn on compressed memory and again with
-/// compression held off (switchRawProbePlainPrivate:): every byte the same, every target compressed. Mid-chain one command buffer that samples the first target also writes a Boolean visibility result,
-/// and stays raw (moves counts the targets that left compressed memory meanwhile). Then 16 clear-only passes of the
-/// 512x512 target, compressed and plain, give the GPU time a ZBC clear saves. The shape arms follow
-/// (PrivateCompressionShapes.swift).
+/// compression held off (switchMetalProbePlainPrivate:): every byte the same, the first and the RGBA32Float target
+/// compressed once the work is done (compressed_targets; made_targets at creation: a target made plain for want of
+/// compressed memory moves onto it once some is made, private_comp.h compressedFromPlain, counted in
+/// compressed_moves; nothing moves one off it). A size's compressed memory is waited for by the compression thread's
+/// own event (CompressionSettled). Mid-chain one command buffer that samples the first target also writes a Boolean
+/// visibility result, and stays raw.
+/// Then 16 clear-only passes of the 512x512 target, compressed and plain, give the GPU time a ZBC clear saves. The
+/// shape arms follow (PrivateCompressionShapes.swift), then the move arms (PrivateCompressionMoveArms.swift); the line
+/// keeps the judged fields and puts the longest others in the report alone.
 struct PrivateCompressionTest: HWTest {
-    let id = "gpu.raw.private_compression"
+    let id = "gpu.gm20b.private_compression"
     let name = "Private targets on compressed memory: same bytes, ZBC clears, a Boolean visibility pass kept raw"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
 
-    static let plainSelector = NSSelectorFromString("switchRawProbePlainPrivate:")
-    static let factsSelector = NSSelectorFromString("switchRawProbeFacts:")
+    static let plainSelector = NSSelectorFromString("switchMetalProbePlainPrivate:")
+    static let factsSelector = NSSelectorFromString("switchMetalProbeFacts:")
 
     struct Chain {
         var bytes: [[UInt8]] = []
-        var compressed: [Int] = []
+        /// Each target's comptags when made and once the work is done
+        var made: [Int] = [], compressed: [Int] = []
         var booleanPath = ""
         var clearMs = 0.0
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         guard let facade = gpu.device as? NSObject, facade.responds(to: Self.plainSelector) else {
-            return .skip("a release facade: no switch to hold compression off for the reference")
+            return .skip(GM20BFacade.missing("switchMetalProbePlainPrivate:", on: gpu.device))
         }
-        let before = RawFacade.counters(of: gpu.device), zbcBefore = RawFacade.compression(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device), zbcBefore = GM20BFacade.compression(of: gpu.device)
         let compressed = try await chain(gpu, facade, plain: false)
-        let after = RawFacade.counters(of: gpu.device), zbcAfter = RawFacade.compression(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device), zbcAfter = GM20BFacade.compression(of: gpu.device)
         let plain = try await chain(gpu, facade, plain: true)
         var metrics = Metrics()
         var wrong: [String] = []
@@ -46,10 +52,11 @@ struct PrivateCompressionTest: HWTest {
             if differing != 0 { wrong.append(name) }
         }
         metrics.set("compressed_targets", compressed.compressed.map(String.init).joined(separator: ","))
+        metrics.set("made_targets", compressed.made.map(String.init).joined(separator: ","))
         metrics.set("plain_targets", plain.compressed.map(String.init).joined(separator: ","))
-        let moves = (after["private_moves"] ?? 0) - (before["private_moves"] ?? 0)
-        metrics.set("made", (after["private_compressed"] ?? 0) - (before["private_compressed"] ?? 0))
-        metrics.set("moves", moves)
+        let delta = { (key: String) in (after[key] ?? 0) - (before[key] ?? 0) }
+        metrics.set("made", delta("private_compressed"))
+        metrics.set("compressed_moves", delta("private_compressed_moves"))
         metrics.set("boolean_path", compressed.booleanPath)
         metrics.set("zbc_hits", (zbcAfter["zbc_hits"] ?? 0) - (zbcBefore["zbc_hits"] ?? 0))
         metrics.set("zbc_misses", (zbcAfter["zbc_misses"] ?? 0) - (zbcBefore["zbc_misses"] ?? 0))
@@ -58,8 +65,16 @@ struct PrivateCompressionTest: HWTest {
         if compressed.compressed.first != 1 { wrong.append("not_compressed") }
         if compressed.compressed.last != 1 { wrong.append("wide_not_compressed") }
         if plain.compressed.contains(1) { wrong.append("reference_compressed") }
-        if compressed.booleanPath != "raw" { wrong.append("boolean_path") }
+        if compressed.booleanPath != "gm20b" { wrong.append("boolean_path") }
         try await shapeArms(gpu, facade, &metrics, &wrong)
+        try await moveArms(gpu, facade, &metrics, &wrong)
+        metrics.fitLog(
+            within: 720,
+            keeping: [
+                "compressed_targets", "made_targets", "array_comptags_after", "ms_comptags_after", "moves",
+                "layer_wrong", "sample_wrong",
+            ]
+        )
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -68,19 +83,14 @@ struct PrivateCompressionTest: HWTest {
         return line.contains("comptags=1") ? 1 : 0
     }
 
-    /// A private target of the chain; compressed memory of a size is made off the render thread after its first ask, so
-    /// the compressed run makes it again until one binds it (or 20 tries pass)
+    /// A private target of the chain, on compressed memory in the compressed run (CompressionSettled.remade)
     func target(
         _ gpu: GPU, _ facade: NSObject, _ format: MTLPixelFormat, _ size: Int, plain: Bool
     ) async throws
         -> MTLTexture
     {
-        var made = try gpu.texture(format, size, size)
-        for _ in 0..<20 where !plain && comptags(facade, made) == 0 {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            made = try gpu.texture(format, size, size)
-        }
-        return made
+        if plain { return try gpu.texture(format, size, size) }
+        return try await CompressionSettled.remade(gpu.device) { try gpu.texture(format, size, size) }
     }
 
     func chain(_ gpu: GPU, _ facade: NSObject, plain: Bool) async throws -> Chain {
@@ -92,7 +102,8 @@ struct PrivateCompressionTest: HWTest {
         let again = try await target(gpu, facade, .bgra8Unorm, 256, plain: plain)
         let wide = try await target(gpu, facade, .rgba32Float, 256, plain: plain)
         var out = Chain()
-        out.compressed = [first, half, quarter, again, wide].map { comptags(facade, $0) }
+        let targets = [first, half, quarter, again, wide]
+        out.made = targets.map { comptags(facade, $0) }
         let pattern = try gpu.render(fragment: "comp_pattern_fragment", format: .bgra8Unorm)
         let reduceHalf = try gpu.render(fragment: "comp_reduce_fragment", format: .rgba16Float)
         let reduce = try gpu.render(fragment: "comp_reduce_fragment", format: .bgra8Unorm)
@@ -144,9 +155,10 @@ struct PrivateCompressionTest: HWTest {
             let bytes = texture.pixelFormat == .rgba32Float ? 16 : texture.pixelFormat == .rgba16Float ? 8 : 4
             out.bytes.append(try await gpu.read(texture, bytesPerPixel: bytes))
         }
+        out.compressed = targets.map { comptags(facade, $0) }
         let clears = try await target(gpu, facade, .bgra8Unorm, 512, plain: plain)
         let clearOnly: (MTLCommandBuffer) -> Void = { commands in
-            for _ in 0..<16 {
+            for _ in 0 ..< 16 {
                 let p = MTLRenderPassDescriptor()
                 p.colorAttachments[0].texture = clears
                 p.colorAttachments[0].loadAction = .clear
@@ -155,7 +167,7 @@ struct PrivateCompressionTest: HWTest {
                 commands.makeRenderCommandEncoder(descriptor: p)!.endEncoding()
             }
         }
-        for _ in 0..<3 { out.clearMs += try await gpu.run(clearOnly).gpuMilliseconds / 3 }
+        for _ in 0 ..< 3 { out.clearMs += try await gpu.run(clearOnly).gpuMilliseconds / 3 }
         return out
     }
 }

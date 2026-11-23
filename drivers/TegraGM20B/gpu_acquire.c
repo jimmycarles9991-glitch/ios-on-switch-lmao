@@ -210,10 +210,9 @@ static int chan_parked(u32 chid, u32 ccsr)
 
 /* What the channel's push waits on: a live channel's fence (*source), something the kernel or a host1x engine releases
  * (VICTIM: never its fault), an acquire on an address only its own pushes name (UNKNOWN), or nothing (NONE). From RAMFC,
- * which holds the acquire once the PBDMA switched the channel out (CCSR acquire pending); else the order acquire
- * tgm_chan_order queued last. A channel parked on an acquire (CCSR, or an ACQUIRE interrupt since its last progress)
- * whose RAMFC is stale or names nothing the kernel can read is a victim too: only an acquire decoded on an address
- * outside every kernel-known word is its own. tgm_live_lock held. */
+ * which holds the acquire once the PBDMA switched the channel out (CCSR acquire pending). A channel parked on an acquire
+ * (CCSR, or an ACQUIRE interrupt since its last progress) whose RAMFC is stale or names nothing the kernel can read is a
+ * victim too: only an acquire decoded on an address outside every kernel-known word is its own. tgm_live_lock held. */
 enum tgm_wait_source tgm_chan_wait_source(struct tgm_chan *chan, struct tgm_chan **source,
 					  char *what, unsigned int len)
 {
@@ -221,7 +220,6 @@ enum tgm_wait_source tgm_chan_wait_source(struct tgm_chan *chan, struct tgm_chan
 	const int parked = chan_parked(chan->chid, ccsr) ||
 			   chan->acquire_fired_ns >
 				   max(READ_ONCE(chan->progress_ns), READ_ONCE(chan->busy_ns));
-	const struct tgm_order *o = &chan->waited;
 	enum tgm_wait_source kind = TGM_WAITS_NONE;
 	struct tgm_acquire_wait w = {0, 0, 0, 0, 0};
 	char none[1];
@@ -248,13 +246,6 @@ enum tgm_wait_source tgm_chan_wait_source(struct tgm_chan *chan, struct tgm_chan
 		}
 		if (kind != TGM_WAITS_NONE)
 			return kind;
-	}
-	if (o->cpu && (s32)(READ_ONCE(*o->cpu) - o->seqno) < 0) {
-		*source = live_by(o->id, 0);
-		scnprintf(what, len, "order wait on ch %u fence %u (at %u)", o->chid, o->seqno,
-			  READ_ONCE(*o->cpu));
-		if (*source)
-			return TGM_WAITS_CHANNEL;
 	}
 	if (parked) {
 		scnprintf(what, len, "an acquire RAMFC does not name yet (CCSR %08x)", ccsr);

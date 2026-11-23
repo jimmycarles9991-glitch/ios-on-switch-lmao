@@ -63,7 +63,7 @@ kernel void salted_kernel(device uint *out [[buffer(0)]], uint id [[thread_posit
 }
 
 /// Each threadgroup writes its index in the grid, plus one, at that index: a grid past the 65535 threadgroups down or deep
-/// one QMD holds (gpu.raw.grid_slices)
+/// one QMD holds (gpu.gm20b.grid_slices)
 kernel void grid_positions(device uint *out [[buffer(0)]], uint3 group [[threadgroup_position_in_grid]],
                            uint3 groups [[threadgroups_per_grid]])
 {
@@ -71,7 +71,7 @@ kernel void grid_positions(device uint *out [[buffer(0)]], uint3 group [[threadg
     out[at] = at + 1;
 }
 
-/// Each element of a buffer bound off 16 bytes, doubled plus one, into another bound off 16 (gpu.raw.kernel_window)
+/// Each element of a buffer bound off 16 bytes, doubled plus one, into another bound off 16 (gpu.gm20b.kernel_window)
 kernel void window_float(device const float *src [[buffer(0)]], device float *dst [[buffer(1)]],
                          uint id [[thread_position_in_grid]])
 {
@@ -90,7 +90,7 @@ kernel void window_packed3(device const packed_float3 *src [[buffer(0)]], device
     dst[id] = float3(src[id]) * 2.0f + 1.0f;
 }
 
-/// The texel under each pixel of texture 0 (gpu.raw.buffer_texture_rows16)
+/// The texel under each pixel of texture 0 (gpu.gm20b.buffer_texture_rows16)
 fragment float4 texel_fragment(float4 position [[position]], texture2d<float> source [[texture(0)]])
 {
     return source.read(uint2(position.xy));
@@ -133,7 +133,7 @@ kernel void sample_texture(texture2d<float> texture [[texture(0)]], device float
 }
 
 /// mediaanalysisd's Core Image 4:2:0 conversion on boot 21: luma (slot 0) and chroma (slot 2) written from an RGBA
-/// texture sampled at slot 1, every texture's rows 16 bytes off 32 (gpu.raw.kernel_shadow)
+/// texture sampled at slot 1, every texture's rows 16 bytes off 32 (gpu.gm20b.kernel_shadow)
 kernel void shadow_planes(texture2d<float, access::write> luma [[texture(0)]], texture2d<float> rgba [[texture(1)]],
                           texture2d<float, access::write> chroma [[texture(2)]], sampler linear [[sampler(0)]],
                           uint2 id [[thread_position_in_grid]])
@@ -147,7 +147,7 @@ kernel void shadow_planes(texture2d<float, access::write> luma [[texture(0)]], t
 }
 
 /// A two-plane 4:2:0 YCbCr texture sampled through a constexpr clamp-to-edge sampler beside an RGBA texture sampled through
-/// a bound one, each at the texel centres of a grid twice the textures' width (gpu.raw.kernel_ycbcr_sampler)
+/// a bound one, each at the texel centres of a grid twice the textures' width (gpu.gm20b.kernel_ycbcr_sampler)
 kernel void ycbcr_sampler_pairs(texture2d<float> ycbcr [[texture(0)]], texture2d<float> rgba [[texture(1)]],
                                 sampler bound [[sampler(0)]], device float4 *out [[buffer(0)]],
                                 uint2 id [[thread_position_in_grid]])
@@ -163,7 +163,7 @@ kernel void ycbcr_sampler_pairs(texture2d<float> ycbcr [[texture(0)]], texture2d
 }
 
 /// The same texture through constexpr repeating and clamp-to-zero samplers, which Metal reads as clamp to edge on it
-/// (gpu.raw.kernel_ycbcr_sampler_mapped): three samples a thread
+/// (gpu.gm20b.kernel_ycbcr_sampler_mapped): three samples a thread
 kernel void ycbcr_sampler_mapped(texture2d<float> ycbcr [[texture(0)]], texture2d<float> rgba [[texture(1)]],
                                  sampler bound [[sampler(0)]], device float4 *out [[buffer(0)]],
                                  uint2 id [[thread_position_in_grid]])
@@ -181,7 +181,7 @@ kernel void ycbcr_sampler_mapped(texture2d<float> ycbcr [[texture(0)]], texture2
 }
 
 /// Both textures through the one bound repeating sampler, which Metal reads as clamp to edge on the YCbCr one alone
-/// (gpu.raw.kernel_ycbcr_shared_sampler)
+/// (gpu.gm20b.kernel_ycbcr_shared_sampler)
 kernel void ycbcr_sampler_shared(texture2d<float> ycbcr [[texture(0)]], texture2d<float> rgba [[texture(1)]],
                                  sampler bound [[sampler(0)]], device float4 *out [[buffer(0)]],
                                  uint2 id [[thread_position_in_grid]])
@@ -196,7 +196,7 @@ kernel void ycbcr_sampler_shared(texture2d<float> ycbcr [[texture(0)]], texture2
 }
 
 /// A kernel's float4 and half4 stores into RGB10A8_2P_XR10 over a two-plane surface, thread i at texel i
-/// (gpu.raw.xr_kernel_store)
+/// (gpu.gm20b.xr_kernel_store)
 kernel void xr_kernel_store(texture2d<float, access::write> t [[texture(0)]], device const float4 *v [[buffer(0)]],
                             uint i [[thread_position_in_grid]])
 {
@@ -210,7 +210,7 @@ kernel void xr_kernel_store_half(texture2d<half, access::write> t [[texture(0)]]
 }
 
 /// read() and a nearest sample in pixel coordinates of RGB10A8_2P_XR10 over a two-plane surface, the texture at both
-/// slots, thread i at texel i (gpu.raw.xr_kernel_read)
+/// slots, thread i at texel i (gpu.gm20b.xr_kernel_read)
 kernel void xr_kernel_read(texture2d<float, access::read> t [[texture(0)]], texture2d<float> s [[texture(1)]],
                            device float4 *out [[buffer(0)]], uint i [[thread_position_in_grid]])
 {
@@ -220,8 +220,8 @@ kernel void xr_kernel_read(texture2d<float, access::read> t [[texture(0)]], text
     out[2 * i + 1] = s.sample(nearest, float2(at) + 0.5f);
 }
 
-/// m2v writes a half-float texture through its unsigned integer twin, converting each texel in the shader: the raw path
-/// binds a header of that format over the texture's memory for these (gpu.raw.kernel_view).
+/// m2v writes a half-float texture through its unsigned integer twin, converting each texel in the shader: the driver
+/// binds a header of that format over the texture's memory for these (gpu.gm20b.kernel_view).
 kernel void view_half_write(texture2d<half> source [[texture(0)]], texture2d<half, access::write> rgba [[texture(1)]],
                             texture2d<half, access::write> red [[texture(2)]], uint2 id [[thread_position_in_grid]])
 {
@@ -323,7 +323,7 @@ kernel void argument_kernel(constant KernelArguments &arguments [[buffer(0)]], d
 
 /// A colour behind an argument buffer's pointer plus one float at each of fourteen bind offsets, in red
 /// (metal.native.argument_encoder): m2v places the last offsets past the fragment push window in the stage's argument
-/// table, which the raw path fills
+/// table, which the driver fills
 fragment float4 argument_spill_fragment(constant ColourArguments &arguments [[buffer(0)]],
                                         device const float *b1 [[buffer(1)]], device const float *b2 [[buffer(2)]],
                                         device const float *b3 [[buffer(3)]], device const float *b4 [[buffer(4)]],
@@ -361,7 +361,7 @@ vertex TintVertex spill_vertex(uint vid [[vertex_id]], constant float4 *corners 
                                                                0, 0)};
 }
 
-/// gpu.raw.unaligned_buffer_offsets: one float from each of twenty uniform buffers, as the quad's red tint, every one
+/// gpu.gm20b.unaligned_buffer_offsets: one float from each of twenty uniform buffers, as the quad's red tint, every one
 /// bound off its 256-byte base, so each reads through its bind offset residual, the last ones from the vertex argument
 /// table
 vertex TintVertex residual_vertex(uint vid [[vertex_id]], constant float4 *corners [[buffer(0)]],
@@ -393,7 +393,7 @@ fragment float4 residual_fragment(TintVertex in [[stage_in]], device const float
     return float4(in.tint.x, sum, 0, 1);
 }
 
-/// gpu.raw.vertex_cubic_sampler: one point per sample, each the texel a vertex function reads through the bound sampler at
+/// gpu.gm20b.vertex_cubic_sampler: one point per sample, each the texel a vertex function reads through the bound sampler at
 /// its own coordinate
 struct CubicPoint {
     float4 position [[position]];
@@ -465,4 +465,31 @@ kernel void argument_spill_kernel(constant ColourArguments &arguments [[buffer(0
                                        b12[0] + b13[0] + b14[0] + b15[0] + b16[0] + b17[0] + b18[0] + b19[0] + b20[0] +
                                        b21[0] + b22[0] + b23[0] + b24[0] + b25[0] + b26[0] + b27[0] + b28[0] + b29[0],
                                    0, 0, 0);
+}
+
+/// tests/KernelYcbcrOnePlaneTest.swift: a linear sample a quarter texel left of each texel's centre, so chroma pairs
+/// mix
+kernel void sample_texture_linear(texture2d<float> texture [[texture(0)]], device float4 *out [[buffer(0)]],
+                                  uint2 id [[thread_position_in_grid]])
+{
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    const float2 size = float2(texture.get_width(), texture.get_height());
+    const float2 at = (float2(id) + float2(0.25f, 0.5f)) / size;
+    if (id.x < texture.get_width() && id.y < texture.get_height())
+        out[id.y * texture.get_width() + id.x] = texture.sample(linear, at, level(0));
+}
+
+/// tests/KernelConvertedWriteTest.swift: a store into every texel of a converted YCbCr view, which Metal drops
+kernel void write_converted_texture(texture2d<float, access::write> texture [[texture(0)]],
+                                    uint2 id [[thread_position_in_grid]])
+{
+    if (id.x < texture.get_width() && id.y < texture.get_height())
+        texture.write(float4(0.25f, 0.5f, 0.75f, 1), id);
+}
+
+/// tests/KernelConvertedWriteTest.swift: reads of whatever texture is bound, its size unchecked (none bound reads 0)
+kernel void read_bound_texture(texture2d<float, access::read> texture [[texture(0)]], device float4 *out [[buffer(0)]],
+                               uint id [[thread_position_in_grid]])
+{
+    out[id] = texture.read(uint2(id % 4, id / 4));
 }

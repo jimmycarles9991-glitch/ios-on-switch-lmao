@@ -3,13 +3,13 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// A render state that reads vertex and fragment textures at slots 31, 64 and 127, drawn on the raw path: 24B119's A13
+/// A render state that reads vertex and fragment textures at slots 31, 64 and 127, drawn on the driver: 24B119's A13
 /// binds 128 textures a stage, past the A10X's 31 the raw encoder kept on both. Each texture holds a distinct power of two,
 /// and slots 0 and 63 hold decoys the functions never read, so a handle at another slot's word, or one left out, shows in
-/// the exact sum. 21H461's A10X binds 31: it skips. A build without it does not draw the state on raw: path is not "raw".
+/// the exact sum. 21H461's A10X binds 31: it skips. A build without it does not draw the state on raw: path is not "gm20b".
 struct WideTexturesTest: HWTest {
-    let id = "gpu.raw.wide_textures"
-    let name = "Vertex and fragment textures at slots 31, 64 and 127 draw on the raw path, each read at its own slot"
+    let id = "gpu.gm20b.wide_textures"
+    let name = "Vertex and fragment textures at slots 31, 64 and 127 draw on the driver, each read at its own slot"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -23,16 +23,16 @@ struct WideTexturesTest: HWTest {
         let vertexSum = slots.map { " + v\($0).read(uint2(0)).x" }.joined()
         let fragmentSum = slots.map { " + f\($0).read(uint2(0)).x" }.joined()
         return """
-            #include <metal_stdlib>
-            using namespace metal;
-            struct Out { float4 position [[position]]; float sum; };
-            vertex Out wide_textures_vertex(uint vid [[vertex_id]]\(vertexArguments)) {
-                return {float4(float(vid & 1) * 4 - 1, float(vid >> 1) * 4 - 1, 0, 1), 0.0f\(vertexSum)};
-            }
-            fragment float4 wide_textures_fragment(Out in [[stage_in]]\(fragmentArguments)) {
-                return float4(0.0f\(fragmentSum), in.sum, 0, 1);
-            }
-            """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct Out { float4 position [[position]]; float sum; };
+        vertex Out wide_textures_vertex(uint vid [[vertex_id]]\(vertexArguments)) {
+            return {float4(float(vid & 1) * 4 - 1, float(vid >> 1) * 4 - 1, 0, 1), 0.0f\(vertexSum)};
+        }
+        fragment float4 wide_textures_fragment(Out in [[stage_in]]\(fragmentArguments)) {
+            return float4(0.0f\(fragmentSum), in.sum, 0, 1);
+        }
+        """
     }()
 
     /// Vertex slot k of `slots` holds 2^k, fragment slot k 2^(k + 3), each decoy 2^10
@@ -43,8 +43,8 @@ struct WideTexturesTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         if NativeAnswers.ios17 { return .skip("21H461's A10X binds 31 textures a stage") }
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = Self.n
         let library = try await gpu.device.makeLibrary(source: Self.source, options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
@@ -83,16 +83,16 @@ struct WideTexturesTest: HWTest {
         let texels = try await gpu.read(target, bytesPerPixel: 16)
         let floats = texels.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         var wrong = 0
-        for p in 0..<(n * n) where Array(floats[4 * p..<4 * p + 4]) != Self.want { wrong += 1 }
+        for p in 0 ..< (n * n) where Array(floats[4 * p ..< 4 * p + 4]) != Self.want { wrong += 1 }
         let middle = 4 * (n / 2 * n + n / 2)
         var metrics = Metrics()
         metrics.set("path", path)
-        metrics.set("entries", RawFacade.entries(of: state).map(String.init) ?? "-")
+        metrics.set("entries", GM20BFacade.entries(of: state).map(String.init) ?? "-")
         metrics.set("slots", Self.slots.map(String.init).joined(separator: "/"))
         metrics.set("wrong_pixels", wrong)
-        metrics.set("middle", floats[middle..<middle + 4].map { String($0) }.joined(separator: "/"))
+        metrics.set("middle", floats[middle ..< middle + 4].map { String($0) }.joined(separator: "/"))
         var failures: [String] = []
-        if path != "raw" { failures.append("path") }
+        if path != "gm20b" { failures.append("path") }
         if wrong > 0 { failures.append("wrong_pixels") }
         return failures.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: ","), metrics)
     }

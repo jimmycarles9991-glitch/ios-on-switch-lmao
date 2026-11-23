@@ -14,12 +14,6 @@ py_binary(
     srcs = ["xcode_run.py"],
 )
 
-# A binary linked without m2v and the symbols it still needs from it (gpu/defs.bzl plugin_m2v_edges)
-py_binary(
-    name = "m2v_link_edges",
-    srcs = ["m2v_link_edges.py"],
-)
-
 py_binary(
     name = "bundle",
     srcs = ["bundle.py"],
@@ -29,52 +23,49 @@ py_binary(
     ],
 )
 
-py_library(
-    name = "nvk_twin",
-    srcs = ["nvk_twin.py"],
-    visibility = ["//tools/gpu/shaders:__pkg__"],
-    deps = ["//tools/common:macho"],
+# bundle.py's check: the plugin holds the translation's entry points and nothing of m2v's runtime, bridge or frontend
+py_test(
+    name = "bundle_test",
+    srcs = [
+        "bundle.py",
+        "bundle_test.py",
+    ],
+    data = ["//drivers/TegraGM20BMetal:translate/NativeMetalTranslate.h"],
+    env = {"TRANSLATE_HEADER": "$(rootpath //drivers/TegraGM20BMetal:translate/NativeMetalTranslate.h)"},
+    deps = [
+        "//tools/common:macho",
+        "//tools/trustcache",
+    ],
 )
 
 py_binary(
     name = "seed",
     srcs = ["seed.py"],
-    deps = [":nvk_twin"],
 )
 
-# Runs the pack generator (--generator: drivers/TegraGM20BMetal/raw/pack/rawpack.py, by path) with the twin seed.py
-# made. The generator's modules are each step's own inputs, not this tool's runfiles: a module edit reruns only the
-# steps that run it.
+# Runs the pack generator (--generator: drivers/TegraGM20BMetal/pack/make_pack.py, by path). The generator's modules
+# are each step's own inputs, not this tool's runfiles: a module edit reruns only the steps that run it.
 py_binary(
-    name = "rawpack",
-    srcs = ["rawpack.py"],
+    name = "make_pack",
+    srcs = ["make_pack.py"],
 )
 
-# One bucket of the raw pack (--generator: drivers/TegraGM20BMetal/raw/pack/directbucket.py): its own tool, so a bucket's
-# action is keyed on neither rawpack.py's other steps nor the generator's other modules.
+# One bucket of the pack (--generator: drivers/TegraGM20BMetal/pack/directbucket.py): its own tool, so a bucket's
+# action is keyed on neither make_pack.py's other steps nor the generator's other modules.
 py_binary(
-    name = "rawprobe",
-    srcs = ["rawprobe.py"],
+    name = "probe",
+    srcs = ["probe.py"],
 )
 
 py_library(
-    name = "rawprobe_steps",
-    srcs = ["rawprobe.py"],
+    name = "probe_steps",
+    srcs = ["probe.py"],
 )
 
 py_test(
-    name = "rawprobe_test",
-    srcs = ["rawprobe_test.py"],
-    deps = [":rawprobe_steps"],
-)
-
-# The compile profile the shader tools' bridge is built with, held to their runtime device
-py_test(
-    name = "compile_profile_test",
-    srcs = ["compile_profile_test.py"],
-    data = ["//gpu/seed:local_tools"],
-    env = {"COMPILE_PROFILE_TOOLS": "$(rootpath //gpu/seed:local_tools)"},
-    tags = ["requires-darwin"],
+    name = "probe_test",
+    srcs = ["probe_test.py"],
+    deps = [":probe_steps"],
 )
 
 py_test(
@@ -87,31 +78,32 @@ py_test(
 
 # Its steps, for the pack's coverage test (//drivers/TegraGM20BMetal:archive_coverage_test: archive_lines)
 py_library(
-    name = "rawpack_steps",
-    srcs = ["rawpack.py"],
+    name = "make_pack_steps",
+    srcs = ["make_pack.py"],
     visibility = ["//drivers/TegraGM20BMetal:__pkg__"],
 )
 
 py_test(
-    name = "rawpack_test",
-    srcs = ["rawpack_test.py"],
+    name = "make_pack_test",
+    srcs = ["make_pack_test.py"],
     data = [
         "//drivers/TegraGM20BMetal:precompile/corpus.log",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_format_standin.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_ycbcr_store.h",
+        "//drivers/TegraGM20BMetal:format_standin.h",
+        "//drivers/TegraGM20BMetal:xr.h",
+        "//drivers/TegraGM20BMetal:ycbcr_store.h",
     ],
     env = {
         "RAWPACK_BUILDS": " ".join(IPSWS.keys()),
         "RAWPACK_CORPUS": "$(rootpath //drivers/TegraGM20BMetal:precompile/corpus.log)",
     },
-    deps = [":rawpack_steps"],
+    deps = [":make_pack_steps"],
 )
 
 # Adds the states a device made at run time to the precompile corpus, from a pulled logarchive (logharvest.py)
 py_binary(
     name = "logharvest",
     srcs = ["logharvest.py"],
-    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+    deps = ["//drivers/TegraGM20BMetal:pack"],
 )
 
 py_test(
@@ -120,24 +112,47 @@ py_test(
         "logharvest.py",
         "logharvest_test.py",
     ],
-    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+    deps = ["//drivers/TegraGM20BMetal:pack"],
 )
 
+# Adds the compute kernels a device dispatched at run time to the precompile corpus, from pulled logarchives
+# (kernelharvest.py)
 py_binary(
-    name = "raw_stack",
-    srcs = ["raw_stack.py"],
+    name = "kernelharvest",
+    srcs = [
+        "kernelharvest.py",
+        "logharvest.py",
+    ],
+    data = ["//drivers/TegraGM20BMetal:precompile/libraries.py"],
+    deps = ["//drivers/TegraGM20BMetal:pack"],
 )
 
 py_test(
-    name = "raw_stack_test",
+    name = "kernelharvest_test",
     srcs = [
-        "raw_stack.py",
-        "raw_stack_test.py",
+        "kernelharvest.py",
+        "kernelharvest_test.py",
+        "logharvest.py",
+    ],
+    data = ["//drivers/TegraGM20BMetal:precompile/libraries.py"],
+    deps = ["//drivers/TegraGM20BMetal:pack"],
+)
+
+py_binary(
+    name = "stack_key",
+    srcs = ["stack_key.py"],
+)
+
+py_test(
+    name = "stack_key_test",
+    srcs = [
+        "stack_key.py",
+        "stack_key_test.py",
     ],
     data = [
-        "//drivers/TegraGM20BMetal:raw_stack_sources",
-        "//drivers/TegraGM20BMetal:raw_tree",
-        "//gpu:raw_stack_inputs",
+        "//drivers/TegraGM20BMetal:stack_key_sources",
+        "//drivers/TegraGM20BMetal:driver_tree",
+        "//gpu:stack_key_inputs",
     ],
 )
 

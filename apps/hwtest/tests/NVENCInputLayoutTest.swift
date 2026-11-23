@@ -23,7 +23,8 @@ struct NVENCInputLayoutTest: HWTest {
         let pattern = Pattern(width: width, height: height, clip: 0x7004)
         let settings = CompressorSettings(
             codec: .h264, width: width, height: height, fps: fps, bitrate: 8_000_000, realTime: false,
-            requireHardware: true)
+            requireHardware: true
+        )
         var probe: [String: Any]?
         let encoded = try Compressor.encode(settings, pattern: pattern, frames: 1) { session in
             probe = Compressor.read(session, "SwitchEncoderLayoutProbe" as CFString) as? [String: Any]
@@ -40,7 +41,8 @@ struct NVENCInputLayoutTest: HWTest {
             }
             let decoded = try Decompressor.decode(
                 [try Self.sample(data, format: encoded.format, fps: fps)], format: encoded.format, pattern: pattern,
-                bitDepth: 8, fps: fps)
+                bitDepth: 8, fps: fps
+            )
             reads[layout] = decoded.matched == 1
             metrics.set(layout, decoded.matched == 1 ? "reads" : "wrong")
             metrics.set("\(layout)_luma_err", decoded.worstLumaError, digits: 1)
@@ -60,7 +62,8 @@ struct NVENCInputLayoutTest: HWTest {
                 ),
                 ("VIC's BL2, the encoder's input route, decodes back", reads["vic_bl2"] == true),
                 ("VIC's BL16 decodes back", reads["vic_bl16"] == true),
-            ], metrics, proof: "code0=\(codeZero)")
+            ], metrics, proof: "code0=\(codeZero)"
+        )
     }
 
     /// One AVCC IDR of the session's stream as a sample at frame 0.
@@ -68,21 +71,25 @@ struct NVENCInputLayoutTest: HWTest {
         var block: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil, customBlockSource: nil,
-            offsetToData: 0, dataLength: data.count, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
+            offsetToData: 0, dataLength: data.count, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block
+        )
         guard status == noErr, let block else { throw VideoError.status("CMBlockBufferCreateWithMemoryBlock", status) }
         status = data.withUnsafeBytes {
             CMBlockBufferReplaceDataBytes(
-                with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count)
+                with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count
+            )
         }
         guard status == noErr else { throw VideoError.status("CMBlockBufferReplaceDataBytes", status) }
         var timing = CMSampleTimingInfo(
             duration: CMTime(value: 1, timescale: CMTimeScale(fps)), presentationTimeStamp: .zero,
-            decodeTimeStamp: .zero)
+            decodeTimeStamp: .zero
+        )
         var size = data.count
         var sample: CMSampleBuffer?
         status = CMSampleBufferCreateReady(
             allocator: nil, dataBuffer: block, formatDescription: format, sampleCount: 1, sampleTimingEntryCount: 1,
-            sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample)
+            sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample
+        )
         guard status == noErr, let sample else { throw VideoError.status("CMSampleBufferCreateReady", status) }
         return sample
     }

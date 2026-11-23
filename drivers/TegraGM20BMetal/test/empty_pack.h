@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-#include "raw_pack.h"
+#include "pack.h"
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -11,9 +11,9 @@
 inline std::string emptyPack()
 {
     std::vector<uint8_t> file(0x400, 0);
-    raw::PackHeader h = {};
+    gm20b::PackHeader h = {};
     memcpy(h.magic, "GM20BPK1", 8);
-    h.version = raw::kPackVersion;
+    h.version = gm20b::kPackVersion;
     memcpy(file.data(), &h, sizeof h);
     const char *dir = getenv("TEST_TMPDIR");
     const std::string path = std::string(dir ? dir : "/tmp") + "/empty-pack.bin";

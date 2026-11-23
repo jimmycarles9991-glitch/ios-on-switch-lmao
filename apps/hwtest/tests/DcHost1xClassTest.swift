@@ -41,8 +41,9 @@ struct DcHost1xClassTest: HWTest {
                 (
                     "the probe ran and gave a verdict (class70 = routes, ignored, faults or partial)",
                     Self.verdicts.contains(fields["class70"] ?? "")
-                )
-            ], metrics)
+                ),
+            ], metrics
+        )
     }
 
     /// "key=value" tokens, and "NAME value" pairs of the channel's description.

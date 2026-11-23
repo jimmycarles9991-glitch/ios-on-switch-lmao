@@ -7,7 +7,7 @@ import Security
 
 enum CryptoData {
     static let size = 32 << 20
-    static let payload = Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &* 131 &+ $0 >> 11) })
+    static let payload = Data((0 ..< size).map { UInt8(truncatingIfNeeded: $0 &* 131 &+ $0 >> 11) })
 }
 
 struct CryptoKitTest: HWTest {
@@ -38,7 +38,8 @@ struct CryptoKitTest: HWTest {
                 ("AES-GCM round trip", opened == data),
                 ("CryptoKit and CommonCrypto agree on SHA-256", digest == Data(common)),
             ],
-            metrics)
+            metrics
+        )
     }
 }
 
@@ -56,7 +57,8 @@ struct CommonCryptoTest: HWTest {
             input.withUnsafeBytes { inp in
                 CCCrypt(
                     operation, CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionPKCS7Padding), key, key.count, iv,
-                    inp.baseAddress, input.count, out.baseAddress, capacity, &moved)
+                    inp.baseAddress, input.count, out.baseAddress, capacity, &moved
+                )
             }
         }
         guard status == kCCSuccess else { throw TestFailure("CCCrypt: \(status)") }
@@ -64,15 +66,17 @@ struct CommonCryptoTest: HWTest {
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
-        let key = (0..<32).map { UInt8($0 * 7) }
-        let iv = (0..<16).map { UInt8($0 * 3) }
+        let key = (0 ..< 32).map { UInt8($0 * 7) }
+        let iv = (0 ..< 16).map { UInt8($0 * 3) }
         let (encrypted, encryptSeconds) = try crypt(CCOperation(kCCEncrypt), CryptoData.payload, key: key, iv: iv)
         let (decrypted, decryptSeconds) = try crypt(CCOperation(kCCDecrypt), encrypted, key: key, iv: iv)
         var metrics = Metrics()
         metrics.set(
-            "cbc_encrypt_mbps", Stats.megabytesPerSecond(bytes: CryptoData.size, seconds: encryptSeconds), digits: 1)
+            "cbc_encrypt_mbps", Stats.megabytesPerSecond(bytes: CryptoData.size, seconds: encryptSeconds), digits: 1
+        )
         metrics.set(
-            "cbc_decrypt_mbps", Stats.megabytesPerSecond(bytes: CryptoData.size, seconds: decryptSeconds), digits: 1)
+            "cbc_decrypt_mbps", Stats.megabytesPerSecond(bytes: CryptoData.size, seconds: decryptSeconds), digits: 1
+        )
         return .judged([("AES-256-CBC round trip", decrypted == CryptoData.payload)], metrics)
     }
 }
@@ -84,7 +88,7 @@ struct KeychainTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let account = "hwtest-\(UUID().uuidString)"
-        let secret = Data((0..<48).map { _ in UInt8.random(in: 0...255) })
+        let secret = Data((0 ..< 48).map { _ in UInt8.random(in: 0 ... 255) })
         let base: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword, kSecAttrService: "com.brunostjohn.switch.hwtest",
             kSecAttrAccount: account,
@@ -110,7 +114,8 @@ struct KeychainTest: HWTest {
                 ("reads back the secret", copied == errSecSuccess && (result as? Data) == secret),
                 ("deletes it", deleted == errSecSuccess),
             ],
-            metrics)
+            metrics
+        )
     }
 }
 

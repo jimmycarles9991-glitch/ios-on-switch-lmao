@@ -33,6 +33,23 @@ static inline enum tgm_level tgm_priority_level(uint32_t priority, uint32_t back
 	return p <= 2 ? TGM_LEVEL_FOREGROUND : TGM_LEVEL_BACKGROUND;
 }
 
+/* The priority a queue's ask is scheduled at, as IOGPUFamily's setter answers it (21H461 and 24B119): 0-2 and 4
+ * from any process, 5 (MTLGPUPriorityRealTime) as High (0) here whether or not the process holds
+ * com.apple.private.agx.rt-priority-spi (one level is above every app's), 3 and above 5 refused (-1). */
+static inline int tgm_priority_granted(uint32_t asked)
+{
+	if (asked == 3 || asked > 5)
+		return -1;
+	return asked == 5 ? 0 : (int)asked;
+}
+
+/* The compositor: a connection at the high level whose task holds IOGPUFamily's UI-critical marker
+ * (com.apple.private.graphics-restart-no-kill). Apple grants priority 0 to any process: asking for it alone is not. */
+static inline int tgm_compositor(enum tgm_level level, int restart_no_kill)
+{
+	return level == TGM_LEVEL_HIGH && restart_no_kill;
+}
+
 /* What a high channel's kick should preempt, from engine 0's (GR's) status, whether its resident channel is high, and the
  * PBDMA's: the app channel holding GR, else the one holding the PBDMA; TGM_VICTIM_SWITCHING while GR is mid-switch (the
  * host already leaves a channel, and with the runlist interleaved goes to a high one next). A TSG id names no channel. */
@@ -280,7 +297,7 @@ static inline uint64_t tgm_gpu_span(uint64_t end, uint64_t start, uint64_t last_
 #define TGM_HOLD_SLACK_NS (1000ull * 1000)
 #define TGM_HOLD_CEILING_NS (16666667ull)
 
-/* The longest an app channel's draw is estimated to keep GR (drivers/TegraGM20BMetal raw_draw_bands.h): a longer one is
+/* The longest an app channel's draw is estimated to keep GR (drivers/TegraGM20BMetal draw_bands.h): a longer one is
  * drawn as scissor bands, each ending a batch of its own (its wait-for-idle seqno release), so a compositor kick waits
  * for one band at most. The hold's slack: a channel whose draws fit it is never worth a hold. */
 #define TGM_APP_BAND_NS TGM_HOLD_SLACK_NS

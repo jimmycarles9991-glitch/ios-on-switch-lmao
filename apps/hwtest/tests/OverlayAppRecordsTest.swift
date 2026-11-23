@@ -19,8 +19,8 @@ struct OverlayAppRecordsTest: HWTest {
         var stale: [String] = []
         for app in apps {
             guard let info = NSDictionary(contentsOfFile: app + "/Info.plist"),
-                let identifier = info["CFBundleIdentifier"] as? String,
-                let executable = info["CFBundleExecutable"] as? String
+                  let identifier = info["CFBundleIdentifier"] as? String,
+                  let executable = info["CFBundleExecutable"] as? String
             else {
                 checks.append(("\(app) names its executable", false))
                 continue
@@ -37,7 +37,8 @@ struct OverlayAppRecordsTest: HWTest {
                     "\(identifier)'s record has its executable's entitlements"
                         + (differing.isEmpty ? "" : " (differ: \(differing.joined(separator: ",")))"),
                     differing.isEmpty
-                ))
+                )
+            )
             if !installed || !differing.isEmpty { stale.append(identifier) }
         }
         var metrics = Metrics()

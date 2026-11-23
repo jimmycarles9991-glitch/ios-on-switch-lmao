@@ -26,7 +26,7 @@ struct LatencyScene: GPUScene {
         }
         try await measure("fill", gpu, &result) { commands in
             let blit = commands.makeBlitCommandEncoder()!
-            blit.fill(buffer: buffer, range: 0..<buffer.length, value: 0x5A)
+            blit.fill(buffer: buffer, range: 0 ..< buffer.length, value: 0x5A)
             blit.endEncoding()
         }
         result.expect(buffer.contents().load(as: UInt8.self) == 0x5A, "the fills left the buffer unfilled")
@@ -38,7 +38,7 @@ struct LatencyScene: GPUScene {
     ) async throws {
         var encoding: [Double] = []
         var submitted: [Double] = []
-        for _ in 0..<Self.rounds {
+        for _ in 0 ..< Self.rounds {
             var started: UInt64 = 0
             let timing = try await gpu.run { commands in
                 started = DispatchTime.now().uptimeNanoseconds

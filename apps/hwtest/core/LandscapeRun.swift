@@ -44,7 +44,7 @@ public struct LandscapeSample: Sendable, Equatable {
 
     /// The request's 16 bytes: magic, op, value, 0.
     public static func request(op: UInt32, value: UInt32) -> [UInt8] {
-        [magic, op, value, 0].flatMap { word in (0..<4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) } }
+        [magic, op, value, 0].flatMap { word in (0 ..< 4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) } }
     }
 
     public init?(_ bytes: [UInt8]) {
@@ -56,14 +56,14 @@ public struct LandscapeSample: Sendable, Equatable {
         switches = Int(Self.word(bytes, 20))
         overlayLatches = Int(Self.word(bytes, 24))
         uiLatches = Int(Self.word(bytes, 28))
-        underflows = (0..<3).map { Int(Self.word(bytes, 32 + 4 * $0)) }
-        vicJobs = (0..<3).map { Int(Self.word(bytes, 44 + 4 * $0)) }
-        vicTurns = (0..<3).map { Int(Self.word(bytes, 56 + 4 * $0)) }
-        vicEventTurns = (0..<3).map { Int(Self.word(bytes, 68 + 4 * $0)) }
+        underflows = (0 ..< 3).map { Int(Self.word(bytes, 32 + 4 * $0)) }
+        vicJobs = (0 ..< 3).map { Int(Self.word(bytes, 44 + 4 * $0)) }
+        vicTurns = (0 ..< 3).map { Int(Self.word(bytes, 56 + 4 * $0)) }
+        vicEventTurns = (0 ..< 3).map { Int(Self.word(bytes, 68 + 4 * $0)) }
         displayNs = UInt64(Self.word(bytes, 80)) | UInt64(Self.word(bytes, 84)) << 32
         vicNs = UInt64(Self.word(bytes, 88)) | UInt64(Self.word(bytes, 92)) << 32
-        crc = (0..<frames).map { Self.word(bytes, 96 + 4 * $0) }
-        mode = Array(bytes[(96 + 4 * Self.maxFrames)..<(96 + 4 * Self.maxFrames + frames)])
+        crc = (0 ..< frames).map { Self.word(bytes, 96 + 4 * $0) }
+        mode = Array(bytes[(96 + 4 * Self.maxFrames) ..< (96 + 4 * Self.maxFrames + frames)])
         failures = Int(Self.word(bytes, 96 + 5 * Self.maxFrames))
     }
 
@@ -88,7 +88,7 @@ public struct LandscapeSample: Sendable, Equatable {
     }
 
     static func word(_ bytes: [UInt8], _ at: Int) -> UInt32 {
-        (0..<4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) }
+        (0 ..< 4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) }
     }
 }
 

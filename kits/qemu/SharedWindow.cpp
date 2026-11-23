@@ -79,7 +79,7 @@ uint64_t hex(const char *&text)
 
 }
 
-// The text of the fw_cfg item, or false: the signature must be QEMU's, as on QEMU virt. Also for QemuMetalPublish.cpp.
+// The text of the fw_cfg item, or false: the signature must be QEMU's, as on QEMU virt.
 bool native_fw_cfg_read(const char *name, char *text, size_t capacity)
 {
     static uintptr_t base;

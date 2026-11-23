@@ -122,8 +122,8 @@ public enum BenchResult {
     /// pixels checked without sending them all.
     public static func distinct(_ texels: Data, width: Int, texelBytes: Int) -> [[String: Any]] {
         var order: [Data] = [], counts: [Data: Int] = [:], first: [Data: Int] = [:]
-        for index in 0..<(texels.count / texelBytes) {
-            let texel = texels.subdata(in: (index * texelBytes)..<((index + 1) * texelBytes))
+        for index in 0 ..< (texels.count / texelBytes) {
+            let texel = texels.subdata(in: (index * texelBytes) ..< ((index + 1) * texelBytes))
             if counts[texel] == nil {
                 guard order.count < distinctLimit else { continue }
                 order.append(texel)
@@ -145,7 +145,7 @@ public enum BenchResult {
         var crc: UInt32 = 0xFFFF_FFFF
         for byte in data {
             crc ^= UInt32(byte)
-            for _ in 0..<8 { crc = crc & 1 == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1 }
+            for _ in 0 ..< 8 { crc = crc & 1 == 1 ? (crc >> 1) ^ 0xEDB8_8320 : crc >> 1 }
         }
         return ~crc
     }
@@ -195,6 +195,7 @@ public enum BenchJournal {
             text.split(separator: "\n").compactMap { line in
                 let words = line.split(separator: " ")
                 return words.count >= 2 && words[0] == "done" ? String(words[1]) : nil
-            })
+            }
+        )
     }
 }

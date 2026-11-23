@@ -7,10 +7,10 @@ import Metal
 
 /// Render passes into R10Unorm_PACKED and RG10Unorm_PACKED over the planes of packed 10-bit surfaces ('p420', 'pf20',
 /// 'p422', 'p444'), as VideoStabilizationV2 renders its frames on iOS 17. An M4 Max's Metal faults on these passes, so the
-/// store is not measured: the raw path stores each channel's code as the 10-bit YCbCr targets hold it (YcbcrStore.code),
+/// store is not measured: the driver stores each channel's code as the 10-bit YCbCr targets hold it (YcbcrStore.code),
 /// three to a word in the layout Metal reads, bits 30-31 and a row's tail slots 0. Every word is checked against that
 /// (wrong_words_), each texture's reads against an RGB10A2Unorm texture of the same codes (wrong_reads_), and every
-/// command buffer must be raw (device log: "raw: packed 10-bit plane stored on the GPU"). words_ keeps the device's first
+/// command buffer must be raw (device log: "SwitchMetal: packed 10-bit plane stored on the GPU"). words_ keeps the device's first
 /// words of each view, so a run on any GPU keeps its codes.
 struct PackedPlaneTargetTest: HWTest {
     let id = "gpu.packed_plane_target"
@@ -41,7 +41,7 @@ struct PackedPlaneTargetTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let probe = try GPU.make()
-        let onRaw = RawFacade.kind(of: probe.device) == "raw"
+        let onRaw = GM20BFacade.kind(of: probe.device) == "gm20b"
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
         for view in Self.views {
@@ -53,7 +53,7 @@ struct PackedPlaneTargetTest: HWTest {
             } catch {
                 (found, note) = (Found(), "failed: \(GPU.describe(error))")
             }
-            let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "raw" }
+            let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "gm20b" }
             let key = view.label.filter { $0.isLetter || $0.isNumber }
             metrics.set("paths_" + key, gpu.paths.isEmpty ? "-" : gpu.paths.text)
             metrics.set("wrong_words_" + key, found.words)
@@ -64,7 +64,7 @@ struct PackedPlaneTargetTest: HWTest {
             checks.append((check, note == nil && found.words + found.reads == 0 && raw))
         }
         guard onRaw else {
-            return .skip("the default device is not the raw facade: its words recorded", metrics)
+            return .skip("the default device is not the facade: its words recorded", metrics)
         }
         return .judged(checks, metrics, proof: probe.proof)
     }
@@ -75,7 +75,8 @@ struct PackedPlaneTargetTest: HWTest {
             [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
         guard
             CVPixelBufferCreate(
-                nil, YcbcrTargetTest.width, YcbcrTargetTest.height, view.fourcc, attributes, &made) == kCVReturnSuccess,
+                nil, YcbcrTargetTest.width, YcbcrTargetTest.height, view.fourcc, attributes, &made
+            ) == kCVReturnSuccess,
             let buffer = made, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue(),
             let format = MTLPixelFormat(rawValue: view.format)
         else { return (Found(), "no surface") }
@@ -83,7 +84,8 @@ struct PackedPlaneTargetTest: HWTest {
             CVPixelBufferGetWidthOfPlane(buffer, view.plane), CVPixelBufferGetHeightOfPlane(buffer, view.plane)
         )
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format, width: w, height: h, mipmapped: false)
+            pixelFormat: format, width: w, height: h, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: view.plane) else {
             return (Found(), "no texture")
@@ -104,14 +106,15 @@ struct PackedPlaneTargetTest: HWTest {
         for (index, (state, texels, source)) in passes.enumerated() {
             YcbcrTargetTest.scribble(buffer, seed: UInt8(index))
             try await YcbcrPackedTargetTest.pass(
-                gpu, texture, state, try gpu.buffer(state == nil ? [clear] : values), w)
+                gpu, texture, state, try gpu.buffer(state == nil ? [clear] : values), w
+            )
             codes = texels.flatMap { texel in
-                (0..<view.channels).map { UInt16(YcbcrStore.code(texel[$0], source, max: 1023)) }
+                (0 ..< view.channels).map { UInt16(YcbcrStore.code(texel[$0], source, max: 1023)) }
             }
             found.words += Self.mismatches(buffer, view.plane, codes, rows: h, &found.first)
         }
         let twin = try gpu.texture(.rgb10a2Unorm, w, h, usage: [.shaderRead], storage: .shared)
-        let packed: [UInt32] = (0..<(w * h)).map { i in
+        let packed: [UInt32] = (0 ..< (w * h)).map { i in
             let r = UInt32(codes[view.channels * i]), g = view.channels == 2 ? UInt32(codes[2 * i + 1]) : 0
             return r | g << 10 | 3 << 30
         }
@@ -135,10 +138,10 @@ struct PackedPlaneTargetTest: HWTest {
         let pitch = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane), perRow = codes.count / rows
         var wrong = 0
         var words: [String] = []
-        for y in 0..<rows {
-            for x in 0..<((perRow + 2) / 3) {
+        for y in 0 ..< rows {
+            for x in 0 ..< ((perRow + 2) / 3) {
                 var want: UInt32 = 0
-                for i in 0..<3 where 3 * x + i < perRow {
+                for i in 0 ..< 3 where 3 * x + i < perRow {
                     want |= UInt32(codes[y * perRow + 3 * x + i]) << (10 * i)
                 }
                 let stored = base.loadUnaligned(fromByteOffset: y * pitch + 4 * x, as: UInt32.self)

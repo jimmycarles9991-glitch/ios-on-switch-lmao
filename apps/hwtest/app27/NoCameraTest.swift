@@ -32,13 +32,14 @@ struct NoCameraTest: HWTest {
                 ("it lists no capture device", plist?["AVCaptureDevices"] == nil),
                 ("it states no video effect", plist?["AVCaptureDeviceCommonSettings"] == nil),
                 ("AVFoundation discovers no capture device", devices.isEmpty),
-            ], metrics)
+            ], metrics
+        )
     }
 
     static func cameraModel() -> String? {
         typealias CopyAnswer = @convention(c) (CFString, CFDictionary?) -> Unmanaged<CFTypeRef>?
         guard let library = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW),
-            let symbol = dlsym(library, "MGCopyAnswer")
+              let symbol = dlsym(library, "MGCopyAnswer")
         else { return nil }
         let copy = unsafeBitCast(symbol, to: CopyAnswer.self)
         return copy("HWModelDescriptionForCamera" as CFString, nil)?.takeRetainedValue() as? String

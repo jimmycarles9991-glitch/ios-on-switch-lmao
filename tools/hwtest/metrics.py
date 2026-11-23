@@ -3,8 +3,8 @@
 import re
 import statistics
 
-# Tokens of a metric key (split at '_'): times and losses go down, rates go up. raw_t_ds4, raw_us_<state>,
-# wall_us_<state> and raw_gpu_ms0 are times; fill_gpix_s, copy_gbps and fps are rates.
+# Tokens of a metric key (split at '_'): times and losses go down, rates go up. gm20b_t_ds4, gm20b_us_<state>,
+# wall_us_<state> and gm20b_gpu_ms0 are times; fill_gpix_s, copy_gbps and fps are rates.
 LOWER = re.compile(r'^(?:ms|us|ns|t|latency|missed|dropped|stall|jank|throttle)\d*$')
 HIGHER = re.compile(r'^(?:fps|gflops|gbps|mbps|iops|hz|mhz|gpix|mpix|mops|speedup)\d*$')
 RATE_SUFFIXES = ('_per_s', '_mb_s', '_gb_s')
@@ -39,7 +39,7 @@ def band(previous: float, earlier: list[float]) -> float:
 
 
 def clock_change(entry: dict, other: dict) -> str | None:
-    """Return the *_gpu_clock metric (r104: raw_gpu_clock=ns, m2v_gpu_clock=ptimer) two runs of a test disagree on."""
+    """Return the *_gpu_clock metric (r104: gm20b_gpu_clock=ns, m2v_gpu_clock=ptimer) two runs of a test disagree on."""
     for key in sorted(set(entry.get('metrics', {})) | set(other.get('metrics', {}))):
         if key.endswith('gpu_clock') and entry.get('metrics', {}).get(key) != other.get('metrics', {}).get(key):
             return key

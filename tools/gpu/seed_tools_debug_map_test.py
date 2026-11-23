@@ -1,8 +1,8 @@
 """The shader tools we link carry no debug map.
 
 A debug map (the N_OSO and other stab symbols) names each archive by its path in the link's sandbox or remote worker
-slot, so every relink of an unchanged tool made other bytes, and every seed, native and raw pack bucket keyed on that
-tool ran again with the same output.
+slot, so every relink of an unchanged tool made other bytes, and every native and raw pack bucket keyed on that tool ran
+again with the same output.
 """
 
 import os
@@ -12,11 +12,8 @@ from pathlib import Path
 from tools.common import macho
 
 LINKED = [
-    'precompile',
     'raw/directpack',
-    'raw/probe',
     'raw/native-seed',
-    'raw/compile-profile',
 ]
 
 

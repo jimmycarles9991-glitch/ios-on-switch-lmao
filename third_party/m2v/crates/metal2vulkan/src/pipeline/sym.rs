@@ -324,11 +324,6 @@ pub enum ResourceKind {
     /// `R8_UINT` image of the plane's bytes beside the slot's own image of the color words, which
     /// the function's accesses split each raw texel across and join it from.
     TexturePlane,
-    /// The `half` shadow of extended-range color attachment `n` (`ResourceSlot::index` too) for
-    /// the draw's render pass instance (`VariantKey::extended_shadows`): an `RGBA16_SFLOAT` 2D
-    /// storage image of the attachment's extent holding Metal's tile value of each texel, which
-    /// the function's interlocked storage form reads and writes beside the attachment's codes.
-    ExtendedShadow(u32),
 }
 
 /// What a bound acceleration structure holds: the binder binds a top-level structure, so a
@@ -906,11 +901,6 @@ pub enum PushField {
     /// `[lo, hi]`, which the function clamps its compensated depth's `z / w`, the Vulkan
     /// viewport's normalized depth, to before the interpolation (`CompensatedViewport::vertex_clamp`).
     VertexDepthClamp,
-    /// The render encoder's blend color (`setBlendColorRed:green:blue:alpha:`) for a fragment
-    /// function that blends an extended-range attachment in the shader under a blend that reads
-    /// it: two `uvec4`s holding `f32`s' bits, the color as Metal's blend reads it and one minus
-    /// it (`arith::extended_range::blend_color::constant_words` of `BindState::blend_color`).
-    BlendColor,
     /// The draw's depth state for a fragment function that runs the draw's depth test itself
     /// (`RuntimeFact::ShaderTests`), a `uvec4`: word 0 holds the depth `MTLCompareFunction` in
     /// bits 0 to 2, whether depth writes are enabled in bit 3, and whether the encoder's depth

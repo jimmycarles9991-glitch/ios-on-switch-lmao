@@ -21,7 +21,7 @@ define void @untyped_buffer(ptr addrspace(2) %source, ptr addrspace(1) %target) 
 !3 = !{{i32 0, !"air.buffer", !"air.location_index", i32 0, i32 1, !"air.read", !"air.address_space", i32 2, {layout}!"air.arg_type_name", !"{name}"}}
 !4 = !{{i32 2, i32 8, i32 0}}
 !5 = !{{!"Metal", i32 4, i32 0, i32 0}}
-!6 = !{{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.write", !"air.address_space", i32 1, !"air.arg_type_name", !"void"}}
+!6 = !{{i32 1, !"air.buffer", !"air.location_index", i32 1, i32 1, !"air.read_write", !"air.address_space", i32 1, !"air.arg_type_name", !"void"}}
 "#
     );
     let bytes = llvm_assemble_text(&text).expect("assemble void-buffer AIR");
@@ -31,7 +31,7 @@ define void @untyped_buffer(ptr addrspace(2) %source, ptr addrspace(1) %target) 
         .unwrap()
 }
 
-fn assert_binding(binding: &Binding, index: u32, access: BindingAccess) {
+fn assert_binding(binding: &Binding, index: u32, access: BindingAccess, alignment: u64) {
     assert_eq!(binding.name(), "");
     assert_eq!(binding.index(), index);
     assert_eq!(binding.access(), access);
@@ -39,16 +39,20 @@ fn assert_binding(binding: &Binding, index: u32, access: BindingAccess) {
     let buffer = binding.buffer().unwrap();
     assert_eq!(buffer.buffer_data_type(), DataType::None);
     assert_eq!(buffer.buffer_data_size(), 0);
-    assert_eq!(buffer.buffer_alignment(), 4);
+    assert_eq!(buffer.buffer_alignment(), alignment);
     assert!(buffer.buffer_struct_type().is_none());
     let pointer = buffer.buffer_pointer_type().unwrap();
     assert_eq!(pointer.element_type(), DataType::None);
     assert_eq!(pointer.data_size(), 0);
-    assert_eq!(pointer.alignment(), 4);
+    assert_eq!(pointer.alignment(), alignment);
     assert_eq!(pointer.access(), access);
     assert!(!pointer.element_is_argument_buffer());
 }
 
+// Metal's answers on an M4 Max (macOS 27.2) for this kernel assembled with the Metal toolchain: the
+// constant buffer 0 bytes aligned 4, the device buffer 0 bytes aligned 0, both used, the device one
+// read-write as `device void *` makes it (its `air.write` form, which no Metal compiler emits for a
+// buffer, answers read-only)
 #[test]
 fn generated_void_buffers_match_metal_and_survive_native_artifacts() {
     let f = function("void", "");
@@ -65,8 +69,8 @@ fn generated_void_buffers_match_metal_and_survive_native_artifacts() {
     let saved = native.reflection(&descriptor).unwrap();
     for bindings in [library.bindings(), pipeline.bindings(), saved.bindings()] {
         assert_eq!(bindings.len(), 2);
-        assert_binding(&bindings[0], 0, BindingAccess::ReadOnly);
-        assert_binding(&bindings[1], 1, BindingAccess::WriteOnly);
+        assert_binding(&bindings[0], 0, BindingAccess::ReadOnly, 4);
+        assert_binding(&bindings[1], 1, BindingAccess::ReadWrite, 0);
     }
     assert!(!native.portable_is_materialized());
 }

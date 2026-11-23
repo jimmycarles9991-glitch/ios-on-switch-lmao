@@ -29,7 +29,8 @@ struct MetalDeviceTest: HWTest {
         metrics.set("argument_buffers_tier", Int(device.argumentBuffersSupport.rawValue) + 1)
         metrics.set("rw_texture_tier", Int(device.readWriteTextureSupport.rawValue))
         metrics.set(
-            "msaa", [2, 4, 8].filter { device.supportsTextureSampleCount($0) }.map(String.init).joined(separator: ","))
+            "msaa", [2, 4, 8].filter { device.supportsTextureSampleCount($0) }.map(String.init).joined(separator: ",")
+        )
         metrics.set("bc", device.supportsBCTextureCompression)
         metrics.set("float32_filtering", device.supports32BitFloatFiltering)
         metrics.set("unified", device.hasUnifiedMemory)
@@ -39,7 +40,8 @@ struct MetalDeviceTest: HWTest {
                 ("a non-empty name", !device.name.isEmpty),
                 ("recommendedMaxWorkingSetSize", device.recommendedMaxWorkingSetSize > 0),
                 ("4x MSAA", device.supportsTextureSampleCount(4)),
-            ], metrics, proof: "\(device.name) registry=\(String(device.registryID, radix: 16))")
+            ], metrics, proof: "\(device.name) registry=\(String(device.registryID, radix: 16))"
+        )
     }
 }
 
@@ -51,8 +53,8 @@ struct MetalComputeTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         let count = 1 << 20
-        let a = (0..<count).map { Float($0 % 977) * 0.5 }
-        let b = (0..<count).map { Float($0 % 13) - 6 }
+        let a = (0 ..< count).map { Float($0 % 977) * 0.5 }
+        let b = (0 ..< count).map { Float($0 % 13) - 6 }
         let out = try gpu.buffer(count * 4)
         let counter = try gpu.buffer([UInt32(0)])
         let pipeline = try gpu.compute("multiply_add")
@@ -66,12 +68,14 @@ struct MetalComputeTest: HWTest {
             encoder.dispatchThreads(
                 MTLSize(width: count, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(
-                    width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1
+                )
+            )
             encoder.endEncoding()
         }
         let results = out.contents().bindMemory(to: Float.self, capacity: count)
         // Every product and sum is a small multiple of 0.5, exact in float32, so fma and a*b+c agree bit for bit.
-        let wrong = (0..<count).filter { results[$0] != a[$0] * b[$0] + Float($0 & 1023) }
+        let wrong = (0 ..< count).filter { results[$0] != a[$0] * b[$0] + Float($0 & 1023) }
         let atomics = counter.contents().load(as: UInt32.self)
         var metrics = Metrics()
         metrics.set("elements", count)
@@ -94,12 +98,12 @@ struct MetalRuntimeCompileTest: HWTest {
     let subsystem = Subsystem.metal
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        kernel void square(device uint *data [[buffer(0)]], uint id [[thread_position_in_grid]]) {
-            data[id] = id * id + 7;
-        }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void square(device uint *data [[buffer(0)]], uint id [[thread_position_in_grid]]) {
+        data[id] = id * id + 7;
+    }
+    """
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
@@ -118,11 +122,12 @@ struct MetalRuntimeCompileTest: HWTest {
             encoder.setBuffer(data, offset: 0, index: 0)
             encoder.dispatchThreads(
                 MTLSize(width: count, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }
         let values = data.contents().bindMemory(to: UInt32.self, capacity: count)
-        let wrong = (0..<count).filter { values[$0] != UInt32($0 * $0 + 7) }.count
+        let wrong = (0 ..< count).filter { values[$0] != UInt32($0 * $0 + 7) }.count
         var metrics = Metrics()
         metrics.set("compile_ms", compileMs, digits: 1)
         metrics.set("wrong", wrong)
@@ -141,7 +146,7 @@ struct MetalBenchmarkTest: HWTest {
 
         let threads = 1 << 18
         var iterations: UInt32 = 512
-        let data = try gpu.buffer((0..<threads * 4).map { Float($0 % 7) * 0.001 })
+        let data = try gpu.buffer((0 ..< threads * 4).map { Float($0 % 7) * 0.001 })
         let fma = try gpu.compute("fma_loop")
         let alu = try await gpu.run { commands in
             let encoder = commands.makeComputeCommandEncoder()!
@@ -150,7 +155,8 @@ struct MetalBenchmarkTest: HWTest {
             encoder.setBytes(&iterations, length: 4, index: 1)
             encoder.dispatchThreads(
                 MTLSize(width: threads, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }
         // Two float4 FMAs per iteration: 16 floating-point operations.
@@ -177,13 +183,14 @@ struct MetalBenchmarkTest: HWTest {
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(solid)
-            for index in 0..<draws {
+            for index in 0 ..< draws {
                 GPU.draw(encoder, corners: GPU.fullScreen, color: SIMD4(Float(index) / Float(draws), 0.5, 0.25, 1))
             }
             encoder.endEncoding()
         }
         metrics.set(
-            "fill_gpix_s", fill.gpuTimed ? Double(width * height * draws) / fill.gpuMilliseconds / 1e6 : 0, digits: 2)
+            "fill_gpix_s", fill.gpuTimed ? Double(width * height * draws) / fill.gpuMilliseconds / 1e6 : 0, digits: 2
+        )
         metrics.set("alu_ms", alu.gpuMilliseconds, digits: 2)
         metrics.set("copy_ms", copy.gpuMilliseconds, digits: 2)
         metrics.set("fill_ms", fill.gpuMilliseconds, digits: 2)

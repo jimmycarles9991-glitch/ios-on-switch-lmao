@@ -2,7 +2,7 @@
 // NIL's block-linear layout of an IOSurface's image (TegraGM20BLayout.h) lowered to fit the surface's allocation, the way
 // NIL's Tiling::choose lowers y_log2 one GOB power at a time under max_tile_size_B (nil/tiling.rs). NIL picks blocks by
 // height alone: a 1280x720 BGRA surface of 3,686,400 bytes would need 128-row blocks padded to 768 rows (3,932,160 bytes);
-// 16-row blocks lie in its 720 rows exactly. Kept out of TegraGM20BLayout.h, which the raw stack key hashes.
+// 16-row blocks lie in its 720 rows exactly. Kept out of TegraGM20BLayout.h, which the stack key hashes.
 #pragma once
 #include "TegraGM20BLayout.h"
 

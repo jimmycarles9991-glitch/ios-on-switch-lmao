@@ -2,8 +2,8 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// The answers the raw device gives above its identity, per build, as drivers/TegraGM20BMetal/raw/runtime/
-/// raw_device_answers.h holds them (GM20B's counts from kits/SwitchGM20B caps): a test reads the device's answer, logs it
+/// The answers the device gives above its identity, per build, as drivers/TegraGM20BMetal/
+/// device_answers.h holds them (GM20B's counts from kits/SwitchGM20B caps): a test reads the device's answer, logs it
 /// and fails where it is not this table's.
 enum NativeAnswers {
     static var ios17: Bool { ProcessInfo.processInfo.operatingSystemVersion.majorVersion < 27 }
@@ -35,7 +35,7 @@ enum NativeAnswers {
 
     /// The largest count supportsVertexAmplificationCount: answers YES for, up to 16
     static func largestAmplification(_ device: MTLDevice) -> Int {
-        (1...16).last(where: device.supportsVertexAmplificationCount) ?? 0
+        (1 ... 16).last(where: device.supportsVertexAmplificationCount) ?? 0
     }
 
     /// Logs `selector`'s answer as `field` and gives a failure where it is not `want`

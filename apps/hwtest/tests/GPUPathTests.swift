@@ -57,7 +57,7 @@ struct GPUPaths {
 
 /// The parts of a GPUPathTest's workload that could not run here, each with why and the counters only it would have
 /// taken: exercise() reports them through `current`, and run() leaves those counters out of its "no X while it ran".
-/// A part that could not run because of the raw path's own failing fails the test.
+/// A part that could not run because of the driver's own failing fails the test.
 final class PathParts: @unchecked Sendable {
     @TaskLocal static var current: PathParts?
     private(set) var skipped: [(why: String, counters: [String])] = []
@@ -70,31 +70,31 @@ final class PathParts: @unchecked Sendable {
     }
 
     /// The route HW Test's own command buffers take, from a blit fill through the test's queue that the path tally
-    /// leaves out: a promise test whose maker or reader is this process's own Metal work runs its part only on "raw".
+    /// leaves out: a promise test whose maker or reader is this process's own Metal work runs its part only on "gm20b".
     static func ownRoute(_ gpu: GPU) -> String {
         guard let buffer = gpu.device.makeBuffer(length: 256, options: .storageModeShared),
-            let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder()
+              let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder()
         else { return "none" }
-        blit.fill(buffer: buffer, range: 0..<256, value: 0x5a)
+        blit.fill(buffer: buffer, range: 0 ..< 256, value: 0x5a)
         blit.endEncoding()
         commands.commit()
         commands.waitUntilCompleted()
-        return RawFacade.path(of: commands)
+        return GM20BFacade.path(of: commands)
     }
 
-    /// Whether this process's own command buffers take the raw path; when not, the part does not run and the test fails
+    /// Whether this process's own command buffers take the driver; when not, the part does not run and the test fails
     /// with the route.
     static func ownRouteRaw(_ gpu: GPU, part: String, counters: [String], _ metrics: inout Metrics) -> Bool {
         let route = ownRoute(gpu)
         metrics.set("own_route", route)
-        if route == "raw" { return true }
+        if route == "gm20b" { return true }
         current?.fail("\(part): HW Test's own command buffers go \(route)", counters: counters)
         return false
     }
 }
 
-/// One GM20B kernel path behind a capability bit, on the raw facade: the kernel advertises the bit, a workload that
-/// needs the path gives the right bytes with every command buffer on the raw path, and the kernel counted the path for
+/// One GM20B kernel path behind a capability bit, on the facade: the kernel advertises the bit, a workload that
+/// needs the path gives the right bytes with every command buffer on the driver, and the kernel counted the path for
 /// this process while it ran.
 protocol GPUPathTest: HWTest {
     /// The capability bit that still gates the path, if any
@@ -110,8 +110,8 @@ extension GPUPathTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         let connection = GPUConnection()
         var metrics = Metrics()
@@ -145,7 +145,7 @@ extension GPUPathTest {
             if taken <= 0 && !skippedCounters.contains(counter) { failures.append("no \(counter) while it ran") }
         }
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
-        if gpu.paths.paths.keys.contains(where: { $0 != "raw" }) {
+        if gpu.paths.paths.keys.contains(where: { $0 != "gm20b" }) {
             failures.append("command buffers went \(gpu.paths.text)")
         }
         if !failures.isEmpty { return .fail(failures.joined(separator: "; "), metrics, proof: gpu.proof) }
@@ -192,13 +192,13 @@ struct LeanCopyPathTest: GPUPathTest {
     func exercise(_ gpu: GPU, _: TestContext, _ metrics: inout Metrics) async throws -> [String] {
         let width = 160, height = 48, row = width * 4
         let texture = try gpu.texture(.rgba8Unorm, width, height, usage: [.shaderRead], storage: .shared)
-        let pattern = (0..<(row * height)).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) }
+        let pattern = (0 ..< (row * height)).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) }
         let region = MTLRegionMake2D(0, 0, width, height)
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         texture.replace(region: region, mipmapLevel: 0, withBytes: pattern, bytesPerRow: row)
         var back = [UInt8](repeating: 0, count: pattern.count)
         texture.getBytes(&back, bytesPerRow: row, from: region, mipmapLevel: 0)
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         let uploads = (after["texture_uploads"] ?? 0) - (before["texture_uploads"] ?? 0)
         let readbacks = (after["texture_readbacks"] ?? 0) - (before["texture_readbacks"] ?? 0)
         let wrong = Self.wrong(back, pattern)
@@ -233,8 +233,8 @@ struct ControlReservePathTest: GPUPathTest {
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(pipeline)
             var payload = [Float](repeating: 0, count: Self.bytesPerDraw / 4)
-            for y in 0..<height {
-                for x in 0..<width {
+            for y in 0 ..< height {
+                for x in 0 ..< width {
                     let value = UInt8((x * 3 + y * 29) & 0xff)
                     payload[0] = Float(value) / 255
                     payload[1] = Float(255 - value) / 255
@@ -245,7 +245,7 @@ struct ControlReservePathTest: GPUPathTest {
                     encoder.setFragmentBytes(&payload, length: Self.bytesPerDraw, index: 0)
                     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     let at = (y * width + x) * 4
-                    want[at..<(at + 4)] = [value, 255 - value, UInt8(y), 255]
+                    want[at ..< (at + 4)] = [value, 255 - value, UInt8(y), 255]
                 }
             }
             encoder.endEncoding()
@@ -274,19 +274,20 @@ struct CpuCompletePathTest: GPUPathTest {
         guard
             let buffer = gpu.device.makeBuffer(
                 bytesNoCopy: memory, length: length, options: .storageModeShared,
-                deallocator: { pointer, _ in free(pointer) })
+                deallocator: { pointer, _ in free(pointer) }
+            )
         else {
             free(memory)
             throw TestFailure("no-copy buffer creation failed")
         }
-        let range = 100..<(length - 300)
+        let range = 100 ..< (length - 300)
         try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.fill(buffer: buffer, range: range, value: 0x6b)
             blit.endEncoding()
         }
         var wrong = 0
-        for offset in 0..<length {
+        for offset in 0 ..< length {
             let want: UInt8 = range.contains(offset) ? 0x6b : 0x11
             if memory.load(fromByteOffset: offset, as: UInt8.self) != want { wrong += 1 }
         }
@@ -304,7 +305,7 @@ struct UseRangesPathTest: GPUPathTest {
 
     func exercise(_ gpu: GPU, _: TestContext, _ metrics: inout Metrics) async throws -> [String] {
         let length = 768
-        let buffers = try (0..<8).map { _ in try gpu.buffer(length) }
+        let buffers = try (0 ..< 8).map { _ in try gpu.buffer(length) }
         for (index, buffer) in buffers.enumerated() {
             buffer.contents().initializeMemory(as: UInt8.self, repeating: UInt8(index), count: length)
         }
@@ -313,11 +314,13 @@ struct UseRangesPathTest: GPUPathTest {
             committed.append(
                 try gpu.commit { commands in
                     let blit = commands.makeBlitCommandEncoder()!
-                    blit.fill(buffer: buffer, range: 0..<length, value: UInt8(0x80 | index))
+                    blit.fill(buffer: buffer, range: 0 ..< length, value: UInt8(0x80 | index))
                     blit.endEncoding()
-                })
+                }
+            )
             buffers[index + 1].contents().initializeMemory(
-                as: UInt8.self, repeating: UInt8(0x40 | index), count: length)
+                as: UInt8.self, repeating: UInt8(0x40 | index), count: length
+            )
         }
         try gpu.finish(committed)
         var wrong = 0
@@ -345,24 +348,41 @@ struct NativeSurfaceViewPathTest: GPUPathTest {
 
     static let nv12 = NativeSurfaceViewPathTest(
         id: "gpu.path.native_surface_view",
-        name: "Draws sample a decoded picture where the decoder put it, matching its CPU rows", codec: .h264)
+        name: "Draws sample a decoded picture where the decoder put it, matching its CPU rows", codec: .h264
+    )
     static let p010 = NativeSurfaceViewPathTest(
         id: "gpu.path.native_surface_view_p010",
         name:
-            "Draws sample a decoded Main 10 picture's 16-bit planes where the decoder put them, matching its CPU rows",
-        codec: .hevc10)
+        "Draws sample a decoded Main 10 picture's 16-bit planes where the decoder put them, matching its CPU rows",
+        codec: .hevc10
+    )
 
     func exercise(_ gpu: GPU, _ context: TestContext, _ metrics: inout Metrics) async throws -> [String] {
         guard let clip = Clip.all.first(where: { $0.codec == codec && $0.height == 720 }) else {
             throw TestFailure("no 720p \(codec) clip")
         }
         let frame = try Self.decodeFirst(try await Demux.load(clip, from: context.media), clip)
-        let sampleBytes = codec.bitDepth > 8 ? 2 : 1
-        let scale = sampleBytes == 2 ? 65535.0 : 255.0
         var made: CVMetalTextureCache?
         guard CVMetalTextureCacheCreate(nil, nil, gpu.device, nil, &made) == kCVReturnSuccess, let cache = made else {
             throw TestFailure("CVMetalTextureCacheCreate failed")
         }
+        let wrong = try await Self.planesWrong(frame, through: cache, gpu, bitDepth: codec.bitDepth)
+        var failures: [String] = []
+        for (plane, count) in wrong.enumerated() {
+            metrics.set("plane\(plane)_wrong_bytes", count)
+            if count != 0 { failures.append("plane \(plane): \(count) bytes differ from the CPU's rows") }
+        }
+        metrics.set("textures", wrong.count)
+        return failures
+    }
+
+    /// Per plane, the bytes a compute kernel samples from `frame` through `cache` that differ from its CPU rows; the GPU
+    /// reads both planes before the CPU's lock
+    static func planesWrong(
+        _ frame: CVPixelBuffer, through cache: CVMetalTextureCache, _ gpu: GPU, bitDepth: Int
+    ) async throws -> [Int] {
+        let sampleBytes = bitDepth > 8 ? 2 : 1
+        let scale = sampleBytes == 2 ? 65535.0 : 255.0
         let planes: [(format: MTLPixelFormat, channels: Int)] =
             sampleBytes == 2 ? [(.r16Unorm, 1), (.rg16Unorm, 2)] : [(.r8Unorm, 1), (.rg8Unorm, 2)]
         var sampled: [[UInt8]] = []
@@ -372,28 +392,24 @@ struct NativeSurfaceViewPathTest: GPUPathTest {
             guard
                 CVMetalTextureCacheCreateTextureFromImage(
                     nil, cache, frame, nil, shape.format, CVPixelBufferGetWidthOfPlane(frame, plane),
-                    CVPixelBufferGetHeightOfPlane(frame, plane), plane, &texture) == kCVReturnSuccess,
+                    CVPixelBufferGetHeightOfPlane(frame, plane), plane, &texture
+                ) == kCVReturnSuccess,
                 let texture, let metal = CVMetalTextureGetTexture(texture)
             else { throw TestFailure("no Metal texture of plane \(plane)") }
             held.append(texture)
             let texels = try await gpu.texels(metal)
             sampled.append(
                 texels.flatMap { texel in
-                    (0..<shape.channels).flatMap { channel -> [UInt8] in
+                    (0 ..< shape.channels).flatMap { channel -> [UInt8] in
                         let value = UInt16((Double(texel[channel]) * scale).rounded())
                         return sampleBytes == 2 ? [UInt8(value & 0xff), UInt8(value >> 8)] : [UInt8(value)]
                     }
-                })
+                }
+            )
         }
-        var failures: [String] = []
-        for (plane, shape) in planes.enumerated() {
-            let wrong = Self.wrong(
-                sampled[plane], Self.rows(frame, plane: plane, bytesPerPixel: shape.channels * sampleBytes))
-            metrics.set("plane\(plane)_wrong_bytes", wrong)
-            if wrong != 0 { failures.append("plane \(plane): \(wrong) bytes differ from the CPU's rows") }
+        return planes.enumerated().map { plane, shape in
+            wrong(sampled[plane], rows(frame, plane: plane, bytesPerPixel: shape.channels * sampleBytes))
         }
-        metrics.set("textures", held.count)
-        return failures
     }
 
     final class Decoded: @unchecked Sendable {
@@ -403,14 +419,16 @@ struct NativeSurfaceViewPathTest: GPUPathTest {
 
     static func decodeFirst(_ demuxed: Demuxed, _ clip: Clip) throws -> CVPixelBuffer {
         let specification: [CFString: Any] = [
-            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true
+            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder: true,
         ]
         let destination = PatternPixels.attributes(
-            width: clip.width, height: clip.height, format: PatternPixels.format(bitDepth: clip.codec.bitDepth))
+            width: clip.width, height: clip.height, format: PatternPixels.format(bitDepth: clip.codec.bitDepth)
+        )
         var made: VTDecompressionSession?
         let created = VTDecompressionSessionCreate(
             allocator: nil, formatDescription: demuxed.format, decoderSpecification: specification as CFDictionary,
-            imageBufferAttributes: destination as CFDictionary, outputCallback: nil, decompressionSessionOut: &made)
+            imageBufferAttributes: destination as CFDictionary, outputCallback: nil, decompressionSessionOut: &made
+        )
         guard created == noErr, let session = made, let first = demuxed.samples.first else {
             throw TestFailure("VTDecompressionSessionCreate \(created)")
         }
@@ -435,7 +453,7 @@ struct NativeSurfaceViewPathTest: GPUPathTest {
         guard let base = CVPixelBufferGetBaseAddressOfPlane(frame, plane) else { return [] }
         let stride = CVPixelBufferGetBytesPerRowOfPlane(frame, plane)
         let rowBytes = CVPixelBufferGetWidthOfPlane(frame, plane) * bytesPerPixel
-        return (0..<CVPixelBufferGetHeightOfPlane(frame, plane)).flatMap { y in
+        return (0 ..< CVPixelBufferGetHeightOfPlane(frame, plane)).flatMap { y in
             [UInt8](UnsafeRawBufferPointer(start: base + y * stride, count: rowBytes))
         }
     }
@@ -452,20 +470,22 @@ struct SemanticFencePathTest: GPUPathTest {
 
     func exercise(_ gpu: GPU, _: TestContext, _ metrics: inout Metrics) async throws -> [String] {
         let buffer = try gpu.buffer(Self.count * Self.slice)
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         var committed: [MTLCommandBuffer] = []
-        for index in 0..<Self.count {
+        for index in 0 ..< Self.count {
             committed.append(
                 try gpu.commit { commands in
                     let blit = commands.makeBlitCommandEncoder()!
                     blit.fill(
-                        buffer: buffer, range: (index * Self.slice)..<((index + 1) * Self.slice),
-                        value: UInt8(index + 1))
+                        buffer: buffer, range: (index * Self.slice) ..< ((index + 1) * Self.slice),
+                        value: UInt8(index + 1)
+                    )
                     blit.endEncoding()
-                })
+                }
+            )
         }
         try gpu.finish(committed)
-        let reopens = (RawFacade.counters(of: gpu.device)["reopens"] ?? 0) - (before["reopens"] ?? 0)
+        let reopens = (GM20BFacade.counters(of: gpu.device)["reopens"] ?? 0) - (before["reopens"] ?? 0)
         let bytes = UnsafeRawBufferPointer(start: buffer.contents(), count: Self.count * Self.slice)
         var wrong = 0
         for (offset, byte) in bytes.enumerated() where byte != UInt8(offset / Self.slice + 1) {
@@ -490,7 +510,7 @@ struct SharedEventsPathTest: GPUPathTest {
 
     func exercise(_ gpu: GPU, _: TestContext, _ metrics: inout Metrics) async throws -> [String] {
         guard let event = gpu.device.makeSharedEvent(), let other = gpu.device.makeCommandQueue(),
-            let waiter = other.makeCommandBuffer()
+              let waiter = other.makeCommandBuffer()
         else { throw TestFailure("no shared event or second queue") }
         let length = 4096
         let source = try gpu.buffer(length), target = try gpu.buffer(length)
@@ -501,16 +521,16 @@ struct SharedEventsPathTest: GPUPathTest {
         waiter.commit()
         let producer = try gpu.commit { commands in
             let fill = commands.makeBlitCommandEncoder()!
-            fill.fill(buffer: source, range: 0..<length, value: 0x3c)
+            fill.fill(buffer: source, range: 0 ..< length, value: 0x3c)
             fill.endEncoding()
             commands.encodeSignalEvent(event, value: 1)
         }
         try gpu.finish([producer])
         waiter.waitUntilCompleted()
         var failures: [String] = []
-        let waiterPath = RawFacade.path(of: waiter)
+        let waiterPath = GM20BFacade.path(of: waiter)
         metrics.set("waiter_path", waiterPath)
-        if waiterPath != "raw" && waiterPath != "device" {
+        if waiterPath != "gm20b" && waiterPath != "device" {
             failures.append("the waiting command buffer went \(waiterPath)")
         }
         if waiter.status != .completed { failures.append("the waiting command buffer ended \(waiter.status.rawValue)") }
@@ -541,7 +561,8 @@ struct ResourceReadyPathTest: GPUPathTest {
         ]
         guard let surface = IOSurface(properties: properties) else { throw TestFailure("IOSurface creation failed") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {
             throw TestFailure("no texture over the IOSurface")
@@ -571,9 +592,9 @@ struct ResourceReadyPathTest: GPUPathTest {
             throw TestFailure("IOSurfaceLock for the readback failed")
         }
         var wrong = 0
-        for y in 0..<height {
+        for y in 0 ..< height {
             let row = UnsafeRawBufferPointer(start: surface.baseAddress + y * rowBytes, count: width * 4)
-            for x in 0..<width where Array(row[(x * 4)..<(x * 4 + 4)]) != [0, 255, 0, 255] { wrong += 1 }
+            for x in 0 ..< width where Array(row[(x * 4) ..< (x * 4 + 4)]) != [0, 255, 0, 255] { wrong += 1 }
         }
         surface.unlock(options: .readOnly, seed: nil)
         metrics.set("wrong_pixels", wrong)
@@ -593,10 +614,11 @@ enum GPUPathTests {
         QuietJobsPathTest(), PresentPromisePathTest(), PromiseCancelPathTest(), StateSegmentsPathTest(),
         EncodeCostPathTest(), PromiseVICPathTest(), PromiseUnkeptPathTest(), PromiseReleaseOrderPathTest(),
         SetSurvivesTrimPathTest(), SurfaceLocksSideBySideTest.blockLinear, SurfaceLocksSideBySideTest.pitchLinear,
-        ImportBesideSubmitsTest(), CommitLatencyPathTest(), FreshSurfaceImportPathTest(),
+        ImportBesideSubmitsTest(), TransferBesideReadbackTest(), CommitLatencyPathTest(), AheadMovesTest(),
+        FreshSurfaceImportPathTest(), NativeSurfaceRepublishedPathTest(), HolderTimeoutPathTest(),
     ]
 }
 
 extension Array {
-    fileprivate func repeated(_ times: Int) -> [Element] { (0..<times).flatMap { _ in self } }
+    fileprivate func repeated(_ times: Int) -> [Element] { (0 ..< times).flatMap { _ in self } }
 }

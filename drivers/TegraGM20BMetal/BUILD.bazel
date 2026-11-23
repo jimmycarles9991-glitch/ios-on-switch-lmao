@@ -10,12 +10,18 @@ load("//kits/SwitchGM20BEmit:defs.bzl", "EMIT_SOURCES")
 
 package(default_visibility = ["//visibility:public"])
 
-# raw/pack/mesa is Mesa's code, kept as upstream has it; srgb_knots.h is m2v's SRGB_KNOTS table and srgb_encode.h its
-# inverse (raw_ycbcr_converted_store_test holds it to the rule), generated.
+# pack/mesa is Mesa's code, kept as upstream has it; srgb_knots.h is m2v's SRGB_KNOTS table and srgb_encode.h its
+# inverse (ycbcr_converted_store_test holds it to the rule), generated; xr_srgb_decode.h and xr_srgb_encode.h are m2v's
+# BGR10_XR_sRGB tables (metal/format/extended_srgb.rs), copied. plugin/TwoPlaneStandIn.h is generated (TwoPlaneStandIn.sh
+# from TwoPlaneStandIn.metal). fill_texel_tables.h is the fill codes an Apple M4 wrote, as measured.
 lint_files(exclude = [
-    "raw/pack/mesa/**",
-    "raw/pack/srgb_encode.h",
-    "raw/pack/srgb_knots.h",
+    "fill_texel_tables.h",
+    "plugin/TwoPlaneStandIn.h",
+    "pack/mesa/**",
+    "pack/srgb_encode.h",
+    "pack/srgb_knots.h",
+    "pack/xr_srgb_decode.h",
+    "pack/xr_srgb_encode.h",
 ])
 
 exports_files(glob(
@@ -23,145 +29,156 @@ exports_files(glob(
     exclude = ["BUILD.bazel"],
 ))
 
-# The raw GM20B path: its runtime (compiled into the plugin), its pack generator, and the sources its stack key hashes
-# (raw_stack_sources).
+# The driver: its runtime (compiled into the plugin), its pack generator, and the sources its stack key hashes
+# (stack_key_sources).
 filegroup(
-    name = "raw_runtime_headers",
+    name = "gm20b_runtime_headers",
     srcs = glob([
-        "raw/runtime/*.h",
-        "raw/fx/*.h",
+        "*.h",
+        "fx/*.h",
     ]) + [
         "translate/NativeMetalTranslate.h",
-        "raw/pack/probe_bind.h",  # the probe's bind offsets, which name a record's residual words (raw_record.h)
-        "raw/pack/srgb_encode.h",  # the sRGB YCbCr store states' table, the device's copy of it (Device::srgbEncode_)
-        "//drivers/NativeMetal/abi:MetalABI.h",
-        "//drivers/TegraGM20BMetal/precompile/ca-selectors:raw_ca_selector_layout.h",
+        "pack/probe_bind.h",  # the probe's bind offsets, which name a record's residual words (record.h)
+        "pack/srgb_encode.h",  # the sRGB YCbCr store states' table, the device's copy of it (Device::srgbEncode_)
+        "pack/xr_srgb_decode.h",  # BGR10_XR_sRGB's tables, which xr_srgb.h's model reads
+        "pack/xr_srgb_encode.h",
+        "//drivers/TegraGM20BMetal/abi:MetalABI.h",
+        "//drivers/TegraGM20BMetal/precompile/ca-selectors:ca_selector_layout.h",
     ],
 )
 
-# The raw path's translation crate's Rust (//gpu:translate), which the stack key hashes by bytes
+# The plugin's own headers, which the plugin's units, the compiler daemon's and the runtime's include by name
+filegroup(
+    name = "plugin_headers",
+    srcs = glob(["plugin/*.h"]),
+)
+
+# The driver's translation crate's Rust (//gpu:translate), which the stack key hashes by bytes
 filegroup(
     name = "translate_rust",
     srcs = glob(["translate/*.rs"]),
 )
 
-# The raw facade's Objective-C++ units (RawMetal.mm and the RawMetal*.mm beside it, RawAlias.mm, RawComplete.mm, RawDirect.mm)
+# The facade's Objective-C++ units (TegraGM20BMetal.mm and the TegraGM20BMetal*.mm beside it, GM20BAlias.mm, TegraGM20BMetalComplete.mm, TegraGM20BMetalDirect.mm)
 filegroup(
-    name = "raw_facade_srcs",
-    srcs = glob(["raw/runtime/Raw*.mm"]) + ["raw/runtime/SwitchSharedEvent.mm"],
+    name = "facade_srcs",
+    srcs = glob(
+        ["TegraGM20BMetal*.mm"],
+        exclude = ["TegraGM20BMetalPlugin.mm"],
+    ) + ["SwitchSharedEvent.mm"],
 )
 
-# Not a hand run's leftovers: a .pyc of the modules (the host Python's) in a checkout would change the raw pack's action key
+# Not a hand run's leftovers: a .pyc of the modules (the host Python's) in a checkout would change the pack's action key
 # there and nowhere else, so that checkout's pack never hits the disk cache another checkout filled, and the other way round.
 filegroup(
-    name = "raw_pack_generator",
+    name = "pack_generator",
     srcs = glob(
-        ["raw/pack/**"],
+        ["pack/**"],
         exclude = [
             "**/__pycache__/**",
             "**/*.pyc",
             "**/.DS_Store",
         ],
     ) + [
-        "raw/runtime/raw_owned.h",  # the methods the raw path owns (pack/mkpack.py reads them)
+        "owned.h",  # the methods the driver owns (pack/mkpack.py reads them)
         "//kits/SwitchGM20B:class_headers",  # pack/nvdec.cpp's method numbers
-        "raw/runtime/raw_srgb_table.h",  # the colour table pack/layouts.py recognises
-        "raw/runtime/raw_chip_facts.h",  # the chip facts pack/packfile.py writes into a pack's header
-        "raw/runtime/raw_own_states.h",
+        "srgb_table.h",  # the colour table pack/layouts.py recognises
+        "chip_facts.h",  # the chip facts pack/packfile.py writes into a pack's header
+        "own_states.h",
         # a kernel's key (pack/kernel_shapes.h)
-        "raw/runtime/raw_compute_key.h",
-        "raw/runtime/raw_metallib.cpp",
-        "raw/runtime/raw_metallib.h",
-        "raw/runtime/raw_pack.h",
-        "raw/runtime/raw_pack_selectors.h",
-        "raw/runtime/raw_set_entries.h",
-        "raw/runtime/RawPipelineKey.h",  # the runtime's key of a state, which probe_states.h files records under
-        "raw/runtime/raw_pipeline_fields.h",  # the descriptor fields that key reads
+        "compute_key.h",
+        "metallib.cpp",
+        "metallib.h",
+        "pack.h",
+        "pack_selectors.h",
+        "set_entries.h",
+        "TegraGM20BMetalPipelineKey.h",  # the runtime's key of a state, which probe_states.h files records under
+        "pipeline_fields.h",  # the descriptor fields that key reads
     ],
 )
 
-# The raw runtime's sources the pack generator's directpack.mm and native_seed.mm make records with (raw/pack/rawpack.py
+# The runtime's sources the pack generator's directpack.mm and native_seed.mm make records with (pack/make_pack.py
 # DIRECT_RUNTIME), as the plugin makes its own
 filegroup(
-    name = "raw_direct_sources",
+    name = "direct_sources",
     srcs = [
-        "precompile/PrecompileCompute.h",
         "precompile/PrecompileInputs.h",
-        "raw/runtime/RawDirect.h",
-        "raw/runtime/RawDirect.mm",
-        "raw/runtime/RawOffline.h",
-        "raw/runtime/RawOffline.mm",
-        "raw/runtime/RawOfflineReflection.mm",
-        "raw/runtime/RawRenderKey.h",
-        "raw/runtime/RawRenderKey.mm",
-        "raw/runtime/RawPipelineKey.h",
-        "raw/runtime/raw_pipeline_fields.h",
-        "raw/runtime/raw_render_key.h",
-        "raw/runtime/raw_cache.cpp",
-        "raw/runtime/raw_cache.h",
-        "raw/runtime/raw_cache_io.h",
-        "raw/runtime/raw_cbuf.h",
-        "raw/runtime/raw_kernel_cache.cpp",
-        "raw/runtime/raw_compute_key.h",
-        "raw/runtime/raw_compute_record.h",
-        "raw/runtime/raw_chip_facts.h",
-        "raw/runtime/raw_own_states.h",
-        "raw/runtime/raw_cubic.h",
-        "raw/runtime/raw_descriptors.h",
-        "raw/runtime/raw_direct.cpp",
-        "raw/runtime/raw_direct.h",
-        "raw/runtime/raw_direct_abi.h",
+        "TegraGM20BMetalDirect.h",
+        "TegraGM20BMetalDirect.mm",
+        "TegraGM20BMetalOffline.h",
+        "TegraGM20BMetalOffline.mm",
+        "TegraGM20BMetalOfflineReflection.mm",
+        "TegraGM20BMetalRenderKey.h",
+        "TegraGM20BMetalRenderKey.mm",
+        "TegraGM20BMetalPipelineKey.h",
+        "pipeline_fields.h",
+        "render_key.h",
+        "gm20b_cache.cpp",
+        "gm20b_cache.h",
+        "cache_io.h",
+        "cbuf.h",
+        "kernel_cache.cpp",
+        "compute_key.h",
+        "compute_record.h",
+        "chip_facts.h",
+        "own_states.h",
+        "cubic.h",
+        "descriptors.h",
+        "direct.cpp",
+        "direct.h",
+        "direct_abi.h",
         "translate/NativeMetalTranslate.h",
-        "raw/runtime/raw_direct_compute.cpp",
-        "raw/runtime/raw_direct_compute.h",
-        "raw/runtime/raw_direct_encode.h",
-        "raw/runtime/raw_direct_heap.h",
-        "raw/runtime/raw_direct_nvk.h",
-        "raw/runtime/raw_direct_push.h",
-        "raw/runtime/raw_kernel_pairs.h",
-        "raw/runtime/raw_dynamic_push.h",
-        "raw/runtime/raw_spill_table.h",
-        "raw/runtime/raw_direct_storage.h",
-        "raw/runtime/raw_storage.h",
-        "raw/runtime/raw_split_metadata.h",
-        "raw/runtime/raw_emit.cpp",
-        "raw/runtime/raw_emit.h",
-        "raw/runtime/raw_metallib.cpp",
-        "raw/runtime/raw_metallib.h",
-        "raw/runtime/raw_nak_target.h",
-        "raw/runtime/raw_owned.h",
-        "raw/runtime/raw_program_pages.h",
-        "raw/runtime/raw_sample_shading.h",
-        "raw/runtime/raw_pack.cpp",
-        "raw/runtime/raw_pack.h",
-        "raw/runtime/raw_pack_selectors.h",
-        "raw/runtime/raw_push.h",
-        "raw/runtime/raw_record.h",
-        "raw/runtime/raw_record_parts.cpp",
-        "raw/runtime/raw_record_parts.h",
-        "raw/runtime/raw_residual.h",
-        "raw/runtime/raw_rotation.h",
-        "raw/runtime/raw_selector_variants.h",
-        "raw/runtime/raw_set_entries.h",
-        "raw/runtime/raw_set_layout.h",
-        "raw/runtime/raw_slot_mask.h",
-        "raw/runtime/raw_stage_textures.h",
-        "raw/runtime/raw_set_reads.h",
-        "raw/runtime/raw_written_textures.h",
-        "raw/runtime/raw_xr.h",
-        "raw/runtime/raw_xr_pass.h",
-        "raw/runtime/raw_zeta.h",  # the formats directpack.mm's test classes reach
+        "direct_compute.cpp",
+        "direct_compute.h",
+        "direct_encode.h",
+        "direct_heap.h",
+        "direct_nvk.h",
+        "direct_push.h",
+        "kernel_pairs.h",
+        "dynamic_push.h",
+        "spill_table.h",
+        "direct_storage.h",
+        "storage.h",
+        "split_metadata.h",
+        "emit.cpp",
+        "emit.h",
+        "metallib.cpp",
+        "metallib.h",
+        "nak_target.h",
+        "owned.h",
+        "program_pages.h",
+        "sample_shading.h",
+        "pack.cpp",
+        "pack.h",
+        "pack_selectors.h",
+        "push.h",
+        "record.h",
+        "record_parts.cpp",
+        "record_parts.h",
+        "residual.h",
+        "rotation.h",
+        "selector_variants.h",
+        "set_entries.h",
+        "set_layout.h",
+        "slot_mask.h",
+        "stage_textures.h",
+        "set_reads.h",
+        "written_textures.h",
+        "xr.h",
+        "xr_pass.h",
+        "zeta.h",  # the formats directpack.mm's test classes reach
     ],
 )
 
 # The pack generator but ca/, which only picks the states the pack makes and writes each as a corpus line: a line names
 # its state's key and everything its record is made from, so no ca/ edit changes the bytes behind a key.
 filegroup(
-    name = "raw_pack_records",
+    name = "pack_records",
     srcs = glob(
-        ["raw/pack/**"],
+        ["pack/**"],
         exclude = [
-            "raw/pack/ca/**",
+            "pack/ca/**",
+            "pack/rb/**",
             "**/*_test.py",
             "**/__pycache__/**",
             "**/*.pyc",
@@ -169,15 +186,15 @@ filegroup(
             "**/.clang-format",
         ],
     ) + [
-        "raw/fx/test/twod_sim.h",  # the 2D engine nvdec executes (pack/nvdec.cpp)
-        "raw/runtime/raw_srgb_table.h",  # the colour table pack/layouts.py recognises
+        "fx/test/twod_sim.h",  # the 2D engine nvdec executes (pack/nvdec.cpp)
+        "srgb_table.h",  # the colour table pack/layouts.py recognises
         "//kits/SwitchGM20B:class_headers",  # pack/nvdec.cpp's method numbers
         "//kits/SwitchGM20BEmit:context",  # the channel's context init pack/context_state.cpp runs
     ],
 )
 
 # The system shader compiler (compiler/): compiled into the plugin and run by SwitchShaderCompiler below. Not part of the
-# stack key: a store is named by the stack and the pack's rules, its entries are raw_cache.cpp's, and a store name made
+# stack key: a store is named by the stack and the pack's rules, its entries are gm20b_cache.cpp's, and a store name made
 # otherwise only misses.
 filegroup(
     name = "compiler_srcs",
@@ -233,44 +250,40 @@ filegroup(
     srcs = ["compiler/com.brunostjohn.switch.shadercompiler.plist"],
 )
 
-# What the raw path's records, pack entries and native seed records are made by, as //gpu:raw_stack hashes it: the shader
-# tools build the raw pack's tools from exactly these files (//gpu/seed:local_tools), and the plugin makes and reads its
-# records with the same units. raw_stack checks that each unit here includes nothing else; tools/gpu/raw_stack_test.py
+# What the driver's records, pack entries and native seed records are made by, as //gpu:stack_key hashes it: the shader
+# tools build the pack's tools from exactly these files (//gpu/seed:local_tools), and the plugin makes and reads its
+# records with the same units. stack_key checks that each unit here includes nothing else; tools/gpu/stack_key_test.py
 # that the generator builds and reads nothing else.
 filegroup(
-    name = "raw_stack_sources",
+    name = "stack_key_sources",
     srcs = [
-        ":raw_direct_sources",
-        ":raw_pack_records",
-        "//drivers/NativeMetal:NativeBridgeMetalFrontend.mm",
-        "//drivers/NativeMetal:frontend_headers",
+        ":direct_sources",
+        ":pack_records",
+        "//drivers/TegraGM20BMetal:plugin/MetallibEntries.h",
+        "//drivers/TegraGM20BMetal:plugin/MetallibSlice.h",
+        "//drivers/TegraGM20BMetal:plugin/TwoPlaneStandIn.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
         "//kits/SwitchRefusal:SwitchRefusalSite.h",
+        "//kits/SwitchSeedPack:SwitchSeedPack.h",
     ],
 )
 
-# The plugin's own sources and the selector inventory: what raw/plan/test/m2v_routes_test.py reads every way into m2v from
+# Every file below raw/: what stack_key_test.py looks the generator's file names up in
 filegroup(
-    name = "m2v_route_sources",
-    srcs = glob([
-        "raw/runtime/*",
-        "raw/fx/*.cpp",
-        "raw/fx/*.h",
-        "compiler/*",
-    ]) + [
-        "TegraGM20BMetalPlugin.mm",
-        "raw/test/inventory.tsv",
-    ],
-)
-
-# Every file below raw/: what raw_stack_test.py looks the generator's file names up in
-filegroup(
-    name = "raw_tree",
+    name = "driver_tree",
     srcs = glob(
-        ["raw/**"],
+        [
+            "*.h",
+            "*.cpp",
+            "*.mm",
+            "pack/**",
+            "fx/**",
+            "harness/**",
+        ],
         exclude = [
             "**/__pycache__/**",
             "**/*.pyc",
@@ -279,48 +292,77 @@ filegroup(
     ),
 )
 
-# The GPU context-switch stress and fetch readback (raw/test/fetchform.cpp): debug boot packages stage it at
+# The GPU context-switch stress and fetch readback (harness/fetchform.cpp): debug boot packages stage it at
 # /usr/bin/switch-fetchform, and the BlueTool stand-in runs it when the Mac posts
 # com.brunostjohn.switch.debug.ctxsw-stress (`idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.ctxsw-stress`);
 # its lines are the "fetchform" category of com.brunostjohn.switch.TegraGM20BMetal (`idevicesyslog -u <udid> -m fetchform`).
 ios_binary(
     name = "fetchform",
     srcs = [
-        "raw/fx/fx_image.cpp",
-        "raw/fx/fx_mip.cpp",
-        "raw/runtime/raw_alias.cpp",
-        "raw/runtime/raw_amplification.cpp",
-        "raw/runtime/raw_arena.cpp",
-        "raw/runtime/raw_comp.cpp",
-        "raw/runtime/raw_completed.cpp",
-        "raw/runtime/raw_gpu.cpp",
-        "raw/runtime/raw_private_comp.cpp",
-        "raw/runtime/raw_record_parts.cpp",
-        "raw/runtime/raw_draw_bands.cpp",
-        "raw/runtime/raw_job_uses.cpp",
-        "raw/runtime/raw_mip_passes.cpp",
-        "raw/runtime/raw_resolve_twod.cpp",
-        "raw/runtime/raw_tessellation.cpp",
-        "raw/runtime/raw_transfer.cpp",
-        "raw/runtime/raw_kernel.cpp",
-        "raw/runtime/raw_kernel_job.cpp",
-        "raw/runtime/raw_resource_set.cpp",
-        "raw/runtime/raw_encoder_state.cpp",
-        "raw/runtime/raw_state_segment.cpp",
-        "raw/runtime/raw_shared_events.cpp",
-        "raw/runtime/raw_pack.cpp",
-        "raw/runtime/raw_split.cpp",
-        "raw/runtime/raw_variants.cpp",
-        "raw/runtime/raw_vertex_streams.cpp",
-        "raw/runtime/raw_zeta.cpp",
-        "raw/test/fetchform.cpp",
+        "fx/fx_image.cpp",
+        "fx/fx_mip.cpp",
+        "alias.cpp",
+        "amplification.cpp",
+        "arena.cpp",
+        "comp.cpp",
+        "completed.cpp",
+        "gpu.cpp",
+        "binds.cpp",
+        "blit.cpp",
+        "blit_convert.cpp",
+        "blit_probe.cpp",
+        "blit_texels.cpp",
+        "command_buffer.cpp",
+        "device_channel.cpp",
+        "device_stamps.cpp",
+        "draw.cpp",
+        "draw_prepare.cpp",
+        "draw_probes.cpp",
+        "draw_times.cpp",
+        "draw_inputs.cpp",
+        "draw_shader_tests.cpp",
+        "memory.cpp",
+        "pass_backings.cpp",
+        "pass_begin.cpp",
+        "pass_clears.cpp",
+        "pass_end.cpp",
+        "pipelines.cpp",
+        "samplers.cpp",
+        "sparse_window.cpp",
+        "surface_textures.cpp",
+        "ycbcr_textures.cpp",
+        "texel_rows.cpp",
+        "texture_views.cpp",
+        "textures.cpp",
+        "texture_chains.cpp",
+        "texture_headers.cpp",
+        "private_comp.cpp",
+        "record_parts.cpp",
+        "draw_bands.cpp",
+        "job_uses.cpp",
+        "mip_passes.cpp",
+        "resolve_twod.cpp",
+        "tessellation.cpp",
+        "transfer.cpp",
+        "kernel.cpp",
+        "kernel_job.cpp",
+        "resource_set.cpp",
+        "encoder_state.cpp",
+        "state_segment.cpp",
+        "shared_events.cpp",
+        "pack.cpp",
+        "split.cpp",
+        "variants.cpp",
+        "vertex_streams.cpp",
+        "zeta.cpp",
+        "harness/fetchform.cpp",
     ] + ["//kits/SwitchGM20BEmit:" + s for s in EMIT_SOURCES],
     out = "build/switch-gpu/fetchform",
     hdrs = [
-        ":raw_runtime_headers",
-        "//drivers/NativeMetal:bridge/NativeMetalBlend.h",
+        ":gm20b_runtime_headers",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "//drivers/TegraGM20B:TegraGM20BClockABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BHost.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
@@ -333,7 +375,7 @@ ios_binary(
     copts = [
         "-O2",
         "-std=c++17",
-        "-DSWITCH_RAW_HARNESS_MARKS",
+        "-DSWITCH_METAL_HARNESS_MARKS",
         "-Wall",
         "-Wextra",
         "-I",
@@ -345,7 +387,7 @@ ios_binary(
         "-I",
         "{bin}",
         "-I",
-        "{bin}/drivers/NativeMetal/abi",
+        "{bin}/drivers/TegraGM20BMetal/abi",
         "-I",
         "third_party/mesa/src/nouveau/headers",
         "-lc++",
@@ -353,124 +395,143 @@ ios_binary(
         "CoreFoundation",
         "-framework",
         "IOKit",
+        "-framework",
+        "IOSurface",
     ],
     # debug builds only (Device::fetchBarrier): //boot:package depends on it in the debug profile
     tags = ["manual"],
 )
 
-# The pack generator (raw/pack/rawpack.py and the modules it imports); //tools/gpu:rawpack runs it.
+# The pack generator (pack/make_pack.py and the modules it imports); //tools/gpu:make_pack runs it.
 py_library(
-    name = "raw_pack",
+    name = "pack",
     srcs = glob(
         [
-            "raw/pack/*.py",
-            "raw/pack/ca/*.py",
-            "raw/pack/iterated/*.py",
+            "pack/*.py",
+            "pack/ca/*.py",
+            "pack/iterated/*.py",
+            "pack/rb/*.py",
         ],
         exclude = [
-            "raw/pack/ca/*_test.py",
-            "raw/pack/iterated/*_test.py",
+            "pack/ca/*_test.py",
+            "pack/iterated/*_test.py",
+            "pack/rb/*_test.py",
         ],
     ),
     data = [
-        "raw/pack/ca/qc-21H461.json",
-        "raw/pack/ca/qc-24B119.json",
-        "raw/runtime/raw_srgb_table.h",  # pack/layouts.py reads it at import
-        "raw/runtime/raw_own_states.h",  # pack/packfile.py reads it at import
+        "pack/ca/qc-21H461.json",
+        "pack/ca/qc-24B119.json",
+        "pack/rb/rb-21H461.json",
+        "pack/rb/rb-24B119.json",
+        "srgb_table.h",  # pack/layouts.py reads it at import
+        "own_states.h",  # pack/packfile.py reads it at import
     ],
 )
 
-# raw/pack/ca/caspec.py makes every Core Animation state of the corpus from its name alone (QuartzCore's own decoding).
+# pack/ca/caspec.py makes every Core Animation state of the corpus from its name alone (QuartzCore's own decoding).
 py_test(
     name = "caspec_test",
-    srcs = ["raw/pack/ca/caspec_test.py"],
+    srcs = ["pack/ca/caspec_test.py"],
     data = [
         "precompile/corpus.log",
-        "raw/pack/ca/qc-21H461.json",
+        "pack/ca/qc-21H461.json",
     ],
-    main = "raw/pack/ca/caspec_test.py",
-    deps = [":raw_pack"],
+    main = "pack/ca/caspec_test.py",
+    deps = [":pack"],
 )
 
-# The same for iOS 27's QuartzCore (raw/pack/ca/caspec27.py): every state of the raw pack's tiers against the functions
+# The same for iOS 27's QuartzCore (pack/ca/caspec27.py): every state of the pack's tiers against the functions
 # and constants its own library declares, and the journal's iOS 27 states made as drawn.
 py_test(
     name = "caspec27_test",
-    srcs = ["raw/pack/ca/caspec27_test.py"],
+    srcs = ["pack/ca/caspec27_test.py"],
     data = [
         "precompile/ca-names/24B119.txt",
         "precompile/corpus.log",
-        "raw/pack/ca/qc-24B119.json",
+        "pack/ca/qc-24B119.json",
     ],
-    main = "raw/pack/ca/caspec27_test.py",
-    deps = [":raw_pack"],
+    main = "pack/ca/caspec27_test.py",
+    deps = [":pack"],
 )
 
-# raw/pack/ca/fetchfree.py: the fetch-free forms the pack makes of fetching Core Animation states, on both IPSWs' tables.
+# pack/ca/fetchfree.py: the fetch-free forms the pack makes of fetching Core Animation states, on both IPSWs' tables.
 py_test(
     name = "fetchfree_test",
-    srcs = ["raw/pack/ca/fetchfree_test.py"],
+    srcs = ["pack/ca/fetchfree_test.py"],
     data = [
         "precompile/corpus.log",
-        "raw/pack/ca/qc-21H461.json",
-        "raw/pack/ca/qc-24B119.json",
+        "pack/ca/qc-21H461.json",
+        "pack/ca/qc-24B119.json",
     ],
-    main = "raw/pack/ca/fetchfree_test.py",
-    deps = [":raw_pack"],
+    main = "pack/ca/fetchfree_test.py",
+    deps = [":pack"],
 )
 
-# raw/pack/ca/deepcolour.py: the colour precision the device's QuartzCore names Core Animation's states with, from the
+# pack/ca/deepcolour.py: the colour precision the device's QuartzCore names Core Animation's states with, from the
 # preferences the stager writes.
 py_test(
     name = "deepcolour_test",
-    srcs = ["raw/pack/ca/deepcolour_test.py"],
+    srcs = ["pack/ca/deepcolour_test.py"],
     data = [
-        "raw/pack/ca/qc-21H461.json",
-        "raw/pack/ca/qc-24B119.json",
+        "pack/ca/qc-21H461.json",
+        "pack/ca/qc-24B119.json",
         "stage-tegra-gm20b-metal.py",
     ],
-    main = "raw/pack/ca/deepcolour_test.py",
-    deps = [":raw_pack"],
+    main = "pack/ca/deepcolour_test.py",
+    deps = [":pack"],
 )
 
-# raw/pack/fetchfree_link.py: where a colour matrix form's draws read the matrix uniform.
+# pack/rb/rbfree.py: the fetch-free forms the pack makes of RenderBox's states that blend by fetching, on both
+# IPSWs' tables.
+py_test(
+    name = "rbfree_test",
+    srcs = ["pack/rb/rbfree_test.py"],
+    data = [
+        "pack/rb/rb-21H461.json",
+        "pack/rb/rb-24B119.json",
+    ],
+    main = "pack/rb/rbfree_test.py",
+    deps = [":pack"],
+)
+
+# pack/fetchfree_link.py: where a colour matrix form's draws read the matrix uniform.
 py_test(
     name = "fetchfree_link_test",
-    srcs = ["raw/pack/fetchfree_link_test.py"],
-    main = "raw/pack/fetchfree_link_test.py",
-    deps = [":raw_pack"],
+    srcs = ["pack/fetchfree_link_test.py"],
+    main = "pack/fetchfree_link_test.py",
+    deps = [":pack"],
 )
 
-# raw/pack/kernels.py: a kernel record viewing a texture slot in texels of another size is left out of the pack.
+# pack/kernels.py: a kernel record viewing a texture slot in texels of another size is left out of the pack.
 py_test(
     name = "kernels_view_test",
-    srcs = ["raw/pack/kernels_view_test.py"],
-    main = "raw/pack/kernels_view_test.py",
-    deps = [":raw_pack"],
+    srcs = ["pack/kernels_view_test.py"],
+    main = "pack/kernels_view_test.py",
+    deps = [":pack"],
 )
 
-# raw/pack/kernels.py and packfile.py: a kernel sampler entry's window (the texture slots it samples) reaches the pack.
+# pack/kernels.py and packfile.py: a kernel sampler entry's window (the texture slots it samples) reaches the pack.
 py_test(
     name = "kernels_pairs_test",
-    srcs = ["raw/pack/kernels_pairs_test.py"],
-    main = "raw/pack/kernels_pairs_test.py",
-    deps = [":raw_pack"],
+    srcs = ["pack/kernels_pairs_test.py"],
+    main = "pack/kernels_pairs_test.py",
+    deps = [":pack"],
 )
 
-# raw/pack/iterated: every iterated blend program a fetch-free form names, against QuartzCore's formula.
+# pack/iterated: every iterated blend program a fetch-free form names, against QuartzCore's formula.
 py_test(
     name = "iterated_table_test",
-    srcs = ["raw/pack/iterated/table_test.py"],
+    srcs = ["pack/iterated/table_test.py"],
     data = [
-        "raw/runtime/raw_chip_facts.h",
-        "raw/runtime/raw_own_states.h",
+        "chip_facts.h",
+        "own_states.h",
     ],
-    main = "raw/pack/iterated/table_test.py",
-    deps = [":raw_pack"],
+    main = "pack/iterated/table_test.py",
+    deps = [":pack"],
 )
 
 # Developer tools, `bazel run //drivers/TegraGM20BMetal:<name> -- ...`: the shader corpus
-# (corpus/tools), the raw path's draw-order check, and the dyld shared cache import check.
+# (corpus/tools), the driver's draw-order check, and the dyld shared cache import check.
 [py_binary(
     name = tool,
     srcs = ["corpus/tools/%s.py" % tool],
@@ -481,8 +542,6 @@ py_test(
     "dsc_owner",
     "make_corpus",
     "mtlb_extract",
-    "report",
-    "run_corpus",
     "runtime_compile_callers",
 ]]
 
@@ -490,20 +549,20 @@ py_test(
 # scripts. `bazel run //drivers/TegraGM20BMetal:declared -- --root <mounted OS volume> --root <mounted cryptex>...
 # --inventory <tsv>` writes precompile/archives/<build>.tsv from an IPSW's images; archive_coverage diffs one against the
 # raw pack's states and the device's journals.
-# What the raw pack makes of them (//gpu/seed:raw_pack takes the IPSW kind's: tools/gpu/rawpack.py archive_lines).
+# What the pack makes of them (//gpu/seed:pack takes the IPSW kind's: tools/gpu/make_pack.py archive_lines).
 filegroup(
     name = "archive_inventories",
     srcs = glob(["precompile/archives/*.tsv"]),
 )
 
 # The Core Animation states devices named missing from the pack, per IPSW kind (precompile/ca_names.py merges a boot's
-# logs in; //gpu/seed:raw_pack makes them from their names).
+# logs in; //gpu/seed:pack makes them from their names).
 filegroup(
     name = "ca_name_lists",
     srcs = glob(["precompile/ca-names/*.txt"]),
 )
 
-# Our own apps' render states the raw pack holds, per IPSW kind (//gpu/seed:raw_pack, tools/gpu/rawpack.py app_states).
+# Our own apps' render states the pack holds, per IPSW kind (//gpu/seed:pack, tools/gpu/make_pack.py app_states).
 filegroup(
     name = "app_state_lists",
     srcs = glob(["precompile/app-states/*.log"]),
@@ -537,26 +596,26 @@ py_binary(
     main = "corpus/tools/archives/coverage.py",
     deps = [
         ":archives",
-        ":raw_pack",
+        ":pack",
     ],
 )
 
-# Every render state the IPSW kinds' archives declare for the device is the raw pack's, or raw takes it from elsewhere
+# Every render state the IPSW kinds' archives declare for the device is the pack's, or raw takes it from elsewhere
 py_test(
     name = "archive_coverage_test",
     srcs = ["corpus/tools/archives/coverage_test.py"],
     data = [
         "precompile/corpus.log",
-        "raw/pack/ca/qc-21H461.json",
-        "raw/pack/ca/qc-24B119.json",
+        "pack/ca/qc-21H461.json",
+        "pack/ca/qc-24B119.json",
         ":archive_inventories",
         ":ca_name_lists",
     ],
     main = "corpus/tools/archives/coverage_test.py",
     deps = [
         ":archives",
-        ":raw_pack",
-        "//tools/gpu:rawpack_steps",
+        ":pack",
+        "//tools/gpu:make_pack_steps",
     ],
 )
 
@@ -573,47 +632,47 @@ py_test(
     ],
 )
 
-# argcheck (raw/test/argcheck.py): HW Test's argument-buffer states' fragment programs on the Maxwell interpreter, over a
+# argcheck (harness/argcheck.py): HW Test's argument-buffer states' fragment programs on the Maxwell interpreter, over a
 # draw's root table as rootdump writes it with the device's own writer
 cc_binary(
     name = "rootdump",
     srcs = [
-        "raw/runtime/raw_heap_tables.h",
-        "raw/runtime/raw_pack.h",
-        "raw/runtime/raw_resource_id.h",
-        "raw/runtime/raw_set_entries.h",
-        "raw/test/rootdump.cpp",
+        "heap_tables.h",
+        "pack.h",
+        "resource_id.h",
+        "set_entries.h",
+        "harness/rootdump.cpp",
     ],
 )
 
 py_binary(
     name = "argcheck",
-    srcs = ["raw/test/argcheck.py"],
+    srcs = ["harness/argcheck.py"],
     args = [
         "--rootdump",
         "$(rootpath :rootdump)",
     ],
     data = [
-        ":raw_pack_generator",
+        ":pack_generator",
         ":rootdump",
     ],
-    main = "raw/test/argcheck.py",
+    main = "harness/argcheck.py",
     deps = [
-        ":raw_pack",
+        ":pack",
         "//tools/gpu/maxwell:interp",
         "//tools/gpu/maxwell:isa",
     ],
 )
 
-# boundcheck (raw/test/boundcheck.py): every record's words for the probe's bound draw against m2v's own instantiation of it,
+# boundcheck (harness/boundcheck.py): every record's words for the probe's bound draw against m2v's own instantiation of it,
 # and each record with an argument table drawn on the Maxwell interpreter over both: bazel run :boundcheck -- <records.bin>
 py_binary(
     name = "boundcheck",
-    srcs = ["raw/test/boundcheck.py"],
-    data = [":raw_pack_generator"],
-    main = "raw/test/boundcheck.py",
+    srcs = ["harness/boundcheck.py"],
+    data = [":pack_generator"],
+    main = "harness/boundcheck.py",
     deps = [
-        ":raw_pack",
+        ":pack",
         "//tools/gpu/maxwell:interp",
         "//tools/gpu/maxwell:isa",
     ],
@@ -657,7 +716,7 @@ py_test(
         "precompile/libraries.py",
         "precompile/libraries_test.py",
     ],
-    data = ["//drivers/NativeMetal:MetallibSlice.h"],
+    data = ["//drivers/TegraGM20BMetal:plugin/MetallibSlice.h"],
     imports = ["precompile"],
     main = "precompile/libraries_test.py",
 )

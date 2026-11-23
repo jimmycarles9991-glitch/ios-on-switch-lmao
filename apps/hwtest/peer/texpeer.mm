@@ -87,7 +87,7 @@ bool fill(id<MTLDevice> device, id<MTLCommandBuffer> cb, id<MTLTexture> t)
     const bool blocks = t.pixelFormat == kBlocks, volume = t.textureType == MTLTextureType3D;
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     for (uint32_t level = 0; level < t.mipmapLevelCount; level++) {
-        if (switch_texpeer_rendered(uint32_t(t.textureType), uint32_t(t.mipmapLevelCount), level))
+        if (switch_texpeer_rendered(uint32_t(t.textureType), uint32_t(t.mipmapLevelCount), level, blocks))
             continue;
         const NSUInteger w = std::max<NSUInteger>(t.width >> level, 1), h = std::max<NSUInteger>(t.height >> level, 1);
         const NSUInteger d = volume ? std::max<NSUInteger>(t.depth >> level, 1) : 1;
@@ -157,7 +157,8 @@ NSString *footprint()
         clear(cb, t, 0);
     } else {
         for (uint32_t level = 0; level < t.mipmapLevelCount; level++)
-            if (switch_texpeer_rendered(uint32_t(t.textureType), uint32_t(t.mipmapLevelCount), level))
+            if (switch_texpeer_rendered(uint32_t(t.textureType), uint32_t(t.mipmapLevelCount), level,
+                                        t.pixelFormat == kBlocks))
                 clear(cb, t, level);
         if (!fill(self.device, cb, t)) {
             reply([NSString stringWithFormat:@"fail=no_buffer pid=%d", getpid()]);
@@ -166,8 +167,8 @@ NSString *footprint()
     }
     [cb commit];
     [cb waitUntilCompleted];
-    const SEL path = NSSelectorFromString(@"switchRawPath");
-    NSString *taken = [(id)cb respondsToSelector:path] ? [(id)cb valueForKey:@"switchRawPath"] : @"device";
+    const SEL path = NSSelectorFromString(@"switchMetalPath");
+    NSString *taken = [(id)cb respondsToSelector:path] ? [(id)cb valueForKey:@"switchMetalPath"] : @"device";
     reply([NSString stringWithFormat:@"%@ pid=%d registry=%llx path=%@ shareable=%d %@",
                                      cb.status == MTLCommandBufferStatusCompleted ? @"ok" : @"fail=not_completed",
                                      getpid(), (unsigned long long)self.device.registryID, taken, t.isShareable,
@@ -211,8 +212,8 @@ NSString *footprint()
     [cb waitUntilCompleted];
     if (keep)
         [self.kept addObject:t];
-    const SEL path = NSSelectorFromString(@"switchRawPath");
-    NSString *taken = [(id)cb respondsToSelector:path] ? [(id)cb valueForKey:@"switchRawPath"] : @"device";
+    const SEL path = NSSelectorFromString(@"switchMetalPath");
+    NSString *taken = [(id)cb respondsToSelector:path] ? [(id)cb valueForKey:@"switchMetalPath"] : @"device";
     return [NSString stringWithFormat:@"%@ pid=%d id=%u path=%@",
                                       cb.status == MTLCommandBufferStatusCompleted ? @"ok" : @"fail=not_completed",
                                       getpid(), IOSurfaceGetID((__bridge IOSurfaceRef)surface), taken];

@@ -2,7 +2,7 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// gpu.raw.mip_lod's draws (shaders/MipLod.metal): a mipmapped texture drawn over a whole target, minified by a uniform
+/// gpu.gm20b.mip_lod's draws (shaders/MipLod.metal): a mipmapped texture drawn over a whole target, minified by a uniform
 /// ratio, so every pixel's level of detail is Metal's log2 of the texels a pixel spans, plus the bias, within the
 /// sampler's clamps.
 ///
@@ -81,7 +81,8 @@ public enum MipLod {
         let target = try gpu.texture(.bgra8Unorm, side, side, usage: [.renderTarget, .shaderRead])
         let state = try gpu.render(
             vertex: "textured_vertex", fragment: bias == nil ? "mip_lod_fragment" : "mip_lod_bias_fragment",
-            format: .bgra8Unorm)
+            format: .bgra8Unorm
+        )
         let path = try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = target
@@ -105,11 +106,12 @@ public enum MipLod {
     static func levelChain(_ gpu: GPU) async throws -> MTLTexture {
         let levels = Int(log2(Double(levelSide))) + 1
         let chain = try gpu.texture(.rgba8Unorm, levelSide, levelSide, usage: [.shaderRead], mipmaps: levels)
-        for level in 0..<levels {
+        for level in 0 ..< levels {
             let side = max(1, levelSide >> level), red = UInt8(levelRed(level))
             let texel: [UInt8] = [red, 255 - red, 128, 255]
             try await gpu.upload(
-                [UInt8]((0..<side * side).flatMap { _ in texel }), to: chain, bytesPerRow: side * 4, level: level)
+                [UInt8]((0 ..< side * side).flatMap { _ in texel }), to: chain, bytesPerRow: side * 4, level: level
+            )
         }
         return chain
     }
@@ -119,18 +121,20 @@ public enum MipLod {
         let chain = try await levelChain(gpu)
         guard
             let view = chain.makeTextureView(
-                pixelFormat: .rgba8Unorm, textureType: .type2D, levels: 1..<4, slices: 0..<1)
+                pixelFormat: .rgba8Unorm, textureType: .type2D, levels: 1 ..< 4, slices: 0 ..< 1
+            )
         else { throw TestFailure("makeTextureView returned nil") }
         var fields: [String] = [], wrong: [String] = []
         var paths: Set<String> = []
         for a in arms {
             let (texels, path) = try await draw(
-                gpu, a.view ? view : chain, try sampler(gpu.device, a), side: a.side, bias: a.bias == 0 ? nil : a.bias)
+                gpu, a.view ? view : chain, try sampler(gpu.device, a), side: a.side, bias: a.bias == 0 ? nil : a.bias
+            )
             paths.insert(path)
             let centre = (a.side / 2 * a.side + a.side / 2) * 4
             let got = Int(texels[centre + 2]), want = wantRed(a)
             var spread = 0
-            for t in 0..<a.side * a.side { spread = max(spread, abs(Int(texels[t * 4 + 2]) - got)) }
+            for t in 0 ..< a.side * a.side { spread = max(spread, abs(Int(texels[t * 4 + 2]) - got)) }
             fields.append("\(a.name)=\(got)/\(Int(want.rounded()))")
             if abs(Double(got) - want) > Double(levelTolerance) || spread > 1 { wrong.append(a.name) }
         }

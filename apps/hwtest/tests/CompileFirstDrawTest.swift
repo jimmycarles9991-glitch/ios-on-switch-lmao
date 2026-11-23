@@ -3,15 +3,15 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 import Metal
-import SwitchCompilerProbe
 import notify
+import SwitchCompilerProbe
 
-/// A render state the pack lacks is usable when its creation returns: each salted state (no pack or store holds it before
-/// its run) is drawn by the first command buffer after its creation, on the raw path, every pixel its colour. Made once
-/// by the synchronous form, once by the completion-handler form, and once while the shader compiler dies holding its
-/// request (a debug compiler's com.brunostjohn.switch.debug.compiler-dies-at-next-request, its state this app's pid: the
-/// compiler dies at this app's next request): the creation completes once launchd's next compiler has made it. Nothing goes to m2v (T-v3g: state.making, a returned state still being made) and
-/// the synchronous creation's state is the compiler's.
+/// A render state the pack lacks is usable when its creation returns: each salted state (no pack or store holds it
+/// before its run) is drawn by the first command buffer after its creation, on the driver, every pixel its colour.
+/// Made once by the synchronous form, once by the completion-handler form, and once while the shader compiler dies
+/// holding its request (a debug compiler's com.brunostjohn.switch.debug.compiler-dies-at-next-request, its state this
+/// app's pid: the compiler dies at this app's next request): the creation completes once launchd's next compiler has
+/// made it. No state is returned still being made, and the synchronous creation's state is the compiler's.
 struct CompileFirstDrawTest: HWTest {
     let id = "gpu.compile.first_draw"
     let name = "A state the pack lacks draws raw from the first command buffer after its creation"
@@ -22,15 +22,15 @@ struct CompileFirstDrawTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade")
         }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
-        let salt = UInt32.random(in: 1...UInt32.max / 4)
+        let salt = UInt32.random(in: 1 ... UInt32.max / 4)
 
         let made = try pipeline(gpu, salt: salt)
-        if let answer = RawFacade.compile(of: made) {
+        if let answer = GM20BFacade.compile(of: made) {
             let madeHow = answer["how"] as? String ?? "?"
             metrics.set("created_how", madeHow)
             checks.append(("created: made by the shader compiler", ["compiled", "joined", "stored"].contains(madeHow)))
@@ -57,7 +57,7 @@ struct CompileFirstDrawTest: HWTest {
         }
         metrics.set("generations", Int(probe.generation) - Int(generation))
         checks.append(("the compiler died holding the request and the next one made it", probe.generation > generation))
-        if let answer = RawFacade.compile(of: survived) {
+        if let answer = GM20BFacade.compile(of: survived) {
             metrics.set("killed_how", answer["how"] as? String ?? "?")
             metrics.set("killed_wait_ms", Double((answer["wait_us"] as? NSNumber)?.intValue ?? 0) / 1000, digits: 1)
         }
@@ -65,7 +65,7 @@ struct CompileFirstDrawTest: HWTest {
 
         let paths = gpu.paths.paths.keys.sorted()
         metrics.set("paths", paths.joined(separator: ","))
-        checks.append(("every command buffer on the raw path", paths == ["raw"]))
+        checks.append(("every command buffer on the driver", paths == ["gm20b"]))
         return .judged(checks, metrics, proof: "salt \(salt)")
     }
 
@@ -75,7 +75,7 @@ struct CompileFirstDrawTest: HWTest {
         var token: Int32 = 0
         guard
             notify_register_check("com.brunostjohn.switch.debug.compiler-dies-at-next-request", &token)
-                == NOTIFY_STATUS_OK
+            == NOTIFY_STATUS_OK
         else { return false }
         defer { notify_cancel(token) }
         return notify_set_state(token, UInt64(getpid())) == NOTIFY_STATUS_OK
@@ -115,13 +115,13 @@ struct CompileFirstDrawTest: HWTest {
         }
         let bytes = try await gpu.read(target, bytesPerPixel: 4)
         let want: [UInt8] = [64, UInt8((salt >> 8) & 0xff), UInt8(salt & 0xff), 255]
-        let wrong = (0..<(Self.size * Self.size)).filter {
+        let wrong = (0 ..< (Self.size * Self.size)).filter {
             Array(bytes.pixel($0 % Self.size, $0 / Self.size, width: Self.size)) != want
         }.count
         metrics.set(label + "_path", timing.path)
         metrics.set(label + "_wrong", wrong)
         return [
-            ("\(label): its first command buffer on the raw path", timing.path == "raw"),
+            ("\(label): its first command buffer on the driver", timing.path == "gm20b"),
             ("\(label): every pixel its colour", wrong == 0),
         ]
     }

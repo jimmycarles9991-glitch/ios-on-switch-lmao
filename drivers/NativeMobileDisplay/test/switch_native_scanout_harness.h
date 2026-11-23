@@ -178,7 +178,7 @@ struct Display {
         planeSpace.init(kPlaneSlot0, Space, spaceBits, kSpaceWords);
         planeDropped = {};
         planeForgets = {};
-        planeUnplacedLogged = planeForgetsLost = false;
+        planeUnplacedLogged = false;
     }
 
     bool planeSlotBusy(int slot) const

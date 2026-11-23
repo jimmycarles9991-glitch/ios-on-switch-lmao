@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The states and kernels direct_exec_test.py executes the raw path's records of (directrun.mm makes them).
+// The states and kernels direct_exec_test.py executes the driver's records of (directrun.mm makes them).
 #include <metal_stdlib>
 using namespace metal;
 
@@ -76,6 +76,19 @@ struct Dynamic {
 vertex Shaded dynamic_vertex(Dynamic in [[stage_in]], const device float4 *colour [[buffer(2)]])
 {
     return {float4(in.position, 0, 1), colour[0]};
+}
+
+struct FiveDynamic {
+    float2 a0 [[attribute(0)]];
+    float2 a1 [[attribute(1)]];
+    float2 a2 [[attribute(2)]];
+    float2 a3 [[attribute(3)]];
+    float2 a4 [[attribute(4)]];
+};
+
+vertex Shaded five_dynamic_vertex(FiveDynamic in [[stage_in]])
+{
+    return {float4(in.a0 + in.a1 + in.a2 + in.a3 + in.a4, 0, 1), float4(1)};
 }
 
 fragment float4 wide_fragment(Shaded in [[stage_in]])
@@ -395,4 +408,16 @@ fragment float4 bound_wide_fragment(Shaded in [[stage_in]] SWITCH_EACH_31(SWITCH
     const float buffers = 0.0f SWITCH_EACH_31(SWITCH_READ);
     const float textures = 0.0f SWITCH_PAIRS_128(SWITCH_SAMPLE);
     return float4(in.colour.x + buffers, in.colour.y + textures, 0, 1);
+}
+
+kernel void converted_sample_kernel(texture2d<float> plane [[texture(0)]], sampler smp [[sampler(0)]],
+                                    device float4 *out [[buffer(0)]], uint tid [[thread_position_in_grid]])
+{
+    out[tid] = plane.sample(smp, float2(0.25f * float(tid), 0.5f));
+}
+
+kernel void converted_write_kernel(texture2d<float, access::write> plane [[texture(0)]],
+                                   uint tid [[thread_position_in_grid]])
+{
+    plane.write(float4(0.5f), uint2(tid, 0));
 }

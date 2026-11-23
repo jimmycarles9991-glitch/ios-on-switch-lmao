@@ -7,7 +7,6 @@ namespace
 {
 SwitchGpuEvents *state;
 constexpr uint32_t kReservations = 256;
-uint32_t records;
 
 void retire(thread_call_param_t, thread_call_param_t)
 {
@@ -84,11 +83,11 @@ void retire(thread_call_param_t, thread_call_param_t)
 			batch->completed(batch->context, batch->result > 0 ? 0 : batch->result);
 		switch_gpu_event_waits_drop(batch);
 	}
+	// A failed signal moves the value too: its failure ends every wait on it, the ones on the value alone included
 	while (ready) {
 		auto *signal = ready;
 		ready = signal->next;
-		if (signal->result > 0)
-			switch_gpu_event_native_signal(signal->event->native, signal->value, true);
+		switch_gpu_event_native_signal(signal->event->native, signal->value, true);
 		switch_gpu_event_release(&signal->event);
 		switch_gpu_event_signal_drop(signal);
 	}
@@ -97,21 +96,6 @@ void retire(thread_call_param_t, thread_call_param_t)
 	if (progress && __atomic_load_n(&s->pendingSignals, __ATOMIC_ACQUIRE))
 		switch_gpu_events_schedule();
 }
-}
-
-bool switch_gpu_events_reserve()
-{
-	uint32_t count = __atomic_load_n(&records, __ATOMIC_RELAXED);
-	while (count < 4096)
-		if (__atomic_compare_exchange_n(&records, &count, count + 1, false,
-						__ATOMIC_RELAXED, __ATOMIC_RELAXED))
-			return true;
-	return false;
-}
-
-void switch_gpu_events_unreserve()
-{
-	__atomic_sub_fetch(&records, 1u, __ATOMIC_RELAXED);
 }
 
 SwitchGpuEvents *switch_gpu_events_state()
@@ -227,6 +211,7 @@ extern "C" uint64_t switch_gpu_event_value(switch_gpu_event *event)
 	return event ? switch_gpu_event_native_value(event->native) : 0;
 }
 
+// A producer that failed or is gone ends the wait as its completion does: the waiter runs on what it left behind.
 int switch_gpu_event_resolve_locked(switch_gpu_event *event, uint64_t value,
 				    switch_gpu_backing_token *token)
 {
@@ -237,12 +222,12 @@ int switch_gpu_event_resolve_locked(switch_gpu_event *event, uint64_t value,
 		if (signal->value >= value && (!chosen || signal->value < chosen->value))
 			chosen = signal;
 	if (!chosen)
-		return event->failure && value <= event->failedThrough ? event->failure : 0;
+		return event->failure && value <= event->failedThrough ? 1 : 0;
 	const int result = chosen->result
 				   ? chosen->result
 				   : switch_gpu_backing_token_external_status(&chosen->token);
 	if (result < 0)
-		return result;
+		return 1;
 	if (token) {
 		const int retained = switch_gpu_backing_token_retain(&chosen->token);
 		if (retained)
@@ -270,17 +255,20 @@ extern "C" int switch_gpu_event_signal_prepare(switch_gpu_event *event, uint64_t
 	if (!event || !out)
 		return -22;
 	*out = nullptr;
-	if (!switch_gpu_events_reserve())
+	uint32_t quota = 0;
+	if (!switch_gpu_events_reserve(&quota))
 		return -16;
 	auto *signal = IONewZero(switch_gpu_event_signal, 1);
 	if (!signal) {
-		switch_gpu_events_unreserve();
+		switch_gpu_events_unreserve(quota);
 		return -12;
 	}
 	signal->refs = 1;
 	signal->kind = SwitchEventSignal;
+	signal->quota = quota;
 	IOLockLock(state->lock);
-	const bool full = event->reservations >= kReservations;
+	// the compositor's (an uncounted record) are not bounded by an event an app may share with it
+	const bool full = quota && event->reservations >= kReservations;
 	if (!full) {
 		++event->reservations;
 		++event->refs;
@@ -288,7 +276,7 @@ extern "C" int switch_gpu_event_signal_prepare(switch_gpu_event *event, uint64_t
 	IOLockUnlock(state->lock);
 	if (full) {
 		IODelete(signal, switch_gpu_event_signal, 1);
-		switch_gpu_events_unreserve();
+		switch_gpu_events_unreserve(quota);
 		return -16;
 	}
 	signal->event = event;
@@ -380,13 +368,15 @@ extern "C" int switch_gpu_event_resolve_use(switch_gpu_event *event, uint64_t va
 		return -22;
 	*out = nullptr;
 	*token = {};
-	if (!switch_gpu_events_reserve())
+	uint32_t quota = 0;
+	if (!switch_gpu_events_reserve(&quota))
 		return -16;
 	auto *use = IONewZero(switch_gpu_event_use, 1);
 	if (!use) {
-		switch_gpu_events_unreserve();
+		switch_gpu_events_unreserve(quota);
 		return -12;
 	}
+	use->quota = quota;
 	IOLockLock(state->lock);
 	const int result = switch_gpu_event_resolve_locked(event, value, &use->token);
 	if (result == 2) {
@@ -404,7 +394,7 @@ extern "C" int switch_gpu_event_resolve_use(switch_gpu_event *event, uint64_t va
 	IOLockUnlock(state->lock);
 	if (result != 2) {
 		IODelete(use, switch_gpu_event_use, 1);
-		switch_gpu_events_unreserve();
+		switch_gpu_events_unreserve(quota);
 	}
 	return result;
 }

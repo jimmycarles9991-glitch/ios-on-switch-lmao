@@ -15,11 +15,17 @@ extern "C" {
 namespace
 {
 int pid = 100;
+int charged = 0;
 }
 
 extern "C" int proc_selfpid(void)
 {
 	return pid;
+}
+
+extern "C" int switch_gpu_events_charged(void)
+{
+	return charged;
 }
 
 extern "C" uint32_t switch_gpu_info_flags(void)
@@ -119,4 +125,16 @@ TEST(PathStats, EachProcessReadsItsOwnAndTheLeastRecentGivesUpItsSlot)
 	EXPECT_NE(line().find(" submit_jobs=2 "), std::string::npos) << line();
 	pid = 4242;
 	EXPECT_NE(line().find(" submit_jobs=0 "), std::string::npos) << line();
+}
+
+// VIC's engine thread waits on a writer promise for the process whose job it runs, charged to it
+// (switch_gpu_events_charge): that process reads the wait, not pid 0
+TEST(PathStats, AKernelThreadCountsForTheProcessItIsChargedTo)
+{
+	pid = 0;
+	charged = 4604;
+	switch_gpu_path_taken(SWITCH_GPU_PATH_PROMISE_WAIT, 1);
+	charged = 0;
+	pid = 4604;
+	EXPECT_NE(line().find(" promise_waits=1 "), std::string::npos) << line();
 }

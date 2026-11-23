@@ -22,7 +22,8 @@ public enum PatternPixels {
     public static func pool(width: Int, height: Int, format: OSType) throws -> CVPixelBufferPool {
         var pool: CVPixelBufferPool?
         let status = CVPixelBufferPoolCreate(
-            nil, nil, attributes(width: width, height: height, format: format) as CFDictionary, &pool)
+            nil, nil, attributes(width: width, height: height, format: format) as CFDictionary, &pool
+        )
         guard status == kCVReturnSuccess, let pool else { throw VideoError.status("CVPixelBufferPoolCreate", status) }
         return pool
     }
@@ -38,7 +39,8 @@ public enum PatternPixels {
             let format = format(bitDepth: bitDepth)
             status = CVPixelBufferCreate(
                 nil, pattern.width, pattern.height, format,
-                attributes(width: pattern.width, height: pattern.height, format: format) as CFDictionary, &buffer)
+                attributes(width: pattern.width, height: pattern.height, format: format) as CFDictionary, &buffer
+            )
         }
         guard status == kCVReturnSuccess, let buffer else { throw VideoError.status("CVPixelBufferCreate", status) }
         fill(buffer, pattern: pattern, frame: frame)
@@ -63,7 +65,8 @@ public enum PatternPixels {
     static func plane(_ buffer: CVPixelBuffer, _ index: Int, _ sampleBytes: Int) -> PatternWriter.Plane {
         PatternWriter.Plane(
             base: CVPixelBufferGetBaseAddressOfPlane(buffer, index)!,
-            rowBytes: CVPixelBufferGetBytesPerRowOfPlane(buffer, index), sampleBytes: sampleBytes)
+            rowBytes: CVPixelBufferGetBytesPerRowOfPlane(buffer, index), sampleBytes: sampleBytes
+        )
     }
 
     /// Checks a decoded 4:2:0 or 4:2:2 biplanar buffer (8-bit or P010) against the pattern.
@@ -83,7 +86,8 @@ public enum PatternPixels {
                 return (
                     chroma.mean(x * 2, y, w, h, step: 2, offset: 0), chroma.mean(x * 2, y, w, h, step: 2, offset: 1)
                 )
-            })
+            }
+        )
     }
 
     /// Checks a decoded 32-bit BGRA buffer (full-range RGB) against the pattern.
@@ -94,8 +98,8 @@ public enum PatternPixels {
         let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
         return PatternChecker(pattern).checkRGB(expected: expected) { region in
             var (r, g, b) = (0.0, 0.0, 0.0)
-            for y in region.y..<(region.y + region.height) {
-                for x in region.x..<(region.x + region.width) {
+            for y in region.y ..< (region.y + region.height) {
+                for x in region.x ..< (region.x + region.width) {
                     let pixel = base + y * rowBytes + x * 4
                     b += Double(pixel.load(as: UInt8.self))
                     g += Double(pixel.load(fromByteOffset: 1, as: UInt8.self))

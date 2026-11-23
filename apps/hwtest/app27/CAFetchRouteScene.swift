@@ -4,14 +4,15 @@ import HWTestGPU
 import Metal
 
 /// Draws that fetch the colour they write (fetch_order_fragment: each full-screen triangle blends its step into what the
-/// one before it left), in the shapes whose raster order the raw path keeps differently: three instances in the middle of
+/// one before it left), in the shapes whose raster order the driver keeps differently: three instances in the middle of
 /// three render encoders of one command buffer, a strip of six vertices whose four triangles cover each other, and twelve
 /// overlapping triangles in one draw over a depth attachment and into four and two samples. Each pass must match the
-/// result of its triangles applied in order, and on the facade each pass must take the raw path and the fetch counters
+/// result of its triangles applied in order, and on the facade each pass must take the driver and the fetch counters
 /// show how it kept their order: inside the pixel interlock (fetch_interlocked), ordered on the GPU a triangle a draw
 /// (sequential) or on the CPU's proof (whole). A pass that moves none of them did not fetch its own colour.
 struct CAFetchRouteScene: GPUScene {
     let id = "gpu.ca.fetch_routes"
+    let framework = true
     let name = "Draws fetching their own colour: instanced, folded strip, depth and multisample routes and pixels"
 
     static let size = 64
@@ -39,7 +40,7 @@ struct CAFetchRouteScene: GPUScene {
         switch pass {
         case .instanced: return [0, 0, 1, 2, 0]
         case .strip: return [0, 0, 0, 1]
-        case .depth, .msaa, .msaa2: return Array(0..<12)
+        case .depth, .msaa, .msaa2: return Array(0 ..< 12)
         }
     }
 
@@ -49,7 +50,8 @@ struct CAFetchRouteScene: GPUScene {
         let depthFormat: MTLPixelFormat = pass == .depth ? .depth32Float : .invalid
         let pipeline = try gpu.render(
             vertex: "fetch_vertex", fragment: "fetch_order_fragment", format: .bgra8Unorm, samples: samples,
-            depth: depthFormat)
+            depth: depthFormat
+        )
         let resolved = try gpu.texture(.bgra8Unorm, size, size, usage: [.renderTarget, .shaderRead])
         let target =
             try samples > 1 ? gpu.texture(.bgra8Unorm, size, size, usage: [.renderTarget], samples: samples) : resolved
@@ -61,14 +63,15 @@ struct CAFetchRouteScene: GPUScene {
             descriptor.isDepthWriteEnabled = true
             return gpu.device.makeDepthStencilState(descriptor: descriptor)
         }
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         let timing = try await gpu.run(tolerateError: true) { commands in
             func encoder(first: Bool, last: Bool) -> MTLRenderCommandEncoder {
                 let descriptor = MTLRenderPassDescriptor()
                 descriptor.colorAttachments[0].texture = target
                 descriptor.colorAttachments[0].loadAction = first ? .clear : .load
                 descriptor.colorAttachments[0].clearColor = MTLClearColor(
-                    red: Double(Self.clear[0]), green: Double(Self.clear[1]), blue: Double(Self.clear[2]), alpha: 1)
+                    red: Double(Self.clear[0]), green: Double(Self.clear[1]), blue: Double(Self.clear[2]), alpha: 1
+                )
                 descriptor.colorAttachments[0].storeAction = samples > 1 && last ? .multisampleResolve : .store
                 if samples > 1 && last { descriptor.colorAttachments[0].resolveTexture = resolved }
                 if let depth {
@@ -101,24 +104,25 @@ struct CAFetchRouteScene: GPUScene {
                 e.endEncoding()
             }
         }
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         let name = pass.rawValue
         let moved = { (key: String) in (after[key] ?? 0) - (before[key] ?? 0) }
         result.metrics.set("path_" + name, timing.path)
-        result.metrics.set("fetch_" + name, RawFacade.fetchRoutes(before: before, after: after))
+        result.metrics.set("fetch_" + name, GM20BFacade.fetchRoutes(before: before, after: after))
         result.expect(!timing.path.hasPrefix("error:"), "\(name): \(timing.path)")
-        if RawFacade.kind(of: gpu.device) == "raw" {
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
             let interlocked = moved("fetch_interlocked")
-            let ordered = moved("fetch_sequential") + moved("fetch_whole")
-            result.expect(timing.path == "raw", "\(name): not drawn on the raw path: \(timing.path)")
+            let ordered = moved("fetch_sequential")
+            result.expect(timing.path == "gm20b", "\(name): not drawn on the driver: \(timing.path)")
             result.expect(
                 interlocked + ordered > 0,
-                "\(name): no fetch counter moved: the pipeline did not fetch the colour it writes in order")
+                "\(name): no fetch counter moved: the pipeline did not fetch the colour it writes in order"
+            )
             // twelve overlapping triangles over a depth attachment: one draw each behind the fetch barrier, no vertex read
             if pass == .depth {
                 result.expect(
-                    timing.path == "raw" && interlocked + moved("fetch_sequential") > 0,
-                    "depth: not ordered on the raw path: \(timing.path) \(RawFacade.fetchRoutes(before: before, after: after))"
+                    timing.path == "gm20b" && interlocked + moved("fetch_sequential") > 0,
+                    "depth: not ordered on the driver: \(timing.path) \(GM20BFacade.fetchRoutes(before: before, after: after))"
                 )
             }
         }
@@ -126,7 +130,8 @@ struct CAFetchRouteScene: GPUScene {
         let expected = Patterns.repeated(Self.expected(Self.steps(pass)), count: size * size)
         result.compare(
             name, bytes: picture, expected: expected, format: .bgra8Unorm, width: size, height: size,
-            tolerance: 3.0 / 255)
+            tolerance: 3.0 / 255
+        )
     }
 
     /// fetch_order_fragment's steps over the clear colour, each stored as BGRA8 before the next reads it
@@ -138,7 +143,7 @@ struct CAFetchRouteScene: GPUScene {
         var value = stored(clear)
         for step in steps {
             let next = [Float((step * 3 + 1) % 7), Float((step * 5 + 2) % 7), Float((step + 3) % 7)]
-            value = stored((0..<3).map { value[$0] * 0.5 + next[$0] / 16 } + [1])
+            value = stored((0 ..< 3).map { value[$0] * 0.5 + next[$0] / 16 } + [1])
         }
         return format.encode(value)
     }

@@ -454,7 +454,6 @@ surface! {
         struct ArgumentRun E;
         struct FlatLayout E;
         fn flat_layouts;
-        fn extended_blend_color_words;
         fn heap_class_code;
         fn heap_code_class;
         fn heap_code_holds;
@@ -614,15 +613,12 @@ surface! {
         struct ShadowMergeModule N;
         fn unused_bits_module;
         struct UnusedBitsModule N;
-        fn extended_shadow_module;
-        struct ExtendedShadowModule N;
         fn tile_reach_module;
         struct TileReachModule N;
         fn capture_assembly_module;
         struct CaptureAssemblyModule N;
         fn capture_settle_module;
         struct CaptureSettleModule N;
-        enum TexelWords N;
         fn compressed_blit_module;
         enum CompressedBlit N;
         struct CompressedBlitModule N;
@@ -830,7 +826,6 @@ surface! {
         fn ycbcr_renders;
         fn ycbcr_pass_refused;
         fn padded_only_over_memory;
-        fn extended_range_blend;
         fn x_channel;
         fn half_write_nans_converted;
         fn bound_texel_format;

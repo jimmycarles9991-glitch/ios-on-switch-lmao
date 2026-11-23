@@ -7,9 +7,16 @@ from tools.hwtest import metrics
 
 class Direction(unittest.TestCase):
     def test_times_go_down(self):
-        for key in ('raw_gpu_ms0', 'raw_t_ds4', 'raw_us_pbgraxm_tds4a2xhf_isrc', 'wall_us_x', 'alu_ms', 'compile_ms'):
+        for key in (
+            'gm20b_gpu_ms0',
+            'gm20b_t_ds4',
+            'gm20b_us_pbgraxm_tds4a2xhf_isrc',
+            'wall_us_x',
+            'alu_ms',
+            'compile_ms',
+        ):
             self.assertEqual(metrics.direction(key), -1, key)
-        self.assertEqual(metrics.direction('raw_ms_radius2'), -1)
+        self.assertEqual(metrics.direction('gm20b_ms_radius2'), -1)
         self.assertEqual(metrics.direction('link_missed'), -1)
         self.assertEqual(metrics.direction('throttle_pct'), -1)
         self.assertEqual(metrics.direction('clear_submit_us_p99'), -1)
@@ -29,7 +36,7 @@ class Direction(unittest.TestCase):
             self.assertEqual(metrics.direction(key), 1, key)
 
     def test_counts_and_settings_are_not_performance(self):
-        for key in ('raw_wrong', 'threads_per_group', 'max_buffer_mb', 'raw_bias_4096', 'raw_cbs', 'status'):
+        for key in ('gm20b_wrong', 'threads_per_group', 'max_buffer_mb', 'gm20b_bias_4096', 'gm20b_cbs', 'status'):
             self.assertEqual(metrics.direction(key), 0, key)
 
     def test_flags_are_not_numbers(self):
@@ -63,12 +70,12 @@ class Comparable(unittest.TestCase):
 
     def test_a_gpu_clock_change_stops_the_test(self):
         identities = ({}, {})
-        now = self.entry(raw_gpu_clock='ns')
+        now = self.entry(gm20b_gpu_clock='ns')
         self.assertEqual(
-            metrics.not_comparable(now, self.entry(raw_gpu_clock='host'), identities), 'raw_gpu_clock changed'
+            metrics.not_comparable(now, self.entry(gm20b_gpu_clock='host'), identities), 'gm20b_gpu_clock changed'
         )
-        self.assertEqual(metrics.not_comparable(now, self.entry(), identities), 'raw_gpu_clock changed')
-        self.assertIsNone(metrics.not_comparable(now, self.entry(raw_gpu_clock='ns'), identities))
+        self.assertEqual(metrics.not_comparable(now, self.entry(), identities), 'gm20b_gpu_clock changed')
+        self.assertIsNone(metrics.not_comparable(now, self.entry(gm20b_gpu_clock='ns'), identities))
 
 
 if __name__ == '__main__':

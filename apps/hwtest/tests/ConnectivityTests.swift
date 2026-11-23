@@ -22,7 +22,8 @@ struct NetworkPathTest: HWTest {
         metrics.set("interfaces", path.availableInterfaces.map { "\($0.name):\($0.type)" }.joined(separator: ","))
         metrics.set("expensive", path.isExpensive)
         return .judged(
-            [("satisfied", path.status == .satisfied), ("over Wi-Fi", path.usesInterfaceType(.wifi))], metrics)
+            [("satisfied", path.status == .satisfied), ("over Wi-Fi", path.usesInterfaceType(.wifi))], metrics
+        )
     }
 }
 
@@ -38,7 +39,8 @@ struct ReachabilityTest: HWTest {
         let session = URLSession(configuration: configuration)
         let start = CFAbsoluteTimeGetCurrent()
         let (data, response) = try await session.data(
-            from: URL(string: "https://www.apple.com/library/test/success.html")!)
+            from: URL(string: "https://www.apple.com/library/test/success.html")!
+        )
         let milliseconds = (CFAbsoluteTimeGetCurrent() - start) * 1000
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         var metrics = Metrics()
@@ -48,7 +50,8 @@ struct ReachabilityTest: HWTest {
             [
                 ("HTTP 200", status == 200),
                 ("the Success page", String(decoding: data, as: UTF8.self).contains("Success")),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -96,7 +99,8 @@ struct BluetoothTest: HWTest {
         if state == .unauthorized { return .skip("Bluetooth permission denied") }
         guard state == .poweredOn else { return .fail("CBCentralManager state \(state.rawValue), not poweredOn") }
         probe.manager.scanForPeripherals(
-            withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
+            withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
+        )
         try await Task.sleep(nanoseconds: 5_000_000_000)
         probe.manager.stopScan()
         var metrics = Metrics()
@@ -141,7 +145,7 @@ struct USBStorageTest: HWTest {
         }
         defer { folder.stopAccessingSecurityScopedResource() }
         let file = folder.appendingPathComponent("switch-hwtest.bin")
-        let data = Data((0..<(16 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9) })
+        let data = Data((0 ..< (16 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 31 &+ $0 >> 9) })
         let writeStart = CFAbsoluteTimeGetCurrent()
         try data.write(to: file)
         let handle = try FileHandle(forUpdating: file)

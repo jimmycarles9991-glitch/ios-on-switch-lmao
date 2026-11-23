@@ -9,6 +9,8 @@ extern "C" {
 
 namespace
 {
+constexpr int kRcNone = 0, kRcPending = 1, kRcRunning = 2;
+
 std::vector<std::string> calls;
 uint32_t fence, firstFailure;
 bool recorded;
@@ -16,11 +18,9 @@ bool recorded;
 class GrFault : public testing::Test
 {
 protected:
-	nvkm_device device{0x10001};
 	nvkm_runl run{};
-	nvkm_cgrp group{&run, false};
-	nvkm_chan channel{&group, false, 0};
-	bool held = false;
+	nvkm_cgrp group{&run, kRcNone};
+	nvkm_chan channel{&group, 0};
 
 	void SetUp() override
 	{
@@ -29,33 +29,10 @@ protected:
 		firstFailure = 0;
 		recorded = false;
 	}
-
-	void acknowledge()
-	{
-		calls.emplace_back("ack");
-		if (device.control & 0x10000)
-			fence = 8;
-	}
 };
 }
 
 extern "C" {
-u32 switch_gr_fault_mask(nvkm_device *device, u32 address, u32 mask, u32 value)
-{
-	EXPECT_EQ(address, 0x400500u);
-	const u32 before = device->control;
-	device->control = (before & ~mask) | value;
-	calls.emplace_back("hold");
-	return before;
-}
-
-void switch_gr_fault_write(nvkm_device *device, u32 address, u32 value)
-{
-	EXPECT_EQ(address, 0x400500u);
-	device->control = value;
-	calls.emplace_back(value ? "enable" : "held");
-}
-
 void tgm_gr_fault(int chid)
 {
 	if (chid < 0)
@@ -67,86 +44,66 @@ void tgm_gr_fault(int chid)
 	}
 }
 
+/* chan.c nvkm_chan_error: errored 0 -> 1 once, the channel blocked then */
 void nvkm_chan_error(nvkm_chan *channel, bool preempt)
 {
-	EXPECT_FALSE(preempt);
-	channel->stopped = true;
-	channel->errored = 1;
-	calls.emplace_back("stop");
+	EXPECT_FALSE(preempt)
+		<< "PFIFO_PREEMPT is written under runl->mutex, not from the GR interrupt";
+	if (channel->errored == 0) {
+		channel->errored = 1;
+		calls.emplace_back("stop");
+	}
 }
 
+/* runl.c nvkm_runl_rc_cgrp: NONE -> PENDING once, one recovery scheduled then */
 void nvkm_runl_rc_cgrp(nvkm_cgrp *group)
 {
-	if (!group->pending) {
-		group->pending = true;
+	if (group->rc == kRcNone) {
+		group->rc = kRcPending;
 		++group->runl->rc_pending;
+		calls.emplace_back("recover");
 	}
-	calls.emplace_back("recover");
 }
 }
 
-TEST_F(GrFault, FatalAckCannotNaturallyReleaseTheFaultedFence)
+// The fault is charged to the job GR stopped in before the acknowledgement lets GR finish it; the channel and its group
+// alone go to recovery, and GR's FIFO access is not this path's (the header takes no device to write it with).
+TEST_F(GrFault, TheFaultIsChargedThenItsChannelStoppedAndItsGroupRecovered)
 {
-	switch_gpu_gr_fault_stop(&device, &held, &channel, 3);
-	acknowledge();
-	switch_gpu_gr_fault_access(&device, held);
-	EXPECT_EQ(calls,
-		  (std::vector<std::string>{"hold", "record", "stop", "recover", "ack", "held"}));
-	EXPECT_TRUE(held);
-	EXPECT_TRUE(channel.stopped);
+	switch_gpu_gr_fault_stop(&channel, 3);
+	fence = 8;
+	EXPECT_EQ(calls, (std::vector<std::string>{"record", "stop", "recover"}));
+	EXPECT_EQ(channel.errored, 1);
+	EXPECT_EQ(group.rc, kRcPending);
 	EXPECT_EQ(run.rc_pending, 1);
 	EXPECT_EQ(firstFailure, 8u);
-	EXPECT_EQ(fence, 7u);
 }
 
-TEST_F(GrFault, ReinitializationKeepsTheExceptionalHold)
+TEST_F(GrFault, RepeatedFaultsKeepTheFirstFailedSequenceAndOneRecovery)
 {
-	switch_gpu_gr_fault_stop(&device, &held, &channel, 3);
-	device.control = 0;
-	switch_gpu_gr_fault_access(&device, held);
-	acknowledge();
-	EXPECT_EQ(device.control, 0u);
-	EXPECT_EQ(fence, 7u);
-}
-
-TEST_F(GrFault, ANewerQueuedRecoveryKeepsAccessDisabled)
-{
-	switch_gpu_gr_fault_stop(&device, &held, &channel, 3);
-	switch_gpu_gr_fault_release(&device, &held, &run.rc_pending);
-	EXPECT_TRUE(held);
-	EXPECT_EQ(device.control, 0u);
-	run.rc_pending = 0;
-	switch_gpu_gr_fault_release(&device, &held, &run.rc_pending);
-	EXPECT_FALSE(held);
-	EXPECT_EQ(device.control, 0x10001u);
-	const auto completed = calls;
-	switch_gpu_gr_fault_release(&device, &held, &run.rc_pending);
-	EXPECT_EQ(calls, completed);
-}
-
-TEST_F(GrFault, RepeatedFaultsKeepTheFirstFailedSequence)
-{
-	switch_gpu_gr_fault_stop(&device, &held, &channel, 3);
-	switch_gpu_gr_fault_stop(&device, &held, &channel, 3);
+	switch_gpu_gr_fault_stop(&channel, 3);
+	fence = 8;
+	switch_gpu_gr_fault_stop(&channel, 3);
 	EXPECT_EQ(firstFailure, 8u);
 	EXPECT_EQ(run.rc_pending, 1);
+	EXPECT_EQ(calls, (std::vector<std::string>{"record", "stop", "recover", "record"}));
 }
 
-TEST_F(GrFault, AnUnreferenceableChannelDoesNotAcquireAnUnownedHold)
+TEST_F(GrFault, AnUnreferenceableChannelStopsNothing)
 {
-	switch_gpu_gr_fault_stop(&device, &held, nullptr, -1);
-	EXPECT_FALSE(held);
+	switch_gpu_gr_fault_stop(nullptr, -1);
 	EXPECT_EQ(run.rc_pending, 0);
-	EXPECT_EQ(device.control, 0x10001u);
 	EXPECT_TRUE(calls.empty());
 }
 
-TEST_F(GrFault, AQuiescedChannelsLateInterruptDoesNotAcquireAnotherHold)
+// A late interrupt for a channel nvkm_runl_rc already quiesced (errored 2, its group RUNNING) starts no second
+// recovery: both nvkm calls are no-ops then, so the path needs no check of its own.
+TEST_F(GrFault, AQuiescedChannelsLateInterruptStartsNoSecondRecovery)
 {
 	channel.errored = 2;
-	switch_gpu_gr_fault_stop(&device, &held, &channel, 3);
-	EXPECT_FALSE(held);
+	group.rc = kRcRunning;
+	switch_gpu_gr_fault_stop(&channel, 3);
 	EXPECT_EQ(run.rc_pending, 0);
-	EXPECT_EQ(device.control, 0x10001u);
+	EXPECT_EQ(channel.errored, 2);
 	EXPECT_EQ(calls, (std::vector<std::string>{"record"}));
 }

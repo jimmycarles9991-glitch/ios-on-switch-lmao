@@ -27,6 +27,8 @@
 #include "../SwitchDisplayMemoryEnvelope.h"
 #include "../SwitchLandscapeWindows.h"
 
+constexpr int kIOReturnAborted = static_cast<int>(0xe00002eb);
+
 namespace media_flip_test {
 extern int gFenceResult;
 extern unsigned gFences;
@@ -36,12 +38,14 @@ struct HostStream {
     std::vector<std::pair<uint32_t, uint32_t>> stores;
     std::vector<switch_gpu_backing_token> producers;
     uint32_t update = 0, request = 0, sequence = 0;
+    unsigned cancels = 0;
     bool executed = false;
     std::function<void(uint32_t, uint32_t)> write;
 };
 
 inline HostStream gHost;
 inline std::function<void(void *, int)> gDelivered;
+inline int gTokensWhy = SWITCH_GPU_BACKING_WRITER_GONE;
 }
 
 inline int switch_host1x_display_start(SwitchHost1xDisplayStream *stream)
@@ -69,7 +73,6 @@ inline int switch_host1x_display_submit(SwitchHost1xDisplayStream *stream, const
     gHost.executed = false;
     stream->status = 0;
     stream->restore = false;
-    stream->queued = true;
     stream->completed = completed;
     stream->context = context;
     stream->fence.threshold = ++gHost.sequence;
@@ -78,7 +81,8 @@ inline int switch_host1x_display_submit(SwitchHost1xDisplayStream *stream, const
 
 inline int switch_host1x_display_cancel(SwitchHost1xDisplayStream *stream)
 {
-    if (stream->queued && !media_flip_test::gHost.executed) {
+    ++media_flip_test::gHost.cancels;
+    if (media_flip_test::gHost.owner == stream && !media_flip_test::gHost.executed) {
         stream->restore = true;
         stream->status = SwitchHost1xDisplayStream::kCancelled;
     }
@@ -337,6 +341,7 @@ struct Display {
     uint64_t planeRequestedAt = 0, frameEnds = 10;
     unsigned stPlaneFlips = 0, stPlaneDropped = 0, deadlines = 0, releases = 0, planeUnderflowRun = 0;
     unsigned notShown = 0;
+    int offered = 0;  // planeFenceWithMediaFlip's result at the last offer
     bool flipStarted = false;
     std::vector<uint64_t> shown;  // the take sequence of every set the latch saw taken
     std::function<void()> midFrameEnd;
@@ -349,8 +354,8 @@ struct Display {
         mediaFlipUnverified = PlaneCommits::kNone;
         mediaFlipRequestedSeq = 0;
         mediaHostStream = {};
-        mediaHostGeneration = mediaHostCancelled = mediaHostRestored = 0;
-        mediaHostHeldSlots = 0;
+        mediaHostGeneration = 0;
+        gTokensWhy = SWITCH_GPU_BACKING_WRITER_GONE;
         gHost = {};
         gHost.write = [this](uint32_t word, uint32_t value) {
             model.write(word, value);
@@ -466,7 +471,8 @@ struct Display {
         planeTarget = p;
         const switch_gpu_backing_token producer[2] = {{seq, 1, SWITCH_GPU_ENGINE_VIC, 161},
                                                       {seq + kSecond, 1, SWITCH_GPU_ENGINE_NVDEC, 162}};
-        if (planeFenceWithMediaFlip(p, producer, producers) == 0)
+        offered = planeFenceWithMediaFlip(p, producer, producers);
+        if (offered == 0)
             return true;
         planeFencePending = gpuScanout = transferred = false;
         planeNotShown();
@@ -504,7 +510,7 @@ struct Display {
 
     void complete(int status)
     {
-        if (gHost.owner && gHost.owner->queued) {
+        if (gHost.owner) {
             auto *stream = gHost.owner;
             if (status && !gHost.executed)
                 stream->status = status;
@@ -516,7 +522,6 @@ struct Display {
                 model.completing = false;
             }
             gWaiters.clear();
-            stream->queued = false;
             gHost.owner = nullptr;
             stream->completed(stream->context, stream->status ? stream->status : status);
         } else {
@@ -653,7 +658,6 @@ struct Display {
         mediaFlipFromGate();
         const uint64_t shown = suspendShownSeq();
         planeLatch.settle();
-        mediaHostHeldSlots = 0;
         hwSuspended = true;
         retireSuspendShown(shown);
     }
@@ -732,6 +736,12 @@ extern "C" inline int switch_host1x_filter_wait(uint32_t, uint32_t threshold, vo
 extern "C" inline int switch_gpu_backing_token_filter_status(const switch_gpu_backing_token *token)
 {
     return media_flip_test::gUncertain.count(token->value) ? 0 : media_flip_test::gProducerCertain;
+}
+
+// Why the stream's producers failed, as the GPU driver answers.
+extern "C" inline int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *, uint32_t)
+{
+    return media_flip_test::gTokensWhy;
 }
 
 extern "C" inline int switch_gpu_backing_token_status(const switch_gpu_backing_token *token)

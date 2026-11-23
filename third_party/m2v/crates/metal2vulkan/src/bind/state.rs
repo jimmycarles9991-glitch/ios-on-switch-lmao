@@ -176,15 +176,6 @@ pub struct BindState {
     /// (`BindShape::interlocked_colors`); empty for every other draw.
     #[cfg_attr(feature = "serde", serde(default))]
     pub interlocked_colors: BTreeSet<u32>,
-    /// The extended-range color attachments whose `half` shadow the draw's render pass instance
-    /// holds (Metal's tile value of each texel), by color index: a fragment function that writes or
-    /// reads one in the interlocked storage form runs the variant that reads and writes the shadow
-    /// beside the codes (`VariantKey::extended_shadows`), and the consumer binds the instance's
-    /// shadow where the plan writes `WriteSource::ExtendedShadow`. The colors the function writes
-    /// this way the instance leaves out of its subpass, as it does `interlocked_colors`. Its
-    /// variant is part of the shape (`BindShape::extended_shadows`); empty for every other draw.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub extended_shadows: BTreeSet<u32>,
     /// What the draw's depth and stencil tests can do to its fragments ([`FragmentTests::of`]),
     /// which decides whether a fragment function that stores a color through the interlocked
     /// storage form before the tests (`RuntimeFact::TestedStorageWrites`) stores what Metal
@@ -195,10 +186,10 @@ pub struct BindState {
     #[cfg_attr(feature = "serde", serde(default))]
     pub fragment_tests: FragmentTests,
     /// The render encoder's blend color (`setBlendColorRed:green:blue:alpha:`; Metal's default
-    /// `[0, 0, 0, 0]` where the encoder never set it), red first: a fragment function that blends
-    /// an extended-range attachment in the shader under a blend that reads it takes it as push
-    /// data (`PushField::BlendColor`). Only a draw's bytes depend on it, so it is not part of the
-    /// shape.
+    /// `[0, 0, 0, 0]` where the encoder never set it), red first: a fragment function that
+    /// computes Metal's 16-bit float blend in the shader under a blend that reads it takes it as
+    /// push data (`PushField::HalfBlendColor`). Only a draw's bytes depend on it, so it is not part
+    /// of the shape.
     #[cfg_attr(feature = "serde", serde(default))]
     pub blend_color: [f32; 4],
     /// Viewport 0's depth range `[near, far]` as the encoder set it (`setViewport:`; Metal's
@@ -614,7 +605,6 @@ impl BindState {
             depth_clamp_range: self.depth_clamp_range.is_some(),
             interlocked_colors: self.interlocked_colors.clone(),
             fragment_tests: self.fragment_tests,
-            extended_shadows: self.extended_shadows.clone(),
         }
     }
 
@@ -662,7 +652,6 @@ impl BindState {
             depth_clamp_range,
             interlocked_colors,
             fragment_tests,
-            extended_shadows,
         } = shape;
         let tables = self.stages.iter().filter(|(_, t)| !t.has_empty_shape());
         tables.clone().count() == stages.len()
@@ -684,7 +673,6 @@ impl BindState {
             && self.depth_clamp_range.is_some() == *depth_clamp_range
             && self.interlocked_colors == *interlocked_colors
             && self.fragment_tests == *fragment_tests
-            && self.extended_shadows == *extended_shadows
             // Last: the one field compared through a shape made of it.
             && match self.used_resources.is_empty() {
                 true => used.is_empty(),
@@ -1476,11 +1464,6 @@ pub struct BindShape {
     /// or is refused.
     #[cfg_attr(feature = "serde", serde(default))]
     pub fragment_tests: FragmentTests,
-    /// `BindState.extended_shadows`: the variant whose fragment function reads and writes those
-    /// it reads or writes in the storage form against their shadows
-    /// (`VariantKey::extended_shadows`).
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub extended_shadows: BTreeSet<u32>,
 }
 
 impl BindShape {

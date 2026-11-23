@@ -1,10 +1,8 @@
 """Normalise one driver's nvdec log of a frame into the draws and clears eq compares.
 
-Every submission's events are one frame (a command buffer the raw path submits in segments is several submissions,
-NVK's one), a draw raw drew a triangle at a time folded back into one wherever its runs fall (eqcheck.fold_runs, here
-across submissions too and past what each run sets of its own: its first vertex in the root words NVDEC_ROOTWORDS shows,
-and an odd strip triangle's reversed front face, raw_overlap.h), and each draw's fields drop what two drivers compile or
-lay out their own way:
+Every submission's events are one frame (a command buffer the driver submits in segments is several submissions,
+NVK's one), the BEGINs of one split draw are one draw (fold_split: the fetch macro's BEGIN a primitive, which the
+hardware assembles as one draw), and each draw's fields drop what two drivers compile or lay out their own way:
 
   draw, vb*, ib, tsc*/tic*, rt*/zt   the draw's parameters, vertex bytes, header-0 samplers and targets, the targets
                                      named in order of first appearance in draws' target lines
@@ -19,19 +17,22 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'raw/pack'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'pack'))
 import eqcheck
-
-# What a run sets of its own beyond eqcheck.run_state's: the root words' first vertex, the register hash, and
-# OGL_SET_FRONT_FACE, which an odd triangle of a strip drawn alone reverses
-RUN_LINES = ('rootwords', 'regs=')
-FRONT_FACE = '191c'
-EQCHECK_RUN_STATE = eqcheck.run_state
 
 # SET_PIPELINE_REGISTER_COUNT(i) and SET_BINDLESS_TEXTURE: each driver's compiler decides them
 PROGRAM_DERIVED = {f'{0x200C + 0x40 * i:x}' for i in range(6)} | {'2608'}
 CONTENT = re.compile(r'(?:data=|ptr\{)([0-9a-f]+:[0-9a-f]+)')
 HANDLE = re.compile(r'handle\{[^}]*\}')
+
+DRAW_HEAD = re.compile(r'(DRAW(?:-INDEXED)?) first=(\d+) count=(\d+) begin=([0-9a-f]+) barriers=(.*)')
+# BEGIN's SPLIT_MODE (clb197.h NVB197_BEGIN_SPLIT_MODE, 30:29): OPEN_BEGIN_OPEN_END and OPEN_BEGIN_NORMAL_END
+# continue the BEGIN before them
+SPLIT_SHIFT, SPLIT_MASK, OPEN_BEGIN = 29, 3, (2, 3)
+# What each BEGIN of a split draw reads of its own: the vertex bytes up to its last vertex (the last BEGIN's, or an
+# indexed one's reaching furthest, are the whole draw's) and its indices
+OWN_LINES = ('vb', 'ib ')
+IB = re.compile(r'ib size=(\d+) first=(\d+) count=(\d+) idx=([0-9a-f,]+) restart=(\w+) end=(\w+)$')
 
 
 @dataclass
@@ -114,30 +115,64 @@ class Frame:
     clears: list[str]  # the others
 
 
-def run_state(lines: list[str]) -> list[str]:
-    out = []
-    for line in EQCHECK_RUN_STATE(lines):
-        if line.startswith(RUN_LINES):
-            continue
-        kept = line
-        if line.startswith('R '):
-            kept = 'R ' + ' '.join(t for t in line[2:].split() if not t.startswith(FRONT_FACE + '='))
-        out.append(kept)
+def shared(event: dict) -> list[str]:
+    return [line for line in event['lines'] if not line.startswith(OWN_LINES)]
+
+
+def continues(head: re.Match[str]) -> bool:
+    return (int(head[4], 16) >> SPLIT_SHIFT & SPLIT_MASK) in OPEN_BEGIN
+
+
+def joined(prev: dict, ev: dict) -> dict | None:
+    """Give split draw `prev` with its next BEGIN `ev` joined to it.
+
+    None where `ev` does not continue its vertices or indices: the comparison then fails on it.
+    """
+    pm, em = DRAW_HEAD.match(prev['head']), DRAW_HEAD.match(ev['head'])
+    begin = f'{int(pm[4], 16) & ~(SPLIT_MASK << SPLIT_SHIFT):08x}'
+    lines = prev['lines']
+    if pm[1] == 'DRAW':
+        first, end, start = int(pm[2]), int(pm[2]) + int(pm[3]), int(em[2])
+        if start != end:
+            return None
+        count = start + int(em[3]) - first
+        own = {x.split()[0]: x for x in ev['lines'] if x.startswith('vb')}
+    else:
+        a, b = (next((m for m in map(IB.match, e['lines']) if m), None) for e in (prev, ev))
+        if not a or not b or (a[1], a[5], a[6]) != (b[1], b[5], b[6]) or int(b[2]) != int(a[2]) + int(a[3]):
+            return None
+        first, count = int(pm[2]), max(int(pm[3]), int(em[3]))
+        further = ev if int(em[3]) >= int(pm[3]) else prev
+        own = {x.split()[0]: x for x in further['lines'] if x.startswith('vb')}
+        indices = int(a[3]) + int(b[3])
+        own['ib'] = f'ib size={a[1]} first={a[2]} count={indices} idx={a[4]},{b[4]} restart={a[5]} end={a[6]}'
+    return {
+        'head': f'{pm[1]} first={first} count={count} begin={begin} barriers={pm[5]}',
+        'lines': [own.get(x.split()[0], x) if x.startswith(OWN_LINES) else x for x in lines],
+    }
+
+
+def fold_split(events: list[dict]) -> list[dict]:
+    """Give the events with each BEGIN that continues a split draw joined to the draw before it.
+
+    Only a draw of the same kind and state joins; the joined draw keeps the first BEGIN's barriers and a normal BEGIN's
+    split mode.
+    """
+    out: list[dict] = []
+    for ev in events:
+        m = DRAW_HEAD.match(ev['head'])
+        prev = DRAW_HEAD.match(out[-1]['head']) if m and out and continues(m) else None
+        folded = joined(out[-1], ev) if prev and prev[1] == m[1] and shared(out[-1]) == shared(ev) else None
+        if folded is None:
+            out.append(ev)
+        else:
+            out[-1] = folded
     return out
-
-
-def fold_runs(events: list[dict]) -> list[dict]:
-    """Give the events with each run eqcheck.fold_runs left apart folded into the draw before it (run_state)."""
-    eqcheck.run_state = run_state
-    try:
-        return eqcheck.fold_runs(events)
-    finally:
-        eqcheck.run_state = EQCHECK_RUN_STATE
 
 
 def frame(log: str) -> Frame:
     """Read the log's draws and clears, every submission's as one frame."""
-    events = fold_runs([e for submission in eqcheck.frames(log) for e in submission])
+    events = fold_split([e for submission in eqcheck.frames(log) for e in submission])
     names = target_names(events)
     out, early, clears, cleared = Frame([], [], []), [], [], True
     for e in events:

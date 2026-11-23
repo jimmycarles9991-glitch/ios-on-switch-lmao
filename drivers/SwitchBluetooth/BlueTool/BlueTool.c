@@ -190,7 +190,7 @@ static void startPairingAgent(void)
 #endif
 
 #if SWITCH_DEBUG
-// Debug builds: the GPU context-switch stress (drivers/TegraGM20BMetal/raw/test/fetchform.cpp), once per Darwin notification
+// Debug builds: the GPU context-switch stress (drivers/TegraGM20BMetal/harness/fetchform.cpp), once per Darwin notification
 // the Mac posts (`idevicenotificationproxy -u <udid> post com.brunostjohn.switch.debug.ctxsw-stress`). Nothing else starts
 // it; it runs a bounded time and exits.
 static const char kStress[] = "/usr/bin/switch-fetchform";

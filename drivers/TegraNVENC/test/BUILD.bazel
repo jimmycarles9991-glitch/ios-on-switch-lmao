@@ -88,6 +88,7 @@ host_test(
         "//drivers/TegraVIC:SwitchNativeSurface.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",

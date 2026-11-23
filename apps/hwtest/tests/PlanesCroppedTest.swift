@@ -41,7 +41,8 @@ struct PlanesCroppedTest: HWTest {
         let portrait = await context.onStage(fullScreen: true) { stage -> Bool in
             let bounds = stage.bounds
             let view = PlayerView(
-                frame: CGRect(x: -bounds.width / 2, y: 0, width: bounds.width * 2, height: bounds.height))
+                frame: CGRect(x: -bounds.width / 2, y: 0, width: bounds.width * 2, height: bounds.height)
+            )
             view.playerLayer.player = player
             view.playerLayer.videoGravity = .resizeAspect
             stage.addSubview(view)
@@ -77,13 +78,14 @@ struct PlanesCroppedTest: HWTest {
                 ("the decoder's own picture, clipped, on window B (native_share >= 0.9)", share >= 0.9),
                 ("no detached layer went unshown (d_dropped 0)", delta("dropped") == 0),
                 ("the scene turned back (restored)", restored),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// Asks the scene for `mask` again and waits up to 3 s for it to report that orientation.
     static func turnBack(_ mask: UIInterfaceOrientationMask) async -> Bool {
         _ = await request(mask)
-        for _ in 0..<30 {
+        for _ in 0 ..< 30 {
             if await MainActor.run(body: { current() == mask }) { return true }
             try? await Task.sleep(nanoseconds: 100_000_000)
         }

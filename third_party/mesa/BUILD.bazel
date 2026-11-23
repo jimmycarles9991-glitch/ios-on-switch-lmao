@@ -1,12 +1,9 @@
 # Mesa 77452b90 for NVK (README.ios-on-switch-lmao.md), built by Bazel the way meson builds it: one BUILD.bazel beside each
 # meson.build NVK's build uses (bazel/defs.bzl), every compile, archive and generator its own action.
-#
-#   bazel build //gpu/nvk:ios //gpu/nvk:host      the dylib and its macOS host twin (gpu/nvk/BUILD.bazel)
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_ONLY", "MESA_PY_DEPS", "mesa_file")
-load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
+load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_ONLY", "MESA_PY_DEPS")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -20,15 +17,11 @@ exports_files(glob(
     exclude = ["BUILD.bazel"],
 ))
 
-mesa_identity_files()
-
-# Every header a Mesa compile may include: include/, each package's own and generated headers, and TegraGM20B's ABI
-# (meson's -Dnvk-darwin-abi-dir), at $(BINDIR)/third_party/mesa/abi. Compiles depend on all of them; each object's
-# .d file prunes them to what it really includes, so a header edit recompiles only its includers.
+# Every header a Mesa compile may include: include/ and each package's own and generated headers. Compiles depend on all
+# of them; each object's .d file prunes them to what it really includes, so a header edit recompiles only its includers.
 filegroup(
     name = "header_files",
     srcs = glob(["include/**/*.h"]) + [
-        ":abi/TegraGM20BABI.h",
         "//third_party/mesa/src:headers",
         "//third_party/mesa/src/c11/impl:headers",
         "//third_party/mesa/src/compiler:headers",
@@ -57,12 +50,6 @@ cc_library(
     hdrs = [":header_files"],
     tags = ["no-lint"],
     target_compatible_with = MESA_ONLY,
-)
-
-mesa_file(
-    name = "abi",
-    src = "//drivers/TegraGM20B:TegraGM20BABI.h",
-    out = "abi/TegraGM20BABI.h",
 )
 
 # bin/git_sha1_gen.py (src/git_sha1.h).

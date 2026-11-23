@@ -188,26 +188,34 @@ TEST_F(CompletionFlipFilter, APassBetweenTheCompletionsStoresAndItsClaimEntersTh
     EXPECT_TRUE(d.model.written.empty());
 }
 
-// The producers' contract broken: a flip their filter wrote whose completion then failed is shown as done, logged once,
-// with one line.
-TEST_F(CompletionFlipFilter, AFilterFlipWhoseCompletionFailsIsShownWithOneLine)
+// A kill dated back to the producer's job fails a frame its filter already flipped: its client's (GONE) leaves the
+// frame shown, with one line.
+TEST_F(CompletionFlipFilter, AFilterFlipWhoseClientWentIsShownWithOneLine)
 {
     ASSERT_EQ(d.offer(kSlot), 0);
     d.gpuFilter();
-    d.complete(-5);
+    d.complete(TEGRA_SCANOUT_SOURCE_GONE);
     EXPECT_EQ(d.gpuStatus, 0);
     ASSERT_EQ(gLog.size(), 1u);
-    EXPECT_NE(gLog[0].find("whose completion then failed (-5)"), std::string::npos) << gLog[0];
+    EXPECT_NE(gLog[0].find("whose completion then failed (-3)"), std::string::npos) << gLog[0];
     d.donePass();
     EXPECT_EQ(d.ring.pending, kSlot);
 }
 
 // After the failed one, the next armed flip's filter writes it as usual: nothing is held.
+// A flipped frame lost on the GPU is the kernel's own failure, shown or not.
+TEST_F(CompletionFlipFilter, AFilterFlipLostOnTheGpuPanics)
+{
+    ASSERT_EQ(d.offer(kSlot), 0);
+    d.gpuFilter();
+    EXPECT_THROW(d.complete(TEGRA_SCANOUT_SOURCE_LOST), std::runtime_error);
+}
+
 TEST_F(CompletionFlipFilter, TheNextFlipsFilterWritesAsUsual)
 {
     ASSERT_EQ(d.offer(kSlot), 0);
     d.gpuFilter();
-    d.complete(-5);
+    d.complete(TEGRA_SCANOUT_SOURCE_GONE);
     d.donePass();
     frame();
     ASSERT_EQ(d.offer(kSlot + 1), 0);

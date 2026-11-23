@@ -2,8 +2,8 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// A Core Animation state that fetches its own colour, drawn by the raw facade with the route a debug build's probe
-/// forces (RMDevice switchRawProbeFetchRung:): 4 its storage form (the fetch, and the pipeline's blend where it has one,
+/// A Core Animation state that fetches its own colour, drawn by the facade with the route a debug build's probe
+/// forces (SwitchMetalDevice switchMetalProbeFetchRung:): 4 its storage form (the fetch, and the pipeline's blend where it has one,
 /// inside the pixel interlock), 5 its barrier twin a triangle at a time behind the fetch barrier, 6 the twin's whole draw
 /// behind one barrier, the ROP blending. Quads are CA's 48-byte vertices at vertex buffer 1, drawn as triangle lists.
 public enum BlendTwinScene {
@@ -24,7 +24,7 @@ public enum BlendTwinScene {
                 CAState.Vertex(0.9, -0.9, u: 1, v: 1, color: SIMD4(0, 1, 0.25, 1)),
                 CAState.Vertex(-0.9, 0.9, u: 0, v: 0, color: SIMD4(0.2, 0.4, 1, 0.5)),
                 CAState.Vertex(-0.3, -0.3, u: 1, v: 0, color: SIMD4(1, 1, 1, 0.25)),
-            ])
+            ]),
         ]
     }
 
@@ -43,7 +43,7 @@ public enum BlendTwinScene {
 
     /// `count` quads over the whole target, each offset by a pixel or two, in one draw
     public static func overlapping(_ count: Int) -> [CAState.Vertex] {
-        (0..<count).flatMap { k -> [CAState.Vertex] in
+        (0 ..< count).flatMap { k -> [CAState.Vertex] in
             let d = Float(k) * 0.01
             return list(CAState.rectangle(x0: -1 + d, y0: -1, x1: 1, y1: 1 - d, color: SIMD4(0.45, 0.1, 0.3, 0.5)))
         }
@@ -53,7 +53,7 @@ public enum BlendTwinScene {
     /// height, about 5% of it: a mesh covering little of its pass, as Core Animation's glass edges do.
     public static func mesh(_ triangles: Int) -> [CAState.Vertex] {
         let slices = max(1, triangles / 2)
-        return (0..<slices).flatMap { k -> [CAState.Vertex] in
+        return (0 ..< slices).flatMap { k -> [CAState.Vertex] in
             let x0 = -0.5 + Float(k) / Float(slices), x1 = -0.5 + Float(k + 1) / Float(slices)
             return list(CAState.rectangle(x0: x0, y0: -0.1, x1: x1, y1: 0.1, color: SIMD4(0.45, 0.1, 0.3, 0.5)))
         }
@@ -100,7 +100,8 @@ public enum BlendTwinScene {
             for vertices in draws {
                 var vertices = vertices
                 encoder.setVertexBytes(
-                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
+                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1
+                )
                 encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count)
             }
             encoder.endEncoding()
@@ -111,13 +112,14 @@ public enum BlendTwinScene {
     }
 
     /// The GPU's time of one draw of `quads` overlapping full-target quads into a `side`-pixel (or 1280x720) target, the
-    /// median of `runs` command buffers of `draws` draws each, from the raw facade's GPU stamps; nil where untimed
+    /// median of `runs` command buffers of `draws` draws each, from the facade's GPU stamps; nil where untimed
     public static func microseconds(
         _ line: PipelineLine, quads: Int, width: Int, height: Int, library: MTLLibrary, gpu: GPU, draws: Int, runs: Int
     ) async throws -> Double? {
         try await microseconds(
             line, vertices: overlapping(quads), width: width, height: height, library: library, gpu: gpu, draws: draws,
-            runs: runs)
+            runs: runs
+        )
     }
 
     /// The same for one draw of `vertices` (a triangle list)
@@ -135,12 +137,13 @@ public enum BlendTwinScene {
             CAStateSweep.bind(encoder, source: source, sampler: sampler)
             var vertices = quadVertices
             encoder.setVertexBytes(&vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
-            for _ in 0..<draws { encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count) }
+            for _ in 0 ..<
+                draws { encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertices.count) }
             encoder.endEncoding()
         }
         _ = try await gpu.run(tolerateError: true, draw)
         var timings: [GPU.Timing] = []
-        for _ in 0..<runs { timings.append(try await gpu.run(draw)) }
+        for _ in 0 ..< runs { timings.append(try await gpu.run(draw)) }
         guard timings.allSatisfy(\.gpuTimed) else { return nil }
         return Stats.percentile(timings.map { $0.gpuMilliseconds * 1000 / Double(draws) }, 0.5)
     }

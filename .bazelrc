@@ -144,15 +144,6 @@ build:rbe --strategy=AssetCatalogCompile=remote
 build:rbe --noremote_local_fallback
 build:rbe --remote_download_outputs=toplevel
 
-# nom2v: the m2v deletion's dry run. Bazel loads m2v's runtime crate, Mesa's NVK and its dylibs (//gpu/nvk) as deleted
-# packages, and leaves out the tests tagged m2v (they test the fallback itself, or still need it). With --keep_going,
-# whatever else fails to load, build or pass is what the deletion still has to move:
-#   bazel test --config=remote --config=nom2v //drivers/... //kits/... //apps/... //tools/... //gpu/...
-common:nom2v --deleted_packages=third_party/m2v/crates/metal2vulkan-runtime,third_party/mesa/src/nouveau/vulkan,gpu/nvk
-test:nom2v --build_tests_only
-test:nom2v --test_tag_filters=-m2v
-build:nom2v --keep_going
-
 # The default preset.
 build --config=debug
 

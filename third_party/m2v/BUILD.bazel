@@ -11,11 +11,11 @@ lint_files(exclude = THIRD_PARTY_LINT_EXCLUDE)
 exports_files([
     # The workspace manifest the crates inherit from: metal2vulkan's source fingerprint hashes it.
     "Cargo.toml",
-    # The runtime's AIR fixtures, which the Metal bridge assembles and compiles in (gpu/BUILD.bazel).
-    "crates/metal2vulkan-validation/fixtures/public/examples/runtime_examples.ll",
-    "crates/metal2vulkan-validation/fixtures/public/kernel_function_constant_gate_fold.ll",
 ])
 
+# The profiles are upstream's at 963f0e64, only those the translation tests name. engine_stencil.rs sweeps the directory
+# and needs each stencil form: export (lavapipe, moltenvk-m3), interlock only (nvidia-rtx50-linux), neither (the other
+# two).
 filegroup(
     name = "translation_test_inputs",
     srcs = [
@@ -24,5 +24,10 @@ filegroup(
         "crates/metal2vulkan-validation/fixtures/public/engine/linked_visible_functions.ll",
         "crates/metal2vulkan-validation/fixtures/public/engine/stage_io.ll",
         "crates/metal2vulkan-validation/fixtures/public/fragment_depth_stencil.ll",
-    ] + glob(["crates/metal2vulkan-validation/profiles/*.json"]),
+        "crates/metal2vulkan-validation/profiles/lavapipe.json",
+        "crates/metal2vulkan-validation/profiles/lunarg-desktop-baseline-2023.json",
+        "crates/metal2vulkan-validation/profiles/moltenvk-m3.json",
+        "crates/metal2vulkan-validation/profiles/nvidia-rtx50-linux.json",
+        "crates/metal2vulkan-validation/profiles/vk12-floor.json",
+    ],
 )

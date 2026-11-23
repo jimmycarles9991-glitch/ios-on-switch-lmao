@@ -4,16 +4,16 @@ import HWTestGPU
 import Metal
 
 /// A fragment function's [[stencil]] output whose stencil write follows the depth test (a depth compare other than Always,
-/// a depth-failure operation other than the pass one): the hardware tests depth after the program, so the raw path draws
+/// a depth-failure operation other than the pass one): the hardware tests depth after the program, so the driver draws
 /// the state's variant whose program runs both tests on stand-ins (m2v refused these draws). A 32x32
 /// Depth32Float_Stencil8 pass cleared to depth 1 and stencil 16 writes depth 0.5 over the left half, then draws green at
 /// depth 0.75 under Less with each column x as reference, stencil Always, IncrementClamp on depth failure and Replace on
 /// pass: the left half keeps its colour with stencil 17, the right is green with stencil x. PASS: no pixel or texel off
-/// and every command buffer on the raw path.
+/// and every command buffer on the driver.
 struct ShadowStencilDepthTest: HWTest {
-    let id = "gpu.raw.shadow_stencil_depth"
+    let id = "gpu.gm20b.shadow_stencil_depth"
     let name =
-        "A [[stencil]] output whose stencil write follows the depth test, both tests in its program on the raw path"
+        "A [[stencil]] output whose stencil write follows the depth test, both tests in its program on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
 
@@ -21,17 +21,19 @@ struct ShadowStencilDepthTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = Self.size
         let colour = try gpu.texture(.rgba8Unorm, n, n)
         let zeta = try gpu.texture(.depth32Float_stencil8, n, n, usage: [.renderTarget])
         let solid = try gpu.render(
             fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth32Float_stencil8,
-            stencil: .depth32Float_stencil8)
+            stencil: .depth32Float_stencil8
+        )
         let shadow = try gpu.render(
             fragment: "shadow_stencil_fragment", format: .rgba8Unorm, depth: .depth32Float_stencil8,
-            stencil: .depth32Float_stencil8)
+            stencil: .depth32Float_stencil8
+        )
         let writeDepth = MTLDepthStencilDescriptor()
         writeDepth.depthCompareFunction = .always
         writeDepth.isDepthWriteEnabled = true
@@ -45,7 +47,7 @@ struct ShadowStencilDepthTest: HWTest {
         tested.frontFaceStencil = face
         tested.backFaceStencil = face
         guard let first = gpu.device.makeDepthStencilState(descriptor: writeDepth),
-            let second = gpu.device.makeDepthStencilState(descriptor: tested)
+              let second = gpu.device.makeDepthStencilState(descriptor: tested)
         else { throw TestFailure("no depth state") }
         func quad(_ e: MTLRenderCommandEncoder, x1: Float, z: Float, _ rgba: SIMD4<Float>) {
             var corners: [SIMD4<Float>] = [[-1, -1, z, 1], [x1, -1, z, 1], [-1, 1, z, 1], [x1, 1, z, 1]]
@@ -85,17 +87,18 @@ struct ShadowStencilDepthTest: HWTest {
             b.copy(
                 from: zeta, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                 sourceSize: MTLSize(width: n, height: n, depth: 1), to: stencilBytes, destinationOffset: 0,
-                destinationBytesPerRow: n, destinationBytesPerImage: n * n, options: .stencilFromDepthStencil)
+                destinationBytesPerRow: n, destinationBytesPerImage: n * n, options: .stencilFromDepthStencil
+            )
             b.endEncoding()
         }
         let pixels = try await gpu.read(colour, bytesPerPixel: 4)
         let s = stencilBytes.contents().bindMemory(to: UInt8.self, capacity: n * n)
         var colourWrong = 0, stencilWrong = 0
-        for y in 0..<n {
-            for x in 0..<n {
+        for y in 0 ..< n {
+            for x in 0 ..< n {
                 let left = x < n / 2
                 let at = 4 * (x + n * y)
-                colourWrong += Array(pixels[at..<at + 4]) == (left ? [0, 0, 255, 255] : [0, 255, 0, 255]) ? 0 : 1
+                colourWrong += Array(pixels[at ..< at + 4]) == (left ? [0, 0, 255, 255] : [0, 255, 0, 255]) ? 0 : 1
                 stencilWrong += s[x + n * y] == (left ? 17 : UInt8(x)) ? 0 : 1
             }
         }
@@ -105,7 +108,7 @@ struct ShadowStencilDepthTest: HWTest {
         metrics.set("stencil_wrong", stencilWrong)
         metrics.set("stencil_x2_x20", "\(s[2])/\(s[20])")
         var failures: [String] = []
-        if path != "raw" { failures.append("the pass went off the raw path (\(path))") }
+        if path != "gm20b" { failures.append("the pass went off the driver (\(path))") }
         if colourWrong != 0 { failures.append("\(colourWrong) pixels wrong") }
         if stencilWrong != 0 { failures.append("\(stencilWrong) stencil texels wrong") }
         return failures.isEmpty

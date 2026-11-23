@@ -59,7 +59,8 @@ struct UIGlassLiveTest: HWTest {
             await context.clearStage()
             var summary = LiveSummary(
                 name: variant.rawValue, frames: reader?.frames ?? [], recorded: read.recorded,
-                regenerated: read.regenerated, seconds: Date().timeIntervalSince(start))
+                regenerated: read.regenerated, seconds: Date().timeIntervalSince(start)
+            )
             summary.rest = rest
             summaries.append(summary)
             pngs += reader?.saved ?? []
@@ -76,7 +77,8 @@ struct UIGlassLiveTest: HWTest {
         let before = reader.frames.count
         scene.scroll.contentOffset.x += 1
         _ = await LiveReader.run(
-            reader, until: Date().addingTimeInterval(0.4), after: GlassProbe.count()?.count ?? 0)
+            reader, until: Date().addingTimeInterval(0.4), after: GlassProbe.count()?.count ?? 0
+        )
         return "\(last)/\(reader.frames.count > before ? reader.frames[before].atPresent : "-")"
     }
 
@@ -107,7 +109,8 @@ struct UIGlassLiveTest: HWTest {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try? encoder.encode(summaries.map(LiveSummary.Detail.init)).write(
-            to: directory.appendingPathComponent("frames.json"))
+            to: directory.appendingPathComponent("frames.json")
+        )
         guard summaries.contains(where: { !$0.frames.isEmpty }) else {
             return .skip("the read-back caught no presented frame", metrics)
         }
@@ -165,7 +168,9 @@ struct LiveScene {
         glass = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
         glass.frame = Snapshots.aligned(
             CGRect(
-                x: screen.width * 0.2, y: screen.height * 0.3, width: screen.width * 0.6, height: screen.height * 0.4))
+                x: screen.width * 0.2, y: screen.height * 0.3, width: screen.width * 0.6, height: screen.height * 0.4
+            )
+        )
         glass.isHidden = hidden
         stage.addSubview(glass)
         dot = UIView(frame: CGRect(x: screen.maxX - 6, y: screen.maxY - 6, width: 4, height: 4))

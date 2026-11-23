@@ -1,14 +1,14 @@
-"""Write a pack whose program indices pass 65,535, by the pack writer's own codec (raw/pack/packfile.py).
+"""Write a pack whose program indices pass 65,535, by the pack writer's own codec (pack/packfile.py).
 
 usage: wide_index_pack.py <out pack.bin>
-raw_pack_test reads it back with the runtime's reader (raw/runtime/raw_pack.h): the two agree on every index field, and
+pack_test reads it back with the runtime's reader (pack.h): the two agree on every index field, and
 on a program of more constant buffers than the 11 PackProgram once held.
 """
 
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'raw', 'pack'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pack'))
 import packfile
 
 STATE_KEY = 'samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0  | v wide_vertex  | f wide_fragment'

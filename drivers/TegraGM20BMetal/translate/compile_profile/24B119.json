@@ -1200,8 +1200,8 @@
   "policy": {
     "pointer_domain": "ResidentTable",
     "handle_domain": "Table",
-    "containment": "Contained",
-    "isolation": "On",
+    "containment": "UnsafeOff",
+    "isolation": "Off",
     "framebuffer_fetch": "AcceptUnordered",
     "unorm8_linear_filter": "Exact",
     "sampling": "NativeDevice",

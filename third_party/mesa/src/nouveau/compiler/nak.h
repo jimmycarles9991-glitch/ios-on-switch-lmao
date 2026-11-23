@@ -71,9 +71,12 @@ struct nak_fs_key {
 
    /** Switch: the set-0 bindings read in two planes, little endian (NVK's nvk_switch_xr_planes.h): 384 */
    uint8_t xr_plane_bindings[48];
+
+   /** Switch: the 16-bit float colour attachments (bit j: attachment j) */
+   uint8_t half_targets;
 };
 PRAGMA_DIAGNOSTIC_POP
-static_assert(sizeof(struct nak_fs_key) == 54, "This struct has no holes");
+static_assert(sizeof(struct nak_fs_key) == 55, "This struct has no holes");
 
 struct nak_constant_offset_info {
    /**

@@ -5,16 +5,15 @@ import HWTestGPU
 import IOSurface
 import Metal
 
-/// Blended and channel-masked states into two-plane YCbCr attachments (RawMetalYcbcrTargets.mm standInTargetState: before,
-/// raw:state.ycbcr left them to m2v, which renders into no YCbCr target). A clear and three draws a pass. Masked states,
-/// and states blending by the destination alpha (which a format without alpha reads as 1), store Metal's codes exactly;
-/// one blending over the source alpha lies within one code of Metal's, which blends in halves of its own rounding
-/// (raw/test/ycbcrblendoracle.mm on an M4 Max: the route's codes 0 off for those, at most one off for these).
-/// off_<case>_<format> counts codes past that bound (0 to pass), one_<case>_<format> the codes one off (a figure),
-/// paths every command buffer's path (raw/N to pass).
+/// Blended and channel-masked states into two-plane YCbCr attachments (TegraGM20BMetalYcbcrTargets.mm standInTargetState). A
+/// clear and three draws a pass. Masked states, and states blending by the destination alpha (which a format without
+/// alpha reads as 1), store Metal's codes exactly; one blending over the source alpha lies within one code of Metal's,
+/// which blends in halves of its own rounding (harness/ycbcrblendoracle.mm on an M4 Max: the route's codes 0 off for
+/// those, at most one off for these). off_<case>_<format> counts codes past that bound (0 to pass), one_<case>_<format>
+/// the codes one off (a figure), paths every command buffer's path (raw/N to pass).
 struct YcbcrBlendTargetTest: HWTest {
-    let id = "gpu.raw.ycbcr_blend"
-    let name = "Blended and masked states into two-plane YCbCr targets on the raw path"
+    let id = "gpu.gm20b.ycbcr_blend"
+    let name = "Blended and masked states into two-plane YCbCr targets on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -31,16 +30,20 @@ struct YcbcrBlendTargetTest: HWTest {
     static let cases = [
         Case(
             name: "over", blending: true, source: .sourceAlpha, destination: .oneMinusSourceAlpha, mask: .all,
-            clearAlpha: 1, tolerance: 1),
+            clearAlpha: 1, tolerance: 1
+        ),
         Case(
             name: "dst_alpha", blending: true, source: .destinationAlpha, destination: .oneMinusDestinationAlpha,
-            mask: .all, clearAlpha: 0.25, tolerance: 0),
+            mask: .all, clearAlpha: 0.25, tolerance: 0
+        ),
         Case(
             name: "mask_luma", blending: false, source: .one, destination: .zero, mask: .green, clearAlpha: 1,
-            tolerance: 0),
+            tolerance: 0
+        ),
         Case(
             name: "mask_chroma", blending: false, source: .one, destination: .zero, mask: [.red, .blue], clearAlpha: 1,
-            tolerance: 0),
+            tolerance: 0
+        ),
     ]
 
     static let targets = [
@@ -51,8 +54,8 @@ struct YcbcrBlendTargetTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
@@ -70,7 +73,7 @@ struct YcbcrBlendTargetTest: HWTest {
                 }
             }
         }
-        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "raw" }
+        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "gm20b" }
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
         checks.append(("every command buffer raw", raw))
         return .judged(checks, metrics, proof: gpu.proof)
@@ -83,11 +86,12 @@ struct YcbcrBlendTargetTest: HWTest {
         let attributes =
             [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
         guard CVPixelBufferCreate(nil, w, h, target.fourcc, attributes, &made) == kCVReturnSuccess, let buffer = made,
-            let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue(),
-            let format = MTLPixelFormat(rawValue: target.format)
+              let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue(),
+              let format = MTLPixelFormat(rawValue: target.format)
         else { throw TestFailure("no surface") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format, width: w, height: h, mipmapped: false)
+            pixelFormat: format, width: w, height: h, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {
             throw TestFailure("no texture")
@@ -101,7 +105,7 @@ struct YcbcrBlendTargetTest: HWTest {
             a.destinationRGBBlendFactor = c.destination
             a.destinationAlphaBlendFactor = c.destination
         }
-        let draws = (0..<3).map { Self.values(w * h, seed: UInt64(1 + $0)) }
+        let draws = (0 ..< 3).map { Self.values(w * h, seed: UInt64(1 + $0)) }
         let buffers = try draws.map { try gpu.buffer($0) }
         let clear = MTLClearColor(red: 0.31, green: 0.52, blue: 0.73, alpha: c.clearAlpha)
         YcbcrTargetTest.scribble(buffer, seed: 3)
@@ -132,13 +136,14 @@ struct YcbcrBlendTargetTest: HWTest {
     /// destination alpha of 1.
     static func held(_ draws: [[SIMD4<Float>]], clear: MTLClearColor, _ c: Case) -> [SIMD4<Float>] {
         let start = SIMD4<Float>(
-            Float(Float16(clear.red)), Float(Float16(clear.green)), Float(Float16(clear.blue)), 1)
+            Float(Float16(clear.red)), Float(Float16(clear.green)), Float(Float16(clear.blue)), 1
+        )
         let writes = [c.mask.contains(.red), c.mask.contains(.green), c.mask.contains(.blue), c.mask.contains(.alpha)]
-        return (0..<draws[0].count).map { i in
+        return (0 ..< draws[0].count).map { i in
             var v = start
             for draw in draws {
                 let s = draw[i]
-                for k in 0..<3 where writes[k] {
+                for k in 0 ..< 3 where writes[k] {
                     switch (c.blending, c.source) {
                     case (false, _), (true, .destinationAlpha): v[k] = s[k]
                     default: v[k] = s[k] * s.w + v[k] * (1 - s.w)
@@ -162,14 +167,14 @@ struct YcbcrBlendTargetTest: HWTest {
             let row = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane)
             let rows = CVPixelBufferGetHeightOfPlane(buffer, plane)
             let perRow = codes.count / rows
-            for y in 0..<rows {
+            for y in 0 ..< rows {
                 let line = base.advanced(by: y * row)
-                for x in 0..<perRow {
+                for x in 0 ..< perRow {
                     let stored =
                         wide
-                        ? (UInt16(line.load(fromByteOffset: 2 * x, as: UInt8.self))
-                            | UInt16(line.load(fromByteOffset: 2 * x + 1, as: UInt8.self)) << 8) >> 6
-                        : UInt16(line.load(fromByteOffset: x, as: UInt8.self))
+                            ? (UInt16(line.load(fromByteOffset: 2 * x, as: UInt8.self))
+                                | UInt16(line.load(fromByteOffset: 2 * x + 1, as: UInt8.self)) << 8) >> 6
+                            : UInt16(line.load(fromByteOffset: x, as: UInt8.self))
                     let off = abs(Int(stored) - Int(codes[y * perRow + x]))
                     past += off > tolerance ? 1 : 0
                     one += off == 1 ? 1 : 0
@@ -186,6 +191,6 @@ struct YcbcrBlendTargetTest: HWTest {
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
             return Float(state >> 40) / Float(1 << 24)
         }
-        return (0..<count).map { _ in SIMD4(next(), next(), next(), next()) }
+        return (0 ..< count).map { _ in SIMD4(next(), next(), next(), next()) }
     }
 }

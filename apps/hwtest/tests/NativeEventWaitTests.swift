@@ -15,12 +15,12 @@ struct NativeEventWaitTest: NativeObjectTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
         guard let produced = device.makeSharedEvent(), let relayed = device.makeEvent(),
-            let big = device.makeBuffer(length: 64 << 20, options: .storageModePrivate),
-            let source = device.makeBuffer(length: 4096, options: .storageModeShared),
-            let target = device.makeBuffer(length: 4096, options: .storageModeShared),
-            let check = device.makeBuffer(length: 4096, options: .storageModeShared),
-            let producerQueue = device.makeCommandQueue(), let waiterQueue = device.makeCommandQueue(),
-            let readerQueue = device.makeCommandQueue()
+              let big = device.makeBuffer(length: 64 << 20, options: .storageModePrivate),
+              let source = device.makeBuffer(length: 4096, options: .storageModeShared),
+              let target = device.makeBuffer(length: 4096, options: .storageModeShared),
+              let check = device.makeBuffer(length: 4096, options: .storageModeShared),
+              let producerQueue = device.makeCommandQueue(), let waiterQueue = device.makeCommandQueue(),
+              let readerQueue = device.makeCommandQueue()
         else { throw TestFailure("the device made no events, buffers or queues") }
         memset(source.contents(), 0x5a, 4096)
         memset(target.contents(), 0, 4096)
@@ -30,8 +30,8 @@ struct NativeEventWaitTest: NativeObjectTest {
 
         let producer = producerQueue.makeCommandBuffer()!
         let fills = producer.makeBlitCommandEncoder()!
-        fills.fill(buffer: big, range: 0..<big.length, value: 1)
-        fills.fill(buffer: big, range: 0..<big.length, value: 2)
+        fills.fill(buffer: big, range: 0 ..< big.length, value: 1)
+        fills.fill(buffer: big, range: 0 ..< big.length, value: 2)
         fills.copy(from: source, sourceOffset: 0, to: target, destinationOffset: 0, size: 4096)
         fills.endEncoding()
         producer.encodeSignalEvent(produced, value: 1)
@@ -61,15 +61,16 @@ struct NativeEventWaitTest: NativeObjectTest {
         metrics.set("producer_running_at_commit", producerRunning ? 1 : 0)
 
         for (name, done) in [("producer", producerDone), ("tail", tailDone), ("reader", readerDone)]
-        where !(await NativeSharedEventTest.waited(done, seconds: 5)) {
+            where !(await NativeSharedEventTest.waited(done, seconds: 5)) {
             work.failures.append("the \(name) command buffer never completed")
         }
         metrics.set(
-            "producer_at_tail", producerAtTail.value == .completed ? "completed" : "\(producerAtTail.value.rawValue)")
-        let wrong = (0..<4096).filter { check.contents().load(fromByteOffset: $0, as: UInt8.self) != 0x5a }.count
+            "producer_at_tail", producerAtTail.value == .completed ? "completed" : "\(producerAtTail.value.rawValue)"
+        )
+        let wrong = (0 ..< 4096).filter { check.contents().load(fromByteOffset: $0, as: UInt8.self) != 0x5a }.count
         metrics.set("wrong_bytes", wrong)
         if wrong != 0 { work.failures.append("\(wrong) bytes the relayed wait let through early") }
-        work.paths = [relay, tail, reader].map { RawFacade.path(of: $0) }
+        work.paths = [relay, tail, reader].map { GM20BFacade.path(of: $0) }
 
         let after = EventJobs.read(device)
         for key in ["wait_jobs", "signal_jobs", "promise_waits", "cpu_waits", "cpu_signals"] {

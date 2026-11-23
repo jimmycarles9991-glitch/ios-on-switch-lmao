@@ -9,13 +9,14 @@
 //                                            holds, global ones), then a try-retain; release with OSObject::release
 //   getMemoryDescriptor, getPixelFormat, getWidth, getHeight, getBytesPerRow, getPlaneCount, getAllocSize,
 //   getProtectionOptions; getPlaneWidth/Height/Offset/BytesPerRow(plane) (plane 0 falls back to the surface's own
-//   fields when the surface has no plane array); prepare/complete (wire count, IOMemoryDescriptor::prepare).
+//   fields when the surface has no plane array); prepare/complete (wire count, IOMemoryDescriptor::prepare);
+//   getBulkAttachments, the colour tags: IOSurface.framework turns kIOSurfaceYCbCrMatrix, ColorPrimaries,
+//   TransferFunction and both chroma locations, and CoreVideo's attachments for them, into code points there and never
+//   into the surface's property dictionary.
 // The IOSurfaceRoot is the service named "IOCoreSurfaceRoot".
 #include <IOKit/IOLib.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IOService.h>
-#include <libkern/c++/OSString.h>
-#include <libkern/c++/OSSymbol.h>
 #include <string.h>
 #include "TegraVIC.h"
 #include "TegraVICSurface.h"
@@ -24,7 +25,7 @@
 #include "../../kits/SwitchDMA/SwitchDMAPages.h"
 
 extern "C" {
-OSObject *switch_surface_copy_value(OSObject *surface, const OSSymbol *key, uint32_t *seed);
+void switch_surface_bulk_attachments(OSObject *surface, void *out, size_t *size);
 OSObject *tegra_vic_ios_lookup(IOService *root, uint32_t id, task_t task);
 IOMemoryDescriptor *tegra_vic_ios_memory(OSObject *surface);
 uint32_t tegra_vic_ios_format(OSObject *surface);
@@ -46,47 +47,18 @@ int tegra_vic_ios_device_unlock(OSObject *surface, uint32_t options);
 
 namespace {
 IOService *gRoot;
-const OSSymbol *gMatrixKey;
-const OSSymbol *gTransferKey, *gPrimariesKey, *gChromaTopKey, *gChromaBottomKey;
-
-uint32_t colorTag(OSObject *surface, const OSSymbol *key, uint32_t (*parse)(const char *))
-{
-    if (!key)
-        return UINT32_MAX;
-    uint32_t seed = 0;
-    OSObject *value = switch_surface_copy_value(surface, key, &seed);
-    auto *name = OSDynamicCast(OSString, value);
-    const uint32_t result = value && !name ? UINT32_MAX : parse(name ? name->getCStringNoCopy() : nullptr);
-    OSSafeReleaseNULL(value);
-    return result;
-}
-
-uint32_t colorMatrix(OSObject *surface)
-{
-    if (!gMatrixKey)
-        return SWITCH_VIC_MATRIX_UNSUPPORTED;
-    uint32_t seed = 0;
-    OSObject *value = switch_surface_copy_value(surface, gMatrixKey, &seed);
-    auto *name = OSDynamicCast(OSString, value);
-    const uint32_t matrix = value && !name ? uint32_t(SWITCH_VIC_MATRIX_UNSUPPORTED)
-                                           : switch_vic_matrix_tag(name ? name->getCStringNoCopy() : nullptr);
-    OSSafeReleaseNULL(value);
-    return matrix;
-}
-}
-
-extern "C" uint32_t switch_vic_surface_matrix(OSObject *surface)
-{
-    return surface ? colorMatrix(surface) : uint32_t(SWITCH_VIC_MATRIX_UNSUPPORTED);
 }
 
 extern "C" void switch_vic_surface_color(OSObject *surface, TegraVICSurfaceDesc *desc)
 {
-    desc->colorMatrix = colorMatrix(surface);
-    desc->transfer = colorTag(surface, gTransferKey, switch_surface_transfer_tag);
-    desc->primaries = colorTag(surface, gPrimariesKey, switch_surface_primaries_tag);
-    desc->chromaTop = colorTag(surface, gChromaTopKey, switch_surface_chroma_tag);
-    desc->chromaBottom = colorTag(surface, gChromaBottomKey, switch_surface_chroma_tag);
+    uint8_t bulk[OriginalIOSurface::bulkSize] = {};
+    size_t size = sizeof(bulk);
+    switch_surface_bulk_attachments(surface, bulk, &size);
+    desc->colorMatrix = switch_vic_matrix_code(bulk[OriginalIOSurface::bulkYCbCrMatrix]);
+    desc->transfer = tegra_vic_color_code(bulk[OriginalIOSurface::bulkTransferFunction]);
+    desc->primaries = tegra_vic_color_code(bulk[OriginalIOSurface::bulkColorPrimaries]);
+    desc->chromaTop = switch_surface_chroma_code(bulk[OriginalIOSurface::bulkChromaTop]);
+    desc->chromaBottom = switch_surface_chroma_code(bulk[OriginalIOSurface::bulkChromaBottom]);
 }
 
 extern "C" bool tegra_vic_surface_start(void)
@@ -98,22 +70,6 @@ extern "C" bool tegra_vic_surface_start(void)
         return false;
     IOService *root = IOService::waitForMatchingService(match, 5ULL * 1000 * 1000 * 1000);
     match->release();
-    if (root) {
-        gMatrixKey = OSSymbol::withCStringNoCopy("IOSurfaceYCbCrMatrix");
-        gTransferKey = OSSymbol::withCStringNoCopy("IOSurfaceTransferFunction");
-        gPrimariesKey = OSSymbol::withCStringNoCopy("IOSurfaceColorPrimaries");
-        gChromaTopKey = OSSymbol::withCStringNoCopy("IOSurfaceChromaLocationTopField");
-        gChromaBottomKey = OSSymbol::withCStringNoCopy("IOSurfaceChromaLocationBottomField");
-        if (!gMatrixKey || !gTransferKey || !gPrimariesKey || !gChromaTopKey || !gChromaBottomKey) {
-            OSSafeReleaseNULL(gMatrixKey);
-            OSSafeReleaseNULL(gTransferKey);
-            OSSafeReleaseNULL(gPrimariesKey);
-            OSSafeReleaseNULL(gChromaTopKey);
-            OSSafeReleaseNULL(gChromaBottomKey);
-            root->release();
-            return false;
-        }
-    }
     gRoot = root;  // kept (waitForMatchingService retained it)
     return gRoot != nullptr;
 }

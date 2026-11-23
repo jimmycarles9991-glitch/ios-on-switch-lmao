@@ -5,7 +5,7 @@ import Metal
 
 /// ui.pocket_keyline's offscreen half: the keyline's state (KeylineReplica) on the process's default device with its
 /// other two attachments private (replica_) and memoryless (replica_ml_). Each run gives <run>_path= and <run>_form=
-/// (storage, barrier.<fallback>, split, whole), a run off the raw path on the facade being wrong, <run>_wrong=
+/// (storage, barrier.<fallback>, split, whole), a run off the driver on the facade being wrong, <run>_wrong=
 /// (the first texel off, "-" for none) and <run>_wrong_texels=; the private run also R,G,B,A as drawn and as expected at
 /// each mark (<run>_<mark>_rgba, <run>_<mark>_want) and the rows either side of the keyline's row
 /// (<run>_above_rgba, <run>_below_rgba), and the other attachments there (<run>_others: RGBA16Float/R32Float).
@@ -40,7 +40,8 @@ enum PocketKeylineReplicaRun {
         metrics.set(prefix + "_form", drawn.form)
         metrics.set(prefix + "_wrong", wrong.isEmpty ? "-" : wrong)
         metrics.set(prefix + "_wrong_texels", texels)
-        if RawFacade.kind(of: gpu.device) == "raw" && drawn.path != "raw" { return "off the raw path: \(drawn.path)" }
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" && drawn
+            .path != "gm20b" { return "off the driver: \(drawn.path)" }
         guard !memoryless else { return wrong }
         let text = { (values: [Int]) in values.map(String.init).joined(separator: ",") }
         for mark in KeylineReplica.marks {

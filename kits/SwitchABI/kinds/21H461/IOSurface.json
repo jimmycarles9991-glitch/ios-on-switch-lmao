@@ -13,7 +13,13 @@
     "clientTask": "0x170",
     "useCountFlags": "0x3b2",
     "parent": "0x358",
-    "memoryRegions": "0x350"
+    "memoryRegions": "0x350",
+    "bulkSize": "0x70",
+    "bulkYCbCrMatrix": "0x3a",
+    "bulkColorPrimaries": "0x3b",
+    "bulkTransferFunction": "0x3c",
+    "bulkChromaTop": "0x3d",
+    "bulkChromaBottom": "0x3e"
   },
   "addresses": {
     "protection": "0xfffffff005b9d2fc",
@@ -39,7 +45,8 @@
     "use_count_increment": "0xfffffff005b9f758",
     "use_count_decrement": "0xfffffff005b9f814",
     "use_count": "0xfffffff005b9f9e0",
-    "seed": "0xfffffff005ba4f6c"
+    "seed": "0xfffffff005ba4f6c",
+    "bulk_attachments": "0xfffffff005ba1680"
   },
   "hints": {
     "functions": {
@@ -162,6 +169,11 @@
         "at": "0xfffffff005ba4f6c",
         "body": "f940bc08 b9400d00 d65f03c0",
         "why": "IOSurface::getSeed(): ldr x8, [x0, #0x178] (the shared entry); ldr w0, [x8, #0xc]: the word IOSurface::lock (0xfffffff005b9d81c), the device write end (0xfffffff005ba0ff4), the allocation over client memory (0xfffffff005b9c408) and the seed increment pair (0xfffffff005b9d6b4, 0xfffffff005b9d704) add 1 to; between the +0x3b2 flag readers and the +0x10 reader, the accessor run 24B119 has at 0xfffffff009af6940. The 0xb8-byte shared entry is zeroed when made (0xfffffff005bac818..834)"
+      },
+      "bulk_attachments": {
+        "at": "0xfffffff005ba1680",
+        "body": "d102c3ff a9075ff8 a90857f6 a9094ff4 a90a7bfd 910283fd aa0203f3 aa0103f4 aa0003f6 f9402800 94005aee f940bec8 ad418500 ad0007e0 3dc01500 3d800be0",
+        "why": "IOSurface::getBulkAttachments(out, size): the lock at +0x50, the shared entry (+0x178) from +0x30 copied, min(*size, 0x70) bytes out, the rest zeroed, *size written back; IOSurfaceRootUserClient selector 28 (0xfffffff005bae664) calls it with 0x70"
       }
     },
     "constants": {
@@ -200,6 +212,42 @@
         "at": "0xfffffff005b9c31c",
         "word": "f941aa68",
         "why": "ldr x8, [x19, #0x350] in the memory allocation when clientMemory is 0: each 16-byte range of the creating task (+0x170) is checked page-aligned and the descriptor made over them (0xfffffff005b9c5b0), with no seed move, unlike the clientMemory branch (0xfffffff005b9c408) (24B119: +0x370)"
+      },
+      "bulkSize": {
+        "value": "0x70",
+        "at": "0xfffffff005ba171c",
+        "word": "52800e08",
+        "why": "mov w8, #0x70 after cmp x23, #0x70 in getBulkAttachments: the most it copies, the size the user client's selector 28 (0xfffffff005bae664) asks for"
+      },
+      "bulkYCbCrMatrix": {
+        "value": "0x3a",
+        "at": "0xfffffff005ba154c",
+        "word": "3940ea88",
+        "why": "ldrb w8, [x20, #0x3a] in setBulkAttachments (0xfffffff005ba145c), stored to the shared entry's +0x6a under mask bit 5: kIOSurfaceYCbCrMatrix, whose code point IOSurface.framework puts there"
+      },
+      "bulkColorPrimaries": {
+        "value": "0x3b",
+        "at": "0xfffffff005ba155c",
+        "word": "3940ee88",
+        "why": "ldrb w8, [x20, #0x3b] in setBulkAttachments (0xfffffff005ba145c), stored to the shared entry's +0x6b under mask bit 6: kIOSurfaceColorPrimaries, whose code point IOSurface.framework puts there"
+      },
+      "bulkTransferFunction": {
+        "value": "0x3c",
+        "at": "0xfffffff005ba156c",
+        "word": "3940f288",
+        "why": "ldrb w8, [x20, #0x3c] in setBulkAttachments (0xfffffff005ba145c), stored to the shared entry's +0x6c under mask bit 7: kIOSurfaceTransferFunction, whose code point IOSurface.framework puts there"
+      },
+      "bulkChromaTop": {
+        "value": "0x3d",
+        "at": "0xfffffff005ba157c",
+        "word": "3940f688",
+        "why": "ldrb w8, [x20, #0x3d] in setBulkAttachments (0xfffffff005ba145c), stored to the shared entry's +0x6d under mask bit 8: kIOSurfaceChromaLocationTopField, whose code point IOSurface.framework puts there"
+      },
+      "bulkChromaBottom": {
+        "value": "0x3e",
+        "at": "0xfffffff005ba158c",
+        "word": "3940fa88",
+        "why": "ldrb w8, [x20, #0x3e] in setBulkAttachments (0xfffffff005ba145c), stored to the shared entry's +0x6e under mask bit 9: kIOSurfaceChromaLocationBottomField, whose code point IOSurface.framework puts there"
       }
     }
   }

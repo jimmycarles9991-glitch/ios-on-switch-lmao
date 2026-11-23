@@ -113,6 +113,16 @@ pub struct AirAbi {
 }
 
 impl AirAbi {
+    /// Whether the module's `!air.signature` has no reading: a linked-constants module was
+    /// specialized with the constants it lists, so one that still declares a constant is not the
+    /// module its signature describes. Any other signature describes how a closed module was
+    /// produced, and its own code is what runs, as an entry and as a linked function alike.
+    pub fn signature_unreadable(&self) -> bool {
+        self.linkage_signature
+            .is_some_and(|s| s.kind == LinkageSignatureKind::LinkedConstants)
+            && !self.function_constants.is_empty()
+    }
+
     /// The layout `r` names.
     pub fn struct_info(&self, r: StructRef) -> Option<&StructInfo> {
         self.structs.get(r.0 as usize)
@@ -1293,10 +1303,13 @@ pub enum LinkageSignatureKind {
 
 /// `!air.signature`. Only its kind and operand count are decoded. It describes how a closed
 /// module was produced (the constants a linked-constants module was specialized with, the graph
-/// a stitched module was built from); the module's own code is what runs. A linked-constants module
-/// that still declares function constants is refused (`Feature::Linking`), as is a linked function
-/// module with a signature. An `air.rename_qualified_function_signature` (a function renamed to its
-/// qualified name after it was produced) is read as the signature it wraps.
+/// a stitched module was built from); the module's own code is what runs, whether it is a stage's
+/// or a linked function's (a stitched library's function, or the front end's specialization of a
+/// visible function, which MPS links into its kernels). A linked-constants module that still
+/// declares function constants is refused (`Feature::Linking`, [`AirAbi::signature_unreadable`]),
+/// as is a dynamic library's export from a module with any signature. An
+/// `air.rename_qualified_function_signature` (a function renamed to its qualified name after it
+/// was produced) is read as the signature it wraps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LinkageSignature {
     /// Which signature the node's leading string names.

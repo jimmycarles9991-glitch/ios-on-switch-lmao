@@ -12,7 +12,7 @@ private func floats(_ bytes: [UInt8]) -> [Float] {
 /// the answer counts, each target written its own value at every texel by one draw, exact.
 struct NativeWideTargetsTest: NativeObjectTest {
     let id = "metal.native.wide_targets"
-    let name = "Eight RGBA32Float targets in one pass, the framebuffer bits the device answers, on the raw path"
+    let name = "Eight RGBA32Float targets in one pass, the framebuffer bits the device answers, on the driver"
 
     static let size = 16, targets = 8
 
@@ -23,16 +23,17 @@ struct NativeWideTargetsTest: NativeObjectTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         var work = NativeWork()
         if let wrong = NativeAnswers.check(
-            gpu.device, "maxFramebufferStorageBits", NativeAnswers.framebufferBits, field: "framebuffer_bits", &metrics)
+            gpu.device, "maxFramebufferStorageBits", NativeAnswers.framebufferBits, field: "framebuffer_bits", &metrics
+        )
         {
             work.failures.append(wrong)
         }
         let pipeline = try gpu.render(
             vertex: "answers_full_vertex", fragment: "wide_targets_fragment", format: .rgba32Float
         ) { d in
-            for k in 1..<Self.targets { d.colorAttachments[k].pixelFormat = .rgba32Float }
+            for k in 1 ..< Self.targets { d.colorAttachments[k].pixelFormat = .rgba32Float }
         }
-        let textures = try (0..<Self.targets).map { _ in try gpu.texture(.rgba32Float, Self.size, Self.size) }
+        let textures = try (0 ..< Self.targets).map { _ in try gpu.texture(.rgba32Float, Self.size, Self.size) }
         work.objects += [pipeline] + textures
         let timing = try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
@@ -50,9 +51,9 @@ struct NativeWideTargetsTest: NativeObjectTest {
         var wrong = 0
         for (k, t) in textures.enumerated() {
             let texels = floats(try await gpu.read(t, bytesPerPixel: 16))
-            for y in 0..<Self.size {
-                for x in 0..<Self.size
-                where Array(texels[(y * Self.size + x) * 4..<(y * Self.size + x) * 4 + 4])
+            for y in 0 ..< Self.size {
+                for x in 0 ..< Self.size
+                    where Array(texels[(y * Self.size + x) * 4 ..< (y * Self.size + x) * 4 + 4])
                     != Self.want(k, x, y)
                 {
                     wrong += 1
@@ -70,7 +71,7 @@ struct NativeWideTargetsTest: NativeObjectTest {
 /// weighted sum fills an RGBA32Float target.
 struct NativeInterpolantsTest: NativeObjectTest {
     let id = "metal.native.interpolants"
-    let name = "As many interpolated components as the device answers reach the fragment function, on the raw path"
+    let name = "As many interpolated components as the device answers reach the fragment function, on the driver"
 
     static let size = 8
 
@@ -81,14 +82,16 @@ struct NativeInterpolantsTest: NativeObjectTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         var work = NativeWork()
         if let wrong = NativeAnswers.check(
-            gpu.device, "maxInterpolatedComponents", NativeAnswers.interpolants, field: "interpolants", &metrics)
+            gpu.device, "maxInterpolatedComponents", NativeAnswers.interpolants, field: "interpolants", &metrics
+        )
         {
             work.failures.append(wrong)
         }
         let count = NativeAnswers.interpolants / 4
         metrics.set("varyings", count)
         let pipeline = try gpu.render(
-            vertex: "interpolants\(count)_vertex", fragment: "interpolants\(count)_fragment", format: .rgba32Float)
+            vertex: "interpolants\(count)_vertex", fragment: "interpolants\(count)_fragment", format: .rgba32Float
+        )
         let target = try gpu.texture(.rgba32Float, Self.size, Self.size)
         work.objects += [pipeline, target]
         let timing = try await gpu.run { commands in
@@ -102,10 +105,10 @@ struct NativeInterpolantsTest: NativeObjectTest {
             e.endEncoding()
         }
         work.paths.append(timing.path)
-        let want = (0..<4).map { c in (0..<count).reduce(Float(0)) { $0 + Self.varying($1)[c] * Float($1 + 1) } }
+        let want = (0 ..< 4).map { c in (0 ..< count).reduce(Float(0)) { $0 + Self.varying($1)[c] * Float($1 + 1) } }
         let texels = floats(try await gpu.read(target, bytesPerPixel: 16))
-        let wrong = (0..<Self.size * Self.size).filter { i in
-            (0..<4).contains { c in abs(texels[i * 4 + c] - want[c]) > 0.05 }
+        let wrong = (0 ..< Self.size * Self.size).filter { i in
+            (0 ..< 4).contains { c in abs(texels[i * 4 + c] - want[c]) > 0.05 }
         }.count
         metrics.set("wrong_texels", wrong)
         if wrong != 0 { work.failures.append("\(wrong) texels miss a varying") }
@@ -118,7 +121,7 @@ struct NativeInterpolantsTest: NativeObjectTest {
 /// the words past 32 KiB cross threads too.
 struct NativeThreadgroupMemoryTest: NativeObjectTest {
     let id = "metal.native.threadgroup_memory"
-    let name = "A kernel uses all the threadgroup memory the device answers, on the raw path"
+    let name = "A kernel uses all the threadgroup memory the device answers, on the driver"
 
     static let threads = 256
 
@@ -128,12 +131,14 @@ struct NativeThreadgroupMemoryTest: NativeObjectTest {
         metrics.set("threadgroup_bytes", bytes)
         if bytes != NativeAnswers.threadgroupMemory {
             work.failures.append(
-                "maxThreadgroupMemoryLength answers \(bytes), the table \(NativeAnswers.threadgroupMemory)")
+                "maxThreadgroupMemoryLength answers \(bytes), the table \(NativeAnswers.threadgroupMemory)"
+            )
         }
         if let wrong = NativeAnswers.check(
             gpu.device, "maxComputeThreadgroupMemory", NativeAnswers.threadgroupMemory,
             field: "compute_threadgroup_bytes",
-            &metrics)
+            &metrics
+        )
         {
             work.failures.append(wrong)
         }
@@ -151,12 +156,13 @@ struct NativeThreadgroupMemoryTest: NativeObjectTest {
             e.setBytes(&count, length: 4, index: 1)
             e.dispatchThreadgroups(
                 MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: Self.threads, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: Self.threads, height: 1, depth: 1)
+            )
             e.endEncoding()
         }
         work.paths.append(timing.path)
         let got = out.contents().bindMemory(to: UInt32.self, capacity: Self.threads)
-        let wrong = (0..<Self.threads).filter { tid in
+        let wrong = (0 ..< Self.threads).filter { tid in
             var x: UInt32 = 0
             var i = UInt32((tid + 1) % Self.threads)
             while i < words {

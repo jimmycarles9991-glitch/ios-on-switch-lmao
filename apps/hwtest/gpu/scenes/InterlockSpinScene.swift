@@ -3,7 +3,7 @@ import HWTestCore
 import Metal
 
 struct InterlockSpinScene: GPUScene {
-    let id = "gpu.raw.interlock_spin"
+    let id = "gpu.gm20b.interlock_spin"
     let name = "Interlock ticket waits: exact overlapping blends and GPU time"
 
     static let width = 1280, height = 720
@@ -13,16 +13,17 @@ struct InterlockSpinScene: GPUScene {
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind != "m2v" else {
-            result.notes.append("the raw device and Apple GPU reference only")
-            return result
-        }
+        let kind = GM20BFacade.kind(of: gpu.device)
         let format = TexelFormat.rgba16Float
         let scale = FetchBlendState.scale(format)
-        let target = try gpu.texture(format.metal, Self.width, Self.height)
+        // Plain memory for both arms (a private target moves onto compressed memory once the facade has some): there the
+        // plain arm's ROP blends stay compressed and the interlocked arm's surface stores do not, and the 4x bound would
+        // weigh compression instead of the ticket wait
+        let target = try gpu.texture(
+            format.metal, Self.width, Self.height, usage: [.renderTarget, .shaderRead, .pixelFormatView]
+        )
         let points = try gpu.buffer(FetchBlendPipeline.quad)
-        let tags = (0..<16).map { SIMD4<Float>(0, 0, Float(($0 * 5 + 1) & 3), 0) }
+        let tags = (0 ..< 16).map { SIMD4<Float>(0, 0, Float(($0 * 5 + 1) & 3), 0) }
         let instances = try gpu.buffer(tags)
         var values = [FetchBlendState.clear]
         for tag in tags { values.append(FetchBlendState.step(values.last!, UInt32(tag.z))) }
@@ -43,57 +44,57 @@ struct InterlockSpinScene: GPUScene {
                     let clear = FetchBlendState.clear
                     pass.colorAttachments[0].clearColor = MTLClearColor(
                         red: Double(clear.x) / Double(scale), green: Double(clear.y) / Double(scale),
-                        blue: Double(clear.z) / Double(scale), alpha: Double(clear.w) / Double(scale))
+                        blue: Double(clear.z) / Double(scale), alpha: Double(clear.w) / Double(scale)
+                    )
                     let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
                     encoder.setRenderPipelineState(pipeline)
                     FetchBlendPipeline.bind(encoder, points: points, instances: instances, scale: scale)
-                    for layer in 0..<layers {
+                    for layer in 0 ..< layers {
                         encoder.setVertexBuffer(instances, offset: layer * MemoryLayout<SIMD4<Float>>.stride, index: 1)
                         if arm.0 == "plain" {
                             let delta = values[layer + 1] &- values[layer]
-                            var color = SIMD4<Float>((0..<4).map { Float(delta[$0]) / scale })
+                            var color = SIMD4<Float>((0 ..< 4).map { Float(delta[$0]) / scale })
                             encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                         }
                         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     }
                     encoder.endEncoding()
                 }
-                var warm = try await gpu.run(tolerateError: true, draw)
-                for _ in 0..<20 where kind == "raw" && warm.path.hasPrefix("m2v:state") {
-                    try await Task.sleep(nanoseconds: 50_000_000)
-                    warm = try await gpu.run(tolerateError: true, draw)
-                }
-                guard !warm.path.hasPrefix("error:"), kind != "raw" || warm.path == "raw" else {
+                let warm = try await gpu.run(tolerateError: true, draw)
+                guard !warm.path.hasPrefix("error:"), kind != "gm20b" || warm.path == "gm20b" else {
                     result.expect(false, "\(label): \(warm.path)")
                     continue
                 }
-                let before = RawFacade.counters(of: gpu.device)
+                let before = GM20BFacade.counters(of: gpu.device)
                 var times: [Double] = []
-                for _ in 0..<Self.runs {
+                for _ in 0 ..< Self.runs {
                     let timing = try await gpu.run(draw)
-                    result.expect(kind != "raw" || timing.path == "raw", "\(label): \(timing.path)")
+                    result.expect(kind != "gm20b" || timing.path == "gm20b", "\(label): \(timing.path)")
                     result.expect(timing.gpuTimed && timing.gpuClock != "host", "\(label): no GPU timestamp")
                     times.append(timing.gpuTimed && timing.gpuClock != "host" ? timing.gpuMilliseconds : 0)
                     let bytes = try await gpu.read(target, bytesPerPixel: format.bytesPerTexel)
                     _ = result.compare(
                         label, bytes: bytes, expected: expected, format: format,
-                        width: Self.width, height: Self.height, tolerance: 0)
+                        width: Self.width, height: Self.height, tolerance: 0
+                    )
                 }
                 result.metrics.set("gpu_ms_" + label, Stats.percentile(times, 0.5), digits: 3)
-                if kind == "raw" {
-                    let after = RawFacade.counters(of: gpu.device)
+                if kind == "gm20b" {
+                    let after = GM20BFacade.counters(of: gpu.device)
                     let interlocked = (after["interlock_draws"] ?? 0) - (before["interlock_draws"] ?? 0)
                     result.metrics.set("ilk_" + label, interlocked)
                     result.expect(
                         arm.0 == "plain" ? interlocked == 0 : interlocked >= layers * Self.runs,
-                        "\(label): unexpected interlock count \(interlocked)")
+                        "\(label): unexpected interlock count \(interlocked)"
+                    )
                 }
                 if arm.0 == "plain" {
                     baseline = times
                 } else {
                     result.expect(
                         InterlockSpinBound.accepts(times, baseline: baseline),
-                        "\(label): a draw exceeded 4x the non-interlocked GPU time or lacked a timestamp")
+                        "\(label): a draw exceeded 4x the non-interlocked GPU time or lacked a timestamp"
+                    )
                 }
             }
         }

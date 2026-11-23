@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-#import "../raw/runtime/SwitchSharedEvent.h"
+#import "../SwitchSharedEvent.h"
 #include <cstdio>
 #include <cstdlib>
 

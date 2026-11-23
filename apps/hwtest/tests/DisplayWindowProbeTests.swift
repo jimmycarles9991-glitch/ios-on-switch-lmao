@@ -34,7 +34,7 @@ struct DisplayWindowProbeTest: HWTest {
         guard started.error == 0 else {
             return .failure(TestFailure("not started (errno \(started.error)): \(started.why)"))
         }
-        for _ in 0..<100 {
+        for _ in 0 ..< 100 {
             try? await Task.sleep(nanoseconds: 100_000_000)
             switch exchange(DisplayWindowProbeReply.query, number) {
             case .failure(let failure): return .failure(failure)
@@ -55,24 +55,30 @@ struct DisplayWindowProbeTest: HWTest {
     static let all: [any HWTest] = [
         DisplayWindowProbeTest(
             id: "display.x1.overlay_block_yuv", name: "NV12 in 2- and 16-GOB blocks on window B against pitch (CRC)",
-            probe: "V5a", number: 1),
+            probe: "V5a", number: 1
+        ),
         DisplayWindowProbeTest(
             id: "display.x1.column_scan_yuv",
             name: "Window A column-scanning NVDEC's landscape NV12 both ways, and the UI's BGRA on window B (CRC)",
             probe: "V3",
-            number: 2),
+            number: 2
+        ),
         DisplayWindowProbeTest(
             id: "display.x1.offset_crop", name: "A block-linear NV12 crop through window B's H/V offsets (CRC)",
-            probe: "V5c", number: 3),
+            probe: "V5c", number: 3
+        ),
         DisplayWindowProbeTest(
             id: "display.x1.window_formats",
             name: "NV12 Cb first at depth 43, NV24 at 49, packed 4:2:2 at 16 and SWAP2, against BGRA (CRC)",
-            probe: "L979/L955", number: 4),
+            probe: "L979/L955", number: 4
+        ),
         DisplayWindowProbeTest(
             id: "display.x1.window_wide", name: "Window B's V filter on 3840- and 4096-wide lines (CRC)",
-            probe: "L958", number: 5),
+            probe: "L958", number: 5
+        ),
         DisplayWindowProbeTest(
             id: "display.x1.window_palette", name: "Windows A and B with CP_ENABLE and a per-channel palette (CRC)",
-            probe: "L1004", number: 6),
+            probe: "L1004", number: 6
+        ),
     ]
 }

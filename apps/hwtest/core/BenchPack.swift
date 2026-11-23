@@ -41,13 +41,13 @@ extension BenchFields {
             guard let on = flag as? Bool else { throw BenchInvalid("pack.ca is true or false") }
             ca = on
         }
-        guard let list = p["quads"] as? [Any], (1...BenchProtocol.maxQuads).contains(list.count) else {
+        guard let list = p["quads"] as? [Any], (1 ... BenchProtocol.maxQuads).contains(list.count) else {
             throw BenchInvalid("pack.quads: 1..\(BenchProtocol.maxQuads)")
         }
         let quads = try list.map { item -> BenchQuad in
             guard let quad = item as? [String: Any] else { throw BenchInvalid("pack.quads: objects") }
             try Self.keys(quad, BenchProtocol.quadKeys, "pack.quads[]")
-            let rect = try counts(quad["rect"] ?? ([] as [Any]), 4, 0...BenchProtocol.maxSide, "pack.quads[].rect")
+            let rect = try counts(quad["rect"] ?? ([] as [Any]), 4, 0 ... BenchProtocol.maxSide, "pack.quads[].rect")
             guard rect[0] < rect[2], rect[2] <= width, rect[1] < rect[3], rect[3] <= height else {
                 throw BenchInvalid("pack.quads[].rect outside the target")
             }
@@ -57,13 +57,13 @@ extension BenchFields {
             var built = BenchQuad(rect: rect.map(UInt32.init), blocks: try ubos.map(block))
             if let text = quad["vertices"] {
                 let vertices = try bytes(text, "pack.quads[].vertices")
-                guard (1...BenchProtocol.maxVertexBytes).contains(vertices.count) else {
+                guard (1 ... BenchProtocol.maxVertexBytes).contains(vertices.count) else {
                     throw BenchInvalid("pack.quads[].vertices: 1..\(BenchProtocol.maxVertexBytes) bytes")
                 }
                 built.vertices = vertices
-                built.primitive = UInt32(try count(quad["primitive"], 0...4, "pack.quads[].primitive"))
-                built.first = UInt32(try count(quad["first"] ?? (0 as Any), 0...65535, "pack.quads[].first"))
-                built.count = UInt32(try count(quad["count"], 1...65535, "pack.quads[].count"))
+                built.primitive = UInt32(try count(quad["primitive"], 0 ... 4, "pack.quads[].primitive"))
+                built.first = UInt32(try count(quad["first"] ?? (0 as Any), 0 ... 65535, "pack.quads[].first"))
+                built.count = UInt32(try count(quad["count"], 1 ... 65535, "pack.quads[].count"))
             } else if quad["primitive"] != nil || quad["first"] != nil || quad["count"] != nil {
                 throw BenchInvalid("pack.quads[]: primitive, first and count only with vertices")
             }
@@ -75,10 +75,11 @@ extension BenchFields {
     private func block(_ item: Any) throws -> BenchBlock {
         guard let ubo = item as? [String: Any] else { throw BenchInvalid("pack.quads[].ubos: objects") }
         try Self.keys(ubo, BenchProtocol.uboKeys, "pack.quads[].ubos[]")
-        let stage = try count(ubo["stage"], 1...2, "pack.quads[].ubos[].stage")
-        let slot = try count(ubo["slot"], 0...15, "pack.quads[].ubos[].slot")
+        let stage = try count(ubo["stage"], 1 ... 2, "pack.quads[].ubos[].stage")
+        let slot = try count(ubo["slot"], 0 ... 15, "pack.quads[].ubos[].slot")
         let offset = try count(
-            ubo["offset"] ?? (0 as Any), 0...(BenchProtocol.quadRegion - 1), "pack.quads[].ubos[].offset")
+            ubo["offset"] ?? (0 as Any), 0 ... (BenchProtocol.quadRegion - 1), "pack.quads[].ubos[].offset"
+        )
         let data = try bytes(ubo["data"] ?? ("" as Any), "pack.quads[].ubos[].data")
         guard !data.isEmpty, offset + data.count <= BenchProtocol.quadRegion else {
             throw BenchInvalid("pack.quads[].ubos[]: data inside 64 KiB")

@@ -161,7 +161,7 @@ void deferredWork(thread_call_param_t param, thread_call_param_t)
 		const bool kept = switch_gpu_scan_record(
 			*r, submissionPassed, [&](const ScanQueue::Record &record) {
 				read = tgm_scan::readSubmission(record.push, record.count, nullptr,
-								record.rawMacros, kScanMaxBytes);
+								record.metalMacros, kScanMaxBytes);
 			});
 		if (kept)
 			scanCount(read, r->owner, r->compositor);
@@ -218,7 +218,7 @@ void tgm_uc::tgm_target_peaks_line(char *line, size_t size)
 // connection lock: the counts are atomic.
 const tgm_prof *AGXDeviceUserClient::scanSubmission(uint32_t slot, uint32_t fences,
 						    const tgm_push *pushes, uint32_t count,
-						    tgm_prof &prof, bool rawMacros)
+						    tgm_prof &prof, bool metalMacros)
 {
 	if (!TGM_STATS || !count ||
 	    __atomic_fetch_add(&pushSubmits_, 1u, __ATOMIC_RELAXED) % kScanEvery)
@@ -227,17 +227,17 @@ const tgm_prof *AGXDeviceUserClient::scanSubmission(uint32_t slot, uint32_t fenc
 		count <= TGM_PROF_MAX &&
 		__atomic_fetch_add(&pushScans_, 1u, __ATOMIC_RELAXED) % kProfileEvery == 0;
 	if (!profiled) {
-		deferScan(slot, fences, pushes, count, rawMacros);
+		deferScan(slot, fences, pushes, count, metalMacros);
 		return nullptr;
 	}
-	scanPushes(pushes, count, &prof, rawMacros);
+	scanPushes(pushes, count, &prof, metalMacros);
 	return &prof;
 }
 
 // A profiled submission's read, now: its pushes through the kernel's view of the BOs they lie in (pool BOs
 // write-combined, cached BOs their kernel mapping)
 void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm_prof *prof,
-				     bool rawMacros)
+				     bool metalMacros)
 {
 	if (!TGM_STATS || count > TGM_PROF_MAX)
 		return;
@@ -247,7 +247,7 @@ void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm
 		words[i] = {
 			pushView(pushes[i].va, static_cast<uint64_t>(pushes[i].dwords) * 4, hit),
 			pushes[i].dwords};
-	scanCount(tgm_scan::readSubmission(words, count, prof, rawMacros, kScanMaxBytes), owner_,
+	scanCount(tgm_scan::readSubmission(words, count, prof, metalMacros, kScanMaxBytes), owner_,
 		  critical_);
 }
 
@@ -256,7 +256,7 @@ void AGXDeviceUserClient::scanPushes(const tgm_push *pushes, uint32_t count, tgm
 // The record names the submission's last seqno on its channel's fence (its `fences` internal ones come before it),
 // past which its words may be another's.
 void AGXDeviceUserClient::deferScan(uint32_t slot, uint32_t fences, const tgm_push *pushes,
-				    uint32_t count, bool rawMacros)
+				    uint32_t count, bool metalMacros)
 {
 	Deferral *d = deferral();
 	if (!d)
@@ -266,13 +266,14 @@ void AGXDeviceUserClient::deferScan(uint32_t slot, uint32_t fences, const tgm_pu
 	ScanQueue::Record *r = gQueue.reserve();
 	if (r) {
 		const uint32_t kept = count < kDeferredPushes ? count : kDeferredPushes;
-		switch_gpu_scan_fill(*r, owner_, rawMacros, kept, kDeferredPushes, [&](uint32_t i) {
-			const uint64_t bytes = static_cast<uint64_t>(pushes[i].dwords) * 4;
-			const uint32_t *words = pushView(pushes[i].va, bytes, hit);
-			return switch_gpu_scan_words{words && hit && hit->bo->pool_va ? words
-										      : nullptr,
-						     pushes[i].dwords};
-		});
+		switch_gpu_scan_fill(
+			*r, owner_, metalMacros, kept, kDeferredPushes, [&](uint32_t i) {
+				const uint64_t bytes = static_cast<uint64_t>(pushes[i].dwords) * 4;
+				const uint32_t *words = pushView(pushes[i].va, bytes, hit);
+				return switch_gpu_scan_words{
+					words && hit && hit->bo->pool_va ? words : nullptr,
+					pushes[i].dwords};
+			});
 		r->compositor = critical_;
 		r->fence = tgm_fence_offset(fence_va_ + static_cast<size_t>(slot) * 16);
 		r->fenceOwner = tgm_fence_owner(r->fence);

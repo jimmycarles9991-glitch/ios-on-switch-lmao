@@ -6,19 +6,19 @@ import Metal
 /// Counter sampling as the identity's AGX driver answers it: one counter set, "timestamp", of "GPUTimestamp", sampled
 /// at stage boundaries alone, and its creation errors. One command buffer samples, in order, a render pass's four
 /// boundaries, a compute and a blit encoder's two each, then a pass, two that load what the one before drew (passes
-/// the raw path could fuse) and a parallel encoder's of two sub-encoders. A second command buffer resolves them with a
+/// the driver could fuse) and a parallel encoder's of two sub-encoders. A second command buffer resolves them with a
 /// blit. Each boundary's start is at or before its end, every encoder's samples follow the one before it,
 /// and every sample lies between the sampleTimestamps pairs taken before the commit and after the completion, at or
 /// before GPUEndTime; the samples span no more than the GPU's time for the command buffer. The CPU's resolve and the
 /// blit's agree word for word, unwritten samples read 0, and both command buffers stay raw.
 struct NativeCountersTest: NativeObjectTest {
     let id = "metal.native.counters"
-    let name = "Stage-boundary counter samples on the GPU's clock, resolved on the CPU and by a blit, on the raw path"
+    let name = "Stage-boundary counter samples on the GPU's clock, resolved on the CPU and by a blit, on the driver"
 
     static let samples = 28
     /// Each encoder's samples, in the order they run: render passes take four (vertex start and end, fragment start and
     /// end), the compute and the blit encoder two
-    static let encoders = [0..<4, 4..<6, 6..<8, 8..<12, 12..<16, 16..<20, 20..<24]
+    static let encoders = [0 ..< 4, 4 ..< 6, 6 ..< 8, 8 ..< 12, 12 ..< 16, 16 ..< 20, 20 ..< 24]
     static let written = 24
 
     static func error(_ device: MTLDevice, _ configure: (MTLCounterSampleBufferDescriptor) -> Void) -> String {
@@ -37,7 +37,7 @@ struct NativeCountersTest: NativeObjectTest {
     static func answers(_ device: MTLDevice, _ metrics: inout Metrics) throws -> (MTLCounterSet, [String]) {
         let sets = device.counterSets ?? []
         guard sets.count == 1, let set = sets.first, set.name == MTLCommonCounterSet.timestamp.rawValue,
-            set.counters.map(\.name) == [MTLCommonCounter.timestamp.rawValue]
+              set.counters.map(\.name) == [MTLCommonCounter.timestamp.rawValue]
         else { throw TestFailure("counterSets is not the one timestamp set: \(sets.map(\.name))") }
         var failures: [String] = []
         let points: [MTLCounterSamplingPoint] = [
@@ -119,7 +119,8 @@ struct NativeCountersTest: NativeObjectTest {
             var iterations: UInt32 = 256
             compute.setBytes(&iterations, length: 4, index: 1)
             compute.dispatchThreadgroups(
-                MTLSize(width: 4, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+                MTLSize(width: 4, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+            )
             compute.endEncoding()
             let blitPass = MTLBlitPassDescriptor()
             blitPass.sampleBufferAttachments[0].sampleBuffer = counters
@@ -132,32 +133,35 @@ struct NativeCountersTest: NativeObjectTest {
             draw(commands.makeRenderCommandEncoder(descriptor: Self.pass(target, counters, 12, load: .load))!)
             draw(commands.makeRenderCommandEncoder(descriptor: Self.pass(target, counters, 16, load: .load))!)
             let parallel = commands.makeParallelRenderCommandEncoder(
-                descriptor: Self.pass(target, counters, 20, load: .load))!
-            for _ in 0..<2 { draw(parallel.makeRenderCommandEncoder()!) }
+                descriptor: Self.pass(target, counters, 20, load: .load)
+            )!
+            for _ in 0 ..< 2 { draw(parallel.makeRenderCommandEncoder()!) }
             parallel.endEncoding()
         }
         try gpu.finish([sampling])
         let after = device.sampleTimestamps()
-        work.paths.append(RawFacade.path(of: sampling))
+        work.paths.append(GM20BFacade.path(of: sampling))
         if before.cpu != before.gpu || after.cpu != after.gpu {
             work.failures.append("sampleTimestamps answered two clocks")
         }
 
-        let cpu = try Self.words(counters.resolveCounterRange(0..<Self.samples))
+        let cpu = try Self.words(counters.resolveCounterRange(0 ..< Self.samples))
         guard cpu.count == Self.samples else { throw TestFailure("resolveCounterRange gave \(cpu.count) samples") }
-        let outside = [10..<(Self.samples + 1), 0..<0].compactMap { (try? counters.resolveCounterRange($0)) ?? nil }
+        let outside = [10 ..< (Self.samples + 1), 0 ..< 0].compactMap { (try? counters.resolveCounterRange($0)) ?? nil }
         if !outside.isEmpty { work.failures.append("a resolve past the samples or of none answered data") }
         let resolved = try gpu.buffer(Self.samples * 8)
         let resolving = try gpu.commit { commands in
             let blit = commands.makeBlitCommandEncoder()!
-            blit.resolveCounters(counters, range: 0..<Self.samples, destinationBuffer: resolved, destinationOffset: 0)
+            blit.resolveCounters(counters, range: 0 ..< Self.samples, destinationBuffer: resolved, destinationOffset: 0)
             blit.endEncoding()
         }
         try gpu.finish([resolving])
-        work.paths.append(RawFacade.path(of: resolving))
+        work.paths.append(GM20BFacade.path(of: resolving))
         let blitted = Array(
             UnsafeBufferPointer(
-                start: resolved.contents().bindMemory(to: UInt64.self, capacity: Self.samples), count: Self.samples))
+                start: resolved.contents().bindMemory(to: UInt64.self, capacity: Self.samples), count: Self.samples
+            )
+        )
         if blitted != cpu {
             let differ = zip(blitted, cpu).filter { $0 != $1 }.count
             work.failures.append("the blit's resolve differs from the CPU's in \(differ) samples")
@@ -171,7 +175,7 @@ struct NativeCountersTest: NativeObjectTest {
         _ cpu: [UInt64], _ sampling: MTLCommandBuffer, _ gpu0: UInt64, _ gpu1: UInt64, _ metrics: inout Metrics
     ) -> [String] {
         var failures: [String] = []
-        let taken = Array(cpu[0..<written])
+        let taken = Array(cpu[0 ..< written])
         if taken.contains(0) { failures.append("a boundary was not sampled: \(taken)") }
         if cpu[written...].contains(where: { $0 != 0 }) { failures.append("an unsampled index reads nonzero") }
         for range in encoders {
@@ -186,7 +190,7 @@ struct NativeCountersTest: NativeObjectTest {
         if first < gpu0 || last > gpu1 { failures.append("a sample outside the sampleTimestamps pairs") }
         let endNs = UInt64(sampling.gpuEndTime * 1e9), spanNs = (sampling.gpuEndTime - sampling.gpuStartTime) * 1e9
         if last > endNs + 1000 { failures.append("a sample after GPUEndTime by \(last - endNs) ns") }
-        if RawFacade.gpuClock(of: sampling) == "ns" && Double(last - first) > spanNs + 1000 {
+        if GM20BFacade.gpuClock(of: sampling) == "ns" && Double(last - first) > spanNs + 1000 {
             failures.append("the samples span \(last - first) ns of a GPU time of \(Int(spanNs)) ns")
         }
         func us(_ later: UInt64, _ earlier: UInt64) -> Double { (Double(later) - Double(earlier)) / 1000 }
@@ -198,7 +202,7 @@ struct NativeCountersTest: NativeObjectTest {
         metrics.set("gpu_us", spanNs / 1000, digits: 1)
         metrics.set("lead_us", us(first, gpu0), digits: 1)
         metrics.set("tail_us", us(gpu1, last), digits: 1)
-        metrics.set("clock", RawFacade.gpuClock(of: sampling) ?? "-")
+        metrics.set("clock", GM20BFacade.gpuClock(of: sampling) ?? "-")
         return failures
     }
 }

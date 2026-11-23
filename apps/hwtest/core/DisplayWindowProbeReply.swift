@@ -39,7 +39,7 @@ public struct DisplayWindowProbeReply: Sendable {
 
     /// The request's 16 bytes: magic, op, probe, 0.
     public static func request(op: UInt32, probe: UInt32) -> [UInt8] {
-        [magic, op, probe, 0].flatMap { word in (0..<4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) } }
+        [magic, op, probe, 0].flatMap { word in (0 ..< 4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) } }
     }
 
     public init?(_ bytes: [UInt8]) {
@@ -52,12 +52,13 @@ public struct DisplayWindowProbeReply: Sendable {
         frames = Int(Self.word(bytes, 24))
         error = Int32(bitPattern: Self.word(bytes, 28))
         why = Self.text(bytes, 32, 64)
-        steps = (0..<count).map { i in
+        steps = (0 ..< count).map { i in
             let at = Self.stepsOffset + i * Self.stepSize
             return Step(
                 name: Self.text(bytes, at + 12, 16), crc: Self.word(bytes, at), settled: bytes[at + 4] != 0,
                 underflows: Int(bytes[at + 5]), changes: Int(bytes[at + 6]), mismatches: Int(bytes[at + 7]),
-                check: Int(bytes[at + 8]), against: Int(bytes[at + 9]))
+                check: Int(bytes[at + 8]), against: Int(bytes[at + 9])
+            )
         }
     }
 
@@ -76,7 +77,8 @@ public struct DisplayWindowProbeReply: Sendable {
             if !step.clean {
                 metrics.set(
                     "\(step.name)_unclean",
-                    "\(step.settled ? 1 : 0)/\(step.underflows)/\(step.changes)/\(step.mismatches)")
+                    "\(step.settled ? 1 : 0)/\(step.underflows)/\(step.changes)/\(step.mismatches)"
+                )
             }
         }
         let claim: ClaimVerdict = verdict == 0 ? .pass : verdict == 1 ? .fail : .inconclusive
@@ -84,11 +86,11 @@ public struct DisplayWindowProbeReply: Sendable {
     }
 
     static func word(_ bytes: [UInt8], _ at: Int) -> UInt32 {
-        (0..<4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) }
+        (0 ..< 4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) }
     }
 
     static func text(_ bytes: [UInt8], _ at: Int, _ count: Int) -> String {
-        let field = bytes[at..<(at + count)]
+        let field = bytes[at ..< (at + count)]
         return String(decoding: field.prefix { $0 != 0 }, as: UTF8.self)
     }
 }

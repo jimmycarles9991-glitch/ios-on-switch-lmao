@@ -54,7 +54,8 @@ struct FocusReload27Test: HWTest {
                 ("a reload with focus on asks for one", (total["on"] ?? 0) > 0),
                 ("editing with focus during editing off asks for none", total["editing_off"] == 0),
                 ("editing with focus during editing on asks for one", (total["editing_on"] ?? 0) > 0),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 

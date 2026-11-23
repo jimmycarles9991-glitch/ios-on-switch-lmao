@@ -53,11 +53,11 @@ public struct MipLayout {
         let at = texel * self.bytes
         if self.bytes <= 4 {
             var word: UInt32 = 0
-            for b in 0..<self.bytes { word |= UInt32(bytes[at + b]) << UInt32(8 * b) }
+            for b in 0 ..< self.bytes { word |= UInt32(bytes[at + b]) << UInt32(8 * b) }
             return (word >> UInt32(f.shift)) & f.mask
         }
         var value: UInt32 = 0
-        for b in 0..<(f.width / 8) { value |= UInt32(bytes[at + f.shift / 8 + b]) << UInt32(8 * b) }
+        for b in 0 ..< (f.width / 8) { value |= UInt32(bytes[at + f.shift / 8 + b]) << UInt32(8 * b) }
         return value
     }
 
@@ -65,12 +65,12 @@ public struct MipLayout {
         let at = texel * self.bytes
         if self.bytes <= 4 {
             var word: UInt32 = 0
-            for b in 0..<self.bytes { word |= UInt32(bytes[at + b]) << UInt32(8 * b) }
+            for b in 0 ..< self.bytes { word |= UInt32(bytes[at + b]) << UInt32(8 * b) }
             word = (word & ~(f.mask << UInt32(f.shift))) | ((code & f.mask) << UInt32(f.shift))
-            for b in 0..<self.bytes { bytes[at + b] = UInt8(truncatingIfNeeded: word >> UInt32(8 * b)) }
+            for b in 0 ..< self.bytes { bytes[at + b] = UInt8(truncatingIfNeeded: word >> UInt32(8 * b)) }
             return
         }
-        for b in 0..<(f.width / 8) { bytes[at + f.shift / 8 + b] = UInt8(truncatingIfNeeded: code >> UInt32(8 * b)) }
+        for b in 0 ..< (f.width / 8) { bytes[at + f.shift / 8 + b] = UInt8(truncatingIfNeeded: code >> UInt32(8 * b)) }
     }
 
     /// The field's value: an unorm's fraction, an sRGB code's linear value, a float's value
@@ -150,10 +150,10 @@ public enum MipReference {
         _ above: [UInt8], _ sw: Int, _ sh: Int, _ dw: Int, _ dh: Int, _ layout: MipLayout
     ) -> [UInt8] {
         var out = [UInt8](repeating: 0, count: dw * dh * layout.bytes)
-        let xs = (0..<dw).map { tap($0, sw, dw) }, ys = (0..<dh).map { tap($0, sh, dh) }
-        for y in 0..<dh {
+        let xs = (0 ..< dw).map { tap($0, sw, dw) }, ys = (0 ..< dh).map { tap($0, sh, dh) }
+        for y in 0 ..< dh {
             let (y0, y1, wy) = ys[y]
-            for x in 0..<dw {
+            for x in 0 ..< dw {
                 let (x0, x1, wx) = xs[x]
                 for f in layout.fields {
                     let v = { (tx: Int, ty: Int) in layout.value(layout.code(above, texel: ty * sw + tx, field: f), f) }
@@ -176,7 +176,7 @@ public struct MipTally {
     public var verdict: String { wrong > 0 ? "wrong" : withinOne > 0 ? "near" : exact > 0 ? "exact" : "-" }
 
     public mutating func add(_ got: [UInt8], _ want: [UInt8], texels: Int, _ layout: MipLayout) {
-        for t in 0..<texels {
+        for t in 0 ..< texels {
             for f in layout.fields {
                 let a = layout.code(got, texel: t, field: f), b = layout.code(want, texel: t, field: f)
                 let d = a > b ? a - b : b - a
@@ -197,8 +197,8 @@ public final class MipRounding {
 
     public func add(_ above: [UInt8], _ sw: Int, _ level: [UInt8], _ dw: Int, _ dh: Int, _ layout: MipLayout) {
         for f in layout.fields where f.kind == .unorm && f.width == 8 {
-            for y in 0..<dh {
-                for x in 0..<dw {
+            for y in 0 ..< dh {
+                for x in 0 ..< dw {
                     var sum: UInt32 = 0
                     for (ox, oy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                         sum += layout.code(above, texel: (2 * y + oy) * sw + 2 * x + ox, field: f)
@@ -213,7 +213,7 @@ public final class MipRounding {
 
     public var rule: String {
         guard seen.allSatisfy({ $0 > 0 }) else { return "-" }
-        let all = (0..<3).map { low[$0] == seen[$0] }, none = (0..<3).map { low[$0] == 0 }
+        let all = (0 ..< 3).map { low[$0] == seen[$0] }, none = (0 ..< 3).map { low[$0] == 0 }
         if all[0] && all[1] && all[2] { return "truncate" }
         if all[0] && all[1] && none[2] { return "nearest_ties_down" }
         if all[0] && none[1] && none[2] { return "nearest_ties_up" }

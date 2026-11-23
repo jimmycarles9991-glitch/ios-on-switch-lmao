@@ -275,10 +275,12 @@ final class BenchFormsTests: XCTestCase {
         let a = Data([10, 20, 30, 40, 0, 0, 0, 0, 255, 255, 255, 255])
         let b = Data([10, 21, 30, 38, 0, 0, 0, 0, 0, 255, 255, 255])
         XCTAssertEqual(
-            BenchDifference.histogram(a, b, format: "bgra8unorm", texelBytes: 4), ["2": 1, "0": 1, ">64": 1])
+            BenchDifference.histogram(a, b, format: "bgra8unorm", texelBytes: 4), ["2": 1, "0": 1, ">64": 1]
+        )
         let ten = { (r: UInt32, a: UInt32) -> Data in withUnsafeBytes(of: (r | a << 30).littleEndian) { Data($0) } }
         XCTAssertEqual(
-            BenchDifference.histogram(ten(1023, 3), ten(1020, 2), format: "rgb10a2unorm", texelBytes: 4), ["3": 1])
+            BenchDifference.histogram(ten(1023, 3), ten(1020, 2), format: "rgb10a2unorm", texelBytes: 4), ["3": 1]
+        )
         XCTAssertEqual(BenchDifference.histogram(a, b.prefix(8), format: "bgra8unorm", texelBytes: 4), [:])
     }
 
@@ -301,7 +303,8 @@ final class BenchFormsTests: XCTestCase {
         outcome.output = Data([0, 0, 0, 0xB0, 1, 0, 0, 0xB0, 2, 0, 0, 0xB0, 3, 0, 0, 0xB0])
         let out = try XCTUnwrap(
             JSONSerialization.jsonObject(with: BenchResult.encode(batch: "b", entry: entries[0], outcome: outcome))
-                as? [String: Any])
+                as? [String: Any]
+        )
         let output = try XCTUnwrap(out["output"] as? [String: Any])
         XCTAssertEqual(output["bytes"] as? Int, 16)
         XCTAssertEqual((output["distinct"] as? [[String: Any]])?.count, 4)
@@ -311,7 +314,8 @@ final class BenchFormsTests: XCTestCase {
         twod.form = ["bracketed": 1, "samples": 1]
         let top = try XCTUnwrap(
             JSONSerialization.jsonObject(with: BenchResult.encode(batch: "b", entry: entries[1], outcome: twod))
-                as? [String: Any])
+                as? [String: Any]
+        )
         let compare = try XCTUnwrap(top["compare"] as? [String: Any])
         XCTAssertEqual(compare["histogram"] as? [String: Int], ["0": 1, "1": 1])
         XCTAssertEqual((top["form"] as? [String: Int])?["bracketed"], 1)
@@ -320,7 +324,8 @@ final class BenchFormsTests: XCTestCase {
         failed.compareFailure = ("refused", "the pack has no resolve state for the format")
         let refused = try XCTUnwrap(
             JSONSerialization.jsonObject(with: BenchResult.encode(batch: "b", entry: entries[1], outcome: failed))
-                as? [String: Any])
+                as? [String: Any]
+        )
         XCTAssertEqual((refused["compare"] as? [String: Any])?["status"] as? String, "refused")
     }
 }

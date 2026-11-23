@@ -2,8 +2,8 @@ import CoreGraphics
 import Darwin
 import Foundation
 import HWTestCore
-import IOSurface
 import ImageIO
+import IOSurface
 import UniformTypeIdentifiers
 
 /// A JPEG decoded by NVJPG straight into an IOSurface of the caller's: selector 7 of AppleJPEGDriverUserClient, the
@@ -31,23 +31,25 @@ enum JPEGSurfaceDecode {
 
     static func file(_ size: Int) -> Data? {
         var pixels = [UInt8](repeating: 0, count: size * size * 4)
-        for y in 0..<size {
-            for x in 0..<size {
-                for c in 0..<4 { pixels[(y * size + x) * 4 + c] = byte(x, y, c) }
+        for y in 0 ..< size {
+            for x in 0 ..< size {
+                for c in 0 ..< 4 { pixels[(y * size + x) * 4 + c] = byte(x, y, c) }
             }
         }
         let info = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
         guard let provider = CGDataProvider(data: Data(pixels) as CFData),
-            let image = CGImage(
-                width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: size * 4,
-                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: info), provider: provider,
-                decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+              let image = CGImage(
+                  width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: size * 4,
+                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGBitmapInfo(rawValue: info), provider: provider,
+                  decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              )
         else { return nil }
         let data = NSMutableData()
         guard let destination = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)
         else { return nil }
         CGImageDestinationAddImage(
-            destination, image, [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary)
+            destination, image, [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary
+        )
         return CGImageDestinationFinalize(destination) ? data as Data : nil
     }
 
@@ -86,12 +88,16 @@ enum JPEGSurfaceDecode {
         file.withUnsafeBytes { source.baseAddress.copyMemory(from: $0.baseAddress!, byteCount: file.count) }
         source.unlock(options: [], seed: nil)
         guard let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW),
-            let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(iokit, "IOServiceGetMatchingService"),
-            let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
-            let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
+              let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(
+                  iokit,
+                  "IOServiceGetMatchingService"
+              ),
+              let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
+              let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
         else { return TestFailure("no IOKit") }
         let jpeg = unsafeBitCast(service, to: JPEGRoute.Service.self)(
-            0, unsafeBitCast(matching, to: JPEGRoute.Matching.self)("AppleJPEGDriver"))
+            0, unsafeBitCast(matching, to: JPEGRoute.Matching.self)("AppleJPEGDriver")
+        )
         guard jpeg != 0 else { return TestFailure("no AppleJPEGDriver service") }
         var connection: mach_port_t = 0
         let opened = unsafeBitCast(open, to: JPEGRoute.Open.self)(jpeg, mach_task_self_, 0, &connection)
@@ -118,7 +124,8 @@ enum JPEGSurfaceDecode {
         let kr = request.withUnsafeBytes { input in
             reply.withUnsafeMutableBytes { output in
                 unsafeBitCast(call, to: JPEGRoute.Call.self)(
-                    connection, 7, input.baseAddress, input.count, output.baseAddress, &size)
+                    connection, 7, input.baseAddress, input.count, output.baseAddress, &size
+                )
             }
         }
         withExtendedLifetime(source) {}
@@ -134,17 +141,17 @@ enum JPEGSurfaceDecode {
         var best = ("-", Int.max)
         for candidate in [-1, 0, 1, 2, 3, 4, 5] {
             var memory = [UInt8](repeating: 0, count: rowBytes * blockRows(surface.height, 5))
-            for y in 0..<surface.height {
-                for xB in 0..<(surface.width * 4) {
+            for y in 0 ..< surface.height {
+                for xB in 0 ..< (surface.width * 4) {
                     let at =
                         candidate < 0
-                        ? y * rowBytes + xB : SurfaceCrossProcessTest.gobOffset(rowBytes, candidate, xB, y)
+                            ? y * rowBytes + xB : SurfaceCrossProcessTest.gobOffset(rowBytes, candidate, xB, y)
                     if at < memory.count { memory[at] = byte(xB / 4, y, xB % 4) }
                 }
             }
             var wrong = 0
-            for y in 0..<surface.height {
-                for xB in 0..<(surface.width * 4) {
+            for y in 0 ..< surface.height {
+                for xB in 0 ..< (surface.width * 4) {
                     let at = SurfaceCrossProcessTest.gobOffset(rowBytes, decided, xB, y)
                     let read = at < memory.count ? Int(memory[at]) : 0
                     if abs(read - Int(got[y * surface.width * 4 + xB])) > tolerance { wrong += 1 }
@@ -163,9 +170,9 @@ enum JPEGSurfaceDecode {
     /// Bytes further than `tolerance` from the picture, and the first one's offset in the rows (-1: none)
     static func wrong(_ got: [UInt8], _ surface: IOSurface) -> (Int, Int) {
         var wrong = 0, first = -1
-        for y in 0..<surface.height {
-            for x in 0..<surface.width {
-                for c in 0..<4 where abs(Int(got[(y * surface.width + x) * 4 + c]) - Int(byte(x, y, c))) > tolerance {
+        for y in 0 ..< surface.height {
+            for x in 0 ..< surface.width {
+                for c in 0 ..< 4 where abs(Int(got[(y * surface.width + x) * 4 + c]) - Int(byte(x, y, c))) > tolerance {
                     wrong += 1
                     if first < 0 { first = (y * surface.width + x) * 4 + c }
                 }

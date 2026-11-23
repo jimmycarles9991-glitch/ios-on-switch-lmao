@@ -7,12 +7,13 @@ import Metal
 /// Core Animation's backdrop blur chain, state by state as the corpus has it for this IPSW: the downsamples and narrow
 /// blurs into a 'b3a8' (format 550) surface and the luma boost into it and into BGR10_XR (554), each beside a memoryless
 /// colour 1 of the state's own format (550 on iOS 17; iOS 27's QuartzCore makes these names with 115), sampling a BGRA8
-/// picture. The downsamples' and blurs' uniforms are zero (as the raw pack's probe binds them):
+/// picture. The downsamples' and blurs' uniforms are zero (as the pack's probe binds them):
 /// what counts there is how long each pass takes on the GPU (t_<state>= in ms, the median of three), which path took it,
 /// and whether it completed. The luma boost fetches its target's colour through a LUT (CAUniforms): the BGR10_XR one
 /// draws over a picture uploaded first, and its result (lub_xr) is held to the Mac's.
 struct CABlurChainScene: GPUScene {
     let id = "gpu.ca.blur_chain"
+    let framework = true
     let name = "CA backdrop blur chain on b3a8 and BGR10_XR: timing and path"
 
     static let size = 256
@@ -68,7 +69,7 @@ struct CABlurChainScene: GPUScene {
             var times: [Double] = []
             var paths: Set<String> = []
             let boost = label.contains("_Tlub") && target === xr
-            for _ in 0..<3 {
+            for _ in 0 ..< 3 {
                 if boost { try await gpu.upload(before, to: xr, bytesPerRow: size * 4) }
                 let timing = try await gpu.run(tolerateError: true) { commands in
                     let pass = MTLRenderPassDescriptor()
@@ -82,7 +83,8 @@ struct CABlurChainScene: GPUScene {
                     encoder.setRenderPipelineState(pipeline)
                     CAState.bind(
                         encoder, vertices: CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(1, 1, 1, 1)),
-                        source: source)
+                        source: source
+                    )
                     if label.contains("_Tlub") { CAUniforms.bindLumaBoost(encoder, lut: lut) }
                     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     encoder.endEncoding()
@@ -91,13 +93,15 @@ struct CABlurChainScene: GPUScene {
                 paths.insert(timing.path)
             }
             result.expect(
-                !paths.contains { $0.hasPrefix("error:") }, "\(short): \(paths.sorted().joined(separator: ","))")
+                !paths.contains { $0.hasPrefix("error:") }, "\(short): \(paths.sorted().joined(separator: ","))"
+            )
             result.metrics.set("t_\(short)", Stats.percentile(times, 0.5), digits: 3)
             if target === xr {
                 let bytes = try await gpu.read(xr, bytesPerPixel: 4)
                 result.picture(
                     short, bytes: bytes, metalFormat: xr.pixelFormat.rawValue, width: size, height: size,
-                    before: boost ? before : nil, cleared: boost ? nil : [0, 0, 0, 1])
+                    before: boost ? before : nil, cleared: boost ? nil : [0, 0, 0, 1]
+                )
             }
         }
         return result
@@ -114,11 +118,13 @@ struct CABlurChainScene: GPUScene {
         let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
         guard
             CVPixelBufferCreate(
-                nil, size, size, kCVPixelFormatType_30RGBLE_8A_BiPlanar, attributes as CFDictionary, &buffer)
-                == kCVReturnSuccess, let buffer, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
+                nil, size, size, kCVPixelFormatType_30RGBLE_8A_BiPlanar, attributes as CFDictionary, &buffer
+            )
+            == kCVReturnSuccess, let buffer, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
         else { throw TestFailure("no b3a8 pixel buffer") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: b3a8, width: size, height: size, mipmapped: false)
+            pixelFormat: b3a8, width: size, height: size, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {

@@ -1,10 +1,10 @@
-// The bench's 2D-engine experiments (raw_probe_ops.h, one operation a command buffer so a rejected one names itself in
+// The bench's 2D-engine experiments (probe_ops.h, one operation a command buffer so a rejected one names itself in
 // the kernel's kill line) and their compare forms: the same operation through the 3D path or the copy engine.
 #include <IOSurface/IOSurfaceRef.h>
 #include <cstring>
-#include "drivers/TegraGM20BMetal/raw/fx/fx_image.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_probe_ops.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_samples.h"
+#include "drivers/TegraGM20BMetal/fx/fx_image.h"
+#include "drivers/TegraGM20BMetal/probe_ops.h"
+#include "drivers/TegraGM20BMetal/samples.h"
 #include "apps/hwtest/bench/bench_device.h"
 
 namespace bench {
@@ -15,11 +15,11 @@ constexpr uint32_t kA8b8g8r8 = 0xd5;  // NV902D_SET_RENDER_SOLID_PRIM_COLOR_FORM
 constexpr uint64_t kOne = 1ull << 32;
 constexpr uint8_t kDstInvert = 0x55;
 
-raw::ProbeSurface surface(const raw::Texture &t, uint32_t fmt2d, uint32_t width, uint32_t height)
+gm20b::ProbeSurface surface(const gm20b::Texture &t, uint32_t fmt2d, uint32_t width, uint32_t height)
 {
-    raw::ProbeSurface s;
+    gm20b::ProbeSurface s;
     s.va = t.va;
-    s.fmt2d = fmt2d ? fmt2d : raw::probeTwodFormat(t.format);
+    s.fmt2d = fmt2d ? fmt2d : gm20b::probeTwodFormat(t.format);
     s.pitch = t.pitch;
     s.width = width;
     s.height = height;
@@ -28,7 +28,7 @@ raw::ProbeSurface surface(const raw::Texture &t, uint32_t fmt2d, uint32_t width,
     return s;
 }
 
-raw::ProbeSurface surface(const raw::Texture &t, uint32_t fmt2d = 0)
+gm20b::ProbeSurface surface(const gm20b::Texture &t, uint32_t fmt2d = 0)
 {
     return surface(t, fmt2d, t.width, t.height);
 }
@@ -44,7 +44,7 @@ public:
         made_ = d_.createTexture(s.width, s.height, s.format, own_, true);
         if (!made_)
             return;
-        const uint32_t bpp = raw::formatInfo(s.format)->bpp;
+        const uint32_t bpp = gm20b::formatInfo(s.format)->bpp;
         for (uint32_t y = 0; y < s.height; y++)
             memcpy(own_.cpu + y * own_.pitch, s.data + size_t(y) * s.width * bpp, size_t(s.width) * bpp);
         texture_ = &own_;
@@ -59,23 +59,23 @@ public:
     Source(const Source &) = delete;
     Source &operator=(const Source &) = delete;
 
-    const raw::Texture *texture(const switch_bench_experiment &x) const
+    const gm20b::Texture *texture(const switch_bench_experiment &x) const
     {
         return x.source.data && !made_ ? nullptr : texture_;
     }
 
 private:
-    raw::Device &d_;
-    raw::Texture own_;
-    const raw::Texture *texture_;
+    gm20b::Device &d_;
+    gm20b::Texture own_;
+    const gm20b::Texture *texture_;
     bool made_ = false;
 };
 
-raw::ProbeOp operation(const switch_bench_experiment &x, const raw::Texture &target, const raw::Texture *read)
+gm20b::ProbeOp operation(const switch_bench_experiment &x, const gm20b::Texture &target, const gm20b::Texture *read)
 {
     const switch_bench_twod &w = x.twod;
-    raw::ProbeOp op;
-    op.kind = w.op == SWITCH_BENCH_TWOD_FILL ? raw::ProbeOpKind::Fill : raw::ProbeOpKind::Scale;
+    gm20b::ProbeOp op;
+    op.kind = w.op == SWITCH_BENCH_TWOD_FILL ? gm20b::ProbeOpKind::Fill : gm20b::ProbeOpKind::Scale;
     op.dx = x.rect[0];
     op.dy = x.rect[1];
     op.dw = x.rect[2] - x.rect[0];
@@ -105,10 +105,10 @@ raw::ProbeOp operation(const switch_bench_experiment &x, const raw::Texture &tar
 
 // The source's corner copied 1:1 into the multisampled image's sample grid (its samples as one single-sample surface,
 // as probeResolve reads them), so each pixel's samples are known texels
-raw::ProbeOp gridFill(const raw::Texture &ms, const raw::Texture &read, const raw::fx::MipChain &grid)
+gm20b::ProbeOp gridFill(const gm20b::Texture &ms, const gm20b::Texture &read, const gm20b::fx::MipChain &grid)
 {
-    raw::ProbeOp op;
-    op.kind = raw::ProbeOpKind::Scale;
+    gm20b::ProbeOp op;
+    op.kind = gm20b::ProbeOpKind::Scale;
     op.src = surface(read);
     op.dst = surface(ms, 0, ms.width << grid.sxLog2, ms.height << grid.syLog2);
     op.dw = op.dst.width;
@@ -120,12 +120,12 @@ raw::ProbeOp gridFill(const raw::Texture &ms, const raw::Texture &read, const ra
 
 // The sample grid read into `into` by a scale of the experiment's sample mode, filter and origin, in place of the
 // driver's resolve, which is this with du = 2 << 32 a sampled axis, sx = du / 2, bilinear, corner (probeResolveOp)
-raw::ProbeOp gridScale(const switch_bench_experiment &x, const raw::Texture &ms, const raw::Texture &into,
-                       const raw::fx::MipChain &grid)
+gm20b::ProbeOp gridScale(const switch_bench_experiment &x, const gm20b::Texture &ms, const gm20b::Texture &into,
+                         const gm20b::fx::MipChain &grid)
 {
     const switch_bench_twod &w = x.twod;
-    raw::ProbeOp op;
-    op.kind = raw::ProbeOpKind::Scale;
+    gm20b::ProbeOp op;
+    op.kind = gm20b::ProbeOpKind::Scale;
     op.src = surface(ms, 0, ms.width << grid.sxLog2, ms.height << grid.syLog2);
     op.dst = surface(into);
     op.dw = into.width;
@@ -142,10 +142,10 @@ raw::ProbeOp gridScale(const switch_bench_experiment &x, const raw::Texture &ms,
 
 // The whole sample grid complemented in place: a fill under ROP3 DSTINVERT, whose colour it never writes, in the grid's
 // own 2D format (runTwod holds that to probeSolidFill)
-raw::ProbeOp gridInvert(const raw::Texture &ms, const raw::fx::MipChain &grid)
+gm20b::ProbeOp gridInvert(const gm20b::Texture &ms, const gm20b::fx::MipChain &grid)
 {
-    raw::ProbeOp op;
-    op.kind = raw::ProbeOpKind::Fill;
+    gm20b::ProbeOp op;
+    op.kind = gm20b::ProbeOpKind::Fill;
     op.dst = surface(ms, 0, ms.width << grid.sxLog2, ms.height << grid.syLog2);
     op.dw = op.dst.width;
     op.dh = op.dst.height;
@@ -154,24 +154,25 @@ raw::ProbeOp gridInvert(const raw::Texture &ms, const raw::fx::MipChain &grid)
     return op;
 }
 
-// The pack's resolve state drawn from `ms` into `into`, as RawMetalEncode.mm's resolve does it
-bool resolve3d(raw::CommandBuffer &cb, raw::Device &d, const raw::Texture &ms, const raw::Texture &into, Submission &s)
+// The pack's resolve state drawn from `ms` into `into`, as TegraGM20BMetalEncode.mm's resolve does it
+bool resolve3d(gm20b::CommandBuffer &cb, gm20b::Device &d, const gm20b::Texture &ms, const gm20b::Texture &into,
+               Submission &s)
 {
-    raw::Pipeline *resolve = d.resolvePipeline(into.format, ms.samples);
+    gm20b::Pipeline *resolve = d.resolvePipeline(into.format, ms.samples);
     if (!resolve)
         return s.refused("the pack has no resolve state for the format");
-    raw::Texture target = into;
-    target.format = raw::resolveTargetFormat(into.format);
-    raw::PassDesc p;
+    gm20b::Texture target = into;
+    target.format = gm20b::resolveTargetFormat(into.format);
+    gm20b::PassDesc p;
     p.color[0].texture = &target;
-    p.color[0].load = raw::ColorAttachment::DontCare;
+    p.color[0].load = gm20b::ColorAttachment::DontCare;
     p.color[0].store = true;
     p.count = 1;
     p.width = into.width;
     p.height = into.height;
-    raw::RenderEncoder *e = cb.render(p);
+    gm20b::RenderEncoder *e = cb.render(p);
     if (!e)
-        return s.refused("the raw path cannot render the resolve target");
+        return s.refused("the driver cannot render the resolve target");
     const uint32_t samples = ms.samples;
     const char *why = nullptr;
     e->setPipeline(resolve);
@@ -184,23 +185,23 @@ bool resolve3d(raw::CommandBuffer &cb, raw::Device &d, const raw::Texture &ms, c
 
 // The pack's mip state drawn over the whole of `into` from `read`: each pixel's centre mapped onto the source and sampled
 // with its linear sampler (pack/mip.metal), the 3D path's bilinear scale at any ratio
-bool sampled3d(raw::CommandBuffer &cb, raw::Device &d, const raw::Texture &read, const raw::Texture &into,
+bool sampled3d(gm20b::CommandBuffer &cb, gm20b::Device &d, const gm20b::Texture &read, const gm20b::Texture &into,
                Submission &s)
 {
-    raw::Pipeline *mip = d.mipPipeline(into.format);
+    gm20b::Pipeline *mip = d.mipPipeline(into.format);
     if (!mip)
         return s.refused("the pack has no sampled-quad state for the format");
-    raw::Texture target = into;
-    raw::PassDesc p;
+    gm20b::Texture target = into;
+    gm20b::PassDesc p;
     p.color[0].texture = &target;
-    p.color[0].load = raw::ColorAttachment::DontCare;
+    p.color[0].load = gm20b::ColorAttachment::DontCare;
     p.color[0].store = true;
     p.count = 1;
     p.width = into.width;
     p.height = into.height;
-    raw::RenderEncoder *e = cb.render(p);
+    gm20b::RenderEncoder *e = cb.render(p);
     if (!e)
-        return s.refused("the raw path cannot render the sampled-quad target");
+        return s.refused("the driver cannot render the sampled-quad target");
     const float inverseSize[2] = {1.0f / float(into.width), 1.0f / float(into.height)};
     const char *why = nullptr;
     e->setPipeline(mip);
@@ -213,30 +214,30 @@ bool sampled3d(raw::CommandBuffer &cb, raw::Device &d, const raw::Texture &read,
 
 // A pass that only clears `t`, as the 11 Nov 15:30 timeout's command buffer had before its 2D fill: a clear-only pass
 // leaves no draw for the tiled cache drain that follows draws
-bool clearOnly(raw::CommandBuffer &cb, const switch_bench_experiment &x, raw::Texture &t, Submission &s)
+bool clearOnly(gm20b::CommandBuffer &cb, const switch_bench_experiment &x, gm20b::Texture &t, Submission &s)
 {
-    raw::PassDesc p;
+    gm20b::PassDesc p;
     p.color[0].texture = &t;
-    p.color[0].load = raw::ColorAttachment::Clear;
+    p.color[0].load = gm20b::ColorAttachment::Clear;
     memcpy(p.color[0].clear, x.clear, sizeof x.clear);
     p.color[0].store = true;
     p.count = 1;
-    raw::RenderEncoder *e = cb.render(p);
+    gm20b::RenderEncoder *e = cb.render(p);
     if (!e)
-        return s.refused("the raw path cannot render the target for the clear");
+        return s.refused("the driver cannot render the target for the clear");
     e->end();
     return true;
 }
 
 // The whole of `from` into `to` by the copy engine, in a command buffer of its own (untimed)
-bool copyAll(Submission &s, const raw::Texture &from, raw::Texture &to)
+bool copyAll(Submission &s, const gm20b::Texture &from, gm20b::Texture &to)
 {
     uint64_t gpu = 0, wall = 0;
     return s.record(
-        [&](raw::CommandBuffer &cb) {
-            raw::BlitEncoder *e = cb.blit();
+        [&](gm20b::CommandBuffer &cb) {
+            gm20b::BlitEncoder *e = cb.blit();
             if (!e)
-                return s.refused("the raw path opened no blit encoder");
+                return s.refused("the driver opened no blit encoder");
             e->copyTexels(from, 0, 0, 0, to, 0, 0, 0, to.width, to.height);
             e->end();
             return true;
@@ -245,11 +246,11 @@ bool copyAll(Submission &s, const raw::Texture &from, raw::Texture &to)
 }
 
 // The compare form's operation into a second target, read back into r.compare_texels
-void compare(switch_bench &b, const switch_bench_experiment &x, const raw::Texture *read, const raw::Texture *ms,
+void compare(switch_bench &b, const switch_bench_experiment &x, const gm20b::Texture *read, const gm20b::Texture *ms,
              switch_bench_result &r)
 {
-    raw::Device &d = *b.device;
-    const uint32_t bpp = raw::formatInfo(x.format)->bpp;
+    gm20b::Device &d = *b.device;
+    const uint32_t bpp = gm20b::formatInfo(x.format)->bpp;
     Target t;
     if (!d.createTexture(x.width, x.height, x.format, t.color, true))
         return fail(r, SWITCH_BENCH_ERROR, "no memory for the compare target");
@@ -261,16 +262,16 @@ void compare(switch_bench &b, const switch_bench_experiment &x, const raw::Textu
     uint64_t gpu = 0, wall = 0;
     bool ran = false;
     if (x.compare == SWITCH_BENCH_COMPARE_PROGRAM) {
-        raw::Pipeline *pipeline = pixelPipeline(b, x, r, true);
+        gm20b::Pipeline *pipeline = pixelPipeline(b, x, r, true);
         t.image = read;
         t.linear = x.twod.op == SWITCH_BENCH_TWOD_SCALE && x.twod.bilinear;
         ran = pipeline && s.render(t, pipeline, 1, gpu, wall);
     } else if (x.compare == SWITCH_BENCH_COMPARE_COPY) {
         ran = s.record(
-            [&](raw::CommandBuffer &cb) {
-                raw::BlitEncoder *e = cb.blit();
+            [&](gm20b::CommandBuffer &cb) {
+                gm20b::BlitEncoder *e = cb.blit();
                 if (!e)
-                    return s.refused("the raw path opened no blit encoder");
+                    return s.refused("the driver opened no blit encoder");
                 e->copyTexels(*read, 0, 0, 0, t.color, x.rect[0], x.rect[1], 0, x.rect[2] - x.rect[0],
                               x.rect[3] - x.rect[1]);
                 e->end();
@@ -279,13 +280,13 @@ void compare(switch_bench &b, const switch_bench_experiment &x, const raw::Textu
             gpu, wall);
     } else if (x.compare == SWITCH_BENCH_COMPARE_SAMPLED3D) {
         ran = s.record(
-            [&](raw::CommandBuffer &cb) {
+            [&](gm20b::CommandBuffer &cb) {
                 return sampled3d(cb, d, *read, t.color, s);
             },
             gpu, wall);
     } else if (x.compare == SWITCH_BENCH_COMPARE_RESOLVE3D && ms) {
         ran = s.record(
-            [&](raw::CommandBuffer &cb) {
+            [&](gm20b::CommandBuffer &cb) {
                 return resolve3d(cb, d, *ms, t.color, s);
             },
             gpu, wall);
@@ -301,31 +302,31 @@ void compare(switch_bench &b, const switch_bench_experiment &x, const raw::Textu
 
 void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_result &r)
 {
-    raw::Device &d = *b.device;
+    gm20b::Device &d = *b.device;
     const switch_bench_twod &w = x.twod;
-    const uint32_t fmt2d = w.fmt2d ? w.fmt2d : raw::probeTwodFormat(x.format);
+    const uint32_t fmt2d = w.fmt2d ? w.fmt2d : gm20b::probeTwodFormat(x.format);
     if (!fmt2d)
         return fail(r, SWITCH_BENCH_INVALID, "a format the 2D engine names none of");
-    if (w.op == SWITCH_BENCH_TWOD_FILL && !raw::probeSolidFill(fmt2d, w.color_format))
+    if (w.op == SWITCH_BENCH_TWOD_FILL && !gm20b::probeSolidFill(fmt2d, w.color_format))
         return fail(r, SWITCH_BENCH_INVALID, "a fill's colour format is its destination's own, not sRGB");
-    const uint32_t gridFormat = raw::probeTwodFormat(x.format);
-    if (w.invert_grid && !raw::probeSolidFill(gridFormat, gridFormat))
+    const uint32_t gridFormat = gm20b::probeTwodFormat(x.format);
+    if (w.invert_grid && !gm20b::probeSolidFill(gridFormat, gridFormat))
         return fail(r, SWITCH_BENCH_INVALID, "a grid inverted by a fill: a format a solid fill writes, not sRGB");
     Source source(b, x);
-    const raw::Texture *read = w.op == SWITCH_BENCH_TWOD_FILL ? nullptr : source.texture(x);
+    const gm20b::Texture *read = w.op == SWITCH_BENCH_TWOD_FILL ? nullptr : source.texture(x);
     if (w.op != SWITCH_BENCH_TWOD_FILL && !read)
         return fail(r, SWITCH_BENCH_ERROR, "no memory for the source");
-    raw::Texture t, ms;
-    raw::fx::MipChain grid;
+    gm20b::Texture t, ms;
+    gm20b::fx::MipChain grid;
     const bool resolving = w.op == SWITCH_BENCH_TWOD_RESOLVE;
-    if (resolving && (!raw::fx::msLayout(x.width, x.height, w.samples, raw::formatInfo(x.format)->bpp, grid) ||
+    if (resolving && (!gm20b::fx::msLayout(x.width, x.height, w.samples, gm20b::formatInfo(x.format)->bpp, grid) ||
                       !d.createStoredMultisample(x.width, x.height, x.format, w.samples, ms)))
         return fail(r, SWITCH_BENCH_REFUSED, "no multisampled image of the format and samples");
-    raw::Texture staging;
+    gm20b::Texture staging;
     const bool tiled = w.tiled != 0;
     if (!d.createTexture(x.width, x.height, x.format, t, !tiled, tiled) ||
         (tiled && !d.createTexture(x.width, x.height, x.format, staging, true))) {
-        for (raw::Texture *made : {&ms, &t, &staging})
+        for (gm20b::Texture *made : {&ms, &t, &staging})
             if (made->va)
                 d.destroyTexture(*made);
         return fail(r, SWITCH_BENCH_ERROR, "no memory for the target");
@@ -335,7 +336,7 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
         d.destroyTexture(staging);
         return fail(r, SWITCH_BENCH_REFUSED, "the target's shape does not tile");
     }
-    raw::Texture &cpuSide = tiled ? staging : t;
+    gm20b::Texture &cpuSide = tiled ? staging : t;
     r.form = {1,
               t.comptags,
               t.blockLinear,
@@ -346,8 +347,8 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
               w.clear_first,
               w.rop,
               resolving && w.resolve_by_scale && w.invert_grid};
-    const raw::ProbeOp op = operation(x, t, read);
-    const uint32_t bpp = raw::formatInfo(x.format)->bpp;
+    const gm20b::ProbeOp op = operation(x, t, read);
+    const uint32_t bpp = gm20b::formatInfo(x.format)->bpp;
     Submission s(b, x, r);
     bool ran = true;
     for (uint32_t c = 0; ran && c < x.draw_counts; c++)
@@ -362,21 +363,21 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
             // a resolve's samples come from a command buffer of their own, so its stamps time the resolve alone
             uint64_t fillGpu = 0, fillWall = 0;
             ran = !resolving || s.record(
-                                    [&](raw::CommandBuffer &cb) {
-                                        raw::BlitEncoder *e = cb.blit();
+                                    [&](gm20b::CommandBuffer &cb) {
+                                        gm20b::BlitEncoder *e = cb.blit();
                                         if (!e)
-                                            return s.refused("the raw path opened no blit encoder");
+                                            return s.refused("the driver opened no blit encoder");
                                         e->probe(gridFill(ms, *read, grid), read, ms);
                                         e->end();
                                         return true;
                                     },
                                     fillGpu, fillWall);
             ran = ran && s.record(
-                             [&](raw::CommandBuffer &cb) {
+                             [&](gm20b::CommandBuffer &cb) {
                                  if (resolving && w.resolve_by_scale) {
-                                     raw::BlitEncoder *e = cb.blit();
+                                     gm20b::BlitEncoder *e = cb.blit();
                                      if (!e)
-                                         return s.refused("the raw path opened no blit encoder");
+                                         return s.refused("the driver opened no blit encoder");
                                      if (w.invert_grid)
                                          e->probe(gridInvert(ms, grid), nullptr, ms);
                                      e->probe(gridScale(x, ms, t, grid), &ms, t);
@@ -388,9 +389,9 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
                                             s.refused("the 2D engine has no resolve for the grid");
                                  if (w.clear_first && !clearOnly(cb, x, t, s))
                                      return false;
-                                 raw::BlitEncoder *e = cb.blit();
+                                 gm20b::BlitEncoder *e = cb.blit();
                                  if (!e)
-                                     return s.refused("the raw path opened no blit encoder");
+                                     return s.refused("the driver opened no blit encoder");
                                  e->probe(op, read, t);
                                  e->end();
                                  return true;
@@ -424,7 +425,7 @@ void runTwod(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
 
 void fillSurface(switch_bench &b, const void *surface, uint32_t format, uint32_t color, switch_bench_result &r)
 {
-    raw::Device &d = *b.device;
+    gm20b::Device &d = *b.device;
     const auto s = static_cast<IOSurfaceRef>(const_cast<void *>(surface));
     switch_bench_experiment x = {};
     x.kind = SWITCH_BENCH_TWOD;
@@ -436,18 +437,18 @@ void fillSurface(switch_bench &b, const void *surface, uint32_t format, uint32_t
     x.twod.op = SWITCH_BENCH_TWOD_FILL;
     x.twod.color_format = kA8b8g8r8;
     x.twod.color[0] = color;
-    raw::Texture t;
-    if (!raw::probeTwodFormat(format) ||
+    gm20b::Texture t;
+    if (!gm20b::probeTwodFormat(format) ||
         !d.createSurfaceTexture(IOSurfaceGetID(s), IOSurfaceGetBaseAddress(s), IOSurfaceGetAllocSize(s), s, 0, x.width,
                                 x.height, uint32_t(IOSurfaceGetBytesPerRow(s)), format, t, true))
-        return fail(r, SWITCH_BENCH_REFUSED, "the raw path takes no texture over the surface");
+        return fail(r, SWITCH_BENCH_REFUSED, "the driver takes no texture over the surface");
     Submission submission(b, x, r);
     uint64_t gpu = 0, wall = 0;
     submission.record(
-        [&](raw::CommandBuffer &cb) {
-            raw::BlitEncoder *e = cb.blit();
+        [&](gm20b::CommandBuffer &cb) {
+            gm20b::BlitEncoder *e = cb.blit();
             if (!e)
-                return submission.refused("the raw path opened no blit encoder");
+                return submission.refused("the driver opened no blit encoder");
             e->probe(operation(x, t, nullptr), nullptr, t);
             e->end();
             return true;

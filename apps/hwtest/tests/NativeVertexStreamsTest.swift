@@ -3,25 +3,25 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// A state of two fixed-function vertex streams on the raw path: positions in buffer 1 (8 bytes apart), colours in buffer
+/// A state of two fixed-function vertex streams on the driver: positions in buffer 1 (8 bytes apart), colours in buffer
 /// 2 (32 bytes apart, junk between them). One draw of two quads, the left half red and the right half blue, each vertex
 /// its own colour from stream 1. A second stream left unbound, bound at stream 0's address or read at the wrong stride
 /// draws black, red or junk where the expected colour is.
 struct NativeVertexStreamsTest: NativeObjectTest {
     let id = "metal.native.vertex_streams"
-    let name = "A state of two vertex buffers reads each from its own bind on the raw path"
+    let name = "A state of two vertex buffers reads each from its own bind on the driver"
 
     static let size = 32
     static let colourStride = 32
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct In { float2 position [[attribute(0)]]; float4 colour [[attribute(1)]]; };
-        struct Out { float4 position [[position]]; float4 colour [[flat]]; };
-        vertex Out two_stream_vertex(In in [[stage_in]]) { return {float4(in.position, 0, 1), in.colour}; }
-        fragment float4 two_stream_fragment(Out in [[stage_in]]) { return in.colour; }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct In { float2 position [[attribute(0)]]; float4 colour [[attribute(1)]]; };
+    struct Out { float4 position [[position]]; float4 colour [[flat]]; };
+    vertex Out two_stream_vertex(In in [[stage_in]]) { return {float4(in.position, 0, 1), in.colour}; }
+    fragment float4 two_stream_fragment(Out in [[stage_in]]) { return in.colour; }
+    """
 
     /// Each quad's two triangles over [x0, x1] of the whole height, and its colour
     static let quads: [(x0: Float, x1: Float, colour: SIMD4<Float>)] = [
@@ -36,7 +36,7 @@ struct NativeVertexStreamsTest: NativeObjectTest {
         let floats = colourStride / 4
         var out: [Float] = []
         for q in quads {
-            for _ in 0..<6 {
+            for _ in 0 ..< 6 {
                 out += [q.colour.x, q.colour.y, q.colour.z, q.colour.w]
                 out += [Float](repeating: 1e6, count: floats - 4)
             }
@@ -80,7 +80,7 @@ struct NativeVertexStreamsTest: NativeObjectTest {
         }
         work.paths.append(timing.path)
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let wrong = (0..<Self.size * Self.size).filter {
+        let wrong = (0 ..< Self.size * Self.size).filter {
             let x = $0 % Self.size
             let expected: [UInt8] = x < Self.size / 2 ? [255, 0, 0, 255] : [0, 0, 255, 255]
             return Array(pixels.pixel(x, $0 / Self.size, width: Self.size)) != expected

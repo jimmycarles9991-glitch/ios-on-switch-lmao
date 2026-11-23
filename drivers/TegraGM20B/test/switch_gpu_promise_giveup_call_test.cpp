@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The give-up's one call and its table (SwitchGpuPromiseGiveUp.h), under the same kernel as
-// switch_gpu_promise_giveup_test: what it costs at idle and at a pass, where it runs, and that every promise slot that can
-// exist, and every GPU reader of one, is given up at its second.
+// switch_gpu_promise_giveup_test: what it costs at idle and at a pass, where it runs, and that every promise slot that
+// can exist, and every GPU reader of one, is given up at its holder's bound.
 #include "switch_gpu_promise_giveup_fixture.h"
 
 namespace
@@ -63,13 +63,14 @@ TEST_P(Call, EveryDropOfAMovedWordTheDirectPresentWaitsOnHandsItOver)
 	fake::pool[(kOffset + 4) / 4] = kValue - 1;
 	tgm_fence_pages.made[0][(kOffset + 4) / 4 - TGM_FENCE_PROMISE_WORD] = kValue;
 	const switch_gpu_backing_token other = {kValue, 0, SWITCH_GPU_ENGINE_PROMISE, kOffset + 4};
-	tgm_chan_park_promises(&reader, &other, 1);
+	parkPromises(&reader, &other, 1);
 	EXPECT_EQ(presentReleased, 1u);
 }
 
-// Every promise slot that can exist, each waited on at once (a GPU reader on each): every one has its own record, so
-// each is given up a second after its park, the 33rd and the 64th and the 2048th as the first, with its own line.
-TEST_P(Call, EveryPromiseSlotWaitedOnAtOnceIsGivenUpAtOneSecond)
+// Every promise slot that can exist, each waited on at once (a GPU reader on each) and armed with a 1 s bound: every one
+// has its own record, so each is given up at its bound, the 33rd and the 64th and the 2048th as the first, with its
+// own line.
+TEST_P(Call, EveryPromiseSlotWaitedOnAtOnceIsGivenUpAtItsBound)
 {
 	std::vector<uint32_t> offsets;
 	for (uint32_t page = 0; page < TGM_FENCE_USER_PAGES; ++page)
@@ -83,7 +84,8 @@ TEST_P(Call, EveryPromiseSlotWaitedOnAtOnceIsGivenUpAtOneSecond)
 				    [offset % TGM_FENCE_SLOT / 4 - TGM_FENCE_PROMISE_WORD] = kValue;
 		const switch_gpu_backing_token promise = {kValue, 0, SWITCH_GPU_ENGINE_PROMISE,
 							  offset};
-		tgm_chan_park_promises(&reader, &promise, 1);
+		parkPromises(&reader, &promise, 1);
+		holderArms(1000, 1, offset);
 	}
 	reader.submitted += 1;
 	EXPECT_EQ(readerSetsTaken(), unsigned(SWITCH_GPU_GIVEUP_READER_SETS))
@@ -102,8 +104,8 @@ TEST_P(Call, EveryPromiseSlotWaitedOnAtOnceIsGivenUpAtOneSecond)
 }
 
 // More GPU reader channels than a record tells apart, one of them with two jobs parked: the promise is still given up a
-// second after the first park, with one line, and every reader's acquire passes.
-TEST_P(Call, SixGpuReaderChannelsAreAllLetGoAtOneSecond)
+// bound after the first park, with one line, and every reader's acquire passes.
+TEST_P(Call, SixGpuReaderChannelsAreAllLetGoAtTheBound)
 {
 	fake_tgm_chan more[5];
 	const char *const names[] = {"Photos", "Camera", "backboardd", "present", "host1x-bridge"};
@@ -114,11 +116,12 @@ TEST_P(Call, SixGpuReaderChannelsAreAllLetGoAtOneSecond)
 		fake::chans.push_back(&more[i]);
 	}
 	for (auto &chan : more) {
-		tgm_chan_park_promises(&chan, &promise, 1);
+		parkPromises(&chan, &promise, 1);
 		chan.submitted += 1;
 	}
-	tgm_chan_park_promises(&more[0], &promise, 1);
+	parkPromises(&more[0], &promise, 1);
 	more[0].submitted += 1;
+	holderArms(1000);
 	until(fake::now + 999 * kMs);
 	EXPECT_TRUE(lines.empty());
 	until(fake::now + 1 * kMs);
@@ -130,7 +133,7 @@ TEST_P(Call, SixGpuReaderChannelsAreAllLetGoAtOneSecond)
 }
 
 // The channels the record tells apart die; the readers it could not tell apart are still parked, and the promise is given
-// up at its second all the same: nothing pins it.
+// up at its bound all the same: nothing pins it.
 TEST_P(Call, ReadersBeyondTheRecordNeverPinThePromise)
 {
 	fake_tgm_chan more[5];
@@ -140,9 +143,10 @@ TEST_P(Call, ReadersBeyondTheRecordNeverPinThePromise)
 	for (int i = 0; i < 5; ++i) {
 		setChan(more[i], 0x40 + i, names[i], 10);
 		fake::chans.push_back(&more[i]);
-		tgm_chan_park_promises(&more[i], &promise, 1);
+		parkPromises(&more[i], &promise, 1);
 		more[i].submitted += 1;
 	}
+	holderArms(1000);
 	reader.error = 1;
 	for (int i = 0; i < 3; ++i)
 		more[i].error = 1;
@@ -165,11 +169,12 @@ TEST_P(Call, AFifthChannelTakesTheRoomOfAReaderThatWentOn)
 		fake::chans.push_back(&more[i]);
 	}
 	for (int i = 0; i < 3; ++i) {
-		tgm_chan_park_promises(&more[i], &promise, 1);
+		parkPromises(&more[i], &promise, 1);
 		more[i].submitted += 1;
 	}
+	holderArms(1000);
 	reader.error = 1;
-	tgm_chan_park_promises(&more[3], &promise, 1);
+	parkPromises(&more[3], &promise, 1);
 	more[3].submitted += 1;
 	for (auto &chan : more)
 		chan.error = 1;
@@ -180,7 +185,7 @@ TEST_P(Call, AFifthChannelTakesTheRoomOfAReaderThatWentOn)
 }
 
 // The slot's promise is kept with no pass to see it, and the slot made again: a reader of the new promise takes the
-// slot's record over, and the new promise has its own second.
+// slot's record over, and the new promise has its own bound.
 TEST_P(Call, ASlotMadeAgainHasItsRecordForTheNewPromise)
 {
 	readerSubmits();
@@ -190,8 +195,9 @@ TEST_P(Call, ASlotMadeAgainHasItsRecordForTheNewPromise)
 	tgm_fence_pages.made[0][kOffset / 4 - TGM_FENCE_PROMISE_WORD] = kValue + 1;
 	const switch_gpu_backing_token next = {kValue + 1, 0, SWITCH_GPU_ENGINE_PROMISE, kOffset};
 	const uint64_t parked = fake::now;
-	tgm_chan_park_promises(&reader, &next, 1);
+	parkPromises(&reader, &next, 1);
 	reader.submitted += 1;
+	holderArms(1000, 1, kOffset, kValue + 1);
 	until(parked + 999 * kMs);
 	EXPECT_TRUE(lines.empty());
 	until(parked + 1000 * kMs);
@@ -200,9 +206,32 @@ TEST_P(Call, ASlotMadeAgainHasItsRecordForTheNewPromise)
 	EXPECT_EQ(fake::pool[kOffset / 4], kValue + 1);
 }
 
+// The slot's earlier promise was kept and its word moved; the slot made again is held by a maker that never arms it.
+// The new promise's record is its own and the earlier keep is not its job: it is given up at the default bound after
+// its reader parked, as its own unkept promise.
+TEST_P(Call, ASlotMadeAgainAfterAKeepHasTheDefaultBoundForTheNewPromise)
+{
+	readerSubmits();
+	keeps();
+	fake::pool[kOffset / 4] = kValue;
+	gpuRuns();
+	until(fake::now + 500 * kMs);
+	tgm_fence_pages.made[0][kOffset / 4 - TGM_FENCE_PROMISE_WORD] = kValue + 1;
+	const switch_gpu_backing_token next = {kValue + 1, 0, SWITCH_GPU_ENGINE_PROMISE, kOffset};
+	const uint64_t parked = fake::now;
+	parkPromises(&reader, &next, 1);
+	reader.submitted += 1;
+	until(parked + 4999 * kMs);
+	EXPECT_TRUE(lines.empty());
+	until(parked + 5000 * kMs);
+	ASSERT_EQ(lines.size(), 1u) << "the new promise's reader still waits";
+	EXPECT_NE(lines[0].find("(value 10)"), std::string::npos) << lines[0];
+	EXPECT_EQ(fake::pool[kOffset / 4], kValue + 1);
+}
+
 // The page's earlier owner kept a promise of the same slot and value; the page then went to another connection,
 // cleared, whose promise of that value nobody keeps. Its reader is not handed the earlier owner's job: nothing is asked
-// of that channel, and the promise is given up at its second.
+// of that channel, and the unkept promise has its own bound.
 TEST_P(Call, AKeepOfThePagesEarlierOwnerIsNotTheNewPromisesJob)
 {
 	makerKeeps(1);
@@ -213,13 +242,14 @@ TEST_P(Call, AKeepOfThePagesEarlierOwnerIsNotTheNewPromisesJob)
 	readerSubmits();
 	EXPECT_EQ(maker.asked, asked);
 	until(fake::now + 1000 * kMs);
-	EXPECT_EQ(lines.size(), 1u);
+	EXPECT_TRUE(lines.empty());
+	EXPECT_EQ(fake::call.ran, 0u);
 	EXPECT_EQ(fake::hangLooks, 0u);
 }
 
 // More GPU reader channels parked than the record tells apart, and then every one of them dies: the promise is given up
-// at its second with its line (the untold readers are taken as parked until then), never kept waiting on.
-TEST_P(Call, ReadersBeyondTheRecordThatAllDiedAreGivenUpAtTheSecond)
+// at its bound with its line (the untold readers are taken as parked until then), never kept waiting on.
+TEST_P(Call, ReadersBeyondTheRecordThatAllDiedAreGivenUpAtTheBound)
 {
 	fake_tgm_chan more[5];
 	const char *const names[] = {"Photos", "Camera", "backboardd", "present", "host1x-bridge"};
@@ -228,9 +258,10 @@ TEST_P(Call, ReadersBeyondTheRecordThatAllDiedAreGivenUpAtTheSecond)
 	for (int i = 0; i < 5; ++i) {
 		setChan(more[i], 0x40 + i, names[i], 10);
 		fake::chans.push_back(&more[i]);
-		tgm_chan_park_promises(&more[i], &promise, 1);
+		parkPromises(&more[i], &promise, 1);
 		more[i].submitted += 1;
 	}
+	holderArms(1000);
 	reader.error = 1;
 	for (auto &chan : more)
 		chan.error = 1;
@@ -247,12 +278,14 @@ TEST_P(Call, EveryWayARecordEndsGivesItsReaderSetBack)
 {
 	constexpr int kRounds = 2 * SWITCH_GPU_GIVEUP_READER_SETS;
 	uint32_t value = kValue;
-	auto park = [&](uint32_t v) {
+	auto park = [&](uint32_t v, bool armed = true) {
 		fake::pool[kOffset / 4] = v - 1;
 		tgm_fence_pages.made[0][kOffset / 4 - TGM_FENCE_PROMISE_WORD] = v;
 		const switch_gpu_backing_token promise = {v, 0, SWITCH_GPU_ENGINE_PROMISE, kOffset};
-		tgm_chan_park_promises(&reader, &promise, 1);
+		parkPromises(&reader, &promise, 1);
 		reader.submitted += 1;
+		if (armed)
+			holderArms(1000, 1, kOffset, v);
 	};
 	for (int i = 0; i < kRounds; ++i, ++value) {
 		park(value);
@@ -277,15 +310,13 @@ TEST_P(Call, EveryWayARecordEndsGivesItsReaderSetBack)
 	}
 	EXPECT_EQ(readerSetsTaken(), 0u) << "the readers gone";
 	for (int i = 0; i < kRounds; ++i, ++value) {
-		park(value);
+		park(value, false);
 		fake::pool[kOffset / 4] = value;
 		reader.fence = reader.submitted;
 		EXPECT_EQ(readerSetsTaken(), 1u) << "the slot made again";
 	}
-	until(fake::now + 1000 * kMs);
-	EXPECT_EQ(readerSetsTaken(), 0u);
 	for (int i = 0; i < kRounds; ++i, ++value) {
-		park(value);
+		park(value, false);
 		ASSERT_EQ(tgm_promise_park(kOffset, value, "SpringBoard", "a CPU lock", nullptr, 0),
 			  1);
 		reader.fence = reader.submitted;
@@ -321,6 +352,7 @@ TEST_P(Call, AReaderParkedAfterTheKeepFindsTheJob)
 TEST_P(Call, TheCallRunsInThreadContextAndOnlyTheRaiseHasInterruptsOff)
 {
 	readerSubmits();
+	holderArms(1000);
 	fake::now += 1000 * kMs;
 	unsigned long flags = 0;
 	local_irq_save(flags);

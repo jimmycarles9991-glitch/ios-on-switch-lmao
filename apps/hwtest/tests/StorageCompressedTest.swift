@@ -3,34 +3,34 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Rule storage.compressed (drivers/TegraGM20BMetal/raw/runtime/raw_storage_form.h storageReadsCompressed): whether the
+/// Rule storage.compressed (drivers/TegraGM20BMetal/storage_form.h storageReadsCompressed): whether the
 /// surface unit's loads and stores (SULD/SUST) read and write a compressed C32_2CRA target as its texels. A 224x224
 /// private BGRA8 target (a shape of its own: a shape a storage form once moved to plain memory is made plain from then
-/// on), compressed (raw_private_comp.h), cleared to a ZBC value, then four fetching source-over draws
+/// on), compressed (private_comp.h), cleared to a ZBC value, then four fetching source-over draws
 /// (FixedBlendRule.metal rule_fetch_fragment, which reads [[color(0)]]) three ways: the same draws on plain memory
-/// (switchRawProbePlainPrivate:), the storage form viewing the compressed target (switchRawProbeStorageCompressed:), and
+/// (switchMetalProbePlainPrivate:), the storage form viewing the compressed target (switchMetalProbeStorageCompressed:), and
 /// the route without that switch (the barrier form, or a move to plain memory where the state has none), last as it
 /// makes the shape plain. `<arm>_made` is the target's comptags when made, `<arm>_compressed` after the draws. PASS: the
 /// storage form ran on compressed memory (no compressed fallback counted, the target compressed before and after) and its
 /// bytes are the plain run's; the barrier arm's are too. FAIL with `storage_bytes_differ`: the unit reads raw bytes, so
 /// the rule stays false and compressed targets keep the barrier form.
 struct StorageCompressedTest: HWTest {
-    let id = "gpu.raw.storage_compressed"
+    let id = "gpu.gm20b.storage_compressed"
     let name = "Surface loads and stores through a compressed target: the storage form against plain memory"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
 
-    static let storageSelector = NSSelectorFromString("switchRawProbeStorageCompressed:")
-    static let plainSelector = NSSelectorFromString("switchRawProbePlainPrivate:")
-    static let factsSelector = NSSelectorFromString("switchRawProbeFacts:")
+    static let storageSelector = NSSelectorFromString("switchMetalProbeStorageCompressed:")
+    static let plainSelector = NSSelectorFromString("switchMetalProbePlainPrivate:")
+    static let factsSelector = NSSelectorFromString("switchMetalProbeFacts:")
     static let side = 224
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         guard let facade = gpu.device as? NSObject, facade.responds(to: Self.storageSelector) else {
-            return .skip("a release facade: no storage-compression switch")
+            return .skip(GM20BFacade.missing("switchMetalProbeStorageCompressed:", on: gpu.device))
         }
         let state = try gpu.render(fragment: "rule_fetch_fragment", format: .bgra8Unorm)
         var metrics = Metrics()
@@ -44,7 +44,7 @@ struct StorageCompressedTest: HWTest {
             }
             let target = try await self.target(gpu, facade, plain: arm == "plain")
             metrics.set("\(arm)_made", comptags(facade, target))
-            let before = RawFacade.counters(of: gpu.device)["fetch_fallback.compressed"] ?? 0
+            let before = GM20BFacade.counters(of: gpu.device)["fetch_fallback.compressed"] ?? 0
             let path = try await gpu.run { commands in
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = target
@@ -55,21 +55,21 @@ struct StorageCompressedTest: HWTest {
                 e.setRenderPipelineState(state)
                 var corners = GPU.fullScreen
                 e.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
-                for layer in 0..<4 {
+                for layer in 0 ..< 4 {
                     var which = SIMD2<UInt32>(UInt32(layer), 1)
                     e.setFragmentBytes(&which, length: 8, index: 0)
                     e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 }
                 e.endEncoding()
             }.path
-            let fallbacks = (RawFacade.counters(of: gpu.device)["fetch_fallback.compressed"] ?? 0) - before
+            let fallbacks = (GM20BFacade.counters(of: gpu.device)["fetch_fallback.compressed"] ?? 0) - before
             runs[arm] = try await gpu.read(target, bytesPerPixel: 4)
             metrics.set("\(arm)_path", path)
             metrics.set("\(arm)_compressed", comptags(facade, target))
             metrics.set("\(arm)_compressed_fallbacks", fallbacks)
         }
         var wrong: [String] = []
-        for arm in ["plain", "storage", "barrier"] where metrics["\(arm)_path"] != .text("raw") {
+        for arm in ["plain", "storage", "barrier"] where metrics["\(arm)_path"] != .text("gm20b") {
             wrong.append("\(arm)_off_raw")
         }
         for arm in ["storage", "barrier"] {
@@ -89,14 +89,10 @@ struct StorageCompressedTest: HWTest {
         return line.contains("comptags=1") ? 1 : 0
     }
 
-    /// A private target; compressed memory of a size is made off the render thread after its first ask, so the
-    /// compressed arms make it again until one binds it (or 20 tries pass)
+    /// A private target, on compressed memory in the compressed arms (CompressionSettled.remade)
     func target(_ gpu: GPU, _ facade: NSObject, plain: Bool) async throws -> MTLTexture {
-        var made = try gpu.texture(.bgra8Unorm, Self.side, Self.side, usage: [.renderTarget, .shaderRead])
-        for _ in 0..<20 where !plain && comptags(facade, made) == 0 {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            made = try gpu.texture(.bgra8Unorm, Self.side, Self.side, usage: [.renderTarget, .shaderRead])
-        }
-        return made
+        let make = { try gpu.texture(.bgra8Unorm, Self.side, Self.side, usage: [.renderTarget, .shaderRead]) }
+        if plain { return try make() }
+        return try await CompressionSettled.remade(gpu.device, make)
     }
 }

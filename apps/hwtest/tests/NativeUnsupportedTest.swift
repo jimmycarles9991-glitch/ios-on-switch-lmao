@@ -7,27 +7,27 @@ import Metal
 /// an amplification count past the amplify macro's 8 mapping words. What both builds answer YES is made: a state of
 /// amplification 8, one of a dynamic attribute stride (render and compute stage-in) and a post-tessellation state at
 /// the device's maxTessellationFactor, 64 (metal.native.amplification, metal.native.dynamic_stride and
-/// metal.native.tessellation draw them). Predicated loops nest as deep as the raw path lays them down
-/// (raw_loop_copies.h LoopCopies::kMaxDepth, 8; gpu.raw.predication runs them). Linear textures align to the pitch
-/// texture header's 32 bytes. The amplification count Metal defaults to, 1, draws on the raw path.
+/// metal.native.tessellation draw them). Predicated loops nest as deep as the driver lays them down
+/// (loop_copies.h LoopCopies::kMaxDepth, 8; gpu.gm20b.predication runs them). Linear textures align to the pitch
+/// texture header's 32 bytes. The amplification count Metal defaults to, 1, draws on the driver.
 struct NativeUnsupportedTest: NativeObjectTest {
     let id = "metal.native.unsupported"
     let name = "Features the device has no form of answer NO and refuse their creations; amplification 1 draws raw"
 
-    /// raw_loop_copies.h LoopCopies::kMaxDepth
+    /// loop_copies.h LoopCopies::kMaxDepth
     static let loopDepth = 8
 
     static let patchSource = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct ControlPoint { float4 position [[attribute(0)]]; };
-        struct Patch { patch_control_point<ControlPoint> points; };
-        [[patch(triangle, 3)]] vertex float4 tri_post(Patch patch [[stage_in]], float3 uvw [[position_in_patch]]) {
-            return patch.points[0].position * uvw.x + patch.points[1].position * uvw.y +
-                   patch.points[2].position * uvw.z;
-        }
-        fragment float4 tri_fragment() { return float4(1); }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct ControlPoint { float4 position [[attribute(0)]]; };
+    struct Patch { patch_control_point<ControlPoint> points; };
+    [[patch(triangle, 3)]] vertex float4 tri_post(Patch patch [[stage_in]], float3 uvw [[position_in_patch]]) {
+        return patch.points[0].position * uvw.x + patch.points[1].position * uvw.y +
+               patch.points[2].position * uvw.z;
+    }
+    fragment float4 tri_fragment() { return float4(1); }
+    """
 
     /// What a device query answers through its selector (nil where the device has no method for it)
     static func answer(_ device: MTLDevice, _ selector: String) -> Int? {
@@ -53,7 +53,7 @@ struct NativeUnsupportedTest: NativeObjectTest {
         let nesting = Self.answer(device, "maxPredicatedNestingDepth")
         metrics.set("predicated_nesting", nesting ?? -1)
         if nesting != Self.loopDepth {
-            work.failures.append("maxPredicatedNestingDepth is not the raw path's loop depth")
+            work.failures.append("maxPredicatedNestingDepth is not the driver's loop depth")
         }
         for (selector, want, field) in [
             ("supportsDynamicAttributeStride", 1, "dynamic_stride"),
@@ -80,6 +80,14 @@ struct NativeUnsupportedTest: NativeObjectTest {
         tessellated.fragmentFunction = patchLibrary.makeFunction(name: "tri_fragment")
         tessellated.colorAttachments[0].pixelFormat = .rgba8Unorm
         tessellated.maxTessellationFactor = NativeAnswers.tessellationFactor
+        // tri_post reads its control points as attributes: Metal refuses the state without a vertex descriptor (an M4
+        // Max: "Vertex function has input attributes but no vertex descriptor was set")
+        let controlPoints = MTLVertexDescriptor()
+        controlPoints.attributes[0].format = .float4
+        controlPoints.attributes[0].bufferIndex = 0
+        controlPoints.layouts[0].stride = MemoryLayout<SIMD4<Float>>.stride
+        controlPoints.layouts[0].stepFunction = .perPatchControlPoint
+        tessellated.vertexDescriptor = controlPoints
         let amplified = MTLRenderPipelineDescriptor()
         amplified.vertexFunction = gpu.library.makeFunction(name: "quad_vertex")
         amplified.fragmentFunction = gpu.library.makeFunction(name: "solid_fragment")
@@ -91,7 +99,7 @@ struct NativeUnsupportedTest: NativeObjectTest {
         let vertices = MTLVertexDescriptor()
         vertices.attributes[0].format = .float4
         vertices.attributes[0].bufferIndex = 1
-        vertices.layouts[1].stride = Int(bitPattern: UInt.max)  // MTLBufferLayoutStrideDynamic
+        vertices.layouts[1].stride = Int(bitPattern: UInt.max) // MTLBufferLayoutStrideDynamic
         strided.vertexDescriptor = vertices
         var made: [String] = []
         for (what, descriptor) in [("tessellation64", tessellated), ("amplification8", amplified), ("stride", strided)]
@@ -117,6 +125,7 @@ struct NativeUnsupportedTest: NativeObjectTest {
         stageIn.attributes[0].format = .float4
         stageIn.attributes[0].bufferIndex = 2
         stageIn.layouts[2].stride = Int(bitPattern: UInt.max)
+        stageIn.layouts[2].stepFunction = .threadPositionInGridX
         compute.stageInputDescriptor = stageIn
         if let error = Self.refused({ _ = try device.makeComputePipelineState(descriptor: compute, options: []) }) {
             work.failures.append("the dynamic-stride stage-in state was refused: \(error)")
@@ -149,7 +158,7 @@ struct NativeUnsupportedTest: NativeObjectTest {
         }
         work.paths.append(timing.path)
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let wrong = (0..<size * size).filter {
+        let wrong = (0 ..< size * size).filter {
             Array(pixels.pixel($0 % size, $0 / size, width: size)) != [0, 255, 0, 255]
         }.count
         metrics.set("wrong_pixels", wrong)

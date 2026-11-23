@@ -9,8 +9,8 @@
  * A frame whose one pending writer is a writer promise (SwitchGpuWriterPromise.h) is watched too: the watch waits
  * PROMISED, which no pass looks at, until the promised job is submitted, and then watches that job as its producer (the
  * promise's word is released by the same job's fence push, after its fence). A promise released or given up on from the
- * CPU meanwhile goes to the work item; one still unkept is given up (SwitchGpuPromiseGiveUp.h), and the present is
- * dropped. The deadline is armed only once the job is submitted. */
+ * CPU meanwhile goes to the work item: its maker's withdraw (a held command buffer its runtime failed at Metal's bound),
+ * cancel or close, and the present of one abandoned is dropped. The deadline is armed only once the job is submitted. */
 #pragma once
 #include <stdint.h>
 #include "SwitchGpuBacking.h"

@@ -57,7 +57,8 @@ struct AccelerometerTest: HWTest {
                 manager.startAccelerometerUpdates(to: Motion.queue) { data, _ in
                     if let data { sink.add(data.acceleration) }
                 }
-            }, stop: { manager.stopAccelerometerUpdates() })
+            }, stop: { manager.stopAccelerometerUpdates() }
+        )
         let magnitude = Stats.mean(samples.map { sqrt($0.x * $0.x + $0.y * $0.y + $0.z * $0.z) })
         var metrics = Metrics()
         metrics.set("rate_hz", rate, digits: 1)
@@ -66,7 +67,8 @@ struct AccelerometerTest: HWTest {
             [
                 ("at least 80 Hz of the 100 asked", rate >= 80),
                 ("about 1 g at rest (0.8-1.2)", magnitude > 0.8 && magnitude < 1.2),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -82,7 +84,8 @@ struct GyroscopeTest: HWTest {
         let (samples, rate) = try await Motion.collect(
             start: { (sink: MotionSamples<CMRotationRate>) in
                 manager.startGyroUpdates(to: Motion.queue) { data, _ in if let data { sink.add(data.rotationRate) } }
-            }, stop: { manager.stopGyroUpdates() })
+            }, stop: { manager.stopGyroUpdates() }
+        )
         let spin = Stats.mean(samples.map { sqrt($0.x * $0.x + $0.y * $0.y + $0.z * $0.z) })
         var metrics = Metrics()
         metrics.set("rate_hz", rate, digits: 1)
@@ -91,7 +94,8 @@ struct GyroscopeTest: HWTest {
             [
                 ("at least 80 Hz of the 100 asked", rate >= 80),
                 ("samples are finite", samples.allSatisfy { $0.x.isFinite }),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -110,11 +114,13 @@ struct DeviceMotionTest: HWTest {
                 manager.startDeviceMotionUpdates(using: .xArbitraryZVertical, to: Motion.queue) { data, _ in
                     if let data { sink.add(data) }
                 }
-            }, stop: { manager.stopDeviceMotionUpdates() })
+            }, stop: { manager.stopDeviceMotionUpdates() }
+        )
         let gravity = Stats.mean(
             samples.map {
                 sqrt($0.gravity.x * $0.gravity.x + $0.gravity.y * $0.gravity.y + $0.gravity.z * $0.gravity.z)
-            })
+            }
+        )
         let orientation = await MainActor.run { () -> Int in
             UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             defer { UIDevice.current.endGeneratingDeviceOrientationNotifications() }

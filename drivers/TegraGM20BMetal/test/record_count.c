@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// What one thread does while it records (raw_record_cost_test): its Objective-C messages, locks, allocations, weak
+// What one thread does while it records (record_cost_test): its Objective-C messages, locks, allocations, weak
 // reference calls (each takes the runtime's side-table lock, which the lock interposers cannot see), retains and
 // releases, and work it hands to a dispatch queue, counted by interposers in this library, which the test links so dyld applies them at launch. Only the thread
 // that called record_count_start counts, so a completion or a queue thread of the facade never adds to it.

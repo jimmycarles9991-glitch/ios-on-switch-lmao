@@ -49,7 +49,7 @@ struct ScalePacingTest: HWTest {
         var metrics = Metrics()
         var failures: [String] = []
         for kind in Kind.allCases {
-            for i in 0..<Self.rounds {
+            for i in 0 ..< Self.rounds {
                 _ = LaunchHitchTest.spans(connection)
                 let from = CACurrentMediaTime()
                 await probe.animate(kind, seconds: Self.seconds)
@@ -98,10 +98,11 @@ struct ScalePacingTest: HWTest {
         }
         await probe.stop()
         let (kr, reply) = connection.call(
-            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: 512)
+            GPUPaths.method, GPUConnection.words([Self.targetPeaksOp, 0]), outputSize: 512
+        )
         if kr == KERN_SUCCESS,
-            let compositor = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))
-                .first(where: { $0.owner == "backboardd" })
+           let compositor = TargetPeak.parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self))
+            .first(where: { $0.owner == "backboardd" })
         {
             metrics.set("compositor_largest_target", "\(compositor.width)x\(compositor.height)x\(compositor.samples)")
         }
@@ -143,14 +144,17 @@ final class ScaleProbe: NSObject {
         view.layer.allowsGroupOpacity = true
         view.layer.cornerRadius = 24
         view.clipsToBounds = true
-        for row in 0..<8 {
-            for column in 0..<6 {
+        for row in 0 ..< 8 {
+            for column in 0 ..< 6 {
                 let cell = UIView(
                     frame: CGRect(
                         x: 20 + CGFloat(column) * frame.width / 6, y: 20 + CGFloat(row) * frame.height / 8,
-                        width: frame.width / 6 - 30, height: frame.height / 8 - 20))
+                        width: frame.width / 6 - 30, height: frame.height / 8 - 20
+                    )
+                )
                 cell.backgroundColor = UIColor(
-                    hue: CGFloat(row * 6 + column) / 48, saturation: 0.6, brightness: 0.9, alpha: 1)
+                    hue: CGFloat(row * 6 + column) / 48, saturation: 0.6, brightness: 0.9, alpha: 1
+                )
                 cell.layer.cornerRadius = 12
                 view.addSubview(cell)
             }

@@ -24,7 +24,8 @@ struct DecodeRouteTest: HWTest {
         let demuxed = try await Demux.load(clip, from: context.media)
         let result = try Decompressor.decode(
             demuxed.samples, format: demuxed.format, pattern: clip.pattern, bitDepth: clip.codec.bitDepth,
-            fps: clip.fps)
+            fps: clip.fps
+        )
         var metrics = Metrics()
         metrics.set("frames", result.frames)
         metrics.set("matched", result.matched)
@@ -45,7 +46,8 @@ struct DecodeRouteTest: HWTest {
             ], metrics,
             proof: "SwitchPictureRoutes picture_waits=\(routes["picture_waits"] ?? -1) "
                 + "sync_waits=\(routes["sync_waits"] ?? -1) in_flight_max=\(routes["in_flight_max"] ?? -1) "
-                + "completion_port=\(routes["completion_port"] ?? -1)")
+                + "completion_port=\(routes["completion_port"] ?? -1)"
+        )
     }
 
     static let keys = [

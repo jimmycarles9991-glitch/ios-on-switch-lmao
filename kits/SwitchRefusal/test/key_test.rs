@@ -22,7 +22,7 @@ fn keys_are_the_headers() {
     for (domain, reason) in [
         ("m2v", "renderCommandEncoder"),
         ("", ""),
-        ("raw", "pass.ds"),
+        ("gm20b", "pass.ds"),
         ("a", "b\u{e9}c"),
     ] {
         let key = c_key(domain, reason);

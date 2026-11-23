@@ -159,7 +159,9 @@ IOReturn ioreturn(int err)
     case -19:
         return kIOReturnNotReady;
     case -125:
-    case -5:
+    case SWITCH_GPU_BACKING_WRITER_GONE:
+    case SWITCH_GPU_BACKING_WRITER_FAILED:
+    case SWITCH_GPU_BACKING_WRITE_REFUSED:
         return kIOReturnAborted;
     case -95:
         return kIOReturnUnsupported;
@@ -210,9 +212,10 @@ void refused(IOReturn ret, const char *why, const TegraVICSurfaceDesc &src, cons
                      dst.height);
 }
 
+extern "C" int proc_selfpid(void);
+
 #if TEGRA_VIC_STATS
 extern "C" void proc_selfname(char *buf, int size);
-extern "C" int proc_selfpid(void);
 
 // Who allocates surfaces VIC cannot address, once a boot: each one costs the copy engine two copies a job, and the
 // fix is that allocator's row or plane alignment.
@@ -250,6 +253,7 @@ struct Job {
     IOReturn status;
     bool done, detached;  // detached: its synchronous caller was interrupted and finishJob frees it
     TegraVICJob check;    // the submitting thread's check of each operation
+    int caller;           // its event records are counted as this process's (switch_gpu_events_charge)
 #if TEGRA_VIC_STATS
     uint64_t submittedUs;
     int pid;  // the transform caller's (the job runs on the engine thread)
@@ -380,7 +384,10 @@ void engineThread(void *, wait_result_t)
         IOLockWakeup(gQueueLock, &gRequests, false);
         IOLockUnlock(gQueueLock);
         IOReturn status = kIOReturnSuccess;
-        if (runJob(job, &status))
+        switch_gpu_events_charge(job->caller);
+        const bool finished = runJob(job, &status);
+        switch_gpu_events_charge(0);
+        if (finished)
             finishJob(job, status);
     }
 }
@@ -511,6 +518,7 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
     Job *job = IONewZero(Job, 1);
     if (!job)
         return kIOReturnNoMemory;
+    job->caller = proc_selfpid();
 #if TEGRA_VIC_STATS
     job->pid = proc_selfpid();
     job->origin = switch_vic_turn_origin(job->pid);
@@ -855,6 +863,10 @@ OSDictionary *capabilities(const TegraVICTraits *t)
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesHDR", 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesEnhancement", 0);
     putNumber(d, "IOSurfaceAcceleratorCapabilitiesFilmGrain", 0);
+    // 0 although VIC takes three gamut changes (TegraVICColor.h). With it, VideoToolbox (both builds) offers the scaler
+    // every colour-space change and rebuilds its chain to offer a refused one again on the next transfer, and Core
+    // Animation (both builds, AppleDisplay::detachable_layer_impl) detaches BT.2020-tagged layers on every display
+    // through a Display P3 copy that VIC cannot make.
     putNumber(d, "kSurfaceAcceleratorCapabilitiesColorManager", 0);
     putNumber(d, "kSurfaceAcceleratorCapabilitiesAccessibility", 0);
     putNumber(d, "kSurfaceAcceleratorCapabilitiesHistogram", 0);

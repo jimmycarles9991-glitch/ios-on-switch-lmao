@@ -229,7 +229,8 @@ enum PacingTests {
         stage.addSubview(veil)
         return { frame in
             veil.backgroundColor = UIColor(
-                hue: CGFloat(frame % 120) / 120, saturation: 0.7, brightness: 0.9, alpha: 0.35)
+                hue: CGFloat(frame % 120) / 120, saturation: 0.7, brightness: 0.9, alpha: 0.35
+            )
             veil.transform = CGAffineTransform(translationX: CGFloat(frame % 40) - 20, y: 0)
         }
     }

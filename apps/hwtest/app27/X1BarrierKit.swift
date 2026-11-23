@@ -43,15 +43,17 @@ struct BarrierKit {
         if layout == .pitch {
             let rowBytes = (width * bytesPerTexel + 255) / 256 * 256
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: format, width: width, height: height, mipmapped: false)
+                pixelFormat: format, width: width, height: height, mipmapped: false
+            )
             descriptor.usage = [.renderTarget, .shaderRead]
             descriptor.storageMode = .shared
             return try gpu.buffer(rowBytes * height).makeTexture(
-                descriptor: descriptor, offset: 0, bytesPerRow: rowBytes)
+                descriptor: descriptor, offset: 0, bytesPerRow: rowBytes
+            )
         }
-        if layout == .compressed { try RawProbe.compressNext(gpu.device) }
+        if layout == .compressed { try GM20BProbe.compressNext(gpu.device) }
         let texture = try gpu.texture(format, width, height, usage: [.renderTarget, .shaderRead])
-        if layout == .compressed, try RawProbe.facts(gpu.device, texture)["comptags"] != 1 { return nil }
+        if layout == .compressed, try GM20BProbe.facts(gpu.device, texture)["comptags"] != 1 { return nil }
         return texture
     }
 
@@ -77,7 +79,7 @@ struct BarrierKit {
         encoder.setFragmentBytes(&params, length: 16, index: 0)
         let (x0, y0, x1, y1) = window ?? (0, 0, target.width, target.height)
         let strips = window == nil ? 4 : 1
-        for s in 0..<strips {
+        for s in 0 ..< strips {
             let top = y0 + (y1 - y0) * s / strips, bottom = y0 + (y1 - y0) * (s + 1) / strips
             var corners = GPU.pixelQuad(x0, top, x1, bottom, width: target.width, height: target.height)
             encoder.setVertexBytes(&corners, length: 64, index: 0)
@@ -100,7 +102,8 @@ struct BarrierKit {
         ]
         encoder.setFragmentBytes(&params, length: 32, index: 0)
         var corners = GPU.pixelQuad(
-            0, index * Self.tile, Self.tile, (index + 1) * Self.tile, width: atlas.width, height: atlas.height)
+            0, index * Self.tile, Self.tile, (index + 1) * Self.tile, width: atlas.width, height: atlas.height
+        )
         encoder.setVertexBytes(&corners, length: 64, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
@@ -119,7 +122,8 @@ struct BarrierKit {
             encoder.setFragmentBytes(&params, length: 32, index: 0)
             var corners = GPU.pixelQuad(
                 0, k * Self.tile, Self.tile, (k + 1) * Self.tile, width: atlas.width,
-                height: atlas.height)
+                height: atlas.height
+            )
             encoder.setVertexBytes(&corners, length: 64, index: 0)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
@@ -143,7 +147,8 @@ struct BarrierKit {
         blit.copy(
             from: atlas, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
             sourceSize: MTLSize(width: atlas.width, height: atlas.height, depth: 1), to: buffer,
-            destinationOffset: 0, destinationBytesPerRow: atlas.width * bytesPerTexel, destinationBytesPerImage: 0)
+            destinationOffset: 0, destinationBytesPerRow: atlas.width * bytesPerTexel, destinationBytesPerImage: 0
+        )
         blit.endEncoding()
     }
 
@@ -176,8 +181,8 @@ struct BarrierKit {
     func expectedTap(seed: Int, base: SIMD2<Int32>, step: SIMD2<Int32>, width: Int, height: Int) -> [UInt8] {
         var out: [UInt8] = []
         out.reserveCapacity(tileBytes)
-        for y in 0..<Self.tile {
-            for x in 0..<Self.tile {
+        for y in 0 ..< Self.tile {
+            for x in 0 ..< Self.tile {
                 let sx = min(max(Int(base.x) + x * Int(step.x), 0), width - 1)
                 let sy = min(max(Int(base.y) + y * Int(step.y), 0), height - 1)
                 out += texel(sx, sy, seed: seed)

@@ -204,7 +204,8 @@ struct PocketStripTest: HWTest {
             let hostOrigin = [origin.x, origin.y].map { String(format: "%.2f", $0 * scale) }.joined(separator: ",")
             return Shot(
                 picture: Snapshots.composited(pictured), bar: Int((bar * scale).rounded()), view: view,
-                hostOrigin: hostOrigin)
+                hostOrigin: hostOrigin
+            )
         }
     }
 
@@ -223,13 +224,13 @@ struct PocketStripTest: HWTest {
         return picture[x, y, 0] - green > margin && picture[x, y, 2] - green > margin
     }
 
-    /// Pixels of a new texture's pattern as Apple's GPUs read it (raw_fresh.h): opaque magenta, 254 where a filter mixed in
+    /// Pixels of a new texture's pattern as Apple's GPUs read it (fresh.h): opaque magenta, 254 where a filter mixed in
     /// 1/255 of a neighbour
     static func patternPixels(_ picture: Raster) -> Int {
         var count = 0
-        for y in 0..<picture.height {
-            for x in 0..<picture.width
-            where byte(picture[x, y, 1]) == 0 && byte(picture[x, y, 0]) >= 254 && byte(picture[x, y, 2]) >= 254 {
+        for y in 0 ..< picture.height {
+            for x in 0 ..< picture.width
+                where byte(picture[x, y, 1]) == 0 && byte(picture[x, y, 0]) >= 254 && byte(picture[x, y, 2]) >= 254 {
                 count += 1
             }
         }
@@ -237,27 +238,27 @@ struct PocketStripTest: HWTest {
     }
 
     static func purpleRows(_ picture: Raster) -> [Int] {
-        (0..<picture.height).filter { y in
-            (0..<picture.width).filter { purple(picture, $0, y) }.count * 2 > picture.width
+        (0 ..< picture.height).filter { y in
+            (0 ..< picture.width).filter { purple(picture, $0, y) }.count * 2 > picture.width
         }
     }
 
     static func purpleColumns(_ picture: Raster) -> [Int] {
-        (0..<picture.width).filter { x in
-            (0..<picture.height).filter { purple(picture, x, $0) }.count * 2 > picture.height
+        (0 ..< picture.width).filter { x in
+            (0 ..< picture.height).filter { purple(picture, x, $0) }.count * 2 > picture.height
         }
     }
 
     static func byte(_ value: Float) -> Int { Int((value * 255).rounded()) }
 
     static func bytes(_ picture: Raster, _ x: Int, _ y: Int) -> String {
-        (0..<3).map { String(byte(picture[x, y, $0])) }.joined(separator: ",")
+        (0 ..< 3).map { String(byte(picture[x, y, $0])) }.joined(separator: ",")
     }
 
     /// "234-255,44-55,241-255": each channel's least and greatest along row `y`.
     static func range(_ picture: Raster, _ y: Int) -> String {
-        (0..<3).map { c in
-            let values = (0..<picture.width).map { byte(picture[$0, y, c]) }
+        (0 ..< 3).map { c in
+            let values = (0 ..< picture.width).map { byte(picture[$0, y, c]) }
             let (least, greatest) = (values.min() ?? 0, values.max() ?? 0)
             return least == greatest ? "\(least)" : "\(least)-\(greatest)"
         }.joined(separator: ",")
@@ -276,9 +277,9 @@ struct PocketStripTest: HWTest {
         let width = min(a.width, b.width)
         guard rows > 0, width > 0 else { return 0 }
         var sum: Float = 0
-        for y in 0..<rows {
-            for x in 0..<width {
-                for c in 0..<3 { sum += abs(a[x, y, c] - b[x, y, c]) }
+        for y in 0 ..< rows {
+            for x in 0 ..< width {
+                for c in 0 ..< 3 { sum += abs(a[x, y, c] - b[x, y, c]) }
             }
         }
         return sum / Float(rows * width * 3)
@@ -292,9 +293,9 @@ struct PocketList: View {
     var body: some View {
         NavigationStack {
             List {
-                ForEach(0..<6) { section in
+                ForEach(0 ..< 6) { section in
                     Section("Section \(section)") {
-                        ForEach(0..<8) { row in
+                        ForEach(0 ..< 8) { row in
                             Label("Row \(section).\(row)  Wi-Fi  Bluetooth  General", systemImage: "circle.fill")
                         }
                     }

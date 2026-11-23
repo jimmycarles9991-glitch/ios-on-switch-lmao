@@ -7,7 +7,7 @@ final class LandscapeRunTests: XCTestCase {
     func reply(crc: [UInt32], mode: [UInt8], vicJobs: [UInt32] = [0, 0, 0], latches: UInt32 = 0) -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: LandscapeSample.size)
         func put(_ word: UInt32, _ at: Int) {
-            for i in 0..<4 { bytes[at + i] = UInt8(truncatingIfNeeded: word >> (8 * i)) }
+            for i in 0 ..< 4 { bytes[at + i] = UInt8(truncatingIfNeeded: word >> (8 * i)) }
         }
         put(LandscapeSample.magic, 0)
         put(LandscapeSample.done, 4)
@@ -46,12 +46,14 @@ final class LandscapeRunTests: XCTestCase {
 
     func testTheRequestIsMagicOpValueAndZero() {
         XCTAssertEqual(
-            LandscapeSample.request(op: 1, value: 2), [0x56, 0x53, 0x4c, 0x44, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0])
+            LandscapeSample.request(op: 1, value: 2), [0x56, 0x53, 0x4c, 0x44, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]
+        )
     }
 
     func testTheReplyCarriesEveryFrameAndCounter() throws {
         let parsed = try XCTUnwrap(
-            LandscapeSample(reply(crc: [1, 2, 3], mode: [0, 1, 3], vicJobs: [5, 6, 8], latches: 9)))
+            LandscapeSample(reply(crc: [1, 2, 3], mode: [0, 1, 3], vicJobs: [5, 6, 8], latches: 9))
+        )
         XCTAssertEqual(parsed.crc, [1, 2, 3])
         XCTAssertEqual(parsed.mode, [0, 1, 3])
         XCTAssertEqual(parsed.vicJobs, [5, 6, 8])
@@ -72,12 +74,14 @@ final class LandscapeRunTests: XCTestCase {
         let entering = enter ?? Array(repeating: 0xaaaa, count: 20) + Array(repeating: 0xbbbb, count: 70)
         s.enter = sample(entering, Array(repeating: 0, count: 22) + Array(repeating: 1, count: 68), switches: 1)
         s.playing = sample(
-            Array(0..<180).map { UInt32($0 + 1) }, Array(repeating: 1, count: 180), vicJobs: vicJobs,
-            vicTurns: vicTurns, latches: 90)
+            Array(0 ..< 180).map { UInt32($0 + 1) }, Array(repeating: 1, count: 180), vicJobs: vicJobs,
+            vicTurns: vicTurns, latches: 90
+        )
         s.landscapeHeld = sample(Array(repeating: 0xbbbb, count: 30), Array(repeating: 1, count: 30))
         s.leave = sample(
             Array(repeating: 0xbbbb, count: 20) + Array(repeating: 0xaaaa, count: 70),
-            Array(repeating: 1, count: 22) + Array(repeating: 0, count: 68), switches: 1)
+            Array(repeating: 1, count: 22) + Array(repeating: 0, count: 68), switches: 1
+        )
         return s
     }
 
@@ -100,7 +104,8 @@ final class LandscapeRunTests: XCTestCase {
         let (checks, metrics) = LandscapeJudge.judge(samples(vicJobs: [90, 0, 0]), dropped: 0)
         XCTAssertEqual(
             checks.filter { !$0.1 }.map(\.0),
-            ["no VIC job from the display server for the landscape video (vic_jobs_per_frame 0)"])
+            ["no VIC job from the display server for the landscape video (vic_jobs_per_frame 0)"]
+        )
         XCTAssertEqual(metrics["vic_jobs_per_frame"], .number(1, digits: 3))
     }
 
@@ -115,7 +120,8 @@ final class LandscapeRunTests: XCTestCase {
         let (checks, _) = LandscapeJudge.judge(samples(vicTurns: [0, 0, 90]), dropped: 0)
         XCTAssertEqual(
             checks.filter { !$0.1 }.map(\.0),
-            ["the display server's requests were recorded as quarter turns (vic_turns)"])
+            ["the display server's requests were recorded as quarter turns (vic_turns)"]
+        )
     }
 
     func testZeroReadingsAreNotFrames() {
@@ -136,7 +142,8 @@ final class LandscapeRunTests: XCTestCase {
         s.landscapeHeld = sample(Array(repeating: 0xcccc, count: 30), Array(repeating: 1, count: 30))
         s.leave = sample(
             Array(repeating: 0xcccc, count: 3) + Array(repeating: 0xdddd, count: 87),
-            Array(repeating: 1, count: 3) + Array(repeating: 0, count: 87), switches: 1)
+            Array(repeating: 1, count: 3) + Array(repeating: 0, count: 87), switches: 1
+        )
         let (checks, metrics) = LandscapeJudge.judge(s, dropped: 0)
         XCTAssertEqual(metrics["crc_landscape"], .text("0000cccc"))
         XCTAssertEqual(metrics["crc_back"], .text("0000dddd"))
@@ -151,7 +158,8 @@ final class LandscapeRunTests: XCTestCase {
             [
                 "the display went landscape on that frame (switches, crc_landscape settled)",
                 "back to the VIC route's very frame (crc_vic again, stray_leave 0)",
-            ])
+            ]
+        )
     }
 
     func testDroppedFramesFail() {

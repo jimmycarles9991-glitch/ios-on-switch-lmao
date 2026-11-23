@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! A tessellation state's modes for the raw path's direct compile (NativeMetalDirect.h NmbDirectTess): its
+//! A tessellation state's modes for the driver's direct compile (NativeMetalDirect.h NmbDirectTess): its
 //! SET_TESSELLATION_PARAMETERS, and its evaluation stage's module given the control stage's tessellation modes.
 //! m2v declares the modes in the control stage alone, as Vulkan allows, and a pipeline's link merges them into both stages
 //! (vk_pipeline_tess_info_merge); NVK's direct compile builds each stage alone, and NAK lowers the evaluation stage's

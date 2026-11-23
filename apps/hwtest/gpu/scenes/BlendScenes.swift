@@ -27,7 +27,8 @@ struct BlendGrid {
         let stored = Array(destination.prefix(format.channels))
         let fill = Patterns.repeated(format.encode(stored), count: width * height)
         try await gpu.blitUpload(
-            [UploadRect(x: 0, y: 0, width: width, height: height)], [fill], into: target, texel: format.bytesPerTexel)
+            [UploadRect(x: 0, y: 0, width: width, height: height)], [fill], into: target, texel: format.bytesPerTexel
+        )
         var pipelines: [MTLRenderPipelineState?] = []
         for blend in cases {
             do {
@@ -64,9 +65,10 @@ struct BlendGrid {
             let (x, y) = (index % Self.columns * Self.cell, index / Self.columns * Self.cell)
             var expected = Blend.apply(
                 blend.state, source: source, source1: source1, destination: destinationAsRead, constant: constant,
-                normalized: normalized)
+                normalized: normalized
+            )
             for (c, bit) in [MTLColorWriteMask.red, .green, .blue, .alpha].enumerated()
-            where !blend.writeMask.contains(bit) {
+                where !blend.writeMask.contains(bit) {
                 expected[c] = destinationAsRead[c]
             }
             let texel = format.decode(format.encode(Array(expected.prefix(format.channels)))[...])
@@ -77,14 +79,15 @@ struct BlendGrid {
             result.compare(
                 "\(format.rawValue) \(blend.state.name)\(mask)",
                 got.cropped(x: x, y: y, width: Self.cell, height: Self.cell),
-                want, tolerance: texel.map { format.step(near: $0) }.max()! * 1.51)
+                want, tolerance: texel.map { format.step(near: $0) }.max()! * 1.51
+            )
         }
     }
 
     /// The destination as the blender reads it: what the format stored, alpha 1 where the format has none.
     var destinationAsRead: [Float] {
         let stored = format.decode(format.encode(Array(destination.prefix(format.channels)))[...])
-        return (0..<4).map { $0 < stored.count ? stored[$0] : 1 }
+        return (0 ..< 4).map { $0 < stored.count ? stored[$0] : 1 }
     }
 
     func pipeline(_ gpu: GPU, _ blend: BlendCase) throws -> MTLRenderPipelineState {
@@ -98,7 +101,8 @@ struct BlendGrid {
             attachment.destinationRGBBlendFactor = MTLBlendFactor(rawValue: UInt(blend.state.destinationRGB.rawValue))!
             attachment.sourceAlphaBlendFactor = MTLBlendFactor(rawValue: UInt(blend.state.sourceAlpha.rawValue))!
             attachment.destinationAlphaBlendFactor = MTLBlendFactor(
-                rawValue: UInt(blend.state.destinationAlpha.rawValue))!
+                rawValue: UInt(blend.state.destinationAlpha.rawValue)
+            )!
         }
     }
 }
@@ -118,18 +122,23 @@ struct UnormBlendScene: GPUScene {
         for operation in BlendOperation.allCases {
             cases.append(BlendCase(state: BlendState(operation, source: .one, destination: .one)))
             cases.append(
-                BlendCase(state: BlendState(operation, source: .sourceAlpha, destination: .oneMinusSourceAlpha)))
+                BlendCase(state: BlendState(operation, source: .sourceAlpha, destination: .oneMinusSourceAlpha))
+            )
         }
         cases += [
             BlendCase(
                 state: BlendState(
                     source: .sourceAlpha, destination: .oneMinusSourceAlpha, sourceAlpha: .one,
-                    destinationAlpha: .oneMinusSourceAlpha)),
+                    destinationAlpha: .oneMinusSourceAlpha
+                )
+            ),
             BlendCase(state: BlendState(.subtract, source: .one, destination: .one, alphaOperation: .reverseSubtract)),
             BlendCase(
                 state: BlendState(
                     source: .destinationColor, destination: .sourceColor, sourceAlpha: .blendAlpha,
-                    destinationAlpha: .oneMinusBlendColor)),
+                    destinationAlpha: .oneMinusBlendColor
+                )
+            ),
             BlendCase(state: BlendState(source: .one, destination: .one), writeMask: [.red, .alpha]),
         ]
         return cases
@@ -139,7 +148,8 @@ struct UnormBlendScene: GPUScene {
         var result = SceneResult()
         let grid = BlendGrid(
             format: .rgba8Unorm, source: [0.8, 0.4, 0.2, 0.6], source1: [0.2, 0.6, 1, 0.4],
-            destination: [0.4, 0.6, 0.8, 0.2], constant: [0.6, 0.2, 0.4, 0.8], normalized: true)
+            destination: [0.4, 0.6, 0.8, 0.2], constant: [0.6, 0.2, 0.4, 0.8], normalized: true
+        )
         try await grid.run(gpu, Self.cases, &result)
         return result
     }
@@ -172,7 +182,8 @@ struct ExtendedBlendScene: GPUScene {
             let grid = BlendGrid(
                 format: format, source: [1.2, -0.25, 0.6, 0.5], source1: [0, 0, 0, 0],
                 destination: [0.4, 1.1, -0.5, 0.8],
-                constant: [0.5, 0.25, 1, 0.75], normalized: false)
+                constant: [0.5, 0.25, 1, 0.75], normalized: false
+            )
             try await grid.run(gpu, Self.cases, &result)
         }
         return result

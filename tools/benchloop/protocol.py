@@ -38,7 +38,7 @@ MAX_COMMAND_BUFFER_MS = 50.0
 CLOCK_HZ = 768e6
 LANES_PER_CLOCK = 256
 
-# MTLPixelFormat raw values the raw path renders (raw_gpu.cpp kFormats with a render target format), bytes per texel
+# MTLPixelFormat raw values the driver renders (gpu.cpp kFormats with a render target format), bytes per texel
 FORMATS = {
     'r32float': (55, 4),
     'rgba8unorm': (70, 4),
@@ -64,7 +64,7 @@ FORMATS = {
 
 # MAXWELL_B methods a readback experiment may set around its draw: the blend, iterated blend and colour write state, and
 # every ROP option that could trade colour precision (the owner's question: is an inexact result our configuration).
-# The raw path owns everything else (raw_owned.h); apps/hwtest/bench/switch_bench_methods.h holds the same ranges.
+# The driver owns everything else (owned.h); apps/hwtest/bench/switch_bench_methods.h holds the same ranges.
 METHOD_RANGES = (
     (0x02E0, 0x02E4),  # DECOMPRESS_SURFACE
     (0x02F4, 0x02F8),  # SET_ITERATED_BLEND_OPTIMIZATION
@@ -122,7 +122,7 @@ TWOD_KEYS = {'op', 'fmt2d', 'colorFormat', 'color', 'du', 'dv', 'sx', 'sy', 'bil
 TWOD_KEYS |= {'reference', 'bracketed', 'samples', 'clip', 'clearFirst', 'tiled', 'byScale', 'rop', 'invertGrid'}
 SOURCE_KEYS = {'format', 'width', 'height', 'data'}
 TWOD_OPS = ('fill', 'scale', 'resolve')
-# Target formats the 2D engine names a surface format for (raw_probe_ops.h probeTwodFormat), by MTLPixelFormat
+# Target formats the 2D engine names a surface format for (probe_ops.h probeTwodFormat), by MTLPixelFormat
 TWOD_FORMATS = {10, 20, 25, 30, 60, 65, 70, 71, 80, 81, 90, 92, 110, 115, 125}
 # Each of them and its 2D surface format (probeTwodFormat)
 TWOD_DESTINATION = {
@@ -146,7 +146,7 @@ TWOD_DESTINATION = {
 # 12 Nov: a fill of four floats (0xC0) into A8R8G8B8 passed its waits, then GR could not save the channel's context and
 # the kernel panicked; an sRGB destination raises class error 0x4a
 SOLID_FILL_FORMATS = {0xC0, 0xCA, 0xCF, 0xD1, 0xD5, 0xEE, 0xF3}
-# Target formats the pack has a sampled-quad state for (raw_mip.h mipState): the 3D side of a bilinear scale's compare
+# Target formats the pack has a sampled-quad state for (mip.h mipState): the 3D side of a bilinear scale's compare
 MIP_FORMATS = {1, 20, 25, 40, 43, 55, 60, 65, 71, 81, 90, 92, 94, 105, 110, 125}
 # A multisampled image's samples across and down, log2 (fx_image.cpp msLayout)
 SAMPLE_GRIDS = {2: (1, 0), 4: (1, 1)}
@@ -230,7 +230,7 @@ def target_of(experiment: dict) -> Target:
     t = experiment.get('target') or {}
     _require(isinstance(t, dict), 'target is an object')
     _keys(t, TARGET_KEYS, 'target')
-    _require(t.get('format') in FORMATS, f'target format {t.get("format")!r} is not one the raw path renders')
+    _require(t.get('format') in FORMATS, f'target format {t.get("format")!r} is not one the driver renders')
     return Target(t['format'], _count(t.get('width'), 1, MAX_SIDE, 'width'), _count(t.get('height'), 1, MAX_SIDE, 'h'))
 
 
@@ -298,7 +298,7 @@ def source_of(experiment: dict) -> Target:
         return Target(*PICTURE)
     _require(isinstance(src, dict), 'source is an object')
     _keys(src, SOURCE_KEYS, 'source')
-    _require(src.get('format') in FORMATS, f'source format {src.get("format")!r} is not one the raw path renders')
+    _require(src.get('format') in FORMATS, f'source format {src.get("format")!r} is not one the driver renders')
     _require(FORMATS[src['format']][0] in TWOD_FORMATS, 'source format: the 2D engine has no surface format for it')
     width = _count(src.get('width'), 1, MAX_SIDE, 'source.width')
     t = Target(src['format'], width, _count(src.get('height'), 1, MAX_SIDE, 'source.height'))
@@ -362,7 +362,7 @@ def _twod(e: dict, target: Target) -> None:
 def centre_mapped(t: dict) -> bool:
     """Say whether a scale maps destination pixel centres onto the source, as the 3D path's sampled quad does.
 
-    The centre origin with no offset, or the production form (raw_probe_ops.h probeResolveOp): the corner origin
+    The centre origin with no offset, or the production form (probe_ops.h probeResolveOp): the corner origin
     offset by half a step.
     """
     du, dv, sx, sy = (t.get(k, ONE if k in ('du', 'dv') else 0) for k in ('du', 'dv', 'sx', 'sy'))
@@ -592,6 +592,6 @@ def decode_result(data: bytes) -> dict:
     return result
 
 
-# ok: ran; invalid: the device refused its description; refused: the raw path refused a draw or state; killed: the
+# ok: ran; invalid: the device refused its description; refused: the driver refused a draw or state; killed: the
 # kernel killed the channel; crashed: the app ended while it ran (found by the journal at the next start); error: other
 STATUSES = ('ok', 'invalid', 'refused', 'killed', 'crashed', 'error')

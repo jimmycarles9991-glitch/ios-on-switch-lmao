@@ -20,7 +20,7 @@ std::vector<int> bridgePhysicalAtRelease;
 std::vector<switch_gpu_backing_token> promiseTokens;  // the uses' pending writer promises
 std::vector<uint32_t> publishedWords;
 uint32_t arena[SWITCH_HOST1X_ARENA_WORDS], reservedWords, submittedSyncpt, submittedThreshold;
-uint32_t arenaShort, arenaWaits, cancels;
+uint32_t arenaShort, arenaWaits, cancels, reservedCapacity;
 uint32_t begins, aborts, commits, retained, bridges, released, roomWaits, submits, powerUses, powerDones;
 int bridgeError, submitError, retainError, statusError, powerError, semanticResult = 1, batchSettled = 1;
 std::vector<switch_host1x_fence *> fences;
@@ -103,6 +103,22 @@ int switch_gpu_backing_register_engine(uint32_t, const switch_gpu_backing_engine
 }
 
 int switch_gpu_backing_register_filter_status(uint32_t, switch_gpu_backing_filter_status)
+{
+    return 0;
+}
+
+int switch_gpu_backing_register_failure(uint32_t, switch_gpu_backing_failure)
+{
+    return 0;
+}
+
+// A job's why (SwitchHost1xStages why): none of its producers failed
+int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *, uint32_t)
+{
+    return 0;
+}
+
+int switch_gpu_bridge_why(const switch_gpu_bridge *)
 {
     return 0;
 }
@@ -314,7 +330,7 @@ int switch_host1x_job_reserve(uint32_t channel, uint32_t capacity, uint32_t **wo
         --arenaShort;
         return TEGRA_HOST1X_EAGAIN;
     }
-    reservedWords = capacity;
+    reservedWords = reservedCapacity = capacity;
     *words = arena;
     return 0;
 }
@@ -389,7 +405,7 @@ int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t
 {
     EXPECT_EQ(id, gSyncpt);
     const auto distance = static_cast<int32_t>(threshold - hardware);
-    if (distance > static_cast<int32_t>(maxIncrements) || maxIncrements > 2)
+    if (distance > static_cast<int32_t>(maxIncrements))
         return -22;
     if (distance > 0)
         hardware = threshold;
@@ -587,7 +603,7 @@ protected:
     void SetUp() override
     {
         begins = aborts = commits = retained = bridges = released = roomWaits = submits = preparedBatches = 0;
-        reservedWords = submittedSyncpt = submittedThreshold = arenaShort = arenaWaits = cancels = 0;
+        reservedWords = submittedSyncpt = submittedThreshold = arenaShort = arenaWaits = cancels = reservedCapacity = 0;
         powerUses = powerDones = 0;
         bridgeError = submitError = retainError = statusError = powerError = 0;
         semanticResult = batchSettled = 1;
@@ -894,13 +910,17 @@ TEST_F(SwitchNVDECSubmitTest, LargeDependencySetGrowsOutsideOwnershipAndPublishe
     EXPECT_EQ(gQueue.jobs[0].bridge->tokens.size(), 70u);
 }
 
-TEST_F(SwitchNVDECSubmitTest, LargeVicDependencySetHasEnoughCommandStorage)
+// VIC's syncpoint passes its jobs in order, so a hundred of them are one wait on the newest, and the arena holds only
+// the words written.
+TEST_F(SwitchNVDECSubmitTest, ManyFramesOfOneVicProducerAreOneWaitOnTheNewest)
 {
     for (uint32_t i = 0; i < 100; ++i)
         sourceTokens.push_back({0x181234567ULL + i, 1, SWITCH_GPU_ENGINE_VIC, 161});
     ASSERT_EQ(submit(), 0);
-    EXPECT_EQ(publishedWords.size(), 308u);
-    EXPECT_EQ(publishedWords[298], 0x812345cau);
+    EXPECT_EQ(publishedWords.size(), 11u) << "one wait and the decode's eight words";
+    EXPECT_EQ(reservedCapacity, publishedWords.size());
+    EXPECT_EQ(publishedWords[1], 0x812345cau);
+    EXPECT_EQ(publishedWords[2], 161u);
 }
 
 TEST_F(SwitchNVDECSubmitTest, TooManyDependenciesRejectBeforeHardware)

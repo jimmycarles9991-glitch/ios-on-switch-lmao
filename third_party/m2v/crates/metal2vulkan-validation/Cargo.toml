@@ -25,12 +25,11 @@ exclude = [
 [dependencies]
 # `cli` adds nothing validation uses (it builds the product's binary and enables `serde`), but with
 # it the product's library here has the feature set of `cargo test -p metal2vulkan --all-features`,
-# so one target dir builds the product (and the runtime on it) once for both suites, not twice.
+# so one target dir builds the product once for both suites, not twice.
 metal2vulkan = { path = "../metal2vulkan", features = ["serde", "ash", "cli"] }
 # The AIR front end the product pins exactly: the same crate the product
 # builds, which validation decodes, canonicalizes, and audits AIR through.
 metal2vulkan-air = { path = "../metal2vulkan-air" }
-metal2vulkan-runtime = { path = "../metal2vulkan-runtime" }
 metal2vulkan-devtools = { path = "../metal2vulkan-devtools" }
 base64 = "0.22"
 libc.workspace = true

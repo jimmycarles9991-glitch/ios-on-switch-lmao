@@ -27,9 +27,14 @@ struct MetalColorPassTest: HWTest {
         }
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
         var wrong = 0
-        for y in 0..<size {
-            for x in 0..<size
-            where Array(pixels.pixel(x, y, width: size)) != (x < size / 2 ? [51, 102, 153, 255] : [0, 0, 255, 255]) {
+        for y in 0 ..< size {
+            for x in 0 ..< size
+                where Array(pixels.pixel(x, y, width: size)) != (x < size / 2 ? [51, 102, 153, 255] : [
+                    0,
+                    0,
+                    255,
+                    255,
+                ]) {
                 wrong += 1
             }
         }
@@ -72,7 +77,8 @@ struct MetalDepthStencilTest: HWTest {
         let depth = try gpu.texture(.depth32Float_stencil8, size, size, usage: [.renderTarget])
         let pipeline = try gpu.render(
             fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth32Float_stencil8,
-            stencil: .depth32Float_stencil8)
+            stencil: .depth32Float_stencil8
+        )
         let writeStencil = depthState(gpu.device, write: true, stencil: .always, replace: true)
         let depthOnly = depthState(gpu.device, write: true, stencil: .always, replace: false)
         let stencilEqual = depthState(gpu.device, write: false, stencil: .equal, replace: false)
@@ -104,8 +110,8 @@ struct MetalDepthStencilTest: HWTest {
         let depths = try await gpu.read(depth, bytesPerPixel: 4, options: .depthFromDepthStencil)
         let stencils = try await gpu.read(depth, bytesPerPixel: 1, options: .stencilFromDepthStencil)
         var (wrongColor, wrongDepth, wrongStencil) = (0, 0, 0)
-        for y in 0..<size {
-            for x in 0..<size {
+        for y in 0 ..< size {
+            for x in 0 ..< size {
                 let left = x < size / 2
                 if Array(pixels.pixel(x, y, width: size)) != (left ? [0, 0, 255, 255] : [0, 255, 0, 255]) {
                     wrongColor += 1
@@ -159,8 +165,8 @@ struct MetalMSAATest: HWTest {
         // The triangle is the bottom-left half; its hypotenuse runs through the centres of the diagonal pixels
         // (x == y), which resolve to a blend. Pixels further from it are fully white or black.
         var (inside, outside, edge, wrong) = (0, 0, 0, 0)
-        for y in 0..<size {
-            for x in 0..<size {
+        for y in 0 ..< size {
+            for x in 0 ..< size {
                 let red = pixels.pixel(x, y, width: size).first!
                 let distance = y - x
                 if distance > 1 {

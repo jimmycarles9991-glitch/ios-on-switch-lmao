@@ -23,7 +23,7 @@ inline size_t wordEnd(const std::string &key, size_t at)
     return end == std::string::npos ? key.size() : end;
 }
 
-// A key's fields: its blank-separated words, a "|" joined to the word after it ("| v", "| xr2p") unless that is a "|"
+// A key's fields: its blank-separated words, a "|" joined to the word after it ("| v", "| tests=2") unless that is a "|"
 // too (an empty segment, such as a kernel's constants where it has none)
 inline std::vector<Field> fields(const std::string &key)
 {

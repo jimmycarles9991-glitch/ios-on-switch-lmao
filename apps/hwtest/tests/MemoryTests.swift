@@ -38,6 +38,7 @@ struct MemoryTest: HWTest {
             [
                 ("jetsam's free-memory level above 10%", level > 10),
                 ("the app may take 256 MB more", headroom >= 256),
-            ], metrics)
+            ], metrics
+        )
     }
 }

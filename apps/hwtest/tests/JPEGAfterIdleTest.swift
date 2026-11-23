@@ -46,8 +46,10 @@ struct JPEGAfterIdleTest: HWTest {
                 (
                     "\(pass): matches the pattern",
                     Pixels.check(decoded, pattern: still.pattern).matches(
-                        frame: 0, tolerance: still.tolerance)
-                ))
+                        frame: 0, tolerance: still.tolerance
+                    )
+                )
+            )
             checks.append(("\(pass): within 1.5 mean of the software decode", d.mean <= 1.5))
         }
         metrics.set("idle_ms", Int(Self.idleSeconds * 1000))

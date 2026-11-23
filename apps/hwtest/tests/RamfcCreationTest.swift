@@ -49,6 +49,7 @@ struct RamfcCreationTest: HWTest {
                     "every client channel last written at its creation holds it (created_mismatched = 0)",
                     fields["created_mismatched"] == "0"
                 ),
-            ], metrics)
+            ], metrics
+        )
     }
 }

@@ -6,25 +6,29 @@
 #include <string>
 #include <vector>
 #include "switch_gpu_promise_giveup_stubs.h"
+#include "drivers/TegraGM20B/TegraGM20BJobABI.h"
 #include "drivers/TegraGM20B/test/promise_giveup_source.h"
-#include "drivers/TegraGM20B/test/promise_note_source.h"
+#include "drivers/TegraGM20B/test/promise_park_source.h"
 
 namespace promise_giveup
 {
 constexpr uint64_t kMs = 1000 * 1000;
-constexpr uint32_t kOffset = 2052, kValue = 9;
+constexpr uint32_t kOffset = (TegraGM20BPromiseWord + 1) * 4, kValue = 9;
 constexpr int kPrevious = 1, kPromised = 2;
 
 struct Kind {
 	const char *name;
 	const char *owner;  // the reader's channel
 	bool present;       // the GPU present's own channel
+	bool compositor;    // critical: the compositor's (entitled, priority 0) or the present's
 };
 
 const Kind kKinds[] = {
-	{"RawUntimedWaitFence", "Camera", false},   {"WriterWaitIOSurfaceLock", "Photos", false},
-	{"FenceOnlyPresent", "present", true},      {"Composite", "backboardd", false},
-	{"BridgeVicNvdec", "host1x-bridge", false},
+	{"GM20BUntimedWaitFence", "Camera", false, false},
+	{"WriterWaitIOSurfaceLock", "Photos", false, false},
+	{"FenceOnlyPresent", "present", true, true},
+	{"Composite", "backboardd", false, true},
+	{"BridgeVicNvdec", "host1x-bridge", false, false},
 };
 
 class Fixture : public testing::Test
@@ -36,6 +40,11 @@ protected:
 	}
 
 	virtual bool readerPresent() const
+	{
+		return false;
+	}
+
+	virtual bool readerCompositor() const
 	{
 		return false;
 	}
@@ -68,6 +77,7 @@ protected:
 		setChan(reader, 0x10, readerOwner(), 40);
 		setChan(maker, 0x30, "maker-app", 20);
 		tgm_present.chan = readerPresent() ? &reader : nullptr;
+		reader.critical = readerCompositor();
 		interrupts_off::logged = &lines;
 		ASSERT_EQ(tgm_promise_giveup_open(), 0);
 	}
@@ -94,13 +104,27 @@ protected:
 		switch_gpu_jobs_init(&chan.jobs, done);
 	}
 
+	// A job's acquires kicked on `chan`: chan_exec parks it on the promises among them still pending, under
+	// tgm_live_lock when any is
+	static void parkPromises(fake_tgm_chan *chan, const switch_gpu_backing_token *tokens,
+				 uint32_t count)
+	{
+		uint32_t unsettled[(TegraGM20BMaxJobDependencies + 31) / 32] = {};
+		const bool locked = backing_unsettled(tokens, count, unsettled) != 0;
+		if (locked)
+			mutex_lock(&tgm_live_lock);
+		switch_gpu_chan_park_promises_locked(chan, tokens, count, unsettled);
+		if (locked)
+			mutex_unlock(&tgm_live_lock);
+	}
+
 	// The reader's job, its acquire on the promise kicked: chan_exec parks it, then fences the job
 	void readerSubmits()
 	{
 		readerFirst = reader.submitted + 1;
 		const switch_gpu_backing_token promise = {kValue, 0, SWITCH_GPU_ENGINE_PROMISE,
 							  kOffset};
-		tgm_chan_park_promises(&reader, &promise, 1);
+		parkPromises(&reader, &promise, 1);
 		reader.submitted = readerFirst;
 	}
 
@@ -116,11 +140,46 @@ protected:
 		tgm_promise_kept(kOffset, kValue, &maker, &job);
 	}
 
+	// The promise of `value` at `offset` kept by the maker's job at the head of its channel, nothing ahead of it (kicked
+	// at the first keep)
+	void keeps(uint32_t offset = kOffset, uint32_t value = kValue)
+	{
+		if (maker.submitted == maker.fence) {
+			maker.submitted += 1;
+			switch_gpu_jobs_kick(&maker.jobs, maker.submitted, maker.submitted,
+					     fake::now, 1);
+		}
+		const switch_gpu_backing_token job = {maker.submitted, uint32_t(maker.id >> 32) + 1,
+						      SWITCH_GPU_ENGINE_GM20B, uint32_t(maker.id)};
+		tgm_promise_kept(offset, value, &maker, &job);
+	}
+
+	// The holder's runtime arms its bound on the promise (method 34 Arm), `ms` from now; `fails`: its command buffer fails
+	// there, so a keep after it is refused
+	static void holderArms(uint64_t ms, int fails = 1, uint32_t offset = kOffset,
+			       uint32_t value = kValue)
+	{
+		tgm_promise_hold(offset, value, ms * kMs, fails);
+	}
+
 	// The keeping job's end: its fence, then its push's release of the word, then its interrupt's pass
 	void makerReleases()
 	{
 		maker.fence = maker.submitted;
 		fake::pool[kOffset / 4] = kValue;
+		pass();
+	}
+
+	// The maker's connection releases a promise it will never write (AGXDeviceUserClient::releasePromise: the retirement of
+	// its killed or destroyed channel, the withdraw of a command buffer its runtime failed), marked abandoned before the
+	// word moves, and the readers it lets go complete
+	void makerRetires()
+	{
+		tgm_promise_unhold(kOffset, kValue);
+		tgm_promise_abandon(kOffset, kValue);
+		fake::pool[kOffset / 4] = kValue;
+		tgm_present_promise_released(kOffset, kValue);
+		gpuRuns();
 		pass();
 	}
 
@@ -178,6 +237,11 @@ protected:
 	bool readerPresent() const override
 	{
 		return GetParam().present;
+	}
+
+	bool readerCompositor() const override
+	{
+		return GetParam().compositor;
 	}
 };
 }  // namespace promise_giveup

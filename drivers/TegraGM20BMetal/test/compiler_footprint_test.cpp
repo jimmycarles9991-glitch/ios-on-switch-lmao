@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // What the system shader compiler holds as it serves boot 12's requests (compiler_boot12.log), each run a process of its
-// own over the mock GM20B, as compiler_service.mm opens and serves: the pack, the store, the request log an earlier boot
+// own, as compiler_service.mm opens and serves: the pack, the store, the request log an earlier boot
 // left (boot 12's 13 replayed requests), the take buffer and the pool's workers; the log replayed at the background
 // class; the 2 requests clients then asked; the compiler at rest (its libraries let go: compiler_libraries.h), and the
 // heap relieved (malloc_zone_pressure_relief). Each step's line: the heap in use and allocated (the device's footprint
@@ -19,7 +19,7 @@
 #include "../compiler/compiler_log.h"
 #include "../compiler/compiler_pool.h"
 #include "../compiler/compiler_store.h"
-#include "../raw/runtime/raw_pack.h"
+#include "../pack.h"
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -97,7 +97,7 @@ std::string logPath()
 }
 
 // Boot 12's requests (compiler_boot12.log): the request log's, which an earlier boot's compiles left, and the 2 asked
-std::vector<raw::CompileRequest> boot12()
+std::vector<gm20b::CompileRequest> boot12()
 {
     const char *hwtest = getenv("SWITCH_HWTEST_METALLIB");
     const bool withHwtest = hwtest && *hwtest;
@@ -111,7 +111,7 @@ std::vector<raw::CompileRequest> boot12()
                     lines.end());
     EXPECT_EQ(lines.size(), withHwtest ? 15u : 5u);
     compiler_test::Requests made(root(), {{"/Applications/SwitchHWTest.app/default.metallib", hwtest ?: ""}});
-    std::vector<raw::CompileRequest> asked = made.of(lines);
+    std::vector<gm20b::CompileRequest> asked = made.of(lines);
     EXPECT_EQ(asked.size(), lines.size());
     return asked;
 }
@@ -120,11 +120,11 @@ constexpr size_t kAsked = 2;
 
 std::vector<std::string> clients(size_t &total)
 {
-    const std::vector<raw::CompileRequest> asked = boot12();
+    const std::vector<gm20b::CompileRequest> asked = boot12();
     total = asked.size();
     std::vector<std::string> out;
     for (size_t i = asked.size() - std::min(kAsked, asked.size()); i < asked.size(); ++i)
-        out.push_back(raw::encodeRequest(asked[i]));
+        out.push_back(gm20b::encodeRequest(asked[i]));
     return out;
 }
 
@@ -135,12 +135,12 @@ void writeLog()
     switch_compiler::RequestLog log;
     switch_compiler::SystemLibraries system(root());
     ASSERT_TRUE(log.open(logPath()));
-    const std::vector<raw::CompileRequest> asked = boot12();
+    const std::vector<gm20b::CompileRequest> asked = boot12();
     ASSERT_GT(asked.size(), kAsked);
     for (size_t i = 0; i + kAsked < asked.size(); ++i) {
         switch_compiler::Prepared p;
         std::string why;
-        const std::string request = raw::encodeRequest(asked[i]);
+        const std::string request = gm20b::encodeRequest(asked[i]);
         ASSERT_TRUE(switch_compiler::prepare(request, 0, system, p, why)) << why;
         log.add(p.name, request);
     }
@@ -155,7 +155,7 @@ struct Serving {
     std::vector<uint8_t> buffer = std::vector<uint8_t>(1u << 20);
     std::unique_ptr<switch_compiler::Pool> pool;
 
-    template <typename Compile> bool open(const raw::Digest &rules, Compile compile)
+    template <typename Compile> bool open(const gm20b::Digest &rules, Compile compile)
     {
         std::string why;
         if (!store.open(dir() + "/shaders", 0, rules, why) || !log.open(logPath()))
@@ -205,7 +205,7 @@ struct Serving {
     {
         dispatch_semaphore_t ran = dispatch_semaphore_create(0);
         size_t replayed = 0;
-        log.replay([&](const std::string &request, raw::Digest &name) {
+        log.replay([&](const std::string &request, gm20b::Digest &name) {
             switch_compiler::Prepared p;
             std::string why;
             if (!switch_compiler::prepare(request, 0, system, p, why)) {

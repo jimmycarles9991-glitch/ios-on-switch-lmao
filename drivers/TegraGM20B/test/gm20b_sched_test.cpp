@@ -212,6 +212,27 @@ TEST(Priority, ABackgroundRoleRunsAtTheBackgroundPriority)
 	EXPECT_EQ(tgm_priority_level(0, 0, 1), TGM_LEVEL_FOREGROUND);
 }
 
+// IOGPUFamily's setter: any process may ask 0-2 and 4; RealTime (5) is High; 3 and above 5 are refused
+TEST(Priority, AQueuesAskIsScheduledAsIOGPUFamilyAnswersIt)
+{
+	for (const uint32_t open : {0u, 1u, 2u, 4u})
+		EXPECT_EQ(tgm_priority_granted(open), int(open));
+	EXPECT_EQ(tgm_priority_granted(5), 0);
+	EXPECT_EQ(tgm_priority_granted(3), -1);
+	EXPECT_EQ(tgm_priority_granted(6), -1);
+}
+
+// Priority 0 schedules any process high; only one holding graphics-restart-no-kill is then the compositor
+TEST(Priority, TheCompositorAsksForTheTopPriorityAndHoldsTheMarker)
+{
+	const enum tgm_level asked = tgm_priority_level(uint32_t(tgm_priority_granted(0)), 4, 0);
+	EXPECT_EQ(asked, TGM_LEVEL_HIGH) << "an app that asks for 0 is scheduled high";
+	EXPECT_FALSE(tgm_compositor(asked, 0)) << "and is not the compositor";
+	EXPECT_TRUE(tgm_compositor(asked, 1));
+	EXPECT_FALSE(tgm_compositor(tgm_priority_level(2, 4, 0), 1)) << "entitled, not asking";
+	EXPECT_FALSE(tgm_compositor(tgm_priority_level(0, 4, 1), 1)) << "entitled, GPU denied";
+}
+
 TEST(Deadline, AChannelIsHeldItsPreemptionLatencyBeforeTheCompositorsLatestStart)
 {
 	const uint64_t vblank = 1000 * kMs, expected = 6 * kMs, latency = 2 * kMs;
@@ -677,7 +698,7 @@ TEST(HangBlame, ALateKernelVictimIsNeverFatal)
 }
 
 // iconservicesagent's channel 20 on slice B's boot: GR and PBDMA0 on another process's long 3D work that keeps going,
-// channel 20 not resident with work pending behind it, and the late sibling's order acquire on channel 20.
+// channel 20 not resident with work pending behind it, and the late sibling's acquire on channel 20.
 TEST(HangBlame, ChannelsWaitingBehindAnEngineThatMovesAreNotKilled)
 {
 	Candidates k{{kMovingResident, kStuckClient, waiting(kStuckClient, 1)}};

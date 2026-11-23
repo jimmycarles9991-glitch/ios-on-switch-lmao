@@ -57,11 +57,13 @@ struct UIGlassSettingsTest: HWTest {
         guard layout.shown && !layout.collapsed && layout.sidebar.width > 0 && layout.paneClear else {
             await MainActor.run { scene.dismiss() }
             return .skip(
-                "the split view showed no sidebar beside a detail clear of the pane (collapsed=\(layout.collapsed))")
+                "the split view showed no sidebar beside a detail clear of the pane (collapsed=\(layout.collapsed))"
+            )
         }
         let paneRect = SidebarLayout.paneRect(in: layout.screen)
         var run = SidebarRun(
-            session: session, test: id, layout: layout, band: SidebarLayout.paneBand, directory: directory)
+            session: session, test: id, layout: layout, band: SidebarLayout.paneBand, directory: directory
+        )
         for step in Self.steps where run.stopped == nil {
             let scrolls = await MainActor.run { () -> [UIScrollView] in
                 pane.isHidden = step.appears
@@ -77,9 +79,11 @@ struct UIGlassSettingsTest: HWTest {
         metrics.set(
             "region",
             [paneRect.minX, paneRect.minY, paneRect.width, paneRect.height].map { String(Int($0.rounded())) }
-                .joined(separator: ","))
+                .joined(separator: ",")
+        )
         metrics.set("means", run.means)
         return GlassSidebarVerdict.outcome(
-            run.phases, reads: run.reads, scene: metrics, pngs: run.pngs, stopped: run.stopped, subject: "glass pane")
+            run.phases, reads: run.reads, scene: metrics, pngs: run.pngs, stopped: run.stopped, subject: "glass pane"
+        )
     }
 }

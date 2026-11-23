@@ -5,15 +5,14 @@ import HWTestGPU
 import IOSurface
 import Metal
 
-/// Two-plane YCbCr textures over surfaces tagged kIOSurfaceYCbCrMatrix P3_D65 or DCI_P3. An M4 Max converts nothing under
-/// those matrices (raw/test/ycbcroracle.mm): a converted format reads its codes as red Y, green Cb, blue Cr, which is its
-/// surface's codes format's read (red Cr, green Y, blue Cb) turned. Each arm reads both textures over one surface of random
-/// codes, each texture read by a draw: off_<format>_<matrix> counts the converted texels that are not the codes texels
-/// turned (0 to pass), paths the command buffers' paths (raw/N to pass; before the change the converted texture was m2v's:
-/// tex.shape "matrix").
+/// Two-plane YCbCr textures over surfaces tagged kIOSurfaceYCbCrMatrix P3_D65 or DCI_P3. An M4 Max converts nothing
+/// under those matrices (harness/ycbcroracle.mm): a converted format reads its codes as red Y, green Cb, blue Cr,
+/// which is its surface's codes format's read (red Cr, green Y, blue Cb) turned. Each arm reads both textures over one
+/// surface of random codes, each texture read by a draw: off_<format>_<matrix> counts the converted texels that are not
+/// the codes texels turned (0 to pass), paths the command buffers' paths (raw/N to pass).
 struct YcbcrP3MatrixTest: HWTest {
-    let id = "gpu.raw.ycbcr_p3"
-    let name = "YCbCr textures under the P3 matrices read their codes, as Metal reads them, on the raw path"
+    let id = "gpu.gm20b.ycbcr_p3"
+    let name = "YCbCr textures under the P3 matrices read their codes, as Metal reads them, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -31,8 +30,8 @@ struct YcbcrP3MatrixTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
@@ -44,7 +43,7 @@ struct YcbcrP3MatrixTest: HWTest {
                 checks.append(("\(key): the converted texture reads the codes turned", off == 0))
             }
         }
-        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "raw" }
+        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "gm20b" }
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
         checks.append(("every command buffer raw", raw))
         return .judged(checks, metrics, proof: gpu.proof)
@@ -54,15 +53,15 @@ struct YcbcrP3MatrixTest: HWTest {
     func armOff(_ gpu: GPU, _ arm: Arm, _ matrix: String) async throws -> Int? {
         let (w, h) = (34, 18)
         guard let buffer = YcbcrCornerTest.pixelBuffer(w, h, arm.fourcc),
-            let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
+              let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
         else { return nil }
         CVPixelBufferLockBaseAddress(buffer, [])
         var seed: UInt32 = 0x9e37_79b9 &* UInt32(arm.converted)
-        for plane in 0..<CVPixelBufferGetPlaneCount(buffer) {
+        for plane in 0 ..< CVPixelBufferGetPlaneCount(buffer) {
             guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { continue }
             let bytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane) * CVPixelBufferGetHeightOfPlane(buffer, plane)
             let p = base.bindMemory(to: UInt8.self, capacity: bytes)
-            for i in 0..<bytes {
+            for i in 0 ..< bytes {
                 seed = seed &* 1_664_525 &+ 1_013_904_223
                 p[i] = UInt8(truncatingIfNeeded: seed >> 24)
             }
@@ -72,7 +71,8 @@ struct YcbcrP3MatrixTest: HWTest {
         let make = { (format: UInt) -> MTLTexture? in
             guard let pixelFormat = MTLPixelFormat(rawValue: format) else { return nil }
             let d = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: pixelFormat, width: w, height: h, mipmapped: false)
+                pixelFormat: pixelFormat, width: w, height: h, mipmapped: false
+            )
             d.usage = .shaderRead
             return gpu.device.makeTexture(descriptor: d, iosurface: surface, plane: 0)
         }

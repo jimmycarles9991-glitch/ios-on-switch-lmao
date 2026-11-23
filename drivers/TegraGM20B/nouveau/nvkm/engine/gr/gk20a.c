@@ -21,7 +21,6 @@
  */
 #include "gf100.h"
 #include "ctxgf100.h"
-#include "TegraGM20BGrFault.h"
 
 #include <core/firmware.h>
 #include <subdev/timer.h>
@@ -222,12 +221,7 @@ gk20a_gr_init(struct gf100_gr *gr)
 	gf100_grctx_generate_floorsweep(gr);
 
 	/* Enable FIFO access */
-	{
-		unsigned long flags;
-		spin_lock_irqsave(&device->intr.lock, flags);
-		switch_gpu_gr_fault_access(device, gr->fault_fifo_held);
-		spin_unlock_irqrestore(&device->intr.lock, flags);
-	}
+	nvkm_wr32(device, 0x400500, 0x00010001);
 
 	/* Enable interrupts */
 	nvkm_wr32(device, 0x400100, 0xffffffff);

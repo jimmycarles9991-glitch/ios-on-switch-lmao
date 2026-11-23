@@ -39,7 +39,7 @@ final class PresentationCounter: NSObject {
     @objc private func tick(_ link: CADisplayLink) {
         let time = output.itemTime(forHostTime: link.targetTimestamp)
         guard output.hasNewPixelBuffer(forItemTime: time),
-            let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
+              let buffer = output.copyPixelBuffer(forItemTime: time, itemTimeForDisplay: nil)
         else { return }
         presented += 1
         guard presented % 15 == 0 else { return }
@@ -66,16 +66,17 @@ struct PlaybackTest: HWTest {
         let asset = AVURLAsset(url: context.media.appendingPathComponent(clip.file))
         let duration = try await asset.load(.duration)
         let composition = AVMutableComposition()
-        for _ in 0..<Self.repeats {
+        for _ in 0 ..< Self.repeats {
             try await composition.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration), of: asset, at: composition.duration)
+                CMTimeRange(start: .zero, duration: duration), of: asset, at: composition.duration
+            )
         }
         // Finished: nothing mutates the composition once the player item owns it.
         nonisolated(unsafe) let timeline = composition
         let (item, output, player) = await MainActor.run { () -> (AVPlayerItem, AVPlayerItemVideoOutput, AVPlayer) in
             let item = AVPlayerItem(asset: timeline)
             let output = AVPlayerItemVideoOutput(pixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
             ])
             item.add(output)
             return (item, output, AVPlayer(playerItem: item))

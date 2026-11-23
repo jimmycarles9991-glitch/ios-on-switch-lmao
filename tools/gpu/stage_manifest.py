@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-r"""List what deploy stages onto the Data volume (//gpu:bundle): the signed bundle, the shader seed and the raw pack.
+r"""List what deploy stages onto the Data volume (//gpu:bundle): the signed bundle, the shader seed and the pack.
 
-usage: stage_manifest.py --self <rlocation> --base <dir> --base-rlocation R --seed <join's dir> --seed-rlocation R
-                         --pack <bucket pack> --pack-rlocation R ... --raw <dir> --raw-rlocation R --out <manifest>
-                         --native <packed native dir> --native-rlocation R
-       stage_manifest.py --part --seed ... --pack ... --raw ... --native ... --out <part>
+usage: stage_manifest.py --self <rlocation> --base <dir> --base-rlocation R --seed <replies' dir> --seed-rlocation R
+                         --raw <dir> --raw-rlocation R --native <packed native dir> --native-rlocation R
+                         --out <manifest>
+       stage_manifest.py --part --seed ... --raw ... --native ... --out <part>
        stage_manifest.py --self <rlocation> --base <dir> --base-rlocation R --from-part <part> --out <manifest>
 
---part lists the seed's and the raw pack's files alone, and --from-part takes them from that list: a plugin edit then
+--part lists the seed's and the pack's files alone, and --from-part takes them from that list: a plugin edit then
 hashes only the bundle and reads none of the seed's files.
 
 The manifest names files where Bazel left them, in //deploy:sd's runfiles, so nothing is copied to make it:
@@ -26,9 +26,9 @@ from tools.common import hashing
 from tools.gpu import seed_pack
 
 HEADER = '# gpu stage 1 '
-SEED = 'ngpu/addons/TegraGM20BMetal.m2v-seed/shared'
-RAW = 'ngpu/addons/TegraGM20BMetal.raw'
-EXECUTABLES = ('TegraGM20BMetal', 'libvulkan_nouveau.dylib')
+SEED = 'ngpu/addons/TegraGM20BMetal.seed/shared'
+RAW = 'ngpu/addons/TegraGM20BMetal.pack'
+EXECUTABLES = ('TegraGM20BMetal',)
 
 
 def line(path: Path, digest: str, target: str, rlocation: str) -> str:
@@ -43,13 +43,9 @@ def native_target(native: Path, relative: str) -> str | None:
     None for the host's files beside it and the derived entries' packs.
     """
     top, _, below = relative.partition('/')
-    if top == 'native-analysis':
-        under = SEED
-    elif top.startswith('raw-'):
-        under = RAW + '/native'
-    else:
+    if not top.startswith('rec-') or not below or not seed_pack.staged(native / top, below):
         return None
-    return under + '/' + relative if below and seed_pack.staged(native / top, below) else None
+    return RAW + '/native/' + relative
 
 
 def tree(directory: Path, rlocation: str, under: str) -> list[tuple[Path, str, str]]:
@@ -62,12 +58,8 @@ def tree(directory: Path, rlocation: str, under: str) -> list[tuple[Path, str, s
 
 
 def seed_files(args: argparse.Namespace) -> list[tuple[Path, str, str]]:
-    """Return the seed's, the raw pack's and the native seed's files, each with where it goes and its rlocation."""
+    """Return the seed's, the pack's and the native seed's files, each with where it goes and its rlocation."""
     files = tree(Path(args.seed), args.seed_rlocation, SEED + '/')
-    files += [
-        (Path(pack), f'{SEED}/packs/{number:03d}', rlocation)
-        for number, (pack, rlocation) in enumerate(zip(args.pack, args.pack_rlocation, strict=True))
-    ]
     files += tree(Path(args.raw), args.raw_rlocation, RAW + '/')
     files += [
         (path, target, rlocation)
@@ -89,8 +81,6 @@ def main() -> None:
         parser.add_argument('--' + name)
     parser.add_argument('--native-rlocation')
     parser.add_argument('--out', required=True)
-    parser.add_argument('--pack', action='append', default=[])
-    parser.add_argument('--pack-rlocation', action='append', default=[])
     parser.add_argument('--part', action='store_true')
     parser.add_argument('--from-part')
     args = parser.parse_args()

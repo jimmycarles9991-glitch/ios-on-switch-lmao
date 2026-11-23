@@ -9,7 +9,7 @@ import HWTestGPU
 /// past the pair's first (0, 1, 2; 15 mixed); <case>_expected what the case's description predicts. reading= names the
 /// description whose cases came out clean.
 enum X1VICTransposeProbe {
-    static let magic: UInt32 = 0x5654_3432  // 'VT42'
+    static let magic: UInt32 = 0x5654_3432 // 'VT42'
     static let cases = 8
     static let caseWords = 10
     static let replyBytes = 16 + 4 * caseWords * cases
@@ -31,8 +31,8 @@ enum X1VICTransposeProbe {
         }
         var wrong: [String: Int] = [:]
         let clean = reply[3]
-        for i in 0..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 0 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = names[i]
             let count = Int(r[2]) + Int(r[3]) + Int(r[6]) + (r[1] != 0 ? 1 : 0)
             metrics.set(name + "_status", Int(Int32(bitPattern: r[1])))

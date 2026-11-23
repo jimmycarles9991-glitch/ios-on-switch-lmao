@@ -4,16 +4,16 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// RGB10A8_2P_XR10 (550) over a 'b3a8' surface, as Core Animation's backdrop blur makes it, drawn in its planes
-/// (raw_xr_pass.h: the word into plane 0, the alpha byte into plane 1 as a target of its own): a cleared pass with a
-/// draw, a pass that loads it and draws again, and a pass that samples it; then, each after the CPU rewrote part of
+/// RGB10A8_2P_XR10 (550) over a 'b3a8' surface, as Core Animation's backdrop blur makes it, rendered through its
+/// RGBA16Float stand-in and stored into its planes (the word into plane 0, the alpha byte into plane 1): a cleared pass
+/// with a draw, a pass that loads it and draws again, and a pass that samples it; then, each after the CPU rewrote part of
 /// both planes, a loading pass, a sampling pass and a blit into a buffer; last a blit from a buffer into it. Every
-/// command buffer must take the raw path, and the planes must hold Metal's bytes (plane 0 the code word, plane 1 the alpha byte, codes as raw_xr.h writeCode stores
+/// command buffer must take the driver, and the planes must hold Metal's bytes (plane 0 the code word, plane 1 the alpha byte, codes as xr.h writeCode stores
 /// them), the samples each code's value as a half, and blits move plane 0's words alone; rows of
 /// 128-byte multiples (96 wide) are drawn in place. Then XRTwoPlaneCells.
 struct XRTwoPlaneTest: HWTest {
-    let id = "gpu.raw.xr_two_plane"
-    let name = "RGB10A8_2P_XR10 over a b3a8 surface: drawn, loaded, sampled and blitted on the raw path"
+    let id = "gpu.gm20b.xr_two_plane"
+    let name = "RGB10A8_2P_XR10 over a b3a8 surface: drawn, loaded, sampled and blitted on the driver"
     let subsystem = Subsystem.metal
 
     static let width = 96, height = 64
@@ -32,10 +32,10 @@ struct XRTwoPlaneTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
-        let counted = RawFacade.counters(of: gpu.device)
+        let counted = GM20BFacade.counters(of: gpu.device)
         let (buffer, texture) = try Self.surfaceTexture(gpu)
         let draw = try gpu.render(fragment: "solid_fragment", format: Self.format)
         var want = [UInt64](repeating: Self.texel(Self.clear), count: Self.width * Self.height)
@@ -53,13 +53,13 @@ struct XRTwoPlaneTest: HWTest {
         let words = try await gpu.read(texture, bytesPerPixel: 4)
         let copiedOut = want.indices.filter { words.loaded(as: UInt32.self, at: $0) != UInt32(want[$0] & 0xffff_ffff) }
             .count
-        let incoming = (0..<want.count).map { UInt32(($0 &* 2_654_435_761) & 0x3fff_ffff) }
+        let incoming = (0 ..< want.count).map { UInt32(($0 &* 2_654_435_761) & 0x3fff_ffff) }
         try await gpu.upload(incoming.withUnsafeBytes { Array($0) }, to: texture, bytesPerRow: Self.width * 4)
         want = zip(want, incoming).map { $0 & 0xff_0000_0000 | UInt64($1) }
         let copiedIn = Self.wrongTexels(Self.planes(buffer), want)
 
         let moved = { (name: String) in
-            (RawFacade.counters(of: gpu.device)[name] ?? 0) - (counted[name] ?? 0)
+            (GM20BFacade.counters(of: gpu.device)[name] ?? 0) - (counted[name] ?? 0)
         }
         let directShadows = moved("xr_plane_shadows")
         let cells = XRTwoPlaneCells(gpu: gpu)
@@ -78,11 +78,10 @@ struct XRTwoPlaneTest: HWTest {
         let linearApart = XRTwoPlaneModel.linearApart(
             linear.halves,
             exact: XRTwoPlaneModel.bilinear(texels, width: Self.width, height: Self.height, weight: 1.0 / 3),
-            fixed: XRTwoPlaneModel.bilinear(texels, width: Self.width, height: Self.height, weight: 85.0 / 256))
+            fixed: XRTwoPlaneModel.bilinear(texels, width: Self.width, height: Self.height, weight: 85.0 / 256)
+        )
 
         var metrics = Metrics()
-        let planePasses = moved("xr_plane_passes")
-        metrics.set("plane_passes", planePasses)
         metrics.set("plane_shadows", directShadows)
         metrics.set("cell_shadows", cellShadows)
         metrics.set("narrow_wrong", narrow)
@@ -112,25 +111,24 @@ struct XRTwoPlaneTest: HWTest {
         metrics.set("copied_out_wrong", copiedOut)
         metrics.set("copied_in_wrong", copiedIn)
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
-        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "raw" }
+        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "gm20b" }
         return .judged(
             [
-                ("every command buffer on the raw path (\(gpu.paths.text))", raw),
+                ("every command buffer on the driver (\(gpu.paths.text))", raw),
                 ("both planes hold the clear and the draws", drawn == 0),
                 ("the samples are the codes' values", sampled == 0),
                 ("a loading pass keeps a CPU write of the planes", loaded == 0),
                 ("the samples follow a CPU write of the planes", resampled == 0),
                 ("a blit into a buffer gives plane 0's words after a CPU write", copiedOut == 0),
                 ("a blit from a buffer writes plane 0 alone", copiedIn == 0),
-                ("the passes drew in the planes", planePasses > 0),
                 (
                     "rows of 128-byte multiples are drawn in place, beside a memoryless 550 too",
                     directShadows == 0 && cellShadows == 0
                 ),
                 ("a surface 60 wide is drawn through shadows", narrow == 0 && narrowShadows > 0),
                 (
-                    "blended draws are source-over of the codes, within one code",
-                    blend.wrong == 0 && blend.interlocked > 0
+                    "blended draws are source-over of the codes, within one code, blended by the ROP",
+                    blend.wrong == 0 && blend.interlocked == 0
                 ),
                 (
                     "Core Animation's blended fills in the storage form are source-over, within one code",
@@ -152,10 +150,11 @@ struct XRTwoPlaneTest: HWTest {
                     "gathers of alpha and red through the header pair are the texels' values",
                     gatherAlpha.paired && gatherRed.paired && gatherAlpha.wrong == 0 && gatherRed.wrong == 0
                 ),
-            ], metrics, proof: gpu.proof)
+            ], metrics, proof: gpu.proof
+        )
     }
 
-    /// raw_xr.h writeCode: a channel's code, or the alpha byte
+    /// xr.h writeCode: a channel's code, or the alpha byte
     static func code(_ value: Float, alpha: Bool = false) -> UInt32 {
         let v = value.isNaN ? 0 : Double(value)
         if alpha { return UInt32((min(max(v, 0), 1) * 255).rounded(.toNearestOrEven)) }
@@ -171,23 +170,26 @@ struct XRTwoPlaneTest: HWTest {
     static func paint(
         _ texels: inout [UInt64], _ r: (Int, Int, Int, Int), _ value: UInt64, width: Int = XRTwoPlaneTest.width
     ) {
-        for y in r.1..<r.3 { for x in r.0..<r.2 { texels[y * width + x] = value } }
+        for y in r.1 ..< r.3 { for x in r.0 ..< r.2 { texels[y * width + x] = value } }
     }
 
     static func surfaceTexture(
-        _ gpu: GPU, width: Int = XRTwoPlaneTest.width, height: Int = XRTwoPlaneTest.height
+        _ gpu: GPU, width: Int = XRTwoPlaneTest.width, height: Int = XRTwoPlaneTest.height,
+        usage: MTLTextureUsage = [.renderTarget, .shaderRead]
     ) throws -> (CVPixelBuffer, MTLTexture) {
         var made: CVPixelBuffer?
         let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
         guard
             CVPixelBufferCreate(
-                nil, width, height, kCVPixelFormatType_30RGBLE_8A_BiPlanar, attributes as CFDictionary, &made)
-                == kCVReturnSuccess, let buffer = made,
+                nil, width, height, kCVPixelFormatType_30RGBLE_8A_BiPlanar, attributes as CFDictionary, &made
+            )
+            == kCVReturnSuccess, let buffer = made,
             let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
         else { throw TestFailure("no b3a8 pixel buffer") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format, width: width, height: height, mipmapped: false)
-        descriptor.usage = [.renderTarget, .shaderRead]
+            pixelFormat: format, width: width, height: height, mipmapped: false
+        )
+        descriptor.usage = usage
         descriptor.storageMode = .shared
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {
             throw TestFailure("no 550 texture over the b3a8 surface")
@@ -205,13 +207,15 @@ struct XRTwoPlaneTest: HWTest {
             pass.colorAttachments[0].texture = texture
             pass.colorAttachments[0].loadAction = load
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: Double(clear.x), green: Double(clear.y), blue: Double(clear.z), alpha: Double(clear.w))
+                red: Double(clear.x), green: Double(clear.y), blue: Double(clear.z), alpha: Double(clear.w)
+            )
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(pipeline)
             let r = draw.rect
             GPU.draw(
-                encoder, corners: GPU.pixelQuad(r.0, r.1, r.2, r.3, width: width, height: height), color: draw.color)
+                encoder, corners: GPU.pixelQuad(r.0, r.1, r.2, r.3, width: width, height: height), color: draw.color
+            )
             encoder.endEncoding()
         }
     }
@@ -226,7 +230,7 @@ struct XRTwoPlaneTest: HWTest {
             alpha = CVPixelBufferGetBaseAddressOfPlane(buffer, 1)!
         let wordRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0),
             alphaRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
-        return (0..<(width * height)).map { i in
+        return (0 ..< (width * height)).map { i in
             let (x, y) = (i % width, i / width)
             let w = word.loadUnaligned(fromByteOffset: y * wordRow + x * 4, as: UInt32.self)
             let a = alpha.load(fromByteOffset: y * alphaRow + x, as: UInt8.self)
@@ -247,8 +251,8 @@ struct XRTwoPlaneTest: HWTest {
             alpha = CVPixelBufferGetBaseAddressOfPlane(buffer, 1)!
         let wordRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 0),
             alphaRow = CVPixelBufferGetBytesPerRowOfPlane(buffer, 1)
-        for y in r.1..<r.3 {
-            for x in r.0..<r.2 {
+        for y in r.1 ..< r.3 {
+            for x in r.0 ..< r.2 {
                 word.storeBytes(of: texel.word, toByteOffset: y * wordRow + x * 4, as: UInt32.self)
                 alpha.storeBytes(of: texel.alpha, toByteOffset: y * alphaRow + x, as: UInt8.self)
             }
@@ -280,13 +284,13 @@ struct XRTwoPlaneTest: HWTest {
         }
         let bytes = try await gpu.read(target, bytesPerPixel: 8)
         let value = { (n: Int, d: Double) in Float16(Double(n) / d).bitPattern }
-        return (0..<(width * height)).filter { i in
+        return (0 ..< (width * height)).filter { i in
             let t = want[i]
             let expected: [UInt16] = [
                 value(Int(t >> 20 & 0x3ff) - 384, 510), value(Int(t >> 10 & 0x3ff) - 384, 510),
                 value(Int(t & 0x3ff) - 384, 510), value(Int(t >> 32 & 0xff), 255),
             ]
-            let got = (0..<4).map { c in bytes.loaded(as: UInt16.self, at: i * 4 + c) }
+            let got = (0 ..< 4).map { c in bytes.loaded(as: UInt16.self, at: i * 4 + c) }
             return got != expected
         }.count
     }

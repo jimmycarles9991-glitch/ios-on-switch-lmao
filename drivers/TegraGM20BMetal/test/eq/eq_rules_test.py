@@ -24,21 +24,21 @@ def compare(nvk: eq_fields.Draw, raw: eq_fields.Draw) -> tuple[set, list[str]]:
 # NVK's fetching form: its program blends, the ROP's blend of colour 0 off at ZERO coefficients
 NVK_FETCH = {'1e08': '4000', '1e0c': '4000'}
 # raw's fetch-free form of an additive blend: SET_BLEND(0) on, ONE and ONE
-RAW_ROP_BLEND = {'1360': '1', '1e08': '4001', '1e0c': '4001'}
+SWITCH_METAL_ROP_BLEND = {'1360': '1', '1e08': '4001', '1e0c': '4001'}
 
 
 class FetchFree(unittest.TestCase):
     def test_a_colour_raw_blends_on_the_rop_where_only_nvk_fetches_it_is_raws_form(self):
-        tags, refused = compare(draw(NVK_FETCH, True, FETCH_BARRIERS), draw(RAW_ROP_BLEND, False, set()))
+        tags, refused = compare(draw(NVK_FETCH, True, FETCH_BARRIERS), draw(SWITCH_METAL_ROP_BLEND, False, set()))
         self.assertEqual(refused, [])
         self.assertEqual(tags, {'fetchfree'})
 
     def test_raw_blending_on_the_rop_while_it_still_fetches_is_refused(self):
-        _, refused = compare(draw(NVK_FETCH, True, FETCH_BARRIERS), draw(RAW_ROP_BLEND, True, set()))
+        _, refused = compare(draw(NVK_FETCH, True, FETCH_BARRIERS), draw(SWITCH_METAL_ROP_BLEND, True, set()))
         self.assertIn('draw 0: register 1360 nvk=- raw=1', refused)
 
     def test_a_rop_blend_where_nvk_fetches_nothing_is_refused(self):
-        _, refused = compare(draw(NVK_FETCH, False, set()), draw(RAW_ROP_BLEND, False, set()))
+        _, refused = compare(draw(NVK_FETCH, False, set()), draw(SWITCH_METAL_ROP_BLEND, False, set()))
         self.assertIn('draw 0: register 1360 nvk=- raw=1', refused)
 
 

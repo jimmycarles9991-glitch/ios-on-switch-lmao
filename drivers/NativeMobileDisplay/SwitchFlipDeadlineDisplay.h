@@ -47,7 +47,6 @@ void idleFlipDeadline()
 // An offer out: its completion is due kGpuCopyDeadlineMS from now.
 void armGpuDeadline()
 {
-    gpuDeadlines = 0;
     offerAged = true;
     gpuOfferDeadline = mach_absolute_time() + gpuDeadlineTicks();
     armDeadlineTimer();
@@ -56,15 +55,6 @@ void armGpuDeadline()
 void cancelGpuDeadline()
 {
     offerAged = false;
-}
-
-// The GPU driver still holds the offer, or its completion is signalled: it is looked for again a deadline later.
-void extendGpuDeadline()
-{
-    if (offerAged)
-        gpuOfferDeadline = mach_absolute_time() + gpuDeadlineTicks();
-    else
-        gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
 }
 
 void checkOfferAge()

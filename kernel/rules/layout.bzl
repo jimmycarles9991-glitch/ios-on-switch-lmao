@@ -22,7 +22,7 @@ KERNEL_PACKAGE = "kernel"
 MOVED_ROOTS = ["drivers", "kits", "diagnostics", "overlay"]
 
 # The kernel tree's own subpackages before the move: their outputs were below OLD_TREE/<package>/ already.
-OLD_SUBPACKAGES = ["drivers/NativeMetal", "drivers/TegraGM20BMetal"]
+OLD_SUBPACKAGES = ["drivers/TegraGM20BMetal"]
 
 def tree_path(path):
     """A path below the kernel tree, as it is now (TREE_ROOT/path)."""

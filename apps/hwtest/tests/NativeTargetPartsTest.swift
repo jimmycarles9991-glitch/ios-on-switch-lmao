@@ -28,7 +28,7 @@ enum TextureParts {
     /// Every part of `t`: its levels' slices (6 a cube), a 3D level's planes
     static func parts(_ t: MTLTexture) -> [TexturePart] {
         var out: [TexturePart] = []
-        for level in 0..<t.mipmapLevelCount {
+        for level in 0 ..< t.mipmapLevelCount {
             let slices: Int
             switch t.textureType {
             case .type3D: slices = size(t, level).depth
@@ -36,7 +36,7 @@ enum TextureParts {
             case .typeCubeArray: slices = 6 * t.arrayLength
             default: slices = t.arrayLength
             }
-            for slice in 0..<slices { out.append(TexturePart(level: level, slice: slice)) }
+            for slice in 0 ..< slices { out.append(TexturePart(level: level, slice: slice)) }
         }
         return out
     }
@@ -66,7 +66,8 @@ enum TextureParts {
                 from: t, sourceSlice: volume ? 0 : p.slice, sourceLevel: p.level,
                 sourceOrigin: MTLOrigin(x: 0, y: 0, z: volume ? p.slice : 0),
                 sourceSize: MTLSize(width: w, height: h, depth: 1), to: out, destinationOffset: 0,
-                destinationBytesPerRow: w * 4, destinationBytesPerImage: 0)
+                destinationBytesPerRow: w * 4, destinationBytesPerImage: 0
+            )
             blit.endEncoding()
         }
         paths.append(timing.path)
@@ -86,7 +87,8 @@ enum TextureParts {
             e.setRenderPipelineState(pipeline)
             GPU.draw(
                 e, corners: GPU.pixelQuad(0, 0, tw / 2, th, width: tw, height: th),
-                color: SIMD4<Float>(drawn.map { Float($0) / 255 }))
+                color: SIMD4<Float>(drawn.map { Float($0) / 255 })
+            )
             e.endEncoding()
         }
         paths.append(timing.path)
@@ -94,8 +96,8 @@ enum TextureParts {
         for p in parts {
             let (w, h, _) = size(t, p.level)
             let got = try await read(gpu, t, p, paths: &paths)
-            for y in 0..<h {
-                for x in 0..<w {
+            for y in 0 ..< h {
+                for x in 0 ..< w {
                     let want = p == target && x < tw / 2 ? drawn : clearColor(p)
                     if Array(got.pixel(x, y, width: w)) != want { wrong += 1 }
                 }
@@ -106,7 +108,7 @@ enum TextureParts {
 }
 
 /// Render targets of a mip level, an array slice, a cube face, a cube array's face and a 3D plane, in textures of one
-/// level and mipmapped ones: each binds the part NVK binds (raw_attachment_target.h), so the quad lands in that part and
+/// level and mipmapped ones: each binds the part NVK binds (attachment_target.h), so the quad lands in that part and
 /// every other texel of the texture keeps its clear.
 struct NativeTargetPartsTest: NativeObjectTest {
     let id = "metal.native.target_parts"
@@ -138,22 +140,28 @@ struct NativeTargetPartsTest: NativeObjectTest {
         Shape(name: "mip", descriptor: descriptor(.type2D, 64, 48, levels: 4), target: TexturePart(level: 2, slice: 0)),
         Shape(
             name: "array", descriptor: descriptor(.type2DArray, 32, 24, layers: 3),
-            target: TexturePart(level: 0, slice: 2)),
+            target: TexturePart(level: 0, slice: 2)
+        ),
         Shape(
             name: "mip_array", descriptor: descriptor(.type2DArray, 32, 32, layers: 3, levels: 3),
-            target: TexturePart(level: 1, slice: 1)),
+            target: TexturePart(level: 1, slice: 1)
+        ),
         Shape(name: "cube", descriptor: descriptor(.typeCube, 32, 32), target: TexturePart(level: 0, slice: 3)),
         Shape(
             name: "mip_cube", descriptor: descriptor(.typeCube, 32, 32, levels: 3),
-            target: TexturePart(level: 1, slice: 5)),
+            target: TexturePart(level: 1, slice: 5)
+        ),
         Shape(
             name: "cube_array", descriptor: descriptor(.typeCubeArray, 16, 16, layers: 2),
-            target: TexturePart(level: 0, slice: 8)),
+            target: TexturePart(level: 0, slice: 8)
+        ),
         Shape(
-            name: "volume", descriptor: descriptor(.type3D, 16, 16, depth: 8), target: TexturePart(level: 0, slice: 5)),
+            name: "volume", descriptor: descriptor(.type3D, 16, 16, depth: 8), target: TexturePart(level: 0, slice: 5)
+        ),
         Shape(
             name: "mip_volume", descriptor: descriptor(.type3D, 16, 16, depth: 8, levels: 2),
-            target: TexturePart(level: 1, slice: 2)),
+            target: TexturePart(level: 1, slice: 2)
+        ),
     ]
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
@@ -166,7 +174,8 @@ struct NativeTargetPartsTest: NativeObjectTest {
             }
             work.objects.append(t)
             let wrong = try await TextureParts.check(
-                gpu, t, target: shape.target, pipeline: pipeline, paths: &work.paths)
+                gpu, t, target: shape.target, pipeline: pipeline, paths: &work.paths
+            )
             metrics.set("wrong_\(shape.name)", wrong)
             if wrong != 0 { work.failures.append("\(wrong) texels of the \(shape.name) texture") }
         }

@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 #include <unistd.h>
+#include "MetallibEntries.h"
+#include "MetallibSlice.h"
 
 namespace precompile {
 
@@ -88,7 +90,26 @@ struct Library {
     std::set<std::string> names;
 };
 
-static std::map<std::string, Library> gLibraries;  // by host file; nil library: none there, or the frontend refused it
+static std::map<std::string, Library> gLibraries;  // by host file; nil library: none there, or the device refused it
+
+// The functions Metal lists in functionNames: the AIR slice's function list less its extern functions; none for a
+// malformed list
+static std::set<std::string> functionNames(NSData *file)
+{
+    std::set<std::string> names;
+    const auto *bytes = static_cast<const uint8_t *>(file.bytes);
+    size_t at = 0, size = 0;
+    if (!switch_metal::airSlice(bytes, file.length, at, size))
+        return names;
+    const bool whole = switch_metal::forEachMetallibEntry(bytes + at, size, [&](const switch_metal::MetallibEntry &e) {
+        if (e.type != switch_metal::kMetallibExternType)
+            names.insert(e.name);
+        return true;
+    });
+    if (!whole)
+        names.clear();
+    return names;
+}
 
 static Library &library(const std::string &file)
 {
@@ -101,8 +122,10 @@ static Library &library(const std::string &file)
         l.library = [gDevice newLibraryWithURL:[NSURL fileURLWithPath:@(file.c_str())] error:&error];
         if (!l.library)
             fprintf(stderr, "library %s: %s\n", file.c_str(), error.localizedDescription.UTF8String);
-        for (NSString *name in l.library.functionNames)
-            l.names.insert(name.UTF8String);
+        else
+            l.names = functionNames([NSData dataWithContentsOfFile:@(file.c_str())
+                                                           options:NSDataReadingMappedIfSafe
+                                                             error:nil]);
     }
     return l;
 }

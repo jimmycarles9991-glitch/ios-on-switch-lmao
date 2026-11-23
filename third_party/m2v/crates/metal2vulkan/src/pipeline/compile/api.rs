@@ -452,14 +452,13 @@ impl Device {
         m: &mut Meter,
     ) -> Result<RenderPipeline, Error> {
         // A mesh draw's plan zeroes and drops no color, nor writes one through the interlock it
-        // does not fetch, nor shadows one.
+        // does not fetch.
         if !v.zeroed_colors.is_empty()
             || !v.dropped_colors.is_empty()
             || !v.interlocked_colors.is_empty()
-            || !v.extended_shadows.is_empty()
         {
             return Err(invariant(
-                "a mesh variant zeroing, dropping, interlocking or shadowing colors",
+                "a mesh variant zeroing, dropping or interlocking colors",
             ));
         }
         let p = self.profile();
@@ -664,6 +663,7 @@ impl Device {
         m: &mut Meter,
     ) -> Result<RenderPipeline, Error> {
         crate::pipeline::private_state::check_render(&d.private)?;
+        crate::pipeline::color_writes::refuse_unstood_extended_range(&d.color_attachments)?;
         let zeroed = with_zeroed_colors(d, v)?;
         let d = zeroed.as_ref();
         let p = self.profile();

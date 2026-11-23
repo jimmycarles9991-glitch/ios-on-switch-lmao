@@ -53,7 +53,7 @@ struct NativeSharedTextureTest: NativeObjectTest {
     static func gradient(_ x: Int, _ y: Int) -> [UInt8] { [UInt8(x * 4), UInt8(y * 5), UInt8((x ^ y) & 0xff), 255] }
 
     static func wrong(_ pixels: [UInt8], width: Int, height: Int, _ want: (Int, Int) -> [UInt8]) -> Int {
-        (0..<width * height).filter { i in
+        (0 ..< width * height).filter { i in
             Array(pixels.pixel(i % width, i / width, width: width)) != want(i % width, i / width)
         }.count
     }
@@ -65,12 +65,16 @@ struct NativeSharedTextureTest: NativeObjectTest {
         typealias EntryID = @convention(c) (mach_port_t, UnsafeMutablePointer<UInt64>) -> kern_return_t
         typealias Release = @convention(c) (mach_port_t) -> kern_return_t
         guard let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW),
-            let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(iokit, "IOServiceGetMatchingService"),
-            let entryID = dlsym(iokit, "IORegistryEntryGetRegistryEntryID"),
-            let release = dlsym(iokit, "IOObjectRelease")
+              let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(
+                  iokit,
+                  "IOServiceGetMatchingService"
+              ),
+              let entryID = dlsym(iokit, "IORegistryEntryGetRegistryEntryID"),
+              let release = dlsym(iokit, "IOObjectRelease")
         else { return 0 }
         let accelerator = unsafeBitCast(service, to: Service.self)(
-            0, unsafeBitCast(matching, to: Matching.self)("AGXAccelerator"))
+            0, unsafeBitCast(matching, to: Matching.self)("AGXAccelerator")
+        )
         guard accelerator != 0 else { return 0 }
         var id: UInt64 = 0
         let kr = unsafeBitCast(entryID, to: EntryID.self)(accelerator, &id)
@@ -144,7 +148,8 @@ struct NativeSharedTextureTest: NativeObjectTest {
             blit.copy(
                 from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
                 sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1), to: out,
-                destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0)
+                destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0
+            )
             blit.endEncoding()
         }
         return ([UInt8](UnsafeRawBufferPointer(start: out.contents(), count: rowBytes * texture.height)), timing.path)
@@ -152,7 +157,8 @@ struct NativeSharedTextureTest: NativeObjectTest {
 
     static func descriptor(_ width: Int, _ height: Int, _ usage: MTLTextureUsage) -> MTLTextureDescriptor {
         let d = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false
+        )
         d.usage = usage
         d.storageMode = .private
         return d
@@ -173,7 +179,7 @@ struct NativeSharedTextureTest: NativeObjectTest {
 
         let (w, h) = (100, 70)
         guard let rendered = device.makeSharedTexture(descriptor: Self.descriptor(w, h, [.renderTarget, .shaderRead])),
-            let blitted = device.makeSharedTexture(descriptor: Self.descriptor(64, 48, .shaderRead))
+              let blitted = device.makeSharedTexture(descriptor: Self.descriptor(64, 48, .shaderRead))
         else { throw TestFailure("makeSharedTexture returned nil for a one-level 2D RGBA8 texture") }
         rendered.label = "switch.shared.rendered"
         work.objects += [rendered, blitted]
@@ -192,17 +198,19 @@ struct NativeSharedTextureTest: NativeObjectTest {
                 let c = Self.quarter(x0, y0, width: w, height: h).map { Float($0) / 255 }
                 GPU.draw(
                     encoder, corners: GPU.pixelQuad(x0, y0, x0 + w / 2, y0 + h / 2, width: w, height: h),
-                    color: SIMD4(c[0], c[1], c[2], c[3]))
+                    color: SIMD4(c[0], c[1], c[2], c[3])
+                )
             }
             encoder.endEncoding()
         }
-        let source = try gpu.buffer((0..<48).flatMap { y in (0..<64).flatMap { x in Self.gradient(x, y) } })
+        let source = try gpu.buffer((0 ..< 48).flatMap { y in (0 ..< 64).flatMap { x in Self.gradient(x, y) } })
         let copied = try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.copy(
                 from: source, sourceOffset: 0, sourceBytesPerRow: 256, sourceBytesPerImage: 0,
                 sourceSize: MTLSize(width: 64, height: 48, depth: 1), to: blitted, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin())
+                destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
             blit.endEncoding()
         }
         work.paths += [drawn.path, copied.path]
@@ -253,7 +261,8 @@ struct NativeSharedTextureTest: NativeObjectTest {
             [
                 kIOSurfaceWidth as String: 16, kIOSurfaceHeight as String: 16, kIOSurfaceBytesPerElement as String: 4,
                 kIOSurfaceBytesPerRow as String: 128,
-            ] as CFDictionary)
+            ] as CFDictionary
+        )
         let overSurface = surface.flatMap {
             device.makeTexture(descriptor: Self.descriptor(16, 16, .shaderRead), iosurface: $0, plane: 0)
         }
@@ -269,7 +278,8 @@ struct NativeSharedTextureTest: NativeObjectTest {
         metrics.set("mipmapped", device.makeSharedTexture(descriptor: mipmapped) == nil ? "refused" : "made")
         metrics.set(
             "resource_index",
-            (device as AnyObject).responds(to: NSSelectorFromString("newSharedTextureWithHandle:withResourceIndex:")))
+            (device as AnyObject).responds(to: NSSelectorFromString("newSharedTextureWithHandle:withResourceIndex:"))
+        )
         return work
     }
 }

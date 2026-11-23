@@ -2,8 +2,8 @@ import Foundation
 import HWTestCore
 import Metal
 
-/// A Core Animation state that blends by fetching its colour, drawn by the raw facade with the fetch rung a debug
-/// build's probe forces (RMDevice switchRawProbeFetchRung:): 4 its storage form (the fetch and the blend inside the
+/// A Core Animation state that blends by fetching its colour, drawn by the facade with the fetch rung a debug
+/// build's probe forces (SwitchMetalDevice switchMetalProbeFetchRung:): 4 its storage form (the fetch and the blend inside the
 /// pixel interlock), 2 or 3 its fetch-free form (the ROP's blend or its iterated blend). Each draw is CAStateSweep's
 /// with its colours premultiplied, as Core Animation's always are (every attachment cleared, a slanted strip and a
 /// rectangle over the pattern) so the two routes' bytes compare, and
@@ -14,7 +14,7 @@ public enum FetchRungScene {
 
     /// The facade takes the forced rung for the closure's command buffers; false where it has no probe channel.
     public static func forcing<T>(_ rung: Int, _ device: MTLDevice, _ body: () async throws -> T) async rethrows -> T? {
-        let force = NSSelectorFromString("switchRawProbeFetchRung:")
+        let force = NSSelectorFromString("switchMetalProbeFetchRung:")
         guard let facade = device as? NSObject, facade.responds(to: force) else { return nil }
         _ = facade.perform(force, with: NSNumber(value: rung))
         defer { _ = facade.perform(force, with: NSNumber(value: 0)) }
@@ -55,12 +55,12 @@ public enum FetchRungScene {
             CAStateSweep.bind(encoder, source: source, sampler: sampler)
             var vertices = cover
             encoder.setVertexBytes(&vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
-            for _ in 0..<draws { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+            for _ in 0 ..< draws { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
             encoder.endEncoding()
         }
         _ = try await gpu.run(tolerateError: true, draw)
         var timings: [GPU.Timing] = []
-        for _ in 0..<runs { timings.append(try await gpu.run(draw)) }
+        for _ in 0 ..< runs { timings.append(try await gpu.run(draw)) }
         guard timings.allSatisfy(\.gpuTimed) else { return (0, "untimed") }
         let perDraw = timings.map { $0.gpuMilliseconds * 1000 / Double(draws) }
         return (Stats.percentile(perDraw, 0.5), Set(timings.map(\.path)).sorted().joined(separator: ","))
@@ -103,8 +103,8 @@ public enum FetchRungScene {
         let layer = CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(0.45, 0.1, 0.3, 0.5))
         var counts: [Int] = []
         var paths: Set<String> = []
-        for frame in 0..<frames {
-            let before = RawFacade.counters(of: gpu.device)["fetch_rung2"] ?? 0
+        for frame in 0 ..< frames {
+            let before = GM20BFacade.counters(of: gpu.device)["fetch_rung2"] ?? 0
             let timing = try await gpu.run { commands in
                 let pass = MTLRenderPassDescriptor()
                 for (index, target) in targets.enumerated() {
@@ -118,12 +118,13 @@ public enum FetchRungScene {
                 CAStateSweep.bind(encoder, source: source, sampler: sampler)
                 var vertices = layer.map(CAStateSweep.premultiply)
                 encoder.setVertexBytes(
-                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
-                for _ in 0..<layers { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1
+                )
+                for _ in 0 ..< layers { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
                 encoder.endEncoding()
             }
             paths.insert(timing.path)
-            counts.append((RawFacade.counters(of: gpu.device)["fetch_rung2"] ?? 0) - before)
+            counts.append((GM20BFacade.counters(of: gpu.device)["fetch_rung2"] ?? 0) - before)
         }
         let format = UInt(targets[0].pixelFormat.rawValue)
         guard let bytes = CAStateSweep.bytesPerTexel(format) else { throw TestFailure("attachment format \(format)") }

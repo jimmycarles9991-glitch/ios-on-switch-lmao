@@ -5,7 +5,7 @@ import Metal
 
 /// gpu.x1.rotated_target's rotation-4 loads whose draws reach some 32x32 frame tiles and not others. Metal loads the plane
 /// transposed and stores it only in the tiles a draw's primitives touch, rounded out to tiles by the scissor (measured on an
-/// M4 Max, raw/runtime/raw_reach.h): the reference loads pass 1's frame flipped top to bottom in those tiles alone.
+/// M4 Max, reach.h): the reference loads pass 1's frame flipped top to bottom in those tiles alone.
 extension RotatedCells {
     var tilesX: Int { (width + 31) / 32 }
 
@@ -13,7 +13,7 @@ extension RotatedCells {
     func reachedTiles(_ cell: RotatedCell) -> Set<Int>? {
         guard turn == 4 else { return nil }
         switch cell {
-        case .load: return Set(0..<(tilesX * ((height + 31) / 32)))
+        case .load: return Set(0 ..< (tilesX * ((height + 31) / 32)))
         case .partLoad, .pointLoad: return [1, tilesX + 2]
         case .edgeLoad: return [tilesX + 1, tilesX + 2]
         case .besideR4: return [1]
@@ -36,10 +36,10 @@ extension RotatedCells {
         let w = texture.width, h = texture.height
         let first = try await gpu.read(texture, bytesPerPixel: 4)
         var loaded = first
-        for y in 0..<h {
-            for x in 0..<w where tiles.contains((y / 32) * perRow + x / 32) {
+        for y in 0 ..< h {
+            for x in 0 ..< w where tiles.contains((y / 32) * perRow + x / 32) {
                 let to = (y * w + x) * 4, from = ((h - 1 - y) * w + x) * 4
-                loaded[to..<(to + 4)] = first[from..<(from + 4)]
+                loaded[to ..< (to + 4)] = first[from ..< (from + 4)]
             }
         }
         try await gpu.upload(loaded, to: texture, bytesPerRow: w * 4)
@@ -63,7 +63,7 @@ extension RotatedCells {
     }
 
     /// The same tiles by a point (three pixels wide) and a line whose fragments are discarded (a turned plane's line
-    /// rasteriser may pick other end pixels), which the raw path reaches at the frame's resolution
+    /// rasteriser may pick other end pixels), which the driver reaches at the frame's resolution
     func pointLoad() -> Pass {
         encode(load: .load) { e in
             let ndc = { (x: Float, y: Float) in

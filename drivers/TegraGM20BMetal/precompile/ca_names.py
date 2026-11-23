@@ -5,8 +5,8 @@ usage: ca_names.py <ca-names/<build>.txt> <decoded log>...   (idevicesyslog's or
 
 A state.unpacked refusal names a Core Animation state by its label alone, com.apple.coreanimation.<name>. The m2v
 journals hold no such state: raw makes Core Animation's states, and the harvest reads only the caches of the system
-containers it opens. The name is enough, as QuartzCore makes the state of a name (raw/pack/ca/caspec.py), and the pack
-generator adds each name of the IPSW kind's file to its Core Animation corpus tier (raw/pack/rawpack.py ca_states).
+containers it opens. The name is enough, as QuartzCore makes the state of a name (pack/ca/caspec.py), and the pack
+generator adds each name of the IPSW kind's file to its Core Animation corpus tier (pack/make_pack.py ca_states).
 The file keeps what it had: one name a line, sorted.
 """
 

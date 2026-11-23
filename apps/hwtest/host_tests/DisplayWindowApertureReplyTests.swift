@@ -5,7 +5,7 @@ import XCTest
 final class DisplayWindowApertureReplyTests: XCTestCase {
     func reply(error: Int32 = 0, words: UInt32 = 0xf, aliased: UInt32, restored: UInt32 = 0xf) -> [UInt8] {
         [DisplayWindowProbeReply.magic, UInt32(bitPattern: error), words, aliased, restored, 0].flatMap { word in
-            (0..<4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) }
+            (0 ..< 4).map { UInt8(truncatingIfNeeded: word >> (8 * $0)) }
         }
     }
 

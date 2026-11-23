@@ -3,15 +3,15 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Accumulating visibility results (MTLVisibilityResultTypeAccumulate, iOS 26) on the raw path
-/// (drivers/TegraGM20BMetal/raw/runtime/raw_visibility.h): Counting adds to an offset's low word modulo 2^32 and keeps
+/// Accumulating visibility results (MTLVisibilityResultTypeAccumulate, iOS 26) on the driver
+/// (drivers/TegraGM20BMetal/visibility.h): Counting adds to an offset's low word modulo 2^32 and keeps
 /// its high word, through the counter's report reducing into the offset; Boolean ORs 1 into the low word where a sample
 /// passed, by a copy-engine release that render enable gates on the count. An offset set with no draw keeps its bytes.
 /// Each offset starts from a preset; the values are an M4 Max's (macOS 27.2.1). Two passes in a row add up. Every
 /// command buffer must stay raw.
 struct VisibilityAccumulateTest: HWTest {
-    let id = "gpu.raw.visibility_accumulate"
-    let name = "Visibility results accumulated across passes: Counting adds, Boolean ORs 1, on the raw path"
+    let id = "gpu.gm20b.visibility_accumulate"
+    let name = "Visibility results accumulated across passes: Counting adds, Boolean ORs 1, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -75,8 +75,8 @@ struct VisibilityAccumulateTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         guard #available(iOS 26, *) else { return .skip("MTLVisibilityResultTypeAccumulate is iOS 26's") }
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let results = try gpu.buffer(48)
         let target = try gpu.texture(.bgra8Unorm, Self.size, Self.size)
         let state = try gpu.render(fragment: "solid_fragment", format: .bgra8Unorm)
@@ -86,7 +86,7 @@ struct VisibilityAccumulateTest: HWTest {
             let words = results.contents().bindMemory(to: UInt64.self, capacity: 6)
             for (i, v) in arm.preset.enumerated() { words[i] = v }
             var paths: [String] = []
-            for _ in 0..<arm.passes {
+            for _ in 0 ..< arm.passes {
                 paths.append(
                     try await gpu.run { commands in
                         let pass = MTLRenderPassDescriptor()
@@ -99,13 +99,14 @@ struct VisibilityAccumulateTest: HWTest {
                         encoder.setRenderPipelineState(state)
                         arm.encode(encoder)
                         encoder.endEncoding()
-                    }.path)
+                    }.path
+                )
             }
-            let got = (0..<6).map { words[$0] }
+            let got = (0 ..< 6).map { words[$0] }
             metrics.set("\(arm.name)_values", got.map { String($0, radix: 16) }.joined(separator: ","))
             metrics.set("\(arm.name)_paths", paths.joined(separator: ","))
             for (i, want) in arm.expected.enumerated() where got[i] != want { wrong.append("\(arm.name)_\(8 * i)") }
-            if paths.contains(where: { $0 != "raw" }) { wrong.append("\(arm.name)_path") }
+            if paths.contains(where: { $0 != "gm20b" }) { wrong.append("\(arm.name)_path") }
         }
         return wrong.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(wrong.joined(separator: ","), metrics)
     }

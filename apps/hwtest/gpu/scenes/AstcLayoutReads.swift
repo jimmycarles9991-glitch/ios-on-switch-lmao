@@ -14,7 +14,7 @@ struct AstcLayoutReading {
     /// The address bit mapping of the misplaced blocks (BlockLinearMap.bitMap), worked out only for the cases reported.
     var map: String {
         guard wrong > 0 else { return "identity" }
-        let map = BlockLinearMap.bitMap(pairs, bits: 4...13)
+        let map = BlockLinearMap.bitMap(pairs, bits: 4 ... 13)
         return unread > 0 ? map + ",unread\(unread)" : map
     }
 }
@@ -33,14 +33,15 @@ extension AstcLayoutRun {
             encoder.setBuffer(out, offset: 0, index: 0)
             encoder.dispatchThreads(
                 MTLSize(width: width, height: height, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+            )
             encoder.endEncoding()
         }
-        if noCopy && onRaw && timing.path != "raw" { return AstcLayoutReading(measured: false) }
+        if noCopy && onRaw && timing.path != "gm20b" { return AstcLayoutReading(measured: false) }
         let texels = out.contents().bindMemory(to: SIMD4<Float>.self, capacity: width * height)
         return Self.judge { x, y in
             let first = texels[y * 4 * width + x * 4]
-            let uniform = (0..<16).allSatisfy { texels[(y * 4 + $0 / 4) * width + x * 4 + $0 % 4] == first }
+            let uniform = (0 ..< 16).allSatisfy { texels[(y * 4 + $0 / 4) * width + x * 4 + $0 % 4] == first }
             return uniform ? Self.grid.source(of: first) : nil
         }
     }
@@ -53,7 +54,8 @@ extension AstcLayoutRun {
             blit.copy(
                 from: texture, sourceSlice: slice, sourceLevel: 0, sourceOrigin: MTLOrigin(),
                 sourceSize: MTLSize(width: Self.grid.texelWidth, height: Self.grid.texelHeight, depth: 1), to: out,
-                destinationOffset: 0, destinationBytesPerRow: Self.grid.rowBytes, destinationBytesPerImage: 0)
+                destinationOffset: 0, destinationBytesPerRow: Self.grid.rowBytes, destinationBytesPerImage: 0
+            )
             blit.endEncoding()
         }
         return Self.blocks([UInt8](UnsafeRawBufferPointer(start: out.contents(), count: Self.grid.bytes.count)))
@@ -72,7 +74,7 @@ extension AstcLayoutRun {
     static func blocks(_ bytes: [UInt8]) -> AstcLayoutReading {
         judge { x, y in
             let at = (y * grid.across + x) * AstcBlockGrid.blockBytes
-            return AstcBlockGrid.decode(bytes[at..<(at + AstcBlockGrid.blockBytes)]).flatMap(grid.source(of:))
+            return AstcBlockGrid.decode(bytes[at ..< (at + AstcBlockGrid.blockBytes)]).flatMap(grid.source(of:))
         }
     }
 
@@ -81,8 +83,8 @@ extension AstcLayoutRun {
         let address = { (x: Int, y: Int) in
             BlockLinearMap.offset(xB: x * AstcBlockGrid.blockBytes, y: y, rowBytes: grid.rowBytes, yLog2: yLog2)
         }
-        for y in 0..<grid.down {
-            for x in 0..<grid.across {
+        for y in 0 ..< grid.down {
+            for x in 0 ..< grid.across {
                 guard let source = found(x, y) else {
                     reading.unread += 1
                     reading.wrong += 1

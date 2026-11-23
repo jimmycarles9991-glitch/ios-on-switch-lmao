@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 import XCTest
 
-/// gpu.raw.icon_corners' GPU arms on this Mac's GPU, whose Metal is Apple's: RenderBox's icon masks at the App
+/// gpu.gm20b.icon_corners' GPU arms on this Mac's GPU, whose Metal is Apple's: RenderBox's icon masks at the App
 /// Library's small and large sizes within RenderBoxCorner.tolerance of its own CPU drawing in every corner pixel, as
 /// antialiased as it, a stepped corner beyond it; the fetching indexed strips' sums; and the reduction the
 /// IconServices arms compare through.
@@ -37,7 +37,8 @@ final class RenderBoxCornerTests: XCTestCase {
                 let cell = try await RenderBoxCorner.cell(gpu, side: side, radius: radius, storage: storage)
                 print(
                     "icon_corners rb\(side)_\(cell.storage) beyond=\(cell.beyond) max_diff=\(cell.maxDiff) "
-                        + "partial=\(cell.partial)/\(cell.referencePartial)")
+                        + "partial=\(cell.partial)/\(cell.referencePartial)"
+                )
                 XCTAssertEqual(cell.beyond, 0, "\(side) \(cell.storage)")
                 XCTAssertGreaterThan(cell.referencePartial, 0)
                 XCTAssertGreaterThanOrEqual(cell.partial * 4, cell.referencePartial * 3, "\(side) \(cell.storage)")
@@ -73,7 +74,7 @@ final class RenderBoxCornerTests: XCTestCase {
 
     func testReductionAveragesTheCoveredArea() {
         var big = [Double](repeating: 0, count: 10 * 10)
-        for y in 0..<10 { for x in 0..<5 { big[y * 10 + x] = 1 } }
+        for y in 0 ..< 10 { for x in 0 ..< 5 { big[y * 10 + x] = 1 } }
         let small = RenderBoxCorner.reduce(big, from: 10, to: 4)
         XCTAssertEqual(small[0], 1, accuracy: 1e-9)
         XCTAssertEqual(small[1], 1, accuracy: 1e-9)

@@ -405,92 +405,77 @@ static bool switch_gpu_recover_failed_target(struct nvkm_runl *runl, u32 target,
 	return failed;
 }
 
-static u32 switch_gpu_recover_failed_status(struct nvkm_runl *runl, u32 status, bool engine)
+static u32 switch_gpu_recover_lower(u32 target, u32 other)
 {
-	u32 target = switch_gpu_recover_target(status);
-
-	if (switch_gpu_recover_status_holds(status, target, engine) &&
-	    switch_gpu_recover_failed_target(runl, target, true))
-		return target;
-	target = switch_gpu_recover_target(status >> 16);
-	if (switch_gpu_recover_status_holds(status, target, engine) &&
-	    switch_gpu_recover_failed_target(runl, target, true))
-		return target;
-	return ~0U;
+	return target < other ? target : other;
 }
 
-static u32 switch_gpu_recover_failed_resident(struct nvkm_runl *runl)
+/* The lowest failed group from `from` up that a PBDMA's or engine's status holds, current or incoming; ~0U: none */
+static u32 switch_gpu_recover_failed_status(struct nvkm_runl *runl, u32 status, bool engine,
+					    u32 from)
+{
+	u32 lowest = ~0U;
+	u32 target = switch_gpu_recover_target(status);
+
+	if (target >= from && switch_gpu_recover_status_holds(status, target, engine) &&
+	    switch_gpu_recover_failed_target(runl, target, true))
+		lowest = target;
+	target = switch_gpu_recover_target(status >> 16);
+	if (target >= from && switch_gpu_recover_status_holds(status, target, engine) &&
+	    switch_gpu_recover_failed_target(runl, target, true))
+		lowest = switch_gpu_recover_lower(lowest, target);
+	return lowest;
+}
+
+static u32 switch_gpu_recover_failed_resident(struct nvkm_runl *runl, u32 from)
 {
 	struct nvkm_device *device = runl->fifo->engine.subdev.device;
 	struct nvkm_engn *engn = NULL;
-	u32 target = ~0U;
+	u32 lowest = ~0U;
 	int i = 0;
 
 	for (i = 0; i < runl->runq_nr; i++) {
 		if (!runl->runq[i])
 			continue;
-		target = switch_gpu_recover_failed_status(
-			runl, nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)), false);
-		if (target != ~0U)
-			return target;
+		lowest = switch_gpu_recover_lower(
+			lowest, switch_gpu_recover_failed_status(
+					runl, nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)),
+					false, from));
 	}
 	nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
 	{
-		target = switch_gpu_recover_failed_status(
-			runl, nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)), true);
-		if (target != ~0U)
-			return target;
+		lowest = switch_gpu_recover_lower(
+			lowest,
+			switch_gpu_recover_failed_status(
+				runl, nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)), true, from));
 	}
-	return ~0U;
+	return lowest;
 }
 
-static bool switch_gpu_recover_target_resident(struct nvkm_runl *runl, u32 target)
-{
-	struct nvkm_device *device = runl->fifo->engine.subdev.device;
-	struct nvkm_engn *engn = NULL;
-	int i = 0;
-
-	for (i = 0; i < runl->runq_nr; i++) {
-		if (runl->runq[i] &&
-		    switch_gpu_recover_status_holds(
-			    nvkm_rd32(device, PBDMA_STATUS(runl->runq[i]->id)), target, false))
-			return true;
-	}
-	nvkm_runl_foreach_engn_cond(engn, runl, engn->func->cxid)
-	{
-		if (switch_gpu_recover_status_holds(nvkm_rd32(device, PFIFO_ENG_STATUS(engn->id)),
-						    target, true))
-			return true;
-	}
-	return false;
-}
-
-bool switch_gpu_recover_pending(struct nvkm_runl *runl, u32 *target)
+/* nvkm_runl_rc's preempt wait, runl->mutex held; *from starts at 0. A preempt is done once PFIFO_PREEMPT_PENDING
+ * clears, as nvgpu's gk20a_fifo_is_preempt_pending and nouveau's gf100_runl_preempt_pending count it. Then each failed
+ * group a PBDMA or engine still holds gets a preempt of its own, the lowest first: upstream nouveau asks for it at the
+ * error (nvkm_chan_error(chan, true)), here it waits for runl->mutex as every PFIFO_PREEMPT write does. *from moves past
+ * each target asked for, so a status that still names a group after its preempt completed asks for nothing more. */
+bool switch_gpu_recover_pending(struct nvkm_runl *runl, u32 *from)
 {
 	struct nvkm_device *device = runl->fifo->engine.subdev.device;
 	unsigned long flags = 0;
-	u32 preempt = 0;
-	bool pending = true, issued = false;
+	u32 target = ~0U;
+	bool pending = true;
 
 	BUG_ON(!mutex_is_locked(&runl->mutex));
 	spin_lock_irqsave(&device->intr.lock, flags);
-	preempt = nvkm_rd32(device, PFIFO_PREEMPT);
-	if (preempt & PFIFO_PREEMPT_PENDING) {
-		if (*target == ~0U && switch_gpu_recover_failed_target(runl, preempt, false))
-			*target = preempt & ((u32)PFIFO_PREEMPT_TSG | 0xfffU);
-	} else if (*target != ~0U && switch_gpu_recover_target_resident(runl, *target)) {
-		/* A completed request must evict its target; never replace it with another request. */
-	} else {
-		*target = switch_gpu_recover_failed_resident(runl);
-		if (*target != ~0U) {
-			nvkm_wr32(device, PFIFO_PREEMPT, *target);
-			issued = true;
-		} else {
-			pending = false;
+	if (!(nvkm_rd32(device, PFIFO_PREEMPT) & PFIFO_PREEMPT_PENDING)) {
+		target = switch_gpu_recover_failed_resident(runl, *from);
+		pending = target != ~0U;
+		if (pending) {
+			nvkm_wr32(device, PFIFO_PREEMPT, target);
+			*from = target + 1;
 		}
 	}
 	spin_unlock_irqrestore(&device->intr.lock, flags);
-	if (issued)
+	if (target != ~0U)
 		tgm_recover_preempt_unblock(runl);
 	return pending;
 }

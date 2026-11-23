@@ -4,13 +4,13 @@ import HWTestGPU
 import Metal
 
 /// What a Metal object made by the GM20B facade answers about itself in debug runtimes
-/// (drivers/TegraGM20BMetal/raw/runtime/RawMetalObjectProbe.mm): its class. An object the facade did not make answers
+/// (drivers/TegraGM20BMetal/TegraGM20BMetalObjectProbe.mm): its class. An object the facade did not make answers
 /// nothing.
 enum NativeObject {
     static func name(_ object: AnyObject) -> String? {
-        let selector = NSSelectorFromString("switchRawObject")
+        let selector = NSSelectorFromString("switchMetalObject")
         guard let object = object as? NSObject, object.responds(to: selector),
-            let answer = object.perform(selector)?.takeUnretainedValue() as? [String: Any]
+              let answer = object.perform(selector)?.takeUnretainedValue() as? [String: Any]
         else { return nil }
         return answer["class"] as? String ?? "?"
     }
@@ -24,7 +24,7 @@ struct NativeWork {
     var paths: [String] = []
 }
 
-/// A Metal object the raw facade makes itself: on the facade, the workload gives the right bytes, every object it made
+/// A Metal object the facade makes itself: on the facade, the workload gives the right bytes, every object it made
 /// is the device's own, and the command buffers that used them stayed raw.
 protocol NativeObjectTest: HWTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork
@@ -39,11 +39,11 @@ extension NativeObjectTest {
     func run(_ context: TestContext) async throws -> Outcome {
         if let why = unavailable { return .skip(why) }
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
-        guard !RawFacade.counters(of: gpu.device).isEmpty else {
-            return .skip("a release runtime: objects do not answer switchRawObject")
+        guard !GM20BFacade.counters(of: gpu.device).isEmpty else {
+            return .skip("a release runtime: objects do not answer switchMetalObject")
         }
         var metrics = Metrics()
         var work = try await exercise(gpu, &metrics)
@@ -59,7 +59,8 @@ extension NativeObjectTest {
         }
         metrics.set("objects", names.isEmpty ? "-" : Set(names).sorted().joined(separator: ","))
         metrics.set("paths", work.paths.isEmpty ? "-" : work.paths.joined(separator: ","))
-        if let path = work.paths.first(where: { $0 != "raw" }) { work.failures.append("a command buffer went \(path)") }
+        if let path = work.paths
+            .first(where: { $0 != "gm20b" }) { work.failures.append("a command buffer went \(path)") }
         return work.failures.isEmpty
             ? .pass(metrics, proof: gpu.proof)
             : .fail(work.failures.joined(separator: "; "), metrics, proof: gpu.proof)
@@ -105,10 +106,12 @@ struct NativeDepthStencilTest: NativeObjectTest {
         let depth = try gpu.texture(.depth32Float_stencil8, size, size, usage: [.renderTarget])
         let pipeline = try gpu.render(
             fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth32Float_stencil8,
-            stencil: .depth32Float_stencil8)
+            stencil: .depth32Float_stencil8
+        )
         let faces = try Self.state(
             gpu.device, depth: .less, write: true, front: Self.face(.always, pass: .replace, write: 0x3c),
-            back: Self.face(.always, pass: .incrementClamp))
+            back: Self.face(.always, pass: .incrementClamp)
+        )
         let masked = Self.face(.equal, pass: .keep, read: 0x0c)
         let equal = try Self.state(gpu.device, depth: .always, write: false, front: masked, back: masked)
         let greater = try Self.state(gpu.device, depth: .greater, write: false)
@@ -152,8 +155,8 @@ struct NativeDepthStencilTest: NativeObjectTest {
         metrics.set("stencil_halves", "\(left),\(right)")
         if Set([left, right]) != [0x3c, 1] { work.failures.append("stencil halves \(left)/\(right), not 0x3c and 1") }
         var wrongColor = 0, wrongStencil = 0
-        for y in 0..<size {
-            for x in 0..<size {
+        for y in 0 ..< size {
+            for x in 0 ..< size {
                 let half = x < size / 2 ? left : right
                 if stencils[y * size + x] != half { wrongStencil += 1 }
                 let want: [UInt8] =
@@ -204,7 +207,7 @@ struct NativeFenceTest: NativeObjectTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let size = 32
         guard let inside = gpu.device.makeFence(), let across = gpu.device.makeFence(),
-            let colour = gpu.device.makeBuffer(length: 16, options: .storageModePrivate)
+              let colour = gpu.device.makeBuffer(length: 16, options: .storageModePrivate)
         else { throw TestFailure("no fence or private buffer") }
         var work = NativeWork(objects: [inside, across])
         let magenta = try gpu.buffer([SIMD4<Float>(1, 0, 1, 1)]), green = try gpu.buffer([SIMD4<Float>(0, 1, 0, 1)])
@@ -217,12 +220,12 @@ struct NativeFenceTest: NativeObjectTest {
         let copied = try gpu.commit { Self.copy($0, green, colour, across) }
         let drawn = try gpu.commit { Self.draw($0, pipeline, into: second, colour: colour, after: across) }
         try gpu.finish([copied, drawn])
-        work.paths += [one.path, RawFacade.path(of: copied), RawFacade.path(of: drawn)]
+        work.paths += [one.path, GM20BFacade.path(of: copied), GM20BFacade.path(of: drawn)]
         var wrong = 0
         for (texture, want) in [(first, [UInt8](arrayLiteral: 255, 0, 255, 255)), (second, [0, 255, 0, 255])] {
             let pixels = try await gpu.read(texture, bytesPerPixel: 4)
-            for y in 0..<size {
-                for x in 0..<size where Array(pixels.pixel(x, y, width: size)) != want { wrong += 1 }
+            for y in 0 ..< size {
+                for x in 0 ..< size where Array(pixels.pixel(x, y, width: size)) != want { wrong += 1 }
             }
         }
         metrics.set("wrong_pixels", wrong)

@@ -19,7 +19,7 @@ int main(int argc, char **argv)
     const std::string dir = argc > 3    ? argv[3]
                             : workspace ? std::string(workspace) + "/drivers/TegraGM20BMetal/test/records/testdata"
                                         : ".";
-    raw::Pack pack;
+    gm20b::Pack pack;
     std::string err;
     if (!pack.load(argv[1], 0, err)) {
         fprintf(stderr, "%s: %s\n", argv[1], err.c_str());

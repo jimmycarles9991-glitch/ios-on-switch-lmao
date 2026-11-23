@@ -149,7 +149,25 @@ TEST_F(MediaFlip, AFailedProducerLeavesTheLatchAsItWas)
     EXPECT_EQ(d.model.assembly[kStartB], address(1));
 }
 
-TEST_F(MediaFlip, APartiallyWrittenStreamKeepsItsCandidateSlotsUntilTheRestoreLatches)
+// A completed stream leaves nothing to stop: the gate's writers of windows B and C, every overlay frame's planeStage
+// among them, never take host1x's channel lock for it.
+TEST_F(MediaFlip, ACompletedStreamIsNeverCancelled)
+{
+    shownByGate(video(1));
+    ASSERT_TRUE(armed(2));
+    d.complete(0);
+    d.donePass();
+    frame();
+    ASSERT_EQ(d.model.active[kStartB], address(2));
+    const unsigned cancels = gHost.cancels;
+    d.mediaFlipFromGate();
+    EXPECT_EQ(gHost.cancels, cancels);
+}
+
+// A stream SC7 stops before host1x counts it done may already have stored its addresses and request, and a boundary
+// taken them: the scanout halts there, and the resume writes the latch's set over them before its own request, so
+// nothing of the stopped stream is written back or held at the stop.
+TEST_F(MediaFlip, AStreamStoppedPartWayIsOverwrittenByTheResume)
 {
     shownByGate(video(1));
     ASSERT_TRUE(armed(2));
@@ -159,16 +177,16 @@ TEST_F(MediaFlip, APartiallyWrittenStreamKeepsItsCandidateSlotsUntilTheRestoreLa
     d.model.write(Display::kDcStateControl, gHost.request);
     d.model.boundary();
     ASSERT_EQ(d.model.active[kStartB], address(2));
-    d.mediaFlipFromGate();
-    EXPECT_EQ(d.mediaHostHeldSlots, uint64_t(1) << 2);
-    EXPECT_EQ(d.model.assembly[kStartB], address(1));
+    d.model.written.clear();
+    d.suspend();
+    EXPECT_TRUE(d.mediaFlipIdle());
+    EXPECT_TRUE(d.model.written.empty());
     d.complete(0);
     d.donePass();
-    EXPECT_EQ(d.mediaHostHeldSlots, uint64_t(1) << 2);
     EXPECT_EQ(d.notShown, 1u);
+    d.resume();
     frame();
     EXPECT_EQ(d.model.active[kStartB], address(1));
-    EXPECT_EQ(d.mediaHostHeldSlots, 0u);
     EXPECT_EQ(d.completions(seq), 1u);
 }
 
@@ -178,7 +196,7 @@ TEST_F(MediaFlip, AProducerSetBeyondTheExistingFenceCapacityNeverArmsAController
     switch_gpu_backing_token producers[5] = {};
     EXPECT_EQ(d.planeFenceWithMediaFlip(video(2), producers, 5), -22);
     EXPECT_TRUE(d.mediaFlipIdle());
-    EXPECT_FALSE(d.mediaHostStream.queued);
+    EXPECT_EQ(media_flip_test::gHost.owner, nullptr);
     EXPECT_EQ(d.planeLatch.armed, Display::PlaneCommits::kNone);
 }
 
@@ -190,6 +208,30 @@ TEST_F(MediaFlip, ARefusedFenceWithdrawsItsSet)
     EXPECT_TRUE(d.mediaFlipIdle());
     EXPECT_EQ(d.planeLatch.armed, Display::PlaneCommits::kNone);
     EXPECT_TRUE(d.planeLatch.armedRequested);
+}
+
+// planeMediaFence sends -22 and -16 to the bridge fence and completes any other error as the set's failure, so an armed
+// stream host1x refuses returns host1x's error, named in a line.
+TEST_F(MediaFlip, AnArmedStreamHost1xRefusesReturnsAndNamesItsError)
+{
+    shownByGate(video(1));
+    gFenceResult = -22;
+    EXPECT_FALSE(d.offer(video(2), ++seq));
+    EXPECT_EQ(d.offered, -22);
+    ASSERT_EQ(gLog.size(), 1u);
+    EXPECT_NE(gLog[0].find("host1x refused windows B and C's controller stream (-22)"), std::string::npos) << gLog[0];
+    EXPECT_TRUE(d.mediaFlipIdle());
+    EXPECT_EQ(d.planeLatch.armed, Display::PlaneCommits::kNone);
+}
+
+TEST_F(MediaFlip, AnArmedStreamRefusedAsBusyReturnsItsOwnError)
+{
+    shownByGate(video(1));
+    gFenceResult = -16;
+    EXPECT_FALSE(d.offer(video(2), ++seq));
+    EXPECT_EQ(d.offered, -16);
+    ASSERT_EQ(gLog.size(), 1u);
+    EXPECT_NE(gLog[0].find("(-16)"), std::string::npos) << gLog[0];
 }
 
 // Any other gate write of windows B and C withdraws an armed set first; that set goes out from the gate after it.

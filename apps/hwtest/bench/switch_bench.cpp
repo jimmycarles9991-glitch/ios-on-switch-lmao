@@ -8,13 +8,13 @@
 #include <mutex>
 #include <string>
 #include <vector>
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_compute.h"
+#include "drivers/TegraGM20BMetal/compute.h"
 #include "apps/hwtest/bench/bench_device.h"
 #include "apps/hwtest/bench/bench_known.h"
 
 namespace {
 
-constexpr const char *kPack = "/System/Library/Extensions/TegraGM20BMetal.raw/pack.bin";
+constexpr const char *kPack = "/System/Library/Extensions/TegraGM20BMetal.pack/pack.bin";
 constexpr const char kPlugin[] = "/TegraGM20BMetal.bundle/";
 constexpr uint32_t kTriangleStrip = 4, kBgra8 = 80;
 constexpr uint64_t kKeyBase = 0xbe7c000000000000ull;
@@ -32,20 +32,20 @@ constexpr uint32_t kRelease0AddOneWord = 1u << 26 | 1u << 31;
 
 // placeCompute caches a placed kernel by its record's address for the device's life, so a record's address must never
 // name another kernel: the records outlive every device the bench opens
-std::deque<raw::ComputeRecord> &kernelRecords()
+std::deque<gm20b::ComputeRecord> &kernelRecords()
 {
-    static std::deque<raw::ComputeRecord> records;
+    static std::deque<gm20b::ComputeRecord> records;
     return records;
 }
 
 // The pack beside the Metal plugin this process loaded, where the plugin itself finds it (TegraGM20BMetalPlugin.mm
-// rawPackRefusal); fetchform's path when no plugin is loaded
+// gm20bPackRefusal); fetchform's path when no plugin is loaded
 std::string packPath()
 {
     for (uint32_t i = 0, n = _dyld_image_count(); i < n; i++) {
         const char *name = _dyld_get_image_name(i);
         if (const char *at = name ? strstr(name, kPlugin) : nullptr)
-            return std::string(name, at) + "/TegraGM20BMetal.raw/pack.bin";
+            return std::string(name, at) + "/TegraGM20BMetal.pack/pack.bin";
     }
     return kPack;
 }
@@ -69,10 +69,10 @@ bool readsPositionW(const uint8_t *sph)
 
 bool valid(const switch_bench_experiment &x, switch_bench_result &r)
 {
-    const raw::FormatInfo *f = raw::formatInfo(x.format);
+    const gm20b::FormatInfo *f = gm20b::formatInfo(x.format);
     std::string why;
     if (!f || !f->rt)
-        why = "not a format the raw path renders";
+        why = "not a format the driver renders";
     else if (!x.width || !x.height || x.width > 2048 || x.height > 2048)
         why = "target size";
     else if (x.rect[0] >= x.rect[2] || x.rect[1] >= x.rect[3] || x.rect[2] > x.width || x.rect[3] > x.height)
@@ -137,14 +137,14 @@ bench::Methods pairs(const uint32_t *words, uint32_t count)
 
 // The experiment's draws into colour 0: compressed, its texels through a staging texture, else written and read by the
 // CPU. `into` gets the texels
-bool drawInto(switch_bench &b, const switch_bench_experiment &x, raw::Pipeline *pipeline,
+bool drawInto(switch_bench &b, const switch_bench_experiment &x, gm20b::Pipeline *pipeline,
               const std::vector<uint32_t> &others, bool compressed, uint8_t *into, switch_bench_result &r,
-              const raw::Buffer *storage = nullptr)
+              const gm20b::Buffer *storage = nullptr)
 {
-    raw::Device &d = *b.device;
-    const uint32_t bpp = raw::formatInfo(x.format)->bpp;
+    gm20b::Device &d = *b.device;
+    const uint32_t bpp = gm20b::formatInfo(x.format)->bpp;
     bench::Target t;
-    raw::Texture staging;
+    gm20b::Texture staging;
     if (compressed && !d.createTexture(x.width, x.height, x.format, staging, true)) {
         bench::fail(r, SWITCH_BENCH_ERROR, "no memory for the staging texture");
         return false;
@@ -168,14 +168,14 @@ bool drawInto(switch_bench &b, const switch_bench_experiment &x, raw::Pipeline *
 
 // The experiment's storage buffer, zeroed under a CPU write lease (fill's reason), for as long as the experiment runs
 struct Storage {
-    raw::Device &device;
-    raw::Buffer buffer;
+    gm20b::Device &device;
+    gm20b::Buffer buffer;
     bool made = false;
 
-    Storage(raw::Device &d, uint32_t bytes) : device(d)
+    Storage(gm20b::Device &d, uint32_t bytes) : device(d)
     {
         made = bytes && d.createBuffer(bytes, buffer, true);
-        raw::HostAccess lease;
+        gm20b::HostAccess lease;
         if (made && !(made = d.hostAccess(buffer, true, lease)))
             d.destroyBuffer(buffer);
         if (made)
@@ -194,15 +194,15 @@ struct Storage {
 
 void runRender(switch_bench &b, const switch_bench_experiment &x, switch_bench_result &r)
 {
-    raw::Device &d = *b.device;
+    gm20b::Device &d = *b.device;
     Storage storage(d, x.storage_bytes);
     if (x.storage_bytes && !storage.made)
         return bench::fail(r, SWITCH_BENCH_ERROR, "no memory for the storage buffer");
     const bool samples = x.kind != SWITCH_BENCH_NOOP && bench::samplesTexture(program(x));
-    const raw::PackPipeline *tpl = x.template_key ? bench::fragmentTemplate(d.pack(), x.template_key)
-                                   : samples      ? b.textured
-                                                  : b.fragment;
-    raw::Pipeline *pipeline = nullptr;
+    const gm20b::PackPipeline *tpl = x.template_key ? bench::fragmentTemplate(d.pack(), x.template_key)
+                                     : samples      ? b.textured
+                                                    : b.fragment;
+    gm20b::Pipeline *pipeline = nullptr;
     const uint64_t storageVa = storage.made ? storage.buffer.va : 0;
     if (x.kind != SWITCH_BENCH_NOOP && !(pipeline = bench::pixelPipeline(b, x, r, x.single_target != 0, storageVa)))
         return;
@@ -211,7 +211,7 @@ void runRender(switch_bench &b, const switch_bench_experiment &x, switch_bench_r
         others = bench::otherFormats(d.pack().string(tpl->keyString));
     if (!drawInto(b, x, pipeline, others, x.compressed != 0, r.texels, r, storage.made ? &storage.buffer : nullptr))
         return;
-    raw::HostAccess read;
+    gm20b::HostAccess read;
     if (storage.made && r.storage && r.storage_bytes >= x.storage_bytes && d.hostAccess(storage.buffer, false, read))
         memcpy(r.storage, storage.buffer.cpu, x.storage_bytes);
     if (x.compare == SWITCH_BENCH_COMPARE_PLAIN && r.compare_texels) {
@@ -225,19 +225,19 @@ void runCompute(switch_bench &b, const switch_bench_experiment &x, switch_bench_
 {
     if (!b.kernel)
         return bench::fail(r, SWITCH_BENCH_ERROR, "the pack has no kernel the bench can take as a template");
-    raw::Device &d = *b.device;
-    raw::Buffer output;
+    gm20b::Device &d = *b.device;
+    gm20b::Buffer output;
     if (x.output_bytes && !d.createBuffer(x.output_bytes, output, true))
         return bench::fail(r, SWITCH_BENCH_ERROR, "no memory for the output buffer");
     bench::Program p = program(x);
     if (output.va)
         memcpy(p.data.data(), &output.va, sizeof output.va);
-    raw::ComputeRecord &record = kernelRecords().emplace_back();
+    gm20b::ComputeRecord &record = kernelRecords().emplace_back();
     std::string why;
-    const raw::ComputeState *state = nullptr;
+    const gm20b::ComputeState *state = nullptr;
     if (!bench::kernelRecord(*b.kernel, p, x.threads, record, why))
         bench::fail(r, SWITCH_BENCH_INVALID, why);
-    else if (!(state = raw::placeCompute(d, record)))
+    else if (!(state = gm20b::placeCompute(d, record)))
         bench::fail(r, SWITCH_BENCH_REFUSED, "no room for the kernel in the shader heap");
     else
         r.template_key = b.kernel->keyHash;
@@ -271,8 +271,8 @@ void runChain(switch_bench &b, const switch_bench_experiment &x, switch_bench_re
         return bench::fail(r, SWITCH_BENCH_ERROR, "the pack has no kernel the bench can take as a template");
     if (!x.chain || x.chain_links > kQmdChainMax || x.output_bytes < 16)
         return bench::fail(r, SWITCH_BENCH_INVALID, "chain: 1..3 QMDs after the experiment's and an output buffer");
-    raw::Device &d = *b.device;
-    raw::Buffer output, qmds;
+    gm20b::Device &d = *b.device;
+    gm20b::Buffer output, qmds;
     if (!d.createBuffer(x.output_bytes, output, true) || !d.createBuffer(kQmdChainMax * kQmdBytes, qmds, true) ||
         (qmds.va & (kQmdBytes - 1))) {
         if (output.va)
@@ -281,7 +281,7 @@ void runChain(switch_bench &b, const switch_bench_experiment &x, switch_bench_re
             d.destroyBuffer(qmds);
         return bench::fail(r, SWITCH_BENCH_ERROR, "no memory for the output or the chain's QMDs");
     }
-    std::vector<const raw::ComputeState *> states;
+    std::vector<const gm20b::ComputeState *> states;
     for (uint32_t i = 0; i <= x.chain_links; i++) {
         switch_bench_experiment link = x;
         if (i)
@@ -294,13 +294,13 @@ void runChain(switch_bench &b, const switch_bench_experiment &x, switch_bench_re
         }
         memcpy(p.data.data(), &output.va, 8);
         memcpy(p.data.data() + 8, &qmds.va, 8);
-        raw::ComputeRecord &record = kernelRecords().emplace_back();
+        gm20b::ComputeRecord &record = kernelRecords().emplace_back();
         std::string why;
         if (!bench::kernelRecord(*b.kernel, p, x.threads, record, why)) {
             bench::fail(r, SWITCH_BENCH_INVALID, why);
             break;
         }
-        const raw::ComputeState *state = raw::placeCompute(d, record);
+        const gm20b::ComputeState *state = gm20b::placeCompute(d, record);
         if (!state) {
             bench::fail(r, SWITCH_BENCH_REFUSED, "no room for the kernel in the shader heap");
             break;
@@ -314,8 +314,8 @@ void runChain(switch_bench &b, const switch_bench_experiment &x, switch_bench_re
     memset(output.cpu + x.output_bytes - 4, 0, 4);
     const bool ran = states.size() == x.chain_links + 1 &&
                      s.record(
-                         [&](raw::CommandBuffer &cb) {
-                             raw::ComputeEncoder ce(cb, d);
+                         [&](gm20b::CommandBuffer &cb) {
+                             gm20b::ComputeEncoder ce(cb, d);
                              bool ok = true;
                              for (uint32_t i = x.chain_links + 1; ok && i-- > 0;) {
                                  ce.setState(states[i]);
@@ -355,9 +355,9 @@ void runChain(switch_bench &b, const switch_bench_experiment &x, switch_bench_re
 
 bool switch_bench::open()
 {
-    auto opened = std::make_unique<raw::Device>();
+    auto opened = std::make_unique<gm20b::Device>();
     pack = packPath();
-    if (!opened->open(pack.c_str(), 0, error, raw::Device::Role::Client)) {
+    if (!opened->open(pack.c_str(), 0, error, gm20b::Device::Role::Client)) {
         error = pack + ": " + error;
         return false;
     }
@@ -365,7 +365,7 @@ bool switch_bench::open()
     fragment = bench::fragmentTemplate(device->pack());
     textured = bench::textureTemplate(device->pack());
     kernel = bench::kernelTemplate(device->pack());
-    raw::SamplerDesc nearest, filtered;
+    gm20b::SamplerDesc nearest, filtered;
     filtered.minFilter = filtered.magFilter = 1;  // MTLSamplerMinMagFilterLinear
     imageMade = device->createTexture(64, 64, kBgra8, image, true);
     samplerMade = imageMade && device->createSampler(nearest, sampler);
@@ -417,12 +417,12 @@ std::vector<uint32_t> otherFormats(const char *key)
     return formats;
 }
 
-// The template's inputs as fetchform binds the pack's states (raw/test/fetchform.cpp): the rect's corners as float4
+// The template's inputs as fetchform binds the pack's states (harness/fetchform.cpp): the rect's corners as float4
 // clip-space positions through identity matrices, the other attributes and uniforms fixed, its textures one picture
-void bindTemplate(raw::RenderEncoder *e, const raw::Pipeline &p, const uint32_t rect[4], uint32_t width,
-                  uint32_t height, const raw::Texture &image, const raw::Sampler &sampler)
+void bindTemplate(gm20b::RenderEncoder *e, const gm20b::Pipeline &p, const uint32_t rect[4], uint32_t width,
+                  uint32_t height, const gm20b::Texture &image, const gm20b::Sampler &sampler)
 {
-    const raw::PackPipeline &r = *p.rec;
+    const gm20b::PackPipeline &r = *p.rec;
     std::vector<uint8_t> v(4 * r.vertexStride);
     const float x0 = float(rect[0]) / width * 2 - 1, x1 = float(rect[2]) / width * 2 - 1;
     const float y0 = 1 - float(rect[1]) / height * 2, y1 = 1 - float(rect[3]) / height * 2;
@@ -441,19 +441,19 @@ void bindTemplate(raw::RenderEncoder *e, const raw::Pipeline &p, const uint32_t 
         identity[k] = (k % 16) % 5 == 0 ? 1.f : 0.f;
         uniforms[k] = float(k % 7) / 7.f;
     }
-    for (uint32_t k = 0; k < raw::entryCount(r); k++) {
-        const raw::PackEntry &entry = r.entry[k];
-        if (entry.kind == raw::EntryUbo)
+    for (uint32_t k = 0; k < gm20b::entryCount(r); k++) {
+        const gm20b::PackEntry &entry = r.entry[k];
+        if (entry.kind == gm20b::EntryUbo)
             e->setBytes(entry.stage, entry.slot, entry.stage == 1 ? identity : uniforms, sizeof uniforms);
-        else if (entry.kind == raw::EntryTexture)
+        else if (entry.kind == gm20b::EntryTexture)
             e->setTexture(entry.slot, &image);
-        if (entry.kind != raw::EntryUbo && entry.samplerKind == raw::SamplerSlot)
+        if (entry.kind != gm20b::EntryUbo && entry.samplerKind == gm20b::SamplerSlot)
             e->setSampler(entry.sampler, &sampler);
     }
 }
 
 // The target and the template's other colours (memoryless); false: no memory, `r` says so
-bool makeTarget(raw::Device &d, const switch_bench_experiment &x, const std::vector<uint32_t> &others,
+bool makeTarget(gm20b::Device &d, const switch_bench_experiment &x, const std::vector<uint32_t> &others,
                 bool compressible, Target &t, switch_bench_result &r)
 {
     if (compressible)
@@ -478,9 +478,9 @@ bool makeTarget(raw::Device &d, const switch_bench_experiment &x, const std::vec
     return true;
 }
 
-void destroyTarget(raw::Device &d, Target &t)
+void destroyTarget(gm20b::Device &d, Target &t)
 {
-    for (raw::Texture &o : t.others)
+    for (gm20b::Texture &o : t.others)
         d.destroyTexture(o);
     t.others.clear();
     if (t.color.va)
@@ -496,9 +496,9 @@ void fail(switch_bench_result &r, uint32_t status, const std::string &why)
 // The GPU's L2 is not coherent with the CPU: a CPU write reaches the next job only when the kernel knows of it. The
 // lease's release makes that job drop the L2's lines of the memory first (gpu_exec.c), which otherwise still hold what the
 // GPU wrote there before, the previous experiment's texels at the same address.
-bool fill(raw::Device &d, raw::Texture &t, const switch_bench_experiment &x, uint32_t bpp)
+bool fill(gm20b::Device &d, gm20b::Texture &t, const switch_bench_experiment &x, uint32_t bpp)
 {
-    raw::HostAccess lease;
+    gm20b::HostAccess lease;
     if (!d.hostAccess(t, t.cpu, uint64_t(t.pitch) * x.height, true, lease))
         return false;
     for (uint32_t y = 0; y < x.height; y++) {
@@ -511,12 +511,12 @@ bool fill(raw::Device &d, raw::Texture &t, const switch_bench_experiment &x, uin
     return true;
 }
 
-bool readBack(raw::Device &d, const raw::Texture &t, const switch_bench_experiment &x, uint32_t bpp, uint8_t *into,
+bool readBack(gm20b::Device &d, const gm20b::Texture &t, const switch_bench_experiment &x, uint32_t bpp, uint8_t *into,
               size_t bytes)
 {
     if (!into || !t.cpu || bytes < size_t(x.width) * x.height * bpp)
         return true;
-    raw::HostAccess lease;
+    gm20b::HostAccess lease;
     if (!d.hostAccess(t, t.cpu, uint64_t(t.pitch) * x.height, false, lease))
         return false;
     for (uint32_t y = 0; y < x.height; y++)
@@ -524,16 +524,16 @@ bool readBack(raw::Device &d, const raw::Texture &t, const switch_bench_experime
     return true;
 }
 
-raw::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, switch_bench_result &r,
-                             bool firstColourOnly, uint64_t storageVa)
+gm20b::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, switch_bench_result &r,
+                               bool firstColourOnly, uint64_t storageVa)
 {
-    raw::Device &d = *b.device;
+    gm20b::Device &d = *b.device;
     bench::Program fs = program(x);
     if (storageVa)
         memcpy(fs.data.data() + x.storage_va_at, &storageVa, sizeof storageVa);
-    const raw::PackPipeline *tpl = x.template_key       ? fragmentTemplate(d.pack(), x.template_key)
-                                   : samplesTexture(fs) ? b.textured
-                                                        : b.fragment;
+    const gm20b::PackPipeline *tpl = x.template_key       ? fragmentTemplate(d.pack(), x.template_key)
+                                     : samplesTexture(fs) ? b.textured
+                                                          : b.fragment;
     if (!tpl && x.template_key) {
         fail(r, SWITCH_BENCH_INVALID, "no plain pack state has the template key");
         return nullptr;
@@ -542,7 +542,7 @@ raw::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, 
         fail(r, SWITCH_BENCH_ERROR, "the pack has no state the bench can take as a template");
         return nullptr;
     }
-    raw::RuntimeRecord record;
+    gm20b::RuntimeRecord record;
     std::string why;
     const uint64_t key = kKeyBase | ++b.records;
     if (!fragmentRecord(d.pack(), *tpl, fs, x.format, key, pairs(x.methods, x.method_pairs),
@@ -552,7 +552,7 @@ raw::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, 
     }
     // a program bound at dataBound bytes is bound at exactly that many, the bench's measure of the chip's bound
     d.probeExactCbufs.store(fs.dataBound != 0, std::memory_order_relaxed);
-    raw::Pipeline *pipeline = d.addRecord(record, false, why);
+    gm20b::Pipeline *pipeline = d.addRecord(record, false, why);
     d.probeExactCbufs.store(false, std::memory_order_relaxed);
     if (!pipeline)
         fail(r, SWITCH_BENCH_REFUSED, why);
@@ -561,12 +561,12 @@ raw::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, 
     return pipeline;
 }
 
-bool timeDraws(switch_bench &b, const switch_bench_experiment &x, Target &t, raw::Pipeline *pipeline,
+bool timeDraws(switch_bench &b, const switch_bench_experiment &x, Target &t, gm20b::Pipeline *pipeline,
                switch_bench_result &r)
 {
-    const uint32_t bpp = raw::formatInfo(x.format)->bpp;
+    const uint32_t bpp = gm20b::formatInfo(x.format)->bpp;
     Submission s(b, x, r);
-    raw::Texture *written = t.staging ? t.staging : &t.color;
+    gm20b::Texture *written = t.staging ? t.staging : &t.color;
     for (uint32_t c = 0; c < x.draw_counts; c++)
         for (uint32_t k = 0; k < x.warmup + x.repeats; k++) {
             uint64_t gpu = 0, wall = 0;
@@ -616,38 +616,38 @@ void checkAlive(switch_bench &b, const switch_bench_experiment &x, Target &t, sw
     snprintf(r.why, sizeof r.why, "the channel was dead after the experiment's last fence (a trap the fence missed)");
 }
 
-bool Submission::render(Target &t, raw::Pipeline *pipeline, uint32_t draws, uint64_t &gpu, uint64_t &wall)
+bool Submission::render(Target &t, gm20b::Pipeline *pipeline, uint32_t draws, uint64_t &gpu, uint64_t &wall)
 {
-    raw::Device &d = *b_.device;
-    raw::CommandBuffer *cb = d.begin();
+    gm20b::Device &d = *b_.device;
+    gm20b::CommandBuffer *cb = d.begin();
     if (!cb)
         return error("no channel: " + d.channelError());
     if (t.storage)
         cb->use(*t.storage, true);
     const uint32_t w = x_.width, h = x_.height;
     if (t.staging) {
-        raw::BlitEncoder *in = cb->blit();
+        gm20b::BlitEncoder *in = cb->blit();
         if (!in) {
             cb->abandon();
-            return refused("the raw path opened no blit encoder");
+            return refused("the driver opened no blit encoder");
         }
         in->copyTexels(*t.staging, 0, 0, 0, t.color, 0, 0, 0, w, h);
         in->end();
     }
-    raw::PassDesc pass;
+    gm20b::PassDesc pass;
     pass.count = 1 + uint32_t(t.others.size());
     pass.color[0].texture = &t.color;
-    pass.color[0].load = x_.fill ? raw::ColorAttachment::Load : raw::ColorAttachment::Clear;
+    pass.color[0].load = x_.fill ? gm20b::ColorAttachment::Load : gm20b::ColorAttachment::Clear;
     memcpy(pass.color[0].clear, x_.clear, sizeof x_.clear);
     for (size_t i = 0; i < t.others.size(); i++) {
         pass.color[1 + i].texture = &t.others[i];
-        pass.color[1 + i].load = raw::ColorAttachment::Clear;
+        pass.color[1 + i].load = gm20b::ColorAttachment::Clear;
         pass.color[1 + i].store = false;
     }
-    raw::RenderEncoder *e = cb->render(pass);
+    gm20b::RenderEncoder *e = cb->render(pass);
     if (!e) {
         cb->abandon();
-        return refused("the raw path cannot render the target");
+        return refused("the driver cannot render the target");
     }
     e->setViewport(0, 0, w, h, 0, 1);
     e->setScissor(0, 0, w, h);
@@ -660,7 +660,7 @@ bool Submission::render(Target &t, raw::Pipeline *pipeline, uint32_t draws, uint
         const char *why = nullptr;
         if (!e->draw(kTriangleStrip, 0, 4, 1, 0, &why)) {
             e->end();
-            const raw::Refusal refusal = cb->refusal;
+            const gm20b::Refusal refusal = cb->refusal;
             cb->abandon();
             char line[160];
             snprintf(line, sizeof line, "draw refused: %s (predicate %u: %u %u %u)", why ? why : "?", refusal.id,
@@ -670,10 +670,10 @@ bool Submission::render(Target &t, raw::Pipeline *pipeline, uint32_t draws, uint
     }
     e->end();
     if (t.staging) {
-        raw::BlitEncoder *out = cb->blit();
+        gm20b::BlitEncoder *out = cb->blit();
         if (!out) {
             cb->abandon();
-            return refused("the raw path opened no blit encoder");
+            return refused("the driver opened no blit encoder");
         }
         out->copyTexels(t.color, 0, 0, 0, *t.staging, 0, 0, 0, w, h);
         out->end();
@@ -681,10 +681,10 @@ bool Submission::render(Target &t, raw::Pipeline *pipeline, uint32_t draws, uint
     return finish(cb, gpu, wall);
 }
 
-bool Submission::record(const std::function<bool(raw::CommandBuffer &)> &body, uint64_t &gpu, uint64_t &wall)
+bool Submission::record(const std::function<bool(gm20b::CommandBuffer &)> &body, uint64_t &gpu, uint64_t &wall)
 {
-    raw::Device &d = *b_.device;
-    raw::CommandBuffer *cb = d.begin();
+    gm20b::Device &d = *b_.device;
+    gm20b::CommandBuffer *cb = d.begin();
     if (!cb)
         return error("no channel: " + d.channelError());
     if (!body(*cb)) {
@@ -694,14 +694,14 @@ bool Submission::record(const std::function<bool(raw::CommandBuffer &)> &body, u
     return finish(cb, gpu, wall);
 }
 
-bool Submission::dispatch(const raw::ComputeState *state, uint32_t dispatches, uint64_t &gpu, uint64_t &wall)
+bool Submission::dispatch(const gm20b::ComputeState *state, uint32_t dispatches, uint64_t &gpu, uint64_t &wall)
 {
-    raw::Device &d = *b_.device;
-    raw::CommandBuffer *cb = d.begin();
+    gm20b::Device &d = *b_.device;
+    gm20b::CommandBuffer *cb = d.begin();
     if (!cb)
         return error("no channel: " + d.channelError());
     {
-        raw::ComputeEncoder ce(*cb, d);
+        gm20b::ComputeEncoder ce(*cb, d);
         ce.setState(state);
         for (uint32_t n = 0; n < dispatches; n++) {
             const char *why = nullptr;
@@ -716,9 +716,9 @@ bool Submission::dispatch(const raw::ComputeState *state, uint32_t dispatches, u
     return finish(cb, gpu, wall);
 }
 
-bool Submission::finish(raw::CommandBuffer *cb, uint64_t &gpu, uint64_t &wall)
+bool Submission::finish(gm20b::CommandBuffer *cb, uint64_t &gpu, uint64_t &wall)
 {
-    raw::Device &d = *b_.device;
+    gm20b::Device &d = *b_.device;
     const uint32_t stamp = cb->stamp;
     uint32_t seq = 0;
     const uint64_t start = mach_absolute_time();
@@ -775,7 +775,7 @@ void switch_bench_close(struct switch_bench *bench)
 
 uint32_t switch_bench_texel_bytes(uint32_t format)
 {
-    const raw::FormatInfo *f = raw::formatInfo(format);
+    const gm20b::FormatInfo *f = gm20b::formatInfo(format);
     return f && f->rt ? f->bpp : 0;
 }
 
@@ -783,7 +783,7 @@ size_t switch_bench_describe(struct switch_bench *b, char *out, size_t size)
 {
     if (!b || !b->device)
         return size_t(snprintf(out, size, "no raw device: %s", b ? b->error.c_str() : "?"));
-    const raw::Pack &pack = b->device->pack();
+    const gm20b::Pack &pack = b->device->pack();
     return size_t(snprintf(out, size,
                            "%s v%u stack %016llx states %u; template %016llx (%s); kernel template %016llx; own GPU VM",
                            b->pack.c_str(), pack.header()->version, (unsigned long long)pack.header()->stack,

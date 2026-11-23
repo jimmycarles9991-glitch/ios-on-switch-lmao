@@ -5,6 +5,8 @@
 namespace
 {
 constexpr uint32_t accessMask = SWITCH_GPU_BACKING_READ | SWITCH_GPU_BACKING_WRITE;
+// what a use may carry: its access, and a read's leave to go on beside CPU owners (switch_gpu_claim_use)
+constexpr uint32_t useMask = accessMask | SWITCH_GPU_BACKING_NO_CPU_EXCLUSION;
 }
 
 SwitchGpuAdmission::~SwitchGpuAdmission()
@@ -29,7 +31,7 @@ int SwitchGpuAdmission::begin(const switch_gpu_backing_use *uses, uint32_t count
 	}
 	for (uint32_t i = 0; i < count; ++i) {
 		if (!uses[i].backing || !(uses[i].access & accessMask) ||
-		    (uses[i].access & ~accessMask) || uses[i].reserved)
+		    (uses[i].access & ~useMask) || uses[i].reserved)
 			return -22;
 		uses_[i] = uses[i];
 	}
@@ -89,8 +91,9 @@ int SwitchGpuAdmission::begin(const switch_gpu_backing_use *uses, uint32_t count
 			else
 				--owners;
 		}
+		// IOSurface's lock only bounds CPU access (IOSurfaceRef.h): a read goes on beside its holders
 		const bool write = uses_[i].access & SWITCH_GPU_BACKING_WRITE;
-		if (!result && (writers || (write && readers)))
+		if (!result && write && (writers || readers))
 			result = -16;
 		if (!result)
 			switch_gpu_backing_prune_locked(backing);
@@ -123,7 +126,7 @@ bool SwitchGpuAdmission::covers(const switch_gpu_backing_use *uses, uint32_t cou
 		return false;
 	for (uint32_t i = 0; i < count; ++i) {
 		if (!uses[i].backing || !(uses[i].access & accessMask) ||
-		    (uses[i].access & ~accessMask) || uses[i].reserved)
+		    (uses[i].access & ~useMask) || uses[i].reserved)
 			return false;
 		uint32_t first = 0, last = count_;
 		while (first < last) {
@@ -134,7 +137,7 @@ bool SwitchGpuAdmission::covers(const switch_gpu_backing_use *uses, uint32_t cou
 				last = middle;
 		}
 		if (first == count_ || uses_[first].backing != uses[i].backing ||
-		    (uses[i].access & ~uses_[first].access))
+		    (uses[i].access & accessMask & ~uses_[first].access))
 			return false;
 	}
 	return true;
@@ -163,9 +166,10 @@ extern "C" int switch_gpu_backing_admission_ready(switch_gpu_backing *backing, u
 	if (!backing || !(access & accessMask) || (access & ~accessMask))
 		return -22;
 	const bool claimed = switch_gpu_backing_enter(backing);
+	// as begin: a read is ready beside CPU owners
 	const bool ready =
-		!backing->cpu_writers && (!(access & SWITCH_GPU_BACKING_WRITE) ||
-					  !switch_gpu_backing_exclusive_readers(backing));
+		!(access & SWITCH_GPU_BACKING_WRITE) ||
+		(!backing->cpu_writers && !switch_gpu_backing_exclusive_readers(backing));
 	switch_gpu_backing_leave(backing, claimed);
 	return ready ? 1 : 0;
 }

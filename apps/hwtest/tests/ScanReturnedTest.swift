@@ -54,7 +54,8 @@ struct ScanReturnedTest: HWTest {
                 ("pages went back to Core Animation (d_handed >= 100)", delta("handed") >= 100),
                 ("none while the display could scan it (d_overlaps = 0)", delta("overlaps") == 0),
                 ("none since boot (overlaps_boot = 0)", (after["overlaps"] ?? 0) == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// kern.switch_scan_* by name, and the errno of the first that could not be read.

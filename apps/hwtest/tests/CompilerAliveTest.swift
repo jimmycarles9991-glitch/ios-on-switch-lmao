@@ -70,7 +70,8 @@ struct CompilerAliveTest: HWTest {
                     "inactive limit \(inactive) MB, hard",
                     Int(probe.inactive_mb) == inactive && probe.inactive_fatal != 0
                 ),
-            ], metrics, proof: "pid \(probe.pid)")
+            ], metrics, proof: "pid \(probe.pid)"
+        )
     }
 
     /// xnu bsd/sys/kern_memorystatus.h kMemorystatusTracked | kMemorystatusSupportsIdleExit, on 10063 and 12377 alike

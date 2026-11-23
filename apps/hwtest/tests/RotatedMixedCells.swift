@@ -5,7 +5,7 @@ import IOSurface
 import Metal
 
 /// gpu.x1.rotated_target's passes whose attachments beside the turned target are turned another way, of another frame, or
-/// not turned and of another size. Metal accepts each (measured on an M4 Max, raw/runtime/raw_area_load.h): the render area,
+/// not turned and of another size. Metal accepts each (measured on an M4 Max, area_load.h): the render area,
 /// default viewport and scissor are the attachments' intersection, and every attachment lands by its own store map. A turned
 /// attachment's Load reads its plane as a plane of the render area's frame would be read, so where its frame is past the area
 /// each texel the pass stores is the frame's texel past it; the references load so ahead of those passes (loadAsMetal).
@@ -27,7 +27,8 @@ extension RotatedCells {
         let second: MTLTexture
         if beside.turnedRun {
             let cells = RotatedCells(
-                gpu: gpu, states: states, turn: secondTurn, width: w, height: h, aligned: aligned)
+                gpu: gpu, states: states, turn: secondTurn, width: w, height: h, aligned: aligned
+            )
             guard let plane = try? cells.makePlane() else { return }
             fillSurface(plane, 0x5a)
             beside.second = (plane, cells)
@@ -84,7 +85,8 @@ extension RotatedCells {
         case (.sized, 1), (.sized, 3):
             let area = n == 1 ? (width, height) : sizes[1]
             try await loadTurned(
-                reference, turn: turn, area: area, reached: reachedTiles(of: sizedLoadRect, area: area))
+                reference, turn: turn, area: area, reached: reachedTiles(of: sizedLoadRect, area: area)
+            )
         case (_, 1):
             try await transposedLoad(cell, into: reference)
         default:
@@ -100,8 +102,8 @@ extension RotatedCells {
         let perRow = (area.0 + 31) / 32, rows = (area.1 + 31) / 32
         let tile = { (v: Double, n: Int) in min(max(Int(floor(v / 32)), 0), n - 1) }
         var out = Set<Int>()
-        for ty in tile(ys.min()!, rows)...tile(ys.max()!, rows) {
-            for tx in tile(xs.min()!, perRow)...tile(xs.max()!, perRow) { out.insert(ty * perRow + tx) }
+        for ty in tile(ys.min()!, rows) ... tile(ys.max()!, rows) {
+            for tx in tile(xs.min()!, perRow) ... tile(xs.max()!, perRow) { out.insert(ty * perRow + tx) }
         }
         return out
     }
@@ -116,11 +118,11 @@ extension RotatedCells {
         let perRow = (area.0 + 31) / 32
         let first = try await gpu.read(texture, bytesPerPixel: 4)
         var loaded = first
-        for y in 0..<min((area.1 + 31) / 32 * 32, h) {
-            for x in 0..<min((area.0 + 31) / 32 * 32, w) where reached?.contains((y / 32) * perRow + x / 32) ?? true {
+        for y in 0 ..< min((area.1 + 31) / 32 * 32, h) {
+            for x in 0 ..< min((area.0 + 31) / 32 * 32, w) where reached?.contains((y / 32) * perRow + x / 32) ?? true {
                 let (sx, sy) = turn == 4 ? (x, h - 1 - y) : (min(x + dx, w - 1), min(y + dy, h - 1))
                 let to = (y * w + x) * 4, from = (sy * w + sx) * 4
-                loaded[to..<(to + 4)] = first[from..<(from + 4)]
+                loaded[to ..< (to + 4)] = first[from ..< (from + 4)]
             }
         }
         try await gpu.upload(loaded, to: texture, bytesPerRow: w * 4)
@@ -135,11 +137,12 @@ extension RotatedCells {
         }
         defer { plane.surface.unlock(options: .readOnly, seed: nil) }
         var wrong = 0
-        for y in 0..<cells.height {
-            for x in 0..<cells.width {
+        for y in 0 ..< cells.height {
+            for x in 0 ..< cells.width {
                 let (px, py) = cells.stored(x, y)
                 let got = UnsafeRawBufferPointer(
-                    start: plane.surface.baseAddress + py * plane.rowBytes + px * 4, count: 4)
+                    start: plane.surface.baseAddress + py * plane.rowBytes + px * 4, count: 4
+                )
                 if !zip(got, expected.pixel(x, y, width: cells.width)).allSatisfy({ $0 == $1 }) { wrong += 1 }
             }
         }

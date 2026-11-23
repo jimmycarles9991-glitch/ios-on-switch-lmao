@@ -1,7 +1,6 @@
-"""The native seed's actions (metal_seed's, defs.bzl): the raw path's records and NativeMetal's compute analyses, made
-per corpus bucket, stamped for the tools' stack into one per-file tree that the host checks read, then packed as the
-device reads them (kits/SwitchSeedPack): <packed>/raw-<stack> and <packed>/native-analysis, an index and ~12 MiB packs
-each, the observed states' packs first.
+"""The native seed's actions (metal_seed's, defs.bzl): the driver's records, made per corpus bucket by the offline
+compile, stamped for the tools' stack into one per-file tree that the host checks read, then packed as the device reads
+them (kits/SwitchSeedPack): <packed>/raw-<stack>, an index and ~12 MiB packs, the observed states' packs first.
 """
 
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
@@ -31,14 +30,13 @@ def native_records(ctx, tools, crawl, views, lines):
     for i, corpus in enumerate(lines):
         view = views[i]
         inputs = depset(
-            native_tools + [view.store, tools.twin] + ctx.files.device_libraries + ctx.files.embedded,
+            native_tools + [view.store] + ctx.files.device_libraries + ctx.files.embedded,
             transitive = [view.files],
         )
         out = ctx.actions.declare_directory(named(ctx, "_native/bucket-" + three(i)))
         args = ctx.actions.args()
         args.add("bucket")
         args.add("--raw", tools.raw_dir)
-        args.add("--nvk", tools.twin)
         args.add("--root", view.root + "/root")
         args.add("--store", view.store)
         args.add("--qc", crawl.qc)
@@ -91,22 +89,21 @@ def native_records(ctx, tools, crawl, views, lines):
     )
     return native_records, checked
 
-def native_pack(ctx, stamped, meta):
-    """Pack the stamped tree for the device; `meta` is the join's directory, whose index names the m2v build."""
+def native_pack(ctx, stamped):
+    """Pack the stamped tree for the device."""
     packed = ctx.actions.declare_directory(named(ctx, "_native/packed"))
     args = ctx.actions.args()
     args.add("pack")
     args.add("--seed", stamped.path)
-    args.add("--m2v-index", meta.path + "/index")
     args.add("--tool", ctx.executable._seedpack)
     args.add("--out", packed.path)
     ctx.actions.run(
         executable = ctx.executable._native_seed,
         arguments = [args],
-        inputs = [stamped, meta],
+        inputs = [stamped],
         tools = [ctx.executable._seedpack],
         outputs = [packed],
         mnemonic = "MetalNativePack",
-        progress_message = "Packing native records and analyses for the device",
+        progress_message = "Packing native records for the device",
     )
     return packed

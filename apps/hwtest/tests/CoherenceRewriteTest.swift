@@ -24,8 +24,8 @@ struct CoherenceRewriteTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         let blend = try gpu.render(vertex: "coherence_vertex", fragment: "coherence_fragment", format: .bgra8Unorm) {
             let colour = $0.colorAttachments[0]!
@@ -38,7 +38,7 @@ struct CoherenceRewriteTest: HWTest {
         var tallies: [CoherenceTally] = []
         for arm in try Self.arms(gpu) {
             var tally = CoherenceTally(arm: arm.name)
-            for round in 0..<Self.rounds {
+            for round in 0 ..< Self.rounds {
                 try await Self.round(gpu, blend, arm, round, &tally)
             }
             tallies.append(tally)
@@ -73,7 +73,8 @@ struct CoherenceRewriteTest: HWTest {
             pass.colorAttachments[0].storeAction = .store
             pass.colorAttachments[0].clearColor = MTLClearColor(
                 red: Double(written[2]) / 255, green: Double(written[1]) / 255, blue: Double(written[0]) / 255,
-                alpha: Double(written[3]) / 255)
+                alpha: Double(written[3]) / 255
+            )
             commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
         }
         tally.cpuStale += CoherenceTally.differing(try arm.read(texture), from: written)
@@ -91,7 +92,8 @@ struct CoherenceRewriteTest: HWTest {
         }
         let older = written.enumerated().map { min(255, Int($0.element) + Int(added[$0.offset])) }
         tally.count(
-            try arm.read(texture), cpu: cpu, added: { _, c in Int(added[c]) }, older: [{ _, c in older[c] }])
+            try arm.read(texture), cpu: cpu, added: { _, c in Int(added[c]) }, older: [{ _, c in older[c] }]
+        )
     }
 
     /// Far from every CPU byte (0...199), so a read of the GPU's own clear never passes for the CPU's
@@ -100,7 +102,7 @@ struct CoherenceRewriteTest: HWTest {
     }
 
     static func cpuBytes(_ round: Int) -> [UInt8] {
-        (0..<(side * side * 4)).map { UInt8(($0 &* 7 &+ round &* 13) % 200) }
+        (0 ..< (side * side * 4)).map { UInt8(($0 &* 7 &+ round &* 13) % 200) }
     }
 
     static func arms(_ gpu: GPU) throws -> [CoherenceArm] {
@@ -111,7 +113,8 @@ struct CoherenceRewriteTest: HWTest {
             texture: {
                 shared = nil
                 shared = try gpu.texture(
-                    .bgra8Unorm, side, side, usage: [.renderTarget, .shaderRead], storage: .shared)
+                    .bgra8Unorm, side, side, usage: [.renderTarget, .shaderRead], storage: .shared
+                )
                 return shared!
             },
             write: { texture, bytes in
@@ -121,11 +124,13 @@ struct CoherenceRewriteTest: HWTest {
                 var out = [UInt8](repeating: 0, count: side * side * 4)
                 texture.getBytes(&out, bytesPerRow: rowBytes, from: region, mipmapLevel: 0)
                 return out
-            })
+            }
+        )
 
         let buffer = try gpu.buffer(side * rowBytes)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: side, height: side, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: side, height: side, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
         guard let bufferTexture = buffer.makeTexture(descriptor: descriptor, offset: 0, bytesPerRow: rowBytes) else {
@@ -134,33 +139,38 @@ struct CoherenceRewriteTest: HWTest {
         let viaBuffer = CoherenceArm(
             name: "buffer", texture: { bufferTexture },
             write: { _, bytes in buffer.contents().copyMemory(from: bytes, byteCount: bytes.count) },
-            read: { _ in [UInt8](UnsafeRawBufferPointer(start: buffer.contents(), count: side * rowBytes)) })
+            read: { _ in [UInt8](UnsafeRawBufferPointer(start: buffer.contents(), count: side * rowBytes)) }
+        )
 
         let properties: [IOSurfacePropertyKey: Any] = [
             .width: side, .height: side, .bytesPerElement: 4, .pixelFormat: kCVPixelFormatType_32BGRA,
         ]
         guard let surface = IOSurface(properties: properties),
-            let surfaceTexture = gpu.device.makeTexture(
-                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0)
+              let surfaceTexture = gpu.device.makeTexture(
+                  descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0
+              )
         else { throw TestFailure("no IOSurface-backed texture") }
         let viaSurface = CoherenceArm(
             name: "iosurface", texture: { surfaceTexture },
             write: { _, bytes in
                 surface.lock(options: [], seed: nil)
                 defer { surface.unlock(options: [], seed: nil) }
-                for y in 0..<side {
+                for y in 0 ..< side {
                     (surface.baseAddress + y * surface.bytesPerRow).copyMemory(
-                        from: Array(bytes[(y * rowBytes)..<((y + 1) * rowBytes)]), byteCount: rowBytes)
+                        from: Array(bytes[(y * rowBytes) ..< ((y + 1) * rowBytes)]), byteCount: rowBytes
+                    )
                 }
             },
             read: { _ in
                 surface.lock(options: .readOnly, seed: nil)
                 defer { surface.unlock(options: .readOnly, seed: nil) }
-                return (0..<side).flatMap {
+                return (0 ..< side).flatMap {
                     [UInt8](
-                        UnsafeRawBufferPointer(start: surface.baseAddress + $0 * surface.bytesPerRow, count: rowBytes))
+                        UnsafeRawBufferPointer(start: surface.baseAddress + $0 * surface.bytesPerRow, count: rowBytes)
+                    )
                 }
-            })
+            }
+        )
         return [replaced, viaBuffer, viaSurface]
     }
 }

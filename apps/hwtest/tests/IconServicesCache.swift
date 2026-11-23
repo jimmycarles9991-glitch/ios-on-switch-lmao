@@ -4,7 +4,7 @@ import Foundation
 import HWTestCore
 import HWTestGPU
 
-/// gpu.raw.icon_corners' IconServices arms: Settings' icon as iconservicesagent draws it at the App Library's 27 and
+/// gpu.gm20b.icon_corners' IconServices arms: Settings' icon as iconservicesagent draws it at the App Library's 27 and
 /// 68 points, scale 2, and the agent's rendered-icon cache; and the requests the icon_* cases make.
 ///
 /// The agent keeps its renders in systemgroup.com.apple.lsd.iconscache's Library/Caches/com.apple.IconsCache, 24B119's
@@ -68,14 +68,14 @@ enum IconServicesCache {
             68: icon(settings, points: 68, scale: 2, ignoreCache: false),
         ]
         guard let large = icon(settings, points: 68, scale: 2, ignoreCache: true),
-            let small = icon(settings, points: 27, scale: 2, ignoreCache: true)
+              let small = icon(settings, points: 27, scale: 2, ignoreCache: true)
         else {
             metrics.set("icon_api", "absent")
             wrong.append("icon_api")
             return
         }
         if let placeholder = icon(missingApp, points: 68, scale: 2, ignoreCache: true),
-            differing(placeholder, large) == 0
+           differing(placeholder, large) == 0
         {
             metrics.set("icon_placeholder", true)
             wrong.append("icon_placeholder")
@@ -105,8 +105,8 @@ enum IconServicesCache {
 
     static func differing(_ a: Image, _ b: Image) -> Int {
         guard a.side == b.side else { return a.side * a.side }
-        return (0..<(a.rgba.count / 4)).filter { p in
-            (0..<4).contains { abs(Int(a.rgba[p * 4 + $0]) - Int(b.rgba[p * 4 + $0])) > codes }
+        return (0 ..< (a.rgba.count / 4)).filter { p in
+            (0 ..< 4).contains { abs(Int(a.rgba[p * 4 + $0]) - Int(b.rgba[p * 4 + $0])) > codes }
         }.count
     }
 
@@ -114,7 +114,8 @@ enum IconServicesCache {
         let reference = RenderBoxCorner.reduce(large.alpha, from: large.side, to: small.side)
         let toCodes = { (alpha: [Double]) in alpha.map { UInt8(($0 * 255).rounded()) } }
         return RenderBoxCorner.judge(
-            toCodes(small.alpha), toCodes(reference), side: small.side, radius: Double(small.side) * iconRadius)
+            toCodes(small.alpha), toCodes(reference), side: small.side, radius: Double(small.side) * iconRadius
+        )
     }
 
     static func systemBuild() -> String? {
@@ -161,12 +162,13 @@ enum IconServicesCache {
         found.folders = names.filter { name in
             var folder: ObjCBool = false
             return FileManager.default.fileExists(
-                atPath: directory.appendingPathComponent(name).path, isDirectory: &folder)
+                atPath: directory.appendingPathComponent(name).path, isDirectory: &folder
+            )
                 && folder.boolValue
         }.sorted()
         let candidates =
             [(directory, "top")]
-            + found.folders.map { (directory.appendingPathComponent($0), "salt") }
+                + found.folders.map { (directory.appendingPathComponent($0), "salt") }
         for (folder, at) in candidates {
             let url = folder.appendingPathComponent(info)
             guard let data = try? Data(contentsOf: url) else { continue }
@@ -187,12 +189,13 @@ enum IconServicesCache {
     static func stamp(_ folder: URL) -> [Int]? {
         guard
             let files = FileManager.default.enumerator(
-                at: folder, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey])
+                at: folder, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey]
+            )
         else { return nil }
         var count = 0, bytes = 0
         for case let url as URL in files {
             guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
-                values.isRegularFile == true
+                  values.isRegularFile == true
             else { continue }
             count += 1
             bytes += values.fileSize ?? 0
@@ -207,7 +210,7 @@ enum IconServicesCache {
     /// `source`'s icon as iconservicesagent draws it at `points` and `scale`, nil where IconServices lacks what this asks
     static func icon(_ source: IconSource, points: CGFloat, scale: CGFloat, ignoreCache: Bool) -> Image? {
         guard let iconType = NSClassFromString("ISIcon") as? NSObject.Type,
-            let descriptorType = NSClassFromString("ISImageDescriptor") as? NSObject.Type
+              let descriptorType = NSClassFromString("ISImageDescriptor") as? NSObject.Type
         else { return nil }
         let initSize = NSSelectorFromString("initWithSize:scale:"), ignore = NSSelectorFromString("setIgnoreCache:")
         let prepare = NSSelectorFromString("prepareImageForDescriptor:")
@@ -218,19 +221,21 @@ enum IconServicesCache {
             case .type(let id): ("initWithType:", id)
             }
         guard descriptorType.instancesRespond(to: initSize), descriptorType.instancesRespond(to: ignore),
-            iconType.instancesRespond(to: prepare), iconType.instancesRespond(to: cgImage),
-            let made = iconType.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue() as? NSObject,
-            let icon = made.perform(NSSelectorFromString(initIcon), with: identifier)?.takeUnretainedValue()
-                as? NSObject,
-            let alloc = descriptorType.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue()
+              iconType.instancesRespond(to: prepare), iconType.instancesRespond(to: cgImage),
+              let made = iconType.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue() as? NSObject,
+              let icon = made.perform(NSSelectorFromString(initIcon), with: identifier)?.takeUnretainedValue()
+              as? NSObject,
+              let alloc = descriptorType.perform(NSSelectorFromString("alloc"))?.takeUnretainedValue()
         else { return nil }
         let descriptor = unsafeBitCast(descriptorType.instanceMethod(for: initSize), to: InitSizeScale.self)(
-            alloc, initSize, CGSize(width: points, height: points), scale)
+            alloc, initSize, CGSize(width: points, height: points), scale
+        )
         unsafeBitCast(descriptorType.instanceMethod(for: ignore), to: SetBool.self)(descriptor, ignore, ignoreCache)
         _ = icon.perform(prepare, with: descriptor)
         guard
             let image = unsafeBitCast(iconType.instanceMethod(for: cgImage), to: ImageFor.self)(
-                icon, cgImage, descriptor)?
+                icon, cgImage, descriptor
+            )?
                 .takeUnretainedValue(), image.width == image.height
         else { return nil }
         return Image(rgba: rgba(of: image), side: image.width)
@@ -243,7 +248,8 @@ enum IconServicesCache {
             guard
                 let context = CGContext(
                     data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
-                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                    space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                )
             else { return }
             context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         }

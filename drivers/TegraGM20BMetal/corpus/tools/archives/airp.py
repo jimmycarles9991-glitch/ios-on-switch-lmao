@@ -1,7 +1,7 @@
 """The pipeline states of a binary archive's AIRP buffers (gpubin.py): one buffer per state Apple compiled ahead.
 
 The fields, numbered as the buffers' vtables number them, were matched against the states QuartzCore's tables make of
-its offline compilation manifest (raw/pack/ca): every state both name has the same corpus line.
+its offline compilation manifest (pack/ca): every state both name has the same corpus line.
 
   root          0 a 12-byte header, 1 a byte, 2 the kind (1 render, 2 compute, 3 tile), 3 the state
   render        0 the vertex function, 1 the fragment function, 2 {1 vertex descriptor, 3 input primitive topology,

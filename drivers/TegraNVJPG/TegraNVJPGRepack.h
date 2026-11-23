@@ -7,10 +7,9 @@
 #include "TegraNVJPGRequest.h"
 #include "../TegraVIC/TegraVICSurface.h"
 
-// Keeps the grown repack buffer mapped through its backing, runs the decode from the request's bitstream IOVA with
-// VIC's re-pack queued to wait for its fence on the hardware, and returns once
-// VIC has written the destination: 0, or the decode's or VIC's error (`why` set for a refusal before any engine work).
-// Engine thread; takes the job lock.
+// Runs the decode from the scan at IOVA `bitstream` with VIC's re-pack queued behind its fence, and returns once VIC has
+// written the destination: 0, or the decode's or VIC's error (`why` set for a refusal before any engine work). Engine
+// thread.
 int tegra_nvjpg_repack(TegraNVJPGJob *engine, const TegraNVJPGPlan *plan, const TegraNVJPGDecodeRequest *request,
                        const TegraVICSurface *destination, uint64_t bitstream, nvjpg_dec_status *status,
                        uint64_t *busyUs, const char **why);

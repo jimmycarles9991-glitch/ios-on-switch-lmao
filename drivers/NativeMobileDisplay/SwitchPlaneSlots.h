@@ -33,18 +33,13 @@ int planeSlotIdle(int avoid, bool mapped) const
     return lru;
 }
 
-static inline bool planeUnplacedLogged = false, planeForgetsLost = false;
+static inline bool planeUnplacedLogged = false;
 static inline switch_display::PlaneForgets<kPlaneSlots> planeForgets;
 
 // The backing registry's retirement thread, once for each freed allocation the display noted: no lock, no wait.
 static void planeForgotten(uint64_t allocation)
 {
-    if (!planeForgets.forget(allocation) && !planeForgetsLost) {
-        planeForgetsLost = true;
-        IOLog("SwitchDisplay: window B's forgotten allocations overflowed at %llu: its slot keeps the freed pages "
-              "mapped until it is reused\n",
-              static_cast<unsigned long long>(allocation));
-    }
+    planeForgets.forget(allocation);
 }
 
 // Every slot mapping an allocation the registry freed goes; one a set still uses goes at the latch that frees it.
@@ -125,15 +120,15 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
 {
     if (!memory || !memory->metaCast("IOMemoryDescriptor") || high <= low || high - low > kPlaneSlotSpan)
         return -1;
+    const uint64_t pages = (memory->getLength() + 4095) & ~4095ULL;
+    const uint64_t end = high < pages ? high : pages;
     for (unsigned k = 0; k < kPlaneSlots; ++k) {
-        if (planeSlots[k].memory == memory && planeSlots[k].low == low && planeSlots[k].high == high &&
+        if (planeSlots[k].memory == memory && planeSlots[k].low == low && planeSlots[k].high == end &&
             planeSlots[k].tiled == tiled) {
             planeSlots[k].used = ++planeSlotUses;
             return static_cast<int>(k);
         }
     }
-    const uint64_t pages = (memory->getLength() + 4095) & ~4095ULL;
-    const uint64_t end = high < pages ? high : pages;
     const int k = end > low ? planeSlotPlace(low, end, -1) : -1;
     if (k < 0)
         return -1;

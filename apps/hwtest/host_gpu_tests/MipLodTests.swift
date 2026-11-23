@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 import XCTest
 
-/// gpu.raw.mip_lod's references on this Mac's GPU, whose sampling is Metal's: every level arm within the tolerance of
+/// gpu.gm20b.mip_lod's references on this Mac's GPU, whose sampling is Metal's: every level arm within the tolerance of
 /// the formula, every icon draw within MipLod.iconTolerance of the CPU's reference.
 final class MipLodTests: XCTestCase {
     private func makeGPU() throws -> GPU {

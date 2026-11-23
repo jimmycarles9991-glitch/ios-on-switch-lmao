@@ -49,7 +49,8 @@ public enum Demux {
             try sample(
                 frame.data, format: format,
                 pts: CMTime(value: CMTimeValue(frame.pts), timescale: CMTimeScale(clip.fps)),
-                duration: CMTime(value: 1, timescale: CMTimeScale(clip.fps)))
+                duration: CMTime(value: 1, timescale: CMTimeScale(clip.fps))
+            )
         }
         return Demuxed(format: format, samples: samples)
     }
@@ -61,12 +62,13 @@ public enum Demux {
         let level: UInt8 = rate <= 36_864_000 ? 31 : rate <= 83_558_400 ? 40 : rate <= 160_432_128 ? 41 : 50
         let record: [UInt8] = [1, 0, 0, 0, 0, level, 8 << 4 | 1 << 1, 1, 1, 1, 0, 0]
         let extensions: [CFString: Any] = [
-            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: ["vpcC": Data(record)]
+            kCMFormatDescriptionExtension_SampleDescriptionExtensionAtoms: ["vpcC": Data(record)],
         ]
         var format: CMVideoFormatDescription?
         let status = CMVideoFormatDescriptionCreate(
             allocator: nil, codecType: kCMVideoCodecType_VP9, width: Int32(clip.width), height: Int32(clip.height),
-            extensions: extensions as CFDictionary, formatDescriptionOut: &format)
+            extensions: extensions as CFDictionary, formatDescriptionOut: &format
+        )
         guard status == noErr, let format else { throw VideoError.status("CMVideoFormatDescriptionCreate", status) }
         return format
     }
@@ -78,11 +80,13 @@ public enum Demux {
         var block: CMBlockBuffer?
         var status = CMBlockBufferCreateWithMemoryBlock(
             allocator: nil, memoryBlock: nil, blockLength: data.count, blockAllocator: nil, customBlockSource: nil,
-            offsetToData: 0, dataLength: data.count, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block)
+            offsetToData: 0, dataLength: data.count, flags: kCMBlockBufferAssureMemoryNowFlag, blockBufferOut: &block
+        )
         guard status == noErr, let block else { throw VideoError.status("CMBlockBufferCreateWithMemoryBlock", status) }
         status = data.withUnsafeBytes {
             CMBlockBufferReplaceDataBytes(
-                with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count)
+                with: $0.baseAddress!, blockBuffer: block, offsetIntoDestination: 0, dataLength: data.count
+            )
         }
         guard status == noErr else { throw VideoError.status("CMBlockBufferReplaceDataBytes", status) }
         var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: pts, decodeTimeStamp: .invalid)
@@ -90,13 +94,15 @@ public enum Demux {
         var sample: CMSampleBuffer?
         status = CMSampleBufferCreateReady(
             allocator: nil, dataBuffer: block, formatDescription: format, sampleCount: 1, sampleTimingEntryCount: 1,
-            sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample)
+            sampleTimingArray: &timing, sampleSizeEntryCount: 1, sampleSizeArray: &size, sampleBufferOut: &sample
+        )
         guard status == noErr, let sample else { throw VideoError.status("CMSampleBufferCreateReady", status) }
         if !sync, let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: true) {
             let first = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
             CFDictionarySetValue(
                 first, Unmanaged.passUnretained(kCMSampleAttachmentKey_NotSync).toOpaque(),
-                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
+                Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+            )
         }
         return sample
     }

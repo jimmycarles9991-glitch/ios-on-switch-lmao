@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The probes that program MAXWELL_B methods no open driver runs on GM20B (clb197.h), through RawMethods. Each is its
+/// The probes that program MAXWELL_B methods no open driver runs on GM20B (clb197.h), through GM20BMethods. Each is its
 /// own test, so the run's journal names it before it starts, and each puts back every register it set after its draw.
 enum X1RawProbes {
     static let setIteratedBlendOptimization: UInt32 = 0x02f4
@@ -42,8 +42,8 @@ enum X1RawProbes {
             0x8000, 0x7e00, 0xfe00, 0x7c00, 0xfc00, 0x0001, 0x8001, 0x03ff, 0x3c00, 0xbc00, 0x7bff, 0x0000, 0x3555,
             0x0400, 0x8400, 0x7d00,
         ]
-        let halves = (0..<64).map { special[$0 % special.count] }
-        let unorm = (0..<64).map { UInt8(($0 * 53 + 7) & 255) }
+        let halves = (0 ..< 64).map { special[$0 % special.count] }
+        let unorm = (0 ..< 64).map { UInt8(($0 * 53 + 7) & 255) }
         var wrong: [String: Int] = [:]
         var metrics = Metrics()
         var paths: [String] = []
@@ -68,8 +68,9 @@ enum X1RawProbes {
                 if words.isEmpty {
                     paths.append(try await gpu.run(draw).path)
                 } else {
-                    let drawn = try await RawMethods.draw(
-                        gpu, before: words, after: [(setIteratedBlendOptimization, 0)], draw)
+                    let drawn = try await GM20BMethods.draw(
+                        gpu, before: words, after: [(setIteratedBlendOptimization, 0)], draw
+                    )
                     paths.append(drawn.path)
                     emitted += drawn.emitted
                 }
@@ -118,9 +119,10 @@ enum X1RawProbes {
                 encoder.endEncoding()
             }
             if swizzled {
-                let drawn = try await RawMethods.draw(
+                let drawn = try await GM20BMethods.draw(
                     gpu, before: [(setViewportCoordinateSwizzle0, 0x6402)],
-                    after: [(setViewportCoordinateSwizzle0, 0x6420)], draw)
+                    after: [(setViewportCoordinateSwizzle0, 0x6420)], draw
+                )
                 paths.append(drawn.path)
                 emitted += drawn.emitted
             } else {
@@ -137,8 +139,8 @@ enum X1RawProbes {
         ]
         let matched =
             transforms.first { _, map in
-                (0..<size).allSatisfy { y in
-                    (0..<size).allSatisfy { x in
+                (0 ..< size).allSatisfy { y in
+                    (0 ..< size).allSatisfy { x in
                         let (sx, sy) = map(x, y)
                         return pictures[1].pixel(x, y, width: size) == pictures[0].pixel(sx, sy, width: size)
                     }

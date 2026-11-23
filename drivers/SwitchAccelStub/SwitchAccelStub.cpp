@@ -4,10 +4,10 @@
 // dispatch_once block, QuartzCore 21H461 0x189595afc: cmp w21,#0x12b; usleep(0x186a0)). Without one, backboardd's
 // window server start waits the full 30 s. This class has no MetalPluginName, so Metal's _MTLRegisterDevices skips it
 // (getMetalPluginClassForService returns nil) and CA keeps its CPU renderer.
-// It derives from the original IOAcceleratorES (drivers/NativeMetal/OriginalAcceleratorABI.h; original-bindings.S from
+// It derives from the original IOAcceleratorES (drivers/TegraGM20B/OriginalAcceleratorABI.h; original-bindings.S from
 // scripts/data/ioaccelerator-base-abi.json), so it is built like TegraGM20BAccelerator.cpp: static initializer staged out
 // of __mod_init_func and run by SwitchAccelStubPublish.cpp once IOGPUFamily has loaded.
-#include "../NativeMetal/OriginalAcceleratorABI.h"
+#include "../TegraGM20B/OriginalAcceleratorABI.h"
 
 // NOLINTNEXTLINE(misc-use-internal-linkage): OSDefineMetaClassAndStructors needs the class's external linkage
 class SwitchAccelStub : public IOAcceleratorES {

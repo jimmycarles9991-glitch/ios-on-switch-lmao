@@ -107,9 +107,9 @@ class Fetch(unittest.TestCase):
     def test_the_gpu_scenes_files_come_along(self):
         scene = self.card.reports.parent / 'gpu/gpu.xr_blend'
         scene.mkdir(parents=True)
-        (scene / 'raw-0-got.png').write_bytes(b'png')
+        (scene / 'gm20b-0-got.png').write_bytes(b'png')
         fetch.fetch(self.card.data, self.card.switch, self.history, self.root / 'out')
-        copied = self.root / 'out/hwtest-gpu/com.brunostjohn.switch.hwtest/gpu.xr_blend/raw-0-got.png'
+        copied = self.root / 'out/hwtest-gpu/com.brunostjohn.switch.hwtest/gpu.xr_blend/gm20b-0-got.png'
         self.assertEqual(copied.read_bytes(), b'png')
 
     def test_the_ui_tests_pictures_come_along(self):

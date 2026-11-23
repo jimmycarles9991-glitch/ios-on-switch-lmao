@@ -1,18 +1,18 @@
-"""The Core Animation states this device's QuartzCore asks for that the raw pack holds by deduction, not by a journal.
+"""The Core Animation states this device's QuartzCore asks for that the pack holds by deduction, not by a journal.
 
 ca_asked.py <qc-<build>.json> <stage-tegra-gm20b-metal.py> <out> [<ca-names/<build>.txt>]. Apple's offline compilation
 manifest names its states for extended-colour devices; this device's QuartzCore names them as
-raw/pack/ca/deepcolour.py gives (asked), from the Core Animation preferences the stager writes. A device's logs name the
+pack/ca/deepcolour.py gives (asked), from the Core Animation preferences the stager writes. A device's logs name the
 states it made at run time (precompile/ca-names/<build>.txt), which the pack's corpus tier makes from their names. <out>
 starts with "# cif10=<answer>" and holds each asked state the manifest does not name, then each named one, as R lines,
-which gpu.ca.asked_forms makes on the raw facade.
+which gpu.ca.asked_forms makes on the facade.
 """
 
 import importlib.util
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.raw.pack.ca.caspec').origin).parent))
+sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.pack.ca.caspec').origin).parent))
 import caset
 import caspec
 import deepcolour

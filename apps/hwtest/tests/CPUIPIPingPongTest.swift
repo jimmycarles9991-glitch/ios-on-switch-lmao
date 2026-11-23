@@ -45,7 +45,7 @@ struct CPUIPIPingPongTest: HWTest {
         }
         group.wait()
 
-        let wakes = (0..<rounds).flatMap { [first[$0], second[$0]] }.filter { $0 != 0 }.map(SchedProbe.microseconds)
+        let wakes = (0 ..< rounds).flatMap { [first[$0], second[$0]] }.filter { $0 != 0 }.map(SchedProbe.microseconds)
         let lostWakes = Int(lost[0]) + Int(lost[1])
         var metrics = Metrics()
         metrics.set("rounds", rounds)
@@ -59,6 +59,7 @@ struct CPUIPIPingPongTest: HWTest {
                 ("every wake arrived (none waited 1 s)", lostWakes == 0 && wakes.count == 2 * rounds),
                 ("cross-core wakes: median under 1 ms", Stats.percentile(wakes, 0.5) < 1_000),
                 ("cross-core wakes: p99 within a quantum", Stats.percentile(wakes, 0.99) < Self.quantumMicroseconds),
-            ], metrics)
+            ], metrics
+        )
     }
 }

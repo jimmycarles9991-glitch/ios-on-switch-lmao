@@ -5,17 +5,17 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_gpu.h"
+#include "drivers/TegraGM20BMetal/gpu.h"
 #include "apps/hwtest/bench/bench_records.h"
 #include "apps/hwtest/bench/switch_bench.h"
 
 struct switch_bench {
-    std::unique_ptr<raw::Device> device;
-    const raw::PackPipeline *fragment = nullptr;
-    const raw::PackPipeline *textured = nullptr;  // the template of a program that samples (bench::textureTemplate)
-    const raw::PackKernel *kernel = nullptr;
-    raw::Texture image;
-    raw::Sampler sampler, linear;
+    std::unique_ptr<gm20b::Device> device;
+    const gm20b::PackPipeline *fragment = nullptr;
+    const gm20b::PackPipeline *textured = nullptr;  // the template of a program that samples (bench::textureTemplate)
+    const gm20b::PackKernel *kernel = nullptr;
+    gm20b::Texture image;
+    gm20b::Sampler sampler, linear;
     std::string pack;
     bool imageMade = false, samplerMade = false, linearMade = false;
     uint64_t records = 0;
@@ -30,38 +30,38 @@ struct switch_bench {
 namespace bench {
 
 struct Target {
-    raw::Texture color;
-    std::vector<raw::Texture> others;  // the template's other colours, memoryless
+    gm20b::Texture color;
+    std::vector<gm20b::Texture> others;  // the template's other colours, memoryless
     // A colour with no CPU view (compressible memory): its texels copied in from here before each pass and out after it
-    raw::Texture *staging = nullptr;
-    const raw::Texture *image = nullptr;  // what the template's texture entries sample; null: the bench's picture
-    bool linear = false;                  // they sample it filtered (else nearest)
+    gm20b::Texture *staging = nullptr;
+    const gm20b::Texture *image = nullptr;  // what the template's texture entries sample; null: the bench's picture
+    bool linear = false;                    // they sample it filtered (else nearest)
     // The experiment's storage buffer: the addressed job ABI resolves only the addresses a command buffer names
-    const raw::Buffer *storage = nullptr;
+    const gm20b::Buffer *storage = nullptr;
 };
 
 void fail(switch_bench_result &r, uint32_t status, const std::string &why);
 // The experiment's fill (none: zeros) into `t`, and `t`'s texels out, each under a CPU lease of `t`'s memory; false: the
 // kernel refused the lease
-bool fill(raw::Device &d, raw::Texture &t, const switch_bench_experiment &x, uint32_t bpp);
-bool readBack(raw::Device &d, const raw::Texture &t, const switch_bench_experiment &x, uint32_t bpp, uint8_t *into,
+bool fill(gm20b::Device &d, gm20b::Texture &t, const switch_bench_experiment &x, uint32_t bpp);
+bool readBack(gm20b::Device &d, const gm20b::Texture &t, const switch_bench_experiment &x, uint32_t bpp, uint8_t *into,
               size_t bytes);
 // A template's other colour formats, from its key string's " c<n>=" fields
 std::vector<uint32_t> otherFormats(const char *key);
 // The template's inputs as fetchform binds the pack's states over `rect` of a `width` x `height` target
-void bindTemplate(raw::RenderEncoder *e, const raw::Pipeline &p, const uint32_t rect[4], uint32_t width,
-                  uint32_t height, const raw::Texture &image, const raw::Sampler &sampler);
+void bindTemplate(gm20b::RenderEncoder *e, const gm20b::Pipeline &p, const uint32_t rect[4], uint32_t width,
+                  uint32_t height, const gm20b::Texture &image, const gm20b::Sampler &sampler);
 // The target and the template's other colours (memoryless); false: no memory, `r` says so
-bool makeTarget(raw::Device &d, const switch_bench_experiment &x, const std::vector<uint32_t> &others,
+bool makeTarget(gm20b::Device &d, const switch_bench_experiment &x, const std::vector<uint32_t> &others,
                 bool compressible, Target &t, switch_bench_result &r);
-void destroyTarget(raw::Device &d, Target &t);
+void destroyTarget(gm20b::Device &d, Target &t);
 // The caller's pixel program in the template's state, made a pipeline of the device; null: `r` says why.
 // `firstColourOnly`: the state without the template's other colours, for a pass that binds colour 0 alone
 // `storageVa`: written into the shader data at x.storage_va_at (0: none)
-raw::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, switch_bench_result &r,
-                             bool firstColourOnly, uint64_t storageVa = 0);
+gm20b::Pipeline *pixelPipeline(switch_bench &b, const switch_bench_experiment &x, switch_bench_result &r,
+                               bool firstColourOnly, uint64_t storageVa = 0);
 // The experiment's command buffers into `t`, fill first where it has one; false: `r` says why
-bool timeDraws(switch_bench &b, const switch_bench_experiment &x, Target &t, raw::Pipeline *pipeline,
+bool timeDraws(switch_bench &b, const switch_bench_experiment &x, Target &t, gm20b::Pipeline *pipeline,
                switch_bench_result &r);
 // A trap in a lone command buffer can land after its fence (the channel is killed while the wait already returned), so
 // one more empty pass on the channel: it never completes on a killed one
@@ -74,10 +74,10 @@ public:
     {}
 
     // `draws` quads of `pipeline` (none: an empty pass) into `t`
-    bool render(Target &t, raw::Pipeline *pipeline, uint32_t draws, uint64_t &gpu, uint64_t &wall);
-    bool dispatch(const raw::ComputeState *state, uint32_t dispatches, uint64_t &gpu, uint64_t &wall);
+    bool render(Target &t, gm20b::Pipeline *pipeline, uint32_t draws, uint64_t &gpu, uint64_t &wall);
+    bool dispatch(const gm20b::ComputeState *state, uint32_t dispatches, uint64_t &gpu, uint64_t &wall);
     // Whatever `body` records; false from it abandons the command buffer (`r` already says why)
-    bool record(const std::function<bool(raw::CommandBuffer &)> &body, uint64_t &gpu, uint64_t &wall);
+    bool record(const std::function<bool(gm20b::CommandBuffer &)> &body, uint64_t &gpu, uint64_t &wall);
     bool refused(const std::string &why);
 
 private:
@@ -85,7 +85,7 @@ private:
     const switch_bench_experiment &x_;
     switch_bench_result &r_;
 
-    bool finish(raw::CommandBuffer *cb, uint64_t &gpu, uint64_t &wall);
+    bool finish(gm20b::CommandBuffer *cb, uint64_t &gpu, uint64_t &wall);
     bool error(const std::string &why);
 };
 

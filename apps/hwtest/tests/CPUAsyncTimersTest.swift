@@ -34,7 +34,7 @@ struct CPUAsyncTimersTest: HWTest {
         }
         let dispatchMS = await dispatch.wait(timeout: 2)
         metrics.set("dispatch_ms", dispatchMS ?? -1)
-        checks.append(("dispatch 50 ms deadline completes within 500 ms", (40...500).contains(dispatchMS ?? -1)))
+        checks.append(("dispatch 50 ms deadline completes within 500 ms", (40 ... 500).contains(dispatchMS ?? -1)))
 
         for clock in ClockCase.allCases {
             let waiter = Waiter<Double>()
@@ -61,7 +61,8 @@ struct CPUAsyncTimersTest: HWTest {
             task.cancel()
             metrics.set("\(clock.rawValue)_ms", milliseconds ?? -1)
             checks.append(
-                ("\(clock.rawValue) 50 ms sleep completes within 500 ms", (40...500).contains(milliseconds ?? -1)))
+                ("\(clock.rawValue) 50 ms sleep completes within 500 ms", (40 ... 500).contains(milliseconds ?? -1))
+            )
         }
 
         let cancelled = Waiter<Bool>()

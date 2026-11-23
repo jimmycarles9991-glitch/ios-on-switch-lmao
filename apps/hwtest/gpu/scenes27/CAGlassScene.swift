@@ -5,13 +5,14 @@ import Metal
 /// QuartzCore 27's Liquid Glass background (glass_background_all over the variable blur's vertex function, into BGRA8
 /// beside an RGBA16Float and an R32Float attachment) and the RGBA16Float downsample its blur starts with, made from
 /// QuartzCore's own library exactly as these corpus lines say. They are caspec27_test.py's GLASS and DOWNSAMPLE
-/// (drivers/TegraGM20BMetal/raw/pack/ca), which caspec.state_line makes from qc-24B119.json. 27's raw pack holds every
-/// glass variant, so on the facade each pass must take the raw path: an m2v path fails. Their uniforms are zero, as
+/// (drivers/TegraGM20BMetal/pack/ca), which caspec.state_line makes from qc-24B119.json. 27's raw pack holds every
+/// glass variant, so on the facade each pass must take the driver: an m2v path fails. Their uniforms are zero, as
 /// the pack's probe binds them, except the glass's own parameter block (CAUniforms, so its draw shows), and the pictures
 /// have no CPU model: each pass's is held to the Mac's (ds4_rgba16f, glass),
 /// t_<pass>= is the GPU time in ms (the median of three). iOS 27's app runs it (Scenes.glass).
 struct CAGlassScene: GPUScene {
     let id = "gpu.ca.glass"
+    let framework = true
     let name = "CA 27 Liquid Glass background and RGBA16Float downsample: path and pixels"
 
     static let size = 256
@@ -45,13 +46,14 @@ struct CAGlassScene: GPUScene {
         let source = try gpu.texture(.bgra8Unorm, size, size, usage: [.shaderRead])
         try await gpu.upload(
             Patterns.bytes(Patterns.busy(width: size, height: size, channels: 4), .bgra8Unorm), to: source,
-            bytesPerRow: size * 4)
+            bytesPerRow: size * 4
+        )
         let sdf = try gpu.texture(.rgba16Float, size, size, usage: [.shaderRead])
         let field = Raster(width: size, height: size, channels: 4) { x, y, _ in
             (hypotf(Float(x - size / 2), Float(y - size / 2)) - Float(size) / 3) / Float(size)
         }
         try await gpu.upload(Patterns.bytes(field, .rgba16Float), to: sdf, bytesPerRow: size * 8)
-        let onFacade = RawFacade.kind(of: gpu.device) == "raw"
+        let onFacade = GM20BFacade.kind(of: gpu.device) == "gm20b"
         for (short, text) in Self.passes {
             guard let line = PipelineLine(text) else {
                 result.expect(false, "\(short): the corpus line does not parse")
@@ -72,21 +74,23 @@ struct CAGlassScene: GPUScene {
             }
             var times: [Double] = []
             var paths: Set<String> = []
-            for _ in 0..<3 {
+            for _ in 0 ..< 3 {
                 let timing = try await gpu.run(tolerateError: true) { commands in
                     let pass = MTLRenderPassDescriptor()
                     for (index, texture) in attachments.enumerated() {
                         pass.colorAttachments[index].texture = texture
                         pass.colorAttachments[index].loadAction = .clear
                         pass.colorAttachments[index].clearColor = MTLClearColor(
-                            red: 0.1, green: 0.2, blue: 0.3, alpha: 1)
+                            red: 0.1, green: 0.2, blue: 0.3, alpha: 1
+                        )
                         pass.colorAttachments[index].storeAction = index == 0 ? .store : .dontCare
                     }
                     let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
                     encoder.setRenderPipelineState(pipeline)
                     CAState.bind(
                         encoder, vertices: CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(1, 1, 1, 1)),
-                        source: source)
+                        source: source
+                    )
                     if short == "glass" { CAUniforms.bindGlass(encoder, source: source, sdf: sdf) }
                     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     encoder.endEncoding()
@@ -96,13 +100,14 @@ struct CAGlassScene: GPUScene {
             }
             let shown = paths.sorted().joined(separator: ",")
             result.expect(!paths.contains { $0.hasPrefix("error:") }, "\(short): \(shown)")
-            if onFacade { result.expect(paths == ["raw"], "\(short) drew on \(shown), not the raw path") }
+            if onFacade { result.expect(paths == ["gm20b"], "\(short) drew on \(shown), not the driver") }
             result.metrics.set("t_\(short)", Stats.percentile(times, 0.5), digits: 3)
             let format = line.colors[0].format
             let bytesPerPixel = format == MTLPixelFormat.rgba16Float.rawValue ? 8 : 4
             let bytes = try await gpu.read(attachments[0], bytesPerPixel: bytesPerPixel)
             result.picture(
-                short, bytes: bytes, metalFormat: format, width: size, height: size, cleared: [0.1, 0.2, 0.3, 1])
+                short, bytes: bytes, metalFormat: format, width: size, height: size, cleared: [0.1, 0.2, 0.3, 1]
+            )
         }
         return result
     }

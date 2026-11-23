@@ -15,7 +15,7 @@ public struct MipFormat {
 }
 
 public enum MipFormats {
-    /// The formats fx::twodFormat gives the 2D engine (gpu.raw.mip_twod)
+    /// The formats fx::twodFormat gives the 2D engine (gpu.gm20b.mip_twod)
     public static let twod = [
         MipFormat(name: "bgra8", pixel: .bgra8Unorm, layout: .unorm([8, 8, 8, 8])),
         MipFormat(name: "rgba8", pixel: .rgba8Unorm, layout: .unorm([8, 8, 8, 8])),
@@ -26,7 +26,7 @@ public enum MipFormats {
         MipFormat(name: "rgba8srgb", pixel: .rgba8Unorm_srgb, layout: .unorm([8, 8, 8, 8], srgb: true)),
     ]
 
-    /// The pack's mip state formats (gpu.raw.mip_twod_candidates)
+    /// The pack's mip state formats (gpu.gm20b.mip_twod_candidates)
     public static let candidates = [
         MipFormat(name: "a8", pixel: .a8Unorm, layout: .unorm([8])),
         MipFormat(name: "r16", pixel: .r16Unorm, layout: .unorm([16])),

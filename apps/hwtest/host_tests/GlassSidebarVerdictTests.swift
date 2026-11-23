@@ -49,11 +49,13 @@ final class GlassSidebarVerdictTests: XCTestCase {
     func testTheWordsFieldsAreWhereTheProbePutsThem() {
         let rise = GlassMemRise(
             Self.mem(cbs: 0xf_fff0, changed: 1, nonFinite: 2, moved: 3, zero: 4),
-            Self.mem(cbs: 0x10, changed: 2, nonFinite: 4, moved: 6, zero: 8))
+            Self.mem(cbs: 0x10, changed: 2, nonFinite: 4, moved: 6, zero: 8)
+        )
         XCTAssertEqual(rise.text, "32/1/2/3/4")
         XCTAssertTrue(rise.faults)
         let pool = GlassPool(
-            word: Self.pool(mb: 4095, chunks: 255, backings: 1, backingMB: 2, compressed: 3, made: 65535))
+            word: Self.pool(mb: 4095, chunks: 255, backings: 1, backingMB: 2, compressed: 3, made: 65535)
+        )
         XCTAssertEqual(pool.text, "4095,255,1,2,3,65535")
     }
 
@@ -68,7 +70,8 @@ final class GlassSidebarVerdictTests: XCTestCase {
 
     func testAPassingRunWithTheReclaimShowing() {
         let outcome = GlassSidebarVerdict.outcome(
-            phases(), reads: words(Self.stale), scene: Metrics(), pngs: [], stopped: nil)
+            phases(), reads: words(Self.stale), scene: Metrics(), pngs: [], stopped: nil
+        )
         XCTAssertEqual(outcome.verdict, .pass)
         XCTAssertEqual(outcome.metrics["reclaim"], .text("yes"))
         XCTAssertEqual(outcome.metrics["idle1_pool"], .text("96,12,30,40,8,100>48,6,0,0,0,100"))
@@ -98,7 +101,8 @@ final class GlassSidebarVerdictTests: XCTestCase {
         XCTAssertEqual(outcome.metrics["reclaim"], .text("no"))
         let release = words(Array(repeating: 0, count: 6), mems: Array(repeating: 0, count: 6))
         let quiet = GlassSidebarVerdict.outcome(
-            phases(sidebar: [0], detail: [0]), reads: release, scene: Metrics(), pngs: [], stopped: nil)
+            phases(sidebar: [0], detail: [0]), reads: release, scene: Metrics(), pngs: [], stopped: nil
+        )
         XCTAssertEqual(quiet.verdict, .pass)
         XCTAssertEqual(quiet.metrics["probe"], .text("-"))
         XCTAssertEqual(quiet.metrics["reclaim"], .text("-"))
@@ -108,7 +112,8 @@ final class GlassSidebarVerdictTests: XCTestCase {
     func testBlackFramesAndProbeFaultsFail() {
         var run = phases()
         run[3] = Phase(
-            name: "detail", moving: true, frames: 240, black: [5012, 5040], partial: 1, pools: [Self.trimmed])
+            name: "detail", moving: true, frames: 240, black: [5012, 5040], partial: 1, pools: [Self.trimmed]
+        )
         let mems = [0, 100, 200, 300, 400, 500].map { Self.mem(cbs: $0) }
         var moved = mems
         moved[4] = Self.mem(cbs: 400, moved: 2)
@@ -122,7 +127,8 @@ final class GlassSidebarVerdictTests: XCTestCase {
         XCTAssertEqual(
             outcome.detail,
             "detail: 2 of 240 frames show the sidebar black; detail: glass-mem 100/0/0/2/0; "
-                + "1 frames show the sidebar partly black")
+                + "1 frames show the sidebar partly black"
+        )
     }
 
     /// ui.glass_settings judges its glass pane, phases with no idle between them
@@ -133,12 +139,14 @@ final class GlassSidebarVerdictTests: XCTestCase {
         ]
         let reads = [0, 100, 200].map { GlassMemWords(mem: Self.mem(cbs: $0), pool: Self.busy) }
         let outcome = GlassSidebarVerdict.outcome(
-            run, reads: reads, scene: Metrics(), pngs: [], stopped: nil, subject: "glass pane")
+            run, reads: reads, scene: Metrics(), pngs: [], stopped: nil, subject: "glass pane"
+        )
         XCTAssertEqual(outcome.verdict, .fail)
         XCTAssertEqual(outcome.metrics["reclaim"], .text("-"))
         XCTAssertEqual(
             outcome.detail,
-            "appear: 1 of 180 frames show the glass pane black; 3 frames show the glass pane partly black")
+            "appear: 1 of 180 frames show the glass pane black; 3 frames show the glass pane partly black"
+        )
     }
 
     func testNoFrameIsASkipAndAStoppedReadBackNeverPasses() {
@@ -148,7 +156,8 @@ final class GlassSidebarVerdictTests: XCTestCase {
         XCTAssertEqual(none.verdict, .skip)
         let stopped = GlassSidebarVerdict.outcome(
             Array(phases().prefix(2)), reads: Array(release.prefix(3)), scene: Metrics(), pngs: [],
-            stopped: "sidebar:rearm")
+            stopped: "sidebar:rearm"
+        )
         XCTAssertEqual(stopped.verdict, .skip)
     }
 
@@ -156,16 +165,19 @@ final class GlassSidebarVerdictTests: XCTestCase {
         let worst = phases().map {
             Phase(
                 name: $0.name, moving: $0.moving, frames: 999, black: Array(repeating: UInt64(UInt32.max), count: 999),
-                partial: 999, pools: [UInt64.max])
+                partial: 999, pools: [UInt64.max]
+            )
         }
         let full = Self.mem(cbs: 0xf_ffff, changed: 4094, nonFinite: 4094, moved: 4094, zero: 254)
-        let reads = (0..<6).map {
+        let reads = (0 ..< 6).map {
             GlassMemWords(
                 mem: $0 == 0 ? 0 : full,
                 pool: $0 % 2 == 0
                     ? UInt64.max
                     : Self.pool(
-                        mb: 4095, chunks: 255, backings: 255, backingMB: 4095, compressed: 255, made: 65535))
+                        mb: 4095, chunks: 255, backings: 255, backingMB: 4095, compressed: 255, made: 65535
+                    )
+            )
         }
         var scene = Metrics()
         scene.set("under", true)
@@ -173,7 +185,8 @@ final class GlassSidebarVerdictTests: XCTestCase {
         scene.set("means", "0.00/0.00")
         let pngs = Array(repeating: "detail-\(UInt32.max)-before.png", count: 9)
         let outcome = GlassSidebarVerdict.outcome(
-            worst, reads: reads, scene: scene, pngs: pngs, stopped: "both:query_0x1")
+            worst, reads: reads, scene: scene, pngs: pngs, stopped: "both:query_0x1"
+        )
         let line = LogLine.format(id: "ui.glass_sidebar", outcome: outcome, milliseconds: 123_456.7)
         XCTAssertLessThanOrEqual(line.utf8.count, 1000, line)
     }

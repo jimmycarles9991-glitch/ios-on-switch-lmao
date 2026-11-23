@@ -8,7 +8,8 @@ final class KeylineClaimTests: XCTestCase {
         fill: [Double]? = nil
     ) -> KeylineClaim.Evidence {
         KeylineClaim.Evidence(
-            line: line, backdrop: backdrop, framebuffer: framebuffer, replicaWrong: replica, alpha: 0.1, fill: fill)
+            line: line, backdrop: backdrop, framebuffer: framebuffer, replicaWrong: replica, alpha: 0.1, fill: fill
+        )
     }
 
     func testAMagentaFillIsUIKitsOwnBeforeAnyPixelReasoning() {
@@ -16,7 +17,8 @@ final class KeylineClaimTests: XCTestCase {
         let fresh = evidence(line: [255, 0, 255], framebuffer: [255, 0, 255], fill: magenta)
         XCTAssertEqual(KeylineClaim.verdict(fresh).claim, "fill")
         XCTAssertEqual(
-            KeylineClaim.verdict(evidence(line: [255, 0, 255], replica: "c0.g", fill: magenta)).claim, "fill")
+            KeylineClaim.verdict(evidence(line: [255, 0, 255], replica: "c0.g", fill: magenta)).claim, "fill"
+        )
         XCTAssertEqual(KeylineClaim.verdict(evidence(line: [255, 0, 255], replica: nil, fill: magenta)).claim, "fill")
         let white = evidence(line: [255, 0, 255], framebuffer: [255, 0, 255], fill: [1, 1, 1, 0.1])
         XCTAssertEqual(KeylineClaim.verdict(white).claim, "b")

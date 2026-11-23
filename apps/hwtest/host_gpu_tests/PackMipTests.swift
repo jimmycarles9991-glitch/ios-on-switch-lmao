@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 import XCTest
 
-/// The raw pack's mip states (drivers/TegraGM20BMetal/raw/pack/mip.metal) on this Mac's GPU: every step of every chain
+/// The pack's mip states (drivers/TegraGM20BMetal/pack/mip.metal) on this Mac's GPU: every step of every chain
 /// format, odd steps included, within one code of Metal's step (MipReference), each level drawn from the one above as
 /// the runtime's mipPasses draws it (buffer 0: the two levels' sizes; an sRGB level read as its codes). A 32-bit float field may be two ulps off: the
 /// state blends in float, rounding twice where MipReference rounds once.
@@ -12,13 +12,14 @@ final class PackMipTests: XCTestCase {
     private func library(_ device: MTLDevice) throws -> MTLLibrary {
         let root = ProcessInfo.processInfo.environment["TEST_SRCDIR"].map { $0 + "/_main/" } ?? ""
         let source = try String(
-            contentsOfFile: root + "drivers/TegraGM20BMetal/raw/pack/mip.metal", encoding: .utf8)
+            contentsOfFile: root + "drivers/TegraGM20BMetal/pack/mip.metal", encoding: .utf8
+        )
         return try device.makeLibrary(source: source, options: MTLCompileOptions())
     }
 
     private static func pattern(_ w: Int, _ h: Int, _ layout: MipLayout) -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: w * h * layout.bytes)
-        for t in 0..<w * h {
+        for t in 0 ..< w * h {
             for (i, f) in layout.fields.enumerated() {
                 var v = UInt32(truncatingIfNeeded: t &* 73_856_093) ^ UInt32(truncatingIfNeeded: (i + 1) &* 83_492_791)
                 v ^= v >> 13
@@ -52,13 +53,15 @@ final class PackMipTests: XCTestCase {
                 var dims = [(w, h)]
                 while dims.last! != (1, 1) { dims.append((max(1, dims.last!.0 / 2), max(1, dims.last!.1 / 2))) }
                 var level = Self.pattern(w, h, format.layout)
-                for l in 1..<dims.count {
+                for l in 1 ..< dims.count {
                     let (sw, sh) = dims[l - 1], (dw, dh) = dims[l]
                     let above = try gpu.texture(
-                        Self.codes(format.pixel), sw, sh, usage: [.shaderRead], storage: .shared)
+                        Self.codes(format.pixel), sw, sh, usage: [.shaderRead], storage: .shared
+                    )
                     above.replace(
                         region: MTLRegionMake2D(0, 0, sw, sh), mipmapLevel: 0, withBytes: level,
-                        bytesPerRow: sw * format.layout.bytes)
+                        bytesPerRow: sw * format.layout.bytes
+                    )
                     let target = try gpu.texture(format.pixel, dw, dh, usage: [.renderTarget, .shaderRead])
                     try await gpu.run { commands in
                         let pass = MTLRenderPassDescriptor()
@@ -75,7 +78,8 @@ final class PackMipTests: XCTestCase {
                     }
                     let drawn = try await gpu.read(target, bytesPerPixel: format.layout.bytes)
                     tally.add(
-                        drawn, MipReference.step(level, sw, sh, dw, dh, format.layout), texels: dw * dh, format.layout)
+                        drawn, MipReference.step(level, sw, sh, dw, dh, format.layout), texels: dw * dh, format.layout
+                    )
                     level = drawn
                 }
             }

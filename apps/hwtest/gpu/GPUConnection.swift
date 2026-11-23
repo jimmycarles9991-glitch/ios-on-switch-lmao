@@ -39,12 +39,16 @@ public final class GPUConnection {
 
     public init?() {
         guard let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW),
-            let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(iokit, "IOServiceGetMatchingService"),
-            let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
-            let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
+              let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(
+                  iokit,
+                  "IOServiceGetMatchingService"
+              ),
+              let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
+              let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
         else { return nil }
         let accelerator = unsafeBitCast(service, to: Service.self)(
-            0, unsafeBitCast(matching, to: Matching.self)("IOAcceleratorES"))
+            0, unsafeBitCast(matching, to: Matching.self)("IOAcceleratorES")
+        )
         guard accelerator != 0 else { return nil }
         var connection: mach_port_t = 0
         let kr = unsafeBitCast(open, to: Open.self)(accelerator, mach_task_self_, Self.openType, &connection)
@@ -54,7 +58,7 @@ public final class GPUConnection {
         callStruct = unsafeBitCast(call, to: Call.self)
         self.close = unsafeBitCast(close, to: Release.self)
         let probe = Self.words([Self.tunnelMagic, Self.tunnelProbe])
-        tunnel = (0..<256).map(UInt32.init).first { send($0, probe, 0).0 == KERN_SUCCESS }
+        tunnel = (0 ..< 256).map(UInt32.init).first { send($0, probe, 0).0 == KERN_SUCCESS }
     }
 
     deinit { _ = close(connection) }
@@ -74,7 +78,8 @@ public final class GPUConnection {
         let address = mapping.address
         _ = call(
             Self.unmapMethod, Self.words([mapping.token, 0, UInt32(address & 0xffff_ffff), UInt32(address >> 32)]),
-            outputSize: 0)
+            outputSize: 0
+        )
     }
 
     public func call(_ method: UInt32, _ input: [UInt8], outputSize: Int) -> (kern_return_t, [UInt8]) {
@@ -104,5 +109,23 @@ public final class GPUConnection {
     }
     public static func uint64(_ b: [UInt8], _ at: Int) -> UInt64 {
         b.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: at, as: UInt64.self) }
+    }
+}
+
+extension GPUConnection {
+    /// The connection's fence page and the calls that reach it, as drivers/TegraGM20B/TegraGM20BFencePageABI.h (its
+    /// regions), TegraGM20BClockABI.h (ClockAnchors) and TegraGM20BABI.h (GetInfo, ChannelCreate, ChannelDestroy) lay
+    /// them out.
+    public enum FencePage {
+        public static let getInfo: UInt32 = 1, infoBytes = 192, infoFenceToken = 28
+        public static let channelCreate: UInt32 = 6, channelDestroy: UInt32 = 7, channelReplyBytes = 16
+        /// TegraGM20BEngineCopy | TegraGM20BEngineCopyOnly
+        public static let copyOnlyEngines: UInt32 = 0x8000_0001
+        public static let clockAnchors: UInt32 = 0x4341, clockAnchorsReplyBytes = 16
+        public static let anchorsFirst = 2048, anchorsBytes = 1024
+        public static let promisesFirst = 3136, promiseWords = 32
+        /// TegraGM20BFencePageGpuBytes: the GPU maps the page's first bytes at an address aligned to them, so a GPU
+        /// address in the page names its byte by its offset from that alignment
+        public static let gpuBytes = 4096
     }
 }

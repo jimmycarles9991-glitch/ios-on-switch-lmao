@@ -69,6 +69,7 @@
 #include "TegraGM20BClkgate.h"
 #include "TegraGM20BComp.h"
 #include "TegraGM20BCopyEmit.h"
+#include "TegraGM20BFencePageABI.h"
 #include "TegraGM20BGpu.h"
 #include "SwitchGpuJobFences.h"
 #include "SwitchGpuQuiet.h"
@@ -163,10 +164,7 @@ struct tgm_vm {
 	struct nvif_vmm vmm;
 	struct mutex map_lock;
 	struct list_head kmaps;
-	u64 fences_va; /* every connection's fence page, read-only (tgm_chan_order's acquires), 0: not mapped */
-	struct list_head
-		imports; /* struct tgm_import: first pages of the host imports made in it (tgm_live_lock) */
-	int imports_lost;         /* one could not be recorded: taken as importing every page */
+	u64 fences_va; /* every connection's fence page, read-only (a job's acquires on other channels), 0: not mapped */
 	struct tgm_tlb_space tlb; /* GPU-ordered maps (TegraGM20BTlb.h) */
 	const void *owner;        /* tgm_vm_claim: the connection whose channels alone address it */
 	const void *connection; /* tgm_vm_claim_connection: the client whose pushes a hang reads */
@@ -175,12 +173,6 @@ struct tgm_vm {
 	u64 bind_va;
 	const volatile u32 *bind_cpu;
 	u32 bind_target;
-};
-
-struct tgm_import {
-	struct list_head head;
-	u64 pa;
-	u32 refs;
 };
 
 struct switch_gpu_memory_view {
@@ -239,15 +231,6 @@ struct tgm_stamps {
 		end; /* the GPU starts the submission (WFI: the one before finished) / finished it */
 };
 
-/* An acquire tgm_chan_order queued for a channel's next submission: another channel's fence word reaching seqno. */
-struct tgm_order {
-	u64 va;                  /* the source's fence word in the waiter's address space */
-	const volatile u32 *cpu; /* and in the kernel's */
-	u64 id;                  /* the source channel */
-	u32 seqno;
-	u32 chid; /* the source's hardware channel */
-};
-
 struct tgm_chan {
 	struct switch_gpu_timeline *timeline;
 	struct tgm_vm *vm;
@@ -271,7 +254,7 @@ struct tgm_chan {
 	u32 chid;
 	int nobj;
 	int kernel; /* a kernel channel, no client waits on it and the present does not wait for it: CHAN_PRESENT, CHAN_SCRUB */
-	int critical; /* the compositor's or the kernel's: the high timeslice */
+	int critical; /* the compositor's or the kernel's (tgm_chan_set_level) */
 	int high; /* the compositor's or the present's: high on the runlist (TegraGM20BSched.h) */
 	int isolating; /* client fault isolation: its error or hang was taken as its own, the kill is under way */
 	u64 isolated_ns;
@@ -357,12 +340,6 @@ struct tgm_chan {
 	u32 prof_n[TGM_PC_COUNT];
 	u64 prof_dn[TGM_PC_COUNT],
 		prof_sdn[TGM_PC_COUNT]; /* draws, and draws shaded per sample, by class */
-	/* tgm_chan_order: its connection's task (tgm_chan_set_group), the acquires queued for its next submission
-	 * (tgm_live_lock), and the last one kicked (a hang's line names it while it has not passed) */
-	const void *group;
-	u32 norder;
-	struct tgm_order order[TGM_ORDER_MAX];
-	struct tgm_order waited;
 	struct tgm_hang_log hang;
 	/* tgm_hang_recover: its GPFIFO and pushbuffer GET as last read, and when they last moved */
 	u64 get_seen, get_ns;
@@ -384,9 +361,6 @@ struct tgm_chan {
 	int iso_retried; /* tgm_iso_deadline asked nvkm for its kill again */
 #if TGM_STATS
 	u64 killed_ns; /* tgm_chan_killed's time, for a fault's line (TegraGM20BUserClient.cpp) */
-	/* this window's SubmitAddress calls on it, by phase (tgm_stats_submit), for its owner */
-	u64 stat_submit_ns[TGM_SUBMIT_PHASES], stat_submit_total, stat_submit_max;
-	u32 stat_submits;
 	unsigned int gr_slot; /* gpu_stats_ctx.c's slot for its GR context, plus 1; 0: none */
 #endif
 };
@@ -402,6 +376,10 @@ int tgm_nonstall_init(struct nvkm_device *device);
 extern struct mutex tgm_live_lock;
 extern u64 tgm_live_ids;
 void tgm_chan_describe(struct tgm_chan *chan, char *buf, unsigned int len);
+#if DEVELOPMENT || DEBUG
+/* gpu_describe.c, tgm_live_lock held: the channel's process under its new uid (switch_gpu_writer_process) */
+void switch_gpu_chan_named(const struct tgm_chan *chan);
+#endif
 /* GR's, FECS's and PBDMA0's state for a context switch that timed out (TegraGM20BHangDecode.h tgm_engine_format) */
 void tgm_engine_state(char *buf, unsigned int len);
 
@@ -598,15 +576,13 @@ int tgm_chan_ramfc_open(struct tgm_chan *chan, int critical);
 
 static int chan_push_wait(struct tgm_chan *chan, u32 push_nr);
 
-static void order_forget(struct tgm_chan *chan);
-
 /* fence pages:
  * Every connection's fence page (its channels' seqno words) is one page of a single pool range, so the GPU present's
  * address space maps all of them once and waits on any user channel with a semaphore acquire. Pages are handed out
  * round-robin and zeroed, so a page freed with an acquire still pending on it is not reused at once. */
 /* a fence page's writer promise words (TegraGM20BJobABI.h TegraGM20BMaxPromises from TegraGM20BPromiseWord) */
-#define TGM_FENCE_PROMISES 32
-#define TGM_FENCE_PROMISE_WORD 512
+#define TGM_FENCE_PROMISES (TegraGM20BFencePagePromisesBytes / 4)
+#define TGM_FENCE_PROMISE_WORD (TegraGM20BFencePagePromisesFirst / 4)
 #define TGM_FENCE_USER_PAGES \
 	64 /* one per connection (TegraGM20BUserClient.cpp kMaxConnectionsAll) */
 /* and one after them for the kernel's own client channels (tgm_fence_kernel), so every address space's fence view holds
@@ -638,8 +614,6 @@ void tgm_clock_anchors_fill(u32 page);
 extern u64 tgm_fences_pas[];
 extern struct tgm_mem *tgm_fences_mem;
 int tgm_fences_map(struct tgm_vm *vm);
-int tgm_order_waits(struct tgm_chan *chan);
-int switch_gpu_order_waits_locked(struct tgm_chan *chan);
 
 /* CPU readers of GPU-written memory:
  * The GPU is not IO-coherent; its sysmem PTEs are volatile (no GPU L2 lines), so a submission's writes are in DRAM once
@@ -680,15 +654,12 @@ void tgm_chan_wake_push(struct tgm_chan *chan);
 void tgm_idle_settle(void *arg);
 /* gpu_promise.c: a GPU job whose acquires include pending writer promises parks on them (SwitchGpuPromiseGiveUp.h),
  * once those acquires are pushed and nothing rolls them back */
-int tgm_chan_note_promise(struct tgm_chan *chan, uint32_t offset, uint32_t value);
 int switch_gpu_promise_park_locked(uint32_t offset, uint32_t value, const char *waiter,
 				   const char *who, const struct switch_gpu_giveup_job *reader,
 				   int display);
 void switch_gpu_chan_park_promises_locked(struct tgm_chan *chan,
 					  const struct switch_gpu_backing_token *tokens, u32 count,
 					  const u32 *unsettled);
-void tgm_chan_park_promises(struct tgm_chan *chan, const struct switch_gpu_backing_token *tokens,
-			    u32 count);
 /* tgm_live_lock held: the process whose fence page holds the word at `offset` */
 const char *tgm_promise_maker(uint32_t offset);
 void tgm_promise_kept_first(uint32_t offset, uint32_t value);
@@ -727,7 +698,7 @@ u32 switch_gpu_chan_fence_sealed(struct tgm_chan *chan, int external,
  *    column-scans (NativeScanout.h native_legacy_block_copy);
  *  - the kernel fence (chan_fence: WFI, the L2 flush, semaphore release, NON_STALL_INTERRUPT).
  * The fence's nonstall interrupt completes it: the caller's callback (native_legacy_gpu_complete, which any context may
- * call) runs from the completion work item, with TEGRA_SCANOUT_SOURCE_LOST when a producer it waited for failed (the
+ * call) runs from the completion work item, with why (TEGRA_SCANOUT_SOURCE_*) when a producer it waited for failed (the
  * acquire passed on the kill's release, over a partial frame). A present that has not completed 1 s
  * after it was queued panics, naming what it waits for. Every mapping is volatile: the source was written by work whose
  * fence flushed the L2 (or bypassed it), the destination is read by the display controller only. The copy is
@@ -761,7 +732,7 @@ struct present_state {
 	int fenced_due;
 	void (*done)(void *, int);
 	void *arg;
-	u32 completing; /* completions claimed whose callback has not returned yet */
+	u32 completing; /* completions claimed and not yet handed to their callback */
 	u32 stamped;    /* stats: seqno of the present in flight, whose copy is stamped */
 	u32 presents;   /* stats */
 	u64 lat_sum, lat_max;

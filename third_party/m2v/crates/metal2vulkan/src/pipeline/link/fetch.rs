@@ -7,15 +7,15 @@
 //! The function compiled under its pipeline's state (`LoweringInputs::framebuffer_fetch`); link
 //! decides the form again from the state of the pipeline it links into, with the same rule, and
 //! a stage whose form, attachment format, kept channels (a write mask short of the format's
-//! channels), or in-shader blend (an extended-range attachment's) that state would not choose (a
-//! write before a depth or stencil attachment's tests only where the function states
-//! `RuntimeFact::TestedStorageWrites`, which each draw's plan checks) was compiled for another
-//! pipeline: `NeedsInput(FramebufferFetch)`. A write mask that keeps some of a format's channels
-//! compiles as its class (`FramebufferFetchInputs::of`), so the comparison holds across the masks
-//! of a class, and the pipeline's own kept channels go in `StorageAttachmentUse::kept`, which the
-//! binder writes into each draw's push bytes. An attachment the function reads in the
-//! storage form is no color attachment of the subpass (`graphics_state` gives it no state), and
-//! the consumer binds it as `GraphicsState::storage_attachments` states.
+//! channels), or in-shader blend that state would not choose (a write before a depth or stencil
+//! attachment's tests only where the function states `RuntimeFact::TestedStorageWrites`, which
+//! each draw's plan checks) was compiled for another pipeline: `NeedsInput(FramebufferFetch)`. A
+//! write mask that keeps some of a format's channels compiles as its class
+//! (`FramebufferFetchInputs::of`), so the comparison holds across the masks of a class, and the
+//! pipeline's own kept channels go in `StorageAttachmentUse::kept`, which the binder writes into
+//! each draw's push bytes. An attachment the function reads in the storage form is no color
+//! attachment of the subpass (`graphics_state` gives it no state), and the consumer binds it as
+//! `GraphicsState::storage_attachments` states.
 //!
 //! In a multisampled pipeline the form is per sample. Where the device has multisampled storage
 //! images, the image has the pipeline's samples, so the device's `storageImageSampleCounts` must
@@ -23,18 +23,6 @@
 //! shadow; otherwise the fetch is refused naming it. Elsewhere the image holds the samples as
 //! planes (`StorageAttachmentView::SamplePlanes`), a single-sample image of one layer per sample,
 //! which needs no sample count of storage images.
-//!
-//! On a device that orders framebuffer fetch through rasterization-order input attachments, or
-//! reads them unordered under `AcceptUnordered` (`lower::fragment::blends_through_inputs`), and
-//! beside the pixel interlock under that policy where the pipeline's state blocks the storage form
-//! (`lower::fragment::blends_inputs_beside_interlock`), the function computes an extended-range
-//! attachment's blend over its input attachment
-//! (`RuntimeFact::ExtendedRangeInputBlend`, [`input_blends`]): the attachment stays a color
-//! attachment of the subpass, which `graphics_state` gives no Vulkan blend and a write of every raw
-//! component, the function merging the channels the descriptor's mask keeps; a stage compiled under
-//! another blend or mask there was compiled for another pipeline, `NeedsInput(FramebufferFetch)`.
-
-use std::collections::BTreeMap;
 
 use crate::device::requirements::VkProperty;
 use crate::device::DeviceProfile;
@@ -43,14 +31,13 @@ use crate::error::{
 };
 use crate::library::FunctionArtifact;
 use crate::lower::fragment::{
-    blends_inputs_beside_interlock, blends_through_inputs, interlock_orders, kept_channels,
-    storage_form, ColorUse, StorageSamples,
+    interlock_orders, kept_channels, storage_form, ColorUse, StorageSamples,
 };
 use crate::metal::state::color_write_mask;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::graphics::{StorageAttachmentUse, StorageAttachmentView};
 use crate::pipeline::link::RenderLinkInputs;
-use crate::pipeline::lower_inputs::{BlendEquation, FramebufferFetchInputs};
+use crate::pipeline::lower_inputs::FramebufferFetchInputs;
 
 /// The attachments the fragment stage `fragment` of render inputs `r` reads in the storage form
 /// on `p`, by color index (see the module docs).
@@ -167,44 +154,6 @@ pub fn storage_attachments(
             )
             .into());
         }
-    }
-    Ok(out)
-}
-
-/// The extended-range attachments whose blend fragment stage `fragment` computes over their
-/// input attachments (`RuntimeFact::ExtendedRangeInputBlend`), on a device that orders fetch
-/// through rasterization-order input attachments (or reads them unordered,
-/// `lower::fragment::blends_through_inputs`, or beside the pixel interlock,
-/// `lower::fragment::blends_inputs_beside_interlock`), against the attachments of render inputs
-/// `r`:
-/// by color index, the channels each write keeps from its texel, where the pipeline's blend and
-/// write mask there are those the function compiled under; `NeedsInput(FramebufferFetch)` where
-/// they are another pipeline's.
-pub fn input_blends(
-    r: &RenderLinkInputs,
-    fragment: Option<&FunctionArtifact>,
-    p: &DeviceProfile,
-) -> Result<BTreeMap<u32, crate::vk::ColorComponentFlags>, Error> {
-    let mut out = BTreeMap::new();
-    for fact in fragment.into_iter().flat_map(|f| &f.facts) {
-        let RuntimeFact::ExtendedRangeInputBlend { color, blend, kept } = *fact else {
-            continue;
-        };
-        if !blends_through_inputs(p) && !blends_inputs_beside_interlock(p) {
-            return Err(Error::Internal(InternalError::new(
-                InternalKind::Invariant,
-                "an extended-range blend over an input attachment on a device that fetches \
-                 otherwise",
-            )));
-        }
-        let Some(a) = r.color_attachments.get(color as usize).copied().flatten() else {
-            return Err(Error::NeedsInput(RuntimeInput::FramebufferFetch));
-        };
-        let pipeline_kept = color_write_mask(kept_channels(a.pixel_format, a.write_mask, true))?;
-        if BlendEquation::of(&a) != Some(blend) || pipeline_kept != kept {
-            return Err(Error::NeedsInput(RuntimeInput::FramebufferFetch));
-        }
-        out.insert(color, kept);
     }
     Ok(out)
 }

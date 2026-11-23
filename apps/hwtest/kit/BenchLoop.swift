@@ -5,7 +5,7 @@ import os
 
 /// What the bench screen shows.
 struct BenchStatus: Sendable {
-    var device = "opening the raw device"
+    var device = "opening the device"
     var selfCheck = "-"
     var roots: [String] = []
     var current = "waiting for a batch"
@@ -71,7 +71,8 @@ final class BenchWorker: @unchecked Sendable {
         let inbox = root.appendingPathComponent("inbox")
         try? FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(
-            at: root.appendingPathComponent("outbox"), withIntermediateDirectories: true)
+            at: root.appendingPathComponent("outbox"), withIntermediateDirectories: true
+        )
         let fd = open(inbox.path, O_EVTONLY)
         guard fd >= 0 else {
             logger.error(
@@ -143,7 +144,8 @@ final class BenchWorker: @unchecked Sendable {
             }
             try? DurableFile.write(
                 BenchResult.encode(batch: batch.name, entry: entry, outcome: outcome),
-                to: outbox.appendingPathComponent(entry.id + ".json"))
+                to: outbox.appendingPathComponent(entry.id + ".json")
+            )
             try? DurableFile.append(BenchJournal.done(entry.id, outcome.status), to: journal)
             counts[outcome.status, default: 0] += 1
             let line = BenchResult.logLine(batch: batch.name, id: entry.id, outcome: outcome)

@@ -22,7 +22,7 @@ enum CPUClock {
         var clocks = [[Double]](repeating: [Double](repeating: 0, count: threads), count: slices)
         let lock = NSLock()
         DispatchQueue.concurrentPerform(iterations: threads) { thread in
-            for slice in 0..<slices {
+            for slice in 0 ..< slices {
                 let clock = megahertz(blocks: blocksPerSlice)
                 lock.lock()
                 clocks[slice][thread] = clock
@@ -54,7 +54,8 @@ struct CPUClockTest: HWTest {
             [
                 ("the fastest core clocks at least 1000 MHz", fastest >= 1000),
                 ("every core within 10% of the fastest", slowest >= 0.9 * fastest),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -82,6 +83,7 @@ struct CPUSustainedTest: HWTest {
             [
                 ("the clock at the end within 10% of the start", end >= 0.9 * start),
                 ("not thermally serious after it", after.rawValue < ProcessInfo.ThermalState.serious.rawValue),
-            ], metrics)
+            ], metrics
+        )
     }
 }

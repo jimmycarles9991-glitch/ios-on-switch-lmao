@@ -43,7 +43,8 @@ struct SocThermThrottleTest: HWTest {
                     fields["global"] == "on" && fields["cdiv_therm"] == "on"
                 ),
                 ("SOC_THERM drives no GPU throttle now", fields["gpu_depth"] == "0"),
-            ], metrics)
+            ], metrics
+        )
     }
 
     static func fields(_ line: String) -> [String: String] {

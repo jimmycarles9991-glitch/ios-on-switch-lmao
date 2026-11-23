@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
-/* Kernel <-> userland wire ABI for the Tegra X1 GM20B driver (kext: drivers/TegraGM20B, client: Mesa NVK's nvkmd_darwin).
+/* Kernel <-> userland wire ABI for the Tegra X1 GM20B driver (kext: drivers/TegraGM20B, client: the driver,
+ * drivers/TegraGM20BMetal/kernel.cpp).
  * Semantics are in scratchpad/gpu/CONTRACT.md. The kext and the client compile this same file; keep it byte-identical in both.
  *
  * Every call is IOConnectCallStructMethod(conn, selector, in, in_size, out, &out_size) with one of the fixed records below.
@@ -23,39 +24,31 @@ enum {
 	TegraGM20BMethodVmBind = 5,
 	TegraGM20BMethodChannelCreate = 6,
 	TegraGM20BMethodChannelDestroy = 7,
-	TegraGM20BMethodExec = 8,
 	TegraGM20BMethodWaitFence = 9,
-	TegraGM20BMethodGetTimestamp = 10,
 	TegraGM20BMethodGetStatus = 11,
 	TegraGM20BMethodMap = 12,           /* with TegraGM20BInfoKernelMap */
 	TegraGM20BMethodUnmap = 13,         /* with TegraGM20BInfoKernelMap */
-	TegraGM20BMethodOrder = 14,         /* with TegraGM20BInfoOrder */
 	TegraGM20BMethodSurfaceWrites = 15, /* with TegraGM20BInfoSurfaceWrites */
 	TegraGM20BMethodSurfaceLayout = 16, /* with TegraGM20BInfoSurfaceLayout */
-	TegraGM20BMethodExecSurfaces = 17,  /* with TegraGM20BInfoExecSurfaces */
 	TegraGM20BMethodPriority = 18,      /* with TegraGM20BInfoPriority */
 	TegraGM20BMethodZbc = 19,           /* with TegraGM20BInfoCompression */
-	TegraGM20BMethodSubmit = 20,        /* with TegraGM20BInfoSubmit */
 	TegraGM20BMethodCpuAcquire = 21,
 	TegraGM20BMethodCpuRelease = 22,
-	TegraGM20BMethodSubmitAddress = 23,
 	TegraGM20BMethodSurfaceLayoutInfo = 24,
-    TegraGM20BMethodNativeSurfaceView = 25,
-    TegraGM20BMethodEventImport = 26,
-    TegraGM20BMethodEventRelease = 27,
-    TegraGM20BMethodEventObserve = 28,
-    TegraGM20BMethodResourceObserve = 29,
-    TegraGM20BMethodCpuComplete = 30,
+	TegraGM20BMethodNativeSurfaceView = 25,
+	TegraGM20BMethodEventImport = 26,
+	TegraGM20BMethodEventRelease = 27,
+	TegraGM20BMethodEventObserve = 28,
+	TegraGM20BMethodResourceObserve = 29,
+	TegraGM20BMethodCpuComplete = 30,
 
 	TegraGM20BMaxBindOps = 100,
 	TegraGM20BMaxPushes = 255,
-	TegraGM20BMaxExecSurfaces = 64,
-	TegraGM20BMaxSubmitBytes = 4088, /* leaves room for the tunnel header */
 	TegraGM20BMaxJobPushes = 1024,
 	TegraGM20BMaxJobUses = 1024,
 	TegraGM20BMaxJobFences = 128,
-    TegraGM20BMaxJobEvents = 32,
-    TegraGM20BMaxJobDependencies = TegraGM20BMaxJobUses + TegraGM20BMaxJobEvents,
+	TegraGM20BMaxJobEvents = 32,
+	TegraGM20BMaxJobDependencies = TegraGM20BMaxJobUses + TegraGM20BMaxJobEvents,
 };
 
 /* TegraGM20BAbiInfo.flags */
@@ -64,62 +57,60 @@ enum {
 	TegraGM20BInfoHostImport = 1u << 1, /* BoImport is implemented */
 	TegraGM20BInfoZcull = 1u << 2,      /* zcull[] is valid */
 	TegraGM20BInfoKernelMap = 1u << 3,  /* Map and Unmap (methods 12, 13) are implemented */
-	TegraGM20BInfoOrder = 1u << 4,      /* Order (method 14) is implemented */
 	TegraGM20BInfoSurfaceWrites = 1u
 		<< 5, /* BoImport takes TegraGM20BImportGpuReads; method 15 is implemented */
 	TegraGM20BInfoSurfaceLayout = 1u << 6, /* method 16 is implemented */
-	TegraGM20BInfoExecSurfaces = 1u << 7,  /* ExecSurfaces (method 17) is implemented */
 	TegraGM20BInfoPriority = 1u << 8,      /* Priority (method 18) is implemented */
 	TegraGM20BInfoCompression = 1u << 9, /* compressible kinds bind; method 19 is implemented */
 	TegraGM20BInfoKillRecord = 1u << 10, /* a channel's fence word is a TegraGM20BAbiFence */
 	TegraGM20BInfoTiledCache = 1u
 		<< 11, /* every GR context holds the tile coalescer's table: a client may enable the tiled cache */
-	TegraGM20BInfoSubmit = 1u << 12, /* atomic surface uses and pushes (method 20) */
 	TegraGM20BInfoCpuAccess = 1u << 13,
-	TegraGM20BInfoSubmitAddress = 1u << 14,
+	TegraGM20BInfoSubmitAddress = 1u << 14, /* SubmitJob (method 33) takes exact jobs */
 	TegraGM20BInfoCpuPreserveDirty = 1u << 15,
 	TegraGM20BInfoCanonicalSurfaceLayout = 1u << 16,
-    TegraGM20BInfoPushFences = 1u << 26, /* SubmitAddress takes TegraGM20BPushFence */
+	TegraGM20BInfoChannelEpoch = 1u << 17, /* the fence page holds TegraGM20BChannelEpochWord */
+	TegraGM20BInfoPushFences = 1u << 26,   /* SubmitJob takes TegraGM20BPushFence */
 };
 
 /* CpuComplete maintains cached CPU ranges only while the accepted channel prefix still owns their current
  * GPU content. Stale intervals are not acknowledged. Pending/failed intervals perform no cache maintenance. */
 struct TegraGM20BAbiCpuComplete {
-    uint64_t channel_uid, ranges_address;
-    uint32_t channel, seqno, range_count, reserved;
+	uint64_t channel_uid, ranges_address;
+	uint32_t channel, seqno, range_count, reserved;
 };
 
 struct TegraGM20BAbiCpuRange {
-    uint64_t handle, offset, bytes;
+	uint64_t handle, offset, bytes;
 };
 
 struct TegraGM20BAbiCpuCompleteReply {
-    uint32_t current_count, stale, pending, failed;
-    int32_t first_error;
-    uint32_t reserved;
+	uint32_t current_count, stale, pending, failed;
+	int32_t first_error;
+	uint32_t reserved;
 };
 
 /* This follows AbiFenceSemantic in the validated read-only fence mapping. */
 struct TegraGM20BAbiFenceIdentity {
-    uint64_t channel_uid;
+	uint64_t channel_uid;
 };
 
 struct TegraGM20BAbiEventImport {
-    uint32_t port, reserved;
+	uint32_t port, reserved;
 };
 
 struct TegraGM20BAbiEventImportReply {
-    uint64_t handle, currentValue;
+	uint64_t handle, currentValue;
 };
 
 struct TegraGM20BAbiEventRelease {
-    uint64_t handle;
+	uint64_t handle;
 };
 
 enum {
-    TegraGM20BEventObserveCancel = 1u << 0,
-    TegraGM20BEventObserveProbe = 1u << 1,
-    TegraGM20BEventObserveTerminal = 1u << 2,
+	TegraGM20BEventObserveCancel = 1u << 0,
+	TegraGM20BEventObserveProbe = 1u << 1,
+	TegraGM20BEventObserveTerminal = 1u << 2,
 };
 
 /* Arm uses IOConnectCallAsyncStructMethod, including the ordinary tunnel prefix. Cancel is synchronous and
@@ -127,51 +118,53 @@ enum {
  * Callback payload is cookie; result is Success when resolvable, Aborted on producer failure, or Aborted on cancel.
  * Terminal waits for the selected producer's external semantic result. Probe|Terminal queries that result. */
 struct TegraGM20BAbiEventObserve {
-    uint64_t handle, value, cookie;
-    uint32_t flags, reserved;
+	uint64_t handle, value, cookie;
+	uint32_t flags, reserved;
 };
 
-enum { TegraGM20BResourceObserveCancel = 1u << 0 };
+enum {
+	TegraGM20BResourceObserveCancel = 1u << 0
+};
 
 /* Readiness is one-shot and grants no ownership. Cancel acknowledges through the original async callback.
  * uses_address names use_count AbiSurfaceUse records, copied once before resolving retained backing identities. */
 struct TegraGM20BAbiResourceObserve {
-    uint64_t cookie, uses_address;
-    uint32_t use_count, flags;
-    uint64_t reserved;
+	uint64_t cookie, uses_address;
+	uint32_t use_count, flags;
+	uint64_t reserved;
 };
 
 struct TegraGM20BAbiSubmitAdmission {
-    uint64_t cookie, reserved;
+	uint64_t cookie, reserved;
 };
 
 struct TegraGM20BAbiEventUse {
-    uint64_t handle, value;
+	uint64_t handle, value;
 };
 
-/* With SubmitHasEvents, this follows the addressed job's surface uses, then waits followed by signals. */
+/* With TegraGM20BJobHasEvents, this follows the job's shared uses, then waits followed by signals. */
 struct TegraGM20BAbiSubmitEvents {
-    uint32_t wait_count, signal_count;
-    uint64_t reserved;
+	uint32_t wait_count, signal_count;
+	uint64_t reserved;
 };
 
 /* Returns an immutable read-only representation of an attested IOSurface BO. handle=0 means this format has no representation view.
- * A native view's generation mismatch at SubmitAddress returns kIOReturnNotReady before publication. */
+ * A native view's generation mismatch at SubmitJob returns kIOReturnNotReady before publication. */
 struct TegraGM20BAbiNativeSurfaceView {
-    uint64_t source_handle;
-    uint32_t flags, reserved;
+	uint64_t source_handle;
+	uint32_t flags, reserved;
 };
 
 struct TegraGM20BAbiNativeSurfacePlane {
-    uint64_t offset, bytes;
-    uint32_t width, height, pitch, bpe, block_height_log2, reserved;
+	uint64_t offset, bytes;
+	uint32_t width, height, pitch, bpe, block_height_log2, reserved;
 };
 
 struct TegraGM20BAbiNativeSurfaceViewReply {
-    uint64_t handle, bytes, representation_generation, allocation_generation;
-    uint32_t format, plane_count, kind, reserved;
-    uint32_t crop_x, crop_y, crop_width, crop_height;
-    struct TegraGM20BAbiNativeSurfacePlane planes[3];
+	uint64_t handle, bytes, representation_generation, allocation_generation;
+	uint32_t format, plane_count, kind, reserved;
+	uint32_t crop_x, crop_y, crop_width, crop_height;
+	struct TegraGM20BAbiNativeSurfacePlane planes[3];
 };
 
 enum {
@@ -187,8 +180,8 @@ struct TegraGM20BAbiCpuAccess {
 	uint32_t access, reserved;
 };
 
-/* The addressed record is a TegraGM20BAbiSubmit followed by its pushes and uses. The kernel copies it once before
- * validation. A job's final entry must complete its method packet; the entire job is published together. */
+/* SubmitJob's call (method 33): the addressed record, which the kernel copies once before validation.
+ * A job's final entry must complete its method packet; the entire job is published together. */
 struct TegraGM20BAbiSubmitAddress {
 	uint64_t address;
 	uint32_t bytes, reserved;
@@ -209,10 +202,10 @@ struct TegraGM20BAbiInfo {
 	uint16_t cls_m2mf;    /* 0xa140 KEPLER_INLINE_TO_MEMORY_B */
 	uint16_t cls_compute; /* 0xb1c0 MAXWELL_COMPUTE_B */
 	uint16_t cls_gpfifo;  /* 0xb06f MAXWELL_CHANNEL_GPFIFO_A */
-	uint32_t reserved1;
-	uint64_t va_start;  /* client-managed GPU VA range [va_start, va_end) */
-	uint64_t va_end;    /* the kext keeps everything at and above va_end for itself */
-	uint32_t page_size; /* bind granularity: 4096 */
+	uint32_t fence_token; /* the fence page's clientMemoryForType type (ChannelCreate's) */
+	uint64_t va_start;    /* client-managed GPU VA range [va_start, va_end) */
+	uint64_t va_end;      /* the kext keeps everything at and above va_end for itself */
+	uint32_t page_size;   /* bind granularity: 4096 */
 	uint32_t
 		big_page_size; /* GMMU big page the kext may use for aligned binds (0x20000), informational */
 	uint64_t max_bo_bytes;
@@ -231,7 +224,8 @@ enum {
 	 * physically contiguous runs of the kernel's GPU pool under its tiers (kIOReturnNoMemory while they refuse it or no run
 	 * is free), never mapped for the CPU (Map refuses its token) */
 	TegraGM20BBoCompressible = 1u << 2,
-    TegraGM20BBoControl = 1u << 3, /* Coherent command/control allocation; bounded ready-page preference. */
+	TegraGM20BBoControl = 1u
+		<< 3, /* Coherent command/control allocation; bounded ready-page preference. */
 };
 
 /* Method 2. Zero-filled pages below 4 GiB. map_token is the clientMemoryForType type for IOConnectMapMemory64. */
@@ -254,8 +248,7 @@ struct TegraGM20BAbiBoAllocReply {
  * keeps the import coherent across every process's IOSurfaceLock/Unlock of that surface (an unlock that wrote cleans it
  * for the GPU, a lock after GPU writes invalidates it for the CPU). Memory without an ID is cleaned once, at import;
  * later CPU writes to it are the caller's to clean.
- * flags: TegraGM20BImportGpuReads says the GPU only reads the surface until a SurfaceWrites (method 15) names it, so a CPU
- * lock of a surface only ever sampled invalidates nothing. Without it every submission may have written the import. */
+ * flags: TegraGM20BImportGpuReads says the GPU only reads the surface until a SurfaceWrites (method 15) names it. */
 enum {
 	TegraGM20BImportGpuReads = 1u << 0,
 };
@@ -319,8 +312,9 @@ struct TegraGM20BAbiBoFree {
  * before return; a map is seen by every submission made after the call returns (each of the connection's channels
  * invalidates at its next submission), and by none of the work already submitted. */
 enum {
-	TegraGM20BBindMap = 1,   /* [va, va+range) -> handle at bo_offset, PTE kind = kind */
-	TegraGM20BBindMapVolatile = 4, /* CPU command/control memory bypasses GPU L2; kind must be 0 */
+	TegraGM20BBindMap = 1, /* [va, va+range) -> handle at bo_offset, PTE kind = kind */
+	TegraGM20BBindMapVolatile =
+		4,               /* CPU command/control memory bypasses GPU L2; kind must be 0 */
 	TegraGM20BBindUnmap = 2, /* [va, va+range) -> invalid (GPU access faults) */
 	TegraGM20BBindMapSparse =
 		3, /* [va, va+range) -> sparse (reads 0, writes dropped); needs InfoSparse */
@@ -356,7 +350,7 @@ enum {
 	TegraGM20BEngine3D = 1u << 2,
 	TegraGM20BEngineM2MF = 1u << 3,
 	TegraGM20BEngineCompute = 1u << 4,
-    TegraGM20BEngineCopyOnly = 1u << 31, /* Requires exactly EngineCopy. */
+	TegraGM20BEngineCopyOnly = 1u << 31, /* Requires exactly EngineCopy. */
 };
 
 /* Method 6. A GPFIFO channel on the GR runlist in the connection's VM. EngineCopyOnly binds only CE on subchannel 4;
@@ -374,6 +368,15 @@ struct TegraGM20BAbiChannelCreateReply {
 	uint32_t reserved;
 };
 
+/* TegraGM20BInfoChannelEpoch: the GPU's channel epoch, the same in every connection's fence page (GetInfo's fence_token
+ * maps it before any channel is made). It moves on (by one, wrapping) whenever a ChannelCreate that was refused may
+ * succeed: a channel destroyed on any connection, a connection closed, and GPU pool memory given back after the pool
+ * refused the kernel an allocation (a channel's ring or context). A refused call returns no reply, so a client reads the
+ * word (acquire) before it asks, and once refused asks again only when the word differs from what it read. */
+enum {
+	TegraGM20BChannelEpochWord = 255,
+};
+
 /* What fence_offset points at (TegraGM20BInfoKillRecord). The GPU writes `completed`. When the kext kills the channel
  * (method 11) it writes the rest, then moves `completed` past every seqno it gave out, so a client that sees `completed`
  * pass a seqno sees the record too, with a load barrier between the two reads. A seqno s with
@@ -388,14 +391,14 @@ struct TegraGM20BAbiFence {
 };
 
 enum {
-    TegraGM20BFenceSemanticPending = 1u << 0,
-    TegraGM20BFenceSemanticFailed = 1u << 1,
+	TegraGM20BFenceSemanticPending = 1u << 0,
+	TegraGM20BFenceSemanticFailed = 1u << 1,
 };
 
 /* This immediately follows AbiFence. Read epoch, fields, epoch with acquire ordering;
  * an odd or changed epoch requires WaitFence. Prefix comparisons use signed32 sequence differences. */
 struct TegraGM20BAbiFenceSemantic {
-    uint32_t epoch, pending_first, failed_first, flags;
+	uint32_t epoch, pending_first, failed_first, flags;
 };
 
 /* Method 7. Waits (bounded) for the channel to go idle, then tears it down. */
@@ -404,16 +407,10 @@ struct TegraGM20BAbiChannel {
 	uint32_t reserved;
 };
 
-/* Method 8. Appends one GPFIFO entry per push, in order and contiguously, then the kext's own fence push (wait-for-idle, the
- * cache flush needed for CPU visibility, semaphore release of seqno to the fence page), then rings GP_PUT. count may be 0: no
- * GPU work, the reply is the last seqno already submitted (and errors of the channel are still reported). */
 enum {
 	TegraGM20BPushNoPrefetch = 1u << 0, /* GPFIFO entry NO_PREFETCH bit */
-	/* From this submission on, every writable import of the connection counts as GPU-written, TegraGM20BImportGpuReads
-	 * or not: the client could not deliver a SurfaceWrites. Carried by a real push, so it takes effect with the work. */
-	TegraGM20BPushImportsWritten = 1u << 1,
 	TegraGM20BPushIncomplete = 1u << 2,
-	/* SubmitAddress with InfoPushFences: after this push the GPU waits for idle and releases the channel's next seqno
+	/* SubmitJob with InfoPushFences: after this push the GPU waits for idle and releases the channel's next seqno
 	 * (an internal fence, with its completion interrupt), then runs the next push. The job's own fence releases the
 	 * seqno after its last such fence, which the reply names. Never on an Incomplete push or the job's last; at most
 	 * TegraGM20BMaxJobFences. */
@@ -424,12 +421,6 @@ struct TegraGM20BAbiPush {
 	uint64_t va;     /* 4-byte aligned GPU VA of the method stream */
 	uint32_t dwords; /* 1..(1 << 21) - 1 */
 	uint32_t flags;  /* TegraGM20BPush* */
-};
-
-struct TegraGM20BAbiExec {
-	uint32_t channel;
-	uint32_t count; /* 0..TegraGM20BMaxPushes */
-	struct TegraGM20BAbiPush pushes[TegraGM20BMaxPushes];
 };
 
 struct TegraGM20BAbiExecReply {
@@ -447,63 +438,17 @@ enum {
 /* TegraGM20BAbiSurfaceUse.access: one or both */
 enum {
 	TegraGM20BSurfaceRead = 1u << 0,
-	TegraGM20BSurfaceWrite = 1u << 1, /* renders, blits or stores into it */
-	TegraGM20BSurfaceHostWritten = 1u << 3, /* SubmitAddress explicit visibility: CPU bytes changed since GPU use */
-	TegraGM20BSurfaceGpuAddress = 1u << 2, /* SubmitAddress only: handle is a GPU VA in a live binding */
-    TegraGM20BSurfaceRange = 1u << 4, /* With GpuAddress, reserved is the nonzero byte extent. */
+	TegraGM20BSurfaceWrite = 1u << 1,       /* renders, blits or stores into it */
+	TegraGM20BSurfaceHostWritten = 1u << 3, /* CPU bytes changed since GPU use */
+	TegraGM20BSurfaceGpuAddress = 1u << 2,  /* handle is a GPU VA in a live binding */
+	TegraGM20BSurfaceRange = 1u
+		<< 4, /* With GpuAddress, reserved is the nonzero byte extent. */
 };
 
-/* TegraGM20BAbiExecSurfaces.flags */
-enum {
-	TegraGM20BExecSurfacesAll = 1u
-		<< 0, /* it touches more imports than it lists: the Exec runs as one with no list */
-};
-
-/* SubmitAddress only. Flags zero preserve the legacy host acquire and external release. Internal execution fences
- * do not expose GPU writes to the CPU or other engines; request ExternalVisibility at those boundaries. */
-enum {
-	TegraGM20BSubmitVisibilityExplicit = 1u << 1,
-	TegraGM20BSubmitExternalVisibility = 1u << 2,
-    TegraGM20BSubmitHasEvents = 1u << 3,
-    TegraGM20BSubmitAdmissionBegin = 1u << 4,
-    TegraGM20BSubmitAdmissionContinue = 1u << 5,
-    TegraGM20BSubmitAdmissionEnd = 1u << 6,
-    TegraGM20BSubmitAdmissionCancel = 1u << 7,
-};
-
-/* Method 17. The host imports (BoImport handles) the channel's next Exec touches, as an Apple command buffer carries its
- * resource list. That Exec starts with a semaphore acquire, as Order's (method 14), on each submission of another channel,
- * in any process, whose own list named a listed import as written and that may still be running, so it reads and writes
- * the surface after them on the GPU, with no CPU wait; and it counts as a GPU write (TegraGM20BImportGpuReads, the
- * IOSurfaceLock wait) of the imports it lists with TegraGM20BSurfaceWrite only. An Exec with no list, or with
- * TegraGM20BExecSurfacesAll, waits for nothing and counts as a write of every writable import of the connection for the
- * IOSurfaceLock wait alone: no Exec waits for it on the GPU. A client's surfaces are fenced from the point it sends lists.
- * The channel's next Exec takes the list whether it succeeds or not: a retry after kIOReturnBusy sends it again. The record
- * may end after its `count` uses, as Exec's after its pushes. A handle that is not a live import is passed over. A channel
- * queues at most TegraGM20BMaxOrderWaits acquires: an Exec that cannot queue all required waits fails before submitting. */
 struct TegraGM20BAbiSurfaceUse {
 	uint64_t handle;
 	uint32_t access; /* TegraGM20BSurface* */
 	uint32_t reserved;
-};
-
-struct TegraGM20BAbiExecSurfaces {
-	uint32_t channel;
-	uint32_t count; /* 0..TegraGM20BMaxExecSurfaces */
-	uint32_t flags; /* TegraGM20BExecSurfaces* */
-	uint32_t reserved;
-	struct TegraGM20BAbiSurfaceUse uses[TegraGM20BMaxExecSurfaces];
-};
-
-/* Method 20, reply TegraGM20BAbiExecReply. The header is followed by push_count AbiPush records, then surface_count
- * AbiSurfaceUse records. The exact byte count must fit MaxSubmitBytes. The surface list and pushes are consumed together,
- * under the connection lock; malformed records or unresolved dependencies publish no GPU work. No pending method 17 list
- * is used. surface_flags has ExecSurfaces semantics (All for an unlisted submission). */
-struct TegraGM20BAbiSubmit {
-	uint32_t channel;
-	uint32_t push_count;
-	uint32_t surface_count;
-	uint32_t surface_flags;
 };
 
 /* Method 9. Returns kIOReturnSuccess once completed seqno has passed `seqno`, kIOReturnTimeout after timeout_ns (0 = poll once),
@@ -514,14 +459,8 @@ struct TegraGM20BAbiWaitFence {
 	uint64_t timeout_ns;
 };
 
-/* Method 10, output only: PTIMER, the clock the GPU writes in timestamp queries. It counts 32 a tick of the 19.2 MHz
- * oscillator, so a unit is 625/384 ns, not one: GK20A-family PTIMERs have no rate registers to make it count nanoseconds. */
-struct TegraGM20BAbiTimestamp {
-	uint64_t ns;
-};
-
 /* Method 11. Input TegraGM20BAbiChannel; error 0 means healthy, anything else means the kext killed the channel (its fence
- * word was moved past every seqno it gave out, so no acquire or wait stays on it). Only that channel is dead: Exec, Order
+ * word was moved past every seqno it gave out, so no acquire or wait stays on it). Only that channel is dead: SubmitJob
  * and WaitFence on it answer kIOReturnNotResponding, while the connection's BOs, binds and other channels go on, and
  * ChannelDestroy then ChannelCreate (whose reply names the new channel and fence word) gives the client a new one. */
 struct TegraGM20BAbiStatus {
@@ -562,43 +501,15 @@ struct TegraGM20BAbiUnmap {
 	uint64_t address;
 };
 
-/* TegraGM20BAbiOrder.flags: one or both */
-enum {
-	TegraGM20BOrderAfterTask = 1u << 0,  /* `channel` waits for the task's other channels */
-	TegraGM20BOrderBeforeTask = 1u << 1, /* the task's other channels wait for `channel` */
-};
-
-enum {
-	TegraGM20BMaxOrderWaits = 16, /* acquires one channel's next submission can have queued */
-};
-
-/* Method 14. Order on the GPU between the channels of the calling task (its connections: two drivers of one process, e.g.
- * the render server's raw GM20B path and NVK), with no CPU wait. The kext queues semaphore acquires (ACQ_GEQ, acquire switch
- * on: the host runs other channels meanwhile) that a channel's next Exec starts with, ahead of its pushes, on the fence words
- * of the task's other channels (every address space maps the fence pages read-only for them):
- *  - AfterTask: the next submission of `channel` waits for the last submission, as of this call, of every other channel of
- *    the task that has work pending;
- *  - BeforeTask: the next submission of every other channel of the task waits for `channel` to complete `seqno` (0: its
- *    last submission; a seqno not submitted yet is refused).
- * Every acquire names work submitted before the call, so no two submissions can wait for each other. A channel the task makes
- * after the call is not ordered by it; work that completed already queues nothing. reply.waits: the acquires queued.
- * kIOReturnNotReady: an address space has no view of the fence pages; kIOReturnNoResources: a channel has
- * TegraGM20BMaxOrderWaits acquires from other channels queued. Either way the caller orders that switch itself.
- * kIOReturnNotResponding: `channel` was killed (method 11); killed channels of the task are left out. */
-struct TegraGM20BAbiOrder {
-	uint32_t channel;
-	uint32_t flags; /* TegraGM20BOrder* */
-	uint32_t seqno; /* BeforeTask */
-	uint32_t reserved;
-};
-
 /* Method 18. The GPU priority the process's Metal command queues asked for (-[MTLCommandQueue setGPUPriority:] and
- * setBackgroundGPUPriority:), Metal's values, the lower the more urgent: Core Animation's render server asks for 0 (its
- * window server renderer: CA::OGL::new_metal_context's MetalPriority 4), its asynchronous dispatcher 1, its other
- * contexts 2 and 4. It sets the runlist level of every channel of the connection, made before the call or after:
-  * 0 the compositor's, the highest, 1 and 2 an app's, 3 and above background. background_priority is the one for while
- * runningboardd denies the process the GPU (task_is_gpu_denied, IOKit's "foreground" privilege). Values above
- * TegraGM20BMaxPriority are refused. */
+ * setBackgroundGPUPriority:), Metal's values as IOGPUFamily's setter takes them (21H461, 24B119): 0-2 and 4 open, 0 the
+ * most urgent of them; 5 RealTime, scheduled as 0 (com.apple.private.agx.rt-priority-spi held or not); 3 refused. Core
+ * Animation's render server asks for 0 (its window server renderer: CA::OGL::new_metal_context's MetalPriority 4), its
+ * asynchronous dispatcher 1, its other contexts 2 and 4. It sets the runlist level of every channel of the connection,
+ * made before the call or after: 0 the highest, 1 and 2 an app's, 4 background; the compositor is a connection at 0
+ * whose task holds com.apple.private.graphics-restart-no-kill. background_priority is the one for while runningboardd
+ * denies the process the GPU (task_is_gpu_denied, IOKit's "foreground" privilege). Values above TegraGM20BMaxPriority
+ * are refused. */
 enum {
 	TegraGM20BMaxPriority = 5,
 };
@@ -606,11 +517,6 @@ enum {
 struct TegraGM20BAbiPriority {
 	uint32_t priority;
 	uint32_t background_priority;
-};
-
-struct TegraGM20BAbiOrderReply {
-	uint32_t waits;
-	uint32_t reserved;
 };
 
 /* Method 19. A zero-bandwidth-clear entry: a full-tile clear (CLEAR_SURFACE) of a compressed surface to a value in the
@@ -662,18 +568,13 @@ TEGRA_GM20B_ASSERT(TegraGM20BAbiFenceIdentity, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiChannelCreateReply, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiChannel, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiPush, 16);
-TEGRA_GM20B_ASSERT(TegraGM20BAbiExec, 4088);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiExecReply, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiSurfaceUse, 16);
-TEGRA_GM20B_ASSERT(TegraGM20BAbiExecSurfaces, 1040);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiWaitFence, 16);
-TEGRA_GM20B_ASSERT(TegraGM20BAbiTimestamp, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiStatus, 24);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiMap, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiMapReply, 16);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiUnmap, 16);
-TEGRA_GM20B_ASSERT(TegraGM20BAbiOrder, 16);
-TEGRA_GM20B_ASSERT(TegraGM20BAbiOrderReply, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiPriority, 8);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiZbc, 40);
 TEGRA_GM20B_ASSERT(TegraGM20BAbiZbcReply, 8);

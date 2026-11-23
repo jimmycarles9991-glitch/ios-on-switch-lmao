@@ -26,13 +26,13 @@ public enum PatternWriter {
     }
 
     public static func writeLuma(_ pattern: Pattern, frame: Int, into plane: Plane) {
-        for y in 0..<pattern.height {
+        for y in 0 ..< pattern.height {
             if y < pattern.barcodeHeight {
-                for x in 0..<pattern.width { plane.store(pattern.luma(x: x, y: y, frame: frame), x: x, y: y) }
+                for x in 0 ..< pattern.width { plane.store(pattern.luma(x: x, y: y, frame: frame), x: x, y: y) }
                 continue
             }
             let rowPhase = y * 128 / pattern.height + frame * 8
-            for x in 0..<pattern.width {
+            for x in 0 ..< pattern.width {
                 let phase = (x * 512 / pattern.width + rowPhase) % 512
                 plane.store(16 + (phase < 256 ? phase : 511 - phase) * 219 / 255, x: x, y: y)
             }
@@ -41,8 +41,8 @@ public enum PatternWriter {
 
     /// 4:2:0 CbCr pairs in one plane (NV12, P010).
     public static func writeChromaInterleaved(_ pattern: Pattern, into plane: Plane) {
-        for cy in 0..<(pattern.height / 2) {
-            for cx in 0..<(pattern.width / 2) {
+        for cy in 0 ..< (pattern.height / 2) {
+            for cx in 0 ..< (pattern.width / 2) {
                 let (cb, cr) = pattern.chroma(x: cx * 2, y: cy * 2)
                 plane.store(cb, x: cx * 2, y: cy)
                 plane.store(cr, x: cx * 2 + 1, y: cy)
@@ -52,8 +52,8 @@ public enum PatternWriter {
 
     /// 4:2:0 Cb and Cr in planes of their own (I420).
     public static func writeChromaPlanar(_ pattern: Pattern, cb: Plane, cr: Plane) {
-        for cy in 0..<(pattern.height / 2) {
-            for cx in 0..<(pattern.width / 2) {
+        for cy in 0 ..< (pattern.height / 2) {
+            for cx in 0 ..< (pattern.width / 2) {
                 let value = pattern.chroma(x: cx * 2, y: cy * 2)
                 cb.store(value.cb, x: cx, y: cy)
                 cr.store(value.cr, x: cx, y: cy)
@@ -63,9 +63,9 @@ public enum PatternWriter {
 
     /// Full-range RGB, `channels` bytes a pixel (3: RGB, 4: RGBX with X = 255).
     public static func writeRGB(_ pattern: Pattern, frame: Int = 0, into plane: Plane, channels: Int) {
-        for y in 0..<pattern.height {
+        for y in 0 ..< pattern.height {
             let row = plane.base + y * plane.rowBytes
-            for x in 0..<pattern.width {
+            for x in 0 ..< pattern.width {
                 let (r, g, b) = pattern.rgb(x: x, y: y, frame: frame)
                 let pixel = row + x * channels
                 pixel.storeBytes(of: r, toByteOffset: 0, as: UInt8.self)

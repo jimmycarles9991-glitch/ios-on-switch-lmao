@@ -7,11 +7,11 @@ import Metal
 /// made; once added to the archive it is a hit. A render state (made at once and, on the Switch, through a completion
 /// handler) and a compute state of this app's library, against an empty archive and against QuartzCore's
 /// default.metallib opened as an archive, which declares Core Animation's states and none of this app's. On the raw
-/// facade every archive is the device's own (RawMetalBinaryArchive.mm): the empty one holds what was added to it, and
-/// QuartzCore's what the raw pack's archive key lists declare for that file; a miss is the target driver's error domain
+/// facade every archive is the device's own (TegraGM20BMetalBinaryArchive.mm): the empty one holds what was added to it, and
+/// QuartzCore's what the pack's archive key lists declare for that file; a miss is the target driver's error domain
 /// with Metal's code 3.
 struct ArchiveMissScene: GPUScene {
-    let id = "gpu.raw.archive_miss"
+    let id = "gpu.gm20b.archive_miss"
     let name = "A binary archive miss under FailOnBinaryArchiveMiss is Metal's nil"
 
     static let quartzCoreLibraries = [
@@ -35,7 +35,7 @@ struct ArchiveMissScene: GPUScene {
         expectMiss(&result, "compute, empty archive") { try makeCompute(gpu, compute) }
         // Not on a Mac: AGXMetalG16X crashed the host test in this call (11-11, a bad capture in _Block_object_assign
         // under createFragmentProgramVariant), which the same calls from Objective-C did not
-        if RawFacade.kind(of: gpu.device) != "apple" {
+        if GM20BFacade.kind(of: gpu.device) != "apple" {
             let handled = await renderThroughHandler(gpu, render)
             result.expect(handled.state == nil && handled.error != nil, "render handler, empty archive: not a miss")
         }
@@ -52,10 +52,10 @@ struct ArchiveMissScene: GPUScene {
         }
         let archiveDescriptor = MTLBinaryArchiveDescriptor()
         archiveDescriptor.url = URL(fileURLWithPath: path)
-        let kind = RawFacade.kind(of: gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
         guard let quartzCore = try? gpu.device.makeBinaryArchive(descriptor: archiveDescriptor) else {
             // This Mac's Metal calls its own QuartzCore library an invalid archive; iOS's (an AIR slice beside Apple GPU
-            // binaries) opens on an M4 as an archive holding nothing for it (metal2vulkan-runtime container.rs)
+            // binaries) opens on an M4 as an archive holding nothing for it
             result.expect(kind == "apple", "QuartzCore's default.metallib did not open as an archive")
             return result
         }
@@ -66,7 +66,7 @@ struct ArchiveMissScene: GPUScene {
         ]
         for (label, make) in makers {
             let error = expectMiss(&result, "\(label), QuartzCore's archive", make)
-            if kind != "m2v", let error {
+            if let error {
                 result.expect(error.code == 3, "\(label), QuartzCore's archive: code \(error.code), not Metal's 3")
             }
             result.metrics.set("\(label)_domain", error?.domain ?? "-")

@@ -8,13 +8,13 @@ public enum GPUProbe {
         let waiter = Waiter<Bool>()
         DispatchQueue.global(qos: .userInitiated).async {
             guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
-                let buffer = device.makeBuffer(length: 64, options: .storageModeShared),
-                let commands = queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder()
+                  let buffer = device.makeBuffer(length: 64, options: .storageModeShared),
+                  let commands = queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder()
             else {
                 waiter.resume(false)
                 return
             }
-            blit.fill(buffer: buffer, range: 0..<64, value: 0xA5)
+            blit.fill(buffer: buffer, range: 0 ..< 64, value: 0xA5)
             blit.endEncoding()
             commands.addCompletedHandler { done in
                 waiter.resume(done.status == .completed && buffer.contents().load(as: UInt8.self) == 0xA5)

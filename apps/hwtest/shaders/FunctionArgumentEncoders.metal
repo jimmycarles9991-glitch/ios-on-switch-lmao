@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-/// gpu.raw.function_argument_encoder: argument buffers each function's own encoder lays out
+/// gpu.gm20b.function_argument_encoder: argument buffers each function's own encoder lays out
 /// (newArgumentEncoderWithBufferIndex:). The case's expected lengths, alignments and offsets are Metal's for these
 /// structs on an M4 Max under macOS 27.2.
 struct ArgEncInner {

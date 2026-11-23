@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Rule mip.twod (drivers/TegraGM20BMetal/raw/fx/fx_mip_route.h): generateMipmaps on the 2D engine, step by step against
+/// Rule mip.twod (drivers/TegraGM20BMetal/fx/fx_mip_route.h): generateMipmaps on the 2D engine, step by step against
 /// Metal's definition computed from the level above as the GPU left it (MipReference), for BGRA8, RGBA8, RGBA16Float, R8,
 /// RG8 and both 8-bit sRGB formats. The line opens with what decides it: the facade's counters over the run
 /// (mip_twod_levels, mip_twod_unproven_levels, mip_3d_levels), the sRGB formats' evidence (`srgb=<fmt>:2d=..:3d=..:l1=..:
@@ -18,9 +18,10 @@ import Metal
 /// filter drawing each level into a one-level texture (paths_3d). Details follow: <fmt>_* (proven), <fmt>_odd_*,
 /// <fmt>_3d_* (the control's proven steps), <fmt>_3d_odd_*, <fmt>_l1_* (level 1 of both compared). `layered=` and
 /// <fmt>_layers_*: a two-layer 255x129 BGRA8 and BGRA8 sRGB array chain, every layer's steps against Metal's (a wrong
-/// step fails it).
+/// step fails it). A command buffer of the 3D arm or of gpu_ms's chains that fails or throws fails it too: `error` in
+/// its cell, the error in the detail.
 struct MipTwodTest: HWTest {
-    let id = "gpu.raw.mip_twod"
+    let id = "gpu.gm20b.mip_twod"
     let name = "generateMipmaps on the 2D engine within one code of Metal's step, and its GPU time against 3D passes"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 240 }
@@ -29,20 +30,21 @@ struct MipTwodTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         var detail = Metrics()
         var wrong: [String] = []
         var paths: Set<String> = [], paths3d: Set<String> = []
         var cells: [String] = [], times: [String] = [], srgb: [String] = [], firsts: [String] = []
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         let rounding = MipRounding()
         for f in MipFormats.twod {
             let chains = MipChains(gpu: gpu, format: f)
             var proven = MipTally(), odd = MipTally(), control = MipTally(), controlOdd = MipTally(),
                 level1 = MipTally()
             var arm3d = "-"
+            var failure3d: String?
             var evidence = MipSrgbEvidence()
             let isSrgb = f.layout.fields.contains { $0.kind == .srgb }
             for (w, h) in Self.sizes {
@@ -63,8 +65,10 @@ struct MipTwodTest: HWTest {
                 } catch {
                     paths3d.insert("error")
                     arm3d = "error"
+                    failure3d = failure3d ?? "\(error)"
                 }
             }
+            if let failure3d { wrong.append("\(f.name)_3d: \(failure3d)") }
             cells.append("\(f.name):\(proven.verdict)/\(odd.verdict)/\(arm3d)")
             if isSrgb {
                 (evidence.twod, evidence.threeD, evidence.level1) = (proven, control, level1)
@@ -79,10 +83,12 @@ struct MipTwodTest: HWTest {
             if proven.wrong > 0 && !f.layout.fields.contains(where: { $0.kind == .float }) {
                 wrong.append("\(f.name)_wrong")
             }
-            if let (twodMs, drawnMs) = try? await chains.times(1024) {
+            do {
+                let (twodMs, drawnMs) = try await chains.times(1024)
                 times.append(String(format: "%@:%.3f/%.3f", f.name, twodMs, drawnMs))
-            } else {
+            } catch {
                 times.append("\(f.name):error")
+                wrong.append("\(f.name)_gpu_ms: \(error)")
             }
         }
         var layered: [String] = []
@@ -97,7 +103,7 @@ struct MipTwodTest: HWTest {
             Self.report(&detail, f.name + "_layers_odd", odd)
             if proven.wrong > 0 || odd.wrong > 0 { wrong.append("\(f.name)_layers_wrong") }
         }
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         var metrics = Metrics()
         metrics.set("layered", layered.joined(separator: ","))
         for key in ["mip_twod_levels", "mip_twod_unproven_levels", "mip_3d_levels"] {
@@ -120,7 +126,7 @@ struct MipTwodTest: HWTest {
         if !after.isEmpty && (after["mip_twod_levels"] ?? 0) == (before["mip_twod_levels"] ?? 0) {
             wrong.insert("no_twod_levels", at: 0)
         }
-        if paths != ["raw"] { wrong.insert("paths", at: 0) }
+        if paths != ["gm20b"] { wrong.insert("paths", at: 0) }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 

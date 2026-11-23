@@ -11,27 +11,27 @@ import Metal
 /// Every command buffer stays raw.
 struct NativeAmplificationTest: NativeObjectTest {
     let id = "metal.native.amplification"
-    let name = "Vertex amplification drawn one amplification at a time on the raw path"
+    let name = "Vertex amplification drawn one amplification at a time on the driver"
 
     static let size = 32
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct Out { float4 position [[position]]; float4 color; };
-        vertex Out amplified_quad(uint v [[vertex_id]], ushort a [[amplification_id]]) {
-            const float2 corner = float2(v & 1, v >> 1);
-            Out o;
-            o.position = float4(-1 + corner.x + a, corner.y * 2 - 1, 0, 1);
-            o.color = a ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-            return o;
-        }
-        fragment float4 amplified_color(Out in [[stage_in]]) { return in.color; }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct Out { float4 position [[position]]; float4 color; };
+    vertex Out amplified_quad(uint v [[vertex_id]], ushort a [[amplification_id]]) {
+        const float2 corner = float2(v & 1, v >> 1);
+        Out o;
+        o.position = float4(-1 + corner.x + a, corner.y * 2 - 1, 0, 1);
+        o.color = a ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+        return o;
+    }
+    fragment float4 amplified_color(Out in [[stage_in]]) { return in.color; }
+    """
 
     /// Pixels other than red in the left half, and green in the right one where `both`, black where not
     static func wrong(_ pixels: [UInt8], both: Bool) -> Int {
-        (0..<size * size).filter { i in
+        (0 ..< size * size).filter { i in
             let left = i % size < size / 2
             let want: [UInt8] = left ? [255, 0, 0, 255] : both ? [0, 255, 0, 255] : [0, 0, 0, 255]
             return Array(pixels.pixel(i % size, i / size, width: size)) != want
@@ -65,7 +65,8 @@ struct NativeAmplificationTest: NativeObjectTest {
         }
         work.objects.append(quad)
         quad.indirectRenderCommandAt(0).drawPrimitives(
-            .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: 0)
+            .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: 0
+        )
         for (count, indirect) in [(2, false), (1, false), (2, true), (1, true)] {
             let target = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
             let timing = try await gpu.run { commands in
@@ -78,7 +79,7 @@ struct NativeAmplificationTest: NativeObjectTest {
                 encoder.setRenderPipelineState(pipeline)
                 encoder.setVertexAmplificationCount(count, viewMappings: nil)
                 if indirect {
-                    encoder.executeCommandsInBuffer(quad, range: 0..<1)
+                    encoder.executeCommandsInBuffer(quad, range: 0 ..< 1)
                 } else {
                     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 }

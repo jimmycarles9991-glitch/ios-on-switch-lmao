@@ -5,11 +5,11 @@ import Metal
 import MetalPerformanceShaders
 
 /// MPS's Gaussian blur, edges clamped, against a Gaussian worked in double on the CPU, at small, medium and large
-/// sigma. MPS's kernels write half-float intermediate textures, which m2v writes through their unsigned integer twin:
-/// on the raw facade they run on raw through a header of that view (raw_view.h; boot 17 sent all three to m2v as
-/// compute.view, whose replay over the twins came back as zeros).
+/// sigma. MPS's kernels write half-float intermediate textures, which the facade writes through a texture header of
+/// that format (view.h).
 struct MPSBlurScene: GPUScene {
     let id = "gpu.blur.mps"
+    let framework = true
     let name = "MPS Gaussian blur against a CPU Gaussian"
 
     func run(_ gpu: GPU) async throws -> SceneResult {
@@ -35,11 +35,12 @@ struct MPSBlurScene: GPUScene {
             paths.append(timing.path)
             let want = TexelFormat.rgba8Unorm.quantized(Gaussian.blur(image, sigma: Double(sigma)))
             result.compare(
-                "sigma \(sigma)", try await gpu.raster(destination, .rgba8Unorm), want, tolerance: BlurTolerance.mps)
+                "sigma \(sigma)", try await gpu.raster(destination, .rgba8Unorm), want, tolerance: BlurTolerance.mps
+            )
         }
         result.metrics.set("paths", paths.joined(separator: ","))
-        if RawFacade.kind(of: gpu.device) == "raw" {
-            result.expect(paths.allSatisfy { $0 == "raw" }, "the blurs took \(paths), not raw")
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
+            result.expect(paths.allSatisfy { $0 == "gm20b" }, "the blurs took \(paths), not raw")
         }
         return result
     }
@@ -51,6 +52,7 @@ struct MPSBlurScene: GPUScene {
 /// Image's downsampled pyramid, so they get a wider tolerance.
 struct CoreImageBlurScene: GPUScene {
     let id = "gpu.blur.coreimage"
+    let framework = true
     let name = "Core Image Gaussian blur against a CPU Gaussian"
 
     func run(_ gpu: GPU) async throws -> SceneResult {
@@ -60,10 +62,12 @@ struct CoreImageBlurScene: GPUScene {
         let image = TexelFormat.rgba8Unorm.raster(bytes, width: size, height: size)
         let context = CIContext(
             mtlCommandQueue: gpu.queue,
-            options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull(), .cacheIntermediates: false])
+            options: [.workingColorSpace: NSNull(), .outputColorSpace: NSNull(), .cacheIntermediates: false]
+        )
         let input = CIImage(
             bitmapData: Data(bytes), bytesPerRow: size * 4, size: CGSize(width: size, height: size), format: .RGBA8,
-            colorSpace: nil)
+            colorSpace: nil
+        )
         for (radius, tolerance) in [
             (2.0, BlurTolerance.coreImage), (6, BlurTolerance.coreImage), (16, BlurTolerance.coreImageLarge),
         ] {
@@ -71,12 +75,14 @@ struct CoreImageBlurScene: GPUScene {
             var out = [UInt8](repeating: 0, count: size * size * 4)
             let start = CFAbsoluteTimeGetCurrent()
             context.render(
-                blurred, toBitmap: &out, rowBytes: size * 4, bounds: input.extent, format: .RGBA8, colorSpace: nil)
+                blurred, toBitmap: &out, rowBytes: size * 4, bounds: input.extent, format: .RGBA8, colorSpace: nil
+            )
             result.metrics.set("ms_radius\(Int(radius))", (CFAbsoluteTimeGetCurrent() - start) * 1000, digits: 2)
             let want = TexelFormat.rgba8Unorm.quantized(Gaussian.blur(image, sigma: radius))
             result.compare(
                 "radius \(radius)", TexelFormat.rgba8Unorm.raster(out, width: size, height: size), want,
-                tolerance: tolerance)
+                tolerance: tolerance
+            )
         }
         return result
     }

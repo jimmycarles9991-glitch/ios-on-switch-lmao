@@ -19,6 +19,11 @@ extern "C" int proc_selfpid(void)
 	return 50;
 }
 
+extern "C" int switch_gpu_events_charged(void)
+{
+	return 0;
+}
+
 extern "C" uint32_t switch_gpu_info_flags(void)
 {
 	return 0;

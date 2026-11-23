@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-//! The address-mode maps of the textures the raw path samples through an image it converts from their planes, for the
+//! The address-mode maps of the textures the driver samples through an image it converts from their planes, for the
 //! direct compile of a kernel that binds them (NativeMetalDirectCompute.rs), so the kernel compiles as m2v's variant for
 //! them does: its constexpr samplers through the translator's `VariantKey::address_maps`, its runtime samplers mapped at
 //! bind (metal2vulkan-runtime address_map.rs). A map is two bits, as raw's `Texture::addressMap`
-//! (drivers/TegraGM20BMetal/raw/runtime/raw_ycbcr.cpp `addressMapOf`): bit 0 sends the wrapping modes to clamp to edge,
+//! (drivers/TegraGM20BMetal/ycbcr.cpp `addressMapOf`): bit 0 sends the wrapping modes to clamp to edge,
 //! bit 1 the clamps to zero and to the border colour. The rule is m2v's `ycbcr_modes` (metal2vulkan-runtime
 //! texture/ycbcr_image.rs, a private function of a frozen crate), Metal's reads in EVs XRR2-ycc2-m4, TXN2-ycr1-m4,
 //! TXN2-ycb1-m4 and -m3, TXN2-ycq1-m4 and TXN2-ycb2-m4: a 4:2:0 or 4:2:2 texture samples repeat, mirrored repeat and
@@ -92,7 +92,7 @@ pub fn sampler_maps(
 mod tests {
     use super::*;
 
-    // raw_ycbcr.cpp kFormats: each two-plane format's subsampling and reads, and the map raw gives it
+    // ycbcr.cpp kFormats: each two-plane format's subsampling and reads, and the map raw gives it
     const RAW: [(u64, bool, bool, u8); 27] = [
         (500, true, false, 1),
         (502, true, false, 1),

@@ -69,6 +69,11 @@ extern "C" int switch_gpu_backing_register_timeline_refs(uint32_t,
 	return 0;
 }
 
+extern "C" int switch_gpu_backing_register_failure(uint32_t, switch_gpu_backing_failure)
+{
+	return 0;
+}
+
 extern "C" void switch_gpu_event_waits_retain(switch_gpu_event_waits *batch)
 {
 	++batch->refs;
@@ -294,7 +299,7 @@ TEST_F(PresentFilter, AProducerAlreadyVisibleAtTheAttachRunsAtTheNextFilter)
 TEST_F(PresentFilter, AKilledChannelsAdvancedFenceIsNeverVisible)
 {
 	tgm_present_filter_attach(&watched);
-	switch_gpu_timeline_failed(timeline, 4);
+	switch_gpu_timeline_failed(timeline, 4, 0);
 	__atomic_store_n(&fence, 100u, __ATOMIC_RELEASE);
 	__atomic_store_n(&visible, 100u, __ATOMIC_RELEASE);
 	filter();
@@ -441,28 +446,6 @@ TEST_F(PromisedPresentFilter, AWorkItemThatClaimsFirstLeavesTheFilterNothing)
 	EXPECT_EQ(workItem(), SWITCH_GPU_PRESENT_WATCH_VISIBLE);
 	filter();
 	EXPECT_TRUE(callouts.empty());
-}
-
-// The order SwitchGpuPresentFilter.cpp relies on: the view goes before the watch is armed and is dropped right after
-// each claim, before the tokens drop and done runs; the nonstall line alone is filtered, masked until its pass.
-// A direct present of a producer that ended without external visibility (every compositor job on boot 19: d_filter 0 in
-// 301 frames) is delivered by present_watch_flush's fence-only present job. That job's fence, on the kernel present
-// channel, is its visibility, so the filter watches it: attached before its kick, detached before its completion's done.
-TEST(PresentFilterSource, ThePresentJobsOwnFenceIsWatchedByTheFilter)
-{
-	using switch_ios::test::Between;
-	using switch_ios::test::SourceText;
-	const std::string present = SourceText("../gpu_present.c");
-	const std::string copy = Between(present, "static int present_copy(", "\n}\n");
-	const auto attach = copy.find("tgm_present_filter_attach(&own);");
-	ASSERT_NE(attach, std::string::npos);
-	EXPECT_NE(copy.find("switch_gpu_chan_next_token(chan, &own);"), std::string::npos);
-	EXPECT_LT(attach, copy.find("chan_fence_volatile(chan);"));
-	const std::string complete =
-		Between(present, "static void present_typed_complete(void *unused)", "\n}\n");
-	ASSERT_NE(complete.find("tgm_present_filter_detach();"), std::string::npos);
-	EXPECT_LT(complete.find("tgm_present_filter_detach();"),
-		  complete.find("done(arg, status);"));
 }
 
 TEST(PresentFilterSource, TheWatchAttachesBeforeItsArmAndEachClaimDetachesFirst)

@@ -6,14 +6,14 @@ import IOSurface
 import Metal
 
 /// Passes that load R10Unorm_PACKED and RG10Unorm_PACKED over a 'p420' surface's planes (before this such a pass went to
-/// m2v: raw:pass.ycbcr). The raw path fills the pass's stand-in with each code over 1023, as Metal reads the codes, and the
+/// m2v: gm20b:pass.ycbcr). The driver fills the pass's stand-in with each code over 1023, as Metal reads the codes, and the
 /// store gives each back. The plane is first written on the CPU with codes three to a word (bits 30-31 and the tail
 /// slots 0); a pass that loads it and draws nothing stores the same words (identity_wrong_), and one that draws the left
 /// half stores the drawn half's codes as the store targets hold them (YcbcrStore.code) and the right half's as they were
-/// (partial_wrong_). PASS: no word off and every command buffer on the raw path.
+/// (partial_wrong_). PASS: no word off and every command buffer on the driver.
 struct PackedPlaneLoadTest: HWTest {
-    let id = "gpu.raw.packed_plane_load"
-    let name = "Loaded passes into packed 10-bit surface planes, on the raw path"
+    let id = "gpu.gm20b.packed_plane_load"
+    let name = "Loaded passes into packed 10-bit surface planes, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
 
@@ -23,8 +23,8 @@ struct PackedPlaneLoadTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         var metrics = Metrics()
         var failures: [String] = []
         for view in Self.views {
@@ -40,8 +40,8 @@ struct PackedPlaneLoadTest: HWTest {
             }
         }
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
-        if gpu.paths.isEmpty || !gpu.paths.paths.keys.allSatisfy({ $0 == "raw" }) {
-            failures.append("command buffers off the raw path: \(gpu.paths.text)")
+        if gpu.paths.isEmpty || !gpu.paths.paths.keys.allSatisfy({ $0 == "gm20b" }) {
+            failures.append("command buffers off the driver: \(gpu.paths.text)")
         }
         return failures.isEmpty
             ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics, proof: gpu.proof)
@@ -53,7 +53,8 @@ struct PackedPlaneLoadTest: HWTest {
             [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true] as CFDictionary
         guard
             CVPixelBufferCreate(
-                nil, YcbcrTargetTest.width, YcbcrTargetTest.height, view.fourcc, attributes, &made) == kCVReturnSuccess,
+                nil, YcbcrTargetTest.width, YcbcrTargetTest.height, view.fourcc, attributes, &made
+            ) == kCVReturnSuccess,
             let buffer = made, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue(),
             let format = MTLPixelFormat(rawValue: view.format)
         else { throw TestFailure("no surface") }
@@ -61,13 +62,14 @@ struct PackedPlaneLoadTest: HWTest {
             CVPixelBufferGetWidthOfPlane(buffer, view.plane), CVPixelBufferGetHeightOfPlane(buffer, view.plane)
         )
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format, width: w, height: h, mipmapped: false)
+            pixelFormat: format, width: w, height: h, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: view.plane) else {
             throw TestFailure("no texture")
         }
         let perRow = w * view.channels
-        var codes = (0..<(perRow * h)).map { UInt16(($0 % perRow * 7 + $0 / perRow * 13) % 1024) }
+        var codes = (0 ..< (perRow * h)).map { UInt16(($0 % perRow * 7 + $0 / perRow * 13) % 1024) }
         Self.fill(buffer, view.plane, codes, rows: h)
         try await Self.loadedPass(gpu, texture, nil, [], w, h)
         var first = ""
@@ -75,9 +77,9 @@ struct PackedPlaneLoadTest: HWTest {
         let floats = try gpu.render(fragment: "texel_values", format: format)
         let values = YcbcrTargetTest.values(w * h)
         try await Self.loadedPass(gpu, texture, floats, values, w, h)
-        for y in 0..<h {
-            for x in 0..<(w / 2) {
-                for c in 0..<view.channels {
+        for y in 0 ..< h {
+            for x in 0 ..< (w / 2) {
+                for c in 0 ..< view.channels {
                     let v = values[y * w + x][c]
                     codes[y * perRow + view.channels * x + c] = UInt16(YcbcrStore.code(v, .drawnFloat, max: 1023))
                 }
@@ -94,10 +96,10 @@ struct PackedPlaneLoadTest: HWTest {
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         guard let base = CVPixelBufferGetBaseAddressOfPlane(buffer, plane) else { return }
         let pitch = CVPixelBufferGetBytesPerRowOfPlane(buffer, plane), perRow = codes.count / rows
-        for y in 0..<rows {
-            for x in 0..<((perRow + 2) / 3) {
+        for y in 0 ..< rows {
+            for x in 0 ..< ((perRow + 2) / 3) {
                 var word: UInt32 = 0
-                for i in 0..<3 where 3 * x + i < perRow {
+                for i in 0 ..< 3 where 3 * x + i < perRow {
                     word |= UInt32(codes[y * perRow + 3 * x + i]) << (10 * i)
                 }
                 base.storeBytes(of: word, toByteOffset: y * pitch + 4 * x, as: UInt32.self)

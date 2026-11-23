@@ -245,7 +245,9 @@ const QUIET_NAN: u32 = 0x7fc0_0000;
 ///   elsewhere the device stores its own NaN there, noted `PrecisionNote::DeviceNanEncoding`);
 /// - an output to a 16-bit unorm or snorm channel where the profile takes
 ///   `DriverDeviation::MetalNorm16ColorWrites`: as computed, a blended snorm channel's NaN as
-///   -1.0, as Metal stores it.
+///   -1.0, as Metal stores it;
+/// - an output to an 8-bit sRGB channel where the target's store encodes as Metal does
+///   (`NativeShaderTarget::stores_srgb_code`): as computed.
 fn lane(
     cx: &SelectCx<'_>,
     rule: ChannelWrite,
@@ -268,6 +270,7 @@ fn lane(
         ChannelWrite::Unorm { bits } if stores_unorm_code(cx, own, bits) => {
             Some(Lane::StoreCode(bits))
         }
+        ChannelWrite::Srgb if stores_srgb_code(cx, own) => None,
         ChannelWrite::Unorm { bits: 16 } | ChannelWrite::Snorm { bits: 16, .. }
             if takes(DriverDeviation::MetalNorm16ColorWrites) =>
         {
@@ -335,6 +338,13 @@ fn stores_half(cx: &SelectCx<'_>, fmt: Option<FloatFmt>, own: bool) -> bool {
 /// converts.
 fn stores_unorm_code(cx: &SelectCx<'_>, own: bool, bits: u8) -> bool {
     !own && cx.profile.fields().native_target.stores_unorm_code(bits)
+}
+
+/// Whether a lane of an output variable to an 8-bit sRGB channel is written as computed for the
+/// device's store to encode (`NativeShaderTarget::stores_srgb_code`): not where the function
+/// writes the output itself (`own`).
+fn stores_srgb_code(cx: &SelectCx<'_>, own: bool) -> bool {
+    !own && cx.profile.fields().native_target.stores_srgb_code()
 }
 
 /// Whether the device stores the NaN of a fragment function's output of form `f` to a

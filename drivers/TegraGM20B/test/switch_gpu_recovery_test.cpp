@@ -193,12 +193,6 @@ bool switch_gpu_recover_pending(nvkm_runl *run, u32 *)
 	return pending(run);
 }
 
-void switch_gpu_gr_fault_recovered(nvkm_runl *)
-{
-	EXPECT_EQ(locks, 0);
-	calls.emplace_back("gr-release");
-}
-
 int nvkm_engine_reset(nvkm_engine *)
 {
 	EXPECT_EQ(notifications, 0);
@@ -224,11 +218,10 @@ void nvkm_event_ntfy(nvkm_event *, int, int type)
 TEST_F(Recovery, RemovedChannelsPublishOnlyAfterQuiescence)
 {
 	nvkm_runl_rc(&run);
-	EXPECT_EQ(calls,
-		  (std::vector<std::string>{"disable", "remove", "disable", "remove", "idle",
-					    "hold", "reset", "release", "update", "clear", "allow",
-					    "wait", "unblock", "preempt", "owed", "preempt",
-					    "terminal", "terminal", "gr-release"}));
+	EXPECT_EQ(calls, (std::vector<std::string>{"disable", "remove", "disable", "remove", "idle",
+						   "hold", "reset", "release", "update", "clear",
+						   "allow", "wait", "unblock", "preempt", "owed",
+						   "preempt", "terminal", "terminal"}));
 	EXPECT_EQ(notifications, 2);
 	EXPECT_EQ(locks, 0);
 	EXPECT_EQ(run.cgrps, nullptr);

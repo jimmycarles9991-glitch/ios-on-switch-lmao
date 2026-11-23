@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// A shared event's signal in the middle of a raw command buffer (drivers/TegraGM20BMetal/raw/runtime/RawMetalInlineSignals.mm
+/// A shared event's signal in the middle of a raw command buffer (drivers/TegraGM20BMetal/TegraGM20BMetalInlineSignals.mm
 /// and the kernel's event words, TegraGM20BJobABI.h method 40): a compute dispatch and a fill, the signal, then compute work
 /// four times longer, as one job whose pushes release the signal into the event's word. A listener must hear the value
 /// before the command buffer completes, and a command buffer committed right after it on another queue, waiting for the
@@ -11,10 +11,10 @@ import Metal
 /// fill. Reports the command buffer's jobs alone (the facade's jobs counter: one, where the signal
 /// used to end a job and start another), the signals released mid-job, and how long after the work before the signal the
 /// listener heard it. The rounds after those write only private memory before the signal, so on a kernel with addressed
-/// jobs the release goes without the L2 flush (raw_event_release.h), and the waiter must still copy the fill:
+/// jobs the release goes without the L2 flush (event_release.h), and the waiter must still copy the fill:
 /// unflushed_signals counts them (0 where exact_jobs=0).
 struct EventReleaseTest: HWTest {
-    let id = "gpu.raw.event_release"
+    let id = "gpu.gm20b.event_release"
     let name = "A mid-command-buffer shared-event signal: one job, heard before the command buffer completes"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
@@ -38,7 +38,8 @@ struct EventReleaseTest: HWTest {
             encoder.setBytes(&count, length: 4, index: 1)
             encoder.dispatchThreads(
                 MTLSize(width: EventReleaseTest.threads, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }
 
@@ -46,7 +47,7 @@ struct EventReleaseTest: HWTest {
         func before(_ commands: MTLCommandBuffer, fill: UInt8, iterations: UInt32) {
             dispatch(commands, iterations: iterations)
             let blit = commands.makeBlitCommandEncoder()!
-            blit.fill(buffer: source, range: 0..<EventReleaseTest.bytes, value: fill)
+            blit.fill(buffer: source, range: 0 ..< EventReleaseTest.bytes, value: fill)
             blit.endEncoding()
         }
     }
@@ -61,18 +62,19 @@ struct EventReleaseTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         guard EventJobs.read(gpu.device)["jobs"] != nil else {
-            return .skip("the facade counts no jobs (release runtime)")
+            return .skip(GM20BFacade.missing("switchMetalEvents.jobs", on: gpu.device))
         }
         guard let event = gpu.device.makeSharedEvent(), let other = gpu.device.makeCommandQueue() else {
             throw TestFailure("no shared event or second queue")
         }
         let work = Work(
             gpu: gpu, kernel: try gpu.compute("fma_loop"),
-            data: try gpu.buffer((0..<Self.threads * 4).map { Float($0 % 7) * 0.001 }),
-            source: try gpu.buffer(Self.bytes))
+            data: try gpu.buffer((0 ..< Self.threads * 4).map { Float($0 % 7) * 0.001 }),
+            source: try gpu.buffer(Self.bytes)
+        )
         var metrics = Metrics()
         var wrong: [String] = []
 
@@ -84,23 +86,23 @@ struct EventReleaseTest: HWTest {
         metrics.set("before_wall_ms", before.wallMilliseconds, digits: 3)
 
         var rounds: [Round] = []
-        for round in 0..<Self.rounds {
+        for round in 0 ..< Self.rounds {
             let value = UInt64(round + 1)
             rounds.append(try await signalled(work, event, value, iterations, waiter: round == 0 ? nil : other))
         }
         guard let privateData = gpu.device.makeBuffer(length: Self.threads * 4, options: .storageModePrivate),
-            let privateSource = gpu.device.makeBuffer(length: Self.bytes, options: .storageModePrivate)
+              let privateSource = gpu.device.makeBuffer(length: Self.bytes, options: .storageModePrivate)
         else { throw TestFailure("no private buffers") }
         let privateWork = Work(gpu: gpu, kernel: work.kernel, data: privateData, source: privateSource)
         let unflushedBefore = EventJobs.read(gpu.device)["unflushed_signals"] ?? 0
-        for round in 0..<Self.rounds {
+        for round in 0 ..< Self.rounds {
             let value = UInt64(Self.rounds + round + 1)
             rounds.append(try await signalled(privateWork, event, value, iterations, waiter: round == 0 ? nil : other))
         }
         let unflushed = (EventJobs.read(gpu.device)["unflushed_signals"] ?? 0) - unflushedBefore
         let solo = rounds[0]
         metrics.set("path", solo.path)
-        if rounds.contains(where: { $0.path != "raw" }) {
+        if rounds.contains(where: { $0.path != "gm20b" }) {
             return .fail("path", metrics)
         }
         metrics.set("jobs_per_cb", solo.jobs)
@@ -165,7 +167,7 @@ struct EventReleaseTest: HWTest {
                 UnsafeRawBufferPointer(start: copy.contents(), count: Self.bytes).filter { $0 != fill }.count
         }
         if !completed || commands.status != .completed { throw TestFailure("the signalled command buffer failed") }
-        round.path = RawFacade.path(of: commands)
+        round.path = GM20BFacade.path(of: commands)
         let after = EventJobs.read(work.gpu.device)
         round.jobs = (after["jobs"] ?? 0) - (counters["jobs"] ?? 0) - (waiter == nil ? 0 : 1)
         round.released = (after["released_signals"] ?? 0) - (counters["released_signals"] ?? 0)

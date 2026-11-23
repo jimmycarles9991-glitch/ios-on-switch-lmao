@@ -26,7 +26,7 @@ struct FreshSurfaceImportPathTest: GPUPathTest {
             .allocSize: Self.rowBytes * Self.height, .pixelFormat: 0x4247_5241,
         ]
         var surfaces: [IOSurface] = []
-        for _ in 0..<Self.surfaces {
+        for _ in 0 ..< Self.surfaces {
             guard let surface = IOSurface(properties: properties) else {
                 throw TestFailure("IOSurface creation failed")
             }
@@ -37,7 +37,8 @@ struct FreshSurfaceImportPathTest: GPUPathTest {
             memset(surface.baseAddress, 0xff, Self.writtenBytes)
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: Self.width, height: Self.height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: Self.width, height: Self.height, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         var textures: [MTLTexture] = []
         var importNs: [UInt64] = []
@@ -69,10 +70,10 @@ struct FreshSurfaceImportPathTest: GPUPathTest {
                 throw TestFailure("IOSurfaceLock for the readback failed")
             }
             var missed = 0
-            for y in 0..<Self.height {
+            for y in 0 ..< Self.height {
                 let row = UnsafeRawBufferPointer(start: surface.baseAddress + y * Self.rowBytes, count: Self.width * 4)
-                for x in 0..<Self.width
-                where row[x * 4] != 0 || row[x * 4 + 1] != 255 || row[x * 4 + 2] != 0 || row[x * 4 + 3] != 255 {
+                for x in 0 ..< Self.width
+                    where row[x * 4] != 0 || row[x * 4 + 1] != 255 || row[x * 4 + 2] != 0 || row[x * 4 + 3] != 255 {
                     missed += 1
                 }
             }
@@ -92,7 +93,8 @@ struct FreshSurfaceImportPathTest: GPUPathTest {
         if wrongWritten > 0 {
             failures.append(
                 "\(wrongWritten) pixels of \(Self.surfaces / 2) surfaces the CPU wrote without IOSurfaceLock miss the "
-                    + "GPU's clear: their import skipped the clean")
+                    + "GPU's clear: their import skipped the clean"
+            )
         }
         return failures
     }

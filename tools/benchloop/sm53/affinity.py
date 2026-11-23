@@ -1,6 +1,6 @@
 """SR_AFFINITY in every pixel of a full-screen draw: the GPC index NAK's pixel interlock takes from its low byte.
 
-NAK's lowering puts a warp's ticket word at (affinity & 0xff) * 256 + ticket id, and the raw path's ticket buffer is
+NAK's lowering puts a warp's ticket word at (affinity & 0xff) * 256 + ticket id, and the driver's ticket buffer is
 4 KiB, room for affinities 0..3. The tile shapes keep the whole register in RGBA32F; the full-screen ones keep its low
 16 bits in R32F, a quarter of the bytes for the app to summarise. The summary's distinct texels are the histogram.
 """

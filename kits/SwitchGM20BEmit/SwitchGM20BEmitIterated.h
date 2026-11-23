@@ -31,7 +31,7 @@ struct switch_gm20b_iterated_program {
 
 // Per-target blend off, the common block programmed, the zero-source drop off, the program loaded from instruction 0,
 // its pass count and the enable. The caller binds colour target 0 alone for the draws that follow. The drop
-// (SET_ITERATED_BLEND_OPTIMIZATION NOOP_SOURCE_RGBA_0000, which raw's source-over states set: raw_blend_kill.h) keeps
+// (SET_ITERATED_BLEND_OPTIMIZATION NOOP_SOURCE_RGBA_0000, which raw's source-over states set: blend_kill.h) keeps
 // the destination under a zero source, which a program that ignores the destination does not: T-v2's gpu.x1.iterated_blend
 // pass arm kept it on its zero-alpha row, 510 fields up to 255 codes off. The next state bind writes the state's own value.
 void switch_gm20b_iterated_blend(struct nv_push *p, const struct switch_gm20b_iterated_program *b);

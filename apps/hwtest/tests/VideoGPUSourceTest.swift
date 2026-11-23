@@ -26,7 +26,7 @@ struct VideoGPUSourceTest: HWTest {
             return .fail("no Metal device")
         }
         var pictures: [CVPixelBuffer] = []
-        for i in 0..<Self.frames {
+        for i in 0 ..< Self.frames {
             guard let picture = Self.render(device, queue, luma: Self.luma(i)) else {
                 return .fail("frame \(i): no NV12 IOSurface the GPU renders into")
             }
@@ -34,10 +34,12 @@ struct VideoGPUSourceTest: HWTest {
         }
         let settings = CompressorSettings(
             codec: .h264, width: Self.width, height: Self.height, fps: 30, bitrate: 8_000_000, realTime: false,
-            requireHardware: true)
+            requireHardware: true
+        )
         let encoded = try Compressor.encode(settings, pictures: pictures)
         let decoded = try Decompressor.decodePictures(
-            encoded.samples, format: encoded.format, width: Self.width, height: Self.height, bitDepth: 8)
+            encoded.samples, format: encoded.format, width: Self.width, height: Self.height, bitDepth: 8
+        )
         var worst = 0.0
         for (i, picture) in decoded.pictures.enumerated() {
             worst = max(worst, abs(Self.meanLuma(picture) - Double(Self.luma(i))))
@@ -60,7 +62,8 @@ struct VideoGPUSourceTest: HWTest {
                 ),
                 ("every frame decodes back", decoded.pictures.count == Self.frames),
                 ("every frame decodes to its grey within 3", worst <= 3),
-            ], metrics, proof: "input_direct=\(routes?["input_direct"].map(String.init) ?? "-") of \(Self.frames)")
+            ], metrics, proof: "input_direct=\(routes?["input_direct"].map(String.init) ?? "-") of \(Self.frames)"
+        )
     }
 
     /// An NV12 IOSurface whose planes a render pass clears (luma to `luma`, chroma to neutral), committed and not
@@ -72,10 +75,11 @@ struct VideoGPUSourceTest: HWTest {
             ] as CFDictionary
         var made: CVPixelBuffer?
         let created = CVPixelBufferCreate(
-            nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes, &made)
+            nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes, &made
+        )
         guard created == kCVReturnSuccess, let picture = made,
-            let surface = CVPixelBufferGetIOSurface(picture)?.takeUnretainedValue(),
-            let buffer = queue.makeCommandBuffer()
+              let surface = CVPixelBufferGetIOSurface(picture)?.takeUnretainedValue(),
+              let buffer = queue.makeCommandBuffer()
         else { return nil }
         let planes: [(MTLPixelFormat, Int, Int, MTLClearColor)] = [
             (.r8Unorm, width, height, MTLClearColor(red: Double(luma) / 255, green: 0, blue: 0, alpha: 1)),
@@ -83,7 +87,8 @@ struct VideoGPUSourceTest: HWTest {
         ]
         for (plane, (format, w, h, colour)) in planes.enumerated() {
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: format, width: w, height: h, mipmapped: false)
+                pixelFormat: format, width: w, height: h, mipmapped: false
+            )
             descriptor.usage = [.renderTarget, .shaderRead]
             guard let texture = device.makeTexture(descriptor: descriptor, iosurface: surface, plane: plane) else {
                 return nil

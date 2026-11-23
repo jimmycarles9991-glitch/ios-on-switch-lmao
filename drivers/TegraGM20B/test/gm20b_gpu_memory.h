@@ -21,7 +21,7 @@ struct Memory {
 		std::vector<uint8_t> *buffer;
 		uint8_t *bytes;
 		uint64_t offset, size;
-		bool readOnly, cached;
+		bool readOnly, cached, sparse;
 
 		uint8_t *base() const
 		{
@@ -40,6 +40,8 @@ struct Memory {
 	std::map<uint64_t, Pte> ptes;                              // by GPU page number
 	std::map<const uint8_t *, std::array<uint8_t, kLine>> l2;  // by the line's first byte
 	std::map<const uint8_t *, uint64_t> dirty;  // l2's written lines: their valid bytes
+	// What a sparse page reads, and where its writes go
+	std::array<uint8_t, kPage> zeros{}, dropped{};
 	// One translation per direction: a copy alternates its reads and writes between two surfaces
 	uint64_t lastPage[2] = {~0ull, ~0ull};
 	const Pte *lastPte[2] = {};
@@ -50,9 +52,9 @@ struct Memory {
 		EXPECT_EQ(va % kPage, 0u) << "a GPU mapping starts on a page";
 		last = lastPte[0] = lastPte[1] = nullptr;
 		for (uint64_t at = 0; at < size; at += kPage)
-			ptes[(va + at) / kPage] = {nullptr,  bytes + at,
-						   0,        std::min(kPage, size - at),
-						   readOnly, cached};
+			ptes[(va + at) / kPage] = {
+				nullptr,  bytes + at, 0,    std::min(kPage, size - at),
+				readOnly, cached,     false};
 	}
 
 	void map(uint64_t va, std::vector<uint8_t> &buffer, bool readOnly = false,
@@ -61,7 +63,17 @@ struct Memory {
 		EXPECT_EQ(va % kPage, 0u) << "a GPU mapping starts on a page";
 		last = lastPte[0] = lastPte[1] = nullptr;
 		for (uint64_t at = 0; at < buffer.size(); at += kPage)
-			ptes[(va + at) / kPage] = {&buffer, nullptr, at, 0, readOnly, cached};
+			ptes[(va + at) / kPage] = {&buffer,  nullptr, at,   0,
+						   readOnly, cached,  false};
+	}
+
+	// A sparse PTE (VALID false, VOL): every read of its page is 0 and every write is dropped, with no fault.
+	void mapSparse(uint64_t va, uint64_t size)
+	{
+		EXPECT_EQ(va % kPage, 0u) << "a GPU mapping starts on a page";
+		last = lastPte[0] = lastPte[1] = nullptr;
+		for (uint64_t at = 0; at < size; at += kPage)
+			ptes[(va + at) / kPage] = {nullptr, nullptr, 0, kPage, false, false, true};
 	}
 
 	void invalidateL2()
@@ -131,6 +143,8 @@ struct Memory {
 		last = lastPte[write];
 		if (offset >= last->valid() || (write && last->readOnly))
 			return nullptr;
+		if (last->sparse)
+			return (write ? dropped.data() : zeros.data()) + offset;
 		return last->base() + offset;
 	}
 

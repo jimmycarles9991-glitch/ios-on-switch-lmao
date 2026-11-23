@@ -15,7 +15,8 @@ struct TrueToneDefaultTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let domain = "com.apple.CoreBrightness" as CFString
         let value = CFPreferencesCopyValue(
-            "CBColorAdaptationEnabled" as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+            "CBColorAdaptationEnabled" as CFString, domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost
+        )
         let keys = CFPreferencesCopyKeyList(domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? [String]
         let enabled = value as? NSNumber
         var metrics = Metrics()
@@ -25,6 +26,7 @@ struct TrueToneDefaultTest: HWTest {
             [
                 ("com.apple.CoreBrightness is readable", (keys?.count ?? 0) > 0),
                 ("CBColorAdaptationEnabled is set", enabled != nil),
-            ], metrics)
+            ], metrics
+        )
     }
 }

@@ -2,10 +2,11 @@
 // Why the kernel refused a GPU job call: SubmitJob (TegraGM20BJobABI.h method 33), ResourceSetCreate (method 31), or
 // a call that never reached its method. The IOReturn goes back unchanged (the ABI has no room for a reason); the site
 // and its values go to one error line, which the call's single exit writes outside every lock. Two answers are flow
-// control the raw path takes as normal and stay silent: kIOReturnNotReady for a set whose generation ended, and
+// control the driver takes as normal and stay silent: kIOReturnNotReady for a set whose generation ended, and
 // kIOReturnCannotLock for an admission or backing another admission holds. A client can fire a site per job, so a
 // connection's refusals at one site are logged for the first four, then every 256th.
 #pragma once
+#include <IOKit/IOReturn.h>
 #include <stddef.h>
 #include <stdint.h>
 #ifdef KERNEL
@@ -194,6 +195,17 @@ struct SwitchGpuRefusalNote {
 	SwitchGpuRefusal site = SwitchGpuRefusal::None;
 	uint64_t values[3] = {};
 };
+
+// A SubmitJob refusal the compositor's (a critical client's) frame does not survive, which panics at the refusal: any
+// but the silent sites the runtime resubmits, Aborted (a -5 while the job is admitted, the one source found a native
+// surface not readied for the GPU, SwitchGpuSurfaceRefresh) and NotOpen (the connection closing: the process is going).
+inline bool switch_gpu_refusal_loses_frame(bool critical, SwitchGpuRefusal site, int32_t ret)
+{
+	const SwitchGpuRefusal named =
+		site == SwitchGpuRefusal::None ? SwitchGpuRefusal::Unnamed : site;
+	return critical && !switch_gpu_refusal::site(named).silent &&
+	       ret != int32_t(kIOReturnAborted) && ret != int32_t(kIOReturnNotOpen);
+}
 
 // A negative errno as a refusal's value (SwitchGpuRefusalValue::Errno prints it signed)
 constexpr uint64_t switch_gpu_refusal_errno(int error)

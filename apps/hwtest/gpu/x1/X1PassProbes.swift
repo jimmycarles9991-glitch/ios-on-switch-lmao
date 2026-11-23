@@ -15,7 +15,7 @@ public enum X1PassProbes {
         let quad = GPU.pixelQuad(0, 0, 100, 100, width: size, height: size)
         var reads: [UInt64] = []
         var paths: [String] = []
-        for passIndex in 0..<2 {
+        for passIndex in 0 ..< 2 {
             paths.append(
                 try await gpu.run { commands in
                     let pass = MTLRenderPassDescriptor()
@@ -33,7 +33,8 @@ public enum X1PassProbes {
                         GPU.draw(encoder, corners: quad, color: SIMD4(0, 0, 1, 1))
                     }
                     encoder.endEncoding()
-                }.path)
+                }.path
+            )
             reads.append(results.contents().load(fromByteOffset: 0, as: UInt64.self))
             if passIndex == 0 { reads.append(results.contents().load(fromByteOffset: 8, as: UInt64.self)) }
         }

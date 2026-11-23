@@ -11,8 +11,8 @@ extension MipLod {
     static func coverage(_ x: Int, _ y: Int) -> Double {
         let s = Double(iconSide), r = iconRadius
         var inside = 0
-        for j in 0..<8 {
-            for i in 0..<8 {
+        for j in 0 ..< 8 {
+            for i in 0 ..< 8 {
                 let px = Double(x) + (Double(i) + 0.5) / 8, py = Double(y) + (Double(j) + 0.5) / 8
                 let dx = max(r - px, px - (s - r), 0), dy = max(r - py, py - (s - r), 0)
                 if dx * dx + dy * dy <= r * r { inside += 1 }
@@ -23,7 +23,7 @@ extension MipLod {
 
     /// Level 0: premultiplied white, every channel the coverage's code
     static func iconLevel0() -> [UInt8] {
-        (0..<iconSide * iconSide).flatMap { t -> [UInt8] in
+        (0 ..< iconSide * iconSide).flatMap { t -> [UInt8] in
             let c = UInt8((coverage(t % iconSide, t / iconSide) * 255).rounded())
             return [c, c, c, c]
         }
@@ -53,10 +53,10 @@ extension MipLod {
         let l = min(Int(lod.rounded(.down)), levels.count - 1), f = lod - Double(l)
         let l1 = min(l + 1, levels.count - 1)
         var out = [UInt8](repeating: 0, count: side * side * 4)
-        for y in 0..<side {
-            for x in 0..<side {
+        for y in 0 ..< side {
+            for x in 0 ..< side {
                 let u = (Double(x) + 0.5) / Double(side), v = (Double(y) + 0.5) / Double(side)
-                for c in 0..<4 {
+                for c in 0 ..< 4 {
                     let a = bilinear(levels[l], max(1, iconSide >> l), u, v, channel: c)
                     let b = bilinear(levels[l1], max(1, iconSide >> l1), u, v, channel: c)
                     out[(y * side + x) * 4 + c] = UInt8(min(max(a * (1 - f) + b * f, 0), 255).rounded())
@@ -72,7 +72,8 @@ extension MipLod {
         let level0 = iconLevel0()
         let count = Int(log2(Double(iconSide))) + 1
         let chain = try gpu.texture(
-            .bgra8Unorm, iconSide, iconSide, usage: [.shaderRead, .renderTarget], mipmaps: count)
+            .bgra8Unorm, iconSide, iconSide, usage: [.shaderRead, .renderTarget], mipmaps: count
+        )
         try await gpu.upload(level0, to: chain, bytesPerRow: iconSide * 4)
         let path = try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
@@ -81,7 +82,7 @@ extension MipLod {
         }.path
         let layout = MipLayout.unorm([8, 8, 8, 8])
         var metal = [level0]
-        for l in 1..<count {
+        for l in 1 ..< count {
             let s = max(1, iconSide >> (l - 1)), d = max(1, iconSide >> l)
             metal.append(MipReference.step(metal[l - 1], s, s, d, d, layout))
         }
@@ -91,7 +92,7 @@ extension MipLod {
             let (got, _) = try await draw(gpu, chain, trilinear, side: side, bias: nil)
             let want = iconReference(metal, side: side)
             var beyond = 0, largest = 0
-            for i in 0..<got.count {
+            for i in 0 ..< got.count {
                 let d = abs(Int(got[i]) - Int(want[i]))
                 largest = max(largest, d)
                 if d > iconTolerance { beyond += 1 }

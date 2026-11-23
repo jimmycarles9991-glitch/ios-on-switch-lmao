@@ -20,14 +20,17 @@ struct VideoTranscodeTest: HWTest {
         }
         let demuxed = try await Demux.load(clip, from: context.media)
         let decoded = try Decompressor.decodePictures(
-            demuxed.samples, format: demuxed.format, width: clip.width, height: clip.height, bitDepth: 8)
+            demuxed.samples, format: demuxed.format, width: clip.width, height: clip.height, bitDepth: 8
+        )
         let frames = decoded.pictures.count
         let settings = CompressorSettings(
             codec: .h264, width: clip.width, height: clip.height, fps: clip.fps, bitrate: 8_000_000, realTime: false,
-            requireHardware: true)
+            requireHardware: true
+        )
         let encoded = try Compressor.encode(settings, pictures: decoded.pictures)
         let back = try Decompressor.decode(
-            encoded.samples, format: encoded.format, pattern: clip.pattern, bitDepth: 8, fps: clip.fps)
+            encoded.samples, format: encoded.format, pattern: clip.pattern, bitDepth: 8, fps: clip.fps
+        )
         let routes = encoded.routes
         var metrics = Metrics()
         metrics.set("frames", frames)
@@ -47,6 +50,7 @@ struct VideoTranscodeTest: HWTest {
                         && routes?["input_cpu_copies"] == 0 && routes?["input_refused"] == 0
                 ),
                 ("decodes back to the pattern (\(back.firstMismatch ?? "ok"))", back.matched == frames),
-            ], metrics, proof: "input_direct=\(routes?["input_direct"].map(String.init) ?? "-") of \(frames)")
+            ], metrics, proof: "input_direct=\(routes?["input_direct"].map(String.init) ?? "-") of \(frames)"
+        )
     }
 }

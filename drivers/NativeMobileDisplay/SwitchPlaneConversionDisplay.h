@@ -31,9 +31,12 @@ bool planeConversionUses(int slot) const
     return planeConversionQueued && planeConversion->sourceSlot == slot;
 }
 
+// A submission refused behind a failed source reports that source's plain failure: its producer says why.
 void planeConversionFinished()
 {
     auto &work = *planeConversion;
+    const int status =
+        work.status ? producerFailure(work.status, &planeSlots[work.sourceSlot].native->view.producer, 1) : 0;
     auto &target = convertedPlanes[work.target];
     if (target.backing)
         switch_gpu_backing_release(target.backing);
@@ -48,10 +51,10 @@ void planeConversionFinished()
     if (!work.status) {
         kickSwapQueue();
     } else if ((latchRetire ? firstUntaken() : pendingSwapRequest()) == work.request) {
-        if (work.status == TEGRA_SCANOUT_SOURCE_LOST) {
+        if (sourceUnshown(status, work.request, "overlay conversion")) {
             noteTaken(work.request, mach_absolute_time());
             planeNextSet = false;
-            dropLostFrame(work.request, kNoBuffer);
+            retireSwapUnshown(work.request, kNoBuffer);
         } else {
             native_legacy_transfer_observed(kIOReturnNotReady, work.request, 0);
         }
@@ -141,6 +144,8 @@ int planeConvertSlot(int sourceSlot, const native_planes::Layer &layer, uint32_t
     const auto &allocation = source->allocation;
     const auto &view = source->view;
     const uint32_t matrix = view.layout.plane_count ? view.layout.color_matrix : layer.surface.colorMatrix;
+    // Window B shows a matrix VIC lacks as BT.601 (native_planes::matrixOf); the conversion shows it the same.
+    const uint32_t shownMatrix = matrix < SWITCH_VIC_MATRIX_UNSUPPORTED ? matrix : uint32_t(SWITCH_VIC_MATRIX_601);
     const uint32_t transfer = view.layout.plane_count ? view.layout.transfer : layer.surface.transfer;
     const uint32_t primaries = view.layout.plane_count ? view.layout.primaries : layer.surface.primaries;
     const uint32_t chromaTop = view.layout.plane_count ? view.layout.chroma_top : layer.surface.chromaTop;
@@ -186,7 +191,9 @@ int planeConvertSlot(int sourceSlot, const native_planes::Layer &layer, uint32_t
         operation.dstH = layer.surface.height;
         const char *why = nullptr;
         if (view.layout.plane_count) {
-            why = switch_native_vic_image(view, 0, &input);
+            auto shown = view;
+            shown.layout.color_matrix = shownMatrix;
+            why = switch_native_vic_image(shown, 0, &input);
             if (!why && !switch_native_vic_crop(view, &operation))
                 why = "native conversion crop";
         } else {
@@ -196,7 +203,7 @@ int planeConvertSlot(int sourceSlot, const native_planes::Layer &layer, uint32_t
             desc.height = layer.surface.height;
             desc.planes = 2;
             desc.length = layer.surface.descriptorBytes;
-            desc.colorMatrix = layer.surface.colorMatrix;
+            desc.colorMatrix = shownMatrix;
             desc.transfer = transfer;
             desc.primaries = primaries;
             desc.chromaTop = chromaTop;

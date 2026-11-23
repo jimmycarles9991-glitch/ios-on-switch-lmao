@@ -18,7 +18,7 @@ struct switch_gpu_scan_words {
 template <uint32_t Records, uint32_t Pushes> struct SwitchGpuPushScanQueue {
 	struct Record {
 		char owner[17];
-		bool rawMacros, compositor;
+		bool metalMacros, compositor;
 		uint32_t count;
 		// its channel's fence word (an offset in the fence pool), that page's owner then, and its last seqno
 		uint32_t fence, fenceOwner, seqno;
@@ -57,12 +57,12 @@ template <uint32_t Records, uint32_t Pushes> struct SwitchGpuPushScanQueue {
 
 // A record of `count` pushes from `owner`: `view(i)` gives push i's words in the pool, or null
 template <typename Record, typename View>
-inline void switch_gpu_scan_fill(Record &r, const char *owner, bool rawMacros, uint32_t count,
+inline void switch_gpu_scan_fill(Record &r, const char *owner, bool metalMacros, uint32_t count,
 				 uint32_t capacity, View &&view)
 {
 	strncpy(r.owner, owner, sizeof(r.owner) - 1);
 	r.owner[sizeof(r.owner) - 1] = 0;
-	r.rawMacros = rawMacros;
+	r.metalMacros = metalMacros;
 	r.count = count;
 	for (uint32_t i = 0; i < count && i < capacity; i++)
 		r.push[i] = view(i);

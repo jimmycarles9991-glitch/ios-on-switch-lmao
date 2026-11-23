@@ -21,7 +21,8 @@ public struct BootTally {
 
     public func add() throws {
         try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            at: url.deletingLastPathComponent(), withIntermediateDirectories: true
+        )
         try DurableFile.write(Data("\(boot) \(count + 1)".utf8), to: url)
     }
 }

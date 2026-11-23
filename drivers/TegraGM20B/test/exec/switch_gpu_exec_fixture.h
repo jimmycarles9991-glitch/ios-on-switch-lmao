@@ -48,8 +48,8 @@ uint32_t switch_exec_parked_promises(void);
 uint64_t switch_exec_mutex_takes(void);
 int switch_exec_mutex_held(void);
 void switch_exec_chan_high(struct switch_exec_chan *chan, int high);
-void switch_exec_chan_task_order(struct switch_exec_chan *chan, struct switch_exec_chan *source,
-				 uint32_t value);
+/* The GPU clock on its idle divider until the next tgm_idle_raise, which calls `raised` first; NULL: the idle clock off */
+void switch_exec_idle_low(void (*raised)(void *context), void *context);
 
 void *switch_exec_host_alloc(uint64_t bytes);
 void switch_exec_host_free(void *block);

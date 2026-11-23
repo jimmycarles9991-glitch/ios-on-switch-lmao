@@ -3,6 +3,8 @@
 #                            every plausible CBC_PARAM, which page lists and binds may compress, a compressed bind's PTEs
 #   gm20b_zcull_test         TegraGM20BZcull.h against nvgpu's zcull report for the X1's GR; its record is
 #                            drm_nouveau_get_zcull_info's
+#   gm20b_zcull_context_test TegraGM20BZcullContext.h: each GR context's own zcull image and the context words
+#                            pointing FECS at it (nvgpu's separate buffer mode), released at teardown
 #   gm20b_tiled_cache_test   TegraGM20BTiledCache.h: the tile coalescer's table in the golden context is deko3d's masked
 #                            writes folded over sw_ctx's zero
 #   gm20b_coherency_test     TegraGM20BCoherency.cpp: which IOSurface lock/unlock traps clean or invalidate an import,
@@ -10,10 +12,6 @@
 #                            layout decision (TegraGM20BTiled.cpp) and its contents tiled in place; CPU locks of a
 #                            block-linear surface (TegraGM20BViews.cpp): rows in a scratch at the task's own address
 #                            while the pages keep texels, shared readers, nested locks, writes put back, dead tasks
-#   gm20b_fences_test        TegraGM20BExecSurfaces.cpp and TegraGM20BFences.h with the registry's writer records over a
-#                            model of gpu_*.c's channels: which listed surfaces' writers an Exec waits for on the GPU (another
-#                            channel's, unfinished, not killed), which imports it counts as written, and no list or the
-#                            all-imports flag as before
 #   gm20b_relayout_test      TegraGM20BRelayout.h's copy-engine pushes over a model of MAXWELL_DMA_COPY_A: every move
 #                            gives back exactly TegraGM20BLayout.h's bytes, for every texel size and NIL's shapes
 #   gm20b_copy_test          TegraGM20BCopyPush.h (TegraVIC's plane bounce) over the same model: rows at the new pitch
@@ -29,7 +27,7 @@
 #   gm20b_prefault_test      TegraGM20BSurfacePrefault.h over a mock create ABI: which IOSurfaceRootUserClient outputs
 #                            name a new surface, and which surfaces are faulted in (size, memory pressure)
 #   gm20b_push_scan_test     TegraGM20BPushScan.h (the kernel's method-stream reader and the push profile's classes) over
-#                            streams laid out as NVK and the raw path write them: every counter, each drawn target's
+#                            streams laid out as NVK and the driver write them: every counter, each drawn target's
 #                            image under its sample grid, a raw job's indirect command buffer draws inside their executed
 #                            range (its macro slots the generator's), and no profile stamp after a push whose method
 #                            continues, one the kernel could not read or one with an opcode NVK never writes
@@ -132,6 +130,27 @@ host_test(
     name = "switch_gpu_client_retirement_test",
     srcs = [
         "switch_gpu_client_retirement_test.cpp",
+        "switch_gpu_client_fixture.h",
+        "//drivers/TegraGM20B:SwitchGpuBoIndex.h",
+        "//drivers/TegraGM20B:SwitchGpuBindingTable.h",
+        "//drivers/TegraGM20B:SwitchGpuClientRetirement.h",
+        "//drivers/TegraGM20B:SwitchGpuOwnerMemory.h",
+        "//drivers/TegraGM20B:SwitchGpuClientBinds.h",
+        "//drivers/TegraGM20B:SwitchGpuBindings.h",
+        "//drivers/TegraGM20B:TegraGM20BBindHistory.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuSubmitGate.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "gm20b_gpu_memory.h",
+    ],
+    deps = [":client_retirement_kernel"],
+)
+
+# MapSparse's bindings: no BO, pages that read 0 and drop writes, cut, replaced, retired and closed as any binding
+host_test(
+    name = "switch_gpu_client_sparse_test",
+    srcs = [
+        "switch_gpu_client_sparse_test.cpp",
         "switch_gpu_client_fixture.h",
         "//drivers/TegraGM20B:SwitchGpuBoIndex.h",
         "//drivers/TegraGM20B:SwitchGpuBindingTable.h",
@@ -289,6 +308,28 @@ host_test(
     ],
 )
 
+host_shims(
+    name = "zcull_context_kernel",
+    headers = [
+        "core/gpuobj.h",
+        "core/memory.h",
+        "subdev/mmu.h",
+    ],
+    stubs = "gm20b_zcull_context_fixture.h",
+)
+
+host_test(
+    name = "gm20b_zcull_context_test",
+    srcs = [
+        "gm20b_zcull_context_fixture.h",
+        "gm20b_zcull_context_test.cpp",
+        "//drivers/TegraGM20B:TegraGM20BZcull.h",
+        "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
+        "//drivers/TegraGM20B:TegraGM20BZcullContext.h",
+    ],
+    deps = [":zcull_context_kernel"],
+)
+
 host_test(
     name = "gm20b_tiled_cache_test",
     srcs = [
@@ -416,6 +457,7 @@ host_test(
         "gm20b_job_abi_test.cpp",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
         "//drivers/TegraGM20B:TegraGM20BCopyResetABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BReadbackABI.h",
         "//drivers/TegraGM20B:TegraGM20BRegDumpABI.h",
@@ -429,6 +471,7 @@ host_test(
         "gm20b_job_record_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuJobRecord.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
     ],
 )
@@ -587,8 +630,9 @@ host_test(
     cxx_std = "c++17",
 )
 
-# The give-up as the kernel builds it: gpu_promise_giveup.c whole and gpu_promise.c's GPU-reader park, with only their
-# #include lines left out for switch_gpu_promise_giveup_stubs.h's stand-ins.
+# The give-up as the kernel builds it: gpu_promise_giveup.c whole, and gpu_promise.c's GPU-reader park with gpu_exec.c's
+# pick of the tokens it parks on, with only their #include lines left out for switch_gpu_promise_giveup_stubs.h's
+# stand-ins.
 genrule(
     name = "promise_giveup_source",
     testonly = True,
@@ -602,14 +646,16 @@ grep -q '^void tgm_promise_pass(void)' $@
 )
 
 genrule(
-    name = "promise_note_source",
+    name = "promise_park_source",
     testonly = True,
-    srcs = ["//drivers/TegraGM20B:gpu_promise.c"],
-    outs = ["promise_note_source.h"],
+    srcs = [
+        "//drivers/TegraGM20B:gpu_exec.c",
+        "//drivers/TegraGM20B:gpu_promise.c",
+    ],
+    outs = ["promise_park_source.h"],
     cmd = """
 set -e
-awk '/^int tgm_chan_note_promise\\(/ || /^void tgm_chan_park_promises\\(/ { on = 1 } on { print } on && /^}/ { on = 0 }' $< > $@
-grep -q tgm_promise_park $@
+awk '/^static u32 backing_unsettled\\(/ || /^void switch_gpu_chan_park_promises_locked\\(/ { on = 1; count++ } on { print } on && /^}/ { on = 0 } END { if (count != 2) exit 1 }' $(SRCS) > $@
 """,
 )
 
@@ -651,13 +697,14 @@ PROMISE_GIVEUP_SRCS = [
     "switch_gpu_promise_giveup_fixture.h",
     "switch_gpu_promise_giveup_stubs.h",
     ":promise_giveup_source",
-    ":promise_note_source",
+    ":promise_park_source",
     "//drivers/TegraGM20B:SwitchGpuBacking.h",
     "//drivers/TegraGM20B:SwitchGpuJobFences.h",
     "//drivers/TegraGM20B:SwitchGpuPathStats.h",
     "//drivers/TegraGM20B:SwitchGpuPromiseGiveUp.h",
     "//drivers/TegraGM20B:SwitchGpuWriterPromise.h",
     "//drivers/TegraGM20B:TegraGM20BABI.h",
+    "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
     "//drivers/TegraGM20B:TegraGM20BGpu.h",
     "//drivers/TegraGM20B:TegraGM20BJobABI.h",
 ]
@@ -1037,19 +1084,21 @@ host_test(
     srcs = ["gm20b_source_test.cpp"],
     # c++20 (not the harnesses' c++17): bazel/testing's headers use string_view and nested namespaces.
     data = [
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_amplification.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_vertex_streams.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_tessellation.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_multisample.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack.cpp",
+        "//drivers/TegraGM20BMetal:amplification.cpp",
+        "//drivers/TegraGM20BMetal:vertex_streams.cpp",
+        "//drivers/TegraGM20BMetal:command_buffer.cpp",
+        "//drivers/TegraGM20BMetal:device_channel.cpp",
+        "//drivers/TegraGM20BMetal:gpu.cpp",
+        "//drivers/TegraGM20BMetal:gm20b_gpu_internal.h",
+        "//drivers/TegraGM20BMetal:tessellation.cpp",
+        "//drivers/TegraGM20BMetal:multisample.h",
+        "//drivers/TegraGM20BMetal:pack.cpp",
         "//drivers/TegraGM20B:TegraGM20BCopy.cpp",
         "//drivers/TegraGM20B:SwitchGpuKqueue.h",
         "//drivers/TegraGM20B:SwitchGpuCachedZero.cpp",
         "//drivers/TegraGM20B:SwitchGpuBacking.cpp",
         "//drivers/TegraGM20B:SwitchGpuBridge.cpp",
         "//drivers/TegraGM20B:TegraGM20BDeviceClient.cpp",
-        "//drivers/TegraGM20B:TegraGM20BExecSurfaces.cpp",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
         "//drivers/TegraGM20B:TegraGM20BReadback.cpp",
         "//drivers/TegraGM20B:TegraGM20BRelayout.cpp",
@@ -1093,12 +1142,23 @@ host_test(
     ],
 )
 
+# SwitchGpuConnectionQuota.h: GPU connections shared out by process, the last eighth the UI-critical processes'
+host_test(
+    name = "switch_gpu_connection_quota_test",
+    srcs = [
+        "switch_gpu_connection_quota_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuConnectionQuota.h",
+    ],
+)
+
 # SwitchGpuRefusalSites.h's sites, line and rate bound, and every SubmitJob and ResourceSetCreate refusal going through one
 host_test(
     name = "switch_gpu_refusal_sites_test",
     srcs = [
         "switch_gpu_refusal_sites_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuRefusalSites.h",
+        "//drivers/TegraGM20B:TegraGM20BHost.h",
+        "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
     ],
     data = [
         "//drivers/TegraGM20B:TegraGM20BUserClientJob.cpp",
@@ -1116,19 +1176,6 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BUserClientDispatch.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientImport.cpp",
     ],
-)
-
-# NVK's side of the kernel's contracts: goes with m2v (tag m2v: .bazelrc's nom2v dry run leaves it out).
-host_test(
-    name = "gm20b_nvk_source_test",
-    srcs = ["gm20b_nvk_source_test.cpp"],
-    data = [
-        "//third_party/mesa/src/nouveau/vulkan:nvkmd/darwin/nvkmd_darwin.c",
-        "//third_party/mesa/src/nouveau/vulkan:nvk_image.c",
-        "//third_party/mesa/src/nouveau/vulkan:nvk_queue.c",
-        "//third_party/mesa/src/vulkan/runtime:vk_queue.c",
-    ],
-    tags = ["m2v"],
 )
 
 host_test(
@@ -1469,7 +1516,6 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BUserClient.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientInternal.h",
         "//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp",
-        "//drivers/TegraGM20B:TegraGM20BUserClientSubmit.cpp",
         "//drivers/TegraGM20B:gpu_sources",
     ],
 )
@@ -1505,6 +1551,7 @@ host_test(
     srcs = [
         "switch_gpu_backing_failure_test.cpp",
         "switch_gpu_backing_fixture.h",
+        "//drivers/TegraGM20B:SwitchGpuPresentTokens.h",
     ],
     deps = [
         ":backing",
@@ -1513,14 +1560,13 @@ host_test(
 )
 
 host_test(
-    name = "switch_gpu_legacy_uses_test",
+    name = "switch_gpu_claims_test",
     srcs = [
         "switch_gpu_backing_fixture.h",
-        "switch_gpu_legacy_uses_test.cpp",
-        "//drivers/TegraGM20B:SwitchGpuLegacyUses.h",
+        "switch_gpu_claims_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuClaims.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
     ],
-    # m2v: the uses of methods 8, 17 and 20, which only NVK calls
-    tags = ["m2v"],
     deps = [
         ":backing",
         ":coherency_kernel",
@@ -1612,34 +1658,6 @@ host_test(
     ],
 )
 
-host_library(
-    name = "exec_surfaces",
-    srcs = ["//drivers/TegraGM20B:TegraGM20BExecSurfaces.cpp"],
-    hdrs = [
-        "//drivers/TegraGM20B:TegraGM20BABI.h",
-        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
-        "//drivers/TegraGM20B:TegraGM20BExecSurfaces.h",
-        "//drivers/TegraGM20B:TegraGM20BFences.h",
-        "//drivers/TegraGM20B:TegraGM20BGpu.h",
-    ],
-    deps = [":coherency_kernel"],
-)
-
-host_test(
-    name = "gm20b_fences_test",
-    srcs = [
-        "gm20b_fences_test.cpp",
-        "gm20b_backing_stubs.cpp",
-        "gm20b_record_model.h",
-        "gm20b_tiled_stubs.cpp",
-    ],
-    deps = [
-        ":coherency",
-        ":coherency_kernel",
-        ":exec_surfaces",
-    ],
-)
-
 host_test(
     name = "gm20b_relayout_test",
     size = "medium",
@@ -1664,7 +1682,9 @@ host_test(
         "switch_gpu_job_visibility_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuJobVisibility.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BGpu.h",
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
     ],
     cxx_std = "c++17",
 )
@@ -2080,6 +2100,23 @@ host_test(
     cxx_std = "gnu++20",
 )
 
+# MapSparse's PTEs (SwitchGpuVmSparse.h) and the installs it shares with prepared maps
+host_test(
+    name = "switch_gpu_vm_sparse_test",
+    srcs = [
+        "switch_gpu_vm_map_stubs.h",
+        "switch_gpu_vm_sparse_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuMapping.h",
+        "//drivers/TegraGM20B:SwitchGpuOrdered.h",
+        "//drivers/TegraGM20B:SwitchGpuVmMap.h",
+        "//drivers/TegraGM20B:SwitchGpuVmSparse.h",
+        "//drivers/TegraGM20B:TegraGM20BComp.h",
+        "//drivers/TegraGM20B:TegraGM20BTlb.h",
+    ],
+    copts = ["-Wno-missing-field-initializers"],
+    cxx_std = "gnu++20",
+)
+
 host_test(
     name = "switch_gpu_clock_test",
     srcs = [
@@ -2350,6 +2387,7 @@ host_library(
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuWordWait.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:SwitchGpuTimeline.h",
     ],
@@ -2400,6 +2438,7 @@ host_library(
         "//drivers/TegraGM20B:SwitchGpuBacking.h",
         "//drivers/TegraGM20B:SwitchGpuWordWait.h",
         "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
     ],
     visibility = [
@@ -2425,6 +2464,19 @@ host_test(
     name = "switch_gpu_event_word_test",
     srcs = [
         "switch_gpu_event_word_test.cpp",
+        "switch_gpu_event_fixture.h",
+    ],
+    deps = [
+        ":switch_gpu_event",
+        ":event_kernel",
+    ],
+)
+
+# A producer that failed or whose client died ends the waits on it: the waiting job is admitted, its outcome kept
+host_test(
+    name = "switch_gpu_event_ended_test",
+    srcs = [
+        "switch_gpu_event_ended_test.cpp",
         "switch_gpu_event_fixture.h",
     ],
     deps = [
@@ -3172,6 +3224,31 @@ host_test(
         "switch_gpu_wake_word_test.cpp",
         "//drivers/TegraGM20B:SwitchGpuWakeWord.h",
     ],
+)
+
+host_test(
+    name = "switch_gpu_channel_epoch_test",
+    srcs = [
+        "switch_gpu_channel_epoch_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuChannelEpoch.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+    ],
+)
+
+# The fence page (TegraGM20BFencePageABI.h) as the kernel writes it: each power-up's clock anchor and the writer promises,
+# made, kept and cancelled, each writing bytes of its own region alone
+host_test(
+    name = "switch_gpu_fence_page_test",
+    srcs = [
+        "switch_gpu_fence_page_test.cpp",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuWriterPromise.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BClockABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
+    ],
+    cxx_std = "c++17",
 )
 
 # The busy words and the wake word between threads, under ThreadSanitizer

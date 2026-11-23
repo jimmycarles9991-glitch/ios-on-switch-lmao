@@ -35,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::device::requirements::VkProperty;
 use crate::device::DeviceProfile;
-use crate::error::{Error, RuntimeInput};
+use crate::error::{Attachment, Error, Feature, RuntimeInput, Unsupported};
 use crate::library::FunctionArtifact;
 use crate::metal;
 use crate::metal::format::{color_output_components, write_conversion, WriteConversion};
@@ -413,11 +413,12 @@ pub(crate) fn wanted_srgb_fetches(
         .collect()
 }
 
-/// The extended-range color attachments of a render pipeline whose color attachments are
+/// The padded and bfloat color attachments of a render pipeline whose color attachments are
 /// `colors` and whose `textureWriteRoundingMode` is `rounding`, by color index
-/// (`LoweringInputs::extended_range_colors`): every attachment of one of Apple's extended-range
-/// formats, blended where the pipeline enables blending there, a bfloat one rounding by the mode
-/// (`ExtendedRangeColor::nearest_even`).
+/// (`LoweringInputs::extended_range_colors`): every attachment of one of those formats, blended
+/// where the pipeline enables blending there, a bfloat one rounding by the mode
+/// (`ExtendedRangeColor::nearest_even`). An attachment of any other extended-range format renders
+/// only through its stand-in ([`refuse_unstood_extended_range`]).
 pub(crate) fn extended_range_colors(
     colors: &[Option<ColorAttachmentDescriptor>],
     rounding: TextureWriteRoundingMode,
@@ -427,11 +428,33 @@ pub(crate) fn extended_range_colors(
         .enumerate()
         .filter_map(|(i, c)| {
             let c = c.as_ref()?;
-            let form = metal::format::ExtendedRange::of(c.pixel_format)?;
+            let form = metal::format::ExtendedRange::of(c.pixel_format)
+                .filter(|f| f.padded() || f.bfloat())?;
             let write = ExtendedRangeColor::new(form, c.blending_enabled).with_rounding(rounding);
             Some((i as u32, write))
         })
         .collect()
+}
+
+/// Refuse the first of `colors` held in one of Apple's 10-bit extended-range formats
+/// (`BGR10_XR`, `BGRA10_XR`, `RGB10A8_2P_XR10` and their `_sRGB` twins):
+/// `NotImplemented(Format)` at that attachment. Such an attachment renders only through its
+/// `RGBA16Float` stand-in (`ColorAttachmentDescriptor::stand_in`).
+pub(crate) fn refuse_unstood_extended_range(
+    colors: &[Option<ColorAttachmentDescriptor>],
+) -> Result<(), Error> {
+    let unstood = colors.iter().position(|c| {
+        c.as_ref()
+            .and_then(|c| metal::format::ExtendedRange::of(c.pixel_format))
+            .is_some_and(|f| !f.padded() && !f.bfloat())
+    });
+    match unstood {
+        Some(i) => {
+            let refused = Unsupported::not_implemented(Feature::Format);
+            Err(refused.at_attachment(Attachment::Color(i as u32)).into())
+        }
+        None => Ok(()),
+    }
 }
 
 /// The color attachments of a render pipeline whose color attachments are `colors` held with

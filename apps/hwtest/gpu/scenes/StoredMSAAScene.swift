@@ -11,9 +11,9 @@ import Metal
 /// minimum, maximum and sample 0, and where the depth is stored unresolved, which takes the last sample (an M-series Mac's
 /// GPU does; its target's depth kept); Stencil8's by sample 0 under both filters. Each target's stencil is 0xFF before. Positions: a pass at sample positions of its own. Each sample's colour and
 /// depth is read back through texture2d_ms and depth2d_ms, and every reference is the triangle's coverage at the samples'
-/// positions, worked out on the CPU. On the raw facade every command buffer must run on the raw path.
+/// positions, worked out on the CPU. On the facade every command buffer must run on the driver.
 struct StoredMSAAScene: GPUScene {
-    let id = "gpu.raw.stored_msaa"
+    let id = "gpu.gm20b.stored_msaa"
     let name = "Stored 2x/4x colour and depth: load, store, texture2d_ms reads, resolves and own sample positions"
 
     static let size = 16
@@ -74,14 +74,13 @@ struct StoredMSAAScene: GPUScene {
         }
         result.expect(!counts.isEmpty, "the device renders no 2x or 4x texture")
         result.metrics.set("counts", counts.joined(separator: ","))
-        if RawFacade.kind(of: gpu.device) == "raw" {
-            let off = gpu.paths.paths.keys.filter { $0 != "raw" }.sorted()
-            result.expect(off.isEmpty, "command buffers off the raw path: \(off.joined(separator: ","))")
-            result.metrics.set("route", off.isEmpty ? "raw" : "m2v")
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
+            let off = gpu.paths.paths.keys.filter { $0 != "gm20b" }.sorted()
+            result.expect(off.isEmpty, "command buffers off the driver: \(off.joined(separator: ","))")
             var packed: [Bool] = []
             for format in [TexelFormat.rgba8Unorm, .r32Float] {
                 let fragment = Self.unpackFragment(format)
-                guard let held = RawFacade.packed(try gpu.render(fragment: fragment, format: format.metal)) else {
+                guard let held = GM20BFacade.packed(try gpu.render(fragment: fragment, format: format.metal)) else {
                     continue
                 }
                 packed.append(held)
@@ -124,16 +123,18 @@ struct StoredMSAAScene: GPUScene {
             e.copy(
                 from: color, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 3, y: 5, z: 0),
                 sourceSize: MTLSize(width: 7, height: 9, depth: 1), to: copied, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin(x: 1, y: 2, z: 0))
+                destinationLevel: 0, destinationOrigin: MTLOrigin(x: 1, y: 2, z: 0)
+            )
             e.endEncoding()
         }
-        let copiedCover = (0..<size * size).map { i in
+        let copiedCover = (0 ..< size * size).map { i in
             let x = i % size, y = i / size
-            return (1..<8).contains(x) && (2..<11).contains(y) ? cover[(y + 3) * size + x + 2] : cover[i]
+            return (1 ..< 8).contains(x) && (2 ..< 11).contains(y) ? cover[(y + 3) * size + x + 2] : cover[i]
         }
         result.compare(
             "\(samples)x whole and partial sample copies", try await Self.unpack(gpu, copied, samples, .rgba8Unorm),
-            Self.each(copiedCover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255)
+            Self.each(copiedCover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255
+        )
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = color
@@ -149,13 +150,16 @@ struct StoredMSAAScene: GPUScene {
         }
         result.compare(
             "\(samples)x samples", try await Self.unpack(gpu, color, samples, .rgba8Unorm),
-            Self.each(cover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255)
+            Self.each(cover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255
+        )
         result.compare(
             "\(samples)x storeAndMultisampleResolve", try await gpu.raster(resolved, .rgba8Unorm), mean,
-            tolerance: 1.01 / 255)
+            tolerance: 1.01 / 255
+        )
         result.compare(
             "\(samples)x load then multisampleResolve", try await gpu.raster(again, .rgba8Unorm), mean,
-            tolerance: 1.01 / 255)
+            tolerance: 1.01 / 255
+        )
     }
 
     private func depth(_ gpu: GPU, _ samples: Int, _ cover: [[Bool]?], _ result: inout SceneResult) async throws {
@@ -163,9 +167,11 @@ struct StoredMSAAScene: GPUScene {
         let color = try gpu.texture(.rgba8Unorm, size, size, samples: samples)
         let depth = try gpu.texture(.depth32Float, size, size, samples: samples)
         let depthOnly = try gpu.render(
-            fragment: "solid_fragment", format: .invalid, samples: samples, depth: .depth32Float)
+            fragment: "solid_fragment", format: .invalid, samples: samples, depth: .depth32Float
+        )
         let drawn = try gpu.render(
-            fragment: "solid_fragment", format: .rgba8Unorm, samples: samples, depth: .depth32Float)
+            fragment: "solid_fragment", format: .rgba8Unorm, samples: samples, depth: .depth32Float
+        )
         let descriptor = MTLDepthStencilDescriptor()
         descriptor.depthCompareFunction = .lessEqual
         descriptor.isDepthWriteEnabled = true
@@ -202,7 +208,7 @@ struct StoredMSAAScene: GPUScene {
             Self.draw(f, triangle, Self.red)
             Self.draw(f, GPU.quad(x0: -1, y0: -1, x1: 1, y1: 1, z: 0.75), Self.blue)
             f.endEncoding()
-            for k in 1..<filters.count {
+            for k in 1 ..< filters.count {
                 let again = MTLRenderPassDescriptor()
                 again.depthAttachment.texture = depth
                 again.depthAttachment.loadAction = .load
@@ -220,18 +226,21 @@ struct StoredMSAAScene: GPUScene {
                     guard let s = cover[y * size + x] else { return .nan }
                     let depths = s.map { Float($0 ? 0.5 : 0.75) }
                     return filter == .min ? depths.min()! : filter == .max ? depths.max()! : depths[0]
-                }, tolerance: 0)
+                }, tolerance: 0
+            )
         }
         result.compare(
             "\(samples)x depth-tested samples", try await Self.unpack(gpu, color, samples, .rgba8Unorm),
-            Self.each(cover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255)
+            Self.each(cover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255
+        )
         result.compare(
             "\(samples)x depth samples", try await Self.unpack(gpu, depth, samples, .r32Float),
-            Self.each(cover, samples, channels: 1) { covered, _ in covered ? 0.5 : 0.75 }, tolerance: 0)
+            Self.each(cover, samples, channels: 1) { covered, _ in covered ? 0.5 : 0.75 }, tolerance: 0
+        )
     }
 
     /// A memoryless multisampled depth texture of each format, depth-tested and resolved to its minimum in the pass that
-    /// draws it: the raw path's backing for it may be compressed memory, which the resolve samples through a header of its
+    /// draws it: the driver's backing for it may be compressed memory, which the resolve samples through a header of its
     /// own
     private func memorylessDepth(
         _ gpu: GPU, _ samples: Int, _ cover: [[Bool]?], _ result: inout SceneResult
@@ -245,7 +254,8 @@ struct StoredMSAAScene: GPUScene {
         ] {
             let color = try gpu.texture(.rgba8Unorm, size, size, samples: samples)
             let depth = try gpu.texture(
-                format, size, size, usage: [.renderTarget], samples: samples, storage: .memoryless)
+                format, size, size, usage: [.renderTarget], samples: samples, storage: .memoryless
+            )
             let resolved = try gpu.texture(format, size, size, usage: [.renderTarget, .shaderRead])
             let drawn = try gpu.render(fragment: "solid_fragment", format: .rgba8Unorm, samples: samples, depth: format)
             let descriptor = MTLDepthStencilDescriptor()
@@ -278,23 +288,26 @@ struct StoredMSAAScene: GPUScene {
                 Raster(width: size, height: size, channels: 1, levels: 1) { x, y, _ in
                     guard let s = cover[y * size + x] else { return .nan }
                     return code(s.contains(true) ? 0.5 : 0.75)
-                }, tolerance: format == .depth16Unorm ? 1.01 / 65535 : 0)
+                }, tolerance: format == .depth16Unorm ? 1.01 / 65535 : 0
+            )
         }
     }
 
     private func stencil(_ gpu: GPU, _ samples: Int, _ cover: [[Bool]?], _ result: inout SceneResult) async throws {
         let size = Self.size
         let zeta = try gpu.texture(.depth32Float_stencil8, size, size, usage: [.renderTarget], samples: samples)
-        let resolved = try (0..<5).map { _ in
+        let resolved = try (0 ..< 5).map { _ in
             try gpu.texture(.depth32Float_stencil8, size, size, usage: [.renderTarget])
         }
         let s8 = try gpu.texture(.stencil8, size, size, usage: [.renderTarget], samples: samples)
-        let s8Resolved = try (0..<2).map { _ in try gpu.texture(.stencil8, size, size, usage: [.renderTarget]) }
+        let s8Resolved = try (0 ..< 2).map { _ in try gpu.texture(.stencil8, size, size, usage: [.renderTarget]) }
         let tested = try gpu.render(
             fragment: "solid_fragment", format: .invalid, samples: samples, depth: .depth32Float_stencil8,
-            stencil: .depth32Float_stencil8)
+            stencil: .depth32Float_stencil8
+        )
         let stencilOnly = try gpu.render(
-            fragment: "solid_fragment", format: .invalid, samples: samples, stencil: .stencil8)
+            fragment: "solid_fragment", format: .invalid, samples: samples, stencil: .stencil8
+        )
         let replaceNearer = try Self.stencilWrites(gpu, depth: .lessEqual)
         let replace = try Self.stencilWrites(gpu, depth: .always)
         try await Self.prefill(gpu, resolved + s8Resolved)
@@ -377,12 +390,14 @@ struct StoredMSAAScene: GPUScene {
                 Raster(width: size, height: size, channels: 1, levels: 1) { x, y, _ in
                     guard let s = cover[y * size + x] else { return .nan }
                     return Float(nearer(s) ? Self.near : Self.far)
-                }, tolerance: 0)
+                }, tolerance: 0
+            )
         }
         let kept = try await gpu.read(resolved[3], bytesPerPixel: 4, options: .depthFromDepthStencil)
         result.compare(
             "\(samples)x depth kept beside a stencil resolve", Self.floats(kept),
-            Raster(width: size, height: size, channels: 1, levels: 1) { _, _, _ in 0.25 }, tolerance: 0)
+            Raster(width: size, height: size, channels: 1, levels: 1) { _, _, _ in 0.25 }, tolerance: 0
+        )
     }
 
     private func positioned(_ gpu: GPU, _ samples: Int, _ result: inout SceneResult) async throws {
@@ -409,7 +424,8 @@ struct StoredMSAAScene: GPUScene {
         result.expect(moved, "\(samples)x: the own positions cover what the device's do")
         result.compare(
             "\(samples)x own sample positions", try await Self.unpack(gpu, color, samples, .rgba8Unorm),
-            Self.each(cover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255)
+            Self.each(cover, samples, channels: 4) { $0 ? Self.red[$1] : Self.blue[$1] }, tolerance: 0.5 / 255
+        )
     }
 
     /// Each sample of `texture` side by side, sample s of pixel (x, y) at (x * samples + s, y), read by texture2d_ms (or
@@ -516,7 +532,8 @@ struct StoredMSAAScene: GPUScene {
         encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * corners.count, index: 0)
         encoder.setFragmentBytes(&color, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
         encoder.drawPrimitives(
-            type: corners.count == 3 ? .triangle : .triangleStrip, vertexStart: 0, vertexCount: corners.count)
+            type: corners.count == 3 ? .triangle : .triangleStrip, vertexStart: 0, vertexCount: corners.count
+        )
     }
 
     private static func clip(_ points: [SIMD2<Double>], z: Float) -> [SIMD4<Float>] {
@@ -530,7 +547,7 @@ struct StoredMSAAScene: GPUScene {
         }
         let usable =
             Set(answered.map { "\($0)" }).count == samples
-            && answered.allSatisfy { $0.x >= 0 && $0.x < 1 && $0.y >= 0 && $0.y < 1 }
+                && answered.allSatisfy { $0.x >= 0 && $0.x < 1 && $0.y >= 0 && $0.y < 1 }
         return usable ? (answered, "device") : (standard[samples]!, "standard")
     }
 
@@ -540,7 +557,7 @@ struct StoredMSAAScene: GPUScene {
         func edge(_ a: SIMD2<Double>, _ b: SIMD2<Double>, _ p: SIMD2<Double>) -> Double {
             (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
         }
-        return (0..<(size * size)).map { index in
+        return (0 ..< (size * size)).map { index in
             var covered: [Bool] = []
             for offset in positions {
                 let p = SIMD2<Double>(Double(index % size), Double(index / size)) + offset

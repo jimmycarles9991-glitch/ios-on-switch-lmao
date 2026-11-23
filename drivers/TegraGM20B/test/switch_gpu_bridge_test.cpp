@@ -380,6 +380,12 @@ extern "C" int switch_gpu_backing_token_physical_status(const switch_gpu_backing
 	return switch_gpu_backing_token_status(token);
 }
 
+// switch_gpu_bridge_why's: no producer of these tests has a cause to name
+extern "C" int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *, uint32_t)
+{
+	return 0;
+}
+
 extern "C" int switch_gpu_backing_token_external_status(const switch_gpu_backing_token *token)
 {
 	const auto at = external.find(key(*token));

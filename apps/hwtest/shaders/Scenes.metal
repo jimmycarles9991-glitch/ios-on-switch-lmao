@@ -187,7 +187,7 @@ fragment float4 sampled_fragment(TexturedVertex in [[stage_in]], texture2d<float
 }
 
 /// NAK stamps TEXS_F16_PROOF_MARKER with 0x5346 << 16 | the fetches it folded into TEXS's F16 forms under the chip fact
-/// (raw_chip_facts.h AssumeTexsF16, nak_nir_lower_tex_sm50.c); the probe marker only keeps the proof output's select
+/// (chip_facts.h AssumeTexsF16, nak_nir_lower_tex_sm50.c); the probe marker only keeps the proof output's select
 constant uint TEXS_F16_PROBE_MARKER = 0x7fa55346u;
 constant uint TEXS_F16_PROOF_MARKER = 0x7fa55347u;
 
@@ -195,7 +195,7 @@ struct TexsF16In {
     float4 position [[position]];
 };
 
-/// The F16 form's bits as whole floats and the proof word's bits as a float: formats the raw path renders (RGBA32Float,
+/// The F16 form's bits as whole floats and the proof word's bits as a float: formats the driver renders (RGBA32Float,
 /// R32Float), each holding every bit
 struct TexsF16Out {
     float4 f32 [[color(0)]];
@@ -203,7 +203,7 @@ struct TexsF16Out {
     float proof [[color(2)]];
 };
 
-/// gpu.raw.texs_f16: one texel, sampled through two names of the same texture (bound textures, never one fetch), at the
+/// gpu.gm20b.texs_f16: one texel, sampled through two names of the same texture (bound textures, never one fetch), at the
 /// pixel's centre plus `offset` texels: TEXS's F32 form, and its F16 form's bits. One function per filter, so each
 /// fetch's only use is the rounding NAK folds.
 static TexsF16Out texs_f16(TexsF16In in, texture2d<float> first, texture2d<float> second, float2 offset, sampler s)
@@ -230,7 +230,7 @@ fragment TexsF16Out texs_f16_linear(TexsF16In in [[stage_in]], texture2d<float> 
     return texs_f16(in, first, second, offset, bilinear);
 }
 
-/// gpu.raw.texs_f16: the same fetches by a compute kernel, whose textures stay bindless (TEX.B)
+/// gpu.gm20b.texs_f16: the same fetches by a compute kernel, whose textures stay bindless (TEX.B)
 kernel void texs_f16_bindless(texture2d<float> first [[texture(0)]], device float4 *out [[buffer(0)]],
                               constant float2 &offset [[buffer(1)]], constant uint &linear [[buffer(2)]],
                               uint2 id [[thread_position_in_grid]])
@@ -241,7 +241,7 @@ kernel void texs_f16_bindless(texture2d<float> first [[texture(0)]], device floa
     out[id.y * first.get_width() + id.x] = linear ? first.sample(bilinear, at) : first.sample(point, at);
 }
 
-/// gpu.raw.stored_msaa: sample x % count of pixel (x / count, y) of a multisampled texture, its samples side by side
+/// gpu.gm20b.stored_msaa: sample x % count of pixel (x / count, y) of a multisampled texture, its samples side by side
 fragment float4 ms_sample_fragment(float4 position [[position]], texture2d_ms<float> samples [[texture(0)]],
                                    constant uint &count [[buffer(0)]])
 {
@@ -296,7 +296,7 @@ struct OrderedVertex {
     uint instance [[flat]];
 };
 
-/// gpu.raw.raster_order: instance iid's full-target quad (a four-vertex strip)
+/// gpu.gm20b.raster_order: instance iid's full-target quad (a four-vertex strip)
 vertex OrderedVertex raster_order_vertex(uint vid [[vertex_id]], uint iid [[instance_id]])
 {
     return OrderedVertex{float4((vid & 1) ? 1.0 : -1.0, (vid & 2) ? -1.0 : 1.0, 0.5, 1), iid};

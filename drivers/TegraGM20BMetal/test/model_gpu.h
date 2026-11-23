@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// The GPU of a test over the kernel model (raw_kernel_model.h): a thread that runs each job submitted from its start on
+// The GPU of a test over the kernel model (kernel_model.h): a thread that runs each job submitted from its start on
 // the predication model (predication_model.h) over the model's memory, in submission order, and only then completes it, as
 // the fence interrupt follows the GPU. Held, it leaves what it has not begun in flight.
 #pragma once
-#include "raw_kernel_model.h"
+#include "kernel_model.h"
 #include "predication_model.h"
 #include <chrono>
 #include <condition_variable>

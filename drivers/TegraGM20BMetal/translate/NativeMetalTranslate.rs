@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-//! The raw GM20B path's direct compile with no m2v runtime: a render state's or a kernel's translation by metal2vulkan's
+//! The driver's direct compile with no m2v runtime: a render state's or a kernel's translation by metal2vulkan's
 //! translator alone, on the compile profile's devices, handed to the stage compile as SPIR-V and layouts given as data
 //! (NativeMetalDirect.h). The pack generator and the shader compiler daemon compile through it; the m2v bridge
 //! (NativeMetalBridge.rs) adds its runtime device's forms on top.
@@ -12,10 +12,30 @@ pub mod argument_layouts;
 pub mod descriptors;
 #[path = "NativeMetalDirect.rs"]
 pub mod direct;
+#[path = "NativeMetalDirectAbi.rs"]
+pub mod direct_abi;
 #[path = "NativeMetalDirectCompute.rs"]
 pub mod direct_compute;
+#[path = "NativeMetalDirectComputeAbi.rs"]
+pub mod direct_compute_abi;
+#[path = "NativeMetalDirectComputeBinds.rs"]
+mod direct_compute_binds;
+#[path = "NativeMetalDirectComputeWords.rs"]
+mod direct_compute_words;
+#[path = "NativeMetalDirectComputeWrites.rs"]
+mod direct_compute_writes;
+#[path = "NativeMetalDirectDraw.rs"]
+mod direct_draw;
+#[path = "NativeMetalDirectLayout.rs"]
+pub mod direct_layout;
+#[path = "NativeMetalDirectProbe.rs"]
+pub mod direct_probe;
 #[path = "NativeMetalDirectTess.rs"]
 mod direct_tess;
+#[path = "NativeMetalDirectWrites.rs"]
+pub mod direct_writes;
+#[path = "NativeMetalKernelTextures.rs"]
+mod kernel_textures;
 #[path = "NativeMetalOffline.rs"]
 pub mod offline;
 #[path = "NativeMetalReflection.rs"]

@@ -67,15 +67,19 @@ void writeEarlyCompletionFlip(uint32_t armed, uint8_t by)
     }
 }
 
-// gpuComplete's first step: a flip its producer's filter already wrote is on screen, so its completion is a success
-// (the filter wrote only for a job certain to end so). A failure here breaks that: one error line; the next flip's filter
-// runs as usual.
+// gpuComplete's first step: a flip its producer's filter already wrote is on screen. A kill the GPU driver dates back to
+// the producer's job can still fail its completion: its client's (GONE) leaves the frame shown with one line, and the
+// next flip's filter runs as usual; a lost one is the kernel's own failure.
 int completionFlipVerdict(int status)
 {
     status = mediaFlipVerdict(status);
     if (!status || !completionFlip.early())
         return status;
     const int entry = completionFlip.entry;
+    if (status == TEGRA_SCANOUT_SOURCE_LOST)
+        panic("SwitchDisplay: window A was flipped to entry %d from its producer's interrupt filter, and the frame was "
+              "then lost (%d)",
+              entry, status);
     IOLog("SwitchDisplay: window A was flipped to entry %d from its producer's interrupt filter, whose completion then "
           "failed (%d): shown as done\n",
           entry, status);

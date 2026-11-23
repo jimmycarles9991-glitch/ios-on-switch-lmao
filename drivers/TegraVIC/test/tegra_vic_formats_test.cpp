@@ -192,6 +192,56 @@ TEST(VicFormats, AThreePlaneSourcesCbDrivesBlueAndItsCrRed)
     EXPECT_LT(bgrx[2], 16) << "Cr 16 holds red down";
 }
 
+std::vector<uint8_t> runLuma(const TegraVICSurfaceDesc &s, const std::vector<uint8_t> &src,
+                             const TegraVICSurfaceDesc &d)
+{
+    const Built b = build(s, d);
+    EXPECT_EQ(b.why, nullptr) << b.why;
+    std::vector<uint8_t> in(src), out(d.length);
+    VicModel model = {};
+    model.region[0] = {kSrcIova, in.data(), in.size()};
+    model.region[1] = {kDstIova, out.data(), out.size()};
+    model.regions = 2;
+    if (!b.why)
+        vic_model_run(&model, &b.job);
+    EXPECT_EQ(model.faults, 0u);
+    return out;
+}
+
+TEST(VicFormats, ALuminanceDestinationHoldsTheStandardsLuma)
+{
+    const uint32_t l008 = TEGRA_VIC_FOURCC('L', '0', '0', '8');
+    const TegraVICSurfaceDesc bgra = surface(kBgra, 64, 64, 256);
+    std::vector<uint8_t> px(bgra.length);
+    for (uint32_t y = 0; y < 64; y++)
+        for (uint32_t x = 0; x < 64; x++) {
+            const uint32_t word = x < 32 ? 0xffff0000u : 0xff00ff00u;
+            memcpy(&px[y * 256 + x * 4], &word, 4);
+        }
+    TegraVICSurfaceDesc luma = surface(l008, 64, 64, 256);
+    const std::vector<uint8_t> untagged = runLuma(bgra, px, luma);
+    EXPECT_NEAR(untagged[8 * 256 + 4], 76, 1) << "BT.601 luma of red";
+    EXPECT_NEAR(untagged[8 * 256 + 40], 150, 1) << "BT.601 luma of green";
+    luma.colorMatrix = SWITCH_VIC_MATRIX_709;
+    const std::vector<uint8_t> hd = runLuma(bgra, px, luma);
+    EXPECT_NEAR(hd[8 * 256 + 4], 54, 1) << "BT.709 luma of red";
+    EXPECT_NEAR(hd[8 * 256 + 40], 182, 1) << "BT.709 luma of green";
+    luma.colorMatrix = SWITCH_VIC_MATRIX_UNSUPPORTED;
+    EXPECT_STREQ(build(bgra, luma).why, "YCbCr matrix requires color conversion outside VIC's contract");
+}
+
+TEST(VicFormats, ALuminanceDestinationTakesAYccSourcesLumaAloneInFullRange)
+{
+    const TegraVICSurfaceDesc nv12 = surface(TEGRA_VIC_FOURCC('4', '2', '0', 'v'), 64, 64, 256, 256);
+    std::vector<uint8_t> px(nv12.length);
+    memset(&px[nv12.planeOffset[1]], 16, 256 * 32);
+    for (uint32_t y = 0; y < 64; y++)
+        memset(&px[y * 256], y < 32 ? 235 : 126, 64);
+    const std::vector<uint8_t> out = runLuma(nv12, px, surface(TEGRA_VIC_FOURCC('L', '0', '0', '8'), 64, 64, 256));
+    EXPECT_EQ(out[8 * 256 + 8], 255) << "video white whatever its chroma";
+    EXPECT_NEAR(out[40 * 256 + 8], 128, 1) << "(126 - 16) * 255 / 219";
+}
+
 TEST(VicFormats, OneAndTwoByteElementsAndFullResolutionChroma)
 {
     const TegraVICSurfaceDesc bgra = surface(kBgra, 640, 480, 2560);

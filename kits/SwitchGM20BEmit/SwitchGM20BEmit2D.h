@@ -3,7 +3,7 @@
 // SRCCOPY, colour key off, render enable on, clip set to the destination, and the destination's own colour format with
 // one packed colour word. The first boot's probe fill (RF32x4 colour format, four float words, clip off, unbracketed after
 // clear-only passes) left GR busy until a context-switch timeout (x1-units UNITS.md). The caller brackets a fill as
-// raw/fx/fx_mip.cpp brackets 2D work: tiled cache drained and the 3D engine idle before, the 2D then 3D engine idle and
+// fx/fx_mip.cpp brackets 2D work: tiled cache drained and the 3D engine idle before, the 2D then 3D engine idle and
 // the texture cache invalidated after.
 #pragma once
 
@@ -39,7 +39,7 @@ void switch_gm20b_2d_fill(struct nv_push *p, const struct switch_gm20b_2d_surfac
 
 // A scaled copy of `src` into [dst_x, dst_x + dst_w) x [dst_y, dst_y + dst_h) of `dst`: destination texel (x, y) samples
 // the source at src_x + (x + 1/2) du, src_y + (y + 1/2) dv under the centre origin, or from the corner under `corner`
-// (GM20B's mip chains: corner origin, source origin at du/2, raw/fx/fx_mip.h kGm20bSampling). 32.32 fixed point. The
+// (GM20B's mip chains: corner origin, source origin at du/2, fx/fx_mip.h kGm20bSampling). 32.32 fixed point. The
 // engine's texture cache is invalidated (L1) before the source is read; the caller orders the source's writes before and
 // the destination's readers after.
 // `rop` 0 copies the filtered source (SRCCOPY); any other value is a ROP3 code the engine applies to the destination's

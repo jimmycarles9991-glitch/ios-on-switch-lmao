@@ -23,6 +23,7 @@ enum tgm_bind_origin {
 	TGM_BIND_POOL,
 	TGM_BIND_COMPRESSIBLE,
 	TGM_BIND_IMPORT,
+	TGM_BIND_NO_BO, /* a MapSparse, or a Map refused for a BO the connection does not have */
 };
 
 #define TGM_BIND_CHANNELS 8
@@ -115,6 +116,8 @@ static inline const char *tgm_bind_origin_name(uint8_t origin)
 		return "compressible alloc";
 	case TGM_BIND_IMPORT:
 		return "import";
+	case TGM_BIND_NO_BO:
+		return "no BO";
 	default:
 		return "?";
 	}

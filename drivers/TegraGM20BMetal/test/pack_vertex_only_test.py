@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""A state of no fragment function is packed: its record names no fragment program (runtime/raw_pack.h kNoProgram).
+"""A state of no fragment function is packed: its record names no fragment program (runtime/pack.h kNoProgram).
 
 RenderBox's four path_edges states are the corpus's (precompile/corpus.log): each draws depth and stencil from its
-vertex function alone, and the device looked each up under the key hashes below.
+vertex function alone. The run time keys a stage by its library function, never the name it was specialized under
+(TegraGM20BMetalLibrary.mm metal_pipeline_key, TegraGM20BMetalCompileRequest.mm requestPackKey; the pack's
+probe_states.h alike), so the line naming path_edges_vertex as=vhba14dhipa4 is the state of the line naming it plainly:
+three keys.
 """
 
 import os
 import sys
 import unittest
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'raw', 'pack'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pack'))
 import directlink
+import make_pack
 import mkpack
 import packfile
-import rawpack
 
 CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'precompile', 'corpus.log')
-RENDER_BOX_KEYS = {0x5A8334BB122A80B3, 0x970DB699817A2E73, 0xE0CA57468521CCEB, 0xE3060592583748EA}
+RENDER_BOX_KEYS = {0x5A8334BB122A80B3, 0x970DB699817A2E73, 0xE0CA57468521CCEB}
 VERTEX = {'image': bytes(80) + b'\x01', 'data': b'', 'cbufs': [1]}
 NONE = {'image': b'', 'data': b'', 'cbufs': []}
 KEY = 'samples=1 topo=0 ds=260/260 c0=115:0:0:1:0:0:1:0:0  | v path_edges_vertex  | f -  | l RenderBox'
@@ -30,16 +33,18 @@ def made(key: str, programs: list[dict]) -> dict:
 
 
 class KeyTest(unittest.TestCase):
-    def test_render_box_path_edges_states_key_as_the_device_looked_them_up(self) -> None:
+    def test_render_box_path_edges_states_key_as_the_run_time_keys_them(self) -> None:
         with open(CORPUS) as f:
             lines = [line.rstrip('\n') for line in f if ' | v path_edges_vertex ' in line and ' | f - ' in line]
-        hashes = {packfile.fnv(rawpack.state_key(line).encode()) for line in lines}
+        self.assertEqual(len(lines), 4)
+        self.assertEqual(sum(' as=' in line for line in lines), 1)
+        hashes = {packfile.fnv(make_pack.state_key(line).encode()) for line in lines}
         self.assertEqual(hashes, RENDER_BOX_KEYS)
 
     def test_a_state_metal_does_not_rasterize_keys_rast_0_after_its_attachments(self) -> None:
         line = 'R ok=1 label=x samples=1 topo=0 ds=252/0 rast=0 a0=31:0:0:16:1:1 | v v  | f - '
-        self.assertEqual(rawpack.state_key(line), 'samples=1 topo=0 ds=252/0 a0=31:0:0:16:1:1 rast=0  | v v  | f -')
-        self.assertNotIn('rast=', rawpack.state_key(line.replace(' rast=0', '')))
+        self.assertEqual(make_pack.state_key(line), 'samples=1 topo=0 ds=252/0 a0=31:0:0:16:1:1 rast=0  | v v  | f -')
+        self.assertNotIn('rast=', make_pack.state_key(line.replace(' rast=0', '')))
 
 
 class LinkTest(unittest.TestCase):

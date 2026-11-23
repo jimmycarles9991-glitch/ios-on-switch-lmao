@@ -144,6 +144,105 @@ fn native_sm53_binary_operations_keep_rounding_and_signed_zero() {
     }
 }
 
+/// On the Sm53 target the exact product's rounding takes no integer multiply, and is still the
+/// exact product's: at every `f32` the multiply rounds onto `k + 1/2` next to each midpoint (up
+/// to 1.5 times the scale, as an extended-range write's magnitude), at the midpoints themselves,
+/// and at ordinary values, for every scale a pack or an extended-range write takes.
+#[test]
+fn native_sm53_exact_products_round_by_their_residual() {
+    let x = float(32);
+    let word = int(32);
+    for (m, snorm) in [
+        (510u32, false),
+        (255, false),
+        (4095, false),
+        (127, true),
+        (65535, false),
+        (32767, true),
+        (1023, false),
+        (3, false),
+    ] {
+        let top = if snorm { 1.0 } else { 1.5 };
+        let mut vals: Vec<f32> = vec![0.0, -0.0, 1.0, 0.5, 1e-30, 1.0e-6, 0.999_999_9, top];
+        let mut split = 0;
+        let last = (f64::from(m) * f64::from(top)) as u32;
+        for k in (0..last).step_by((last as usize / 4096).max(1)) {
+            let x0 = (f64::from(k) + 0.5) / f64::from(m);
+            let first = (x0 as f32).to_bits().saturating_sub(4);
+            for b in first..first + 9 {
+                let v = f32::from_bits(b);
+                if f64::from(v) > f64::from(top) {
+                    continue;
+                }
+                let p = v * m as f32;
+                if p.fract() == 0.5 || f64::from(v) == x0 {
+                    vals.push(v);
+                    if snorm {
+                        vals.push(-v);
+                    }
+                    split += usize::from(f64::from(p) != f64::from(v) * f64::from(m));
+                }
+            }
+        }
+        assert!(split > 0 || m < 8, "scale {m}: no split found");
+        let body = |fb: &mut FunctionBuilder<'_>, v: &[Value]| {
+            fb.module().set_native_half_conversions(true);
+            math::round_exact_product(fb, x, v[0], m, snorm)
+        };
+        let module = kernel(&[x], word, &body).unwrap();
+        assert!(
+            !module.blocks().iter().flat_map(|b| &b.insts).any(|n| matches!(
+                n.inst,
+                Inst::Binary {
+                    op: BinOp::UMulExtended,
+                    ..
+                }
+            )),
+            "scale {m}: an integer product"
+        );
+        let cases: Vec<Case> = vals
+            .iter()
+            .map(|v| vec![vec![u64::from(v.to_bits())]])
+            .collect();
+        check(
+            &format!("native exact product x {m}"),
+            &[x],
+            word,
+            &body,
+            &cases,
+            &|c| {
+                let v = f64::from(f32::from_bits(c[0][0] as u32));
+                let r = (v * f64::from(m)).round_ties_even() as i64;
+                Some(vec![r as u64 & 0xFFFF_FFFF])
+            },
+            false,
+        );
+    }
+}
+
+/// The quotient mended by its residual is `k / d` correctly rounded at every `k` from 0 to `d`, for
+/// each divisor it is used with.
+#[test]
+fn native_sm53_quotients_by_a_constant_round_correctly() {
+    use super::super::residual_round::{ratio_to_f32, EXACT_DIVISORS};
+    let word = int(32);
+    for d in EXACT_DIVISORS {
+        let cases: Vec<Case> = (0..=u64::from(d)).map(|k| vec![vec![k]]).collect();
+        check(
+            &format!("quotient by {d}"),
+            &[word],
+            float(32),
+            &|fb, k| {
+                fb.module().set_native_half_conversions(true);
+                ratio_to_f32(fb, word, k[0], &[d])
+            },
+            &cases,
+            &|c| Some(vec![u64::from((c[0][0] as f32 / d as f32).to_bits())]),
+            false,
+        );
+    }
+}
+
 #[test]
 fn native_sm53_fma_rounds_once_while_multiply_add_rounds_twice() {
     use crate::lower::arith::fma::{Fma, Route};

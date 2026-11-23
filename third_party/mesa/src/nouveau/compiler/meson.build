@@ -21,6 +21,7 @@ libnak_c_files = files(
   'nak_nir_lower_cf.c',
   'nak_nir_lower_cmat.c',
   'nak_nir_lower_fs_inputs.c',
+  'nak_nir_lower_fs_interlock.c',
   'nak_nir_lower_gs_intrinsics.c',
   'nak_nir_lower_image_addrs.c',
   'nak_nir_lower_mesh_intrinsics.c',
@@ -31,10 +32,12 @@ libnak_c_files = files(
   'nak_nir_lower_tex_sm50.c',
   'nak_nir_lower_vtg_io.c',
   'nak_nir_mark_lcssa_invariants.c',
+  'nak_nir_narrow_half_phis.c',
   'nak_nir_rematerialize_compares.c',
   'nak_nir_rematerialize_load_const.c',
   'nak_nir_rematerialize_uniforms.c',
   'nak_nir_shrink_interlock.c',
+  'nak_nir_strip_half_rounding.c',
 )
 
 libnak_deps = [

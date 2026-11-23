@@ -69,7 +69,7 @@ WEBKIT_IDS = (
     'WebContentExtension.appex',
     'com.apple.fskit.exfat',
 )
-BACKBOARDD_CACHE = 'm2v/System_6C7A65AF-CB18-421C-A07A-D724B05A7AB6_Library_Caches_m2v'
+BACKBOARDD_CACHE = 'm2v/System_6C7A65AF-CB18-421C-A07A-D724B05A7AB6_Library_Caches_TegraGM20BMetal'
 
 
 def copytree(src: Path, dst: Path, log: host.Log) -> bool:

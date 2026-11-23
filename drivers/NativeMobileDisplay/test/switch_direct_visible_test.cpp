@@ -4,7 +4,12 @@
 // frame is watched by the GPU driver instead of a present job; anything else keeps the job.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdarg>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -18,7 +23,30 @@ using switch_ios::test::SourceText;
 
 using IOReturn = int;
 constexpr IOReturn kIOReturnSuccess = 0;
-#define IOLog(...) ((void)0)
+
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+namespace switch_gpu_refusal {
+// SwitchGpuRefusalSites.h's bound, which this test's sources do not carry
+constexpr bool logged(uint32_t nth)
+{
+    return nth < 4 || nth % 256 == 0;
+}
+}  // namespace switch_gpu_refusal
+
+namespace {
+std::vector<std::string> lines;
+
+void IOLog(const char *format, ...)
+{
+    char line[512];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    lines.emplace_back(line);
+}
+}  // namespace
+#endif
 
 struct switch_gpu_backing {
     unsigned refs = 1, holds = 0;
@@ -55,7 +83,9 @@ extern "C" int switch_gpu_backing_promised(switch_gpu_backing *b)
 }
 
 namespace {
-struct OriginalLegacySwapRequest {};
+struct OriginalLegacySwapRequest {
+    uint32_t swap = 0;
+};
 
 struct PlaneSet {
     bool fenced = false;
@@ -112,6 +142,22 @@ struct NativeLegacyDisplay {
         ++observed;
     }
 
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    struct {
+        int front = 0;
+    } ring;
+
+    uint64_t seqOf(const OriginalLegacySwapRequest *) const
+    {
+        return taken;
+    }
+
+    static uint32_t swapOf(const OriginalLegacySwapRequest *request)
+    {
+        return request->swap;
+    }
+#endif
+
 #include "../SwitchDirectVisibleDisplay.h"
 };
 
@@ -127,6 +173,9 @@ protected:
         display.reads[1].lease = reinterpret_cast<switch_gpu_cpu_lease *>(1);
         display.reads[1].view.native = &backing;
         display.reads[1].view.producer = {7, 1, SWITCH_GPU_ENGINE_GM20B, 3};
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+        lines.clear();
+#endif
     }
 };
 
@@ -210,6 +259,50 @@ TEST_F(DirectVisible, ASlotsFirstFrameKeepsThePresentJobAndLaterOnesAreWatched)
     display.releaseScanoutBacking(1);
     EXPECT_EQ(display.producerWatch(entry), 0u);
 }
+
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+size_t linesWith(const std::string &text)
+{
+    return static_cast<size_t>(std::count_if(lines.begin(), lines.end(), [&](const std::string &line) {
+        return line.find(text) != std::string::npos;
+    }));
+}
+
+// What directSlotFor copies from the swap's snapshot: surface 33, allocation 9, at content generation `content`.
+switch_gpu_scanout_look drawn(uint64_t content)
+{
+    switch_gpu_scanout_look look = {};
+    look.allocation = 9;
+    look.content = content;
+    look.surface = 33;
+    return look;
+}
+
+TEST_F(DirectVisible, AFlipToContentsAlreadyShownNamesTheFrameThatShowedThem)
+{
+    display.directLook = drawn(4);
+    request.swap = 41;
+    EXPECT_TRUE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
+    request.swap = 42;
+    EXPECT_TRUE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
+    EXPECT_EQ(linesWith("swap 42 (taken 2) flips from slot 0 to surface 33 (allocation 9) in slot 5 with no present "
+                        "job, again with nothing written since swap 41 (taken 1), 1 frames ago (generation 4,"),
+              1u);
+    EXPECT_EQ(linesWith("nothing else changes with it (1 so far)"), 1u);
+}
+
+// A pending writer promise is a write still to come, whatever the generation.
+TEST_F(DirectVisible, AFlipToNewOrPromisedContentsLogsNothing)
+{
+    display.directLook = drawn(4);
+    EXPECT_TRUE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
+    display.directLook.content = 5;
+    EXPECT_TRUE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
+    display.directLook.promised = 1;
+    EXPECT_TRUE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
+    EXPECT_EQ(linesWith("again with nothing written"), 0u);
+}
+#endif
 
 TEST(DirectVisibleSource, TheOfferTriesItOnceTheSlotIsMappedAndSlotsHoldTheirBacking)
 {

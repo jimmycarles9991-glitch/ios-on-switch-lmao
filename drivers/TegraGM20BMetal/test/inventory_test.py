@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""raw/test/inventory.tsv stays the inventory of what the kinds send and m2v implements.
+"""harness/inventory.tsv stays the inventory of what the kinds send and m2v implements.
 
-selcover (raw/test/selcover.mm, over the host harness) writes the inventory and its baseline from the raw device's own
+selcover (harness/selcover.mm, over the host harness) writes the inventory and its baseline from the device's own
 objects; this checks, with no harness, that the committed files still describe the kinds' sent tables: every selector a
 kind sends has its row naming that kind and no row names a kind that does not send it, the baseline's gaps are the
 inventory's, and every refusal by design names an inventory row and gives its reason. A kind table that gains a selector
@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parents[3]
-TEST = ROOT / 'drivers/TegraGM20BMetal/raw/test'
-KINDS = sorted((ROOT / 'drivers/NativeMetal/abi/kinds').glob('*.json'))
+TEST = ROOT / 'drivers/TegraGM20BMetal/harness'
+KINDS = sorted((ROOT / 'drivers/TegraGM20BMetal/abi/kinds').glob('*.json'))
 FIRST_PARTY = ('raw', 'zero', 'refused')
 
 

@@ -42,18 +42,23 @@ GPU_SOURCES = [
 # The drivers' hand-written method numbers and fields (STRUCTURE.md D4/D5), read as text: none of these files is
 # compiled or edited here. A define prefix limits a C file to its class constants.
 DRIVER_SOURCES = {
-    "raw_gpu.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
-    "raw_compute.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_compute.cpp",
-    "raw_split.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_split.cpp",
-    "raw_cbuf.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_cbuf.h",
-    "raw_zeta.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.cpp",
-    "raw_emit.cpp": "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.cpp",
-    "raw_tiled_cache.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_tiled_cache.h",
-    "raw_stamps.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_stamps.h",
-    "raw_counters.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_counters.h",
-    "raw_mme.h": "//drivers/TegraGM20BMetal:raw/runtime/raw_mme.h",
-    "fx_mip.cpp": "//drivers/TegraGM20BMetal:raw/fx/fx_mip.cpp",
-    "nvdec.cpp": "//drivers/TegraGM20BMetal:raw/pack/nvdec.cpp",
+    "gpu.cpp": "//drivers/TegraGM20BMetal:gpu.cpp",
+    "gm20b_gpu_internal.h": "//drivers/TegraGM20BMetal:gm20b_gpu_internal.h",
+    "draw.cpp": "//drivers/TegraGM20BMetal:draw.cpp",
+    "draw_prepare.cpp": "//drivers/TegraGM20BMetal:draw_prepare.cpp",
+    "pass_end.cpp": "//drivers/TegraGM20BMetal:pass_end.cpp",
+    "blit.cpp": "//drivers/TegraGM20BMetal:blit.cpp",
+    "compute.cpp": "//drivers/TegraGM20BMetal:compute.cpp",
+    "split.cpp": "//drivers/TegraGM20BMetal:split.cpp",
+    "cbuf.h": "//drivers/TegraGM20BMetal:cbuf.h",
+    "zeta.cpp": "//drivers/TegraGM20BMetal:zeta.cpp",
+    "emit.cpp": "//drivers/TegraGM20BMetal:emit.cpp",
+    "tiled_cache.h": "//drivers/TegraGM20BMetal:tiled_cache.h",
+    "stamps.h": "//drivers/TegraGM20BMetal:stamps.h",
+    "counters.h": "//drivers/TegraGM20BMetal:counters.h",
+    "mme.h": "//drivers/TegraGM20BMetal:mme.h",
+    "fx_mip.cpp": "//drivers/TegraGM20BMetal:fx/fx_mip.cpp",
+    "nvdec.cpp": "//drivers/TegraGM20BMetal:pack/nvdec.cpp",
 } | {f: "//drivers/TegraGM20B:" + f for f in GPU_SOURCES}
 
 DEFINE_PREFIXES = {f: "NVB0B5_" for f in GPU_SOURCES}

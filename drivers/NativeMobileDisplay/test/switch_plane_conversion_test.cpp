@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <gtest/gtest.h>
 #include <array>
+#include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <functional>
+#include <stdexcept>
 #include "../NativePlanes.h"
+#include "../../TegraDisplayFlip/TegraScanoutCopy.h"
 #include "../../TegraVIC/SwitchNativeScanout.h"
 #include "../../TegraVIC/SwitchNativeVICImage.h"
 #include "../../TegraVIC/SwitchVICScanoutConvert.h"
@@ -18,13 +22,14 @@ struct switch_gpu_backing {
 
 struct switch_gpu_cpu_lease {};
 
-struct OriginalLegacySwapRequest {};
+struct OriginalLegacySwapRequest {
+    uint32_t swap = 0;
+};
 
 class OSObject {};
 
 using IOReturn = int;
 constexpr int kIOReturnSuccess = 0, kIOReturnNotReady = -10, kIOReturnAborted = -14;
-constexpr int TEGRA_SCANOUT_SOURCE_LOST = -5;
 
 namespace {
 unsigned allocations, conversions, leases, backingCount, observations;
@@ -39,6 +44,14 @@ uint64_t mach_absolute_time()
 void native_legacy_transfer_observed(int, const OriginalLegacySwapRequest *, uint64_t)
 {
     ++observations;
+}
+
+void IOLog(const char *, ...)
+{}
+
+[[noreturn]] void panic(const char *, ...)
+{
+    throw std::runtime_error("panic");
 }
 
 int convertError, exportError;
@@ -77,6 +90,12 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *backing, switch_
     info->content_generation = backing->content;
     info->pages = pages;
     info->page_count = uint32_t((backing->bytes + 4095) >> 12);
+}
+
+// The source slot's producer did not fail: a failure is the conversion's own.
+extern "C" int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *, uint32_t)
+{
+    return 0;
 }
 
 extern "C" int switch_gpu_backing_export_read(switch_gpu_backing *backing, switch_gpu_backing_token *producer,
@@ -146,8 +165,9 @@ struct Loop {
 
 struct NativeLegacyDisplay : OSObject {
     bool transferred = false, copyStopping = false, latchRetire = true, planeNextSet = true;
-    unsigned kicks = 0, lost = 0, taken = 0;
+    unsigned kicks = 0, unshown = 0, taken = 0;
     static constexpr int kNoBuffer = -1;
+    static constexpr size_t swapId = offsetof(OriginalLegacySwapRequest, swap);
     Event event;
     Event *copySource = &event;
     Loop loop;
@@ -163,9 +183,14 @@ struct NativeLegacyDisplay : OSObject {
         return request;
     }
 
-    const OriginalLegacySwapRequest *pendingSwapRequest()
+    const OriginalLegacySwapRequest *pendingSwapRequest() const
     {
         return request;
+    }
+
+    static const OriginalLegacySwapRequest *queuedAfter(const OriginalLegacySwapRequest *)
+    {
+        return nullptr;
     }
 
     void kickSwapQueue()
@@ -178,9 +203,9 @@ struct NativeLegacyDisplay : OSObject {
         ++taken;
     }
 
-    void dropLostFrame(const OriginalLegacySwapRequest *, int)
+    void retireSwapUnshown(const OriginalLegacySwapRequest *, int)
     {
-        ++lost;
+        ++unshown;
     }
 
     static constexpr unsigned kPlaneSlots = 8;
@@ -240,6 +265,7 @@ struct NativeLegacyDisplay : OSObject {
         return -11;
     }
 
+#include "../SwitchUnshownSource.h"
 #include "../SwitchPlaneConversionDisplay.h"
 
     ~NativeLegacyDisplay()
@@ -399,8 +425,8 @@ TEST_F(PlaneConversion, AliasOffsetAndStrideArePartOfContentIdentity)
 
 TEST_F(PlaneConversion, FailedSubmissionDoesNotCreateCachedImage)
 {
-    convertError = -5;
-    EXPECT_EQ(convert(), -5);
+    convertError = -12;
+    EXPECT_EQ(convert(), -12);
     EXPECT_EQ(display->mappings, 0u);
     convertError = 0;
     EXPECT_GE(convert(), 0);
@@ -416,6 +442,16 @@ TEST_F(PlaneConversion, AcceptedConversionSurvivesTemporaryDisplayMappingPressur
     EXPECT_GE(convert(), 0);
     EXPECT_EQ(conversions, 1u);
     EXPECT_EQ(allocations, 1u);
+}
+
+TEST_F(PlaneConversion, AMatrixVICLacksConvertsAsWindowBShowsIt)
+{
+    layer.surface.colorMatrix = SWITCH_VIC_MATRIX_UNSUPPORTED;
+    layer.surface.chromaTop = layer.surface.chromaBottom = 2;
+    ASSERT_EQ(offer(), -115);
+    EXPECT_EQ(display->planeConversion->input.standard, uint32_t(TEGRA_VIC_YCC_601));
+    work();
+    EXPECT_GE(offer(), 0);
 }
 
 TEST_F(PlaneConversion, NewContentQueuesWithoutAllocationOrEngineAdmissionUnderTheDisplayGate)
@@ -459,16 +495,23 @@ TEST_F(PlaneConversion, StopBeforeDispatchReleasesTheQueuedReservationWithoutTou
     EXPECT_FALSE(display->planeConversionQueued);
 }
 
-TEST_F(PlaneConversion, FailedProducerDoesNotSpinOrScanConvertedPixels)
+// A source whose writer's client is gone retires its swap unshown, never tried again; a lost one is the kernel's own
+// failure.
+TEST_F(PlaneConversion, AGoneSourceRetiresItsSwapUnshownAndALostOnePanics)
 {
-    convertError = -5;
+    convertError = TEGRA_SCANOUT_SOURCE_GONE;
     ASSERT_EQ(offer(), -115);
     work();
     EXPECT_EQ(display->kicks, 0u);
-    EXPECT_EQ(display->lost, 1u);
+    EXPECT_EQ(display->unshown, 1u);
     EXPECT_EQ(display->taken, 1u);
     EXPECT_FALSE(display->planeNextSet);
     EXPECT_FALSE(display->convertedPlanes[0].valid);
+    convertError = TEGRA_SCANOUT_SOURCE_LOST;
+    ASSERT_EQ(offer(), -115);
+    offGate = true;
+    EXPECT_THROW(display->planeConversionWork(), std::runtime_error);
+    EXPECT_EQ(display->unshown, 1u);
 }
 
 TEST_F(PlaneConversion, UnavailableWorkerDoesNotAllocateOrAdmit)

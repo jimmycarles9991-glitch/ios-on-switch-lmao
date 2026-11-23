@@ -40,9 +40,10 @@ struct LandscapeVideoTest: HWTest {
         let asset = AVURLAsset(url: context.media.appendingPathComponent(clip.file))
         let duration = try await asset.load(.duration)
         let composition = AVMutableComposition()
-        for _ in 0..<10 {
+        for _ in 0 ..< 10 {
             try await composition.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration), of: asset, at: composition.duration)
+                CMTimeRange(start: .zero, duration: duration), of: asset, at: composition.duration
+            )
         }
         nonisolated(unsafe) let timeline = composition
         let (item, player) = await MainActor.run { () -> (AVPlayerItem, AVPlayer) in
@@ -53,9 +54,11 @@ struct LandscapeVideoTest: HWTest {
         defer {
             _ = session.call(LandscapeSample.request(op: LandscapeSample.force, value: 0), replyBytes: 0)
             _ = session.call(
-                LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size)
+                LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
+            )
             _ = session.call(
-                LandscapeSample.request(op: LandscapeSample.fail, value: 0), replyBytes: LandscapeSample.size)
+                LandscapeSample.request(op: LandscapeSample.fail, value: 0), replyBytes: LandscapeSample.size
+            )
         }
         // Before the stage: with V3 shipped, the clip's first frame would take the landscape route.
         _ = try session.call(
@@ -142,7 +145,7 @@ struct LandscapeVideoTest: HWTest {
         await MainActor.run { video.play() }
         var entered = false
         var last = before
-        for _ in 0..<6 {
+        for _ in 0 ..< 6 {
             guard case .success(let window) = await sample(session, frames: 120) else { break }
             last = window
             if window.failures > before.failures && window.landscapeFrames > 0 {
@@ -214,7 +217,7 @@ struct LandscapeVideoTest: HWTest {
         -> Result<(LandscapeSample, Int), TestFailure>
     {
         var last = LandscapeSample()
-        for attempt in 1...Self.changeSamples {
+        for attempt in 1 ... Self.changeSamples {
             if let failure = start(session, frames: 90) { return .failure(failure) }
             if attempt == 1 { await held.show(video, settle: false, fresh: fresh) }
             if attempt == 3 && !fresh { await held.show(video, settle: false) }
@@ -236,7 +239,8 @@ struct LandscapeVideoTest: HWTest {
     /// Has the kernel record the next `frames` frame ends; nil once it does.
     func start(_ session: VICKernelTest.Session, frames: UInt32) -> TestFailure? {
         switch session.call(
-            LandscapeSample.request(op: LandscapeSample.sample, value: frames), replyBytes: LandscapeSample.size)
+            LandscapeSample.request(op: LandscapeSample.sample, value: frames), replyBytes: LandscapeSample.size
+        )
         {
         case .failure(let failure): return failure
         case .success(let bytes):
@@ -250,11 +254,12 @@ struct LandscapeVideoTest: HWTest {
     /// The sample once the kernel has all of it (a frame end every 16.7 ms).
     func finish(_ session: VICKernelTest.Session, frames: UInt32) async -> Result<LandscapeSample, TestFailure> {
         let size = LandscapeSample.size
-        for _ in 0..<Int(frames / 6 + 60) {
+        for _ in 0 ..< Int(frames / 6 + 60) {
             try? await Task.sleep(nanoseconds: 100_000_000)
             guard
                 case .success(let bytes) = session.call(
-                    LandscapeSample.request(op: LandscapeSample.query, value: 0), replyBytes: size),
+                    LandscapeSample.request(op: LandscapeSample.query, value: 0), replyBytes: size
+                ),
                 let reply = LandscapeSample(bytes)
             else { return .failure(TestFailure("malformed reply")) }
             if reply.state == LandscapeSample.done { return .success(reply) }

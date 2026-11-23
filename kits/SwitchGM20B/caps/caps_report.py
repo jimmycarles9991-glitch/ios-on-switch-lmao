@@ -1,9 +1,9 @@
 """The capability table's correctness backlog.
 
-The rows graded below chip, and every place the current device answers (raw_device_answers.h, per iOS kind) or the raw
-path's format tables (raw_gpu.cpp kFormats, raw_zeta.h) disagree with the table. Disagreements are ordered by how wrong
+The rows graded below chip, and every place the current device answers (device_answers.h, per iOS kind) or the raw
+path's format tables (gpu.cpp kFormats, zeta.h) disagree with the table. Disagreements are ordered by how wrong
 the current answer is: an over-claim (the device promises what the hardware lacks) first, then a wrong value, then an
-under-claim (the hardware does it, the device says no or sends it to m2v), then a format the raw path lowers to another
+under-claim (the hardware does it, the device says no or sends it to m2v), then a format the driver lowers to another
 format's codes. Within a class, the larger mismatch first.
 
     bazel run //kits/SwitchGM20B:caps_report
@@ -18,7 +18,7 @@ import caps
 import gen_caps
 
 ORDER = ['over-claim', 'wrong value', 'under-claim', 'lowered']
-RAW = 'drivers/TegraGM20BMetal/raw/runtime/'
+RAW = 'drivers/TegraGM20BMetal/'
 MACRO_SLOTS = 'kits/SwitchGM20BEmit/SwitchGM20BMacroSlots.h'
 
 
@@ -57,7 +57,7 @@ def answers(text: str, chip_features: dict | None = None, names: dict | None = N
 
 
 def answer_names(table: caps.Caps, rows: list[dict], macro_slots: str) -> dict:
-    """Give what raw_device_answers.h's named answers stand for.
+    """Give what device_answers.h's named answers stand for.
 
     They are SWITCH_GM20B_LIMIT_<name> of each limit row, the amplify macro's SWITCH_GM20B_AMP_MAX and kFramebufferBits
     (every colour target at the widest format rendered).
@@ -74,14 +74,14 @@ def answer_names(table: caps.Caps, rows: list[dict], macro_slots: str) -> dict:
 
 
 def chip_feature_answers(table: caps.Caps) -> dict:
-    """raw_device_answers.h chipFeature's value of each feature row, by its SWITCH_GM20B_FEATURE_ name."""
+    """device_answers.h chipFeature's value of each feature row, by its SWITCH_GM20B_FEATURE_ name."""
     return {
         gen_caps.ident(r.cols['id']): int(r.cols['present'] == 'yes' and r.cols['grade'] == 'chip')
         for r in table.features
     }
 
 
-def raw_formats(gpu_cpp: str, zeta_h: str) -> dict:
+def gm20b_formats(gpu_cpp: str, zeta_h: str) -> dict:
     rows = {}
     body = gpu_cpp[gpu_cpp.index('kFormats[] = {') :]
     body = body[: body.index('};')]
@@ -178,14 +178,14 @@ def compare_formats(rows: list[dict], raw: dict, out: list) -> None:
         cap = by_mtl.get(mtl)
         name = cap['name'] if cap else str(mtl)
         if cap is None:
-            out.append(('wrong value', 1, 'raw', f"format {mtl} is in raw's table, not in formats.tsv"))
+            out.append(('wrong value', 1, 'gm20b', f"format {mtl} is in raw's table, not in formats.tsv"))
             continue
         if cap['pipe'] == '-':
             out.append(
                 (
                     'lowered',
                     1,
-                    'raw',
+                    'gm20b',
                     (
                         f'{name}: no native target or texture header; raw stores and samples '
                         f"another format's codes (target 0x{r.get('ct', 0):02x})"
@@ -199,18 +199,18 @@ def compare_formats(rows: list[dict], raw: dict, out: list) -> None:
                 (
                     'wrong value',
                     2,
-                    'raw',
+                    'gm20b',
                     f"{name}: raw's {target} 0x{r[target]:02x}, the hardware's 0x{cap[target]:02x}",
                 )
             )
         if target == 'ct' and r['ct'] and 'render' not in cap['flags']:
-            out.append(('over-claim', 9, 'raw', f'{name}: raw renders it, the hardware has no target for it'))
+            out.append(('over-claim', 9, 'gm20b', f'{name}: raw renders it, the hardware has no target for it'))
         if target == 'ct' and not r['ct'] and 'render' in cap['flags']:
             out.append(
                 (
                     'under-claim',
                     1,
-                    'raw',
+                    'gm20b',
                     (
                         f'{name}: raw samples it only, the hardware renders and '
                         f'{"blends" if "blend" in cap["flags"] else "stores"} it'
@@ -222,14 +222,14 @@ def compare_formats(rows: list[dict], raw: dict, out: list) -> None:
                 (
                     'wrong value',
                     2,
-                    'raw',
+                    'gm20b',
                     f"{name}: raw's texture header word 0 0x{r['tic0']:08x}, NIL's 0x{cap['tic0']:08x}",
                 )
             )
     for cap in rows:
         if cap['mtl'] not in raw and ('texture' in cap['flags'] or 'render' in cap['flags']):
             what = 'renders and samples' if 'render' in cap['flags'] else 'samples'
-            out.append(('under-claim', 0.75, 'raw', f'{cap["name"]}: the hardware {what} it, raw has no row (m2v)'))
+            out.append(('under-claim', 0.75, 'gm20b', f'{cap["name"]}: the hardware {what} it, raw has no row (m2v)'))
 
 
 def below_chip(table: caps.Caps) -> list[str]:
@@ -286,10 +286,10 @@ def main() -> None:
         table, rows = gen_caps.build(args)
     except caps.CapsError as e:
         caps.fail(e)
-    with open(RAW + 'raw_device_answers.h', encoding='utf-8') as f, open(MACRO_SLOTS, encoding='utf-8') as m:
+    with open(RAW + 'device_answers.h', encoding='utf-8') as f, open(MACRO_SLOTS, encoding='utf-8') as m:
         kinds = answers(f.read(), chip_feature_answers(table), answer_names(table, rows, m.read()))
-    with open(RAW + 'raw_gpu.cpp', encoding='utf-8') as f, open(RAW + 'raw_zeta.h', encoding='utf-8') as z:
-        raw = raw_formats(f.read(), z.read())
+    with open(RAW + 'gpu.cpp', encoding='utf-8') as f, open(RAW + 'zeta.h', encoding='utf-8') as z:
+        raw = gm20b_formats(f.read(), z.read())
     found = []
     for kind, ans in sorted(kinds.items()):
         compare_limits(table, kind, ans, found)

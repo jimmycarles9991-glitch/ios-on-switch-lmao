@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreImage
 import Foundation
 import HWTestCore
+import HWTestGPU
 import ImageIO
 import Metal
 
@@ -10,14 +11,15 @@ enum Pixels {
     static func check(_ image: CGImage, pattern: Pattern) -> FrameCheck {
         let context = CGContext(
             data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
         context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         let base = context.data!.assumingMemoryBound(to: UInt8.self)
         let width = image.width
         return PatternChecker(pattern).checkRGB { region in
             var sum = (0.0, 0.0, 0.0)
-            for y in region.y..<(region.y + region.height) {
-                for x in region.x..<(region.x + region.width) {
+            for y in region.y ..< (region.y + region.height) {
+                for x in region.x ..< (region.x + region.width) {
                     let at = (y * width + x) * 4
                     sum = (sum.0 + Double(base[at]), sum.1 + Double(base[at + 1]), sum.2 + Double(base[at + 2]))
                 }
@@ -37,7 +39,8 @@ enum Pixels {
                 let context = CGContext(
                     data: $0.baseAddress, width: image.width, height: image.height, bitsPerComponent: 8,
                     bytesPerRow: image.width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+                    bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+                )!
                 context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
             }
             return bytes
@@ -46,7 +49,7 @@ enum Pixels {
         var squares = 0
         var largest = 0
         for i in stride(from: 0, to: rows[0].count, by: 4) {
-            for c in 0..<3 {
+            for c in 0 ..< 3 {
                 let d = abs(Int(rows[0][i + c]) - Int(rows[1][i + c]))
                 sums[c] += d
                 squares += d * d
@@ -63,7 +66,8 @@ enum Pixels {
         var bytes = [UInt8](repeating: 0, count: pattern.width * pattern.height * 4)
         bytes.withUnsafeMutableBytes {
             PatternWriter.writeRGB(
-                pattern, into: .init(base: $0.baseAddress!, rowBytes: pattern.width * 4), channels: 4)
+                pattern, into: .init(base: $0.baseAddress!, rowBytes: pattern.width * 4), channels: 4
+            )
         }
         return CGImage(
             width: pattern.width, height: pattern.height, bitsPerComponent: 8, bitsPerPixel: 32,
@@ -71,7 +75,8 @@ enum Pixels {
             space: CGColorSpace(name: CGColorSpace.sRGB)!,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue),
             provider: CGDataProvider(data: Data(bytes) as CFData)!, decode: nil, shouldInterpolate: false,
-            intent: .defaultIntent)!
+            intent: .defaultIntent
+        )!
     }
 }
 
@@ -108,7 +113,8 @@ struct ImageDecodeTest: HWTest {
         ]
         if jpeg {
             checks += Self.againstSoftware(
-                data, still: image, full: decoded, before: before, after: after, metrics: &metrics)
+                data, still: image, full: decoded, before: before, after: after, metrics: &metrics
+            )
         }
         return .judged(checks, metrics, proof: CGImageSourceGetType(source).map { $0 as String } ?? "")
     }
@@ -123,7 +129,7 @@ struct ImageDecodeTest: HWTest {
         after: Result<JPEGRoute.Counts, TestFailure>?, metrics: inout Metrics
     ) -> [(String, Bool)] {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-            let software = CGImageSourceCreateWithData(data as CFData, nil)
+              let software = CGImageSourceCreateWithData(data as CFData, nil)
         else { return [("ImageIO opens it twice", false)] }
         let thumb: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -137,7 +143,8 @@ struct ImageDecodeTest: HWTest {
         off[hardwareKey] = false
         let softHalf = CGImageSourceCreateThumbnailAtIndex(software, 0, off as CFDictionary)
         let softFull = CGImageSourceCreateImageAtIndex(
-            software, 0, [kCGImageSourceShouldCacheImmediately: true, hardwareKey: false] as CFDictionary)
+            software, 0, [kCGImageSourceShouldCacheImmediately: true, hardwareKey: false] as CFDictionary
+        )
         let afterSoftware = JPEGRoute.decodes()
         var checks: [(String, Bool)] = []
         switch (before, after, afterThumb, afterSoftware) {
@@ -154,7 +161,7 @@ struct ImageDecodeTest: HWTest {
             checks.append(("thumbnail decoded on NVJPG", last.decodes > mid.decodes))
             checks.append(("no NVJPG job failed", last.failed == first.failed))
         case (.failure(let why)?, _, _, _), (_, .failure(let why)?, _, _), (_, _, .failure(let why), _),
-            (_, _, _, .failure(let why)):
+             (_, _, _, .failure(let why)):
             metrics.set("route", "unknown")
             checks.append(("decoded on NVJPG (route unreadable: \(why.description))", false))
         default:
@@ -185,7 +192,7 @@ struct ImageDecodeTest: HWTest {
     /// software decode of the same request: by its mean, as the half-size one, and its PSNR.
     static func scaledThumbnail(_ data: Data, label: String, side: Int, metrics: inout Metrics) -> [(String, Bool)] {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-            let software = CGImageSourceCreateWithData(data as CFData, nil)
+              let software = CGImageSourceCreateWithData(data as CFData, nil)
         else { return [("\(label): ImageIO opens it twice", false)] }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceThumbnailMaxPixelSize: side,
@@ -219,7 +226,9 @@ struct ImageDecodeTest: HWTest {
     static var all: [ImageDecodeTest] { StillImage.all.map { ImageDecodeTest(image: $0) } }
 }
 
-/// A Metal-backed CIContext: a blur of a flat colour stays flat (exact), and a 1080p blur chain is timed.
+/// A Metal-backed CIContext: a blur of a flat colour stays flat (exact), and a 1080p blur chain is timed. On the raw
+/// facade none of Core Image's command buffers may fail (failed_cbs=, failed_why=; foreign_why=: Core Image's are none
+/// of the test's own) and none of its calls be skipped (skipped_calls=, skipped_why=).
 struct CoreImageTest: HWTest {
     let id = "image.coreimage"
     let name = "Core Image filters on the GPU"
@@ -227,15 +236,18 @@ struct CoreImageTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         guard let device = MTLCreateSystemDefaultDevice() else { return .fail("no Metal device") }
+        let before = GM20BFacade.counters(of: device)
         let ci = CIContext(mtlDevice: device, options: [.cacheIntermediates: false])
         let flat = CIImage(color: CIColor(red: 0.2, green: 0.4, blue: 0.6)).cropped(
-            to: CGRect(x: 0, y: 0, width: 256, height: 256))
+            to: CGRect(x: 0, y: 0, width: 256, height: 256)
+        )
         let blurred = flat.applyingGaussianBlur(sigma: 6).cropped(to: CGRect(x: 64, y: 64, width: 128, height: 128))
         var pixel = [UInt8](repeating: 0, count: 4)
         ci.render(
             blurred.cropped(to: CGRect(x: 128, y: 128, width: 1, height: 1)), toBitmap: &pixel, rowBytes: 4,
             bounds: CGRect(x: 128, y: 128, width: 1, height: 1), format: .RGBA8,
-            colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+            colorSpace: CGColorSpace(name: CGColorSpace.sRGB)
+        )
         let photo = CIImage(cgImage: Pixels.patternImage(Pattern(width: 1920, height: 1080, clip: 0x0C1)))
         let chain = photo.applyingGaussianBlur(sigma: 8).applyingFilter(
             "CIColorControls", parameters: ["inputSaturation": 1.4]
@@ -244,11 +256,12 @@ struct CoreImageTest: HWTest {
         guard
             let target = CGContext(
                 data: nil, width: 1920, height: 1080, bitsPerComponent: 8, bytesPerRow: 1920 * 4,
-                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            )
         else { return .fail("no bitmap") }
         let start = CFAbsoluteTimeGetCurrent()
         let runs = 10
-        for _ in 0..<runs {
+        for _ in 0 ..< runs {
             ci.render(
                 chain, toBitmap: target.data!, rowBytes: 1920 * 4, bounds: photo.extent, format: .RGBA8, colorSpace: nil
             )
@@ -257,13 +270,17 @@ struct CoreImageTest: HWTest {
         var metrics = Metrics()
         metrics.set("flat", pixel.prefix(3).map(String.init).joined(separator: ","))
         metrics.set("ms_1080p", perRun, digits: 1)
-        return .judged(
-            [
-                (
-                    "a blurred flat colour stays 51,102,153",
-                    zip(pixel.prefix(3), [51, 102, 153]).allSatisfy { abs(Int($0) - $1) <= 1 }
-                )
-            ],
-            metrics, proof: "CIContext(mtlDevice: \(device.name))")
+        var checks = [
+            (
+                "a blurred flat colour stays 51,102,153",
+                zip(pixel.prefix(3), [51, 102, 153]).allSatisfy { abs(Int($0) - $1) <= 1 }
+            ),
+        ]
+        if GM20BFacade.kind(of: device) == "gm20b" {
+            checks += FailedCounts.judgedFramework(
+                before: before, after: GM20BFacade.counters(of: device), own: PathTally(), &metrics
+            )
+        }
+        return .judged(checks, metrics, proof: "CIContext(mtlDevice: \(device.name))")
     }
 }

@@ -109,7 +109,7 @@ cc_library(
     deps = [":push"],
 )
 
-# The raw path's draw macros, built with Mesa's MME builder (mme/switch_gm20b_macros.c): gen/SwitchGM20BMacros.h.
+# The driver's draw macros, built with Mesa's MME builder (mme/switch_gm20b_macros.c): gen/SwitchGM20BMacros.h.
 cc_binary(
     name = "gen_macros",
     srcs = MESA_MME_SOURCES + MESA_MME_HEADERS + SWITCH_GM20B_MESA_HEADERS + [

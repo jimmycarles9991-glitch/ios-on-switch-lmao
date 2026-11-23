@@ -5,17 +5,20 @@
 #include <kern/thread.h>
 #include "../TegraGM20B/SwitchGpuBacking.h"
 
+struct switch_gpu_bridge;
+
 struct SwitchHost1xResult {
     SwitchHost1xResult *next = nullptr;
     uint64_t first = 0, last = 0, generation = 0;
     uint32_t references = 0;
     int result = 0, physicalResult = 0;
+    int why = 0;  // a failed job's: SwitchGpuBacking.h WRITER_GONE, WRITER_FAILED or WRITE_REFUSED
     bool registered = false, completed = false;
 };
 
 struct SwitchHost1xFailure {
     uint64_t first, last, generation;
-    int result, physicalResult;
+    int result, physicalResult, why;
 };
 
 struct SwitchHost1xResultState {
@@ -57,8 +60,8 @@ class SwitchHost1xResults {
             State.retiredThrough = record.last;
         if (record.result >= 0 && record.physicalResult >= 0)
             return;
-        State.failures[State.nextFailure] = {record.first, record.last, record.generation, record.result,
-                                             record.physicalResult};
+        State.failures[State.nextFailure] = {record.first,  record.last,           record.generation,
+                                             record.result, record.physicalResult, record.why};
         State.nextFailure = (State.nextFailure + 1) % kRecent;
     }
 
@@ -197,6 +200,9 @@ public:
         auto *record = *owned;
         *owned = nullptr;
         record->result = result < 0 ? result : 1;
+        // failed with its hardware done: its semantic batch failed, a shared event's signaller with it
+        if (result < 0 && !record->why)
+            record->why = SWITCH_GPU_BACKING_WRITER_GONE;
         record->completed = true;
         if (auto *old = State.recent[State.nextRecent])
             drop(old);
@@ -206,7 +212,8 @@ public:
         IOLockUnlock(State.lock);
     }
 
-    static bool physical(SwitchHost1xResult *record, int result)
+    // why: a failed result's (SwitchHost1xStages why)
+    static bool physical(SwitchHost1xResult *record, int result, int why = SWITCH_GPU_BACKING_WRITER_FAILED)
     {
         if (!record)
             return false;
@@ -214,19 +221,36 @@ public:
         const bool failed = record->physicalResult >= 0 && result < 0;
         if (record->physicalResult >= 0)
             record->physicalResult = result < 0 ? result : 1;
+        if (failed)
+            record->why = why;
         IOLockUnlock(State.lock);
         return failed;
     }
 
-    // Physical completion publishes before releasing this source; inspection excludes that publication.
-    template <class Source>
-    static int sourceFailure(SwitchHost1xResult *record, Source *const *source, int (*inspect)(const Source *))
+    // switch_gpu_backing_register_failure's: why a failed job failed, kept with its result; 0 once neither its record
+    // nor its failure is kept (the backing then reads its status)
+    static int why(const switch_gpu_backing_token *token)
+    {
+        if (!token)
+            return 0;
+        IOLockLock(State.lock);
+        const auto *record = find(*token);
+        const auto *retired =
+            !record && retiredToken(*token) ? failure(token->value, &token->reset_generation) : nullptr;
+        const int found = record ? record->why : retired ? retired->why : 0;
+        IOLockUnlock(State.lock);
+        return found;
+    }
+
+    // Physical completion publishes before releasing the job's bridge; inspection excludes that publication.
+    static int sourceFailure(SwitchHost1xResult *record, switch_gpu_bridge *const *bridge,
+                             int (*inspect)(const switch_gpu_bridge *))
     {
         if (!record)
             return 0;
         IOLockLock(State.lock);
         const int physical = record->physicalResult;
-        const int result = physical ? physical : *source ? inspect(*source) : 0;
+        const int result = physical ? physical : *bridge ? inspect(*bridge) : 0;
         IOLockUnlock(State.lock);
         return result < 0 ? result : 0;
     }

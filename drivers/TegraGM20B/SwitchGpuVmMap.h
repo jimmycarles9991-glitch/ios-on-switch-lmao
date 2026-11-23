@@ -311,7 +311,8 @@ int switch_gpu_vm_split(struct tgm_vm *vm, struct switch_gpu_mapping **mapping, 
 	const u64 end = va + range;
 	(void)read_only;
 	(void)vol;
-	if (!old || !vm || !mem || !range || ((va | range) & (PAGE_SIZE - 1)) || end < va)
+	if (!old || !vm || (!mem && !old->sparse) || !range || ((va | range) & (PAGE_SIZE - 1)) ||
+	    end < va)
 		return -EINVAL;
 	for (i = 0; i < old->count; ++i) {
 		const struct switch_gpu_mapping_entry *e = &old->entries[i];
@@ -331,6 +332,8 @@ int switch_gpu_vm_split(struct tgm_vm *vm, struct switch_gpu_mapping **mapping, 
 				kfree(parts[p]);
 			return -ENOMEM;
 		}
+		if (parts[p])
+			parts[p]->sparse = old->sparse;
 	}
 	for (i = 0; i < old->count; ++i) {
 		const struct switch_gpu_mapping_entry *e = &old->entries[i];
@@ -407,32 +410,45 @@ int switch_gpu_vm_prepare(struct tgm_vm *vm, u64 va, u64 range, struct tgm_mem *
 
 int switch_gpu_mapping_pending(const struct switch_gpu_mapping *mapping);
 
+/* nvkm writes the sparse PTE (VALID false, VOL: vmmgm200.c gm200_vmm_pgt_sparse, nvgpu's __update_pte_sparse)
+ * through its unmap with sparse set, over PTEs nvif_vmm_raw_get took. Where it goes there was no translation, so it is
+ * GPU-ordered as a map is. */
+static int sparse_ptes(struct tgm_vm *vm, const struct switch_gpu_mapping_entry *e)
+{
+	return nvif_vmm_raw_unmap(&vm->vmm, e->va, e->bytes, e->shift, true);
+}
+
 int switch_gpu_vm_install(struct tgm_vm *vm, struct switch_gpu_mapping *mapping,
 			  struct tgm_mem *mem, u8 kind, int read_only, int vol)
 {
 	struct gf100_vmm_map_v0 args = {
 		.version = 0, .vol = !!vol || !l2_on(), .ro = !!read_only, .kind = kind};
-	u32 i, ordered_scope, failed = 0;
+	u32 i, ordered_scope, failed = 0, failed_get = 0;
 	int ret = 0;
 	if (!switch_gpu_vm_volatile_kind_ok(kind, vol))
 		return -EINVAL;
 	if (!switch_gpu_mapping_pending(mapping))
 		return 0;
-	mem_prepare_big_views(mem);
+	if (!mapping->sparse)
+		mem_prepare_big_views(mem);
 	tgm_gate_enter();
 	mutex_lock(&vm->map_lock);
 	ordered_scope = nvxnu_gpu_ordered_begin();
 	for (i = 0; i < mapping->count; ++i) {
 		struct switch_gpu_mapping_entry *e = &mapping->entries[i];
-		u64 memory_offset;
-		struct nvif_mem *memory;
+		u64 memory_offset = 0;
+		struct nvif_mem *memory = NULL;
 		if (!e->pending)
 			continue;
-		memory = mem_mapping_view(mem, e, &memory_offset);
+		if (!mapping->sparse)
+			memory = mem_mapping_view(mem, e, &memory_offset);
 		ret = nvif_vmm_raw_get(&vm->vmm, e->va, e->bytes, e->shift);
+		failed_get |= ret != 0;
 		if (!ret) {
-			ret = nvif_vmm_raw_map(&vm->vmm, e->va, e->bytes, e->shift, &args,
-					       sizeof(args), memory, memory_offset);
+			ret = mapping->sparse
+				      ? sparse_ptes(vm, e)
+				      : nvif_vmm_raw_map(&vm->vmm, e->va, e->bytes, e->shift, &args,
+							 sizeof(args), memory, memory_offset);
 			if (ret)
 				e->pending =
 					2; /* got, not mapped: put below, outside the ordered scope */
@@ -456,6 +472,9 @@ int switch_gpu_vm_install(struct tgm_vm *vm, struct switch_gpu_mapping *mapping,
 		memmove(e, e + 1, (mapping->count - i - 1) * sizeof(*e));
 		--mapping->count;
 	}
+	/* a failed get may have dropped page tables it made, with nvkm's flush skipped in the ordered scope */
+	if (failed_get)
+		mmu_invalidate_all();
 	mutex_unlock(&vm->map_lock);
 	gate_leave();
 	return failed ? -ENOMEM : 0;

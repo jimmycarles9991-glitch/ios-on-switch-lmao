@@ -2,7 +2,7 @@
 using namespace metal;
 
 // TextureShapesTest: each pixel reads one texel as half, the type Core Animation reads an extended-range texture as
-// (gpu.raw.texture_shapes)
+// (gpu.gm20b.texture_shapes)
 
 struct ShapesVertex {
     float4 position [[position]];

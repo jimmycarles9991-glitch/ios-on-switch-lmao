@@ -89,8 +89,6 @@ pub const fn shape(f: PushField) -> FieldShape {
         PushField::ViewportMirrors => FieldShape::U32,
         // A draw's clamp of each vertex's depth, two `f32`s' bits.
         PushField::VertexDepthClamp => FieldShape::UVec2,
-        // The blend color and one minus it, four `f32`s' bits each.
-        PushField::BlendColor => FieldShape::UVec4Array(2),
         // The blend color as the encoder set it, four `f32`s' bits.
         PushField::HalfBlendColor => FieldShape::UVec4Array(1),
         // Base vertex, base instance.

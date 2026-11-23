@@ -8,11 +8,11 @@ import Metal
 /// what an M4 Max's Metal answers (macOS 27.2: an integer scalar its own size, alignment 1 and no id, so `atomic_uint
 /// *` is 4/1; a one-component vector, which Metal reflects with no data type, 8 bytes with an id). A dispatch then
 /// reads back what the encoders wrote (k's tail, n[1] and m[2], s's h, v's a) and must give the words the M4 Max
-/// gave, on the raw path. The case fails on a nil or wrong encoder, a wrong word, a dispatch off the
-/// raw path, or any m2v need asked (m2v_needs_asked).
+/// gave, on the driver. The case fails on a nil or wrong encoder, a wrong word, a dispatch off the
+/// raw path, or any command buffer that failed (failed_cbs=).
 struct PlainStructEncoderTest: HWTest {
-    let id = "gpu.raw.plain_struct_encoder"
-    let name = "A plain struct buffer's encoder is where its program reads, without m2v"
+    let id = "gpu.gm20b.plain_struct_encoder"
+    let name = "A plain struct buffer's encoder is where its program reads"
     let subsystem = Subsystem.metal
 
     /// (buffer index, "length/alignment", "id@offset ...")
@@ -22,9 +22,9 @@ struct PlainStructEncoderTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
-        let before = OwnAnswersTest.needs(gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
+        let before = GM20BFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var wrong: [String] = []
         do {
@@ -33,9 +33,10 @@ struct PlainStructEncoderTest: HWTest {
             metrics.set("dispatch", "threw: \(String(describing: error).prefix(200))")
             wrong.append("threw")
         }
-        let asked = OwnAnswersTest.needs(gpu.device).filter { $0.value > (before[$0.key] ?? 0) }.keys.sorted()
-        metrics.set("m2v_needs_asked", asked.isEmpty ? "-" : asked.joined(separator: ","))
-        if !asked.isEmpty { wrong.append("m2v") }
+        let failed = FailedCounts.judged(
+            before: before, after: GM20BFacade.counters(of: gpu.device), own: gpu.paths, &metrics
+        )
+        if !failed.1 { wrong.append(failed.0) }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -51,7 +52,8 @@ struct PlainStructEncoderTest: HWTest {
                 continue
             }
             let (gotSized, gotPlaces) = try FunctionArgumentEncoderTest.answer(
-                gpu, encoder, ids: FunctionArgumentEncoderTest.ids(places))
+                gpu, encoder, ids: FunctionArgumentEncoderTest.ids(places)
+            )
             if gotSized != sized || gotPlaces != places {
                 wrong.append("buffer\(index)")
                 metrics.set("buffer\(index)", "\(gotSized) \(gotPlaces)")
@@ -79,10 +81,11 @@ struct PlainStructEncoderTest: HWTest {
             compute.setBuffer(out, offset: 0, index: 3)
             compute.setBuffer(v, offset: 0, index: 4)
             compute.dispatchThreads(
-                MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
             compute.endEncoding()
         }
-        let words = (0..<12).map { out.contents().load(fromByteOffset: 4 * $0, as: Float.self) }
+        let words = (0 ..< 12).map { out.contents().load(fromByteOffset: 4 * $0, as: Float.self) }
         let count = counter.contents().load(as: UInt32.self)
         let exact = words == [2.5, 7, 1.25, 0, 1, 2, 3, 0, 9, 0, 0, 0] && count == 1
         metrics.set("dispatch", "\(timing.path)/\(exact ? "exact" : "wrong")")
@@ -90,6 +93,6 @@ struct PlainStructEncoderTest: HWTest {
             metrics.set("words", words.map { String($0) }.joined(separator: ",") + " counter \(count)")
             wrong.append("dispatch")
         }
-        if timing.path != "raw" { wrong.append("dispatch_path") }
+        if timing.path != "gm20b" { wrong.append("dispatch_path") }
     }
 }

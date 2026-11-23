@@ -1,7 +1,7 @@
 """How the build's Rust is compiled: one rule, `rust_artifact`, builds a rules_rust crate (and every crate below it) for a
 platform and a purpose, mapping //bazel:profile onto rustc flags for that crate graph alone.
 
-    rust_artifact(name = "bridge_ios", crate = ":bridge", kind = "device")
+    rust_artifact(name = "translate_ios", crate = ":translate_static", kind = "device")
 
 kind:
   device       the iPad's code (aarch64-apple-ios, //bazel/platforms:ios_arm64), what the plugin links.
@@ -39,10 +39,9 @@ _PIPELINED = "@rules_rust//rust/settings:pipelined_compilation"
 # Source paths as rustc records them (panic locations, debug info), the same in both profiles and on every machine:
 # the crate roots are execroot-relative, so these name each tree by a fixed prefix (rustc matches whole path components;
 # the crates.io crates' are theirs, in crates.MODULE.bazel). They are the paths cargo's build of the bridge gave
-# (tools/gpu/cargo_bridge.py laid m2v in as m2v/ next to the bridge's src/), so the release plugin's strings are the same.
+# (tools/gpu/cargo_bridge.py laid m2v in as m2v/), so the release plugin's strings are the same.
 REMAP_FLAGS = [
     "--remap-path-prefix=third_party/m2v=m2v",
-    "--remap-path-prefix=drivers/NativeMetal/bridge=src",
 ]
 
 # The deployment targets the plugin and the host tools are built for (rustc reads them from the environment: the

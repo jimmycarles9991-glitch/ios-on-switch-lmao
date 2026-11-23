@@ -15,7 +15,7 @@ from drivers.TegraGM20BMetal.precompile import harvest
 
 def container(volume: Path, uuid: str, identifier: str) -> Path:
     root = volume / 'containers/Data/System' / uuid
-    (root / 'Library/Caches/m2v').mkdir(parents=True)
+    (root / 'Library/Caches/TegraGM20BMetal').mkdir(parents=True)
     with (root / harvest.CONTAINER_METADATA).open('wb') as f:
         plistlib.dump({'MCMMetadataIdentifier': identifier}, f)
     (root / 'Library').chmod(0)
@@ -60,17 +60,17 @@ class Lines(unittest.TestCase):
 # Where the plugin's "ready in <process>, cache <directory>" lines put each process's cache on 24B119, below the Data
 # volume (/private/var); the system containers' as container() makes them.
 BOOT_CACHES = {
-    'assetsd': 'tmp/m2v-assetsd',
-    'iconservicesagent': 'tmp/m2v-iconservicesagent',
-    'cameracaptured': 'mobile/tmp/com.apple.cameracaptured/m2v',
-    'mediaplaybackd': 'mobile/tmp/com.apple.mediaplaybackd/m2v',
-    'photoanalysisd': 'mobile/tmp/com.apple.photoanalysisd/m2v',
+    'assetsd': 'tmp/TegraGM20BMetal-assetsd',
+    'iconservicesagent': 'tmp/TegraGM20BMetal-iconservicesagent',
+    'cameracaptured': 'mobile/tmp/com.apple.cameracaptured/TegraGM20BMetal',
+    'mediaplaybackd': 'mobile/tmp/com.apple.mediaplaybackd/TegraGM20BMetal',
+    'photoanalysisd': 'mobile/tmp/com.apple.photoanalysisd/TegraGM20BMetal',
     'SwitchHWTest': 'mobile/Containers/Data/Application/5D11DCAB-A17F-4F4C-931F-7363A518CD9D/Library/Caches/'
-    'm2v-SwitchHWTest',
+    'TegraGM20BMetal-SwitchHWTest',
     'WidgetRenderer_Default': 'mobile/Containers/Data/Application/A9DE58A1-8235-4C90-B907-F9C626DF9F8D/Library/'
-    'Caches/m2v-WidgetRenderer_Default',
+    'Caches/TegraGM20BMetal-WidgetRenderer_Default',
     'MercuryPosterExtension': 'mobile/Containers/Data/PluginKitPlugin/7424FFDF-0627-4481-ABBA-A177819B5983/Library/'
-    'Caches/m2v-MercuryPosterExtension',
+    'Caches/TegraGM20BMetal-MercuryPosterExtension',
 }
 BOOT_SYSTEM_CACHES = {
     'backboardd': ('CE929FE0-E622-45FA-8423-A8020D7412A1', 'com.apple.backboardd'),
@@ -89,7 +89,7 @@ class Caches(unittest.TestCase):
             try:
                 found, skipped = harvest.caches(volume, set(harvest.SYSTEM_CACHES), False, print)
                 expected = {volume / where for where in BOOT_CACHES.values()}
-                expected |= {root / 'Library/Caches/m2v' for root in closed}
+                expected |= {root / 'Library/Caches/TegraGM20BMetal' for root in closed}
                 self.assertEqual({m2v for _, m2v, _ in found}, expected)
                 self.assertEqual(skipped, [])
             finally:
@@ -103,10 +103,10 @@ class Caches(unittest.TestCase):
             other = container(volume, '00000000-0000-0000-0000-000000000000', 'com.apple.locationd')
             try:
                 found, skipped = harvest.caches(volume, set(harvest.SYSTEM_CACHES), False, print)
-                self.assertEqual([m2v for _, m2v, _ in found], [backboardd / 'Library/Caches/m2v'])
+                self.assertEqual([m2v for _, m2v, _ in found], [backboardd / 'Library/Caches/TegraGM20BMetal'])
                 self.assertEqual(skipped, [other.name])
                 found, skipped = harvest.caches(volume, {other.name}, False, print, explicit=True)
-                self.assertEqual([m2v for _, m2v, _ in found], [other / 'Library/Caches/m2v'])
+                self.assertEqual([m2v for _, m2v, _ in found], [other / 'Library/Caches/TegraGM20BMetal'])
                 self.assertEqual(skipped, [backboardd.name])
             finally:
                 for root in (backboardd, other):
@@ -123,7 +123,7 @@ STAGES = (
 )
 
 
-def raw_made(t: int, tid: int, callers: str) -> str:
+def gm20b_made(t: int, tid: int, callers: str) -> str:
     """Return a raw-made state's line as native_bridge_metal_journal_render writes it: no cost, no options."""
     return f'R t={t} tid={tid} main=0 us=0 ok=1 {TARGETS} label=primitive_image {COLORS}{STAGES} | {callers}'
 
@@ -132,9 +132,9 @@ class Journal(unittest.TestCase):
     def test_a_raw_made_state_merges_once_in_its_corpus_form(self):
         with tempfile.TemporaryDirectory() as d:
             corpus = Path(d) / 'corpus.log'
-            first = raw_made(10, 4403, 'RB::Device::render')
+            first = gm20b_made(10, 4403, 'RB::Device::render')
             refused = first.replace(' ok=1 ', ' ok=0 ')
-            again = raw_made(93011, 5120, 'RB::Surface::draw')
+            again = gm20b_made(93011, 5120, 'RB::Surface::draw')
             journals = [('iconservicesagent', f'{first}\n{refused}'), ('SpringBoard', again)]
             lines = harvest.merge(corpus, journals, '24B119')
             self.assertEqual(lines, [f'R ok=1 label=primitive_image os=24B119 {TARGETS} {COLORS}{STAGES} | '])

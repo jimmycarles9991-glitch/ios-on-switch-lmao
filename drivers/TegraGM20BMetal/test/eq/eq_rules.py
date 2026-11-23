@@ -6,21 +6,21 @@ A draw that differs in any other way is refused, and no golden is written over i
              separate alpha on, ADD, ZERO coefficients (NVK leaves it 0)
   storage    a fetching state in raw's storage form: the interlock, colour writes through the program, its blend in the
              program, and no pixel barrier (the interlock orders its fetches)
-  blendkill  SET_ITERATED_BLEND_OPTIMIZATION's zero-source kill (raw_blend_kill.h)
+  blendkill  SET_ITERATED_BLEND_OPTIMIZATION's zero-source kill (blend_kill.h)
   shader     a fetch after storage writes, ordered by raw's shader barrier (INVALIDATE_SHADER_CACHES, a WFI) for NVK's
              PSB
   elided     a fetch raw draws without a barrier because its scissor meets no pixel written since the last one
-             (raw_region.h): the draw's box and those writes' boxes, which must not overlap
+             (region.h): the draw's box and those writes' boxes, which must not overlap
   inherit    a fetch with no barrier of its own where no draw since raw's last barrier (named) writes a colour
   passstart  a pass's first draw, without the scheduler and header-cache invalidations NVK's pass start adds
   push       push words a program of only one driver reads (raw's direct-compiled programs read their own)
-  fetchfree  the state's fetch-free form (raw_fetch_free.h): raw blends a colour on the ROP that NVK's program fetches
+  fetchfree  the state's fetch-free form (fetch_free.h): raw blends a colour on the ROP that NVK's program fetches
              and raw's does not, its blend registers raw's, and no pixel barrier (the ROP orders its own reads)
   noread     a draw whose programs read none of the colours NVK's fetches, without NVK's pixel barrier
-             (raw_blend_reads.h: a blend whose result does not depend on the destination does not read it)
+             (blend_reads.h: a blend whose result does not depend on the destination does not read it)
   unread     uniform contents NVK's program reads that raw's draw does not reach, where raw binds none of them and keeps
              the set-0 upload of the draw before: raw uploads set 0 again only where an entry its programs read from it
-             moved (raw_descriptors.h), so none of its programs reads them (unread_uniforms_test.py: a storage form's
+             moved (descriptors.h), so none of its programs reads them (unread_uniforms_test.py: a storage form's
              in-program blend that drops the colour they feed)
 
 Barriers only raw has are its own to add.

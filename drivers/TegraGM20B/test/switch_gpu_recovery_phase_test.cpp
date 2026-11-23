@@ -4,7 +4,6 @@
 
 namespace
 {
-constexpr u32 none = ~0u;
 constexpr unsigned failed = 2, live = 3, otherFailed = 4;
 
 u32 status(unsigned state, u32 id, u32 next = 0)
@@ -31,7 +30,7 @@ protected:
 	nvkm_runl runl{};
 	std::array<nvkm_cgrp, 16> groups{};
 	std::array<nvkm_chan, 16> channels{};
-	u32 target = none;
+	u32 from = 0;
 
 	void SetUp() override
 	{
@@ -64,51 +63,69 @@ protected:
 
 	bool pending()
 	{
-		return switch_gpu_recover_pending(&runl, &target);
+		return switch_gpu_recover_pending(&runl, &from);
 	}
 };
 
-TEST_F(RecoveryPhase, JoinsOlderUnrelatedPreemptBeforeIssuingFailedEviction)
+TEST_F(RecoveryPhase, AnotherPreemptInFlightIsWaitedForBeforeTheFailedGroupIsAskedFor)
 {
 	hw.pbdma = status(1, failed);
 	hw.preempt = PFIFO_PREEMPT_PENDING | live;
 	EXPECT_TRUE(pending());
 	EXPECT_TRUE(hw.writes.empty());
-	EXPECT_EQ(target, none);
+	EXPECT_EQ(from, 0u);
 	hw.preempt = live;
 	EXPECT_TRUE(pending());
 	ASSERT_EQ(hw.writes.size(), 1u);
 	EXPECT_EQ(hw.writes[0], failed);
-	EXPECT_EQ(target, failed);
+	EXPECT_EQ(from, failed + 1);
 	EXPECT_EQ(hw.unblocks, 1);
 }
 
-TEST_F(RecoveryPhase, ClearedPendingWithResidentTargetNeverReissuesTheRequest)
+// A preempt is done once PREEMPT_PENDING clears (nvgpu gk20a_fifo_is_preempt_pending): a status still naming its target
+// afterwards neither keeps the wait going nor asks for the same preempt again.
+TEST_F(RecoveryPhase, ACompletedPreemptEndsTheWaitThoughThePbdmaStillNamesItsTarget)
 {
 	hw.pbdma = status(1, failed);
 	ASSERT_TRUE(pending());
 	hw.preempt = failed;
-	for (unsigned i = 0; i < 4; i++) {
-		EXPECT_TRUE(pending());
-		EXPECT_EQ(target, failed);
-	}
-	EXPECT_EQ(hw.writes.size(), 1u);
-	EXPECT_EQ(hw.unblocks, 1);
-	hw.pbdma = 0;
 	EXPECT_FALSE(pending());
-	EXPECT_EQ(target, none);
-	EXPECT_EQ(hw.writes.size(), 1u);
+	EXPECT_EQ(hw.writes, std::vector<u32>{failed});
+	EXPECT_EQ(hw.unblocks, 1);
 }
 
-TEST_F(RecoveryPhase, AlreadyPendingFailedEvictionIsTrackedWithoutBeingWrittenAgain)
+TEST_F(RecoveryPhase, ACompletedPreemptEndsTheWaitThoughAnEngineStillNamesItsTarget)
+{
+	hw.pbdma = status(1, live);
+	hw.engines[0] = PFIFO_ENG_BUSY | status(1, failed);
+	ASSERT_TRUE(pending());
+	hw.preempt = failed;
+	EXPECT_FALSE(pending());
+	EXPECT_EQ(hw.writes, std::vector<u32>{failed});
+}
+
+// nvkm_runl_rc's loop, with the hardware completing every preempt at once and every status frozen: each failed group is
+// asked for once and the wait ends well inside nvkm_msec's iterations.
+TEST_F(RecoveryPhase, FrozenStatusesEndTheWaitAfterOnePreemptPerFailedGroup)
+{
+	hw.pbdma = status(7, otherFailed, failed);
+	hw.engines[0] = PFIFO_ENG_BUSY | status(1, failed);
+	int calls = 0;
+	while (calls < 16 && pending()) {
+		hw.preempt &= ~u32{PFIFO_PREEMPT_PENDING};
+		calls++;
+	}
+	EXPECT_LT(calls, 16);
+	EXPECT_EQ(hw.writes, (std::vector<u32>{failed, otherFailed}));
+}
+
+TEST_F(RecoveryPhase, AFailedGroupsPreemptAnotherWriterAskedForIsWaitedFor)
 {
 	hw.pbdma = status(1, failed);
 	hw.preempt = PFIFO_PREEMPT_PENDING | failed;
 	EXPECT_TRUE(pending());
-	EXPECT_EQ(target, failed);
-	hw.preempt = failed;
-	EXPECT_TRUE(pending());
 	EXPECT_TRUE(hw.writes.empty());
+	hw.preempt = failed;
 	hw.pbdma = 0;
 	EXPECT_FALSE(pending());
 	EXPECT_TRUE(hw.writes.empty());
@@ -149,12 +166,10 @@ TEST_F(RecoveryPhase, IncomingLoadAndChannelGroupTypeSelectTheMatchingPreemptTar
 	ASSERT_TRUE(pending());
 	ASSERT_EQ(hw.writes.size(), 1u);
 	EXPECT_EQ(hw.writes[0], groupTarget);
-	EXPECT_EQ(target, groupTarget);
+	EXPECT_EQ(from, groupTarget + 1);
 	hw.preempt = groupTarget;
-	EXPECT_TRUE(pending());
-	EXPECT_EQ(hw.writes.size(), 1u);
-	hw.pbdma = status(1, live);
 	EXPECT_FALSE(pending());
+	EXPECT_EQ(hw.writes.size(), 1u);
 }
 
 TEST_F(RecoveryPhase, SemaphoreAcquireWaiterIsStillEvicted)
@@ -169,7 +184,7 @@ TEST_F(RecoveryPhase, SemaphoreAcquireWaiterIsStillEvicted)
 
 TEST_F(RecoveryPhase, DistinctFailedSwitchSidesAreEachEvictedOnce)
 {
-	hw.pbdma = status(7, failed, otherFailed);
+	hw.pbdma = status(7, otherFailed, failed);
 	ASSERT_TRUE(pending());
 	ASSERT_EQ(hw.writes.size(), 1u);
 	EXPECT_EQ(hw.writes[0], failed);
@@ -182,19 +197,6 @@ TEST_F(RecoveryPhase, DistinctFailedSwitchSidesAreEachEvictedOnce)
 	hw.pbdma = status(1, live);
 	EXPECT_FALSE(pending());
 	EXPECT_EQ(hw.writes.size(), 2u);
-}
-
-TEST_F(RecoveryPhase, EngineResidencyAloneKeepsTheRequestedEvictionOutstanding)
-{
-	hw.pbdma = status(1, live);
-	hw.engines[0] = PFIFO_ENG_BUSY | status(1, failed);
-	ASSERT_TRUE(pending());
-	hw.preempt = failed;
-	EXPECT_TRUE(pending());
-	EXPECT_EQ(hw.writes.size(), 1u);
-	hw.engines[0] = PFIFO_ENG_BUSY | status(1, live);
-	EXPECT_FALSE(pending());
-	EXPECT_EQ(hw.writes.size(), 1u);
 }
 
 TEST_F(RecoveryPhase, IdleEngineLoadUsesIncomingFailedContext)
@@ -213,22 +215,7 @@ TEST_F(RecoveryPhase, SoftwareEngineCannotSupplyAFailedResidentContext)
 	hw.engines[1] = PFIFO_ENG_BUSY | status(1, failed);
 	hw.engineUnreadable[1] = true;
 	EXPECT_FALSE(pending());
-	EXPECT_EQ(target, none);
-	EXPECT_TRUE(hw.writes.empty());
-	EXPECT_EQ(hw.engineReads[1], 0u);
-}
-
-TEST_F(RecoveryPhase, SoftwareEngineCannotKeepAnEvictedTargetResident)
-{
-	const nvkm_engn_func softwareFunctions{nullptr};
-	nvkm_engn software{&softwareFunctions, nullptr, 1, &graphics};
-	engine.next = &software;
-	hw.engines[1] = PFIFO_ENG_BUSY | status(1, failed);
-	hw.engineUnreadable[1] = true;
-	target = failed;
-	hw.preempt = failed;
-	EXPECT_FALSE(pending());
-	EXPECT_EQ(target, none);
+	EXPECT_EQ(from, 0u);
 	EXPECT_TRUE(hw.writes.empty());
 	EXPECT_EQ(hw.engineReads[1], 0u);
 }
@@ -240,17 +227,8 @@ TEST_F(RecoveryPhase, NewerPendingRecoveryIsLeftForItsExistingOwner)
 	hw.pbdma = status(1, failed);
 	hw.preempt = PFIFO_PREEMPT_PENDING | failed;
 	EXPECT_TRUE(pending());
-	EXPECT_EQ(target, failed);
 	hw.preempt = failed;
-	EXPECT_TRUE(pending());
-	EXPECT_EQ(target, failed);
-	EXPECT_TRUE(hw.writes.empty());
-	EXPECT_EQ(groups[failed].rc, NVKM_CGRP_RC_PENDING);
-	EXPECT_EQ(channels[failed].errored, 1);
-	EXPECT_EQ(runl.rc_pending, 1);
-	hw.pbdma = 0;
 	EXPECT_FALSE(pending());
-	EXPECT_EQ(target, none);
 	EXPECT_TRUE(hw.writes.empty());
 	EXPECT_EQ(groups[failed].rc, NVKM_CGRP_RC_PENDING);
 	EXPECT_EQ(channels[failed].errored, 1);
@@ -263,11 +241,25 @@ TEST_F(RecoveryPhase, NewerPendingRecoveryDoesNotAdmitANewEviction)
 	runl.rc_pending = 1;
 	hw.pbdma = status(1, failed);
 	EXPECT_FALSE(pending());
-	EXPECT_EQ(target, none);
+	EXPECT_EQ(from, 0u);
 	EXPECT_TRUE(hw.writes.empty());
 	EXPECT_EQ(groups[failed].rc, NVKM_CGRP_RC_PENDING);
 	EXPECT_EQ(channels[failed].errored, 1);
 	EXPECT_EQ(runl.rc_pending, 1);
+}
+
+TEST_F(RecoveryPhase, SoftwareEngineIsNotReadAfterAPreemptCompleted)
+{
+	const nvkm_engn_func softwareFunctions{nullptr};
+	nvkm_engn software{&softwareFunctions, nullptr, 1, &graphics};
+	engine.next = &software;
+	hw.engines[1] = PFIFO_ENG_BUSY | status(1, failed);
+	hw.engineUnreadable[1] = true;
+	from = failed + 1;
+	hw.preempt = failed;
+	EXPECT_FALSE(pending());
+	EXPECT_TRUE(hw.writes.empty());
+	EXPECT_EQ(hw.engineReads[1], 0u);
 }
 
 TEST_F(RecoveryPhase, UnblockResetsFailedIdleLoadIncomingContext)

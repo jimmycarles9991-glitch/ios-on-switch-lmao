@@ -554,7 +554,7 @@ fn to_odd(fb: &mut FunctionBuilder<'_>, f: Form, u: Form, s: Value, e: Value) ->
 /// fuses or not; `s`'s exact error is FastTwoSum's on `p` and `c` ([`sum_error`]), and
 /// [`to_odd`] keeps the rounding direction. An infinite or NaN `s` (only from such an operand)
 /// is `Fma`'s, unmoved, decided on its bits. Rounded to `half` to nearest even, it is the `half`
-/// fused multiply-add correctly rounded (an extended-range blend's).
+/// fused multiply-add correctly rounded (Metal's 16-bit float blend, `extended_range::blend`).
 ///
 /// Both choices keep the result off two renderings of SPIRV-Cross, which MoltenVK uses (`f7850ba7`
 /// lanes 2, 3, and 7): a `NoContraction` `OpFMul` becomes `fma(l, r, 0)`, which answers `+0` for a
@@ -575,49 +575,6 @@ pub(crate) fn half_sum(
     let odd = to_odd(fb, wide, u32_form(f), s, e)?;
     let finite = all_finite(fb, wide, &[s])?;
     fb.select(finite, odd, s)
-}
-
-/// `a * b + c` of finite `float`s (lanes of form `f`) rounded once to `float`, nearest even, in
-/// plain `float` arithmetic, whatever the device's `Fma` fuses: Dekker's exact product
-/// `a * b = ph + pl` (each factor split at 12 bits by Veltkamp's constant, every step
-/// `NoContraction`), then Boldo and Melquiond's emulation of a fused multiply-add through rounding
-/// to odd (IEEE TC 57(4), 2008): `(th, tl) = TwoSum(c, ph)`, `v = RO(tl + pl)` ([`half_sum`]'s
-/// odd sum, its product `tl · 1` exact), and `RN(th + v)`. Exact where no part underflows: an
-/// extended-range blend of a `float4` output, whose operands are at most 2 in magnitude and whose
-/// result is rounded to `half` next, far above a part that small.
-pub(crate) fn float_fma_exact(
-    fb: &mut FunctionBuilder<'_>,
-    f: Form,
-    a: Value,
-    b: Value,
-    c: Value,
-) -> BResult<Value> {
-    let (ah, al) = veltkamp(fb, f, a)?;
-    let (bh, bl) = veltkamp(fb, f, b)?;
-    let ph = exact_op(fb, BinOp::FMul, a, b)?;
-    let hh = exact_op(fb, BinOp::FMul, ah, bh)?;
-    let t = exact_op(fb, BinOp::FSub, hh, ph)?;
-    let hl = exact_op(fb, BinOp::FMul, ah, bl)?;
-    let t = exact_op(fb, BinOp::FAdd, t, hl)?;
-    let lh = exact_op(fb, BinOp::FMul, al, bh)?;
-    let t = exact_op(fb, BinOp::FAdd, t, lh)?;
-    let ll = exact_op(fb, BinOp::FMul, al, bl)?;
-    let pl = exact_op(fb, BinOp::FAdd, t, ll)?;
-    let (th, tl) = two_sum(fb, c, ph)?;
-    let one = fsplat(fb, f, 1.0)?;
-    let v = half_sum(fb, f.with(Held::Float(FloatFmt::Half)), tl, one, pl)?;
-    exact_op(fb, BinOp::FAdd, th, v)
-}
-
-/// `x`'s high 12 significand bits and the rest, `x = hi + lo` exactly (Veltkamp's split by
-/// `2^12 + 1`), for finite `x` far below `float`'s overflow.
-fn veltkamp(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<(Value, Value)> {
-    let k = fsplat(fb, f, 4097.0)?;
-    let t = exact_op(fb, BinOp::FMul, k, x)?;
-    let u = exact_op(fb, BinOp::FSub, t, x)?;
-    let hi = exact_op(fb, BinOp::FSub, t, u)?;
-    let lo = exact_op(fb, BinOp::FSub, x, hi)?;
-    Ok((hi, lo))
 }
 
 /// `x` (`float` lanes of form `f`) as Metal reads an operand: a denormal is a zero of its sign

@@ -4,15 +4,15 @@ import HWTestCore
 import HWTestGPU
 
 /// Compressed memory down to the GPU pool's floor for an app (drivers/TegraGM20B/TegraGM20BPoolPolicy.h
-/// compressibleRefusal). Boot 22 refused 187 compressible BoAllocs, SwitchHWTest's first one at 49 MiB ready ("the
-/// pool's last 48 MiB stay for coherent BOs and nvkm"). The app asks for compressible BOs of boot 22's 3840 KiB until
-/// one is refused (at most 64), then for 2048 down to 128 KiB once each, and reads the pool's ready bytes through the
-/// paths method's pool op (debug kernels) before and right after; every BO goes back at the end. PASS: the first
-/// refusal is kIOReturnNoMemory, and the asks stopped at a hardware fact, within the last ask and 8 MiB (other
-/// processes' and the scrubber's moves meanwhile): the floor (`ready_after_kib` < `floor_kib` + 128 + 8192), or no
-/// whole clean 128 KiB chunk left in a fragmented pool (`clean_chunks_after` * 128 < 8192); something was made when
-/// the pool had room. It drains the pool to its floor for a moment, so it runs after every other test (Registry.last):
-/// a "compressed memory ... not made" line of any process inside its window is its own doing. Fields:
+/// compressibleRefusal). Boot 22 refused 187 compressible BoAllocs, SwitchHWTest's first one at 49 MiB ready (the pool
+/// keeps its last 16 MiB for nvkm now: "the pool's last 16 MiB stay for nvkm"). The app asks for compressible BOs of
+/// boot 22's 3840 KiB until one is refused (at most 64), then for 2048 down to 128 KiB once each, and reads the pool's
+/// ready bytes through the paths method's pool op (debug kernels) before and right after; every BO goes back at the
+/// end. PASS: the first refusal is kIOReturnNoMemory, and the asks stopped at a hardware fact, within the last ask and
+/// 8 MiB (other processes' and the scrubber's moves meanwhile): the floor (`ready_after_kib` < `floor_kib` + 128 +
+/// 8192), or no whole clean 128 KiB chunk left in a fragmented pool (`clean_chunks_after` * 128 < 8192); something was
+/// made when the pool had room. It drains the pool to its floor for a moment, so it runs after every other test
+/// (Registry.last): a "compressed memory ... not made" line of any process inside its window is its own doing. Fields:
 /// `ready_before_kib`, `ready_after_kib`, `floor_kib`, `held_before_kib`, `clean_chunks_before`, `clean_chunks_after`,
 /// `made_kib`, `asks`, `refused` (the first refusal's kern_return_t).
 struct CompressedFloorTest: HWTest {
@@ -55,7 +55,8 @@ struct CompressedFloorTest: HWTest {
         for handle in handles {
             _ = connection.call(
                 Self.boFree, GPUConnection.words([UInt32(truncatingIfNeeded: handle), UInt32(handle >> 32)]),
-                outputSize: 0)
+                outputSize: 0
+            )
         }
         var metrics = Metrics()
         metrics.set("ready_before_kib", before["ready_kib"] ?? -1)

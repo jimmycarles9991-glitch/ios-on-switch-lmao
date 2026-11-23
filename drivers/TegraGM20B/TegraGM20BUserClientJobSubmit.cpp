@@ -13,8 +13,14 @@ IOReturn AGXDeviceUserClient::submitJob(const TegraGM20BAbiSubmitAddress *in,
 	SwitchGpuRefusalNote why;
 	uint32_t channel = 0;
 	const IOReturn result = takeJob(in, out, why, channel);
-	if (result != kIOReturnSuccess)
-		logRefusal("SubmitJob", channel, result, why);
+	if (result == kIOReturnSuccess)
+		return result;
+	logRefusal("SubmitJob", channel, result, why);
+	char line[320];
+	if (switch_gpu_refusal_loses_frame(critical_, why.site, result) &&
+	    switch_gpu_refusal_line(line, sizeof(line), owner_, ownerPid_, "SubmitJob", channel,
+				    result, why, 0))
+		panic("%s: the compositor's frame is lost", line);
 	return result;
 }
 
@@ -71,8 +77,7 @@ IOReturn AGXDeviceUserClient::takeJob(const TegraGM20BAbiSubmitAddress *in,
 								 record.releases, header.channel);
 			if (prepared)
 				result = switch_gpu_refuse(why, SwitchGpuRefusal::EventPrepare,
-							   prepared == -5 ? kIOReturnAborted
-									  : ioreturn(prepared),
+							   ioreturn(prepared),
 							   switch_gpu_refusal_errno(prepared));
 		}
 		if (!result) {
@@ -131,7 +136,7 @@ IOReturn AGXDeviceUserClient::runJob(const SwitchGpuJobRecord &record, JobScratc
 			applyLevel(false);
 		}
 		if (channelLevels_[slot] != level_) {
-			tgm_chan_set_level(chan, level_);
+			tgm_chan_set_level(chan, level_, static_cast<int>(critical_));
 			channelLevels_[slot] = level_;
 		}
 		IOLockUnlock(lock_);
@@ -164,6 +169,8 @@ IOReturn AGXDeviceUserClient::runJob(const SwitchGpuJobRecord &record, JobScratc
 	const IOReturn result = runJobUses(record, job, out, set, siblings, siblingCount, why);
 	if (set)
 		switch_gpu_set_leave(set);
+	if (result != kIOReturnSuccess && record.promises && record.promises->count)
+		reholdPromises(record.promises);
 	return result;
 }
 
@@ -225,14 +232,21 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 	constexpr uint32_t kUseFlags = kUseAccess | TegraGM20BSurfaceHostWritten |
 				       TegraGM20BSurfaceGpuAddress | TegraGM20BSurfaceRange;
 	const uint32_t claim = switch_gpu_claim_flags(admissionBegin || admissionContinue);
+	// A refused job's writes never come: until each surface's next write, its frame is not the one asked of it
+	// (switch_gpu_backing_write_refused). Not a busy one: a display lease on the surface's current frame refuses it.
+	const auto refuseWrites = [&](int32_t ret) {
+		switch_gpu_backing_writes_refused(job.uses, useTotal);
+		return ret;
+	};
 	for (uint32_t i = 0; i < head.shared_count; ++i) {
 		const TegraGM20BAbiSurfaceUse &use = record.uses[i];
 		const bool addressed = use.access & TegraGM20BSurfaceGpuAddress;
 		const uint64_t bytes = use.access & TegraGM20BSurfaceRange ? use.reserved : 0;
 		if (!(use.access & kUseAccess) || (use.access & ~kUseFlags) ||
 		    (!bytes && use.reserved))
-			return switch_gpu_refuse(why, SwitchGpuRefusal::UseAccess,
-						 kIOReturnBadArgument, i, use.access, use.reserved);
+			return refuseWrites(switch_gpu_refuse(why, SwitchGpuRefusal::UseAccess,
+							      kIOReturnBadArgument, i, use.access,
+							      use.reserved));
 		rangedUses += bytes != 0;
 		const BindingTable::Entry *binding =
 			addressed ? bindTable_.find(use.handle, bytes ? bytes : 1) : nullptr;
@@ -240,9 +254,9 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 		uint64_t offset = 0;
 		if (const SwitchGpuRefusal refused = useRefusal(bo, binding, use, bytes, offset);
 		    refused != SwitchGpuRefusal::None)
-			return switch_gpu_refuse(
+			return refuseWrites(switch_gpu_refuse(
 				why, refused, kIOReturnBadArgument, i, use.handle,
-				refused == SwitchGpuRefusal::UseReadOnly ? use.access : bytes);
+				refused == SwitchGpuRefusal::UseReadOnly ? use.access : bytes));
 		hostWritten |= (use.access & TegraGM20BSurfaceHostWritten) != 0;
 		const uint32_t access = use.access & kUseAccess;
 		if (bo->nativeView) {
@@ -251,14 +265,16 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 			if (const int error = switch_gpu_native_surface_add_read(
 				    *bo->nativeView, access, job.uses, job.guards, job.capacity,
 				    useTotal, nativeGuardCount))
-				return switch_gpu_refuse(why, SwitchGpuRefusal::NativeRead,
-							 ioreturn(error), i,
-							 switch_gpu_refusal_errno(error));
+				return refuseWrites(switch_gpu_refuse(
+					why, SwitchGpuRefusal::NativeRead, ioreturn(error), i,
+					switch_gpu_refusal_errno(error)));
 			for (uint32_t u = first; u < useTotal; ++u)
-				job.uses[u].access |= claim;
+				job.uses[u].access |=
+					switch_gpu_claim_use(claim, job.uses[u].access);
 			continue;
 		}
-		job.uses[useTotal++] = {bo->backing, access | claim, 0};
+		job.uses[useTotal++] = {bo->backing, access | switch_gpu_claim_use(claim, access),
+					0};
 		if (access & TegraGM20BSurfaceWrite) {
 			job.writes[writeCount++] = {bo->backing, bo->representation ? 0 : offset,
 						    bo->representation ? 0 : bytes};
@@ -281,16 +297,16 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 	const uint32_t guardCount = surfaceCount + nativeGuardCount;
 	[[maybe_unused]] uint32_t backings = 0;
 	if (admissionContinue && !admission.covers(job.uses, useTotal))
-		return switch_gpu_refuse(why, SwitchGpuRefusal::AdmissionCover,
-					 kIOReturnBadArgument, useTotal);
+		return refuseWrites(switch_gpu_refuse(why, SwitchGpuRefusal::AdmissionCover,
+						      kIOReturnBadArgument, useTotal));
 	tgm_views_job_writes(job.written, writtenCount);
 	job.phases.end(TGM_SUBMIT_RESOLVE);
 	SwitchGpuEventJob *events = job.events;
 	int error = events->sequence(eventChannels_[slot]);
 	if (error)
-		return switch_gpu_refuse(why, SwitchGpuRefusal::EventSequence,
-					 error == -5 ? kIOReturnAborted : ioreturn(error),
-					 switch_gpu_refusal_errno(error));
+		return refuseWrites(switch_gpu_refuse(why, SwitchGpuRefusal::EventSequence,
+						      ioreturn(error),
+						      switch_gpu_refusal_errno(error)));
 	// an event's waiters are woken by the interrupt at its signal; the job's semantic fence and scanout writes are
 	// known below (switch_gpu_quiet_end)
 	const bool quiet =
@@ -300,15 +316,14 @@ IOReturn AGXDeviceUserClient::runJobUses(const SwitchGpuJobRecord &record, JobSc
 	switch_gpu_release releases[TegraGM20BMaxJobPromises] = {};
 	const uint32_t keptCount = record.promises ? record.promises->count : 0;
 	// the job's fence releases them: a job with no pushes and no events has none
-	if (keptCount && ((!count && !(head.flags & TegraGM20BJobHasEvents)) ||
-			  keepPromises(record.promises, releases)))
-		return switch_gpu_refuse(why, SwitchGpuRefusal::Promises, kIOReturnBadArgument,
-					 keptCount, count);
-	const uint32_t submit =
-		TegraGM20BSubmitVisibilityExplicit |
-		((head.flags & TegraGM20BJobExternal) ? uint32_t(TegraGM20BSubmitExternalVisibility)
-						      : 0u) |
-		((head.flags & TegraGM20BJobHasEvents) ? uint32_t(TegraGM20BSubmitHasEvents) : 0u);
+	const bool fenced = count || (head.flags & TegraGM20BJobHasEvents);
+	const IOReturn kept =
+		keptCount && fenced ? keepPromises(record.promises, releases) : kIOReturnSuccess;
+	if (keptCount && (!fenced || kept))
+		return refuseWrites(switch_gpu_refuse(
+			why, SwitchGpuRefusal::Promises,
+			kept == kIOReturnTimeout ? kIOReturnTimeout : kIOReturnBadArgument,
+			keptCount, count));
 	switch_gpu_backing_transaction transaction = {};
 	switch_gpu_backing_token completion = {};
 	uint32_t seqno = 0, dependencies = 0, jobVisibility = 0, leaseCount = 0;
@@ -411,7 +426,7 @@ refresh:
 			const bool quietEnd = switch_gpu_quiet_end(quiet, semanticBound,
 								   scanoutWrites, closesGroup);
 			jobVisibility =
-				switch_gpu_job_visibility(submit, events->signals(),
+				switch_gpu_job_visibility(head.flags, events->signals(),
 							  unlockedWrites || scanoutWrites,
 							  hostWritten || transaction.host_written) |
 				(quietEnd ? uint32_t(SWITCH_GPU_SUBMIT_QUIET) : 0u);
@@ -456,9 +471,9 @@ refresh:
 	if (ownershipFailed || error) {
 		const IOReturn ret = ownershipFailed ? kIOReturnAborted : ioreturn(error);
 		if (stage == SwitchGpuRefusal::DependencyRoom)
-			return switch_gpu_refuse(why, stage, ret,
-						 dependencies + siblingCount + events->wordCount(),
-						 TegraGM20BMaxJobDependencies);
+			return refuseWrites(switch_gpu_refuse(
+				why, stage, ret, dependencies + siblingCount + events->wordCount(),
+				TegraGM20BMaxJobDependencies));
 		const uint64_t counted =
 			stage == SwitchGpuRefusal::Refresh       ? surfaceCount
 			: stage == SwitchGpuRefusal::WriteRanges ? writeCount
@@ -468,14 +483,14 @@ refresh:
 			: stage == SwitchGpuRefusal::Exec || stage == SwitchGpuRefusal::Room
 				? count
 				: useTotal;
-		return switch_gpu_refuse(why, stage, ret, switch_gpu_refusal_errno(error), counted,
-					 dependencies);
+		return refuseWrites(switch_gpu_refuse(
+			why, stage, ret, switch_gpu_refusal_errno(error), counted, dependencies));
 	}
 	if (count) {
 		switch_gpu_path_job(jobVisibility, unlockedWrites, leanChannels_[slot], rangedUses);
 		switch_gpu_path_taken(SWITCH_GPU_PATH_NATIVE_READ, nativeReads);
 		for (uint32_t i = 0; i < writtenCount; ++i)
-			tgm_coherency_wrote_listed(job.written[i], tgm_chan_uid(chan), seqno);
+			tgm_coherency_wrote(job.written[i], tgm_chan_uid(chan), seqno);
 	}
 	job.phases.end(TGM_SUBMIT_COMMIT);
 #if TGM_STATS

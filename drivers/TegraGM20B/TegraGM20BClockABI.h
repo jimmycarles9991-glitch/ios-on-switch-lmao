@@ -5,16 +5,17 @@
  * client and the GPU both read, so a sample converts with its own power-up's anchor with no call and no CPU wait.
  * PTIMER is reseeded past every value before the power-down (gpu_power.c stamp_reseed): each power-up's values lie at or
  * above its anchor and below the next one's, so a value's anchor is the newest one at or below it.
- * The raw stack key does not hash this header, so no unit it hashes (gpu/BUILD.bazel raw_stack) may include it. */
+ * The stack key does not hash this header, so no unit it hashes (gpu/BUILD.bazel stack_key) may include it. */
 #ifndef TEGRA_GM20B_CLOCK_ABI_H
 #define TEGRA_GM20B_CLOCK_ABI_H
 #include <stdint.h>
+#include "TegraGM20BFencePageABI.h"
 
 enum {
 	TegraGM20BMethodClockAnchors =
 		0x4341, /* 'CA': no input, reply TegraGM20BAbiClockAnchorsReply */
 	TegraGM20BClockAnchorOffset =
-		2048, /* the table's byte offset in the connection's fence page */
+		TegraGM20BFencePageClockAnchorsFirst, /* the table's byte offset in the connection's fence page */
 	TegraGM20BClockAnchorSlots = 63,
 };
 
@@ -67,14 +68,23 @@ tgm_clock_anchor_slot(struct TegraGM20BAbiClockAnchors *t, uint32_t published)
 	return &t->slot[published % TegraGM20BClockAnchorSlots];
 }
 
+/* The kernel's publish of anchor n of its own table `from` into a fence page's `to`: the slot, then the count */
+static inline void tgm_clock_anchor_mirror(struct TegraGM20BAbiClockAnchors *to,
+					   const struct TegraGM20BAbiClockAnchors *from, uint32_t n)
+{
+	*tgm_clock_anchor_slot(to, n) = from->slot[n % TegraGM20BClockAnchorSlots];
+	__atomic_store_n(&to->published, n + 1, __ATOMIC_RELEASE);
+}
+
 #ifdef __cplusplus
 static_assert(sizeof(TegraGM20BAbiClockAnchor) == 16, "TegraGM20BAbiClockAnchor layout");
-static_assert(sizeof(TegraGM20BAbiClockAnchors) == 1024, "TegraGM20BAbiClockAnchors layout");
+static_assert(sizeof(TegraGM20BAbiClockAnchors) == TegraGM20BFencePageClockAnchorsBytes,
+	      "TegraGM20BAbiClockAnchors layout");
 static_assert(sizeof(TegraGM20BAbiClockAnchorsReply) == 16,
 	      "TegraGM20BAbiClockAnchorsReply layout");
 #else
 _Static_assert(sizeof(struct TegraGM20BAbiClockAnchor) == 16, "TegraGM20BAbiClockAnchor layout");
-_Static_assert(sizeof(struct TegraGM20BAbiClockAnchors) == 1024,
+_Static_assert(sizeof(struct TegraGM20BAbiClockAnchors) == TegraGM20BFencePageClockAnchorsBytes,
 	       "TegraGM20BAbiClockAnchors layout");
 _Static_assert(sizeof(struct TegraGM20BAbiClockAnchorsReply) == 16,
 	       "TegraGM20BAbiClockAnchorsReply layout");

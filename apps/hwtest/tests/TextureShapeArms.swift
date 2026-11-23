@@ -3,9 +3,10 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// What a gpu.raw.texture_shapes case checks of newTextureWithDescriptor: shapes that went to m2v (raw_texture_shape.h,
-/// test/raw_device_shapes_test.cpp): each texture's route (raw's own, m2v's or nil), the bytes it gave back, every made
-/// texture asked again for its twin after its work (twins_after), and every command buffer's path (paths)
+/// What a gpu.gm20b.texture_shapes case checks of newTextureWithDescriptor (texture_shape.h,
+/// test/device_shapes_test.cpp): each texture's route (raw's own, another object or nil), the bytes it gave back,
+/// every made texture asked again after its work whether it is still raw's (twins_after), and every command buffer's
+/// path (paths)
 final class ShapeArms {
     let gpu: GPU
     private var metrics = Metrics()
@@ -18,17 +19,17 @@ final class ShapeArms {
 
     /// Why a case cannot run on `gpu`, nil where it can
     static func skip(_ gpu: GPU) -> Outcome? {
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
-        guard !RawFacade.counters(of: gpu.device).isEmpty else {
-            return .skip("a release runtime: textures do not answer switchRawObject")
+        guard !GM20BFacade.counters(of: gpu.device).isEmpty else {
+            return .skip("a release runtime: textures do not answer switchMetalObject")
         }
         return nil
     }
 
     private func answer(_ texture: MTLTexture?) -> String {
-        texture.map { NativeObject.name($0) == nil ? "m2v" : "raw" } ?? "nil"
+        texture.map { NativeObject.name($0) == nil ? "other" : "gm20b" } ?? "nil"
     }
 
     func route(_ label: String, _ texture: MTLTexture?, expect: String) {
@@ -48,11 +49,11 @@ final class ShapeArms {
     }
 
     func outcome() -> Outcome {
-        let twins = made.filter { answer($0.1) != "raw" }.map(\.0)
+        let twins = made.filter { answer($0.1) != "gm20b" }.map(\.0)
         metrics.set("twins_after", twins.isEmpty ? "-" : twins.joined(separator: "/"))
         if !twins.isEmpty { wrong.append("twins_after") }
         metrics.set("paths", gpu.paths.text)
-        if gpu.paths.paths.keys.contains(where: { $0 != "raw" }) { wrong.append("paths") }
+        if gpu.paths.paths.keys.contains(where: { $0 != "gm20b" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -80,15 +81,17 @@ final class ShapeArms {
         _ texture: MTLTexture, width: Int, height: Int, bytesPerRow: Int, rows: Int, level: Int = 0, slice: Int = 0,
         plane: Int = 0
     ) throws -> [UInt8] {
-        let put = (0..<bytesPerRow * rows).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
+        let put = (0 ..< bytesPerRow * rows).map { UInt8(truncatingIfNeeded: $0 * 7 + 3) }
         let region = MTLRegionMake3D(0, 0, plane, width, height, 1)
         let image = texture.textureType == .type3D ? put.count : 0
         texture.replace(
             region: region, mipmapLevel: level, slice: slice, withBytes: put, bytesPerRow: bytesPerRow,
-            bytesPerImage: image)
+            bytesPerImage: image
+        )
         var got = [UInt8](repeating: 0, count: put.count)
         texture.getBytes(
-            &got, bytesPerRow: bytesPerRow, bytesPerImage: image, from: region, mipmapLevel: level, slice: slice)
+            &got, bytesPerRow: bytesPerRow, bytesPerImage: image, from: region, mipmapLevel: level, slice: slice
+        )
         return zip(put, got).compactMap { $0 == $1 ? nil : $1 }
     }
 
@@ -137,6 +140,6 @@ final class ShapeArms {
             encoder.endEncoding()
         }
         let bytes = try await gpu.read(target, bytesPerPixel: 4)
-        return (4..<8).flatMap { y in (4..<8).flatMap { x in bytes[4 * (x + 12 * y)..<4 * (x + 12 * y) + 4] } }
+        return (4 ..< 8).flatMap { y in (4 ..< 8).flatMap { x in bytes[4 * (x + 12 * y) ..< 4 * (x + 12 * y) + 4] } }
     }
 }

@@ -8,16 +8,16 @@ using switch_ios::test::Body;
 using switch_ios::test::SourceText;
 using testing::HasSubstr;
 
-// TegraNVJPGUserClient.cpp builds in no host test. A GPU sampler whose first ask of a surface nothing has written comes
-// while NVJPG decodes into it would tile in place the rows NVJPG is writing (TegraGM20BTiled.cpp's seed-0 rule): the
-// decode moves the seed before it reads the layout, so such an ask finds a written surface and keeps it pitch, and a
-// surface decided block linear before is held, its texels unmoved, until the decode has ended.
+// A GPU sampler whose first ask of a surface nothing has written comes while NVJPG decodes into it would tile in place
+// the rows NVJPG is writing (TegraGM20BTiled.cpp's seed-0 rule): the decode moves the seed before it reads the layout,
+// so such an ask finds a written surface and keeps it pitch, and a surface decided block linear before is held, its
+// texels unmoved, until the decode has ended.
 TEST(NVJPGLayoutWiring, TheSeedMovesBeforeTheLayoutIsReadAndTheHoldOutlastsTheDecode)
 {
     const std::string source = SourceText("../TegraNVJPGUserClient.cpp");
     const std::string run = Body(source, "IOReturn runJob(Job *job)\n{");
     const auto seed = run.find("tegra_vic_surface_written(&job->dst);");
-    const auto layout = run.find("takeLayout(job, addresses[0], &hold)");
+    const auto layout = run.find("takeLayout(job, target.pages[0], &hold)");
     const auto decode = run.find("tegra_nvjpg_run(&job->engine");
     ASSERT_NE(seed, std::string::npos);
     ASSERT_NE(layout, std::string::npos);
@@ -28,6 +28,25 @@ TEST(NVJPGLayoutWiring, TheSeedMovesBeforeTheLayoutIsReadAndTheHoldOutlastsTheDe
     const std::string take = Body(source, "const char *takeLayout(Job *job, uint64_t firstPage, void **hold)\n{");
     EXPECT_LT(take.find("tegra_gm20b_surface_hold(firstPage, &tiled)"), take.find("tegra_gm20b_surface_layout("));
     EXPECT_THAT(take, HasSubstr("tegra_nvjpg_plan_block_linear("));
+}
+
+// A block-linear destination's plan writes whole block rows, so its sink is sized from the plan takeLayout leaves, and
+// only the run itself holds the job lock.
+TEST(NVJPGLayoutWiring, TheDestinationIsMappedForThePlanTakeLayoutLeavesAndOnlyTheRunHoldsTheJobLock)
+{
+    const std::string run = Body(SourceText("../TegraNVJPGUserClient.cpp"), "IOReturn runJob(Job *job)\n{");
+    const auto layout = run.find("takeLayout(job, target.pages[0], &hold)");
+    const auto map = run.find("switch_nvjpg_mapping(target, extent, p.writeEnd, &why, job->pid)");
+    const auto lock = run.find("tegra_nvjpg_lock();");
+    const auto unlock = run.find("tegra_nvjpg_unlock();");
+    ASSERT_NE(layout, std::string::npos);
+    ASSERT_NE(map, std::string::npos);
+    ASSERT_NE(lock, std::string::npos);
+    ASSERT_NE(unlock, std::string::npos);
+    EXPECT_LT(layout, map);
+    EXPECT_LT(map, lock);
+    EXPECT_EQ(run.substr(lock, unlock - lock),
+              "tegra_nvjpg_lock();\n    const int error = tegra_nvjpg_run(&job->engine, &status, &busy);\n    ");
 }
 
 // A '422f' or '444f' decode: VIC's re-pack is queued while NVJPG's job is in flight, to wait for its fence on the

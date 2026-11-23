@@ -162,6 +162,42 @@ fn a_texel_under_native_half_rounding_takes_its_forms_nan() {
     }
 }
 
+/// On the Sm53 target, whose conversion pair is Metal's rounding but for a NaN's bits, a texel's
+/// `half` is the pair's alone where the NaN switch leaves a texel's NaN to the device: every
+/// half-float texel and every wider value reads as Metal's, a NaN stays a NaN, and the module
+/// holds no test of the texel's bits; where the switch asks for Metal's NaN it keeps the test.
+#[test]
+fn a_texel_on_the_sm53_target_keeps_its_nan_only_where_the_nan_switch_asks() {
+    use crate::spirv::builder::QuantizeForm;
+    let mut cases: Vec<Case> = (0..=0xFFFFu16).map(|h| vec![vec![widened(h)]]).collect();
+    cases.extend(half_probe_bits().into_iter().map(|b| vec![vec![b]]));
+    for keep in [false, true] {
+        let what = format!("Sm53 keep {keep}");
+        let body = move |fb: &mut FunctionBuilder<'_>, x: &[Value]| -> BResult<Value> {
+            fb.module().set_quantize_form(QuantizeForm::Converted);
+            fb.module().set_native_half_conversions(true);
+            fb.module().set_texel_nans(keep);
+            texel(1)(fb, x)
+        };
+        let m = kernel_with(&[float(32)], half(), &body, true, false)
+            .unwrap_or_else(|e| panic!("{what}: build: {e:?}"));
+        assert_eq!(unsigned_compares(&m), usize::from(keep), "{what}");
+        check_accept(
+            &what,
+            &[float(32)],
+            half(),
+            &body,
+            &cases,
+            &|c| {
+                Some(vec![u64::from(f64_to_f16(f64::from(f32::from_bits(
+                    arg(c, 0) as u32,
+                ))))])
+            },
+            &|g, w| g == w || (is_nan(half(), g) && is_nan(half(), w)),
+        );
+    }
+}
+
 /// The unsigned compares of module `m`: the keep's test of a texel's bits is one.
 fn unsigned_compares(m: &crate::spirv::ir::TypedModule) -> usize {
     m.blocks()

@@ -9,6 +9,7 @@
 #include <sys/sockio.h>
 #include <sys/types.h>
 #include "SwitchWLANAssoc.h"
+#include "SwitchWLANScan.h"
 
 #define SIOCSA80211 0x802869c8UL  // _IOW('i', 200, struct apple80211req)
 #define SIOCGA80211 0xc02869c9UL  // _IOWR('i', 201, struct apple80211req)
@@ -102,31 +103,11 @@ enum {
     kAssocBadKey = 21
 };
 
-struct channel {
-    uint32_t version, channel, flags;
-};
-
 struct channels_list {
     uint32_t version, count;
     channel list[401];
     uint32_t unused;
 };  // 4824 bytes
-
-struct scan_result {  // 1164 bytes
-    uint32_t version;
-    channel ch;
-    uint16_t noise_known;
-    int16_t noise, snr, rssi;
-    uint16_t beacon_interval, capability;
-    uint8_t bssid[6];
-    uint8_t rate_count, unused0;
-    uint32_t rates[15];
-    uint8_t ssid_length, ssid[32], unused1[3];
-    uint32_t age_ms;
-    uint8_t flags, unused2;
-    uint16_t elements_length;
-    uint8_t elements[1024];
-};
 
 struct link_event {
     uint8_t down, unused0[3];
@@ -138,9 +119,6 @@ struct link_event {
     uint8_t unused3[4];
 };
 
-static_assert(sizeof(scan_result) == 1164 && __builtin_offsetof(scan_result, ssid_length) == 0x60 &&
-                  __builtin_offsetof(scan_result, age_ms) == 0x84 && __builtin_offsetof(scan_result, elements) == 0x8c,
-              "scan result layout");
 static_assert(sizeof(channels_list) == 4824, "channel list layout");
 static_assert(sizeof(link_event) == 32, "link event layout");
 static_assert(sizeof(struct ifmediareq64) == 44 && SIOCGIFMEDIA64 == SIOCGIFMEDIA,

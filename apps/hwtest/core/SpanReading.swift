@@ -43,7 +43,7 @@ public struct SpanReading: Equatable, Sendable {
     }
 }
 
-/// One of the spans line's notes, "<owner>: <us> us k<key> <state> ..." (raw_span_marks.h formatSpan). The key is read
+/// One of the spans line's notes, "<owner>: <us> us k<key> <state> ..." (span_marks.h formatSpan). The key is read
 /// as the one field that is "k" and 16 hex digits, so a line from before the key was the third field ("<us> us <state>
 /// k<key> ...", boot 22) reads the same, and the state's name, which a span may lack, is never looked at.
 public struct LongSpan: Equatable, Sendable {

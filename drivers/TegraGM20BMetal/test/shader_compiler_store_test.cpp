@@ -4,10 +4,10 @@
 // a full one keeping its newest entries; the log keeps whole requests across a torn tail and only those a replay keeps.
 #include "../compiler/compiler_log.h"
 #include "../compiler/compiler_store.h"
-#include "../raw/runtime/raw_cache.h"
-#include "../raw/runtime/raw_compute_slot.h"
-#include "../raw/runtime/raw_program_pages.h"
-#include "../raw/runtime/raw_record_parts.h"
+#include "../gm20b_cache.h"
+#include "../compute_slot.h"
+#include "../program_pages.h"
+#include "../record_parts.h"
 
 #include <gtest/gtest.h>
 
@@ -28,17 +28,17 @@ namespace pack = switch_seed_pack;
 
 constexpr uint64_t kStack = 0x5357495443480004ull;
 
-raw::Digest digest(uint8_t fill, uint32_t n = 0)
+gm20b::Digest digest(uint8_t fill, uint32_t n = 0)
 {
-    raw::Digest d;
+    gm20b::Digest d;
     d.fill(fill);
     memcpy(d.data(), &n, sizeof n);
     return d;
 }
 
-raw::CacheKey keyOf(uint32_t n)
+gm20b::CacheKey keyOf(uint32_t n)
 {
-    raw::CacheKey k;
+    gm20b::CacheKey k;
     k.stack = kStack;
     k.key = "samples=1 topo=3 ds=0/0 | v vertex_" + std::to_string(n) + " | f fragment";
     return k;
@@ -46,18 +46,18 @@ raw::CacheKey keyOf(uint32_t n)
 
 std::string entryOf(uint32_t n)
 {
-    raw::RuntimeRecord record;
+    gm20b::RuntimeRecord record;
     record.keyString = keyOf(n).key;
     record.programs[0].id = std::to_string(n);
     record.programs[1].id = std::string(n % 900, char('a' + n % 26));
-    return raw::encodeEntry(keyOf(n), &record, "");
+    return gm20b::encodeEntry(keyOf(n), &record, "");
 }
 
 bool whole(const std::string &bytes, uint32_t n)
 {
-    raw::RuntimeRecord record;
+    gm20b::RuntimeRecord record;
     std::string refusal;
-    return raw::decodeEntry(bytes, keyOf(n), record, refusal) == raw::RecordCache::Found::Record &&
+    return gm20b::decodeEntry(bytes, keyOf(n), record, refusal) == gm20b::RecordCache::Found::Record &&
            record.programs[0].id == std::to_string(n);
 }
 
@@ -104,12 +104,12 @@ protected:
         std::filesystem::remove_all(root);
     }
 
-    std::string pathOf(uint64_t stack, const raw::Digest &rules) const
+    std::string pathOf(uint64_t stack, const gm20b::Digest &rules) const
     {
         return (root / switch_compiler::storeDirectory(stack, rules) / "store").string();
     }
 
-    void open(switch_compiler::Store &store, uint64_t stack = kStack, const raw::Digest &rules = digest(0x77))
+    void open(switch_compiler::Store &store, uint64_t stack = kStack, const gm20b::Digest &rules = digest(0x77))
     {
         std::string error;
         ASSERT_TRUE(store.open(root.string(), stack, rules, error)) << error;
@@ -118,7 +118,7 @@ protected:
 
 TEST_F(SharedStore, AStoreIsKeyedByStackAndPackRulesAndAnOldOneStaysWholeForItsReaders)
 {
-    const raw::Digest rules = digest(0x77), otherRules = digest(0x78);
+    const gm20b::Digest rules = digest(0x77), otherRules = digest(0x78);
     {
         switch_compiler::Store store;
         open(store);
@@ -141,14 +141,14 @@ TEST_F(SharedStore, AStoreIsKeyedByStackAndPackRulesAndAnOldOneStaysWholeForItsR
 // record: what a client runs in place from its mapping
 TEST_F(SharedStore, ARecordsLargeSlotsArePublishedOnPagesOfTheirOwn)
 {
-    raw::RuntimeRecord record;
+    gm20b::RuntimeRecord record;
     record.keyString = keyOf(7).key;
     record.programs[0].id = "small";
     record.programs[0].image.assign(80 + 512, 0x11);
     record.programs[1].id = "large";
     record.programs[1].image.assign(80 + 200 * 1024, 0x22);
     record.programs[1].data.assign(512, 0x33);
-    const std::string entry = raw::encodeEntry(keyOf(7), &record, "");
+    const std::string entry = gm20b::encodeEntry(keyOf(7), &record, "");
     switch_compiler::Store store;
     open(store);
     ASSERT_EQ(store.putProgramSlots(keyOf(7), entry), switch_compiler::Store::Put::Added);
@@ -156,33 +156,33 @@ TEST_F(SharedStore, ARecordsLargeSlotsArePublishedOnPagesOfTheirOwn)
     EXPECT_EQ(store.putProgramSlots(keyOf(7), entry), switch_compiler::Store::Put::Added);
     EXPECT_EQ(store.entries(), 1u) << "a slot is kept once";
     ASSERT_EQ(store.put(digest(0x51, 7), entry), switch_compiler::Store::Put::Added);
-    raw::PackProgram info;
-    const std::vector<uint8_t> slot = raw::programSlot(record.programs[1], info);
-    const raw::Digest name = raw::programSlotName(slot.data(), slot.size());
+    gm20b::PackProgram info;
+    const std::vector<uint8_t> slot = gm20b::programSlot(record.programs[1], info);
+    const gm20b::Digest name = gm20b::programSlotName(slot.data(), slot.size());
     Client client(store.path());
     pack::Bytes found;
     ASSERT_TRUE(client.reader.find(name.data(), found));
-    EXPECT_EQ(uint64_t(found.data - client.mapped.data) % raw::kProgramSlotPage, 0u);
-    EXPECT_EQ(found.size, raw::programSlotEntryBytes(slot.size()));
+    EXPECT_EQ(uint64_t(found.data - client.mapped.data) % gm20b::kProgramSlotPage, 0u);
+    EXPECT_EQ(found.size, gm20b::programSlotEntryBytes(slot.size()));
     EXPECT_EQ(memcmp(found.data, slot.data(), slot.size()), 0);
     for (size_t i = slot.size(); i < found.size; i++)
         ASSERT_EQ(found.data[i], 0) << "zeros through the prefetch past its end";
     std::string bytes, refusal;
-    raw::RuntimeRecord read;
+    gm20b::RuntimeRecord read;
     ASSERT_TRUE(client.find(7, bytes));
-    EXPECT_EQ(raw::decodeEntry(bytes, keyOf(7), read, refusal), raw::RecordCache::Found::Record);
+    EXPECT_EQ(gm20b::decodeEntry(bytes, keyOf(7), read, refusal), gm20b::RecordCache::Found::Record);
 
-    raw::ComputeRecord kernel;
+    gm20b::ComputeRecord kernel;
     kernel.code.assign(48 * 1024, 0x44);
     kernel.data.assign(256, 0x55);
-    EXPECT_EQ(store.putProgramSlots(keyOf(8), raw::encodeKernelEntry(keyOf(8), &kernel, "")),
+    EXPECT_EQ(store.putProgramSlots(keyOf(8), gm20b::encodeKernelEntry(keyOf(8), &kernel, "")),
               switch_compiler::Store::Put::Added);
-    EXPECT_EQ(store.entries(), 3u) << "a kernel's slot as raw_compute.cpp places it";
-    const std::vector<uint8_t> kernelSlot = raw::computeSlot(kernel);
-    const raw::Digest kernelName = raw::programSlotName(kernelSlot.data(), kernelSlot.size());
+    EXPECT_EQ(store.entries(), 3u) << "a kernel's slot as compute.cpp places it";
+    const std::vector<uint8_t> kernelSlot = gm20b::computeSlot(kernel);
+    const gm20b::Digest kernelName = gm20b::programSlotName(kernelSlot.data(), kernelSlot.size());
     Client again(store.path());
     ASSERT_TRUE(again.reader.find(kernelName.data(), found));
-    EXPECT_EQ(uint64_t(found.data - again.mapped.data) % raw::kProgramSlotPage, 0u);
+    EXPECT_EQ(uint64_t(found.data - again.mapped.data) % gm20b::kProgramSlotPage, 0u);
 }
 
 TEST_F(SharedStore, ReadersInOtherThreadsAndProcessesOnlyEverSeeWholeEntries)
@@ -294,20 +294,20 @@ TEST_F(SharedStore, ASlotAFullStoreRefusesIsPutAfterItsRoomIsMade)
     uint32_t added = 0;
     while (store.put(digest(0x53, added), big + std::to_string(added)) == switch_compiler::Store::Put::Added)
         added++;
-    raw::RuntimeRecord record;
+    gm20b::RuntimeRecord record;
     record.keyString = keyOf(9).key;
     record.programs[0].image.assign(80 + 512, 0x11);
     record.programs[1].image.assign(80 + 2048 * 1024, 0x22);
-    const std::string entry = raw::encodeEntry(keyOf(9), &record, "");
+    const std::string entry = gm20b::encodeEntry(keyOf(9), &record, "");
     EXPECT_EQ(store.putProgramSlots(keyOf(9), entry), switch_compiler::Store::Put::Full);
     std::string error;
     ASSERT_TRUE(store.makeRoom(error)) << error;
     EXPECT_EQ(store.putProgramSlots(keyOf(9), entry), switch_compiler::Store::Put::Added);
-    raw::PackProgram info;
-    const std::vector<uint8_t> slot = raw::programSlot(record.programs[1], info);
+    gm20b::PackProgram info;
+    const std::vector<uint8_t> slot = gm20b::programSlot(record.programs[1], info);
     Client client(store.path());
     pack::Bytes found;
-    EXPECT_TRUE(client.reader.find(raw::programSlotName(slot.data(), slot.size()).data(), found));
+    EXPECT_TRUE(client.reader.find(gm20b::programSlotName(slot.data(), slot.size()).data(), found));
 }
 
 TEST_F(SharedStore, TheLogKeepsWholeRequestsAcrossATornTail)
@@ -326,7 +326,7 @@ TEST_F(SharedStore, TheLogKeepsWholeRequestsAcrossATornTail)
     switch_compiler::RequestLog log;
     ASSERT_TRUE(log.open(path));
     std::vector<std::string> seen;
-    log.replay([&](const std::string &request, raw::Digest &name) {
+    log.replay([&](const std::string &request, gm20b::Digest &name) {
         seen.push_back(request);
         name = digest(uint8_t(0x60 + seen.size()));
         return request != "request 1";
@@ -336,7 +336,7 @@ TEST_F(SharedStore, TheLogKeepsWholeRequestsAcrossATornTail)
     switch_compiler::RequestLog again;
     ASSERT_TRUE(again.open(path));
     seen.clear();
-    again.replay([&](const std::string &request, raw::Digest &name) {
+    again.replay([&](const std::string &request, gm20b::Digest &name) {
         seen.push_back(request);
         name = digest(0x99, uint32_t(seen.size()));
         return true;
@@ -358,7 +358,7 @@ TEST_F(SharedStore, AFullLogDropsItsOldestRequests)
     switch_compiler::RequestLog log;
     ASSERT_TRUE(log.open(path));
     std::vector<std::string> seen;
-    log.replay([&](const std::string &request, raw::Digest &name) {
+    log.replay([&](const std::string &request, gm20b::Digest &name) {
         seen.push_back(request.substr(0, request.size() - big.size()));
         name = digest(0x41, uint32_t(seen.size()));
         return true;

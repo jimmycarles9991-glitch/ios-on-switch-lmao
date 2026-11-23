@@ -24,7 +24,6 @@ bool tegra_vic_surface_start(void);  // finds the IOSurfaceRoot (V3)
 IOReturn tegra_vic_surface_lookup(uint32_t id, task_t task, TegraVICSurface *out);
 // A retained kernel object needs no numeric ID; user requests still go through task-authorized lookup.
 IOReturn switch_vic_surface_from_object(OSObject *surface, uint32_t id, TegraVICSurface *out);
-uint32_t switch_vic_surface_matrix(OSObject *surface);
 void switch_vic_surface_color(OSObject *surface, TegraVICSurfaceDesc *desc);
 void tegra_vic_surface_release(TegraVICSurface *s);
 IOReturn tegra_vic_surface_prepare(TegraVICSurface *s, uint64_t extent, uint64_t *pages, uint32_t max, uint32_t *count);

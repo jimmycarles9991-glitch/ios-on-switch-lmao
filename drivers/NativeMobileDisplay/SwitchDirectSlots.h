@@ -13,6 +13,9 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
     if ((!held || switch_native_scanout_pitch_held(surface, held, &snapshot)) &&
         switch_native_scanout_pitch(surface, &snapshot))
         return kNoBuffer;
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    switch_gpu_cpu_lease_look(snapshot.lease, &directLook);
+#endif
     const uint64_t offset = snapshot.pitchOffset;
     const uint32_t pages = static_cast<uint32_t>((allocation + 4095) / 4096);
     if ((offset & 4095) || offset / 4096 > snapshot.allocation.page_count ||

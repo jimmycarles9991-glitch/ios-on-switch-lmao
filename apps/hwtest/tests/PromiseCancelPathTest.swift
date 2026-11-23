@@ -10,14 +10,14 @@ import Metal
 /// surface into a buffer, so its job acquires the promise's fence word on the GPU (ACQ_GEQ) and parks there. 30 ms
 /// later the test cancels the promise, which the kernel writes from the CPU. The copy must complete soon after, with
 /// the surface's CPU fill: a channel parked on ACQ_GEQ reads the word again after a CPU write, which the kernel's
-/// cancel, kill and close releases and the give-up's raise all rely on. Were it not so, the copy would wait for the
-/// give-up a second after it parked (its "writer promise ... was not kept" line).
+/// cancel, kill and close releases and the give-up's raise all rely on. Were it not so, the copy would wait for good:
+/// an unkept promise is never given up (gpu.path.promise_unkept).
 struct PromiseCancelPathTest: GPUPathTest {
     let id = "gpu.path.promise_cancel"
     let name = "A job parked on the GPU for a writer promise goes on once the CPU cancels it"
     let counters = ["writer_promises", "promise_waits", "promise_cpu_releases"]
     static let size = 64, parkMs = 30.0, goesOnMs = 150.0
-    static let fill: [UInt8] = [255, 0, 0, 255]  // BGRA blue
+    static let fill: [UInt8] = [255, 0, 0, 255] // BGRA blue
     static let boImport: UInt32 = 3, boFree: UInt32 = 4, writerPromise: UInt32 = 34
     static let surfaceWrite: UInt32 = 1 << 1, promiseMake: UInt32 = 0, promiseCancel: UInt32 = 1
 
@@ -25,6 +25,17 @@ struct PromiseCancelPathTest: GPUPathTest {
 
     /// The surface imported into `maker` and its writes promised: the import's handle and the promise.
     static func promise(_ surface: IOSurface, _ maker: GPUConnection) throws -> (UInt64, UInt32) {
+        let handle = try imported(surface, maker)
+        let (kr, promise) = make(handle, maker, channel: 1)
+        guard kr == KERN_SUCCESS else {
+            _ = maker.call(boFree, GPUConnection.words(halves(handle)), outputSize: 0)
+            throw TestFailure("the writer promise was refused: \(GPUConnection.hex(kr))")
+        }
+        return (handle, promise)
+    }
+
+    /// The surface imported into `maker`: the import's handle
+    static func imported(_ surface: IOSurface, _ maker: GPUConnection) throws -> UInt64 {
         let page = Int(getpagesize())
         let bytes = UInt32((surface.allocationSize + page - 1) / page * page)
         surface.lock(options: [], seed: nil)
@@ -35,18 +46,23 @@ struct PromiseCancelPathTest: GPUPathTest {
         guard imported.0 == KERN_SUCCESS else {
             throw TestFailure("the surface's import was refused: \(GPUConnection.hex(imported.0))")
         }
-        let handle = GPUConnection.uint64(imported.1, 0)
+        return GPUConnection.uint64(imported.1, 0)
+    }
+
+    /// A promise of the writes of the import `handle`, kept by `channel`: the kern_return_t and the promise
+    static func make(_ handle: UInt64, _ maker: GPUConnection, channel: UInt32) -> (kern_return_t, UInt32) {
         let use = GPUConnection.words(halves(handle) + [surfaceWrite, 0])
         let made = use.withUnsafeBytes { uses -> (kern_return_t, [UInt8]) in
             let at = UInt64(UInt(bitPattern: uses.baseAddress!))
             return maker.call(
-                writerPromise, GPUConnection.words(halves(at) + [promiseMake, 1, 0, 1]), outputSize: 8)
+                writerPromise, GPUConnection.words(halves(at) + [promiseMake, 1, 0, channel]), outputSize: 8
+            )
         }
-        guard made.0 == KERN_SUCCESS else {
-            _ = maker.call(boFree, GPUConnection.words(halves(handle)), outputSize: 0)
-            throw TestFailure("the writer promise was refused: \(GPUConnection.hex(made.0))")
-        }
-        return (handle, GPUConnection.uint32(made.1, 0))
+        return (made.0, GPUConnection.uint32(made.1, 0))
+    }
+
+    static func cancel(_ promise: UInt32, _ maker: GPUConnection) -> kern_return_t {
+        maker.call(writerPromise, GPUConnection.words([0, 0, promiseCancel, 0, promise, 0]), outputSize: 8).0
     }
 
     func exercise(_ gpu: GPU, _ context: TestContext, _ metrics: inout Metrics) async throws -> [String] {
@@ -68,17 +84,19 @@ struct PromiseCancelPathTest: GPUPathTest {
         defer { _ = maker.call(Self.boFree, GPUConnection.words(Self.halves(handle)), outputSize: 0) }
 
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: Self.size, height: Self.size, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: Self.size, height: Self.size, mipmapped: false
+        )
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = .shared
         guard let source = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0),
-            let copied = gpu.device.makeBuffer(length: rowBytes * Self.size, options: .storageModeShared),
-            let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder()
+              let copied = gpu.device.makeBuffer(length: rowBytes * Self.size, options: .storageModeShared),
+              let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder()
         else { throw TestFailure("no surface texture, buffer or command buffer") }
         blit.copy(
             from: source, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
             sourceSize: MTLSize(width: Self.size, height: Self.size, depth: 1), to: copied, destinationOffset: 0,
-            destinationBytesPerRow: rowBytes, destinationBytesPerImage: rowBytes * Self.size)
+            destinationBytesPerRow: rowBytes, destinationBytesPerImage: rowBytes * Self.size
+        )
         blit.endEncoding()
         let start = DispatchTime.now()
         let cancel = Cancel()
@@ -106,7 +124,8 @@ struct PromiseCancelPathTest: GPUPathTest {
         }
         if afterMs > Self.goesOnMs {
             failures.append(
-                String(format: "the copy ended %.1f ms after the cancel (at most %.0f)", afterMs, Self.goesOnMs))
+                String(format: "the copy ended %.1f ms after the cancel (at most %.0f)", afterMs, Self.goesOnMs)
+            )
         }
         let got = Array(UnsafeRawBufferPointer(start: copied.contents(), count: 4))
         if got != Self.fill { failures.append("the copy read \(got), not the surface's \(Self.fill)") }

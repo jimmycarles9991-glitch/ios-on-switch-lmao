@@ -15,7 +15,7 @@ namespace {
 uint64_t mix(uint64_t key, Kind kind)
 {
     const uint64_t words[2] = {key, uint64_t(kind)};
-    return raw::Pack::fnv(words, sizeof words);
+    return gm20b::Pack::fnv(words, sizeof words);
 }
 
 std::vector<uint32_t> classes(const Record &r)

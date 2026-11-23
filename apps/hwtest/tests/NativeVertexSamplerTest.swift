@@ -11,14 +11,14 @@ struct NativeVertexSamplerTest: NativeObjectTest {
     let name = "Vertex samplers bound by range keep a command buffer raw; a vertex-sampling state draws its texel"
 
     static let samplingSource = """
-        #include <metal_stdlib>
-        using namespace metal;
-        vertex float4 sampled_vertex(uint vid [[vertex_id]], constant float4 *corners [[buffer(0)]],
-                                     texture2d<float> scale [[texture(0)]], sampler s [[sampler(0)]]) {
-            float4 p = corners[vid];
-            return float4(p.xy * scale.sample(s, float2(0.5), level(0)).r, p.zw);
-        }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    vertex float4 sampled_vertex(uint vid [[vertex_id]], constant float4 *corners [[buffer(0)]],
+                                 texture2d<float> scale [[texture(0)]], sampler s [[sampler(0)]]) {
+        float4 p = corners[vid];
+        return float4(p.xy * scale.sample(s, float2(0.5), level(0)).r, p.zw);
+    }
+    """
 
     static func sampler(_ device: MTLDevice, _ filter: MTLSamplerMinMagFilter) throws -> MTLSamplerState {
         let descriptor = MTLSamplerDescriptor()
@@ -40,9 +40,9 @@ struct NativeVertexSamplerTest: NativeObjectTest {
 
     /// Pixels of `target` that differ from green inside [lo, hi) of both axes and from black outside
     static func wrong(_ pixels: [UInt8], size: Int, inside lo: Int, _ hi: Int) -> Int {
-        (0..<size * size).filter { i in
+        (0 ..< size * size).filter { i in
             let (x, y) = (i % size, i / size)
-            let want: [UInt8] = (lo..<hi).contains(x) && (lo..<hi).contains(y) ? [0, 255, 0, 255] : [0, 0, 0, 255]
+            let want: [UInt8] = (lo ..< hi).contains(x) && (lo ..< hi).contains(y) ? [0, 255, 0, 255] : [0, 0, 0, 255]
             return Array(pixels.pixel(x, y, width: size)) != want
         }.count
     }
@@ -57,9 +57,10 @@ struct NativeVertexSamplerTest: NativeObjectTest {
         let bound = try await gpu.run { commands in
             let encoder = commands.makeRenderCommandEncoder(descriptor: Self.pass(target))!
             encoder.setRenderPipelineState(pipeline)
-            encoder.setVertexSamplerStates(samplers, range: 0..<3)
+            encoder.setVertexSamplerStates(samplers, range: 0 ..< 3)
             encoder.setVertexSamplerStates(
-                [samplers[1], samplers[0]], lodMinClamps: [0, 1], lodMaxClamps: [4, 2], range: 3..<5)
+                [samplers[1], samplers[0]], lodMinClamps: [0, 1], lodMaxClamps: [4, 2], range: 3 ..< 5
+            )
             encoder.setVertexSamplerState(samplers[2], index: 5)
             GPU.draw(encoder, corners: GPU.fullScreen, color: SIMD4(0, 1, 0, 1))
             encoder.endEncoding()
@@ -80,7 +81,7 @@ struct NativeVertexSamplerTest: NativeObjectTest {
             let encoder = commands.makeRenderCommandEncoder(descriptor: Self.pass(target))!
             encoder.setRenderPipelineState(sampling)
             encoder.setVertexTexture(half, index: 0)
-            encoder.setVertexSamplerStates([ownSampler], range: 0..<1)
+            encoder.setVertexSamplerStates([ownSampler], range: 0 ..< 1)
             GPU.draw(encoder, corners: GPU.fullScreen, color: SIMD4(0, 1, 0, 1))
             encoder.endEncoding()
         }

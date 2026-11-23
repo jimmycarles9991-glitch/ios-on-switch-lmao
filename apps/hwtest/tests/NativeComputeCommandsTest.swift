@@ -15,7 +15,7 @@ import Metal
 /// command buffer runs what the GPU left. Every command buffer stays raw.
 struct NativeComputeCommandsTest: NativeObjectTest {
     let id = "metal.native.compute_commands"
-    let name = "Indirect command buffers of dispatches: encoded once, executed by range on the raw path"
+    let name = "Indirect command buffers of dispatches: encoded once, executed by range on the driver"
 
     static let count = 100
 
@@ -24,7 +24,7 @@ struct NativeComputeCommandsTest: NativeObjectTest {
 
     static func wrong(_ buffer: MTLBuffer, _ want: UInt32) -> Int {
         let words = buffer.contents().bindMemory(to: UInt32.self, capacity: count)
-        return (0..<count).filter { words[$0] != want }.count
+        return (0 ..< count).filter { words[$0] != want }.count
     }
 
     static func zero(_ buffers: [MTLBuffer]) {
@@ -61,16 +61,19 @@ struct NativeComputeCommandsTest: NativeObjectTest {
             case 0:
                 command.concurrentDispatchThreads(
                     MTLSize(width: Self.count, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1)
+                )
             case 1:
                 command.setBarrier()
                 command.concurrentDispatchThreadgroups(
                     MTLSize(width: 4, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 25, height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: 25, height: 1, depth: 1)
+                )
             default:
                 command.concurrentDispatchThreadgroups(
                     MTLSize(width: 1, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: Self.count, height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: Self.count, height: 1, depth: 1)
+                )
             }
         }
         commands.indirectComputeCommandAt(3).reset()
@@ -82,8 +85,8 @@ struct NativeComputeCommandsTest: NativeObjectTest {
         }
 
         for (name, range, want) in [
-            ("whole", 0..<4, [(a, Self.folded([1, 2])), (b, Self.folded([3])), (c, UInt32(0))]),
-            ("third", 2..<3, [(a, UInt32(0)), (b, Self.folded([3])), (c, UInt32(0))]),
+            ("whole", 0 ..< 4, [(a, Self.folded([1, 2])), (b, Self.folded([3])), (c, UInt32(0))]),
+            ("third", 2 ..< 3, [(a, UInt32(0)), (b, Self.folded([3])), (c, UInt32(0))]),
         ] {
             Self.zero([a, b, c])
             let timing = try await gpu.run { buffer in
@@ -123,9 +126,11 @@ struct NativeComputeCommandsTest: NativeObjectTest {
         inheritsPipeline.maxKernelBufferBindCount = 2
         guard
             let buffers = device.makeIndirectCommandBuffer(
-                descriptor: inheritsBuffers, maxCommandCount: 1, options: []),
+                descriptor: inheritsBuffers, maxCommandCount: 1, options: []
+            ),
             let pipelines = device.makeIndirectCommandBuffer(
-                descriptor: inheritsPipeline, maxCommandCount: 1, options: [])
+                descriptor: inheritsPipeline, maxCommandCount: 1, options: []
+            )
         else { throw TestFailure("makeIndirectCommandBuffer returned nil for inherited state") }
         work.objects += [buffers, pipelines]
         let group = MTLSize(width: 1, height: 1, depth: 1), threads = MTLSize(width: Self.count, height: 1, depth: 1)
@@ -140,9 +145,9 @@ struct NativeComputeCommandsTest: NativeObjectTest {
             encoder.setComputePipelineState(pipeline)
             encoder.setBuffer(a, offset: 0, index: 0)
             encoder.setBuffer(two, offset: 0, index: 1)
-            encoder.executeCommandsInBuffer(buffers, range: 0..<1)
+            encoder.executeCommandsInBuffer(buffers, range: 0 ..< 1)
             encoder.memoryBarrier(scope: .buffers)
-            encoder.executeCommandsInBuffer(pipelines, range: 0..<1)
+            encoder.executeCommandsInBuffer(pipelines, range: 0 ..< 1)
             encoder.endEncoding()
         }
         work.paths.append(inherited.path)
@@ -155,15 +160,15 @@ struct NativeComputeCommandsTest: NativeObjectTest {
             encoder.setComputePipelineState(pipeline)
             encoder.setBuffer(a, offset: 0, index: 0)
             encoder.setBuffer(one, offset: 0, index: 1)
-            encoder.executeCommandsInBuffer(buffers, range: 0..<1)
+            encoder.executeCommandsInBuffer(buffers, range: 0 ..< 1)
             encoder.memoryBarrier(scope: .buffers)
             encoder.setBuffer(c, offset: 0, index: 0)
             encoder.setBuffer(offset, offset: 16, index: 1)
-            encoder.executeCommandsInBuffer(buffers, range: 0..<1)
+            encoder.executeCommandsInBuffer(buffers, range: 0 ..< 1)
             encoder.memoryBarrier(scope: .buffers)
-            encoder.executeCommandsInBuffer(pipelines, range: 0..<1)
+            encoder.executeCommandsInBuffer(pipelines, range: 0 ..< 1)
             encoder.memoryBarrier(scope: .buffers)
-            encoder.executeCommandsInBuffer(pipelines, range: 0..<1)
+            encoder.executeCommandsInBuffer(pipelines, range: 0 ..< 1)
             encoder.endEncoding()
         }
         work.paths.append(rebound.path)
@@ -172,11 +177,11 @@ struct NativeComputeCommandsTest: NativeObjectTest {
         Self.zero([a, b, c])
         let edited = try await gpu.run { buffer in
             let blit = buffer.makeBlitCommandEncoder()!
-            blit.resetCommandsInBuffer(commands, range: 0..<1)
-            blit.copyIndirectCommandBuffer(commands, sourceRange: 1..<2, destination: commands, destinationIndex: 3)
+            blit.resetCommandsInBuffer(commands, range: 0 ..< 1)
+            blit.copyIndirectCommandBuffer(commands, sourceRange: 1 ..< 2, destination: commands, destinationIndex: 3)
             blit.endEncoding()
             let encoder = buffer.makeComputeCommandEncoder()!
-            encoder.executeCommandsInBuffer(commands, range: 0..<4)
+            encoder.executeCommandsInBuffer(commands, range: 0 ..< 4)
             encoder.endEncoding()
         }
         work.paths.append(edited.path)
@@ -187,7 +192,8 @@ struct NativeComputeCommandsTest: NativeObjectTest {
         metrics.set(
             "patches",
             device.makeIndirectCommandBuffer(descriptor: patches, maxCommandCount: 1, options: []) == nil
-                ? "nil" : "made")
+                ? "nil" : "made"
+        )
         return work
     }
 }

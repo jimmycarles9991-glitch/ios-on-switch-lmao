@@ -130,11 +130,7 @@ fn notes() -> Vec<(&'static str, Ledger)> {
             NativeHalfQuantize,
             HalfOutputPrecision,
         ],
-        NotBuilt: [
-            ExtendedRangeBlendSource,
-            ExtendedRangeFloatBlendSource,
-            BicubicFilterArithmetic,
-        ],
+        NotBuilt: [BicubicFilterArithmetic],
         OptIn: [DeviceUnorm8LinearFilter, UnorderedFramebufferFetch],
         DeviceGap: [
             DeviceDenormals,

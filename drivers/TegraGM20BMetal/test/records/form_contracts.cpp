@@ -1,18 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Two contracts of a pack's form records, which the runtime emits as they are:
 //  - a fetch-free form blends each colour it draws on FetchBlend with its own registers (SET_BLEND(j) on), and names the
-//    iterated blend program of a colour it draws on FetchIteratedBlend (raw_pack.h PipelineFetchFreeForm);
-//  - a storage record with depth or stencil tests and no shader tests has early tests on (raw_storage.h
+//    iterated blend program of a colour it draws on FetchIteratedBlend (pack.h PipelineFetchFreeForm);
+//  - a storage record with depth or stencil tests and no shader tests has early tests on (storage.h
 //    usableStorageMetadata refuses it otherwise).
 //   form_contracts <pack.bin>
 #include <cstdio>
 #include <map>
 #include <string>
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_pack.h"
+#include "drivers/TegraGM20BMetal/pack.h"
 
 namespace {
 
-using namespace raw;
+using namespace gm20b;
 
 constexpr uint32_t kBlend = 0x1360, kEarlyTests = 0x0210;
 

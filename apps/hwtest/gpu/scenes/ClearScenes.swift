@@ -3,8 +3,8 @@ import HWTestCore
 import Metal
 
 /// Load-action clears of every common format into private (block-linear where the shape tiles) targets, small and
-/// large, read back by the blit engine. A pass with nothing but a clear needs no pipeline state, so on the raw facade
-/// it is the raw path's own: its fast clears and the kernel's zero-bandwidth-clear table (ZBC, method 19), whose
+/// large, read back by the blit engine. A pass with nothing but a clear needs no pipeline state, so on the facade
+/// it is the driver's own: its fast clears and the kernel's zero-bandwidth-clear table (ZBC, method 19), whose
 /// few entries the many distinct colours here overflow, so both kinds of clear run.
 struct ClearFormatsScene: GPUScene {
     let id = "gpu.clear.formats"
@@ -43,7 +43,8 @@ struct ClearFormatsScene: GPUScene {
                         "\(format.rawValue) \(width)x\(height) clear \(value.map { "\($0)" }.joined(separator: ","))",
                         bytes: got, expected: Patterns.repeated(texel, count: width * height),
                         format: format, width: width, height: height,
-                        tolerance: format.step(near: value.max() ?? 1) * 1.01)
+                        tolerance: format.step(near: value.max() ?? 1) * 1.01
+                    )
                 }
             }
         }
@@ -87,7 +88,8 @@ struct ClearFormatsScene: GPUScene {
             pass.colorAttachments[0].texture = target
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: Double(value[0]), green: Double(value[1]), blue: Double(value[2]), alpha: Double(value[3]))
+                red: Double(value[0]), green: Double(value[1]), blue: Double(value[2]), alpha: Double(value[3])
+            )
             pass.colorAttachments[0].storeAction = .store
         }
         return pass
@@ -95,7 +97,7 @@ struct ClearFormatsScene: GPUScene {
 }
 
 /// A large target cleared (raw on the facade, compressible and ZBC-cleared where the kernel compresses), drawn over
-/// in part by a pipeline of the app's own (m2v on the facade, through its alias of the raw path's memory), cleared
+/// in part by a pipeline of the app's own (m2v on the facade, through its alias of the driver's memory), cleared
 /// again and loaded and drawn again: each step read back whole. A draw that sees the cleared memory in another
 /// compression state or layout than the clear left it shows up as blocks or streaks here.
 struct ClearThenDrawScene: GPUScene {
@@ -124,7 +126,8 @@ struct ClearThenDrawScene: GPUScene {
                         pass.colorAttachments[0].loadAction = .clear
                         pass.colorAttachments[0].clearColor = MTLClearColor(
                             red: Double(clear[0]), green: Double(clear[1]), blue: Double(clear[2]),
-                            alpha: Double(clear[3]))
+                            alpha: Double(clear[3])
+                        )
                     } else {
                         pass.colorAttachments[0].loadAction = .load
                     }
@@ -134,7 +137,8 @@ struct ClearThenDrawScene: GPUScene {
                         let r = step.rect
                         GPU.draw(
                             encoder, corners: GPU.pixelQuad(r[0], r[1], r[2], r[3], width: width, height: height),
-                            color: SIMD4(step.color[0], step.color[1], step.color[2], step.color[3]))
+                            color: SIMD4(step.color[0], step.color[1], step.color[2], step.color[3])
+                        )
                     }
                     encoder.endEncoding()
                 }
@@ -143,8 +147,8 @@ struct ClearThenDrawScene: GPUScene {
                 }
                 if !step.rect.isEmpty {
                     let r = step.rect
-                    for y in r[1]..<r[3] {
-                        for x in r[0]..<r[2] { for c in 0..<4 { model[x, y, c] = step.color[c] } }
+                    for y in r[1] ..< r[3] {
+                        for x in r[0] ..< r[2] { for c in 0 ..< 4 { model[x, y, c] = step.color[c] } }
                     }
                 }
                 let got = try await gpu.raster(target, format)

@@ -27,7 +27,7 @@ round_output(nir_builder *b, nir_intrinsic_instr *store, void *data)
 
    b->cursor = nir_before_instr(&store->instr);
    nir_def *value = store->src[1].ssa;
-   nir_src_rewrite(&store->src[1], nir_f2f32(b, nir_f2f16_rtne(b, value)));
+   nir_src_rewrite(&store->src[1], nir_f2f32(b, nir_f2f16_rtz(b, value)));
    return true;
 }
 

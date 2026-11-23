@@ -6,7 +6,7 @@ index in the buffer SET_BINDLESS_TEXTURE names), the coordinates (an array's ind
 1 zero, 2 bias, 3 level) and its value, the depth reference, the offsets and the dimension (TEX's encoding). Field
 layouts are NAK's sm50.rs; TEXS's targets, masks and F16 packing those of the Switch emulators' decoder
 (texture_fetch_swizzled.cpp). A TEXS.F16 result is the f32 one rounded to the nearest half, ties to even: the
-assumption a pack may hold only once the device's probe has shown it (raw_chip_facts.h). A texel load (TLD, TLDS) is
+assumption a pack may hold only once the device's probe has shown it (chip_facts.h). A texel load (TLD, TLDS) is
 keyed alike by its handle, integer coordinates, level, offsets, sample and dimension; TLDS's targets are nv50_ir's
 getTLDSTarget's (NAK's sm50/texs.rs tlds_target), its operands where texture_load_swizzled.cpp reads them.
 """

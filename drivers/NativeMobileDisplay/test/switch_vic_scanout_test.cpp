@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
+#include "../../TegraDisplayFlip/TegraScanoutCopy.h"
 #include "../../TegraVIC/SwitchVICScanoutConvert.h"
 #include "bazel/testing/source_text.h"
 
@@ -60,7 +63,6 @@ public:
 };
 
 constexpr int kIOReturnAborted = -14;
-constexpr int TEGRA_SCANOUT_SOURCE_LOST = -5;
 constexpr uint32_t kNativeBlockWidth = 720, kNativeBlockHeight = 1280, kScanBlockLog2 = 4;
 constexpr uint64_t kNativeBlockStride = 2880, kNativeBlockBytes = 0x384000;
 
@@ -71,6 +73,7 @@ uint64_t sourcePages[2048];
 bool vicUp = true;
 unsigned refusals, fences, placed, swapStages, snapshots;
 int placeError, fenceError, completedStatus = 1;
+int sourceStatus = 1, sourceWhy, windowBStatus = 1, windowBWhy;  // a producer's status, and why it failed
 switch_gpu_cpu_lease sourceLease, targetLease;
 switch_gpu_backing sourceBacking = {0x90000000, 2048, 1}, windowB = {0xa0000000, 256, 1};
 TegraVICImage placedImage, placedLayout;
@@ -118,11 +121,13 @@ IOMemoryDescriptor *native_legacy_surface_descriptor(OSObject *)
     return &descriptor;
 }
 
-void native_legacy_gpu_complete(void *, int status)
+}  // namespace
+
+// TegraScanoutCopy.h's: the completion VIC's fence delivers.
+extern "C" void native_legacy_gpu_complete(void *, int status)
 {
     completedStatus = status;
 }
-}  // namespace
 
 extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages, uint32_t count, uint32_t, void *,
                                                            void (*)(void *))
@@ -178,6 +183,18 @@ int switch_vic_scanout_place(const SwitchNativeScanout *source, const TegraVICIm
     return 0;
 }
 
+// The producers a failed job ran behind: the source's (job 41) and window B's (job 12).
+extern "C" int switch_gpu_backing_tokens_failure(const switch_gpu_backing_token *tokens, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        if (tokens[i].value == 41 && sourceStatus < 0)
+            return sourceWhy;
+        if (tokens[i].value == 12 && windowBStatus < 0)
+            return windowBWhy;
+    }
+    return 0;
+}
+
 extern "C" int switch_host1x_token_fence(const switch_gpu_backing_token *tokens, uint32_t count,
                                          void (*completed)(void *, int), void *)
 {
@@ -192,7 +209,8 @@ namespace {
 struct Display {
     static constexpr unsigned kScanBuffers = 3;
     static constexpr int kNoBuffer = -1;
-    static constexpr unsigned kGpuCopyDeadlineMS = 1000, kGpuCopyDeadlines = 10;
+    static constexpr unsigned kGpuCopyDeadlineMS = 10000;
+    static constexpr size_t swapId = offsetof(OriginalLegacySwapRequest, id);
 
     struct Ring {
         int free = 1, claimed = kNoBuffer, released = 0;
@@ -261,7 +279,7 @@ struct Display {
     Slot planeSlots[8] = {};
     Timer *gpuDeadline = &timer;
     Source *copySource = &source;
-    unsigned presented = 0, retiredUnshown = 0, retired = 0, kicks = 0, lost = 0, taken = 0, finished = 0;
+    unsigned presented = 0, retiredUnshown = 0, retired = 0, kicks = 0, unshown = 0, taken = 0, finished = 0;
     int armedFor = -1;
     switch_gpu_backing_token waiterFor = {};
     unsigned waiters = 0;
@@ -287,9 +305,9 @@ struct Display {
         ++presented;
     }
 
-    void dropLostFrame(const OriginalLegacySwapRequest *, int)
+    void retireSwapUnshown(const OriginalLegacySwapRequest *, int)
     {
-        ++lost;
+        ++unshown;
     }
 
     void releaseIdleDirectReads()
@@ -308,6 +326,23 @@ struct Display {
     const OriginalLegacySwapRequest *pendingSwapRequest() const
     {
         return pending;
+    }
+
+    static const OriginalLegacySwapRequest *queuedAfter(const OriginalLegacySwapRequest *)
+    {
+        return nullptr;
+    }
+
+    static constexpr unsigned kPlaneDependencies = 4;
+
+    // The window B producers the flip orders after (SwitchNativePlaneDisplay.h): one per overlay that has a writer.
+    unsigned planeDependencies(const PlaneSet &p, switch_gpu_backing_token *tokens) const
+    {
+        unsigned count = 0;
+        for (const auto &overlay : p.window)
+            if (overlay.on && planeSlots[overlay.slot].native)
+                tokens[count++] = planeSlots[overlay.slot].native->view.producer;
+        return count;
     }
 
     void finishTransfer(const OriginalLegacySwapRequest *, bool)
@@ -332,6 +367,7 @@ struct Display {
         ++waiters;
     }
 
+#include "../SwitchUnshownSource.h"
 #include "../SwitchVICScanoutDisplay.h"
 
     ~Display()
@@ -354,6 +390,8 @@ protected:
         refusals = fences = placed = swapStages = snapshots = 0;
         placeError = fenceError = 0;
         completedStatus = 1;
+        sourceStatus = windowBStatus = 1;
+        sourceWhy = windowBWhy = 0;
         descriptor.pa = 0x90000000;
         for (uint32_t i = 0; i < 2048; ++i)
             sourcePages[i] = 0x90000000 + (uint64_t(i) << 12);
@@ -468,10 +506,8 @@ TEST_F(VicScanout, AFailedJobIsNeverFlippedToAndItsSwapRetires)
     EXPECT_EQ(completedStatus, -95);
     ASSERT_TRUE(display.finishVicCopy(completedStatus));
     EXPECT_EQ(display.presented, 0u);
-    EXPECT_EQ(display.ring.released, 1);
-    EXPECT_EQ(display.retiredUnshown, 1u);
-    EXPECT_EQ(display.kicks, 1u);
-    EXPECT_FALSE(display.transferred);
+    EXPECT_EQ(display.unshown, 1u);
+    EXPECT_FALSE(display.gpuScanout);
     EXPECT_EQ(refusals, 1u);
     EXPECT_EQ(surface.refs, 1);
 }
@@ -488,19 +524,63 @@ TEST_F(VicScanout, ASnapshotOfOtherPagesThanTheSwapsIsNotCopied)
     EXPECT_EQ(refusals, 2u);
 }
 
-TEST_F(VicScanout, ALostSourceIsTheGpuDriversLostFrame)
+// A VIC job that ran on a failed source ends with that source's plain failure: the source's producer says why. Its
+// writer's client gone, the swap retires unshown with no refusal of VIC's.
+TEST_F(VicScanout, AJobOnASourceWhoseWriterIsGoneRetiresItsSwapUnshown)
 {
     ASSERT_TRUE(offer(3072));
     ASSERT_TRUE(display.vicCopyWork());
-    ASSERT_TRUE(display.finishVicCopy(SWITCH_GPU_BACKING_DEPENDENCY_FAILED));
-    EXPECT_EQ(display.lost, 1u);
+    sourceStatus = -5;
+    sourceWhy = TEGRA_SCANOUT_SOURCE_GONE;
+    ASSERT_TRUE(display.finishVicCopy(-5));
+    EXPECT_EQ(display.unshown, 1u);
+    EXPECT_EQ(display.presented, 0u);
+    EXPECT_EQ(refusals, 0u);
+    EXPECT_EQ(surface.refs, 1);
 }
 
-TEST_F(VicScanout, AJobVicNeverEndsPanicsAfterTenDeadlines)
+// The source's accepted work failed on the GPU (a compositor's channel killed), or VIC failed on a sound source: the
+// kernel's own failure.
+TEST_F(VicScanout, AJobOnALostSourceOrVicsOwnFailurePanics)
 {
     ASSERT_TRUE(offer(3072));
-    for (unsigned i = 1; i < Display::kGpuCopyDeadlines; ++i)
-        EXPECT_TRUE(display.vicCopyLate());
+    ASSERT_TRUE(display.vicCopyWork());
+    sourceStatus = -5;
+    sourceWhy = TEGRA_SCANOUT_SOURCE_LOST;
+    EXPECT_THROW(display.finishVicCopy(-5), std::runtime_error);
+    display.ring.release();
+    ASSERT_TRUE(offer(3072));
+    ASSERT_TRUE(display.vicCopyWork());
+    sourceStatus = 1;
+    EXPECT_THROW(display.finishVicCopy(-5), std::runtime_error);
+    EXPECT_EQ(display.unshown, 0u);
+}
+
+// A job that failed behind a window B surface the flip also shows: that surface's producer says why, not VIC.
+TEST_F(VicScanout, AJobBehindAGoneWindowBWriterRetiresItsSwapUnshown)
+{
+    SwitchNativeScanout shown = {};
+    shown.lease = &sourceLease;
+    shown.view.native = &windowB;
+    shown.view.producer = {12, 1, SWITCH_GPU_ENGINE_GM20B, 4};
+    display.planeSlots[2].native = &shown;
+    display.planeNext.window[0] = {true, 2};
+    display.planeNextSet = true;
+    ASSERT_TRUE(offer(3072));
+    ASSERT_TRUE(display.vicCopyWork());
+    windowBStatus = -5;
+    windowBWhy = TEGRA_SCANOUT_SOURCE_GONE;
+    ASSERT_TRUE(display.finishVicCopy(-5));
+    EXPECT_EQ(display.unshown, 1u);
+    EXPECT_EQ(refusals, 0u);
+    EXPECT_EQ(windowB.refs, 1u);
+}
+
+// VIC's completion is a syncpoint interrupt: one deadline, and one that passes with the job still VIC's is a lost
+// interrupt, never a wait extended.
+TEST_F(VicScanout, AJobVicNeverEndsPanicsAtItsDeadline)
+{
+    ASSERT_TRUE(offer(3072));
     EXPECT_THROW(display.vicCopyLate(), std::runtime_error);
 }
 
@@ -544,9 +624,9 @@ TEST_F(VicScanout, TheKickTriesVicAfterTheGpuCopyAndBeforeTheCpu)
                 testing::HasSubstr("    void copyWork()\n    {\n        if (vicCopyWork())\n            return;"));
     EXPECT_THAT(source,
                 testing::HasSubstr("    void finishGpuSwap(int status)\n    {\n        if (finishVicCopy(status))"));
-    EXPECT_THAT(source,
-                testing::HasSubstr("    void gpuDeadlineCheck()\n    {\n        if (!gpuScanout)\n            return;\n"
-                                   "        if (vicCopyLate())\n            return;"));
+    EXPECT_THAT(source, testing::HasSubstr("    void gpuDeadlineCheck()\n    {\n        if (!gpuScanout || "
+                                           "__atomic_load_n(&gpuDonePending, __ATOMIC_ACQUIRE))\n            return;\n"
+                                           "        vicCopyLate();"));
     EXPECT_THAT(source, testing::HasSubstr("        startGpuCopy();\n        startVicCopy();"));
     EXPECT_THAT(source, testing::HasSubstr("                self->stopVicCopy();"));
 }

@@ -3,9 +3,9 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.predication's loops (drivers/TegraGM20BMetal/raw/runtime/raw_loop_copies.h): Whiles that count down a
+/// gpu.gm20b.predication's loops (drivers/TegraGM20BMetal/loop_copies.h): Whiles that count down a
 /// GPU-written word from 0, 1, a data-dependent 37, the copies' bound less one and the bound; a DoWhile that runs
-/// once; a While inside a While; then a While one past the bound, which the raw path lays down again from its
+/// once; a While inside a While; then a While one past the bound, which the driver lays down again from its
 /// completion and so must run to its end, and the GPU time a copy after the loop's end costs (one fetch where the
 /// fetcher sees the heads the copies write).
 struct PredicationLoops {
@@ -48,14 +48,16 @@ struct PredicationLoops {
         e.setBytes(&pair, length: 8, index: 1)
         e.dispatchThreadgroups(
             MTLSize(width: 1, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+            threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+        )
         e.memoryBarrier(scope: .buffers)
     }
 
     func startWhile(_ e: MTLComputeCommandEncoder, word: Int) {
         let o = e as AnyObject
         unsafeBitCast(o.method(for: Self.startWhile), to: StartWhile.self)(
-            o, Self.startWhile, words, 4 * word, Self.notEqual, 0)
+            o, Self.startWhile, words, 4 * word, Self.notEqual, 0
+        )
     }
 
     mutating func endWhile(_ e: MTLComputeCommandEncoder) {
@@ -82,7 +84,9 @@ struct PredicationLoops {
         one(e, count, marks, doMark, 1)
         ends.append(
             unsafeBitCast(o.method(for: Self.endDoWhile), to: EndDoWhile.self)(
-                o, Self.endDoWhile, words, 4 * doWord, Self.notEqual, 0))
+                o, Self.endDoWhile, words, 4 * doWord, Self.notEqual, 0
+            )
+        )
         let outerWord = doWord + 1, innerWord = doWord + 2, nestedMark = doMark + 1
         one(e, store, words, outerWord, Self.nestedOuter)
         startWhile(e, word: outerWord)
@@ -107,7 +111,7 @@ struct PredicationLoops {
         metrics.set("nested_runs", Int(nested))
         metrics.set("loop_ends_yes", "\(ends.filter { $0 }.count)/\(ends.count)")
         metrics.set("loop_gpu_ms", ran.gpuMilliseconds)
-        if ran.path != "raw" { wrong.append("loop_path") }
+        if ran.path != "gm20b" { wrong.append("loop_path") }
         if counted != Self.counts { wrong.append("loop_counts") }
         if doOnce != 1 { wrong.append("dowhile") }
         if nested != Self.nestedOuter * Self.nestedInner { wrong.append("nested") }
@@ -122,7 +126,7 @@ struct PredicationLoops {
         let pastRuns = marks.contents().bindMemory(to: UInt32.self, capacity: 1)[0]
         metrics.set("overflow", past.path.hasPrefix("error:") ? "error" : past.path)
         metrics.set("overflow_runs", Int(pastRuns))
-        if past.path != "raw" || pastRuns != Self.bound + 1 { wrong.append("overflow") }
+        if past.path != "gm20b" || pastRuns != Self.bound + 1 { wrong.append("overflow") }
 
         let plain = try await gpu.run { commands in
             let e = commands.makeComputeCommandEncoder()!

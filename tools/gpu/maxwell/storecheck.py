@@ -27,9 +27,9 @@ from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'drivers/TegraGM20BMetal/raw/pack'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'drivers/TegraGM20BMetal/pack'))
 
-import rawpack
+import make_pack
 
 from tools.gpu.maxwell import isa, nakstat, rungcheck
 from tools.gpu.maxwell.interp import Inputs, UnsupportedError
@@ -37,10 +37,10 @@ from tools.gpu.maxwell.quad import LANES, run_quad
 
 DELTA = 0.25
 HANDLE = 0x5E7C0000  # a fetched colour's handle word: this, its colour in the low byte
-ENTRY_FETCH = 3  # runtime/raw_pack.h EntryFetch
+ENTRY_FETCH = 3  # runtime/pack.h EntryFetch
 CBUF_SET = 3  # PackCbufType CbufSet
 STORAGE_METADATA, SKIPPED = 8, 2 | 16 | 32  # PipelineStorageMetadata; barrier, variant and fetch-free records
-# PackPipeline past its head: entry[32], pushMask, pushWords[32], blendColorWord, halfBlendColorWord, iterated
+# PackPipeline past its head: entry[32], pushMask, pushWords[32], halfBlendColorWord, iterated
 STORAGE_MASKS = 8 * 32 + 4 + 4 * 32 + 4
 PROGRAM = struct.Struct('<IIIII')  # PackProgram: heapOffset, program, bytes, dataOffset, dataBytes
 
@@ -184,7 +184,7 @@ def main() -> None:
     for path in a.corpus:
         for line in path.read_text().splitlines():
             if line.startswith('R ok=1 ') and a.library in line:
-                functions[nakstat.fnv(rawpack.state_key(line).encode())] = line.split('| f ')[1].split()[0]
+                functions[nakstat.fnv(make_pack.state_key(line).encode())] = line.split('| f ')[1].split()[0]
     tally = collections.Counter()
     for r in records(a.pack, set(functions)):
         try:

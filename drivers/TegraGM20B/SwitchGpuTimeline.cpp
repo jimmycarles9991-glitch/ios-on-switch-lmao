@@ -23,6 +23,9 @@ namespace
 switch_gpu_timeline *timelines;
 uint32_t semantic_count;
 
+// terminal's high half: why the timeline ended, its low half the last seqno it completed
+constexpr uint64_t kClosed = 1, kKilled = 2, kCompositorKilled = 3;
+
 void fail_locked(switch_gpu_timeline *timeline, uint32_t value)
 {
 	if (failed_locked(timeline, value))
@@ -228,6 +231,24 @@ int retain(const switch_gpu_backing_token *token)
 	return timeline ? 0 : -19;
 }
 
+// Why a failed token failed (switch_gpu_backing_register_failure). A compositor channel's kill is the kernel's own
+// failure; any other kill and a teardown end that client's frame. A producer's failure never fails its waiters' work
+// (switch_gpu_event_waits_producers_locked).
+int failure(const switch_gpu_backing_token *token)
+{
+	IOLockLock(lock);
+	const auto *timeline = find(token);
+	const uint64_t terminal =
+		timeline ? __atomic_load_n(&timeline->terminal, __ATOMIC_ACQUIRE) : 0;
+	IOLockUnlock(lock);
+	if (!timeline)
+		return 0;
+	if (terminal && int32_t(uint32_t(terminal) - uint32_t(token->value)) < 0 &&
+	    terminal >> 32 == kCompositorKilled)
+		return SWITCH_GPU_BACKING_WRITER_FAILED;
+	return SWITCH_GPU_BACKING_WRITER_GONE;
+}
+
 void release(const switch_gpu_backing_token *token)
 {
 	IOLockLock(lock);
@@ -262,7 +283,9 @@ extern "C" int switch_gpu_timeline_init(void)
 						       switch_gpu_timeline_held_status};
 	const int refs_result =
 		switch_gpu_backing_register_timeline_refs(SWITCH_GPU_ENGINE_GM20B, &refs);
-	return refs_result == -16 ? 0 : refs_result;
+	if (refs_result && refs_result != -16)
+		return refs_result;
+	return switch_gpu_backing_register_failure(SWITCH_GPU_ENGINE_GM20B, failure);
 }
 
 extern "C" switch_gpu_timeline *switch_gpu_timeline_create(uint64_t uid,
@@ -283,7 +306,8 @@ extern "C" switch_gpu_timeline *switch_gpu_timeline_create(uint64_t uid,
 	return timeline;
 }
 
-extern "C" void switch_gpu_timeline_failed(switch_gpu_timeline *timeline, uint32_t completed)
+extern "C" void switch_gpu_timeline_failed(switch_gpu_timeline *timeline, uint32_t completed,
+					   int compositor)
 {
 	if (!timeline)
 		return;
@@ -292,7 +316,8 @@ extern "C" void switch_gpu_timeline_failed(switch_gpu_timeline *timeline, uint32
 					 ? completed
 					 : __atomic_load_n(timeline->visible, __ATOMIC_ACQUIRE);
 	__atomic_store_n(&timeline->terminal_visible, visible, __ATOMIC_RELEASE);
-	__atomic_compare_exchange_n(&timeline->terminal, &expected, (uint64_t(1) << 32) | completed,
+	__atomic_compare_exchange_n(&timeline->terminal, &expected,
+				    ((compositor ? kCompositorKilled : kKilled) << 32) | completed,
 				    false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 	switch_gpu_backing_completed();
 }
@@ -308,7 +333,7 @@ extern "C" void switch_gpu_timeline_close(switch_gpu_timeline *timeline)
 		__atomic_store_n(&timeline->terminal_visible,
 				 __atomic_load_n(timeline->visible, __ATOMIC_ACQUIRE),
 				 __ATOMIC_RELEASE);
-	__atomic_compare_exchange_n(&timeline->terminal, &expected, (uint64_t(1) << 32) | completed,
+	__atomic_compare_exchange_n(&timeline->terminal, &expected, (kClosed << 32) | completed,
 				    false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 	// the present filter reads the fence with no lock (physical_now)
 	__atomic_store_n(&timeline->fence, nullptr, __ATOMIC_RELEASE);

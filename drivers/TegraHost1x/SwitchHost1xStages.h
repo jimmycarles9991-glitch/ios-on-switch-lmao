@@ -30,29 +30,50 @@
 #include "TegraHost1x.h"
 #include "../TegraGM20B/SwitchGpuBridge.h"
 
-// The other host1x engines' jobs a job's stream waits for by syncpoint: the newest of each engine's, since a
-// cancellation fails every job queued behind the one that stalled.
+// The other host1x engines' jobs a job's stream waits for by syncpoint, a slot per engine: each engine has one job
+// syncpoint, so its newest job stands for every older one (the syncpoint passes them first, and a cancellation fails
+// every job queued behind the one that stalled).
 struct SwitchHost1xProducers {
-    static constexpr uint32_t kMax = 3;  // NVDEC, VIC and NVENC, a syncpoint each
+    static constexpr uint32_t kEngines[] = {SWITCH_GPU_ENGINE_VIC, SWITCH_GPU_ENGINE_NVDEC, SWITCH_GPU_ENGINE_NVENC};
+    static constexpr uint32_t kMax = sizeof(kEngines) / sizeof(kEngines[0]);
     switch_gpu_backing_token tokens[kMax] = {};
-    uint32_t count = 0;
 
-    void add(const switch_gpu_backing_token &token)
+    // False: the token is not a host1x engine's job.
+    bool add(const switch_gpu_backing_token &token)
     {
-        for (uint32_t i = 0; i < count; ++i)
-            if (tokens[i].engine == token.engine && tokens[i].queue == token.queue) {
-                if (token.value > tokens[i].value)
+        for (uint32_t i = 0; i < kMax; ++i)
+            if (kEngines[i] == token.engine) {
+                if (!held(i) || token.value > tokens[i].value)
                     tokens[i] = token;
-                return;
+                return true;
             }
-        if (count < kMax)
-            tokens[count++] = token;
+        return false;
+    }
+
+    bool held(uint32_t slot) const
+    {
+        return tokens[slot].engine != 0;
+    }
+
+    // Held, and not the job of the engine whose job syncpoint is `syncpt`: that engine's stream waits for it, where its
+    // own jobs are ordered by its channel.
+    bool foreign(uint32_t slot, uint32_t syncpt) const
+    {
+        return held(slot) && tokens[slot].queue != syncpt;
+    }
+
+    uint32_t foreignCount(uint32_t syncpt) const
+    {
+        uint32_t count = 0;
+        for (uint32_t i = 0; i < kMax; ++i)
+            count += foreign(i, syncpt);
+        return count;
     }
 
     int failure() const
     {
-        for (uint32_t i = 0; i < count; ++i) {
-            const int physical = switch_gpu_backing_token_physical_status(&tokens[i], 0);
+        for (uint32_t i = 0; i < kMax; ++i) {
+            const int physical = held(i) ? switch_gpu_backing_token_physical_status(&tokens[i], 0) : 0;
             if (physical < 0 && physical != SWITCH_GPU_BACKING_STALE)
                 return physical;
         }
@@ -93,9 +114,7 @@ public:
         stage.producers = producers;
         stage.bridgeSyncpt = bridgeSyncpt;
         stage.bridgeThreshold = bridgeThreshold;
-        uint32_t own = bridge ? 1 : 0;
-        for (uint32_t i = 0; i < producers.count; ++i)
-            own += producers.tokens[i].queue != syncpt;
+        const uint32_t own = (bridge ? 1 : 0) + producers.foreignCount(syncpt);
         stage.hardware = 1 + own;
         stage.inputs = own + 1;  // and start's own hold on them, given back once every input is armed
         stage.successor = kNoSuccessor;
@@ -122,8 +141,8 @@ public:
         }
         if (const int error = switch_host1x_fence_add(&stage.fence, 0))
             return error;
-        for (uint32_t i = 0; i < producers.count; ++i) {
-            if (producers.tokens[i].queue == syncpt)
+        for (uint32_t i = 0; i < SwitchHost1xProducers::kMax; ++i) {
+            if (!producers.foreign(i, syncpt))
                 continue;
             auto &input = stage.produced[i];
             input.slot = slot;
@@ -172,14 +191,27 @@ public:
         return true;
     }
 
+    // Engine::physical's, for a failed result, before it releases the job's bridge: the first of the job's inputs that
+    // failed says why (its GPU producers through the bridge, its host1x producers); none did, the job's own failure.
+    static int why(uint32_t slot, const switch_gpu_bridge *bridge)
+    {
+        const int input = bridge ? switch_gpu_bridge_why(bridge) : 0;
+        if (input)
+            return input;
+        const int host1x =
+            switch_gpu_backing_tokens_failure(stages[slot].producers.tokens, SwitchHost1xProducers::kMax);
+        return host1x ? host1x : SWITCH_GPU_BACKING_WRITER_FAILED;
+    }
+
     static bool producerCancelled(uint32_t slot, uint32_t syncpt, uint32_t reached, bool sourceFailed = false)
     {
         auto &stage = stages[slot];
         bool failed = sourceFailed || __atomic_load_n(&stage.physical, __ATOMIC_ACQUIRE) < 0 ||
                       (stage.bridgeSyncpt == syncpt && static_cast<int32_t>(stage.bridgeThreshold - reached) > 0);
-        for (uint32_t i = 0; i < stage.producers.count && !failed; ++i) {
+        for (uint32_t i = 0; i < SwitchHost1xProducers::kMax && !failed; ++i) {
             const auto &token = stage.producers.tokens[i];
-            failed = token.queue == syncpt && static_cast<int32_t>(uint32_t(token.value) - reached) > 0;
+            failed = stage.producers.held(i) && token.queue == syncpt &&
+                     static_cast<int32_t>(uint32_t(token.value) - reached) > 0;
         }
         failed = failed || stage.producers.failure() < 0;
         if (failed)

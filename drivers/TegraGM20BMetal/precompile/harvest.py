@@ -14,39 +14,34 @@ usage: harvest.py <corpus.log> --build <IPSW build> <pipelines.log>...
                   [--open <container UUID>]... [--open-all]
 
 --build   the OS build the journals were written under (a journal does not say): each render and dispatch line it adds
-          names it (os=<build>), as the raw pack keeps a line to the builds it names (tools/gpu/rawpack.py own_build)
+          names it (os=<build>), as the pack keeps a line to the builds it names (tools/gpu/make_pack.py own_build)
 
 --volume  every process's m2v cache on the iPad's Data volume (the plugin's cacheCandidates: a container's
-          Library/Caches/m2v, Library/Caches/m2v-<process> or tmp/m2v, tmp/m2v-<process>, a daemon's user cache or
-          temp directory), its pipelines.log and pipelines.log.old. Read only, but for one write: a system container's
-          Library and Library/Caches are mode 000, so for a container named by --open (default: backboardd's,
-          SpringBoard's, PosterBoard's, Preferences' and Spotlight's, by SYSTEM_CACHES' UUIDs or by their container
-          manager identifiers, SYSTEM_IDENTIFIERS) or every one with --open-all, each closed directory on the way is
-          made u+rx for the read and given its mode back at once (and checked); other closed containers are skipped
-          and counted.
+          Library/Caches/TegraGM20BMetal, Library/Caches/TegraGM20BMetal-<process> or tmp/TegraGM20BMetal,
+          tmp/TegraGM20BMetal-<process>, a daemon's user cache or temp directory), its pipelines.log and
+          pipelines.log.old. Read only, but for one write: a system container's Library and Library/Caches are mode 000,
+          so for a container named by --open (default: backboardd's, SpringBoard's, PosterBoard's, Preferences' and
+          Spotlight's, by SYSTEM_CACHES' UUIDs or by their container manager identifiers, SYSTEM_IDENTIFIERS) or every
+          one with --open-all, each closed directory on the way is made u+rx for the read and given its mode back at
+          once (and checked); other closed containers are skipped and counted.
 --save    also copy each m2v cache found, whole (v1/, msl/, libs/, the journals, makings.log), to <dir>/<where it was>,
           e.g. the boot's log folder. makings.log (m2v 0118, the plugin turns it on in every cache): one line per driver
           record the process wrote (a compile), its name and the making's description; a precompile run with
           METAL2VULKAN_MAKING_LOG=<file> writes the host's, so a seeded making the device made again shows where the two
           descriptions part.
 --device  the device data staging directory (default <state>/gpu-device-data/staging; <state> is ~/Library/Application
-          Support/switch-ios or $SWITCH_HOME): with --volume, and for every saved cache below --records-from, each
-          driver record (the content directory's v1/<content>/<xx>/<name>, m2v's VkPipelineCache data of one pipeline
-          making, named by what the making reads and the NVK identity) whose envelope checks out is copied to
-          <device>/records/<xx>/<name>, every cache's libs/<SHA-256>.metallib (a library a process made from bytes)
-          to <device>/data/, and every msl/<name>.reply (the frontend's kept MTLCompiler reply: Core Image's kernel
-          source compiled to AIR) whose envelope checks out to <device>/msl/. The device's own makings: those of draws'
-          variants that no creation predicts, and each one the precompile makes otherwise than the device (r8-webgpu:
-          1268 of the 1293 records of the 23:17 boot's caches were not in the seed). The seed takes those of its NVK's
-          identity, and every reply.
-          harvest.py --records-from <dir>... [--device <dir>]: only the records and compile replies of every m2v cache
-          below each <dir> (the --save copies, e.g. <state>/device-logs/*/m2v), no corpus.
+          Support/switch-ios or $SWITCH_HOME): with --volume, every cache's libs/<SHA-256>.metallib (a library a
+          process made from bytes) is copied to <device>/data/, and, with --volume and for every saved cache below
+          --replies-from, every msl/<name>.reply (the frontend's kept MTLCompiler reply: Core Image's kernel source
+          compiled to AIR) whose envelope checks out to <device>/msl/. The seed takes every reply.
+          harvest.py --replies-from <dir>... [--device <dir>]: only the compile replies of every m2v cache below each
+          <dir> (the --save copies, e.g. <state>/device-logs/*/m2v), no corpus.
 --pack    harvest.py --pack [--device <dir>]: the staging directory as the build's @gpu_device_data: a tar (sorted, no
-          times or owners) of its records and of the libraries made from bytes that the corpus names and the build
-          cannot make itself (not one of gpu/apple-libs.sha256's, not the frontend's TwoPlaneStandIn.h: Core Image's
-          kernels compiled on the device) and of its compile replies, written to
-          <state>/gpu-device-data/m2v-device-<sha256[:16]>.tar; prints the DEVICE_DATA pin for gpu/deps.bzl. The first
-          build after the pin copies the tar into the repository cache; no build reads the staging directory.
+          times or owners) of the libraries made from bytes that the corpus names and the build cannot make itself (not
+          one of gpu/apple-libs.sha256's, not the frontend's TwoPlaneStandIn.h: Core Image's kernels compiled on the
+          device) and of its compile replies, written to <state>/gpu-device-data/device-data-<sha256[:16]>.tar; prints
+          the DEVICE_DATA pin for gpu/deps.bzl. The first build after the pin copies the tar into the repository cache;
+          no build reads the staging directory.
 """
 
 import hashlib
@@ -58,13 +53,13 @@ import shutil
 import stat
 import sys
 import tarfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from tools.gpu.shaders import replies as compiler_replies
 
-# os=<build>: the OS build the journal was written under, which the raw pack keeps a line to (tools/gpu/rawpack.py
+# os=<build>: the OS build the journal was written under, which the pack keeps a line to (tools/gpu/make_pack.py
 # own_build)
 DESCRIPTOR = re.compile(r'(samples|topo|ds|opt|os|c\d|a\d+)=')
 OS_BUILD = re.compile(r' os=\S+')
@@ -76,10 +71,10 @@ PROJECT = Path(os.environ.get('BUILD_WORKSPACE_DIRECTORY') or Path(__file__).res
 DEVICE = (
     Path(os.environ.get('SWITCH_HOME') or Path.home() / 'Library/Application Support/switch-ios') / 'gpu-device-data'
 )
-# /private/var/containers/Data/System/<UUID>/Library/Caches/m2v of the system containers whose processes kept an m2v
-# cache there (the plugin's "device ... ready in" lines, r5d and r6h): their Library and Library/Caches are mode 000.
-# The UUIDs are one install's (21H461's, r5d); another install names the same containers otherwise (24B119's boot 15:
-# backboardd's CE929FE0-..., SpringBoard's 1809AE07-...), so a container is also known by the identifier its
+# /private/var/containers/Data/System/<UUID>/Library/Caches/TegraGM20BMetal of the system containers whose processes
+# kept an m2v cache there (the plugin's "device ... ready in" lines, r5d and r6h): their Library and Library/Caches are
+# mode 000. The UUIDs are one install's (21H461's, r5d); another install names the same containers otherwise (24B119's
+# boot 15: backboardd's CE929FE0-..., SpringBoard's 1809AE07-...), so a container is also known by the identifier its
 # container manager metadata gives it.
 SYSTEM_CACHES = {
     '6C7A65AF-CB18-421C-A07A-D724B05A7AB6': 'backboardd',
@@ -96,11 +91,6 @@ SYSTEM_IDENTIFIERS = {
 }
 CONTAINER_METADATA = '.com.apple.mobile_container_manager.metadata.plist'
 JOURNALS = ('pipelines.log.old', 'pipelines.log')  # oldest first: the frontend renames the journal past 2 MiB
-CONTENT = (
-    '529a20fd270ababa3e5ec2fe4d1674d93739ba5bcd61861674b4fb6db349af9f'  # m2v's content directory (seed.py's CONTENT)
-)
-# m2v shader_cache/driver.rs: magic, identity (28 bytes), data length (u64), data, SHA-256
-RECORD_MAGIC = b'M2VPPLC\0'
 # The frontend's kept MTLCompiler reply (NativeBridgeMetalFrontend.mm NBCompileReplyHeader): "NSC1", the warning and
 # metallib lengths, the SHA-256 of both, then both; named by the SHA-256 of the compiler's LC_UUID and the request.
 REPLY_MAGIC = b'NSC1'
@@ -165,9 +155,9 @@ def _normal_render(line: str) -> tuple[str | None, str | None]:
     if v < 0 or f < 0:
         return None, None
     # The functions the state links follow its stages (the frontend's linkedText: " | <vl|vp|fl|fp> <stage>"), then
-    # the cubic samplers' binds of a state's variant (" | cubic ...", raw_cubic.h), then the slots its sampled two-plane
-    # variant reads two-plane textures at (" | xrs=<slots>", raw_xr_pass.h), then the formats its written variant stores
-    # (" | wtex=<slot>:<format>,...", raw_written_textures.h)
+    # the cubic samplers' binds of a state's variant (" | cubic ...", cubic.h), then the slots its sampled two-plane
+    # variant reads two-plane textures at (" | xrs=<slots>", xr_pass.h), then the formats its written variant stores
+    # (" | wtex=<slot>:<format>,...", written_textures.h)
     while end >= 0 and (
         line[end + 3 : end + 6] in ('vl ', 'vp ', 'fl ', 'fp ')
         or line[end + 3 : end + 9] == 'cubic '
@@ -231,13 +221,13 @@ def caches(
             found += in_container
             skipped += closed
     for pattern in (
-        'tmp/m2v-*',
-        'tmp/m2v',
-        'mobile/tmp/*/m2v',
-        'mobile/Library/Caches/m2v',
-        'root/Library/Caches/m2v',
-        'folders/*/*/C/m2v',
-        'folders/*/*/T/m2v',
+        'tmp/TegraGM20BMetal-*',
+        'tmp/TegraGM20BMetal',
+        'mobile/tmp/*/TegraGM20BMetal',
+        'mobile/Library/Caches/TegraGM20BMetal',
+        'root/Library/Caches/TegraGM20BMetal',
+        'folders/*/*/C/TegraGM20BMetal',
+        'folders/*/*/T/TegraGM20BMetal',
     ):
         for m2v in sorted(volume.glob(pattern)):
             if m2v.is_dir() and readable(m2v):
@@ -264,7 +254,7 @@ def _container_caches(
     where: str, container: Path, may_open: bool
 ) -> tuple[list[tuple[str, Path, tuple[Path, ...]]], list[str]]:
     found, skipped = [], []
-    for sub in ('Library/Caches/m2v', 'tmp/m2v'):
+    for sub in ('Library/Caches/TegraGM20BMetal', 'tmp/TegraGM20BMetal'):
         parts = sub.split('/')
         way = [container / '/'.join(parts[: i + 1]) for i in range(len(parts) - 1)]
         shut = [d for d in way if os.path.lexists(d) and not readable(d)]
@@ -275,12 +265,12 @@ def _container_caches(
             found.append((f'{where}/{sub}', container / sub, tuple(way)))
         elif sub.startswith('Library'):
             skipped.append(container.name)
-    # the plugin's Library/Caches/m2v-<process> of a data container whose tmp is the process's temp directory
-    # (66b8ec2: WebKit's GPU process in Safari's container, a poster extension in its own)
+    # the plugin's Library/Caches/TegraGM20BMetal-<process> of a data container whose tmp is the process's temp
+    # directory (66b8ec2: WebKit's GPU process in Safari's container, a poster extension in its own)
     if readable(container / 'Library') and readable(container / 'Library/Caches'):
         found.extend(
             (f'{where}/{m2v.relative_to(container)}', m2v, ())
-            for m2v in sorted((container / 'Library/Caches').glob('m2v-*'))
+            for m2v in sorted((container / 'Library/Caches').glob('TegraGM20BMetal-*'))
             if m2v.is_dir() and readable(m2v)
         )
     return found, skipped
@@ -328,47 +318,6 @@ def replies(m2v: Path, store: Path) -> int:
     return copied
 
 
-def record_ok(data: bytes) -> bool:
-    """Return whether `data` is a whole driver record.
-
-    Magic, identity, a length that ends where the checksum begins, the checksum.
-    """
-    if len(data) < 8 + 28 + 8 + 32 or data[:8] != RECORD_MAGIC:
-        return False
-    length = int.from_bytes(data[36:44], 'little')
-    return 44 + length + 32 == len(data) and hashlib.sha256(data[:-32]).digest() == data[-32:]
-
-
-def records(caches: Sequence[str | Path], store: Path) -> None:
-    """Copy every driver record of each cache directory in `caches` whose envelope checks out into `store`.
-
-    By name; one already there is kept: a name is what the making reads, so two records of one name hold the same
-    driver's data.
-    """
-    seen = copied = bad = 0
-    for cache in caches:
-        content = Path(cache) / 'v1' / CONTENT
-        for path in sorted(content.glob('*/*')) if content.is_dir() else []:
-            if path.name.startswith('.') or not path.is_file():
-                continue
-            seen += 1
-            target = store / path.parent.name / path.name
-            if target.is_file():
-                continue
-            data = path.read_bytes()
-            if not record_ok(data):
-                bad += 1
-                continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            copied += 1
-    in_store = sum(1 for _ in store.glob('*/*')) if store.is_dir() else 0
-    print(
-        f'{store}: {seen} driver records of {len(caches)} caches, {copied} new, {bad} refused (envelope), '
-        f'{in_store} in the store'
-    )
-
-
 def embedded_libraries() -> set[str]:
     """Return the sha256 of each metallib the build makes itself.
 
@@ -379,7 +328,7 @@ def embedded_libraries() -> set[str]:
         for line in (PROJECT / 'gpu/apple-libs.sha256').read_text().splitlines()
         if line.strip() and not line.startswith('#')
     }
-    text = (Path(__file__).resolve().parents[2] / 'NativeMetal/TwoPlaneStandIn.h').read_text()
+    text = (Path(__file__).resolve().parents[1] / 'plugin/TwoPlaneStandIn.h').read_text()
     made.add(
         hashlib.sha256(
             bytes(int(b, 16) for b in re.findall(r'0x([0-9a-fA-F]{2})', text[text.index('{') :]))
@@ -392,8 +341,7 @@ def pack(store: Path, corpus: Path) -> None:
     """Write the tar of @gpu_device_data (DEVICE_DATA in gpu/deps.bzl) from the staging directory `store`."""
     named = set(re.findall(r'lib=data:([0-9a-f]{64})', corpus.read_text()))
     own = embedded_libraries()
-    members = sorted(p for p in (store / 'records').glob('*/*') if p.is_file() and record_ok(p.read_bytes()))
-    members += sorted(
+    members = sorted(
         p
         for p in (store / 'data').glob('*.metallib')
         if p.stem in named and p.stem not in own and hashlib.sha256(p.read_bytes()).hexdigest() == p.stem
@@ -401,7 +349,7 @@ def pack(store: Path, corpus: Path) -> None:
     reply_inventory = compiler_replies.inventory(store / 'msl', strict=True)
     members += [store / 'msl' / name for name in sorted(reply_inventory['files'])]
     if not members:
-        sys.exit(f'{store}: no driver records or libraries staged (harvest.py --volume or --records-from first)')
+        sys.exit(f'{store}: no libraries or compile replies staged (harvest.py --volume or --replies-from first)')
     data = io.BytesIO()
     with tarfile.open(fileobj=data, mode='w', format=tarfile.USTAR_FORMAT) as tar:
         for path in members:
@@ -410,15 +358,14 @@ def pack(store: Path, corpus: Path) -> None:
             with path.open('rb') as f:
                 tar.addfile(info, f)
     digest = hashlib.sha256(data.getvalue()).hexdigest()
-    out = DEVICE / f'm2v-device-{digest[:16]}.tar'
+    out = DEVICE / f'device-data-{digest[:16]}.tar'
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(data.getvalue())
-    record_count = sum(1 for p in members if p.parts[-3] == 'records')
     library_count = sum(1 for p in members if p.parts[-2] == 'data')
     reply_count = reply_inventory['replies']
     print(
-        f'{out}: {record_count} driver records, {library_count} libraries '
-        f'(of {len(named)} made from bytes the corpus names), {reply_count} compile replies'
+        f'{out}: {library_count} libraries (of {len(named)} made from bytes the corpus names), '
+        f'{reply_count} compile replies'
     )
     print(f'gpu/deps.bzl:\nDEVICE_DATA = {{\n    "file": "{out.name}",\n    "sha256": "{digest}",\n}}')
 
@@ -442,14 +389,10 @@ def main() -> None:
     if '--pack' in args:
         pack(store, Path(__file__).resolve().parent / 'corpus.log')
         return
-    records_from = option(args, '--records-from', many=True)
-    if records_from:
-        records_from += args
-        records(
-            sorted({str(v1.parent) for d in records_from for v1 in Path(d).rglob('v1') if (v1 / CONTENT).is_dir()}),
-            store / 'records',
-        )
-        kept = sum(replies(msl.parent, store / 'msl') for d in records_from for msl in sorted(Path(d).rglob('msl')))
+    replies_from = option(args, '--replies-from', many=True)
+    if replies_from:
+        replies_from += args
+        kept = sum(replies(msl.parent, store / 'msl') for d in replies_from for msl in sorted(Path(d).rglob('msl')))
         print(f'{store / "msl"}: {kept} new compile replies')
         return
     explicit = set(option(args, '--open', many=True))
@@ -475,7 +418,6 @@ def main() -> None:
                     if (m2v / journal).is_file()
                 )
                 collect(m2v, store)
-                records([m2v], store / 'records')
                 replies(m2v, store / 'msl')
                 if save:
                     target = Path(save) / where.replace('/', '_')

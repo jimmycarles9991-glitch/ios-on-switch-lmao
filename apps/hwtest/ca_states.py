@@ -2,7 +2,7 @@
 
 ca_states.py <corpus.log> <QuartzCore default.metallib> <qc-<build>.json> <out>. A state is this IPSW's where its line
 names the IPSW's build (os=), its QuartzCore declares both functions and every constant the line sets on them, and the
-constants' values are those its QuartzCore makes of the state's name (raw/pack/ca/caspec.py with this IPSW's tables).
+constants' values are those its QuartzCore makes of the state's name (pack/ca/caspec.py with this IPSW's tables).
 iOS 17's path_stroke_* states fail the second on iOS 27, whose QuartzCore has no such functions; most of iOS 17's other
 lines fail the third there (a memoryless index past the pass's attachments, another build's blend function codes),
 states iOS 27 never makes.
@@ -16,7 +16,7 @@ from pathlib import Path
 from tools.gpu.shaders import metallib
 
 # caspec imports its iOS 27 half (caspec27) by its bare name, so ca/ goes on the path and caspec is imported as caspec
-sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.raw.pack.ca.caspec').origin).parent))
+sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.pack.ca.caspec').origin).parent))
 import caspec
 
 PREFIX = 'R ok=1 label=com.apple.coreanimation.'

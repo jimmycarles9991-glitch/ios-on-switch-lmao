@@ -9,13 +9,13 @@ extension Raster {
     public func rgba8() -> [UInt8] {
         var out = [UInt8](repeating: 255, count: width * height * 4)
         let byte = { (v: Float) -> UInt8 in v.isNaN ? 0 : UInt8((Swift.min(Swift.max(v, 0), 1) * 255).rounded()) }
-        for i in 0..<(width * height) {
-            let p = Array(samples[(i * channels)..<((i + 1) * channels)])
+        for i in 0 ..< (width * height) {
+            let p = Array(samples[(i * channels) ..< ((i + 1) * channels)])
             switch channels {
             case 1: out[i * 4] = byte(p[0]); out[i * 4 + 1] = byte(p[0]); out[i * 4 + 2] = byte(p[0])
             case 2: out[i * 4] = byte(p[0]); out[i * 4 + 1] = byte(p[1]); out[i * 4 + 2] = 0
             default:
-                for c in 0..<3 { out[i * 4 + c] = byte(p[c]) }
+                for c in 0 ..< 3 { out[i * 4 + c] = byte(p[c]) }
                 if channels == 4 { out[i * 4 + 3] = byte(p[3]) }
             }
         }
@@ -34,7 +34,8 @@ extension Raster {
             width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4,
             space: CGColorSpace(name: CGColorSpace.sRGB)!,
             bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider,
-            decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+            decode: nil, shouldInterpolate: false, intent: .defaultIntent
+        )
     }
 
     static func png(_ image: CGImage) -> Data? {
@@ -50,11 +51,11 @@ extension Raster {
 extension SceneCheck {
     public func diffPNG() -> Data? {
         var bytes = want.rgba8()
-        for i in 0..<(want.width * want.height) {
+        for i in 0 ..< (want.width * want.height) {
             if diff.mask[i] {
-                bytes.replaceSubrange((i * 4)..<(i * 4 + 4), with: [255, 0, 255, 255])
+                bytes.replaceSubrange((i * 4) ..< (i * 4 + 4), with: [255, 0, 255, 255])
             } else {
-                for c in 0..<3 { bytes[i * 4 + c] /= 3 }
+                for c in 0 ..< 3 { bytes[i * 4 + c] /= 3 }
                 bytes[i * 4 + 3] = 255
             }
         }

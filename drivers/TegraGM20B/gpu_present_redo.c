@@ -25,9 +25,9 @@ void tgm_present_push_copy(struct nvif_push *push)
 
 /* The present whose copy a copy engine reset cut (tgm_present_redo): its fence completed, so it is copied again, with no
  * acquire (what it waited for completed before), the L2 flush and the fence as present_copy pushes them. The display
- * keeps scanning the frame before it until this copy's fence completes and present_fenced delivers its completion. While
- * the GPU sleeps the redo waits: gate_open kicks it again (tgm_present_redo_kick). A redo that finds no room in the
- * present's ring for 1 s (the copy engine stuck again) goes to the hang rule, as present_copy's does, and is tried
+ * keeps scanning the frame before it until this copy's fence completes and present_fenced delivers its completion. It
+ * runs inside the gate its present holds until delivery (gpu_present.c present_deliver). A redo that finds no room in
+ * the present's ring for 1 s (the copy engine stuck again) goes to the hang rule, as present_copy's does, and is tried
  * again. */
 void tgm_present_redo_work(void *unused)
 {
@@ -37,7 +37,7 @@ void tgm_present_redo_work(void *unused)
 	u32 again = 0;
 
 	(void)unused;
-	if (!__atomic_load_n(&tgm_present.redoing, __ATOMIC_ACQUIRE) || !gate_try())
+	if (!__atomic_load_n(&tgm_present.redoing, __ATOMIC_ACQUIRE))
 		return;
 	mutex_lock(&tgm_present.lock);
 #if TGM_STATS
@@ -55,7 +55,6 @@ void tgm_present_redo_work(void *unused)
 	}
 	if (ret) {
 		mutex_unlock(&tgm_present.lock);
-		gate_leave();
 		if (ret == -ETIMEDOUT)
 			nvxnu_work_schedule(tgm_present.redo_work);
 		return;
@@ -78,7 +77,6 @@ void tgm_present_redo_work(void *unused)
 	tgm_copy_reset_redone();
 #endif
 	mutex_unlock(&tgm_present.lock);
-	gate_leave();
 }
 
 void tgm_present_redo_kick(void)

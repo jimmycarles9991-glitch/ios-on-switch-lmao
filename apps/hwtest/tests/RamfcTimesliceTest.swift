@@ -45,6 +45,7 @@ struct RamfcTimesliceTest: HWTest {
                     fields["back_read"] != nil && fields["back_read"] == fields["flip_from"]
                 ),
                 ("every checked client channel reads its last write (mismatched = 0)", fields["mismatched"] == "0"),
-            ], metrics)
+            ], metrics
+        )
     }
 }

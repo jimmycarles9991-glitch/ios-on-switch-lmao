@@ -124,7 +124,6 @@ lint_test(
         "swiftformat",
     ],
     exempt = "//bazel/lint:format_exempt.txt",
-    rust_modules = ["//third_party/m2v/crates/metal2vulkan:src/lower/arith/extended_range/blend_color.rs"],
 )
 
 lint_test(

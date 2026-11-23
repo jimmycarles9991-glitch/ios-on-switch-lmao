@@ -48,7 +48,8 @@ struct DisplaySnapshotTest: HWTest {
             }
             if let darkest = means.min(), darkest < patternMean - 0.02 {
                 reasons.append(
-                    "flash style \(style) darkened the screen (\(Self.level(darkest)) < \(Self.level(patternMean)))")
+                    "flash style \(style) darkened the screen (\(Self.level(darkest)) < \(Self.level(patternMean)))"
+                )
             }
         }
         if !reasons.isEmpty { check.save(to: context.documents, id: id, stem: "pattern") }
@@ -65,7 +66,8 @@ struct DisplaySnapshotTest: HWTest {
             pattern.addSubview(view)
             let done: @convention(block) () -> Void = {}
             _ = view.perform(
-                NSSelectorFromString("flashWithCompletion:"), with: unsafeBitCast(done, to: AnyObject.self))
+                NSSelectorFromString("flashWithCompletion:"), with: unsafeBitCast(done, to: AnyObject.self)
+            )
         }
         var samples: [Raster] = []
         var elapsed = 0.0
@@ -84,7 +86,7 @@ struct DisplaySnapshotTest: HWTest {
         let path = "/System/Library/PrivateFrameworks/ScreenshotServices.framework/ScreenshotServices"
         let selector = NSSelectorFromString("flashViewForStyle:")
         guard dlopen(path, RTLD_NOW) != nil, let flashClass = NSClassFromString("SSFlashView") as? NSObject.Type,
-            flashClass.responds(to: selector)
+              flashClass.responds(to: selector)
         else { return nil }
         typealias Make = @convention(c) (AnyClass, Selector, UInt) -> Unmanaged<UIView>?
         let make = unsafeBitCast(flashClass.method(for: selector), to: Make.self)
@@ -99,8 +101,8 @@ struct DisplaySnapshotTest: HWTest {
 
     static func blackPercent(_ raster: Raster) -> Int {
         var black = 0
-        for y in 0..<raster.height {
-            for x in 0..<raster.width where raster.pixel(x, y).allSatisfy({ $0 < nearBlack }) { black += 1 }
+        for y in 0 ..< raster.height {
+            for x in 0 ..< raster.width where raster.pixel(x, y).allSatisfy({ $0 < nearBlack }) { black += 1 }
         }
         return black * 100 / max(raster.width * raster.height, 1)
     }

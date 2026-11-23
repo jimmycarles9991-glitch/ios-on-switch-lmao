@@ -35,22 +35,25 @@ struct FrameProcessorTest: HWTest {
         guard
             let configuration = VTTemporalNoiseFilterConfiguration(
                 frameWidth: Self.width, frameHeight: Self.height,
-                sourcePixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+                sourcePixelFormat: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+            )
         else { return .fail("the noise filter refused 1280x720 420v", metrics) }
         let processor = VTFrameProcessor()
         try processor.startSession(configuration: configuration)
         defer { processor.endSession() }
         let (previous, next) = (configuration.previousFrameCount ?? 0, configuration.nextFrameCount ?? 0)
-        let frames = try (0...(previous + next)).map { index in
+        let frames = try (0 ... (previous + next)).map { index in
             try Self.frame(Self.greyBuffer(configuration.sourcePixelBufferAttributes), index)
         }
         let destination = try Self.frame(
-            Self.greyBuffer(configuration.destinationPixelBufferAttributes, luma: 0), previous)
+            Self.greyBuffer(configuration.destinationPixelBufferAttributes, luma: 0), previous
+        )
         guard
             let parameters = VTTemporalNoiseFilterParameters(
                 sourceFrame: frames[previous], nextFrames: Array(frames.suffix(next)),
                 previousFrames: Array(frames.prefix(previous)), destinationFrame: destination, filterStrength: 0.5,
-                hasDiscontinuity: false)
+                hasDiscontinuity: false
+            )
         else { return .fail("the noise filter's parameters were refused", metrics) }
         let start = CFAbsoluteTimeGetCurrent()
         try await processor.process(parameters: parameters)
@@ -72,7 +75,8 @@ struct FrameProcessorTest: HWTest {
     static func greyBuffer(_ attributes: [String: Any], luma: UInt8 = 128) throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
-            nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer)
+            nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, attributes as CFDictionary, &buffer
+        )
         guard status == kCVReturnSuccess, let buffer else { throw TestFailure("CVPixelBufferCreate: \(status)") }
         CVPixelBufferLockBaseAddress(buffer, [])
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }

@@ -49,7 +49,8 @@ public struct CompressorSettings {
     public init(_ clip: Clip, requireHardware: Bool) {
         self.init(
             codec: clip.codec, width: clip.width, height: clip.height, fps: clip.fps, bitrate: clip.bitrate,
-            realTime: false, requireHardware: requireHardware)
+            realTime: false, requireHardware: requireHardware
+        )
     }
 
     var codecType: CMVideoCodecType { codec == .h264 ? kCMVideoCodecType_H264 : kCMVideoCodecType_HEVC }
@@ -77,10 +78,11 @@ public enum Compressor {
         let sessionPool = clientPool ? nil : VTCompressionSessionGetPixelBufferPool(session)
         let pool =
             try sessionPool
-            ?? PatternPixels.pool(
-                width: settings.width, height: settings.height,
-                format: PatternPixels.format(bitDepth: settings.codec.bitDepth))
-        let inputs = try (0..<frames).map {
+                ?? PatternPixels.pool(
+                    width: settings.width, height: settings.height,
+                    format: PatternPixels.format(bitDepth: settings.codec.bitDepth)
+                )
+        let inputs = try (0 ..< frames).map {
             try PatternPixels.make(pattern, frame: $0, bitDepth: settings.codec.bitDepth, pool: pool)
         }
         return try encode(session, settings, inputs: inputs, pause: pause, inspect: inspect)
@@ -132,7 +134,8 @@ public enum Compressor {
             usingHardware: readFlag(session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder),
             encoderID: readString(session, kVTCompressionPropertyKey_EncoderID), seconds: seconds,
             bytes: samples.reduce(0) { $0 + CMSampleBufferGetTotalSampleSize($1) },
-            routes: (read(session, "SwitchEncoderRoutes" as CFString) as? [String: NSNumber])?.mapValues(\.intValue))
+            routes: (read(session, "SwitchEncoderRoutes" as CFString) as? [String: NSNumber])?.mapValues(\.intValue)
+        )
     }
 
     static func makeSession(_ settings: CompressorSettings) throws -> VTCompressionSession {
@@ -147,7 +150,8 @@ public enum Compressor {
             allocator: nil, width: Int32(settings.width), height: Int32(settings.height), codecType: settings.codecType,
             encoderSpecification: specification as CFDictionary, imageBufferAttributes: nil,
             compressedDataAllocator: nil,
-            outputCallback: nil, refcon: nil, compressionSessionOut: &session)
+            outputCallback: nil, refcon: nil, compressionSessionOut: &session
+        )
         guard status == noErr, let session else { throw VideoError.status("VTCompressionSessionCreate", status) }
         let properties: [CFString: Any] = [
             kVTCompressionPropertyKey_RealTime: settings.realTime,
@@ -211,7 +215,7 @@ extension CMSampleBuffer {
     public var isKeyFrame: Bool {
         guard
             let attachments = CMSampleBufferGetSampleAttachmentsArray(self, createIfNecessary: false)
-                as? [[CFString: Any]],
+            as? [[CFString: Any]],
             let first = attachments.first
         else { return true }
         return !((first[kCMSampleAttachmentKey_NotSync] as? Bool) ?? false)

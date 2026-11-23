@@ -1,7 +1,7 @@
-"""The raw pack holds every render state Apple's archives declare for the device (precompile/archives/<build>.tsv).
+"""The pack holds every render state Apple's archives declare for the device (precompile/archives/<build>.tsv).
 
 Per IPSW kind, each declared state is the pack's (its key is one the generator makes: Core Animation's from the corpus
-and QuartzCore's tables, rawpack.py ca_states; every other framework's fed from the inventory, tools/gpu/rawpack.py
+and QuartzCore's tables, make_pack.py ca_states; every other framework's fed from the inventory, tools/gpu/make_pack.py
 archive_lines, and kept by the generator's split), or one of the kinds below that raw does not take from the pack, each
 with why. A new state in either inventory, or a pack that loses one, fails here.
 """
@@ -10,8 +10,8 @@ import unittest
 from pathlib import Path
 
 from drivers.TegraGM20BMetal.corpus.tools.archives.model import packable
-from drivers.TegraGM20BMetal.raw.pack import rawpack
-from tools.gpu import rawpack as steps
+from drivers.TegraGM20BMetal.pack import make_pack
+from tools.gpu import make_pack as steps
 
 HERE = Path(__file__).absolute().parents[3]  # drivers/TegraGM20BMetal
 KINDS = ('21H461', '24B119')
@@ -22,8 +22,8 @@ NOT_FROM_THE_PACK = {
     'unspecialized': "a function lacks a constant its library requires: the archive does not record the caller's value",
     'creation': "not a vertex and a fragment function of one framework's default.metallib (or it links another "
     "library's) nor of one bundle's library linking none: the runtime makes it when created, never from the pack "
-    '(RawMetalStates.mm pipelineFor)',
-    'family': 'declared only for GPU families the raw device does not answer for (Apple4 and later)',
+    '(TegraGM20BMetalStates.mm pipelineFor)',
+    'family': 'declared only for GPU families the device does not answer for (Apple4 and later)',
 }
 # QuartzCore's archive states whose key no QuartzCore descriptor on the device has, by why
 QUARTZCORE_ELSEWHERE = {
@@ -68,25 +68,25 @@ class Coverage(unittest.TestCase):
             with self.subTest(kind=kind):
                 rows = inventory(kind)
                 fed = steps.archive_lines((HERE / f'precompile/archives/{kind}.tsv').read_text())
-                self.assertTrue(all(rawpack.FRAMEWORK.search(line) for line in fed))
+                self.assertTrue(all(make_pack.FRAMEWORK.search(line) for line in fed))
                 packable_elsewhere = {
                     line
                     for what, owner, family, line in rows
                     if what == 'render' and family == 'device' and owner != 'QuartzCore.framework' and packable(line)
                 }
                 self.assertEqual(set(fed), packable_elsewhere, 'the generator feeds what the runtime looks up')
-                pack = {rawpack.state_key(line) for line in fed}
-                tables = HERE / f'raw/pack/ca/qc-{kind}.json'
+                pack = {make_pack.state_key(line) for line in fed}
+                tables = HERE / f'pack/ca/qc-{kind}.json'
                 names = HERE / f'precompile/ca-names/{kind}.txt'
                 named = names.read_text().split() if names.exists() else []
-                for _tier, lines in rawpack.ca_states(tables, HERE / 'precompile/corpus.log', named):
-                    pack |= {rawpack.state_key(line) for line in lines}
+                for _tier, lines in make_pack.ca_states(tables, HERE / 'precompile/corpus.log', named):
+                    pack |= {make_pack.state_key(line) for line in lines}
                 left: dict[str, int] = {}
                 for what, owner, family, line in rows:
                     reason = what if what in NOT_FROM_THE_PACK else None
                     if not reason and family != 'device':
                         reason = 'family'
-                    if not reason and rawpack.state_key(line) not in pack:
+                    if not reason and make_pack.state_key(line) not in pack:
                         reason = quartzcore_elsewhere(line) if owner == 'QuartzCore.framework' else None
                         if reason is None and not packable(line):
                             reason = 'creation'

@@ -46,6 +46,7 @@ struct Token {
 
 std::map<Key, Token> tokens;
 uint32_t nextQueue = 1, nextPort = 1;
+int eventPid;  // the process that reserves event records (proc_selfpid); 0 a kernel thread
 bool failWaiter;
 uint32_t statusEngine = 0;
 int (*statusOverride)(const switch_gpu_backing_token *) = nullptr;
@@ -119,6 +120,7 @@ protected:
 
 	void SetUp() override
 	{
+		eventPid = 0;
 		statusEngine = 0;
 		statusOverride = physicalOverride = nullptr;
 		native = new NativeEvent;
@@ -221,6 +223,11 @@ protected:
 		switch_gpu_event_waits_commit(&b);
 	}
 };
+}
+
+extern "C" int proc_selfpid(void)
+{
+	return eventPid;
 }
 
 extern "C" OSObject *switch_gpu_event_native_lookup(void *, uint32_t port)

@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-/// gpu.raw.zeta_colour: a zeta's pattern, every stencil value and a depth of its own a texel (ZetaColourCells.pattern)
+/// gpu.gm20b.zeta_colour: a zeta's pattern, every stencil value and a depth of its own a texel (ZetaColourCells.pattern)
 struct ZetaPattern {
     uint seed, bit;
 };

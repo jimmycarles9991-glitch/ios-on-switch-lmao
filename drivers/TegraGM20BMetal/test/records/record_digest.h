@@ -13,7 +13,7 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_pack.h"
+#include "drivers/TegraGM20BMetal/pack.h"
 
 namespace records {
 
@@ -51,17 +51,17 @@ enum Trait : uint32_t {
     TraitVariants = 16,
     TraitStorage = 32,
     TraitStorageTests = 64,  // a storage record with depth or stencil tests and none in its shader (form_contracts.cpp)
-    TraitSpill = 128,        // an argument table's words (raw_spill_table.h)
-    TraitHeap = 256,         // set-1 heap arrays (raw_heap_tables.h)
-    TraitWritten = 512,      // a storage texture's written format (raw_written_textures.h)
-    TraitTwoPlane = 1024,    // two-plane XR colours or texture reads (raw_xr_pass.h)
+    TraitSpill = 128,        // an argument table's words (spill_table.h)
+    TraitHeap = 256,         // set-1 heap arrays (heap_tables.h)
+    TraitWritten = 512,      // a storage texture's written format (written_textures.h)
+    TraitTwoPlane = 1024,    // two-plane XR colours or texture reads (xr_pass.h)
     TraitRungShift = 16      // bits 16-19: the highest fetch rung of its colour attachments
 };
 
 using Digest = std::array<uint8_t, 16>;
 
 // The pack's records in (key, kind) order
-std::vector<Record> records(const raw::Pack &pack);
+std::vector<Record> records(const gm20b::Pack &pack);
 
 Digest digest(const std::vector<Section> &sections);
 std::array<uint8_t, 32> sha256(const std::vector<uint8_t> &bytes);

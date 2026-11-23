@@ -8,7 +8,7 @@ import UIKit
 /// An app launch's compositor cost, there and back, in two arms. Settings is opened (LSApplicationWorkspace, with
 /// FrontBoard's launch entitlement), then this app again, and the debug kernel answers the compositor's longest GPU job
 /// and every span of 5 ms or more of one state the render server's raw path noted (TegraGM20BPathsABI.h spans op;
-/// raw_span_marks.h), each "<us> us k<key> <state> <instructions> instr x<marks> <target>k[m]".
+/// span_marks.h), each "<us> us k<key> <state> <instructions> instr x<marks> <target>k[m]".
 /// - The cold arm is the first round, run only where the process list shows Settings was not running when the test
 ///   began: the app holds no right to end another app, and a list the sandbox cuts to this app cannot tell (the
 ///   first round is then reported as "first").
@@ -43,7 +43,7 @@ struct LaunchHitchTest: HWTest {
             return .skip("the kernel keeps no compositor spans (a release kernel)")
         }
         guard let url = Bundle.main.url(forResource: "ca_generic_keys", withExtension: "txt"),
-            let table = try? String(contentsOf: url, encoding: .utf8)
+              let table = try? String(contentsOf: url, encoding: .utf8)
         else { return .fail("ca_generic_keys.txt is not in the app's bundle") }
         let states = GenericStates.parse(table)
         let processes = RunningProcesses.list(sysctl: "kern.proc.all")
@@ -80,7 +80,8 @@ struct LaunchHitchTest: HWTest {
         try await Task.sleep(nanoseconds: returnSettleSeconds * NSEC_PER_SEC)
         let back = drain(connection)
         let verdict = LaunchHitchVerdict(
-            reading: SpanReading.merged([launch, back].compactMap { $0 }), states: states, jobBoundUs: jobBoundUs)
+            reading: SpanReading.merged([launch, back].compactMap { $0 }), states: states, jobBoundUs: jobBoundUs
+        )
         return LaunchHitchArm(name: name, verdict: verdict, launchMs: launchMs, returnMs: returnMs)
     }
 
@@ -121,7 +122,7 @@ struct LaunchHitchTest: HWTest {
     /// room for, so it is asked until a line holds all it had; nil off a debug kernel
     static func drain(_ connection: GPUConnection) -> SpanReading? {
         var readings: [SpanReading] = []
-        for _ in 0...keptNotes {
+        for _ in 0 ... keptNotes {
             guard let line = spans(connection) else { break }
             let reading = SpanReading.parse(line)
             readings.append(reading)
@@ -134,8 +135,9 @@ struct LaunchHitchTest: HWTest {
     static func open(_ bundle: String) -> Bool {
         let selector = NSSelectorFromString("openApplicationWithBundleID:")
         guard let type = NSClassFromString("LSApplicationWorkspace") as? NSObject.Type,
-            let workspace = type.perform(NSSelectorFromString("defaultWorkspace"))?.takeUnretainedValue() as? NSObject,
-            workspace.responds(to: selector)
+              let workspace = type.perform(NSSelectorFromString("defaultWorkspace"))?
+                .takeUnretainedValue() as? NSObject,
+              workspace.responds(to: selector)
         else { return false }
         typealias Open = @convention(c) (NSObject, Selector, NSString) -> Bool
         let call = unsafeBitCast(workspace.method(for: selector), to: Open.self)

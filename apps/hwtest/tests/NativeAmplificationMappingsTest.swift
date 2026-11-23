@@ -11,28 +11,28 @@ import Metal
 /// id's colour. Exact texel by texel, every command buffer raw.
 struct NativeAmplificationMappingsTest: NativeObjectTest {
     let id = "metal.native.amplification_mappings"
-    let name = "Vertex amplification's view mappings choose each amplification's layer and viewport on the raw path"
+    let name = "Vertex amplification's view mappings choose each amplification's layer and viewport on the driver"
 
     static let size = 32
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct Out { float4 position [[position]]; float4 color; };
-        vertex Out mapped_quad(uint v [[vertex_id]], ushort a [[amplification_id]]) {
-            Out o;
-            o.position = float4(float(v & 1) * 2 - 1, float(v >> 1) * 2 - 1, 0, 1);
-            o.color = a ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
-            return o;
-        }
-        vertex Out ided_quad(uint v [[vertex_id]], ushort a [[amplification_id]]) {
-            Out o;
-            o.position = float4(float(v & 1) * 2 - 1, float(v >> 1) * 2 - 1, 0, 1);
-            o.color = float4(float(a & 1), float((a >> 1) & 1), float(a >> 2), 1);
-            return o;
-        }
-        fragment float4 mapped_color(Out in [[stage_in]]) { return in.color; }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct Out { float4 position [[position]]; float4 color; };
+    vertex Out mapped_quad(uint v [[vertex_id]], ushort a [[amplification_id]]) {
+        Out o;
+        o.position = float4(float(v & 1) * 2 - 1, float(v >> 1) * 2 - 1, 0, 1);
+        o.color = a ? float4(0, 1, 0, 1) : float4(1, 0, 0, 1);
+        return o;
+    }
+    vertex Out ided_quad(uint v [[vertex_id]], ushort a [[amplification_id]]) {
+        Out o;
+        o.position = float4(float(v & 1) * 2 - 1, float(v >> 1) * 2 - 1, 0, 1);
+        o.color = float4(float(a & 1), float((a >> 1) & 1), float(a >> 2), 1);
+        return o;
+    }
+    fragment float4 mapped_color(Out in [[stage_in]]) { return in.color; }
+    """
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
@@ -46,7 +46,8 @@ struct NativeAmplificationMappingsTest: NativeObjectTest {
         }
         if let wrong = NativeAnswers.check(
             device, "maxVertexAmplificationCount", NativeAnswers.amplificationCount, field: "max_amplification_count",
-            &metrics)
+            &metrics
+        )
         {
             work.failures.append(wrong)
         }
@@ -124,7 +125,7 @@ struct NativeAmplificationMappingsTest: NativeObjectTest {
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(pipeline)
-            var mappings = (0..<count).map {
+            var mappings = (0 ..< count).map {
                 MTLVertexAmplificationViewMapping(viewportArrayIndexOffset: 0, renderTargetArrayIndexOffset: UInt32($0))
             }
             encoder.setVertexAmplificationCount(count, viewMappings: &mappings)

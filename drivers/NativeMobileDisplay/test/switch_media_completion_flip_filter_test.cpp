@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -176,7 +177,7 @@ TEST_F(MediaFlipFilter, AStaleWaiterClaimsNothingOfTheNextOffer)
     EXPECT_EQ(d.mediaFlip.state(), SwitchCompletionFlip::kArmed);
 }
 
-// The producers' contract broken: a set the filter wrote whose completion then failed is shown as done with one line,
+// A producer's client's failure dated back to its job fails a set the filter already wrote: it is shown with one line,
 // and the next set's filter writes it as usual: nothing is held.
 TEST_F(MediaFlipFilter, AFilterSetWhoseCompletionFailsIsOneLineAndTheNextFilterWrites)
 {
@@ -197,6 +198,24 @@ TEST_F(MediaFlipFilter, AFilterSetWhoseCompletionFailsIsOneLineAndTheNextFilterW
 
 // A filter's stores that never reach the assembly copy are judged as the completion's: one line, that set from the
 // gate, the next set armed as usual.
+// A written set whose producer was lost on its engine, or whose failure no producer reports, is the kernel's own
+// failure.
+TEST_F(MediaFlipFilter, AFilterSetLostAfterItWasWrittenPanics)
+{
+    ASSERT_TRUE(armed(2));
+    d.filter();
+    gTokensWhy = SWITCH_GPU_BACKING_WRITER_FAILED;
+    EXPECT_THROW(d.complete(-5), std::runtime_error);
+}
+
+TEST_F(MediaFlipFilter, AFilterSetFailedWithNoProducersWhyPanics)
+{
+    ASSERT_TRUE(armed(2));
+    d.filter();
+    gTokensWhy = 0;
+    EXPECT_THROW(d.complete(-5), std::runtime_error);
+}
+
 TEST_F(MediaFlipFilter, AFilterSetThatDoesNotLatchIsWrittenFromTheGate)
 {
     ASSERT_TRUE(armed(2));

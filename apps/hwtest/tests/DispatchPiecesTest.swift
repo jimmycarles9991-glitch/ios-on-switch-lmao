@@ -4,10 +4,12 @@ import HWTestGPU
 import Metal
 
 /// An app dispatch longer than a band (TegraGM20BSchedPolicy.h TGM_APP_BAND_NS) launched in pieces of its threadgroup
-/// grid (raw/runtime/raw_dispatch_bands.h), each ending a batch. The kernel loops over an argument, so its few dozen
-/// instructions price it under a band: its first dispatch is whole and measured (raw_band_rates.h), and once its rate is
-/// learned the same dispatch must go in pieces, writing what the whole dispatch writes (each thread its threadgroup, the
-/// grid's threadgroup and thread counts, and a value of its position), byte for byte, as with the facade's budget at 0.
+/// grid (dispatch_bands.h), each ending a batch. The kernel loops over an argument, so its few dozen
+/// instructions price it under a band: its first dispatch is whole and measured (band_rates.h), and once its rate
+/// is learned the same dispatch must go in pieces, writing what the whole dispatch writes (each thread its threadgroup,
+/// the grid's threadgroup and thread counts, and a value of its position), byte for byte, as with the facade's budget
+/// at 0. A device learns the measured dispatches at its next command buffer's begin, so a blit fill follows each
+/// measured command buffer before the counters are read.
 struct DispatchPiecesTest: HWTest {
     let id = "gpu.sched.long_dispatch_pieces"
     let name = "Long app dispatches in grid pieces: identical results"
@@ -21,11 +23,11 @@ struct DispatchPiecesTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         guard let production = DrawBandsTest.budget(gpu.device, Self.budgetUs * 1000) else {
-            return .skip("the facade has no band budget (a release build)")
+            return .skip(GM20BFacade.missing("switchMetalBandBudget:", on: gpu.device))
         }
         defer { DrawBandsTest.budget(gpu.device, production) }
         var metrics = Metrics()
@@ -40,15 +42,23 @@ struct DispatchPiecesTest: HWTest {
             encoder.setBytes(&steps, length: 4, index: 1)
             encoder.dispatchThreadgroups(
                 MTLSize(width: Self.threads / Self.groupSize, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: Self.groupSize, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: Self.groupSize, height: 1, depth: 1)
+            )
             encoder.endEncoding()
+        }
+        let teachBuffer = try gpu.buffer(4)
+        let teach = { (commands: MTLCommandBuffer) in
+            let blit = commands.makeBlitCommandEncoder()!
+            blit.fill(buffer: teachBuffer, range: 0 ..< 4, value: 0)
+            blit.endEncoding()
         }
         var wholeMs = 0.0
         var pieces = 0
-        for round in 0..<Self.rounds {
-            let before = RawFacade.counters(of: gpu.device)
+        for round in 0 ..< Self.rounds {
+            let before = GM20BFacade.counters(of: gpu.device)
             let timing = try await gpu.run(encode)
-            let after = RawFacade.counters(of: gpu.device)
+            try await gpu.run(teach)
+            let after = GM20BFacade.counters(of: gpu.device)
             let banded = (after["banded_dispatches"] ?? 0) - (before["banded_dispatches"] ?? 0)
             let bands = (after["bands"] ?? 0) - (before["bands"] ?? 0)
             let learned = (after["learned_draws"] ?? 0) - (before["learned_draws"] ?? 0)

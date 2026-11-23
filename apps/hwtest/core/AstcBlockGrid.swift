@@ -27,24 +27,24 @@ public struct AstcBlockGrid: Sendable {
 
     /// The blocks in rows, `rowBytes` apart.
     public var bytes: [UInt8] {
-        (0..<down).flatMap { y in (0..<across).flatMap { x in Self.voidExtent(Self.colour(x, y)) } }
+        (0 ..< down).flatMap { y in (0 ..< across).flatMap { x in Self.voidExtent(Self.colour(x, y)) } }
     }
 
     /// The colour an LDR void-extent block decodes to (0...1); nil for any other block.
     public static func decode(_ block: ArraySlice<UInt8>) -> SIMD4<Float>? {
         let b = Array(block)
         guard b.count == blockBytes, b[0] == 0xFC, b[1] & 0x0F == 0x0D else { return nil }
-        let unorm = (0..<4).map { Float(UInt16(b[8 + 2 * $0]) | UInt16(b[9 + 2 * $0]) << 8) / 65535 }
+        let unorm = (0 ..< 4).map { Float(UInt16(b[8 + 2 * $0]) | UInt16(b[9 + 2 * $0]) << 8) / 65535 }
         return SIMD4(unorm[0], unorm[1], unorm[2], unorm[3])
     }
 
     /// The block whose colour `texel` is, by the CPU's decode of every block; nil when it is no block's.
     public func source(of texel: SIMD4<Float>) -> (x: Int, y: Int)? {
-        guard (0..<4).allSatisfy({ texel[$0].isFinite && abs(texel[$0]) <= 2 }) else { return nil }
+        guard (0 ..< 4).allSatisfy({ texel[$0].isFinite && abs(texel[$0]) <= 2 }) else { return nil }
         let x = Int(((texel.x * 255 - 4) / 8).rounded()), y = Int(((texel.y * 255 - 4) / 8).rounded())
         guard x >= 0, x < across, y >= 0, y < down,
-            let want = Self.decode(Self.voidExtent(Self.colour(x, y))[...]),
-            (0..<4).allSatisfy({ abs(texel[$0] - want[$0]) < 1.0 / 512 })
+              let want = Self.decode(Self.voidExtent(Self.colour(x, y))[...]),
+              (0 ..< 4).allSatisfy({ abs(texel[$0] - want[$0]) < 1.0 / 512 })
         else { return nil }
         return (x, y)
     }
@@ -54,7 +54,7 @@ public struct AstcBlockGrid: Sendable {
 /// tgm_layout_offset_of: TegraColor GOBs, blocks one GOB wide and 2^yLog2 GOBs tall), and which address bits a
 /// misplaced picture swapped.
 public enum BlockLinearMap {
-    /// The block height NIL picks for an image `texelHeight` tall with `rows` rows of blocks (raw/fx blockChainLayout).
+    /// The block height NIL picks for an image `texelHeight` tall with `rows` rows of blocks (fx blockChainLayout).
     public static func yLog2(texelHeight: Int, rows: Int) -> Int {
         let byHeight =
             texelHeight >= 86 ? 4 : texelHeight >= 43 ? 3 : texelHeight >= 22 ? 2 : texelHeight >= 11 ? 1 : 0
@@ -83,12 +83,12 @@ public enum BlockLinearMap {
     }
 
     static func fit(_ k: Int, _ pairs: [(displayed: Int, written: Int)], bits: [Int]) -> String? {
-        for size in 0...4 {
+        for size in 0 ... 4 {
             for subset in combinations(bits, size) {
-                for constant in 0...1
-                where pairs.allSatisfy({ pair in
-                    subset.reduce(constant) { $0 ^ (pair.written >> $1) & 1 } == (pair.displayed >> k) & 1
-                }) {
+                for constant in 0 ... 1
+                    where pairs.allSatisfy({ pair in
+                        subset.reduce(constant) { $0 ^ (pair.written >> $1) & 1 } == (pair.displayed >> k) & 1
+                    }) {
                     let names = subset.map { "w\($0)" } + (constant == 1 ? ["1"] : [])
                     return names.isEmpty ? "0" : names.joined(separator: "^")
                 }

@@ -99,6 +99,9 @@ int tegra_host1x_start(void);
 int tegra_host1x_syncpt_alloc(uint32_t *id);
 uint32_t tegra_host1x_syncpt_read(uint32_t id);
 // Only after the exclusive producer stopped and retained completion records say failed; this never publishes success.
+// `max_increments`: the most the caller's cancelled jobs leave outstanding; a longer distance is refused. The jobs
+// waiting on the cancelled ones fail first, then the display stream waiting on any of them is cancelled, then the CPU
+// increments the syncpoint to `threshold`; an increment that does not take panics.
 int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t max_increments);
 
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
@@ -107,19 +110,12 @@ int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshold, uint32_t
 int tegra_host1x_syncpt_cpu_increment(uint32_t id);
 #endif
 
-// A stopped engine's cancelled jobs' increments, done by the CPU up to `threshold` (two at a time, the most
-// tegra_host1x_syncpt_release_failed takes): another engine's stream waiting on one of them goes on, and the engine's
-// queue renumbers from the syncpoint.
+// A stopped engine's cancelled jobs' increments, done by the CPU up to `threshold` in one release: another engine's
+// stream waiting on one of them goes on, and the engine's queue renumbers from the syncpoint.
 static inline int tegra_host1x_syncpt_release_through(uint32_t id, uint32_t threshold)
 {
-    for (uint32_t now = tegra_host1x_syncpt_read(id); (int32_t)(threshold - now) > 0;
-         now = tegra_host1x_syncpt_read(id)) {
-        const uint32_t step = threshold - now > 2 ? 2 : threshold - now;
-        const int error = tegra_host1x_syncpt_release_failed(id, now + step, step);
-        if (error)
-            return error;
-    }
-    return 0;
+    const uint32_t now = tegra_host1x_syncpt_read(id);
+    return (int32_t)(threshold - now) > 0 ? tegra_host1x_syncpt_release_failed(id, threshold, threshold - now) : 0;
 }
 
 // Sleeps until syncpoint `id` reaches `threshold` (wrapping compare) or `timeoutUs` pass, on a fence of the

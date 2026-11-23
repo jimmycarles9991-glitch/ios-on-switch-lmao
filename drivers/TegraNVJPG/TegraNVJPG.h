@@ -25,7 +25,8 @@ struct TegraNVJPGBuffer {
 };
 
 // The two windows of NVJPG's address space a job's memory is mapped into, page by page: the scan's bytes (read-only)
-// and the destination surface. Below the DRAM aperture (0x80000000), so they never meet the 1:1 kernel buffers.
+// and the destination surface. Below the DRAM aperture (0x80000000), so they never meet the 1:1 kernel buffers. The
+// input window holds every queue slot's scan buffer at once.
 enum {
     TEGRA_NVJPG_WINDOW_IN = 0,
     TEGRA_NVJPG_WINDOW_OUT = 1,
@@ -33,7 +34,7 @@ enum {
 };
 
 constexpr uint64_t kTegraNVJPGWindowBase[TEGRA_NVJPG_WINDOWS] = {0x10000000ULL, 0x20000000ULL};
-constexpr uint64_t kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOWS] = {64ULL << 20, 1536ULL << 20};
+constexpr uint64_t kTegraNVJPGWindowBytes[TEGRA_NVJPG_WINDOWS] = {256ULL << 20, 1536ULL << 20};
 constexpr uint64_t kTegraNVJPGOutputBytes = 256ULL << 20;
 
 // What the engine decodes right (TegraNVJPG.cpp kTraits); the service builds every job with it.
@@ -65,12 +66,14 @@ extern "C" {
 // Engine (TegraNVJPG.cpp).
 bool tegra_nvjpg_ready(void);
 const TegraNVJPGTraits *tegra_nvjpg_traits(void);
-int tegra_nvjpg_buffer(uint64_t size, TegraNVJPGBuffer *out);  // from the kernel arena; never freed
-void tegra_nvjpg_lock(void);  // held across a job's map, run and unmap (one job at a time)
+void tegra_nvjpg_lock(void);  // held across tegra_nvjpg_run only: sleep waits for the job on the engine
 void tegra_nvjpg_unlock(void);
-// Allocation-lifetime mappings of 4 KiB pages; unmapped only after the engine has finished. Job lock held.
-uint64_t tegra_nvjpg_pages_map(uint32_t window, const uint64_t *pages, uint32_t count, bool writable);
-void tegra_nvjpg_pages_unmap(uint64_t address, uint32_t count);
+// `count` pages, then `sinkCount` entries of the kernel's sink page, at the lowest free IOVA of `window`; 0 when the
+// window has no room. Each mapping lives as long as its buffer and is unmapped (`mapped` = count + sinkCount) only once
+// the engine can no longer touch it. Neither takes the job lock: a backing's retirement unmaps while a decode runs.
+uint64_t tegra_nvjpg_pages_map(uint32_t window, const uint64_t *pages, uint32_t count, uint32_t sinkCount,
+                               bool writable);
+void tegra_nvjpg_pages_unmap(uint32_t window, uint64_t address, uint32_t mapped);
 // Copies the setup to the kernel's slot, queues the job's methods on host1x channel 3 behind an OP_DONE increment of
 // NVJPG's syncpoint, runs `follow` (another engine's job queued to wait for that increment on the hardware) and sleeps
 // until the increment's interrupt (bounded: past the bound the job is cancelled, -5). Fills the firmware's status. Job

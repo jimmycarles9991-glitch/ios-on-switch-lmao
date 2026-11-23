@@ -217,6 +217,9 @@ bool nak_nir_sm50_fold_f16_fetches(nir_shader *nir, const struct nak_compiler *n
                                    bool texs_f16);
 bool nak_nir_lower_gs_intrinsics(nir_shader *shader);
 bool nak_nir_lower_algebraic_late(nir_shader *nir, const struct nak_compiler *nak);
+bool nak_nir_lower_float_tests(nir_shader *nir);
+bool nak_nir_strip_half_rounding(nir_shader *nir, uint8_t half_targets);
+bool nak_nir_narrow_half_phis(nir_shader *nir);
 bool nak_nir_lower_kepler_shared_atomics(nir_shader *shader);
 bool nak_nir_lower_mesh_stages_shared_atomics(nir_shader *nir);
 bool nak_nir_lower_f16vec2_shared_atomics(nir_shader *nir);
@@ -453,6 +456,7 @@ bool nak_nir_rematerialize_compares(nir_shader *nir);
 bool nak_nir_rematerialize_load_const(nir_shader *nir);
 bool nak_nir_rematerialize_uniforms(nir_shader *nir);
 bool nak_nir_shrink_interlock(nir_shader *nir);
+bool nak_nir_lower_fs_interlock(nir_shader *nir, const void *data);
 bool nak_nir_mark_lcssa_invariants(nir_shader *nir);
 bool nak_nir_lower_non_uniform_ldcx(nir_shader *nir, const struct nak_compiler *nak);
 bool nak_nir_add_barriers(nir_shader *nir, const struct nak_compiler *nak);

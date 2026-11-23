@@ -1,8 +1,8 @@
 """The pipeline states of a pipeline library's pipelines.desc (<name>.pipelinelib/, or a framework's g<gpu>/ directory).
 
 A pipeline library is what newPipelineLibraryWithFilePath: opens: pipelines.desc names its states, `functions` is the
-metallib they are made from and pipelines.<gpu> holds one Apple GPU's compiled code. The raw device refuses the
-library (RawMetalDeviceAnswers.mm), and its caller makes the same states from its own metallib.
+metallib they are made from and pipelines.<gpu> holds one Apple GPU's compiled code. The device refuses the
+library (TegraGM20BMetalDeviceAnswers.mm), and its caller makes the same states from its own metallib.
 
 The file: a u32 section count, each section's offset, and per section a u32 count and each entry's offset from the
 section. Sections 0 libraries, 1 the specialized functions' names, 2 compute and 3 render state names, 5 the

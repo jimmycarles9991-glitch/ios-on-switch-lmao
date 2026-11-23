@@ -95,8 +95,8 @@ pub enum FormatEmulation {
     /// the texels' bytes held in an unsigned integer format of the same layout, which a function
     /// reads and writes through its slot's [`ExtendedRange`] variant
     /// (`LoweringInputs::extended_range`), decoding and encoding Metal's values in the shader.
-    /// Exact for a sampled image a function fetches from, for a storage image, and for a color
-    /// attachment a fragment function writes encoded texels to
+    /// Exact for a sampled image a function fetches from, for a storage image, and for a padded or
+    /// bfloat color attachment a fragment function writes encoded texels to
     /// (`LoweringInputs::extended_range_colors`); admitted for those usages only (no filter, blend,
     /// or texel buffer).
     ExtendedRange,
@@ -497,62 +497,6 @@ impl ExtendedRange {
         let x = (v + 384.0 / 510.0) * 510.0;
         // Ties up, of the `float`: its sum with a half is exact in `f64`.
         (f64::from(x) + 0.5).floor().clamp(0.0, 1023.0) as u32
-    }
-
-    /// Whether a render pass's `Clear` load of the clear color `color` leaves Metal's tile memory
-    /// holding the values the clear's stored codes ([`clear_texel`](Self::clear_texel)) read
-    /// back, rounded to `half`. Metal's tile memory holds each channel of a pass's
-    /// `BGR10_XR`, `BGRA10_XR` or two-plane color, and their `_sRGB` twins, as `half` until the
-    /// pass stores it, and a `Clear` load as the clear color through `float` and then `half`
-    /// (EV XRB-pxr3-m4 on an Apple M4 and the same probe on an Apple M3 Max): a draw that reads
-    /// or blends into the color then sees those halves, where an image of the codes holds the
-    /// codes nearest them. `None` for the padded and bfloat forms, whose tile memory is
-    /// unmeasured.
-    pub fn clear_read_back(self, color: [f64; 4]) -> Option<bool> {
-        if self.padded() || self.bfloat() {
-            return None;
-        }
-        let half = |v: f32| crate::float16::f16_bits_to_f32(crate::float16::f32_to_f16_bits(v));
-        let channels = match self {
-            ExtendedRange::Bgr10 { .. } => 3,
-            _ => 4,
-        };
-        Some((0..channels).all(|c| {
-            let held = half(color[c] as f32);
-            held == half(self.code_value(self.code(held, c == 3), c == 3))
-        }))
-    }
-
-    /// The `half` values Metal's tile memory holds for a color of this form after a render
-    /// pass's `Clear` load of the clear color `color` (red, green, blue, alpha), as `f32`: each
-    /// channel through `float` and then `half`, each rounded to nearest even, and `BGR10_XR`'s
-    /// alpha 1, as a read of the tile reads it. The runtime clears the attachment's `half` shadow
-    /// to them. `None` for the padded and bfloat forms, whose tile memory is unmeasured.
-    pub fn clear_tile_value(self, color: [f64; 4]) -> Option<[f32; 4]> {
-        if self.padded() || self.bfloat() {
-            return None;
-        }
-        let half = |v: f32| crate::float16::f16_bits_to_f32(crate::float16::f32_to_f16_bits(v));
-        Some(std::array::from_fn(|c| match (self, c) {
-            (ExtendedRange::Bgr10 { .. }, 3) => 1.0,
-            _ => half(color[c] as f32),
-        }))
-    }
-
-    /// The value Metal reads from the code `code` of a color channel, or of alpha where `alpha`,
-    /// of a `BGR10_XR`, `BGRA10_XR` or two-plane format or an `_sRGB` twin: `(code - 384) / 510`
-    /// correctly rounded, an `_sRGB` color channel's table step, the two-plane formats' alpha byte
-    /// over 255.
-    fn code_value(self, code: u32, alpha: bool) -> f32 {
-        let n = code as i32 - 384;
-        match (self, alpha) {
-            (ExtendedRange::Planes { .. }, true) => code as f32 / 255.0,
-            (_, false) if self.srgb() => {
-                let step = extended_srgb::SRGB_DECODE_STEPS[n.unsigned_abs() as usize];
-                (f32::from(step) / 8192.0).copysign(n as f32)
-            }
-            _ => n as f32 / 510.0,
-        }
     }
 
     /// The code Metal's write stores for the value `v` of a color channel, or of alpha where
@@ -1069,18 +1013,6 @@ macro_rules! formats_named_not_held {
             | PixelFormat::RG12UintPACKED
             | PixelFormat::RGB10A8Uint2P
     };
-}
-
-/// Whether a render pipeline on `profile` blends into a color attachment of `pf`, one of Apple's
-/// extended-range formats ([`ExtendedRange::of`]). No device blends such an attachment's raw
-/// texels: the fragment function computes Metal's blend in the shader, inside the pixel
-/// interlock, from the texel it reads. `Ok` where the device orders fetch through the pixel
-/// interlock alone and that form is exact for an attachment of `pf` written whole under a blend
-/// Metal's model holds; else what blocks it. A pipeline's own blend, write mask or output may still
-/// be refused by name (`Feature::ExtendedRangeBlend`), as [`rotated_channels`]' blends are per
-/// pipeline. Another format answers `NotImplemented(Format)`.
-pub fn extended_range_blend(pf: PixelFormat, profile: &DeviceProfile) -> Result<(), Unsupported> {
-    crate::lower::fragment::extended_range_blend(pf, profile)
 }
 
 /// Whether Metal holds a texture of `pf` exactly only over memory it is given, an IOSurface's
@@ -1750,8 +1682,8 @@ pub fn ycbcr_renders(pf: PixelFormat) -> bool {
 /// Whether `pf` is a packed 10-bit two-plane YCbCr format this crate holds ([`ycbcr`]), whose
 /// pipeline a color attachment of is made ([`FormatEmulation::YCbCrPassRefused`]) and whose
 /// render pass the runtime refuses at its start, `NotImplemented(Format)`: `YCBCR10_420_2P_PACKED`,
-/// `YCBCR10_422_2P_PACKED`, `YCBCR10_444_2P_PACKED` and their `_sRGB` twins (the code twins
-/// `RGB10_*_2P_PACKED` join once a texture of them is held). Metal makes the pipeline and fails
+/// `YCBCR10_422_2P_PACKED`, `YCBCR10_444_2P_PACKED`, their `_sRGB` twins and their code twins
+/// `RGB10_*_2P_PACKED` (whose passes are not measured). Metal makes the pipeline and fails
 /// the pass (EVs GSM2-pk1-m4 and GSM2-pk2-m4, an Apple M4 under macOS 27.0.1, a clear and a
 /// draw of each over its packed surface, 16 x 8, plain; the consumer's runs of the same probe on
 /// an Apple M3 Max under macOS 26.7): the command buffer ends in an error, `Hang` in most runs
@@ -1761,7 +1693,7 @@ pub fn ycbcr_renders(pf: PixelFormat) -> bool {
 /// the queue's later command buffers. No rule gives those bytes or that code, so no exact form
 /// exists: the runtime's refusal is its gap.
 pub fn ycbcr_pass_refused(pf: PixelFormat) -> bool {
-    // Held: read converted or through the sRGB curve (`bind::YCbCrCodes::of`).
+    // Held: read converted, through the sRGB curve or as codes (`bind::YCbCrCodes::of`).
     ycbcr_format(pf)
         .is_some_and(|f| f.packed && f.bits == 10 && crate::bind::YCbCrCodes::of(f).is_some())
 }

@@ -20,7 +20,7 @@ public enum FetchBlendPipeline {
             vertices.attributes[0].bufferIndex = 0
             vertices.layouts[0].stride = MemoryLayout<SIMD4<Float>>.stride
             descriptor.vertexDescriptor = vertices
-            for index in 0..<attachments {
+            for index in 0 ..< attachments {
                 descriptor.colorAttachments[index].pixelFormat = format
                 descriptor.colorAttachments[index].writeMask = index == written ? .all : []
             }
@@ -52,7 +52,8 @@ struct FetchBlendLayer: Sendable {
     func moved(_ shift: FetchBlendShift) -> FetchBlendLayer {
         guard x1 != .max else { return .whole(tag ^ shift.tag) }
         return FetchBlendLayer(
-            x0: x0 + shift.dx, y0: y0 + shift.dy, x1: x1 + shift.dx, y1: y1 + shift.dy, tag: tag ^ shift.tag)
+            x0: x0 + shift.dx, y0: y0 + shift.dy, x1: x1 + shift.dx, y1: y1 + shift.dy, tag: tag ^ shift.tag
+        )
     }
 }
 
@@ -132,8 +133,8 @@ struct FetchBlendMesh: Sendable {
             let first = mesh.points.count
             switch strip {
             case .folded(let triangles, let bits):
-                for j in 0..<(triangles + 2) { mesh.point(whole[j % 3], UInt32(j & 1) | bits) }
-                mesh.layers += (0..<triangles).map { .whole(UInt32($0 & 1) | bits) }
+                for j in 0 ..< (triangles + 2) { mesh.point(whole[j % 3], UInt32(j & 1) | bits) }
+                mesh.layers += (0 ..< triangles).map { .whole(UInt32($0 & 1) | bits) }
             case .band(let xs, let y0, let y1, let tag):
                 for x in xs {
                     mesh.point(clip(x, y0), tag)
@@ -141,9 +142,9 @@ struct FetchBlendMesh: Sendable {
                 }
                 mesh.layers.append(FetchBlendLayer(x0: xs.first!, y0: y0, x1: xs.last!, y1: y1, tag: tag))
             case .stub(let vertices):
-                for _ in 0..<vertices { mesh.point(whole[0], 0) }
+                for _ in 0 ..< vertices { mesh.point(whole[0], 0) }
             }
-            mesh.indices += (first..<mesh.points.count).map(UInt32.init) + [.max]
+            mesh.indices += (first ..< mesh.points.count).map(UInt32.init) + [.max]
         }
         return mesh
     }
@@ -151,13 +152,13 @@ struct FetchBlendMesh: Sendable {
     /// Rectangles, each its own indexed strip of four vertices (16-bit indices, no restart), as RenderBox draws a quad
     static func quads(_ count: Int) -> FetchBlendMesh {
         var mesh = FetchBlendMesh()
-        for q in 0..<count {
+        for q in 0 ..< count {
             let (x0, y0) = ((q * 13) % 40, (q * 23) % 40)
             let (x1, y1) = (min(size, x0 + 10 + (q * 7) % 24), min(size, y0 + 12 + (q * 5) % 20))
             let tag = UInt32((q * 3 + q / 4) & 3)
             let first = UInt32(mesh.points.count)
             for corner in [clip(x0, y0), clip(x1, y0), clip(x0, y1), clip(x1, y1)] { mesh.point(corner, tag) }
-            mesh.indices += (first..<first + 4).map { $0 }
+            mesh.indices += (first ..< first + 4).map { $0 }
             mesh.layers.append(FetchBlendLayer(x0: x0, y0: y0, x1: x1, y1: y1, tag: tag))
         }
         return mesh
@@ -187,7 +188,7 @@ struct FetchBlendMesh: Sendable {
     /// step is fetch_blend_primitive_fragment's primitive_id >> 1.
     static func primitivePairs(_ count: Int) -> FetchBlendMesh {
         var mesh = FetchBlendMesh()
-        for m in 0..<count {
+        for m in 0 ..< count {
             let step = UInt32(m)
             if m % 3 == 1 {
                 let (x0, y0) = ((m * 11) % 36, (m * 17) % 36)
@@ -210,8 +211,8 @@ enum FetchBlendState {
     /// What the pixel's next fetch reads back of state `n` once stored in `format`: itself, but a two-bit alpha's
     static func stored(_ n: SIMD4<Int>, _ format: TexelFormat) -> SIMD4<Int> {
         let scale = scale(format)
-        let values = format.decode(format.encode((0..<4).map { Float(n[$0]) / scale })[...])
-        return SIMD4((0..<4).map { Int((values[$0] * scale).rounded()) })
+        let values = format.decode(format.encode((0 ..< 4).map { Float(n[$0]) / scale })[...])
+        return SIMD4((0 ..< 4).map { Int((values[$0] * scale).rounded()) })
     }
 
     static func step(_ n: SIMD4<Int>, _ tag: UInt32) -> SIMD4<Int> {
@@ -225,8 +226,8 @@ enum FetchBlendState {
         for layer in layers {
             let (xs, ys) = ((max(0, layer.x0), min(size, layer.x1)), (max(0, layer.y0), min(size, layer.y1)))
             guard xs.0 < xs.1, ys.0 < ys.1 else { continue }
-            for y in ys.0..<ys.1 {
-                for x in xs.0..<xs.1 { pixels[y * size + x] = stored(step(pixels[y * size + x], layer.tag), format) }
+            for y in ys.0 ..< ys.1 {
+                for x in xs.0 ..< xs.1 { pixels[y * size + x] = stored(step(pixels[y * size + x], layer.tag), format) }
             }
         }
         return pixels
@@ -234,13 +235,13 @@ enum FetchBlendState {
 
     static func bytes(_ pixels: [SIMD4<Int>], _ format: TexelFormat) -> [UInt8] {
         let scale = scale(format)
-        return pixels.flatMap { n in format.encode((0..<4).map { Float(n[$0]) / scale }) }
+        return pixels.flatMap { n in format.encode((0 ..< 4).map { Float(n[$0]) / scale }) }
     }
 
     static func units(_ bytes: [UInt8], _ format: TexelFormat, pixel: Int) -> SIMD4<Int> {
         let at = pixel * format.bytesPerTexel
-        let values = format.decode(bytes[at..<(at + format.bytesPerTexel)])
-        return SIMD4((0..<4).map { Int((values[$0] * scale(format)).rounded()) })
+        let values = format.decode(bytes[at ..< (at + format.bytesPerTexel)])
+        return SIMD4((0 ..< 4).map { Int((values[$0] * scale(format)).rounded()) })
     }
 
     static func shown(_ n: SIMD4<Int>) -> String { "\(n.x)/\(n.y)/\(n.z)/\(n.w)" }

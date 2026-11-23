@@ -29,15 +29,16 @@ struct XRBlendScene: GPUScene {
         let target = try gpu.texture(.rgb10a2Unorm, width, height, usage: [.renderTarget, .shaderRead])
         var fill: [UInt8] = []
         fill.reserveCapacity(width * height * 4)
-        for _ in 0..<height {
-            for x in 0..<width {
+        for _ in 0 ..< height {
+            for x in 0 ..< width {
                 let word = UInt32(x) | UInt32(x) << 10 | UInt32(x) << 20 | 3 << 30
                 fill += withUnsafeBytes(of: word.littleEndian, Array.init)
             }
         }
         try await gpu.blitUpload(
-            [UploadRect(x: 0, y: 0, width: width, height: height)], [fill], into: target, texel: 4)
-        let rows = (0..<height).map(Self.row)
+            [UploadRect(x: 0, y: 0, width: width, height: height)], [fill], into: target, texel: 4
+        )
+        let rows = (0 ..< height).map(Self.row)
         let rowBuffer = try gpu.buffer(rows)
         let pipeline = try gpu.render(fragment: "xr_blend_fragment", format: .rgb10a2Unorm) { descriptor in
             let attachment = descriptor.colorAttachments[0]!
@@ -64,16 +65,16 @@ struct XRBlendScene: GPUScene {
         var counts = (rne: 0, trunc: 0, up: 0, alpha: 0)
         var histogram = [Int: Int]()
         var first: String?
-        for y in 0..<height {
+        for y in 0 ..< height {
             let row = rows[y]
             let a = Double(row[3])
-            for x in 0..<width {
+            for x in 0 ..< width {
                 let at = 4 * (y * width + x)
                 let word =
                     UInt32(bytes[at]) | UInt32(bytes[at + 1]) << 8 | UInt32(bytes[at + 2]) << 16
-                    | UInt32(bytes[at + 3]) << 24
+                        | UInt32(bytes[at + 3]) << 24
                 counts.alpha += word >> 30 == 3 ? 0 : 1
-                for c in 0..<3 {
+                for c in 0 ..< 3 {
                     let exact = 1023 * Double(row[c]) + Double(x) * (1 - a)
                     let clamp = { (v: Double) in Int(min(max(v, 0), 1023)) }
                     let want = clamp(exact.rounded(.toNearestOrEven)), have = Int(word >> (10 * UInt32(c)) & 0x3FF)
@@ -97,7 +98,7 @@ struct XRBlendScene: GPUScene {
         result.metrics.set("up_matches", counts.up)
         result.metrics.set("within1", worst <= 1 ? "pass" : "fail")
         result.metrics.set("max_error", worst)
-        for e in -1...1 { result.metrics.set("err_\(e < 0 ? "m1" : e == 0 ? "0" : "p1")", histogram[e, default: 0]) }
+        for e in -1 ... 1 { result.metrics.set("err_\(e < 0 ? "m1" : e == 0 ? "0" : "p1")", histogram[e, default: 0]) }
         if let first { result.metrics.set("rne_first", first) }
         result.expect(worst <= 1, "a blended code \(worst) from RNE of the exact value (\(first ?? ""))")
         result.expect(counts.alpha == 0, "\(counts.alpha) texels lost alpha 3 under ONE / ZERO")

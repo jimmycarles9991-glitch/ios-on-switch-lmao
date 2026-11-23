@@ -633,9 +633,11 @@ pub(super) fn read_check(cx: &SelectCx<'_>, buffer: bool) -> ReadCheck {
 /// Whether a write needs the in-shader bounds check: Metal discards an out-of-bounds write, and
 /// Vulkan does under `robustImageAccess` (images, either level) or `robustBufferAccess2` (texel
 /// buffers). Under `robustBufferAccess` a write past a texel buffer may instead modify any memory
-/// bound to the underlying buffer, so it is checked in the shader.
+/// bound to the underlying buffer, so it is checked in the shader. Without containment
+/// (`Containment::UnsafeOff`) no write is checked.
 pub(super) fn write_guard(cx: &SelectCx<'_>, buffer: bool) -> bool {
-    !contain::device_drops_texel_writes(cx.profile, buffer)
+    matches!(cx.profile.fields().containment, Containment::On { .. })
+        && !contain::device_drops_texel_writes(cx.profile, buffer)
 }
 
 /// Whether the device's robustness is left both an out-of-bounds store and an out-of-bounds
@@ -1003,6 +1005,16 @@ pub(crate) fn two_planes(
     ) && inputs.two_plane_textures.contains(&slot)
 }
 
+/// Whether a slot of `shape`, bound in extended-range form `extended`, is a two-plane
+/// `RGB10A8_2P_XR10` texture buffer, held as its color words alone (`R32ui`, the binder's view):
+/// a read takes the image's second component, 0, as the alpha byte, and a write stores the word.
+fn words_alone(extended: Option<crate::metal::format::ExtendedRange>, shape: ImageShape) -> bool {
+    matches!(
+        extended,
+        Some(crate::metal::format::ExtendedRange::Planes { .. })
+    ) && shape.dim == ImageDim::Buffer
+}
+
 /// The declaration of slot `s`, checked on the profile, with the facts, push fields, and
 /// descriptors it contributes.
 fn declare_slot(
@@ -1104,7 +1116,7 @@ fn declare_slot(
             facts.push(RuntimeFact::StorageTextureIntegerChannels { slot: s.slot });
             push.push(PushField::TextureIntegerChannels(s.slot));
         }
-        match planes && (s.uses.read || s.uses.write) {
+        match (planes || words_alone(extended, shape)) && (s.uses.read || s.uses.write) {
             true => (crate::spv::ImageFormat::R32ui, StorageImageClass::Identity),
             false => storage_format(cx, s, texel)?,
         }

@@ -3086,10 +3086,13 @@ fn select_image(
     observe(cx, image, shape, texel.map(|(_, c)| c))?;
     if let Some(form) = extended_range(cx, image)? {
         // Metal binds an extended-range texture only to a `float` or `half` parameter; a read or
-        // write of a whole texel of a texture (not a texel buffer) is built.
+        // write of a whole texel of a texture, or of a two-plane format's texel buffer (its words
+        // alone: `slot::words_alone`), is built.
         let whole = texel
             .is_none_or(|(f, _)| matches!(f.conv, TexelConv::F32 | TexelConv::F16) && f.lanes == 4);
-        if !whole || shape.dim == ImageDim::Buffer || matches!(t.op, TexOp::Atomic(_)) {
+        let other_buffer = shape.dim == ImageDim::Buffer
+            && !matches!(form, crate::metal::format::ExtendedRange::Planes { .. });
+        if !whole || other_buffer || matches!(t.op, TexOp::Atomic(_)) {
             return Err(Unsupported::not_implemented(Feature::Format).into());
         }
         if matches!(t.op, TexOp::Read | TexOp::Write) {
@@ -3299,8 +3302,10 @@ fn select_read_as(
     if extended.is_some() && residency {
         return Err(Unsupported::not_implemented(Feature::Format).into());
     }
+    // Metal's out-of-bounds texel of an extended-range texture is no device's (its raw zero decodes
+    // to -0.752941), and Metal defines it: the shader checks such a read without containment too.
     let check = match slot::read_check(cx, shape.dim == ImageDim::Buffer) {
-        ReadCheck::Device if extended.is_some() => ReadCheck::Shader,
+        ReadCheck::Device | ReadCheck::Off if extended.is_some() => ReadCheck::Shader,
         c => c,
     };
     // A storage read at a level reads the slot's level views, and past the bound level count

@@ -376,6 +376,11 @@ extern "C" int switch_gpu_bridge_source_failure(const switch_gpu_bridge *bridge)
 	return 0;
 }
 
+extern "C" int switch_gpu_bridge_why(const switch_gpu_bridge *bridge)
+{
+	return switch_gpu_backing_tokens_failure(bridge->tokens, bridge->count);
+}
+
 extern "C" int switch_gpu_bridge_status(const switch_gpu_bridge *bridge)
 {
 	if (!bridge)

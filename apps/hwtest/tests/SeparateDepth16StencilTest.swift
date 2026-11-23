@@ -4,27 +4,28 @@ import HWTestGPU
 import Metal
 
 /// A Depth16Unorm texture and a Stencil8 texture as one pass's attachments (pass.ds: GM20B has no 16-bit depth zeta with
-/// stencil, so the raw path renders a Depth32Float_Stencil8 and converts the depth in and out by draws). The first pass
+/// stencil, so the driver renders a Depth32Float_Stencil8 and converts the depth in and out by draws). The first pass
 /// clears depth to 0.25 (Metal's code 0x3fff), writes depth 0.5 and stencil 0x5A over the left half and stores both; the
 /// second loads both, draws red at 0.2 where the stencil is 0x5A and stores them again. Every depth code read back after
 /// the second pass is the one the first stored (the load and store through the float depth keep each code), the right
-/// half 0x3fff, the colour red on the left alone, the stencil 0x5A on the left; both passes on the raw path.
+/// half 0x3fff, the colour red on the left alone, the stencil 0x5A on the left; both passes on the driver.
 struct SeparateDepth16StencilTest: HWTest {
-    let id = "gpu.raw.separate_depth16_stencil"
-    let name = "Depth16Unorm and Stencil8 textures as one pass's attachments, on the raw path"
+    let id = "gpu.gm20b.separate_depth16_stencil"
+    let name = "Depth16Unorm and Stencil8 textures as one pass's attachments, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = 32
         let colour = try gpu.texture(.rgba8Unorm, n, n)
         let depth = try gpu.texture(.depth16Unorm, n, n, usage: [.renderTarget])
         let stencil = try gpu.texture(.stencil8, n, n, usage: [.renderTarget])
         let state = try gpu.render(
-            fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth16Unorm, stencil: .stencil8)
+            fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth16Unorm, stencil: .stencil8
+        )
         func ds(
             _ compare: MTLCompareFunction, write: Bool, stencil: MTLCompareFunction, replace: Bool
         ) throws
@@ -72,7 +73,8 @@ struct SeparateDepth16StencilTest: HWTest {
             b.copy(
                 from: depth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                 sourceSize: MTLSize(width: n, height: n, depth: 1), to: out, destinationOffset: 0,
-                destinationBytesPerRow: n * 2, destinationBytesPerImage: n * n * 2)
+                destinationBytesPerRow: n * 2, destinationBytesPerImage: n * n * 2
+            )
             b.endEncoding()
         }
         var paths: [String] = []
@@ -85,7 +87,8 @@ struct SeparateDepth16StencilTest: HWTest {
                 quad(e, x0: -1, x1: 0, z: 0.5, [0, 0, 1, 1])
                 e.endEncoding()
                 readDepth(commands, into: afterFirst)
-            }.path)
+            }.path
+        )
         paths.append(
             try await gpu.run { commands in
                 let e = commands.makeRenderCommandEncoder(descriptor: pass(true))!
@@ -99,19 +102,21 @@ struct SeparateDepth16StencilTest: HWTest {
                 b.copy(
                     from: stencil, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                     sourceSize: MTLSize(width: n, height: n, depth: 1), to: stencilBytes, destinationOffset: 0,
-                    destinationBytesPerRow: n, destinationBytesPerImage: n * n)
+                    destinationBytesPerRow: n, destinationBytesPerImage: n * n
+                )
                 b.endEncoding()
-            }.path)
+            }.path
+        )
         let pixels = try await gpu.read(colour, bytesPerPixel: 4)
         let d1 = afterFirst.contents().bindMemory(to: UInt16.self, capacity: n * n)
         let d2 = afterSecond.contents().bindMemory(to: UInt16.self, capacity: n * n)
         let s = stencilBytes.contents().bindMemory(to: UInt8.self, capacity: n * n)
         var colourWrong = 0, changed = 0, clearWrong = 0, stencilWrong = 0
-        for y in 0..<n {
-            for x in 0..<n {
+        for y in 0 ..< n {
+            for x in 0 ..< n {
                 let i = x + n * y, left = x < n / 2
                 let want: [UInt8] = left ? [255, 0, 0, 255] : [0, 0, 0, 255]
-                colourWrong += Array(pixels[4 * i..<4 * i + 4]) == want ? 0 : 1
+                colourWrong += Array(pixels[4 * i ..< 4 * i + 4]) == want ? 0 : 1
                 changed += d1[i] == d2[i] ? 0 : 1
                 if !left { clearWrong += d2[i] == 0x3fff ? 0 : 1 }
                 stencilWrong += s[i] == (left ? 0x5A : 0) ? 0 : 1
@@ -125,7 +130,7 @@ struct SeparateDepth16StencilTest: HWTest {
         metrics.set("stencil_wrong", stencilWrong)
         metrics.set("left_right", String(format: "%04x/%04x->%04x/%04x", d1[2], d1[n - 2], d2[2], d2[n - 2]))
         var failures: [String] = []
-        if paths.contains(where: { $0 != "raw" }) { failures.append("a pass went off the raw path") }
+        if paths.contains(where: { $0 != "gm20b" }) { failures.append("a pass went off the driver") }
         if colourWrong != 0 { failures.append("\(colourWrong) colour pixels wrong") }
         if changed != 0 { failures.append("\(changed) depth codes changed by a load and store") }
         if clearWrong != 0 { failures.append("\(clearWrong) cleared codes not 0x3fff") }

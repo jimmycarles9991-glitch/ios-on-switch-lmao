@@ -23,7 +23,7 @@ final class SharedExponentTests: XCTestCase {
 
     func testEncodingIsMSLsEncodingOfTheWordsValue() {
         let mantissas: [UInt32] = [0, 1, 2, 3, 127, 128, 129, 255, 256, 257, 300, 511]
-        for exponent in UInt32(0)...31 {
+        for exponent in UInt32(0) ... 31 {
             for r in mantissas {
                 for g in mantissas {
                     for b in mantissas {

@@ -6,7 +6,6 @@ load("@rules_python//python:py_test.bzl", "py_test")
 load("@rules_rust//rust:defs.bzl", "rust_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//third_party/mesa/bazel:defs.bzl", "MESA_LINT_EXCLUDE", "MESA_PY_DEPS", "mesa_args", "mesa_cc_library", "mesa_files", "mesa_genrule")
-load("//third_party/mesa/bazel:identity.bzl", "mesa_identity_files")
 load("//third_party/mesa/bazel:rust.bzl", "NOUVEAU_RUST_ARGS", "RUST_GLOBAL_ARGS", "mesa_rust_library")
 load(":fs_depth_test.bzl", "fs_depth_test_binary")
 
@@ -21,8 +20,6 @@ exports_files(glob(
     ["**"],
     exclude = ["BUILD.bazel"],
 ))
-
-mesa_identity_files()
 
 # Every header of this package, its generated ones included: //third_party/mesa:headers gathers them.
 filegroup(
@@ -138,6 +135,7 @@ mesa_cc_library(
         "nak_nir_lower_cf.c",
         "nak_nir_lower_cmat.c",
         "nak_nir_lower_fs_inputs.c",
+        "nak_nir_lower_fs_interlock.c",
         "nak_nir_lower_gs_intrinsics.c",
         "nak_nir_lower_image_addrs.c",
         "nak_nir_lower_mesh_intrinsics.c",
@@ -148,10 +146,12 @@ mesa_cc_library(
         "nak_nir_lower_tex_sm50.c",
         "nak_nir_lower_vtg_io.c",
         "nak_nir_mark_lcssa_invariants.c",
+        "nak_nir_narrow_half_phis.c",
         "nak_nir_rematerialize_compares.c",
         "nak_nir_rematerialize_load_const.c",
         "nak_nir_rematerialize_uniforms.c",
         "nak_nir_shrink_interlock.c",
+        "nak_nir_strip_half_rounding.c",
         "//third_party/mesa/src/nouveau/headers:nv_push.c",
     ],
 )
@@ -385,6 +385,20 @@ py_test(
     main = "run_host_test.py",
 )
 
+# ios-on-switch-lmao: NAK's SM50 code layout (nak/sm50/layout_tests.rs): blocks run on across scheduling groups and no
+# NOP follows a branch, from the same binary
+py_test(
+    name = "sm50_layout_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_sm53_half_test_bin)",
+        "sm50::layout_tests",
+    ],
+    data = [":nak_sm53_half_test_bin"],
+    main = "run_host_test.py",
+)
+
 # ios-on-switch-lmao: NAK's SM50 LOP3/IADD3/ISCADD encodings (nak/sm50/int3.rs sm53_int3_tests), from the same binary
 py_test(
     name = "sm53_int3_test",
@@ -526,5 +540,139 @@ py_test(
         "half-contract",
     ],
     data = [":nak_half_contract_test_host"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: NAK's NIR rules for GM20B (nak_rules_test.c): metal2vulkan's integer float tests as float compares, a 16-bit
+# float target's rounding folded or removed, phis of halves narrowed
+mesa_cc_library(
+    name = "nak_rules_test_objects",
+    testonly = True,
+    c_args = mesa_args(
+        "c",
+        include_dirs = [
+            "src/nouveau/compiler",
+            "gen:src/nouveau/compiler",
+            "include",
+            "gen:include",
+            "src",
+            "gen:src",
+            "src/compiler",
+            "gen:src/compiler",
+            "src/compiler/nir",
+            "gen:src/compiler/nir",
+            "src/nouveau/nil",
+            "gen:src/nouveau/nil",
+            "src/nouveau/headers",
+            "gen:src/nouveau/headers",
+            "src/nouveau/headers/nvidia/classes",
+            "gen:src/util",
+            "gen:src/util/format",
+        ],
+    ),
+    sources = [
+        "nak_rules_test.c",
+        "nak_nir_algebraic.c",
+        "nak_nir_narrow_half_phis.c",
+        "nak_nir_strip_half_rounding.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "nak_rules_test_bin",
+    testonly = True,
+    archives = [
+        ":nak_rules_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "nak_rules_test_host",
+    testonly = True,
+    srcs = [":nak_rules_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "rules_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_rules_test_host)",
+        "rules",
+    ],
+    data = [":nak_rules_test_host"],
+    main = "run_host_test.py",
+)
+
+# ios-on-switch-lmao: the pixel interlock's ticket protocol (nak_interlock_test.c): one ticket read, one wait, the release on the
+# word waited on
+mesa_cc_library(
+    name = "nak_interlock_test_objects",
+    testonly = True,
+    c_args = mesa_args(
+        "c",
+        include_dirs = [
+            "src/nouveau/compiler",
+            "gen:src/nouveau/compiler",
+            "include",
+            "gen:include",
+            "src",
+            "gen:src",
+            "src/compiler",
+            "gen:src/compiler",
+            "src/compiler/nir",
+            "gen:src/compiler/nir",
+            "src/nouveau/nil",
+            "gen:src/nouveau/nil",
+            "src/nouveau/headers",
+            "gen:src/nouveau/headers",
+            "src/nouveau/headers/nvidia/classes",
+            "gen:src/util",
+            "gen:src/util/format",
+        ],
+    ),
+    sources = [
+        "nak_interlock_test.c",
+        "nak_nir_lower_fs_interlock.c",
+    ],
+)
+
+fs_depth_test_binary(
+    name = "nak_interlock_test_bin",
+    testonly = True,
+    archives = [
+        ":nak_interlock_test_objects",
+        "//third_party/mesa/src/compiler/nir:nir",
+        "//third_party/mesa/src/compiler:compiler",
+        "//third_party/mesa/src/util:mesa_util",
+        "//third_party/mesa/src/util:mesa_util_simd",
+        "//third_party/mesa/src/c11/impl:mesa_util_c11",
+        "//third_party/mesa/src/util/blake3",
+    ],
+)
+
+mesa_files(
+    name = "nak_interlock_test_host",
+    testonly = True,
+    srcs = [":nak_interlock_test_bin"],
+    platform = "macos",
+)
+
+py_test(
+    name = "interlock_test",
+    size = "small",
+    srcs = ["run_host_test.py"],
+    args = [
+        "$(rootpath :nak_interlock_test_host)",
+        "interlock",
+    ],
+    data = [":nak_interlock_test_host"],
     main = "run_host_test.py",
 )

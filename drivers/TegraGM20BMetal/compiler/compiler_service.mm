@@ -33,10 +33,11 @@
 #include "compiler_sandbox.h"
 #include "compiler_store.h"
 #include "compiler_times.h"
-#include "../raw/runtime/raw_cache_io.h"
-#include "../raw/runtime/raw_reflection_blob.h"
-#include "../raw/runtime/raw_compute_facts_entry.h"
-#include "../raw/runtime/raw_library_entry.h"
+#include "../../../kits/SwitchRefusal/SwitchRefusal.h"
+#include "../cache_io.h"
+#include "../reflection_blob.h"
+#include "../compute_facts_entry.h"
+#include "../library_entry.h"
 
 namespace switch_compiler {
 namespace {
@@ -71,14 +72,14 @@ struct Asked : Work {
 
 // What a stored entry answers, -1 for one that is not `k`'s whole, or a library the front end refused (retired, and made
 // again: the store is not named by what the front end ran with)
-int32_t storedResult(const std::string &bytes, const raw::CacheKey &k)
+int32_t storedResult(const std::string &bytes, const gm20b::CacheKey &k)
 {
-    raw::Reader r(bytes);
+    gm20b::Reader r(bytes);
     uint32_t kind = 0;
-    if (!raw::readEntryHead(bytes, r, k, kind) || kind == raw::kKindLibraryRefusal)
+    if (!gm20b::readEntryHead(bytes, r, k, kind) || kind == gm20b::kKindLibraryRefusal)
         return -1;
-    return kind == raw::kKindRecord || kind == raw::kKindKernel || kind == raw::kKindFacts ||
-                   kind == raw::kKindLibrary || kind == raw::kKindReflection
+    return kind == gm20b::kKindRecord || kind == gm20b::kKindKernel || kind == gm20b::kKindFacts ||
+                   kind == gm20b::kKindLibrary || kind == gm20b::kKindReflection
                ? TegraGM20BCompileMade
                : TegraGM20BCompileRefused;
 }
@@ -137,7 +138,7 @@ private:
 
     int32_t run(Work &work);
     void remember(const Asked &asked, int32_t ran);
-    bool publish(const raw::Digest *name, const raw::CacheKey &key, const std::string &entry, bool slots,
+    bool publish(const gm20b::Digest *name, const gm20b::CacheKey &key, const std::string &entry, bool slots,
                  std::string &why);
     bool connect(std::string &why, StartFailure &failure);
     void decline();
@@ -162,7 +163,7 @@ int32_t packed(int32_t result, bool stored, qos_class_t ran)
 
 // The entry under `name` (null: the store holds it already), and with `slots` its program slots ahead of it
 // (Store::putProgramSlots): a full store is written again with its newest half and registered again, then takes both
-bool Service::publish(const raw::Digest *name, const raw::CacheKey &key, const std::string &entry, bool slots,
+bool Service::publish(const gm20b::Digest *name, const gm20b::CacheKey &key, const std::string &entry, bool slots,
                       std::string &why)
 {
     std::lock_guard<std::mutex> l(publishLock_);
@@ -174,7 +175,7 @@ bool Service::publish(const raw::Digest *name, const raw::CacheKey &key, const s
     Store::Put put = putAll();
     if (put == Store::Put::Full) {
         const uint32_t before = store_.entries();
-        if (!store_.makeRoom(why) || !registerStore(uint64_t(TEGRA_RAW_STACK), why))
+        if (!store_.makeRoom(why) || !registerStore(uint64_t(TEGRA_STACK_KEY), why))
             return false;
         os_log(logger(), "SwitchShaderCompiler: the full store kept its newest %u of %u entries", store_.entries(),
                before);
@@ -208,6 +209,12 @@ int32_t Service::run(Work &work)
     if (result == TegraGM20BCompileFailed || result == TegraGM20BCompileUnavailable)
         os_log_error(logger(), "SwitchShaderCompiler: pid %d's state not made: %{public}s | %{public}.300s", asked.pid,
                      why.c_str(), p.key.key.c_str());
+    if (result == TegraGM20BCompileRefused) {
+        const RefusalLine line = refusalLine(p.request, asked.pid, why);
+        switch_refusal_k(
+            switch_refusal_key_with(switch_refusal_key("m2v", line.reason), switch_refusal_key(line.text.c_str(), "")),
+            "m2v", line.reason, "%s", line.text.c_str());
+    }
 #if SWITCH_DEBUG
     os_log(logger(),
            "SwitchShaderCompiler: %{public}s in %llu ms, queued %llu ms (class 0x%x) for pid %d: %{public}.400s",
@@ -251,7 +258,7 @@ bool Service::submit(Prepared prepared, std::string request, const Waiter &waite
 #if SWITCH_DEBUG
     work->takenNs = uptimeNs();
 #endif
-    const raw::Digest name = prepared.name;
+    const gm20b::Digest name = prepared.name;
     work->prepared = std::move(prepared);
     return pool_->submit(name, std::move(work), waiter);
 }
@@ -307,7 +314,7 @@ bool Service::connect(std::string &why, StartFailure &failure)
 }
 
 // No compiler comes this boot: the kernel answers every waiting and later request Unavailable, and a client fails the
-// creation of a state the pack, the seed and the store lack, by name (RawComplete.h kNoCompilerComes)
+// creation of a state the pack, the seed and the store lack, by name (TegraGM20BMetalComplete.h kNoCompilerComes)
 void Service::decline()
 {
     if (connection_)
@@ -384,7 +391,9 @@ void Service::open(uint64_t stack)
 }
 
 // The requests an earlier store was made from, made again as background work nobody waits for, one at a time: the pool
-// runs one background compile at once, and a queued request would hold its libraries' bytes until it ran. A store
+// runs one background compile at once, and a queued request would hold its libraries' bytes until it ran. One an
+// earlier build logged is made under this build's stack key, so the states a device made before a key moved are made
+// again rather than dropped; one of another layout, or whose fields this build keys otherwise, is dropped. A store
 // already holding one gets the record's program slots it lacks (a store written before they were kept, or one that
 // dropped them). A stored refusal this compiler build has not confirmed is made again too (compiler_refusals.h).
 void Service::warm(uint64_t stack)
@@ -392,15 +401,15 @@ void Service::warm(uint64_t stack)
     uint32_t again = 0, dropped = 0, refusals = 0;
     ConfirmedRefusals &confirmed = *refusals_;
     dispatch_semaphore_t ran = dispatch_semaphore_create(0);
-    log_.replay([&](const std::string &request, raw::Digest &name) {
+    log_.replay([&](const std::string &request, gm20b::Digest &name) {
         Prepared prepared;
         std::string why;
-        if (!prepare(request, stack, system_, prepared, why)) {
+        if (!prepare(restacked(request, stack), stack, system_, prepared, why)) {
             dropped++;
             return false;
         }
         name = prepared.name;
-        const raw::CacheKey key = prepared.key;
+        const gm20b::CacheKey key = prepared.key;
         std::string bytes;
         const int32_t stored = store_.find(name, bytes) ? storedResult(bytes, key) : -1;
         const bool unconfirmed = stored == TegraGM20BCompileRefused && !confirmed.confirmed(name);
@@ -425,7 +434,7 @@ void Service::warm(uint64_t stack)
 
 void Service::serve()
 {
-    const uint64_t stack = uint64_t(TEGRA_RAW_STACK);
+    const uint64_t stack = uint64_t(TEGRA_STACK_KEY);
 #if SWITCH_DEBUG
     armDeath();  // before the sandbox, which looks up no notification center
 #endif
@@ -459,7 +468,7 @@ void Service::serve()
     pool_ = std::make_unique<Pool>(std::move(hooks));
     std::thread([this] {
         pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
-        warm(uint64_t(TEGRA_RAW_STACK));
+        warm(uint64_t(TEGRA_STACK_KEY));
     }).detach();
     for (;;)
         take(stack);

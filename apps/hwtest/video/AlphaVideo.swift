@@ -15,7 +15,8 @@ public enum AlphaVideo {
         let created = VTCompressionSessionCreate(
             allocator: nil, width: Int32(AlphaClip.width), height: Int32(AlphaClip.height),
             codecType: kCMVideoCodecType_HEVCWithAlpha, encoderSpecification: nil, imageBufferAttributes: nil,
-            compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &made)
+            compressedDataAllocator: nil, outputCallback: nil, refcon: nil, compressionSessionOut: &made
+        )
         guard created == noErr, let session = made else {
             throw VideoError.status("VTCompressionSessionCreate", created)
         }
@@ -36,7 +37,7 @@ public enum AlphaVideo {
         let pool = try PatternPixels.pool(width: AlphaClip.width, height: AlphaClip.height, format: format)
         let collector = DecodeOrder()
         let start = CFAbsoluteTimeGetCurrent()
-        for frame in 0..<AlphaClip.frames {
+        for frame in 0 ..< AlphaClip.frames {
             var input: CVPixelBuffer?
             let status = CVPixelBufferPoolCreatePixelBuffer(nil, pool, &input)
             guard status == kCVReturnSuccess, let input else { throw VideoError.status("CVPixelBufferPool", status) }
@@ -60,7 +61,8 @@ public enum AlphaVideo {
             usingHardware: Compressor.readFlag(session, kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder),
             encoderID: Compressor.readString(session, kVTCompressionPropertyKey_EncoderID),
             seconds: CFAbsoluteTimeGetCurrent() - start,
-            bytes: samples.reduce(0) { $0 + CMSampleBufferGetTotalSampleSize($1) })
+            bytes: samples.reduce(0) { $0 + CMSampleBufferGetTotalSampleSize($1) }
+        )
     }
 
     public struct Decoded {
@@ -89,11 +91,13 @@ public enum AlphaVideo {
         _ samples: [CMSampleBuffer], format description: CMVideoFormatDescription, flags: VTDecodeFrameFlags
     ) throws -> Decoded {
         let destination = PatternPixels.attributes(
-            width: AlphaClip.width, height: AlphaClip.height, format: Self.format)
+            width: AlphaClip.width, height: AlphaClip.height, format: Self.format
+        )
         var made: VTDecompressionSession?
         let created = VTDecompressionSessionCreate(
             allocator: nil, formatDescription: description, decoderSpecification: nil,
-            imageBufferAttributes: destination as CFDictionary, outputCallback: nil, decompressionSessionOut: &made)
+            imageBufferAttributes: destination as CFDictionary, outputCallback: nil, decompressionSessionOut: &made
+        )
         guard created == noErr, let session = made else {
             throw VideoError.status("VTDecompressionSessionCreate", created)
         }
@@ -114,7 +118,8 @@ public enum AlphaVideo {
         }
         var result = outputs.result
         result.usingHardware = Compressor.readFlag(
-            session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder)
+            session, kVTDecompressionPropertyKey_UsingHardwareAcceleratedVideoDecoder
+        )
         result.routesBefore = before
         result.routesAfter = Decompressor.pictureRoutes(session)
         return result
@@ -164,7 +169,7 @@ public enum AlphaVideo {
             }
             if let alpha { result.worstAlpha = max(result.worstAlpha, alpha) }
             if let verdict, let alpha, verdict.matches(frame: frame, tolerance: Decompressor.tolerance),
-                alpha <= Decompressor.tolerance
+               alpha <= Decompressor.tolerance
             {
                 result.matched += 1
             } else if result.firstMismatch == nil {
@@ -211,7 +216,7 @@ public enum AlphaVideo {
         defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
         let base = CVPixelBufferGetBaseAddressOfPlane(buffer, 2)!
         let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, 2)
-        for y in 0..<AlphaClip.height {
+        for y in 0 ..< AlphaClip.height {
             memset(base + y * rowBytes, Int32(AlphaClip.alpha(y: y, frame: frame)), AlphaClip.width)
         }
     }
@@ -227,15 +232,15 @@ public enum AlphaVideo {
         let base = UnsafeRawPointer(CVPixelBufferGetBaseAddressOfPlane(buffer, 2)!)
         let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(buffer, 2)
         var worst = 0.0
-        for row in 0..<16 {
+        for row in 0 ..< 16 {
             let top = (row * 2 + 1) * AlphaClip.height / 32 - 4
-            for column in 0..<8 {
+            for column in 0 ..< 8 {
                 let left = (column * 2 + 1) * AlphaClip.width / 16 - 4
                 var read = 0.0
                 var expected = 0.0
-                for y in top..<(top + 8) {
+                for y in top ..< (top + 8) {
                     expected += Double(AlphaClip.alpha(y: y, frame: frame)) * 8
-                    for x in left..<(left + 8) {
+                    for x in left ..< (left + 8) {
                         read += Double(base.load(fromByteOffset: y * rowBytes + x, as: UInt8.self))
                     }
                 }

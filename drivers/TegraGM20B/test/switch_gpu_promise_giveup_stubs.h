@@ -28,8 +28,9 @@ typedef int32_t s32;
 #define _Static_assert static_assert
 #define TGM_FENCE_SLOT (16 * 1024)
 #define TGM_FENCE_USER_PAGES 64
-#define TGM_FENCE_PROMISE_WORD 512
-#define TGM_FENCE_PROMISES 32
+#define TGM_FENCE_PROMISE_WORD TegraGM20BPromiseWord
+#define TGM_FENCE_PROMISES TegraGM20BMaxPromises
+#define TGM_HANG_NS (2000ull * 1000 * 1000)
 
 // gpu_internal.h's fences_state: the raise/remake guard
 inline struct {
@@ -63,6 +64,8 @@ struct Chan {
 	switch_gpu_jobs jobs = {};
 	char owner[17] = {};
 	uint32_t submitted = 0;
+	int critical = 0;  // the compositor's or a kernel queue's
+	int kernel = 0;
 	// the hang rule's bookkeeping as the deferred call's checks see it (tgm_chan_check_progress_locked)
 	uint64_t stall_ns = 0;
 	uint32_t stall_done = 0, strikes = 0;
@@ -202,7 +205,7 @@ inline void tgm_chan_need(fake_tgm_chan *chan, uint32_t seqno)
 // ahead complete.
 inline uint64_t tgm_chan_check_progress_locked(fake_tgm_chan *chan, const char *, uint32_t)
 {
-	constexpr uint64_t kHangNs = 2000ull * 1000 * 1000;
+	constexpr uint64_t kHangNs = TGM_HANG_NS;
 	registers("the hang rule's look");
 	const uint32_t done = *chan->fence_cpu;
 	++fake::hangLooks;

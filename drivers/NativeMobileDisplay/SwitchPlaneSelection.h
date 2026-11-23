@@ -33,6 +33,13 @@ static bool planeRetry(int slot)
     return slot == -11 || slot == -16 || slot == -115 || slot == SWITCH_GPU_BACKING_STALE;
 }
 
+static void planeWaits(PlaneDecision &d, const char *why, int code)
+{
+    d.waitSlot = true;
+    d.waitWhy = why;
+    d.waitCode = code;
+}
+
 void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
 {
     d = {};
@@ -112,7 +119,7 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
         if (slot == -2)
             continue;
         if (planeRetry(slot)) {
-            d.waitSlot = true;
+            planeWaits(d, "an overlay's slot waits", slot);
             return;
         }
         if (slot < 0) {
@@ -125,8 +132,8 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
         overlay.depth = index + 1;
         planeBuildingSlots |= uint64_t(1) << unsigned(slot);
     }
-    if (planeComposeWaits(wanted, selected, width, height)) {
-        d.waitSlot = true;
+    if (const int wait = planeComposeWaits(wanted, selected, width, height)) {
+        planeWaits(d, "the overlays' composite waits", wait);
         return;
     }
     const switch_display::WindowState windows[2] = {planeWindowState(switch_landscape::kB),
@@ -138,7 +145,7 @@ void planeDecide(const OriginalLegacySwapRequest *request, PlaneDecision &d)
             const auto &layer = planeLayers[selected[index]];
             const int slot = planeConvertSlot(overlay.slot, layer.layer, width, height, overlay.image, request);
             if (planeRetry(slot)) {
-                d.waitSlot = true;
+                planeWaits(d, "an overlay's conversion waits", slot);
                 return;
             }
             if (slot < 0) {

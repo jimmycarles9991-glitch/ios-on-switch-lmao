@@ -17,14 +17,14 @@ import Metal
 ///   memory read back through getBytes;
 /// - alias: as nocopy, over memory a no-copy buffer already imported and the GPU already read;
 /// - ce: the copy engine's readback of the nocopy textures' blocks.
-/// On the raw facade a base off the layout's alignment (4096 bytes here: bits 0, 8, 16 and 24 of a _bad mask are the
+/// On the facade a base off the layout's alignment (4096 bytes here: bits 0, 8, 16 and 24 of a _bad mask are the
 /// aligned bases) is a pool image the copy engine fills from the caller's memory, and the aligned ones are that memory.
 /// texture= and blit= are wrong blocks; <label>_bad= says which of the 32 bases (bit n: base n x 512) had any, as 8 hex
 /// digits, <label>_wrong= their wrong blocks summed. map=, map2= and map3= are the first three different address bit
 /// mappings the wrong cases showed (BlockLinearMap.bitMap: displayed bit gK from written bits wN), each after the first
 /// case that showed it; maps= how many different ones the first three wrong bases of each path showed.
-/// On the raw facade a no-copy texture sampled off raw is counted in <label>_off_raw= (m2v samples nothing there), not
-/// as wrong. Only the raw facade takes the no-copy paths: the m2v device refuses no-copy textures, and a Mac's AGX
+/// On the facade a no-copy texture sampled off raw is counted in <label>_off_raw= (m2v samples nothing there), not
+/// as wrong. Only the facade takes the no-copy paths: the m2v device refuses no-copy textures, and a Mac's AGX
 /// device answers the selector but throws inside it.
 struct AstcLayoutScene: GPUScene {
     let id = "gpu.astc.layouts"
@@ -53,7 +53,7 @@ final class AstcLayoutRun {
 
     init(_ gpu: GPU) throws {
         self.gpu = gpu
-        onRaw = RawFacade.kind(of: gpu.device) == "raw"
+        onRaw = GM20BFacade.kind(of: gpu.device) == "gm20b"
         sampler = try gpu.compute("sample_texture")
     }
 
@@ -73,7 +73,8 @@ final class AstcLayoutRun {
 
     static func descriptor(_ storage: MTLStorageMode) -> MTLTextureDescriptor {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .astc_4x4_ldr, width: grid.texelWidth, height: grid.texelHeight, mipmapped: false)
+            pixelFormat: .astc_4x4_ldr, width: grid.texelWidth, height: grid.texelHeight, mipmapped: false
+        )
         descriptor.usage = [.shaderRead]
         descriptor.storageMode = storage
         return descriptor
@@ -94,7 +95,8 @@ final class AstcLayoutRun {
                 Self.grid.bytes.withUnsafeBytes {
                     texture.replace(
                         region: Self.region, mipmapLevel: 0, withBytes: $0.baseAddress!,
-                        bytesPerRow: Self.grid.rowBytes)
+                        bytesPerRow: Self.grid.rowBytes
+                    )
                 }
             }
             let reading = try await sample(texture, noCopy: false)
@@ -147,7 +149,8 @@ final class AstcLayoutRun {
             guard
                 let buffer = gpu.device.makeBuffer(
                     bytesNoCopy: memory.base, length: memory.bytes, options: .storageModeShared,
-                    deallocator: { pointer, _ in free(pointer) })
+                    deallocator: { pointer, _ in free(pointer) }
+                )
             else {
                 memory.release()
                 throw TestFailure("no-copy buffer creation failed")
@@ -167,7 +170,8 @@ final class AstcLayoutRun {
         }
         guard
             let texture = TextureLayoutSPI.noCopyTexture(
-                gpu.device, at, length: length, Self.descriptor(.shared), deallocator: deallocator)
+                gpu.device, at, length: length, Self.descriptor(.shared), deallocator: deallocator
+            )
         else {
             if deallocator != nil { memory.release() }
             return nil
@@ -177,7 +181,8 @@ final class AstcLayoutRun {
         case "replace":
             Self.grid.bytes.withUnsafeBytes {
                 texture.replace(
-                    region: Self.region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: Self.grid.rowBytes)
+                    region: Self.region, mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: Self.grid.rowBytes
+                )
             }
         case "rewrite":
             layout.copy(Self.grid.bytes, rowBytes: Self.grid.rowBytes, region: Self.region, to: at)
@@ -197,10 +202,11 @@ final class AstcLayoutRun {
             blit.copy(
                 from: staging, sourceOffset: 0, sourceBytesPerRow: Self.grid.rowBytes, sourceBytesPerImage: 0,
                 sourceSize: MTLSize(width: Self.grid.texelWidth, height: Self.grid.texelHeight, depth: 1), to: texture,
-                destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin())
+                destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
             blit.endEncoding()
         }
-        if timing.path != "raw" { throw TestFailure("the blit into it ran on \(timing.path)") }
+        if timing.path != "gm20b" { throw TestFailure("the blit into it ran on \(timing.path)") }
     }
 }
 

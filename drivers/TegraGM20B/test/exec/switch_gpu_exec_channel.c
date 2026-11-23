@@ -157,18 +157,6 @@ void switch_exec_chan_high(struct switch_exec_chan *chan, int high)
 	chan->tgm.high = high;
 }
 
-void switch_exec_chan_task_order(struct switch_exec_chan *chan, struct switch_exec_chan *source,
-				 uint32_t value)
-{
-	struct tgm_order *order = &chan->tgm.order[chan->tgm.norder++];
-
-	order->va = source->tgm.fence_gpu;
-	order->cpu = source->tgm.fence_cpu;
-	order->id = source->tgm.id;
-	order->seqno = value;
-	order->chid = source->tgm.chid;
-}
-
 void switch_exec_chan_live(struct switch_exec_chan *chan, int live)
 {
 	mutex_lock(&tgm_live_lock);

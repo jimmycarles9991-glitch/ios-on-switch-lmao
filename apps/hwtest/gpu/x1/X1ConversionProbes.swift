@@ -27,21 +27,26 @@ public enum X1ConversionProbes {
         Target(
             name: "unorm8", format: .bgra8Unorm, bytesPerPixel: 4, stored: { Int($0[$1 * 4]) },
             want: { X1Reference.unorm(Double($0), top: 255) }, tie: { X1Reference.tie(Double($0), top: 255) },
-            chip: { X1Reference.store(Double($0), bits: 8) }),
+            chip: { X1Reference.store(Double($0), bits: 8) }
+        ),
         Target(
             name: "unorm16", format: .rgba16Unorm, bytesPerPixel: 8, stored: { u16($0, $1 * 8) },
             want: { X1Reference.unorm(Double($0), top: 65535) }, tie: { X1Reference.tie(Double($0), top: 65535) },
-            chip: { X1Reference.store(Double($0), bits: 16) }),
+            chip: { X1Reference.store(Double($0), bits: 16) }
+        ),
         Target(
             name: "srgb8", format: .bgra8Unorm_srgb, bytesPerPixel: 4, stored: { Int($0[$1 * 4]) },
-            want: { X1Reference.srgb8(Double($0)) }, tie: { _ in false }, tolerance: 1),
+            want: { X1Reference.srgb8(Double($0)) }, tie: { _ in false }, tolerance: 1
+        ),
         Target(
             name: "rgb10a2", format: .rgb10a2Unorm, bytesPerPixel: 4, stored: { u16($0, $1 * 4) & 0x3ff },
             want: { X1Reference.unorm(Double($0), top: 1023) }, tie: { X1Reference.tie(Double($0), top: 1023) },
-            chip: { X1Reference.store(Double($0), bits: 10) }),
+            chip: { X1Reference.store(Double($0), bits: 10) }
+        ),
         Target(
             name: "half", format: .rgba16Float, bytesPerPixel: 8, stored: { u16($0, $1 * 8) },
-            want: { $0.isNaN || $0 <= 0 ? 0 : Int($0.bitPattern) }, tie: { _ in false }),
+            want: { $0.isNaN || $0 <= 0 ? 0 : Int($0.bitPattern) }, tie: { _ in false }
+        ),
     ]
 
     public static func rop(_ gpu: GPU) async throws -> ProbeFinding {
@@ -72,14 +77,15 @@ public enum X1ConversionProbes {
                     encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
                     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                     encoder.endEncoding()
-                }.path)
+                }.path
+            )
             let bytes = try await gpu.read(texture, bytesPerPixel: target.bytesPerPixel)
             var count = 0
             var ties = 0
             var byOne = 0
             var first: String?
             var chipMisses = 0
-            for i in 0..<65536 {
+            for i in 0 ..< 65536 {
                 let h = Float16(bitPattern: UInt16(i))
                 let (have, want) = (target.stored(bytes, i), target.want(h))
                 if let chip = target.chip, have != chip(h) { chipMisses += 1 }
@@ -124,7 +130,7 @@ public enum X1ConversionProbes {
             let texture = try gpu.texture(format, width, height, usage: [.shaderRead])
             let bytes: [UInt8] =
                 top == 255
-                ? (0..<count).map { UInt8($0) } : (0..<count).flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }
+                    ? (0 ..< count).map { UInt8($0) } : (0 ..< count).flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }
             try await gpu.upload(bytes, to: texture, bytesPerRow: width * (top == 255 ? 1 : 2))
             let out = try gpu.buffer(count * 8)
             paths.append(
@@ -135,16 +141,18 @@ public enum X1ConversionProbes {
                     encoder.setBuffer(out, offset: 0, index: 0)
                     encoder.dispatchThreads(
                         MTLSize(width: width, height: height, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1))
+                        threadsPerThreadgroup: MTLSize(width: 16, height: 1, depth: 1)
+                    )
                     encoder.endEncoding()
-                }.path)
+                }.path
+            )
             let got = out.contents().bindMemory(to: UInt16.self, capacity: count * 4)
             var nearest = 0
             var flushed = 0
             var towardZero = 0
             var first: String?
             var codes: [String] = []
-            for code in 0..<count {
+            for code in 0 ..< count {
                 let have = got[code * 4]
                 let exact = Double(code) / top
                 let rne = Float16(exact).bitPattern

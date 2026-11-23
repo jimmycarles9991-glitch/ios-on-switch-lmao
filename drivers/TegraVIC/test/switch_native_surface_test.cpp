@@ -569,6 +569,24 @@ TEST_F(TurnedSurface, TheDisplayAcquiresTheTurnedPictureItself)
     EXPECT_EQ(native.readers, readers);
 }
 
+// A writer made the destination's rows after its turn was recorded (VIC's copy while the display holds portrait): the
+// display's turned acquire finds no picture to scan, as for a destination nothing was published to, and shows the rows
+// rather than wait for a publication that may never come.
+TEST_F(TurnedSurface, ADestinationWrittenAfterItsTurnHasNoPictureForTheDisplay)
+{
+    ASSERT_EQ(publishTurned(), 0);
+    switch_gpu_backing *backing = nullptr;
+    switch_gpu_cpu_lease *owned = nullptr;
+    ASSERT_EQ(prepareCpu(turnedObject, 0, &backing, &owned), 0);
+    finishCpu(turnedObject, backing, &owned);
+    const unsigned readers = native.readers;
+    SwitchNativeScanout scanout = {};
+    EXPECT_EQ(switch_native_scanout_acquire(turnedObject, &scanout, true), -2);
+    EXPECT_EQ(scanout.lease, nullptr);
+    EXPECT_EQ(scanout.view.native, nullptr);
+    EXPECT_EQ(native.readers, readers);
+}
+
 // The request's waits come with the picture to every reader: the display orders the frame after them as after the
 // picture's producer.
 TEST_F(TurnedSurface, TheRequestsWaitsOrderTheDisplaysScan)

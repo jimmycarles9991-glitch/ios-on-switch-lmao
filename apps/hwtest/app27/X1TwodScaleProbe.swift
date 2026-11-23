@@ -91,17 +91,18 @@ extension X1TwodProbes {
                     let du = (UInt64(from) << 32) / UInt64(to)
                     let batch = try await gpu.run(forms: "") { commands in
                         let blit = commands.makeBlitCommandEncoder()!
-                        try RawProbe.engine(
+                        try GM20BProbe.engine(
                             commands,
                             [
                                 "kind": "scale", "read": src, "written": written, "du": du, "dv": du, "sx": du / 2,
                                 "sy": du / 2, "bilinear": point ? 0 : 1, "corner": 1,
-                            ])
+                            ]
+                        )
                         blit.endEncoding()
                     }
                     ops += batch.taken["ops"] ?? 0
                     let name = "\(format.name)_\(ratio)_\(point ? "point" : "linear")"
-                    guard batch.path == "raw" else {
+                    guard batch.path == "gm20b" else {
                         offPath.append("\(name):\(batch.path)")
                         continue
                     }
@@ -109,7 +110,7 @@ extension X1TwodProbes {
                     let filters = Filter.all(point: point, srgb: srgb)
                     var tallies = [X1RuleTally](repeating: X1RuleTally(), count: filters.count)
                     let metal = filters.firstIndex(of: .metal(srgb: srgb && !point)) ?? 0
-                    for t in 0..<to * to {
+                    for t in 0 ..< to * to {
                         let (x, y) = (t % to, t / to)
                         let px = Double(UInt64(x) * du + du / 2) / 4_294_967_296
                         let py = Double(UInt64(y) * du + du / 2) / 4_294_967_296
@@ -117,7 +118,8 @@ extension X1TwodProbes {
                         for (k, f) in filters.enumerated() {
                             let exact = filtered(codes, from, from, format, x: px, y: py, point: point, f)
                             tallies[k].add(
-                                got, exact: exact, channels: format.channels, metal: format.metalRounding, at: t)
+                                got, exact: exact, channels: format.channels, metal: format.metalRounding, at: t
+                            )
                         }
                     }
                     cells.append((name, tallies[metal]))

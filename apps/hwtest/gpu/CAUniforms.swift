@@ -53,7 +53,7 @@ public enum CAUniforms {
         "00000000 003ce270 000000c8 00440045 0000003c 003c0000 003800b8 000000b8 00b26642 0000333b 00380000 003c0000",
     ]
     static let glassExtensionWords = [
-        "cdcc4c3d 00000000 0000803f 74a1903f 6666263f 00010101 01000000"
+        "cdcc4c3d 00000000 0000803f 74a1903f 6666263f 00010101 01000000",
     ]
 
     static func glassBlock() -> UniformBlock { UniformBlock(hex: glassWords.joined(separator: " ")) }
@@ -70,7 +70,7 @@ public struct UniformBlock {
     /// Bytes written as hex, whitespace between them ignored.
     public init(hex: String) {
         let digits = Array(hex.filter { !$0.isWhitespace })
-        bytes = stride(from: 0, to: digits.count, by: 2).map { UInt8(String(digits[$0...$0 + 1]), radix: 16)! }
+        bytes = stride(from: 0, to: digits.count, by: 2).map { UInt8(String(digits[$0 ... $0 + 1]), radix: 16)! }
     }
 
     public mutating func floats(_ offset: Int, _ values: [Float]) {
@@ -84,6 +84,6 @@ public struct UniformBlock {
     public mutating func half(_ offset: Int, _ value: Float) { put(offset, Float16(value).bitPattern) }
 
     mutating func put<T: FixedWidthInteger>(_ offset: Int, _ value: T) {
-        withUnsafeBytes(of: value.littleEndian) { bytes.replaceSubrange(offset..<(offset + $0.count), with: $0) }
+        withUnsafeBytes(of: value.littleEndian) { bytes.replaceSubrange(offset ..< (offset + $0.count), with: $0) }
     }
 }

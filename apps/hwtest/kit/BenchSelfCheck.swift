@@ -27,7 +27,7 @@ enum BenchSelfCheck {
             ],
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: batch),
-            let decoded = try? BenchBatch.decode(data)
+              let decoded = try? BenchBatch.decode(data)
         else { return "FAIL the self-check batch does not decode" }
         var parts: [String] = []
         var failed = false
@@ -63,13 +63,13 @@ enum BenchSelfCheck {
         guard texels.count >= texelBytes else { return false }
         let first = texels.prefix(texelBytes)
         return stride(from: 0, to: texels.count, by: texelBytes).allSatisfy {
-            texels.subdata(in: $0..<($0 + texelBytes)) == first
+            texels.subdata(in: $0 ..< ($0 + texelBytes)) == first
         }
     }
 
     private static func matching(_ texels: Data, want: [UInt32]) -> Int {
         let texel = want.withUnsafeBytes { Data($0) }
-        return stride(from: 0, to: texels.count - 15, by: 16).filter { texels.subdata(in: $0..<($0 + 16)) == texel }
+        return stride(from: 0, to: texels.count - 15, by: 16).filter { texels.subdata(in: $0 ..< ($0 + 16)) == texel }
             .count
     }
 }

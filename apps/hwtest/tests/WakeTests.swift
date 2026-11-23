@@ -48,7 +48,8 @@ struct WakeTest: HWTest {
                 ("the first frame within 500 ms of becoming active", first > 0 && first - active <= 0.5),
                 ("no frame missed after waking", shown.frames > 0 && shown.missed == 0),
                 ("the GPU scene after waking: \(gpu.detail)", gpu.verdict == Verdict.pass),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -63,14 +64,16 @@ final class WakeObservers {
         tokens.append(
             center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) {
                 [weak self] _ in MainActor.assumeIsolated { self?.left = true }
-            })
+            }
+        )
         tokens.append(
             center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) {
                 [weak self] _ in
                 MainActor.assumeIsolated {
                     if self?.left == true { waiter.resume(CACurrentMediaTime()) }
                 }
-            })
+            }
+        )
     }
 
     func stop() {

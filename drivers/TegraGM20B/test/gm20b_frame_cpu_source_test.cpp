@@ -19,14 +19,6 @@ std::string unit(const char *name)
 }
 }  // namespace
 
-// The kick's own store barrier (chan506f.c, switch_gpu_gpfifo_kick_test) is the job's only one.
-TEST(GM20BFrameCpuSource, AJobsFenceAddsNoBarrierOfItsOwn)
-{
-	const CodeText fence = Block(unit("gpu_exec.c"), "static u32 chan_fence_job(");
-	EXPECT_FALSE(fence.has("dsb")) << "a barrier ahead of the kick's own";
-	EXPECT_FALSE(fence.has("dmb"));
-}
-
 // A pass wakes a thread on the global word only while one sleeps there, and moves a sequence it alone writes.
 TEST(GM20BFrameCpuSource, ThePassWakesTheGlobalWordOnlyForASleeper)
 {

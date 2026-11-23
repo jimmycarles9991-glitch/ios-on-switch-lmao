@@ -33,12 +33,14 @@ struct SurfaceTarget {
             throw TestFailure("IOSurface \(format.rawValue) \(width)x\(height) row \(stride) not made")
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: format.metal, width: width, height: height, mipmapped: false)
+            pixelFormat: format.metal, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = usage
         descriptor.storageMode = .shared
         guard
             let texture = gpu.device.makeTexture(
-                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0)
+                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0
+            )
         else { throw TestFailure("makeTexture(iosurface:) \(format.rawValue) \(width)x\(height) returned nil") }
         return SurfaceTarget(surface: surface, texture: texture, format: format, width: width, height: height)
     }
@@ -47,7 +49,7 @@ struct SurfaceTarget {
     func cpuRead() throws -> [UInt8] {
         try lock(.readOnly) {
             let row = width * format.bytesPerTexel
-            return (0..<height).flatMap { y in
+            return (0 ..< height).flatMap { y in
                 Array(UnsafeRawBufferPointer(start: surface.baseAddress + y * surface.bytesPerRow, count: row))
             }
         }
@@ -56,7 +58,7 @@ struct SurfaceTarget {
     func cpuWrite(_ rect: UploadRect, _ bytes: [UInt8]) throws {
         try lock([]) {
             let texel = format.bytesPerTexel
-            for row in 0..<rect.height {
+            for row in 0 ..< rect.height {
                 let to = surface.baseAddress + (rect.y + row) * surface.bytesPerRow + rect.x * texel
                 bytes.withUnsafeBytes {
                     to.copyMemory(from: $0.baseAddress! + row * rect.width * texel, byteCount: rect.width * texel)
@@ -69,7 +71,8 @@ struct SurfaceTarget {
         let status = surface.lock(options: options, seed: nil)
         guard status == 0 else {
             throw TestFailure(
-                "IOSurface lock \(options.rawValue) failed: 0x\(String(UInt32(bitPattern: status), radix: 16))")
+                "IOSurface lock \(options.rawValue) failed: 0x\(String(UInt32(bitPattern: status), radix: 16))"
+            )
         }
         defer { surface.unlock(options: options, seed: nil) }
         return body()
@@ -77,7 +80,7 @@ struct SurfaceTarget {
 }
 
 extension GPU {
-    /// One pass into `target`: a load-action clear (the raw path's own on the facade) and, when `rect` is given, a
+    /// One pass into `target`: a load-action clear (the driver's own on the facade) and, when `rect` is given, a
     /// solid quad over it drawn by the app's pipeline (m2v on the facade).
     func clearAndFill(
         _ target: MTLTexture, clear: [Float], rect: UploadRect?, color: [Float], pipeline: MTLRenderPipelineState?
@@ -87,7 +90,8 @@ extension GPU {
             pass.colorAttachments[0].texture = target
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: Double(clear[0]), green: Double(clear[1]), blue: Double(clear[2]), alpha: Double(clear[3]))
+                red: Double(clear[0]), green: Double(clear[1]), blue: Double(clear[2]), alpha: Double(clear[3])
+            )
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             if let rect, let pipeline {
@@ -96,8 +100,10 @@ extension GPU {
                     encoder,
                     corners: GPU.pixelQuad(
                         rect.x, rect.y, rect.x + rect.width, rect.y + rect.height, width: target.width,
-                        height: target.height),
-                    color: SIMD4(color[0], color[1], color[2], color[3]))
+                        height: target.height
+                    ),
+                    color: SIMD4(color[0], color[1], color[2], color[3])
+                )
             }
             encoder.endEncoding()
         }

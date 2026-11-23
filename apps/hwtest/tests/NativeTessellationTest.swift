@@ -24,33 +24,33 @@ struct NativeTessellationTest: NativeObjectTest {
     static let deepLevel: Float = 32
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        kernel void quad_factors(device MTLQuadTessellationFactorsHalf *factors [[buffer(0)]],
-                                 constant float &level [[buffer(1)]], uint patch [[thread_position_in_grid]]) {
-            for (int e = 0; e < 4; e++)
-                factors[patch].edgeTessellationFactor[e] = half(patch == 0 || e != 2 ? level : 0.0f);
-            factors[patch].insideTessellationFactor[0] = half(level);
-            factors[patch].insideTessellationFactor[1] = half(level);
-        }
-        kernel void patch_arguments(device MTLDrawPatchIndirectArguments *arguments [[buffer(0)]]) {
-            arguments->patchCount = 1;
-            arguments->instanceCount = 1;
-            arguments->patchStart = 0;
-            arguments->baseInstance = 0;
-        }
-        struct ControlPoint { float4 position [[attribute(0)]]; };
-        struct QuadPatch { patch_control_point<ControlPoint> points; };
-        [[patch(quad, 4)]] vertex float4 quad_post(QuadPatch patch [[stage_in]], float2 uv [[position_in_patch]],
-                                                   device atomic_uint *seen [[buffer(1)]]) {
-            const uint u = uint(round(uv.x * 64)), v = uint(round(uv.y * 64));
-            atomic_store_explicit(&seen[v * 65 + u], 1, memory_order_relaxed);
-            const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
-            const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
-            return mix(low, high, uv.y);
-        }
-        fragment float4 patch_green() { return float4(0, 1, 0, 1); }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    kernel void quad_factors(device MTLQuadTessellationFactorsHalf *factors [[buffer(0)]],
+                             constant float &level [[buffer(1)]], uint patch [[thread_position_in_grid]]) {
+        for (int e = 0; e < 4; e++)
+            factors[patch].edgeTessellationFactor[e] = half(patch == 0 || e != 2 ? level : 0.0f);
+        factors[patch].insideTessellationFactor[0] = half(level);
+        factors[patch].insideTessellationFactor[1] = half(level);
+    }
+    kernel void patch_arguments(device MTLDrawPatchIndirectArguments *arguments [[buffer(0)]]) {
+        arguments->patchCount = 1;
+        arguments->instanceCount = 1;
+        arguments->patchStart = 0;
+        arguments->baseInstance = 0;
+    }
+    struct ControlPoint { float4 position [[attribute(0)]]; };
+    struct QuadPatch { patch_control_point<ControlPoint> points; };
+    [[patch(quad, 4)]] vertex float4 quad_post(QuadPatch patch [[stage_in]], float2 uv [[position_in_patch]],
+                                               device atomic_uint *seen [[buffer(1)]]) {
+        const uint u = uint(round(uv.x * 64)), v = uint(round(uv.y * 64));
+        atomic_store_explicit(&seen[v * 65 + u], 1, memory_order_relaxed);
+        const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
+        const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
+        return mix(low, high, uv.y);
+    }
+    fragment float4 patch_green() { return float4(0, 1, 0, 1); }
+    """
 
     /// Patch 0 the left half of the target, patch 1 the right, four corners each in clip space
     static let controlPoints: [SIMD4<Float>] = [
@@ -60,7 +60,7 @@ struct NativeTessellationTest: NativeObjectTest {
 
     /// Pixels that are not green in the drawn half (`left`, or both where `both`) and black in the other
     static func wrong(_ pixels: [UInt8], left: Bool, both: Bool = false) -> Int {
-        (0..<size * size).filter { i in
+        (0 ..< size * size).filter { i in
             let drawn = both || (i % size < size / 2) == left
             let want: [UInt8] = drawn ? [0, 255, 0, 255] : [0, 0, 0, 255]
             return Array(pixels.pixel(i % size, i / size, width: size)) != want
@@ -71,7 +71,7 @@ struct NativeTessellationTest: NativeObjectTest {
     static func wrongPoints(_ seen: MTLBuffer, level: Float) -> Int {
         let marks = seen.contents().bindMemory(to: UInt32.self, capacity: grid * grid)
         let step = Int(64 / level)
-        return (0..<grid * grid).filter { i in
+        return (0 ..< grid * grid).filter { i in
             let expected = (i % grid) % step == 0 && (i / grid) % step == 0
             return (marks[i] != 0) != expected
         }.count
@@ -82,8 +82,8 @@ struct NativeTessellationTest: NativeObjectTest {
         var work = NativeWork()
         let library = try await device.makeLibrary(source: Self.source, options: nil)
         guard let post = library.makeFunction(name: "quad_post"),
-            let factorsKernel = library.makeFunction(name: "quad_factors"),
-            let argumentsKernel = library.makeFunction(name: "patch_arguments")
+              let factorsKernel = library.makeFunction(name: "quad_factors"),
+              let argumentsKernel = library.makeFunction(name: "patch_arguments")
         else { throw TestFailure("missing tessellation functions") }
         let vertices = MTLVertexDescriptor()
         vertices.attributes[0].format = .float4
@@ -106,7 +106,7 @@ struct NativeTessellationTest: NativeObjectTest {
 
         let points = try gpu.buffer(Self.controlPoints)
         guard let factors = device.makeBuffer(length: 2 * 12, options: .storageModePrivate),
-            let arguments = device.makeBuffer(length: 16, options: .storageModePrivate)
+              let arguments = device.makeBuffer(length: 16, options: .storageModePrivate)
         else { throw TestFailure("no private factor or argument buffer") }
         let patchOrder = try gpu.buffer([UInt32](arrayLiteral: 1, 0))
         let indirect = NativeAnswers.answer(device, "supportsIndirectTessellation") == 1
@@ -114,7 +114,8 @@ struct NativeTessellationTest: NativeObjectTest {
         if !indirect { work.failures.append("supportsIndirectTessellation answers NO") }
         if let wrong = NativeAnswers.check(
             device, "maxTessellationFactor", NativeAnswers.tessellationFactor, field: "max_tessellation_factor",
-            &metrics)
+            &metrics
+        )
         {
             work.failures.append(wrong)
         }
@@ -135,12 +136,14 @@ struct NativeTessellationTest: NativeObjectTest {
                 compute.setBytes(&written, length: 4, index: 1)
                 compute.dispatchThreadgroups(
                     MTLSize(width: 2, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+                )
                 compute.setComputePipelineState(argumentState)
                 compute.setBuffer(arguments, offset: 0, index: 0)
                 compute.dispatchThreadgroups(
                     MTLSize(width: 1, height: 1, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                    threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+                )
                 compute.endEncoding()
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = target
@@ -156,20 +159,23 @@ struct NativeTessellationTest: NativeObjectTest {
                 case "direct", "factor32":
                     encoder.drawPatches(
                         numberOfPatchControlPoints: 4, patchStart: 0, patchCount: 2, patchIndexBuffer: nil,
-                        patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0)
+                        patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0
+                    )
                 case "indexed":
                     encoder.drawPatches(
                         numberOfPatchControlPoints: 4, patchStart: 0, patchCount: 1, patchIndexBuffer: patchOrder,
-                        patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0)
+                        patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0
+                    )
                 case "icb", "icb_indexed", "icb_both":
                     encoder.useResource(factors, usage: .read, stages: .vertex)
                     encoder.useResource(patchOrder, usage: .read, stages: .vertex)
-                    let range = form == "icb" ? 0..<1 : form == "icb_indexed" ? 1..<2 : 0..<2
+                    let range = form == "icb" ? 0 ..< 1 : form == "icb_indexed" ? 1 ..< 2 : 0 ..< 2
                     encoder.executeCommandsInBuffer(patchCommands!, range: range)
                 default:
                     encoder.drawPatches(
                         numberOfPatchControlPoints: 4, patchIndexBuffer: nil, patchIndexBufferOffset: 0,
-                        indirectBuffer: arguments, indirectBufferOffset: 0)
+                        indirectBuffer: arguments, indirectBufferOffset: 0
+                    )
                 }
                 encoder.endEncoding()
             }
@@ -204,11 +210,13 @@ struct NativeTessellationTest: NativeObjectTest {
         commands.indirectRenderCommandAt(0).drawPatches(
             4, patchStart: 0, patchCount: 2, patchIndexBuffer: nil, patchIndexBufferOffset: 0, instanceCount: 1,
             baseInstance: 0, tessellationFactorBuffer: factors, tessellationFactorBufferOffset: 0,
-            tessellationFactorBufferInstanceStride: 0)
+            tessellationFactorBufferInstanceStride: 0
+        )
         commands.indirectRenderCommandAt(1).drawPatches(
             4, patchStart: 0, patchCount: 1, patchIndexBuffer: patchOrder, patchIndexBufferOffset: 0, instanceCount: 1,
             baseInstance: 0, tessellationFactorBuffer: factors, tessellationFactorBufferOffset: 0,
-            tessellationFactorBufferInstanceStride: 0)
+            tessellationFactorBufferInstanceStride: 0
+        )
         return commands
     }
 }

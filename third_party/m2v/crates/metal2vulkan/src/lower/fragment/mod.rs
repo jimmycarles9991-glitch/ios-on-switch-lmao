@@ -9,9 +9,7 @@
 //!   interlock, a storage image of the attachment read and written inside the interlock where the
 //!   pipeline's state lets that be exact (`fetch`). Compiled for a multisampled pipeline, either
 //!   form reads (and writes) the invocation's own sample at `SampleId`, which runs the function
-//!   once per covered sample, as Metal does. On a device that orders the read through
-//!   rasterization-order input attachments, a blend into an extended-range attachment is computed
-//!   over its input attachment (`input_blend`).
+//!   once per covered sample, as Metal does.
 //! - **Raster order groups** (`rog`): a function that names a group runs its body as a function
 //!   called from `main` between `Begin/EndInvocationInterlockEXT` ([`wrap_entry`], the
 //!   entry-wrapper hook of `lower::emit`); inside it a discard only records `discarded`, and `main`
@@ -55,11 +53,9 @@ mod depth_test;
 mod discard;
 pub(crate) mod fetch;
 mod imageblock;
-mod input_blend;
 mod rog;
 mod rop_blend;
 mod stencil;
-mod two_plane;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -97,8 +93,7 @@ pub(crate) use depth_test::{
 };
 pub use discard::DiscardForm;
 pub(crate) use fetch::{
-    blends_half_in_shader, blends_inputs_beside_interlock, blends_through_inputs,
-    compiled_write_mask, extended_range_blend, half4_output, half_blend_attachment,
+    blends_half_in_shader, compiled_write_mask, half4_output, half_blend_attachment,
     interlock_orders, kept_channels, storage_form, ColorUse, StorageSamples,
 };
 pub use fetch::{
@@ -106,8 +101,6 @@ pub use fetch::{
     StorageColor,
 };
 pub use imageblock::{select_output as select_imageblock_output, ImageblockPlan};
-pub(crate) use input_blend::texel as input_blend_texel;
-pub use input_blend::{select_second_output as select_input_second_output, InputBlend};
 pub(crate) use stencil::{face_word, SHADOW_FORMAT};
 pub use stencil::{select_output as select_stencil_output, ShadowStencil};
 
@@ -184,14 +177,6 @@ pub struct FragmentPlan {
     /// The color attachments the function reads in the interlocked storage form, by index
     /// (`fetch`).
     pub fetch: BTreeMap<u32, StorageColor>,
-    /// The extended-range attachments whose blend the function computes over their input
-    /// attachments, on a device that orders fetch through them (`input_blend`), by index.
-    pub input_blends: BTreeMap<u32, InputBlend>,
-    /// The extended-range attachments the function blends into whose storage form the pipeline's
-    /// state blocks, on a device that orders fetch through the pixel interlock alone under
-    /// `AcceptUnordered` (`fetch::plan`): their blend is computed over their input attachments,
-    /// unordered, as on a device with neither ordered form (`input_blend`).
-    pub blocked_blends: BTreeSet<u32>,
     /// The stage interface's `FragCoord` object, which gives the pixel of the storage form and
     /// of the shader-side stencil.
     pub fetch_coord: Option<usize>,
@@ -222,10 +207,6 @@ pub struct FragmentPlan {
     /// The function returns a `[[depth(...)]]` output (`StageIoPlan::depth_clamp`). Inside an
     /// interlocked body each return records a positive NaN depth as discarded.
     pub depth_output: bool,
-    /// The pipeline's two-plane extended-range attachments by index, with the index each one's
-    /// alpha byte is held at (`LoweringInputs::two_plane_alphas`): their input attachments and
-    /// storage views are pairs (`two_plane`).
-    pub two_plane: BTreeMap<u32, u32>,
 }
 
 impl FragmentPlan {
@@ -415,7 +396,6 @@ pub fn finish(cx: &mut SelectCx<'_>, m: &mut Meter) -> Result<(), Error> {
             rets,
         ))
         .saturating_add(stencil::words(cx, rets))
-        .saturating_add(input_blend::words(cx, returns(cx)))
         .saturating_add(depth_test::words(cx, rets))
         .saturating_add(killing_rets.saturating_mul(RETURN_KILL_WORDS))
         .saturating_add((quad_exits.len() as u64).saturating_mul(QUAD_EXIT_WORDS))
@@ -456,9 +436,6 @@ pub struct Declared {
     pub depth_stand_in: Option<GlobalId>,
     /// The stand-in of the stencil attachment an in-shader stencil test reads and writes.
     pub stencil_stand_in: Option<GlobalId>,
-    /// The `half` shadow of each extended-range attachment the storage form reads and writes
-    /// against it (`fetch::StorageColor::shadowed`), by color index.
-    pub extended_shadows: BTreeMap<u32, GlobalId>,
     /// The `Private u32` holding the sample of the loop's pass over the covered samples.
     pub loop_sample: Option<GlobalId>,
     /// The `Private u32` copy of the `SampleMask` input's word, which the entry stores before it
@@ -497,17 +474,10 @@ pub fn declare(
     d.attachments = color::declare(
         mb,
         &fp.colors,
-        (&fp.fetch, &fp.input_blends),
-        &fp.two_plane,
+        &fp.fetch,
         fp.fetch_sample.is_some(),
         fp.fetch_layer.is_some(),
     )?;
-    for (&color, sc) in &fp.fetch {
-        if sc.shadowed {
-            d.extended_shadows
-                .insert(color, fetch::declare_shadow(mb, color)?);
-        }
-    }
     d.imageblock = imageblock::declare(mb, fp.imageblock.as_ref())?;
     d.shadow_stencil = stencil::declare(mb, fp.stencil.as_ref())?;
     d.depth_stand_in = depth_test::declare(mb, fp.depth_test.as_ref())?;
@@ -596,33 +566,8 @@ pub fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<(), Error
 /// in the storage form is no interface variable. Then the loop over the covered samples, which
 /// decides how the stage interface reads `[[sample_id]]` and the sample-qualified varyings.
 pub fn plan_entry(cx: &mut SelectCx<'_>) -> Result<(), Error> {
-    cx.families.fragment.two_plane = cx.inputs.two_plane_alphas.clone();
     fetch::plan(cx)?;
     stencil::plan_tests(cx)?;
-    input_blend::plan(cx)?;
-    let fp = &cx.families.fragment;
-    let fetched = |c: &u32| fp.fetch.contains_key(c) || fp.input_blends.contains_key(c);
-    // A two-plane attachment past the last free index has no alpha to fetch from.
-    let unpaired = cx.inputs.extended_range_colors.iter().any(|(c, e)| {
-        matches!(e.form, crate::metal::format::ExtendedRange::Planes { .. })
-            && crate::pipeline::two_plane::held(cx.profile)
-            && !fp.two_plane.contains_key(c)
-            && fetched(c)
-    });
-    if unpaired {
-        return Err(Unsupported::not_implemented(Feature::Format).into());
-    }
-    let paired: Vec<(u32, u32)> = fp
-        .two_plane
-        .iter()
-        .filter(|(c, _)| fetched(c))
-        .map(|(&c, &a)| (c, a))
-        .collect();
-    cx.families
-        .stage_io
-        .interface
-        .two_plane_alphas
-        .extend(paired);
     coverage::plan(cx)
 }
 
@@ -652,42 +597,9 @@ pub fn blends_half_in_storage(cx: &SelectCx<'_>, color: u32) -> bool {
 }
 
 /// Whether the function's second (index-1) output to `color` is the second source of the
-/// extended-range blend the shader computes in the storage form, outside the stage interface.
+/// device's blend the shader computes in the storage form, outside the stage interface.
 pub fn blends_second_through_storage(cx: &SelectCx<'_>, color: u32) -> bool {
     fetch::blends_second(cx, color)
-}
-
-/// The extended-range write of attachment `color` the shader computes, in the storage form
-/// (`fetch`) or over the input attachment (`input_blend`): the pipeline's blend there (`None`
-/// for an unblended write and for a write that stores none of the format's channels), the
-/// attachment's form, and whether the write stores none of its channels. `None` where the
-/// function writes the attachment otherwise (or not at all).
-pub(crate) fn shader_blend(
-    cx: &SelectCx<'_>,
-    color: u32,
-) -> Option<(
-    Option<crate::pipeline::lower_inputs::BlendEquation>,
-    crate::metal::format::ExtendedRange,
-    bool,
-)> {
-    let fp = &cx.families.fragment;
-    if let Some(sc) = fp.fetch.get(&color) {
-        return sc
-            .view
-            .extended
-            .map(|form| (sc.view.blend, form, sc.view.stores_nothing()));
-    }
-    fp.input_blends.get(&color).map(|ib| {
-        let stores = ib.blend.is_some();
-        (stores.then_some(ib.equation), ib.form, !stores)
-    })
-}
-
-/// Whether the function's second (index-1) output to `color` is the second source of the
-/// extended-range blend it computes over the attachment's input attachment, outside the stage
-/// interface.
-pub fn blends_second_through_inputs(cx: &SelectCx<'_>, color: u32) -> bool {
-    input_blend::blends_second(cx, color)
 }
 
 /// Whether the function writes an output the returned value holds outside the stage interface:

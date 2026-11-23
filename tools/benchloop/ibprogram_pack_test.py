@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'drivers/TegraGM20BMetal/raw/pack/iterated'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'drivers/TegraGM20BMetal/pack/iterated'))
 
 import microcode
 import programs_long

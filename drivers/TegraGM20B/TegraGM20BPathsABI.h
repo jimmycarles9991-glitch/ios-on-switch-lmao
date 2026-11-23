@@ -3,7 +3,7 @@
  * TegraGM20B connection (TegraGM20BABI.h's wire form, direct or tunnelled) answering kern.switch_gpu_paths' line
  * (SwitchGpuPathStats.h), which an app's sandbox may deny it as a sysctl, or the push scan's target peaks, which no
  * sysctl carries. Kept out of TegraGM20BABI.h, which NVK, the GPU
- * seed and the raw stack key build from: the method number is far from theirs. */
+ * seed and the stack key build from: the method number is far from theirs. */
 #ifndef TEGRA_GM20B_PATHS_ABI_H
 #define TEGRA_GM20B_PATHS_ABI_H
 #include <stdint.h>
@@ -33,7 +33,7 @@ struct TegraGM20BAbiPaths {
 	uint32_t reserved;
 };
 
-/* The note-span op's input: the span as raw_span_marks.h formats it, NUL-terminated */
+/* The note-span op's input: the span as span_marks.h formats it, NUL-terminated */
 struct TegraGM20BAbiPathsSpan {
 	uint32_t op;
 	uint32_t reserved;

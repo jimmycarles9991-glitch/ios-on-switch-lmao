@@ -17,7 +17,8 @@ enum StillWriter {
         var pixels = [UInt8](repeating: 0, count: pattern.width * pattern.height * 3)
         pixels.withUnsafeMutableBytes {
             PatternWriter.writeRGB(
-                pattern, into: .init(base: $0.baseAddress!, rowBytes: pattern.width * 3), channels: 3)
+                pattern, into: .init(base: $0.baseAddress!, rowBytes: pattern.width * 3), channels: 3
+            )
         }
         switch image.format {
         case .jpeg420: try writeJPEG(pixels, pattern, subsampling: TJSAMP_420, to: url)
@@ -41,7 +42,8 @@ enum StillWriter {
         var jpeg: UnsafeMutablePointer<UInt8>?
         var size = 0
         let status = tj3Compress8(
-            handle, pixels, Int32(pattern.width), 0, Int32(pattern.height), Int32(TJPF_RGB.rawValue), &jpeg, &size)
+            handle, pixels, Int32(pattern.width), 0, Int32(pattern.height), Int32(TJPF_RGB.rawValue), &jpeg, &size
+        )
         defer { tj3Free(jpeg) }
         guard status == 0, let jpeg else {
             throw Failure(description: "tj3Compress8: \(String(cString: tj3GetErrorStr(handle)))")
@@ -56,11 +58,13 @@ enum StillWriter {
                 width: pattern.width, height: pattern.height, bitsPerComponent: 8, bitsPerPixel: 24,
                 bytesPerRow: pattern.width * 3, space: CGColorSpace(name: CGColorSpace.sRGB)!,
                 bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue), provider: provider, decode: nil,
-                shouldInterpolate: false, intent: .defaultIntent),
+                shouldInterpolate: false, intent: .defaultIntent
+            ),
             let destination = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)
         else { throw Failure(description: "\(url.lastPathComponent): cannot make the image") }
         CGImageDestinationAddImage(
-            destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+            destination, image, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary
+        )
         guard CGImageDestinationFinalize(destination) else {
             throw Failure(description: "\(url.lastPathComponent): ImageIO could not write it")
         }

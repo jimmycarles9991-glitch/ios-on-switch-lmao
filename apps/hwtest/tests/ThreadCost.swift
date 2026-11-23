@@ -42,6 +42,7 @@ struct ThreadCost {
     static func - (a: ThreadCost, b: ThreadCost) -> ThreadCost {
         ThreadCost(
             userUs: a.userUs - b.userUs, systemUs: a.systemUs - b.systemUs, machCalls: a.machCalls - b.machCalls,
-            unixCalls: a.unixCalls - b.unixCalls, switches: a.switches - b.switches, faults: a.faults - b.faults)
+            unixCalls: a.unixCalls - b.unixCalls, switches: a.switches - b.switches, faults: a.faults - b.faults
+        )
     }
 }

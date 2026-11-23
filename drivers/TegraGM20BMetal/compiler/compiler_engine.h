@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// What the system shader compiler compiles with: the translator's own libraries and functions (raw/runtime/RawOffline.h: no
+// What the system shader compiler compiles with: the translator's own libraries and functions (TegraGM20BMetalOffline.h: no
 // m2v device, no shader cache on disk), the stage compile linked into the plugin (third_party/mesa/src/nouveau/
 // switch_compile) and the installed pack's rules, as the pack generator makes its records.
 #pragma once
@@ -9,7 +9,7 @@
 #include "compiler_codegen.h"
 #include "compiler_request.h"
 
-namespace raw {
+namespace gm20b {
 class Direct;
 }
 
@@ -32,14 +32,14 @@ public:
 
     // The pack read: what the store is named by
     bool open(uint64_t stack, const EngineInputs &inputs, std::string &why);
-    // The installed pack's rules (raw_record.h PackRules), as the store is named by them
-    raw::Digest rules() const;
-    // `p`'s record or refusal as the store keeps it (raw_cache.h's entry bytes); TegraGM20BCompilerABI.h's result
+    // The installed pack's rules (record.h PackRules), as the store is named by them
+    gm20b::Digest rules() const;
+    // `p`'s record or refusal as the store keeps it (gm20b_cache.h's entry bytes); TegraGM20BCompilerABI.h's result
     int32_t compile(const Prepared &p, std::string &entry, std::string &why);
 
 private:
     // What compiles, made at the first compile that needs it, so a compiler that serves its store alone has none
-    raw::Direct &compiler();
+    gm20b::Direct &compiler();
 
     struct State;
     std::unique_ptr<State> state_;

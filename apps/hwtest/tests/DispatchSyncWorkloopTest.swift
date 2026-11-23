@@ -15,7 +15,7 @@ struct DispatchSyncWorkloopTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let hierarchy = SyncHierarchy(silos: Self.homes)
-        let homes = (0..<Self.homes).map {
+        let homes = (0 ..< Self.homes).map {
             DispatchQueue(label: "com.brunostjohn.switch.hwtest.home\($0)", qos: .userInitiated)
         }
         let start = Date()
@@ -43,7 +43,8 @@ struct DispatchSyncWorkloopTest: HWTest {
                 ("every sync block ran exactly once (\(wantSyncs))", syncs == wantSyncs),
                 ("every async block ran exactly once (\(wantAsyncs))", asyncs == wantAsyncs),
                 ("no two blocks of the serial hierarchy ran at once (overlaps 0)", overlaps == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// One round: each home queue's block syncs onto its silo `iterations` times; whether every block finished.
@@ -52,7 +53,7 @@ struct DispatchSyncWorkloopTest: HWTest {
         for (index, home) in homes.enumerated() {
             home.async(group: group) {
                 let silo = hierarchy.silos[index]
-                for step in 1...iterations {
+                for step in 1 ... iterations {
                     silo.sync { hierarchy.block(sync: true) }
                     if step % asyncEvery == 0 {
                         hierarchy.shared.async { hierarchy.block(sync: false, spinMicroseconds: 20) }

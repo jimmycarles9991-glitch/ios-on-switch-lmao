@@ -79,7 +79,9 @@ struct PocketKeylineTest: HWTest {
         let (claim, why) = KeylineClaim.verdict(
             KeylineClaim.Evidence(
                 line: line, backdrop: backdrop, framebuffer: framebuffer, replicaWrong: replica, alpha: Double(alpha),
-                fill: layers.fill))
+                fill: layers.fill
+            )
+        )
         var reasons: [String] = []
         if let problem = PocketKeylineProbe.fillProblem(layers) { reasons.append(problem) }
         if !(layers.fill.map(KeylineClaim.magenta) ?? false) {
@@ -103,11 +105,12 @@ struct PocketKeylineTest: HWTest {
     }
 
     /// The render server's debug lines for its Core Animation draws and short writes, for 30 s from its notification
-    /// handler (raw_gpu.h armKeylineProbe): their budgets were spent long before this test
+    /// handler (pipeline.h armKeylineProbe): their budgets were spent long before this test
     static func armRawProbe() {
         CFNotificationCenterPostNotification(
             CFNotificationCenterGetDarwinNotifyCenter(),
-            CFNotificationName("com.brunostjohn.switch.debug.keyline-probe" as CFString), nil, nil, true)
+            CFNotificationName("com.brunostjohn.switch.debug.keyline-probe" as CFString), nil, nil, true
+        )
     }
 
     /// The purple or fresh row nearest the keyline's last pixel row, within two rows of it (a fractional edge at the UI's
@@ -118,7 +121,7 @@ struct PocketKeylineTest: HWTest {
         let near = [0, -1, 1, -2, 2].map { keyline + $0 }.filter { $0 > 0 && $0 + 1 < picture.height }
         let row =
             near.first { KeylineClaim.purple(rgb(picture, x, $0)) || KeylineClaim.fresh(rgb(picture, x, $0)) }
-            ?? keyline
+                ?? keyline
         metrics.set("line_row", row)
         metrics.set("line_offset", row - keyline)
         return row
@@ -193,8 +196,8 @@ struct PocketKeylineTest: HWTest {
         let image = frame.framebuffer
         var texels = 0
         var (columns, rows) = (Set<Int>(), Set<Int>())
-        for y in 0..<image.height {
-            for x in 0..<image.width where fresh(image, x, y) {
+        for y in 0 ..< image.height {
+            for x in 0 ..< image.width where fresh(image, x, y) {
                 texels += 1
                 columns.insert(x)
                 rows.insert(y)
@@ -224,7 +227,7 @@ struct PocketKeylineTest: HWTest {
     }
 
     static func rgb(_ picture: Raster, _ x: Int, _ y: Int) -> [Int] {
-        (0..<3).map { PocketStripTest.byte(picture[x, y, $0]) }
+        (0 ..< 3).map { PocketStripTest.byte(picture[x, y, $0]) }
     }
 
     static func text(_ values: [Int]) -> String { values.map(String.init).joined(separator: ",") }
@@ -233,10 +236,10 @@ struct PocketKeylineTest: HWTest {
 
     /// The rows holding fresh texels (within three rows of `near`, else anywhere) and how many each holds
     static func freshRows(_ picture: Raster, near: Int? = nil) -> [Int: Int] {
-        let rows = near.map { max($0 - 3, 0)..<min($0 + 4, picture.height) } ?? 0..<picture.height
+        let rows = near.map { max($0 - 3, 0) ..< min($0 + 4, picture.height) } ?? 0 ..< picture.height
         var found: [Int: Int] = [:]
         for y in rows {
-            let count = (0..<picture.width).filter { fresh(picture, $0, y) }.count
+            let count = (0 ..< picture.width).filter { fresh(picture, $0, y) }.count
             if count > 0 { found[y] = count }
         }
         return found

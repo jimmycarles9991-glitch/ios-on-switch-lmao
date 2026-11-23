@@ -3,16 +3,16 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Alpha to coverage and alpha to one on the raw path (SET_ANTI_ALIAS_ALPHA_CONTROL, caps 3D-E5): white drawn at alpha
+/// Alpha to coverage and alpha to one on the driver (SET_ANTI_ALIAS_ALPHA_CONTROL, caps 3D-E5): white drawn at alpha
 /// (x + 0.5) / 256 over black into a 4x MSAA BGRA8 target, resolved. Metal's rule is that each sample is covered or not,
 /// so a resolved pixel holds k/4 of white for k covered samples (a code within one of 255 k / 4). A 2x2 block's 16
 /// samples follow alpha within two: per-pixel rounding (no dither) is off by half a sample a pixel at most, and a 2x2
 /// dither (SET_ALPHA_TO_COVERAGE_DITHER_CONTROL) by less. Alpha to one writes alpha 1 to the covered samples, so a
-/// resolved alpha is k/4 too. PASS: both on the raw path, every pixel a whole number of samples, every block within two
+/// resolved alpha is k/4 too. PASS: both on the driver, every pixel a whole number of samples, every block within two
 /// samples of alpha, and no block more than one sample below the block to its left.
 struct AlphaToCoverageTest: HWTest {
-    let id = "gpu.raw.alpha_to_coverage"
-    let name = "Alpha to coverage and alpha to one: whole samples, coverage following alpha, on the raw path"
+    let id = "gpu.gm20b.alpha_to_coverage"
+    let name = "Alpha to coverage and alpha to one: whole samples, coverage following alpha, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -26,8 +26,8 @@ struct AlphaToCoverageTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         guard gpu.device.supportsTextureSampleCount(Self.samples) else { return .skip("no 4x MSAA") }
         var metrics = Metrics()
         var wrong: [String] = []
@@ -39,7 +39,7 @@ struct AlphaToCoverageTest: HWTest {
             metrics.set("\(name)_falling", r.falling)
             metrics.set("\(name)_worst_block", r.worstBlock, digits: 3)
             if toOne { metrics.set("\(name)_alpha_not_whole", r.alphaNotWhole) }
-            if r.path != "raw" { wrong.append("\(name)_path") }
+            if r.path != "gm20b" { wrong.append("\(name)_path") }
             if r.notWhole > 0 || r.offAlpha > 0 || r.falling > 0 || r.alphaNotWhole > 0 { wrong.append(name) }
         }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)

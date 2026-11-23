@@ -1,13 +1,12 @@
 load("@bazel_skylib//rules:common_settings.bzl", "string_flag")
+load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load(":defs.bzl", "metal_seed", "seed_raw_pack", "seed_tree", "shader_crawl")
-load(":tools.bzl", "raw_tools", "seed_tools", "tools_archive")
+load(":defs.bzl", "metal_seed", "seed_pipeline_pack", "seed_tree", "shader_crawl")
+load(":tools.bzl", "seed_tools", "tools_archive")
 
 package(default_visibility = ["//visibility:public"])
 
 lint_files()
-
-METAL = "//drivers/NativeMetal"
 
 GM20B_METAL = "//drivers/TegraGM20BMetal"
 
@@ -26,15 +25,6 @@ alias(
     actual = select({
         "//install:from_release": "@switch_release//:shader_tools",
         "//conditions:default": ":local_tools",
-    }),
-)
-
-# The raw pack's tools: the release's prebuilt shader tools, or these (no m2v or NVK in them)
-alias(
-    name = "default_raw_tools",
-    actual = select({
-        "//install:from_release": "@switch_release//:shader_tools",
-        "//conditions:default": ":local_raw_tools",
     }),
 )
 
@@ -58,43 +48,12 @@ string_flag(
 
 seed_tools(
     name = "local_tools",
-    hdrs = [
-        METAL + ":frontend_headers",
-        GM20B_METAL + ":precompile/PrecompileCompute.h",
-        GM20B_METAL + ":precompile/PrecompileInputs.h",
-        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
-        "//kits/SwitchRefusal:SwitchRefusal.h",
-        "//kits/SwitchRefusal:SwitchRefusalSite.h",
-    ],
-    abi_header = "//drivers/TegraGM20B:TegraGM20BABI.h",
     compile = "//third_party/mesa/src/nouveau/switch_compile:host",
     context_header = "//kits/SwitchGM20BEmit:context",
-    frontend = METAL + ":NativeBridgeMetalFrontend.mm",
-    host_bridge = "//gpu:bridge_host",
-    metal_abi = METAL + "/abi:MetalABI.h",
-    metal_header = METAL + ":NativeBridgeMetalFrontend.h",
-    mock_iokit = GM20B_METAL + ":precompile/mock_iokit.c",
-    nvk = "//gpu/nvk:dylib",
-    nvk_sources = [
-        "//gpu/nvk:dylib_source",
-        "//gpu/nvk:twin_source",
-    ],
-    precompile = GM20B_METAL + ":precompile/precompile.mm",
-    raw_generator = GM20B_METAL + ":raw/pack/rawpack.py",
-    raw_srcs = [GM20B_METAL + ":raw_stack_sources"],
-    stack = "//gpu:raw_stack",
-    translate = "//gpu:translate_host",
-    twin = "//gpu/nvk:twin",
-)
-
-raw_tools(
-    name = "local_raw_tools",
-    compile = "//third_party/mesa/src/nouveau/switch_compile:host",
-    context_header = "//kits/SwitchGM20BEmit:context",
-    metal_abi = METAL + "/abi:MetalABI.h",
-    raw_generator = GM20B_METAL + ":raw/pack/rawpack.py",
-    raw_srcs = [GM20B_METAL + ":raw_stack_sources"],
-    stack = "//gpu:raw_stack",
+    gm20b_generator = GM20B_METAL + ":pack/make_pack.py",
+    gm20b_srcs = [GM20B_METAL + ":stack_key_sources"],
+    metal_abi = GM20B_METAL + "/abi:MetalABI.h",
+    stack = "//gpu:stack_key",
     translate = "//gpu:translate_host",
 )
 
@@ -112,7 +71,7 @@ shader_crawl(
             "//apps/hwtest:SwitchHWTest27e",
         ],
     }),
-    embedded = [METAL + ":TwoPlaneStandIn.h"],
+    embedded = [GM20B_METAL + ":plugin/TwoPlaneStandIn.h"],
     inventory = "@ipsw//:crawl_inventory",
     qc = "@ipsw//:crawl_qc",
     tags = ["manual"],
@@ -126,15 +85,14 @@ metal_seed(
     crawl = ":crawl",
     depth = ":depth",
     device_libraries = "@gpu_device_data//:libraries",
-    records = "@gpu_device_data//:records",
     replies = "@gpu_device_data//:replies",
     tags = ["manual"],
     tools = ":tools",
 )
 
-seed_raw_pack(
-    name = "raw_pack",
-    srcs = [GM20B_METAL + ":raw_pack_generator"],
+seed_pipeline_pack(
+    name = "pack",
+    srcs = [GM20B_METAL + ":pack_generator"],
     app_states = [GM20B_METAL + ":app_state_lists"],
     archives = [GM20B_METAL + ":archive_inventories"],
     ca_names = [GM20B_METAL + ":ca_name_lists"],
@@ -142,14 +100,14 @@ seed_raw_pack(
     corpus = GM20B_METAL + ":precompile/corpus.log",
     crawl = ":crawl",
     device_libraries = "@gpu_device_data//:libraries",
-    generator = GM20B_METAL + ":raw/pack/rawpack.py",
+    generator = GM20B_METAL + ":pack/make_pack.py",
     tags = ["manual"],
-    tools = ":default_raw_tools",
+    tools = ":default_tools",
 )
 
 seed_tree(
     name = "tree",
-    raw = ":raw_pack",
+    raw = ":pack",
     seed = ":seed",
     tags = ["manual"],
 )
@@ -159,4 +117,26 @@ filegroup(
     srcs = [":tree"],
     output_group = "size",
     tags = ["manual"],
+)
+
+# The pack's refused states for the configured IPSW kind, against a pack report built elsewhere (the pack is too
+# large to build here): bazel test --config=ios27 //gpu/seed:pack_refusals_test --test_arg=<pack>/report.txt.
+# Re-pin from a report: grep -E '^  (refused \(|skipped kernel )' report.txt | sed 's/^  //' | sort
+alias(
+    name = "pack_pin",
+    actual = select({
+        "//ipsw:21H461": "pack_refused_21H461.txt",
+        "//ipsw:24B119": "pack_refused_24B119.txt",
+    }),
+)
+
+py_test(
+    name = "pack_refusals_test",
+    srcs = ["pack_refusals_test.py"],
+    args = ["$(rootpath :pack_pin)"],
+    data = [":pack_pin"],
+    tags = [
+        "manual",
+        "pack",
+    ],
 )

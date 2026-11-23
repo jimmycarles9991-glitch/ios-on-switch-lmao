@@ -32,7 +32,8 @@ struct WiFiLinkTest: HWTest {
             } else if address.pointee.sa_family == UInt8(AF_INET) {
                 var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
                 getnameinfo(
-                    address, socklen_t(address.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+                    address, socklen_t(address.pointee.sa_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST
+                )
                 interface.ipv4 = String(cString: host)
             }
             found = interface
@@ -96,8 +97,9 @@ struct WiFiLinkTest: HWTest {
                 ("en0 up and running", up && running),
                 ("the driver reports a link rate", (wifi.data?.ifi_baudrate ?? 0) > 0),
                 ("the driver is associated (APPLE80211_IOC_STATE 4)", driverState == 4),
-                ("the driver names the joined network (1-32 bytes)", (1...32).contains(ssidLength)),
+                ("the driver names the joined network (1-32 bytes)", (1 ... 32).contains(ssidLength)),
                 ("a DHCP lease (not a 169.254 link-local address)", leased),
-            ], metrics)
+            ], metrics
+        )
     }
 }

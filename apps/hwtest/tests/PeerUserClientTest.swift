@@ -54,6 +54,7 @@ struct PeerUserClientTest: HWTest {
             [
                 ("the peer is signed for \(Self.surfaceClass)", classes?.contains(Self.surfaceClass) ?? true),
                 ("the peer made an IOSurface", made),
-            ], metrics, proof: "")
+            ], metrics, proof: ""
+        )
     }
 }

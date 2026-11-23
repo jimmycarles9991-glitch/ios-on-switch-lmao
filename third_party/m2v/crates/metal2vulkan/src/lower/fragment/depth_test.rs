@@ -179,6 +179,10 @@ pub struct DepthTest {
     /// The stand-ins are 2D arrays of a layered pass's layers, addressed at each fragment's layer
     /// (`LoweringInputs::layered_storage`, one sample).
     pub layered: bool,
+    /// The stand-in holds a `Depth16Unorm`'s codes as floats
+    /// (`LoweringInputs::shader_tests_unorm16`): the test compares the code Metal stores for the
+    /// fragment's depth with the stand-in's, and writes that code.
+    pub unorm16: bool,
 }
 
 /// The in-shader stencil test's plan: how the module declares the stencil's stand-in (of the
@@ -387,11 +391,13 @@ pub(super) fn plan(cx: &mut SelectCx<'_>, exports: Exports) -> Result<(), Error>
         stencil,
         mask: exports.mask,
         layered: fp.fetch_layer.is_some(),
+        unorm16: cx.inputs.shader_tests_unorm16,
     });
     cx.facts.insert(RuntimeFact::ShaderTests {
         formatless: form.declared == crate::spv::ImageFormat::Unknown,
         multisampled: cx.inputs.multisampled,
         planes: form.samples == StorageSamples::Planes,
+        unorm16: cx.inputs.shader_tests_unorm16,
     });
     cx.push.insert(PushField::ShaderTestsState);
     cx.descriptors.storage_images = cx.descriptors.storage_images.saturating_add(1);
@@ -412,6 +418,7 @@ pub(super) fn words(cx: &SelectCx<'_>, rets: u64) -> u64 {
     const RETURNED: u64 = 160;
     const STENCIL: u64 = 520;
     const MASK: u64 = 80;
+    const UNORM16: u64 = 200;
     let Some(plan) = cx.families.fragment.depth_test else {
         return 0;
     };
@@ -427,6 +434,10 @@ pub(super) fn words(cx: &SelectCx<'_>, rets: u64) -> u64 {
     let per_return = match plan.mask {
         Some(_) => per_return + MASK,
         None => per_return,
+    };
+    let per_return = match plan.unorm16 {
+        true => per_return + UNORM16,
+        false => per_return,
     };
     objects.saturating_add(rets.saturating_mul(per_return))
 }
@@ -535,6 +546,19 @@ fn compare(fb: &mut FunctionBuilder<'_>, code: SValue, a: SValue, b: SValue) -> 
         out = fb.select(is, choice, out)?;
     }
     Ok(out)
+}
+
+/// The `Depth16Unorm` code of depth `z` in `[0, 1]`, as a float: `z * 65535` rounded to nearest
+/// from the exact product, ties to even, which is the code Metal stores (0.3 is 19661, though the
+/// `f32` product rounds to the tie 19660.5).
+fn unorm16_code(fb: &mut FunctionBuilder<'_>, z: SValue) -> BResult<SValue> {
+    use crate::lower::arith::legal::{FloatFmt, Form, Held};
+    let form = Form {
+        held: Held::Float(FloatFmt::F32),
+        lanes: 1,
+    };
+    let scale = f32_value(fb, 65536.0)?;
+    crate::lower::arith::color_write::round_scaled_product(fb, form, z, scale)
 }
 
 /// Whether bit `bit` of `word` is set.
@@ -746,6 +770,16 @@ pub(super) fn emit_return(
         let image = fb.load(image, MemAccess::default())?;
         let texel = fb.read(image, pixel, &operands, mem)?;
         let stored = fb.composite_extract(texel, &[0])?;
+        let (z, stored, written) = match plan.unorm16 {
+            true => {
+                let code = unorm16_code(fb, z)?;
+                let held = unorm16_code(fb, stored)?;
+                let step = f32_value(fb, 1.0 / 65535.0)?;
+                let written = fb.binary_no_contraction(BinOp::FMul, code, step)?;
+                (code, held, written)
+            }
+            false => (z, stored, z),
+        };
         let seven = u32_value(fb, 7)?;
         let code = fb.binary(BinOp::BitwiseAnd, word, seven)?;
         let passed = compare(fb, code, z, stored)?;
@@ -768,7 +802,7 @@ pub(super) fn emit_return(
             let f32_ = fb.module().ty(SType::Float { width: 32 })?;
             let vec4 = fb.module().ty(SType::Vector { elem: f32_, len: 4 })?;
             let zero = f32_value(fb, 0.0)?;
-            let texel = fb.composite_construct(vec4, &[z, zero, zero, zero])?;
+            let texel = fb.composite_construct(vec4, &[written, zero, zero, zero])?;
             fb.write(image, pixel, texel, &operands, mem)?;
             Ok(ArmEnd::FallThrough(Vec::new()))
         });

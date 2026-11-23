@@ -16,10 +16,11 @@
 //! - the binder asks for the function only for a pipeline with a depth attachment: one linked
 //!   into a pipeline without one was compiled for another pipeline's state
 //!   (`NeedsInput(FramebufferFetch)`);
-//! - the stand-in holds 32-bit floats, Metal's `Depth32Float` and `Depth32Float_Stencil8` depth:
-//!   another depth format (`Depth16Unorm`, `Depth24Unorm_Stencil8`) stores codes the function's
-//!   float depth would have to round to as Metal does, not implemented (refinement 3), refused at
-//!   the depth attachment.
+//! - the stand-in holds 32-bit floats, Metal's `Depth32Float` and `Depth32Float_Stencil8` depth,
+//!   or a `Depth16Unorm`'s codes as floats, which a function compiled for one tests and writes as
+//!   codes (`RuntimeFact::ShaderTests::unorm16`): a function compiled for the other form was
+//!   compiled for another pipeline's state (`NeedsInput(FramebufferFetch)`), and another depth
+//!   format (`Depth24Unorm_Stencil8`) is not implemented, refused at the depth attachment.
 //! - a function that runs the stencil test too (`RuntimeFact::ShaderStencilTest`) holds the stencil
 //!   in a stand-in of the pipeline's samples (`R8_UINT`, a multisampled image at more than one),
 //!   which the consumer copies to and from the stencil aspect, at more than one sample by
@@ -44,13 +45,14 @@ pub fn shader_tests(
     fragment: Option<&FunctionArtifact>,
     p: &DeviceProfile,
 ) -> Result<Option<ShaderTestsUse>, Error> {
-    let Some((formatless, multisampled, planes)) = fragment.and_then(|f| {
+    let Some((formatless, multisampled, planes, unorm16)) = fragment.and_then(|f| {
         f.facts.iter().find_map(|fact| match *fact {
             RuntimeFact::ShaderTests {
                 formatless,
                 multisampled,
                 planes,
-            } => Some((formatless, multisampled, planes)),
+                unorm16,
+            } => Some((formatless, multisampled, planes, unorm16)),
             _ => None,
         })
     }) else {
@@ -78,7 +80,13 @@ pub fn shader_tests(
     }
     match r.depth_format {
         None => return Err(Error::NeedsInput(RuntimeInput::FramebufferFetch)),
-        Some(PixelFormat::Depth32Float | PixelFormat::Depth32FloatStencil8) => {}
+        Some(PixelFormat::Depth32Float | PixelFormat::Depth32FloatStencil8) if !unorm16 => {}
+        Some(PixelFormat::Depth16Unorm) if unorm16 => {}
+        Some(
+            PixelFormat::Depth32Float
+            | PixelFormat::Depth32FloatStencil8
+            | PixelFormat::Depth16Unorm,
+        ) => return Err(Error::NeedsInput(RuntimeInput::FramebufferFetch)),
         Some(_) => {
             return Err(
                 Error::from(Unsupported::not_implemented(Feature::FramebufferFetch))

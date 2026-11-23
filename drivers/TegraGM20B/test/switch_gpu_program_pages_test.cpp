@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The kernel's registries for programs run in place from a file's pages (raw_program_pages.h): two processes import
+// The kernel's registries for programs run in place from a file's pages (program_pages.h): two processes import
 // the same fixed grain of the pack, read-only and without a surface ID, in boImport's order (TegraGM20BUserClientBo.cpp:
 // tgm_coherency_add, the pin's switch_gpu_backing_register, tgm_coherency_pin, switch_gpu_backing_cpu_track), and both
 // imports get the one coherency entry and the one backing, refused by neither. An import of another page list that

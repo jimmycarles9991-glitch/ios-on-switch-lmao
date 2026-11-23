@@ -41,7 +41,7 @@ struct FocusSearchTest: HWTest {
             }
             let before = ThreadCost.sample()
             let start = CACurrentMediaTime()
-            for _ in 0..<updates {
+            for _ in 0 ..< updates {
                 focus.requestFocusUpdate(to: table)
                 focus.updateFocusIfNeeded()
             }
@@ -73,6 +73,7 @@ struct FocusSearchTest: HWTest {
             [
                 ("one focus update over the list takes under a frame", ms < 16.7),
                 ("the update finds an item to focus", focused),
-            ], metrics)
+            ], metrics
+        )
     }
 }

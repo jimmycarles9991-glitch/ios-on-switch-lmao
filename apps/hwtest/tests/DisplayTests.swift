@@ -88,14 +88,16 @@ struct DisplayPacingTest: HWTest {
         metrics.set("max_at_ms", worst.map { (stamps[$0 + 1] - stamps[0]) * 1000 } ?? 0, digits: 1)
         metrics.set(
             "dropped_first_500ms",
-            Stats.droppedFrames(intervals: Array(intervals.prefix(max(settled - 1, 0))), period: period))
+            Stats.droppedFrames(intervals: Array(intervals.prefix(max(settled - 1, 0))), period: period)
+        )
         metrics.set("dropped", dropped)
         return .judged(
             [
                 ("10 s of frames", stamps.count >= 590),
                 ("p50 at 16.67 ms (±0.5)", abs(Stats.percentile(intervals, 0.5) - period) <= 0.5),
                 ("no dropped frames", dropped == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 }
 
@@ -129,7 +131,8 @@ struct DisplayModeTest: HWTest {
             metrics.set("edr_current", Double(current), digits: 3)
         }
         return .judged(
-            [("60 frames per second", fps == 60), ("a native size", native.width > 0 && native.height > 0)], metrics)
+            [("60 frames per second", fps == 60), ("a native size", native.width > 0 && native.height > 0)], metrics
+        )
     }
 }
 
@@ -153,7 +156,8 @@ struct BrightnessTest: HWTest {
         metrics.set("read_0_8", Double(readings[1]), digits: 3)
         return .judged(
             [("reads back what was set (±0.02)", abs(readings[0] - 0.3) <= 0.02 && abs(readings[1] - 0.8) <= 0.02)],
-            metrics)
+            metrics
+        )
     }
 }
 
@@ -204,9 +208,11 @@ struct ColourPipelineTest: HWTest {
         let context = CGContext(
             data: &pixel, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
             space: CGColorSpace(name: CGColorSpace.sRGB)!,
-            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
         context.draw(
-            image, in: CGRect(x: -image.width / 2, y: -image.height / 2, width: image.width, height: image.height))
+            image, in: CGRect(x: -image.width / 2, y: -image.height / 2, width: image.width, height: image.height)
+        )
         return pixel.prefix(3).map(Int.init)
     }
 }

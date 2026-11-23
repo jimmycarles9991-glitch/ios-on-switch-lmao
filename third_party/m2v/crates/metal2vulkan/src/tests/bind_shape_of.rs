@@ -232,9 +232,6 @@ fn states() -> Vec<BindState> {
         with(|s| {
             s.interlocked_colors.insert(1);
         }),
-        with(|s| {
-            s.extended_shadows.insert(0);
-        }),
         with(|s| s.fragment_tests = FragmentTests::Pass),
     ]
 }

@@ -46,8 +46,8 @@ public struct PatternChecker: Sendable {
         let top = pattern.barcodeHeight
         let span = pattern.height - top
         var regions: [Region] = []
-        for row in 0..<Self.gradientRows {
-            for column in 0..<Self.gradientColumns {
+        for row in 0 ..< Self.gradientRows {
+            for column in 0 ..< Self.gradientColumns {
                 let x = (column * 2 + 1) * pattern.width / (Self.gradientColumns * 2) - Self.block / 2
                 let y = top + (row * 2 + 1) * span / (Self.gradientRows * 2) - Self.block / 2
                 regions.append(Region(x: x & ~1, y: y & ~1, width: Self.block, height: Self.block))
@@ -59,7 +59,7 @@ public struct PatternChecker: Sendable {
     public func readCode(brightness: (Region) -> Double) -> UInt32 {
         let threshold = Double(Pattern.black + Pattern.white) / 2
         var code: UInt32 = 0
-        for index in 0..<(2 * Pattern.columns) {
+        for index in 0 ..< (2 * Pattern.columns) {
             let region = cellRegion(row: index / Pattern.columns, column: index % Pattern.columns)
             code = code << 1 | (brightness(region) > threshold ? 1 : 0)
         }
@@ -84,8 +84,8 @@ public struct PatternChecker: Sendable {
 
     func mean(_ region: Region, _ value: (Int, Int) -> Double) -> Double {
         var sum = 0.0
-        for y in region.y..<(region.y + region.height) {
-            for x in region.x..<(region.x + region.width) { sum += value(x, y) }
+        for y in region.y ..< (region.y + region.height) {
+            for x in region.x ..< (region.x + region.width) { sum += value(x, y) }
         }
         return sum / Double(region.width * region.height)
     }

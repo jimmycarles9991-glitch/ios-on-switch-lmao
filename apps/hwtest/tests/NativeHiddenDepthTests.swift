@@ -30,9 +30,11 @@ struct NativeHiddenDepthTest: NativeObjectTest {
         let never = try NativeDepthStencilTest.state(d, depth: .never, write: false)
         let always = try NativeDepthStencilTest.state(d, depth: .always, write: false)
         let notEqual = try NativeDepthStencilTest.state(
-            d, depth: .always, write: false, front: Self.stencil(.notEqual), back: Self.stencil(.notEqual))
+            d, depth: .always, write: false, front: Self.stencil(.notEqual), back: Self.stencil(.notEqual)
+        )
         let equal = try NativeDepthStencilTest.state(
-            d, depth: .always, write: false, front: Self.stencil(.equal), back: Self.stencil(.equal))
+            d, depth: .always, write: false, front: Self.stencil(.equal), back: Self.stencil(.equal)
+        )
         var work = NativeWork(objects: [lessWrites, less, never, always, notEqual, equal])
         func pass(_ load: MTLLoadAction) -> MTLRenderPassDescriptor {
             let pass = MTLRenderPassDescriptor()
@@ -68,12 +70,12 @@ struct NativeHiddenDepthTest: NativeObjectTest {
         work.paths.append(timing.path)
         let pixels = try await gpu.read(color, bytesPerPixel: 4)
         var wrong = [String: Int]()
-        for y in 0..<size {
-            for x in 0..<size {
+        for y in 0 ..< size {
+            for x in 0 ..< size {
                 let (name, want): (String, [UInt8]) =
                     x < size / 2
-                    ? ("left", [255, 0, 255, 255])
-                    : y < size / 2
+                        ? ("left", [255, 0, 255, 255])
+                        : y < size / 2
                         ? ("top_right", [255, 255, 255, 255])
                         : ("bottom_right", [255, 255, 0, 255])
                 if Array(pixels.pixel(x, y, width: size)) != want { wrong[name, default: 0] += 1 }
@@ -86,7 +88,8 @@ struct NativeHiddenDepthTest: NativeObjectTest {
             wrong.isEmpty
                 ? "-"
                 : wrong.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }
-                    .joined(separator: ","))
+                .joined(separator: ",")
+        )
         if total != 0 { work.failures.append("\(total) pixels miss what the hidden depth and stencil decide") }
         return work
     }

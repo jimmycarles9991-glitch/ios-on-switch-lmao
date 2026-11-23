@@ -81,7 +81,7 @@ public enum Blend {
             case .oneMinusSource1Alpha: return 1 - s1[3]
             }
         }
-        let result = (0..<4).map { c -> Float in
+        let result = (0 ..< 4).map { c -> Float in
             let alpha = c == 3
             let operation = alpha ? state.alphaOperation : state.rgbOperation
             let a = s[c] * factor(alpha ? state.sourceAlpha : state.sourceRGB, c)

@@ -13,7 +13,7 @@ final class ProbeArmsTests: XCTestCase {
 
     func testATallyCountsTrialsAndNamesTheFirstTexelThatDiffered() {
         var tally = ArmTally()
-        let want: [UInt8] = Array(0..<32)
+        let want: [UInt8] = Array(0 ..< 32)
         tally.compare(want, want, trial: 0, width: 4, bytesPerTexel: 4)
         var got = want
         got[21] = 0xff
@@ -54,10 +54,11 @@ final class ProbeArmsTests: XCTestCase {
     }
 
     func testConsecutiveTrialsTakeDifferentSeeds() {
-        for cell in 0..<5 {
-            for trial in 0..<200 {
+        for cell in 0 ..< 5 {
+            for trial in 0 ..< 200 {
                 XCTAssertNotEqual(
-                    probeSeed(trial: trial, cell: cell, seeds: 16), probeSeed(trial: trial + 1, cell: cell, seeds: 16))
+                    probeSeed(trial: trial, cell: cell, seeds: 16), probeSeed(trial: trial + 1, cell: cell, seeds: 16)
+                )
             }
         }
         XCTAssertEqual(probeHash(0, 0, 0), 0)

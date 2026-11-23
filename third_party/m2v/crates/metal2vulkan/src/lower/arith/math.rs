@@ -4051,6 +4051,9 @@ pub fn round_exact_product_lanes(
     m: &[u32],
     snorm: bool,
 ) -> BResult<Value> {
+    if super::residual_round::takes(fb) {
+        return super::residual_round::round_exact_product_lanes(fb, s, v, m, snorm);
+    }
     let u = narrow::u32_form(s);
     let c = |fb: &mut FunctionBuilder<'_>, k: u64| splat(fb, u, k);
     let a = if snorm {

@@ -265,4 +265,56 @@ TEST(DisplayRetirement, RecoveryKeepsOriginalTicketUntilRestoredCompositionLatch
     display.retireThrough(3, 120);
     EXPECT_EQ(display.retired, (std::vector<uint64_t>{1, 2, 3}));
 }
+
+// A head deferred at its accept, then by every frame end's kick: the first kick at a later frame end reports it held,
+// once; its take reports how long it waited.
+TEST(HeldHead, AHeadAKickAtALaterFrameEndDefersIsReportedOnceAndAgainWhenTaken)
+{
+    switch_display::HeldHead held;
+    switch_display::HeldHead::Ended ended;
+    EXPECT_FALSE(held.defer(28867, 10, 1000, ended));
+    EXPECT_FALSE(held.defer(28867, 10, 1100, ended));  // the kick's loop in the same frame
+    EXPECT_TRUE(held.defer(28867, 11, 2000, ended));
+    EXPECT_FALSE(held.defer(28867, 12, 3000, ended));
+    EXPECT_EQ(ended.swap, 0u);
+    const auto taken = held.take(28867, 5000);
+    EXPECT_EQ(taken.swap, 28867u);
+    EXPECT_TRUE(taken.taken);
+    EXPECT_EQ(taken.ticks, 4000u);
+    EXPECT_EQ(held.heldSinceBoot(), 1u);
+    EXPECT_EQ(held.take(28867, 6000).swap, 0u);
+}
+
+TEST(HeldHead, AHeadTakenAtTheNextFrameEndIsNotHeld)
+{
+    switch_display::HeldHead held;
+    switch_display::HeldHead::Ended ended;
+    EXPECT_FALSE(held.recording());
+    EXPECT_FALSE(held.defer(5, 20, 100, ended));
+    EXPECT_TRUE(held.recording());
+    EXPECT_EQ(held.take(5, 200).swap, 0u);
+    EXPECT_FALSE(held.recording());
+    EXPECT_FALSE(held.defer(6, 21, 300, ended));  // the next head counts from its own first deferral
+    EXPECT_FALSE(held.defer(6, 21, 310, ended));
+    EXPECT_EQ(held.heldSinceBoot(), 0u);
+}
+
+// The family cancelled a held head (IOMFB's swap_wait timeout): its hold ends untaken at the next kick of another head.
+TEST(HeldHead, AHeldHeadTheFamilyLetGoEndsUntakenAtTheNextHead)
+{
+    switch_display::HeldHead held;
+    switch_display::HeldHead::Ended ended;
+    held.defer(7, 1, 10, ended);
+    ASSERT_TRUE(held.defer(7, 2, 20, ended));
+    EXPECT_FALSE(held.defer(8, 400, 9000, ended));
+    EXPECT_EQ(ended.swap, 7u);
+    EXPECT_FALSE(ended.taken);
+    EXPECT_EQ(ended.ticks, 8990u);
+    EXPECT_TRUE(held.defer(8, 401, 9100, ended));
+    EXPECT_EQ(ended.swap, 0u);
+    const auto other = held.take(9, 9200);
+    EXPECT_EQ(other.swap, 8u);
+    EXPECT_FALSE(other.taken);
+    EXPECT_EQ(held.heldSinceBoot(), 2u);
+}
 }  // namespace

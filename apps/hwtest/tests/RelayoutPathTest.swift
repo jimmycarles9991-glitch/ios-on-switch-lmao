@@ -5,16 +5,17 @@ import HWTestGPU
 import IOSurface
 import Metal
 
-/// A render target nothing wrote is made block-linear without moving its bytes, and when its texture goes it stays
-/// block-linear until a CPU lock asks for rows (drivers/TegraGM20B/TegraGM20BTiled.cpp decide,
-/// TegraGM20BCoherency.cpp drop, TegraGM20BViews.cpp): the GPU blits a pattern into a fresh IOSurface, the texture goes,
-/// and a read-only lock must read the pattern as rows. A surface the CPU wrote first must still be tiled by a move: the
-/// GPU blits over its top half only, and its lock must read the GPU's rows above the CPU's. A pattern that is not uniform
-/// shows a skipped tiling move (the CPU's rows read back scrambled) and a skipped untile (texels read as rows).
+/// A render target nothing wrote is made block-linear without moving its bytes (drivers/TegraGM20B/TegraGM20BTiled.cpp
+/// decide), and a CPU lock reads its rows (TegraGM20BViews.cpp): the GPU blits a pattern into a fresh IOSurface, the
+/// texture goes (the runtime keeps its import, memory.cpp keepImport, so the kernel's untile at the last release does not
+/// run), and a read-only lock must read the pattern as rows. A surface the CPU wrote first must still be tiled by a move:
+/// the GPU blits over its top half only, and its lock must read the GPU's rows above the CPU's (written_wrong_blitted and
+/// written_wrong_moved split its wrong bytes by half). A pattern that is not uniform shows a skipped tiling move (the
+/// CPU's rows read back scrambled) and a skipped untile (texels read as rows).
 struct RelayoutPathTest: GPUPathTest {
     let id = "gpu.path.relayout_history"
     let name = "A fresh render target is tiled without a move and untiled at its first CPU lock; a written one moves"
-    let counters = ["relayout_fresh", "relayout_deferred", "relayout_lazy"]
+    let counters = ["relayout_fresh", "relayout_moved"]
 
     static let width = 128, height = 128, rowBytes = 512
 
@@ -38,8 +39,11 @@ struct RelayoutPathTest: GPUPathTest {
         try await Self.blit(gpu, top, into: written, rows: Self.height / 2)
         let half = Self.height / 2 * Self.rowBytes
         let want = Array(top[..<half]) + Array(cpu[half...])
-        let writtenWrong = Self.wrong(Self.read(written), want)
+        let got = Self.read(written)
+        let writtenWrong = Self.wrong(got, want)
         metrics.set("written_wrong_bytes", writtenWrong)
+        metrics.set("written_wrong_blitted", Self.wrong(Array(got[..<half]), Array(want[..<half])))
+        metrics.set("written_wrong_moved", Self.wrong(Array(got[half...]), Array(want[half...])))
         if writtenWrong != 0 { failures.append("\(writtenWrong) bytes of the CPU-written target read back wrong") }
         if case .counts(let start) = before, case .counts(let end) = GPUPaths.read(connection) {
             let skipped = end.taken("relayout_fresh", since: start)
@@ -50,7 +54,7 @@ struct RelayoutPathTest: GPUPathTest {
     }
 
     static func pattern(_ seed: Int) -> [UInt8] {
-        (0..<(rowBytes * height)).map { UInt8(truncatingIfNeeded: ($0 &* 7) ^ ($0 >> 9) &+ seed &* 61) }
+        (0 ..< (rowBytes * height)).map { UInt8(truncatingIfNeeded: ($0 &* 7) ^ ($0 >> 9) &+ seed &* 61) }
     }
 
     static func surface() throws -> IOSurface {
@@ -62,23 +66,26 @@ struct RelayoutPathTest: GPUPathTest {
         return surface
     }
 
-    /// The bytes' first `rows` rows into the surface's texture, which goes before this returns: its import's release.
+    /// The bytes' first `rows` rows into the surface's texture, which goes before this returns
     static func blit(_ gpu: GPU, _ bytes: [UInt8], into surface: IOSurface, rows: Int) async throws {
         let source = try gpu.buffer(bytes)
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
         guard
             let target = gpu.device.makeTexture(
-                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0)
+                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0
+            )
         else { throw TestFailure("makeTexture(iosurface:) returned nil") }
         try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.copy(
                 from: source, sourceOffset: 0, sourceBytesPerRow: rowBytes, sourceBytesPerImage: rowBytes * rows,
                 sourceSize: MTLSize(width: width, height: rows, depth: 1), to: target, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+                destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+            )
             blit.endEncoding()
         }
     }

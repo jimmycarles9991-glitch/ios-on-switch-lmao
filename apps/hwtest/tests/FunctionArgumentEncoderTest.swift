@@ -4,15 +4,15 @@ import HWTestGPU
 import Metal
 
 /// A function's own argument encoder (newArgumentEncoderWithBufferIndex:) is the shader compiler's answer from the
-/// function's AIR (drivers/TegraGM20BMetal/raw/runtime/raw_buffer_encoders.h), never an m2v twin. The expected encoded
+/// function's AIR (drivers/TegraGM20BMetal/buffer_encoders.h), never an m2v twin. The expected encoded
 /// lengths, alignments and per-index offsets for shaders/FunctionArgumentEncoders.metal are what an M4 Max's Metal
 /// answers for the same source (macOS 27.2): constants, arrays, struct arrays, gaps between ids, every texture kind, a
 /// pointer to another argument buffer (its nested encoder), and plain buffers of no struct (an encoder of no bytes). A
 /// draw then reads every kind of member through what the encoders wrote and must give the pixels the M4 Max gave. The
-/// case fails on a wrong answer or pixel, a draw off the raw path, or any m2v need asked (m2v_needs_asked).
+/// case fails on a wrong answer or pixel, a draw off the driver, or any command buffer that failed (failed_cbs=).
 struct FunctionArgumentEncoderTest: HWTest {
-    let id = "gpu.raw.function_argument_encoder"
-    let name = "A function's argument encoders are the shader compiler's and Metal's, without m2v"
+    let id = "gpu.gm20b.function_argument_encoder"
+    let name = "A function's argument encoders are the shader compiler's and Metal's"
     let subsystem = Subsystem.metal
 
     /// (function, buffer index, "length/alignment", "id@offset ...")
@@ -36,7 +36,7 @@ struct FunctionArgumentEncoderTest: HWTest {
         [255, 0, 255, 255],
     ]
 
-    /// The raw facade answers nil where it makes no encoder, which the Swift signature cannot say
+    /// The facade answers nil where it makes no encoder, which the Swift signature cannot say
     static func made(_ encoder: MTLArgumentEncoder) -> MTLArgumentEncoder? {
         unsafeBitCast(encoder as AnyObject, to: Int.self) == 0 ? nil : encoder
     }
@@ -57,9 +57,9 @@ struct FunctionArgumentEncoderTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
-        let before = OwnAnswersTest.needs(gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
+        let before = GM20BFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var wrong: [String] = []
 
@@ -82,9 +82,10 @@ struct FunctionArgumentEncoderTest: HWTest {
             wrong.append("draw")
         }
 
-        let asked = OwnAnswersTest.needs(gpu.device).filter { $0.value > (before[$0.key] ?? 0) }.keys.sorted()
-        metrics.set("m2v_needs_asked", asked.isEmpty ? "-" : asked.joined(separator: ","))
-        if !asked.isEmpty { wrong.append("m2v") }
+        let failed = FailedCounts.judged(
+            before: before, after: GM20BFacade.counters(of: gpu.device), own: gpu.paths, &metrics
+        )
+        if !failed.1 { wrong.append(failed.0) }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -98,9 +99,9 @@ struct FunctionArgumentEncoderTest: HWTest {
     /// Every member argenc_mixed_fragment reads, written through its own encoder and the nested one at id 8
     func draw(_ gpu: GPU, _ metrics: inout Metrics, _ wrong: inout [String]) async throws {
         guard let function = gpu.library.makeFunction(name: "argenc_mixed_fragment"),
-            let encoder = Self.made(function.makeArgumentEncoder(bufferIndex: 0)),
-            let nested = encoder.makeArgumentEncoderForBuffer(atIndex: 8),
-            let sampler = gpu.device.makeSamplerState(descriptor: MTLSamplerDescriptor())
+              let encoder = Self.made(function.makeArgumentEncoder(bufferIndex: 0)),
+              let nested = encoder.makeArgumentEncoderForBuffer(atIndex: 8),
+              let sampler = gpu.device.makeSamplerState(descriptor: MTLSamplerDescriptor())
         else {
             wrong.append("draw_setup")
             return
@@ -112,7 +113,7 @@ struct FunctionArgumentEncoderTest: HWTest {
         let arguments = try gpu.buffer(encoder.encodedLength), inner = try gpu.buffer(nested.encodedLength)
         encoder.setArgumentBuffer(arguments, offset: 0)
         encoder.constantData(at: 0).storeBytes(of: Float(0.5), as: Float.self)
-        encoder.setTextures([red, green], range: 1..<3)
+        encoder.setTextures([red, green], range: 1 ..< 3)
         encoder.setSamplerState(sampler, index: 3)
         encoder.setBuffer(colour, offset: 0, index: 4)
         encoder.constantData(at: 5).storeBytes(of: SIMD4<UInt32>(0, 17, 0, 0), as: SIMD4<UInt32>.self)
@@ -132,17 +133,18 @@ struct FunctionArgumentEncoderTest: HWTest {
         let timing = try await gpu.run { commands in
             let render = commands.makeRenderCommandEncoder(descriptor: NativeArgumentEncoderTest.pass(target))!
             render.useResources(
-                [red, green, blue, inner, colour, yellow] as [MTLResource], usage: .read, stages: .fragment)
+                [red, green, blue, inner, colour, yellow] as [MTLResource], usage: .read, stages: .fragment
+            )
             render.setFragmentBuffer(plain, offset: 0, index: 1)
             NativeArgumentEncoderTest.cover(render, pipeline, arguments)
         }
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let got = (0..<6).map { Array(pixels.pixel($0, 0, width: 6)) }
+        let got = (0 ..< 6).map { Array(pixels.pixel($0, 0, width: 6)) }
         metrics.set("draw", "\(timing.path)/\(got == Self.drawn ? "exact" : "wrong")")
         if got != Self.drawn {
             metrics.set("pixels", got.map { $0.map(String.init).joined(separator: ",") }.joined(separator: " "))
             wrong.append("draw")
         }
-        if timing.path != "raw" { wrong.append("draw_path") }
+        if timing.path != "gm20b" { wrong.append("draw_path") }
     }
 }

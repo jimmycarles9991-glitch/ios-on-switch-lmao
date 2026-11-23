@@ -1,6 +1,6 @@
 """Turn the render server's split captures into pack experiments.
 
-The device logs each captured split draw as `raw: splitcap` lines (raw/runtime/raw_split_capture.h, debug switch
+The device logs each captured split draw as `SwitchMetal: splitcap` lines (split_capture.h, debug switch
 split-capture). Each record becomes one experiment per form, the draw replayed as one quad with its own vertices, root
 push words and uniform blocks at their residual offsets.
 
@@ -41,7 +41,7 @@ def blobs(text: str) -> dict[int, bytes]:
 
 
 def record(blob: bytes) -> dict:
-    """Read one blob as raw_split_capture.h splitCaptureBlob writes it."""
+    """Read one blob as split_capture.h splitCaptureBlob writes it."""
     words = struct.unpack_from('<16I', blob)
     if words[0] != MAGIC or words[1] != VERSION:
         raise ValueError('not a split capture')

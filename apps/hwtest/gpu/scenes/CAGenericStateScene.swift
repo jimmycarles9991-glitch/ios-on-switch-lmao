@@ -1,18 +1,20 @@
 import Foundation
 import HWTestCore
 import Metal
+import simd
 
 /// Core Animation's generic state (the uber shader) declares color_cube0, color_cube1 and lut_tex as texture3d
 /// arguments at fragment indices 12, 13 and 14. Boot 15's first key press drew it with a 1-texel BGRA8 texture at index
-/// 12; the raw facade sent the command buffer to m2v, whose pipelines for the keyboard took 18-20 s to make while the
+/// 12; the facade sent the command buffer to m2v, whose pipelines for the keyboard took 18-20 s to make while the
 /// render thread waited for it to be scheduled. Each case draws the state into a 256x256 BGRA8 target (its second
 /// colour memoryless) after binding what that case leaves at indices 12-14: nothing, a 2D texture, one cube, one cube
-/// at all three, three distinct cubes. On the raw facade path_<case>= must be "raw" for every case (wait_ms_<case>= is
+/// at all three, three distinct cubes. On the facade path_<case>= must be "gm20b" for every case (wait_ms_<case>= is
 /// the command buffer's commit to completion). Each case's target is held to the Mac's drawing of it, the mistyped 2D
 /// texture to the Mac's case with nothing bound (a Mac's Metal draws no mistyped case). iOS 17's QuartzCore has no such
 /// state, so the scene draws nothing there.
 struct CAGenericStateScene: GPUScene {
     let id = "gpu.ca.generic_texture3d"
+    let framework = true
     let name = "Core Animation's generic state with its colour cubes bound, unbound and mistyped"
 
     static let line = PipelineLine(
@@ -24,14 +26,14 @@ struct CAGenericStateScene: GPUScene {
             + "fc_has_color_trc0:53:01 fc_has_color_trc1:53:01 fc_has_gamma_luts:53:01 fc_has_image_0A:53:01 "
             + "fc_has_image_0B:53:01 fc_has_image_0C:53:01 fc_has_image_1A:53:01 fc_has_image_1B:53:01 "
             + "fc_has_image_1C:53:01 fc_has_lod_bias:53:01 fc_has_lut_tex:53:01 fc_has_noise_scale:53:01 "
-            + "fc_has_noise_tex:53:01 fc_has_ycbcr_matrix:53:01 fc_vertex_layout:49:00 | ")!
+            + "fc_has_noise_tex:53:01 fc_has_ycbcr_matrix:53:01 fc_vertex_layout:49:00 | "
+    )!
     static let size = 256
-    static let warmups = 20
     static let mistyped = "leftover_2d"
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
-        let kind = RawFacade.kind(of: gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
         let pipeline: MTLRenderPipelineState
         do {
             let library = try gpu.device.makeLibrary(URL: CAState.library)
@@ -48,12 +50,27 @@ struct CAGenericStateScene: GPUScene {
             ("nothing", [nil, nil, nil]), ("leftover_2d", [leftover, nil, nil]), ("one_cube", [cube, nil, nil]),
             ("same_cube", [cube, cube, cube]), ("distinct_cubes", [cube, other, lut]),
         ].filter { kind != "apple" || $0.0 != Self.mistyped }
-        let raw = kind == "raw"
+        let raw = kind == "gm20b"
         let zeros = [UInt8](repeating: 0, count: 256)
-        for (label, cubes) in cases {
+        // the facade's two arms past the Mac's cases, both held to its nothing case: into a target its usage keeps off
+        // compressed memory for life, and with every buffer slot the state may read bound to 64 KiB of zeros (the
+        // transform at its first 64 bytes)
+        let plain = try gpu.texture(
+            .bgra8Unorm, Self.size, Self.size, usage: [.renderTarget, .shaderRead, .pixelFormatView]
+        )
+        let wide = try gpu.buffer(65536), wideTransform = try gpu.buffer(65536)
+        withUnsafeBytes(of: matrix_identity_float4x4) {
+            wideTransform.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
+        }
+        var runs = cases.map { (label: $0.0, cubes: $0.1, into: target, padded: false) }
+        if raw {
+            runs.append((label: "nothing_plain", cubes: [nil, nil, nil], into: plain, padded: false))
+            runs.append((label: "nothing_padded", cubes: [nil, nil, nil], into: target, padded: true))
+        }
+        for (label, cubes, into, padded) in runs {
             let draw = { (commands: MTLCommandBuffer) in
                 let pass = MTLRenderPassDescriptor()
-                pass.colorAttachments[0].texture = target
+                pass.colorAttachments[0].texture = into
                 pass.colorAttachments[0].loadAction = .clear
                 pass.colorAttachments[0].storeAction = .store
                 pass.colorAttachments[1].texture = scratch
@@ -63,31 +80,33 @@ struct CAGenericStateScene: GPUScene {
                 encoder.setRenderPipelineState(pipeline)
                 CAState.bind(
                     encoder, vertices: CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(1, 1, 1, 1)),
-                    source: nil)
-                for slot in 4..<8 { encoder.setVertexBytes(zeros, length: zeros.count, index: slot) }
-                for slot in 4..<16 { encoder.setFragmentBytes(zeros, length: zeros.count, index: slot) }
-                encoder.setFragmentTextures(cubes, range: 12..<15)
+                    source: nil
+                )
+                for slot in 4 ..< 8 { encoder.setVertexBytes(zeros, length: zeros.count, index: slot) }
+                for slot in 4 ..< 16 { encoder.setFragmentBytes(zeros, length: zeros.count, index: slot) }
+                if padded {
+                    for slot in [0, 3, 4, 5, 6, 7] { encoder.setVertexBuffer(wide, offset: 0, index: slot) }
+                    encoder.setVertexBuffer(wideTransform, offset: 0, index: 2)
+                    for slot in 0 ..< 16 { encoder.setFragmentBuffer(wide, offset: 0, index: slot) }
+                }
+                encoder.setFragmentTextures(cubes, range: 12 ..< 15)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 encoder.endEncoding()
             }
-            var timing = try await gpu.run(tolerateError: true, draw)
-            var runs = 1
-            while raw && timing.path.hasPrefix("m2v:state") && runs < Self.warmups {
-                try await Task.sleep(nanoseconds: 50_000_000)
-                timing = try await gpu.run(tolerateError: true, draw)
-                runs += 1
-            }
+            let timing = try await gpu.run(tolerateError: true, draw)
             result.metrics.set("path_" + label, timing.path)
             result.metrics.set("wait_ms_" + label, timing.wallMilliseconds, digits: 2)
             if !timing.path.hasPrefix("error:") {
-                let pixels = try await gpu.read(target, bytesPerPixel: 4)
+                let pixels = try await gpu.read(into, bytesPerPixel: 4)
                 result.picture(
-                    label, bytes: pixels, metalFormat: target.pixelFormat.rawValue, width: Self.size,
-                    height: Self.size, golden: label == Self.mistyped ? "nothing" : label, cleared: [0, 0, 0, 1])
+                    label, bytes: pixels, metalFormat: into.pixelFormat.rawValue, width: Self.size,
+                    height: Self.size, golden: label == Self.mistyped || into === plain || padded ? "nothing" : label,
+                    cleared: [0, 0, 0, 1]
+                )
             }
             guard raw else { continue }
             result.expect(!timing.path.hasPrefix("error:"), "\(label): \(timing.path)")
-            result.expect(timing.path == "raw", "\(label) drawn on \(timing.path)")
+            result.expect(timing.path == "gm20b", "\(label) drawn on \(timing.path)")
         }
         return result
     }

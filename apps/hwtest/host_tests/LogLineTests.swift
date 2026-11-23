@@ -59,10 +59,12 @@ final class LogLineTests: XCTestCase {
         let records = [record("a", .pass()), record("b", .skip("no headset")), record("c", .fail("bad"))]
         XCTAssertEqual(
             LogLine.summary(records, ios: 17, milliseconds: 1000),
-            "HWTEST suite FAIL pass=1 fail=1 skip=1 ios=17 ms=1000.0")
+            "HWTEST suite FAIL pass=1 fail=1 skip=1 ios=17 ms=1000.0"
+        )
         XCTAssertEqual(
             LogLine.summary(Array(records.prefix(2)), ios: 27, milliseconds: 5),
-            "HWTEST suite PASS pass=1 fail=0 skip=1 ios=27 ms=5.0")
+            "HWTEST suite PASS pass=1 fail=0 skip=1 ios=27 ms=5.0"
+        )
     }
 
     func testJudgedNamesTheFailedChecks() {
@@ -87,7 +89,8 @@ final class LogLineTests: XCTestCase {
         XCTAssertEqual(outcome.detail, "harness: bad metric key ms,Bad-Key,why")
         XCTAssertEqual(
             LogLine.format(record("image.png", outcome)),
-            "HWTEST image.png FAIL fps=60 ms=12.3 why=harness:_bad_metric_key_ms,Bad-Key,why")
+            "HWTEST image.png FAIL fps=60 ms=12.3 why=harness:_bad_metric_key_ms,Bad-Key,why"
+        )
         let failed = Outcome.fail("no decoder", metrics).withHarnessFaults
         XCTAssertEqual(failed.detail, "harness: bad metric key ms,Bad-Key,why; no decoder")
         XCTAssertEqual(Outcome.pass().withHarnessFaults.verdict, .pass)

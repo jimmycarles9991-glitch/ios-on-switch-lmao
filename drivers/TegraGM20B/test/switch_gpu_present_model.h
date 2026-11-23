@@ -6,8 +6,10 @@
 // present the watch does not take is the fence-only present job: its acquires wait for the producers on the GPU, and its
 // fence, on a kernel channel, always interrupts. The deadline (gpu_present_deadline.c watch_late) never delivers. A
 // frame behind a writer promise is watched PROMISED until the job that keeps it is submitted (gpu_promise.c), then on
-// that job; the deadline gives up a promise still unkept, and the frame is dropped (`failed`: the display's
-// dropLostFrame keeps the frame before it on the panel). `panel` is the frame window A shows: a delivered present
+// that job; a promise still unkept is released by its maker or given up at its bound (its holder's, or the default from
+// its first reader's park), and one abandoned (the withdraw of a command buffer its runtime failed at Metal's bound,
+// the bound passing, a kill, a close) drops the frame (the display's dropLostFrame keeps the frame before it on the
+// panel). `panel` is the frame window A shows: a delivered present
 // flips it to the offered frame, from the nonstall filter first when its view of a GM20B producer sees it end
 // (SwitchGpuPresentFilter.cpp: attached before each arm, detached at each claim), and a failed one leaves it.
 #pragma once
@@ -169,10 +171,11 @@ public:
 			work();
 	}
 
-	// SwitchGpuPromiseGiveUp.h's call for the watch parked on its promise, a second after the offer: a word a job the
-	// watch never heard of released is delivered (tgm_present_promise_released); one still short is given up (marked,
-	// raised, its line), and the work item drops the frame
-	void giveUp()
+	// SwitchGpuPromiseGiveUp.h's call for the watch parked on its promise, at its bound (its holder's, or the default from
+	// the first reader's park): a word a job the watch never heard of released is delivered
+	// (tgm_present_promise_released); one still short is given up (marked, raised, its line), and the work item drops the
+	// frame
+	void atBound()
 	{
 		if (!parked || watch.state != SWITCH_GPU_PRESENT_WATCH_PROMISED)
 			return;
@@ -182,6 +185,17 @@ public:
 			words[uint32_t(watch.token.queue)] = uint32_t(watch.token.value);
 			++reported;
 		}
+		work();
+	}
+
+	// The give-up's pass over a watch still PROMISED before its bound: a word moved by a keep the watch never heard of is
+	// delivered
+	void giveUp()
+	{
+		if (!parked || watch.state != SWITCH_GPU_PRESENT_WATCH_PROMISED ||
+		    physical(&watch.token) != 1)
+			return;
+		parked = false;
 		work();
 	}
 

@@ -2,7 +2,7 @@
 /* The register dump into the kernel log, debug kernels only (a release kernel answers kIOReturnUnsupported): a call on
  * a TegraGM20B connection (TegraGM20BABI.h's wire form, direct or tunnelled) through which hw_test_app has the kernel
  * read TegraGM20BRegDump.h's registers and log them, chunked, as "tegra-gm20b: regdump v1" lines (regdump.c). Each tag
- * dumps once a boot. Kept out of TegraGM20BABI.h, which NVK, the GPU seed and the raw stack key build from: the method
+ * dumps once a boot. Kept out of TegraGM20BABI.h, which NVK, the GPU seed and the stack key build from: the method
  * number is far from theirs. */
 #ifndef TEGRA_GM20B_REG_DUMP_ABI_H
 #define TEGRA_GM20B_REG_DUMP_ABI_H

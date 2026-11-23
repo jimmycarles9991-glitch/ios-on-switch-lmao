@@ -147,7 +147,8 @@ final class PresentedFrames: @unchecked Sendable {
         defer { lock.unlock() }
         let f = frames[index]
         frames[index] = PresentTimeVerdict.Frame(
-            committed: f.committed, target: f.target, presented: time, handled: handled)
+            committed: f.committed, target: f.target, presented: time, handled: handled
+        )
     }
 
     var all: [PresentTimeVerdict.Frame] {

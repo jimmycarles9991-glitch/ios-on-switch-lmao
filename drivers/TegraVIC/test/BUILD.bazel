@@ -13,12 +13,16 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
-# libdrm/ is NVIDIA's (MIT), kept as upstream has it.
-lint_files(exclude = ["libdrm/**"])
+# libdrm/ is NVIDIA's (MIT), kept as upstream has it; vic_color_reference.h is the lattice the colour probe wrote.
+lint_files(exclude = [
+    "libdrm/**",
+    "vic_color_reference.h",
+])
 
 exports_files([
     "TegraVICProbe.h",
     "vic_model.h",
+    "vic_model_color.h",
 ])
 
 host_test(
@@ -56,6 +60,7 @@ host_test(
     srcs = [
         "switch_vic_layout_probe_test.cpp",
         "//drivers/TegraVIC:SwitchVICLayoutProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -67,7 +72,9 @@ host_test(
     srcs = [
         "switch_vic_fraction_probe_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:SwitchVICFractionProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -78,6 +85,7 @@ host_test(
     srcs = [
         "switch_vic_packed_probe_test.cpp",
         "//drivers/TegraVIC:SwitchVICPackedProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -89,6 +97,7 @@ host_test(
         "switch_vic_compose_probe_test.cpp",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraVIC:SwitchVICComposeProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICCompose.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
@@ -100,7 +109,9 @@ host_test(
     srcs = [
         "switch_vic_transpose_probe_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:SwitchVICTransposeProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -111,7 +122,9 @@ host_test(
     srcs = [
         "switch_vic_odd_probe_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:SwitchVICOddProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -122,8 +135,10 @@ host_test(
     srcs = [
         "switch_vic_large_probe_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraVIC:SwitchVICLargeProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],
@@ -143,6 +158,7 @@ host_library(
     srcs = [
         "libdrm/vic40.h",
         "vic_host.c",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -150,6 +166,21 @@ host_library(
     ],
     copts = ["-O1"],
     defines = ["main=vic_host_main"],
+)
+
+host_test(
+    name = "tegra_vic_color_test",
+    srcs = [
+        "tegra_vic_color_test.cpp",
+        "vic_color_reference.h",
+        "vic_model.h",
+        "vic_model_color.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+    ],
 )
 
 host_test(
@@ -163,7 +194,9 @@ host_test(
     srcs = [
         "tegra_vic_odd_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -176,6 +209,7 @@ host_test(
     srcs = [
         "libdrm/vic40.h",
         "tegra_vic_compose_test.cpp",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICCompose.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
@@ -196,6 +230,7 @@ host_test(
         "tegra_vic_bounce_test.cpp",
         "//drivers/TegraHost1x:TegraHost1x.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -222,6 +257,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICJobs.h",
         "//drivers/TegraVIC:TegraVIC.cpp",
         "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
     ],
 )
 
@@ -241,7 +277,9 @@ host_test(
     srcs = [
         "tegra_vic_formats_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -254,8 +292,10 @@ host_test(
         "TegraVICProbe.h",
         "tegra_vic_422_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -267,6 +307,8 @@ host_test(
     srcs = [
         "tegra_vic_transpose_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "TegraVICProbe.h",
@@ -281,6 +323,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICPicturePlan.h",
         "//drivers/TegraVIC:SwitchVICSurfaceRange.h",
         "//drivers/TegraVIC:TegraVICBand.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -305,6 +348,7 @@ host_test(
     name = "switch_vic_backing_test",
     srcs = [
         "switch_vic_backing_test.cpp",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -327,6 +371,7 @@ host_test(
     srcs = [
         "switch_vic_present_test.cpp",
         "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICPresent.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
@@ -356,6 +401,7 @@ host_test(
     srcs = [
         "switch_vic_present_identity_test.cpp",
         "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICPresent.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
@@ -400,6 +446,7 @@ host_test(
     name = "switch_vic_color_test",
     srcs = [
         "switch_vic_color_test.cpp",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -443,6 +490,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICPicture.h",
         "//drivers/TegraVIC:SwitchVICPicturePlan.h",
         "//drivers/TegraVIC:SwitchVICSurfaceRange.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICPresent.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -489,6 +537,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICJobs.h",
         "//drivers/TegraVIC:SwitchVICEvents.h",
         "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
@@ -534,6 +583,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICTransform.h",
         "//drivers/TegraVIC:TegraVIC.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -565,6 +615,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICJobs.h",
         "//drivers/TegraVIC:SwitchVICEvents.h",
         "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
@@ -587,6 +638,7 @@ host_test(
     srcs = [
         "switch_vic_decode_output_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "//drivers/TegraVIC:SwitchVICDecodeOutput.h",
         "//drivers/TegraVIC:SwitchVICBouncePool.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
@@ -600,6 +652,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICJobs.h",
         "//drivers/TegraVIC:SwitchVICEvents.h",
         "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
@@ -623,6 +676,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICSurfaceAccess.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
         "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -663,6 +717,7 @@ host_test(
         "//drivers/TegraHost1x:SwitchHost1xResults.cpp",
         "switch_vic_jobs_test.cpp",
         "//drivers/TegraVIC:SwitchVICJobs.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICEngine.h",
         "//kits/SwitchEngineGate:SwitchEngineGate.h",
         "//drivers/TegraVIC:SwitchVICEvents.h",
@@ -697,6 +752,7 @@ host_test(
     srcs = [
         "switch_vic_scanout_compose_test.cpp",
         "//drivers/TegraVIC:SwitchVICScanoutCompose.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICCompose.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
@@ -732,6 +788,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICPicture.h",
         "//drivers/TegraVIC:SwitchVICPicturePlan.h",
         "//drivers/TegraVIC:TegraVIC.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -764,6 +821,7 @@ host_library(
         "//drivers/TegraVIC:SwitchVICEvents.h",
         "//drivers/TegraVIC:SwitchVICSemantics.h",
         "//drivers/TegraVIC:SwitchVICQueue.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -804,6 +862,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICJobs.h",
         "//drivers/TegraVIC:SwitchVICEvents.h",
         "//drivers/TegraVIC:SwitchVICSemantics.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraGM20B:SwitchGpuSharedEvent.h",
@@ -840,6 +899,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICMapping.h",
         "//drivers/TegraVIC:TegraVIC.h",
         "//drivers/TegraVIC:TegraVICBounce.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -857,7 +917,9 @@ host_test(
     srcs = [
         "switch_vic_subrect_test.cpp",
         "vic_model.h",
+        "vic_model_color.h",
         "TegraVICProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
     ],

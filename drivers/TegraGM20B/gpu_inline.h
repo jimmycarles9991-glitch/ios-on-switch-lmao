@@ -68,19 +68,6 @@ static inline void mem_big_views_drop(struct tgm_mem *mem)
 	}
 }
 
-static inline int vm_imports(struct tgm_vm *vm, u64 pa) /* tgm_live_lock held */
-{
-	struct tgm_import *im = NULL;
-	if (vm->imports_lost)
-		return 1;
-	list_for_each_entry(im, &vm->imports, head)
-	{
-		if (im->pa == pa)
-			return 1;
-	}
-	return 0;
-}
-
 /* gpu_sync.c defines these for the rest of the driver; the units inline these copies of them (gnu_inline: a copy is
  * never emitted). Keep the two the same. */
 extern inline __attribute__((gnu_inline)) uint32_t tgm_chan_completed(struct tgm_chan *chan)
@@ -217,24 +204,6 @@ static inline void chan_prioritize(struct tgm_chan *chan)
 {
 	chan->high = 1;
 	tgm_sched_level(tgm_gpu.device, chan->chid, TGM_LEVEL_HIGH);
-}
-
-/* tgm_live_lock held, `chan` leaving: what other channels had queued on its fence word goes (it is idle: nothing to wait for) */
-static inline void order_forget(struct tgm_chan *chan)
-{
-	struct tgm_chan *other = NULL;
-	u32 i = 0;
-
-	list_for_each_entry(other, &tgm_live_chans, live)
-	{
-		for (i = 0; i < other->norder;) {
-			if (other->order[i].id == chan->id) {
-				other->order[i] = other->order[--other->norder];
-			} else {
-				i++;
-			}
-		}
-	}
 }
 
 static inline int sync_done(u64 id, u32 seqno)

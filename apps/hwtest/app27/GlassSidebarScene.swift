@@ -18,7 +18,9 @@ final class SidebarScene {
     init(pane withPane: Bool = false) {
         let sidebar = UICollectionViewController(
             collectionViewLayout: UICollectionViewCompositionalLayout.list(
-                using: UICollectionLayoutListConfiguration(appearance: .sidebar)))
+                using: UICollectionLayoutListConfiguration(appearance: .sidebar)
+            )
+        )
         list = sidebar.collectionView
         list.dataSource = rows
         list.showsVerticalScrollIndicator = false
@@ -103,7 +105,8 @@ final class SidebarScene {
         return SidebarLayout(
             screen: screen.size, sidebar: list.superview?.convert(list.frame, to: nil) ?? .zero,
             detail: detail.superview?.convert(detail.frame, to: nil) ?? .zero, collapsed: split.isCollapsed,
-            shown: split.displayMode == .oneBesideSecondary)
+            shown: split.displayMode == .oneBesideSecondary
+        )
     }
 }
 
@@ -129,12 +132,13 @@ struct SidebarLayout {
     var region: CGRect {
         CGRect(
             x: sidebar.minX + sidebar.width * 0.62, y: screen.height * 0.3, width: sidebar.width * 0.26,
-            height: screen.height * 0.4)
+            height: screen.height * 0.4
+        )
     }
 
-    var x: ClosedRange<Double> { Double(region.minX / screen.width)...Double(region.maxX / screen.width) }
-    var mirroredX: ClosedRange<Double> { (1 - x.upperBound)...(1 - x.lowerBound) }
-    var y: ClosedRange<Double> { 0.3...0.7 }
+    var x: ClosedRange<Double> { Double(region.minX / screen.width) ... Double(region.maxX / screen.width) }
+    var mirroredX: ClosedRange<Double> { (1 - x.upperBound) ... (1 - x.lowerBound) }
+    var y: ClosedRange<Double> { 0.3 ... 0.7 }
     var band: SidebarBand { SidebarBand(x: x, mirroredX: mirroredX, y: y) }
 
     /// The pane, in the middle of the screen both ways so that a turn of the buffer leaves it where it was, and the
@@ -142,7 +146,7 @@ struct SidebarLayout {
     static func paneRect(in screen: CGSize) -> CGRect {
         CGRect(x: screen.width * 0.38, y: screen.height * 0.3, width: screen.width * 0.24, height: screen.height * 0.4)
     }
-    static let paneBand = SidebarBand(x: 0.42...0.58, mirroredX: 0.42...0.58, y: 0.36...0.64)
+    static let paneBand = SidebarBand(x: 0.42 ... 0.58, mirroredX: 0.42 ... 0.58, y: 0.36 ... 0.64)
 
     /// The pane stands over the detail alone, the sidebar clear of it.
     var paneClear: Bool { sidebar.maxX <= Self.paneRect(in: screen).minX }

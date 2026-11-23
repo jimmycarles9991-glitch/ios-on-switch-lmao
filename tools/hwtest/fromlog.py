@@ -66,7 +66,7 @@ def report(lines: list[str], identity: dict, boot: str, started: str) -> dict:
             continue
         if match['id'] == 'suite':
             finished = True
-        else:
+        elif not match['id'].startswith('suite.'):
             results[match['id']] = entry(match)
     summary = {
         verdict.lower(): sum(r['verdict'] == verdict for r in results.values()) for verdict in ('PASS', 'FAIL', 'SKIP')

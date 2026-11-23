@@ -13,7 +13,7 @@ struct BenchView: View {
         NavigationStack {
             List {
                 Section("Device") {
-                    row("Raw device", loop.status.device)
+                    row("Device", loop.status.device)
                     row("Self-check", loop.status.selfCheck)
                         .foregroundStyle(loop.status.selfCheck.hasPrefix("PASS") ? .green : .red)
                 }

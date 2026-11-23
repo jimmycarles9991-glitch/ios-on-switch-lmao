@@ -1,0 +1,40 @@
+# What each refusal predicate of TegraGM20BMetalPredicates.h becomes once the planner decides before emission.
+# fate: rule (a planner node rule or ladder rung covers it; covered_by names rules of plan_graph.h kRuleNames),
+# client / query (validate() answers ClientError / QueryGated; covered_by names plan_validate.h kProblemNames),
+# cb-error (the command buffer fails with MTLCommandBufferErrorDomain), gap (Metal allows it and no GPU-side rung exists
+# yet: the work left before the slow backend can go), layer (owned below or above the planner: L3 resources, L4
+# programs, L6 the Metal API), nil (L6 answers nil at creation, as Metal does for that descriptor), growth (a pool grows
+# or the GPU work waits; never a refusal).
+# tag	fires	fate	covered_by	note
+tex.foreign	record	cb-error	-	a texture of another device: blitted, the command buffer fails InvalidResource as it is recorded (gm20bCallInvalid); bound, it fails Internal (gm20bBindTexture)
+pass.fmt	record	gap	rotated_target,stored_multisample,planar_target	R1 (~1,400 HW Test cbs), R2, R3, R4 as tex.shape
+pass.level	record	layer	L3	levels, slices and depth planes of the textures the driver keeps, and levels of format views of mipmapped ones, are attachment targets (attachment_target.h), for attachments and resolves alike; left: a resolve into a texture the driver does not keep or render, a planar or YCbCr one, or a format with no resolve state, a resolve from a part of a texture, and what Metal's validation refuses (past the texture, a slice of a 3D texture or a plane of an array); renderTargetArrayLength past an attachment beside one drawn through work of the driver's own: the layers all have drawn, skipped at each making
+pass.ds	record	gap	stored_multisample	Depth32Float beside Stencil8 (layered, from any slice) and one-sample Depth16Unorm beside Stencil8 render a Depth32Float_Stencil8 of theirs; a resolved pair resolves each aspect from its own texture, a multisampled Depth16Unorm converts a sample at a time; left: such a pair turned, a memoryless stencil resolved; a resolve or a store other than DontCare and Store the encoder decides with no resolve texture: its store kept or stored, skipped at each call
+pass.rotated	record	gap	rotated_target	a turned attachment beside one of another rotation or size or a loaded or stored one not turned, a rotation-4 Load, and at encode a state whose turned variant could not be made (PipelineTurnRefused)
+pass.positions	record	client	sample_positions	sample positions past the pass's samples: drawn at the standard ones, as Apple's driver, logged once
+state.foreign	record	cb-error	-	a render or depth/stencil state of another device, or no render state: the command buffer fails InvalidResource as it is recorded (gm20bCallInvalid)
+call.vis	record	cb-error	-	Counting and Boolean results, reset or accumulated (visibility.h); left: what Metal's validation stops (no visibility buffer, an offset past it or taken twice in an encoder, a mode MTLVisibilityResultMode lacks)
+call.buf	record	cb-error	-	a buffer of another device, or none, bound, drawn with, blitted, filled, copied, resolved into or executed with: the command buffer fails InvalidResource as it is recorded (gm20bCallInvalid; an indirect command's at its execute)
+call.sampler	record	cb-error	-	every sampler the device makes is raw's (opaque borders per sampled texture, Sampler::bordered); one it has no form of is nil at creation (gm20b:sampler.unsupported); left: a sampler of another device bound, and an opaque border header the pool has no slot for (the full-pool answer)
+call.bufcopy	record	client	buffer_range	a copy or fill past its buffer: clamped to the bytes inside both, as Apple's driver copies (client_errors.h), skipped (counted), logged once a rule
+compute	record	cb-error	-	a kernel's state, buffer, texture or sampler of another device: the command buffer fails InvalidResource as it is recorded (gm20bComputeFails)
+compute.nokernel	record	layer	L4	no pack kernel at the dispatch's shape: a kernel record per shape
+compute.image	record	rule	compute.shadow_load,compute.shadow_store	a texture sampled through an image of its own; the cropped-surface-view alias case is not tested
+compute.predicate	record	cb-error	-	predication raw cannot run fails the command buffer: a misused record or a loop open where its unit ends; If/Else/End and loops run on render enable (predication.h, loop_copies.h)
+event	record	rule	recorded	MTLEvent waits and signals: Wait and Signal nodes (GPU semaphore acquire, release)
+enc.planarclamp	encode	layer	L3	a sampler state's header under a planar texture's address map with no header entry left (a constexpr sampler's are placed with it, Device::constexprMapped_)
+enc.planarrt	encode	rule	planar.standin_load,planar.standin_store	a planar target through its stand-in; sampled and rendered in one command buffer: its codes converted again after the store (edges order it)
+enc.pass	encode	rule	resolve.draw,ycbcr.image,xr.standin	a pass raw could not begin: resolve, YCbCr and extended-range targets are nodes with their rule decided before emission
+enc.kernel	encode	cb-error	-	the kernel refused the submission: a commit-time outcome, the command buffer's error (MTLCommandBufferErrorInternal)
+enc.idxrange	encode	client	index_buffer_offset	an index type Metal has none of, indirect arguments past their buffer (read as zeros) or indices outside it (skipped), as Apple's driver, logged once
+enc.colorfmt	encode	client	pipeline_color_format	a state of the other four-channel 8-bit order drawn into the pass's format; another format skipped (Apple writes other bits), logged once
+enc.notic	encode	layer	L3	a texture with no header at the draw: every view gets its header slot when made
+enc.ds	encode	client	pipeline_depth_format	a state testing depth or stencil the pass lacks; shader-side tests (copyShaderTests) stay the pass's own work
+enc.samples	encode	client	pipeline_sample_count	a one-sample state in a pass of more writes sample 0, a many-sample one in a one-sample pass draws whole, as Apple's driver; others skipped, logged once
+enc.nochannel	encode	cb-error	channel_lost	MTLCommandBufferErrorInternal
+enc.geometry	encode	rule	fetch.interlock	fetch ladder rung 4 for any geometry; the states with no storage form stay gap fetch_without_storage_form (11 on iOS 27, 53 on iOS 17 per x1-f1)
+enc.storage	encode	rule	fetch.barrier,fetch.interlock	a fetched colour with neither form stays gap fetch_without_storage_form
+call.blit	record	cb-error	-	a blit of this device's own objects Metal's validation stops: one an M4 Max crashes on or fails fails InvalidResource as it is recorded; one it runs nothing of or runs to no rule is skipped (counted, logged once a rule: c38-audit/failed-counts/probe/RESULTS.txt)
+call.icb	record	cb-error	-	an indirect command buffer call Metal's validation stops: another device's or none executed, reset or copied, a reset past it, a command that sets a pipeline its buffer inherits or patches on a buffer of none (an M4 Max faults encoding it; at the execute that reaches it) fail InvalidResource; ranges past a buffer are cut to it, as an M4 Max runs them (skipped); a range off 4 bytes, render or compute, is read from the offset rounded down, as an M4 Max's GPU reads it, and one read past its buffer runs none, not mirrored: the GPU reads whatever lies past it (skipped both); an indexed command's indices off their type are read from the offset rounded down to it (skipped)
+call.counter	record	cb-error	-	a counter sample buffer of another device, or a counter sample at an encoder's boundaries (an M4 Max aborts): InvalidResource as recorded; an invalid sample index, a nil sample buffer or a resolve range past the samples skipped, a resolve past its destination cut to it; a resolve into an offset off 4 bytes written there a byte at a time (skipped)
+event.timeout	encode	cb-error	-	an untimed shared-event wait that held its queue's head for Metal's bound (5 s): MTLCommandBufferErrorTimeout with IOGPU's error under it, as Metal's GPU fails it; its writer promises withdrawn, the queue going on behind it

@@ -1,8 +1,8 @@
 """A pipeline state an Apple archive declares, and its corpus line: the journal's R or C line for its descriptor.
 
 The line is what the device would journal for the same descriptor (NativeBridgeMetalFrontend.mm journalRenderPipeline),
-so the pack's key of it (raw/pack/rawpack.py state_key) is the key the raw runtime asks for (RawMetalLibrary.mm
-raw_metal_pipeline_key): every descriptor field at Metal's default where the archive leaves it out.
+so the pack's key of it (pack/make_pack.py state_key) is the key the runtime asks for (TegraGM20BMetalLibrary.mm
+metal_pipeline_key): every descriptor field at Metal's default where the archive leaves it out.
 """
 
 import re
@@ -14,10 +14,10 @@ RENDER, COMPUTE, TILE, TESSELLATION = 'render', 'compute', 'tile', 'tessellation
 # A render state whose function lacks a constant its library requires: the archive does not record it, so the
 # state's own values are its caller's at run time
 UNSPECIALIZED = 'unspecialized'
-# MTLGPUFamilyApple1 .. Apple3: what the raw device answers supportsFamily: true for (raw_device_answers.h)
+# MTLGPUFamilyApple1 .. Apple3: what the device answers supportsFamily: true for (device_answers.h)
 DEVICE_FAMILIES = frozenset({1001, 1002, 1003})
 FRAMEWORK_LIBRARY = re.compile(r'^/System/Library/(?:Private)?Frameworks/\w+\.framework/default\.metallib$')
-# A bundle's library or a framework resource library (tools/gpu/rawpack.py OS_LIBRARY), keyed by its functions' AIR
+# A bundle's library or a framework resource library (tools/gpu/make_pack.py OS_LIBRARY), keyed by its functions' AIR
 BUNDLE_LIBRARY = re.compile(r'^/System/Library/\S+?\.(?:bundle|framework/Resources)/\S+\.metallib$')
 STAGE_LIBRARY = re.compile(r' \| [vf] \S+ lib=(\S+)')
 NO_FRAGMENT = re.compile(r' \| f - ')
@@ -25,7 +25,7 @@ LINKED = re.compile(r' \| [vf][lp] \S+(?: lib=(\S+))?')
 
 
 def packable(line: str) -> bool:
-    """Whether the raw runtime looks a render state up in the pack (RawMetalStates.mm pipelineFor).
+    """Whether the runtime looks a render state up in the pack (TegraGM20BMetalStates.mm pipelineFor).
 
     Its functions (a vertex one alone where it has no fragment function) are of one framework's default.metallib, and
     every function it links is a framework library's; or of one bundle's or framework resource library, linking none
@@ -137,10 +137,10 @@ class Pipeline:
     excluded_families: frozenset[int] = frozenset()
     max_threads: int = 0
     multiple_of_width: int = 0
-    rasterize: bool = True  # rasterizationEnabled: a state of NO keys rast=0 (raw/runtime/RawPipelineKey.h)
+    rasterize: bool = True  # rasterizationEnabled: a state of NO keys rast=0 (TegraGM20BMetalPipelineKey.h)
 
     def for_device(self) -> bool:
-        """Whether a device of the raw device's families is one the archive declares the state for."""
+        """Whether a device of the device's families is one the archive declares the state for."""
         if self.families and not self.families & DEVICE_FAMILIES:
             return False
         return not self.excluded_families >= DEVICE_FAMILIES

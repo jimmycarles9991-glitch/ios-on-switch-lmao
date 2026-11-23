@@ -106,6 +106,13 @@ inline void IOLockWakeup(IOLock *lock, void *, bool)
 }
 
 constexpr int THREAD_UNINT = 0, THREAD_CALL_PRIORITY_KERNEL = 0, THREAD_CALL_OPTIONS_ONCE = 1;
+
+inline void *current_thread()
+{
+	static thread_local char self;
+	return &self;
+}
+
 using thread_call_param_t = void *;
 
 struct SwitchEventCall {

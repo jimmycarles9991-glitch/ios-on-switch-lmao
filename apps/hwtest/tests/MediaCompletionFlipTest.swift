@@ -74,8 +74,8 @@ struct MediaCompletionFlipTest: HWTest {
         if armed == 0 && refused == 0 {
             let why =
                 delta("fenced") == 0
-                ? "every video set's producers were done at its swap (d_done_at_swap)"
-                : "the video sets that waited for their producers were declined (d_declined)"
+                    ? "every video set's producers were done at its swap (d_done_at_swap)"
+                    : "the video sets that waited for their producers were declined (d_declined)"
             return .skip(why, metrics)
         }
         return .judged(
@@ -89,7 +89,8 @@ struct MediaCompletionFlipTest: HWTest {
                 ),
                 ("ahead of the display's work loop (d_lead_us > 0)", delta("lead_us") > 0),
                 ("no frames dropped", dropped == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// kern.switch_media_flips_* by name, and the errno of the first that could not be read.

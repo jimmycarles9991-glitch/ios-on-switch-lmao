@@ -13,7 +13,7 @@ import HWTestKit
 /// programmed, 1 the top slot replacing, 2 the top slot missing, 3 read premultiplied, 4 read straight, 5 nothing drawn):
 /// a wrong case says which reading the engine follows.
 enum X1VICComposeProbe {
-    static let magic: UInt32 = 0x5643_4D50  // 'VCMP'
+    static let magic: UInt32 = 0x5643_4D50 // 'VCMP'
     static let cases = 12
     static let caseWords = 10
     static let replyBytes = 16 + 4 * caseWords * cases
@@ -37,8 +37,8 @@ enum X1VICComposeProbe {
         case .success(let words): reply = words
         }
         var wrong: [String: Int] = [:]
-        for i in 0..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 0 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = names[i]
             let count = Int(r[3]) + Int(r[9]) + (r[1] != 0 ? 1 : 0)
             metrics.set(name + "_status", Int(Int32(bitPattern: r[1])))

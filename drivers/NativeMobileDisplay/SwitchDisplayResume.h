@@ -45,8 +45,6 @@ bool finishResume()
     dc[kDcDispWinOptions] = savedDispWinOptions;
     dc[kDcRegActControl] = savedActControl;
     dc[kDcScratchB] = savedScratchB;
-    if (vpulseProgrammed)
-        writePhaseRegisters();  // r17-touch: SC7 reset them; they latch with the request below
     color->restoreAfterPowerUp();
     dc[kDcStateControl] = kGeneralUpdate | kWinAUpdate;
     dc[kDcStateControl] = kGeneralActReq | kWinAActReq;
@@ -54,7 +52,7 @@ bool finishResume()
     clearUnderflowCounts();
     dc[kDcIntEnable] = savedIntEnable;
     writeIntMask(~0u, savedIntMask);
-    dropFrameEndStatus(kVblankInt | kFrameEndInt | kVpulse2Int);
+    dropFrameEndStatus(kVblankInt | kFrameEndInt);
     planesResume();
     hwSuspended = false;
     scanoutStopped = true;

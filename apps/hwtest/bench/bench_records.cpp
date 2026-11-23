@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <tuple>
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_owned.h"
+#include "drivers/TegraGM20BMetal/owned.h"
 
 namespace bench {
 namespace {
@@ -14,7 +14,7 @@ constexpr uint32_t kCtWriteRgba = 0x1111;  // its R, G, B and A enables
 constexpr uint32_t kFloat4 = 31;           // MTLVertexFormatFloat4
 
 // tools/benchloop/protocol.py METHOD_RANGES
-constexpr raw::MethodRange kAllowed[] = {
+constexpr gm20b::MethodRange kAllowed[] = {
     {0x02E0, 0x02E4}, {0x02F4, 0x02F8}, {0x0754, 0x0758}, {0x0D9C, 0x0DA0}, {0x0DD0, 0x0DD8}, {0x0DF0, 0x0DF8},
     {0x0F40, 0x0F54}, {0x0F90, 0x0F94}, {0x0FAC, 0x0FB0}, {0x0FDC, 0x0FE0}, {0x10CC, 0x10D0}, {0x10E0, 0x10F4},
     {0x113C, 0x1140}, {0x1140, 0x1144}, {0x1220, 0x1224}, {0x1224, 0x1228}, {0x12E0, 0x12E8}, {0x131C, 0x132C},
@@ -42,18 +42,18 @@ unsigned colors(const char *key)
     return n;
 }
 
-bool plainEntries(const raw::PackPipeline &p)
+bool plainEntries(const gm20b::PackPipeline &p)
 {
-    for (uint32_t k = 0; k < raw::entryCount(p) && k < raw::kPackEntries; k++) {
-        const raw::PackEntry &e = p.entry[k];
-        const bool ubo = e.kind == raw::EntryUbo && !raw::bufferStorage(e);
-        if (!ubo && e.kind != raw::EntryTexture && e.kind != raw::EntrySamplerOnly)
+    for (uint32_t k = 0; k < gm20b::entryCount(p) && k < gm20b::kPackEntries; k++) {
+        const gm20b::PackEntry &e = p.entry[k];
+        const bool ubo = e.kind == gm20b::EntryUbo && !gm20b::bufferStorage(e);
+        if (!ubo && e.kind != gm20b::EntryTexture && e.kind != gm20b::EntrySamplerOnly)
             return false;
     }
     return true;
 }
 
-bool positionFirst(const raw::PackPipeline &p, const char *key)
+bool positionFirst(const gm20b::PackPipeline &p, const char *key)
 {
     unsigned format = 0, offset = 0, buffer = 0, stride = 0, step = 0;
     const char *a0 = strstr(key, " a0=");
@@ -62,10 +62,10 @@ bool positionFirst(const raw::PackPipeline &p, const char *key)
 }
 
 // Its first set-0 texture whose sampler is the draw's (a slot, not constexpr)
-const raw::PackEntry *sampledTexture(const raw::PackPipeline &p)
+const gm20b::PackEntry *sampledTexture(const gm20b::PackPipeline &p)
 {
-    for (uint32_t k = 0; k < raw::entryCount(p) && k < raw::kPackEntries; k++)
-        if (p.entry[k].kind == raw::EntryTexture && p.entry[k].samplerKind == raw::SamplerSlot)
+    for (uint32_t k = 0; k < gm20b::entryCount(p) && k < gm20b::kPackEntries; k++)
+        if (p.entry[k].kind == gm20b::EntryTexture && p.entry[k].samplerKind == gm20b::SamplerSlot)
             return &p.entry[k];
     return nullptr;
 }
@@ -91,20 +91,21 @@ template <typename Visit> void fetchWords(std::vector<uint8_t> &code, Visit visi
     }
 }
 
-bool plainState(const raw::PackPipeline &p, const char *key)
+bool plainState(const gm20b::PackPipeline &p, const char *key)
 {
     Color c0;
     return !strncmp(key, "samples=1 ", 10) && strstr(key, " ds=0/0 ") && color(key, 0, c0) && c0.mask == 15 &&
-           !c0.blend && !(p.flags & (raw::PipelineFetches | raw::PipelineBarrierForm | raw::PipelineStorageMetadata)) &&
-           !p.storageMask && !p.shaderTests.flags && !p.blendColorWord && !p.halfBlendColorWord &&
-           p.vertexSlot != raw::kNoSlot && p.vertexStride >= 16 && plainEntries(p) && positionFirst(p, key);
+           !c0.blend &&
+           !(p.flags & (gm20b::PipelineFetches | gm20b::PipelineBarrierForm | gm20b::PipelineStorageMetadata)) &&
+           !p.storageMask && !p.shaderTests.flags && !p.halfBlendColorWord && p.vertexSlot != gm20b::kNoSlot &&
+           p.vertexStride >= 16 && plainEntries(p) && positionFirst(p, key);
 }
 
-raw::CapturedProgram captured(const raw::Pack &pack, uint32_t index)
+gm20b::CapturedProgram captured(const gm20b::Pack &pack, uint32_t index)
 {
-    const raw::PackProgram &p = pack.section<raw::PackProgram>(raw::PackPrograms)[index];
-    const uint8_t *heap = pack.section<uint8_t>(raw::PackHeap);
-    raw::CapturedProgram c;
+    const gm20b::PackProgram &p = pack.section<gm20b::PackProgram>(gm20b::PackPrograms)[index];
+    const uint8_t *heap = pack.section<uint8_t>(gm20b::PackHeap);
+    gm20b::CapturedProgram c;
     c.id = "bench-pack-" + std::to_string(index);
     c.image.assign(heap + p.program, heap + p.heapOffset + (p.dataBytes ? p.dataOffset : p.bytes));
     if (p.dataBytes)
@@ -121,7 +122,7 @@ std::string programId(const Program &p)
     all.insert(all.end(), p.code.begin(), p.code.end());
     all.insert(all.end(), p.data.begin(), p.data.end());
     char id[40];
-    snprintf(id, sizeof id, "bench-%016llx-%u-%u", (unsigned long long)raw::Pack::fnv(all.data(), all.size()), p.gprs,
+    snprintf(id, sizeof id, "bench-%016llx-%u-%u", (unsigned long long)gm20b::Pack::fnv(all.data(), all.size()), p.gprs,
              p.dataBound);
     return id;
 }
@@ -171,9 +172,9 @@ void setQmd(uint32_t *qmd, unsigned hi, unsigned lo, uint32_t v)
 
 bool methodAllowed(uint32_t method)
 {
-    if (method % 4 || raw::ownedMethod(method))
+    if (method % 4 || gm20b::ownedMethod(method))
         return false;
-    return std::any_of(std::begin(kAllowed), std::end(kAllowed), [&](const raw::MethodRange &r) {
+    return std::any_of(std::begin(kAllowed), std::end(kAllowed), [&](const gm20b::MethodRange &r) {
         return method >= r.begin && method < r.end;
     });
 }
@@ -190,30 +191,30 @@ std::string withoutOtherColours(std::string key)
     return key;
 }
 
-const raw::PackPipeline *fragmentTemplate(const raw::Pack &pack)
+const gm20b::PackPipeline *fragmentTemplate(const gm20b::Pack &pack)
 {
-    const raw::PackPipeline *pipelines = pack.section<raw::PackPipeline>(raw::PackPipelines);
-    const raw::PackPipeline *best = nullptr;
-    auto rank = [&](const raw::PackPipeline &p) {
-        return std::make_tuple(colors(pack.string(p.keyString)), raw::entryCount(p), p.keyHash);
+    const gm20b::PackPipeline *pipelines = pack.section<gm20b::PackPipeline>(gm20b::PackPipelines);
+    const gm20b::PackPipeline *best = nullptr;
+    auto rank = [&](const gm20b::PackPipeline &p) {
+        return std::make_tuple(colors(pack.string(p.keyString)), gm20b::entryCount(p), p.keyHash);
     };
     for (uint32_t i = 0; i < pack.header()->pipelines; i++) {
-        const raw::PackPipeline &p = pipelines[i];
+        const gm20b::PackPipeline &p = pipelines[i];
         if (plainState(p, pack.string(p.keyString)) && (!best || rank(p) < rank(*best)))
             best = &p;
     }
     return best;
 }
 
-const raw::PackPipeline *textureTemplate(const raw::Pack &pack)
+const gm20b::PackPipeline *textureTemplate(const gm20b::Pack &pack)
 {
-    const raw::PackPipeline *pipelines = pack.section<raw::PackPipeline>(raw::PackPipelines);
-    const raw::PackPipeline *best = nullptr;
-    auto rank = [&](const raw::PackPipeline &p) {
-        return std::make_tuple(colors(pack.string(p.keyString)), raw::entryCount(p), p.keyHash);
+    const gm20b::PackPipeline *pipelines = pack.section<gm20b::PackPipeline>(gm20b::PackPipelines);
+    const gm20b::PackPipeline *best = nullptr;
+    auto rank = [&](const gm20b::PackPipeline &p) {
+        return std::make_tuple(colors(pack.string(p.keyString)), gm20b::entryCount(p), p.keyHash);
     };
     for (uint32_t i = 0; i < pack.header()->pipelines; i++) {
-        const raw::PackPipeline &p = pipelines[i];
+        const gm20b::PackPipeline &p = pipelines[i];
         if (plainState(p, pack.string(p.keyString)) && sampledTexture(p) && (!best || rank(p) < rank(*best)))
             best = &p;
     }
@@ -231,35 +232,35 @@ bool samplesTexture(const Program &p)
     return found;
 }
 
-const raw::PackPipeline *fragmentTemplate(const raw::Pack &pack, uint64_t key)
+const gm20b::PackPipeline *fragmentTemplate(const gm20b::Pack &pack, uint64_t key)
 {
-    const raw::PackPipeline *pipelines = pack.section<raw::PackPipeline>(raw::PackPipelines);
+    const gm20b::PackPipeline *pipelines = pack.section<gm20b::PackPipeline>(gm20b::PackPipelines);
     for (uint32_t i = 0; i < pack.header()->pipelines; i++)
         if (pipelines[i].keyHash == key)
             return plainState(pipelines[i], pack.string(pipelines[i].keyString)) ? &pipelines[i] : nullptr;
     return nullptr;
 }
 
-const raw::PackKernel *kernelTemplate(const raw::Pack &pack)
+const gm20b::PackKernel *kernelTemplate(const gm20b::Pack &pack)
 {
-    const raw::PackKernel *kernels = pack.section<raw::PackKernel>(raw::PackKernels);
-    const raw::PackProgram *programs = pack.section<raw::PackProgram>(raw::PackPrograms);
-    const raw::PackKernel *best = nullptr;
-    for (uint64_t i = 0; i < pack.bytes(raw::PackKernels) / sizeof(raw::PackKernel); i++) {
-        const raw::PackKernel &k = kernels[i];
-        const raw::PackProgram &p = programs[k.program];
-        if (p.cbufs && raw::cbufKind(p.cbufType[0]) == raw::CbufRoot && (k.qmd[20] & 1) &&
+    const gm20b::PackKernel *kernels = pack.section<gm20b::PackKernel>(gm20b::PackKernels);
+    const gm20b::PackProgram *programs = pack.section<gm20b::PackProgram>(gm20b::PackPrograms);
+    const gm20b::PackKernel *best = nullptr;
+    for (uint64_t i = 0; i < pack.bytes(gm20b::PackKernels) / sizeof(gm20b::PackKernel); i++) {
+        const gm20b::PackKernel &k = kernels[i];
+        const gm20b::PackProgram &p = programs[k.program];
+        if (p.cbufs && gm20b::cbufKind(p.cbufType[0]) == gm20b::CbufRoot && (k.qmd[20] & 1) &&
             (!best || std::tie(k.entries, k.keyHash) < std::tie(best->entries, best->keyHash)))
             best = &k;
     }
     return best;
 }
 
-bool fragmentRecord(const raw::Pack &pack, const raw::PackPipeline &tpl, const Program &fs, uint32_t format,
-                    uint64_t key, const Methods &methods, const Methods &restore, raw::RuntimeRecord &r,
+bool fragmentRecord(const gm20b::Pack &pack, const gm20b::PackPipeline &tpl, const Program &fs, uint32_t format,
+                    uint64_t key, const Methods &methods, const Methods &restore, gm20b::RuntimeRecord &r,
                     std::string &why, bool firstColourOnly)
 {
-    r = raw::RuntimeRecord();
+    r = gm20b::RuntimeRecord();
     r.pipeline = tpl;
     r.pipeline.keyHash = key;
     r.keyString = pack.string(tpl.keyString);
@@ -270,19 +271,19 @@ bool fragmentRecord(const raw::Pack &pack, const raw::PackPipeline &tpl, const P
         return false;
     }
     r.programs[0] = captured(pack, tpl.vs);
-    raw::CapturedProgram &p = r.programs[1];
+    gm20b::CapturedProgram &p = r.programs[1];
     p.id = programId(fs);
     p.image = fs.sph;
     p.image.insert(p.image.end(), fs.code.begin(), fs.code.end());
     p.data = padded(fs.data);
     if (fs.dataBound)
         p.data.resize(fs.dataBound);
-    p.cbufTypes = {raw::CbufRoot};
+    p.cbufTypes = {gm20b::CbufRoot};
     if (!fs.data.empty())
-        p.cbufTypes.push_back(raw::CbufShaderData);
+        p.cbufTypes.push_back(gm20b::CbufShaderData);
     p.gprs = uint8_t(fs.gprs);
     if (samplesTexture(fs)) {
-        const raw::PackEntry *texture = sampledTexture(tpl);
+        const gm20b::PackEntry *texture = sampledTexture(tpl);
         if (!texture) {
             why = "the program samples a texture and the template has none with a sampler slot";
             return false;
@@ -296,10 +297,10 @@ bool fragmentRecord(const raw::Pack &pack, const raw::PackPipeline &tpl, const P
             return true;
         });
         std::copy(code.begin(), code.end(), p.image.begin() + 80);
-        p.cbufTypes.push_back(raw::CbufSet);
+        p.cbufTypes.push_back(gm20b::CbufSet);
         p.boundTextures = uint8_t(p.cbufTypes.size());
     }
-    const uint32_t *blob = pack.section<uint32_t>(raw::PackBlob) + tpl.blob;
+    const uint32_t *blob = pack.section<uint32_t>(gm20b::PackBlob) + tpl.blob;
     r.blob.assign(blob, blob + tpl.blobDwords);
     // The key's write mask is Metal's: a state whose format its pixel program packs into one word (BGR10_XR, the
     // device's template) has the hardware write R alone
@@ -315,7 +316,7 @@ bool fragmentRecord(const raw::Pack &pack, const raw::PackPipeline &tpl, const P
             }
     r.extras = methods;
     r.restore = restore;
-    const uint32_t *samplers = pack.section<uint32_t>(raw::PackSamplers);
+    const uint32_t *samplers = pack.section<uint32_t>(gm20b::PackSamplers);
     for (uint32_t i = 0; i < pack.header()->samplers; i++) {
         std::array<uint32_t, 8> words;
         memcpy(words.data(), samplers + 8 * i, sizeof words);
@@ -324,14 +325,14 @@ bool fragmentRecord(const raw::Pack &pack, const raw::PackPipeline &tpl, const P
     return true;
 }
 
-bool kernelRecord(const raw::PackKernel &tpl, const Program &kernel, const uint32_t threads[3], raw::ComputeRecord &r,
-                  std::string &why)
+bool kernelRecord(const gm20b::PackKernel &tpl, const Program &kernel, const uint32_t threads[3],
+                  gm20b::ComputeRecord &r, std::string &why)
 {
     if (kernel.data.size() > 0x10000) {
         why = "shader data past a constant buffer's 64 KiB";
         return false;
     }
-    r = raw::ComputeRecord();
+    r = gm20b::ComputeRecord();
     r.code = kernel.code;
     r.data = padded(kernel.data);
     r.kernel = tpl;
@@ -351,8 +352,8 @@ bool kernelRecord(const raw::PackKernel &tpl, const Program &kernel, const uint3
     setQmd(qmd, 647, 640, kernel.data.empty() ? 1 : 3);  // CONSTANT_BUFFER_VALID: the root table, the shader data
     if (!kernel.data.empty())
         setQmd(qmd, 1055, 1039, uint32_t(r.data.size()));  // CONSTANT_BUFFER_SIZE(1)
-    r.cbufType[0] = raw::CbufRoot;
-    r.cbufType[1] = kernel.data.empty() ? 0 : raw::CbufShaderData;
+    r.cbufType[0] = gm20b::CbufRoot;
+    r.cbufType[1] = kernel.data.empty() ? 0 : gm20b::CbufShaderData;
     r.cbufs = kernel.data.empty() ? 1 : 2;
     r.keyString = "bench kernel";
     return true;

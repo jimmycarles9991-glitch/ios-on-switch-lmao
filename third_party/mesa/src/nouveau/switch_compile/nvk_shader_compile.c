@@ -9,6 +9,7 @@
 #include "nvk_shader.h"
 #include "nvk_descriptor_types.h"
 #include "nvk_root_table.h"
+#include "nvk_switch_round.h"
 #include "nvk_switch_split.h"
 #include "nvk_switch_stage.h"
 #include "nvk_switch_turn.h"
@@ -87,6 +88,7 @@ nvk_populate_fs_key(struct nak_fs_key *key,
    memset(key, 0, sizeof(*key));
    key->center_frag_depth = switch_nvk_center_frag_depth_current;
    key->texs_f16 = switch_nvk_texs_f16_current;
+   key->half_targets = (uint8_t)switch_nvk_half_targets_current;
    key->turned = switch_nvk_turned_current;
    for (unsigned i = 0; i < 8 * SWITCH_XR_PLANE_WORDS; i++)
       key->xr_plane_bindings[i] = (uint8_t)(switch_nvk_xr_plane_bindings_current[i / 8] >> (8 * (i % 8)));

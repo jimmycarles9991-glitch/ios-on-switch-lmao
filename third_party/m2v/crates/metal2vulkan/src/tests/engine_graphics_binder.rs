@@ -251,6 +251,38 @@ fn an_srgb_color_write_binds_the_color_table() {
     }
 }
 
+/// On the Sm53 target an sRGB attachment's color channels are written as computed for GM20B's ROP
+/// to encode (`NativeShaderTarget::stores_srgb_code`), so the fragment binds no color table, where
+/// the same device without the target binds one.
+#[test]
+fn an_srgb_color_write_for_gm20b_binds_no_color_table() {
+    use crate::device::NativeShaderTarget;
+    use crate::pipeline::sym::SyntheticBinding;
+    let Some(bc) = fixture("stage_io") else {
+        return;
+    };
+    let table = BindingSource::Synthetic {
+        stage: Stage::Fragment,
+        binding: SyntheticBinding::ColorWriteTable,
+    };
+    let vulkan = device("nvidia-rtx5080-laptop");
+    let sm53 = vulkan.with_native_target(NativeShaderTarget::Sm53);
+    for (dev, want) in [(&vulkan, true), (&sm53, false)] {
+        let mut d = render_descriptor(&bc);
+        d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(PixelFormat::RGBA8UnormSRGB));
+        let p = dev
+            .compile_render_pipeline(&d, &Budget::standard())
+            .expect("pipeline");
+        let bound = p
+            .layout
+            .sets
+            .iter()
+            .flat_map(|s| &s.bindings)
+            .any(|b| b.source == table);
+        assert_eq!(bound, want, "{:?}", dev.profile().fields().native_target);
+    }
+}
+
 /// `Device::compile_render_pipeline` compiles a `Function` fragment stage with no output at a color
 /// it writes that the pipeline has no attachment for, whose write Metal discards: the fixture's
 /// fragment, writing colors 0 and 2, states color 0 alone among its color outputs in a pipeline of

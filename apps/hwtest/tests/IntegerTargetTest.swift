@@ -3,12 +3,12 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.integer_targets: every integer colour format the GM20B renders (NIL's RU*/RS* targets) cleared, then half of it
+/// gpu.gm20b.integer_targets: every integer colour format the GM20B renders (NIL's RU*/RS* targets) cleared, then half of it
 /// drawn by an integer fragment, read back word for word. A clear's double is truncated toward zero and saturated, as
-/// Metal stores it (m2v clear_value.rs). Fails on any byte off or any command buffer off the raw path.
+/// Metal stores it (m2v clear_value.rs). Fails on any byte off or any command buffer off the driver.
 struct IntegerTargetTest: HWTest {
-    let id = "gpu.raw.integer_targets"
-    let name = "Integer render targets: cleared and drawn on the raw path"
+    let id = "gpu.gm20b.integer_targets"
+    let name = "Integer render targets: cleared and drawn on the driver"
     let subsystem = Subsystem.metal
 
     struct Case {
@@ -63,7 +63,7 @@ struct IntegerTargetTest: HWTest {
                 at += bits
             } else {
                 let start = bytes.startIndex + out.count * bytesEach
-                field = bytes[start..<(start + bytesEach)].enumerated().reduce(UInt64(0)) {
+                field = bytes[start ..< (start + bytesEach)].enumerated().reduce(UInt64(0)) {
                     $0 | UInt64($1.element) << (8 * $1.offset)
                 }
             }
@@ -76,8 +76,8 @@ struct IntegerTargetTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         var failed: [String] = []
         for c in Self.cases {
@@ -85,7 +85,8 @@ struct IntegerTargetTest: HWTest {
             do {
                 let target = try gpu.texture(c.format, Self.size, Self.size)
                 let state = try gpu.render(
-                    fragment: c.signed ? "integer_sint_fragment" : "integer_uint_fragment", format: c.format)
+                    fragment: c.signed ? "integer_sint_fragment" : "integer_uint_fragment", format: c.format
+                )
                 var value = Self.drawn(c) + Array(repeating: 0, count: 4 - c.bits.count)
                 try await gpu.run { commands in
                     let pass = MTLRenderPassDescriptor()
@@ -106,10 +107,10 @@ struct IntegerTargetTest: HWTest {
                 let wantCleared = zip(clears, c.bits).map { Self.cleared($0, bits: $1, signed: c.signed) }
                 let wantDrawn = Self.drawn(c)
                 var wrong = 0
-                for y in 0..<Self.size {
-                    for x in 0..<Self.size {
+                for y in 0 ..< Self.size {
+                    for x in 0 ..< Self.size {
                         let at = (y * Self.size + x) * pixelBytes
-                        let got = Self.words(pixels[at..<(at + pixelBytes)], c)
+                        let got = Self.words(pixels[at ..< (at + pixelBytes)], c)
                         wrong += got == (x < Self.size / 2 ? wantDrawn : wantCleared) ? 0 : 1
                     }
                 }
@@ -118,8 +119,8 @@ struct IntegerTargetTest: HWTest {
                 failed.append("\(c.format.rawValue): \(GPU.describe(error))")
             }
         }
-        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "raw" }
-        if !raw { failed.append("command buffers off the raw path: \(gpu.paths.text)") }
+        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "gm20b" }
+        if !raw { failed.append("command buffers off the driver: \(gpu.paths.text)") }
         var metrics = Metrics()
         metrics.set("formats", Self.cases.count)
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)

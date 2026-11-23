@@ -1093,7 +1093,6 @@ fn an_exact_half_blend_is_computed_in_the_storage_form() {
             let pushes =
                 |field: PushField| f.interface.push.fields.iter().any(|x| x.field == field);
             assert_eq!(pushes(PushField::HalfBlendColor), reads_color, "{what}");
-            assert!(!pushes(PushField::BlendColor), "{what}");
             link_and_validate(&f, &p).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
             let storage = storage_attachments(&r, Some(&f), &p)
                 .unwrap_or_else(|e| panic!("{what}: link: {e}"));

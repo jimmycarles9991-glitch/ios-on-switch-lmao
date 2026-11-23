@@ -5,14 +5,14 @@ import Metal
 
 /// A state that fetches its own colour, by its storage form (the fetch, and the pipeline's blend where it has one, inside
 /// the pixel interlock) against its barrier twin (the colour read through the texture unit behind the fetch barrier, the
-/// ROP blending), both forced through the facade's probe channel (raw_fetch_rungs.h): the twin a triangle at a time
+/// ROP blending), both forced through the facade's probe channel (fetch_rungs.h): the twin a triangle at a time
 /// (twin1) and as one draw behind one barrier (twinw). Per state, keyed by its program's size: worst_<arm>_<scene> the
 /// largest difference in codes from the storage form's colour, on convex quads (CAStateSweep's strip and rectangle), a
 /// strip folded back over its first triangle and a quad crossing w = 0 under perspective; us_<arm>_<target>_<quads> one
 /// draw's GPU time from the facade's stamps, `quads` overlapping full-target quads into 64x64 or 1280x720. twins= the
 /// draws the facade counted on a twin. verdict=PASS: twin1 within the bound everywhere and twinw within it on the convex
 /// quads, every forced draw counted; the folded quad's twinw difference is the measurement's proof that it sees a
-/// draw's own triangles out of order (folded_seen). The rule arm forces nothing, so rule fetch.twin (raw_twin_rule.h)
+/// draw's own triangles out of order (folded_seen). The rule arm forces nothing, so rule fetch.twin (twin_rule.h)
 /// picks the form: the scenes again over 64x64 against the storage form there (worst_rule_<scene>), us_rule_* beside
 /// us_storage_*, rule_twins= the draws the facade counted on the twin by that rule and rule_free= those a fetch-free
 /// rung took first (every rule arm draw is a shape and area the twin rule takes), and verdict=PASS also needs those
@@ -22,7 +22,7 @@ import Metal
 /// full quads, at 720p (4-32) and 256x256 (8, 32), where the rule's area threshold is read from. Debug builds only (the
 /// probe channel).
 struct BlendTwinTest: HWTest {
-    let id = "gpu.raw.blend_twin"
+    let id = "gpu.gm20b.blend_twin"
     let name = "Storage form against barrier twin: codes, ordering and GPU time of Core Animation's fetching states"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 600 }
@@ -51,9 +51,9 @@ struct BlendTwinTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else { return .skip("the default device is not the raw facade") }
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else { return .skip("the default device is not the facade") }
         guard let statesURL = Bundle.main.url(forResource: "ca_states", withExtension: "log"),
-            let text = try? String(contentsOf: statesURL, encoding: .utf8)
+              let text = try? String(contentsOf: statesURL, encoding: .utf8)
         else { return .fail("ca_states.log is not in the app's bundle") }
         let keys = Dictionary(uniqueKeysWithValues: Self.states.map { ($0.label, $0.key) })
         let lines = CAStateSweep.states(text, everyState: true).filter { keys[$0.shortLabel] != nil }
@@ -62,9 +62,9 @@ struct BlendTwinTest: HWTest {
         var metrics = Metrics()
         var failures: [String] = []
         var unseen: [String] = []
-        let before = RawFacade.counters(of: gpu.device)["fetch_blend_twin"] ?? 0
+        let before = GM20BFacade.counters(of: gpu.device)["fetch_blend_twin"] ?? 0
         let ruleKeys = ["fetch_twin_rule", "fetch_rung2", "fetch_rung3"]
-        let ruleBefore = ruleKeys.map { RawFacade.counters(of: gpu.device)[$0] ?? 0 }
+        let ruleBefore = ruleKeys.map { GM20BFacade.counters(of: gpu.device)[$0] ?? 0 }
         var forcedDraws = 0
         var ruleDraws = 0
         var slower: [String] = []
@@ -81,7 +81,7 @@ struct BlendTwinTest: HWTest {
                     try await BlendTwinScene.bytes(line, colour: colour, draws: scene.draws, library: library, gpu: gpu)
                 }
                 guard let storage = try await FetchRungScene.forcing(BlendTwinScene.storage, gpu.device, draw) else {
-                    return .skip("the facade has no probe channel (a release build)")
+                    return .skip(GM20BFacade.missing("switchMetalProbeFetchRung:", on: gpu.device))
                 }
                 for arm in Self.arms {
                     guard let twin = try await FetchRungScene.forcing(arm.rung, gpu.device, draw) else { continue }
@@ -98,10 +98,11 @@ struct BlendTwinTest: HWTest {
                 let side = Self.ruleSide
                 let ruled = {
                     try await BlendTwinScene.bytes(
-                        line, colour: colour, draws: scene.draws, library: library, gpu: gpu, width: side, height: side)
+                        line, colour: colour, draws: scene.draws, library: library, gpu: gpu, width: side, height: side
+                    )
                 }
                 guard let storage64 = try await FetchRungScene.forcing(BlendTwinScene.storage, gpu.device, ruled),
-                    let byRule = try await FetchRungScene.forcing(Self.rule, gpu.device, ruled)
+                      let byRule = try await FetchRungScene.forcing(Self.rule, gpu.device, ruled)
                 else { continue }
                 ruleDraws += scene.draws.count
                 let (worst, differing) = FetchRungScene.difference(storage64.1, byRule.1)
@@ -114,13 +115,14 @@ struct BlendTwinTest: HWTest {
                     var times: [String: Double] = [:]
                     let arms =
                         [(BlendTwinScene.storage, "storage")] + Self.arms.map({ ($0.rung, $0.name) }) + [
-                            (Self.rule, "rule")
+                            (Self.rule, "rule"),
                         ]
                     for (rung, arm) in arms {
                         let us = try await FetchRungScene.forcing(rung, gpu.device) {
                             try await BlendTwinScene.microseconds(
                                 line, quads: quads, width: size.width, height: size.height, library: library, gpu: gpu,
-                                draws: Self.draws, runs: Self.runs)
+                                draws: Self.draws, runs: Self.runs
+                            )
                         }
                         if rung == Self.rule {
                             ruleDraws += Self.draws * (Self.runs + 1)
@@ -144,14 +146,15 @@ struct BlendTwinTest: HWTest {
                         var us: [Double] = []
                         var took = "s"
                         for rung in [BlendTwinScene.storage, BlendTwinScene.twinTriangles, Self.rule] {
-                            let ruleTwins = RawFacade.counters(of: gpu.device)["fetch_twin_rule"] ?? 0
+                            let ruleTwins = GM20BFacade.counters(of: gpu.device)["fetch_twin_rule"] ?? 0
                             let time = try await FetchRungScene.forcing(rung, gpu.device) {
                                 try await BlendTwinScene.microseconds(
                                     line, vertices: vertices, width: shape.width, height: shape.height,
-                                    library: library, gpu: gpu, draws: Self.draws, runs: Self.runs)
+                                    library: library, gpu: gpu, draws: Self.draws, runs: Self.runs
+                                )
                             }
                             us.append((time ?? nil) ?? 0)
-                            let after = RawFacade.counters(of: gpu.device)["fetch_twin_rule"] ?? 0
+                            let after = GM20BFacade.counters(of: gpu.device)["fetch_twin_rule"] ?? 0
                             if rung == Self.rule && after > ruleTwins { took = "t" }
                         }
                         let times = String(format: "%.1f/%.1f/%.1f", us[0], us[1], us[2])
@@ -160,7 +163,7 @@ struct BlendTwinTest: HWTest {
                 }
             }
         }
-        let counters = RawFacade.counters(of: gpu.device)
+        let counters = GM20BFacade.counters(of: gpu.device)
         let twins = (counters["fetch_blend_twin"] ?? 0) - before
         let ruleTaken = zip(ruleKeys, ruleBefore).map { (counters[$0.0] ?? 0) - $0.1 }
         let ruleTwins = ruleTaken[0], ruleFree = ruleTaken[1] + ruleTaken[2]
@@ -181,8 +184,8 @@ struct BlendTwinTest: HWTest {
             "the facade drew \(twins) of \(forcedDraws) forced and \(ruleTwins) of \(ruleDraws) rule draws on a twin"
         let why =
             !failures.isEmpty
-            ? "a twin beyond the bound"
-            : !unseen.isEmpty
+                ? "a twin beyond the bound"
+                : !unseen.isEmpty
                 ? "the folded quad showed no difference on the whole twin draw"
                 : !counted ? uncounted : "the rule's form was not faster than the storage form"
         return .fail(why, metrics)

@@ -11,8 +11,10 @@ import UIKit
 /// their fill (RecoverBystander): one on the 2D engine, one through the copy engine. A probe layer another bench raw
 /// device fills shows that the compositor kept presenting. Exactly the poisoned command buffer fails, the eight before
 /// it keep their completion and bytes, the eight after it complete on the channel made again, neither bystander sees an
-/// error or a kill (its reopen), the GR one no gap past the bound, this channel one reopen, and the drivers stay ordered
-/// on the GPU (no CPU-ordered line).
+/// error or a kill (its reopen), the GR one no gap past the bound, and this channel one reopen. The poisoned command
+/// buffer is the process's only failure, with no predicate (error:none: the kernel's kill names none; failed_cbs=,
+/// failed_why=). kill_ms= from the end of the command buffer before the poisoned one to the
+/// poisoned one's failed end: the app's view of GR's error to the kernel's "channel killed" line.
 struct RecoverKillOneTest: HWTest {
     let id = "gpu.recover.kill_one"
     let name = "A killed raw channel: others render on, raw comes back, only the poisoned command buffer fails"
@@ -27,12 +29,12 @@ struct RecoverKillOneTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         try Self.settle(gpu)
-        let start = RawFacade.counters(of: gpu.device)
-        guard start["gpu_order"] != nil else { return .skip("the facade has no recovery counters (a release build)") }
+        let start = GM20BFacade.counters(of: gpu.device)
+        guard start["reopen_us"] != nil else { return .skip(GM20BFacade.missing("reopen_us", on: gpu.device)) }
         let bystander: RecoverBystander
         let copier: RecoverBystander
         let probeBench: BenchRunner
@@ -61,10 +63,10 @@ struct RecoverKillOneTest: HWTest {
         let ring = try gpu.buffer((2 * Self.around + 1) * Self.slice)
         let scratch = try gpu.texture(.bgra8Unorm, 16, 16, usage: [.shaderRead])
         let ends = CompletionTimes()
-        let before = try (0..<Self.around).map { try fill(gpu, ring, slot: $0, ends) }
+        let before = try (0 ..< Self.around).map { try fill(gpu, ring, slot: $0, ends) }
         let (poisoned, refusal) = try poison(gpu, ring, slot: Self.around, scratch, ends)
         let killDone = await ends.wait(before + [poisoned], seconds: 10)
-        let after = try (0..<Self.around).map { try fill(gpu, ring, slot: Self.around + 1 + $0, ends) }
+        let after = try (0 ..< Self.around).map { try fill(gpu, ring, slot: Self.around + 1 + $0, ends) }
         let afterDone = await ends.wait(after, seconds: 10)
         try await Task.sleep(nanoseconds: 300_000_000)
 
@@ -74,25 +76,25 @@ struct RecoverKillOneTest: HWTest {
         let presented = await MainActor.run { compositor.presented }
         let (fillErrors, firstFillError) = await MainActor.run { (compositor.fillErrors, compositor.firstFillError) }
         await context.clearStage()
-        let end = RawFacade.counters(of: gpu.device)
+        let end = GM20BFacade.counters(of: gpu.device)
 
         let bytes = UnsafeRawBufferPointer(start: ring.contents(), count: ring.length)
         let kept = { (slots: Range<Int>) in
             slots.filter { slot in
-                bytes[(slot * Self.slice)..<((slot + 1) * Self.slice)].allSatisfy { $0 == UInt8(slot + 1) }
+                bytes[(slot * Self.slice) ..< ((slot + 1) * Self.slice)].allSatisfy { $0 == UInt8(slot + 1) }
             }.count
         }
         let beforeOK = before.filter { $0.status == .completed && $0.error == nil }.count
         let afterOK = after.filter { $0.status == .completed && $0.error == nil }.count
-        let beforeKept = kept(0..<Self.around)
-        let afterKept = kept((Self.around + 1)..<(2 * Self.around + 1))
+        let beforeKept = kept(0 ..< Self.around)
+        let afterKept = kept((Self.around + 1) ..< (2 * Self.around + 1))
         let delta = { (key: String) in (end[key] ?? 0) - (start[key] ?? 0) }
         let shown = Pacing(times: presented.sorted(), period: 1.0 / 60)
         let presentGapMs = shown.intervals.max() ?? 0
         let bystanderGapMs = Double(bystander.longestNs) / 1e6
         let recoverMs = ends.millisecondsBetween(poisoned, after.last)
-        let paths = Set((before + after).map(RawFacade.path(of:)))
-        let poisonedRaw = RawFacade.path(of: poisoned) == "raw"
+        let killMs = ends.millisecondsBetween(before.last ?? poisoned, poisoned)
+        let paths = Set((before + after).map(GM20BFacade.path(of:)))
 
         var metrics = Metrics()
         metrics.set("killed", poisoned.status == .error)
@@ -108,11 +110,13 @@ struct RecoverKillOneTest: HWTest {
         metrics.set("present_gap_ms", presentGapMs, digits: 1)
         metrics.set("gap_bound_ms", Self.gapBoundMs, digits: 0)
         metrics.set("reopens", delta("reopens"))
-        metrics.set("cpu_ordered", delta("cpu_ordered"))
-        metrics.set("gpu_order", end["gpu_order"] ?? 0)
+        var own = PathTally()
+        for buffer in before + [poisoned] + after { own.add(GM20BFacade.path(of: buffer)) }
+        let failed = FailedCounts.judged(before: start, after: end, expecting: ["none": 1], own: own, &metrics)
         metrics.set("reopen_us", end["reopen_us"] ?? 0)
         metrics.set("recover_ms", recoverMs, digits: 1)
-        metrics.set("poisoned_path", RawFacade.path(of: poisoned))
+        metrics.set("kill_ms", killMs, digits: 1)
+        metrics.set("poisoned_path", GM20BFacade.path(of: poisoned))
         metrics.set("poisoned_error", (poisoned.error as NSError?).map { "\($0.code)" } ?? "none")
         metrics.set("before_bytes", beforeKept)
         metrics.set("after_bytes", afterKept)
@@ -130,17 +134,20 @@ struct RecoverKillOneTest: HWTest {
         return .judged(
             [
                 ("every command buffer ended (none hung)", killDone && afterDone),
-                ("the poisoned command buffer ran raw and failed", poisoned.status == .error && poisonedRaw),
+                (
+                    "the poisoned command buffer failed, error:none",
+                    poisoned.status == .error && GM20BFacade.path(of: poisoned) == "error:none"
+                ),
+                failed,
                 (
                     "the ones before it kept their completion and bytes",
                     beforeOK == Self.around && beforeKept == Self.around
                 ),
                 (
                     "the ones after it completed raw",
-                    afterOK == Self.around && afterKept == Self.around && paths == ["raw"]
+                    afterOK == Self.around && afterKept == Self.around && paths == ["gm20b"]
                 ),
                 ("the kernel's kill made one reopen of this channel (\(delta("reopens")))", delta("reopens") == 1),
-                ("no CPU-ordered fallback; GPU order on", delta("cpu_ordered") == 0 && end["gpu_order"] == 1),
                 (
                     bystander.failure.isEmpty ? "\(bystander.role.rawValue) ran with no error" : bystander.failure,
                     bystanderStopped && bystander.runs > 0 && bystander.errors == 0
@@ -160,21 +167,22 @@ struct RecoverKillOneTest: HWTest {
                         : "the compositor probe's bench channel: \(firstFillError)",
                     fillErrors == 0
                 ),
-            ], metrics)
+            ], metrics
+        )
     }
 
     func fill(_ gpu: GPU, _ ring: MTLBuffer, slot: Int, _ ends: CompletionTimes) throws -> MTLCommandBuffer {
         guard let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder() else {
             throw TestFailure("no command buffer")
         }
-        blit.fill(buffer: ring, range: (slot * Self.slice)..<((slot + 1) * Self.slice), value: UInt8(slot + 1))
+        blit.fill(buffer: ring, range: (slot * Self.slice) ..< ((slot + 1) * Self.slice), value: UInt8(slot + 1))
         blit.endEncoding()
         ends.track(commands)
         commands.commit()
         return commands
     }
 
-    /// A fill whose blit encoder ends with the illegal method (RawMetalProbe.mm switchRawProbeEngine:); the refusal
+    /// A fill whose blit encoder ends with the illegal method (TegraGM20BMetalProbe.mm switchMetalProbeEngine:); the refusal
     /// where the facade took none
     func poison(
         _ gpu: GPU, _ ring: MTLBuffer, slot: Int, _ scratch: MTLTexture, _ ends: CompletionTimes
@@ -184,8 +192,8 @@ struct RecoverKillOneTest: HWTest {
         guard let commands = gpu.queue.makeCommandBuffer(), let blit = commands.makeBlitCommandEncoder() else {
             throw TestFailure("no command buffer")
         }
-        blit.fill(buffer: ring, range: (slot * Self.slice)..<((slot + 1) * Self.slice), value: UInt8(slot + 1))
-        let selector = NSSelectorFromString("switchRawProbeEngine:")
+        blit.fill(buffer: ring, range: (slot * Self.slice) ..< ((slot + 1) * Self.slice), value: UInt8(slot + 1))
+        let selector = NSSelectorFromString("switchMetalProbeEngine:")
         let op: NSDictionary = [
             "kind": "method", "method": Self.illegalMethod, "value": Self.illegalValue, "written": scratch,
         ]

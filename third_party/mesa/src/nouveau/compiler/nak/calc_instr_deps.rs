@@ -1043,11 +1043,16 @@ fn calc_delays(f: &mut Function, sm: &ShaderModelInfo) -> u64 {
         } else if matches!(instr.op, Op::SrcBar(_)) {
             instr.op = Op::Nop(OpNop { label: None });
             [instr].into()
-        } else if sm.exec_latency(&instr.op) > 1 {
+        } else if sm.exec_latency(&instr.op) > 1 && !sm.is_maxwell() {
             // It's unclear exactly why but the blob inserts a Nop with a delay
             // of 2 after every instruction which has an exec latency.  Perhaps
             // it has something to do with .yld?  In any case, the extra 2
             // cycles aren't worth the chance of weird bugs.
+            //
+            // GM20B runs what follows a BRA or MEMBAR at the stall count
+            // alone: the bench's interlock spin has a BRA then an LDG and a
+            // RED, and a MEMBAR then an LDG, and lost no update (BENCH3
+            // T-v3i interlock_ab).
             let mut nop = Instr::new(OpNop { label: None });
             nop.deps.set_delay(2);
             [instr, nop].into()

@@ -142,6 +142,11 @@ struct EventClient : testing::Test {
 };
 }
 
+extern "C" int switch_gpu_events_compositor(int, int)
+{
+	return 0;
+}
+
 extern "C" int switch_gpu_event_acquire(void *, uint32_t port, switch_gpu_event **out)
 {
 	if (port != 7)

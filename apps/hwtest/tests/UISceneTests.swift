@@ -52,12 +52,15 @@ struct UITextTest: HWTest {
                 let width = (screen.width - 30) / 2
                 let panel = UIView(
                     frame: Snapshots.aligned(
-                        CGRect(x: 10 + CGFloat(index) * (width + 10), y: 10, width: width, height: screen.height - 20)))
+                        CGRect(x: 10 + CGFloat(index) * (width + 10), y: 10, width: width, height: screen.height - 20)
+                    )
+                )
                 panel.backgroundColor = colors.0
                 let row = panel.bounds.height / CGFloat(Self.styles.count)
                 for (line, style) in Self.styles.enumerated() {
                     let label = UILabel(
-                        frame: Snapshots.aligned(CGRect(x: 8, y: CGFloat(line) * row, width: width - 16, height: row)))
+                        frame: Snapshots.aligned(CGRect(x: 8, y: CGFloat(line) * row, width: width - 16, height: row))
+                    )
                     label.font = UIFont.preferredFont(forTextStyle: style)
                     label.textColor = line % 3 == 2 ? .systemBlue : colors.1
                     label.text = "Wi-Fi  Bluetooth  General 0123"
@@ -93,7 +96,8 @@ struct UIBlurTest: HWTest {
             root.addSubview(grey)
             let blur = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
             blur.frame = Snapshots.aligned(
-                CGRect(x: 0, y: screen.height / 4, width: screen.width, height: screen.height / 2))
+                CGRect(x: 0, y: screen.height / 4, width: screen.width, height: screen.height / 2)
+            )
             root.addSubview(blur)
             stage.addSubview(root)
             return root
@@ -104,7 +108,8 @@ struct UIBlurTest: HWTest {
                 CompositeCheck(
                     label: "outside the blur",
                     composited: composited.cropped(x: 0, y: 0, width: composited.width, height: band - 2),
-                    cpu: cpu.cropped(x: 0, y: 0, width: cpu.width, height: band - 2)),
+                    cpu: cpu.cropped(x: 0, y: 0, width: cpu.width, height: band - 2)
+                ),
                 composited
             )
         }
@@ -115,7 +120,8 @@ struct UIBlurTest: HWTest {
         let (top, height, half) = (inside.height / 4 + inset, inside.height / 2 - 2 * inset, inside.width / 2)
         let stripes = Backdrop.overStripes(inside.cropped(x: inset, y: top, width: half - 2 * inset, height: height))
         let grey = Backdrop.overUniform(
-            inside.cropped(x: half + inset, y: top, width: half - 2 * inset, height: height))
+            inside.cropped(x: half + inset, y: top, width: half - 2 * inset, height: height)
+        )
         metrics.set("column_spread", Int((stripes.columnSpread * 255).rounded()))
         metrics.set("step", Int((stripes.step * 255).rounded()))
         metrics.set("contrast", Int((stripes.contrast * 255).rounded()))
@@ -174,8 +180,9 @@ struct UIListTest: HWTest {
 }
 
 /// The same SwiftUI picture twice: once through .drawingGroup(), which RenderBox renders with Metal in this process
-/// (its pack states draw on the raw path: raw_cbs= says how many), once as plain Core Animation layers. Their
-/// composited pictures must agree to within anti-aliasing.
+/// (its pack states draw on the driver), once as plain Core Animation layers. Their composited pictures must agree to
+/// within anti-aliasing, none of RenderBox's command buffers may fail (failed_cbs=, failed_why=; foreign_why=:
+/// RenderBox's are none of the test's own) and none of its calls be skipped (skipped_calls=, skipped_why=).
 struct UIRenderBoxTest: HWTest {
     let id = "ui.renderbox"
     let name = "SwiftUI drawingGroup (RenderBox in process) against plain layers"
@@ -183,7 +190,7 @@ struct UIRenderBoxTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let device = MTLCreateSystemDefaultDevice()
-        let before = device.map(RawFacade.counters) ?? [:]
+        let before = device.map(GM20BFacade.counters) ?? [:]
         let check = await UISceneTests.staged(context) {
             stage, screen -> [UIHostingController<RenderBoxPicture>] in
             [true, false].enumerated().map { index, grouped in
@@ -191,18 +198,28 @@ struct UIRenderBoxTest: HWTest {
                 host.view.frame = Snapshots.aligned(
                     CGRect(
                         x: 10 + CGFloat(index) * (screen.width / 2), y: 10, width: screen.width / 2 - 20,
-                        height: screen.height - 20))
+                        height: screen.height - 20
+                    )
+                )
                 stage.addSubview(host.view)
                 return host
             }
         } _: { hosts in
             let views = hosts.map(\.view!)
             return CompositeCheck(
-                label: "drawingGroup", composited: Snapshots.composited(views[0]), cpu: Snapshots.composited(views[1]))
+                label: "drawingGroup", composited: Snapshots.composited(views[0]), cpu: Snapshots.composited(views[1])
+            )
         }
         var metrics = Metrics()
-        if let device { metrics.merge(PathTally.counterMetrics(before: before, after: RawFacade.counters(of: device))) }
-        return UISceneTests.outcome([("group", check)], context, id: id, metrics: metrics)
+        var checks: [(String, Bool)] = []
+        if let device, GM20BFacade.kind(of: device) == "gm20b" {
+            checks = FailedCounts.judgedFramework(
+                before: before, after: GM20BFacade.counters(of: device), own: PathTally(), &metrics
+            )
+        }
+        return checks.reduce(UISceneTests.outcome([("group", check)], context, id: id, metrics: metrics)) {
+            $0.failing(unless: $1)
+        }
     }
 }
 
@@ -220,7 +237,7 @@ struct RenderBoxPicture: View {
                 Text("Wi-Fi").font(.largeTitle.bold()).foregroundStyle(.white)
                 Text("Bluetooth  General  0123").font(.body).foregroundStyle(.white)
                 HStack(spacing: 8) {
-                    ForEach(0..<6) { index in
+                    ForEach(0 ..< 6) { index in
                         RoundedRectangle(cornerRadius: 6).fill(
                             Color(hue: Double(index) / 6, saturation: 0.8, brightness: 0.9)
                         )

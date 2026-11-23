@@ -8,6 +8,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from tools.devicerun import renamed
+
 SIDECAR = '.mac.json'
 
 
@@ -23,7 +25,7 @@ class Report:
     def load(cls, path: Path) -> 'Report':
         sidecar = sidecar_of(path)
         mac = json.loads(sidecar.read_text()) if sidecar.is_file() else {}
-        return cls(path, json.loads(path.read_text()), mac)
+        return cls(path, renamed.current_report(json.loads(path.read_text())), mac)
 
     @property
     def run(self) -> dict:

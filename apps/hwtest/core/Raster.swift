@@ -20,9 +20,9 @@ public struct Raster: Equatable, Sendable {
 
     public init(width: Int, height: Int, channels: Int, levels: Float = 255, fill: (Int, Int, Int) -> Float) {
         var samples = [Float](repeating: 0, count: width * height * channels)
-        for y in 0..<height {
-            for x in 0..<width {
-                for c in 0..<channels { samples[(y * width + x) * channels + c] = fill(x, y, c) }
+        for y in 0 ..< height {
+            for x in 0 ..< width {
+                for c in 0 ..< channels { samples[(y * width + x) * channels + c] = fill(x, y, c) }
             }
         }
         self.init(width: width, height: height, channels: channels, levels: levels, samples: samples)
@@ -40,7 +40,7 @@ public struct Raster: Equatable, Sendable {
 
     public func pixel(_ x: Int, _ y: Int) -> [Float] {
         let at = (y * width + x) * channels
-        return Array(samples[at..<(at + channels)])
+        return Array(samples[at ..< (at + channels)])
     }
 
     public func cropped(x: Int, y: Int, width: Int, height: Int) -> Raster {
@@ -56,8 +56,8 @@ public struct Raster: Equatable, Sendable {
         let area = Float(factor * factor)
         return Raster(width: w, height: h, channels: channels, levels: levels) { x, y, c in
             var sum: Float = 0
-            for dy in 0..<factor {
-                for dx in 0..<factor { sum += self[x * factor + dx, y * factor + dy, c] }
+            for dy in 0 ..< factor {
+                for dx in 0 ..< factor { sum += self[x * factor + dx, y * factor + dy, c] }
             }
             return sum / area
         }

@@ -1,8 +1,8 @@
 """The keys of one IPSW's Core Animation generic merge states (fragment flag g), which ui.launch_hitch counts spans of.
 
 ca_generic_keys.py <qc-<build>.json> <out>. QuartzCore makes a generic state only from its offline compilation manifest,
-so the manifest's g states are all of them. Each key is the one the raw runtime files the state under and names in its
-long spans (raw_span_marks.h): Pack::fnv of the state's key (rawpack.py state_key) made of its name with the build's own
+so the manifest's g states are all of them. Each key is the one the runtime files the state under and names in its
+long spans (span_marks.h): Pack::fnv of the state's key (make_pack.py state_key) made of its name with the build's own
 tables. <out> holds "<key> <name>" lines, the key as 16 hex digits.
 """
 
@@ -10,11 +10,11 @@ import importlib.util
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.raw.pack.rawpack').origin).parent))
-sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.raw.pack.ca.caspec').origin).parent))
+sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.pack.make_pack').origin).parent))
+sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.pack.ca.caspec').origin).parent))
 import caspec
+from make_pack import state_key
 from packfile import fnv
-from rawpack import state_key
 
 
 def generic_keys(tables: caspec.Tables) -> list[tuple[int, str]]:

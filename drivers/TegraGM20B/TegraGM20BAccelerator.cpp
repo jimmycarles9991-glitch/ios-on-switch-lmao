@@ -4,7 +4,7 @@
 // -initWithAcceleratorPort: to that class (an _MTLDevice subclass); repos oosexgang_hackios/userland/src/metal_test.m:12-20,
 // NWylynko_ios-flame/HANDOFF.md:741-746. Modelled on drivers/NativeAdreno/NativeAdrenoAccelerator.cpp.
 //
-// It derives from the original IOAcceleratorES of IOGPUFamily (prelinked; drivers/NativeMetal/OriginalAcceleratorABI.h), so it
+// It derives from the original IOAcceleratorES of IOGPUFamily (prelinked; OriginalAcceleratorABI.h), so it
 // is a late object (kernel_driver's `late`): its static initializer is taken out of __mod_init_func and exported as
 // __GLOBAL__sub_I_TegraGM20BAccelerator.cpp, which TegraGM20B.cpp runs once IOGPUFamily has loaded. Its three IOAcceleratorES
 // imports (gMetaClass, the C2 constructor, the D2 destructor) are bound by drivers/SwitchAccelStub/original-bindings.S,
@@ -12,7 +12,7 @@
 //
 // The accelerator keeps the Apple class name AGXAccelerator and its connection is AGXDeviceUserClient, so the original
 // sandbox profiles that name them admit the render server's open, and NVK finds it by that class name (never the stub).
-#include "../NativeMetal/OriginalAcceleratorABI.h"
+#include "OriginalAcceleratorABI.h"
 #include <IOKit/IOUserClient.h>
 
 extern "C" IOReturn tegra_gm20b_new_user_client(IOService *, task_t, void *, UInt32, OSDictionary *,

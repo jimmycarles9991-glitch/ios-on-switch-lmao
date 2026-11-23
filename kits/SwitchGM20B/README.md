@@ -32,7 +32,7 @@ Every row carries a mechanism, a grade, a citation and a HW Test:
   exists.
 - hwtest: an id in `apps/hwtest`, or `planned:<id>` for a probe still to be written.
 
-A format is `chip` when raw's format tables (`kFormats`, `raw_zeta.h`) have it and the device's format checks
+A format is `chip` when raw's format tables (`kFormats`, `zeta.h`) have it and the device's format checks
 (`metal.formats`, `gpu.clear.formats`, `metal.compressed`) run raw over it; BC formats stay `source`, since raw never
 reaches them. `planned:gpu.x1.<row>` stands in until a probe has a real id.
 

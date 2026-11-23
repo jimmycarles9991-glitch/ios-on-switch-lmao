@@ -32,7 +32,8 @@ struct GpuRailCycleTest: HWTest {
             keys: [
                 "cycles", "downs", "fences", "plls", "wakes_off_rate", "wake_coeff", "fence_us_max", "coeff", "cfg",
                 "pl", "expect_pl", "khz", "why",
-            ])
+            ]
+        )
         let wanted = String(Self.cycles)
         return .judged(
             [
@@ -43,6 +44,7 @@ struct GpuRailCycleTest: HWTest {
                     "no wake's relock left the GPCPLL off its rate before a repair (wakes_off_rate = 0)",
                     fields["wakes_off_rate"] == "0"
                 ),
-            ], metrics)
+            ], metrics
+        )
     }
 }

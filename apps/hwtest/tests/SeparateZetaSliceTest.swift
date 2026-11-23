@@ -7,17 +7,17 @@ import Metal
 /// from a slice past 0 was pass.ds, m2v's). Three passes clear depth slice s to 0.1 x (s + 1) and stencil slice s to s + 1;
 /// a fourth loads depth slice 1 beside stencil slice 2, draws z 0.5 with stencil 0x5A replaced over the left half and stores
 /// both. Read back: depth slice 1 is 0.5 on the left and 0.2 on the right, stencil slice 2 0x5A on the left and 3 on the
-/// right, every other slice its clear; every pass on the raw path.
+/// right, every other slice its clear; every pass on the driver.
 struct SeparateZetaSliceTest: HWTest {
-    let id = "gpu.raw.separate_zeta_slice"
-    let name = "Depth32Float and Stencil8 array slices past 0 as one pass's attachments, on the raw path"
+    let id = "gpu.gm20b.separate_zeta_slice"
+    let name = "Depth32Float and Stencil8 array slices past 0 as one pass's attachments, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = 16, slices = 3
         func array(_ format: MTLPixelFormat) throws -> MTLTexture {
             let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: n, height: n, mipmapped: false)
@@ -33,7 +33,8 @@ struct SeparateZetaSliceTest: HWTest {
         let depth = try array(.depth32Float), stencil = try array(.stencil8)
         let colour = try gpu.texture(.rgba8Unorm, n, n)
         let state = try gpu.render(
-            fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth32Float, stencil: .stencil8)
+            fragment: "solid_fragment", format: .rgba8Unorm, depth: .depth32Float, stencil: .stencil8
+        )
         let d = MTLDepthStencilDescriptor()
         d.depthCompareFunction = .always
         d.isDepthWriteEnabled = true
@@ -61,18 +62,20 @@ struct SeparateZetaSliceTest: HWTest {
             return p
         }
         var paths: [String] = []
-        for s in 0..<slices {
+        for s in 0 ..< slices {
             paths.append(
                 try await gpu.run { commands in
                     commands.makeRenderCommandEncoder(descriptor: pass(depthSlice: s, stencilSlice: s, clear: true))!
                         .endEncoding()
-                }.path)
+                }.path
+            )
         }
         let depths = try gpu.buffer(slices * n * n * 4), stencils = try gpu.buffer(slices * n * n)
         paths.append(
             try await gpu.run { commands in
                 let e = commands.makeRenderCommandEncoder(
-                    descriptor: pass(depthSlice: 1, stencilSlice: 2, clear: false))!
+                    descriptor: pass(depthSlice: 1, stencilSlice: 2, clear: false)
+                )!
                 e.setRenderPipelineState(state)
                 e.setDepthStencilState(write)
                 e.setStencilReferenceValue(0x5A)
@@ -83,25 +86,28 @@ struct SeparateZetaSliceTest: HWTest {
                 e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 e.endEncoding()
                 let b = commands.makeBlitCommandEncoder()!
-                for s in 0..<slices {
+                for s in 0 ..< slices {
                     b.copy(
                         from: depth, sourceSlice: s, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                         sourceSize: MTLSize(width: n, height: n, depth: 1), to: depths,
                         destinationOffset: s * n * n * 4, destinationBytesPerRow: n * 4,
-                        destinationBytesPerImage: n * n * 4)
+                        destinationBytesPerImage: n * n * 4
+                    )
                     b.copy(
                         from: stencil, sourceSlice: s, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                         sourceSize: MTLSize(width: n, height: n, depth: 1), to: stencils,
-                        destinationOffset: s * n * n, destinationBytesPerRow: n, destinationBytesPerImage: n * n)
+                        destinationOffset: s * n * n, destinationBytesPerRow: n, destinationBytesPerImage: n * n
+                    )
                 }
                 b.endEncoding()
-            }.path)
+            }.path
+        )
         let z = depths.contents().bindMemory(to: Float.self, capacity: slices * n * n)
         let st = stencils.contents().bindMemory(to: UInt8.self, capacity: slices * n * n)
         var depthWrong = [0, 0, 0], stencilWrong = [0, 0, 0]
-        for s in 0..<slices {
-            for y in 0..<n {
-                for x in 0..<n {
+        for s in 0 ..< slices {
+            for y in 0 ..< n {
+                for x in 0 ..< n {
                     let i = s * n * n + y * n + x, left = x < n / 2
                     let wantDepth = s == 1 && left ? Float(0.5) : Float(0.1 * Double(s + 1))
                     let wantStencil = s == 2 && left ? UInt8(0x5A) : UInt8(s + 1)
@@ -117,7 +123,7 @@ struct SeparateZetaSliceTest: HWTest {
         metrics.set("slice1_depth", String(format: "%.3f/%.3f", z[n * n + 2], z[n * n + n - 2]))
         metrics.set("slice2_stencil", String(format: "%02x/%02x", st[2 * n * n + 2], st[2 * n * n + n - 2]))
         var failures: [String] = []
-        if paths.contains(where: { $0 != "raw" }) { failures.append("a pass went off the raw path") }
+        if paths.contains(where: { $0 != "gm20b" }) { failures.append("a pass went off the driver") }
         if depthWrong.reduce(0, +) != 0 { failures.append("depth texels wrong by slice \(depthWrong)") }
         if stencilWrong.reduce(0, +) != 0 { failures.append("stencil texels wrong by slice \(stencilWrong)") }
         try await mipArms(gpu, metrics: &metrics, failures: &failures)
@@ -145,7 +151,8 @@ struct SeparateZetaSliceTest: HWTest {
                     -> MTLTexture
                 {
                     let d = MTLTextureDescriptor.texture2DDescriptor(
-                        pixelFormat: f, width: width, height: height, mipmapped: true)
+                        pixelFormat: f, width: width, height: height, mipmapped: true
+                    )
                     d.mipmapLevelCount = levels
                     d.textureType = slices == 1 ? .type2D : .type2DArray
                     d.arrayLength = slices
@@ -166,13 +173,14 @@ struct SeparateZetaSliceTest: HWTest {
                     return withUnsafeBytes(of: Float(16 + 2 * level + slice) / 32) { Array($0) }
                 }
                 for t in [depth, stencil] {
-                    for level in 0..<t.mipmapLevelCount {
-                        for slice in 0..<t.arrayLength {
+                    for level in 0 ..< t.mipmapLevelCount {
+                        for slice in 0 ..< t.arrayLength {
                             let w = t.width >> level, h = t.height >> level
                             let code = word(t, level, slice)
                             try await gpu.upload(
                                 Array(repeating: code, count: w * h).flatMap { $0 }, to: t,
-                                bytesPerRow: w * code.count, level: level, slice: slice)
+                                bytesPerRow: w * code.count, level: level, slice: slice
+                            )
                         }
                     }
                 }
@@ -182,9 +190,11 @@ struct SeparateZetaSliceTest: HWTest {
                     guard
                         let dv = depth.makeTextureView(
                             pixelFormat: format, textureType: d16 ? .type2D : .type2DArray,
-                            levels: 1..<4, slices: d16 ? 2..<3 : 1..<4),
+                            levels: 1 ..< 4, slices: d16 ? 2 ..< 3 : 1 ..< 4
+                        ),
                         let sv = stencil.makeTextureView(
-                            pixelFormat: .stencil8, textureType: .type2DArray, levels: 1..<5, slices: 1..<4)
+                            pixelFormat: .stencil8, textureType: .type2DArray, levels: 1 ..< 5, slices: 1 ..< 4
+                        )
                     else { throw TestFailure("no \(label) selected views") }
                     d = dv
                     s = sv
@@ -194,7 +204,8 @@ struct SeparateZetaSliceTest: HWTest {
                 let w = depth.width >> depthLevel, h = depth.height >> depthLevel
                 let colour = try gpu.texture(.rgba8Unorm, w, h)
                 let state = try gpu.render(
-                    fragment: "solid_fragment", format: .rgba8Unorm, depth: format, stencil: .stencil8)
+                    fragment: "solid_fragment", format: .rgba8Unorm, depth: format, stencil: .stencil8
+                )
                 var paths: [String] = []
                 for load in [false, true] {
                     paths.append(
@@ -236,22 +247,23 @@ struct SeparateZetaSliceTest: HWTest {
                                 }
                             }
                             e.endEncoding()
-                        }.path)
+                        }.path
+                    )
                 }
                 var wrong = 0, neighbors = 0
                 for t in [depth, stencil] {
-                    for level in 0..<t.mipmapLevelCount {
-                        for slice in 0..<t.arrayLength {
+                    for level in 0 ..< t.mipmapLevelCount {
+                        for slice in 0 ..< t.arrayLength {
                             let selected =
                                 t === depth
-                                ? level == depthLevel && slice == depthSlice
-                                : level == stencilLevel && slice == stencilSlice
+                                    ? level == depthLevel && slice == depthSlice
+                                    : level == stencilLevel && slice == stencilSlice
                             let code =
                                 selected
-                                ? (t === stencil
-                                    ? [UInt8(0x5a)]
-                                    : format == .depth16Unorm ? [0xff, 0x3f] : [0, 0, 0x80, 0x3e])
-                                : word(t, level, slice)
+                                    ? (t === stencil
+                                        ? [UInt8(0x5a)]
+                                        : format == .depth16Unorm ? [0xff, 0x3f] : [0, 0, 0x80, 0x3e])
+                                    : word(t, level, slice)
                             let got = try await gpu.read(t, bytesPerPixel: code.count, level: level, slice: slice)
                             let want = Array(repeating: code, count: (t.width >> level) * (t.height >> level)).flatMap {
                                 $0
@@ -265,15 +277,16 @@ struct SeparateZetaSliceTest: HWTest {
                 let pixels = try await gpu.read(colour, bytesPerPixel: 4)
                 let colourWrong =
                     pixels.enumerated().filter { $0.element != [UInt8(255), 0, 0, 255][$0.offset % 4] }.count
-                    + abs(pixels.count - w * h * 4)
+                        + abs(pixels.count - w * h * 4)
                 metrics.set("\(label)_completed", paths.count)
-                metrics.set("\(label)_raw", paths.allSatisfy { $0 == "raw" } ? 1 : 0)
+                metrics.set("\(label)_raw", paths.allSatisfy { $0 == "gm20b" } ? 1 : 0)
                 metrics.set("\(label)_wrong", wrong)
                 metrics.set("\(label)_neighbors_wrong", neighbors)
                 metrics.set("\(label)_colour_wrong", colourWrong)
-                if paths.contains(where: { $0 != "raw" }) || wrong != 0 || colourWrong != 0 {
+                if paths.contains(where: { $0 != "gm20b" }) || wrong != 0 || colourWrong != 0 {
                     failures.append(
-                        "\(label): bytes \(wrong), neighbors \(neighbors), colour \(colourWrong), paths \(paths)")
+                        "\(label): bytes \(wrong), neighbors \(neighbors), colour \(colourWrong), paths \(paths)"
+                    )
                 }
             }
         }

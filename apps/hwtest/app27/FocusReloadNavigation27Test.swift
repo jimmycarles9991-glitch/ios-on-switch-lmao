@@ -40,7 +40,7 @@ struct FocusReloadNavigation27Test: HWTest {
         await MainActor.run { table.requests = 0 }
         var updateMs = 0.0, reloadMs = 0.0, requests = 0
         let reloads = 8
-        for _ in 0..<reloads {
+        for _ in 0 ..< reloads {
             // A nil-result search has a one-second cooldown in 24B119.
             try await Task.sleep(nanoseconds: 1_100_000_000)
             let sample = await MainActor.run { () -> (Double, Double, Int) in
@@ -86,7 +86,8 @@ struct FocusReloadNavigation27Test: HWTest {
         let (list, rows) = await context.onStage { stage in
             let rows = SidebarRows()
             let layout = UICollectionViewCompositionalLayout.list(
-                using: UICollectionLayoutListConfiguration(appearance: .sidebar))
+                using: UICollectionLayoutListConfiguration(appearance: .sidebar)
+            )
             let list = UICollectionView(frame: stage.bounds, collectionViewLayout: layout)
             list.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             list.dataSource = rows
@@ -108,9 +109,9 @@ struct FocusReloadNavigation27Test: HWTest {
                 forName: UIFocusSystem.didUpdateNotification, object: nil, queue: .main
             ) { note in
                 guard let update = note.userInfo?[UIFocusSystem.focusUpdateContextUserInfoKey] as? UIFocusUpdateContext,
-                    !update.focusHeading.isEmpty,
-                    let previous = update.previouslyFocusedView, let next = update.nextFocusedView,
-                    previous !== next, previous.isDescendant(of: list), next.isDescendant(of: list)
+                      !update.focusHeading.isEmpty,
+                      let previous = update.previouslyFocusedView, let next = update.nextFocusedView,
+                      previous !== next, previous.isDescendant(of: list), next.isDescendant(of: list)
                 else { return }
                 waiter.resume(true)
             }
@@ -145,6 +146,7 @@ struct FocusReloadNavigation27Test: HWTest {
                 ("focus-enabled table can focus a row", allowedFocus),
                 ("editing respects allowsFocusDuringEditing", editingRequests == 0 && editingAllowedRequests > 0),
                 ("controller moves focus between sidebar collection rows", moved == true),
-            ], metrics)
+            ], metrics
+        )
     }
 }

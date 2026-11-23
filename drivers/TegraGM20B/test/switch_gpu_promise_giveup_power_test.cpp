@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // The give-up across the GPU's power-down (system sleep, rail-gating: tgm_recover_suspend) and its power-up (tgm_wake,
-// tgm_rail_up_locked). The call stays armed and does memory work only while the GPU is down: a reader parked across
-// the power-down is still let go at its second, no register is read (the stubs fail any read while down), and at the
-// power-up every promise still waited on gets its whole second again. Suspend and resume each wait out a call in flight.
+// tgm_rail_up_locked). The call stays armed and does memory work only while the GPU is down: a reader of a held promise
+// parked across the power-down is still let go at its holder's bound, which runs on through it, and no register is read
+// (the stubs fail any read while down). A kept promise is not looked at while down (the power-down drained its job
+// first) and the hang rule looks again from the power-up. Suspend and resume each wait out a call in flight.
 #include <atomic>
 #include <chrono>
 #include <thread>
@@ -27,17 +28,20 @@ protected:
 		tgm_promise_resume();
 	}
 
+	// A CPU reader parked on the promise at `offset`, whose holder then arms a 1 s bound
 	int cpuPark(uint32_t offset, const char *waiter, const char *who)
 	{
 		fake::pool[offset / 4] = kValue - 1;
 		tgm_fence_pages.made[0][offset / 4 - TGM_FENCE_PROMISE_WORD] = kValue;
-		return tgm_promise_park(offset, kValue, waiter, who, nullptr, 0);
+		const int parked = tgm_promise_park(offset, kValue, waiter, who, nullptr, 0);
+		holderArms(1000, 1, offset);
+		return parked;
 	}
 };
 
-// A CPU lock parked on a promise nobody keeps; the display goes off and the GPU rail-gates. Nothing brings the rail up,
-// and the call still lets the lock go at its second.
-TEST_F(Power, ACpuReaderParkedAcrossARailGateIsLetGoAtItsSecond)
+// A CPU lock parked on a held promise whose holder stopped; the display goes off and the GPU rail-gates. Nothing brings
+// the rail up, and the call still lets the lock go at the holder's bound.
+TEST_F(Power, ACpuReaderParkedAcrossARailGateIsLetGoAtItsBound)
 {
 	ASSERT_EQ(cpuPark(kOffset, "SpringBoard", "a CPU lock"), 1);
 	const uint64_t parked = fake::now;
@@ -58,11 +62,12 @@ TEST_F(Power, ACpuReaderParkedAcrossARailGateIsLetGoAtItsSecond)
 	EXPECT_EQ(lines.size(), 1u);
 }
 
-// A GPU reader parked on a promise nobody keeps when the GPU goes down: given up at its second with no ACQUIRE probe,
+// A GPU reader parked on a held promise when the GPU goes down: given up at the holder's bound with no ACQUIRE probe,
 // which reads the reader's PBDMA.
 TEST_F(Power, AGpuReaderParkedAcrossAPowerDownIsGivenUpUnprobed)
 {
 	readerSubmits();
+	holderArms(1000);
 	powerDown();
 	until(fake::now + 1000 * kMs);
 	ASSERT_EQ(lines.size(), 1u);
@@ -70,23 +75,28 @@ TEST_F(Power, AGpuReaderParkedAcrossAPowerDownIsGivenUpUnprobed)
 	EXPECT_EQ(probedReaders, 0u);
 }
 
-// Down, with a GPU reader still parked and the promised job queued behind another: every step that reads registers up
-// (the hang rule's look at the job ahead, the ACQUIRE probe of the parked reader) is skipped, and the promise is given
-// up at its second, since nothing runs before the resume.
-TEST_F(Power, TheCallReadsNoRegisterWhileTheGpuIsDown)
+// Down, with a GPU reader still parked on a kept promise whose job is queued behind another: the hang rule's look reads
+// registers, so nothing is looked at and nothing is given up until the power-up, which looks again a hang interval on.
+TEST_F(Power, AKeptPromiseIsNotLookedAtWhileTheGpuIsDown)
 {
 	readerSubmits();
 	makerKeeps(1);
 	powerDown();
-	until(fake::now + 1000 * kMs);
-	ASSERT_EQ(lines.size(), 1u);
-	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
+	until(fake::now + 10000 * kMs);
+	EXPECT_TRUE(lines.empty());
+	EXPECT_EQ(fake::pool[kOffset / 4], kValue - 1);
 	EXPECT_EQ(fake::hangLooks, 0u);
 	EXPECT_EQ(probedReaders, 0u);
+	EXPECT_FALSE(fake::call.pending) << "no call while down";
+	powerUp();
+	EXPECT_TRUE(fake::call.pending);
+	until(fake::now + 2000 * kMs);
+	EXPECT_EQ(fake::hangLooks, 1u);
+	EXPECT_TRUE(lines.empty());
 }
 
-// The power-down's drain killed the reader's and the maker's channels; a CPU copy still waits: memory work only, and
-// the copy is let go at its second.
+// The power-down's drain killed the reader's and the maker's channels; a CPU copy still waits: memory work only, nothing
+// given up, and the copy is let go by the maker's kill's retirement.
 TEST_F(Power, AGpuReaderRecordedOnADrainedChannelReadsNoRegister)
 {
 	readerSubmits();
@@ -97,16 +107,19 @@ TEST_F(Power, AGpuReaderRecordedOnADrainedChannelReadsNoRegister)
 	maker.error = 1;
 	maker.fence = maker.submitted;
 	powerDown();
-	until(fake::now + 1000 * kMs);
-	ASSERT_EQ(lines.size(), 1u);
-	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
+	until(fake::now + 2000 * kMs);
+	EXPECT_TRUE(lines.empty());
+	EXPECT_EQ(fake::pool[kOffset / 4], kValue - 1);
 	EXPECT_EQ(fake::hangLooks, 0u);
 	EXPECT_EQ(probedReaders, 0u);
+	makerRetires();
+	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
+	EXPECT_EQ(fake::abandoned.size(), 1u);
 }
 
-// Two promises parked 300 ms apart, the GPU down from 500 ms to 700 ms: both are judged a whole second from the
-// power-up.
-TEST_F(Power, ThePowerUpGivesEveryPromiseItsWholeSecondAgain)
+// Two promises held 300 ms apart, the GPU down from 500 ms to 700 ms: each holder's bound runs on through the
+// power-down, as Metal's does whatever the GPU's power.
+TEST_F(Power, AHoldersBoundRunsOnThroughAPowerDown)
 {
 	const uint64_t t0 = fake::now;
 	ASSERT_EQ(cpuPark(kOffset, "SpringBoard", "a CPU lock"), 1);
@@ -117,15 +130,35 @@ TEST_F(Power, ThePowerUpGivesEveryPromiseItsWholeSecondAgain)
 	until(t0 + 700 * kMs);
 	powerUp();
 	EXPECT_TRUE(fake::call.pending);
-	EXPECT_EQ(fake::call.due, t0 + 1700 * kMs);
-	until(t0 + 1699 * kMs);
+	EXPECT_EQ(fake::call.due, t0 + 1000 * kMs);
+	until(t0 + 999 * kMs);
 	EXPECT_TRUE(lines.empty());
-	until(t0 + 1700 * kMs);
+	until(t0 + 1000 * kMs);
+	EXPECT_EQ(lines.size(), 1u);
+	until(t0 + 1300 * kMs);
 	EXPECT_EQ(lines.size(), 2u);
 }
 
+// A promise nobody armed, a GPU reader parked on it and the GPU powered down meanwhile: the default bound runs on
+// through the power-down with no register read, as a holder's does
+TEST_F(Power, AnUnarmedPromisesBoundRunsOnThroughAPowerDown)
+{
+	readerSubmits();
+	const uint64_t parked = fake::now;
+	until(parked + 500 * kMs);
+	powerDown();
+	until(parked + 4999 * kMs);
+	EXPECT_TRUE(lines.empty());
+	until(parked + 5000 * kMs);
+	ASSERT_EQ(lines.size(), 1u)
+		<< "a reader of a promise nobody armed waits across the power-down";
+	EXPECT_EQ(fake::pool[kOffset / 4], kValue);
+	EXPECT_EQ(probedReaders, 0u);
+	powerUp();
+}
+
 // After the power-up the call reaches the GPU again: a promised job queued behind another is the hang rule's, looked
-// at and waited for, not given up at its second.
+// at and waited for, never given up.
 TEST_F(Power, AfterThePowerUpAJobAheadIsTheHangRulesAgain)
 {
 	powerDown();
@@ -133,7 +166,7 @@ TEST_F(Power, AfterThePowerUpAJobAheadIsTheHangRulesAgain)
 	powerUp();
 	readerSubmits();
 	makerKeeps(1);
-	until(fake::now + 1000 * kMs);
+	until(fake::now + 2000 * kMs);
 	EXPECT_TRUE(lines.empty());
 	EXPECT_EQ(fake::hangLooks, 1u);
 	EXPECT_EQ(maker.asked.back(), maker.submitted - 1)
@@ -153,7 +186,7 @@ TEST_F(Power, TheSuspendWaitsOutACallInFlight)
 		std::this_thread::sleep_for(std::chrono::milliseconds(50));
 		inLook = false;
 	};
-	fake::now += 1000 * kMs;
+	fake::now += 2000 * kMs;
 	fake::call.pending = false;
 	std::thread call([] {
 		giveup_run(nullptr);

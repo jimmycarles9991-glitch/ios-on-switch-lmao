@@ -1,8 +1,8 @@
-"""The raw path's direct-compiled records of states past 32 set-0 entries (direct/exec.metal), executed on the host.
+"""The driver's direct-compiled records of states past 32 set-0 entries (direct/exec.metal), executed on the host.
 
 wide_set reads twenty storage buffers a stage, each holding a distinct power of two, so a descriptor at the wrong
 set-0 byte or a duplicate shows in the sum. far_uniform adds a fragment uniform buffer whose descriptor is past set-0
-byte 496, which NVK promotes to a constant buffer: its bank is the buffer at that descriptor (raw_pack.h
+byte 496, which NVK promotes to a constant buffer: its bank is the buffer at that descriptor (pack.h
 programUboOffset). field_bound binds every argument the A10X's tables let a stage bind (31 buffers, 31 textures, 16
 samplers), field_bound_wide every argument the A13's do (31 buffers, 128 textures, 16 samplers): each buffer is read
 once and each texture through its own header with its sampler's. The build's identity draws the state of its own bound
@@ -28,7 +28,7 @@ ENTRY_SAMPLER_ONLY, ENTRY_UBO, ENTRY_TEXTURE, ENTRY_SPILL_TABLE = 0, 1, 2, 10
 SAMPLER_SLOT, CBUF_UBO = 1, 5
 VERTEX, FRAGMENT = 1, 2
 SPILL_ADDRESS = 0xF2_0000_0000
-PACK_ENTRIES = 32  # raw_pack.h kPackEntries: a record's entries in its PackPipeline, the rest out of line
+PACK_ENTRIES = 32  # pack.h kPackEntries: a record's entries in its PackPipeline, the rest out of line
 
 
 def tic(stage: int, slot: int) -> int:

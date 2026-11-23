@@ -60,7 +60,7 @@ mod tests;
 /// unchanged version, and its bless records the version. Independent of the crate's version and of
 /// [`ARTIFACT_FORMAT_VERSION`]. The commit that bumps it says what changed; this comment keeps no
 /// history.
-pub const SEMANTICS_VERSION: u32 = 1701;
+pub const SEMANTICS_VERSION: u32 = 1707;
 
 /// The byte-layout version of encoded artifacts (`CompiledFunction::to_bytes` and the
 /// [`PipelineArtifact`] encodings). Every encoded artifact carries it, and a decode under another
@@ -70,7 +70,7 @@ pub const SEMANTICS_VERSION: u32 = 1701;
 /// re-typed in an encoded type, its `codec` body or its `envelope`. A variant removed while its tag
 /// stays unused needs no bump: an entry holding it fails to decode, which is a miss. The commit that
 /// bumps it says what changed; this comment keeps no history.
-pub const ARTIFACT_FORMAT_VERSION: u32 = 400;
+pub const ARTIFACT_FORMAT_VERSION: u32 = 403;
 
 /// The version of what this crate's runtime does with a compiled pipeline: instantiating a binding
 /// plan (`BindingPlan::instantiate_*`: descriptor ranges, push bytes, root, argument, and handle
@@ -93,7 +93,7 @@ pub const ARTIFACT_FORMAT_VERSION: u32 = 400;
 /// changes no behaviour, and then updates that hash alone with the commit saying why, or changes
 /// behaviour and also bumps this version. The commit that bumps it says what changed; this comment
 /// keeps no history.
-pub const RUNTIME_VERSION: u32 = 1211;
+pub const RUNTIME_VERSION: u32 = 1213;
 
 /// The digest of the sources this build of the crate was compiled from: SHA-256, as lowercase hex,
 /// of the manifest, the build script, and exactly the files the crate roots' module tree compiles
@@ -338,6 +338,12 @@ pub struct VariantKey {
     /// (`LoweringInputs::shader_stencil`). The plan of a pipeline compiled under it states it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub shader_stencil: bool,
+    /// Under `shader_tests`, the depth attachment is `Depth16Unorm`: the stand-in holds its codes
+    /// as floats, and the variant's function tests and writes the code Metal stores for its depth
+    /// (`LoweringInputs::shader_tests_unorm16`). The plan of a pipeline compiled under it states
+    /// it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shader_tests_unorm16: bool,
     /// Under `shader_tests` at more than one sample, on a device whose fragment function computes
     /// each sample's depth (`VkProperty::CenterFragCoordDepth`): the vertex function also writes
     /// its window depth for it (`LoweringInputs::window_depth_varying`).
@@ -361,13 +367,6 @@ pub struct VariantKey {
     /// the other form is `BindError::NeedsVariant` with that form.
     #[cfg_attr(feature = "serde", serde(default))]
     pub captured_positions: Option<CaptureForm>,
-    /// Extended-range color attachments whose `half` shadow the draw's render pass instance
-    /// holds (`BindShape::extended_shadows`): the variant's fragment function reads and writes
-    /// each through the interlocked storage form against the shadow as Metal's tile value
-    /// (`LoweringInputs::extended_shadows`), and keeps writing the codes. The runtime asks for it
-    /// for every draw of an instance that holds the shadow and reads or writes the attachment.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub extended_shadows: BTreeSet<u32>,
     /// Sampled texture slots whose compile states `RuntimeFact::CrossClassReads` bound to a
     /// texture of a color format whose numeric class is not the slot's declared one, by the
     /// bound format's class (`LoweringInputs::cross_class`): the variant's function reads,
@@ -480,10 +479,10 @@ impl VariantKey {
             && !self.read_only_tests
             && !self.shader_tests
             && !self.shader_stencil
+            && !self.shader_tests_unorm16
             && !self.window_depth_varying
             && self.cubic_samplers.is_empty()
             && self.captured_positions.is_none()
-            && self.extended_shadows.is_empty()
             && self.cross_class.is_empty()
             && self.anisotropic_samplers.is_empty()
     }
@@ -601,7 +600,7 @@ impl VariantKey {
             out.read_only_tests = self.read_only_tests;
             out.shader_tests = self.shader_tests;
             out.shader_stencil = self.shader_stencil;
-            out.extended_shadows = self.extended_shadows.clone();
+            out.shader_tests_unorm16 = self.shader_tests_unorm16;
         }
         out.window_depth_varying =
             self.window_depth_varying && stage == crate::pipeline::sym::Stage::Vertex;

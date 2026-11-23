@@ -157,7 +157,7 @@ TEST(Gm20bTexTrap, NouveauReportsTexAloneWithoutATrapError)
 TEST(Gm20bGrFault, EveryChannelErrorIsChargedBeforeGrGoesOn)
 {
 	const std::string intr = Body(Text(GF100_C), "gf100_gr_intr(struct nvkm_inth *inth)\n{");
-	const char *handoff = "switch_gpu_gr_fault_stop(device, &gr->fault_fifo_held, chan, chid);";
+	const char *handoff = "switch_gpu_gr_fault_stop(chan, chid);";
 	for (const char *ack : {"nvkm_wr32(device, 0x400100, 0x00000010);",
 				"nvkm_wr32(device, 0x400100, 0x00000020);",
 				"nvkm_wr32(device, 0x400100, 0x00100000);",
@@ -173,8 +173,7 @@ TEST(Gm20bGrFault, EveryChannelErrorIsChargedBeforeGrGoesOn)
 	EXPECT_LT(sw, intr.find(handoff)) << "a software method is no error";
 	const size_t tex = intr.find("if (!gf100_gr_trap_tex(gr, chid, name)) {");
 	EXPECT_LT(tex, intr.rfind(handoff)) << "a TEX-only trap is no error";
-	EXPECT_LT(intr.rfind(handoff),
-		  intr.find("switch_gpu_gr_fault_access(device, gr->fault_fifo_held);"));
+	EXPECT_LT(intr.rfind(handoff), intr.find("nvkm_wr32(device, 0x400500, 0x00010001);"));
 	const std::string fault = Body(Text(GPU_FAULT_C), "void tgm_gr_fault(int chid)\n{");
 	EXPECT_NE(fault.find("chan->fault_seqno = tgm_chan_completed(chan) + 1;"),
 		  std::string::npos);
@@ -192,6 +191,50 @@ TEST(Gm20bGrFault, EveryChannelErrorIsChargedBeforeGrGoesOn)
 	EXPECT_LT(free.find("tgm_fault_unpublish(chan);"),
 		  free.find("nvif_object_dtor(&chan->user);"))
 		<< "out of the table before nvkm drops the channel";
+}
+
+// C24, C32: a GR error left gr_gpfifo_ctl (0x400500) off until nvkm_runl_rc was done, and GR sat in a busy context load
+// through the whole preempt wait (3.26 s). nouveau's gf100_gr_intr and nvgpu's gk20a_gr_isr turn access and semaphore
+// access back on at the interrupt's end, and every GR init turns them on (nvgpu gk20a_init_gr_setup_hw) before FECS
+// starts.
+TEST(Gm20bGrFault, FifoAccessIsBackOnAtTheInterruptsEndAndAfterEveryInit)
+{
+	const char *on = "nvkm_wr32(device, 0x400500, 0x00010001);";
+	const auto uses = [](const std::string &body) {
+		size_t n = 0;
+		for (size_t at = body.find("0x400500"); at != std::string::npos;
+		     at = body.find("0x400500", at + 1))
+			n++;
+		return n;
+	};
+	const std::string intr = Body(Text(GF100_C), "gf100_gr_intr(struct nvkm_inth *inth)\n{");
+	const size_t end = intr.find("return IRQ_HANDLED;");
+	ASSERT_NE(end, std::string::npos);
+	EXPECT_LT(intr.rfind("switch_gpu_gr_fault_stop(chan, chid);"), intr.find(on));
+	EXPECT_LT(intr.find(on), end);
+	EXPECT_EQ(uses(intr), 1u) << "no other write of GR's FIFO access";
+	const std::string init = Body(Text(GK20A_C), "gk20a_gr_init(struct gf100_gr *gr)\n{");
+	ASSERT_NE(init.find(on), std::string::npos)
+		<< "on unconditionally, a reset during recovery too";
+	EXPECT_EQ(uses(init), 1u);
+	EXPECT_LT(init.find(on), init.find("return gf100_gr_init_ctxctl(gr);"));
+}
+
+// The channel a GR error stops is the one on FECS's current context, read once at the interrupt's entry, as nvgpu's
+// gk20a_gr_isr takes it (gr_fecs_current_ctx_r 0x409b00, gk20a_gr_get_channel_from_ctx): not whatever an engine or
+// PBDMA is on by the time recovery runs.
+TEST(Gm20bGrFault, TheStoppedChannelIsTheOneOnFecsCurrentContext)
+{
+	const std::string intr = Body(Text(GF100_C), "gf100_gr_intr(struct nvkm_inth *inth)\n{");
+	const size_t ctx = intr.find("u64 inst = nvkm_rd32(device, 0x409b00) & 0x0fffffff;");
+	const size_t lookup =
+		intr.find("chan = nvkm_chan_get_inst(&gr->base.engine, (u64)inst << 12, &flags);");
+	ASSERT_NE(ctx, std::string::npos);
+	ASSERT_NE(lookup, std::string::npos);
+	EXPECT_LT(ctx, lookup);
+	EXPECT_LT(lookup, intr.find("switch_gpu_gr_fault_stop(chan, chid);"));
+	EXPECT_EQ(intr.find("chan = ", lookup + 1), std::string::npos)
+		<< "chan is never reassigned";
 }
 
 // T-v2 19:26:17-20: the PBDMA kept killed channel 20's method across GR's reset and GR loaded that context for 3 s

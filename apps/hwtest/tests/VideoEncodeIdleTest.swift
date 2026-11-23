@@ -22,20 +22,23 @@ struct VideoEncodeIdleTest: HWTest {
         let pattern = Pattern(width: width, height: height, clip: 0x7003)
         let settings = CompressorSettings(
             codec: codec, width: width, height: height, fps: fps, bitrate: 4_000_000, realTime: false,
-            requireHardware: true)
+            requireHardware: true
+        )
         let encoded: CompressedClip
         do {
             encoded = try Compressor.encode(
-                settings, pattern: pattern, frames: Self.frames, pause: (Self.pauseAfter, Self.pauseSeconds))
+                settings, pattern: pattern, frames: Self.frames, pause: (Self.pauseAfter, Self.pauseSeconds)
+            )
         } catch VideoError.status(let call, let status)
             where codec == .hevc
             && VideoEncodeTest.hardwareEncoders()
-                .allSatisfy({ ($0[kVTVideoEncoderList_CodecType as String] as? UInt32) != kCMVideoCodecType_HEVC })
+            .allSatisfy({ ($0[kVTVideoEncoderList_CodecType as String] as? UInt32) != kCMVideoCodecType_HEVC })
         {
             return .skip("no hardware HEVC encoder: none listed, and \(call) returned \(status)")
         }
         let decoded = try Decompressor.decode(
-            encoded.samples, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps)
+            encoded.samples, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps
+        )
         let afterPause = encoded.samples[(Self.pauseAfter + 1)...]
         var metrics = Metrics()
         metrics.set("pause_ms", Int(Self.pauseSeconds * 1000))
@@ -55,7 +58,8 @@ struct VideoEncodeIdleTest: HWTest {
                     "every input written by VIC across the power-off, none copied or refused",
                     VideoEncodeTest.allByVIC(encoded.routes, Self.frames)
                 ),
-            ], metrics, proof: encoded.usingHardware ? "encoder=\(encoded.encoderID)" : "")
+            ], metrics, proof: encoded.usingHardware ? "encoder=\(encoded.encoderID)" : ""
+        )
     }
 
     static var all: [VideoEncodeIdleTest] { [VideoCodec.h264, .hevc].map { VideoEncodeIdleTest(codec: $0) } }

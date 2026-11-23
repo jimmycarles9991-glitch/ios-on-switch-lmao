@@ -135,7 +135,8 @@ TEST_F(Events, VicCancellationRemovesNativePendingWaitAndNeverCallsReleasedConte
     EXPECT_TRUE(pending.empty());
 }
 
-TEST_F(Events, VicProducerFailureDoesNotPublishSuccessfulNativeSignal)
+// A failed producer ends the VIC job's wait as its completion does: the job runs and signals (SwitchGpuEventWaits.cpp)
+TEST_F(Events, VicProducerFailureEndsTheWaitAndTheJobSignals)
 {
     auto source = token(), consumer = token();
     signal(3, source);
@@ -156,8 +157,8 @@ TEST_F(Events, VicProducerFailureDoesNotPublishSuccessfulNativeSignal)
     switch_vic_events_commit(work);
     finish(consumer);
     finish(source, -5);
-    EXPECT_EQ(switch_gpu_event_waits_status(batch), -5);
-    EXPECT_EQ(native->value, 0u);
+    EXPECT_EQ(switch_gpu_event_waits_status(batch), 1);
+    EXPECT_EQ(native->value, 4u);
     switch_vic_events_release(&work);
     pump();
 }

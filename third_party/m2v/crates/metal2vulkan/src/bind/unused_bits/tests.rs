@@ -1,71 +1,54 @@
-use super::{rule, typed_module, TexelWords, UnusedBitsModule, SHAPE, TILES, WORDS};
+use super::{rule, typed_module, UnusedBitsModule, SHAPE, TILES, WORDS};
 use crate::metal::format::ExtendedRange;
 use crate::spirv::interp::{run, Buffer, Config, Order, Resources};
 use crate::spirv::testing::{assert_valid, committed_profiles};
 
-/// Every form and the words it is held in.
-fn forms() -> Vec<(ExtendedRange, TexelWords)> {
-    let mut all = Vec::new();
-    for srgb in [false, true] {
-        all.push((ExtendedRange::Bgr10 { srgb }, TexelWords::Raw));
-        all.push((ExtendedRange::Bgra10 { srgb }, TexelWords::Raw));
-        all.push((ExtendedRange::Planes { srgb }, TexelWords::Raw));
-        all.push((ExtendedRange::Planes { srgb }, TexelWords::ColorPlane));
-    }
-    for form in [
-        ExtendedRange::R10X6,
-        ExtendedRange::Rg10X12,
-        ExtendedRange::R10X6Srgb,
-        ExtendedRange::Rg10X12Srgb,
-        ExtendedRange::R16Bfloat,
-        ExtendedRange::Rg16Bfloat,
-        ExtendedRange::Rgba16Bfloat,
-    ] {
-        all.push((form, TexelWords::Raw));
-    }
-    all
-}
+/// Every padded and bfloat form.
+const FORMS: [ExtendedRange; 7] = [
+    ExtendedRange::R10X6,
+    ExtendedRange::Rg10X12,
+    ExtendedRange::R10X6Srgb,
+    ExtendedRange::Rg10X12Srgb,
+    ExtendedRange::R16Bfloat,
+    ExtendedRange::Rg16Bfloat,
+    ExtendedRange::Rgba16Bfloat,
+];
 
-/// The module of `form` held as `words`.
-fn module(form: ExtendedRange, words: TexelWords) -> crate::spirv::ir::TypedModule {
-    let rule = rule(form, words).expect("a rule");
-    let bytes = UnusedBitsModule::texel_bytes(form, words).expect("texel bytes");
+/// The module of `form`.
+fn module(form: ExtendedRange) -> crate::spirv::ir::TypedModule {
+    let rule = rule(form).expect("a rule");
+    let bytes = UnusedBitsModule::texel_bytes(form).expect("texel bytes");
     typed_module(&rule, bytes).expect("module")
 }
 
 #[test]
 fn the_unused_bits_kernel_is_valid_on_every_committed_profile() {
     for (_, p) in committed_profiles().expect("profiles") {
-        for (form, words) in forms() {
-            assert_valid(module(form, words), &p);
+        for form in FORMS {
+            assert_valid(module(form), &p);
         }
     }
 }
 
-/// Only a two-plane format has color-plane words.
+/// Only a padded or bfloat form has a rule.
 #[test]
-fn only_a_two_plane_format_has_color_plane_words() {
-    for (form, words) in forms() {
-        assert!(rule(form, words).is_some(), "{form:?} {words:?}");
-        let plane = rule(form, TexelWords::ColorPlane).is_some();
-        assert_eq!(
-            plane,
-            matches!(form, ExtendedRange::Planes { .. }),
-            "{form:?}"
-        );
+fn only_a_padded_or_bfloat_form_has_a_rule() {
+    for form in FORMS {
+        assert!(rule(form).is_some(), "{form:?}");
+    }
+    for form in [
+        ExtendedRange::Bgr10 { srgb: false },
+        ExtendedRange::Bgra10 { srgb: true },
+        ExtendedRange::Planes { srgb: false },
+    ] {
+        assert!(rule(form).is_none(), "{form:?}");
+        assert_eq!(UnusedBitsModule::texel_bytes(form), None, "{form:?}");
     }
 }
 
-/// Metal's store of `word`, the `odd` word of its texel, of `form` held as `words` (the module
-/// docs), computed here apart from the kernel.
-fn stored(form: ExtendedRange, words: TexelWords, word: u32, odd: bool) -> u32 {
-    let codes = 0x3fff_ffff;
-    match (form, words) {
-        (ExtendedRange::Bgr10 { .. }, _) => word | !codes,
-        (ExtendedRange::Planes { .. }, TexelWords::Raw) if odd => word,
-        (ExtendedRange::Planes { .. }, _) => word & codes,
-        (ExtendedRange::Bgra10 { .. }, _) if !odd => word & 0xffc0_ffc0,
-        (ExtendedRange::Bgra10 { .. }, _) => (word & 0xffc0) | (word >> 22).clamp(384, 894) << 22,
+/// Metal's store of `word` of `form` (the module docs), computed here apart from the kernel.
+fn stored(form: ExtendedRange, word: u32) -> u32 {
+    match form {
         _ if form.bfloat() => {
             let code = |h: u32| form.load_code(h).expect("a bfloat code");
             code(word & 0xffff) | code(word >> 16) << 16
@@ -90,16 +73,16 @@ impl Rng {
     }
 }
 
-/// Run the kernel of `form` held as `words` over `bytes` with the mask `tiles` and the shape
-/// `shape`, in `groups` workgroups, both invocation orders.
+/// Run the kernel of `form` over `bytes` with the mask `tiles` and the shape `shape`, in `groups`
+/// workgroups, both invocation orders.
 fn rewritten(
-    (form, words): (ExtendedRange, TexelWords),
+    form: ExtendedRange,
     bytes: &[u8],
     tiles: &[u32],
     shape: [u8; 16],
     groups: u32,
 ) -> Vec<u8> {
-    let m = module(form, words);
+    let m = module(form);
     let mut out = Vec::new();
     for order in [Order::Forward, Order::Reverse] {
         let res = Resources {
@@ -151,8 +134,8 @@ fn each_word_of_a_masked_tile_takes_metals_store_and_no_other_changes() {
         })
         .collect();
     let set = |tile: u32| tile < tiles && mask[(tile / 32) as usize] >> (tile % 32) & 1 == 1;
-    for (form, words) in forms() {
-        let texel = UnusedBitsModule::texel_bytes(form, words).unwrap();
+    for form in FORMS {
+        let texel = UnusedBitsModule::texel_bytes(form).unwrap();
         let row_words = (columns * texel).div_ceil(4);
         let rows = layers * layer_rows - first_row;
         let mut rng = Rng(u64::from(texel) << 32 | u64::from(row_words));
@@ -160,7 +143,7 @@ fn each_word_of_a_masked_tile_takes_metals_store_and_no_other_changes() {
         let bytes: Vec<u8> = before.iter().flat_map(|w| w.to_le_bytes()).collect();
         let groups = (before.len() as u32).div_ceil(UnusedBitsModule::LOCAL_SIZE) + 1;
         let shape = UnusedBitsModule::shape(row_words, first_row, layer_rows, tiles_per_row);
-        let after = rewritten((form, words), &bytes, &mask, shape, groups);
+        let after = rewritten(form, &bytes, &mask, shape, groups);
         let (mut changed, mut kept) = (0, 0);
         for (i, (&word, got)) in before.iter().zip(after.chunks(4)).enumerate() {
             let i = i as u32;
@@ -170,20 +153,20 @@ fn each_word_of_a_masked_tile_takes_metals_store_and_no_other_changes() {
             let x = 4 * w / texel;
             let tile = (layer * tile_rows + y / 32) * tiles_per_row + x / 32;
             let want = match set(tile) {
-                true => stored(form, words, word, w % 2 == 1),
+                true => stored(form, word),
                 false => word,
             };
             let got = u32::from_le_bytes([got[0], got[1], got[2], got[3]]);
             assert_eq!(
                 got, want,
-                "{form:?} {words:?} word {i} (row {row}, word {w}, tile {tile}): {word:08x}"
+                "{form:?} word {i} (row {row}, word {w}, tile {tile}): {word:08x}"
             );
             match got == word {
                 true => kept += 1,
                 false => changed += 1,
             }
         }
-        assert!(changed > 0 && kept > 0, "{form:?} {words:?}");
+        assert!(changed > 0 && kept > 0, "{form:?}");
     }
 }
 
@@ -218,12 +201,12 @@ fn every_padded_word_takes_its_code_s_load_code_with_its_low_six_bits_zeroed() {
             })
             .collect();
         // One row of every word: its texels' tiles all set.
-        let texel = UnusedBitsModule::texel_bytes(form, TexelWords::Raw).unwrap();
+        let texel = UnusedBitsModule::texel_bytes(form).unwrap();
         let tiles_per_row = (4 * words / texel).div_ceil(32);
         let mask = vec![u32::MAX; tiles_per_row.div_ceil(32) as usize];
         let shape = UnusedBitsModule::shape(words, 0, 1, tiles_per_row);
         assert_eq!(
-            rewritten((form, TexelWords::Raw), &bytes, &mask, shape, groups),
+            rewritten(form, &bytes, &mask, shape, groups),
             want,
             "{form:?}"
         );
@@ -267,12 +250,12 @@ fn every_bfloat_code_takes_its_load_code() {
             .iter()
             .flat_map(|&c| (u16::try_from(load(c)).expect("a code")).to_le_bytes())
             .collect();
-        let texel = UnusedBitsModule::texel_bytes(form, TexelWords::Raw).unwrap();
+        let texel = UnusedBitsModule::texel_bytes(form).unwrap();
         let tiles_per_row = (4 * words / texel).div_ceil(32);
         let mask = vec![u32::MAX; tiles_per_row.div_ceil(32) as usize];
         let shape = UnusedBitsModule::shape(words, 0, 1, tiles_per_row);
         assert_eq!(
-            rewritten((form, TexelWords::Raw), &bytes, &mask, shape, groups),
+            rewritten(form, &bytes, &mask, shape, groups),
             want,
             "{form:?}"
         );
@@ -282,15 +265,15 @@ fn every_bfloat_code_takes_its_load_code() {
 /// A mask of no word leaves every word, and a tile past the mask's words reads as unset.
 #[test]
 fn a_tile_past_the_mask_is_not_rewritten() {
-    let form = (ExtendedRange::Bgr10 { srgb: false }, TexelWords::Raw);
-    // Two layers of one row of 64 texels, 40 tiles a row: the first row's tiles 0 and 1 are the
-    // mask's one word's bits 0 and 1 (tile 0 set), and the second's, 40 and 41, lie past it.
-    let bytes = vec![0u8; 4 * 128];
+    // Two layers of one row of 64 texels of 4 bytes, 40 tiles a row: the first row's tiles 0 and
+    // 1 are the mask's one word's bits 0 and 1 (tile 0 set), and the second's, 40 and 41, lie
+    // past it.
+    let bytes = vec![0xffu8; 4 * 128];
     let shape = UnusedBitsModule::shape(64, 0, 1, 40);
-    let after = rewritten(form, &bytes, &[0b01], shape, 2);
+    let after = rewritten(ExtendedRange::Rg10X12, &bytes, &[0b01], shape, 2);
     for (i, word) in after.chunks(4).enumerate() {
         let word = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-        let want = if i < 32 { 0xc000_0000 } else { 0 };
+        let want = if i < 32 { 0xffc0_ffc0 } else { u32::MAX };
         assert_eq!(word, want, "word {i}");
     }
 }

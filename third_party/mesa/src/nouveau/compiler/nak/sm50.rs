@@ -13,6 +13,8 @@ use std::ops::Range;
 #[cfg(test)]
 mod alu_tests;
 #[cfg(test)]
+mod layout_tests;
+#[cfg(test)]
 mod ld_cache_tests;
 mod hsetp2;
 mod int3;
@@ -108,21 +110,25 @@ impl ShaderModel for ShaderModel50 {
         false
     }
 
+    // nv50_ir's GM107 scheduler (SchedDataCalculatorGM107::setDelay) and
+    // UAM's, which compiles for GM20B, stall 13 after a branch-class op and 15
+    // after EXIT, BAR and MEMBAR, with no NOP behind either. CCTL and OUT keep
+    // the 15 they had as 13 and a NOP of 2.
     fn exec_latency(&self, op: &Op) -> u32 {
         match op {
-            Op::CCtl(_)
-            | Op::MemBar(_)
-            | Op::Bra(_)
+            Op::Bra(_)
             | Op::SSy(_)
             | Op::Sync(_)
             | Op::Brk(_)
             | Op::PBk(_)
             | Op::Cont(_)
             | Op::PCnt(_)
+            | Op::Kill(_) => 13,
+            Op::CCtl(_)
+            | Op::MemBar(_)
             | Op::Exit(_)
             | Op::Bar(_)
-            | Op::Kill(_)
-            | Op::OutFinal(_) => 13,
+            | Op::OutFinal(_) => 15,
             _ => 1,
         }
     }
@@ -3541,6 +3547,15 @@ fn encode_instr(
     e.inst
 }
 
+/// The byte address of a program's `n`-th instruction: a scheduling word heads
+/// each group of three, so no instruction, and no branch target, is one.
+/// Blocks run on from one group into the next, as nv50_ir's and UAM's GM107
+/// emitters lay code out: GM20B branches into the middle of a group (the
+/// bench's 42 latency chains of 11 Nov loop to a group's second instruction).
+fn instr_address(n: usize) -> usize {
+    (n + n / 3 + 1) * 8
+}
+
 fn encode_sm50_shader(sm: &ShaderModel50, s: &Shader<'_>) -> Vec<u32> {
     assert!(s.functions.len() == 1);
     let func = &s.functions[0];
@@ -3548,60 +3563,46 @@ fn encode_sm50_shader(sm: &ShaderModel50, s: &Shader<'_>) -> Vec<u32> {
     let mut num_instrs = 0_usize;
     let mut labels = FxHashMap::default();
     for b in &func.blocks {
-        // We ensure blocks will have groups of 3 instructions with a
-        // schedule instruction before each groups.  As we should never jump
-        // to a schedule instruction, we account for that here.
-        labels.insert(b.label, num_instrs + 8);
-
-        let block_num_instrs = b.instrs.len().next_multiple_of(3);
-
-        // Every 3 instructions, we have a new schedule instruction so we
-        // need to account for that.
-        num_instrs += (block_num_instrs + (block_num_instrs / 3)) * 8;
+        labels.insert(b.label, instr_address(num_instrs));
+        num_instrs += b.instrs.len();
     }
 
+    let mut instrs_iter = func.blocks.iter().flat_map(|b| b.instrs.iter());
     let mut encoded = Vec::new();
-    for b in &func.blocks {
-        // A block is composed of groups of 3 instructions.
-        let block_num_instrs = b.instrs.len().next_multiple_of(3);
+    for _ in 0..num_instrs.div_ceil(3) {
+        let mut ip = ((encoded.len() / 2) + 1) * 8;
 
-        let mut instrs_iter = b.instrs.iter();
+        let mut sched_instr = [0x0; 2];
 
-        for _ in 0..(block_num_instrs / 3) {
-            let mut ip = ((encoded.len() / 2) + 1) * 8;
+        let instr0 = encode_instr(
+            0,
+            instrs_iter.next(),
+            sm,
+            &labels,
+            &mut ip,
+            &mut sched_instr,
+        );
+        let instr1 = encode_instr(
+            1,
+            instrs_iter.next(),
+            sm,
+            &labels,
+            &mut ip,
+            &mut sched_instr,
+        );
+        let instr2 = encode_instr(
+            2,
+            instrs_iter.next(),
+            sm,
+            &labels,
+            &mut ip,
+            &mut sched_instr,
+        );
 
-            let mut sched_instr = [0x0; 2];
-
-            let instr0 = encode_instr(
-                0,
-                instrs_iter.next(),
-                sm,
-                &labels,
-                &mut ip,
-                &mut sched_instr,
-            );
-            let instr1 = encode_instr(
-                1,
-                instrs_iter.next(),
-                sm,
-                &labels,
-                &mut ip,
-                &mut sched_instr,
-            );
-            let instr2 = encode_instr(
-                2,
-                instrs_iter.next(),
-                sm,
-                &labels,
-                &mut ip,
-                &mut sched_instr,
-            );
-
-            encoded.extend_from_slice(&sched_instr[..]);
-            encoded.extend_from_slice(&instr0[..]);
-            encoded.extend_from_slice(&instr1[..]);
-            encoded.extend_from_slice(&instr2[..]);
-        }
+        encoded.extend_from_slice(&sched_instr[..]);
+        encoded.extend_from_slice(&instr0[..]);
+        encoded.extend_from_slice(&instr1[..]);
+        encoded.extend_from_slice(&instr2[..]);
     }
 
     encoded

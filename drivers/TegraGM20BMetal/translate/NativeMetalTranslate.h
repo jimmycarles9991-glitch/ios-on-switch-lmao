@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The C ABI of the raw path's translation with no m2v runtime (native_metal_translate, NativeMetalTranslate.rs): libraries
+// The C ABI of the driver's translation with no m2v runtime (native_metal_translate, NativeMetalTranslate.rs): libraries
 // and functions the translator makes alone, the states and kernels it compiles of them on the build's compile profile's
 // devices (every Vulkan handle they hand over 0), and the pipeline descriptors' fields, which the bridge's runtime device
 // takes too (NativeMetalObjects.h). A call that fails returns 0/NULL/false and leaves its reason in nmb_last_error() (per
@@ -8,7 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../raw/runtime/raw_direct_abi.h"
+#include "../direct_abi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,7 +46,8 @@ struct switch_linked_group_name {
  * vertex descriptor. The linked arrays are vertexLinkedFunctions' and fragmentLinkedFunctions' functions and
  * privateFunctions, as NmbComputePipelineDescriptor's linked functions are. tessellation through
  * factor_scale_enabled are the descriptor's tessellator state, as MTLRenderPipelineDescriptor's (0: Metal's defaults),
- * and max_amplification its maxVertexAmplificationCount. */
+ * max_amplification its maxVertexAmplificationCount and texture_write_rounding its textureWriteRoundingMode (Apple SPI,
+ * 0 where Metal has none). */
 #define NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS(Function)                                                           \
     Function *vertex, *fragment;                                                                                  \
     struct NmbColorAttachment colors[8];                                                                          \
@@ -64,7 +65,8 @@ struct switch_linked_group_name {
     uint64_t fragment_private_count;                                                                              \
     uint64_t tessellation, max_tessellation_factor, partition_mode, factor_format, factor_step_function, winding, \
         control_point_index_type, factor_scale_enabled;                                                           \
-    uint64_t max_amplification;
+    uint64_t max_amplification;                                                                                   \
+    uint64_t texture_write_rounding;
 
 /* As NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS, a compute pipeline descriptor's. The linked arrays are MTLLinkedFunctions'
  * functions and privateFunctions, the external functions the kernel calls by name (counted arrays of live handles for
@@ -144,7 +146,12 @@ bool nmb_offline_compute_pipeline_compiles(const NmbOfflineComputePipelineDescri
 // `facts`: maxTotalThreadsPerThreadgroup, threadExecutionWidth, staticThreadgroupMemoryLength (false with nmb_last_error)
 bool nmb_offline_compute_pipeline_facts(const NmbOfflineComputePipelineDescriptor *descriptor, uint32_t facts[3]);
 
-// A state's reflection with no m2v runtime, as raw/runtime/raw_reflection_blob.h lays it out (NativeMetalReflection.rs):
+// The address map (Texture::addressMap) a kernel's compile takes for a texture of MTLPixelFormat `pixelFormat` whose
+// dispatch states none: the driver's map of such a texture under every YCbCr matrix but P3
+// (NativeMetalKernelTextures.rs)
+uint8_t nmb_kernel_texture_map(uint64_t pixelFormat);
+
+// A state's reflection with no m2v runtime, as reflection_blob.h lays it out (NativeMetalReflection.rs):
 // a render state's as newRenderPipelineStateWithDescriptor:options:reflection:error: answers it with argument info, its
 // vertex, fragment, tile, object and mesh stages; a compute state's as the runtime's compute prepare gives it (its kernel's
 // bindings). Null with nmb_last_error. Its bytes live until nmb_reflection_blob_release.

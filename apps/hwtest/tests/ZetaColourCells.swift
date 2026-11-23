@@ -4,8 +4,8 @@ import HWTestGPU
 import IOSurface
 import Metal
 
-/// gpu.raw.zeta_colour's cells (ZetaColourTest.swift): a zeta given a pattern by the fixed-function depth and stencil,
-/// then its stencil moved by the raw path's stencil plane route (a resolve, or a turned pass's turn copies), then read
+/// gpu.gm20b.zeta_colour's cells (ZetaColourTest.swift): a zeta given a pattern by the fixed-function depth and stencil,
+/// then its stencil moved by the driver's stencil plane route (a resolve, or a turned pass's turn copies), then read
 /// back by aspect and tested as a zeta. The pattern holds every stencil value and a depth of its own a texel, so a texel
 /// the route puts elsewhere in the zeta's memory is seen.
 struct ZetaColourCells {
@@ -55,16 +55,20 @@ struct ZetaColourCells {
         if Self.hasDepth(format) {
             e.setRenderPipelineState(
                 try render(
-                    fragment: "zeta_depth_fragment", format: .invalid, samples: samples, depth: depth, stencil: format))
+                    fragment: "zeta_depth_fragment", format: .invalid, samples: samples, depth: depth, stencil: format
+                )
+            )
             e.setDepthStencilState(try state(depth: .always, writes: true))
             e.setFragmentBytes(&p, length: 8, index: 0)
             e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         e.setRenderPipelineState(
             try render(
-                fragment: "zeta_bit_fragment", format: .invalid, samples: samples, depth: depth, stencil: format))
+                fragment: "zeta_bit_fragment", format: .invalid, samples: samples, depth: depth, stencil: format
+            )
+        )
         e.setStencilReferenceValue(0xFF)
-        for k in 0..<8 {
+        for k in 0 ..< 8 {
             p[1] = 1 << k
             e.setDepthStencilState(try state(stencil: .always, op: .replace, writeMask: 1 << k))
             e.setFragmentBytes(&p, length: 8, index: 0)
@@ -166,7 +170,8 @@ struct ZetaColourCells {
         let depth: MTLPixelFormat = Self.hasDepth(format) ? format : .invalid
         let marks = try render(fragment: "solid_fragment", format: .bgra8Unorm, depth: depth, stencil: format)
         let invert = try render(
-            fragment: "solid_fragment", format: .bgra8Unorm, depth: depth, stencil: format, writes: false)
+            fragment: "solid_fragment", format: .bgra8Unorm, depth: depth, stencil: format, writes: false
+        )
         let equal = try state(stencil: .equal)
         let inverting = try state(stencil: .always, op: .invert, writeMask: 0xFF)
         let nearer = try state(depth: .less, writes: true)
@@ -179,7 +184,7 @@ struct ZetaColourCells {
             let e = commands.makeRenderCommandEncoder(descriptor: pass)!
             e.setRenderPipelineState(marks)
             e.setDepthStencilState(equal)
-            for v in 0..<256 {
+            for v in 0 ..< 256 {
                 e.setStencilReferenceValue(UInt32(v))
                 GPU.draw(e, corners: GPU.fullScreen, color: SIMD4(Float(v) / 255, 0, 0, 1))
             }
@@ -196,11 +201,12 @@ struct ZetaColourCells {
         var count = try await check(zeta, seed: seed, cell: cell, inverted: true, nearer: Self.nearer)
         guard plane.surface.lock(options: .readOnly, seed: nil) == 0 else { throw TestFailure("IOSurfaceLock failed") }
         defer { plane.surface.unlock(options: .readOnly, seed: nil) }
-        for y in 0..<height {
-            for x in 0..<width {
+        for y in 0 ..< height {
+            for x in 0 ..< width {
                 let (px, py) = cells.stored(x, y)
                 let got = plane.surface.baseAddress.load(
-                    fromByteOffset: py * plane.rowBytes + px * 4 + 2, as: UInt8.self)
+                    fromByteOffset: py * plane.rowBytes + px * 4 + 2, as: UInt8.self
+                )
                 let want = Self.stencil(x, y, seed)
                 if got != want {
                     count.tested += 1
@@ -223,16 +229,17 @@ struct ZetaColourCells {
         var count = Count()
         let want = { (x: Int, y: Int) in inverted ? ~Self.stencil(x, y, seed) : Self.stencil(x, y, seed) }
         let stencils = try await gpu.read(
-            zeta, bytesPerPixel: 1, options: Self.hasDepth(format) ? .stencilFromDepthStencil : [])
-        for y in 0..<h {
-            for x in 0..<w where stencils[y * w + x] != want(x, y) {
+            zeta, bytesPerPixel: 1, options: Self.hasDepth(format) ? .stencilFromDepthStencil : []
+        )
+        for y in 0 ..< h {
+            for x in 0 ..< w where stencils[y * w + x] != want(x, y) {
                 count.stencil += 1
                 count.miss("stencil", cell, x, y, "\(stencils[y * w + x])", "\(want(x, y))")
             }
         }
         let marks = try await stencilMarks(zeta)
-        for y in 0..<h {
-            for x in 0..<w where marks[y * w + x] != UInt32(want(x, y)) {
+        for y in 0 ..< h {
+            for x in 0 ..< w where marks[y * w + x] != UInt32(want(x, y)) {
                 count.tested += 1
                 count.miss("stencil_equal", cell, x, y, "\(marks[y * w + x])", "\(want(x, y))")
             }
@@ -240,8 +247,8 @@ struct ZetaColourCells {
         guard Self.hasDepth(format) else { return count }
         let depths = try await gpu.read(zeta, bytesPerPixel: 4, options: .depthFromDepthStencil)
         let equal = try await depthMarks(zeta, seed: seed)
-        for y in 0..<h {
-            for x in 0..<w {
+        for y in 0 ..< h {
+            for x in 0 ..< w {
                 let got = depths.loaded(as: Float.self, at: y * w + x), pattern = Self.depth(x, y, seed)
                 let want = min(pattern, nearer)
                 if got.bitPattern != want.bitPattern {
@@ -264,7 +271,8 @@ struct ZetaColourCells {
         let target = try gpu.texture(.r32Uint, zeta.width, zeta.height, usage: [.renderTarget])
         let pipeline = try render(
             fragment: "integer_uint_fragment", format: .r32Uint, depth: Self.hasDepth(format) ? format : .invalid,
-            stencil: format)
+            stencil: format
+        )
         let equal = try state(stencil: .equal)
         try await gpu.run { commands in
             let pass = Self.zetaPass(zeta, load: .load, store: .dontCare)
@@ -277,7 +285,7 @@ struct ZetaColourCells {
             e.setDepthStencilState(equal)
             var corners = GPU.fullScreen
             e.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
-            for v in 0..<256 {
+            for v in 0 ..< 256 {
                 var value = SIMD4<UInt32>(UInt32(v), 0, 0, 0)
                 e.setStencilReferenceValue(UInt32(v))
                 e.setFragmentBytes(&value, length: 16, index: 0)
@@ -292,7 +300,8 @@ struct ZetaColourCells {
     private func depthMarks(_ zeta: MTLTexture, seed: UInt32) async throws -> [UInt32] {
         let target = try gpu.texture(.r32Uint, zeta.width, zeta.height, usage: [.renderTarget])
         let pipeline = try render(
-            fragment: "zeta_depth_mark_fragment", format: .r32Uint, depth: zeta.pixelFormat, stencil: zeta.pixelFormat)
+            fragment: "zeta_depth_mark_fragment", format: .r32Uint, depth: zeta.pixelFormat, stencil: zeta.pixelFormat
+        )
         let equal = try state(depth: .equal)
         try await gpu.run { commands in
             let pass = Self.zetaPass(zeta, load: .load, store: .dontCare)
@@ -314,7 +323,7 @@ struct ZetaColourCells {
 
     private func words(_ texture: MTLTexture) async throws -> [UInt32] {
         let bytes = try await gpu.read(texture, bytesPerPixel: 4)
-        return (0..<(texture.width * texture.height)).map { bytes.loaded(as: UInt32.self, at: $0) }
+        return (0 ..< (texture.width * texture.height)).map { bytes.loaded(as: UInt32.self, at: $0) }
     }
 
     static func name(_ format: MTLPixelFormat) -> String { format == .stencil8 ? "s8" : "d32s8" }

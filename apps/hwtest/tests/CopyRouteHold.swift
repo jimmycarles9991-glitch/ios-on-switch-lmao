@@ -14,7 +14,8 @@ enum CopyRouteHold {
         ).get()
         defer {
             _ = session.call(
-                LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size)
+                LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
+            )
         }
         return try await body()
     }

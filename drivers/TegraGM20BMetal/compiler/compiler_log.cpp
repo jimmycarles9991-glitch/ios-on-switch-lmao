@@ -128,7 +128,7 @@ bool RequestLog::trimLocked(uint64_t room)
     return true;
 }
 
-void RequestLog::add(const raw::Digest &name, const std::string &request)
+void RequestLog::add(const gm20b::Digest &name, const std::string &request)
 {
     std::lock_guard<std::mutex> l(lock_);
     if (fd_ < 0 || names_.count(name) || request.size() > kRequestBytes)
@@ -144,7 +144,7 @@ void RequestLog::add(const raw::Digest &name, const std::string &request)
         added_.emplace_back(name, span);
 }
 
-void RequestLog::replay(const std::function<bool(const std::string &request, raw::Digest &name)> &keep)
+void RequestLog::replay(const std::function<bool(const std::string &request, gm20b::Digest &name)> &keep)
 {
     std::vector<Span> read;
     uint64_t generation;
@@ -153,11 +153,11 @@ void RequestLog::replay(const std::function<bool(const std::string &request, raw
         read.swap(read_);
         generation = generation_;
     }
-    std::vector<std::pair<raw::Digest, Span>> kept;
-    std::set<raw::Digest> seen;
+    std::vector<std::pair<gm20b::Digest, Span>> kept;
+    std::set<gm20b::Digest> seen;
     std::string request;
     for (const Span &s : read) {
-        raw::Digest name{};
+        gm20b::Digest name{};
         bool got;
         {
             std::lock_guard<std::mutex> l(lock_);

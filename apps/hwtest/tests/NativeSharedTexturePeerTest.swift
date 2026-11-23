@@ -42,14 +42,17 @@ final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTextureP
         let interface = NSXPCInterface(with: SharedTexturePeer.self)
         let classes = NSSet(object: MTLSharedTextureHandle.self) as! Set<AnyHashable>
         interface.setClasses(
-            classes, for: #selector(SharedTexturePeer.write(_:reply:)), argumentIndex: 0, ofReply: false)
+            classes, for: #selector(SharedTexturePeer.write(_:reply:)), argumentIndex: 0, ofReply: false
+        )
         let surfaces = NSSet(object: IOSurface.self) as! Set<AnyHashable>
         interface.setClasses(
             surfaces, for: #selector(SharedTexturePeer.renderSurface(_:keep:reply:)), argumentIndex: 0,
-            ofReply: false)
+            ofReply: false
+        )
         interface.setClasses(
             surfaces, for: #selector(SharedTexturePeer.makeSurfaceWidth(_:height:keep:reply:)), argumentIndex: 0,
-            ofReply: true)
+            ofReply: true
+        )
         connection.remoteObjectInterface = interface
         connection.exportedInterface = NSXPCInterface(with: SharedTexturePeerHost.self)
         connection.exportedObject = self
@@ -61,13 +64,14 @@ final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTextureP
     func ready(_ pid: Int32) { accepted.signal() }
 }
 
-/// Shared textures across two processes: the app makes one of each shape the raw path now shares (a mipmapped 2D
+/// Shared textures across two processes: the app makes one of each shape the driver now shares (a mipmapped 2D
 /// texture, a 2D array, a cube and a cube array, a 3D texture, a 4-sample texture, a 1D texture and a mipmapped ASTC
-/// one and a one-level ASTC one, each where the device makes the private texture of its descriptor) and sends each handle to the texture peer, a
-/// process of its own with its own device and raw channel, which opens it with newSharedTextureWithHandle: and writes
-/// every level, slice and sample on the GPU (blits; a render pass into a mipmapped one's level 1 and into the
-/// multisampled one). The app then reads every texel back in its own texture of the same pages: no texel was copied
-/// between the processes. iOS 17 has the BlueTool stand-in start the peer, iOS 27 launchd for its Mach service.
+/// one and a one-level ASTC one, each where the device makes the private texture of its descriptor) and sends each
+/// handle to the texture peer, a process of its own with its own device and raw channel, which opens it with
+/// newSharedTextureWithHandle: and writes every level, slice and sample on the GPU (blits; a render pass into the
+/// mipmapped RGBA8 one's level 1 and into the multisampled one; every ASTC level by a blit, as Metal renders into no
+/// block-compressed format). The app then reads every texel back in its own texture of the same pages: no texel was
+/// copied between the processes. iOS 17 has the BlueTool stand-in start the peer, iOS 27 launchd for its Mach service.
 struct NativeSharedTexturePeerTest: NativeObjectTest {
     let id = "metal.native.shared_texture_peer"
     let name = "Shared textures of every shape written by a second process and read back by the app"
@@ -98,14 +102,16 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
     static let shapes: [Shape] = [
         Shape(
             name: "chain",
-            descriptor: descriptor(.type2D, .rgba8Unorm, 64, 48, levels: 7, usage: [.shaderRead, .renderTarget])),
+            descriptor: descriptor(.type2D, .rgba8Unorm, 64, 48, levels: 7, usage: [.shaderRead, .renderTarget])
+        ),
         Shape(name: "array", descriptor: descriptor(.type2DArray, .rgba8Unorm, 40, 24, layers: 3)),
         Shape(name: "cube", descriptor: descriptor(.typeCube, .rgba8Unorm, 32, 32)),
         Shape(name: "cubearray", descriptor: descriptor(.typeCubeArray, .rgba8Unorm, 16, 16, layers: 2)),
         Shape(name: "volume", descriptor: descriptor(.type3D, .rgba8Unorm, 20, 12, depth: 9)),
         Shape(
             name: "samples4",
-            descriptor: descriptor(.type2DMultisample, .rgba8Unorm, 32, 24, samples: 4, usage: .renderTarget)),
+            descriptor: descriptor(.type2DMultisample, .rgba8Unorm, 32, 24, samples: 4, usage: .renderTarget)
+        ),
         Shape(name: "line", descriptor: descriptor(.type1D, .rgba8Unorm, 300)),
         Shape(name: "astc", descriptor: descriptor(.type2D, .astc_4x4_ldr, 100, 60, levels: 7)),
         Shape(name: "astc1", descriptor: descriptor(.type2D, .astc_4x4_ldr, 64, 40)),
@@ -125,7 +131,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         typealias Create = @convention(c) (UnsafePointer<CChar>, DispatchQueue?, UInt64) -> xpc_connection_t
         let get = NSSelectorFromString("_endpoint")
         guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "xpc_connection_create_mach_service"),
-            endpoint.responds(to: get), let xpc = endpoint.perform(get)?.takeUnretainedValue()
+              endpoint.responds(to: get), let xpc = endpoint.perform(get)?.takeUnretainedValue()
         else { return "no XPC endpoint or Mach service lookup" }
         let ios = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
         let service = ios >= 27 ? "com.brunostjohn.switch.texpeer" : "com.apple.BlueTool"
@@ -166,7 +172,8 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
             answer.split(separator: " ").dropFirst().compactMap { field -> (String, String)? in
                 let parts = field.split(separator: "=", maxSplits: 1)
                 return parts.count == 2 ? (String(parts[0]), String(parts[1])) : nil
-            }, uniquingKeysWith: { first, _ in first })
+            }, uniquingKeysWith: { first, _ in first }
+        )
     }
 
     /// Level `level` of slice `slice` (every plane of a 3D one), its rows packed: texels, or a block-compressed one's blocks
@@ -183,7 +190,8 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
             blit.copy(
                 from: t, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(),
                 sourceSize: MTLSize(width: w, height: h, depth: d), to: out, destinationOffset: 0,
-                destinationBytesPerRow: row, destinationBytesPerImage: d > 1 ? row * rows : 0)
+                destinationBytesPerRow: row, destinationBytesPerImage: d > 1 ? row * rows : 0
+            )
             blit.endEncoding()
         }
         paths.append(timing.path)
@@ -198,20 +206,23 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         let across = blocks ? (w + 3) / 4 : w, down = blocks ? (h + 3) / 4 : h, unit = blocks ? 16 : 4
         let uniform =
             t.sampleCount > 1
-            || switch_texpeer_rendered(UInt32(t.textureType.rawValue), UInt32(t.mipmapLevelCount), UInt32(level))
+                || switch_texpeer_rendered(
+                    UInt32(t.textureType.rawValue), UInt32(t.mipmapLevelCount), UInt32(level), blocks
+                )
         var out: [UInt8] = []
         out.reserveCapacity(across * down * d * unit)
-        for z in 0..<d {
-            for y in 0..<down {
-                for x in 0..<across {
-                    for c in 0..<unit {
+        for z in 0 ..< d {
+            for y in 0 ..< down {
+                for x in 0 ..< across {
+                    for c in 0 ..< unit {
                         let (l, s, xx, yy) = (UInt32(level), UInt32(d > 1 ? z : slice), UInt32(x), UInt32(y))
                         out.append(
                             blocks
                                 ? switch_texpeer_block(l, s, xx, yy, UInt32(c))
                                 : uniform
-                                    ? switch_texpeer_texel(l, 0, 0, 0, UInt32(c))
-                                    : switch_texpeer_texel(l, s, xx, yy, UInt32(c)))
+                                ? switch_texpeer_texel(l, 0, 0, 0, UInt32(c))
+                                : switch_texpeer_texel(l, s, xx, yy, UInt32(c))
+                        )
                     }
                 }
             }
@@ -245,10 +256,11 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
                 continue
             }
             guard let texture = device.makeSharedTexture(descriptor: shape.descriptor),
-                let handle = texture.makeSharedTextureHandle()
+                  let handle = texture.makeSharedTextureHandle()
             else {
                 work.failures.append(
-                    "no shared \(shape.name) texture or handle, where the device makes the private one")
+                    "no shared \(shape.name) texture or handle, where the device makes the private one"
+                )
                 continue
             }
             work.objects.append(texture)
@@ -285,7 +297,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
             peerPaths.append(fields["path"] ?? "-")
             peerPeak = fields["peak_kb"] ?? peerPeak
             if !answer.hasPrefix("ok ") { work.failures.append("the peer's \(name) write: \(answer)") }
-            if fields["path"] != "raw" {
+            if fields["path"] != "gm20b" {
                 work.failures.append("the peer's \(name) command buffer went \(fields["path"] ?? "-")")
             }
             if fields["registry"] != String(device.registryID, radix: 16) {
@@ -295,8 +307,8 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
             var source = texture
             if texture.sampleCount > 1 { source = try await Self.resolved(gpu, texture, paths: &work.paths) }
             var wrong = 0
-            for level in 0..<source.mipmapLevelCount {
-                for slice in 0..<(source.textureType == .type3D ? 1 : Self.slices(source)) {
+            for level in 0 ..< source.mipmapLevelCount {
+                for slice in 0 ..< (source.textureType == .type3D ? 1 : Self.slices(source)) {
                     let got = try await Self.readBack(gpu, source, level: level, slice: slice, paths: &work.paths)
                     let want = Self.expected(texture, level: level, slice: slice)
                     wrong += zip(got, want).filter { $0 != $1 }.count + abs(got.count - want.count)

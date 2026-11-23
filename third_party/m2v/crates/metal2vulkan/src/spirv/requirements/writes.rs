@@ -41,12 +41,12 @@
 //! (`Synthetic(DepthStandIn)` and `Synthetic(StencilStandIn)`), whose writes carry Metal's depth
 //! and stencil tests.
 //!
-//! So are a color attachment's interlocked storage form (`TileAttachment`) and an extended-range
-//! color's `half` shadow (`ExtendedShadow`): their writes carry Metal's color attachment write, a
-//! color output, which Metal masks as it masks any (a sample mask, a failed test) and stores per
-//! sample whether the function runs per pixel or per sample, and which no other invocation or
-//! command reads but through the attachment. A multisampled pipeline's storage form runs per sample
-//! by its own `SampleId`. The function's other writes count as before.
+//! So is a color attachment's interlocked storage form (`TileAttachment`): its writes carry Metal's
+//! color attachment write, a color output, which Metal masks as it masks any (a sample mask, a
+//! failed test) and stores per sample whether the function runs per pixel or per sample, and which
+//! no other invocation or command reads but through the attachment. A multisampled pipeline's
+//! storage form runs per sample by its own `SampleId`. The function's other writes count as
+//! before.
 
 #[cfg(test)]
 mod tests;
@@ -107,8 +107,7 @@ struct Status<'m> {
     /// `Synthetic(MeshWork)` bindings.
     bindings: Vec<Value>,
     /// The variables of the `Synthetic(ShadowStencil)`, `Synthetic(DepthStandIn)`,
-    /// `Synthetic(StencilStandIn)`, `TileAttachment` and `ExtendedShadow` bindings, and the loads
-    /// of them.
+    /// `Synthetic(StencilStandIn)` and `TileAttachment` bindings, and the loads of them.
     shadows: Vec<Value>,
     /// The push block's variable.
     block: Option<Value>,
@@ -145,7 +144,6 @@ impl<'m> Status<'m> {
                                 | SyntheticBinding::DepthStandIn
                                 | SyntheticBinding::StencilStandIn
                         ) | ResourceKind::TileAttachment(_)
-                            | ResourceKind::ExtendedShadow(_)
                     ) =>
                 {
                     s.shadows.push(g.value);
@@ -206,7 +204,7 @@ impl<'m> Status<'m> {
     }
 
     /// Whether image `image` is the product's (the shadow of a shader-side stencil, the depth's
-    /// stand-in, a color's storage form or `half` shadow): a load of its binding.
+    /// stand-in, a color's storage form): a load of its binding.
     fn shadow(&self, image: Value) -> bool {
         self.shadows.contains(&image)
     }

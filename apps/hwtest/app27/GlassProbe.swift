@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import notify
 
-/// The raw path's DEVELOPMENT switches the glass tests post to every process (raw/runtime/RawMetalGlassProbe.mm), and
+/// The driver's DEVELOPMENT switches the glass tests post to every process (TegraGM20BMetalGlassProbe.mm), and
 /// the render server's record of the command buffers it commits while the glass probe is armed, read from notify state.
 /// A release build's processes register none of them: the record then stays empty and the switches change nothing.
 enum GlassProbe {
@@ -10,7 +10,7 @@ enum GlassProbe {
     static let recordName = prefix + "glass-cb"
     static let recordSlots: UInt64 = 16
 
-    /// One command buffer of the record (raw_glass_probe.h GlassCbEntry): API draws and encoders, passes into a mip
+    /// One command buffer of the record (glass_probe.h GlassCbEntry): API draws and encoders, passes into a mip
     /// level above 0 (the backdrop pyramid Core Animation regenerates), and the commit's mach time's low 40 bits.
     struct Buffer: Equatable {
         let draws: Int
@@ -39,7 +39,7 @@ enum GlassProbe {
     static func arm(lines: Bool = true) -> Bool {
         let before = count()?.generation
         post(lines ? "glass-probe" : "glass-record")
-        for _ in 0..<20 {
+        for _ in 0 ..< 20 {
             usleep(10_000)
             if let now = count()?.generation, now != before { return true }
         }
@@ -70,7 +70,7 @@ enum GlassProbe {
         guard let (_, count) = count() else { return (after, [], 0) }
         guard count >= after else { return (count, [], 0) }
         let first = max(after, count > recordSlots ? count - recordSlots : 0)
-        let buffers = (first..<count).compactMap { index in
+        let buffers = (first ..< count).compactMap { index in
             state("\(recordName).\(index % recordSlots)").map(Buffer.init(word:))
         }
         return (count, buffers, first - min(after, first))

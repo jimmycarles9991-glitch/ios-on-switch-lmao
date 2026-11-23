@@ -17,6 +17,7 @@ namespace
 switch_gpu_backing_engine operations{};
 switch_gpu_backing_visibility visibility{};
 switch_gpu_backing_timeline_refs refs{};
+switch_gpu_backing_failure failure;
 unsigned promotions;
 std::atomic<unsigned> fenceRefs, notifications;
 std::atomic<unsigned> waits;
@@ -52,6 +53,14 @@ switch_gpu_backing_register_timeline_refs(uint32_t engine,
 	if (engine != SWITCH_GPU_ENGINE_GM20B)
 		return -22;
 	refs = *ops;
+	return 0;
+}
+
+extern "C" int switch_gpu_backing_register_failure(uint32_t engine, switch_gpu_backing_failure op)
+{
+	if (engine != SWITCH_GPU_ENGINE_GM20B)
+		return -22;
+	failure = op;
 	return 0;
 }
 
@@ -145,7 +154,7 @@ TEST_F(Timeline, FailurePublicationDoesNotBlockOrAllocateInEventContext)
 	auto completed = token(timeline, 4), pending = token(timeline, 5);
 	ASSERT_EQ(operations.retain_token(&pending), 0);
 	switchTimelineAtomicContext = true;
-	switch_gpu_timeline_failed(timeline, 4);
+	switch_gpu_timeline_failed(timeline, 4, 0);
 	switchTimelineAtomicContext = false;
 	__atomic_store_n(&fence, 100, __ATOMIC_RELEASE);
 	EXPECT_EQ(operations.status(&completed), 1);
@@ -155,6 +164,32 @@ TEST_F(Timeline, FailurePublicationDoesNotBlockOrAllocateInEventContext)
 	EXPECT_EQ(fenceRefs.load(), 1u);
 	EXPECT_EQ(operations.status(&pending), -5);
 	operations.release_token(&pending);
+}
+
+// Why a timeline's unfinished tokens failed: a compositor channel's kill is the kernel's own failure; an app channel's
+// kill (gpu.recover.kill_one's) and a teardown end that client's frame. A close after a kill keeps the kill's why, and
+// work the channel finished before either is no failure.
+TEST_F(Timeline, AKillOrTeardownTellsWhyItsUnfinishedTokensFailed)
+{
+	ASSERT_NE(failure, nullptr);
+	const int why[3] = {SWITCH_GPU_BACKING_WRITER_FAILED, SWITCH_GPU_BACKING_WRITER_GONE,
+			    SWITCH_GPU_BACKING_WRITER_GONE};
+	for (int i = 0; i < 3; ++i) {
+		volatile uint32_t fence = 4;
+		auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
+		ASSERT_NE(timeline, nullptr);
+		const auto finished = token(timeline, 4), unfinished = token(timeline, 5);
+		ASSERT_EQ(operations.retain_token(&finished), 0);
+		ASSERT_EQ(operations.retain_token(&unfinished), 0);
+		if (i < 2)
+			switch_gpu_timeline_failed(timeline, 4, i == 0);
+		switch_gpu_timeline_close(timeline);
+		EXPECT_EQ(operations.status(&finished), 1);
+		EXPECT_EQ(operations.status(&unfinished), -5);
+		EXPECT_EQ(failure(&unfinished), why[i]) << "timeline " << i;
+		operations.release_token(&finished);
+		operations.release_token(&unfinished);
+	}
 }
 
 // A job's records take their references many at once, and read their tokens through the timeline's handle with no lock
@@ -194,8 +229,8 @@ TEST_F(Timeline, FirstFailureIncludingZeroCannotBecomeSyntheticSuccess)
 	volatile uint32_t fence = 0;
 	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
 	auto pending = token(timeline, 1);
-	switch_gpu_timeline_failed(timeline, 0);
-	switch_gpu_timeline_failed(timeline, 100);
+	switch_gpu_timeline_failed(timeline, 0, 0);
+	switch_gpu_timeline_failed(timeline, 100, 0);
 	__atomic_store_n(&fence, 100, __ATOMIC_RELEASE);
 	EXPECT_EQ(operations.status(&pending), -5);
 	switch_gpu_timeline_close(timeline);
@@ -242,7 +277,7 @@ TEST_F(Timeline, ConcurrentFailureAndAbandonedFenceNeverReportSuccess)
 			while (!start.load(std::memory_order_acquire))
 				std::this_thread::yield();
 			switchTimelineAtomicContext = true;
-			switch_gpu_timeline_failed(timeline, 1);
+			switch_gpu_timeline_failed(timeline, 1, 0);
 			__atomic_store_n(&fence, 2, __ATOMIC_RELEASE);
 			switchTimelineAtomicContext = false;
 			finished.store(true, std::memory_order_release);
@@ -262,7 +297,7 @@ TEST_F(Timeline, CompletionComparisonPreservesThirtyTwoBitWrap)
 	volatile uint32_t fence = 1;
 	auto *timeline = switch_gpu_timeline_create(++nextId, &fence);
 	auto before = token(timeline, UINT32_MAX), after = token(timeline, 2);
-	switch_gpu_timeline_failed(timeline, 1);
+	switch_gpu_timeline_failed(timeline, 1, 0);
 	EXPECT_EQ(operations.status(&before), 1);
 	EXPECT_EQ(operations.status(&after), -5);
 	switch_gpu_timeline_close(timeline);
@@ -321,7 +356,7 @@ TEST_F(Timeline, FailedPendingWorkCannotBePromoted)
 	switch_gpu_timeline_visibility(timeline, &visible);
 	auto failed = token(timeline, 2), completed = token(timeline, 1);
 	switchTimelineAtomicContext = true;
-	switch_gpu_timeline_failed(timeline, 1);
+	switch_gpu_timeline_failed(timeline, 1, 0);
 	switchTimelineAtomicContext = false;
 	fence = 2;
 	EXPECT_EQ(visibility.wait(&failed), -5);

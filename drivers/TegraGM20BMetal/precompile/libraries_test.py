@@ -95,8 +95,19 @@ class AirSliceTest(unittest.TestCase):
         self.assertEqual(libraries.names(only, '24B119'), ['new'])
         self.assertIsNone(libraries.names(_universal([(libraries.AIR64, 0x20010, _library(['x']))]), '24B119'))
 
+    def test_a_functions_air_hash_is_its_hash_tag(self):
+        hashed = b'NAME' + struct.pack('<H', 4) + b'fn1\0'
+        hashed += b'HASH' + struct.pack('<H', 32) + bytes(range(32)) + b'ENDT'
+        entries = struct.pack('<I', 4 + len(hashed)) + hashed
+        header = bytearray(b'MTLB' + bytes(0x54))
+        struct.pack_into('<QQ', header, 24, 0x58, len(entries))
+        data = bytes(header) + struct.pack('<I', 1) + entries
+        self.assertEqual(libraries.functions(data), {'fn1': bytes(range(32)).hex()})
+        self.assertEqual(libraries.names(data), ['fn1'])
+        self.assertEqual(libraries.functions(_library(['unhashed'])), {})
+
     def test_the_rules_are_metallib_slices(self):
-        header = Path('drivers/NativeMetal/MetallibSlice.h').read_text()
+        header = Path('drivers/TegraGM20BMetal/plugin/MetallibSlice.h').read_text()
         rows = re.findall(r'\{"(\w+)", (true|false), (0x[0-9a-f]+|\d+), (true|false), (0x[0-9a-f]+|\d+)\}', header)
         self.assertEqual(
             {build: (first == 'true', int(c, 0), low == 'true', int(a, 0)) for build, first, c, low, a in rows},

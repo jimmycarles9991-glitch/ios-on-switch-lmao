@@ -3,11 +3,11 @@ import HWTestCore
 import Metal
 
 // A heap texture drawn after its backing was purged keeps its contents, sampled through a white border sampler: the raw
-// path's own (boot 21: it was m2v's, call.sampler "border 2", and the range that bound it failed). Sampling stays inside
+// path's own (boot 21, as gpu.heap.m2v_target: it was m2v's, call.sampler "border 2"). Sampling stays inside
 // the texture; a last draw samples past it, its ring the border's white.
 struct HeapTwinScene: GPUScene {
-    let id = "gpu.heap.m2v_target"
-    let name = "A heap texture drawn by an m2v command buffer, before and after the heap is purged"
+    let id = "gpu.heap.purged_target"
+    let name = "A heap texture drawn and sampled before and after the heap is purged"
 
     static let (width, height) = (140, 143)
     static let color: [UInt8] = [51, 153, 204, 255]
@@ -18,7 +18,8 @@ struct HeapTwinScene: GPUScene {
         heapDescriptor.size = 2 << 20
         heapDescriptor.storageMode = .private
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: Self.width, height: Self.height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: Self.width, height: Self.height, mipmapped: false
+        )
         descriptor.storageMode = .private
         descriptor.usage = [.renderTarget, .shaderRead]
         let samplerDescriptor = MTLSamplerDescriptor()
@@ -40,7 +41,7 @@ struct HeapTwinScene: GPUScene {
         var paths: [String] = []
         for round in ["fresh", "purged, non-volatile again", "purged, still volatile"] {
             guard let heap = gpu.device.makeHeap(descriptor: heapDescriptor),
-                let target = heap.makeTexture(descriptor: descriptor)
+                  let target = heap.makeTexture(descriptor: descriptor)
             else {
                 result.expect(false, "makeHeap or its texture returned nil")
                 return result
@@ -62,8 +63,8 @@ struct HeapTwinScene: GPUScene {
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
             paths.append(timing.path)
-            if RawFacade.kind(of: gpu.device) == "raw" {
-                result.expect(timing.path == "raw", "the sampled draw took \(timing.path), not raw")
+            if GM20BFacade.kind(of: gpu.device) == "gm20b" {
+                result.expect(timing.path == "gm20b", "the sampled draw took \(timing.path), not raw")
             }
             result.compare(round, try await gpu.raster(target, .bgra8Unorm), want, tolerance: 1.51 / 255)
             heap.setPurgeableState(.nonVolatile)
@@ -79,11 +80,11 @@ struct HeapTwinScene: GPUScene {
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         }
         paths.append(timing.path)
-        if RawFacade.kind(of: gpu.device) == "raw" {
-            result.expect(timing.path == "raw", "the border draw took \(timing.path), not raw")
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
+            result.expect(timing.path == "gm20b", "the border draw took \(timing.path), not raw")
         }
         let bordered = Raster(width: 64, height: 64, channels: 4) { x, y, c in
-            (16..<48).contains(x) && (16..<48).contains(y) ? Float(Self.color[c]) / 255 : 1
+            (16 ..< 48).contains(x) && (16 ..< 48).contains(y) ? Float(Self.color[c]) / 255 : 1
         }
         result.compare("border", try await gpu.raster(ring, .bgra8Unorm), bordered, tolerance: 1.51 / 255)
         result.metrics.set("paths", paths.joined(separator: ","))

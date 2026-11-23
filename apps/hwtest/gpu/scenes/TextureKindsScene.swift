@@ -13,7 +13,7 @@ struct TextureKindsScene: GPUScene {
 
     /// RGBA8 bytes of slice `index`: every texel of every slice differs.
     static func pattern(_ index: Int, side: Int = side) -> [UInt8] {
-        (0..<(side * side)).flatMap { i -> [UInt8] in
+        (0 ..< (side * side)).flatMap { i -> [UInt8] in
             let (x, y) = (i % side, i / side)
             return [UInt8(x * 8 & 0xff), UInt8(y * 8 & 0xff), UInt8(index * 37 & 0xff), UInt8(255 - index)]
         }
@@ -44,7 +44,7 @@ struct TextureKindsScene: GPUScene {
             return
         }
         let flat = try gpu.texture(.rgba8Unorm, side, side, usage: [.shaderRead])
-        for layer in 0..<layers {
+        for layer in 0 ..< layers {
             try await gpu.upload(Self.pattern(layer), to: texture, bytesPerRow: side * 4, slice: layer)
         }
         try await gpu.run { commands in
@@ -52,19 +52,22 @@ struct TextureKindsScene: GPUScene {
             blit.copy(
                 from: texture, sourceSlice: copied, sourceLevel: 0, sourceOrigin: MTLOrigin(),
                 sourceSize: MTLSize(width: side, height: side, depth: 1), to: flat, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin())
+                destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
             blit.endEncoding()
         }
-        for layer in 0..<layers {
+        for layer in 0 ..< layers {
             let got = try await gpu.read(texture, bytesPerPixel: 4, slice: layer)
             result.compare(
                 "\(label) \(layer)", bytes: got, expected: Self.pattern(layer), format: .rgba8Unorm, width: side,
-                height: side, tolerance: 0)
+                height: side, tolerance: 0
+            )
         }
         let got = try await gpu.read(flat, bytesPerPixel: 4)
         result.compare(
             "\(label) \(copied) copied to 2D", bytes: got, expected: Self.pattern(copied), format: .rgba8Unorm,
-            width: side, height: side, tolerance: 0)
+            width: side, height: side, tolerance: 0
+        )
     }
 
     private func volume(_ gpu: GPU, _ result: inout SceneResult) async throws {
@@ -82,7 +85,7 @@ struct TextureKindsScene: GPUScene {
             return
         }
         let image = side * side * 4
-        let staging = try gpu.buffer((0..<depth).flatMap { Self.pattern($0) })
+        let staging = try gpu.buffer((0 ..< depth).flatMap { Self.pattern($0) })
         let out = try gpu.buffer(image * (depth + 1))
         let flat = try gpu.texture(.rgba8Unorm, side, side, usage: [.shaderRead])
         let size = MTLSize(width: side, height: side, depth: 1)
@@ -91,28 +94,33 @@ struct TextureKindsScene: GPUScene {
             blit.copy(
                 from: staging, sourceOffset: 0, sourceBytesPerRow: side * 4, sourceBytesPerImage: image,
                 sourceSize: MTLSize(width: side, height: side, depth: depth), to: texture, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin())
+                destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
             blit.copy(
                 from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: copied),
-                sourceSize: size, to: flat, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin())
-            for plane in 0..<depth {
+                sourceSize: size, to: flat, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
+            for plane in 0 ..< depth {
                 blit.copy(
                     from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: plane),
                     sourceSize: size, to: out, destinationOffset: plane * image, destinationBytesPerRow: side * 4,
-                    destinationBytesPerImage: image)
+                    destinationBytesPerImage: image
+                )
             }
             blit.copy(
                 from: flat, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(), sourceSize: size, to: out,
-                destinationOffset: depth * image, destinationBytesPerRow: side * 4, destinationBytesPerImage: image)
+                destinationOffset: depth * image, destinationBytesPerRow: side * 4, destinationBytesPerImage: image
+            )
             blit.endEncoding()
         }
         let bytes = [UInt8](UnsafeRawBufferPointer(start: out.contents(), count: image * (depth + 1)))
-        for plane in 0...depth {
+        for plane in 0 ... depth {
             let want = Self.pattern(plane == depth ? copied : plane)
             let label = plane == depth ? "3D plane \(copied) copied to 2D" : "3D plane \(plane)"
             result.compare(
-                label, bytes: Array(bytes[(plane * image)..<((plane + 1) * image)]), expected: want,
-                format: .rgba8Unorm, width: side, height: side, tolerance: 0)
+                label, bytes: Array(bytes[(plane * image) ..< ((plane + 1) * image)]), expected: want,
+                format: .rgba8Unorm, width: side, height: side, tolerance: 0
+            )
         }
     }
 }

@@ -2,7 +2,7 @@
 
 Runs small GPU experiments on the Switch without a rebuild or a reboot. The Mac writes a batch of experiments into a
 folder on the device over USB, HW Test's Bench screen runs each one on the GPU, and the results come back as files next
-to the batch. Each result has the GPU time of every command buffer, from the raw path's PTIMER stamps, and the target's
+to the batch. Each result has the GPU time of every command buffer, from the driver's PTIMER stamps, and the target's
 texels. It exists to measure things nothing documents: SM53 instruction latencies, dual issue and operand reuse, the
 ROP's iterated blend unit and its float-to-unorm rounding.
 
@@ -58,7 +58,7 @@ Its microcode follows the fake device's guess at what the instruction fields mea
 The app draws through a raw device with its own connection and GPU VM. The app's Metal device already holds the
 process's NVK VA window, and a channel the kernel kills during an experiment must not take the app down with it.
 Programs replace the pixel program of a plain pack state, so the vertex program, the registers and the readback are
-the ones the raw path already uses for Core Animation. No command buffer may have an estimated time over 50 ms, so a
+the ones the driver already uses for Core Animation. No command buffer may have an estimated time over 50 ms, so a
 program that hangs is caught by the kernel's stuck-channel rule (500 ms) and hang recovery, and the app needs no
 timeout of its own. A kill is recorded in that experiment's result and the next experiment gets a fresh device.
 
@@ -98,6 +98,6 @@ than a few KiB runs at instruction-fetch speed.
   isn't watching. While the Bench screen is open the app keeps `status.json` in every folder it watches, and
   `afcclient ls /Switch/benchloop` shows whether the Media folder has one.
 - Self-check `FAIL ... no raw device`: the app couldn't open its own connection to the GPU. The line gives the reason.
-- `refused` results name the draw predicate or state the raw path turned down. `killed` results carry the kernel's
+- `refused` results name the draw predicate or state the driver turned down. `killed` results carry the kernel's
   error code and fault address, and the kernel log has the decoded hang.
 - `invalid` results never reached the GPU. Their `why` names the field that failed.

@@ -179,7 +179,7 @@ def _beside(volume: Volume, path: str, name: str) -> str | None:
 def inventory(states: list[Pipeline]) -> list[tuple[str, str, str, str, str]]:
     """Give one row per owner's distinct state, sorted.
 
-    A row: its kind, owner, first archive, "device" when any of its archives declares it for the raw device's GPU
+    A row: its kind, owner, first archive, "device" when any of its archives declares it for the device's GPU
     families ("other" otherwise), and its line.
     """
     rows: dict[tuple[str, str, str], list[str]] = {}

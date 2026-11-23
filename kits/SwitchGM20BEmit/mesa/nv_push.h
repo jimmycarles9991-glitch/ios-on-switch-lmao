@@ -2,7 +2,7 @@
  * Mesa's src/nouveau/headers/nv_push.h (commit 77452b9092cc, MIT; docs/license.rst), adapted for kits/SwitchGM20BEmit:
  *  - no libc beyond what the kernel has: nv_push_compat.h instead of util/macros.h, no stdio, and no vk_push_print or
  *    nv_push_validate (nv_push.c, which prints);
- *  - P_IMMD takes the one-word form whenever the value fits its 13 bits, as raw::Push::m does, instead of only when the
+ *  - P_IMMD takes the one-word form whenever the value fits its 13 bits, as gm20b::Push::m does, instead of only when the
  *    compiler proves it fits: the stream does not change with the optimisation level;
  *  - the subchannels of GM20B's copy (b0b5), inline-to-memory (a140) and host (b06f) classes, as the kernel binds them;
  *  - a system header to its users, as Mesa's own build includes it: the kernel's stricter warnings stay on our code;

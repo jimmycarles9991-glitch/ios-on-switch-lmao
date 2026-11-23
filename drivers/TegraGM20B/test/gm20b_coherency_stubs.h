@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
-// The kernel calls TegraGM20BCoherency.cpp and TegraGM20BExecSurfaces.cpp make, on the host: IOLock as a real mutex (the
-// concurrency test runs traps against releases on two threads), IONew/IODelete, IOLog counted, and tgm_cpu_clean_pages
-// recording each call's pages.
+// The kernel calls TegraGM20BCoherency.cpp makes, on the host: IOLock as a real mutex (the concurrency test runs traps
+// against releases on two threads), IONew/IODelete, IOLog counted, and tgm_cpu_clean_pages recording each call's pages.
 #pragma once
 #include <algorithm>
 #include <atomic>
@@ -259,7 +258,7 @@ inline void bzero(void *p, size_t n)
 	std::memset(p, 0, n);
 }
 
-// IOLog's lines, counted (TegraGM20BExecSurfaces.cpp's one-shot line).
+// IOLog's lines, counted (the ownership layer's one-shot lines).
 inline int &ioLogLines()
 {
 	static int lines;

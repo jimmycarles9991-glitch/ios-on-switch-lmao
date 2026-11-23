@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 // The GM20B's block-linear layout of a one-level 2D colour image, which every GPU user of this tree takes from here: the raw
-// GM20B path's textures and mip chains (raw/fx), the kernel's lock-time detile and the display's tiled scan
+// GM20B path's textures and mip chains (fx), the kernel's lock-time detile and the display's tiled scan
 // (TegraScanoutCopy.h). It is Mesa NIL's layout for that image (nil/image.rs Image::new_tiled, nil/tiling.rs Tiling::choose
 // and clamp, GOBType::TegraColor, Image::nvc0_choose_pte_kind), so NVK's VK_IMAGE_TILING_OPTIMAL image of the same size and
 // texel size lies at the same bytes under the same PTE kind, and NVK's view of the memory is free (nvk_image_plane_bind
-// reuses a VA whose kind is the plane's). drivers/TegraGM20BMetal/test/raw_layout_test.cpp holds it to NIL's answers.
+// reuses a VA whose kind is the plane's). drivers/TegraGM20BMetal/test/layout_test.cpp holds it to NIL's answers.
 //
 // GOBs of 64 bytes x 8 rows; a block is one GOB wide and 2^y_log2 GOBs tall; blocks lie row by row. Inside a GOB the bytes
 // are in the TegraColor arrangement (nil/copy.rs CopyGOBTegra), which is where kind TGM_LAYOUT_KIND memory holds them in
-// DRAM: what the CPU sees (the raw path's device self-test) and what DC A scans.
+// DRAM: what the CPU sees (the driver's device self-test) and what DC A scans.
 //
 // Which IOSurfaces are block-linear (the kernel decides once per surface, TegraGM20BTiled.cpp, at its first GPU import that
 // asks; every process, driver and engine reads that decision): those the GPU produces and those nothing has written yet. A

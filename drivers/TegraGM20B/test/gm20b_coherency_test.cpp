@@ -356,7 +356,7 @@ TEST_F(Coherency, LockInvalidatesOnlyAfterGpuWrites)
 	ASSERT_NE(c, nullptr);
 	tegra_gm20b_iosurface_trap(kLock, 7, 0);
 	EXPECT_TRUE(cleanCalls().empty());
-	tgm_coherency_wrote(c, 0, kDone, 1);
+	tgm_coherency_wrote(c, kDone, 1);
 	tegra_gm20b_iosurface_trap(kLock, 7, kReadOnly);
 	ASSERT_EQ(cleanCalls().size(), 1u);
 	EXPECT_EQ(cleanCalls()[0], p);
@@ -365,45 +365,16 @@ TEST_F(Coherency, LockInvalidatesOnlyAfterGpuWrites)
 	tgm_coherency_put(c);
 }
 
-TEST_F(Coherency, ASurfaceTheGpuOnlySamplesIsNeverInvalidatedOnLock)
-{
-	const auto p = pages(0x8a000000, 4);
-	tgm_coh *c = sampled(p[0], 61, p.data(), 4);
-	tgm_coherency_wrote(c, 0, kDone, 1);
-	tegra_gm20b_iosurface_trap(kLock, 61, 0);
-	EXPECT_TRUE(cleanCalls().empty());
-	tgm_coherency_gpu_writes(61);
-	tgm_coherency_wrote(c, 0, kDone, 1);
-	tegra_gm20b_iosurface_trap(kLock, 61, 0);
-	ASSERT_EQ(cleanCalls().size(), 1u);
-	EXPECT_EQ(cleanCalls()[0], p);
-	tgm_coherency_put(c);
-}
-
-// A SurfaceWrites the client could not deliver: its submissions carry TegraGM20BPushImportsWritten from then on, which
-// marks even the imports that said the GPU only samples them.
-TEST_F(Coherency, AnUndeclaredWriteStillInvalidatesOnLockOnceTheClientFallsBack)
+// A job's write mark stands whatever an import said of the GPU's access: SubmitJob names only what the job writes.
+TEST_F(Coherency, AJobsWriteInvalidatesOnLockEvenWhereAnImportSaidTheGpuOnlySamples)
 {
 	const auto p = pages(0x8d000000, 3);
 	tgm_coh *c = sampled(p[0], 63, p.data(), 3);
-	tgm_coherency_wrote(c, 1, kDone, 1);
+	tgm_coherency_wrote(c, kDone, 1);
 	tegra_gm20b_iosurface_trap(kLock, 63, kReadOnly);
 	ASSERT_EQ(cleanCalls().size(), 1u);
 	EXPECT_EQ(cleanCalls()[0], p);
 	tgm_coherency_put(c);
-}
-
-TEST_F(Coherency, ARenderedToImportMakesTheSurfaceGpuWrittenForEveryImporter)
-{
-	const auto p = pages(0x8b000000, 2);
-	tgm_coh *reader = sampled(p[0], 62, p.data(), 2);
-	tgm_coh *renderer = add(p[0], 62, p.data(), 2, 1);
-	ASSERT_EQ(reader, renderer);
-	tgm_coherency_wrote(reader, 0, kDone, 1);
-	tegra_gm20b_iosurface_trap(kLock, 62, kReadOnly);
-	EXPECT_EQ(cleanCalls().size(), 1u);
-	tgm_coherency_put(renderer);
-	tgm_coherency_put(reader);
 }
 
 TEST_F(Coherency, TrapsReachEveryEntryOfASurface)
@@ -413,7 +384,7 @@ TEST_F(Coherency, TrapsReachEveryEntryOfASurface)
 	for (uint64_t i = 0; i < 6; i++) {
 		lists.push_back(pages(0x8c000000 + (i << 24), 2));
 		entries.push_back(add(lists.back()[0], 71, lists.back().data(), 2, 1));
-		tgm_coherency_wrote(entries.back(), 0, kDone, 1);
+		tgm_coherency_wrote(entries.back(), kDone, 1);
 	}
 	tegra_gm20b_iosurface_trap(kUnlock, 71, 0);
 	EXPECT_EQ(cleanCalls().size(), 6u);
@@ -440,8 +411,8 @@ TEST_F(Coherency, OtherSurfacesAndUntaggedImportsAreLeftAlone)
 	const auto p = pages(0x82000000, 2), q = pages(0x83000000, 2);
 	tgm_coh *tagged = add(p[0], 11, p.data(), 2, 1);
 	tgm_coh *untagged = add(q[0], 0, q.data(), 2, 1);
-	tgm_coherency_wrote(tagged, 0, kDone, 1);
-	tgm_coherency_wrote(untagged, 0, kDone, 1);
+	tgm_coherency_wrote(tagged, kDone, 1);
+	tgm_coherency_wrote(untagged, kDone, 1);
 	tegra_gm20b_iosurface_trap(kUnlock, 12, 0);
 	tegra_gm20b_iosurface_trap(kLock, 12, 0);
 	tegra_gm20b_iosurface_trap(kLock, 0, 0);
@@ -587,8 +558,8 @@ TEST_F(Coherency, TilingFollowsTheSurfacesWritersOnTheGpu)
 	const auto p = pages(0x85100000, 5);
 	tgm_coh *c = add(p[0], 32, p.data(), 5, 1);
 	gGpu.completed[5] = 10;
-	tgm_coherency_wrote(c, 0, 5, 12);
-	tgm_coherency_wrote(c, 0, kDone, 1);
+	tgm_coherency_wrote(c, 5, 12);
+	tgm_coherency_wrote(c, kDone, 1);
 	ASSERT_EQ(tgm_coherency_layout(c, kW, kH, kBpp, kRow, 1), 1);
 	ASSERT_EQ(gMoves.size(), 1u);
 	ASSERT_EQ(gMoves[0].writers.size(), 1u);
@@ -796,7 +767,7 @@ TEST_F(Coherency, TrapsRaceReleaseWithoutUseAfterFree)
 	for (int i = 0; i < 2000; i++) {
 		const auto p = pages(0x86000000 + (uint64_t(i % 8) << 24), 8);
 		tgm_coh *c = add(p[0], 41, p.data(), 8, 1);
-		tgm_coherency_wrote(c, 0, kDone, 1);
+		tgm_coherency_wrote(c, kDone, 1);
 		tgm_coherency_put(c);
 	}
 	stop.store(true);
@@ -811,7 +782,7 @@ TEST_F(Coherency, ALockBeforeTheWriterCompletesWaitsForIt)
 	const auto p = pages(0x9a000000, 2);
 	tgm_coh *c = add(p[0], 71, p.data(), 2, 1);
 	gGpu.completed[5] = 9;
-	tgm_coherency_wrote(c, 0, 5, 10);
+	tgm_coherency_wrote(c, 5, 10);
 	EXPECT_EQ(tegra_gm20b_iosurface_lock_will(71, kReadOnly), 0);
 	ASSERT_EQ(gGpu.waits.size(), 1u);
 	EXPECT_EQ(gGpu.waits[0], std::make_pair(5u, 10u));
@@ -827,7 +798,7 @@ TEST_F(Coherency, ALockAfterTheWriterCompletedDoesNotWait)
 	const auto p = pages(0x9b000000, 2);
 	tgm_coh *c = add(p[0], 72, p.data(), 2, 1);
 	gGpu.completed[5] = 9;
-	tgm_coherency_wrote(c, 0, 5, 9);
+	tgm_coherency_wrote(c, 5, 9);
 	EXPECT_EQ(tegra_gm20b_iosurface_lock_will(72, 0), 0);
 	EXPECT_TRUE(gGpu.waits.empty());
 	tegra_gm20b_iosurface_trap(kLock, 72, 0);
@@ -841,7 +812,7 @@ TEST_F(Coherency, AnAvoidSyncLockWithWritesPendingCannotLock)
 	const auto p = pages(0x9c000000, 2);
 	tgm_coh *c = add(p[0], 73, p.data(), 2, 1);
 	gGpu.completed[6] = 1;
-	tgm_coherency_wrote(c, 0, 6, 2);
+	tgm_coherency_wrote(c, 6, 2);
 	EXPECT_NE(tegra_gm20b_iosurface_lock_will(73, kAvoidSync | kReadOnly), 0);
 	EXPECT_TRUE(gGpu.waits.empty());
 	gGpu.completed[6] = 2;
@@ -855,7 +826,7 @@ TEST_F(Coherency, AKilledWritersChannelCountsAsComplete)
 	const auto p = pages(0x9d000000, 2);
 	tgm_coh *c = add(p[0], 74, p.data(), 2, 1);
 	gGpu.completed[8] = 0;
-	tgm_coherency_wrote(c, 0, 8, 4);
+	tgm_coherency_wrote(c, 8, 4);
 	gGpu.killed.insert(8);
 	EXPECT_EQ(tegra_gm20b_iosurface_lock_will(74, 0), 0);
 	EXPECT_TRUE(gGpu.waits.empty());
@@ -868,14 +839,14 @@ TEST_F(Coherency, WritersPerChannelAndTooManyChannels)
 	const auto p = pages(0x9e000000, 2);
 	tgm_coh *c = add(p[0], 75, p.data(), 2, 1);
 	gGpu.completed[2] = 0;
-	tgm_coherency_wrote(c, 0, 2, 1);
-	tgm_coherency_wrote(c, 0, 2, 3);
+	tgm_coherency_wrote(c, 2, 1);
+	tgm_coherency_wrote(c, 2, 3);
 	EXPECT_EQ(tegra_gm20b_iosurface_lock_will(75, 0), 0);
 	ASSERT_EQ(gGpu.waits.size(), 1u);
 	EXPECT_EQ(gGpu.waits[0].second, 3u);
 	for (uint32_t uid = 10; uid < 16; uid++) {
 		gGpu.completed[uid] = 0;
-		tgm_coherency_wrote(c, 0, uid, 1);
+		tgm_coherency_wrote(c, uid, 1);
 	}
 	gGpu.allDone = false;
 	EXPECT_NE(tegra_gm20b_iosurface_lock_will(75, kAvoidSync), 0);

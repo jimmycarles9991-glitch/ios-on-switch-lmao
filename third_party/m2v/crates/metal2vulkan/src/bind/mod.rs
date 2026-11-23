@@ -77,8 +77,8 @@
 //! [`two_plane_texels_module`]; a blit into such a texture of a heap writes the heap's bytes at
 //! Metal's rows through [`plane_bytes_copy_module`]. A heap texture over host pages keeps its
 //! elements in the heap's bytes in Metal's tiled layout, moved between its image and those bytes
-//! through [`tiled_texels_module`]. A render pass that loads an extended-range or padded 10-bit
-//! color attachment and draws first rewrites the bits its codes leave unused through
+//! through [`tiled_texels_module`]. A render pass that loads a padded 10-bit or bfloat color
+//! attachment and draws first rewrites the bits its codes leave unused through
 //! [`unused_bits_module`] of its form, in the 32 x 32 tiles a mask names, as Metal's tile store
 //! does. The tiles a pass's draws reach, which Metal's tile store writes back, are the mask one
 //! dispatch of [`tile_reach_module`] bins its captured primitives into: [`capture_assembly_module`]
@@ -117,7 +117,6 @@ pub(crate) mod compressed_blit;
 pub(crate) mod depth_stencil_copy;
 pub(crate) mod depth_stencil_resolve;
 pub(crate) mod dispatch;
-pub(crate) mod extended_shadow;
 pub(crate) mod graphics;
 pub(crate) mod heap;
 pub(crate) mod heap_code;
@@ -183,7 +182,6 @@ pub use depth_stencil_resolve::{
     ResolveWrite,
 };
 pub use dispatch::{Dispatch, DispatchCommands, DispatchRegion, IndirectArgs};
-pub use extended_shadow::{extended_shadow_module, ExtendedShadowModule};
 pub use graphics::{
     DrawCall, DrawCommands, IndexOverrun, MeshDispatch, MeshGroups, MeshRecordsRegion,
 };
@@ -266,7 +264,7 @@ pub use tile_map::{SparseTileMap, TileMapError, TileMapping};
 pub use tile_reach::{tile_reach_module, TileReachModule};
 pub use tiled_texels::{tiled_texels_module, TiledLevelMove, TiledTexelsModule};
 pub use two_plane_texels::{two_plane_texels_module, PlaneLayout, TwoPlaneTexelsModule};
-pub use unused_bits::{unused_bits_module, TexelWords, UnusedBitsModule};
+pub use unused_bits::{unused_bits_module, UnusedBitsModule};
 pub use visibility_combine::{
     visibility_combine_module, ContinuedResult, VisibilityCombine, VisibilityCombineModule,
 };
@@ -278,10 +276,3 @@ pub use ycbcr_convert::{
     YCbCrOutput, YCbCrPlanes, YCbCrRange,
 };
 pub use ycbcr_write::{ycbcr_store, ycbcr_write, ycbcr_write_module, YCbCrWriteModule};
-
-/// The two float-bit vectors for Metal's `setBlendColorRed:green:blue:alpha:` when
-/// shader blending reads [`PushField::BlendColor`](crate::pipeline::PushField::BlendColor).
-/// They include the extended-range clamps and half rounding, including the one-minus values.
-pub fn extended_blend_color_words(color: [f32; 4]) -> [u32; 8] {
-    crate::lower::arith::extended_range::blend_color::constant_words(color)
-}

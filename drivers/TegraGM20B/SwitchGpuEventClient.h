@@ -24,6 +24,9 @@ public:
 	int observe(uint64_t handle, uint64_t value, uint64_t cookie, Callback callback,
 		    void *context, bool terminal = false);
 	int cancel(uint64_t handle, uint64_t cookie);
+	// The connection became the compositor's or stopped being it (switch_gpu_events_compositor), until stop();
+	// false when its process's records stay a task's
+	bool compositor(int pid, bool on);
 	// The connection's fence page, as the kernel, the connection's GPU address space and the fence pool see it
 	void attachWords(volatile uint32_t *page, uint64_t gpu, uint64_t pool,
 			 void (*hold)(const volatile uint32_t *),
@@ -54,6 +57,7 @@ private:
 	Watch *watches_ = nullptr;
 	uint64_t next_ = 1;
 	uint32_t count_ = 0;
+	int compositorPid_ = 0;
 	bool closed_ = false;
 	switch_gpu_event *find(uint64_t handle) const;
 	bool unlink(Watch *watch);

@@ -18,7 +18,7 @@ fragment float4 comp_pattern_fragment(float4 position [[position]])
     return comp_pattern(uint2(position.xy));
 }
 
-// The same pattern written by the surface unit (gpu.raw.private_compression shader_write)
+// The same pattern written by the surface unit (gpu.gm20b.private_compression shader_write)
 kernel void comp_pattern_kernel(texture2d<float, access::write> out [[texture(0)]],
                                 uint2 id [[thread_position_in_grid]])
 {

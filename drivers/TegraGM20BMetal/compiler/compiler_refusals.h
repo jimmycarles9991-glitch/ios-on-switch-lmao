@@ -41,7 +41,7 @@ inline std::string imageBuild(const void *address)
 
 class ConfirmedRefusals {
 public:
-    using Name = std::array<uint8_t, 32>;  // raw::Digest: a store entry's name
+    using Name = std::array<uint8_t, 32>;  // gm20b::Digest: a store entry's name
 
     // `build`: the compiler image's UUID in hex
     ConfirmedRefusals(const std::string &storeDirectory, const std::string &build)

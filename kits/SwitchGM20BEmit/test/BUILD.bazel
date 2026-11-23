@@ -131,7 +131,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
         "//drivers/TegraGM20B:TegraGM20BSyncpt.h",
-        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+        "//drivers/TegraGM20BMetal:gm20b_runtime_headers",
     ],
     copts = ["-Idrivers/TegraGM20B"],
     deps = [
@@ -154,7 +154,7 @@ host_test(
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BRelayout.h",
         "//drivers/TegraGM20B:TegraGM20BSyncpt.h",
-        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+        "//drivers/TegraGM20BMetal:gm20b_runtime_headers",
     ],
     copts = ["-Idrivers/TegraGM20B"],
     deps = [
@@ -189,19 +189,23 @@ host_test(
         "emit_3d_test.cpp",
         "push_words.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
-        "//drivers/TegraGM20BMetal:raw/fx/fx_mip.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_emit.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_push.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_sample_shading.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_slot_mask.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_target.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_xr.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_xr_pass.h",
+        "//drivers/TegraGM20BMetal:fx/fx_mip.h",
+        "//drivers/TegraGM20BMetal:emit.cpp",
+        "//drivers/TegraGM20BMetal:emit.h",
+        "//drivers/TegraGM20BMetal:push.h",
+        "//drivers/TegraGM20BMetal:sample_shading.h",
+        "//drivers/TegraGM20BMetal:slot_mask.h",
+        "//drivers/TegraGM20BMetal:target.h",
+        "//drivers/TegraGM20BMetal:xr.h",
+        "//drivers/TegraGM20BMetal:xr_pass.h",
         "//kits/SwitchGM20B/test:driver_constants_h",
     ],
     copts = ["-Idrivers/TegraGM20B"],
-    data = ["//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp"],
+    data = [
+        "//drivers/TegraGM20BMetal:draw.cpp",
+        "//drivers/TegraGM20BMetal:draw_prepare.cpp",
+        "//drivers/TegraGM20BMetal:pass_end.cpp",
+    ],
     deps = [
         ":emit",
         "//kits/SwitchGM20B:classes",
@@ -209,7 +213,7 @@ host_test(
     ],
 )
 
-# Mesa's Fermi MME decoder and simulator, from Mesa's tree (raw/pack/mesa holds a copy of the same files).
+# Mesa's Fermi MME decoder and simulator, from Mesa's tree (pack/mesa holds a copy of the same files).
 host_library(
     name = "mesa_mme_sim",
     srcs = [
@@ -292,10 +296,24 @@ host_test(
 )
 
 host_test(
+    name = "emit_fetch_test",
+    srcs = [
+        "emit_fetch_test.cpp",
+    ] + MESA_MME_HEADERS,
+    copts = MESA_MME_COPTS,
+    deps = [
+        ":mesa_mme_sim",
+        "//kits/SwitchGM20B:classes",
+        "//kits/SwitchGM20BEmit:macros_h",
+        ":method_checks",
+    ],
+)
+
+host_test(
     name = "emit_icb_bind_test",
     srcs = [
         "emit_icb_bind_test.cpp",
-        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+        "//drivers/TegraGM20BMetal:gm20b_runtime_headers",
     ] + MESA_MME_HEADERS,
     copts = MESA_MME_COPTS,
     deps = [
@@ -326,28 +344,9 @@ kernel_driver(
 py_test(
     name = "macro_slots_test",
     srcs = ["macro_slots_test.py"],
-    args = ["ScratchWords.test_the_context_init_writes_the_root_where_the_patch_macro_reads_it"],
     data = [
         "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
         "//kits/SwitchGM20BEmit:context/context.tsv",
     ],
     main = "macro_slots_test.py",
-)
-
-# Its NVK slots and scratch words against nvk_mme.h's: they keep NVK's numbers only while NVK shares the channel's
-# macros (tag m2v: deleted with NVK)
-py_test(
-    name = "macro_slots_nvk_test",
-    srcs = ["macro_slots_test.py"],
-    args = [
-        "MacroSlots",
-        "ScratchWords.test_each_nvk_word_is_nvk_mmes",
-        "ScratchWords.test_fecs_mailbox_is_nvks_falcon_words",
-    ],
-    data = [
-        "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
-        "//third_party/mesa/src/nouveau/vulkan:nvk_mme.h",
-    ],
-    main = "macro_slots_test.py",
-    tags = ["m2v"],
 )

@@ -28,7 +28,7 @@ std::string slurp(const char *path)
 void regenerate(const char *kind)
 {
     printf("records that moved on purpose: bazel run //drivers/TegraGM20BMetal/test/records:record_goldens with this "
-           "test's --config (it builds //gpu/seed:raw_pack and rewrites testdata/records_%s*)\n",
+           "test's --config (it builds //gpu/seed:pack and rewrites testdata/records_%s*)\n",
            kind);
 }
 
@@ -68,24 +68,24 @@ std::vector<Moved> movedSections(const std::vector<records::Record> &all, const 
 
 // The negative control: the pack's bytes with the last constant buffer type of a sampled record's fragment program
 // changed, checked as the pack was. It must move that record's fs section.
-bool mutantCaught(const char *packPath, const raw::Pack &pack, const Golden &golden)
+bool mutantCaught(const char *packPath, const gm20b::Pack &pack, const Golden &golden)
 {
-    const raw::PackPipeline *p = pack.section<raw::PackPipeline>(raw::PackPipelines);
-    const raw::PackProgram *programs = pack.section<raw::PackProgram>(raw::PackPrograms);
+    const gm20b::PackPipeline *p = pack.section<gm20b::PackPipeline>(gm20b::PackPipelines);
+    const gm20b::PackProgram *programs = pack.section<gm20b::PackProgram>(gm20b::PackPrograms);
     for (uint32_t i = 0; i < pack.header()->pipelines; i++) {
-        const raw::PackPipeline &pp = p[i];
-        const records::RecordId id = {pp.keyHash, records::Kind(uint8_t(raw::recordForm(pp)))};
-        if ((pp.flags & raw::PipelineVariantRecord) || pp.fs >= pack.header()->programs || !programs[pp.fs].cbufs ||
+        const gm20b::PackPipeline &pp = p[i];
+        const records::RecordId id = {pp.keyHash, records::Kind(uint8_t(gm20b::recordForm(pp)))};
+        if ((pp.flags & gm20b::PipelineVariantRecord) || pp.fs >= pack.header()->programs || !programs[pp.fs].cbufs ||
             !golden.count(id) || !golden.at(id).count("fs"))
             continue;
         const uint32_t slot = programs[pp.fs].cbufs - 1;
         std::string bytes = slurp(packPath);
-        bytes[pack.header()->section[raw::PackPrograms].offset + pp.fs * sizeof(raw::PackProgram) +
-              offsetof(raw::PackProgram, cbufType) + slot] ^= 1;
+        bytes[pack.header()->section[gm20b::PackPrograms].offset + pp.fs * sizeof(gm20b::PackProgram) +
+              offsetof(gm20b::PackProgram, cbufType) + slot] ^= 1;
         const char *tmp = getenv("TEST_TMPDIR") ? getenv("TEST_TMPDIR") : getenv("TMPDIR");
         const std::string path = std::string(tmp ? tmp : ".") + "/record_check_mutant.bin";
         std::ofstream(path, std::ios::binary).write(bytes.data(), std::streamsize(bytes.size()));
-        raw::Pack mutant;
+        gm20b::Pack mutant;
         std::string err;
         if (!mutant.load(path.c_str(), 0, err)) {
             printf("negative control: %s: %s\n", path.c_str(), err.c_str());
@@ -105,7 +105,7 @@ bool mutantCaught(const char *packPath, const raw::Pack &pack, const Golden &gol
     return false;
 }
 
-int sample(const char *packPath, const raw::Pack &pack, const std::vector<records::Record> &all,
+int sample(const char *packPath, const gm20b::Pack &pack, const std::vector<records::Record> &all,
            const std::string &goldenText, const char *kind)
 {
     Golden golden;
@@ -165,7 +165,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: record_check <pack.bin> <records.bin> <sample.tsv> <kind> [--sample]\n");
         return 2;
     }
-    raw::Pack pack;
+    gm20b::Pack pack;
     std::string err;
     if (!pack.load(argv[1], 0, err)) {
         printf("%s: %s\n", argv[1], err.c_str());

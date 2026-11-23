@@ -29,7 +29,7 @@ public struct Signature: Equatable, Sendable {
     /// whatever the buffer held.
     public static func blitted(_ bytes: [UInt8], metalFormat: UInt, width: Int, height: Int) -> [UInt8] {
         guard metalFormat == twoPlaneXR, bytes.count == width * height * 8 else { return bytes }
-        return (0..<height).flatMap { row in bytes[(row * width * 8)..<(row * width * 8 + width * 4)] }
+        return (0 ..< height).flatMap { row in bytes[(row * width * 8) ..< (row * width * 8 + width * 4)] }
     }
 
     /// Whether the bytes of each row past 550's plane 0 still hold `sentinel`, the buffer's fill before the blit.
@@ -37,8 +37,8 @@ public struct Signature: Equatable, Sendable {
         _ bytes: [UInt8], metalFormat: UInt, width: Int, height: Int, sentinel: UInt8
     ) -> Bool {
         guard metalFormat == twoPlaneXR, bytes.count == width * height * 8 else { return true }
-        return (0..<height).allSatisfy { row in
-            bytes[(row * width * 8 + width * 4)..<((row + 1) * width * 8)].allSatisfy { $0 == sentinel }
+        return (0 ..< height).allSatisfy { row in
+            bytes[(row * width * 8 + width * 4) ..< ((row + 1) * width * 8)].allSatisfy { $0 == sentinel }
         }
     }
 
@@ -58,13 +58,13 @@ public struct Signature: Equatable, Sendable {
         let (columns, rows) = ((width + Self.block - 1) / Self.block, (height + Self.block - 1) / Self.block)
         var sums = [Float](repeating: 0, count: columns * rows * channels)
         var counts = [Float](repeating: 0, count: columns * rows)
-        for y in 0..<height {
-            for x in 0..<width {
+        for y in 0 ..< height {
+            for x in 0 ..< width {
                 let at = (y * width + x) * format.bytesPerTexel
-                let values = format.decode(bytes[at..<(at + format.bytesPerTexel)])
+                let values = format.decode(bytes[at ..< (at + format.bytesPerTexel)])
                 let cell = (y / Self.block) * columns + x / Self.block
                 counts[cell] += 1
-                for c in 0..<channels {
+                for c in 0 ..< channels {
                     sums[cell * channels + c] += values[c].isFinite ? values[c] : .nan
                 }
             }
@@ -95,7 +95,7 @@ public struct Signature: Equatable, Sendable {
         guard let first = parts.first, let hash = UInt64(String(first), radix: 16) else { return nil }
         let digits = parts.count > 1 ? parts[1] : []
         guard digits.count % 4 == 0 else { return nil }
-        let bits = stride(from: 0, to: digits.count, by: 4).map { UInt16(String(digits[$0..<($0 + 4)]), radix: 16) }
+        let bits = stride(from: 0, to: digits.count, by: 4).map { UInt16(String(digits[$0 ..< ($0 + 4)]), radix: 16) }
         guard bits.allSatisfy({ $0 != nil }) else { return nil }
         self.init(hash: hash, means: bits.map { Float(Float16(bitPattern: $0!)) })
     }

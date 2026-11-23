@@ -10,7 +10,7 @@ import UIKit
 /// contrast is reported (contrast=) but not judged: how much glass blurs is UIKit's choice, not the GPU's. Apple's own
 /// render of this scene (the iOS 27 simulator, iPad Pro 11-inch: out/agent-scratch/x1-glass/ref) measures
 /// column_spread=8 contrast=29 (reference=). The run arms the render server's split capture (split-capture:
-/// `raw: splitcap` lines of the glass shape's draws, tools/benchloop/capture.py). A failed run saves its picture
+/// `SwitchMetal: splitcap` lines of the glass shape's draws, tools/benchloop/capture.py). A failed run saves its picture
 /// (composited.png).
 struct UIGlassTest: HWTest {
     let id = "ui.glass"
@@ -64,7 +64,8 @@ struct UIGlassTest: HWTest {
             root.addSubview(grey)
             let glass = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
             glass.frame = Snapshots.aligned(
-                CGRect(x: 0, y: screen.height / 4, width: screen.width, height: screen.height / 2))
+                CGRect(x: 0, y: screen.height / 4, width: screen.width, height: screen.height / 2)
+            )
             root.addSubview(glass)
             stage.addSubview(root)
             return root
@@ -75,7 +76,8 @@ struct UIGlassTest: HWTest {
                 CompositeCheck(
                     label: "outside the glass",
                     composited: composited.cropped(x: 0, y: 0, width: composited.width, height: band - 2),
-                    cpu: cpu.cropped(x: 0, y: 0, width: cpu.width, height: band - 2)),
+                    cpu: cpu.cropped(x: 0, y: 0, width: cpu.width, height: band - 2)
+                ),
                 composited
             )
         }
@@ -107,7 +109,7 @@ struct UIGlassMotionTest: HWTest {
         var saveNext = false
         let started = Date()
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
-        for frame in 0..<Self.frames {
+        for frame in 0 ..< Self.frames {
             let (composited, recording) = await MainActor.run { () -> (Raster, GlassRecording) in
                 stage.stripes.transform = CGAffineTransform(translationX: CGFloat(frame % 8) * 8, y: 0)
                 stage.glass.transform = CGAffineTransform(translationX: 0, y: CGFloat(frame % 4) * 4)
@@ -175,7 +177,7 @@ struct UIGlassFirstFrameTest: HWTest {
         var signatures: [String] = []
         var saved: [String] = []
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
-        for round in 0..<Self.rounds {
+        for round in 0 ..< Self.rounds {
             let result = await GlassRound.run(context)
             darkest = min(darkest, result.level)
             encodings += result.recording.encoding
@@ -214,7 +216,8 @@ enum GlassPacing {
         stage.addSubview(veil)
         return { frame in
             veil.backgroundColor = UIColor(
-                hue: CGFloat(frame % 120) / 120, saturation: 0.7, brightness: 0.9, alpha: 0.35)
+                hue: CGFloat(frame % 120) / 120, saturation: 0.7, brightness: 0.9, alpha: 0.35
+            )
             veil.transform = CGAffineTransform(translationX: CGFloat(frame % 40) - 20, y: 0)
         }
     }

@@ -7,7 +7,7 @@ import Metal
 /// One hardware probe of the X1 research (out/agent-scratch/x1-probe/PROBES.md names each claim, its source and what
 /// each outcome means), on the process's default device. Its line carries probe=, claim_verdict=, the probe's numbers,
 /// paths= (each command buffer's path on the facade) and reopens= (GPU channels the kernel killed while it ran and the
-/// facade opened again). On the facade a command buffer of the probe's own off the raw path fails it, named by its path. A risky probe programs methods no driver has run on this chip: it runs even after an earlier
+/// facade opened again). On the facade a command buffer of the probe's own off the driver fails it, named by its path. A risky probe programs methods no driver has run on this chip: it runs even after an earlier
 /// test left the GPU unanswering, and ends with a fill on a fresh queue, so gpu_after=0 names the probe that wedged it.
 /// It starts by disarming what a probe that timed out left armed (stale_emitted= draws carried those methods).
 struct X1Probe: HWTest {
@@ -23,8 +23,8 @@ struct X1Probe: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let stale = risky ? RawMethods.disarm(gpu.device) : 0
-        let before = RawFacade.counters(of: gpu.device)
+        let stale = risky ? GM20BMethods.disarm(gpu.device) : 0
+        let before = GM20BFacade.counters(of: gpu.device)
         var finding: ProbeFinding?
         var failure: String?
         do {
@@ -32,16 +32,16 @@ struct X1Probe: HWTest {
         } catch {
             failure = String(describing: error)
         }
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         var base = Metrics()
-        base.set("dev", RawFacade.kind(of: gpu.device))
+        base.set("dev", GM20BFacade.kind(of: gpu.device))
         base.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
         base.set("reopens", (after["reopens"] ?? 0) - (before["reopens"] ?? 0))
         if risky {
             base.set("gpu_after", await GPUProbe.answers())
             base.set("stale_emitted", stale)
         }
-        let offRaw = RawFacade.kind(of: gpu.device) == "raw" ? gpu.paths.offRaw : PathTally()
+        let offRaw = GM20BFacade.kind(of: gpu.device) == "gm20b" ? gpu.paths.offRaw : PathTally()
         guard let finding else {
             var metrics = Metrics()
             metrics.set("probe", probe)
@@ -71,36 +71,54 @@ enum X1Probes {
     static let all: [any HWTest] = [
         X1Probe(
             id: "gpu.x1.buffer_zero", name: "New MTLBuffers read zero after freed ones held 0xAB", probe: "d1/F11",
-            body: X1MemoryProbes.bufferZero),
+            body: X1MemoryProbes.bufferZero
+        ),
         X1Probe(
             id: "gpu.x1.linear_align", name: "Textures over buffers at offsets and rows 16 mod 32", probe: "d24",
-            body: X1MemoryProbes.linearAlign),
+            body: X1MemoryProbes.linearAlign
+        ),
         X1Probe(
             id: "gpu.x1.rop_conversion", name: "ROP float to unorm, sRGB, 10-bit and half: all 65,536 halves",
-            probe: "E3/d23", body: X1ConversionProbes.rop),
+            probe: "E3/d23", body: X1ConversionProbes.rop
+        ),
         X1Probe(
             id: "gpu.x1.sampler_conversion", name: "Sampler unorm8 and unorm16 texels as half: every code",
-            probe: "E3b", body: X1ConversionProbes.sampler),
+            probe: "E3b", body: X1ConversionProbes.sampler
+        ),
         X1Probe(
             id: "gpu.x1.blend_exact", name: "ROP blend on BGRA8 against Metal's half arithmetic, 8.4 M cases a pair",
-            probe: "E4", timeout: 300, body: X1BlendProbes.exact),
+            probe: "E4", timeout: 300, body: X1BlendProbes.exact
+        ),
         X1Probe(
             id: "gpu.x1.f32_filter", name: "RGBA32F linear filtering: {0, 1e6} sampled a quarter of the way",
-            probe: "d7", body: X1FilterProbes.f32Filter),
+            probe: "d7", body: X1FilterProbes.f32Filter
+        ),
         X1Probe(
             id: "gpu.x1.mip_filter", name: "generateMipmaps' first level against an exact 2x2 box, five formats",
-            probe: "G13/d4", body: X1FilterProbes.mipFilter),
+            probe: "G13/d4", body: X1FilterProbes.mipFilter
+        ),
+        X1Probe(
+            id: "gpu.x1.filter_weight_bits",
+            name: "Linear filter sub-texel weights: a two-texel ramp in 1/65,536 steps, BGRA8, RGBA16F, R32F",
+            probe: "ffs2", body: { try await X1FilterProbes.filterWeights($0) }
+        ),
+        X1Probe(
+            id: "gpu.x1.rop_unorm10_rounding",
+            name: "Float to RGB10A2 and BGR10A2 codes at every code boundary: unblended, source-over, max",
+            probe: "d23", body: { try await X1Unorm10Probe.rounding($0) }
+        ),
         X1Probe(
             id: "gpu.x1.visibility", name: "Visibility results: counting within and across passes, boolean",
-            probe: "d17", body: X1PassProbes.visibility),
+            probe: "d17", body: X1PassProbes.visibility
+        ),
         X1PassBarrierProbe.probe, X1JobBoundaryProbe.probe, X1SwitchDrainProbe.probe,
         X1RawProbes.blendKills, X1RawProbes.viewportSwizzle, X1PrecisionProbe.probe, X1IteratedBlendProbe.probe,
         X1CompressedCopyProbe.probe, X1CompressedDepthProbe.probe, X1TwodProbes.scale, X1TwodProbes.clear,
-        X1TwodProbes.resolve, X1ConstantColourProbe.probe, X1FillBoxProbe.probe,
+        X1TwodProbes.resolve, X1TwodProbes.floatConvert, X1ConstantColourProbe.probe, X1FillBoxProbe.probe,
         X1VICPitchProbe.probe, X1VICLayoutProbe.probe, X1VICFractionProbe.probe,
         X1VICPackedProbe.probe, X1VICTransposeProbe.probe, X1VICLargeProbe.probe, X1VICComposeProbe.probe,
         X1VICComposeProbe.display,
-        X1VICOddProbe.probe,
+        X1VICOddProbe.probe, X1IAdd3FormsProbe.probe, X1LayerPastCountProbe.probe,
     ]
     /// The probe that runs after every other test of the app: its draw reads memory no other test's does
     static let last: [any HWTest] = [X1IndexLimitProbe.probe]

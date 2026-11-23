@@ -102,12 +102,20 @@ final class ScanoutSession {
                 sequence: GPUConnection.uint64(reply, 32),
                 previous: flags & Self.previousFlag != 0 ? GPUConnection.uint32(reply, 28) : nil,
                 direct: flags & 1 != 0, width: width, height: height, first: mapped!.0.base, second: mapped!.1.base,
-                ticks: ticks))
+                ticks: ticks
+            )
+        )
     }
 
     /// Arms the read-back for the next present (the same buffers: the mappings stay).
     func rearm() -> Bool {
-        Self.readback(gpu, ScanoutReadback.arm, live: live).0 == KERN_SUCCESS
+        rearmFailure() == nil
+    }
+
+    /// rearm()'s refusal as "arm_<kernel return>" (kIOReturnBusy: the last frame armed is still in flight), nil when armed
+    func rearmFailure() -> String? {
+        let kr = Self.readback(gpu, ScanoutReadback.arm, live: live).0
+        return kr == KERN_SUCCESS ? nil : "arm_" + GPUConnection.hex(kr)
     }
 
     static let previousFlag: UInt32 = 1 << 2

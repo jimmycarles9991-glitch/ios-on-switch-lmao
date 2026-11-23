@@ -283,7 +283,7 @@ TEST_F(SeedPack, MisnamedOrDuplicateEntriesAreNotWritten)
 }
 
 // An entry of whole pages starts on a page of its pack and shares none of its pages: a GPU client imports them and runs
-// the program slot they hold in place (raw_program_pages.h)
+// the program slot they hold in place (program_pages.h)
 TEST_F(SeedPack, AnEntryOfWholePagesHasItsPagesToItself)
 {
     std::vector<pack::Entry> list = {entries[0], entries[1], entries[2]};

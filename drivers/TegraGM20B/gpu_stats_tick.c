@@ -18,61 +18,6 @@ extern int switch_vic_mapping_describe(nvxnu_u32 iova, char *out, unsigned long 
  * line prints ("PTIMER xR"). */
 #define STATS_WINDOW_NS (5 * NSEC_PER_SEC)
 
-/* A process's SubmitAddress calls over the window, by phase (ns), with the longest call */
-struct stats_submits {
-	u64 ns[TGM_SUBMIT_PHASES], total, max;
-	u32 n;
-};
-
-static void stats_submits_merge(struct stats_submits *into, const struct stats_submits *from)
-{
-	unsigned int p = 0;
-
-	for (p = 0; p < TGM_SUBMIT_PHASES; p++)
-		into->ns[p] += from->ns[p];
-	into->total += from->total;
-	into->n += from->n;
-	if (from->max > into->max)
-		into->max = from->max;
-}
-
-void tgm_stats_submit(struct tgm_chan *chan, const uint64_t ns[TGM_SUBMIT_PHASES])
-{
-	u64 total = 0;
-	unsigned int p = 0;
-
-	for (p = 0; p < TGM_SUBMIT_PHASES; p++) {
-		__atomic_fetch_add(&chan->stat_submit_ns[p], ns[p], __ATOMIC_RELAXED);
-		total += ns[p];
-	}
-	stats_add(&chan->stat_submit_total, &chan->stat_submit_max, total);
-	__atomic_fetch_add(&chan->stat_submits, 1, __ATOMIC_RELAXED);
-}
-
-/* tgm_live_lock held */
-static void stats_submits_take(struct tgm_chan *chan, struct stats_submits *s)
-{
-	unsigned int p = 0;
-
-	for (p = 0; p < TGM_SUBMIT_PHASES; p++)
-		s->ns[p] = __atomic_exchange_n(&chan->stat_submit_ns[p], 0, __ATOMIC_RELAXED);
-	s->total = __atomic_exchange_n(&chan->stat_submit_total, 0, __ATOMIC_RELAXED);
-	s->max = __atomic_exchange_n(&chan->stat_submit_max, 0, __ATOMIC_RELAXED);
-	s->n = __atomic_exchange_n(&chan->stat_submits, 0, __ATOMIC_RELAXED);
-}
-
-static unsigned int stats_submits_line(char *buf, unsigned int len, const struct stats_submits *s)
-{
-	if (!s->n)
-		return 0;
-	return scnprintf(buf, len,
-			 ", SubmitAddress %u x mean %llu us (resolve %llu, lock %llu, exec %llu, "
-			 "commit %llu) max %llu us",
-			 s->n, s->total / s->n / 1000, s->ns[TGM_SUBMIT_RESOLVE] / s->n / 1000,
-			 s->ns[TGM_SUBMIT_LOCK] / s->n / 1000, s->ns[TGM_SUBMIT_EXEC] / s->n / 1000,
-			 s->ns[TGM_SUBMIT_COMMIT] / s->n / 1000, s->max / 1000);
-}
-
 /* The window's "exec" line: each process's stamped GPU time per submission (start to end stamp, the L2 flush included:
  * what its work held the GPU for, other channels' time slices inside it included), summed over its channels and taken from
  * them; the window's first EXEC_OWNERS - 1 processes by name, the rest as "(others)". `rate` converts PTIMER units to ns
@@ -90,7 +35,6 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		u64 prof_ns[TGM_PC_COUNT];
 		u32 prof_n[TGM_PC_COUNT];
 		u64 prof_dn[TGM_PC_COUNT], prof_sdn[TGM_PC_COUNT];
-		struct stats_submits submits;
 		struct switch_gpu_job_window jobs;
 		struct switch_gpu_prof_seq seq;
 	} o[EXEC_OWNERS];
@@ -112,10 +56,8 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		u64 max = __atomic_exchange_n(&chan->stat_exec_max, 0, __ATOMIC_RELAXED);
 		u32 subs = __atomic_exchange_n(&chan->prof_subs, 0, __ATOMIC_RELAXED);
 		u32 stamped = __atomic_exchange_n(&chan->prof_stamped, 0, __ATOMIC_RELAXED);
-		struct stats_submits submits = {0};
 
-		stats_submits_take(chan, &submits);
-		if ((!n && !subs && !stamped && !submits.n) || chan->kernel)
+		if ((!n && !subs && !stamped) || chan->kernel)
 			continue;
 		for (i = 0; i < used && strncmp(o[i].name, chan->owner, sizeof(o[i].name)); i++)
 			;
@@ -134,7 +76,6 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 		o[i].stamps += __atomic_exchange_n(&chan->prof_stamps, 0, __ATOMIC_RELAXED);
 		o[i].spans += __atomic_exchange_n(&chan->prof_spans, 0, __ATOMIC_RELAXED);
 		o[i].span += __atomic_exchange_n(&chan->prof_span, 0, __ATOMIC_RELAXED);
-		stats_submits_merge(&o[i].submits, &submits);
 		switch_gpu_job_take(&chan->stat_jobs, &taken);
 		switch_gpu_job_merge(&o[i].jobs, &taken);
 		switch_gpu_prof_seq_take(&chan->prof_slow, &seq);
@@ -154,14 +95,12 @@ static void stats_exec_owners(char *line, unsigned int len, u64 rate)
 	mutex_unlock(&tgm_live_lock);
 	line[0] = 0;
 	for (i = 0; i < EXEC_OWNERS; i++) {
-		if (!o[i].n && !o[i].submits.n)
+		if (!o[i].n)
 			continue;
-		at += scnprintf(line + at, len - at, "%s%s", at ? "; " : "", o[i].name);
-		if (o[i].n)
-			at += scnprintf(line + at, len - at, " %u x mean %llu us max %llu us",
-					o[i].n, ((o[i].sum / o[i].n) * rate >> 16) / 1000,
-					(o[i].max * rate >> 16) / 1000);
-		at += stats_submits_line(line + at, len - at, &o[i].submits);
+		at += scnprintf(line + at, len - at, "%s%s %u x mean %llu us max %llu us",
+				at ? "; " : "", o[i].name, o[i].n,
+				((o[i].sum / o[i].n) * rate >> 16) / 1000,
+				(o[i].max * rate >> 16) / 1000);
 	}
 	if (at)
 		nvxnu_stats("tegra-gm20b: exec by process: %s", line);

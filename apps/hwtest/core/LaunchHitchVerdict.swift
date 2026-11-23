@@ -2,7 +2,7 @@ import Foundation
 
 /// HW Test ui.launch_hitch's judgement of one launch and the return to the test app, read as one SpanReading: it fails
 /// on a compositor job over the bound and names the generic merge states' spans (GenericStates) by key, name and time.
-/// Only spans of 5 ms or more are noted (raw_span_marks.h kLongSpanNs), so the generic counts and times are a floor.
+/// Only spans of 5 ms or more are noted (span_marks.h kLongSpanNs), so the generic counts and times are a floor.
 public struct LaunchHitchVerdict: Sendable {
     public let reading: SpanReading
     public let generic: [LongSpan]

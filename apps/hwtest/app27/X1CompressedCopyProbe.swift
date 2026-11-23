@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 
 /// copy.ce_compressed (METALMAP d2): the copy engine reading and writing a private render target over compressible
-/// memory (raw_comp.h kinds, the facade's switchRawProbeCompressNext) sees and leaves plain texels through that binding,
+/// memory (comp.h kinds, the facade's switchMetalProbeCompressNext) sees and leaves plain texels through that binding,
 /// as it does for the same work on a plain block-linear target. Cases, each format (BGRA8 on C32, RGBA16F on C64,
 /// RGBA32F on C128) and size: a rendered pattern read by the copy engine; full clears to the boot ZBC table's values (comptags only) and to
 /// one it lacks, read by it; a clear then a half-target draw (mixed tiles); the copy engine writing all of it and half
@@ -14,7 +14,8 @@ import Metal
 enum X1CompressedCopyProbe {
     static let probe = X1Probe(
         id: "gpu.x1.ce_compressed", name: "The copy engine reads and writes compressed colour targets as plain texels",
-        probe: "copy.ce_compressed", risky: true, timeout: 300, body: run)
+        probe: "copy.ce_compressed", risky: true, timeout: 300, body: run
+    )
 
     static let repeats = 24
 
@@ -38,22 +39,23 @@ enum X1CompressedCopyProbe {
                 let size = "\(kit.name)_\(w)x\(h)"
                 journal.starting(size)
                 guard let compressed = try kit.target(w, h, .compressed),
-                    let compressed2 = try kit.target(w, h, .compressed)
+                      let compressed2 = try kit.target(w, h, .compressed)
                 else { continue }
                 compressedMade += 1
                 made += 1
                 let plain = try kit.target(w, h, .blockLinear)!, plain2 = try kit.target(w, h, .blockLinear)!
                 let cases = Cases(kit: kit, width: w, height: h)
-                for repeatIndex in 0..<repeats {
+                for repeatIndex in 0 ..< repeats {
                     let seed = repeatIndex * 5 + 1
                     for (name, got, want) in try await cases.all(
-                        seed: seed, compressed: compressed, compressed2: compressed2, plain: plain, plain2: plain2)
+                        seed: seed, compressed: compressed, compressed2: compressed2, plain: plain, plain2: plain2
+                    )
                     {
                         let key = "\(name)_\(kit.name)"
                         let bad = zip(got, want).filter { $0 != $1 }.count + abs(got.count - want.count)
                         wrong[key, default: 0] += bad > 0 ? 1 : 0
                         if bad > 0 && firsts.count < 4,
-                            let at = (0..<min(got.count, want.count)).first(where: { got[$0] != want[$0] })
+                           let at = (0 ..< min(got.count, want.count)).first(where: { got[$0] != want[$0] })
                         {
                             let texel = at / kit.bytesPerTexel
                             firsts.append("\(key)@\(size):\(texel % w),\(texel / w):\(got[at])>\(want[at])")
@@ -79,7 +81,7 @@ enum X1CompressedCopyProbe {
         var bytes: Int { width * height * kit.bytesPerTexel }
 
         func pattern(_ seed: Int) -> [UInt8] {
-            (0..<width * height).flatMap { kit.texel($0 % width, $0 / width, seed: seed) }
+            (0 ..< width * height).flatMap { kit.texel($0 % width, $0 / width, seed: seed) }
         }
 
         func clearPass(_ commands: MTLCommandBuffer, _ t: MTLTexture, _ color: MTLClearColor) {
@@ -121,7 +123,8 @@ enum X1CompressedCopyProbe {
                     from: staging, sourceOffset: 0, sourceBytesPerRow: width * kit.bytesPerTexel,
                     sourceBytesPerImage: 0,
                     sourceSize: MTLSize(width: width, height: rows, depth: 1), to: t, destinationSlice: 0,
-                    destinationLevel: 0, destinationOrigin: MTLOrigin())
+                    destinationLevel: 0, destinationOrigin: MTLOrigin()
+                )
                 blit.endEncoding()
             }
         }
@@ -132,7 +135,8 @@ enum X1CompressedCopyProbe {
                 blit.copy(
                     from: from, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
                     sourceSize: MTLSize(width: width, height: height, depth: 1), to: to, destinationSlice: 0,
-                    destinationLevel: 0, destinationOrigin: MTLOrigin())
+                    destinationLevel: 0, destinationOrigin: MTLOrigin()
+                )
                 blit.endEncoding()
             }
         }

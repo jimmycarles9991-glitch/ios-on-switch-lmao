@@ -128,26 +128,27 @@ struct VideoAlphaTest: HWTest {
         guard
             CVPixelBufferCreate(
                 nil, side, side, kCVPixelFormatType_420YpCbCr8VideoRange_8A_TriPlanar, attributes as CFDictionary,
-                &made) == kCVReturnSuccess, let buffer = made, CVPixelBufferGetPlaneCount(buffer) == 3,
+                &made
+            ) == kCVReturnSuccess, let buffer = made, CVPixelBufferGetPlaneCount(buffer) == 3,
             let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue()
         else { throw TestFailure("CoreVideo made no IOSurface-backed \(side)x\(side) 'v0a8' buffer") }
         let codes = VideoAlpha.grid(mode)
         CVPixelBufferLockBaseAddress(buffer, [])
-        let planes = (0..<3).map { index in
+        let planes = (0 ..< 3).map { index in
             (
                 CVPixelBufferGetBaseAddressOfPlane(buffer, index)!.assumingMemoryBound(to: UInt8.self),
                 CVPixelBufferGetBytesPerRowOfPlane(buffer, index)
             )
         }
-        for y in 0..<side {
-            for x in 0..<side {
+        for y in 0 ..< side {
+            for x in 0 ..< side {
                 let code = codes[y / patch][x / patch]
                 planes[0].0[y * planes[0].1 + x] = code.y
                 planes[2].0[y * planes[2].1 + x] = code.a
             }
         }
-        for y in 0..<(side / 2) {
-            for x in 0..<(side / 2) {
+        for y in 0 ..< (side / 2) {
+            for x in 0 ..< (side / 2) {
                 let code = codes[2 * y / patch][2 * x / patch]
                 planes[1].0[y * planes[1].1 + 2 * x] = code.cb
                 planes[1].0[y * planes[1].1 + 2 * x + 1] = code.cr
@@ -198,8 +199,8 @@ struct VideoAlphaTest: HWTest {
     static func mean(_ picture: Raster, _ x: Int, _ y: Int, _ width: Int, _ height: Int) -> SIMD3<Float> {
         guard x >= 0, y >= 0, x + width <= picture.width, y + height <= picture.height else { return SIMD3(-1, -1, -1) }
         var sum = SIMD3<Float>(repeating: 0)
-        for py in y..<(y + height) {
-            for px in x..<(x + width) {
+        for py in y ..< (y + height) {
+            for px in x ..< (x + width) {
                 let p = picture.pixel(px, py)
                 sum += SIMD3(p[0], p[1], p[2])
             }

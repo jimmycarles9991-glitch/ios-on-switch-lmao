@@ -22,20 +22,20 @@ struct HalfArithmeticScene: GPUScene {
     /// Every finite half three times: against a scattering of all of them, against its own negation one unit off
     /// (cancellation down to subnormals and zeros), and against the subnormals and the first normal binade.
     static func pairs() -> (a: [UInt16], b: [UInt16]) {
-        let finite = (0...UInt16.max).filter { $0 & 0x7C00 != 0x7C00 }
+        let finite = (0 ... UInt16.max).filter { $0 & 0x7C00 != 0x7C00 }
         let n = finite.count
         var a: [UInt16] = [], b: [UInt16] = []
         a.reserveCapacity(3 * n)
         b.reserveCapacity(3 * n)
-        for i in 0..<n {
+        for i in 0 ..< n {
             a.append(finite[i])
             b.append(finite[(i * 40503) % n])
         }
-        for i in 0..<n {
+        for i in 0 ..< n {
             a.append(finite[i])
             b.append(finite[i] ^ 0x8001)
         }
-        for i in 0..<n {
+        for i in 0 ..< n {
             a.append(finite[i])
             b.append(finite[(i * 977) % 2048] | (i & 1 == 0 ? 0 : 0x8000))
         }
@@ -46,7 +46,7 @@ struct HalfArithmeticScene: GPUScene {
         var result = SceneResult()
         var (a, b) = Self.pairs()
         var c = a.indices.map { a[($0 * 7919) % a.count] }
-        for i in 0..<1024 {
+        for i in 0 ..< 1024 {
             let (x, y, z) = Self.fusedEdges[i % Self.fusedEdges.count]
             a.append(x)
             b.append(y)
@@ -65,16 +65,19 @@ struct HalfArithmeticScene: GPUScene {
             encoder.dispatchThreads(
                 MTLSize(width: a.count / 4, height: 1, depth: 1),
                 threadsPerThreadgroup: MTLSize(
-                    width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1))
+                    width: min(256, pipeline.maxTotalThreadsPerThreadgroup), height: 1, depth: 1
+                )
+            )
             encoder.endEncoding()
         }
         let got = UnsafeBufferPointer(
             start: out.contents().bindMemory(to: UInt16.self, capacity: a.count * Self.forms.count),
-            count: a.count * Self.forms.count)
+            count: a.count * Self.forms.count
+        )
         var wrong = [Int](repeating: 0, count: Self.forms.count)
         var first: [String] = []
         var fusedWitnesses = 0
-        for i in 0..<a.count {
+        for i in 0 ..< a.count {
             let x = Float16(bitPattern: a[i]), y = Float16(bitPattern: b[i]), z = Float16(bitPattern: c[i])
             let sum = (x + y).bitPattern, product = (x * y).bitPattern
             let fused = z.addingProduct(x, y).bitPattern
@@ -87,16 +90,17 @@ struct HalfArithmeticScene: GPUScene {
                 wrong[form] += 1
                 if first.count < 4 {
                     first.append(
-                        "\(Self.forms[form]) \(hex(a[i])) \(hex(b[i])) \(hex(c[i])): \(hex(have)), want \(hex(want))")
+                        "\(Self.forms[form]) \(hex(a[i])) \(hex(b[i])) \(hex(c[i])): \(hex(have)), want \(hex(want))"
+                    )
                 }
             }
         }
         result.metrics.set("pairs", a.count)
         result.metrics.set("path", timing.path)
-        if !RawFacade.counters(of: gpu.device).isEmpty {
-            result.expect(timing.path == "raw", "Half arithmetic left raw: \(timing.path)")
+        if !GM20BFacade.counters(of: gpu.device).isEmpty {
+            result.expect(timing.path == "gm20b", "Half arithmetic left raw: \(timing.path)")
         }
-        if RawFacade.kind(of: gpu.device) == "raw" {
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
             let object = gpu.device as AnyObject as! NSObject
             let native = (object.value(forKey: "supportsNativeHardwareFP16") as? NSNumber)?.intValue ?? -1
             result.metrics.set("native_answer", native)

@@ -25,7 +25,8 @@ struct HEICEncodeTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let pattern = Pattern(width: 1024, height: 768, clip: 0x5E1C)
         let tiled = try TileCompressor.encode(
-            try PatternPixels.make(pattern, frame: 0, bitDepth: 8, pool: nil), tile: 512, quality: 0.9)
+            try PatternPixels.make(pattern, frame: 0, bitDepth: 8, pool: nil), tile: 512, quality: 0.9
+        )
         var metrics = Metrics()
         metrics.set("hevc_encoders", encoderIDs(kCMVideoCodecType_HEVC).count)
         metrics.set("tiles", tiled.tiles)
@@ -63,7 +64,7 @@ struct HEICEncodeTest: HWTest {
         metrics.set("encode_ms", (CFAbsoluteTimeGetCurrent() - start) * 1000, digits: 1)
         metrics.set("bytes", data.length)
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-            let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { return .fail("the HEIC written does not decode", metrics) }
         let result = Pixels.check(decoded, pattern: pattern)
         metrics.set("error", result.lumaError, digits: 1)
@@ -96,19 +97,22 @@ struct HEICEncodeTest: HWTest {
                     offGrid.decoded == offGrid.expected && offGrid.worstLumaError <= 4
                 ),
             ],
-            metrics, proof: "SwitchEncoderRoutes tiles=\(nvencTiles.map(String.init) ?? "-") of \(tiled.expected)")
+            metrics, proof: "SwitchEncoderRoutes tiles=\(nvencTiles.map(String.init) ?? "-") of \(tiled.expected)"
+        )
     }
 
     /// The pattern in an NV12 buffer whose rows CoreVideo aligns to 64 bytes only.
     static func offGridPicture(_ pattern: Pattern) throws -> CVPixelBuffer {
         var attributes = PatternPixels.attributes(
-            width: pattern.width, height: pattern.height, format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+            width: pattern.width, height: pattern.height, format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        )
         attributes[kCVPixelBufferBytesPerRowAlignmentKey as String] = 64
         attributes.removeValue(forKey: kCVPixelBufferMetalCompatibilityKey as String)
         var buffer: CVPixelBuffer?
         let status = CVPixelBufferCreate(
             nil, pattern.width, pattern.height, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
-            attributes as CFDictionary, &buffer)
+            attributes as CFDictionary, &buffer
+        )
         guard status == kCVReturnSuccess, let buffer else { throw VideoError.status("CVPixelBufferCreate", status) }
         PatternPixels.fill(buffer, pattern: pattern, frame: 0)
         return buffer

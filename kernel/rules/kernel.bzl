@@ -21,6 +21,7 @@ each object really includes) plus <name>, the driver's objects in link order und
   <name>_asm_cc        assembly (bindings, firmware .incbin)
 """
 
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("@xcode//:defs.bzl", "IPHONEOS_SDK", "XCODE_TOOLCHAIN")
@@ -66,6 +67,14 @@ def _headers_label(directory):
 
 _HEADER_GLOBS = ["**/*.h", "**/*.hpp", "**/*.inc"]
 _KERNEL_ONLY = ["//bazel/platforms:kernel"]
+
+# After XNU's recipe in the command line, so a driver's DEVELOPMENT || DEBUG code compiles out against the DEVELOPMENT
+# SDK. XNU's headers then see DEVELOPMENT undefined too, and kernel-private structures (struct task, struct thread)
+# lose their DEVELOPMENT members: kernel_archive refuses these objects.
+_DIAGNOSTICS_OFF_FLAGS = {
+    "//bazel:diagnostics_off": ["-UDEVELOPMENT"],
+    "//conditions:default": [],
+}
 
 def _recipe_name(label, valid):
     name = label.rpartition(":")[2]
@@ -266,8 +275,8 @@ def kernel_driver(
                 name = lib,
                 srcs = group,
                 hdrs = hdrs,
-                cxxopts = _expand(cxx_flags + extra),
-                conlyopts = _expand(c_copts + extra),
+                cxxopts = _expand(cxx_flags + extra) + select(_DIAGNOSTICS_OFF_FLAGS),
+                conlyopts = _expand(c_copts + extra) + select(_DIAGNOSTICS_OFF_FLAGS),
                 features = features,
                 deps = header_deps + _generated(flags),
                 toolchains = [KERNEL_SDK],
@@ -459,6 +468,8 @@ _kernel_driver_objects = rule(
 )
 
 def _kernel_archive_impl(ctx):
+    if not ctx.attr._diagnostics[BuildSettingInfo].value:
+        fail("{}: --//bazel:diagnostics=false objects are for a compile check, not a kernel".format(ctx.label))
     out = ctx.actions.declare_file(ctx.attr.out)
     members = []
     for m in ctx.attr.members:
@@ -506,6 +517,7 @@ kernel_archive = rule(
     attrs = dict(KERNEL_TOOL_ATTRS, **{
         "out": attr.string(mandatory = True),
         "members": attr.label_list(allow_files = [".o"]),
+        "_diagnostics": attr.label(default = "//bazel:diagnostics"),
     }),
 )
 

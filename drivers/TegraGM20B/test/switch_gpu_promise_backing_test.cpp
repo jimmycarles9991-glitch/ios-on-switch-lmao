@@ -300,8 +300,9 @@ TEST_F(Backing, ACpuLockBehindAWriterThatKeepsPromisingIsLetGoByTheLastOnesGiveU
 }
 
 // The give-up (SwitchGpuPromiseGiveUp.h) gives the promise up: CPU readers asleep behind it, a lock and the display's
-// CPU copy, go on at the abandonment's wake with no cancel or close of the promise, and read what the surface held
-// before (its last writer). The mark alone wakes nobody: the wake is what lets them go.
+// CPU copy, wake at the abandonment's wake with no cancel or close of the promise. The lock reads what the surface held
+// before; the copy, which would show it as the promised frame, is refused WRITE_REFUSED. The mark alone wakes nobody:
+// the wake is what lets them go.
 TEST_F(Backing, CpuReadersAsleepOnAPromiseGivenUpOnGoOnAtItsWake)
 {
 	auto *b = promised();
@@ -328,10 +329,9 @@ TEST_F(Backing, CpuReadersAsleepOnAPromiseGivenUpOnGoOnAtItsWake)
 	copy.join();
 	lock.join();
 	EXPECT_LT(std::chrono::steady_clock::now() - woken, std::chrono::milliseconds(100));
-	EXPECT_EQ(copied.load(), 0);
+	EXPECT_EQ(copied.load(), SWITCH_GPU_BACKING_WRITE_REFUSED);
+	EXPECT_EQ(lease, nullptr);
 	EXPECT_EQ(locked.load(), 0);
-	EXPECT_EQ(producer.value, 2u) << "the frame before the promised one";
-	EXPECT_EQ(switch_gpu_backing_cpu_release_owned(&lease, 0), 0);
 	EXPECT_EQ(switch_gpu_backing_cpu_release(b, 0, 4096, kRead), 0);
 	abandoned = 0;
 	switch_gpu_backing_promise_drop(b, kOffset);
@@ -393,6 +393,28 @@ TEST_F(Backing, AJobTakesThePromisesUnderItsOwnTransaction)
 	switch_gpu_backing_abort(&transaction);
 	switch_gpu_backing_promise_drop(b, kOffset);
 	switch_gpu_backing_release(b);
+}
+
+// One promise names every surface its job writes, as many as its maker chooses: a reader of them all waits for its word
+// once, so no maker fills another connection's dependency list (DependencyRoom refuses the compositor's job).
+TEST_F(Backing, AReaderWaitsOnceForAPromiseOnManySurfaces)
+{
+	auto *a = promised(), *b = promised();
+	switch_gpu_backing_use reads[] = {{a, kRead, 0}, {b, kRead, 0}};
+	switch_gpu_backing_transaction transaction = {};
+	const auto job = token(9, 2);
+	ASSERT_EQ(switch_gpu_backing_begin(reads, 2, &job, &transaction), 0);
+	switch_gpu_backing_token tokens[2] = {};
+	uint32_t needed = 0;
+	ASSERT_EQ(switch_gpu_backing_promise_dependencies(&transaction, tokens, 2, &needed, 0, 0),
+		  0);
+	EXPECT_EQ(needed, 1u);
+	EXPECT_EQ(tokens[0].queue, kOffset);
+	switch_gpu_backing_abort(&transaction);
+	for (auto *backing : {a, b}) {
+		switch_gpu_backing_promise_drop(backing, kOffset);
+		switch_gpu_backing_release(backing);
+	}
 }
 
 // The surface-level read takes the surface's lock, which the transaction already holds: XNU's lock never returns, and
@@ -496,9 +518,9 @@ TEST_F(Backing, AReadOutsideThePromisedRangeIsAnOrdinaryRead)
 	switch_gpu_backing_release(b);
 }
 
-// A promise given up on (the give-up's raise, a kill, a close) is a failed producer: the present that waited for it
-// finishes TEGRA_SCANOUT_SOURCE_LOST, and the display drops the frame, the panel keeping the one before it. The word
-// the release raised does not make it kept.
+// A promise given up on (the give-up's raise, a refused submission of its job) is a write that never came: the present
+// that waited for it finishes WRITE_REFUSED (TEGRA_SCANOUT_SOURCE_REFUSED), and the display does not show the frame.
+// The word the release raised does not make it kept.
 TEST_F(Backing, AnAbandonedPromiseFailsThePresentThatWaitedForIt)
 {
 	auto *b = promised(3);
@@ -511,7 +533,8 @@ TEST_F(Backing, AnAbandonedPromiseFailsThePresentThatWaitedForIt)
 	abandoned = uint64_t(kOffset) << 32 | 3;
 	fence[kOffset / 4] = 3;
 	EXPECT_EQ(switch_gpu_backing_token_status(&tokens[0]), -5);
-	EXPECT_EQ(switch_gpu_present_tokens_finish_ready(&present, nullptr), -5);
+	EXPECT_EQ(switch_gpu_present_tokens_finish_ready(&present, nullptr),
+		  SWITCH_GPU_BACKING_WRITE_REFUSED);
 	abandoned = 0;
 	EXPECT_EQ(switch_gpu_backing_token_status(&tokens[0]), 1)
 		<< "a cancel's raise: nothing was promised after all";
@@ -532,6 +555,32 @@ TEST_F(Backing, APromiseWhoseWordWasRaisedHoldsNothingOff)
 	EXPECT_EQ(switch_gpu_backing_cpu_acquire(b, 0, 4096, kRead | avoid), 0);
 	EXPECT_EQ(switch_gpu_backing_cpu_release(b, 0, 4096, kRead | avoid), 0);
 	switch_gpu_backing_promise_drop(b, kOffset);
+	switch_gpu_backing_release(b);
+}
+
+// A promise given up on, its word raised and its job never submitted: the display's snapshot is refused WRITE_REFUSED,
+// never the frame before it shown in the promised one's place. Its cancel marks the surface as it drops the ref
+// (TegraGM20BUserClientPromise.cpp), so the refusal holds until the next write.
+TEST_F(Backing, AGivenUpPromiseRefusesTheSnapshotUntilTheNextWrite)
+{
+	auto *b = promised();
+	abandoned = uint64_t(kOffset) << 32 | 1;
+	fence[kOffset / 4] = 1;
+	switch_gpu_backing_token producer = {}, tokens[4] = {};
+	switch_gpu_cpu_lease *lease = nullptr;
+	EXPECT_EQ(switch_gpu_backing_snapshot_read_promises(b, &producer, &lease, tokens, 4),
+		  SWITCH_GPU_BACKING_WRITE_REFUSED);
+	EXPECT_EQ(lease, nullptr);
+	switch_gpu_backing_write_refused(b);
+	switch_gpu_backing_promise_drop(b, kOffset);
+	abandoned = 0;
+	EXPECT_EQ(switch_gpu_backing_snapshot_read(b, &producer, &lease),
+		  SWITCH_GPU_BACKING_WRITE_REFUSED);
+	EXPECT_EQ(lease, nullptr);
+	ASSERT_EQ(publish(b, kWrite, token(3, 6)), 0);
+	ASSERT_EQ(switch_gpu_backing_snapshot_read(b, &producer, &lease), 0);
+	EXPECT_EQ(producer.value, 6u);
+	EXPECT_EQ(switch_gpu_backing_cpu_release_owned(&lease, 0), 0);
 	switch_gpu_backing_release(b);
 }
 

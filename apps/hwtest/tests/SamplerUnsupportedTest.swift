@@ -7,14 +7,14 @@ import Metal
 /// whose draws went to m2v): a cubic filter with a mip filter or anisotropy, and a NaN lod clamp; a plain sampler and a
 /// cubic one with no mip filter are made.
 struct SamplerUnsupportedTest: HWTest {
-    let id = "gpu.raw.sampler_unsupported"
+    let id = "gpu.gm20b.sampler_unsupported"
     let name = "Samplers the device has no form of are nil, the rest are made"
     let subsystem = Subsystem.metal
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let cubic = MTLSamplerMinMagFilter(rawValue: 2) ?? .linear
         func made(_ edit: (MTLSamplerDescriptor) -> Void) -> Bool {
             let d = MTLSamplerDescriptor()

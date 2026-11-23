@@ -31,16 +31,18 @@ enum VP9Writer {
         defer { vpx_img_free(image) }
         let pattern = clip.pattern
         var frames: [IVF.Frame] = []
-        for index in 0..<clip.frames {
+        for index in 0 ..< clip.frames {
             let planes = image.pointee.planes
             let strides = image.pointee.stride
             PatternWriter.writeLuma(pattern, frame: index, into: .init(base: planes.0!, rowBytes: Int(strides.0)))
             PatternWriter.writeChromaPlanar(
                 pattern, cb: .init(base: planes.1!, rowBytes: Int(strides.1)),
-                cr: .init(base: planes.2!, rowBytes: Int(strides.2)))
+                cr: .init(base: planes.2!, rowBytes: Int(strides.2))
+            )
             let flags = index == 0 ? vpx_enc_frame_flags_t(VPX_EFLAG_FORCE_KF) : 0
             try check(
-                vpx_codec_encode(&codec, image, vpx_codec_pts_t(index), 1, flags, UInt(VPX_DL_GOOD_QUALITY)), "frame")
+                vpx_codec_encode(&codec, image, vpx_codec_pts_t(index), 1, flags, UInt(VPX_DL_GOOD_QUALITY)), "frame"
+            )
             drain(&codec, into: &frames)
         }
         try check(vpx_codec_encode(&codec, nil, -1, 1, 0, UInt(VPX_DL_GOOD_QUALITY)), "flush")
@@ -49,7 +51,8 @@ enum VP9Writer {
             throw Failure(description: "\(clip.file): libvpx returned \(frames.count) of \(clip.frames) frames")
         }
         let header = IVF.Header(
-            fourcc: "VP90", width: clip.width, height: clip.height, rate: clip.fps, scale: 1, frameCount: frames.count)
+            fourcc: "VP90", width: clip.width, height: clip.height, rate: clip.fps, scale: 1, frameCount: frames.count
+        )
         try IVF.write(header, frames: frames).write(to: url)
     }
 

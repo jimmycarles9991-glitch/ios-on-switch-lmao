@@ -3,17 +3,18 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// What Metal's validation layer would stop completes on the raw path as Apple's driver completes it
-/// (drivers/TegraGM20BMetal/raw/runtime/raw_client_errors.h), never on m2v. Every expected value is what an M-series Mac
-/// did with API validation off (x1-m2v-errors' probes), each command buffer completed with no error; the raw path logs
-/// one refusal line a process and reason. Each case: status=completed, paths=raw, m2v=0 and its contents.
+/// What Metal's validation layer would stop completes on the driver as Apple's driver completes it
+/// (drivers/TegraGM20BMetal/client_errors.h). Every expected value is what an M-series Mac did with API
+/// validation off (x1-m2v-errors' probes), each command buffer completed with no error; the driver logs one refusal
+/// line a process and rule. Each case: status=completed, paths=raw, failed_cbs=0 and its contents.
 enum ClientErrors {
     /// client_colour_fragment's (0.2, 0.4, 0.6, 0.8) as a BGRA8 texel's bytes, as Apple's driver stored it
     static let colour: [UInt8] = [0x99, 0x66, 0x33, 0xcc]
 
     static func state(_ gpu: GPU, _ format: MTLPixelFormat, samples: Int = 1) throws -> MTLRenderPipelineState {
         try gpu.render(
-            vertex: "answers_full_vertex", fragment: "client_colour_fragment", format: format, samples: samples)
+            vertex: "answers_full_vertex", fragment: "client_colour_fragment", format: format, samples: samples
+        )
     }
 
     static func pass(_ t: MTLTexture, resolve: MTLTexture? = nil) -> MTLRenderPassDescriptor {
@@ -31,7 +32,7 @@ enum ClientErrors {
         _ gpu: GPU, _ pass: MTLRenderPassDescriptor, _ state: MTLRenderPipelineState, _ work: inout NativeWork,
         _ metrics: inout Metrics
     ) async throws {
-        let before = RawFacade.counters(of: gpu.device)["m2v"] ?? 0
+        let before = GM20BFacade.counters(of: gpu.device)
         var status = MTLCommandBufferStatus.notEnqueued
         let timing = try await gpu.run(tolerateError: true) { commands in
             let e = commands.makeRenderCommandEncoder(descriptor: pass)!
@@ -41,18 +42,24 @@ enum ClientErrors {
             commands.addCompletedHandler { status = $0.status }
         }
         work.paths.append(timing.path)
-        record(gpu, before, status, &work, &metrics)
+        record(gpu, before, timing, status, &work, &metrics)
     }
 
     static func record(
-        _ gpu: GPU, _ m2vBefore: Int, _ status: MTLCommandBufferStatus, _ work: inout NativeWork,
-        _ metrics: inout Metrics
+        _ gpu: GPU, _ before: [String: Int], _ timing: GPU.Timing, _ status: MTLCommandBufferStatus,
+        _ work: inout NativeWork, _ metrics: inout Metrics
     ) {
-        let m2v = (RawFacade.counters(of: gpu.device)["m2v"] ?? 0) - m2vBefore
         metrics.set("status", status == .completed ? "completed" : "\(status.rawValue)")
-        metrics.set("m2v", m2v)
         if status != .completed { work.failures.append("the command buffer did not complete") }
-        if m2v != 0 { work.failures.append("\(m2v) command buffers went to m2v") }
+        var own = PathTally()
+        own.add(timing.facadePath)
+        let failed = FailedCounts.judged(
+            before: before,
+            after: GM20BFacade.counters(of: gpu.device),
+            own: own,
+            &metrics
+        )
+        if !failed.1 { work.failures.append(failed.0) }
     }
 
     /// The BGRA8 texel at (4, 4) of `t`, logged as `field`; a failure where a channel is off `want` by more than `slack`
@@ -73,7 +80,7 @@ enum ClientErrors {
 /// the source to [0, 2048) and left the rest. A fill of 8 KiB from offset 1024 of a 4 KiB buffer filled [1024, 4096).
 struct NativeErrorBufferCopyTest: NativeObjectTest {
     let id = "metal.native.error_bufcopy"
-    let name = "A buffer copy or fill past its buffer moves the bytes inside it, as Apple's driver, on the raw path"
+    let name = "A buffer copy or fill past its buffer moves the bytes inside it, as Apple's driver, on the driver"
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         var work = NativeWork()
@@ -81,21 +88,21 @@ struct NativeErrorBufferCopyTest: NativeObjectTest {
         memset(a.contents(), 0xAA, 4096)
         memset(b.contents(), 0x55, 8192)
         memset(c.contents(), 0x11, 4096)
-        let before = RawFacade.counters(of: gpu.device)["m2v"] ?? 0
+        let before = GM20BFacade.counters(of: gpu.device)
         var status = MTLCommandBufferStatus.notEnqueued
         let timing = try await gpu.run(tolerateError: true) { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.copy(from: a, sourceOffset: 2048, to: b, destinationOffset: 0, size: 4096)
-            blit.fill(buffer: c, range: 1024..<(1024 + 8192), value: 7)
+            blit.fill(buffer: c, range: 1024 ..< (1024 + 8192), value: 7)
             blit.endEncoding()
             commands.addCompletedHandler { status = $0.status }
         }
         work.paths.append(timing.path)
-        ClientErrors.record(gpu, before, status, &work, &metrics)
+        ClientErrors.record(gpu, before, timing, status, &work, &metrics)
         let copied = b.contents().bindMemory(to: UInt8.self, capacity: 8192)
         let filled = c.contents().bindMemory(to: UInt8.self, capacity: 4096)
-        let copyWrong = (0..<8192).filter { copied[$0] != ($0 < 2048 ? 0xAA : 0x55) }.count
-        let fillWrong = (0..<4096).filter { filled[$0] != ($0 < 1024 ? 0x11 : 7) }.count
+        let copyWrong = (0 ..< 8192).filter { copied[$0] != ($0 < 2048 ? 0xAA : 0x55) }.count
+        let fillWrong = (0 ..< 4096).filter { filled[$0] != ($0 < 1024 ? 0x11 : 7) }.count
         metrics.set("copy_wrong", copyWrong)
         metrics.set("fill_wrong", fillWrong)
         if copyWrong != 0 { work.failures.append("\(copyWrong) bytes of the clamped copy wrong") }
@@ -108,7 +115,7 @@ struct NativeErrorBufferCopyTest: NativeObjectTest {
 /// vertices, 1 instance, from the three words inside and a zero after
 struct NativeErrorIndexRangeTest: NativeObjectTest {
     let id = "metal.native.error_idxrange"
-    let name = "Indirect arguments past their buffer draw from zeros after it, as Apple's driver, on the raw path"
+    let name = "Indirect arguments past their buffer draw from zeros after it, as Apple's driver, on the driver"
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         var work = NativeWork()
@@ -116,7 +123,7 @@ struct NativeErrorIndexRangeTest: NativeObjectTest {
         let state = try ClientErrors.state(gpu, .bgra8Unorm)
         let arguments = try gpu.buffer([UInt32](arrayLiteral: 7, 3, 1, 0))
         work.objects += [target, state]
-        let before = RawFacade.counters(of: gpu.device)["m2v"] ?? 0
+        let before = GM20BFacade.counters(of: gpu.device)
         var status = MTLCommandBufferStatus.notEnqueued
         let timing = try await gpu.run(tolerateError: true) { commands in
             let e = commands.makeRenderCommandEncoder(descriptor: ClientErrors.pass(target))!
@@ -126,7 +133,7 @@ struct NativeErrorIndexRangeTest: NativeObjectTest {
             commands.addCompletedHandler { status = $0.status }
         }
         work.paths.append(timing.path)
-        ClientErrors.record(gpu, before, status, &work, &metrics)
+        ClientErrors.record(gpu, before, timing, status, &work, &metrics)
         try await ClientErrors.texel(gpu, target, want: ClientErrors.colour, field: "texel", &work, &metrics)
         return work
     }
@@ -169,7 +176,7 @@ struct NativeErrorFormatSkipTest: NativeObjectTest {
 /// four-sample state into a one-sample pass drew the whole colour
 struct NativeErrorSamplesTest: NativeObjectTest {
     let id = "metal.native.error_samples"
-    let name = "States of other samples than their pass draw as Apple's driver draws them, on the raw path"
+    let name = "States of other samples than their pass draw as Apple's driver draws them, on the driver"
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         var work = NativeWork()
@@ -180,7 +187,8 @@ struct NativeErrorSamplesTest: NativeObjectTest {
         work.objects += [ms, resolved, one, target, four]
         try await ClientErrors.draw(gpu, ClientErrors.pass(ms, resolve: resolved), one, &work, &metrics)
         try await ClientErrors.texel(
-            gpu, resolved, want: [0x26, 0x1a, 0x0d, 0x33], slack: 1, field: "one_in_four", &work, &metrics)
+            gpu, resolved, want: [0x26, 0x1a, 0x0d, 0x33], slack: 1, field: "one_in_four", &work, &metrics
+        )
         try await ClientErrors.draw(gpu, ClientErrors.pass(target), four, &work, &metrics)
         try await ClientErrors.texel(gpu, target, want: ClientErrors.colour, field: "four_in_one", &work, &metrics)
         return work
@@ -205,7 +213,8 @@ struct NativeErrorPositionsTest: NativeObjectTest {
         ])
         try await ClientErrors.draw(gpu, pass, state, &work, &metrics)
         try await ClientErrors.texel(
-            gpu, resolved, want: ClientErrors.colour, slack: 1, field: "texel", &work, &metrics)
+            gpu, resolved, want: ClientErrors.colour, slack: 1, field: "texel", &work, &metrics
+        )
         return work
     }
 }

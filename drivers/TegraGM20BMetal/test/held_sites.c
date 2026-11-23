@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Every allocation and free of every thread between held_sites_start and held_sites_stop, each allocation with the
-// return addresses of its frames, logged through libmalloc's malloc_logger into storage made before the first start, so
-// the hook never allocates. held_sites.h reads the log back as the blocks still held and where each was allocated.
+// return addresses of its frames and its thread, logged through libmalloc's malloc_logger into storage made before the
+// first start, so the hook never allocates. held_sites.h reads the log back as the blocks still held and where each was
+// allocated.
 #include "held_sites_log.h"
 
+#include <dispatch/dispatch.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <string.h>
 #include <sys/mman.h>
 
 typedef void(malloc_logger_t)(uint32_t type, uintptr_t arg1, uintptr_t arg2, uintptr_t arg3, uintptr_t result,
@@ -22,6 +25,7 @@ enum {
 static struct held_sites_event *events;
 static _Atomic uint64_t used;
 static _Atomic int overflowed;
+static pthread_t starter;
 
 static uint32_t walk(uintptr_t *out)
 {
@@ -44,6 +48,21 @@ static uint32_t walk(uintptr_t *out)
     return n;
 }
 
+static void nameThread(struct held_sites_event *e)
+{
+    const pthread_t self = pthread_self();
+    e->encoding = pthread_equal(self, starter);
+    e->thread[0] = 0;
+    if (e->encoding)
+        return;
+    pthread_getname_np(self, e->thread, sizeof e->thread);
+    if (e->thread[0])
+        return;
+    // an unnamed thread that runs no queue reads as the default root queue
+    strlcpy(e->thread, "queue ", sizeof e->thread);
+    strlcat(e->thread, dispatch_queue_get_label(DISPATCH_CURRENT_QUEUE_LABEL), sizeof e->thread);
+}
+
 // malloc: (zone, size, 0, block); calloc: (zone, count * size, 0, block); free: (zone, block, 0, 0); realloc:
 // (zone, old block, new size, new block)
 static void logBlocks(uint32_t type, uintptr_t zone, uintptr_t a2, uintptr_t a3, uintptr_t result, uint32_t skip)
@@ -61,6 +80,8 @@ static void logBlocks(uint32_t type, uintptr_t zone, uintptr_t a2, uintptr_t a3,
     e->allocated = type & kAllocate ? result : 0;
     e->size = !(type & kAllocate) ? 0 : type & kDeallocate ? a3 : a2;
     e->frames = type & kAllocate ? walk(e->frame) : 0;
+    if (type & kAllocate)
+        nameThread(e);
     __atomic_store_n(&e->ready, 1, __ATOMIC_RELEASE);
 }
 
@@ -73,6 +94,7 @@ void held_sites_start(void)
         __atomic_store_n(&events[i].ready, 0, __ATOMIC_RELAXED);
     atomic_store(&used, 0);
     atomic_store(&overflowed, 0);
+    starter = pthread_self();
     atomic_thread_fence(memory_order_seq_cst);
     malloc_logger = logBlocks;
 }

@@ -24,7 +24,6 @@ struct VicScanoutJob {
 
 VicScanoutJob *vicJob = nullptr;  // allocated at the start: the display class has a size limit
 bool vicCopyQueued = false, vicScanout = false;
-unsigned vicDeadlines = 0;
 
 #if SWITCH_FRAME_TIMELINE
 static constexpr unsigned kScanoutRoutes = 4;
@@ -159,7 +158,6 @@ bool offerVicCopy(const OriginalLegacySwapRequest *request, OSObject *surface, u
     gpuLength = uint64_t(width) * height * 4;
     gpuScanout = true;
     vicScanout = true;
-    vicDeadlines = 0;
     gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
     native_legacy_swap_stage(1);
     transferred = true;
@@ -266,7 +264,9 @@ void releaseVicJob()
 }
 
 // Under the gate: VIC's job ended (status 0: every byte of the target is in DRAM). Done, window A flips to it, as after
-// a GPU copy; failed, the target is never flipped to and the frame is not shown. True: it was VIC's.
+// a GPU copy; failed, the target is never flipped to and the frame is not shown. A job that ran behind a failed producer
+// (its source's, or a window B surface's it orders after) reports that producer's plain failure as its own, so those
+// producers say why first. True: it was VIC's.
 // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
 bool finishVicCopy(int status)
 {
@@ -277,6 +277,11 @@ bool finishVicCopy(int status)
     gpuDeadline->cancelTimeout();
     gpuScanout = false;
     gpuRequest = nullptr;
+    if (status) {
+        switch_gpu_backing_token producers[1 + kPlaneDependencies] = {vicJob->source.view.producer};
+        const unsigned count = 1 + (planeNextSet ? planeDependencies(planeNext, producers + 1) : 0u);
+        status = producerFailure(status, producers, count);
+    }
     releaseVicJob();
     if (status && __atomic_load_n(&copyStopping, __ATOMIC_ACQUIRE)) {
         ring.release();
@@ -301,37 +306,22 @@ bool finishVicCopy(int status)
 // NOLINTNEXTLINE(misc-no-recursion): kickSwapQueue's kicking flag stops re-entry; a nested kick only loops
 void vicNotShown(const OriginalLegacySwapRequest *request, int status)
 {
-    if (status == SWITCH_GPU_BACKING_DEPENDENCY_FAILED || status == TEGRA_SCANOUT_SOURCE_LOST) {
-        dropLostFrame(request, kNoBuffer);
-        return;
+    if (!sourceUnshown(status, request, "VIC copy")) {
+        switch_refusal("display-scanout", "vic-failed",
+                       "SwitchDisplay: VIC did not copy frame %llu into the scanout (%d): it is not shown", gpuSequence,
+                       status);
+        noteScanoutRoute(2);
     }
-    switch_refusal("display-scanout", "vic-failed",
-                   "SwitchDisplay: VIC did not copy frame %llu into the scanout (%d): it is not shown", gpuSequence,
-                   status);
-    noteScanoutRoute(2);
-    ring.release();
-    releaseIdleDirectReads();
-    if (latchRetire && request)
-        retireUnshown(seqOf(request));
-    else if (!latchRetire && !gpuRetired && request && pendingSwapRequest() == request)
-        retireSwap(request, true);
-    gpuRetired = false;
-    transferred = false;
-    kickSwapQueue();
+    retireSwapUnshown(request, kNoBuffer);
 }
 
 // The deadline of a job VIC holds: its completion is a syncpoint interrupt, after the GPU work its source waits for
 // (the GPU driver ends a hung client's within its own deadline). One that never comes is a lost interrupt.
-bool vicCopyLate()
+void vicCopyLate()
 {
-    if (!vicScanout)
-        return false;
-    if (__atomic_load_n(&gpuDonePending, __ATOMIC_SEQ_CST) || ++vicDeadlines < kGpuCopyDeadlines) {
-        gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
-        return true;
-    }
-    panic("SwitchDisplay: VIC scanout copy %llu into %#x not completed in %u ms: no VIC syncpoint interrupt",
-          gpuSequence, surfaceAddress(vicJob->target), vicDeadlines * kGpuCopyDeadlineMS);
+    if (vicScanout)
+        panic("SwitchDisplay: VIC scanout copy %llu into %#x not completed in %u ms: no VIC syncpoint interrupt",
+              gpuSequence, surfaceAddress(vicJob->target), kGpuCopyDeadlineMS);
 }
 
 // Under the gate, in the kick, before the CPU copy: with VIC's route up, a frame neither engine took is not shown (its swap

@@ -50,9 +50,9 @@ FRAME = (
 
 
 RATES = (
-    'TegraGM20BMetal: backboardd raw 5s c=300(60.0/s) m2v=0 sw=0 cpu={cpu} acq=0 enc=120us/c d=9.0 p=2.0 b=0.10 '
-    'defer=0 abort=0 rw=0 pool=16MB/4 grow=0 imp=12/40MB clean=0.0KB/c ce=0/0KB ev=0/0 ws={ws}/{wsus}us wc=0/0us '
-    'sp=0/0'
+    'TegraGM20BMetal: backboardd gm20b 5s c=300(60.0/s) enc=120us/c d=9.0 p=2.0 b=0.10 defer=0 rw=0 '
+    'pool=16MB/4 grow=0 imp=12/40MB clean=0.0KB/c ce=0/0KB ev=0/0 sig=0/0/0 ws={ws}/{wsus}us wc=0/0us '
+    'set_refusals=0 set_rebuilds=0 kept=0/0KB passes=0/0 hdr=8000'
 )
 
 
@@ -122,15 +122,13 @@ class Stutter(unittest.TestCase):
         self.assertEqual(verdicts(line.format(mean=9000, max=250000))['stutter.gpu-raise'], FAIL)
 
     def test_render_thread_cpu_waits_on_the_raw_path(self):
-        got = verdicts(RATES.format(cpu=0, ws=300, wsus=900))
-        self.assertEqual(got['stutter.raw-scheduled-wait'], PASS)
-        self.assertEqual(got['stutter.raw-completed-wait'], PASS)
-        self.assertEqual(got['stutter.raw-cpu-ordered'], PASS)
-        self.assertEqual(got['stutter.raw-ring-waits'], PASS)
-        self.assertEqual(got['stutter.raw-pool-stalls'], PASS)
-        got = verdicts(RATES.format(cpu=4, ws=300, wsus=48000))
-        self.assertEqual(got['stutter.raw-scheduled-wait'], FAIL)
-        self.assertEqual(got['stutter.raw-cpu-ordered'], FAIL)
+        got = verdicts(RATES.format(ws=300, wsus=900))
+        self.assertEqual(got['stutter.gm20b-scheduled-wait'], PASS)
+        self.assertEqual(got['stutter.gm20b-completed-wait'], PASS)
+        self.assertEqual(got['stutter.gm20b-ring-waits'], PASS)
+        self.assertEqual(got['stutter.gm20b-pool-stalls'], PASS)
+        got = verdicts(RATES.format(ws=300, wsus=48000))
+        self.assertEqual(got['stutter.gm20b-scheduled-wait'], FAIL)
 
 
 if __name__ == '__main__':

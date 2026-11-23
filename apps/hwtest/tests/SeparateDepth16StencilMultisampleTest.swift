@@ -4,29 +4,30 @@ import HWTestGPU
 import Metal
 
 /// A 4x multisampled Depth16Unorm texture and Stencil8 texture as one pass's attachments (pass.ds took any multisampled
-/// Depth16Unorm pair to m2v; the raw path renders a multisampled Depth32Float_Stencil8 of the pass's). Cleared and not kept: a
+/// Depth16Unorm pair to m2v; the driver renders a multisampled Depth32Float_Stencil8 of the pass's). Cleared and not kept: a
 /// red quad at depth 0.5 over the left half writing stencil 1, a green one at 0.7 over the whole target under Less, a blue one
 /// over the whole target where the stencil is 1; resolved colour blue on the left, green on the right. Kept: a pass stores a
 /// depth of 0.5 over the left half, the next loads it and draws green at 0.7 under Less (each sample's depth converted
 /// out and back in by the pack's multisampled conversion states); resolved colour black on the left, green on the right.
-/// Every pass on the raw path.
+/// Every pass on the driver.
 struct SeparateDepth16StencilMultisampleTest: HWTest {
-    let id = "gpu.raw.separate_depth16_stencil_ms"
-    let name = "A multisampled Depth16Unorm and Stencil8 pair, transient and kept across passes, on the raw path"
+    let id = "gpu.gm20b.separate_depth16_stencil_ms"
+    let name = "A multisampled Depth16Unorm and Stencil8 pair, transient and kept across passes, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = 16, samples = 4
         let colour = try gpu.texture(.rgba8Unorm, n, n, samples: samples)
         let resolved = try gpu.texture(.rgba8Unorm, n, n)
         let depth = try gpu.texture(.depth16Unorm, n, n, usage: [.renderTarget], samples: samples)
         let stencil = try gpu.texture(.stencil8, n, n, usage: [.renderTarget], samples: samples)
         let state = try gpu.render(
-            fragment: "solid_fragment", format: .rgba8Unorm, samples: samples, depth: .depth16Unorm, stencil: .stencil8)
+            fragment: "solid_fragment", format: .rgba8Unorm, samples: samples, depth: .depth16Unorm, stencil: .stencil8
+        )
         func ds(
             _ compare: MTLCompareFunction, stencil test: MTLCompareFunction, replace: Bool
         ) throws -> MTLDepthStencilState {
@@ -77,9 +78,10 @@ struct SeparateDepth16StencilMultisampleTest: HWTest {
         func wrong(_ left: [UInt8], _ right: [UInt8]) async throws -> Int {
             let pixels = try await gpu.read(resolved, bytesPerPixel: 4)
             var count = 0
-            for y in 0..<n {
-                for x in 0..<n {
-                    count += Array(pixels[4 * (y * n + x)..<4 * (y * n + x) + 4]) == (x < n / 2 ? left : right) ? 0 : 1
+            for y in 0 ..< n {
+                for x in 0 ..< n {
+                    count += Array(pixels[4 * (y * n + x) ..< 4 * (y * n + x) + 4]) == (x < n / 2 ? left : right) ? 0 :
+                        1
                 }
             }
             return count
@@ -121,8 +123,8 @@ struct SeparateDepth16StencilMultisampleTest: HWTest {
         metrics.set("kept_paths", keptPaths.joined(separator: ","))
         metrics.set("kept_wrong", keptWrong)
         var failures: [String] = []
-        if path != "raw" || keptPaths.contains(where: { $0 != "raw" }) {
-            failures.append("a pass went off the raw path")
+        if path != "gm20b" || keptPaths.contains(where: { $0 != "gm20b" }) {
+            failures.append("a pass went off the driver")
         }
         if transientWrong != 0 { failures.append("\(transientWrong) resolved pixels wrong") }
         if keptWrong != 0 { failures.append("\(keptWrong) pixels wrong after the kept depth") }

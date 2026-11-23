@@ -23,14 +23,16 @@ struct HEVCAlphaTest: HWTest {
         let demuxed = try await Demux.mp4(context.media.appendingPathComponent(AlphaClip.file))
         let played = try AlphaVideo.decode(
             demuxed.samples, format: demuxed.format,
-            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing])
+            flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing]
+        )
         // Read-only from here on: the synchronous pass decodes them on its own thread.
         nonisolated(unsafe) let samples = demuxed.samples
         let format = demuxed.format
         let synchronous = Waiter<Result<AlphaVideo.Decoded, Error>>()
         Thread.detachNewThread {
             synchronous.resume(
-                Result { try AlphaVideo.decode(samples, format: format, flags: [._EnableTemporalProcessing]) })
+                Result { try AlphaVideo.decode(samples, format: format, flags: [._EnableTemporalProcessing]) }
+            )
         }
         let waited = await synchronous.wait(timeout: 15)
         let sync = try waited?.get()

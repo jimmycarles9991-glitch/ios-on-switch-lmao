@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: MIT */
-/* The job interface: persistent resource sets and SubmitJob. The raw stack key does not hash this header, so no unit it
- * hashes (gpu/BUILD.bazel raw_stack, RawStackIncludes) may include it, and TegraGM20BABI.h never does. Records keep
- * TegraGM20BABI.h's rules: little endian, naturally aligned, reserved fields zero on input. */
+/* The job interface: persistent resource sets and SubmitJob. The stack key hashes it (the pack's mock_jobs.h includes
+ * it); TegraGM20BABI.h never includes it. Records keep TegraGM20BABI.h's rules: little endian, naturally aligned,
+ * reserved fields zero on input. */
 #ifndef TEGRA_GM20B_JOB_ABI_H
 #define TEGRA_GM20B_JOB_ABI_H
 #include <stdint.h>
 #include "TegraGM20BABI.h"
+#include "TegraGM20BFencePageABI.h"
 
 enum {
 	TegraGM20BMethodResourceSetCreate = 31,
@@ -13,15 +14,15 @@ enum {
 	TegraGM20BMethodSubmitJob = 33,
 	TegraGM20BMethodWriterPromise = 34,
 
-	TegraGM20BMaxResourceSets = 16,
+	TegraGM20BMaxResourceSets = TegraGM20BFencePageSetGenerationsBytes / 4,
 	TegraGM20BMaxSetMembers = 4096,
 	/* The connection's fence page (ChannelCreate's fence_token) holds each set's generation at this word plus its id
 	 * minus one, so a client that gets kIOReturnNotReady can tell a stale set from a stale native view. */
-	TegraGM20BSetGenerationWord = 768,
+	TegraGM20BSetGenerationWord = TegraGM20BFencePageSetGenerationsFirst / 4,
 	/* Writer promises (method 34): promise i is released when the fence page's word TegraGM20BPromiseWord + i
 	 * reaches its value */
-	TegraGM20BPromiseWord = 512,
-	TegraGM20BMaxPromises = 32,
+	TegraGM20BPromiseWord = TegraGM20BFencePagePromisesFirst / 4,
+	TegraGM20BMaxPromises = TegraGM20BFencePagePromisesBytes / 4,
 	TegraGM20BMaxPromiseUses = 8,
 	TegraGM20BMaxJobPromises = 4,
 };
@@ -116,11 +117,39 @@ enum {
  * CPU lock of one waits for the job that keeps it. Make:
  * `uses_address`/`count`, `channel` the channel whose job will keep it; the reply names the promise. Cancel: `promise`,
  * released at once. A job that names it (TegraGM20BJobFulfills) releases it at its end; a kill of the channel it was
- * kept on and the connection's close release it too. */
+ * kept on and the connection's close release it too.
+ * Withdraw: the command buffer failed before its jobs all reached the kernel, so its writes never come. With `count`
+ * zero, `promise` is given up (a reader parked on it goes on without it) and released as Cancel releases it; otherwise
+ * `uses_address`/`count` name, as Make does, IOSurfaces it wrote under no promise. Either way each surface's frame is
+ * refused until its next write (SWITCH_GPU_BACKING_WRITE_REFUSED), so a present of it is not shown with the frame before
+ * in its place.
+ * Arm: the command buffer's wait on a shared event became its queue's head; `promise` is a mask of its promises made and
+ * not kept, `uses_address` the nanoseconds from now to its holder's bound (at most TegraGM20BPromiseArmMaxNs), `count`
+ * zero, `channel` TegraGM20BPromiseArmFails or 0. At the bound the kernel gives each one still unkept up, as Withdraw
+ * does for its readers, whatever its maker is doing; the maker's own Withdraw or Cancel of it afterwards succeeds. With
+ * TegraGM20BPromiseArmFails (the command buffer fails at this bound, as Metal fails an untimed wait) a job that keeps it
+ * later is refused with kIOReturnTimeout; without (it runs after the bound) its job still runs. An arm again replaces
+ * the bound; a keep before it ends it. A promise nobody armed has the bound all the same, TegraGM20BPromiseBoundNs from
+ * its first reader's wait, without TegraGM20BPromiseArmFails: a holder that stops before it arms (suspended, stopped
+ * in a debugger, its submit worker never reaching the wait) keeps no other process waiting longer than that. */
 enum {
 	TegraGM20BPromiseMake = 0,
 	TegraGM20BPromiseCancel = 1,
+	TegraGM20BPromiseWithdraw = 2,
+	TegraGM20BPromiseArm = 3,
 };
+
+enum {
+	TegraGM20BPromiseArmFails = 1u,
+};
+
+/* Metal's bound on a committed command buffer that waits on a shared event, which IOGPU's kernel enforces whatever its
+ * process does (kIOGPUCommandBufferCallbackErrorTimeout): 5.0 s from the wait becoming its queue's head (an M4 Max,
+ * macOS 27.2.1: 5004.3-5005.5 ms over 26 held command buffers). The runtime fails a held command buffer there and arms
+ * it for its promises; the kernel bounds a promise nobody armed by it. */
+#define TegraGM20BPromiseBoundNs (5000ull * 1000 * 1000)
+/* The longest bound an arm may set: ten minutes, a hundred and twenty of Metal's 5 s */
+#define TegraGM20BPromiseArmMaxNs (120 * TegraGM20BPromiseBoundNs)
 
 struct TegraGM20BAbiWriterPromise {
 	uint64_t uses_address;
@@ -137,12 +166,13 @@ struct TegraGM20BAbiJobPromises {
 	uint32_t promise[TegraGM20BMaxJobPromises];
 };
 
-/* Method 33, reply TegraGM20BAbiExecReply. Pushes and shared uses are as SubmitAddress's (TegraGM20BPushFence allowed);
- * push VAs are not resolved to BOs: pushes in GPU-cached memory need HostWritten after CPU writes.
+/* Method 33, input TegraGM20BAbiSubmitAddress, reply TegraGM20BAbiExecReply. The job is followed by its pushes
+ * (TegraGM20BPushFence allowed), then its shared uses; push VAs are not resolved to BOs: pushes in GPU-cached memory need
+ * HostWritten after CPU writes.
  * With a set, the job runs after the latest job of each other channel of the connection that named the set, as an
  * acquire on that channel's fence word, and its members take no per-use work. kIOReturnNotReady: set_generation is not
  * the set's (its fence-page word says the current one), or a shared use's native view is stale. A member named as a
- * shared use is refused. Shared uses keep SubmitAddress's ownership exactly, CPU-lock exclusion included.
+ * shared use is refused. Shared uses take ownership as their access says, CPU-lock exclusion included.
  * Order between two channels is the order their SubmitJobs return in; calls that overlap are not ordered by the set.
  * A job submitted without the set that uses a member is not ordered against the set's jobs. */
 struct TegraGM20BAbiJob {
@@ -153,15 +183,13 @@ struct TegraGM20BAbiJob {
 
 enum {
 	TegraGM20BMethodEventWord = 40,
-	TegraGM20BSubmitEventReleases = 1u
-		<< 12, /* TegraGM20BAbiSubmit.surface_flags (SubmitAddress) */
 	TegraGM20BJobEventReleases = 1u << 12, /* TegraGM20BAbiJob.flags */
 	TegraGM20BEventReleaseLimit = 1u << 31,
 	/* The connection's fence page holds the word of each imported event whose handle's slot is below
-	 * TegraGM20BEventWords at this word plus the slot: the words after the client bind epoch (256) and before the
-	 * writer promises. Method 40 answers kIOReturnNoResources for the other slots, whose signals end their jobs. */
-	TegraGM20BEventWordFirst = 257,
-	TegraGM20BEventWords = TegraGM20BPromiseWord - TegraGM20BEventWordFirst,
+	 * TegraGM20BEventWords at this word plus the slot. Method 40 answers kIOReturnNoResources for the other slots, whose
+	 * signals end their jobs. */
+	TegraGM20BEventWordFirst = TegraGM20BFencePageEventsFirst / 4,
+	TegraGM20BEventWords = TegraGM20BFencePageEventsBytes / 4,
 };
 
 /* Method 40. The word one channel of the connection releases an imported event's values into, mid-job: a signal of value v
@@ -182,7 +210,7 @@ struct TegraGM20BAbiEventWordReply {
 	uint32_t floor, reserved;
 };
 
-/* With SubmitEventReleases or JobEventReleases, one per signal after the signals. Released: the job's pushes release
+/* With JobEventReleases, one per signal after the signals. Released: the job's pushes release
  * payload into the event's word for it (method 40); the submission is refused if payload is not that signal's. */
 enum {
 	TegraGM20BSignalReleased = 1u << 0
@@ -208,4 +236,8 @@ TEGRA_GM20B_JOB_ASSERT(TegraGM20BAbiEventWord, 16);
 TEGRA_GM20B_JOB_ASSERT(TegraGM20BAbiEventWordReply, 24);
 TEGRA_GM20B_JOB_ASSERT(TegraGM20BAbiSignalRelease, 8);
 #undef TEGRA_GM20B_JOB_ASSERT
+TEGRA_GM20B_FENCE_PAGE_ASSERT(TegraGM20BChannelEpochWord * 4 ==
+					      TegraGM20BFencePageChannelEpochFirst &&
+				      TegraGM20BFencePageChannelEpochBytes == 4,
+			      "the channel epoch's word is its region");
 #endif

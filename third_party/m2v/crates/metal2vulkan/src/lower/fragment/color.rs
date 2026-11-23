@@ -33,13 +33,10 @@
 //! invocations read the function's pixel inputs where Metal does or refuse them, and refuse a stage
 //! compiled for another sample count.
 //!
-//! **An extended-range attachment** (`metal::format::ExtendedRange`) holds Metal's raw texels in
-//! its raw unsigned format: its input attachment is of `uint` texels, and a read decodes the texel
-//! to Metal's tile value (`arith::extended_range::tile_value`), as the storage form's does. The
-//! interface records the attachment (`StageIo::extended_range_colors`), so link holds a stage
-//! compiled for it to the pipeline's attachments. Where the pipeline blends such an attachment the
-//! function writes, the write blends over the same input attachment (`input_blend`), which a
-//! `[[color(n)]]` read of the attachment shares ([`input_texel`]).
+//! **A padded or bfloat attachment** (`LoweringInputs::extended_range_colors`) is not fetched: its
+//! tile value is not measured, so a read of a bfloat one is `NotImplemented(Format)` and of a
+//! padded one `NotImplemented(FramebufferFetch)`. Apple's other extended-range formats render only
+//! through their `RGBA16Float` stand-in.
 //!
 //! **An 8-bit four-channel sRGB attachment** (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`) reads through
 //! its input attachment the device's decode, which is not Metal's: Metal decodes a color byte to
@@ -68,10 +65,9 @@ use crate::device::profile::FramebufferFetchPolicy;
 use crate::device::requirements::VkFeature;
 use crate::error::{Attachment, Capability, DescriptorError, Error, Feature, Unsupported};
 use crate::lower::arith::legal::{form_on, refuse_int64_interface};
-use crate::lower::arith::{extended_range, math, narrow, ops, srgb, Form, Held};
+use crate::lower::arith::{math, narrow, ops, srgb, Form, Held};
 use crate::lower::emit::EmitCx;
 use crate::lower::select::SelectCx;
-use crate::metal::format::ExtendedRange;
 use crate::pipeline::artifact::PrecisionNote;
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
@@ -93,10 +89,6 @@ pub struct ColorInput {
     pub color: u32,
     /// The parameter's form: a scalar or 2–4 lane vector of 32-bit held integers or floats.
     pub form: Form,
-    /// The attachment's extended-range form (`LoweringInputs::extended_range_colors`), whose
-    /// image holds Metal's raw texels: an input attachment of the raw format's `uint`s, which
-    /// the read decodes to Metal's tile value. `None` for a format held directly.
-    pub extended: Option<ExtendedRange>,
     /// The attachment is `RGBA8Unorm_sRGB` or `BGRA8Unorm_sRGB` (`LoweringInputs::srgb_fetches`):
     /// an input attachment's read snaps the device's decode back to its byte and decodes that by
     /// Metal's table.
@@ -157,7 +149,6 @@ pub(super) fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<Co
         param: b.param,
         color,
         form,
-        extended: extended.map(|e| e.form),
         srgb: cx.inputs.srgb_fetches.contains(&color),
     };
     // The interlocked storage form `fetch::plan` chose.
@@ -184,50 +175,20 @@ pub(super) fn select_param(cx: &mut SelectCx<'_>, b: &ParamBinding) -> Result<Co
     {
         return Err(not_lowered());
     }
-    let blended = cx
-        .families
-        .fragment
-        .input_blends
-        .get(&color)
-        .is_some_and(|ib| ib.blend.is_some());
-    if !known.iter().any(|c| c.color == color) && !blended {
+    if !known.iter().any(|c| c.color == color) {
         cx.descriptors.input_attachments = cx.descriptors.input_attachments.saturating_add(1);
         cx.facts.insert(RuntimeFact::FramebufferFetch { color });
     }
-    // An extended-range attachment's input reads its raw texels, decoded to the tile value, a
-    // float (an integer read is Metal's pipeline error). The interface records the attachment,
-    // which link holds the pipeline's to (`color_writes::check`).
-    if let Some(e) = extended {
+    // A padded attachment's read is a float (an integer read is Metal's pipeline error), of a
+    // tile value not measured.
+    if extended.is_some() {
         if !form.is_float() {
             return Err(Error::InvalidDescriptor(DescriptorError::ColorAttachment {
                 index: color,
             }));
         }
-        // A padded 10-bit attachment's tile value is not measured.
-        if e.form.padded() {
-            let refused = Unsupported::not_implemented(Feature::FramebufferFetch);
-            return Err(refused.at_attachment(Attachment::Color(color)).into());
-        }
-        cx.families.arith.converts(e.form);
-        cx.families
-            .stage_io
-            .interface
-            .extended_range_colors
-            .insert(color, e);
-        // A two-plane attachment held in its two planes reads them both, at its alpha index too.
-        if matches!(e.form, ExtendedRange::Planes { .. })
-            && crate::pipeline::two_plane::held(cx.profile)
-        {
-            let Some(&alpha) = cx.inputs.two_plane_alphas.get(&color) else {
-                let refused = Unsupported::not_implemented(Feature::Format);
-                return Err(refused.at_attachment(Attachment::Color(color)).into());
-            };
-            cx.families
-                .stage_io
-                .interface
-                .two_plane_alphas
-                .insert(color, alpha);
-        }
+        let refused = Unsupported::not_implemented(Feature::FramebufferFetch);
+        return Err(refused.at_attachment(Attachment::Color(color)).into());
     }
     // An 8-bit four-channel sRGB attachment's input reads the device's decode, which the read
     // snaps back to its byte and decodes by Metal's table: a float (an integer read is Metal's
@@ -299,13 +260,6 @@ pub(super) fn uses(cx: &SelectCx<'_>, colors: &[ColorInput]) -> u64 {
 /// (the storage form's are `fetch::words`).
 pub(super) fn words(cx: &SelectCx<'_>, colors: &[ColorInput]) -> u64 {
     let uses = uses(cx, colors);
-    // An extended-range attachment's read decodes its raw texel.
-    let extended: Vec<ColorInput> = colors
-        .iter()
-        .filter(|c| c.extended.is_some())
-        .copied()
-        .collect();
-    let decodes = self::uses(cx, &extended);
     // An sRGB attachment's read encodes the device's value and decodes the byte.
     let srgb: Vec<ColorInput> = colors.iter().filter(|c| c.srgb).copied().collect();
     let snaps = self::uses(cx, &srgb);
@@ -316,79 +270,36 @@ pub(super) fn words(cx: &SelectCx<'_>, colors: &[ColorInput]) -> u64 {
     OBJECT_WORDS
         .saturating_mul(attachments.len() as u64)
         .saturating_add(READ_WORDS.saturating_mul(uses))
-        .saturating_add(u64::from(extended_range::DECODE_WORDS + 120).saturating_mul(decodes))
         .saturating_add(snap.saturating_mul(snaps))
 }
 
 /// Declare one input attachment per color index the plan reads, multisampled for a per-sample
 /// function (`multisampled`), or its storage image in the interlocked storage form (`fetch`), which
-/// holds the samples as its view states; the storage image of every other attachment in that form
-/// (one the function only writes); and the input attachment of every extended-range attachment
-/// whose blend the function computes over it (`input_blend`). Storage images are arrays of the
-/// pass's layers under the layered storage form (`layered`).
+/// holds the samples as its view states; and the storage image of every other attachment in that
+/// form (one the function only writes). Storage images are arrays of the pass's layers under the
+/// layered storage form (`layered`).
 pub(super) fn declare(
     mb: &mut ModuleBuilder,
     colors: &[ColorInput],
-    (storage, blends): (
-        &BTreeMap<u32, super::fetch::StorageColor>,
-        &BTreeMap<u32, super::InputBlend>,
-    ),
-    two_plane: &BTreeMap<u32, u32>,
+    storage: &BTreeMap<u32, super::fetch::StorageColor>,
     multisampled: bool,
     layered: bool,
 ) -> BResult<BTreeMap<u32, GlobalId>> {
     let mut out = BTreeMap::new();
-    let storage_view = |mb: &mut ModuleBuilder,
-                            out: &mut BTreeMap<u32, GlobalId>,
-                            color: u32,
-                            sc: &super::fetch::StorageColor|
-     -> BResult<()> {
-        match two_plane.get(&color) {
-            Some(&alpha) => {
-                let [word, byte] =
-                    super::two_plane::declare_storage(mb, (color, alpha), sc, layered)?;
-                out.insert(color, word);
-                out.insert(alpha, byte);
-            }
-            None => {
-                out.insert(color, super::fetch::declare(mb, color, sc, layered)?);
-            }
-        }
-        Ok(())
-    };
-    // An extended-range attachment's image holds the raw format's `uint` texels, a two-plane
-    // one's in two images.
-    let inputs = |mb: &mut ModuleBuilder,
-                  out: &mut BTreeMap<u32, GlobalId>,
-                  color: u32,
-                  float: bool|
-     -> BResult<()> {
-        out.insert(color, input_attachment(mb, color, float, multisampled)?);
-        if let Some(&alpha) = two_plane.get(&color) {
-            out.insert(alpha, input_attachment(mb, alpha, false, multisampled)?);
-        }
-        Ok(())
-    };
     for c in colors {
         if out.contains_key(&c.color) {
             continue;
         }
-        if let Some(sc) = storage.get(&c.color) {
-            storage_view(mb, &mut out, c.color, sc)?;
-            continue;
-        }
-        inputs(mb, &mut out, c.color, c.form.is_float() && c.extended.is_none())?;
+        let declared = match storage.get(&c.color) {
+            Some(sc) => super::fetch::declare(mb, c.color, sc, layered)?,
+            None => input_attachment(mb, c.color, c.form.is_float(), multisampled)?,
+        };
+        out.insert(c.color, declared);
     }
-    // A storage-form attachment the function writes without reading it: an extended-range
-    // attachment whose blend the shader computes from the texel.
+    // A storage-form attachment the function writes without reading it.
     for (&color, sc) in storage {
         if !out.contains_key(&color) {
-            storage_view(mb, &mut out, color, sc)?;
-        }
-    }
-    for (&color, _) in blends.iter().filter(|(_, ib)| ib.blend.is_some()) {
-        if !out.contains_key(&color) {
-            inputs(mb, &mut out, color, false)?;
+            out.insert(color, super::fetch::declare(mb, color, sc, layered)?);
         }
     }
     Ok(out)
@@ -438,14 +349,10 @@ pub(super) fn value(
         return super::fetch::value(cx, fb, c);
     }
     let texel = input_texel(cx, fb, c.color)?;
-    let texel = match c.extended {
-        Some(form) => {
-            let table = crate::lower::texture::extended_table(cx, form)?;
-            extended_range::tile_value(fb, form, texel, table)?
-        }
+    let texel = match c.srgb {
         // The device's decode, snapped back to its byte by Metal's encode (every byte's exact
         // decode lies at least 4.9e-5 inside its code's encode interval), then Metal's decode.
-        None if c.srgb => {
+        true => {
             let Some(table) = cx.decl.families.arith.srgb else {
                 return Err(cx.fail("an sRGB input attachment read without Metal's table"));
             };
@@ -457,7 +364,7 @@ pub(super) fn value(
             let byte = math::pack(fb, PackFormat::Unorm4x8Srgb, f4, texel, Some(table), test)?;
             math::unpack(fb, PackFormat::Unorm4x8Srgb, f4, byte, Some(table))?
         }
-        None => texel,
+        false => texel,
     };
     let x = match c.form.lanes {
         4 => texel,
@@ -473,25 +380,7 @@ pub(super) fn value(
 
 /// The texel of color `color`'s input attachment, as the image reads it: at the calling
 /// fragment's own texel, at the invocation's sample for a per-sample function.
-pub(super) fn input_texel(
-    cx: &mut EmitCx<'_>,
-    fb: &mut FunctionBuilder<'_>,
-    color: u32,
-) -> BResult<SValue> {
-    if let Some(alpha) = super::two_plane::alpha(cx, color) {
-        let word = image_texel(cx, fb, color)?;
-        let byte = image_texel(cx, fb, alpha)?;
-        return super::two_plane::join(fb, word, byte);
-    }
-    image_texel(cx, fb, color)
-}
-
-/// The texel of the input attachment at color index `color` ([`input_texel`]).
-fn image_texel(
-    cx: &mut EmitCx<'_>,
-    fb: &mut FunctionBuilder<'_>,
-    color: u32,
-) -> BResult<SValue> {
+fn input_texel(cx: &mut EmitCx<'_>, fb: &mut FunctionBuilder<'_>, color: u32) -> BResult<SValue> {
     let Some(g) = cx.decl.families.fragment.attachments.get(&color).copied() else {
         return Err(cx.fail(format!("input attachment {color} is not declared")));
     };

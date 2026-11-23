@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: MIT
+// parallel.h: a parallel encoder's sub-encoders as the passes m2v replays (the first loads as the parallel
+// pass, the last stores as it, each seam keeps the attachment), and their commands recorded again into the parallel
+// encoder's command buffer with its passes, setBytes chunks and extra words
+#include "../parallel.h"
+
+#include <gtest/gtest.h>
+
+namespace {
+
+constexpr uint8_t kClear = 2, kDontCare = 0, kResolve = 2;
+
+TEST(GM20BParallel, SeamsKeepWhatTheSubEncoderBeforeDrew)
+{
+    EXPECT_EQ(gm20b::seamLoad(kClear, 0), kClear);
+    for (size_t at = 1; at < 4; at++)
+        EXPECT_EQ(gm20b::seamLoad(kClear, at), gm20b::kLoadActionLoad);
+    for (size_t at = 0; at + 1 < 4; at++)
+        EXPECT_EQ(gm20b::seamStore(kDontCare, at, 4), gm20b::kStoreActionStore);
+    EXPECT_EQ(gm20b::seamStore(kDontCare, 3, 4), kDontCare);
+    EXPECT_EQ(gm20b::seamStore(kResolve, 3, 4), kResolve);
+    EXPECT_EQ(gm20b::seamLoad(kClear, 0), kClear);
+    EXPECT_EQ(gm20b::seamStore(kResolve, 0, 1), kResolve) << "one sub-encoder is the parallel pass itself";
+}
+
+TEST(GM20BParallel, CommandsTakeTheParallelCommandBuffersPassesChunksAndWords)
+{
+    Cmd render = cmd(OpRender);
+    render.x = 0;
+    EXPECT_EQ(gm20b::spliced(render, 5, 2, 0, 40).x, 5u);
+    Cmd bytes = cmd(OpBytes, 1, 0);
+    bytes.a = 256;
+    bytes.c = 1;
+    const Cmd b = gm20b::spliced(bytes, 5, 2, 0, 40);
+    EXPECT_EQ(b.c, 3u);
+    EXPECT_EQ(b.a, 256u) << "the offset in its chunk";
+    for (Op op : {OpViewport, OpBlendColor, OpDepthBias, OpDrawIndexed}) {
+        Cmd c = cmd(op);
+        c.x = 7;
+        EXPECT_EQ(gm20b::spliced(c, 5, 2, 0, 40).x, 40u) << int(op);
+    }
+    Cmd indirect = cmd(OpDrawIndirect);
+    indirect.x = 64;
+    EXPECT_EQ(gm20b::spliced(indirect, 5, 2, 0, 40).x, 64u) << "an argument offset";
+    Cmd buffer = cmd(OpBuffer, 1, 3);
+    buffer.c = 128;
+    EXPECT_EQ(gm20b::spliced(buffer, 5, 2, 0, 40).c, 128u) << "a buffer offset";
+}
+
+// A sub-encoder's vertex bytes before its first draw keep a copy in its own command buffer's shadow, which the parallel
+// encoder's command buffer holds past its own; the stride form's word is not moved with it
+TEST(GM20BParallel, ShadowedBytesNameTheirCopyInTheParallelCommandBuffer)
+{
+    Cmd shadowed = cmd(OpBytes, 1, 0);
+    shadowed.shadow = 17;
+    const Cmd s = gm20b::spliced(shadowed, 5, 2, 300, 40);
+    EXPECT_EQ(s.shadow, 317u);
+    EXPECT_EQ(s.x, 0u) << "no attributeStride";
+    Cmd plain = cmd(OpBytes, 1, 0);
+    plain.x = 33;
+    const Cmd p = gm20b::spliced(plain, 5, 2, 300, 40);
+    EXPECT_EQ(p.shadow, 0u) << "bytes with no shadow name none";
+    EXPECT_EQ(p.x, 33u) << "the stride form's stride + 1";
+}
+
+TEST(GM20BParallel, ExtraWordsAreTheRecordedOnes)
+{
+    EXPECT_EQ(gm20b::extraWords(cmd(OpViewport)), 6u);
+    EXPECT_EQ(gm20b::extraWords(cmd(OpDispatch)), 16u);
+    EXPECT_EQ(gm20b::extraWords(cmd(OpBlendColor)), 4u);
+    EXPECT_EQ(gm20b::extraWords(cmd(OpDepthBias)), 3u);
+    EXPECT_EQ(gm20b::extraWords(cmd(OpDrawIndexed)), 3u);
+    for (Op op : {OpRender, OpDraw, OpDrawIndirect, OpDrawIndexedIndirect, OpBytes, OpEnd, OpScissor})
+        EXPECT_EQ(gm20b::extraWords(cmd(op)), 0u) << int(op);
+}
+
+TEST(GM20BParallel, ViewportAndScissorArraysTakeTheirWords)
+{
+    EXPECT_EQ(gm20b::extraWords(cmd(OpViewport, 0, 1)), 6u);
+    EXPECT_EQ(gm20b::extraWords(cmd(OpViewport, 0, 16)), 96u);
+    EXPECT_EQ(gm20b::extraWords(cmd(OpScissor, 0, 1)), 0u) << "one rectangle is the command's own words";
+    EXPECT_EQ(gm20b::extraWords(cmd(OpScissor, 0, 16)), 64u);
+    Cmd scissors = cmd(OpScissor, 0, 3);
+    scissors.x = 7;
+    EXPECT_EQ(gm20b::spliced(scissors, 5, 2, 0, 40).x, 40u);
+}
+
+}  // namespace

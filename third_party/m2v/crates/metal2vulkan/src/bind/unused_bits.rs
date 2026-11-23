@@ -1,17 +1,11 @@
-//! An extended-range or padded 10-bit texture's words as Metal's tile store leaves them.
+//! A padded 10-bit or bfloat texture's words as Metal's tile store leaves them.
 //!
 //! A render pass on an Apple GPU stores its attachments a 32 x 32 tile at a time. A pass that
-//! loads a color attachment of an extended-range format (`BGR10_XR`, `BGRA10_XR`,
-//! `RGB10A8_2P_XR10`, their `_sRGB` twins) or a padded 10-bit one (`R10Unorm_X6`,
-//! `RG10Unorm_X12`, their `_sRGB` twins) and records a draw writes every texel of each tile it
-//! stores back, where a channel a fragment writes takes the write; every other texel keeps its
-//! codes, the bits they leave unused made canonical (EVs XRR2-xrb2 and -xrb3 on an Apple M4 and
-//! the consumer's Apple M3 Max, XRR2-x6g to -x6k, -x6is):
+//! loads a color attachment of a padded 10-bit format (`R10Unorm_X6`, `RG10Unorm_X12`, their
+//! `_sRGB` twins) or a bfloat one and records a draw writes every texel of each tile it stores
+//! back, where a channel a fragment writes takes the write; every other texel keeps its codes, the
+//! bits they leave unused made canonical (EVs XRR2-x6g to -x6k, -x6is):
 //!
-//! - `BGR10_XR`'s word: bits 30 and 31 set;
-//! - `BGRA10_XR`'s four 16-bit fields: each field's low six bits cleared, and the alpha field's
-//!   code clamped to `[384, 894]`;
-//! - the two-plane formats' color word: bits 30 and 31 cleared (the alpha byte kept);
 //! - a padded 16-bit word: its low six bits cleared, an `_sRGB` twin's code through Metal's table
 //!   (`ExtendedRange::load_code`: 23 codes of `R10Unorm_X6_sRGB` move, 1021 of
 //!   `RG10Unorm_X12_sRGB`);
@@ -25,7 +19,7 @@
 //! it copies them back before the pass: the pass's write masks, discards, tests and uncovered
 //! texels then keep Metal's words.
 //!
-//! **The module** (one per device, form and [`TexelWords`]). One `GLCompute` entry `main` with
+//! **The module** (one per device and form). One `GLCompute` entry `main` with
 //! local size ([`UnusedBitsModule::LOCAL_SIZE`], 1, 1), no push constants, and three storage
 //! buffers of 4-byte words in set 0:
 //!
@@ -64,8 +58,7 @@ use crate::spirv::ir::{
     MemAccess, StorageClass, Type, TypedModule,
 };
 
-/// The crate-owned unused bits module of one device, form and [`TexelWords`], validated like
-/// any output.
+/// The crate-owned unused bits module of one device and form, validated like any output.
 #[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnusedBitsModule {
@@ -105,46 +98,21 @@ impl UnusedBitsModule {
         bytes
     }
 
-    /// The bytes of one texel of `form` held as `words`: the raw texel
-    /// (`ExtendedRange::raw_format`), or a two-plane format's color word alone. `None` where
-    /// `form` has no such words ([`TexelWords::ColorPlane`] of another form).
-    pub fn texel_bytes(form: ExtendedRange, words: TexelWords) -> Option<u32> {
-        Some(match (rule(form, words)?, form) {
+    /// The bytes of one raw texel of `form` (`ExtendedRange::raw_format`). `None` where `form`
+    /// is neither padded nor bfloat.
+    pub fn texel_bytes(form: ExtendedRange) -> Option<u32> {
+        Some(match (rule(form)?, form) {
             (Rule::Padded(_), ExtendedRange::R10X6 | ExtendedRange::R10X6Srgb) => 2,
             (Rule::Bfloat, ExtendedRange::R16Bfloat) => 2,
             (Rule::Bfloat, ExtendedRange::Rgba16Bfloat) => 8,
-            (Rule::Fields | Rule::PlaneTexel, _) => 8,
             _ => 4,
         })
     }
 }
 
-/// How a consumer holds a texture's texels in the words it binds.
-#[non_exhaustive]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
-pub enum TexelWords {
-    /// The raw texels of `ExtendedRange::raw_format`: a two-plane format's color word and then its
-    /// alpha byte in a word of its own.
-    Raw,
-    /// A two-plane format's color words alone, as Metal lays its plane 0 in memory (a texture over
-    /// a surface's planes or a heap's bytes).
-    ColorPlane,
-}
-
 /// What the kernel does to each word.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Rule {
-    /// Bits 30 and 31 set: `BGR10_XR`'s word.
-    OnesOnTop,
-    /// Bits 30 and 31 cleared: a two-plane format's color word.
-    ZerosOnTop,
-    /// A two-plane format's raw texel: the even word's bits 30 and 31 cleared, the odd word (the
-    /// alpha byte) kept.
-    PlaneTexel,
-    /// `BGRA10_XR`'s fields: each field's low six bits cleared, and the odd word's high field
-    /// (alpha) code clamped to `[384, 894]`.
-    Fields,
     /// A padded form's two 16-bit words: each one's low six bits cleared, or each one's code
     /// replaced by the table's word for it (an `_sRGB` twin's, [`rewritten_words`]).
     Padded(Option<Vec<u32>>),
@@ -153,14 +121,9 @@ enum Rule {
     Bfloat,
 }
 
-/// The rule of `form`'s texels held as `words`, or `None` where it has none.
-fn rule(form: ExtendedRange, words: TexelWords) -> Option<Rule> {
-    Some(match (form, words) {
-        (ExtendedRange::Bgr10 { .. }, TexelWords::Raw) => Rule::OnesOnTop,
-        (ExtendedRange::Bgra10 { .. }, TexelWords::Raw) => Rule::Fields,
-        (ExtendedRange::Planes { .. }, TexelWords::Raw) => Rule::PlaneTexel,
-        (ExtendedRange::Planes { .. }, TexelWords::ColorPlane) => Rule::ZerosOnTop,
-        (_, TexelWords::ColorPlane) => return None,
+/// The rule of `form`'s texels, or `None` where it has none.
+fn rule(form: ExtendedRange) -> Option<Rule> {
+    Some(match form {
         _ if form.padded() => Rule::Padded(rewritten_words(form)),
         _ if form.bfloat() => Rule::Bfloat,
         _ => return None,
@@ -168,10 +131,8 @@ fn rule(form: ExtendedRange, words: TexelWords) -> Option<Rule> {
 }
 
 /// The mask a padded linear form's word is ANDed with: the top ten bits of each of its two 16-bit
-/// words. `BGRA10_XR`'s fields take it too.
+/// words. `BGRA10_XR`'s fields take it too ([`extended_range_fields`]).
 const FIELDS_MASK: u32 = 0xffc0_ffc0;
-/// The color word's code bits: bits 30 and 31 apart.
-const CODES: u32 = 0x3fff_ffff;
 /// `BGRA10_XR`'s alpha codes Metal's store keeps.
 const ALPHA_CODES: [u32; 2] = [384, 894];
 
@@ -247,30 +208,15 @@ fn u32_value(f: &mut FunctionBuilder<'_>, v: u32) -> BResult<Value> {
     f.module().const_value(c)
 }
 
-/// `rule`'s rewrite of `word`, the `odd` (a `bool`) word of its texel; `table` is a padded
-/// `_sRGB` twin's table of rewritten words ([`words_table`]).
+/// `rule`'s rewrite of `word`; `table` is a padded `_sRGB` twin's table of rewritten words
+/// ([`words_table`]).
 fn rewritten(
     f: &mut FunctionBuilder<'_>,
     rule: &Rule,
     table: Option<GlobalId>,
     word: Value,
-    odd: Value,
 ) -> BResult<Value> {
     Ok(match rule {
-        Rule::OnesOnTop => {
-            let top = u32_value(f, !CODES)?;
-            f.binary(BinOp::BitwiseOr, word, top)?
-        }
-        Rule::ZerosOnTop => {
-            let codes = u32_value(f, CODES)?;
-            f.binary(BinOp::BitwiseAnd, word, codes)?
-        }
-        Rule::PlaneTexel => {
-            let codes = u32_value(f, CODES)?;
-            let color = f.binary(BinOp::BitwiseAnd, word, codes)?;
-            f.select(odd, word, color)?
-        }
-        Rule::Fields => extended_range_fields(f, word, odd)?,
         Rule::Padded(_) => {
             let Some(table) = table else {
                 let mask = u32_value(f, FIELDS_MASK)?;
@@ -396,8 +342,8 @@ fn bfloat_load(f: &mut FunctionBuilder<'_>, code: Value) -> BResult<Value> {
 }
 
 /// `BGRA10_XR`'s `word`, the `odd` (a `bool`) word of its texel, with each field's low six bits
-/// cleared and (the odd word's high field) alpha's code clamped to `[384, 894]`: Metal's tile
-/// store and its blits through a compressed texture alike (`compressed_blit.rs`).
+/// cleared and (the odd word's high field) alpha's code clamped to `[384, 894]`: Metal's blits
+/// through a compressed texture (`compressed_blit.rs`).
 pub(super) fn extended_range_fields(
     f: &mut FunctionBuilder<'_>,
     word: Value,
@@ -493,11 +439,9 @@ fn typed_module(rule: &Rule, texel_bytes: u32) -> BResult<TypedModule> {
         let mask = f.binary(BinOp::BitwiseAnd, mask, k1)?;
         let set = f.binary(BinOp::INotEqual, mask, zero)?;
         let set = f.binary(BinOp::LogicalAnd, set, named)?;
-        let odd = f.binary(BinOp::BitwiseAnd, w, k1)?;
-        let odd = f.binary(BinOp::INotEqual, odd, zero)?;
         let p = f.access_chain(words, &[zero, i])?;
         let word = f.load(p, MemAccess::default())?;
-        let made = rewritten(f, &rule, table, word, odd)?;
+        let made = rewritten(f, &rule, table, word)?;
         let kept = f.select(set, made, word)?;
         f.store(p, kept, MemAccess::default())?;
         Ok(ArmEnd::FallThrough(Vec::new()))
@@ -528,20 +472,12 @@ fn binding_of(sym: &Symbol) -> Option<u32> {
     }
 }
 
-/// The unused bits module of `device` for textures of `form` held as `words`: built with the
-/// typed builder, checked by the owned verifier against the device's profile (requirements
-/// included), serialized, and numbered with the fixed bindings of [`UnusedBitsModule`]. A form
-/// that has no such words ([`UnusedBitsModule::texel_bytes`] is `None`) is
-/// `NotImplemented(Format)`.
-pub fn unused_bits_module(
-    device: &Device,
-    form: ExtendedRange,
-    words: TexelWords,
-) -> Result<UnusedBitsModule, Error> {
-    let (Some(rule), Some(texel_bytes)) = (
-        rule(form, words),
-        UnusedBitsModule::texel_bytes(form, words),
-    ) else {
+/// The unused bits module of `device` for textures of `form`: built with the typed builder,
+/// checked by the owned verifier against the device's profile (requirements included),
+/// serialized, and numbered with the fixed bindings of [`UnusedBitsModule`]. A form neither padded
+/// nor bfloat ([`UnusedBitsModule::texel_bytes`] is `None`) is `NotImplemented(Format)`.
+pub fn unused_bits_module(device: &Device, form: ExtendedRange) -> Result<UnusedBitsModule, Error> {
+    let (Some(rule), Some(texel_bytes)) = (rule(form), UnusedBitsModule::texel_bytes(form)) else {
         return Err(Unsupported::not_implemented(Feature::Format).into());
     };
     let profile = device.profile();

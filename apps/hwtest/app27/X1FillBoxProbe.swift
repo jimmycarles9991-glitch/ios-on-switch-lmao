@@ -28,7 +28,7 @@ enum X1FillBoxProbe {
             var colour = colour
             encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * corners.count, index: 0)
             encoder.setFragmentBytes(&colour, length: 16, index: 0)
-            for _ in 0..<count { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices) }
+            for _ in 0 ..< count { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices) }
             encoder.endEncoding()
         }
     }
@@ -37,8 +37,8 @@ enum X1FillBoxProbe {
     static func covered(_ bytes: [UInt8]) -> (count: Int, inside: Bool) {
         var count = 0
         var inside = true
-        for y in 0..<size {
-            for x in 0..<size where Array(bytes.pixel(x, y, width: size)) != [0, 0, 0, 255] {
+        for y in 0 ..< size {
+            for x in 0 ..< size where Array(bytes.pixel(x, y, width: size)) != [0, 0, 0, 255] {
                 count += 1
                 inside = inside && x >= 8 && x < 40 && y >= 8 && y < 24
             }
@@ -59,9 +59,10 @@ enum X1FillBoxProbe {
         for (name, mode) in [("disabled", UInt32(0)), ("bbox", 2), ("all", 1)] {
             let target = try gpu.texture(.bgra8Unorm, size, size)
             do {
-                let drawn = try await RawMethods.draw(
+                let drawn = try await GM20BMethods.draw(
                     gpu, before: [(setFillViaTriangle, mode)], after: [(setFillViaTriangle, 0)],
-                    draw(state, target, corners: quad, vertices: 3, count: 1))
+                    draw(state, target, corners: quad, vertices: 3, count: 1)
+                )
                 paths.append(drawn.path)
                 emitted += drawn.emitted
             } catch {
@@ -75,12 +76,13 @@ enum X1FillBoxProbe {
         }
         let big = try gpu.texture(.bgra8Unorm, 1280, 720)
         var stripMs = 0.0, boxMs = 0.0
-        for _ in 0..<3 {
+        for _ in 0 ..< 3 {
             stripMs += try await gpu.run(draw(state, big, corners: GPU.fullScreen, vertices: 4, count: 64))
                 .gpuMilliseconds
-            if let box = try? await RawMethods.draw(
+            if let box = try? await GM20BMethods.draw(
                 gpu, before: [(setFillViaTriangle, 2)], after: [(setFillViaTriangle, 0)],
-                draw(state, big, corners: GPU.fullScreen, vertices: 3, count: 64))
+                draw(state, big, corners: GPU.fullScreen, vertices: 3, count: 64)
+            )
             {
                 boxMs += box.gpuMilliseconds
                 emitted += box.emitted

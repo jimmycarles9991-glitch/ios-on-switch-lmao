@@ -9,17 +9,17 @@ import Metal
 /// wrong would not.
 struct NativeDynamicStrideTest: NativeObjectTest {
     let id = "metal.native.dynamic_stride"
-    let name = "A dynamic-stride vertex layout reads each bind's attributeStride on the raw path"
+    let name = "A dynamic-stride vertex layout reads each bind's attributeStride on the driver"
 
     static let size = 32
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct In { float2 position [[attribute(0)]]; };
-        vertex float4 strided_quad(In in [[stage_in]]) { return float4(in.position, 0, 1); }
-        fragment float4 strided_green() { return float4(0, 1, 0, 1); }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct In { float2 position [[attribute(0)]]; };
+    vertex float4 strided_quad(In in [[stage_in]]) { return float4(in.position, 0, 1); }
+    fragment float4 strided_green() { return float4(0, 1, 0, 1); }
+    """
 
     static let corners: [SIMD2<Float>] = [SIMD2(-1, -1), SIMD2(1, -1), SIMD2(-1, 1), SIMD2(1, 1)]
 
@@ -41,7 +41,7 @@ struct NativeDynamicStrideTest: NativeObjectTest {
         let vertices = MTLVertexDescriptor()
         vertices.attributes[0].format = .float2
         vertices.attributes[0].bufferIndex = 1
-        vertices.layouts[1].stride = Int(bitPattern: UInt.max)  // MTLBufferLayoutStrideDynamic
+        vertices.layouts[1].stride = Int(bitPattern: UInt.max) // MTLBufferLayoutStrideDynamic
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "strided_quad")
         descriptor.fragmentFunction = library.makeFunction(name: "strided_green")
@@ -79,7 +79,7 @@ struct NativeDynamicStrideTest: NativeObjectTest {
             }
             work.paths.append(timing.path)
             let pixels = try await gpu.read(target, bytesPerPixel: 4)
-            let wrong = (0..<Self.size * Self.size).filter {
+            let wrong = (0 ..< Self.size * Self.size).filter {
                 Array(pixels.pixel($0 % Self.size, $0 / Self.size, width: Self.size)) != [0, 255, 0, 255]
             }.count
             metrics.set("stride\(stride)_wrong_pixels", wrong)

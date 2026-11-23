@@ -34,10 +34,10 @@ enum Layering {
         _ gpu: GPU, _ t: MTLTexture, paths: inout [String], _ want: (Int, Int, Int) -> [UInt8]
     ) async throws -> Int {
         var wrong = 0
-        for layer in 0..<t.arrayLength {
+        for layer in 0 ..< t.arrayLength {
             let got = try await TextureParts.read(gpu, t, TexturePart(level: 0, slice: layer), paths: &paths)
-            for y in 0..<t.height {
-                for x in 0..<t.width where Array(got.pixel(x, y, width: t.width)) != want(layer, x, y) {
+            for y in 0 ..< t.height {
+                for x in 0 ..< t.width where Array(got.pixel(x, y, width: t.width)) != want(layer, x, y) {
                     wrong += 1
                 }
             }
@@ -59,9 +59,10 @@ struct NativeLayeredClearTest: NativeObjectTest {
         let first: [UInt8] = [0, 255, 0, 255], second: [UInt8] = [0, 0, 255, 255]
         let timing = try await gpu.run { commands in
             for t in [a, b] {
-                for layer in 0..<6 {
+                for layer in 0 ..< 6 {
                     commands.makeRenderCommandEncoder(
-                        descriptor: TextureParts.pass(t, TexturePart(level: 0, slice: layer), load: .clear))!
+                        descriptor: TextureParts.pass(t, TexturePart(level: 0, slice: layer), load: .clear)
+                    )!
                         .endEncoding()
                 }
             }
@@ -81,7 +82,7 @@ struct NativeLayeredClearTest: NativeObjectTest {
         work.paths.append(timing.path)
         for (name, t, c) in [("first", a, first), ("second", b, second)] {
             let wrong = try await Layering.wrong(gpu, t, paths: &work.paths) { layer, _, _ in
-                (1...4).contains(layer) ? c : TextureParts.clearColor(TexturePart(level: 0, slice: layer))
+                (1 ... 4).contains(layer) ? c : TextureParts.clearColor(TexturePart(level: 0, slice: layer))
             }
             metrics.set("wrong_\(name)", wrong)
             if wrong != 0 { work.failures.append("\(wrong) texels of the \(name) attachment's layers") }
@@ -103,9 +104,10 @@ struct NativeLayeredMemorylessTest: NativeObjectTest {
         var work = NativeWork(objects: [stored, color, depth])
         let fill: [UInt8] = [255, 0, 255, 255]
         let timing = try await gpu.run { commands in
-            for layer in 0..<6 {
+            for layer in 0 ..< 6 {
                 commands.makeRenderCommandEncoder(
-                    descriptor: TextureParts.pass(stored, TexturePart(level: 0, slice: layer), load: .clear))!
+                    descriptor: TextureParts.pass(stored, TexturePart(level: 0, slice: layer), load: .clear)
+                )!
                     .endEncoding()
             }
             let pass = MTLRenderPassDescriptor()
@@ -163,7 +165,7 @@ struct NativeLayeredVertexTest: NativeObjectTest {
             let e = commands.makeRenderCommandEncoder(descriptor: pass)!
             e.setRenderPipelineState(pipeline)
             var corners = GPU.pixelQuad(8, 8, 24, 24, width: 32, height: 32)
-            var colors = (0..<4).map { Layering.rgba(Self.color($0)) }
+            var colors = (0 ..< 4).map { Layering.rgba(Self.color($0)) }
             e.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
             e.setVertexBytes(&colors, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 1)
             e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 4)
@@ -171,7 +173,7 @@ struct NativeLayeredVertexTest: NativeObjectTest {
         }
         work.paths.append(timing.path)
         let wrong = try await Layering.wrong(gpu, t, paths: &work.paths) { layer, x, y in
-            (8..<24).contains(x) && (8..<24).contains(y) ? Self.color(layer) : clear
+            (8 ..< 24).contains(x) && (8 ..< 24).contains(y) ? Self.color(layer) : clear
         }
         metrics.set("wrong_texels", wrong)
         if wrong != 0 { work.failures.append("\(wrong) texels miss their layer's instance") }

@@ -42,7 +42,9 @@ local localStore(name, blocksGiB, mapMiB, newBlocks) = {
           chunkingParameters: { minChunkSizeBytes: 256 * 1024, horizonSizeBytes: 2 * 1024 * 1024 },
         },
       },
-      chunkMappingStorage: { 'local': localStore('cms', 4, 128, 1) },
+      // Validating makes FindMissingBlobs check (and so refresh) a large blob's chunks. Without it the mapping outlives
+      // chunks the CAS has rotated out, and the blob is reported present but cannot be read.
+      chunkMappingStorage: { chunkMappingValidating: { backend: { 'local': localStore('cms', 4, 128, 1) } } },
     },
     getAuthorizer: allow,
     putAuthorizer: allow,

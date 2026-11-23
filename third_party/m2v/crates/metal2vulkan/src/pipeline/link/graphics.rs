@@ -146,7 +146,7 @@
 //!   the binder refuses such a pipeline's amplified draws, and its draws at a count of 1 are
 //!   ordinary layered rendering.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use crate::device::requirements::{FormatUsage, VkFeature, VkLimit, VkProperty};
 use crate::device::{DeviceProfile, DriverWorkaround};
@@ -229,19 +229,17 @@ fn vertex_amplification(r: &RenderLinkInputs, p: &DeviceProfile) -> Result<u32, 
 /// The graphics state of render inputs `r` with vertex stage `vs`, fragment stage `fs`, vertex
 /// input `vi`, and, for a tessellation pipeline, its tessellation state `tessellation`: its
 /// topology is `PATCH_LIST` and never dynamic state, as its draws draw patches only.
-/// `input_blends`: the extended-range attachments whose blend the fragment function computes over
-/// their input attachments, and the channels each write keeps (`link::fetch::input_blends`).
 pub fn graphics_state(
     r: &RenderLinkInputs,
     (vs, fs): (&StageInterface, Option<&StageInterface>),
     vi: &VertexInputState,
     tessellation: Option<TessellationState>,
-    input_blends: &BTreeMap<u32, vk::ColorComponentFlags>,
     p: &DeviceProfile,
 ) -> Result<GraphicsState, Error> {
     if r.alpha_to_one {
         return Err(Unsupported::not_implemented(Feature::AlphaToOne).into());
     }
+    color_writes::refuse_unstood_extended_range(&r.color_attachments)?;
     let max_vertex_amplification_count = vertex_amplification(r, p)?;
     let declares_layer = std::iter::once(vs)
         .chain(fs)
@@ -318,10 +316,6 @@ pub fn graphics_state(
                             || f.io.half_bit_colors.contains(&(index as u32))
                     }) || selected_rounds(index as u32);
                     let replaced = rounded && color_writes::replaces(a);
-                    // An extended-range attachment whose blend the function computes over its
-                    // input attachment takes no Vulkan blend, and the function's write stores
-                    // every raw component (none where it keeps every channel).
-                    let input_blend = input_blends.get(&(index as u32)).copied();
                     // An attachment held with its channels rotated takes the function's rotated
                     // output, the descriptor's mask rotated, and the blend `rotated_blend`
                     // finds Metal's in Vulkan's factors.
@@ -334,10 +328,7 @@ pub fn graphics_state(
                     let unwritten_extended = fs.is_some()
                         && ExtendedRange::of(a.pixel_format).is_some_and(|f| !f.bfloat())
                         && !written.contains(&(index as u32));
-                    let blended = a.blending_enabled
-                        && !replaced
-                        && input_blend.is_none()
-                        && !unwritten_extended;
+                    let blended = a.blending_enabled && !replaced && !unwritten_extended;
                     let mut usages = BTreeSet::from([FormatUsage::ColorAttachment]);
                     if blended {
                         usages.insert(FormatUsage::ColorAttachmentBlend);
@@ -361,24 +352,17 @@ pub fn graphics_state(
                     };
                     // An extended-range attachment holds its raw texels, whose components the
                     // function writes whole.
-                    let descriptor_mask = match (ExtendedRange::of(a.pixel_format), input_blend) {
-                        (Some(form), Some(kept)) => {
-                            let stored = match kept == vk::ColorComponentFlags::known_bits() {
-                                true => vk::ColorComponentFlags::empty(),
-                                false => vk::ColorComponentFlags::known_bits(),
-                            };
-                            extended_write_mask(form, stored)?
-                        }
-                        (Some(_), None) if unwritten_extended => vk::ColorComponentFlags::empty(),
-                        (Some(form), None) => extended_write_mask(form, descriptor_mask)?,
-                        (None, _) => descriptor_mask,
+                    let descriptor_mask = match ExtendedRange::of(a.pixel_format) {
+                        Some(_) if unwritten_extended => vk::ColorComponentFlags::empty(),
+                        Some(form) => extended_write_mask(form, descriptor_mask)?,
+                        None => descriptor_mask,
                     };
                     let write_mask = if written.contains(&(index as u32)) {
                         descriptor_mask
                     } else {
                         vk::ColorComponentFlags::empty()
                     };
-                    let unblended = replaced || input_blend.is_some() || unwritten_extended;
+                    let unblended = replaced || unwritten_extended;
                     let blend = match (unblended, rotated) {
                         (true, _) => None,
                         (false, false) => blend_factors(a, p)?,
@@ -445,18 +429,8 @@ pub fn graphics_state(
         None => None,
     };
     let mut input_attachments = Vec::new();
-    let alphas = crate::pipeline::two_plane::alphas(&r.color_attachments, p);
     for d in fs.map(|f| f.descriptors.as_slice()).unwrap_or_default() {
         if let ResourceKind::InputAttachment(color) = d.slot.kind {
-            // A two-plane attachment's alpha byte, read beside its word.
-            if crate::pipeline::two_plane::plane_of(&alphas, color).is_some() {
-                input_attachments.push(InputAttachmentUse {
-                    color_index: color,
-                    input_attachment_index: color,
-                    format_class: SampledType::Uint,
-                });
-                continue;
-            }
             let attachment = r
                 .color_attachments
                 .get(color as usize)
@@ -476,12 +450,7 @@ pub fn graphics_state(
                 let refused = Unsupported::not_implemented(Feature::Format);
                 return Err(refused.at_attachment(Attachment::Color(color)).into());
             }
-            // An extended-range attachment's input reads its raw texels, the raw format's
-            // `uint`s, which a stage compiled for the attachment decodes (`color_writes::check`).
-            let format_class = match ExtendedRange::of(attachment.pixel_format) {
-                Some(_) => SampledType::Uint,
-                None => sampled_type(attachment.pixel_format).unwrap_or(SampledType::Float),
-            };
+            let format_class = sampled_type(attachment.pixel_format).unwrap_or(SampledType::Float);
             input_attachments.push(InputAttachmentUse {
                 color_index: color,
                 input_attachment_index: color,
@@ -942,26 +911,22 @@ fn uniform_blend(
 }
 
 /// The fragment outputs of `fs` against the color attachments (see the module docs).
-/// The write mask of an attachment held in the raw texels of extended-range `form` whose Metal
-/// mask is `mask` (as Vulkan's channels): every raw component where `mask` keeps every channel the
-/// format has, none where it keeps none of them. A mask of some of its channels is
-/// `NotImplemented(Format)`: Metal keeps a masked channel's code but rewrites the texel's other
-/// bits (`BGRA10_XR`'s alpha clamped even where masked, its low bits and `BGR10_XR`'s top bits
-/// made canonical; EV XRR-rtp1-m4), which a mask of the raw components cannot express.
-/// A padded form's channels are its raw words, one each, and the mask is theirs: a loading pass
+/// The write mask of an attachment held in the raw texels of the padded or bfloat `form` whose
+/// Metal mask is `mask` (as Vulkan's channels). A padded form's channels are its raw words, one
+/// each, and the mask is theirs: a loading pass
 /// that draws keeps a masked channel's code and zeroes its word's low six bits, every word of each
 /// tile it stores alike (EVs XRR2-x6g to -x6k, an Apple M3 Max and an M4, byte-identical), which a
 /// consumer's load pass does before the pass (the runtime's `render/unused_bits_load.rs`,
 /// `bind::unused_bits_module`), so a channel the mask leaves out keeps the word Metal's pass
 /// leaves. A bfloat form's channels are its own (red; red and green; all four), each a raw
-/// component; a mask of some of them is unmeasured and refused as above.
+/// component: every raw component where `mask` keeps every channel the format has, none where it
+/// keeps none of them, and a mask of some of them unmeasured, `NotImplemented(Format)`.
 fn extended_write_mask(
     form: ExtendedRange,
     mask: vk::ColorComponentFlags,
 ) -> Result<vk::ColorComponentFlags, Error> {
     use vk::ColorComponentFlags as C;
     let channels = match form {
-        ExtendedRange::Bgr10 { .. } => C::R | C::G | C::B,
         ExtendedRange::R10X6 | ExtendedRange::R10X6Srgb => C::R,
         ExtendedRange::Rg10X12 | ExtendedRange::Rg10X12Srgb => C::R | C::G,
         ExtendedRange::R16Bfloat => C::R,

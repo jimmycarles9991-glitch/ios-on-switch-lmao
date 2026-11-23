@@ -44,14 +44,11 @@ host_library(
 genrule(
     name = "owned_waits_source",
     testonly = True,
-    srcs = [
-        "//drivers/TegraGM20B:gpu_sync.c",
-        "//drivers/TegraGM20B:gpu_promise.c",
-    ],
+    srcs = ["//drivers/TegraGM20B:gpu_promise.c"],
     outs = ["switch_gpu_exec_owned_waits.h"],
     cmd = """
 set -e
-awk '/^int switch_gpu_order_waits_locked\\(/ || /^void switch_gpu_chan_park_promises_locked\\(/ { body = 1; count++ } body { print } /^}/ { body = 0 } END { if (count != 2) exit 1 }' $(SRCS) > $@
+awk '/^void switch_gpu_chan_park_promises_locked\\(/ { body = 1; count++ } body { print } /^}/ { body = 0 } END { if (count != 1) exit 1 }' $< > $@
 """,
 )
 
@@ -103,7 +100,8 @@ MUTANTS = [
     "after_doorbell",
     "before_checks",
     "no_empty_commit",
-    "before_finish",
+    "finish_after_doorbell",
+    "finish_at_publish",
 ]
 
 py_binary(

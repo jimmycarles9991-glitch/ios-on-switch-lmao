@@ -7,7 +7,7 @@ final class GPUReferenceTests: XCTestCase {
     func testDiffNamesWhereAndHowAPictureIsWrong() {
         let want = Raster(width: 16, height: 8, channels: 1) { _, _, _ in 0.5 }
         var got = want
-        for y in 0..<8 { got[3, y, 0] = 0 }
+        for y in 0 ..< 8 { got[3, y, 0] = 0 }
         got[12, 1, 0] = 0.52
         let diff = RasterDiff.compare(got, want, tolerance: 1.01 / 255)
         XCTAssertEqual(diff.wrong, 9)
@@ -17,7 +17,7 @@ final class GPUReferenceTests: XCTestCase {
         XCTAssertEqual(diff.box, [3, 0, 12, 7])
         XCTAssertEqual(diff.streakColumns, 1)
         XCTAssertEqual(diff.map, "4042404040404040")
-        XCTAssertEqual(diff.metrics(prefix: "raw_")["raw_wrong"], .integer(9))
+        XCTAssertEqual(diff.metrics(prefix: "gm20b_")["gm20b_wrong"], .integer(9))
         XCTAssertTrue(diff.summary.hasPrefix("9 wrong of 128 at 3,0 got 0 want 128"))
     }
 
@@ -46,11 +46,13 @@ final class GPUReferenceTests: XCTestCase {
         XCTAssertEqual(TexelFormat.bgra8Unorm.encode([1, 0.5, 0, 1]), [0, 128, 255, 255])
         XCTAssertEqual(TexelFormat.rgba8Srgb.encode([0.2, 0.2, 0.2, 0.2]), [124, 124, 124, 51])
         XCTAssertEqual(
-            TexelFormat.bgr10XR.decode(TexelFormat.bgr10XR.encode([1.25, -0.75, 0])[...])[1], -0.749, accuracy: 0.002)
+            TexelFormat.bgr10XR.decode(TexelFormat.bgr10XR.encode([1.25, -0.75, 0])[...])[1], -0.749, accuracy: 0.002
+        )
         XCTAssertEqual(TexelFormat.bgra10XR.decode(TexelFormat.bgra10XR.encode([0, 0, 0, 1.3])[...])[3], 1)
         XCTAssertEqual(
             TexelFormat.rgba16Float.decode(TexelFormat.rgba16Float.encode([1.5, -2, 0.25, 65504])[...]),
-            [1.5, -2, 0.25, 65504])
+            [1.5, -2, 0.25, 65504]
+        )
     }
 
     func testSRGBRastersAreComparedAsStored() {
@@ -63,21 +65,25 @@ final class GPUReferenceTests: XCTestCase {
         let destination: [Float] = [0.4, 0.6, 0.8, 0.2]
         let over = Blend.apply(
             BlendState(source: .sourceAlpha, destination: .oneMinusSourceAlpha), source: source, source1: source,
-            destination: destination, constant: [0, 0, 0, 0], normalized: true)
+            destination: destination, constant: [0, 0, 0, 0], normalized: true
+        )
         XCTAssertEqual(over[0], 0.8 * 0.6 + 0.4 * 0.4, accuracy: 1e-6)
         XCTAssertEqual(over[3], 0.6 * 0.6 + 0.2 * 0.4, accuracy: 1e-6)
         let saturate = Blend.apply(
             BlendState(source: .sourceAlphaSaturated, destination: .zero), source: source, source1: source,
-            destination: destination, constant: [0, 0, 0, 0], normalized: true)
+            destination: destination, constant: [0, 0, 0, 0], normalized: true
+        )
         XCTAssertEqual(saturate[0], 0.8 * 0.6, accuracy: 1e-6)
         XCTAssertEqual(saturate[3], 0.6, accuracy: 1e-6)
         let subtract = Blend.apply(
             BlendState(.subtract, source: .one, destination: .one), source: source, source1: source,
-            destination: destination, constant: [0, 0, 0, 0], normalized: true)
+            destination: destination, constant: [0, 0, 0, 0], normalized: true
+        )
         XCTAssertEqual(subtract[2], 0)
         let extended = Blend.apply(
             BlendState(.subtract, source: .one, destination: .one), source: source, source1: source,
-            destination: destination, constant: [0, 0, 0, 0], normalized: false)
+            destination: destination, constant: [0, 0, 0, 0], normalized: false
+        )
         XCTAssertEqual(extended[2], -0.6, accuracy: 1e-6)
         XCTAssertEqual(BlendFactor.oneMinusSource1Alpha.rawValue, 18)
         XCTAssertEqual(BlendOperation.max.rawValue, 4)
@@ -95,7 +101,7 @@ final class GPUReferenceTests: XCTestCase {
 
     func testPacingCountsMissedFramesAndBucketsThem() {
         let period = 1.0 / 60
-        var times = (0..<10).map { 1 + Double($0) * period }
+        var times = (0 ..< 10).map { 1 + Double($0) * period }
         times += [1 + 12 * period, 1 + 13 * period, 1 + 17 * period, 0]
         let pacing = Pacing(times: times, period: period)
         XCTAssertEqual(pacing.frames, 13)
@@ -106,16 +112,15 @@ final class GPUReferenceTests: XCTestCase {
 
     func testPathsAndCountersBecomeLogFields() {
         var tally = PathTally()
-        ["raw", "m2v:state:state.notpack", "raw"].forEach { tally.add($0) }
-        XCTAssertEqual(tally.text, "raw/2,m2v:state:state.notpack/1")
-        XCTAssertFalse(tally.onlyM2V)
-        XCTAssertEqual(tally.offRaw.text, "m2v:state:state.notpack/1")
+        ["gm20b", "error:pass.fmt", "gm20b"].forEach { tally.add($0) }
+        XCTAssertEqual(tally.text, "gm20b/2,error:pass.fmt/1")
+        XCTAssertEqual(tally.offRaw.text, "error:pass.fmt/1")
         var raw = PathTally()
-        raw.add("raw")
+        raw.add("gm20b")
         XCTAssertTrue(raw.offRaw.isEmpty)
-        raw.add("split:2+1:enc.storage")
-        raw.add("refused:call.sampler")
-        XCTAssertEqual(raw.offRaw.text, "refused:call.sampler/1,split:2+1:enc.storage/1")
+        raw.add("error:none")
+        raw.add("error:call.sampler")
+        XCTAssertEqual(raw.offRaw.text, "error:call.sampler/1,error:none/1")
         var release = PathTally()
         release.add("device")
         XCTAssertTrue(release.offRaw.isEmpty)
@@ -123,21 +128,22 @@ final class GPUReferenceTests: XCTestCase {
         XCTAssertEqual(passed.failing(offRaw: PathTally()).verdict, .pass)
         let failed = passed.failing(offRaw: raw.offRaw)
         XCTAssertEqual(failed.verdict, .fail)
-        XCTAssertEqual(
-            failed.detail, "command buffers off the raw path: refused:call.sampler/1,split:2+1:enc.storage/1; d")
+        XCTAssertEqual(failed.detail, "command buffers off the driver: error:call.sampler/1,error:none/1; d")
         XCTAssertEqual(failed.proof, "p")
         let metrics = PathTally.counterMetrics(
-            before: ["raw": 5, "m2v": 1, "pred.state.notpack": 1],
-            after: ["raw": 9, "m2v": 4, "pred.state.notpack": 3, "pred.compute": 1])
-        XCTAssertEqual(metrics["raw_cbs"], .integer(4))
-        XCTAssertEqual(metrics["m2v_cbs"], .integer(3))
-        XCTAssertEqual(metrics["m2v_why"], .text("state.notpack/2,compute/1"))
+            before: ["gm20b": 5, "failed": 1, "failed.pass.fmt": 1],
+            after: ["gm20b": 9, "failed": 4, "failed.pass.fmt": 3, "failed.none": 1]
+        )
+        XCTAssertEqual(metrics["gm20b_cbs"], .integer(4))
+        XCTAssertEqual(metrics["failed_cbs"], .integer(3))
+        XCTAssertEqual(metrics["failed_why"], .text("pass.fmt/2,none/1"))
     }
 
     func testFittedReasonsKeepTheFirstAndCountTheRest() {
         XCTAssertEqual(LogLine.fitted(["a", "bb", "ccc"], budget: 10), "a; bb; ccc")
         XCTAssertEqual(
-            LogLine.fitted([String(repeating: "x", count: 12), "y", "z"], budget: 10), "xxxxxxxxxxxx; +2 more")
+            LogLine.fitted([String(repeating: "x", count: 12), "y", "z"], budget: 10), "xxxxxxxxxxxx; +2 more"
+        )
         XCTAssertEqual(LogLine.fitted([]), "")
     }
 
@@ -147,7 +153,9 @@ final class GPUReferenceTests: XCTestCase {
                 "R ok=1 label=com.apple.coreanimation.PBGRAXm_A2Xhf samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0 "
                     + "c1=80:0:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 a3=27:32:1:48:1:1 | v fixed_vert_lph_spc "
                     + "lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib fc_generic:53:00 | "
-                    + "f fixed_frag_lph_cph fc_color_opcodes0:52:0a0b0c0d fc_blend_function:49:3a |"))
+                    + "f fixed_frag_lph_cph fc_color_opcodes0:52:0a0b0c0d fc_blend_function:49:3a |"
+            )
+        )
         XCTAssertEqual(line.shortLabel, "PBGRAXm_A2Xhf")
         XCTAssertEqual(line.colors.map(\.format), [80, 80])
         XCTAssertEqual(line.colors[1].writeMask, 0)
@@ -167,7 +175,7 @@ final class GPUReferenceTests: XCTestCase {
         XCTAssertLessThan(stripes.step, 0.05)
         XCTAssertGreaterThan(stripes.contrast, 0.15)
         var streaked = blurred
-        for y in 0..<8 where y % 2 == 0 { for c in 0..<3 { streaked[7, y, c] = 0.1 } }
+        for y in 0 ..< 8 where y % 2 == 0 { for c in 0 ..< 3 { streaked[7, y, c] = 0.1 } }
         XCTAssertGreaterThan(Backdrop.overStripes(streaked).columnSpread, 0.3)
         XCTAssertEqual(Backdrop.overUniform(Raster(width: 2, height: 2, channels: 1) { x, _, _ in Float(x) }).spread, 1)
     }

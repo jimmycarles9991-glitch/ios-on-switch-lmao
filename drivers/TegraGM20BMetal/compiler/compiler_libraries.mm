@@ -4,7 +4,7 @@
 
 #include <dispatch/dispatch.h>
 #include "compiler_request.h"
-#include "../raw/runtime/RawOffline.h"
+#include "../TegraGM20BMetalOffline.h"
 
 namespace switch_compiler {
 
@@ -31,7 +31,7 @@ void LibraryCache::ended()
 void LibraryCache::release(uint64_t generation)
 {
     std::map<std::string, id<MTLLibrary>> system;
-    std::map<raw::Digest, id<MTLLibrary>> data;
+    std::map<gm20b::Digest, id<MTLLibrary>> data;
     {
         std::lock_guard<std::mutex> l(lock_);
         if (running_ || generation != generation_)
@@ -42,12 +42,12 @@ void LibraryCache::release(uint64_t generation)
     }
 }
 
-id<MTLLibrary> LibraryCache::library(const raw::RequestLibrary &l, std::string &why)
+id<MTLLibrary> LibraryCache::library(const gm20b::RequestLibrary &l, std::string &why)
 {
     std::string real;
     if (l.system && !SystemLibraries::resolve(root_, l.path, real, why))
         return nil;
-    const raw::Digest digest = l.system ? raw::Digest{} : raw::sha256(l.bytes.data(), l.bytes.size());
+    const gm20b::Digest digest = l.system ? gm20b::Digest{} : gm20b::sha256(l.bytes.data(), l.bytes.size());
     {
         std::lock_guard<std::mutex> g(lock_);
         if (l.system) {
@@ -59,7 +59,7 @@ id<MTLLibrary> LibraryCache::library(const raw::RequestLibrary &l, std::string &
     }
     NSError *error = nil;
     id<MTLLibrary> made = nil;
-    RawOfflineDevice *device = [RawOfflineDevice new];
+    GM20BOfflineDevice *device = [GM20BOfflineDevice new];
     if (l.system) {
         made = [device newLibraryWithURL:[NSURL fileURLWithPath:@(real.c_str())] error:&error];
     } else {

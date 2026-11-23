@@ -32,7 +32,7 @@ struct Kick {
 	uint64_t addr;
 	uint32_t bytes;
 	bool recorded, backing_free, live_free, ordered;
-	uint32_t gp_put;
+	uint32_t gp_put, submitted;
 };
 
 TEST(ExecEmpty, FirstWordWaitNeedsNoRegisteredBacking)
@@ -41,8 +41,7 @@ TEST(ExecEmpty, FirstWordWaitNeedsNoRegisteredBacking)
 	const switch_exec_hooks hooks = {&doorbells, nullptr,
 					 [](void *context, switch_exec_chan *, uint32_t) {
 						 ++*static_cast<uint32_t *>(context);
-						 EXPECT_TRUE(switch_exec_backing::order_held());
-						 EXPECT_EQ(ioLocksHeld().size(), 1u);
+						 EXPECT_TRUE(ioLocksHeld().empty());
 						 EXPECT_FALSE(switch_exec_mutex_held());
 					 },
 					 nullptr};
@@ -56,7 +55,8 @@ TEST(ExecEmpty, FirstWordWaitNeedsNoRegisteredBacking)
 					      nullptr),
 		  0);
 	EXPECT_EQ(doorbells, 1u);
-	EXPECT_EQ(ioLockTakes().load() - own, 1u);
+	EXPECT_EQ(ioLockTakes().load() - own, 0u)
+		<< "a job with no records took the ownership order";
 	EXPECT_EQ(switch_exec_mutex_takes() - live, 0u);
 	EXPECT_EQ(switch_exec_chan_word_acquires(chan, 0x100, 1), 1u);
 	EXPECT_TRUE(ioLocksHeld().empty());
@@ -128,6 +128,7 @@ protected:
 	void kicked(bool doorbell, bool main, uint64_t addr, uint32_t bytes)
 	{
 		const bool ordered = switch_exec_backing::order_held();
+		const switch_exec_chan_pointers now = pointers();
 		Kick kick = {doorbell,
 			     main,
 			     addr,
@@ -136,12 +137,15 @@ protected:
 			     ioLocksHeld().size() == size_t(ordered),
 			     !switch_exec_mutex_held(),
 			     ordered,
-			     pointers().gp_put};
+			     now.gp_put,
+			     now.submitted};
 		kicks.push_back(kick);
 		if (doorbell && before_doorbell)
 			before_doorbell();
 	}
 
+	// An ordered job holds the ownership order for every entry it writes until its channel's submitted seqno names it,
+	// and lets it go before its fence's own kick and GP_PUT.
 	void expect_published(bool has_write = true, bool ordered = true) const
 	{
 		ASSERT_FALSE(kicks.empty());
@@ -149,10 +153,10 @@ protected:
 		for (size_t i = 0; i < kicks.size(); ++i) {
 			const Kick &kick = kicks[i];
 			SCOPED_TRACE(i);
-			EXPECT_EQ(kick.ordered, ordered);
+			EXPECT_EQ(kick.ordered, ordered && kick.submitted != seqno);
 			EXPECT_EQ(kick.gp_put, kicks.front().gp_put);
 			if (kick.doorbell || !kick.main || kick.recorded) {
-				EXPECT_TRUE(!has_write || kick.recorded);
+				EXPECT_TRUE(!has_write || !kick.ordered || kick.recorded);
 				EXPECT_TRUE(kick.backing_free);
 				EXPECT_TRUE(kick.live_free);
 			}
@@ -330,7 +334,7 @@ TEST_F(ExecCommit, GpfifoWaitFailureRestoresTheRingAndPublishesNothing)
 	EXPECT_EQ(switch_exec_backing::pending(written), 0u);
 }
 
-// SubmitJob and SubmitAddress begin no transaction for a job with no pushes: owned is the empty one.
+// SubmitJob begins no transaction for a job with no pushes: owned is the empty one.
 TEST_F(ExecCommit, NoPushesNoForcedFenceReturnsWithoutAKick)
 {
 	const uint64_t own = ioLockTakes().load(), live = switch_exec_mutex_takes();
@@ -412,13 +416,15 @@ TEST_F(ExecCommit, ProducersStillLiveAreAcquired)
 	EXPECT_EQ(switch_exec_chan_acquires(consumer, second, 1), 1u);
 }
 
-TEST_F(ExecCommit, OwnershipContenderEntersThePublishedRecordOnlyAfterGpPutAndFinish)
+// A reader that finds the job's record waits for a seqno a kill of the channel releases (tgm_chan_killed writes
+// chan->submitted to the fence), and the job's doorbell, MMIO and PLL work are not inside the ownership order.
+TEST_F(ExecCommit, AContenderEntersOnceTheRecordsSeqnoIsSubmittedAndBeforeGpPut)
 {
 	ASSERT_EQ(begin({{written, SWITCH_GPU_BACKING_WRITE, 0}}), 0);
 	std::mutex lock;
 	std::condition_variable changed;
-	bool trying = false, entered = false, doorbell = false;
-	uint32_t early = 0, observed_put = 0;
+	bool trying = false, entered = false, entered_first = false;
+	uint32_t observed_submitted = 0;
 	std::thread contender([&] {
 		{
 			std::lock_guard<std::mutex> hold(lock);
@@ -432,10 +438,9 @@ TEST_F(ExecCommit, OwnershipContenderEntersThePublishedRecordOnlyAfterGpPutAndFi
 							&next),
 			  0);
 		EXPECT_TRUE(switch_exec_backing::recorded(written, completion));
-		observed_put = pointers().gp_put;
+		observed_submitted = pointers().submitted;
 		{
 			std::lock_guard<std::mutex> hold(lock);
-			early += !doorbell;
 			entered = true;
 			changed.notify_all();
 		}
@@ -449,41 +454,68 @@ TEST_F(ExecCommit, OwnershipContenderEntersThePublishedRecordOnlyAfterGpPutAndFi
 	}
 	before_doorbell = [&] {
 		std::unique_lock<std::mutex> hold(lock);
-		if (!switch_exec_backing::order_held())
-			EXPECT_TRUE(changed.wait_for(hold, std::chrono::seconds(2), [&] {
-				return entered;
-			}));
-		EXPECT_FALSE(entered);
-		doorbell = true;
+		entered_first = changed.wait_for(hold, std::chrono::seconds(2), [&] {
+			return entered;
+		});
 	};
 	const int result = exec(&kPush, 1);
 	switch_gpu_backing_abort(&transaction);
 	contender.join();
 	EXPECT_EQ(result, 0);
-	EXPECT_EQ(early, 0u);
-	EXPECT_EQ(observed_put, pointers().gpfifo_cur);
+	EXPECT_TRUE(entered_first) << "the job rang its doorbell inside the ownership order";
+	EXPECT_EQ(observed_submitted, seqno)
+		<< "a reader found the record before the channel's submitted seqno named it";
 	expect_published();
 }
 
-TEST_F(ExecCommit, ForcedEmptyWaitJobsSealOnlyTheExistingOwnershipOrder)
+// Raised by idle_wake's backstop in the job's fence: a PLL switch that may sleep on the clock's mutex, never under the
+// ownership order every CPU backing operation takes.
+TEST_F(ExecCommit, AnIdleClockGoesUpOutsideTheOwnershipOrderBeforeTheDoorbell)
+{
+	struct Raise {
+		const std::vector<Kick> *kicks;
+		uint32_t raises;
+		bool ordered, after_doorbell;
+	} raise = {&kicks, 0, false, false};
+
+	ASSERT_EQ(begin({{written, SWITCH_GPU_BACKING_WRITE, 0}}), 0);
+	switch_exec_idle_low(
+		[](void *context) {
+			auto *r = static_cast<Raise *>(context);
+			++r->raises;
+			r->ordered |= switch_exec_backing::order_held();
+			for (const Kick &kick : *r->kicks)
+				r->after_doorbell |= kick.doorbell;
+		},
+		&raise);
+
+	const int result = exec(&kPush, 1);
+	switch_exec_idle_low(nullptr, nullptr);
+
+	EXPECT_EQ(result, 0);
+	EXPECT_EQ(raise.raises, 1u);
+	EXPECT_FALSE(raise.ordered) << "the PLL switch ran inside the ownership order";
+	EXPECT_FALSE(raise.after_doorbell);
+	expect_published();
+}
+
+TEST_F(ExecCommit, ForcedEmptyWaitJobsTakeNoOwnershipOrder)
 {
 	switch_exec_chan *source = switch_exec_chan_new(0x120, 1);
 	switch_exec_chan_live(source, 1);
-	for (unsigned mode = 0; mode < 4; ++mode) {
+	for (unsigned mode = 0; mode < 3; ++mode) {
 		SCOPED_TRACE(mode);
 		consumer = switch_exec_chan_new(0x110 + mode, 2 + mode);
 		if (mode < 2)
 			words = {{0x100, 1, 0x120}};
-		else if (mode == 2)
-			siblings = {{switch_exec_chan_tgm(source), 1}};
 		else
-			switch_exec_chan_task_order(consumer, source, 1);
+			siblings = {{switch_exec_chan_tgm(source), 1}};
 		switch_exec_chan_high(consumer, mode == 1);
 		const uint64_t own = ioLockTakes().load(), live = switch_exec_mutex_takes();
 		ASSERT_EQ(exec(nullptr, 0, kJob | SWITCH_GPU_SUBMIT_FORCE_FENCE), 0);
-		EXPECT_EQ(ioLockTakes().load() - own, 1u);
-		EXPECT_EQ(switch_exec_mutex_takes() - live, mode == 1 || mode == 3 ? 1u : 0u);
-		expect_published(false);
+		EXPECT_EQ(ioLockTakes().load() - own, 0u);
+		EXPECT_EQ(switch_exec_mutex_takes() - live, mode == 1 ? 1u : 0u);
+		expect_published(false, false);
 		if (mode < 2)
 			EXPECT_EQ(switch_exec_chan_word_acquires(consumer, 0x100, 1), 1u);
 		else
@@ -509,7 +541,6 @@ TEST_F(ExecCommit, CombinedWaitsReadEachDependencyOnceUnderOneLiveHold)
 	siblings = {{switch_exec_chan_tgm(second), 2}};
 	words = {{0x108, 5, 0x103}};
 	switch_exec_chan_high(consumer, 1);
-	switch_exec_chan_task_order(consumer, first, 2);
 	const uint64_t status = switch_exec_backing::status_reads(),
 		       live = switch_exec_mutex_takes();
 	const uint32_t parked = switch_exec_parked_promises();
@@ -520,7 +551,6 @@ TEST_F(ExecCommit, CombinedWaitsReadEachDependencyOnceUnderOneLiveHold)
 	expect_published();
 	for (auto *source : {first, second})
 		EXPECT_EQ(switch_exec_chan_acquires(consumer, source, 1), 1u);
-	EXPECT_EQ(switch_exec_chan_acquires(consumer, first, 2), 1u);
 	EXPECT_EQ(switch_exec_chan_acquires(consumer, second, 2), 1u);
 	for (uint32_t pool : {0x100u, 0x104u})
 		EXPECT_EQ(switch_exec_chan_word_acquires(consumer, pool, 1), 1u);
@@ -539,9 +569,9 @@ TEST_F(ExecCommit, PlainAndHostOnlyJobsTakeNoLiveLock)
 		const uint64_t status = switch_exec_backing::status_reads();
 		ASSERT_EQ(exec(&kPush, 1), 0);
 		EXPECT_EQ(switch_exec_mutex_takes() - live, 0u);
-		EXPECT_EQ(ioLockTakes().load() - own, host);
+		EXPECT_EQ(ioLockTakes().load() - own, 0u);
 		EXPECT_EQ(switch_exec_backing::status_reads() - status, host);
-		expect_published(false, host != 0);
+		expect_published(false, false);
 		if (host)
 			EXPECT_EQ(switch_exec_chan_syncpt_waits(consumer, 7, 3), 1u);
 		kicks.clear();

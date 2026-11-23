@@ -11,22 +11,6 @@
 class SwitchGpuSubmitGate
 {
 public:
-	bool enter(IOLock *lock)
-	{
-		while (!closed_ && (mutations_ || mutating_))
-			IOLockSleep(lock, this, THREAD_UNINT);
-		if (closed_)
-			return false;
-		++active_;
-		return true;
-	}
-
-	void leave(IOLock *lock)
-	{
-		if (!--active_)
-			IOLockWakeup(lock, this, false);
-	}
-
 	bool enterFast()
 	{
 		__atomic_add_fetch(&fast_, 1u, __ATOMIC_SEQ_CST);
@@ -62,7 +46,7 @@ public:
 	{
 		++mutations_;
 		block();
-		while (!closed_ && (active_ || mutating_ || fast()))
+		while (!closed_ && (mutating_ || fast()))
 			IOLockSleep(lock, this, THREAD_UNINT);
 		--mutations_;
 		if (closed_) {
@@ -80,20 +64,12 @@ public:
 		IOLockWakeup(lock, this, false);
 	}
 
-	bool mutate(IOLock *lock)
-	{
-		if (!beginMutation(lock))
-			return false;
-		endMutation(lock);
-		return true;
-	}
-
 	void close(IOLock *lock)
 	{
 		closed_ = true;
 		block();
 		IOLockWakeup(lock, this, false);
-		while (active_ || mutating_ || fast())
+		while (mutating_ || fast())
 			IOLockSleep(lock, this, THREAD_UNINT);
 	}
 
@@ -119,9 +95,9 @@ private:
 		return __atomic_load_n(&fast_, __ATOMIC_SEQ_CST);
 	}
 
-	unsigned active_ = 0, mutations_ = 0;
+	unsigned mutations_ = 0;
 	bool closed_ = false, mutating_ = false;
-	// enterFast's submissions: at most one per channel slot, so a byte (the struct keeps its size)
+	// enterFast's submissions: at most one per channel slot, so a byte
 	uint8_t fast_ = 0;
 	bool blocked_ = false;
 };

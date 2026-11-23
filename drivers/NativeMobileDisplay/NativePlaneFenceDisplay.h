@@ -58,7 +58,6 @@ bool planeFence(const PlaneSet &p)
 #endif
     gpuOfferedAt = mach_absolute_time();
     gpuScanout = true;
-    gpuDeadlines = 0;
     gpuDeadline->setTimeoutMS(kGpuCopyDeadlineMS);
     if (!planeMediaFence(p)) {
         planeFenceQueued = true;
@@ -68,13 +67,15 @@ bool planeFence(const PlaneSet &p)
 }
 
 // From the fence's completion: the set out now (or with the window A frame held for a flip, or at the SC7 resume); not shown
-// when its writers' work was lost or failed, or planes went off meanwhile.
+// when the fence failed, the display stopped it (kIOReturnAborted), or planes went off meanwhile.
 void finishPlaneFence(int status)
 {
     mediaFlipPass();
     gpuDeadline->cancelTimeout();
     gpuScanout = false;
     planeFencePending = false;
+    if (status && status != kIOReturnAborted)
+        planeFenceFailed(status);
     if (copyPlaneJoined) {
         copiedPlaneFenceFinished(status);
         return;
@@ -89,6 +90,15 @@ void finishPlaneFence(int status)
         planeOut(planeFencing);
     }
     kickSwapQueue();
+}
+
+// A fence's failure, the bridge's or host1x's plain one read through the set's producers: a writer gone or refused has
+// its line (the set is not shown), a lost one panics.
+void planeFenceFailed(int status)
+{
+    switch_gpu_backing_token producers[kPlaneDependencies] = {};
+    const unsigned count = planeDependencies(planeFencing, producers);
+    sourceUnshown(producerFailure(status, producers, count), takenRequest(planeFencing.seq), "overlay fence");
 }
 
 // p reached no register: counted; its swap retires with whatever is still out, and the target is what window B keeps.

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 #include "../compiler/compiler_engine.h"
-#include "../raw/runtime/RawCompileRequest.h"
-#include "../raw/runtime/RawOffline.h"
-#include "../raw/runtime/raw_compute_facts_entry.h"
-#include "../raw/runtime/raw_compute_key.h"
-#include "../raw/runtime/raw_compute_record.h"
-#include "../raw/runtime/raw_metallib.h"
-#include "../raw/runtime/raw_reflection_blob.h"
+#include "../TegraGM20BMetalCompileRequest.h"
+#include "../TegraGM20BMetalOffline.h"
+#include "../compute_facts_entry.h"
+#include "../compute_key.h"
+#include "../compute_record.h"
+#include "../metallib.h"
+#include "../reflection_blob.h"
 #include "empty_pack.h"
 #include "TegraGM20BCompilerABI.h"
 #include <cstring>
@@ -23,12 +23,12 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
     std::ifstream input(path, std::ios::binary);
     const std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     ASSERT_FALSE(bytes.empty());
-    std::map<std::string, raw::AirHash> hashes;
-    ASSERT_TRUE(raw::metallibAirHashes(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size(), hashes));
+    std::map<std::string, gm20b::AirHash> hashes;
+    ASSERT_TRUE(gm20b::metallibAirHashes(reinterpret_cast<const uint8_t *>(bytes.data()), bytes.size(), hashes));
     for (const char *name : {"grouped_pointer", "grouped_add", "grouped_mul"})
         ASSERT_EQ(hashes.count(name), 1u) << name;
 
-    RawOfflineDevice *device = [RawOfflineDevice new];
+    GM20BOfflineDevice *device = [GM20BOfflineDevice new];
     NSError *error = nil;
     id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(path)] error:&error];
     ASSERT_TRUE(library != nil) << error.description.UTF8String;
@@ -61,25 +61,25 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
     std::string why;
     ASSERT_TRUE(engine.open(0, {emptyPack(), "", {}}, why)) << why;
     switch_compiler::SystemLibraries system;
-    for (const auto kind : {raw::RequestKind::Facts, raw::RequestKind::Reflection, raw::RequestKind::Kernel}) {
-        raw::ComputeRecord plainKernel;
-        raw::PackComputeFacts plainFacts = {};
+    for (const auto kind : {gm20b::RequestKind::Facts, gm20b::RequestKind::Reflection, gm20b::RequestKind::Kernel}) {
+        gm20b::ComputeRecord plainKernel;
+        gm20b::PackComputeFacts plainFacts = {};
         std::string plainReflection;
         for (bool grouped : {false, true}) {
-            raw::CompileRequest request;
+            gm20b::CompileRequest request;
             request.kind = kind;
             request.libraries.push_back({"", false, bytes});
-            raw::RequestStage entry;
+            gm20b::RequestStage entry;
             entry.tag = "k";
             entry.function = entry.name = "grouped_pointer";
             request.stages.push_back(entry);
-            std::vector<raw::LinkedComputeFunction> linked;
+            std::vector<gm20b::LinkedComputeFunction> linked;
             for (unsigned list = 0; list < (grouped ? 2u : 1u); ++list)
                 for (const char *name : {"grouped_add", "grouped_mul"}) {
-                    raw::RequestStage stage;
+                    gm20b::RequestStage stage;
                     stage.tag = list ? "kg" : "kl";
                     stage.function = stage.name = name;
-                    raw::LinkedComputeFunction function;
+                    gm20b::LinkedComputeFunction function;
                     function.air = hashes.at(name);
                     function.symbol = function.name = name;
                     if (list) {
@@ -90,20 +90,20 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
                     linked.push_back(std::move(function));
                 }
             const std::string state =
-                raw::computeStateKey(hashes.at("grouped_pointer"), raw::computeLinkedText(linked), 0, false);
+                gm20b::computeStateKey(hashes.at("grouped_pointer"), gm20b::computeLinkedText(linked), 0, false);
             request.kernel.threads[0] = 32;
             request.kernel.threads[1] = request.kernel.threads[2] = 1;
-            request.key = kind == raw::RequestKind::Facts ? raw::factsCacheKey(0, state).key
-                          : kind == raw::RequestKind::Reflection
-                              ? raw::computeReflectionKey(0, state).key
+            request.key = kind == gm20b::RequestKind::Facts ? gm20b::factsCacheKey(0, state).key
+                          : kind == gm20b::RequestKind::Reflection
+                              ? gm20b::computeReflectionKey(0, state).key
                               : "kernel | " + state + " | tg=32,1,1 | tgmem= | tex= | smp=";
             switch_compiler::Prepared prepared;
-            ASSERT_TRUE(switch_compiler::prepare(raw::encodeRequest(request), 0, system, prepared, why)) << why;
+            ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(request), 0, system, prepared, why)) << why;
             std::string result;
             ASSERT_EQ(engine.compile(prepared, result, why), TegraGM20BCompileMade) << why;
-            if (kind == raw::RequestKind::Facts) {
-                raw::PackComputeFacts facts = {};
-                ASSERT_EQ(raw::decodeFactsEntry(result, prepared.key, facts, why), raw::RecordCache::Found::Record)
+            if (kind == gm20b::RequestKind::Facts) {
+                gm20b::PackComputeFacts facts = {};
+                ASSERT_EQ(gm20b::decodeFactsEntry(result, prepared.key, facts, why), gm20b::RecordCache::Found::Record)
                     << why;
                 EXPECT_GT(facts.maxThreads, 0u);
                 EXPECT_GT(facts.executionWidth, 0u);
@@ -114,18 +114,19 @@ TEST(CompilerGroups, TheNativeAdaptersPreserveGroupedFunctionsAndTheUngroupedPro
                 } else {
                     plainFacts = facts;
                 }
-            } else if (kind == raw::RequestKind::Reflection) {
+            } else if (kind == gm20b::RequestKind::Reflection) {
                 bool made = false;
                 std::string reflection;
-                ASSERT_TRUE(raw::decodeReflectionEntry(result, prepared.key, made, reflection) && made);
+                ASSERT_TRUE(gm20b::decodeReflectionEntry(result, prepared.key, made, reflection) && made);
                 ASSERT_FALSE(reflection.empty());
                 if (grouped)
                     EXPECT_EQ(reflection, plainReflection);
                 else
                     plainReflection = std::move(reflection);
             } else {
-                raw::ComputeRecord kernel;
-                ASSERT_EQ(raw::decodeKernelEntry(result, prepared.key, kernel, why), raw::RecordCache::Found::Record)
+                gm20b::ComputeRecord kernel;
+                ASSERT_EQ(gm20b::decodeKernelEntry(result, prepared.key, kernel, why),
+                          gm20b::RecordCache::Found::Record)
                     << why;
                 ASSERT_FALSE(kernel.code.empty());
                 EXPECT_TRUE(kernel.samplers.empty());

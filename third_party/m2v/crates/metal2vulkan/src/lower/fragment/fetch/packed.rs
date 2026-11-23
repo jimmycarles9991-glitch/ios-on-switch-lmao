@@ -1,11 +1,18 @@
 //! The storage form of a packed unsigned normalized attachment a device grants no storage access
 //! (NVK): `BGR5A1Unorm` (`A1R5G5B5_UNORM_PACK16`), viewed in `R16_UINT`, and `BGR10A2Unorm`
 //! (`A2R10G10B10_UNORM_PACK32`), viewed in `R32_UINT` (`StorageView::uint_view`): the function
-//! reads and writes the texel's bits. A read is each channel's exact value, `c / (2^b - 1)`
-//! correctly rounded, as Metal reads one texel of a packed format (`metal::texel_format`,
-//! `PackedTexels`); a write packs each channel's code as Metal's write of the output rounds it
-//! (`color_write::round` by the attachment's rules, else the nearest code), and takes the channels
-//! it keeps from the texel read first, inside the interlock.
+//! reads and writes the texel's bits. A read is what Metal's tile holds of a loaded texel: for
+//! `BGR10A2Unorm` each channel's exact value, `c / (2^b - 1)` correctly rounded
+//! (`metal::texel_format`, `PackedTexels`), and for `BGR5A1Unorm`, whose tile holds `half`s, that
+//! value rounded to the nearest `half` (an Apple M4 Max's fetch of every 16-bit texel, as `float4`
+//! and as `half4`, 262,144 lanes each). A write packs each channel's code as Metal's write of the
+//! output rounds it (`color_write::round` by the attachment's rules, else the nearest code), and
+//! takes the channels it keeps from the texel read first, inside the interlock.
+//!
+//! Within a pass Metal's tile keeps a `BGR5A1Unorm` write as the `half` of the output clamped to
+//! `[0, 1]` and rounds it to the codes only at the store, so a later draw of the pass that reads it
+//! reads that `half` where this form reads the stored code's (the same M4 Max, 61,436 of 61,444
+//! lanes): exact only for a texel no earlier draw of the pass wrote.
 
 use super::{image_and_texel, StorageColor};
 use crate::lower::arith::color_write;
@@ -22,20 +29,24 @@ use crate::spirv::ids::Value as SValue;
 use crate::spirv::ir::{BinOp, ConvOp, GlslOp, Type as SType};
 use crate::vk;
 
-/// One packed format: each channel's bit offset in the texel and its bits, red to alpha.
+/// One packed format: each channel's bit offset in the texel and its bits, red to alpha, and
+/// whether Metal's tile holds its channels as `half`s.
 struct Packed {
     format: vk::Format,
     fields: [(u32, u8); 4],
+    half_tile: bool,
 }
 
 const PACKED: [Packed; 2] = [
     Packed {
         format: vk::Format::A1R5G5B5_UNORM_PACK16,
         fields: [(10, 5), (5, 5), (0, 5), (15, 1)],
+        half_tile: true,
     },
     Packed {
         format: vk::Format::A2R10G10B10_UNORM_PACK32,
         fields: [(20, 10), (10, 10), (0, 10), (30, 2)],
+        half_tile: false,
     },
 ];
 
@@ -83,12 +94,29 @@ fn u32_type() -> SType {
     }
 }
 
-/// The `vec4` a fetch reads from texel `word` (a `u32` of the view of a `format` attachment): each
-/// channel's exact value.
+/// The `vec4` a fetch reads from texel `word` (a `u32` of the view of a `format` attachment), for a
+/// reader of form `reader` (`None`: the in-shader blend): each channel's exact value, and in a
+/// compile for the native SM53 target the nearest `half` to it where the format's tile holds
+/// `half`s and the reader does not round to a `half` itself. The m2v runtime's Vulkan modules keep
+/// the exact value.
 pub(super) fn decode(
+    cx: &EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     format: vk::Format,
     word: SValue,
+    reader: Option<Form>,
+) -> BResult<SValue> {
+    let half_reader = reader.is_some_and(|f| f.float_fmt() == Some(FloatFmt::Half));
+    let half_tile = packing(format).half_tile && cx.plan.families.arith.sm53_half && !half_reader;
+    channel_values(fb, format, word, half_tile)
+}
+
+/// [`decode`]'s value, rounded to the nearest `half` where `half_tile`.
+fn channel_values(
+    fb: &mut FunctionBuilder<'_>,
+    format: vk::Format,
+    word: SValue,
+    half_tile: bool,
 ) -> BResult<SValue> {
     let fields = fields(format);
     let mut codes = Vec::with_capacity(4);
@@ -102,7 +130,29 @@ pub(super) fn decode(
     let codes = fb.composite_construct(uvec4, &codes)?;
     let fvec4 = vec4(fb, SType::Float { width: 32 })?;
     let codes = fb.convert(ConvOp::ConvertUToF, codes, fvec4)?;
-    exact_quotient(fb, codes, fields.map(|(_, top)| top))
+    let exact = exact_quotient(fb, codes, fields.map(|(_, top)| top))?;
+    if !half_tile {
+        return Ok(exact);
+    }
+    // Every nonzero `c / 31` is a normal `half` more than 260 `f32` steps from a rounding boundary:
+    // its nearest `half` is the `f32` with the 13 low fraction bits rounded off to nearest even.
+    let bits = fb.convert(ConvOp::Bitcast, exact, uvec4)?;
+    let shift = uvec4_splat(fb, 13)?;
+    let one = uvec4_splat(fb, 1)?;
+    let lsb = fb.binary(BinOp::ShiftRightLogical, bits, shift)?;
+    let lsb = fb.binary(BinOp::BitwiseAnd, lsb, one)?;
+    let below_half = uvec4_splat(fb, 0x0FFF)?;
+    let biased = fb.binary(BinOp::IAdd, bits, below_half)?;
+    let biased = fb.binary(BinOp::IAdd, biased, lsb)?;
+    let kept = uvec4_splat(fb, !0x1FFF)?;
+    let rounded = fb.binary(BinOp::BitwiseAnd, biased, kept)?;
+    fb.convert(ConvOp::Bitcast, rounded, fvec4)
+}
+
+fn uvec4_splat(fb: &mut FunctionBuilder<'_>, v: u32) -> BResult<SValue> {
+    let c = u32_const(fb, v)?;
+    let uvec4 = vec4(fb, u32_type())?;
+    fb.composite_construct(uvec4, &[c, c, c, c])
 }
 
 /// The `uvec4` texel (its first lane the view's `u32`) a write of output `part` (four `float` or
@@ -248,5 +298,176 @@ mod tests {
         }
         assert!(!is_packed(vk::Format::A2B10G10R10_UNORM_PACK32));
         assert!(!is_packed(vk::Format::B8G8R8A8_SRGB));
+    }
+
+    use crate::pipeline::sym::{ResourceKind, ResourceSlot, Stage};
+    use crate::spirv::builder::ModuleBuilder;
+    use crate::spirv::ids::{GlobalId, TypeId};
+    use crate::spirv::interp::{self, Buffer, Config, Resources};
+    use crate::spirv::ir::{
+        natural_layout, ExecMode, ExecModel, IoDir, LayoutRule, MemAccess, StorageClass,
+        TypedModule,
+    };
+
+    /// The `f32` bits Metal reads of a `BGR5A1Unorm` channel of 5-bit code `c`: the `half` nearest
+    /// `c / 31`, which an Apple M4 Max's fetch read of every 16-bit texel, as `float4` and as
+    /// `half4` alike (storage-forms bgr5a1_probe, arms fetch_float and fetch_half). Each `c / 31`
+    /// past 0 is a normal `half`, so its nearest is the `f32`'s 13 low fraction bits rounded off to
+    /// nearest even.
+    fn metal_5bit(c: u32) -> u32 {
+        let b = ((f64::from(c) / 31.0) as f32).to_bits();
+        let (kept, dropped) = (b >> 13, b & 0x1FFF);
+        let up = dropped > 0x1000 || (dropped == 0x1000 && kept & 1 == 1);
+        (kept + u32::from(up)) << 13
+    }
+
+    fn slot(index: u32) -> ResourceSlot {
+        ResourceSlot {
+            stage: Stage::Kernel,
+            kind: ResourceKind::Buffer,
+            index,
+        }
+    }
+
+    fn storage_buffer(b: &mut ModuleBuilder, index: u32, elem: TypeId) -> BResult<GlobalId> {
+        let rta = b.ty(SType::RuntimeArray {
+            elem,
+            stride: Some(4),
+        })?;
+        let layout = natural_layout(b.types(), LayoutRule::Std430, true, &[rta])?;
+        let block = b.ty(SType::Struct {
+            members: [rta].into(),
+            layout: Some(layout),
+        })?;
+        b.resource(slot(index), StorageClass::StorageBuffer, block)
+    }
+
+    fn element(
+        f: &mut FunctionBuilder<'_>,
+        buf: GlobalId,
+        (i, n): (SValue, u32),
+        k: u32,
+    ) -> BResult<SValue> {
+        let n = u32_const(f, n)?;
+        let at = f.binary(BinOp::IMul, i, n)?;
+        let k = u32_const(f, k)?;
+        let at = f.binary(BinOp::IAdd, at, k)?;
+        let zero = u32_const(f, 0)?;
+        let base = f.module().global_value(buf)?;
+        f.access_chain(base, &[zero, at])
+    }
+
+    /// A kernel whose invocation `i` reads word `i` of buffer 0 as a `format` texel and stores the
+    /// bits of its four lanes' values at words `4i` to `4i + 3` of buffer 1.
+    fn kernel(format: vk::Format, half_tile: bool) -> BResult<TypedModule> {
+        let mut m = ModuleBuilder::new();
+        let u32_ = m.ty(u32_type())?;
+        let uvec3 = m.ty(SType::Vector { elem: u32_, len: 3 })?;
+        let uvec4 = m.ty(SType::Vector { elem: u32_, len: 4 })?;
+        let input = storage_buffer(&mut m, 0, u32_)?;
+        let output = storage_buffer(&mut m, 1, u32_)?;
+        let id = m.builtin(crate::spv::BuiltIn::GlobalInvocationId, IoDir::Input, uvec3)?;
+        let void = m.ty(SType::Void)?;
+        let mut f = m.function(void)?;
+        let gid = f.module().global_value(id)?;
+        let gid = f.load(gid, MemAccess::default())?;
+        let i = f.composite_extract(gid, &[0])?;
+        let at = element(&mut f, input, (i, 1), 0)?;
+        let word = f.load(at, MemAccess::default())?;
+        let values = channel_values(&mut f, format, word, half_tile)?;
+        let values = f.convert(ConvOp::Bitcast, values, uvec4)?;
+        for k in 0..4u32 {
+            let x = f.composite_extract(values, &[k])?;
+            let at = element(&mut f, output, (i, 4), k)?;
+            f.store(at, x, MemAccess::default())?;
+        }
+        f.ret(None)?;
+        let main = f.finish()?;
+        m.entry(
+            ExecModel::GLCompute,
+            main,
+            vec![ExecMode::LocalSize { x: 1, y: 1, z: 1 }],
+        )?;
+        m.finalize()
+    }
+
+    fn decoded(module: &TypedModule, words: &[u32]) -> Vec<[u32; 4]> {
+        let res = Resources {
+            buffers: vec![
+                Buffer {
+                    slot: Some(slot(0)),
+                    address: None,
+                    bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+                },
+                Buffer {
+                    slot: Some(slot(1)),
+                    address: None,
+                    bytes: vec![0xAB; words.len() * 16],
+                },
+            ],
+            ..Resources::default()
+        };
+        let cfg = Config {
+            workgroups: [u32::try_from(words.len()).expect("words"), 1, 1],
+            ..Config::default()
+        };
+        let (out, _) = interp::run_with_images(module, &cfg, res, Vec::new()).expect("run");
+        out.buffers[1]
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|c| {
+                std::array::from_fn(|k| {
+                    u32::from_le_bytes(c[4 * k..4 * k + 4].try_into().expect("word"))
+                })
+            })
+            .collect()
+    }
+
+    /// The `f32` nearest `c / m`, which the exact read gives.
+    fn exact(c: u32, m: u32) -> u32 {
+        ((f64::from(c) / f64::from(m)) as f32).to_bits()
+    }
+
+    /// Every 5-bit code in each channel of a `BGR5A1Unorm` texel, with alpha 0 and 1.
+    fn texels() -> Vec<u32> {
+        (0..32u32)
+            .flat_map(|c| [0, 1].map(|a| c << 10 | (31 - c) << 5 | (c * 7 % 32) | a << 15))
+            .collect()
+    }
+
+    /// A `BGR5A1Unorm` texel reads as Metal's tile holds a loaded one, each channel the `half`
+    /// nearest its value. The exact quotient, which the read gave before, is another `f32` for 30
+    /// of the 32 codes.
+    #[test]
+    fn a_bgr5a1_texel_reads_the_half_metal_reads() {
+        assert_eq!(
+            [1, 15, 16].map(metal_5bit),
+            [0x3d04_2000, 0x3ef7_c000, 0x3f04_2000]
+        );
+        let words = texels();
+        let module = kernel(vk::Format::A1R5G5B5_UNORM_PACK16, true).expect("kernel");
+        for (w, got) in words.iter().zip(decoded(&module, &words)) {
+            let code = |at: u32| metal_5bit(w >> at & 31);
+            let alpha = if w >> 15 != 0 { 1.0f32.to_bits() } else { 0 };
+            assert_eq!(got, [code(10), code(5), code(0), alpha], "texel {w:#06x}");
+        }
+    }
+
+    /// Without the `half` rounding (the m2v runtime's Vulkan compile, a `half` reader, the BGR10A2
+    /// view) the read is each channel's exact quotient: code 1 is `0x3d04_2108`, not the `half`.
+    #[test]
+    fn an_unrounded_read_keeps_the_exact_quotient() {
+        assert_eq!(exact(1, 31), 0x3d04_2108);
+        let words = texels();
+        let module = kernel(vk::Format::A1R5G5B5_UNORM_PACK16, false).expect("kernel");
+        for (w, got) in words.iter().zip(decoded(&module, &words)) {
+            let code = |at: u32| exact(w >> at & 31, 31);
+            assert_eq!(
+                got,
+                [code(10), code(5), code(0), exact(w >> 15, 1)],
+                "texel {w:#06x}"
+            );
+        }
     }
 }

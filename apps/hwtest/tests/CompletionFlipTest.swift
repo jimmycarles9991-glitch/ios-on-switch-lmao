@@ -75,7 +75,8 @@ struct CompletionFlipTest: HWTest {
                 (
                     "no promised direct present given up since boot (direct_given_up = 0)",
                     promisesAfter.directGivenUp == 0
-                ))
+                )
+            )
         }
         let aperture = Self.aperture()
         metrics.set("winbuf_alias", aperture?.alias ?? false)
@@ -91,7 +92,8 @@ struct CompletionFlipTest: HWTest {
                 ("5 s of frames", stamps.count >= 290),
                 ("completions flipped window A (d_completion > 0)", completion > 0),
                 ("ahead of the display's work loop (d_lead_us > 0)", delta("lead_us") > 0),
-            ] + promised, metrics)
+            ] + promised, metrics
+        )
     }
 
     /// The display's window A aperture check through TegraVIC's kernel-test selector, or nil without one.

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The macros Mesa's builder makes (gen/SwitchGM20BMacros.h) against the ones raw_mme.h hand-encoded before it installed
+// The macros Mesa's builder makes (gen/SwitchGM20BMacros.h) against the ones mme.h hand-encoded before it installed
 // the builder's (their words kept here), both run by Mesa's Fermi MME simulator (the in-tree copy) on the same
 // arguments: the same methods with the same values, every argument consumed, no shadow state read. The one difference
 // allowed: the builder sends the root table's two words to LOAD_CONSTANT_BUFFER(0) and (1), raw both to (0); the
@@ -53,7 +53,7 @@ struct Simulation {
 
     static uint32_t state(void *, uint16_t)
     {
-        ADD_FAILURE() << "the raw path's macros read no shadow state";
+        ADD_FAILURE() << "the driver's macros read no shadow state";
         return 0;
     }
 
@@ -239,7 +239,7 @@ TEST(EmitMme, TheFirstPassRuleRefusesTheWordsTheChipRefused)
         EXPECT_EQ(firstPassRefusal(word), nullptr) << std::hex << word;
 }
 
-// The draw parameters as the raw path wrote them from the CPU before each draw (raw_gpu.cpp prepare), then the draw loop
+// The draw parameters as the driver wrote them from the CPU before each draw (gpu.cpp prepare), then the draw loop
 std::vector<Method> withParams(bool indexed, uint32_t instances, uint32_t first, uint32_t count, uint32_t baseVertex,
                                uint32_t baseInstance)
 {
@@ -284,7 +284,9 @@ TEST(EmitMme, TheMacrosTakeNvksDrawSlots)
     EXPECT_EQ(SWITCH_GM20B_MACRO_AMPLIFY, 24);
     EXPECT_EQ(SWITCH_GM20B_MACRO_AMPLIFY_INDEXED, 25);
     EXPECT_EQ(SWITCH_GM20B_MACRO_CLEAR_LAYERS, 26);
-    EXPECT_EQ(SWITCH_GM20B_MACRO_RAW_END, 27);
+    EXPECT_EQ(SWITCH_GM20B_MACRO_FETCH_DRAW, 27);
+    EXPECT_EQ(SWITCH_GM20B_MACRO_FETCH_DRAW_INDEXED, 28);
+    EXPECT_EQ(SWITCH_GM20B_MACRO_METAL_END, 29);
 }
 
 TEST(EmitMme, TheScratchRangesAreTheTables)
@@ -299,6 +301,8 @@ TEST(EmitMme, TheScratchRangesAreTheTables)
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_AMP_END, 25);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ICB_SET_BYTES, 25);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ROOT_HI, 26);
+    EXPECT_EQ(SWITCH_GM20B_SCRATCH_FETCH_FIRST, 28);
+    EXPECT_EQ(SWITCH_GM20B_SCRATCH_FETCH_END, 34);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ICB_BUFFERS, 35);
     EXPECT_EQ(SWITCH_GM20B_SCRATCH_ICB_BUFFERS_END, 128);
 }
@@ -312,7 +316,8 @@ TEST(EmitMme, TheMacrosFitTheRawPathsCodeSpace)
                          count(switch_gm20b_macro_icb_draw) + count(switch_gm20b_macro_icb_draw_indexed) +
                          count(switch_gm20b_macro_icb_gate) + count(switch_gm20b_macro_icb_bind) +
                          count(switch_gm20b_macro_icb_patches) + count(switch_gm20b_macro_amplify) +
-                         count(switch_gm20b_macro_amplify_indexed) + count(switch_gm20b_macro_clear_layers);
+                         count(switch_gm20b_macro_amplify_indexed) + count(switch_gm20b_macro_clear_layers) +
+                         count(switch_gm20b_macro_fetch_draw) + count(switch_gm20b_macro_fetch_draw_indexed);
     RecordProperty("words", int(words));
     EXPECT_LE(words, uint32_t(SWITCH_GM20B_MACRO_CODE_WORDS));
 }

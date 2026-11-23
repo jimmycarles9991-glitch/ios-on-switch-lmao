@@ -8,7 +8,7 @@ import Metal
 /// system a state compiled in 216 ms reached its client 8.1 s later, and urgent requests sat seconds before an idle
 /// worker took them. Here one thread per core spins at the utility class (above background, below the main thread)
 /// for at most `spinLimit`, while the main thread creates a state no pack or store holds. The compiler's account of
-/// the wait (RawMetalCompileProbe.mm) is held to the quiet system's: on boot 22 an answer reached a quiet client in
+/// the wait (TegraGM20BMetalCompileProbe.mm) is held to the quiet system's: on boot 22 an answer reached a quiet client in
 /// 0-1 ms and a HW Test request started 6-12 ms after it was sent (the take thread's copy and prepare of the request).
 /// Delivery may cost the waiter less than one 60 Hz frame; the start, three. A background-class worker under this load
 /// waits for the scheduler to give the background class a turn, or for the spinners to end.
@@ -24,12 +24,12 @@ struct CompileAnswerLatencyTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade")
         }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
-        let salt = UInt32.random(in: 1...UInt32.max)
+        let salt = UInt32.random(in: 1 ... UInt32.max)
         let spinners = Spinners(count: ProcessInfo.processInfo.activeProcessorCount, limit: Self.spinLimit)
         spinners.start()
         let account = try await MainActor.run { try Account(of: try pipeline(gpu, salt: salt)) }
@@ -71,7 +71,7 @@ struct CompileAnswerLatencyTest: HWTest {
         return try gpu.device.makeRenderPipelineState(descriptor: descriptor)
     }
 
-    /// The creation's switchRawCompile, its times in microseconds
+    /// The creation's switchMetalCompile, its times in microseconds
     struct Account: Sendable {
         static let keys = [
             "wait_us", "queue_us", "compile_us", "answer_us", "wake_us", "store_us", "answer_priority", "ran_class",
@@ -80,8 +80,8 @@ struct CompileAnswerLatencyTest: HWTest {
         var us: [String: Int] = [:]
 
         init(of state: MTLRenderPipelineState) throws {
-            guard let answer = RawFacade.compile(of: state) else {
-                throw TestFailure("the state answers no switchRawCompile (a release build?)")
+            guard let answer = GM20BFacade.compile(of: state) else {
+                throw TestFailure("the state answers no switchMetalCompile (a release build?)")
             }
             how = answer["how"] as? String ?? "?"
             for key in Self.keys {
@@ -112,7 +112,7 @@ struct CompileAnswerLatencyTest: HWTest {
         func start() {
             began = Date()
             let deadline = began.addingTimeInterval(limit)
-            for _ in 0..<count {
+            for _ in 0 ..< count {
                 let thread = Thread { [self] in
                     while !isStopped && Date() < deadline {}
                 }

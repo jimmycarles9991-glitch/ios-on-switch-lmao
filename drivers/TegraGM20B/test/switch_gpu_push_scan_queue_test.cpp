@@ -34,7 +34,7 @@ TEST(PushScanQueue, AFilledRecordKeepsWhatItCannotReadAsUnread)
 		return switch_gpu_scan_words{i == 1 ? nullptr : words, i + 1};
 	});
 	EXPECT_STREQ(r->owner, "a-process-name-l");
-	EXPECT_TRUE(r->rawMacros);
+	EXPECT_TRUE(r->metalMacros);
 	EXPECT_EQ(r->count, 3u);
 	EXPECT_EQ(r->push[0].words, words);
 	EXPECT_EQ(r->push[1].words, nullptr);

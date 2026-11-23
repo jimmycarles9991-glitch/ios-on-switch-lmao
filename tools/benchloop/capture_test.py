@@ -1,6 +1,6 @@
 """A split capture as the device logs it replays through the pack kind byte for byte.
 
-testdata/split_capture.log is what raw_split_capture_test.cpp checks the device's lines against; the batch made from it
+testdata/split_capture.log is what split_capture_test.cpp checks the device's lines against; the batch made from it
 is testdata/split_capture_batch.json, which the app's host test decodes.
 """
 

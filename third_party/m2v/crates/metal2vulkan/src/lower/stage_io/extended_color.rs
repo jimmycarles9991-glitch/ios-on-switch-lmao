@@ -1,16 +1,14 @@
-//! A fragment function's color outputs to Apple's extended-range attachments
-//! (`LoweringInputs::extended_range_colors`).
+//! A fragment function's color outputs to the padded and bfloat attachments among Apple's
+//! extended-range formats (`LoweringInputs::extended_range_colors`).
 //!
 //! Such an attachment holds the format's raw texels
 //! (`metal::format::ExtendedRange::raw_format`), so the function writes each `float` or `half`
 //! output to one as the raw texel Metal stores for it, through an output variable of the raw
-//! format's unsigned components ([`plan`], [`encode`]): Metal rounds a `float` output to `half`
-//! (to nearest, ties to even) and stores the texel a kernel's write of that value stores
+//! format's unsigned components ([`plan`], [`encode`]): a padded attachment's store rounds a
+//! `float` output to `half` toward zero and stores the texel a kernel's write of that value stores
 //! (`arith::extended_range::encode`), and a `half` output's texel is the kernel write's of the
-//! `half` itself (EV XRR-rtp1-m4: every texel of 8,192 random outputs to each of the six formats,
-//! `float` and `half`, on an Apple M4 under macOS 27.0.1, plain and under the validation layer
-//! alike). The interface variable keeps the Metal output's type (`StageIo::outputs`), which link
-//! checks against the attachment's format as for any other color.
+//! `half` itself. The interface variable keeps the Metal output's type (`StageIo::outputs`), which
+//! link checks against the attachment's format as for any other color.
 //!
 //! A bfloat attachment (`R16Bfloat`, `RG16Bfloat`, `RGBA16Bfloat`) holds `half` values in Metal's
 //! tile, as an extended-range one does, and stores each as the bfloat code nearest it, ties to
@@ -26,11 +24,6 @@
 //! an attachment the pipeline blends (`ExtendedRangeColor::blended`; Metal's validation refuses a
 //! bfloat one's blend) and a dual-source second output to one. A `bfloat` output is refused
 //! before, as Metal's compiler rejects it.
-//!
-//! On a device that orders framebuffer fetch through rasterization-order input attachments, a blend
-//! the function computes over the attachment's input attachment (`lower::fragment`'s `input_blend`)
-//! is built: the output's write stores the raw texel of Metal's blend over the texel the input
-//! attachment reads, which `stage_io` writes through the output variable as it writes [`encode`]'s.
 
 use crate::error::{Error, Feature, Unsupported};
 use crate::lower::arith::extended_range;
@@ -72,8 +65,9 @@ pub(super) fn plan(
     let Some(fmt) = f.float_fmt() else {
         return Ok(None);
     };
-    let blended = e.blended && !cx.families.fragment.input_blends.contains_key(&color);
-    if index != 0 || blended || !matches!(fmt, FloatFmt::F32 | FloatFmt::Half) {
+    // Apple's 10-bit extended-range formats render through their stand-in alone.
+    let raw = e.form.padded() || e.form.bfloat();
+    if !raw || index != 0 || e.blended || !matches!(fmt, FloatFmt::F32 | FloatFmt::Half) {
         return Err(Unsupported::not_implemented(Feature::Format).into());
     }
     cx.families
@@ -83,9 +77,6 @@ pub(super) fn plan(
         .insert(color, e);
     cx.families.arith.converts(e.form);
     cx.families.stage_io.extended.insert(color, e);
-    if let Some(word) = super::two_plane::plan(cx, color, e)? {
-        return Ok(Some(word));
-    }
     Ok(Some(IoType {
         numeric: IoNumeric::Uint,
         components: e.form.raw_components() as u8,
@@ -114,7 +105,7 @@ pub(super) fn encode(
 
 /// The raw format's components of `texel`, a `uvec4` raw texel of an attachment held in `form`:
 /// what the output variable holds.
-pub(super) fn raw_components(
+fn raw_components(
     fb: &mut FunctionBuilder<'_>,
     form: ExtendedRange,
     texel: Value,
@@ -156,44 +147,31 @@ const FOUR: Form = Form {
 };
 
 /// The raw texel Metal stores for output `x` (form `f`, `float` or `half` lanes) to an attachment
-/// held in `form`, unblended, as a `uvec4` (`arith::extended_range::encode`): the lanes completed
-/// to four (a color lane the output lacks 0, a missing alpha 1; an output with fewer lanes than
-/// the format's channels is refused before), a `float` output rounded to `half` to nearest even,
-/// then the kernel write's encode. The storage form's unblended write stores it too
-/// (`lower::fragment::fetch`).
-pub(crate) fn texel(
+/// held in the padded form `form`, unblended, as a `uvec4` (`arith::extended_range::encode`): the
+/// lanes completed to four ([`held`]), then the kernel write's encode.
+fn texel(
     cx: &mut EmitCx<'_>,
     fb: &mut FunctionBuilder<'_>,
     form: ExtendedRange,
     f: Form,
     x: Value,
 ) -> BResult<Value> {
-    let v = held(fb, form, f, x)?;
+    let v = held(fb, f, x)?;
     let table = crate::lower::texture::extended_table(cx, form)?;
     extended_range::encode(fb, form, v, table)
 }
 
-/// The value [`texel`] encodes for output `x` (form `f`) to an attachment held in `form`, a
-/// `vec4` of `half` values: the lanes completed to four, a `float` output rounded to `half`.
-/// Metal's tile holds it until the store, which the storage form's shadow of the attachment keeps
-/// (`lower::fragment::fetch`). Not a bfloat form's, whose rounding is the pipeline's
-/// ([`bfloat_output`]) and which takes no storage form.
-pub(crate) fn held(
-    fb: &mut FunctionBuilder<'_>,
-    form: ExtendedRange,
-    f: Form,
-    x: Value,
-) -> BResult<Value> {
+/// The value [`texel`] encodes for output `x` (form `f`) to a padded attachment, a `vec4` of
+/// `half` values: the lanes completed to four (a color lane the output lacks 0, a missing alpha 1;
+/// an output with fewer lanes than the format's channels is refused before), a `float` output
+/// rounded to `half` toward zero (EV XRR2-x6d-m4: every value swept around each code's midpoint
+/// through three draw shapes, plain and blended under one and zero).
+fn held(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     let v = four_lanes(fb, f, x)?;
-    // A padded format's store rounds a `float` output to `half` toward zero (EV XRR2-x6d-m4:
-    // every value swept around each code's midpoint through three draw shapes, plain and
-    // blended under one and zero), an extended-range format's to nearest even.
-    let rounding = match form.padded() {
-        true => HalfRounding::TowardZeroSaturating,
-        false => HalfRounding::NearestEven,
-    };
     match f.float_fmt() {
-        Some(FloatFmt::F32) => texel_round::f32_to_half(fb, FOUR, v, rounding),
+        Some(FloatFmt::F32) => {
+            texel_round::f32_to_half(fb, FOUR, v, HalfRounding::TowardZeroSaturating)
+        }
         _ => Ok(v),
     }
 }

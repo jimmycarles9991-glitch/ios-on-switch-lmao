@@ -59,13 +59,14 @@ enum MP4Writer {
             guard size > 0, at + 4 + size <= length else { break }
             let type = hevc ? Int(bytes[at + 4] >> 1 & 0x3F) : Int(bytes[at + 4] & 0x1F)
             let sei = hevc ? (type == 39 || type == 40) : type == 6
-            if !sei { kept.append(contentsOf: bytes[at..<(at + 4 + size)]) }
+            if !sei { kept.append(contentsOf: bytes[at ..< (at + 4 + size)]) }
             at += 4 + size
         }
         guard kept.count != length else { return sample }
         return try Demux.sample(
             kept, format: CMSampleBufferGetFormatDescription(sample)!, pts: sample.presentationTimeStamp,
-            duration: sample.duration, sync: sample.isKeyFrame)
+            duration: sample.duration, sync: sample.isKeyFrame
+        )
     }
 
     static let containers: Set<String> = ["moov", "trak", "mdia"]
@@ -75,10 +76,10 @@ enum MP4Writer {
         var at = start
         let end = end ?? data.count
         while at + 8 <= end {
-            var size = (0..<4).reduce(0) { $0 << 8 | Int(data[at + $1]) }
-            let type = String(decoding: data[(at + 4)..<(at + 8)], as: UTF8.self)
+            var size = (0 ..< 4).reduce(0) { $0 << 8 | Int(data[at + $1]) }
+            let type = String(decoding: data[(at + 4) ..< (at + 8)], as: UTF8.self)
             if size == 1, at + 16 <= end {
-                size = (8..<16).reduce(0) { $0 << 8 | Int(data[at + $1]) }  // 64-bit largesize (mdat)
+                size = (8 ..< 16).reduce(0) { $0 << 8 | Int(data[at + $1]) } // 64-bit largesize (mdat)
             } else if size == 0 {
                 size = end - at
             }
@@ -89,7 +90,7 @@ enum MP4Writer {
                 // Full box: version byte, 3 flag bytes, then creation and modification times (32-bit each in
                 // version 0, 64-bit in version 1).
                 let width = data[at + 8] == 1 ? 8 : 4
-                data.replaceSubrange((at + 12)..<(at + 12 + 2 * width), with: [UInt8](repeating: 0, count: 2 * width))
+                data.replaceSubrange((at + 12) ..< (at + 12 + 2 * width), with: [UInt8](repeating: 0, count: 2 * width))
             }
             at += size
         }

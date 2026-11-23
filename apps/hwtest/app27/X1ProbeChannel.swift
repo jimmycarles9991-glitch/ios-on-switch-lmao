@@ -4,21 +4,22 @@ import HWTestGPU
 import Metal
 import os
 
-/// The raw facade's probe calls beyond RawMethods (drivers/TegraGM20BMetal/raw/runtime/RawMetalProbe.mm, debug
-/// builds): a command buffer's barrier forms (raw_probe_forms.h), where they took effect, 2D-engine work at an open blit
-/// encoder (raw_probe_ops.h), compressible private targets, and what the facade holds of a texture.
-enum RawProbe {
-    static let formsSelector = NSSelectorFromString("switchRawProbeForms:")
-    static let takenSelector = NSSelectorFromString("switchRawProbeTaken")
-    static let engineSelector = NSSelectorFromString("switchRawProbeEngine:")
-    static let compressSelector = NSSelectorFromString("switchRawProbeCompressNext")
-    static let factsSelector = NSSelectorFromString("switchRawProbeFacts:")
-    static let retargetSelector = NSSelectorFromString("switchRawProbeRetarget:")
+/// The facade's probe calls beyond GM20BMethods (drivers/TegraGM20BMetal/TegraGM20BMetalProbe.mm, debug
+/// builds): a command buffer's barrier forms (probe_forms.h), where they took effect, 2D-engine work at an open blit
+/// encoder (probe_ops.h), compressible private targets, and what the facade holds of a texture.
+enum GM20BProbe {
+    static let formsSelector = NSSelectorFromString("switchMetalProbeForms:")
+    static let takenSelector = NSSelectorFromString("switchMetalProbeTaken")
+    static let engineSelector = NSSelectorFromString("switchMetalProbeEngine:")
+    static let compressSelector = NSSelectorFromString("switchMetalProbeCompressNext")
+    static let factsSelector = NSSelectorFromString("switchMetalProbeFacts:")
+    static let retargetSelector = NSSelectorFromString("switchMetalProbeRetarget:")
 
     static func call(_ object: AnyObject, _ selector: Selector, _ argument: Any? = nil) throws -> String? {
         guard let object = object as? NSObject, object.responds(to: selector) else {
             throw TestFailure(
-                "the facade has no \(NSStringFromSelector(selector)) (a release plug-in or another device)")
+                "the facade has no \(NSStringFromSelector(selector)) (a release plug-in or another device)"
+            )
         }
         let answer = argument == nil ? object.perform(selector) : object.perform(selector, with: argument)
         return answer?.takeUnretainedValue() as? String
@@ -34,7 +35,7 @@ enum RawProbe {
         fields(try call(commands, takenSelector) ?? "")
     }
 
-    /// 2D-engine work at the blit encoder open on `commands` (RawMetalProbe.mm switchRawProbeEngine: keys).
+    /// 2D-engine work at the blit encoder open on `commands` (TegraGM20BMetalProbe.mm switchMetalProbeEngine: keys).
     static func engine(_ commands: MTLCommandBuffer, _ op: [String: Any]) throws {
         if let refusal = try call(commands, engineSelector, op as NSDictionary) { throw TestFailure(refusal) }
     }
@@ -79,30 +80,30 @@ extension GPU {
         var buffer: MTLCommandBuffer?
         let timing = try await run { commands in
             buffer = commands
-            if !forms.isEmpty { try RawProbe.forms(commands, forms) }
+            if !forms.isEmpty { try GM20BProbe.forms(commands, forms) }
             try encode(commands)
         }
-        let taken = try buffer.map(RawProbe.taken) ?? [:]
+        let taken = try buffer.map(GM20BProbe.taken) ?? [:]
         return ArmBatch(gpuMilliseconds: timing.gpuMilliseconds, path: timing.path, taken: taken)
     }
 }
 
 extension GPU {
     /// Command buffers under `forms` committed back to back and awaited together, so each starts as the one before
-    /// it ends: the last one's GPU time, the first path off the raw path (else raw), and the forms' effect in all.
+    /// it ends: the last one's GPU time, the first path off the driver (else raw), and the forms' effect in all.
     func runBackToBack(forms: String, _ encodes: [(MTLCommandBuffer) throws -> Void]) throws -> ArmBatch {
         let buffers = try encodes.map { encode in
             try commit { commands in
-                if !forms.isEmpty { try RawProbe.forms(commands, forms) }
+                if !forms.isEmpty { try GM20BProbe.forms(commands, forms) }
                 try encode(commands)
             }
         }
         try finish(buffers)
         var batch = ArmBatch()
         if let last = buffers.last { batch.gpuMilliseconds = max(0, last.gpuEndTime - last.gpuStartTime) * 1000 }
-        batch.path = buffers.map(RawFacade.path(of:)).first { $0 != "raw" } ?? "raw"
+        batch.path = buffers.map(GM20BFacade.path(of:)).first { $0 != "gm20b" } ?? "gm20b"
         for buffer in buffers {
-            for (key, value) in try RawProbe.taken(buffer) { batch.taken[key, default: 0] += value }
+            for (key, value) in try GM20BProbe.taken(buffer) { batch.taken[key, default: 0] += value }
         }
         return batch
     }
@@ -127,7 +128,7 @@ struct ProbeLedger {
         t.batches += 1
         tallies[cell, default: [:]][arm] = t
         for (key, value) in batch.taken { taken[arm, default: [:]][key, default: 0] += value }
-        if batch.path != "raw" && !offPath.contains(batch.path) { offPath.append(batch.path) }
+        if batch.path != "gm20b" && !offPath.contains(batch.path) { offPath.append(batch.path) }
     }
 
     /// The cells where `arm` read other texels than the control, whatever the unguarded arm read
@@ -193,7 +194,7 @@ struct ProbeLedger {
         }
         if !offPath.isEmpty {
             verdict = .inconclusive
-            note = "not on the raw path: \(offPath.joined(separator: ","))"
+            note = "not on the driver: \(offPath.joined(separator: ","))"
         }
         return ProbeFinding(verdict, metrics, note: note)
     }

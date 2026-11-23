@@ -32,10 +32,32 @@ class NakstatTest(unittest.TestCase):
         line = 'R ok=1 label=x samples=1 topo=0 ds=0/0 c0=80:15 a0=31:0 | v vf  | f ff  | '
         self.assertEqual(nakstat.state_key(line), 'samples=1 topo=0 ds=0/0 c0=80:15 a0=31:0  | v vf  | f ff')
 
-    def test_framework_state_key_names_its_framework_and_variant(self):
+    def test_a_framework_stage_of_no_constants_keeps_its_space_before_the_framework(self):
+        # TegraGM20BMetalPipelineKey.h pipelineKey trims the key's end alone: " | f <function> " then " | l <framework>"
+        lib = ' lib=/System/Library/PrivateFrameworks/MediaCoreUI.framework/default.metallib'
+        line = f'R ok=1 label=- samples=1 topo=0 ds=0/0 c0=80:15 | v pinch_vertex{lib}  | f pinch_fragment{lib}  | '
+        want = 'samples=1 topo=0 ds=0/0 c0=80:15  | v pinch_vertex  | f pinch_fragment  | l MediaCoreUI'
+        self.assertEqual(nakstat.state_key(line), want)
+
+    def test_a_variant_keys_as_its_framework_state(self):
+        # the pack holds a variant as a variant record under its state's own key
         lib = ' lib=/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib '
         line = f'R ok=1 label=- samples=1 topo=0 c0=80:15 | v plane__vertex{lib} | f uber{lib}#0:36:01 | wtex=1:23'
-        want = 'samples=1 topo=0 c0=80:15  | v plane__vertex  | f uber #0:36:01 | l RenderBox | wtex=1:23'
+        want = 'samples=1 topo=0 c0=80:15  | v plane__vertex  | f uber #0:36:01 | l RenderBox'
+        self.assertEqual(nakstat.state_key(line), want)
+
+    def test_a_stage_keys_by_its_library_function_and_a_linked_function_by_its_specialized_name(self):
+        rb = ' lib=/System/Library/PrivateFrameworks/RenderBox.framework/default.metallib'
+        ir = ' lib=/System/Library/PrivateFrameworks/IconRendering.framework/default.metallib'
+        line = (
+            f'R ok=1 label=custom_effect:clampToEdges_v1 os=24B119 samples=1 topo=0 ds=260/260 c0=550:15:1:1:5:0:1:5:0'
+            f' | v custom_effect_vertex{rb}  | f custom_effect_fragment{rb} as=ffgea5 #0:36:6504'
+            f' | fp clampToEdges_v1{ir} as=custom_fn #1:33:00000000 | cubic s0:1110n t0:80 | '
+        )
+        want = (
+            'samples=1 topo=0 ds=260/260 c0=550:15:1:1:5:0:1:5:0  | v custom_effect_vertex  | f custom_effect_fragment'
+            ' #0:36:6504 | fp clampToEdges_v1 as=custom_fn #1:33:00000000 | l RenderBox'
+        )
         self.assertEqual(nakstat.state_key(line), want)
 
 

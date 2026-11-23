@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// TextureViewsTest: each pixel reads one texel of a view (gpu.raw.texture_views)
+// TextureViewsTest: each pixel reads one texel of a view (gpu.gm20b.texture_views)
 
 struct ViewVertex {
     float4 position [[position]];

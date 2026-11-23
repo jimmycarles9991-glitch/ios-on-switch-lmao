@@ -13,19 +13,26 @@ struct BenchFields {
         let target = fields["target"] as? [String: Any] ?? [:]
         try Self.keys(target, BenchProtocol.targetKeys, "target")
         guard let format = target["format"] as? String, let info = BenchProtocol.formats[format] else {
-            throw BenchInvalid("target format is not one the raw path renders")
+            throw BenchInvalid("target format is not one the driver renders")
         }
-        let width = try count(target["width"], 1...BenchProtocol.maxSide, "width")
-        let height = try count(target["height"], 1...BenchProtocol.maxSide, "height")
-        let rect = try counts(fields["rect"] ?? ([0, 0, width, height] as [Any]), 4, 0...BenchProtocol.maxSide, "rect")
+        let width = try count(target["width"], 1 ... BenchProtocol.maxSide, "width")
+        let height = try count(target["height"], 1 ... BenchProtocol.maxSide, "height")
+        let rect = try counts(
+            fields["rect"] ?? ([0, 0, width, height] as [Any]),
+            4,
+            0 ... BenchProtocol.maxSide,
+            "rect"
+        )
         guard rect[0] < rect[2], rect[2] <= width, rect[1] < rect[3], rect[3] <= height else {
             throw BenchInvalid("rect outside the target")
         }
         let draws = try counts(
-            fields["draws"] ?? ([1] as [Any]), nil, (kind == .noop ? 0 : 1)...BenchProtocol.maxDraws, "draws")
-        guard (1...BenchProtocol.maxDrawCounts).contains(draws.count) else { throw BenchInvalid("draws: 1..16 counts") }
-        let repeats = try count(fields["repeats"] ?? (1 as Any), 1...BenchProtocol.maxRepeats, "repeats")
-        let warmup = try count(fields["warmup"] ?? (0 as Any), 0...BenchProtocol.maxWarmup, "warmup")
+            fields["draws"] ?? ([1] as [Any]), nil, (kind == .noop ? 0 : 1) ... BenchProtocol.maxDraws, "draws"
+        )
+        guard (1 ... BenchProtocol.maxDrawCounts).contains(draws.count)
+        else { throw BenchInvalid("draws: 1..16 counts") }
+        let repeats = try count(fields["repeats"] ?? (1 as Any), 1 ... BenchProtocol.maxRepeats, "repeats")
+        let warmup = try count(fields["warmup"] ?? (0 as Any), 0 ... BenchProtocol.maxWarmup, "warmup")
         guard draws.count * (repeats + warmup) <= BenchProtocol.maxCommandBuffers else {
             throw BenchInvalid("too many command buffers")
         }
@@ -52,8 +59,9 @@ struct BenchFields {
             let compute = fields["compute"] as? [String: Any] ?? [:]
             program = try self.program(compute, "compute", sph: false)
             threads = try counts(
-                compute["threads"] ?? ([] as [Any]), 3, 1...BenchProtocol.maxThreads, "compute.threads")
-            groups = try counts(compute["groups"] ?? ([] as [Any]), 3, 1...BenchProtocol.maxGroups, "compute.groups")
+                compute["threads"] ?? ([] as [Any]), 3, 1 ... BenchProtocol.maxThreads, "compute.threads"
+            )
+            groups = try counts(compute["groups"] ?? ([] as [Any]), 3, 1 ... BenchProtocol.maxGroups, "compute.groups")
             guard threads.reduce(1, *) <= BenchProtocol.maxThreads else { throw BenchInvalid("compute.threads > 1024") }
             outputBytes = try output(compute, program!)
             chain = try self.chain(compute, outputBytes)
@@ -71,7 +79,7 @@ struct BenchFields {
         if kind != .readback, fields["methods"] != nil || fields["restore"] != nil {
             throw BenchInvalid("only readback experiments set methods")
         }
-        let targets = try count(fields["targets"] ?? (0 as Any), 0...1, "targets")
+        let targets = try count(fields["targets"] ?? (0 as Any), 0 ... 1, "targets")
         if kind != .readback, fields["targets"] != nil {
             throw BenchInvalid("only readback experiments choose their targets")
         }
@@ -89,7 +97,8 @@ struct BenchFields {
             threads: threads.map(UInt32.init), groups: groups.map(UInt32.init), draws: draws.map(UInt32.init),
             repeats: UInt32(repeats), warmup: UInt32(warmup), methods: methods, restore: restore, readback: readback,
             singleTarget: targets == 1, templateKey: templateKey, twod: forms.twod, source: forms.source,
-            compare: forms.compare, compressed: forms.compressed, outputBytes: outputBytes, storage: storage)
+            compare: forms.compare, compressed: forms.compressed, outputBytes: outputBytes, storage: storage
+        )
         (experiment.chain, experiment.chainSchedule) = chain
         experiment.compete = try compete(fields["compete"], kind: kind)
         if kind == .pack {
@@ -111,8 +120,8 @@ struct BenchFields {
         let instructions = Double(program.code.count / 32 * 3)
         let lanes =
             e.kind == .compute
-            ? Double(e.threads.reduce(1, *) * e.groups.reduce(1, *))
-            : max(32, Double((e.rect[2] - e.rect[0]) * (e.rect[3] - e.rect[1])))
+                ? Double(e.threads.reduce(1, *) * e.groups.reduce(1, *))
+                : max(32, Double((e.rect[2] - e.rect[0]) * (e.rect[3] - e.rect[1])))
         let work = lanes * instructions * Double(e.draws.max() ?? 1)
         return work / BenchProtocol.lanesPerClock / BenchProtocol.clockHz * 1e3
     }
@@ -130,9 +139,9 @@ struct BenchFields {
         }
         let header = sph ? try bytes(p["sph"] ?? ("" as Any), "\(field).sph") : Data()
         guard !sph || header.count == BenchProtocol.sphBytes else { throw BenchInvalid("program.sph is 80 bytes") }
-        let gprs = try count(p["gprs"], 1...255, "\(field).gprs")
+        let gprs = try count(p["gprs"], 1 ... 255, "\(field).gprs")
         let padded = max(1, (data.count + 0xff) & ~0xff)
-        let bound = p["dataBound"] == nil ? 0 : try count(p["dataBound"], 1...padded, "\(field).dataBound")
+        let bound = p["dataBound"] == nil ? 0 : try count(p["dataBound"], 1 ... padded, "\(field).dataBound")
         return BenchProgram(sph: header, code: code, data: data, gprs: UInt32(gprs), dataBound: UInt32(bound))
     }
 
@@ -142,7 +151,7 @@ struct BenchFields {
         }
         var flat: [UInt32] = []
         for pair in list {
-            let words = try counts(pair, 2, 0...Int(UInt32.max), field)
+            let words = try counts(pair, 2, 0 ... Int(UInt32.max), field)
             guard BenchProtocol.methodAllowed(UInt32(words[0])) else {
                 throw BenchInvalid("\(field): method \(String(words[0], radix: 16)) is not allowed")
             }
@@ -157,7 +166,7 @@ struct BenchFields {
             guard compute["schedule"] == nil else { throw BenchInvalid("compute.schedule: only with compute.chain") }
             return ([], 0)
         }
-        guard let links = value as? [Any], (1...BenchProtocol.maxChain).contains(links.count) else {
+        guard let links = value as? [Any], (1 ... BenchProtocol.maxChain).contains(links.count) else {
             throw BenchInvalid("compute.chain: 1..\(BenchProtocol.maxChain) kernels")
         }
         guard outputBytes > 0 else { throw BenchInvalid("compute.chain: an output buffer for the QMDs' releases") }
@@ -178,7 +187,7 @@ struct BenchFields {
 
     private func output(_ compute: [String: Any], _ program: BenchProgram) throws -> Int {
         guard let value = compute["output"] else { return 0 }
-        let bytes = try count(value, 16...BenchProtocol.maxOutput, "compute.output")
+        let bytes = try count(value, 16 ... BenchProtocol.maxOutput, "compute.output")
         guard bytes % 16 == 0 else { throw BenchInvalid("compute.output: 16-byte multiples") }
         guard program.data.count >= 16 else {
             throw BenchInvalid("compute.output: its address goes in the shader data's first 8 bytes")
@@ -196,8 +205,8 @@ struct BenchFields {
         guard kind == .fragment || kind == .readback, let s = value as? [String: Any] else {
             throw BenchInvalid("storage is an object, for fragment and readback")
         }
-        let bytes = try count(s["bytes"], 4...BenchProtocol.maxStorage, "storage.bytes")
-        let vaAt = try count(s["va_at"], 0...max(0, data.count - 8), "storage.va_at")
+        let bytes = try count(s["bytes"], 4 ... BenchProtocol.maxStorage, "storage.bytes")
+        let vaAt = try count(s["va_at"], 0 ... max(0, data.count - 8), "storage.va_at")
         guard bytes % 4 == 0, vaAt % 8 == 0, data.count >= 8 else {
             throw BenchInvalid("storage: 4-byte words, its address at an 8-byte step of the data")
         }
@@ -210,7 +219,7 @@ struct BenchFields {
     private func compete(_ value: Any?, kind: BenchKind) throws -> Bool {
         guard let value else { return false }
         guard kind == .fragment || kind == .readback, let flag = value as? NSNumber,
-            CFGetTypeID(flag) == CFBooleanGetTypeID()
+              CFGetTypeID(flag) == CFBooleanGetTypeID()
         else { throw BenchInvalid("compete is true or false, for fragment and readback") }
         return flag.boolValue
     }
@@ -224,7 +233,7 @@ struct BenchFields {
 
     func count(_ value: Any?, _ range: ClosedRange<Int>, _ field: String) throws -> Int {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
-            let n = Int(exactly: number.doubleValue), range.contains(n)
+              let n = Int(exactly: number.doubleValue), range.contains(n)
         else { throw BenchInvalid("\(field) not in \(range.lowerBound)..\(range.upperBound)") }
         return n
     }

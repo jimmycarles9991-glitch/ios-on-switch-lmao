@@ -27,7 +27,7 @@ extension X1TwodProbes {
     /// today's route) is judged the same way where the format has one. T-v2 found no single rounding for the 4x cells:
     /// each is also read as two rounded 2:1 steps (PairReading, either pairing, each rule), and the rules on the line come
     /// from whichever reading fits it with fewer misses (`pair_readings=` lists the cells a pair reading explained). Under resolve=twod the facade needs no resolve
-    /// state for the format; a cell whose command buffer still leaves the raw path is listed apart.
+    /// state for the format; a cell whose command buffer still leaves the driver is listed apart.
     static let resolve = X1Probe(
         id: "gpu.x1.twod_resolve", name: "2D-engine MSAA resolves against the samples' average, per format and count",
         probe: "resolve.twod", risky: true, timeout: 150
@@ -40,7 +40,7 @@ extension X1TwodProbes {
         let (w, h) = (96, 64)
         for format in X1Format.named(["bgra8", "rgba8", "bgra8srgb", "rgba8srgb", "rgba16f", "rgb10a2", "rg11b10f"]) {
             let (stored, calibration) = try await storedSamples(gpu, format)
-            if let off = calibration.first(where: { $0 != "raw" }) {
+            if let off = calibration.first(where: { $0 != "gm20b" }) {
                 offPath.append("\(format.name)_samples:\(off)")
                 continue
             }
@@ -49,11 +49,13 @@ extension X1TwodProbes {
                 journal.starting(name)
                 let colors = try sampleColors(gpu, format)
                 let pipeline = try gpu.render(
-                    fragment: "x1_sample_fragment", format: format.pixelFormat, samples: samples)
+                    fragment: "x1_sample_fragment", format: format.pixelFormat, samples: samples
+                )
                 for arm in ["twod", "draw"] where arm == "twod" || format.name != "rgb10a2" {
                     let ms = try gpu.texture(
                         format.pixelFormat, w, h, usage: [.renderTarget], samples: samples,
-                        storage: .memoryless)
+                        storage: .memoryless
+                    )
                     let into = try gpu.texture(format.pixelFormat, w, h, usage: [.renderTarget, .shaderRead])
                     let batch = try await gpu.run(forms: "resolve=\(arm)") { commands in
                         let pass = MTLRenderPassDescriptor()
@@ -70,7 +72,7 @@ extension X1TwodProbes {
                         encoder.endEncoding()
                     }
                     if arm == "twod" { ops += batch.taken["resolves"] ?? 0 }
-                    guard batch.path == "raw" else {
+                    guard batch.path == "gm20b" else {
                         offPath.append("\(name)_\(arm):\(batch.path)")
                         continue
                     }
@@ -78,19 +80,22 @@ extension X1TwodProbes {
                     var tally = X1RuleTally(), codesTally = X1RuleTally()
                     let pairReadings = samples == 4 && arm == "twod" ? separable : []
                     var pairTallies = [X1RuleTally](repeating: X1RuleTally(), count: pairReadings.count)
-                    for t in 0..<w * h {
+                    for t in 0 ..< w * h {
                         let set = (t % w + 3 * (t / w)) % 4
                         let got = format.codes(bytes, t)
                         tally.add(
                             got, exact: average(format, stored[set], samples, srgbLinear: true),
-                            channels: format.channels, metal: format.metalRounding, at: t)
+                            channels: format.channels, metal: format.metalRounding, at: t
+                        )
                         codesTally.add(
                             got, exact: average(format, stored[set], samples, srgbLinear: false),
-                            channels: format.channels, metal: format.metalRounding, at: t)
+                            channels: format.channels, metal: format.metalRounding, at: t
+                        )
                         for (k, reading) in pairReadings.enumerated() {
                             pairTallies[k].add(
                                 got, exact: pairAverage(format, stored[set], reading),
-                                channels: format.channels, metal: format.metalRounding, at: t)
+                                channels: format.channels, metal: format.metalRounding, at: t
+                            )
                         }
                     }
                     if arm == "twod" {
@@ -125,12 +130,12 @@ extension X1TwodProbes {
         let pipeline = try gpu.render(fragment: "exact_fragment", format: format.pixelFormat)
         var out = [[[UInt32]]](repeating: [[UInt32]](repeating: [], count: 4), count: 4)
         var paths: [String] = []
-        for s in 0..<4 {
+        for s in 0 ..< 4 {
             let target = try gpu.texture(format.pixelFormat, 4, 1, usage: [.renderTarget, .shaderRead])
             let ran = try await gpu.run { commands in
                 let encoder = commands.makeRenderCommandEncoder(descriptor: X1RawProbes.pass(target, load: .clear))!
                 encoder.setRenderPipelineState(pipeline)
-                for set in 0..<4 {
+                for set in 0 ..< 4 {
                     var color = sampleColor(format, set: set, s: s)
                     var corners = GPU.pixelQuad(set, 0, set + 1, 1, width: 4, height: 1)
                     encoder.setVertexBytes(&corners, length: 64, index: 0)
@@ -141,7 +146,7 @@ extension X1TwodProbes {
             }
             paths.append(ran.path)
             let bytes = try await gpu.read(target, bytesPerPixel: format.bytesPerTexel)
-            for set in 0..<4 { out[set][s] = format.codes(bytes, set) }
+            for set in 0 ..< 4 { out[set][s] = format.codes(bytes, set) }
         }
         return (out, paths)
     }
@@ -158,7 +163,7 @@ extension X1TwodProbes {
 
     /// x1_sample_fragment's colours: class set's sample s at set * 4 + s
     static func sampleColors(_ gpu: GPU, _ format: X1Format) throws -> MTLBuffer {
-        try gpu.buffer((0..<16).map { sampleColor(format, set: $0 / 4, s: $0 % 4) })
+        try gpu.buffer((0 ..< 16).map { sampleColor(format, set: $0 / 4, s: $0 % 4) })
     }
 
     /// A 4x resolve read as two 2:1 steps: samples averaged in pairs, each pair rounded to a code by `rounding`, the two
@@ -188,7 +193,7 @@ extension X1TwodProbes {
     /// light and encoded again (Metal's resolve) or as codes
     static func average(_ format: X1Format, _ stored: [[UInt32]], _ samples: Int, srgbLinear: Bool) -> [Double] {
         format.channels.enumerated().map { c, channel in
-            let values = (0..<samples).map { channel.value(stored[$0][c]) }
+            let values = (0 ..< samples).map { channel.value(stored[$0][c]) }
             guard channel == .srgb8 && srgbLinear else { return values.reduce(0, +) / Double(samples) }
             return X1Channel.encoded(values.map(X1Channel.linear).reduce(0, +) / Double(samples))
         }

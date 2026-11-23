@@ -3,8 +3,8 @@ import HWTestCore
 import Metal
 import simd
 
-/// One Core Animation state drawn the same way on any device, for comparing the raw facade's pixels with the m2v
-/// device's (tests/CAStateSweepTest.swift). The state is made from QuartzCore's library exactly as its corpus line
+/// One Core Animation state drawn the same way on any device, for comparing the facade's pixels with a Mac's
+/// (tests/CAStateSweepTest.swift). The state is made from QuartzCore's library exactly as its corpus line
 /// records it; every attachment is cleared, then two draws (a slanted strip and a small rectangle, so blending,
 /// clears and partial tiles all show) read CA's bindings: vertices at vertex buffer 1, an identity transform at 2,
 /// patterned payloads at every other buffer slot CA uses, a patterned texture at every fragment texture slot and a
@@ -52,8 +52,8 @@ public enum CAStateSweep {
         }
         let fields =
             [line.label, "\(line.samples)", "\(line.topology)", "\(line.depthFormat)/\(line.stencilFormat)"]
-            + line.colors.map { "c\($0.index)=\($0.fields)" } + line.attributes.map { "a\($0.index)=\($0.fields)" }
-            + [function(line.vertex), function(line.fragment)]
+                + line.colors.map { "c\($0.index)=\($0.fields)" } + line.attributes.map { "a\($0.index)=\($0.fields)" }
+                + [function(line.vertex), function(line.fragment)]
         return String(Signature.fnv1a(Array(fields.joined(separator: " ").utf8)), radix: 16)
     }
 
@@ -101,7 +101,8 @@ public enum CAStateSweep {
             for vertices in [strip(), rectangle()] {
                 var vertices = premultiplied ? vertices.map(premultiply) : vertices
                 encoder.setVertexBytes(
-                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1)
+                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1
+                )
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
             }
             encoder.endEncoding()
@@ -125,7 +126,8 @@ public enum CAStateSweep {
             blit.copy(
                 from: texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
                 sourceSize: MTLSize(width: texture.width, height: texture.height, depth: 1), to: out,
-                destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0)
+                destinationOffset: 0, destinationBytesPerRow: rowBytes, destinationBytesPerImage: 0
+            )
             blit.endEncoding()
         }
         return [UInt8](UnsafeRawBufferPointer(start: out.contents(), count: rowBytes * texture.height))
@@ -160,24 +162,24 @@ public enum CAStateSweep {
     static func bind(_ encoder: MTLRenderCommandEncoder, source: MTLTexture, sampler: MTLSamplerState) {
         var transform = payload(seed: 2)
         let identity = matrix_identity_float4x4
-        withUnsafeBytes(of: identity) { transform.replaceSubrange(0..<64, with: $0) }
+        withUnsafeBytes(of: identity) { transform.replaceSubrange(0 ..< 64, with: $0) }
         encoder.setVertexBytes(transform, length: transform.count, index: 2)
         for slot in [0, 3, 4, 5] {
             let bytes = payload(seed: UInt32(slot))
             encoder.setVertexBytes(bytes, length: bytes.count, index: slot)
         }
-        for slot in 0..<8 {
+        for slot in 0 ..< 8 {
             let bytes = payload(seed: UInt32(16 + slot))
             encoder.setFragmentBytes(bytes, length: bytes.count, index: slot)
         }
-        for slot in 0..<16 { encoder.setFragmentTexture(source, index: slot) }
-        for slot in 0..<4 { encoder.setFragmentSamplerState(sampler, index: slot) }
+        for slot in 0 ..< 16 { encoder.setFragmentTexture(source, index: slot) }
+        for slot in 0 ..< 4 { encoder.setFragmentSamplerState(sampler, index: slot) }
     }
 
     /// 256 bytes of halves in [0, 1): finite read as half or as float, never a NaN or an infinity.
     static func payload(seed: UInt32) -> [UInt8] {
         var state = seed &* 2_654_435_761 &+ 1
-        return (0..<128).flatMap { _ -> [UInt8] in
+        return (0 ..< 128).flatMap { _ -> [UInt8] in
             state = state &* 1_664_525 &+ 1_013_904_223
             let value = Float16(Float(state >> 8 & 0xffff) / 65536)
             return [UInt8(value.bitPattern & 0xff), UInt8(value.bitPattern >> 8)]
@@ -187,14 +189,15 @@ public enum CAStateSweep {
     static func patternTexture(_ gpu: GPU, premultiplied: Bool = false) throws -> MTLTexture {
         let size = 32
         let texture = try gpu.texture(.bgra8Unorm, size, size, usage: [.shaderRead], storage: .shared)
-        let texels = (0..<(size * size)).flatMap { i -> [UInt8] in
+        let texels = (0 ..< (size * size)).flatMap { i -> [UInt8] in
             let (x, y) = (i % size, i / size)
             let alpha = 128 + (x + y) * 2
             let colour = [x * 8, y * 8, (x ^ y) * 8 & 0xff].map { premultiplied ? $0 * alpha / 255 : $0 }
             return colour.map { UInt8($0) } + [UInt8(alpha)]
         }
         texture.replace(
-            region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0, withBytes: texels, bytesPerRow: size * 4)
+            region: MTLRegionMake2D(0, 0, size, size), mipmapLevel: 0, withBytes: texels, bytesPerRow: size * 4
+        )
         return texture
     }
 

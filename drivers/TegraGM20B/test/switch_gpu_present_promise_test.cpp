@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // A direct present of a frame behind a writer promise (switch_gpu_present_model.h): no present job, the frame flipped
 // from the interrupt pass of the job that keeps the promise; and the frame dropped, never shown unwritten, when the
-// promise is given up on.
+// promise is abandoned.
 #include <gtest/gtest.h>
 #include "switch_gpu_present_model.h"
 
@@ -71,17 +71,37 @@ TEST(PresentPromise, AJobThatEndedBeforeItsConversionIsTakenByTheLastLook)
 	EXPECT_EQ(d.workItems, 1u);
 }
 
-// No job ever keeps the promise: the deadline has nothing to do with it; the give-up a second after the offer reports its
-// writer once, and the frame is dropped (the panel keeps the one before it); it is never shown without its writes.
-TEST(PresentPromise, AnUnkeptPromiseGivenUpDropsTheFrame)
+// No job keeps the promise before its bound: the deadline has nothing to do with it, nor the give-up's pass; its maker
+// withdraws it (the held command buffer failed at Metal's bound), and the frame is dropped (the panel keeps the one
+// before it); it is never shown without its writes.
+TEST(PresentPromise, AnUnkeptPromiseWithdrawnDropsTheFrame)
 {
 	Producer a{kA, Channel(40)};
 	Display d({&a});
 	ASSERT_EQ(d.offer(&kPromise, 1), 0);
 	EXPECT_EQ(d.deadlineAt, 0u) << "no deadline while the promise has no job";
 	EXPECT_EQ(d.deadline(1000000000), Deadline::Idle);
-	EXPECT_EQ(d.reported, 0u);
 	d.giveUp();
+	EXPECT_EQ(d.presented, 0u);
+	d.cpuRelease(kWord, kValue, true);
+	EXPECT_EQ(d.failed, 1u);
+	EXPECT_EQ(shown(d), 0u);
+	EXPECT_FALSE(switch_gpu_present_watch_armed(&d.watch));
+	const auto late = a.token(a.channel.submit(1, false));
+	d.kept(kWord, kValue, late);
+	a.channel.run();
+	EXPECT_EQ(d.presented, 1u) << "the late job delivers nothing more";
+}
+
+// Its holder stopped (an app suspended mid-hold, or before its submit worker armed anything): the kernel gives the
+// promise up at its bound, which reports its writer once and drops the frame; a job keeping it later delivers nothing
+// more.
+TEST(PresentPromise, AnUnkeptPromisePastItsBoundDropsTheFrame)
+{
+	Producer a{kA, Channel(40)};
+	Display d({&a});
+	ASSERT_EQ(d.offer(&kPromise, 1), 0);
+	d.atBound();
 	EXPECT_EQ(d.reported, 1u);
 	EXPECT_EQ(d.failed, 1u);
 	EXPECT_EQ(shown(d), 0u);
@@ -103,11 +123,10 @@ TEST(PresentPromise, ACancelShowsTheFrameAndAKillDropsIt)
 		d.cpuRelease(kWord, kValue, abandon);
 		EXPECT_EQ(d.presented, 1u);
 		EXPECT_EQ(shown(d), abandon ? 0u : 1u);
-		EXPECT_EQ(d.reported, 0u) << "the CPU release's own line reports it";
 	}
 }
 
-// A word released by a job the watch never heard of is delivered by the give-up's run, not given up.
+// A word released by a job the watch never heard of is delivered by the give-up's pass.
 TEST(PresentPromise, AWordAlreadyReleasedAtTheGiveUpShowsTheFrame)
 {
 	Producer a{kA, Channel(40)};
@@ -115,7 +134,6 @@ TEST(PresentPromise, AWordAlreadyReleasedAtTheGiveUpShowsTheFrame)
 	ASSERT_EQ(d.offer(&kPromise, 1), 0);
 	d.words[kWord] = kValue;
 	d.giveUp();
-	EXPECT_EQ(d.reported, 0u);
 	EXPECT_EQ(shown(d), 1u);
 }
 
@@ -160,11 +178,31 @@ TEST(PresentPromiseDirect, ACancelShowsItsFrame)
 	ASSERT_EQ(d.offer(&kPromise, 1), 0);
 	d.cpuRelease(kWord, kValue, false);
 	EXPECT_EQ(d.panel, 2);
-	EXPECT_EQ(d.reported, 0u);
 }
 
-// Never kept: the give-up a second after the watched offer parked (switch_gpu_promise_giveup_test times it) reports its
-// writer once, and the panel keeps frame 1. Once kept, the watch has its deadline from the keep.
+// Past its bound with the holder stopped: given up, and the panel keeps frame 1. The holder's job, when it runs later
+// (nothing armed it to fail, so its keep is accepted), writes the surface for the frames after: this present flips
+// nothing, and the next offer of the surface shows the job's frame.
+TEST(PresentPromiseDirect, UnkeptPastItsBoundIsDroppedAndTheLateJobFlipsNothing)
+{
+	Producer a{kA, Channel(40)};
+	Display d({&a});
+	ASSERT_EQ(d.offer(&kPromise, 1), 0);
+	d.filter();
+	d.atBound();
+	EXPECT_EQ(d.reported, 1u);
+	EXPECT_EQ(d.failed, 1u);
+	EXPECT_EQ(d.panel, 1);
+	const auto late = a.token(a.channel.submit(1, false));
+	d.kept(kWord, kValue, late);
+	a.channel.run();
+	d.filter();
+	EXPECT_EQ(d.panel, 1) << "the late job's write flipped a present already dropped";
+	EXPECT_EQ(d.presented, 1u);
+}
+
+// Never kept: its maker's withdraw drops it, and the panel keeps frame 1. Once kept, the watch has its deadline from the
+// keep.
 TEST(PresentPromiseDirect, UnkeptIsDroppedKeepingThePreviousFrame)
 {
 	Producer a{kA, Channel(40)};
@@ -174,7 +212,7 @@ TEST(PresentPromiseDirect, UnkeptIsDroppedKeepingThePreviousFrame)
 	EXPECT_EQ(d.deadlineAt, 0u);
 	d.filter();
 	d.giveUp();
-	EXPECT_EQ(d.reported, 1u);
+	d.cpuRelease(kWord, kValue, true);
 	EXPECT_EQ(d.failed, 1u);
 	EXPECT_EQ(d.panel, 1);
 }

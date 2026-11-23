@@ -30,7 +30,8 @@ struct RunStore {
     private func reportURLs() -> [URL] {
         let urls =
             (try? FileManager.default.contentsOfDirectory(
-                at: directory, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles))
+                at: directory, includingPropertiesForKeys: [.contentModificationDateKey], options: .skipsHiddenFiles
+            ))
             ?? []
         let modified = { (url: URL) in
             (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast

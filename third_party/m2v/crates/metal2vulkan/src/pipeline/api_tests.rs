@@ -210,6 +210,7 @@ mod serde_round_trips {
             read_only_tests: true,
             shader_tests: true,
             shader_stencil: true,
+            shader_tests_unorm16: true,
             window_depth_varying: true,
             address_maps: BTreeMap::from([(
                 slot(Stage::Kernel, SlotClass::Texture, 7),
@@ -220,7 +221,6 @@ mod serde_round_trips {
             )]),
             cubic_samplers: BTreeMap::from([(slot(Stage::Fragment, SlotClass::Sampler, 0), 0x2d0)]),
             captured_positions: Some(crate::pipeline::CaptureForm::Vertices),
-            extended_shadows: BTreeSet::from([0]),
             cross_class: BTreeMap::from([(
                 slot(Stage::Kernel, SlotClass::Texture, 8),
                 SampledType::Uint,
@@ -355,10 +355,7 @@ mod serde_round_trips {
             )]),
             extended_range_colors: BTreeMap::from([(
                 4,
-                ExtendedRangeColor::new(
-                    crate::metal::format::ExtendedRange::Bgra10 { srgb: true },
-                    true,
-                ),
+                ExtendedRangeColor::new(crate::metal::format::ExtendedRange::R10X6, false),
             )]),
             srgb_fetches: BTreeSet::from([0, 2]),
             zeroed_colors: BTreeMap::from([(2, metal::PixelFormat::RGBA32Sint)]),
@@ -372,6 +369,7 @@ mod serde_round_trips {
             read_only_tests: true,
             shader_tests: true,
             shader_stencil: true,
+            shader_tests_unorm16: true,
             window_depth_varying: true,
             rotated_colors: BTreeSet::from([4]),
             rotated_factors: BTreeMap::from([(
@@ -408,7 +406,6 @@ mod serde_round_trips {
                     None,
                 ],
             )]),
-            extended_shadows: BTreeSet::from([0]),
             cross_class: BTreeMap::from([(
                 slot(Stage::Fragment, SlotClass::Texture, 10),
                 SampledType::Float,
@@ -934,7 +931,6 @@ mod bind_serde_round_trips {
             resident_ranges: vec![crate::bind::ResidentRange::new(0x9_0000, 0x3_0000, 100)],
             interlocked_colors: BTreeSet::from([0, 3]),
             fragment_tests: crate::bind::FragmentTests::Depth { writes: true },
-            extended_shadows: BTreeSet::from([0]),
             depth_range: [0.25, 0.75],
             depth_clip_mode_clamp: true,
             stencil_references: [0x5A, 0xC3],
@@ -994,7 +990,6 @@ mod bind_serde_round_trips {
             depth_clamp_range: true,
             interlocked_colors: BTreeSet::from([0, 3]),
             fragment_tests: crate::bind::FragmentTests::Pass,
-            extended_shadows: BTreeSet::from([0]),
         });
     }
 

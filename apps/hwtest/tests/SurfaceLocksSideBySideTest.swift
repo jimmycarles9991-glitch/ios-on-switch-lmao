@@ -26,10 +26,12 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
 
     static let blockLinear = SurfaceLocksSideBySideTest(
         id: "gpu.path.cpu_locks_side_by_side",
-        name: "Two CPU locks of surfaces the GPU is writing each wait for their own writer only", pitch: false)
+        name: "Two CPU locks of surfaces the GPU is writing each wait for their own writer only", pitch: false
+    )
     static let pitchLinear = SurfaceLocksSideBySideTest(
         id: "gpu.path.cpu_locks_side_by_side_pitch",
-        name: "Two CPU locks of pitch surfaces the GPU is writing each wait for their own writer only", pitch: true)
+        name: "Two CPU locks of pitch surfaces the GPU is writing each wait for their own writer only", pitch: true
+    )
 
     struct Target {
         let surface: IOSurface
@@ -145,7 +147,8 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
         }
         if ahead < jobMs / 2 {
             failures.append(
-                String(format: "B's lock was %.1f ms ahead of A's, under half of A's %.1f ms render", ahead, jobMs))
+                String(format: "B's lock was %.1f ms ahead of A's, under half of A's %.1f ms render", ahead, jobMs)
+            )
         }
         if let connection = GPUConnection() {
             for (label, target) in [("a", a), ("b", b)] {
@@ -154,7 +157,8 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
                 metrics.set("\(label)_layout", answer)
                 if answer != (pitch ? "0" : "1") {
                     failures.append(
-                        "surface \(label.uppercased()) is laid out \(answer), not \(pitch ? "pitch" : "block-linear")")
+                        "surface \(label.uppercased()) is laid out \(answer), not \(pitch ? "pitch" : "block-linear")"
+                    )
                 }
             }
         }
@@ -189,7 +193,7 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
         encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
         var rgba = colour
         encoder.setFragmentBytes(&rgba, length: MemoryLayout<Float>.stride * 4, index: 0)
-        for _ in 0..<draws { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
+        for _ in 0 ..< draws { encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4) }
         encoder.endEncoding()
     }
 
@@ -205,12 +209,14 @@ struct SurfaceLocksSideBySideTest: GPUPathTest {
         }
         let sampler = pitch ? try texture(gpu, surface, [.shaderRead]) : nil
         return Target(
-            surface: surface, texture: try texture(gpu, surface, [.renderTarget, .shaderRead]), sampler: sampler)
+            surface: surface, texture: try texture(gpu, surface, [.renderTarget, .shaderRead]), sampler: sampler
+        )
     }
 
     static func texture(_ gpu: GPU, _ surface: IOSurface, _ usage: MTLTextureUsage) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: side, height: side, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: side, height: side, mipmapped: false
+        )
         descriptor.usage = usage
         descriptor.storageMode = .shared
         guard let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {

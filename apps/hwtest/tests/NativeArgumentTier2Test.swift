@@ -9,7 +9,7 @@ import Metal
 /// sampler: the left half the first texture's colour, the right half the second's, through the device's handle tables.
 struct NativeArgumentTier2Test: NativeObjectTest {
     let id = "metal.native.argument_tier2"
-    let name = "Resource IDs written straight into an argument buffer read through the handle tables on the raw path"
+    let name = "Resource IDs written straight into an argument buffer read through the handle tables on the driver"
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
@@ -23,7 +23,8 @@ struct NativeArgumentTier2Test: NativeObjectTest {
             ("maxIndirectTextures", "indirect_textures"), ("maxIndirectSamplers", "indirect_samplers"),
         ] {
             if let wrong = NativeAnswers.check(
-                device, selector, NativeAnswers.indirectResources, field: field, &metrics)
+                device, selector, NativeAnswers.indirectResources, field: field, &metrics
+            )
             {
                 work.failures.append(wrong)
             }
@@ -58,7 +59,7 @@ struct NativeArgumentTier2Test: NativeObjectTest {
         }
         work.paths.append(timing.path)
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let wrong = (0..<64).filter { i in
+        let wrong = (0 ..< 64).filter { i in
             let want: [UInt8] = i % 8 < 4 ? [255, 0, 0, 255] : [0, 0, 255, 255]
             return Array(pixels.pixel(i % 8, i / 8, width: 8)) != want
         }.count

@@ -21,13 +21,13 @@ public struct ProbeFinding: Sendable {
     }
 
     /// PASS when every count is zero, FAIL otherwise; INCONCLUSIVE when the work did not take the path the claim is
-    /// about (`path`: the facade's path of each command buffer that carried it, "raw" when it did).
+    /// about (`path`: the facade's path of each command buffer that carried it, "gm20b" when it did).
     public static func counted(_ wrong: [String: Int], paths: [String], metrics: Metrics = Metrics()) -> ProbeFinding {
         var metrics = metrics
         for (name, count) in wrong.sorted(by: { $0.key < $1.key }) { metrics.set(name, count) }
-        let offPath = paths.filter { $0 != "raw" }
+        let offPath = paths.filter { $0 != "gm20b" }
         if !offPath.isEmpty {
-            return ProbeFinding(.inconclusive, metrics, note: "not on the raw path: \(offPath.joined(separator: ","))")
+            return ProbeFinding(.inconclusive, metrics, note: "not on the driver: \(offPath.joined(separator: ","))")
         }
         let failed = wrong.filter { $0.value != 0 }.keys.sorted()
         let note = failed.isEmpty ? "" : "wrong: \(failed.joined(separator: ","))"

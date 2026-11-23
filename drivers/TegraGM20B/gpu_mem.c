@@ -101,6 +101,7 @@ struct switch_gpu_mapping_entry {
 
 struct switch_gpu_mapping {
 	u32 count;
+	u8 sparse; /* switch_gpu_vm_sparse's: no memory behind any entry */
 	struct switch_gpu_mapping_entry entries[];
 };
 
@@ -143,7 +144,6 @@ int tgm_vm_new(struct tgm_vm **pvm)
 		return -ENOMEM;
 	mutex_init(&vm->map_lock);
 	INIT_LIST_HEAD(&vm->kmaps);
-	INIT_LIST_HEAD(&vm->imports);
 	tgm_tlb_space_init(&vm->tlb);
 	tgm_gpu_lock();
 	/* RAW: the client manages [0, 1<<39) with raw binds; nvkm allocates in [1<<39, 1<<40) */
@@ -195,12 +195,8 @@ void tgm_vm_del(struct tgm_vm **pvm)
 	struct tgm_vm *vm = *pvm;
 	struct tgm_kmap *k = NULL;
 	struct tgm_kmap *t = NULL;
-	struct tgm_import *im = NULL;
-	struct tgm_import *it = NULL;
 	if (!vm)
 		return;
-	list_for_each_entry_safe(im, it, &vm->imports, head) /* no channel of it is left to look */
-		kfree(im);
 	tgm_gpu_lock();
 	nvkm_ltc_flush(tgm_gpu.device->ltc);
 	list_for_each_entry_safe(k, t, &vm->kmaps, head)
@@ -305,6 +301,7 @@ void tgm_mem_del(struct tgm_mem **pmem)
 }
 
 #include "SwitchGpuVmMap.h"
+#include "SwitchGpuVmSparse.h"
 
 /* Every user channel, so a CPU reader outside the GPU client can wait for all GPU work (tegra_gm20b_sync_for_cpu). */
 /* An empty list head points at itself. */
@@ -312,33 +309,3 @@ void tgm_mem_del(struct tgm_mem **pmem)
 LIST_HEAD(tgm_live_chans);
 DEFINE_MUTEX(tgm_live_lock);
 u64 tgm_live_ids;
-
-/* Host imports per address space, by first physical page: who can write a surface the GPU present copies (only an
- * address space that maps its pages; an IOSurface is imported from its page-aligned base, see "GPU present"). */
-void tgm_vm_import_note(struct tgm_vm *vm, uint64_t pa, int add)
-{
-	struct tgm_import *im = NULL;
-
-	mutex_lock(&tgm_live_lock);
-	list_for_each_entry(im, &vm->imports, head)
-	{
-		if (im->pa == pa)
-			break;
-	}
-	if (&im->head == &vm->imports) {
-		im = add ? kzalloc(sizeof(*im), GFP_KERNEL) : NULL;
-		if (im) {
-			im->pa = pa;
-			list_add(&im->head, &vm->imports);
-		} else if (add) {
-			vm->imports_lost = 1;
-		}
-	}
-	if (im && add) {
-		im->refs++;
-	} else if (im && !--im->refs) {
-		list_del(&im->head);
-		kfree(im);
-	}
-	mutex_unlock(&tgm_live_lock);
-}

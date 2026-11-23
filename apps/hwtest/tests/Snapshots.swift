@@ -25,7 +25,8 @@ public enum Snapshots {
         var bytes = [UInt8](repeating: 0, count: image.width * image.height * 4)
         let context = CGContext(
             data: &bytes, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: image.width * 4,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        )!
         context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
         let opaque = Raster(unorm8: bytes, width: image.width, height: image.height, channels: 4)
         return Raster(width: opaque.width, height: opaque.height, channels: 3) { x, y, c in opaque[x, y, c] }

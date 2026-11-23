@@ -22,7 +22,10 @@ py_library(
         "reports.py",
     ],
     imports = ["../.."],
-    deps = ["//tools/common:paths"],
+    deps = [
+        "//tools/common:paths",
+        "//tools/devicerun:renamed",
+    ],
 )
 
 # bazel run //tools/hwtest -- [--history DIR] [REPORT.json ...]

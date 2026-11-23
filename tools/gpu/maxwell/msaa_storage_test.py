@@ -1,4 +1,4 @@
-"""gpu.ca.fetch_routes' 4x fetch on the host, its storage image bound under each header the raw path has bound.
+"""gpu.ca.fetch_routes' 4x fetch on the host, its storage image bound under each header the driver has bound.
 
 testdata/fetch_order_msaa4.hex is NAK's fragment program of that pass's state (fetch_order_fragment into a 4x BGRA8
 target, its storage form; directcheck's dump). It runs a pass a sample: PIXLD MyIndex gives the sample, TXQ the
@@ -8,7 +8,7 @@ and HEIGHT alone, so a pixel keeps the clear colour unless the stores of all its
 
 Under the attachment's texture header (WIDTH and HEIGHT in pixels, what Device::viewTic bound before) the picture is
 boot 14's line: 3072 of 4096 wrong from (32, 0), only the top-left quarter drawn. Under NIL's storage header, the
-sample grid's extent, every pixel is drawn. raw_view_test holds that the raw path's storage view is NIL's header.
+sample grid's extent, every pixel is drawn. view_test holds that the driver's storage view is NIL's header.
 """
 
 import struct
@@ -24,7 +24,7 @@ SIZE, SAMPLES = 64, 4
 HANDLE = 0x10  # the storage image's word, at c[1][0x10]
 PIXLD_MY_INDEX = 5
 TXQ_TEXTURE_TYPE, TXQ_SAMPLER_POS = 2, 5
-# NIL's headers of a 64x64 4x BGRA8 image, words 4 and 5 (raw/fx/test/nilimage.c ms; raw_view_test's)
+# NIL's headers of a 64x64 4x BGRA8 image, words 4 and 5 (fx/test/nilimage.c ms; view_test's)
 TEXTURE_HEADER = (0xE080003F, 0x8000003F)
 STORAGE_HEADER = (0xE080007F, 0x8000007F)
 

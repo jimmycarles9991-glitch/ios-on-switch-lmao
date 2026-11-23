@@ -25,7 +25,8 @@ struct DisplayBufferTest: HWTest {
         let demuxed = try await Demux.load(clip, from: context.media)
         let result = try Decompressor.decode(
             demuxed.samples, format: demuxed.format, pattern: clip.pattern, bitDepth: clip.codec.bitDepth,
-            fps: clip.fps, probeDisplayBuffer: true)
+            fps: clip.fps, probeDisplayBuffer: true
+        )
         var metrics = Metrics()
         metrics.set("frames", result.frames)
         let finding: ProbeFinding

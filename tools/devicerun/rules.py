@@ -6,11 +6,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 
+from tools.devicerun import renamed
+
 PASS, FAIL, NO_DATA, INFO, NA = 'PASS', 'FAIL', 'NO-DATA', 'INFO', 'N/A'
 
-# count | rate (per minute over the log's span) | boots (with a match) | agg(field) or agg(a/b*k): then OP number.
+# count | rate (per minute over the log's span) | boots (with a match) | repeats (lines past the first of a boot with
+# the same `show` fields) | agg(field) or agg(a/b*k): then OP number.
 RULE = re.compile(
-    r'^(?:(?P<metric>count|rate|boots)|(?P<agg>sum|max|min|last|p50|p99)\((?P<expr>[\w/*]+)\))'
+    r'^(?:(?P<metric>count|rate|boots|repeats)|(?P<agg>sum|max|min|last|p50|p99)\((?P<expr>[\w/*]+)\))'
     r'\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>-?[\d.]+)$'
 )
 WHERE = re.compile(r'^(?P<field>\w+)\s*(?P<op>==|!=|<=|>=|<|>)\s*(?P<value>-?[\d.]+)$')
@@ -42,7 +45,15 @@ class Check:
     lines must come within `within` seconds of each of this check's (with the same `key` value, when `key` is set),
     counted from the line's time less its `since` field in milliseconds: the rule then counts the lines without one.
     `boot` limits the check to one of the morning's boot labels (A, B tiled cache, K kprof). `unless` names a check
-    whose lines excuse this one's in the same boot.
+    whose lines excuse this one's in the same boot. `during` names a check whose lines are tests that kill this check's
+    subjects on purpose, each test's window its line's time less its `ms` field up to its time: this check's lines in a
+    window of the same boot that match `excusable` (searched; every line when empty) are that test's, listed as expected
+    ("killed by <its id>") and left out of the rule. A `process` of '!<name>' matches every process whose name does not
+    begin with <name>. `per` names a check whose lines are tests' runs, each a window as `during`'s: the verdict is then
+    each window's count of this check's lines in the same boot against `per_count`, that line's field or a number (FAIL
+    where any differs, NO_DATA with no run), and `rule` is not read. `preceded` names a check: only this check's lines
+    that one of its lines came within `within` seconds before, in the same boot (with the same `key` value, when `key`
+    is set), are judged.
     """
 
     name: str
@@ -66,6 +77,11 @@ class Check:
     note: str = ''
     boot: str = ''
     unless: str = ''
+    during: str = ''
+    excusable: str = ''
+    per: str = ''
+    per_count: str = ''
+    preceded: str = ''
 
     def literals(self) -> tuple[str, ...]:
         return (self.contains,) if isinstance(self.contains, str) else self.contains
@@ -90,7 +106,7 @@ class Event:
             subsystem=record.get('subsystem') or '',
             category=record.get('category') or '',
             level=record.get('messageType') or '',
-            message=record.get('eventMessage') or '',
+            message=renamed.current(record.get('eventMessage') or ''),
         )
 
 
@@ -105,6 +121,8 @@ class Result:
 def process_matches(check: Check, process: str) -> bool:
     if not check.process:
         return True
+    if check.process.startswith('!'):
+        return not process.startswith(check.process[1:])
     if check.process == 'kernel':
         return process.startswith('kernel')
     return process == check.process
@@ -257,6 +275,9 @@ def measure(check: Check, matches: list[dict], minutes: float) -> tuple[float | 
         return len(matches), describe(check, matches, minutes)
     if m['metric'] == 'boots':
         return len({f['boot'] for f in matches}), describe(check, matches, minutes)
+    if m['metric'] == 'repeats':
+        seen = Counter((f['boot'], *(str(f.get(k, '?')) for k in check.show)) for f in matches)
+        return sum(n - 1 for n in seen.values()), describe(check, matches, minutes)
     if m['metric'] == 'rate':
         rate = len(matches) / minutes if minutes else 0.0
         return rate, f'{rate:.2f}/min over {minutes:.1f} min ({len(matches)} lines)'
@@ -284,18 +305,75 @@ def informational(check: Check, matches: list[dict], minutes: float, by_name: di
     return Result(check, INFO if matches else NO_DATA, observed, matches)
 
 
+def led(check: Check, matches: list[dict], leaders: list[dict]) -> list[dict]:
+    """Return the matches a `preceded` line came within `within` seconds before, in the same boot."""
+    window = timedelta(seconds=check.within)
+    return [
+        fields
+        for fields in matches
+        if any(
+            f['boot'] == fields['boot']
+            and fields['time'] - window <= f['time'] <= fields['time']
+            and (not check.key or f.get(check.key) == fields.get(check.key))
+            for f in leaders
+        )
+    ]
+
+
+def killed_during(check: Check, matches: list[dict], tests: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split `matches` into those `check.during`'s tests do not account for and those they do (each with `killer`)."""
+    windows = [
+        (t['boot'], t['time'] - timedelta(milliseconds=number(t['ms'])), t['time'], t.get('id', check.during))
+        for t in tests
+        if 'ms' in t
+    ]
+    excusable = re.compile(check.excusable) if check.excusable else None
+    kept, excused = [], []
+    for fields in matches:
+        killer = next((i for boot, a, b, i in windows if boot == fields['boot'] and a <= fields['time'] <= b), None)
+        if killer and (not excusable or excusable.search(fields['message'])):
+            excused.append({**fields, 'killer': killer})
+        else:
+            kept.append(fields)
+    return kept, excused
+
+
+def expected_kills(check: Check, excused: list[dict]) -> str:
+    by_test: dict[str, list[dict]] = {}
+    for fields in excused:
+        by_test.setdefault(fields['killer'], []).append(fields)
+    return '; '.join(
+        f'expected: killed by {test}: ' + (grouped(check, lines, 0) if check.show else f'{len(lines)} lines')
+        for test, lines in by_test.items()
+    )
+
+
 def evaluate(check: Check, matches: list[dict], minutes: float, by_name: dict[str, list[dict]]) -> Result:
     """Return the check's verdict over the events it matched."""
     matches = filtered(check, matches)
     if check.unless:
         excused = {fields['boot'] for fields in by_name.get(check.unless, [])}
         matches = [fields for fields in matches if fields['boot'] not in excused]
+    if check.preceded:
+        matches = led(check, matches, by_name.get(check.preceded, []))
+    killed: list[dict] = []
+    if check.during:
+        matches, killed = killed_during(check, matches, by_name.get(check.during, []))
+    result = judge(check, matches, minutes, by_name)
+    if killed:
+        result.observed += '; ' + expected_kills(check, killed)
+    return result
+
+
+def judge(check: Check, matches: list[dict], minutes: float, by_name: dict[str, list[dict]]) -> Result:
+    """Return the check's verdict over the lines it judges."""
     if check.needs and not by_name.get(check.needs):
         return Result(check, NO_DATA, f'no {check.needs} line', matches)
     if check.applies and not applicable(check.applies, by_name):
         return Result(check, NA, f'not run here: no {check.applies} line', matches)
-    if check.followed:
-        return follow(check, matches, minutes, by_name)
+    if check.followed or check.per:
+        runs = by_name.get(check.per, [])
+        return follow(check, matches, minutes, by_name) if check.followed else per_run(check, matches, runs)
     if check.rule in {TIMELINE, REPORT}:
         return informational(check, matches, minutes, by_name)
     got, observed = measure(check, matches, minutes)
@@ -304,3 +382,22 @@ def evaluate(check: Check, matches: list[dict], minutes: float, by_name: dict[st
     m = RULE.match(check.rule)
     verdict = PASS if OPS[m['op']](got, float(m['value'])) else FAIL
     return Result(check, verdict, observed, matches)
+
+
+def per_run(check: Check, matches: list[dict], runs: list[dict]) -> Result:
+    """Each run's count of `matches` in its window against `check.per_count` (its field, else the number itself)."""
+    counted = []
+    for run in runs:
+        want = str(run.get(check.per_count, check.per_count))
+        if 'ms' not in run or not want.isdigit():
+            continue
+        start = run['time'] - timedelta(milliseconds=number(run['ms']))
+        got = sum(1 for f in matches if f['boot'] == run['boot'] and start <= f['time'] <= run['time'])
+        counted.append((run['time'], got, int(want)))
+    if not counted:
+        return Result(check, NO_DATA, f'no {check.per} run', matches)
+    off = [c for c in counted if c[1] != c[2]]
+    rows = ' '.join(f'{t:%H:%M:%S} {got}/{want}' for t, got, want in (off or counted)[:8])
+    return Result(
+        check, FAIL if off else PASS, f'{len(counted)} runs, {len(off)} off (lines/expected): {rows}', matches
+    )

@@ -7,38 +7,38 @@ import Metal
 /// buffers of its own besides its control points, so set 0 holds over 16 descriptors and the control stage's buffers
 /// sit in its second block. The patch macro selects the set at the state's own size. One quad patch at level 4 over the
 /// left half of the target, every buffer holding 0 so the position is the patch's own: the left half green, the right
-/// half black. The base build fails the command buffer (raw:draw.patch_commands_set_bytes).
+/// half black.
 struct PatchCommandsWideSetTest: HWTest {
-    let id = "gpu.raw.patch_commands_wide_set"
-    let name = "Patch commands of a state whose set 0 is past 256 bytes draw on the raw path"
+    let id = "gpu.gm20b.patch_commands_wide_set"
+    let name = "Patch commands of a state whose set 0 is past 256 bytes draw on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
     static let size = 32
-    static let buffers = 2..<22
+    static let buffers = 2 ..< 22
 
     static var source: String {
         let parameters = buffers.map { "device const float *b\($0) [[buffer(\($0))]]" }.joined(separator: ", ")
         let sum = buffers.map { "b\($0)[0]" }.joined(separator: " + ")
         return """
-            #include <metal_stdlib>
-            using namespace metal;
-            struct WideControlPoint { float4 position [[attribute(0)]]; };
-            struct WideQuadPatch { patch_control_point<WideControlPoint> points; };
-            [[patch(quad, 4)]] vertex float4 wide_set_post(WideQuadPatch patch [[stage_in]],
-                                                          float2 uv [[position_in_patch]], \(parameters)) {
-                const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
-                const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
-                return mix(low, high, uv.y) + float4(\(sum), 0, 0, 0);
-            }
-            fragment float4 wide_set_green() { return float4(0, 1, 0, 1); }
-            """
+        #include <metal_stdlib>
+        using namespace metal;
+        struct WideControlPoint { float4 position [[attribute(0)]]; };
+        struct WideQuadPatch { patch_control_point<WideControlPoint> points; };
+        [[patch(quad, 4)]] vertex float4 wide_set_post(WideQuadPatch patch [[stage_in]],
+                                                      float2 uv [[position_in_patch]], \(parameters)) {
+            const float4 low = mix(patch.points[0].position, patch.points[1].position, uv.x);
+            const float4 high = mix(patch.points[3].position, patch.points[2].position, uv.x);
+            return mix(low, high, uv.y) + float4(\(sum), 0, 0, 0);
+        }
+        fragment float4 wide_set_green() { return float4(0, 1, 0, 1); }
+        """
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let device = gpu.device
         let indirect =
             (device as AnyObject as! NSObject).value(forKey: "supportsIndirectTessellation") as? Bool ?? false
@@ -73,7 +73,8 @@ struct PatchCommandsWideSetTest: HWTest {
         commands.indirectRenderCommandAt(0).drawPatches(
             4, patchStart: 0, patchCount: 1, patchIndexBuffer: nil, patchIndexBufferOffset: 0, instanceCount: 1,
             baseInstance: 0, tessellationFactorBuffer: factors, tessellationFactorBufferOffset: 0,
-            tessellationFactorBufferInstanceStride: 0)
+            tessellationFactorBufferInstanceStride: 0
+        )
         let target = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
         let timing = try await gpu.run(tolerateError: true) { buffer in
             let pass = MTLRenderPassDescriptor()
@@ -87,7 +88,7 @@ struct PatchCommandsWideSetTest: HWTest {
             for index in Self.buffers { encoder.setVertexBuffer(zeros, offset: 0, index: index) }
             encoder.setTessellationFactorBuffer(factors, offset: 0, instanceStride: 0)
             encoder.useResource(factors, usage: .read, stages: .vertex)
-            encoder.executeCommandsInBuffer(commands, range: 0..<1)
+            encoder.executeCommandsInBuffer(commands, range: 0 ..< 1)
             encoder.endEncoding()
         }
         var metrics = Metrics()
@@ -96,13 +97,13 @@ struct PatchCommandsWideSetTest: HWTest {
         if !timing.path.hasPrefix("error:") {
             let pixels = try await gpu.read(target, bytesPerPixel: 4)
             wrong =
-                (0..<Self.size * Self.size).filter { i in
+                (0 ..< Self.size * Self.size).filter { i in
                     let want: [UInt8] = i % Self.size < Self.size / 2 ? [0, 255, 0, 255] : [0, 0, 0, 255]
                     return Array(pixels.pixel(i % Self.size, i / Self.size, width: Self.size)) != want
                 }.count
         }
         metrics.set("wrong_pixels", wrong)
-        return timing.path == "raw" && wrong == 0
+        return timing.path == "gm20b" && wrong == 0
             ? .pass(metrics, proof: gpu.proof) : .fail("path \(timing.path.prefix(80)), \(wrong) pixels wrong", metrics)
     }
 }

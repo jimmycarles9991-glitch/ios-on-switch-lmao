@@ -7,8 +7,10 @@ drivers/SwitchVideoDecoders/test/HEVCClip.h
 drivers/SwitchVideoDecoders/test/HEVCTrace.h
 drivers/SwitchVideoDecoders/AVD/VP9Tables.h
 drivers/SwitchVideoDecoders/test/vp9gen/vpx_config.h
-drivers/NativeMetal/TwoPlaneStandIn.h
-drivers/TegraGM20BMetal/raw/pack/srgb_knots.h
+drivers/TegraGM20BMetal/plugin/TwoPlaneStandIn.h
+drivers/TegraGM20BMetal/pack/srgb_knots.h
+drivers/TegraGM20BMetal/fill_texel_tables.h
+drivers/TegraVIC/test/vic_color_reference.h
 bazel/pinned/*/**
 kernel/xnu-*/**
 third_party/**
@@ -17,5 +19,5 @@ vendor/**
 **/linux/**
 **/nouveau/**
 **/nvidia/**
-drivers/TegraGM20BMetal/raw/pack/mesa/**
+drivers/TegraGM20BMetal/pack/mesa/**
 drivers/TegraVIC/test/libdrm/**

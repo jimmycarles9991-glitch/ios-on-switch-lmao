@@ -9,7 +9,7 @@ import HWTestGPU
 /// p: 0 even luma, 1 odd luma, 2 Cb, 3 Cr; packed to packed, the source byte); '2vuy' should read 1302 and 'yuvs' 3120.
 /// reading= names the row reading that held.
 enum X1VICPackedProbe {
-    static let magic: UInt32 = 0x5650_4B44  // 'VPKD'
+    static let magic: UInt32 = 0x5650_4B44 // 'VPKD'
     static let cases = 15
     static let caseWords = 12
     static let replyBytes = 16 + 4 * caseWords * cases
@@ -26,8 +26,8 @@ enum X1VICPackedProbe {
         }
         var wrong: [String: Int] = [:]
         var held: [UInt32: Bool] = [2: true, 4: true]
-        for i in 1..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 1 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = "\(X1VICKernelTest.name(r[0]))_\(X1VICKernelTest.name(r[1]))_e\(r[2])"
             let count = Int(r[4]) + Int(r[11]) + (r[3] != 0 ? 1 : 0)
             metrics.set(name + "_status", Int(Int32(bitPattern: r[3])))

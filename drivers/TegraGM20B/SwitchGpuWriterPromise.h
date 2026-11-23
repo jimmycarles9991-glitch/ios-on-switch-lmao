@@ -1,13 +1,13 @@
 /* SPDX-License-Identifier: MIT */
-/* Writer promises (TegraGM20BJobABI.h method 34). The raw runtime counts a command buffer as scheduled before its jobs
+/* Writer promises (TegraGM20BJobABI.h method 34). The runtime counts a command buffer as scheduled before its jobs
  * reach the kernel only while it waits for a shared event; before it does, it promises its writes of the IOSurfaces it
  * names. A promise is a word of its connection's fence page and a value: each surface it names keeps a ref to it, and a
  * present or another connection's job that uses the surface acquires the word on the GPU until the value is reached, as
  * VIC and NVDEC do through the GPU-to-host1x bridge. A CPU reader (a CPU lock, the display's CPU copy), which cannot
  * acquire it, waits for the promised job's submission, then for its fence. The job that keeps the promise releases it on
- * the GPU at its end; a cancel, a kill or the destruction of the channel it was kept on and the connection's close
- * release it from the CPU, and one a reader is parked on is given up (SwitchGpuPromiseGiveUp.h), so nothing waits for a
- * promise nobody keeps. */
+ * the GPU at its end; a cancel, a withdraw (its command buffer failed: at Metal's bound too, where the runtime holds it
+ * on a shared event), a kill or the destruction of the channel it was kept on and the connection's close release it
+ * from the CPU, and a kept one a reader is parked on is given up (SwitchGpuPromiseGiveUp.h). */
 #pragma once
 #include <stdint.h>
 #include "SwitchGpuBacking.h"

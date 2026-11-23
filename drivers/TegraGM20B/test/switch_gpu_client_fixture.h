@@ -171,13 +171,13 @@ void tgm_chan_del(tgm_chan **chan)
 }
 
 // One run of PTEs over a test buffer, as the GPU sees it through Memory (gm20b_ce_model.h): a pending one has none yet,
-// a big one is a 128 KiB page an edge may cut.
+// a big one is a 128 KiB page an edge may cut, a sparse one (MapSparse's) has no buffer and reads 0.
 struct switch_gpu_mapping {
 	unsigned id;
 	uint64_t va = 0, bytes = 0;
 	std::vector<uint8_t> *buffer = nullptr;
 	uint64_t offset = 0;
-	bool pending = false, big = false, vol = false;
+	bool pending = false, big = false, vol = false, sparse = false;
 };
 
 struct tgm_mem {
@@ -191,7 +191,9 @@ std::mutex gpuMemoryLock;
 void installPtes(switch_gpu_mapping *m)
 {
 	std::lock_guard<std::mutex> held(gpuMemoryLock);
-	if (m->buffer)
+	if (m->sparse)
+		gpuMemory.mapSparse(m->va, m->bytes);
+	else if (m->buffer)
 		gpuMemory.map(m->va, m->buffer->data() + m->offset, m->bytes, false, !m->vol);
 	m->pending = false;
 }
@@ -211,13 +213,15 @@ int switch_gpu_vm_split(void *, switch_gpu_mapping **mapping, tgm_mem *, uint8_t
 	const uint64_t low = std::max(old->va, va), high = std::min(oldEnd, end);
 	const bool keep = old->big && (old->va < va || oldEnd > end);
 	const auto part = [&](uint64_t from, uint64_t to) {
-		return new switch_gpu_mapping{old->id,
-					      from,
-					      to - from,
-					      old->buffer,
-					      old->offset + (from - old->va),
-					      old->pending || keep,
-					      false};
+		auto *made = new switch_gpu_mapping{old->id,
+						    from,
+						    to - from,
+						    old->buffer,
+						    old->offset + (from - old->va),
+						    old->pending || keep,
+						    false};
+		made->sparse = old->sparse;
+		return made;
 	};
 	*below = old->va < va ? part(old->va, va) : nullptr;
 	*taken = keep && !old->pending ? new switch_gpu_mapping(*old) : part(low, high);
@@ -286,6 +290,14 @@ int switch_gpu_vm_map_volatile(void *, uint64_t va, uint64_t range, tgm_mem *mem
 {
 	*out = new switch_gpu_mapping{9000, va, range, mem->buffer, offset, true, false, vol != 0};
 	installPtes(*out);
+	return 0;
+}
+
+int switch_gpu_vm_sparse(void *, uint64_t va, uint64_t range, int now, switch_gpu_mapping **out)
+{
+	*out = new switch_gpu_mapping{9000, va, range, nullptr, 0, true, false, false, true};
+	if (now)
+		installPtes(*out);
 	return 0;
 }
 
@@ -409,16 +421,6 @@ public:
 			return SwitchGpuSubmitGate::beginMutation(lock);
 		}
 	} submitGate_;
-
-	struct Surfaces {
-		void clear()
-		{
-		}
-
-		void remove(uint64_t)
-		{
-		}
-	} surfaces_;
 
 	struct Service {
 		void stop()
@@ -564,6 +566,7 @@ public:
 	IOReturn cutOverlaps(uint64_t, uint64_t, bool, bool, RetiredBinding **);
 	bool workQueued(uint64_t, uint64_t) const;
 	IOReturn mapRange(const TegraGM20BAbiBindOp &, Bo *, RetiredBinding *, bool);
+	static bool bindingIs(const Binding &, const TegraGM20BAbiBindOp &, const Bo *);
 	uint32_t issueBind();
 	void installPendingBinds();
 	void logFaultBindings();
@@ -613,19 +616,20 @@ public:
 		return bo;
 	}
 
-	// VmBind's steps for one op (TegraGM20BUserClientChannel.cpp vmBind, bindOp): a Map of `bo` or, with no BO, an
-	// Unmap, then the bindings published.
+	// VmBind's steps for one op (TegraGM20BUserClientChannel.cpp vmBind, bindOp): a Map of `bo`, with no BO an
+	// Unmap or (mapOp) a MapSparse, then the bindings published.
 	IOReturn bind(uint64_t va, uint64_t range, Bo *bo, uint32_t mapOp = TegraGM20BBindMap)
 	{
+		const bool maps = bo || mapOp == TegraGM20BBindMapSparse;
 		RetiredBinding *spare[2] = {new RetiredBinding{}, new RetiredBinding{}};
 		IOLockLock(lock_);
 		BindingTable::Snapshot *snapshot = BindingTable::prepare(nbinds_ + 2);
 		const bool queued = workQueued(va, range);
-		IOReturn result = cutOverlaps(va, range, !queued, bo != nullptr, spare);
-		if (!result && bo) {
+		IOReturn result = cutOverlaps(va, range, !queued, maps, spare);
+		if (!result && maps) {
 			TegraGM20BAbiBindOp op = {};
 			op.op = mapOp;
-			op.handle = bo->handle;
+			op.handle = bo ? bo->handle : 0;
 			op.va = va;
 			op.range = range;
 			result = mapRange(op, bo, new RetiredBinding{}, queued);

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-//! A function's argument buffer as the raw path's encoder places its arguments (drivers/TegraGM20BMetal/raw/runtime
-//! raw_argument_layout.h): m2v's layout of it (metal2vulkan bind/argument_buffer.rs, from the function's AIR) as flat runs
+//! A function's argument buffer as the driver's encoder places its arguments (drivers/TegraGM20BMetal
+//! argument_layout.h): m2v's layout of it (metal2vulkan bind/argument_buffer.rs, from the function's AIR) as flat runs
 //! of leaf arguments (bind/argument_runs.rs), the layouts of the argument buffers its pointers point to after it.
 
 use metal2vulkan::bind::{ArgumentBufferLayout, ArgumentRun, ArgumentType, flat_layouts};
 
-/// raw_argument_layout.h ArgumentRun
+/// argument_layout.h ArgumentRun
 #[repr(C)]
 pub struct NmbArgumentRun {
     pub id: u32,
@@ -29,7 +29,7 @@ pub struct NmbArgumentLayout {
     pub reserved: u32,
 }
 
-/// raw_argument_layout.h ArgumentKind
+/// argument_layout.h ArgumentKind
 fn kind_of(ty: ArgumentType) -> Result<u32, String> {
     Ok(match ty {
         ArgumentType::Buffer => 0,

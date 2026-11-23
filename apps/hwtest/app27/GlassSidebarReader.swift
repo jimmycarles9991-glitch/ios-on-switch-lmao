@@ -1,7 +1,7 @@
 import Foundation
 import HWTestCore
-import UIKit
 import os
+import UIKit
 
 /// ui.glass_sidebar's (and ui.glass_settings') read-back of one moving phase, on a thread of its own as ui.glass_live's
 /// LiveReader: each presented frame read in place, the band judged in both places the turned buffer may put it (and, with a live
@@ -85,7 +85,8 @@ final class SidebarReader {
         let record = SidebarFrame(
             sequence: frame.sequence, ticks: frame.ticks, ms: ms, turned: turned, a: .init(image.glass(a)),
             b: .init(image.glass(b)), pool: GlassMemWords.pool(), previous: frame.previous,
-            endA: end.map { .init($0.0) }, endB: end.map { .init($0.1) })
+            endA: end.map { .init($0.0) }, endB: end.map { .init($0.1) }
+        )
         frames.append(record)
         if record.verdict == "black" { log(frame.sequence, ticks: frame.ticks, at: "present", record.a, record.b) }
         if let endA = record.endA, let endB = record.endB, record.endVerdict == "black" {
@@ -103,7 +104,8 @@ final class SidebarReader {
             \(self.test, privacy: .public) black phase=\(self.phase, privacy: .public) seq=\(sequence, privacy: .public) \
             ticks=\(ticks, privacy: .public) ticks40=\(low, privacy: .public) at=\(at, privacy: .public) \
             a=\(a.black, privacy: .public) b=\(b.black, privacy: .public)
-            """)
+            """
+        )
     }
 
     /// The phase's first black or partly black frame, the frames read before and after it (their sequences show any

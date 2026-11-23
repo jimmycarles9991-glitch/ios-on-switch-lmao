@@ -25,13 +25,16 @@
 //               output matrices through tegra_vic_matrix_apply, out as x >> 2; Cb in pipeline channel 2, Cr in 1
 //               (T210B01, as V4 measures it). Those are VIC's V and U: Table 51 of the TRM (p.706) names T_Y8___U8V8
 //               NV21, U the pair's second byte; so a three-plane source's chroma-U plane goes into channel 1 and its
-//               chroma-V plane into channel 2
+//               chroma-V plane into channel 2. L8 (TRM 15.3.14, p.711-712): read as L in all three channels, written
+//               as (5 c0 + 9 c1 + 2 c2) / 16; a slot's degamma, gamut matrix and the output's regamma as
+//               vic_model_color.h has them
 // Every access is checked against the regions the test maps; one outside them counts as a fault. Pitch linear only.
 #ifndef VIC_MODEL_H
 #define VIC_MODEL_H
 #include <stdint.h>
 #include <string.h>
 #include "../TegraVICConfig.h"
+#include "vic_model_color.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -153,6 +156,12 @@ static inline int vic_model_read(VicModel *m, const VicModelSlot *s, uint32_t x,
         p->c[1] = ((w >> 8) & 0xff) << 2;
         p->c[2] = b << 2;
         p->a = vic_model_widen(w >> 24);
+    } else if (s->format == TEGRA_VIC_T_L8) {
+        const uint8_t *q = vic_model_at(m, s->luma + (uint64_t)y * s->lw + x, 1);
+        if (!q)
+            return 0;
+        p->c[0] = p->c[1] = p->c[2] = (uint32_t)q[0] << 2;
+        p->a = 1023;
     } else if (vic_model_semi_planar(s->format) || vic_model_planar(s->format)) {
         const int full = s->format == TEGRA_VIC_T_Y8___U8V8_N444 || s->format == TEGRA_VIC_T_Y8___U8___V8_N444;
         const int halfRows = s->format == TEGRA_VIC_T_Y8___U8V8_N420 || s->format == TEGRA_VIC_T_Y8___U8___V8_N420;
@@ -203,6 +212,7 @@ typedef struct {
     VicModelPixel background;
     TegraVICMatrix outMatrix;
     VicModelSlot in;
+    VicModelColor color;
 } VicModelJob;
 
 // The composed pixel at (x, y) of the target rectangle, after the output matrix; 0 if its source read faulted.
@@ -214,10 +224,13 @@ static inline int vic_model_pixel(VicModel *m, const VicModelJob *j, uint32_t x,
         const uint32_t sy = vic_model_sample(j->ST, j->SB, j->DT, j->DB, y);
         if (!vic_model_read(m, &j->in, sx, sy, p))
             return 0;
+        vic_model_color_slot(&j->color, p->c);
         if (j->alphaFill == TEGRA_VIC_ALPHA_BACKGROUND)
             p->a = j->background.a;
         else if (j->alphaFill != TEGRA_VIC_ALPHA_SOURCE_STREAM)
             p->a = 1023;
+    } else {
+        vic_model_color_background(&j->color, p->c);
     }
     if (j->outMatrixOn) {
         const uint32_t in10[3] = {p->c[0], p->c[1], p->c[2]};
@@ -301,6 +314,9 @@ static inline void vic_model_run(VicModel *m, const TegraVICJob *job)
     j.background.a = (uint32_t)TEGRA_VIC_GET(c, TEGRA_VIC_OUTPUT, OUT_BACKGROUND_ALPHA);
     j.outMatrixOn = vic_model_matrix(c, TEGRA_VIC_OUT_MATRIX, &j.outMatrix);
     vic_model_slot(c, inLuma, inChroma, inChromaV, &j.in);
+    TegraVICMatrix gamut;
+    const int gamutOn = vic_model_matrix(c, TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_GAMUT, &gamut);
+    vic_model_color(c, &gamut, gamutOn, &j.color);
     for (uint32_t y = j.T; y <= j.B; y++)
         for (uint32_t x = j.L; x <= j.R; x++) {
             VicModelPixel p;
@@ -323,6 +339,12 @@ static inline void vic_model_run(VicModel *m, const TegraVICJob *job)
                 const uint32_t w =
                     a << 24 | (format == TEGRA_VIC_T_A8R8G8B8 ? (r << 16 | g << 8 | b) : (b << 16 | g << 8 | r));
                 memcpy(q, &w, 4);
+                m->writes++;
+            } else if (format == TEGRA_VIC_T_L8) {
+                uint8_t *q = vic_model_at(m, outLuma + at, 1);
+                if (!q)
+                    continue;
+                q[0] = (uint8_t)(((5 * p.c[0] + 9 * p.c[1] + 2 * p.c[2]) / 16) >> 2);
                 m->writes++;
             } else if (vic_model_semi_planar(format) || format == TEGRA_VIC_T_Y8___U8V8_N422R) {
                 uint8_t *q = vic_model_at(m, outLuma + at, 1);

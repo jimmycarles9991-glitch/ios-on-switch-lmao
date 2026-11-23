@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 
 /// Framebuffer fetch in a layered pass: a fragment function reads [[color(0)]] in the layer its vertex function chose
-/// ([[render_target_array_index]], instance i into the pass's layer i). On the raw path the fetch is the pixel interlock's
+/// ([[render_target_array_index]], instance i into the pass's layer i). On the driver the fetch is the pixel interlock's
 /// storage form, whose storage image is a 2D array of the pass's layers from the attachment's slice. Every part of each
 /// texture is cleared to a colour of its own first; the quad in each layer the pass renders then holds that layer's colour
 /// with its channels rotated, every other texel its clear colour. Passes of six layers, of two from slice 3, of three of a
@@ -15,17 +15,17 @@ struct NativeLayeredFetchTest: NativeObjectTest {
     let name = "A fragment function fetches the colour of the layer its vertex function chose in a layered pass"
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct LayeredOut { float4 position [[position]]; uint layer [[render_target_array_index]]; };
-        vertex LayeredOut layered_fetch_vertex(uint v [[vertex_id]], uint i [[instance_id]]) {
-            LayeredOut o;
-            o.position = float4(float(v & 1) - 0.5, float(v >> 1) - 0.5, 0, 1);
-            o.layer = i;
-            return o;
-        }
-        fragment float4 layered_fetch_fragment(float4 c [[color(0)]]) { return float4(c.g, c.b, c.r, c.a); }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct LayeredOut { float4 position [[position]]; uint layer [[render_target_array_index]]; };
+    vertex LayeredOut layered_fetch_vertex(uint v [[vertex_id]], uint i [[instance_id]]) {
+        LayeredOut o;
+        o.position = float4(float(v & 1) - 0.5, float(v >> 1) - 0.5, 0, 1);
+        o.layer = i;
+        return o;
+    }
+    fragment float4 layered_fetch_fragment(float4 c [[color(0)]]) { return float4(c.g, c.b, c.r, c.a); }
+    """
 
     struct Case {
         let name: String
@@ -41,7 +41,8 @@ struct NativeLayeredFetchTest: NativeObjectTest {
         Case(name: "level_1", type: .type2DArray, layers: 6, levels: 2, level: 1, slice: 2, length: 3),
         Case(name: "one_layer", type: .type2D, layers: 1, levels: 1, level: 0, slice: 0, length: 1),
         Case(
-            name: "one_layer_linear", type: .type2D, layers: 1, levels: 1, level: 0, slice: 0, length: 1, linear: true),
+            name: "one_layer_linear", type: .type2D, layers: 1, levels: 1, level: 0, slice: 0, length: 1, linear: true
+        ),
     ]
 
     /// A texture of case `c`: a linear one over a shared buffer (which the texture keeps), rows 128 bytes apart
@@ -53,7 +54,7 @@ struct NativeLayeredFetchTest: NativeObjectTest {
         }
         d.storageMode = .shared
         guard let buffer = device.makeBuffer(length: 32 * 128, options: .storageModeShared),
-            let t = buffer.makeTexture(descriptor: d, offset: 0, bytesPerRow: 128)
+              let t = buffer.makeTexture(descriptor: d, offset: 0, bytesPerRow: 128)
         else { throw TestFailure("no linear texture for \(c.name)") }
         return t
     }
@@ -90,11 +91,11 @@ struct NativeLayeredFetchTest: NativeObjectTest {
             for p in parts {
                 let got = try await TextureParts.read(gpu, t, p, paths: &work.paths)
                 let (w, h, _) = TextureParts.size(t, p.level)
-                let rendered = p.level == c.level && (c.slice..<c.slice + c.length).contains(p.slice)
+                let rendered = p.level == c.level && (c.slice ..< c.slice + c.length).contains(p.slice)
                 let clear = TextureParts.clearColor(p)
-                for y in 0..<h {
-                    for x in 0..<w {
-                        let inside = rendered && (w / 4..<3 * w / 4).contains(x) && (h / 4..<3 * h / 4).contains(y)
+                for y in 0 ..< h {
+                    for x in 0 ..< w {
+                        let inside = rendered && (w / 4 ..< 3 * w / 4).contains(x) && (h / 4 ..< 3 * h / 4).contains(y)
                         if Array(got.pixel(x, y, width: w)) != (inside ? Self.rotated(clear) : clear) { wrong += 1 }
                     }
                 }

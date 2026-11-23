@@ -7,7 +7,7 @@ import IOSurface
 import Metal
 
 /// A fresh IOSurface the GPU renders first is block-linear (drivers/TegraGM20B/TegraGM20BTiled.cpp: its first GPU import
-/// that asks, writing, while no other import holds it). The raw facade's import asks when the texture is made; after the
+/// that asks, writing, while no other import holds it). The facade's import asks when the texture is made; after the
 /// render, an import of the test's own connection asks too and gets that decision back. Its ask comes last because a
 /// first ask that does not write decides pitch for good. One surface per shape: a square, and Core Animation's 720x1280
 /// framebuffer with 3072-byte rows.
@@ -21,8 +21,8 @@ struct SurfaceTiledDefaultTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         guard let connection = GPUConnection() else { return .skip("no TegraGM20B connection") }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
@@ -43,7 +43,8 @@ struct SurfaceTiledDefaultTest: HWTest {
             checks.append(("\(label) block-linear (kernel said \(answer))", answer == "1"))
             surface.lock(options: .readOnly, seed: nil)
             let seen = Array(
-                UnsafeRawBufferPointer(start: surface.baseAddress + (height / 2) * rowBytes + width * 2, count: 4))
+                UnsafeRawBufferPointer(start: surface.baseAddress + (height / 2) * rowBytes + width * 2, count: 4)
+            )
             surface.unlock(options: .readOnly, seed: nil)
             checks.append(("\(label) the clear reads back as rows", seen == Self.clearSeen))
             withExtendedLifetime(texture) {}
@@ -60,12 +61,14 @@ struct SurfaceTiledDefaultTest: HWTest {
             throw TestFailure("IOSurface \(width)x\(height) not made")
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = [.renderTarget, .shaderRead]
         descriptor.storageMode = .shared
         guard
             let texture = gpu.device.makeTexture(
-                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0)
+                descriptor: descriptor, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0
+            )
         else { throw TestFailure("makeTexture(iosurface:) \(width)x\(height) returned nil") }
         return (surface, texture)
     }
@@ -85,13 +88,15 @@ extension GPUConnection {
         let bytes = UInt64((surface.allocationSize + page - 1) / page * page)
         let id = IOSurfaceGetID(unsafeBitCast(surface, to: IOSurfaceRef.self))
         let (imported, reply) = call(
-            Self.boImportMethod, Self.words(split(address) + split(bytes) + [id, Self.importGpuReads]), outputSize: 16)
+            Self.boImportMethod, Self.words(split(address) + split(bytes) + [id, Self.importGpuReads]), outputSize: 16
+        )
         guard imported == KERN_SUCCESS else { return (imported, 0) }
         let handle = Self.uint64(reply, 0)
         defer { _ = call(Self.boFreeMethod, Self.words(split(handle)), outputSize: 0) }
         let shape = [surface.width, surface.height, surface.bytesPerElement, surface.bytesPerRow].map { UInt32($0) }
         let (asked, info) = call(
-            Self.surfaceLayoutInfoMethod, Self.words(split(handle) + shape + [0, 0]), outputSize: 48)
+            Self.surfaceLayoutInfoMethod, Self.words(split(handle) + shape + [0, 0]), outputSize: 48
+        )
         return (asked, asked == KERN_SUCCESS ? Self.uint32(info, 0) : 0)
     }
 

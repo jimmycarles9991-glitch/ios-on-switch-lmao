@@ -10,7 +10,7 @@ import Metal
 /// the CPU resolves, start at or before end, the unsampled ones 0.
 struct NativeCounterObjectsTest: NativeObjectTest {
     let id = "metal.native.counter_objects"
-    let name = "Counter sets of Metal's classes and the length form of a sample buffer, on the raw path"
+    let name = "Counter sets of Metal's classes and the length form of a sample buffer, on the driver"
 
     typealias LengthForm =
         @convention(c) (AnyObject, Selector, UInt, NSString?, UnsafeMutablePointer<Unmanaged<NSError>?>?) ->
@@ -20,7 +20,7 @@ struct NativeCounterObjectsTest: NativeObjectTest {
         var failures: [String] = []
         let first = device.counterSets ?? [], again = device.counterSets ?? []
         guard let set = first.first as? NSObject, let other = again.first as? NSObject,
-            let counter = (set as? MTLCounterSet)?.counters.first as? NSObject
+              let counter = (set as? MTLCounterSet)?.counters.first as? NSObject
         else { return ["counterSets answered no set"] }
         let names = [NSStringFromClass(type(of: set)), NSStringFromClass(type(of: counter))]
         if names != ["MTLCounterSetInternal", "MTLCounterInternal"] { failures.append("classes \(names)") }
@@ -48,7 +48,7 @@ struct NativeCounterObjectsTest: NativeObjectTest {
         work.failures += Self.classes(device)
         guard
             (device as? NSObject)?.responds(to: NSSelectorFromString("newCounterSampleBufferWithLength:label:error:"))
-                == true
+            == true
         else { throw TestFailure("the device has no newCounterSampleBufferWithLength:label:error:") }
         let refused = [0, 4, 12, 0x8008].map { length -> String in
             let (made, error) = Self.make(device, UInt(length), "refused")
@@ -80,12 +80,13 @@ struct NativeCounterObjectsTest: NativeObjectTest {
             var iterations: UInt32 = 256
             compute.setBytes(&iterations, length: 4, index: 1)
             compute.dispatchThreadgroups(
-                MTLSize(width: 4, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+                MTLSize(width: 4, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+            )
             compute.endEncoding()
         }
         try gpu.finish([sampling])
-        work.paths.append(RawFacade.path(of: sampling))
-        let samples = NativeCountersTest.words(try counters.resolveCounterRange(0..<8))
+        work.paths.append(GM20BFacade.path(of: sampling))
+        let samples = NativeCountersTest.words(try counters.resolveCounterRange(0 ..< 8))
         if samples.count != 8 || samples[0] == 0 || samples[0] > samples[1]
             || samples[2...].contains(where: { $0 != 0 })
         {

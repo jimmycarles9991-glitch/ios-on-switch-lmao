@@ -1,0 +1,380 @@
+// SPDX-License-Identifier: MIT
+// The sampler headers gm20b::Device draws with: a planar texture's address map (Texture::addressMap) applied to a sampler
+// state's header and to a constexpr sampler's, which the device places with the sampler.
+#include "device_harness.h"
+#include "../record.h"
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+#include "../../../kits/SwitchGM20B/SwitchGM20BSampler.h"
+
+namespace {
+
+using Header = std::array<uint32_t, 8>;
+
+constexpr uint32_t kRGBA8 = 70, kTriangle = 3;
+
+// RenderBox's primitive_image_fragment samples its image through a linear constexpr sampler; these address it clamped to
+// zero (TSC BORDER on every axis) and clamped to the edge
+constexpr Header kLinearZero = {0x260DB, 0x2a2, 0x40000, 0, 0, 0, 0, 0};
+constexpr Header kLinearClamp = {0x26092, 0x2a2, 0x40000, 0, 0, 0, 0, 0};
+
+class DeviceSamplers : public harness::DeviceTest {
+protected:
+    gm20b::Texture target, image;
+
+    void SetUp() override
+    {
+        DeviceTest::SetUp();
+        ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
+        ASSERT_TRUE(dev.createTexture(16, 16, kRGBA8, image));
+    }
+
+    // A state whose fragment texture 0 is sampled through constexpr sampler `header`
+    gm20b::Pipeline *constexprState(const Header &header, uint64_t key)
+    {
+        gm20b::RuntimeRecord r;
+        r.keyString = "samples=1 c0=70 ds=0/0 constexpr " + std::to_string(key);
+        for (gm20b::CapturedProgram &p : r.programs) {
+            p.image.assign(80 + 64, 0);
+            p.gprs = 8;
+            p.cbufTypes = {gm20b::CbufRoot, gm20b::CbufSet};
+        }
+        r.pipeline.keyHash = key;
+        gm20b::setEntryCount(r.pipeline, 1);
+        r.pipeline.entry[0] = {0, gm20b::EntryTexture, 2, 0, gm20b::SamplerConstexpr, 0, 0};
+        r.pipeline.setBytes = 32;
+        r.samplers = {header};
+        r.blob = {0x1a00, 0x1111};
+        std::string why;
+        gm20b::Pipeline *made = dev.addRecord(r, false, why);
+        EXPECT_NE(made, nullptr) << why;
+        return made;
+    }
+
+    // A state whose fragment texture 0 is sampled through fragment sampler 0
+    gm20b::Pipeline *slotState()
+    {
+        gm20b::RuntimeRecord r;
+        r.keyString = "samples=1 c0=70 ds=0/0 slot sampler";
+        for (gm20b::CapturedProgram &p : r.programs) {
+            p.image.assign(80 + 64, 0);
+            p.gprs = 8;
+            p.cbufTypes = {gm20b::CbufRoot, gm20b::CbufSet};
+        }
+        r.pipeline.keyHash = 0x53;
+        gm20b::setEntryCount(r.pipeline, 1);
+        r.pipeline.entry[0] = {0, gm20b::EntryTexture, 2, 0, gm20b::SamplerSlot, 0, 0};
+        r.pipeline.setBytes = 32;
+        r.blob = {0x1a00, 0x1111};
+        std::string why;
+        gm20b::Pipeline *made = dev.addRecord(r, false, why);
+        EXPECT_NE(made, nullptr) << why;
+        return made;
+    }
+
+    // One draw of `state` sampling `t` at fragment texture 0 (through `s` at sampler 0): its set's handle word, or *why
+    bool drawnHandle(gm20b::Pipeline *state, const gm20b::Texture &t, uint32_t &handle, std::string &why,
+                     const gm20b::Sampler *s = nullptr)
+    {
+        gm20b::CommandBuffer *cb = dev.begin();
+        gm20b::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.count = 1;
+        gm20b::RenderEncoder *e = cb ? cb->render(pass) : nullptr;
+        if (!e) {
+            why = "no pass";
+            return false;
+        }
+        e->setPipeline(state);
+        e->setTexture(0, &t);
+        e->setSampler(0, s);
+        const char *refused = nullptr;
+        const bool drawn = e->draw(kTriangle, 0, 3, 1, 0, &refused);
+        const uint8_t *set =
+            drawn ? gm20b::DeviceHarness::upload(dev, gm20b::DeviceHarness::preparedSet(*e), 4) : nullptr;
+        if (set)
+            memcpy(&handle, set, 4);
+        e->end();
+        uint32_t seqno = 0;
+        if (!cb->commit(seqno))
+            cb->abandon();
+        why = refused ? refused : set ? "" : "no set uploaded";
+        return drawn && set;
+    }
+};
+
+// Boot 21 WidgetRenderer: a two-plane 4:4:4 texture (address map 2) sampled through a constexpr sampler was refused
+// (enc.planarclamp a=0 b=2) and its command buffer failed. The draw samples through the constexpr header with the
+// clamps to zero sent to the edge.
+TEST_F(DeviceSamplers, APlanarTextureSampledThroughAConstexprSamplerTakesItsMappedHeader)
+{
+    gm20b::Pipeline *state = constexprState(kLinearZero, 0x51);
+    ASSERT_NE(state, nullptr);
+    gm20b::Texture planar = image;
+    planar.addressMap = 2;
+    uint32_t handle = 0;
+    std::string why;
+    EXPECT_FALSE(drawnHandle(state, planar, handle, why)) << "a runtime record's maps are placed before the work";
+    EXPECT_EQ(why, "a planar texture's constexpr sampler without its address map");
+    ASSERT_TRUE(dev.constexprMapsPlaced());
+    ASSERT_TRUE(drawnHandle(state, planar, handle, why)) << why;
+    const uint32_t index = state->rec->entry[0].sampler;
+    const uint32_t mapped = gm20b::DeviceHarness::constexprTsc(dev, index, 2);
+    EXPECT_NE(mapped, gm20b::DeviceHarness::constexprTsc(dev, index, 0));
+    EXPECT_EQ(handle >> 20, mapped);
+    EXPECT_EQ(handle & 0xFFFFF, planar.tic);
+    EXPECT_EQ(gm20b::DeviceHarness::tscHeader(dev, mapped), kLinearClamp);
+    ASSERT_TRUE(drawnHandle(state, image, handle, why)) << why;
+    EXPECT_EQ(handle >> 20, gm20b::DeviceHarness::constexprTsc(dev, index, 0)) << "a plain texture: the sampler's own";
+}
+
+// Boot 21 gpu.heap.m2v_target: an opaque white border made the sampler m2v's. The sampler's own header holds the texel a
+// four-channel float texture reads at it; a texture that reads another (R8Unorm: red and alpha one) samples through a
+// header of that texel, made before the work that samples it, and a draw finding none is refused, never drawn with the
+// wrong border.
+TEST_F(DeviceSamplers, AnOpaqueBorderReadsTheTexelOfTheTextureItSamples)
+{
+    constexpr uint32_t kR8 = 10;
+    gm20b::SamplerDesc d;
+    d.sAddress = d.tAddress = 5;
+    d.border = gm20b::kBorderOpaqueWhite;
+    gm20b::Sampler s;
+    ASSERT_TRUE(dev.createSampler(d, s));
+    const Header own = gm20b::DeviceHarness::tscHeader(dev, s.tsc);
+    EXPECT_EQ((Header{own[4], own[5], own[6], own[7]}), (Header{0x3f800000, 0x3f800000, 0x3f800000, 0x3f800000}));
+    gm20b::Pipeline *state = slotState();
+    ASSERT_NE(state, nullptr);
+    uint32_t handle = 0;
+    std::string why;
+    ASSERT_TRUE(drawnHandle(state, image, handle, why, &s)) << why;
+    EXPECT_EQ(handle >> 20, s.tsc) << "RGBA8Unorm reads the sampler's own texel";
+    gm20b::Texture red;
+    ASSERT_TRUE(dev.createTexture(16, 16, kR8, red));
+    EXPECT_FALSE(drawnHandle(state, red, handle, why, &s));
+    EXPECT_EQ(why, "a sampler without its opaque border's header for the texture");
+    ASSERT_TRUE(dev.borderVariant(s, red));
+    ASSERT_TRUE(drawnHandle(state, red, handle, why, &s)) << why;
+    const uint32_t tsc = handle >> 20;
+    EXPECT_EQ(tsc, s.bordered[0x9]);
+    Header want = own;
+    want[5] = want[6] = 0;
+    want[3] &= ~0x0ffff000u;
+    EXPECT_EQ(gm20b::DeviceHarness::tscHeader(dev, tsc), want) << "(1, 0, 0, 1): no green or blue, sRGB's too";
+}
+
+// A header no map changes is its own under every map: no header is placed for it
+TEST_F(DeviceSamplers, AConstexprSamplerTheMapLeavesAloneSharesItsHeader)
+{
+    gm20b::Pipeline *state = constexprState(kLinearClamp, 0x52);
+    ASSERT_NE(state, nullptr);
+    ASSERT_TRUE(dev.constexprMapsPlaced());
+    const uint32_t index = state->rec->entry[0].sampler;
+    for (uint8_t map = 1; map < 4; map++)
+        EXPECT_EQ(gm20b::DeviceHarness::constexprTsc(dev, index, map),
+                  gm20b::DeviceHarness::constexprTsc(dev, index, 0));
+}
+
+// The map on a header's own fields is the map on the sampler state's address modes (Device::samplerVariant's rule
+// before it moved to the header): every mode of every axis, every map
+TEST(SamplerAddressMaps, TheHeaderMapIsTheDescriptorMap)
+{
+    for (uint8_t s = 0; s < 6; s++)
+        for (uint8_t t = 0; t < 6; t++)
+            for (uint8_t r = 0; r < 6; r++)
+                for (uint8_t map = 1; map < 4; map++) {
+                    gm20b::SamplerDesc d;
+                    d.minFilter = d.magFilter = 1;
+                    d.sAddress = s, d.tAddress = t, d.rAddress = r;
+                    gm20b::SamplerDesc mapped = d;
+                    const bool wrapped = map & 1, clamps = map & 2;
+                    for (uint8_t *m : {&mapped.sAddress, &mapped.tAddress, &mapped.rAddress})
+                        if ((wrapped && *m >= 1 && *m <= 3) || (clamps && *m >= 4))
+                            *m = 0;
+                    uint32_t want[8], got[8];
+                    gm20b::samplerHeader(mapped, want);
+                    gm20b::samplerHeader(d, got);
+                    gm20b::mapSamplerAddresses(got, map);
+                    EXPECT_EQ(memcmp(want, got, sizeof want), 0)
+                        << int(s) << "/" << int(t) << "/" << int(r) << " map " << int(map);
+                }
+}
+
+// A texture whose every lod reads level 0 (R10Unorm_PACKED of several levels: m2v-textures11 probes/h4/mips.txt) is sampled
+// through its sampler as written without a mip filter: level 0 alone, the lod still choosing the filter
+TEST(SamplerLevelZero, TheHeaderIsTheSamplersWithoutAMipFilter)
+{
+    struct Case {
+        uint8_t filter, mipFilter;
+        float lodMin, lodMax;
+    } cases[] = {{1, 1, 0, 1000}, {1, 2, 0, 1000}, {1, 2, 0.5f, 3}, {0, 1, 2, 4}, {1, 1, 0, 0}};
+
+    for (const Case &c : cases) {
+        gm20b::SamplerDesc d;
+        d.minFilter = d.magFilter = c.filter;
+        d.mipFilter = c.mipFilter;
+        d.lodMin = c.lodMin;
+        d.lodMax = c.lodMax;
+        gm20b::SamplerDesc none = d;
+        none.mipFilter = 0;
+        uint32_t want[8], got[8];
+        gm20b::samplerHeader(none, want);
+        gm20b::samplerHeader(d, got);
+        gm20b::mapSamplerHeader(got, gm20b::kLevelZeroMap);
+        EXPECT_EQ(memcmp(want, got, sizeof want), 0)
+            << int(c.filter) << " mip " << int(c.mipFilter) << " [" << c.lodMin << ", " << c.lodMax << "]";
+        uint32_t own[8];
+        gm20b::samplerHeader(none, own);
+        gm20b::levelZeroHeader(own);
+        EXPECT_EQ(memcmp(want, own, sizeof want), 0) << "one without a mip filter reads level 0 already";
+    }
+}
+
+// Its draws take that header (made with the texture's conversion, before the work), a plain texture's the sampler's own;
+// a draw finding none is refused, never drawn through the mip filter
+TEST_F(DeviceSamplers, ATextureWhoseEveryLodReadsLevelZeroSamplesThroughItsLevelZeroHeader)
+{
+    gm20b::SamplerDesc d;
+    d.minFilter = d.magFilter = 1;
+    d.mipFilter = 2;
+    gm20b::Sampler s;
+    ASSERT_TRUE(dev.createSampler(d, s));
+    gm20b::Pipeline *state = slotState();
+    ASSERT_NE(state, nullptr);
+    gm20b::Texture levels = image;
+    levels.levelZero = true;
+    uint32_t handle = 0;
+    std::string why;
+    EXPECT_FALSE(drawnHandle(state, levels, handle, why, &s));
+    EXPECT_EQ(why, "a sampler without its header for a texture whose every lod reads level 0");
+    ASSERT_TRUE(dev.samplerVariant(s, gm20b::kLevelZeroMap));
+    ASSERT_NE(s.mapped[gm20b::kLevelZeroMap], s.tsc);
+    ASSERT_TRUE(drawnHandle(state, levels, handle, why, &s)) << why;
+    EXPECT_EQ(handle >> 20, s.mapped[gm20b::kLevelZeroMap]);
+    gm20b::SamplerDesc none = d;
+    none.mipFilter = 0;
+    Header want;
+    gm20b::samplerHeader(none, want.data());
+    EXPECT_EQ(gm20b::DeviceHarness::tscHeader(dev, handle >> 20), want);
+    ASSERT_TRUE(drawnHandle(state, image, handle, why, &s)) << why;
+    EXPECT_EQ(handle >> 20, s.tsc) << "a plain texture: the sampler's own";
+}
+
+// A constexpr sampler's level-0 header is placed only once such a texture is converted (no other header moves); a
+// trilinear one's is its linear one's, a header that reads level 0 already its own
+TEST_F(DeviceSamplers, AConstexprSamplersLevelZeroHeaderIsPlacedBeforeTheWork)
+{
+    constexpr Header kTrilinearClamp = {0x26092, 0x2e2, 0xf00000, 0, 0, 0, 0, 0};
+    gm20b::Pipeline *trilinear = constexprState(kTrilinearClamp, 0x55), *linear = constexprState(kLinearClamp, 0x56);
+    ASSERT_NE(trilinear, nullptr);
+    ASSERT_NE(linear, nullptr);
+    gm20b::Texture levels = image;
+    levels.levelZero = true;
+    uint32_t handle = 0;
+    std::string why;
+    EXPECT_FALSE(drawnHandle(trilinear, levels, handle, why));
+    EXPECT_EQ(why, "a constexpr sampler without its header for a texture whose every lod reads level 0");
+    ASSERT_TRUE(dev.constexprLevelZeroPlaced());
+    ASSERT_TRUE(drawnHandle(trilinear, levels, handle, why)) << why;
+    const uint32_t index = trilinear->rec->entry[0].sampler;
+    EXPECT_EQ(handle >> 20, gm20b::DeviceHarness::constexprTsc(dev, index, gm20b::kLevelZeroMap));
+    EXPECT_NE(handle >> 20, gm20b::DeviceHarness::constexprTsc(dev, index, 0));
+    EXPECT_EQ(gm20b::DeviceHarness::tscHeader(dev, handle >> 20), kLinearClamp);
+    const uint32_t own = linear->rec->entry[0].sampler;
+    EXPECT_EQ(gm20b::DeviceHarness::constexprTsc(dev, own, gm20b::kLevelZeroMap),
+              gm20b::DeviceHarness::constexprTsc(dev, own, 0));
+}
+
+TEST_F(DeviceSamplers, ASamplerStatesVariantIsItsHeaderUnderTheMap)
+{
+    gm20b::SamplerDesc d;
+    d.sAddress = d.tAddress = 4;
+    gm20b::Sampler s;
+    ASSERT_TRUE(dev.createSampler(d, s));
+    ASSERT_TRUE(dev.samplerVariant(s, 2));
+    ASSERT_NE(s.mapped[2], s.tsc);
+    gm20b::SamplerDesc edge = d;
+    edge.sAddress = edge.tAddress = 0;
+    Header want;
+    gm20b::samplerHeader(edge, want.data());
+    EXPECT_EQ(gm20b::DeviceHarness::tscHeader(dev, s.mapped[2]), want);
+    ASSERT_TRUE(dev.samplerVariant(s, 1));
+    EXPECT_EQ(s.mapped[1], s.tsc) << "nothing wraps";
+}
+
+float fromBits(uint32_t bits)
+{
+    float f;
+    memcpy(&f, &bits, sizeof f);
+    return f;
+}
+
+std::string hex(const uint32_t w[8])
+{
+    std::string out;
+    char word[10];
+    for (int i = 0; i < 8; i++) {
+        snprintf(word, sizeof word, " %08x", w[i]);
+        out += word;
+    }
+    return out;
+}
+
+TEST(GM20BSamplerTsc, EachSweptSamplersHeaderIsThePackerOfTheTranslatorsState)
+{
+    const char *path = getenv("SAMPLER_STATES");
+    ASSERT_NE(path, nullptr);
+    std::ifstream in(path);
+    ASSERT_TRUE(in.good()) << path;
+    unsigned samplers = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (line.empty() || line[0] == '#')
+            continue;
+        std::istringstream fields(line);
+        unsigned minmag, mip, addr, aniso, lod, mag, min, mipmap, u, v, w, anisotropy, compareOp, border, reduction;
+        std::string maxAnisotropy, minLod, maxLod;
+        fields >> minmag >> mip >> addr >> aniso >> lod >> mag >> min >> mipmap >> u >> v >> w >> anisotropy >>
+            maxAnisotropy >> compareOp >> minLod >> maxLod >> border >> reduction;
+        ASSERT_FALSE(fields.fail()) << line;
+        gm20b::SamplerDesc d;
+        d.minFilter = uint8_t(minmag & 1);
+        d.magFilter = uint8_t(minmag >> 1);
+        d.mipFilter = uint8_t(mip);
+        d.sAddress = uint8_t(addr);
+        d.tAddress = uint8_t(addr == 4 ? 4 : (addr + 1) % 4);
+        d.rAddress = uint8_t(addr);
+        d.maxAnisotropy = uint8_t(aniso);
+        if (lod)
+            d.lodMin = 0.5f, d.lodMax = 3.25f;
+        uint32_t got[8];
+        gm20b::samplerHeader(d, got);
+
+        switch_gm20b_sampler_state s = {};
+        s.mag_filter = mag;
+        s.min_filter = min;
+        s.mipmap_mode = mipmap;
+        s.address[0] = u, s.address[1] = v, s.address[2] = w;
+        s.anisotropy = anisotropy != 0;
+        s.max_anisotropy = fromBits(uint32_t(std::stoul(maxAnisotropy, nullptr, 16)));
+        s.compare_op = compareOp;
+        s.min_lod = fromBits(uint32_t(std::stoul(minLod, nullptr, 16)));
+        s.max_lod = fromBits(uint32_t(std::stoul(maxLod, nullptr, 16)));
+        s.border_color = border;
+        s.reduction = reduction;
+        uint32_t want[8];
+        ASSERT_TRUE(switch_gm20b_sampler_header(&s, want)) << line;
+        EXPECT_EQ(memcmp(got, want, sizeof got), 0) << line << "\n  raw" << hex(got) << "\n  kit" << hex(want);
+        samplers++;
+    }
+    EXPECT_EQ(samplers, 4u * 3 * 5 * 4 * 2);
+}
+
+}  // namespace

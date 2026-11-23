@@ -43,31 +43,31 @@ std::string invalidPack(const switch_bench_experiment &x)
     return {};
 }
 
-void applyForm(raw::CommandBuffer &cb, uint32_t form)
+void applyForm(gm20b::CommandBuffer &cb, uint32_t form)
 {
     cb.forceWholePrograms(form == SWITCH_BENCH_PACK_WHOLE);
     cb.forceSplit(form != SWITCH_BENCH_PACK_WHOLE);
-    cb.splitProbe(form == SWITCH_BENCH_PACK_WHOLE_GENERIC ? raw::SplitProbe::Generic
-                  : form == SWITCH_BENCH_PACK_SPLIT_WHOLE ? raw::SplitProbe::LaunchOnly
-                                                          : raw::SplitProbe::Twin);
+    cb.splitProbe(form == SWITCH_BENCH_PACK_WHOLE_GENERIC ? gm20b::SplitProbe::Generic
+                  : form == SWITCH_BENCH_PACK_SPLIT_WHOLE ? gm20b::SplitProbe::LaunchOnly
+                                                          : gm20b::SplitProbe::Twin);
 }
 
-bool drawQuads(switch_bench &b, const switch_bench_experiment &x, raw::CommandBuffer &cb, Target &t,
-               raw::Pipeline *pipeline, const raw::Buffer &blocks, Submission &s)
+bool drawQuads(switch_bench &b, const switch_bench_experiment &x, gm20b::CommandBuffer &cb, Target &t,
+               gm20b::Pipeline *pipeline, const gm20b::Buffer &blocks, Submission &s)
 {
-    raw::PassDesc pass;
+    gm20b::PassDesc pass;
     pass.count = 1 + uint32_t(t.others.size());
     pass.color[0].texture = &t.color;
-    pass.color[0].load = raw::ColorAttachment::Clear;
+    pass.color[0].load = gm20b::ColorAttachment::Clear;
     memcpy(pass.color[0].clear, x.clear, sizeof x.clear);
     for (size_t i = 0; i < t.others.size(); i++) {
         pass.color[1 + i].texture = &t.others[i];
-        pass.color[1 + i].load = raw::ColorAttachment::Clear;
+        pass.color[1 + i].load = gm20b::ColorAttachment::Clear;
         pass.color[1 + i].store = false;
     }
-    raw::RenderEncoder *e = cb.render(pass);
+    gm20b::RenderEncoder *e = cb.render(pass);
     if (!e)
-        return s.refused("the raw path cannot render the target");
+        return s.refused("the driver cannot render the target");
     e->setViewport(0, 0, x.width, x.height, 0, 1);
     e->setScissor(0, 0, x.width, x.height);
     e->setPipeline(pipeline);
@@ -83,7 +83,7 @@ bool drawQuads(switch_bench &b, const switch_bench_experiment &x, raw::CommandBu
         const bool own = quad.vertices != nullptr;
         if (!e->draw(own ? quad.primitive : kTriangleStrip, own ? quad.first : 0, own ? quad.count : 4, 1, 0, &why)) {
             e->end();
-            const raw::Refusal refusal = cb.refusal;
+            const gm20b::Refusal refusal = cb.refusal;
             char line[160];
             snprintf(line, sizeof line, "quad %u refused: %s (predicate %u: %u %u %u)", q, why ? why : "?", refusal.id,
                      refusal.a, refusal.b, refusal.c);
@@ -95,7 +95,7 @@ bool drawQuads(switch_bench &b, const switch_bench_experiment &x, raw::CommandBu
 }
 
 // The command buffer's frontiers into the caller's room, in launch order; launches counts them all
-void readFrontiers(raw::Device &d, const raw::CommandBuffer &cb, switch_bench_result &r)
+void readFrontiers(gm20b::Device &d, const gm20b::CommandBuffer &cb, switch_bench_result &r)
 {
     const size_t room = r.frontier ? r.frontier_bytes : 0;
     size_t at = 0;
@@ -114,12 +114,12 @@ void runPack(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
 {
     if (const std::string why = invalidPack(x); !why.empty())
         return fail(r, SWITCH_BENCH_INVALID, why);
-    raw::Device &d = *b.device;
-    raw::Pipeline *pipeline = d.pipeline(x.template_key, raw::PackForm::Default, x.pack.ca_transform != 0);
+    gm20b::Device &d = *b.device;
+    gm20b::Pipeline *pipeline = d.pipeline(x.template_key, gm20b::PackForm::Default, x.pack.ca_transform != 0);
     if (!pipeline)
         return fail(r, SWITCH_BENCH_INVALID, "pack: no state of that key in the pack");
     r.template_key = x.template_key;
-    raw::Buffer blocks;
+    gm20b::Buffer blocks;
     if (!d.createBuffer(uint64_t(x.pack.quad_count) * kQuadRegion, blocks, true))
         return fail(r, SWITCH_BENCH_ERROR, "no memory for the quads' blocks");
     for (uint32_t q = 0; q < x.pack.quad_count; q++)
@@ -132,11 +132,11 @@ void runPack(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
         x.single_target ? std::vector<uint32_t>() : otherFormats(d.pack().string(pipeline->rec->keyString));
     bool ran = makeTarget(d, x, others, false, t, r);
     Submission s(b, x, r);
-    raw::CommandBuffer *last = nullptr;
+    gm20b::CommandBuffer *last = nullptr;
     for (uint32_t k = 0; ran && k < x.warmup + x.repeats; k++) {
         uint64_t gpu = 0, wall = 0;
         ran = s.record(
-            [&](raw::CommandBuffer &cb) {
+            [&](gm20b::CommandBuffer &cb) {
                 applyForm(cb, x.pack.form);
                 last = &cb;
                 return drawQuads(b, x, cb, t, pipeline, blocks, s);
@@ -149,7 +149,7 @@ void runPack(switch_bench &b, const switch_bench_experiment &x, switch_bench_res
     }
     if (ran && last)
         readFrontiers(d, *last, r);
-    if (ran && !(ran = readBack(d, t.color, x, raw::formatInfo(x.format)->bpp, r.texels, r.texel_bytes)))
+    if (ran && !(ran = readBack(d, t.color, x, gm20b::formatInfo(x.format)->bpp, r.texels, r.texel_bytes)))
         fail(r, SWITCH_BENCH_ERROR, "the kernel refused the CPU a read lease on the target");
     if (ran)
         checkAlive(b, x, t, r);

@@ -371,23 +371,23 @@ void planeCompositeFinished()
     kickSwapQueue();
 }
 
-// planeDecide's question: true when the swap waits for the composite of the overlays in wanted (its completion kicks
-// again); otherwise wanted is what goes out, the composite if VIC took the overlays.
-bool planeComposeWaits(switch_display::Overlay wanted[2], const int selected[2], uint32_t width, uint32_t height)
+// planeDecide's question: the planeRetry code when the swap waits for the composite of the overlays in wanted (its
+// completion kicks again); otherwise 0, and wanted is what goes out, the composite if VIC took the overlays.
+int planeComposeWaits(switch_display::Overlay wanted[2], const int selected[2], uint32_t width, uint32_t height)
 {
     if ((!wanted[0].on && !wanted[1].on) || !memoryAdmissionReady() || planeCompositeStopping || !tegra_vic_ready() ||
         !tegra_vic_traits() || !planeCompositeReady() || planeAdmits(wanted))
-        return false;
+        return 0;
     native_planes::Image image;
     const int slot = planeCompositeSlot(wanted, selected, width, height, image);
     if (planeRetry(slot))
-        return true;
+        return slot;
     if (slot < 0)
-        return false;
+        return 0;
     wanted[0] = {true, slot, image, 1};
     wanted[1] = {};
     planeBuildingSlots |= uint64_t(1) << unsigned(slot);
-    return false;
+    return 0;
 }
 
 // Outside the gate (stop, free): no job is queued once this returns.

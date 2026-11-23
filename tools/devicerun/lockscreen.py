@@ -14,15 +14,15 @@ POSTERKIT = 'PosterKit (dyld cache)'
 
 LOCKSCREEN = [
     Check(
-        'lockscreen.m2v',
+        'lockscreen.failed',
         OWNER,
-        'cb.m2v',
+        'a command buffer failed',
         subsystem=REFUSAL,
-        regex=rf'^(?P<who>{LOCK_PROCESSES})\[\d+\] cb\.m2v: .*\[first predicate (?P<pred>[\w.]+)\]',
+        level='error',
+        regex=rf'^(?P<who>{LOCK_PROCESSES})\[\d+\] (?P<pred>[\w.]+): a command buffer failed ',
         show=('who', 'pred'),
-        source='drivers/TegraGM20BMetal/raw/runtime/RawMetalCommandBuffer.mm',
-        note='first m2v command buffer per process and reason; boot 15: enc.ubo, enc.notic, pass.fmt, blit.b2t, '
-        'tex.shape, compute',
+        source='drivers/TegraGM20BMetal (c38-audit/failed-counts/CONTRACT.md)',
+        note='the first command buffer each predicate failed, per lock-screen process',
     ),
     Check(
         'lockscreen.scene-watchdog',
@@ -40,11 +40,11 @@ LOCKSCREEN = [
         'not done after',
         process='backboardd',
         subsystem='com.brunostjohn.switch.TegraGM20BMetal',
-        regex=r'raw: (?P<wait>.+?),? (?:of )?command buffer 0x[0-9a-f]+ not done',
+        regex=r'SwitchMetal: (?P<wait>.+?),? (?:of )?command buffer 0x[0-9a-f]+ not done',
         show=('wait',),
-        source='drivers/TegraGM20BMetal/raw/runtime/RawMetal.mm',
+        source='drivers/TegraGM20BMetal/TegraGM20BMetal.mm',
         note='the window server aborted on a command buffer: boot 15 twice (19:20:00, 19:21:36), m2v pending 1 '
-        'unscheduled 1; RawMetalSubmit.mm aborts a raw command buffer held behind m2v work the same way',
+        'unscheduled 1; nothing in the driver waits so now: any line is an old driver on the card',
     ),
     Check(
         'lockscreen.hero-fits-time',

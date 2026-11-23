@@ -54,6 +54,8 @@ const Macro kMacros[] = {
     macro("amplify", switch_gm20b_macro_amplify),
     macro("amplify_indexed", switch_gm20b_macro_amplify_indexed),
     macro("clear_layers", switch_gm20b_macro_clear_layers),
+    macro("fetch_draw", switch_gm20b_macro_fetch_draw),
+    macro("fetch_draw_indexed", switch_gm20b_macro_fetch_draw_indexed),
 };
 
 std::vector<mme_fermi_inst> decode(const Macro &m)
@@ -63,9 +65,10 @@ std::vector<mme_fermi_inst> decode(const Macro &m)
     return insts;
 }
 
-// A macro on the simulator: every argument it loads is `argument`, its scratch the channel's
+// A macro on the simulator: every argument it loads is `argument`, its scratch the channel's, and SET_PRIMITIVE_TOPOLOGY,
+// the one register a raw macro reads (a fetching execute's draw macros: the topology each command set), `topology`
 struct MacroRun {
-    uint32_t argument = 0;
+    uint32_t argument = 0, topology = 0;
     Scratch scratch;
     unsigned methods = 0;
 
@@ -77,6 +80,8 @@ struct MacroRun {
     static uint32_t state(void *opaque, uint16_t method)
     {
         auto &r = *static_cast<MacroRun *>(opaque);
+        if (method == NVB197_SET_PRIMITIVE_TOPOLOGY)
+            return r.topology;
         EXPECT_TRUE(isScratch(method)) << "a raw macro reads no state but its scratch, not 0x" << std::hex << method;
         return isScratch(method) ? r.scratch.method(method) : 0;
     }
@@ -101,11 +106,27 @@ struct MacroRun {
     }
 };
 
-// The scratch words as the raw path writes them: an execute's range and layout, its inherited buffers (each slot's
-// address, stride and size), the root table's address, a bound state's amplification words, the count and the mappings
-Scratch channelScratch(uint32_t amplifications, uint32_t layer, uint32_t barrier)
+// A fetch macro call's shape as mme.h fetchShape writes it before every call, by MTLPrimitiveType (point, line, line
+// strip, triangle, triangle strip): the vertices of an instance's first BEGIN and of each later one. The macro's loop
+// advances by them, so a call never meets them 0.
+constexpr uint32_t kFetchFirst[5] = {1, 2, 2, 3, 3}, kFetchStep[5] = {1, 2, 1, 3, 1};
+
+// The scratch words as the driver writes them: an execute's range and layout, its inherited buffers (each slot's
+// address, stride and size), the root table's address, a bound state's amplification words, the count and the mappings,
+// a fetch call's shape (`primitive`) and BEGIN words, and whether an execute's commands are a fetching state's
+Scratch channelScratch(uint32_t amplifications, uint32_t layer, uint32_t barrier, uint32_t primitive = 3,
+                       uint32_t fetchingExecute = 0)
 {
     Scratch s;
+    s[SWITCH_GM20B_SCRATCH_FETCH_FIRST] = kFetchFirst[primitive];
+    s[SWITCH_GM20B_SCRATCH_FETCH_STEP] = kFetchStep[primitive];
+    s[SWITCH_GM20B_SCRATCH_FETCH_BEGIN] = NVB197_BEGIN_SPLIT_MODE_NORMAL_BEGIN_OPEN_END << 29;
+    s[SWITCH_GM20B_SCRATCH_FETCH_NEXT] =
+        NVB197_BEGIN_SPLIT_MODE_NORMAL_BEGIN_OPEN_END << 29 | NVB197_BEGIN_INSTANCE_ID_SUBSEQUENT << 26;
+    s[SWITCH_GM20B_SCRATCH_FETCH_CONTINUED] = NVB197_BEGIN_SPLIT_MODE_OPEN_BEGIN_OPEN_END << 29 |
+                                              NVB197_BEGIN_INSTANCE_ID_UNCHANGED << 26 |
+                                              NVB197_BEGIN_PRIMITIVE_ID_UNCHANGED << 24;
+    s[SWITCH_GM20B_SCRATCH_FETCH_ICB] = fetchingExecute;
     s[SWITCH_GM20B_SCRATCH_ROOT_HI] = 0x1;
     s[SWITCH_GM20B_SCRATCH_ROOT_HI + 1] = 0x00200000;
     s[SWITCH_GM20B_SCRATCH_ICB_LOCATION] = 1;
@@ -177,6 +198,7 @@ TEST(MethodRanges, EveryScratchWordHasOneOwner)
         {"an amplifying state's words", SWITCH_GM20B_SCRATCH_AMP_COUNT_WORD, 5},
         {"the amplification count", SWITCH_GM20B_SCRATCH_AMP_COUNT, 1},
         {"the amplification mappings", SWITCH_GM20B_SCRATCH_AMP_MAPS, SWITCH_GM20B_AMP_MAX},
+        {"the zero page's address", SWITCH_GM20B_SCRATCH_ZERO_PAGE, 1},
         {"an execute's inherited buffers", SWITCH_GM20B_SCRATCH_ICB_BUFFERS, 3 * SWITCH_GM20B_SCRATCH_ICB_BUFFER_SLOTS},
     };
     std::string owner[SWITCH_GM20B_SCRATCH_WORDS];
@@ -228,6 +250,7 @@ TEST(MethodRanges, EveryMacroNamesOnlyMaxwellBsMethods)
 TEST(MethodRanges, EveryMacroRunsOnMaxwellBsMethods)
 {
     const uint32_t layers[] = {SWITCH_GM20B_AMP_LAYER_FIRST, SWITCH_GM20B_AMP_LAYER_RT, 0x710};
+    const mme_sim_state_ops ops = {MacroRun::load, MacroRun::state, MacroRun::emit, MacroRun::barrier, MacroRun::dram};
     for (const Macro &m : kMacros) {
         const std::vector<mme_fermi_inst> insts = decode(m);
         unsigned methods = 0;
@@ -239,12 +262,30 @@ TEST(MethodRanges, EveryMacroRunsOnMaxwellBsMethods)
                         MacroRun r;
                         r.argument = argument;
                         r.scratch = channelScratch(amplifications, layer, barrier);
-                        const mme_sim_state_ops ops = {MacroRun::load, MacroRun::state, MacroRun::emit,
-                                                       MacroRun::barrier, MacroRun::dram};
                         mme_fermi_sim_core(uint32_t(insts.size()), insts.data(), &ops, &r);
                         methods += r.methods;
                     }
         EXPECT_GT(methods, 0u) << m.name << " ran no method";
+    }
+}
+
+// The fetch macros under every shape fetchShape gives a call, and an execute of a fetching state's commands (FETCH_ICB)
+// under every topology a command sets (SET_PRIMITIVE_TOPOLOGY 1 to 5, icb.h topology)
+TEST(MethodRanges, EveryMacroRunsOnMaxwellBsMethodsInEveryFetchShape)
+{
+    const mme_sim_state_ops ops = {MacroRun::load, MacroRun::state, MacroRun::emit, MacroRun::barrier, MacroRun::dram};
+    for (const Macro &m : kMacros) {
+        const std::vector<mme_fermi_inst> insts = decode(m);
+        for (uint32_t primitive = 0; primitive < 5; primitive++)
+            for (uint32_t argument : {0u, 1u, 2u, 3u}) {
+                SCOPED_TRACE(std::string(m.name) + " primitive " + std::to_string(primitive) + " argument " +
+                             std::to_string(argument));
+                MacroRun r;
+                r.argument = argument;
+                r.topology = primitive + 1;
+                r.scratch = channelScratch(1, SWITCH_GM20B_AMP_LAYER_FIRST, 0, primitive, 1);
+                mme_fermi_sim_core(uint32_t(insts.size()), insts.data(), &ops, &r);
+            }
     }
 }
 

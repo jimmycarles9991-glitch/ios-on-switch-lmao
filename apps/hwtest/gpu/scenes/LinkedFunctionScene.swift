@@ -46,7 +46,8 @@ struct LinkedFunctionScene: GPUScene {
             result.compare(
                 "custom_fn variant \(variant)", bytes: got,
                 expected: [[UInt8]](repeating: want, count: Self.size * Self.size).flatMap { $0 },
-                format: .rgba8Unorm, width: Self.size, height: Self.size, tolerance: 0)
+                format: .rgba8Unorm, width: Self.size, height: Self.size, tolerance: 0
+            )
         }
         return result
     }

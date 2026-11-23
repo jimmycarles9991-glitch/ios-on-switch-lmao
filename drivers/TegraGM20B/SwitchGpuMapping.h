@@ -54,6 +54,21 @@ static inline int switch_gpu_mapping_next(const uint64_t *pages, uint32_t count,
 	return 1;
 }
 
+/* A sparse range has no pages behind it: 128 KiB PTEs wherever its VA holds a whole aligned big page, 4 KiB ones
+ * elsewhere */
+static inline void switch_gpu_mapping_sparse_next(uint64_t va, uint64_t bytes,
+						  struct switch_gpu_mapping_run *run)
+{
+	const uint64_t mask = SWITCH_GPU_BIG_BYTES - 1, to_big = SWITCH_GPU_BIG_BYTES - (va & mask);
+	if (!(va & mask) && bytes >= SWITCH_GPU_BIG_BYTES) {
+		run->bytes = bytes & ~mask;
+		run->shift = (uint8_t)SWITCH_GPU_BIG_SHIFT;
+	} else {
+		run->bytes = to_big < bytes ? to_big : bytes;
+		run->shift = (uint8_t)SWITCH_GPU_SMALL_SHIFT;
+	}
+}
+
 /* The bytes of a range 128 KiB PTEs could map (VA and physical pages aligned and contiguous), whatever it is mapped with */
 static inline uint64_t switch_gpu_mapping_big_bytes(const uint64_t *pages, uint32_t count,
 						    uint64_t va, uint64_t offset, uint64_t bytes)

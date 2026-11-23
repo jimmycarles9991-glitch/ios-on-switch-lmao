@@ -33,23 +33,25 @@ enum H264FieldWriter {
                 var sizes = [spsBytes.count, ppsBytes.count]
                 return CMVideoFormatDescriptionCreateFromH264ParameterSets(
                     allocator: nil, parameterSetCount: 2, parameterSetPointers: &pointers,
-                    parameterSetSizes: &sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &format)
+                    parameterSetSizes: &sizes, nalUnitHeaderLength: 4, formatDescriptionOut: &format
+                )
             }
         }
         guard status == noErr, let format else {
             throw Failure(description: "\(clip.file): CMVideoFormatDescriptionCreateFromH264ParameterSets \(status)")
         }
         let frameTime = CMTime(value: 1, timescale: CMTimeScale(clip.fps))
-        let samples = try (0..<clip.frames).map { frame in
+        let samples = try (0 ..< clip.frames).map { frame in
             var data = Data()
             for picture in stream.frame(frame) {
                 let size = UInt32(picture.count)
-                data.append(contentsOf: (0..<4).map { UInt8(truncatingIfNeeded: size >> (24 - 8 * $0)) })
+                data.append(contentsOf: (0 ..< 4).map { UInt8(truncatingIfNeeded: size >> (24 - 8 * $0)) })
                 data.append(contentsOf: picture)
             }
             return try Demux.sample(
                 data, format: format, pts: CMTimeMultiply(frameTime, multiplier: Int32(frame)), duration: frameTime,
-                sync: frame % (2 * group) == 0)
+                sync: frame % (2 * group) == 0
+            )
         }
         try MP4Writer.write(samples, format: format, to: url)
     }
@@ -69,21 +71,21 @@ enum H264FieldWriter {
 
         func sps() -> [UInt8] {
             var w = BitWriter()
-            w.put(77, 8)  // Main
+            w.put(77, 8) // Main
             w.put(0, 8)
             w.put(31, 8)
             w.ue(0)
             w.ue(UInt32(log2MaxFrameNum - 4))
-            w.ue(0)  // pic_order_cnt_type
-            w.ue(4)  // log2_max_pic_order_cnt_lsb_minus4
-            w.ue(2)  // max_num_ref_frames
+            w.ue(0) // pic_order_cnt_type
+            w.ue(4) // log2_max_pic_order_cnt_lsb_minus4
+            w.ue(2) // max_num_ref_frames
             w.put(0, 1)
             w.ue(UInt32(widthMbs - 1))
             w.ue(UInt32(pairRows - 1))
-            w.put(0, 1)  // frame_mbs_only_flag
-            w.put(0, 1)  // mb_adaptive_frame_field_flag
-            w.put(1, 1)  // direct_8x8_inference_flag
-            w.put(0, 2)  // frame_cropping_flag, vui_parameters_present_flag
+            w.put(0, 1) // frame_mbs_only_flag
+            w.put(0, 1) // mb_adaptive_frame_field_flag
+            w.put(1, 1) // direct_8x8_inference_flag
+            w.put(0, 2) // frame_cropping_flag, vui_parameters_present_flag
             w.trailing()
             return w.bytes
         }
@@ -92,8 +94,8 @@ enum H264FieldWriter {
             var w = BitWriter()
             w.ue(0)
             w.ue(0)
-            w.put(0, 1)  // CAVLC
-            w.put(1, 1)  // bottom_field_pic_order_in_frame_present_flag
+            w.put(0, 1) // CAVLC
+            w.put(1, 1) // bottom_field_pic_order_in_frame_present_flag
             w.ue(0)
             w.ue(0)
             w.ue(0)
@@ -101,7 +103,7 @@ enum H264FieldWriter {
             w.se(0)
             w.se(0)
             w.se(0)
-            w.put(1, 1)  // deblocking_filter_control_present_flag
+            w.put(1, 1) // deblocking_filter_control_present_flag
             w.put(0, 2)
             w.trailing()
             return w.bytes
@@ -134,21 +136,21 @@ enum H264FieldWriter {
             if let parity { w.put(UInt32(parity), 1) }
             if idr { w.ue(0) }
             w.put(poc & 0xff, 8)
-            if parity == nil { w.se(1) }  // delta_pic_order_cnt_bottom: the bottom field a count later
+            if parity == nil { w.se(1) } // delta_pic_order_cnt_bottom: the bottom field a count later
             if !intra {
-                w.put(refs > 1 ? 1 : 0, 1)  // num_ref_idx_active_override_flag
+                w.put(refs > 1 ? 1 : 0, 1) // num_ref_idx_active_override_flag
                 if refs > 1 { w.ue(refs - 1) }
-                w.put(0, 1)  // ref_pic_list_modification_flag_l0
+                w.put(0, 1) // ref_pic_list_modification_flag_l0
             }
-            w.put(0, idr ? 2 : 1)  // dec_ref_pic_marking: sliding window
-            w.se(0)  // slice_qp_delta
-            w.ue(1)  // disable_deblocking_filter_idc
+            w.put(0, idr ? 2 : 1) // dec_ref_pic_marking: sliding window
+            w.se(0) // slice_qp_delta
+            w.ue(1) // disable_deblocking_filter_idc
         }
 
         func framePicture(_ frame: Int, frameNum: UInt32, poc: UInt32) -> [UInt8] {
             var w = BitWriter()
             header(&w, intra: true, parity: nil, frameNum: frameNum, poc: poc)
-            for mb in 0..<(widthMbs * pairRows * 2) {
+            for mb in 0 ..< (widthMbs * pairRows * 2) {
                 w.ue(25)
                 pcm(&w, frame: frame, x: mb % widthMbs, y: mb / widthMbs, parity: nil)
             }
@@ -159,7 +161,7 @@ enum H264FieldWriter {
         func intraField(_ frame: Int, poc: UInt32) -> [UInt8] {
             var w = BitWriter()
             header(&w, intra: true, parity: 0, frameNum: 0, poc: poc, idr: true)
-            for mb in 0..<(widthMbs * pairRows) {
+            for mb in 0 ..< (widthMbs * pairRows) {
                 w.ue(25)
                 pcm(&w, frame: frame, x: mb % widthMbs, y: mb / widthMbs, parity: 0)
             }
@@ -172,19 +174,19 @@ enum H264FieldWriter {
             header(&w, intra: false, parity: 0, frameNum: frameNum, poc: poc)
             let barcodeRows = (pattern.barcodeHeight / 2 + 15) / 16
             var vectors = [[Int?]](repeating: [Int?](repeating: nil, count: widthMbs), count: pairRows)
-            for y in 0..<pairRows {
-                for x in 0..<widthMbs {
-                    w.ue(0)  // mb_skip_run
+            for y in 0 ..< pairRows {
+                for x in 0 ..< widthMbs {
+                    w.ue(0) // mb_skip_run
                     if y < barcodeRows || x == widthMbs - 1 {
-                        w.ue(30)  // I_PCM in a P slice
+                        w.ue(30) // I_PCM in a P slice
                         pcm(&w, frame: frame, x: x, y: y, parity: 0)
                         continue
                     }
                     let vector = 4 * shift
-                    w.ue(0)  // P_L0_16x16
+                    w.ue(0) // P_L0_16x16
                     w.se(vector - predictor(vectors, x: x, y: y))
                     w.se(0)
-                    w.ue(0)  // coded_block_pattern 0
+                    w.ue(0) // coded_block_pattern 0
                     vectors[y][x] = vector
                 }
             }
@@ -195,10 +197,10 @@ enum H264FieldWriter {
         func predictedBottom(frameNum: UInt32, poc: UInt32, firstOfIDR: Bool) -> [UInt8] {
             var w = BitWriter()
             header(&w, intra: false, parity: 1, frameNum: frameNum, poc: poc, refs: firstOfIDR ? 1 : 2)
-            for _ in 0..<(widthMbs * pairRows) {
-                w.ue(0)  // mb_skip_run
-                w.ue(0)  // P_L0_16x16
-                if !firstOfIDR { w.put(0, 1) }  // ref_idx_l0 1, te(v) with cMax 1
+            for _ in 0 ..< (widthMbs * pairRows) {
+                w.ue(0) // mb_skip_run
+                w.ue(0) // P_L0_16x16
+                if !firstOfIDR { w.put(0, 1) } // ref_idx_l0 1, te(v) with cMax 1
                 w.se(0)
                 w.se(0)
                 w.ue(0)
@@ -232,12 +234,12 @@ enum H264FieldWriter {
         func pcm(_ w: inout BitWriter, frame: Int, x: Int, y: Int, parity: Int?) {
             w.align()
             func row(_ r: Int, _ height: Int) -> Int { parity.map { 2 * (height * y + r) + $0 } ?? height * y + r }
-            for r in 0..<16 {
-                for c in 0..<16 { w.byte(UInt8(pattern.luma(x: 16 * x + c, y: row(r, 16), frame: frame))) }
+            for r in 0 ..< 16 {
+                for c in 0 ..< 16 { w.byte(UInt8(pattern.luma(x: 16 * x + c, y: row(r, 16), frame: frame))) }
             }
-            for plane in 0..<2 {
-                for r in 0..<8 {
-                    for c in 0..<8 {
+            for plane in 0 ..< 2 {
+                for r in 0 ..< 8 {
+                    for c in 0 ..< 8 {
                         let value = pattern.chroma(x: 2 * (8 * x + c), y: 2 * row(r, 8))
                         w.byte(UInt8(plane == 0 ? value.cb : value.cr))
                     }

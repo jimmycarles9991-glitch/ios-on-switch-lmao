@@ -17,7 +17,7 @@ public enum SharedExponent {
     /// Each little-endian word of `bytes` as its `encoding`.
     public static func encodings(_ bytes: [UInt8]) -> [UInt8] {
         stride(from: 0, to: bytes.count, by: 4).flatMap { at -> [UInt8] in
-            let word = (0..<4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) }
+            let word = (0 ..< 4).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << (8 * $1) }
             return withUnsafeBytes(of: encoding(word).littleEndian, Array.init)
         }
     }

@@ -4,7 +4,7 @@ import HWTestGPU
 import Metal
 
 /// Whether any ROP control our context sets differently from NVIDIA's golden defaults (sw_method_init) moves the
-/// store or the blend: each arm sets controls with the draw and restores our context's value after it (RawMethods), then the
+/// store or the blend: each arm sets controls with the draw and restores our context's value after it (GM20BMethods), then the
 /// unorm8 and RGB10A2 stores of all 65,536 halves (MAX blend over zero, as gpu.x1.rop_conversion) and three BGRA8 blend
 /// pairs of gpu.x1.blend_exact are held to the chip's measured rules (X1Reference.store, chipBlend) and to Metal's.
 /// The claim: no arm changes a count, so the rounding is the hardware's and no setting of ours makes it approximate.
@@ -53,7 +53,8 @@ enum X1PrecisionProbe {
         var paths: [String] = []
         for arm in arms {
             journal.starting(
-                "\(arm.name) set=\(arm.set.map { String(format: "%04x=%x", $0.0, $0.1) }.joined(separator: ","))")
+                "\(arm.name) set=\(arm.set.map { String(format: "%04x=%x", $0.0, $0.1) }.joined(separator: ","))"
+            )
             var fields: [String] = []
             var emitted = 0
             do {
@@ -61,7 +62,8 @@ enum X1PrecisionProbe {
                     let target = try gpu.texture(format, 256, 256, usage: [.renderTarget, .shaderRead])
                     let ran = try await run(gpu, arm) { commands in
                         let encoder = commands.makeRenderCommandEncoder(
-                            descriptor: X1RawProbes.pass(target, load: .clear))!
+                            descriptor: X1RawProbes.pass(target, load: .clear)
+                        )!
                         encoder.setRenderPipelineState(state)
                         var corners = GPU.fullScreen
                         encoder.setVertexBytes(&corners, length: 64, index: 0)
@@ -71,7 +73,8 @@ enum X1PrecisionProbe {
                     paths.append(ran.path)
                     emitted += ran.emitted
                     fields.append(
-                        "store\(bits):" + storeMisses(try await gpu.read(target, bytesPerPixel: 4), bits: bits))
+                        "store\(bits):" + storeMisses(try await gpu.read(target, bytesPerPixel: 4), bits: bits)
+                    )
                 }
                 for (pair, state) in zip(pairs, states) {
                     let ran = try await run(gpu, arm) { rig.encode($0, state) }
@@ -102,14 +105,14 @@ enum X1PrecisionProbe {
         metrics.set("not_emitted_arms", silent.isEmpty ? "-" : silent.joined(separator: ","))
         metrics.set("base", base.joined(separator: "+"))
         metrics.set("arms", lines.joined(separator: ","))
-        let offPath = paths.filter { $0 != "raw" }
+        let offPath = paths.filter { $0 != "gm20b" }
         let judged = arms.count - 1 - refused.count - silent.count
         let verdict: ClaimVerdict =
             !offPath.isEmpty || base == ["refused"] || judged == 0 ? .inconclusive : changed.isEmpty ? .pass : .fail
         let note =
             !offPath.isEmpty
-            ? "not on the raw path: \(offPath.joined(separator: ","))"
-            : judged == 0
+                ? "not on the driver: \(offPath.joined(separator: ","))"
+                : judged == 0
                 ? "no arm's controls reached a draw" : changed.isEmpty ? "" : "a control moved the ROP: see arms"
         return ProbeFinding(verdict, metrics, note: note)
     }
@@ -121,14 +124,14 @@ enum X1PrecisionProbe {
         -> (path: String, emitted: Int)
     {
         if arm.set.isEmpty { return (try await gpu.run(encode).path, 0) }
-        let drawn = try await RawMethods.draw(gpu, before: arm.set, after: arm.restore, encode)
+        let drawn = try await GM20BMethods.draw(gpu, before: arm.set, after: arm.restore, encode)
         return (drawn.path, drawn.emitted)
     }
 
     /// "<misses of the chip's rule>/<misses of Metal's>" over the first channel of all 65,536 halves
     static func storeMisses(_ bytes: [UInt8], bits: Int) -> String {
         var chip = 0, metal = 0
-        for i in 0..<65536 {
+        for i in 0 ..< 65536 {
             let have = bits == 8 ? Int(bytes[i * 4 + 2]) : (Int(bytes[i * 4]) | Int(bytes[i * 4 + 1]) << 8) & 1023
             let v = Double(Float16(bitPattern: UInt16(i)))
             if have != X1Reference.store(v, bits: bits) { chip += 1 }

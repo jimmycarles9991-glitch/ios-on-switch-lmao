@@ -45,6 +45,21 @@ kernel void x1_sample_linear(texture2d<float> texture [[texture(0)]], constant f
     out[0] = texture.sample(linear, uv, level(0));
 }
 
+/// gpu.x1.filter_weight_bits: the red channel of one linear sample of `texture` at each of `uv`
+kernel void x1_sample_points(texture2d<float> texture [[texture(0)]], device const float2 *uv [[buffer(0)]],
+                             device float *out [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    constexpr sampler linear(filter::linear, address::clamp_to_edge);
+    out[i] = texture.sample(linear, uv[i], level(0)).r;
+}
+
+/// gpu.x1.rop_unorm10_rounding: pixel (x, y) returns value y * width + x as it is
+fragment float4 x1_value_fragment(float4 position [[position]], device const float4 *values [[buffer(0)]],
+                                  constant uint &width [[buffer(1)]])
+{
+    return values[uint(position.y) * width + uint(position.x)];
+}
+
 /// metal.float32_filtering: linear samples of a 32-bit float texture at (u, v, lod) triples, mip levels blended linearly
 kernel void float32_filter_sample(texture2d<float> texture [[texture(0)]], constant float4 *points [[buffer(0)]],
                                   device float4 *out [[buffer(1)]], uint i [[thread_position_in_grid]])
@@ -96,6 +111,13 @@ static float x1_spin(uint2 p, constant X1Seeded &s)
         acc += float(h >> 20);
     }
     return acc * s.zero;
+}
+
+/// gpu.x1.gpu_vic_sync: `colour`, after `spin` rounds of work a pixel
+fragment float4 x1_spun_colour(float4 position [[position]], constant X1Seeded &s [[buffer(0)]],
+                               constant float4 &colour [[buffer(1)]])
+{
+    return colour + x1_spin(uint2(position.xy), s);
 }
 
 /// gpu.x1 barrier probes: pass A's texel for seed `seed`, unorm8 codes of the hash

@@ -12,7 +12,7 @@
 namespace
 {
 constexpr uint64_t kSurfaceVa = 1ull << 32, kDrawn = 4000, kDrawnBytes = 256;
-constexpr uint32_t kInternal = TegraGM20BSubmitVisibilityExplicit;
+constexpr uint32_t kInternal = 0;
 
 // gpu_exec.c chan_exec's reading of the flags: without explicit visibility every job is External.
 bool flushes(uint32_t visibility)
@@ -30,11 +30,11 @@ struct Creator {
 		memory.map(kSurfaceVa, pages, false, true);
 	}
 
-	void draw(uint32_t submit, bool signals, bool unlockedWrites)
+	void draw(uint32_t job, bool signals, bool unlockedWrites)
 	{
 		const std::vector<uint8_t> drawn(kDrawnBytes, 0xa7);
 		ASSERT_TRUE(memory.store(kSurfaceVa + kDrawn, drawn.data(), drawn.size()));
-		if (flushes(switch_gpu_job_visibility(submit, signals, unlockedWrites, false)))
+		if (flushes(switch_gpu_job_visibility(job, signals, unlockedWrites, false)))
 			memory.flushL2();
 	}
 
@@ -69,21 +69,13 @@ TEST(JobVisibility, OnlyCreatorMemoryEventSignalsOrTheRuntimeMakeAJobExternal)
 	EXPECT_FALSE(flushes(switch_gpu_job_visibility(kInternal, false, false, true)));
 	EXPECT_TRUE(flushes(switch_gpu_job_visibility(kInternal, false, true, false)));
 	EXPECT_TRUE(flushes(switch_gpu_job_visibility(kInternal, true, false, false)));
-	EXPECT_TRUE(flushes(switch_gpu_job_visibility(
-		kInternal | TegraGM20BSubmitExternalVisibility, false, false, false)));
-}
-
-TEST(JobVisibility, ASubmitWithoutExplicitVisibilityIsExternal)
-{
-	Creator creator;
-	creator.draw(0, false, false);
-	EXPECT_EQ(creator.staleBytes(), 0u);
+	EXPECT_TRUE(flushes(switch_gpu_job_visibility(TegraGM20BJobExternal, false, false, false)));
 }
 
 TEST(JobVisibility, EventsAndHostWritesCarryOverToTheChannel)
 {
-	const uint32_t flags = switch_gpu_job_visibility(kInternal | TegraGM20BSubmitHasEvents,
-							 false, false, true);
+	const uint32_t flags =
+		switch_gpu_job_visibility(TegraGM20BJobHasEvents, false, false, true);
 	EXPECT_TRUE(flags & SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT);
 	EXPECT_TRUE(flags & SWITCH_GPU_SUBMIT_FORCE_FENCE);
 	EXPECT_TRUE(flags & SWITCH_GPU_SUBMIT_HOST_WRITTEN);

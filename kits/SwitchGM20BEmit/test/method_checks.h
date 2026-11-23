@@ -80,7 +80,7 @@ struct Scratch {
 
 // Every method of push segments (a job's GP entries' words, back to back) checked against its subchannel's class, as
 // the PBDMA reads them (clb06f.h DMA): a method's data runs on into the next segment, word 0 is NV_FIFO_DMA_NOP, and
-// END_PB_SEGMENT ends its segment (raw_predication.h's loop heads). False on any other header than those and the
+// END_PB_SEGMENT ends its segment (predication.h's loop heads). False on any other header than those and the
 // method forms 1 INC, 3 NON_INC, 4 IMMD and 5 ONE_INC.
 inline bool expectSegmentMethods(const uint32_t *words, const uint32_t *segmentWords, size_t segments)
 {

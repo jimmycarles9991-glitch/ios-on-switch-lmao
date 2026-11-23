@@ -15,8 +15,8 @@ public struct PlanesCompositeTest: HWTest {
     public var timeout: TimeInterval { 120 }
     let kernelTest: @Sendable (UInt32, Int) -> Result<[UInt32], TestFailure>
 
-    static let arm: UInt32 = 0x5643_4641  // 'VCFA'
-    static let report: UInt32 = 0x5643_4652  // 'VCFR'
+    static let arm: UInt32 = 0x5643_4641 // 'VCFA'
+    static let report: UInt32 = 0x5643_4652 // 'VCFR'
     static let replyBytes = 16
 
     public init(kernelTest: @escaping @Sendable (UInt32, Int) -> Result<[UInt32], TestFailure>) {
@@ -49,6 +49,7 @@ public struct PlanesCompositeTest: HWTest {
             [
                 ("display.planes held: \(played.detail.isEmpty ? "pass" : played.detail)", played.verdict == .pass),
                 ("VIC composited the video (composited > 0)", composited > 0),
-            ], metrics)
+            ], metrics
+        )
     }
 }

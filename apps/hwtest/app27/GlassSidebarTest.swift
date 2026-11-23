@@ -71,7 +71,8 @@ struct UIGlassSidebarTest: HWTest {
         metrics.set("region", layout.regionText)
         metrics.set("means", run.means)
         return GlassSidebarVerdict.outcome(
-            run.phases, reads: run.reads, scene: metrics, pngs: run.pngs, stopped: run.stopped)
+            run.phases, reads: run.reads, scene: metrics, pngs: run.pngs, stopped: run.stopped
+        )
     }
 }
 
@@ -112,8 +113,8 @@ struct SidebarRun {
         let reader = await MainActor.run {
             SidebarReader(session: session, test: test, phase: name, band: band, directory: directory)
         }
-        guard session.rearm() else {
-            stopped = "\(name):arm"
+        if let failure = session.rearmFailure() {
+            stopped = "\(name):\(failure)"
             return
         }
         let driver = await MainActor.run { SidebarDriver(scrolls, appearing: appearing) }
@@ -123,7 +124,9 @@ struct SidebarRun {
         phases.append(
             .init(
                 name: name, moving: true, frames: reader.frames.count, black: reader.black, partial: reader.partial,
-                pools: reader.pools))
+                pools: reader.pools
+            )
+        )
         reads.append(.read())
         frames.append((name, reader.frames))
         pngs += reader.saved
@@ -151,7 +154,8 @@ struct SidebarRun {
             bandX: [band.x.lowerBound, band.x.upperBound],
             mirroredX: [band.mirroredX.lowerBound, band.mirroredX.upperBound],
             bandY: [band.y.lowerBound, band.y.upperBound], reads: reads.map { [$0.mem, $0.pool] },
-            phases: frames.map { Phase(name: $0.0, frames: $0.1) })
+            phases: frames.map { Phase(name: $0.0, frames: $0.1) }
+        )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try? encoder.encode(record).write(to: directory.appendingPathComponent("frames.json"))

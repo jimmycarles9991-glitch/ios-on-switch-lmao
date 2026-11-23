@@ -6,17 +6,17 @@
 #include <string>
 #include <utility>
 #include <vector>
-#include "../raw/pack/direct_states.h"
+#include "../pack/direct_states.h"
 
-namespace raw {
+namespace gm20b {
 
-// A bundle library's states are keyed by their functions' AIR (RawRenderKey.mm, over the frontend); no line here is one
+// A bundle library's states are keyed by their functions' AIR (TegraGM20BMetalRenderKey.mm, over the frontend); no line here is one
 bool renderCacheKey(MTLRenderPipelineDescriptor *, const std::string &, bool, uint64_t, CacheKey &, FunctionSource)
 {
     return false;
 }
 
-}  // namespace raw
+}  // namespace gm20b
 
 namespace {
 
@@ -63,7 +63,7 @@ TEST(EachState, ALineOfItsLibrarysFunctionsMakesAState)
     EXPECT_TRUE(seen.dropped.empty());
 }
 
-// RawPipelineKey.h keys a tessellation state's tessellator and an amplification count above 1: a line holding them makes
+// TegraGM20BMetalPipelineKey.h keys a tessellation state's tessellator and an amplification count above 1: a line holding them makes
 // the state they name, keyed as the runtime keys it
 TEST(EachState, ALineOfATessellatorAndAnAmplificationCountMakesTheirState)
 {

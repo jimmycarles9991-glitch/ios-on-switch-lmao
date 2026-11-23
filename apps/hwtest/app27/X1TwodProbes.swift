@@ -7,11 +7,11 @@ import Metal
 /// value the operation means, rounded by Metal's rule and by every other rule (X1RuleTally). A cell is exact where it
 /// keeps Metal's rule, near where it is within one code, and its rules name the rounding the engine followed, so the
 /// planner can select a cell exactly or within a stated margin. Each probe runs its 2D work through the facade's probe
-/// channel (raw_probe_ops.h) at an open blit encoder.
+/// channel (probe_ops.h) at an open blit encoder.
 enum X1TwodProbes {
     /// claim_verdict: PASS when every cell keeps Metal's rule, FAIL when a cell is beyond one code or fits no rule,
     /// INCONCLUSIVE between; margin_verdict: PASS when every cell is within one code by a named rule. Cells whose
-    /// command buffer left the raw path are listed apart (off_path_cells=) and judge nothing. `explained`, where given,
+    /// command buffer left the driver are listed apart (off_path_cells=) and judge nothing. `explained`, where given,
     /// holds each cell under the reading of the unit's arithmetic that fits it best (its weights, its order of rounding):
     /// the rules come from those.
     static func finding(
@@ -34,7 +34,7 @@ enum X1TwodProbes {
         metrics.set("rules", ruleSummary(ruled))
         metrics.set("cells", cells.map { "\($0.0):\($0.1.text)" }.joined(separator: ","))
         metrics.set("off_path_cells", offPath.isEmpty ? "-" : offPath.joined(separator: ","))
-        if cells.isEmpty { return ProbeFinding(.inconclusive, metrics, note: "no cell ran on the raw path") }
+        if cells.isEmpty { return ProbeFinding(.inconclusive, metrics, note: "no cell ran on the driver") }
         if ops == 0 { return ProbeFinding(.inconclusive, metrics, note: "the 2D work never reached a blit encoder") }
         let verdict: ClaimVerdict =
             exact == cells.count ? .pass : !wrong.isEmpty || !unexplained.isEmpty ? .fail : .inconclusive
@@ -74,7 +74,7 @@ enum X1TwodProbes {
         let t = try gpu.texture(format.pixelFormat, w, h, usage: [.renderTarget, .shaderRead])
         var codes: [[UInt32]] = []
         var bytes: [UInt8] = []
-        for i in 0..<w * h {
+        for i in 0 ..< w * h {
             let texel = format.channels.enumerated().map { c, channel in
                 code(channel, probeHash(UInt32(i % w), UInt32(i / w), UInt32(7 + c)))
             }

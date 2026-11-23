@@ -28,8 +28,8 @@ TEST(SwitchVICColor, ExplicitMatrixOverridesResolution)
 {
     for (uint32_t width : {256u, 1920u}) {
         auto d = surface(true, width, 128);
-        for (const char *tag : {"ITU_R_601_4", "ITU_R_709_2", "ITU_R_2020"}) {
-            d.colorMatrix = switch_vic_matrix_tag(tag);
+        for (uint32_t code : {6u, 1u, 9u}) {
+            d.colorMatrix = switch_vic_matrix_code(code);
             TegraVICImage image = {};
             ASSERT_EQ(tegra_vic_image_from(&d, 0x10000000, &image), nullptr);
             EXPECT_EQ(image.standard, d.colorMatrix - 1);
@@ -41,7 +41,7 @@ TEST(SwitchVICColor, UntaggedDefaultDoesNotInventHDMetadata)
 {
     for (uint32_t width : {256u, 1920u}) {
         auto d = surface(true, width, 128);
-        d.colorMatrix = switch_vic_matrix_tag(nullptr);
+        d.colorMatrix = switch_vic_matrix_code(2);
         TegraVICImage image = {};
         ASSERT_EQ(tegra_vic_image_from(&d, 0x10000000, &image), nullptr);
         EXPECT_EQ(image.standard, TEGRA_VIC_YCC_601);
@@ -106,7 +106,7 @@ TEST(SwitchVICColor, Bt2020CopyConversionAndFillKeepTheExplicitMatrix)
         EXPECT_EQ(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
         op.fill = true;
         EXPECT_EQ(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
-        yuv.colorMatrix = switch_vic_matrix_tag("SMPTE_240M_1995");
+        yuv.colorMatrix = switch_vic_matrix_code(7);
         EXPECT_NE(tegra_vic_image_from(&yuv, 0x10000000, &src), nullptr);
     }
 }
@@ -198,37 +198,13 @@ TEST(SwitchVICColor, FieldSpecificAndUnknownChromaRefuseWithoutGuessing)
     d.chromaTop = 1;
     d.chromaBottom = 3;
     EXPECT_NE(tegra_vic_image_from(&d, 0x10000000, &image), nullptr);
-    d.chromaTop = d.chromaBottom = switch_surface_chroma_tag("DV420");
+    d.chromaTop = d.chromaBottom = switch_surface_chroma_code(7);
     EXPECT_NE(tegra_vic_image_from(&d, 0x10000000, &image), nullptr);
-    EXPECT_EQ(switch_surface_transfer_tag("SMPTE_ST_2084_PQ"), 16u);
-    EXPECT_EQ(switch_surface_primaries_tag("ITU_R_2020"), 9u);
-    EXPECT_EQ(switch_surface_transfer_tag("TransferFunction#255"), 255u);
-    EXPECT_EQ(switch_surface_transfer_tag("TransferFunction#256"), UINT32_MAX);
 }
 
-TEST(SwitchVICColor, TransferAndGamutChangesRequireAColorShader)
-{
-    auto d = surface(true, 256, 128);
-    d.transfer = 16;
-    d.primaries = 9;
-    TegraVICImage src = {}, dst = {};
-    ASSERT_EQ(tegra_vic_image_from(&d, 0x10000000, &src), nullptr);
-    ASSERT_EQ(tegra_vic_image_from(&d, 0x20000000, &dst), nullptr);
-    TegraVICOp op = {};
-    op.srcW = 256ull << 16;
-    op.srcH = 128ull << 16;
-    op.dstW = 256;
-    op.dstH = 128;
-    TegraVICJob job = {};
-    EXPECT_EQ(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
-    dst.transfer = 1;
-    EXPECT_NE(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
-    dst.transfer = 16;
-    dst.primaries = 1;
-    EXPECT_NE(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
-}
-
-TEST(SwitchVICColor, ExplicitSourceEncodingCannotDisappearIntoUntaggedDestination)
+// The engine's own jobs (scanout, decode output, encode input) carry their source's pixels as they are, whatever the
+// tags: only an IOSurfaceAccelerator request decides colour (TegraVICColor.h).
+TEST(SwitchVICColor, TheJobBuilderCopiesWhateverTheTransferAndPrimaries)
 {
     auto d = surface(true, 256, 128);
     TegraVICImage src = {}, dst = {};
@@ -241,10 +217,14 @@ TEST(SwitchVICColor, ExplicitSourceEncodingCannotDisappearIntoUntaggedDestinatio
     op.dstH = 128;
     TegraVICJob job = {};
     for (uint32_t transfer : {1u, 8u, 13u, 16u, 18u}) {
-        src.transfer = transfer;
-        EXPECT_NE(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
+        for (uint32_t destination : {0u, 1u}) {
+            src.transfer = transfer;
+            src.primaries = 12;
+            dst.transfer = destination;
+            dst.primaries = destination ? 9 : 0;
+            EXPECT_EQ(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
+            EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_SLOTS, SLOT_DEGAMMA), 0u);
+            EXPECT_EQ(TEGRA_VIC_GET(job.config, TEGRA_VIC_OUTPUT, OUT_REGAMMA), 0u);
+        }
     }
-    src.transfer = 0;
-    src.primaries = 12;
-    EXPECT_NE(tegra_vic_build(&src, &dst, &op, &kTegraVICTraits, 0x30000000, 0x30001000, &job), nullptr);
 }

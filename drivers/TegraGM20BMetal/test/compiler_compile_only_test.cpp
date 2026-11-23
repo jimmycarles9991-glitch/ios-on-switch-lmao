@@ -1,21 +1,21 @@
 // SPDX-License-Identifier: MIT
-// The system shader compiler's engine (compiler_engine.h, the translator alone: raw/runtime/RawOffline.h) against the m2v
-// device it replaced, each in a process of its own over hostsim's mock GM20B and NVK's host twin: each record the engine
-// makes of a sample of the corpus's states, render and compute, is byte for byte the one made of the m2v device's
-// libraries by its direct compile on its own Vulkan device; and the frontend's compile context
-// (bridge/NativeMetalCompile.h) has a runtime device's enable set and compile devices.
+// The system shader compiler's engine (compiler_engine.h, the translator alone: TegraGM20BMetalOffline.h), run in a
+// process of its own: it makes a record of every kind a sample of the corpus's states asks for, render and compute,
+// refusing only the build's refused function, and each sampled kernel's and render state's reflection is the one this
+// Mac's Metal gives the same functions.
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
-#include "NativeBridgeMetalFrontend.h"
-#include "bridge/NativeMetalCompile.h"
 #include "TegraGM20BCompilerABI.h"
 #include "bazel/testing/fresh_process.h"
 #include "compiler_requests.h"
 #include "../compiler/compiler_engine.h"
-#include "../raw/runtime/raw_cache.h"
-#include "../raw/runtime/raw_pack.h"
-#include "../raw/runtime/RawMetalReflection.h"
-#include "../raw/runtime/raw_reflection_blob.h"
+#include "../compiler/compiler_record.h"
+#include "../gm20b_cache.h"
+#include "../compile_request.h"
+#include "../pack.h"
+#include "../TegraGM20BMetalCompileRequest.h"
+#include "../TegraGM20BMetalReflection.h"
+#include "../reflection_blob.h"
 #include "reflection_compare.h"
 
 #include <gtest/gtest.h>
@@ -31,30 +31,17 @@ std::string dir()
     return tmp ? tmp : "/tmp";
 }
 
-std::string loader()
-{
-    char path[PATH_MAX];
-    const char *nvk = getenv("SWITCH_NVK");
-    return nvk && realpath(nvk, path) ? path : "";
-}
-
 std::string root()
 {
     return compiler_test::systemRoot(getenv("SWITCH_QUARTZCORE"));
 }
 
-void environment()
-{
-    setenv("NMB_DEVICE_BASE_NSOBJECT", "1", 1);
-    setenv("NVK_DARWIN_SERVICE", "AGXAccelerator", 0);
-    setenv("NMB_SHADOW_LOG", "0", 0);
-}
-
 // The sample: every corpus state linking functions, a few of each other kind, a stride through the rest, a RenderBox
 // state's cubic and test-class variants as the device asked for them, the written-format variants the corpus names, Core
-// Animation states into b3a8 drawn in its two planes and one amplified, multisampled VectorKit ground states, kernels at
-// an edge of their grid, Core Animation states that may fetch their attachment over a depth attachment and multisampled
-// (their storage forms), and a state of the function the build's libraries refuse (SWITCH_REFUSED_FRAGMENT_FUNCTION).
+// Animation state into b3a8 amplified, states blending an extended-range colour, multisampled VectorKit ground states,
+// kernels at an edge of their grid, Core Animation states that may fetch their attachment over a depth attachment and
+// multisampled (their storage forms), and a state of the function the build's libraries refuse
+// (SWITCH_REFUSED_FRAGMENT_FUNCTION).
 // Each kind is drawn from lines both crawls' libraries hold, but for the private linked functions, which only iOS 27's
 // libraries have.
 std::vector<std::string> sample()
@@ -69,7 +56,8 @@ std::vector<std::string> sample()
         }
     };
     const std::regex linked(R"( \| (fp|vp|fl|vl) )"), msaa("samples=[24] "), depth("ds=(252|260)/"),
-        samplers(R"( smp=\S)"), quartzKernel("^D .*QuartzCore"), atOrigin("edge=0,0,0 threads=0");
+        samplers(R"( smp=\S)"), quartzKernel("^D .*QuartzCore"), atOrigin("edge=0,0,0 threads=0"),
+        blendedXr(" c0=55[0-5]:15:1:");
     const auto atAnEdge = [&](const std::string &l) {
         return std::regex_replace(l, atOrigin, "edge=7,3,0 threads=1");
     };
@@ -113,8 +101,9 @@ std::vector<std::string> sample()
         }
         if (l[0] == 'R' && l.find(" | wtex=") != std::string::npos)
             take("written", l, 2);
+        if (l[0] == 'R' && std::regex_search(l, blendedXr))
+            take("extended range", l, 8);
         if (l[0] == 'R' && l.find(" c0=550:") != std::string::npos && l.find("QuartzCore") != std::string::npos) {
-            take("two planes", l + " | xr2p", 2);
             const std::string amplified =
                 std::regex_replace(l, std::regex(" \\| v "), " amp=2 | v ", std::regex_constants::format_first_only);
             take("amplified", amplified, 1);
@@ -123,7 +112,7 @@ std::vector<std::string> sample()
     return out;
 }
 
-std::vector<raw::CompileRequest> requests()
+std::vector<gm20b::CompileRequest> requests()
 {
     compiler_test::Requests made(root());
     return made.of(sample());
@@ -134,11 +123,11 @@ template <typename Compile> void writeEntries(const char *name, Compile compile)
 {
     switch_compiler::SystemLibraries system(root());
     std::ofstream out(dir() + "/" + name + ".bin", std::ios::binary);
-    for (const raw::CompileRequest &r : requests()) {
+    for (const gm20b::CompileRequest &r : requests()) {
         switch_compiler::Prepared p;
         std::string entry, why;
         int32_t result = -1;
-        if (switch_compiler::prepare(raw::encodeRequest(r), 0, system, p, why))
+        if (switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, p, why))
             result = compile(p, entry, why);
         const uint32_t head[2] = {uint32_t(result), uint32_t(entry.size())};
         out.write(reinterpret_cast<const char *>(head), sizeof head);
@@ -163,27 +152,8 @@ std::vector<Made> readEntries(const char *name)
     return out;
 }
 
-void viaTheDevice()
-{
-    environment();
-    id<MTLDevice> device = nil;
-    @autoreleasepool {
-        device = native_bridge_metal_open(loader().c_str(), nullptr, 0, nullptr);
-    }
-    ASSERT_TRUE(device != nil) << nmb_last_error();
-    raw::Pack pack;
-    std::string why;
-    ASSERT_TRUE(pack.load(compiler_test::emptyPack(dir()).c_str(), 0, why)) << why;
-    raw::Direct direct(pack);
-    const switch_compiler::Libraries libraries = compiler_test::deviceLibraries(device, root());
-    writeEntries("device", [&](const switch_compiler::Prepared &p, std::string &entry, std::string &failed) {
-        return switch_compiler::makeEntry(p, libraries, direct, 0, entry, failed);
-    });
-}
-
 void viaTheEngine()
 {
-    environment();
     switch_compiler::Engine engine;
     std::string why;
     ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir()), root(), {}}, why)) << why;
@@ -192,23 +162,22 @@ void viaTheEngine()
     });
 }
 
-// Each sampled kernel's reflection as the shader compiler makes it (a Reflection request: the translator alone, no m2v
-// runtime) and as the m2v device's compute prepare gave it, selector by selector
-void reflectionsAsTheDevice()
+// Each sampled kernel's reflection as the shader compiler makes it (a Reflection request: the translator alone) and as
+// this Mac's Metal gives it for the same function and pipeline descriptor, selector by selector
+void reflectionsAsMetal()
 {
-    environment();
-    id<MTLDevice> device = native_bridge_metal_open(loader().c_str(), nullptr, 0, nullptr);
-    ASSERT_TRUE(device != nil) << nmb_last_error();
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    ASSERT_TRUE(device != nil);
     switch_compiler::Engine engine;
     std::string why;
     ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir()), root(), {}}, why)) << why;
     const switch_compiler::Libraries libraries = compiler_test::deviceLibraries(device, root());
     switch_compiler::SystemLibraries system(root());
     std::set<std::string> states;
-    for (raw::CompileRequest r : requests()) {
+    for (gm20b::CompileRequest r : requests()) {
         switch_compiler::Prepared kernel;
-        if (r.kind != raw::RequestKind::Kernel || !r.stages[0].constants.empty() ||
-            !switch_compiler::prepare(raw::encodeRequest(r), 0, system, kernel, why))
+        if (r.kind != gm20b::RequestKind::Kernel || !r.stages[0].constants.empty() ||
+            !switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, kernel, why))
             continue;
         const std::string state = kernel.packKey.substr(0, kernel.packKey.find(" | tg="));
         if (!states.insert(state).second)
@@ -219,95 +188,168 @@ void reflectionsAsTheDevice()
         d.computeFunction = [library newFunctionWithName:@(r.stages[0].function.c_str())];
         d.maxTotalThreadsPerThreadgroup = r.kernel.maxThreads;
         d.threadGroupSizeIsMultipleOfThreadExecutionWidth = r.kernel.multipleOfWidth;
-        id m2v = nil;
+        MTLComputePipelineReflection *metal = nil;
         NSError *error = nil;
-        ASSERT_TRUE(native_bridge_metal_compute_prepare(d, MTLPipelineOptionArgumentInfo, &m2v, &error) != nil)
+        ASSERT_TRUE([device newComputePipelineStateWithDescriptor:d
+                                                          options:MTLPipelineOptionArgumentInfo
+                                                       reflection:&metal
+                                                            error:&error] != nil)
             << state << ": " << (error ? error.localizedDescription.UTF8String : "");
-        r.kind = raw::RequestKind::Reflection;
-        r.key = raw::computeReflectionKey(0, state).key;
+        r.kind = gm20b::RequestKind::Reflection;
+        r.key = gm20b::computeReflectionKey(0, state).key;
         switch_compiler::Prepared p;
-        ASSERT_TRUE(switch_compiler::prepare(raw::encodeRequest(r), 0, system, p, why)) << why;
+        ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, p, why)) << why;
         std::string entry, blob;
         ASSERT_EQ(engine.compile(p, entry, why), TegraGM20BCompileMade) << state << ": " << why;
         bool made = false;
-        ASSERT_TRUE(raw::decodeReflectionEntry(entry, p.key, made, blob) && made) << state << ": " << blob;
-        id raw = rmReflectionOf(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), true);
+        ASSERT_TRUE(gm20b::decodeReflectionEntry(entry, p.key, made, blob) && made) << state << ": " << blob;
+        id raw = gm20bReflectionOf(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), true);
         ASSERT_TRUE(raw != nil) << state;
-        reflection_compare::expectSameList([m2v bindings], [raw bindings], state);
+        reflection_compare::expectSameList(metal.bindings, [raw bindings], state);
     }
     EXPECT_FALSE(states.empty()) << "the sample has no kernel of no constants";
     printf("%zu compute reflections compared\n", states.size());
 }
 
+// A render state as a difference names it: its functions and its key's hash
+std::string stateName(const gm20b::CompileRequest &r)
+{
+    const size_t f = gm20b::fragmentStage(r);
+    char hash[24];
+    snprintf(hash, sizeof hash, " #%016llx", (unsigned long long)gm20b::Pack::fnv(r.key.data(), r.key.size()));
+    return r.stages[0].function + "/" + (f == gm20b::kNoStage ? std::string("-") : r.stages[f].function) + hash;
+}
+
+// Each sampled render state's reflection as the shader compiler makes it (a Reflection request of the state's key) and
+// as this Mac's Metal gives it for the same functions and descriptor fields, selector by selector: vertex, fragment and
+// tile bindings, isUsed and isActive one way (reflection_compare.h Options). A state of linked functions is left out,
+// and so is one this Mac's Metal does not make (a function or a field of iOS alone), counted. It prints the GPU and OS
+// that answered for Metal, every state by name with its key's prefix, and the differences summarised.
+void renderReflectionsAsMetal()
+{
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    ASSERT_TRUE(device != nil);
+    printf("Metal of %s, %s\n", device.name.UTF8String,
+           NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+    switch_compiler::Engine engine;
+    std::string why;
+    ASSERT_TRUE(engine.open(0, {compiler_test::emptyPack(dir()), root(), {}}, why)) << why;
+    const switch_compiler::Libraries libraries = compiler_test::deviceLibraries(device, root());
+    switch_compiler::SystemLibraries system(root());
+    std::set<std::string> states;
+    size_t unmade = 0;
+    reflection_compare::Differences differences;
+    const reflection_compare::Options usedOneWay{true};
+    for (gm20b::CompileRequest r : requests()) {
+        if (r.kind != gm20b::RequestKind::Render || gm20b::firstLinked(r) != r.stages.size() ||
+            !states.insert(r.key).second)
+            continue;
+        std::vector<id<MTLFunction>> made;
+        MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
+        MTLRenderPipelineReflection *metal = nil;
+        NSError *error = nil;
+        if (switch_compiler::functions(r, libraries, made, why)) {
+            gm20b::applyFields(r.fields, d);
+            d.vertexFunction = made[0];
+            if (const size_t f = gm20b::fragmentStage(r); f != gm20b::kNoStage)
+                d.fragmentFunction = made[f];
+        }
+        const std::string state = stateName(r);
+        if (!d.vertexFunction || ![device newRenderPipelineStateWithDescriptor:d
+                                                                       options:MTLPipelineOptionArgumentInfo
+                                                                    reflection:&metal
+                                                                         error:&error]) {
+            printf("not made by this Mac's Metal: %s %s: %s\n", state.c_str(), r.key.substr(0, 160).c_str(),
+                   error ? error.localizedDescription.UTF8String : why.c_str());
+            unmade++;
+            states.erase(r.key);
+            continue;
+        }
+        printf("compared %s %s\n", state.c_str(), r.key.substr(0, 160).c_str());
+        r.kind = gm20b::RequestKind::Reflection;
+        switch_compiler::Prepared p;
+        ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, p, why)) << state << ": " << why;
+        std::string entry, blob;
+        ASSERT_EQ(engine.compile(p, entry, why), TegraGM20BCompileMade) << state << ": " << why;
+        bool reflected = false;
+        ASSERT_TRUE(gm20b::decodeReflectionEntry(entry, p.key, reflected, blob) && reflected) << state << ": " << blob;
+        id raw = gm20bReflectionOf(reinterpret_cast<const uint8_t *>(blob.data()), blob.size(), false);
+        ASSERT_TRUE(raw != nil) << state;
+        differences.state = state;
+        reflection_compare::compareRender(metal, raw, usedOneWay, differences);
+    }
+    EXPECT_FALSE(states.empty()) << "this Mac's Metal made none of the sample's render states";
+    printf("%zu render reflections compared, %zu states this Mac's Metal did not make, %zu differences; %zu bindings "
+           "raw answers used and Metal's compiler unused (not judged):\n%s",
+           states.size(), unmade, differences.found.size(), differences.usedOnlyByRaw.size(),
+           reflection_compare::Differences::summary(differences.usedOnlyByRaw).c_str());
+    EXPECT_TRUE(differences.found.empty()) << differences.found.size() << " differences\n"
+                                           << reflection_compare::Differences::summary(differences.found);
+}
+
 }  // namespace
 
-TEST(CompilerCompileOnly, AKernelsReflectionIsTheDevicesSelectorForSelector)
+TEST(CompilerCompileOnly, AKernelsReflectionIsMetalsSelectorForSelector)
 {
     ASSERT_FALSE(root().empty());
-    switch_ios::test::ExpectPassesInFreshProcess(reflectionsAsTheDevice);
+    switch_ios::test::ExpectPassesInFreshProcess(reflectionsAsMetal);
 }
 
-TEST(CompilerCompileOnly, TheContextCompilesAsTheRuntimeDevice)
-{
-    switch_ios::test::ExpectPassesInFreshProcess([] {
-        environment();
-        NmbDevice *device = nmb_device_open(loader().c_str(), nullptr);
-        ASSERT_NE(device, nullptr) << nmb_last_error();
-        NmbCompileContext *context = nmb_compile_context_open(loader().c_str());
-        ASSERT_NE(context, nullptr) << nmb_last_error();
-        EXPECT_TRUE(nmb_compile_context_matches(context, device)) << nmb_last_error();
-    });
-}
-
-TEST(CompilerCompileOnly, ItsRecordsAreTheDevicesByteForByte)
+TEST(CompilerCompileOnly, ARenderStatesReflectionIsMetalsSelectorForSelector)
 {
     ASSERT_FALSE(root().empty());
-    switch_ios::test::ExpectPassesInFreshProcess(viaTheDevice);
+    switch_ios::test::ExpectPassesInFreshProcess(renderReflectionsAsMetal);
+}
+
+TEST(CompilerCompileOnly, ItMakesARecordOfEveryKindTheSampleAsks)
+{
+    ASSERT_FALSE(root().empty());
     switch_ios::test::ExpectPassesInFreshProcess(viaTheEngine);
-    const std::vector<raw::CompileRequest> asked = requests();
-    const std::vector<Made> device = readEntries("device"), engine = readEntries("engine");
-    ASSERT_EQ(device.size(), asked.size());
+    const std::vector<gm20b::CompileRequest> asked = requests();
+    const std::vector<Made> engine = readEntries("engine");
     ASSERT_EQ(engine.size(), asked.size());
     switch_compiler::SystemLibraries system(root());
     std::map<std::string, size_t> covered;
+    const std::regex blendedXr(" c0=55[0-5]:15:1:");
     for (size_t i = 0; i < asked.size(); ++i) {
-        const raw::CompileRequest &r = asked[i];
-        EXPECT_EQ(engine[i].result, device[i].result) << r.key.substr(0, 300);
-        EXPECT_TRUE(engine[i].entry == device[i].entry) << "entry " << i << " differs: " << r.key.substr(0, 300);
+        const gm20b::CompileRequest &r = asked[i];
         if (engine[i].result == TegraGM20BCompileRefused)
             covered["refused"]++;
         if (engine[i].result != TegraGM20BCompileMade)
             continue;
         switch_compiler::Prepared p;
         std::string why;
-        ASSERT_TRUE(switch_compiler::prepare(raw::encodeRequest(r), 0, system, p, why)) << why;
-        if (r.kind == raw::RequestKind::Kernel) {
+        ASSERT_TRUE(switch_compiler::prepare(gm20b::encodeRequest(r), 0, system, p, why)) << why;
+        if (r.kind == gm20b::RequestKind::Kernel) {
             covered["kernel"]++;
             covered["kernel with textures and samplers"] += !r.kernel.textures.empty() && !r.kernel.samplers.empty();
             covered["region kernel"] += r.kernel.regionMode;
             continue;
         }
-        raw::RuntimeRecord record;
-        ASSERT_EQ(raw::decodeEntry(engine[i].entry, p.key, record, why), raw::RecordCache::Found::Record) << why;
+        gm20b::RuntimeRecord record;
+        ASSERT_EQ(gm20b::decodeEntry(engine[i].entry, p.key, record, why), gm20b::RecordCache::Found::Record) << why;
         covered["render"]++;
         covered["constexpr samplers"] += !record.samplers.empty();
-        covered["storage form"] += (record.pipeline.flags & raw::PipelineStorageMetadata) != 0;
+        covered["storage form"] += (record.pipeline.flags & gm20b::PipelineStorageMetadata) != 0;
         covered["cubic"] += !r.variant.cubic.empty();
         covered["test class"] += r.variant.fragmentTests != 0;
-        covered["two planes"] += r.variant.twoPlane;
         covered["written"] += !r.variant.written.empty();
+        // its RGBA16Float stand-in, which the ROP blends: no storage form for the blend
+        covered["extended range blended by the ROP"] +=
+            std::regex_search(r.key, blendedXr) &&
+            !(record.pipeline.flags & (gm20b::PipelineStorageMetadata | gm20b::PipelineBarrierForm));
         covered["amplified"] += r.fields.amplification > 1;
         covered["multisampled"] += r.fields.samples > 1;
-        covered["specialized"] += std::any_of(r.stages.begin(), r.stages.end(), [](const raw::RequestStage &s) {
+        covered["specialized"] += std::any_of(r.stages.begin(), r.stages.end(), [](const gm20b::RequestStage &s) {
             return !s.constants.empty();
         });
-        covered["private linked"] += std::any_of(r.stages.begin(), r.stages.end(), [](const raw::RequestStage &s) {
+        covered["private linked"] += std::any_of(r.stages.begin(), r.stages.end(), [](const gm20b::RequestStage &s) {
             return s.tag == "fp" || s.tag == "vp";
         });
     }
-    for (const char *kind :
-         {"render", "constexpr samplers", "storage form", "cubic", "test class", "two planes", "written",
-          "multisampled", "specialized", "kernel", "kernel with textures and samplers", "region kernel"})
+    for (const char *kind : {"render", "constexpr samplers", "storage form", "cubic", "test class", "written",
+                             "extended range blended by the ROP", "multisampled", "specialized", "kernel",
+                             "kernel with textures and samplers", "region kernel"})
         EXPECT_GT(covered[kind], 0u) << "the sample made no " << kind << " record";
 #if SWITCH_LIBRARIES_LINK_PRIVATE_FUNCTIONS
     EXPECT_GT(covered["private linked"], 0u) << "the sample made no private linked record";

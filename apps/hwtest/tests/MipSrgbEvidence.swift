@@ -10,12 +10,13 @@ extension MipChains {
     var codesLayout: MipLayout {
         MipLayout(
             bytes: layout.bytes,
-            fields: layout.fields.map { MipLayout.Field(shift: $0.shift, width: $0.width, kind: .unorm) })
+            fields: layout.fields.map { MipLayout.Field(shift: $0.shift, width: $0.width, kind: .unorm) }
+        )
     }
 
     private func provenSteps(_ levels: [[UInt8]], _ w: Int, _ h: Int) -> [(Int, (Int, Int), (Int, Int))] {
         let dims = Self.dims(w, h)
-        return (1..<min(dims.count, levels.count)).compactMap { l in
+        return (1 ..< min(dims.count, levels.count)).compactMap { l in
             let (s, d) = (dims[l - 1], dims[l])
             return Self.proven(s.0, d.0) && Self.proven(s.1, d.1) ? (l, s, d) : nil
         }
@@ -25,7 +26,8 @@ extension MipChains {
     func compareCodes(_ levels: [[UInt8]], _ w: Int, _ h: Int, into tally: inout MipTally) {
         for (l, (sw, sh), (dw, dh)) in provenSteps(levels, w, h) {
             tally.add(
-                levels[l], MipReference.step(levels[l - 1], sw, sh, dw, dh, codesLayout), texels: dw * dh, codesLayout)
+                levels[l], MipReference.step(levels[l - 1], sw, sh, dw, dh, codesLayout), texels: dw * dh, codesLayout
+            )
         }
     }
 
@@ -34,7 +36,7 @@ extension MipChains {
     func firstBeyondOne(_ levels: [[UInt8]], _ w: Int, _ h: Int) -> String? {
         for (l, (sw, sh), (dw, dh)) in provenSteps(levels, w, h) {
             let want = MipReference.step(levels[l - 1], sw, sh, dw, dh, layout)
-            for t in 0..<dw * dh {
+            for t in 0 ..< dw * dh {
                 for (i, f) in layout.fields.enumerated() {
                     let got = layout.code(levels[l], texel: t, field: f), metal = layout.code(want, texel: t, field: f)
                     guard (got > metal ? got - metal : metal - got) > 1 else { continue }
@@ -42,11 +44,12 @@ extension MipChains {
                     let codes = MipReference.step(levels[l - 1], sw, sh, dw, dh, codesLayout)
                     let above = [(0, 0), (1, 0), (0, 1), (1, 1)].map { ox, oy in
                         layout.code(
-                            levels[l - 1], texel: min(2 * y + oy, sh - 1) * sw + min(2 * x + ox, sw - 1), field: f)
+                            levels[l - 1], texel: min(2 * y + oy, sh - 1) * sw + min(2 * x + ox, sw - 1), field: f
+                        )
                     }
                     return
                         "\(sw)x\(sh)>\(dw)x\(dh)@\(x),\(y)c\(i):\(got)/\(metal)/\(layout.code(codes, texel: t, field: f)):"
-                        + above.map(String.init).joined(separator: "_")
+                            + above.map(String.init).joined(separator: "_")
                 }
             }
         }

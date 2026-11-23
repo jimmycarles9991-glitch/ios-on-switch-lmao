@@ -12,7 +12,7 @@ enum Disk {
     }
 
     static func block(_ size: Int, seed: Int) -> [UInt8] {
-        (0..<size).map { UInt8(truncatingIfNeeded: ($0 &+ seed) &* 2_654_435_761 >> 13) }
+        (0 ..< size).map { UInt8(truncatingIfNeeded: ($0 &+ seed) &* 2_654_435_761 >> 13) }
     }
 
     static func file(_ name: String) -> URL {
@@ -30,10 +30,10 @@ struct SequentialStorageTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let url = Disk.file("sequential.bin")
         defer { try? FileManager.default.removeItem(at: url) }
-        let blocks = (0..<4).map { Disk.block(Self.chunk, seed: $0) }
+        let blocks = (0 ..< 4).map { Disk.block(Self.chunk, seed: $0) }
         var fd = try Disk.open(url, write: true)
         var start = CFAbsoluteTimeGetCurrent()
-        for index in 0..<Self.chunks {
+        for index in 0 ..< Self.chunks {
             guard blocks[index % 4].withUnsafeBytes({ write(fd, $0.baseAddress, Self.chunk) }) == Self.chunk else {
                 close(fd)
                 throw TestFailure("short write at chunk \(index)")
@@ -47,7 +47,7 @@ struct SequentialStorageTest: HWTest {
         var buffer = [UInt8](repeating: 0, count: Self.chunk)
         var wrong = 0
         start = CFAbsoluteTimeGetCurrent()
-        for index in 0..<Self.chunks {
+        for index in 0 ..< Self.chunks {
             guard buffer.withUnsafeMutableBytes({ read(fd, $0.baseAddress, Self.chunk) }) == Self.chunk else {
                 throw TestFailure("short read at chunk \(index)")
             }
@@ -85,17 +85,17 @@ struct RandomStorageTest: HWTest {
         var (reads, wrong) = (0, 0)
         var start = CFAbsoluteTimeGetCurrent()
         while CFAbsoluteTimeGetCurrent() - start < 2 {
-            let page = Int.random(in: 0..<(Self.size / Self.page), using: &generator)
+            let page = Int.random(in: 0 ..< (Self.size / Self.page), using: &generator)
             _ = buffer.withUnsafeMutableBytes { pread(fd, $0.baseAddress, Self.page, off_t(page * Self.page)) }
             let at = (page * Self.page) % (1 << 20)
-            if buffer[...] != pattern[at..<(at + Self.page)] { wrong += 1 }
+            if buffer[...] != pattern[at ..< (at + Self.page)] { wrong += 1 }
             reads += 1
         }
         let readIOPS = Double(reads) / (CFAbsoluteTimeGetCurrent() - start)
         var writes = 0
         start = CFAbsoluteTimeGetCurrent()
         while CFAbsoluteTimeGetCurrent() - start < 2 {
-            let page = Int.random(in: 0..<(Self.size / Self.page), using: &generator)
+            let page = Int.random(in: 0 ..< (Self.size / Self.page), using: &generator)
             _ = buffer.withUnsafeBytes { pwrite(fd, $0.baseAddress, Self.page, off_t(page * Self.page)) }
             writes += 1
             if writes % 64 == 0 { fsync(fd) }

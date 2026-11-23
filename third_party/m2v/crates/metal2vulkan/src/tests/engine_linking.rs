@@ -14,27 +14,31 @@
 //! `llvm-as` assembles the fixtures; a missing tool skips visibly.
 
 mod groups;
+mod signed;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::air::ir::InstId;
 use crate::air::ir::print::print_inst;
+use crate::air::ir::InstId;
 use crate::budget::{Budget, SPIRV_WORDS};
 use crate::device::{Device, DeviceDescription, DevicePolicy};
 use crate::error::{DescriptorError, Error, Feature, LinkProblem, LowerFamily, RuntimeInput};
 use crate::library::{FunctionConstantValue, FunctionConstantValues, FunctionStage, Library};
 use crate::lower::select::LowerInputs;
 use crate::metal::DataType;
-use crate::pipeline::compile::{EntryRef, LinkedSource, compile_bitcode_linked};
+use crate::pipeline::compile::{compile_bitcode_linked, EntryRef, LinkedSource};
 use crate::pipeline::layout::BindingSource;
-use crate::pipeline::link::{LinkInputs, link};
+use crate::pipeline::link::{link, LinkInputs};
 use crate::pipeline::sym::{ResourceKind, ResourceSlot, SamplerRef, Stage};
 use crate::pipeline::testing::{
-    AssembleError, engine_dir, link_and_validate, llvm_assemble, meter, profile, specialized_entry, typed_module_linked,
+    engine_dir, link_and_validate, llvm_assemble, meter, profile, specialized_entry,
+    typed_module_linked, AssembleError,
 };
-use crate::pipeline::{ComputePipelineDescriptor, FunctionDescriptor, LinkedFunction, LinkedFunctions, StageSource};
-use crate::spirv::interp::{Buffer, Config, Resources, run};
+use crate::pipeline::{
+    ComputePipelineDescriptor, FunctionDescriptor, LinkedFunction, LinkedFunctions, StageSource,
+};
+use crate::spirv::interp::{run, Buffer, Config, Resources};
 use crate::spirv::testing::committed_profiles;
 
 const CALLER: &str = "linked_visible_caller";
@@ -97,7 +101,11 @@ fn needs(symbol: &str) -> Error {
 
 /// The sources linking the caller completely: `linked_scale` and `linked_blend` of the
 /// functions module, `linked_offset` of the caller's own module.
-fn complete<'a>(caller: &'a [u8], functions: &'a [u8], none: &'a FunctionConstantValues) -> [LinkedSource<'a>; 3] {
+fn complete<'a>(
+    caller: &'a [u8],
+    functions: &'a [u8],
+    none: &'a FunctionConstantValues,
+) -> [LinkedSource<'a>; 3] {
     [
         LinkedSource::new("linked_scale", functions, none),
         LinkedSource::new("linked_blend", functions, none),
@@ -237,7 +245,9 @@ fn check_linked_outputs(caller: &[u8], linked: &[LinkedSource<'_>]) {
             .collect::<Vec<_>>()
     };
     let expect_words = (0..N).map(|i| 3 * i + (i & 7)).collect::<Vec<_>>();
-    let expect_floats = (0..N).map(|i| (i as f32 * 0.5 + 1.0).to_bits()).collect::<Vec<_>>();
+    let expect_floats = (0..N)
+        .map(|i| (i as f32 * 0.5 + 1.0).to_bits())
+        .collect::<Vec<_>>();
     assert_eq!(words(&out.buffers[0]), expect_words);
     assert_eq!(words(&out.buffers[1]), expect_floats);
 }
@@ -277,12 +287,17 @@ fn binary_functions_link_under_their_specialized_names_and_compute_exact_outputs
         .with_function(functions_lib.function("linked_blend").expect("blend"))
         .with_private_function(caller_lib.function("linked_offset").expect("offset"));
     functions.binary_functions.push(
-        LinkedFunction::new(functions_lib.function("binary_scale_definition").expect("definition"))
-            .with_precompiled(true)
-            .with_link_name(Some("linked_scale".into())),
+        LinkedFunction::new(
+            functions_lib
+                .function("binary_scale_definition")
+                .expect("definition"),
+        )
+        .with_precompiled(true)
+        .with_link_name(Some("linked_scale".into())),
     );
     let descriptor = ComputePipelineDescriptor::new(StageSource::Function(
-        FunctionDescriptor::new(caller_lib.function(CALLER).expect("caller")).with_linked(functions),
+        FunctionDescriptor::new(caller_lib.function(CALLER).expect("caller"))
+            .with_linked(functions),
     ));
     dev.compile_compute_pipeline(&descriptor, &Budget::standard())
         .expect("public binary descriptor");
@@ -307,7 +322,8 @@ fn the_public_api_links_functions_and_private_functions() {
         let d = ComputePipelineDescriptor::new(StageSource::Function(
             FunctionDescriptor::new(entry.clone()).with_linked(linked),
         ));
-        dev.compile_compute_pipeline(&d, &Budget::standard()).map(|_| ())
+        dev.compile_compute_pipeline(&d, &Budget::standard())
+            .map(|_| ())
     };
     assert_eq!(compile(LinkedFunctions::new()), Err(needs("linked_scale")));
     let linked = LinkedFunctions::new()
@@ -340,7 +356,8 @@ fn a_visible_function_is_not_a_stage() {
     let scale = lib.function("linked_scale").expect("scale");
     let d = ComputePipelineDescriptor::new(StageSource::Function(FunctionDescriptor::new(scale)));
     assert_eq!(
-        dev.compile_compute_pipeline(&d, &Budget::standard()).map(|_| ()),
+        dev.compile_compute_pipeline(&d, &Budget::standard())
+            .map(|_| ()),
         Err(Error::InvalidDescriptor(DescriptorError::EntryNotFound {
             requested: crate::error::DiagName::new("linked_scale"),
             available: 1,
@@ -369,9 +386,12 @@ fn linked_functions_are_part_of_the_key() {
     let none = key(LinkedFunctions::new());
     let public = key(LinkedFunctions::new().with_function(scale.clone()));
     let private = key(LinkedFunctions::new().with_private_function(scale.clone()));
-    let one = FunctionConstantValues::defaults()
-        .with_index(0, FunctionConstantValue::new(DataType::UInt, 1u32.to_le_bytes()));
-    let specialized = key(LinkedFunctions::new().with_function(LinkedFunction::new(scale.clone()).with_constants(one)));
+    let one = FunctionConstantValues::defaults().with_index(
+        0,
+        FunctionConstantValue::new(DataType::UInt, 1u32.to_le_bytes()),
+    );
+    let specialized = key(LinkedFunctions::new()
+        .with_function(LinkedFunction::new(scale.clone()).with_constants(one)));
     assert_eq!(none, key(LinkedFunctions::new()), "a key is deterministic");
     assert_eq!(public, key(LinkedFunctions::new().with_function(scale)));
     let keys = [none, public, private, specialized];
@@ -432,7 +452,11 @@ fn a_constexpr_sampler_of_a_linked_function_links_with_it() {
         )
     };
     for (stem, p) in committed_profiles().expect("profiles") {
-        assert_eq!(compile(&p, &[]).map(|_| ()), Err(needs("linked_sample")), "{stem}");
+        assert_eq!(
+            compile(&p, &[]).map(|_| ()),
+            Err(needs("linked_sample")),
+            "{stem}"
+        );
         let a = compile(&p, &linked).unwrap_or_else(|e| panic!("{stem}: {e}"));
         link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let constexpr = a
@@ -452,7 +476,11 @@ fn a_constexpr_sampler_of_a_linked_function_links_with_it() {
             .find(|b| matches!(b.source, BindingSource::CombinedTextureSampler { .. }))
             .and_then(|b| b.immutable_sampler)
             .unwrap_or_else(|| panic!("{stem}: no immutable sampler"));
-        assert_eq!(baked.address_mode_u, crate::vk::SamplerAddressMode::REPEAT, "{stem}");
+        assert_eq!(
+            baked.address_mode_u,
+            crate::vk::SamplerAddressMode::REPEAT,
+            "{stem}"
+        );
         assert_eq!(baked.min_filter, crate::vk::Filter::LINEAR, "{stem}");
     }
 }
@@ -497,7 +525,11 @@ fn a_linked_refusal_locates_an_instruction_of_the_specialized_entry() {
     };
     let Some(functions) = edited(FUNCTIONS, |text| {
         let blend = "  %4 = fadd fast float %3, 1.000000e+00\n  ret float %4\n}\n";
-        assert_eq!(text.matches(blend).count(), 1, "the fixture's linked_blend changed");
+        assert_eq!(
+            text.matches(blend).count(),
+            1,
+            "the fixture's linked_blend changed"
+        );
         text.replace(
             blend,
             "  %4 = fadd fast float %3, 1.000000e+00\n  %b = fptoui float %4 to i32\n  \
@@ -515,8 +547,13 @@ fn a_linked_refusal_locates_an_instruction_of_the_specialized_entry() {
         Err(Error::Unsupported(u)) => u,
         other => panic!("not refused: {:?}", other.map(|_| ())),
     };
-    assert_eq!(refusal.feature, Feature::Lowering(LowerFamily::Simd), "{refusal}");
-    let Some((function, _, Some(inst))) = refusal.location.as_ref().and_then(|l| l.in_function()) else {
+    assert_eq!(
+        refusal.feature,
+        Feature::Lowering(LowerFamily::Simd),
+        "{refusal}"
+    );
+    let Some((function, _, Some(inst))) = refusal.location.as_ref().and_then(|l| l.in_function())
+    else {
         panic!("not located at an instruction: {refusal}");
     };
     let spec = specialized_entry(&caller, CALLER, &p, &none, &linked, &mut meter()).expect("entry");
@@ -546,8 +583,8 @@ fn a_linked_refusal_locates_an_instruction_of_the_specialized_entry() {
 /// the kernel reaches it, with no note (SID-sid19-m4).
 #[test]
 fn a_linked_function_s_constexpr_sampler_is_numbered() {
-    use crate::pipeline::PrecisionNote;
     use crate::pipeline::interface::NumberedSampler;
+    use crate::pipeline::PrecisionNote;
     let Some((caller, functions)) = fixtures() else {
         return;
     };
@@ -567,7 +604,9 @@ fn a_linked_function_s_constexpr_sampler_is_numbered() {
     };
     let state = crate::air::abi::SamplerState::from_words([34901797601020562, 0]).expect("state");
     let sampler = NumberedSampler::Constexpr(crate::lower::sampler::state_words(&state));
-    let noted = |a: &crate::library::FunctionArtifact| a.precision.contains(&PrecisionNote::LinkedSamplerNumbering);
+    let noted = |a: &crate::library::FunctionArtifact| {
+        a.precision.contains(&PrecisionNote::LinkedSamplerNumbering)
+    };
     let sample = LinkedSource::new("linked_sample", &functions, &none);
     let a = compile(SAMPLING, &[sample]);
     assert_eq!(a.interface.numbered_samplers, [sampler]);

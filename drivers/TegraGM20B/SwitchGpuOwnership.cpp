@@ -68,8 +68,7 @@ uint64_t logged_producer;
 void switch_gpu_backing_note_failure_locked(const switch_gpu_backing *backing,
 					    switch_gpu_backing_access &access, int status)
 {
-	if (!access.noted && (access.access & SWITCH_GPU_BACKING_WRITE) &&
-	    !(access.access & SWITCH_GPU_BACKING_UNLISTED)) {
+	if (!access.noted && (access.access & SWITCH_GPU_BACKING_WRITE)) {
 		const auto &token = access.token;
 		const uint64_t producer = (uint64_t(token.engine) << 56) ^
 					  (token.reset_generation << 32) ^ token.queue;
@@ -121,15 +120,10 @@ void switch_gpu_backing_prune_locked(switch_gpu_backing *backing)
 
 namespace
 {
-// A backing used both listed and unlisted by one job is ordered by everything it may do, as a listed use.
+// A backing one job uses twice goes on beside CPU owners only when both uses do.
 uint32_t merge(uint32_t a, uint32_t b)
 {
-	uint32_t merged = (a | b) & ~kBesideCpu;
-	if (a & b & SWITCH_GPU_BACKING_UNLISTED)
-		merged |= SWITCH_GPU_BACKING_UNLISTED;
-	else if ((a & kBesideCpu) && (b & kBesideCpu))
-		merged |= SWITCH_GPU_BACKING_NO_CPU_EXCLUSION;
-	return merged;
+	return ((a | b) & ~kBesideCpu) | (a & b & kBesideCpu);
 }
 
 // A dead client's IOSurface lease can refuse or slow down only a job that uses its backing, and keep waiting only what
@@ -354,14 +348,5 @@ extern "C" int switch_gpu_backing_begin_held(
 	const switch_gpu_backing_token *completion, switch_gpu_backing_transaction *transaction)
 {
 	return begin(uses, count, leases, lease_count, guards, guard_count, completion, true, true,
-		     transaction);
-}
-
-extern "C" int switch_gpu_backing_begin_ordered(
-	switch_gpu_backing_use *uses, uint32_t count, switch_gpu_cpu_lease *const *leases,
-	uint32_t lease_count, const switch_gpu_backing_guard *guards, uint32_t guard_count,
-	const switch_gpu_backing_token *completion, switch_gpu_backing_transaction *transaction)
-{
-	return begin(uses, count, leases, lease_count, guards, guard_count, completion, false, true,
 		     transaction);
 }

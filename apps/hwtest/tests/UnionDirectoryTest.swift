@@ -66,7 +66,7 @@ struct UnionDirectoryTest: HWTest {
             guard count > 0 else { return count == 0 ? names : nil }
             buffer.withUnsafeBytes { bytes in
                 var record = 0
-                for _ in 0..<count {
+                for _ in 0 ..< count {
                     let reference = record + 4 + MemoryLayout<attribute_set_t>.size
                     let offset = Int(bytes.loadUnaligned(fromByteOffset: reference, as: Int32.self))
                     let start = bytes.baseAddress!.advanced(by: reference + offset)

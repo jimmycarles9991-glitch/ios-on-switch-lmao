@@ -68,7 +68,8 @@ struct DepthBiasScene: GPUScene {
         result.metrics.set("slope_bias", Double(moved[moved.count / 2]), digits: 6)
         result.expect(
             moved.allSatisfy { abs($0 - 2 * slope) <= 2 * slope * 0.05 },
-            "slope scale 2 on slope \(slope) moved z by \(moved.min() ?? 0)...\(moved.max() ?? 0), not \(2 * slope)")
+            "slope scale 2 on slope \(slope) moved z by \(moved.min() ?? 0)...\(moved.max() ?? 0), not \(2 * slope)"
+        )
         return result
     }
 }

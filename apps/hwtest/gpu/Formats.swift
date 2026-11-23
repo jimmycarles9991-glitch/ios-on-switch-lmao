@@ -33,7 +33,8 @@ extension TexelFormat {
     /// only; the Switch's m2v device answers for itself).
     public func supported(on device: MTLDevice, usage: MTLTextureUsage) -> Bool {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: metal, width: 8, height: 8, mipmapped: false)
+            pixelFormat: metal, width: 8, height: 8, mipmapped: false
+        )
         descriptor.usage = usage
         descriptor.storageMode = .private
         return device.makeTexture(descriptor: descriptor) != nil
@@ -59,7 +60,7 @@ public enum Patterns {
 
     public static func opaque(_ image: Raster) -> Raster {
         var out = image
-        for y in 0..<image.height { for x in 0..<image.width { out[x, y, 3] = 1 } }
+        for y in 0 ..< image.height { for x in 0 ..< image.width { out[x, y, 3] = 1 } }
         return out
     }
 
@@ -78,7 +79,7 @@ public enum Patterns {
     /// One texel's bytes `count` times over.
     public static func repeated(_ texel: [UInt8], count: Int) -> [UInt8] {
         [UInt8](unsafeUninitializedCapacity: texel.count * count) { buffer, initialized in
-            for i in 0..<(texel.count * count) { buffer[i] = texel[i % texel.count] }
+            for i in 0 ..< (texel.count * count) { buffer[i] = texel[i % texel.count] }
             initialized = texel.count * count
         }
     }
@@ -87,8 +88,8 @@ public enum Patterns {
     public static func bytes(_ raster: Raster, _ format: TexelFormat) -> [UInt8] {
         var out: [UInt8] = []
         out.reserveCapacity(raster.width * raster.height * format.bytesPerTexel)
-        for y in 0..<raster.height {
-            for x in 0..<raster.width { out += format.encode(raster.pixel(x, y)) }
+        for y in 0 ..< raster.height {
+            for x in 0 ..< raster.width { out += format.encode(raster.pixel(x, y)) }
         }
         return out
     }

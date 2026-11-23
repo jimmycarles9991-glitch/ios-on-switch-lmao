@@ -1,12 +1,8 @@
 # The Mesa build's own pieces (defs.bzl): the platform settings its BUILD files select on (the host twin builds for
 # //bazel/platforms:macos_user_arm64), and the tools its generators run (bindgen, cbindgen, rustfmt, libclang).
-load("@rules_python//python:py_binary.bzl", "py_binary")
-load("@rules_python//python:py_test.bzl", "py_test")
 load("@xcode//:defs.bzl", "IPHONEOS_SDK", "MACOSX_SDK")
 load("//bazel/lint:defs.bzl", "lint_files")
 load(":defs.bzl", "cargo_tool", "mesa_make_variables")
-load(":identity.bzl", "mesa_identity_files")
-load(":rust.bzl", "mesa_rust_release_staticlib")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -58,30 +54,4 @@ mesa_make_variables(
         ":ios": {"BINDGEN_CLANG_ARGS": "--target=arm64-apple-ios17.0 -isysroot " + IPHONEOS_SDK},
         "//conditions:default": {"BINDGEN_CLANG_ARGS": "--target=arm64-apple-macosx14.0 -isysroot " + MACOSX_SDK},
     }),
-)
-
-mesa_rust_release_staticlib(
-    name = "nvk_release_rs",
-    crate_root = "nvk_release_rs.rs",
-    deps = [
-        "//third_party/mesa/src/nouveau/compiler:nak_rs_rlib",
-        "//third_party/mesa/src/nouveau/nil:nil_rlib",
-        "//third_party/mesa/src/nouveau/vulkan:nvk_rs_rlib",
-    ],
-)
-
-mesa_identity_files()
-
-# NVK's compiler identity (identity.bzl).
-py_binary(
-    name = "compiler_identity",
-    srcs = ["compiler_identity.py"],
-)
-
-py_test(
-    name = "compiler_identity_test",
-    srcs = [
-        "compiler_identity.py",
-        "compiler_identity_test.py",
-    ],
 )

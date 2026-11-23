@@ -63,7 +63,7 @@ public enum DfllLanding {
                 if ms != "\(settledMs)" { metrics.keepInReportOnly("c\(index)_\(ms)") }
             }
             if pair.count == 2, let settled = fields["\(index).\(settledMs)"],
-                let khz = Double(settled.split(separator: ",").first ?? "")
+               let khz = Double(settled.split(separator: ",").first ?? "")
             {
                 landed[pair[1], default: []].append((khz, Reading(settled)))
             }

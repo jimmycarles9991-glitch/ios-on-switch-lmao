@@ -18,10 +18,11 @@ static inline uint8_t switch_texpeer_block(uint32_t level, uint32_t slice, uint3
     return (uint8_t)(x * 11 + y * 13 + level * 17 + slice * 19 + c * 23 + 5);
 }
 
-// Whether the peer renders `level` of a texture of MTLTextureType `type` and `levels` levels: a mipmapped 2D one's level 1
-static inline bool switch_texpeer_rendered(uint32_t type, uint32_t levels, uint32_t level)
+// Whether the peer renders `level` of a texture of MTLTextureType `type` and `levels` levels: a mipmapped 2D one's
+// level 1, unless its format is block-compressed (`blocks`), which Metal cannot render to
+static inline bool switch_texpeer_rendered(uint32_t type, uint32_t levels, uint32_t level, bool blocks)
 {
-    return type == 2 && levels > 1 && level == 1;
+    return !blocks && type == 2 && levels > 1 && level == 1;
 }
 
 // Byte `c` of texel (x, y) of the BGRA IOSurfaces the peer renders for gpu.iosurface.cross_process: every byte of a

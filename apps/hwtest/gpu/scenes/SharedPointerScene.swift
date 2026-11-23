@@ -19,7 +19,8 @@ struct SharedPointerScene: GPUScene {
         guard
             let source = gpu.device.makeBuffer(
                 bytesNoCopy: original, length: length, options: .storageModeShared,
-                deallocator: { pointer, _ in free(pointer) })
+                deallocator: { pointer, _ in free(pointer) }
+            )
         else {
             free(original)
             throw TestFailure("no-copy buffer creation failed")
@@ -30,11 +31,11 @@ struct SharedPointerScene: GPUScene {
         retained.initializeMemory(as: UInt8.self, repeating: 0x33, count: length)
         let filled = try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
-            blit.fill(buffer: source, range: 0..<length, value: 0x5a)
+            blit.fill(buffer: source, range: 0 ..< length, value: 0x5a)
             blit.endEncoding()
         }
         var wrong = 0
-        for offset in 0..<length where original.load(fromByteOffset: offset, as: UInt8.self) != 0x5a {
+        for offset in 0 ..< length where original.load(fromByteOffset: offset, as: UInt8.self) != 0x5a {
             wrong += 1
         }
         result.metrics.set("fill_wrong_bytes", wrong)
@@ -47,7 +48,7 @@ struct SharedPointerScene: GPUScene {
             blit.endEncoding()
         }
         wrong = 0
-        for offset in 0..<length {
+        for offset in 0 ..< length {
             let wanted: UInt8 = offset == 67 ? 0xc7 : 0x5a
             if retained.load(fromByteOffset: offset, as: UInt8.self) != wanted { wrong += 1 }
         }

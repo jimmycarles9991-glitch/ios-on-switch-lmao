@@ -21,7 +21,7 @@ struct GlyphAtlasScene: GPUScene {
 
     static func glyphs(count: Int) -> [Glyph] {
         var (x, y, shelf) = (1, 1, 0)
-        return (0..<count).map { index in
+        return (0 ..< count).map { index in
             let (w, h) = (3 + (index * 7) % 15, 5 + (index * 11) % 17)
             if x + w + 1 > size {
                 (x, y, shelf) = (1, y + shelf + 1, 0)
@@ -35,7 +35,8 @@ struct GlyphAtlasScene: GPUScene {
                 rect: UploadRect(x: x, y: y, width: w, height: h),
                 bytes: raster.samples.map {
                     UInt8(($0 * 255).rounded())
-                })
+                }
+            )
         }
     }
 
@@ -43,16 +44,18 @@ struct GlyphAtlasScene: GPUScene {
         var result = SceneResult()
         let glyphs = Self.glyphs(count: 160)
         let size = Self.size
-        let canReplacePrivate = RawFacade.kind(of: gpu.device) == "raw"
+        let canReplacePrivate = GM20BFacade.kind(of: gpu.device) == "gm20b"
         for format in [TexelFormat.r8Unorm, .a8Unorm] {
             let atlas = try gpu.texture(format.metal, size, size, usage: [.shaderRead])
             var model = TexelImage(format, size, size, Raster(width: size, height: size, channels: 1) { _, _, _ in 0 })
             try await gpu.blitUpload(
-                [UploadRect(x: 0, y: 0, width: size, height: size)], [model.bytes], into: atlas, texel: 1)
+                [UploadRect(x: 0, y: 0, width: size, height: size)], [model.bytes], into: atlas, texel: 1
+            )
             let pipeline = try gpu.render(
                 vertex: "textured_vertex", fragment: format == .a8Unorm ? "alpha_fragment" : "nearest_fragment",
-                format: .r8Unorm)
-            let batches = [0..<50, 50..<110, 110..<160]
+                format: .r8Unorm
+            )
+            let batches = [0 ..< 50, 50 ..< 110, 110 ..< 160]
             var snapshots: [[UInt8]] = []
             var pending: [MTLCommandBuffer] = []
             var targets: [MTLTexture] = []
@@ -81,7 +84,8 @@ struct GlyphAtlasScene: GPUScene {
             let back = try await gpu.read(atlas, bytesPerPixel: 1)
             result.compare(
                 "\(format.rawValue) atlas blit readback", bytes: back, expected: model.bytes, format: format,
-                width: size, height: size, tolerance: 1.01 / 255)
+                width: size, height: size, tolerance: 1.01 / 255
+            )
         }
         return result
     }

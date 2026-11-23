@@ -1,6 +1,6 @@
 {
   "class": "IOAcceleratorES",
-  "doc": "IOGPUFamily's accelerator base: drivers declare it from drivers/NativeMetal/OriginalAcceleratorABI.h (IOService's slots, no fields of its own); its constructor and destructor come from here.",
+  "doc": "IOGPUFamily's accelerator base: drivers declare it from drivers/TegraGM20B/OriginalAcceleratorABI.h (IOService's slots, no fields of its own); its constructor and destructor come from here.",
   "superclass": "IOService",
   "kext": "com.apple.iokit.IOGPUFamily",
   "header": false,

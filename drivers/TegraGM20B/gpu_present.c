@@ -6,6 +6,21 @@
 #define CHAN_PRESENT 1 /* the GPU present's channel */
 struct present_state tgm_present = {.lock = {NULL}};
 
+static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2, uint32_t width,
+			uint32_t height, uint64_t dst_va, uint32_t dst_pitch,
+			uint32_t block_height_log2, void (*done)(void *, int), void *arg,
+			const struct tgm_present_read *reads, u32 nreads,
+			const struct switch_gpu_backing_token *dependencies, u32 dependency_count);
+
+/* An accepted present holds the GPU's sleep gate from its acceptance to here: system sleep and the rail shut the gate
+ * and wait for it to drain (gpu_power.c sleep_gate), so every accepted present is delivered before the GPU goes down,
+ * and nothing in its life (a hidden producer's flush, a reset copy's redo) enters the gate again. */
+static void present_deliver(void (*done)(void *, int), void *arg, int status)
+{
+	switch_gpu_present_deliver(&tgm_present.completing, done, arg, status);
+	gate_leave();
+}
+
 static void present_typed_complete(void *unused)
 {
 	void (*done)(void *, int);
@@ -28,8 +43,7 @@ static void present_typed_complete(void *unused)
 #if TGM_STATS
 	tgm_copy_reset_presented(status);
 #endif
-	done(arg, status);
-	__atomic_fetch_sub(&tgm_present.completing, 1, __ATOMIC_SEQ_CST);
+	present_deliver(done, arg, status);
 }
 
 int tgm_present_outstanding(const void *arg)
@@ -74,12 +88,13 @@ static void present_watch_complete(int status, int from_pass)
 #else
 	(void)from_pass;
 #endif
-	done(arg, status);
-	__atomic_fetch_sub(&tgm_present.completing, 1, __ATOMIC_SEQ_CST);
+	present_deliver(done, arg, status);
 }
 
 /* The producer ended with its writes possibly still in the GPU L2: the fence-only present job after all, on the same
- * producer, whose fence flushes them. Its own completion delivers the present. */
+ * producer, whose fence flushes them, inside the gate the watch holds. Its own completion delivers the present. The
+ * job's every refusal is the kernel's own state gone wrong (the present channel's ring full for 1 s, its fence page
+ * unmapped), never the frame's. */
 static void present_watch_flush(void)
 {
 	struct switch_gpu_present_tokens held;
@@ -93,13 +108,12 @@ static void present_watch_flush(void)
 	__atomic_store_n(&tgm_present.typed_pending, 0, __ATOMIC_RELEASE);
 	switch_gpu_present_watch_reset(&tgm_present.watch);
 	mutex_unlock(&tgm_present.lock);
-	ret = tgm_present_copy_dependencies(0, 0, -1, 1, 1, 0, 0, 0, done, arg, held.tokens,
-					    held.count);
+	ret = present_copy(0, 0, -1, 1, 1, 0, 0, 0, done, arg, NULL, 0, held.tokens, held.count);
+	if (ret)
+		nvxnu_panic("tegra-gm20b: present: the fence-only job that puts a direct "
+			    "present's producer (uid %u fence %llu) in DRAM was refused (%d)",
+			    held.tokens[0].queue, held.tokens[0].value, ret);
 	switch_gpu_present_tokens_drop(&held);
-	if (ret) {
-		nvxnu_work_cancel(tgm_present.deadline_work);
-		done(arg, ret);
-	}
 	__atomic_fetch_sub(&tgm_present.completing, 1, __ATOMIC_SEQ_CST);
 }
 
@@ -123,7 +137,10 @@ static void present_watch_work(void *unused)
 		return;
 	}
 	status = switch_gpu_present_tokens_finish_visible(
-		&tgm_present.tokens, found == SWITCH_GPU_PRESENT_WATCH_FAILED ? -5 : 0,
+		&tgm_present.tokens,
+		found == SWITCH_GPU_PRESENT_WATCH_FAILED
+			? switch_gpu_backing_token_failure(&tgm_present.watch.token)
+			: 0,
 		switch_gpu_timeline_promote);
 	present_watch_complete(status, 0);
 }
@@ -273,7 +290,6 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	struct nvif_push *push = NULL;
 	u32 *push_start = NULL;
 	u32 words = 0;
-	struct switch_gpu_backing_transaction seal;
 	int ret = 0;
 	int cut = 0;
 
@@ -319,22 +335,11 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 		return ret;
 	}
 	push_start = push->cur;
-	if (dependency_count) {
-		memset(&seal, 0, sizeof(seal));
-		ret = switch_gpu_backing_seal(&seal);
-		if (ret) {
-			switch_gpu_present_tokens_drop(&tgm_present.tokens);
-			mutex_unlock(&tgm_present.lock);
-			return ret;
-		}
-	}
 	chan->chan.defer_kick = true;
 	ret = tgm_backing_dependencies(chan, tgm_present.tokens.tokens, dependency_count);
 	if (ret) {
 		push->cur = push_start;
 		chan->chan.defer_kick = false;
-		if (dependency_count)
-			switch_gpu_backing_abort(&seal);
 		switch_gpu_present_tokens_drop(&tgm_present.tokens);
 		mutex_unlock(&tgm_present.lock);
 		return ret;
@@ -388,8 +393,7 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	}
 	/* A copy's flush above put the frame's source in DRAM, and the copy and its read-backs write through the present's
 	 * volatile PTEs (tgm_present_map); a fence-only present is direct scanout of a surface the GPU drew through the L2. */
-	switch_gpu_chan_fence_sealed(chan, dst_va ? TGM_FENCE_VOLATILE_WRITES : 1,
-				     dependency_count ? &seal : NULL);
+	switch_gpu_chan_fence_sealed(chan, dst_va ? TGM_FENCE_VOLATILE_WRITES : 1, NULL);
 	if (!dst_va && stats_on())
 		__atomic_fetch_add(&tgm_stats.present_flushes, 1, __ATOMIC_RELAXED);
 	if (stats_on())
@@ -399,7 +403,7 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	return 0;
 }
 
-/* Refused while the gate is shut: the display copies that frame on the CPU. */
+/* Refused while the gate is shut; an accepted present keeps its entry until it is delivered (present_deliver). */
 int tgm_present_copy_dependencies(uint64_t src_va, uint64_t stride, int32_t src_block_log2,
 				  uint32_t width, uint32_t height, uint64_t dst_va,
 				  uint32_t dst_pitch, uint32_t block_height_log2,
@@ -412,7 +416,8 @@ int tgm_present_copy_dependencies(uint64_t src_va, uint64_t stride, int32_t src_
 		return -EBUSY;
 	ret = present_copy(src_va, stride, src_block_log2, width, height, dst_va, dst_pitch,
 			   block_height_log2, done, arg, NULL, 0, dependencies, dependency_count);
-	gate_leave();
+	if (ret)
+		gate_leave();
 	return ret;
 }
 #if TGM_STATS
@@ -432,14 +437,14 @@ int tgm_present_copy_read_dependencies(uint64_t src_va, uint64_t stride, int32_t
 	ret = present_copy(src_va, stride, src_block_log2, width, height, dst_va, dst_pitch,
 			   block_height_log2, done, arg, reads, nreads, dependencies,
 			   dependency_count);
-	gate_leave();
+	if (ret)
+		gate_leave();
 	return ret;
 }
 #endif
 
 /* No present job: the producer's own interrupt pass completes it (SwitchGpuPresentWatch.h). 1: not exactly one GM20B
- * producer or writer promise still to wait for, so the caller queues the fence-only job; otherwise as
- * tgm_present_copy_dependencies. */
+ * producer or writer promise, so the caller queues the fence-only job; otherwise as tgm_present_copy_dependencies. */
 int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 				   const struct switch_gpu_backing_token *dependencies,
 				   uint32_t dependency_count)
@@ -447,8 +452,7 @@ int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 	struct switch_gpu_backing_token kept = {0};
 	int ret = 0;
 
-	if (!switch_gpu_present_watchable(dependencies, dependency_count) ||
-	    switch_gpu_backing_token_status(&dependencies[0]) < 0)
+	if (!switch_gpu_present_watchable(dependencies, dependency_count))
 		return 1;
 	if (!tgm_present.chan || tgm_present.chan->error || !tgm_present.watch_work)
 		return -ENODEV;
@@ -476,8 +480,9 @@ int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 		__atomic_store_n(&tgm_present.typed_pending, 1, __ATOMIC_RELEASE);
 		tgm_present.recheck = TGM_PRESENT_NS;
 		if (tgm_present.tokens.tokens[0].engine == SWITCH_GPU_ENGINE_PROMISE) {
-			/* no deadline until the job that keeps it is submitted (tgm_present_promise_kept): the give-up is the
-			 * promise's */
+			/* no deadline until the job that keeps it is submitted (tgm_present_promise_kept): until then the promise is
+			 * its maker's to release, by that keep, its withdraw (a held command buffer fails at Metal's bound), a
+			 * cancel or its close */
 			switch_gpu_path_promise_direct(SWITCH_GPU_PATH_DIRECT_PROMISED);
 			switch_gpu_present_watch_promise(&tgm_present.watch,
 							 &tgm_present.tokens.tokens[0]);
@@ -496,7 +501,8 @@ int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 		}
 	}
 	mutex_unlock(&tgm_present.lock);
-	gate_leave();
+	if (ret)
+		gate_leave();
 	/* After the arm and before the last look: a producer's job may end quiet, and then only an interrupt asked for it
 	 * runs the pass that completes the watch (SwitchGpuQuiet.h). The caller's tokens, not the watch's, which the pass
 	 * may already have dropped. */

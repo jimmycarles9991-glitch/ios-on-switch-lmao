@@ -223,8 +223,9 @@ static inline void high_fenced(struct tgm_chan *chan, u32 from, u32 done)
 
 /* From the present channel's completion in the interrupt pass's scan: a present whose fence passed is done. The pass's end
  * (tgm_present_pass) learns its frame, once every channel the scan completes has added its GPU time, and its completion
- * work item reads its producers' result and calls back. completing covers the claim to the callback's return, so
- * tgm_present_outstanding never answers 0 for a present whose completion is not delivered yet. */
+ * work item reads its producers' result and calls back. completing covers the claim up to the callback
+ * (switch_gpu_present_deliver) and the display's snapshot the rest, so tegra_gm20b_scanout_outstanding never answers 0
+ * for a present whose completion is not delivered yet. */
 static inline void present_fenced(struct tgm_chan *chan)
 {
 	u32 pending = __atomic_load_n(&tgm_present.pending, __ATOMIC_ACQUIRE);

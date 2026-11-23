@@ -260,7 +260,8 @@ TEST_F(DisplayPeriod, TheKicksMaskShadowFollowsEveryWriter)
 }
 
 // Each cause the filter takes reaches the action once; two frame ends before it are one status and one fold, a stale
-// V_BLANK the gate drops is not taken, and nothing the filter counts is lost to the action's read.
+// V_BLANK the gate drops is not taken, and nothing the filter counts is lost to the action's read. DC A's other
+// causes (V_PULSE2, INT_STATUS bit 5) are none of its: it neither takes nor clears them.
 TEST_F(DisplayPeriod, TheFiltersCountsReachTheActionOnce)
 {
     d.stats = true;
@@ -272,12 +273,14 @@ TEST_F(DisplayPeriod, TheFiltersCountsReachTheActionOnce)
     const uint32_t folded = d.stFeFolded;
     EXPECT_EQ(d.takeFrameEndStatus(), Display::kFrameEndInt);
     EXPECT_EQ(d.stFeFolded, folded + 1);
-    EXPECT_FALSE(d.frameEndPending(Display::kFrameEndInt | Display::kVblankInt | Display::kVpulse2Int));
+    EXPECT_FALSE(d.frameEndPending(Display::kFrameEndInt | Display::kVblankInt));
     EXPECT_EQ(d.takeFrameEndStatus(), 0u);
-    d.model.general[DcModel::kIntStatus] |= Display::kVpulse2Int;
+    constexpr uint32_t kVpulse2 = 1u << 5;
+    d.model.general[DcModel::kIntStatus] |= kVpulse2;
     d.frameEndInterrupt(false);
-    EXPECT_EQ(d.takeFrameEndStatus(), Display::kFrameEndInt | Display::kVpulse2Int);
-    EXPECT_EQ(d.vblankSource.signals, d.feTaken + d.vpulseTaken - 1u) << "one signal per filter run";
+    EXPECT_EQ(d.takeFrameEndStatus(), Display::kFrameEndInt);
+    EXPECT_EQ(d.model.general[DcModel::kIntStatus] & kVpulse2, kVpulse2) << "left as DC A raised it";
+    EXPECT_EQ(d.vblankSource.signals, d.feTaken) << "one signal per filter run";
 }
 
 // A written flip's pass waits for the frame end, which runs it before it reads the latch: the swap retires at that

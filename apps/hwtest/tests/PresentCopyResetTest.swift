@@ -71,13 +71,14 @@ struct PresentCopyResetTest: HWTest {
                 ("the cut frame was copied again on the GPU", redone >= 1),
                 ("the display flipped it: status 0, no CPU copy", state == Self.done && status == 0),
                 ("the next frame was copied whole", nextWhole),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// Nudges a frame every 100 ms until the armed present is done or missed, for up to 3 s.
     static func settle(_ gpu: GPUConnection, _ nudge: @escaping @MainActor () -> Void) async -> [UInt8] {
         var reply: [UInt8] = []
-        for _ in 0..<30 {
+        for _ in 0 ..< 30 {
             await MainActor.run { nudge() }
             try? await Task.sleep(nanoseconds: 100_000_000)
             let (kr, answer) = call(gpu, query)

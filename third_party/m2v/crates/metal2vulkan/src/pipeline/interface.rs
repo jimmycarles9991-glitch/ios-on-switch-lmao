@@ -284,8 +284,8 @@ pub struct StageInterface {
     /// a buffer or a texture, or updates one atomically (`spirv::requirements::writes_memory`).
     /// Metal runs a multisampled fragment function with such a side effect once per covered
     /// sample. The `ExecutionStatus` buffer's words, which the resident-miss count updates, are not
-    /// the function's, nor a color's interlocked storage form's or `half` shadow's, which carry
-    /// Metal's color attachment write.
+    /// the function's, nor a color's interlocked storage form's, which carry Metal's color
+    /// attachment write.
     #[cfg_attr(feature = "serde", serde(default))]
     pub writes_memory: bool,
     /// A mesh function compiled for a device without `VK_EXT_mesh_shader`: the module is a

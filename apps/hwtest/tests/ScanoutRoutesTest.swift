@@ -32,6 +32,7 @@ struct ScanoutRoutesTest: HWTest {
             [
                 ("no frame copied on the CPU since boot (cpu 0)", values["cpu"] == 0),
                 ("no frame left unshown since boot (unshown 0)", values["unshown"] == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 }

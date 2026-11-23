@@ -102,7 +102,7 @@ int tgm_chan_killed(struct nvif_event *event, void *repv, u32 repc)
 		WRITE_ONCE(chan->fault_va, tgm_fault_va(report, (int)chan->chid));
 	WRITE_ONCE(chan->error, fault_code(report));
 	first = tgm_kill_first(chan->faulted, chan->fault_seqno, READ_ONCE(*chan->fence_cpu));
-	switch_gpu_timeline_failed(chan->timeline, first - 1);
+	switch_gpu_timeline_failed(chan->timeline, first - 1, chan->critical);
 	tgm_fence_kill_record(chan->fence_cpu, first, chan->submitted, chan->error);
 	__atomic_store_n(chan->fence_cpu, chan->submitted, __ATOMIC_RELEASE);
 	__asm__ volatile("dsb sy" ::: "memory");
@@ -344,35 +344,20 @@ static int chan_moving(struct tgm_chan *chan, u64 now)
 
 /* A wait on `late` (the present's or the scrubber's channel when its own work is late) ran out with no GPU error
  * reported. The channel to blame (TegraGM20BRecover.h tgm_hang_blame) is the first stuck one of what the engines and
- * PBDMAs are on (a context switch that does not finish blames the context nvkm's own recovery would), the channel of its
- * task `late` still waits on (tgm_chan_order), and `late`. A client's is killed as a faulting client's is, a kernel
- * channel's engines are reset (tgm_kernel_hang_locked), and the waits it held up go on. tgm_live_lock held. */
+ * PBDMAs are on (a context switch that does not finish blames the context nvkm's own recovery would), the channel
+ * `late` still waits on, and `late`. A client's is killed as a faulting client's is, a kernel channel's engines are
+ * reset (tgm_kernel_hang_locked), and the waits it held up go on. tgm_live_lock held. */
 #if TGM_STATS
-/* tgm_live_lock held: the blamed channel's own order wait and the late one's progress, as a line of its
- * own (TegraGM20BHangDecode.h tgm_hang_detail) */
+/* tgm_live_lock held: the blamed channel's and the late one's progress, as a line of its own
+ * (TegraGM20BHangDecode.h tgm_hang_detail) */
 static void hang_detail(struct tgm_chan *blame, struct tgm_chan *late, u64 now)
 {
-	const struct tgm_order *w = &blame->waited;
 	struct tgm_hang_detail d = {0};
-	struct tgm_chan *source = NULL;
 	const volatile u32 *bind = NULL;
 	char line[TGM_HANG_LINE];
 
 	d.chid = blame->chid;
 	d.stalled_ms = (now - chan_progress_ns(blame, now)) / 1000000;
-	if (w->cpu && (s32)(READ_ONCE(*w->cpu) - w->seqno) < 0) {
-		d.waits = 1;
-		d.wait_chid = w->chid;
-		d.wait_seqno = w->seqno;
-		d.wait_at = READ_ONCE(*w->cpu);
-		source = live_by(w->id, 0);
-	}
-	if (source) {
-		d.source_live = 1;
-		d.source_done = tgm_chan_completed(source);
-		d.source_submitted = READ_ONCE(source->submitted);
-		d.source_ms = (now - chan_progress_ns(source, now)) / 1000000;
-	}
 	d.late_chid = late->chid;
 	d.late_done = tgm_chan_completed(late);
 	d.late_submitted = READ_ONCE(late->submitted);

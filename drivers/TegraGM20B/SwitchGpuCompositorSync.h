@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Debug kernels: the compositor's sync pushes (TGM_PC_SYNC: waits, cache invalidates, host flushes) in its profiled
- * submissions. Its first push is the raw path's submission prologue (a start stamp and cache invalidates, no acquire), whose
+ * submissions. Its first push is the driver's submission prologue (a start stamp and cache invalidates, no acquire), whose
  * first graphics method waits for GR: when an app held GR at the kick (tgm_sched_kicked), until the app's context leaves at
  * its next wait for idle. So the prologue's time splits into kicks that found GR free and kicks behind an app, which is the
  * app's preemption latency, not the compositor's work. Plain C for the host test (test/gm20b_compositor_sync_test.cpp). */

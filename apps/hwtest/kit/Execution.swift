@@ -40,7 +40,8 @@ extension Suite {
     nonisolated static func record(_ test: any HWTest, _ outcome: Outcome, _ milliseconds: Double) -> TestRecord {
         TestRecord(
             id: test.id, subsystem: test.subsystem.rawValue, name: test.name, interactive: test.interactive,
-            outcome: outcome, milliseconds: milliseconds, finished: Date())
+            outcome: outcome, milliseconds: milliseconds, finished: Date()
+        )
     }
 
     /// A hung test cannot be stopped from outside, so the suite stops waiting for it instead: the FAIL names the

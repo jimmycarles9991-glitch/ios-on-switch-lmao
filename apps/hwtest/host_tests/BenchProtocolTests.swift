@@ -16,15 +16,15 @@ final class BenchProtocolTests: XCTestCase {
     func testAPackExperimentDecodesAndItsResultCarriesItsFrontiers() throws {
         let block = Data(repeating: 7, count: 64).base64EncodedString()
         let json = """
-            {"protocol": "\(BenchProtocol.version)", "batch": "pack", "experiments": [
-              {"id": "iscd", "kind": "pack", "template": "618b45175101cd20", "readback": "full",
-               "target": {"format": "rgba16float", "width": 256, "height": 256},
-               "pack": {"form": "split_whole", "ca": true, "quads": [
-                 {"rect": [0, 0, 128, 256], "ubos": [{"stage": 2, "slot": 1, "offset": 80, "data": "\(block)"}]},
-                 {"rect": [128, 0, 256, 256]}]}},
-              {"id": "nokey", "kind": "pack", "target": {"format": "rgba16float", "width": 16, "height": 16},
-               "pack": {"form": "split", "quads": [{"rect": [0, 0, 16, 16]}]}}]}
-            """
+        {"protocol": "\(BenchProtocol.version)", "batch": "pack", "experiments": [
+          {"id": "iscd", "kind": "pack", "template": "618b45175101cd20", "readback": "full",
+           "target": {"format": "rgba16float", "width": 256, "height": 256},
+           "pack": {"form": "split_whole", "ca": true, "quads": [
+             {"rect": [0, 0, 128, 256], "ubos": [{"stage": 2, "slot": 1, "offset": 80, "data": "\(block)"}]},
+             {"rect": [128, 0, 256, 256]}]}},
+          {"id": "nokey", "kind": "pack", "target": {"format": "rgba16float", "width": 16, "height": 16},
+           "pack": {"form": "split", "quads": [{"rect": [0, 0, 16, 16]}]}}]}
+        """
         let batch = try BenchBatch.decode(Data(json.utf8))
         guard case .experiment(let e) = batch.entries[0] else { return XCTFail("\(batch.entries[0])") }
         XCTAssertEqual(e.kind, .pack)
@@ -62,11 +62,11 @@ final class BenchProtocolTests: XCTestCase {
             XCTAssertEqual(e.templateKey, 0x618b_4517_5101_cd20)
             XCTAssertEqual(e.formatRaw, 115)
             let quad = try XCTUnwrap(e.pack?.quads.first)
-            XCTAssertEqual(quad.vertices, Data((0..<64).map { UInt8(255 - $0) }))
+            XCTAssertEqual(quad.vertices, Data((0 ..< 64).map { UInt8(255 - $0) }))
             XCTAssertEqual([quad.primitive, quad.first, quad.count], [4, 0, 4])
             let block = try XCTUnwrap(quad.blocks.first)
             XCTAssertEqual([block.stage, block.slot, block.offset], [2, 1, 80])
-            XCTAssertEqual(block.data, Data(0..<64))
+            XCTAssertEqual(block.data, Data(0 ..< 64))
             XCTAssertEqual(quad.blocks.last?.data, Data(repeating: 0x3c, count: 64))
         }
     }

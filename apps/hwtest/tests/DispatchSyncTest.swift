@@ -19,7 +19,7 @@ final class SyncHierarchy: @unchecked Sendable {
     init(silos count: Int) {
         let shared = DispatchQueue(label: "com.brunostjohn.switch.hwtest.cohort", qos: .userInitiated)
         self.shared = shared
-        silos = (0..<count).map { DispatchQueue(label: "com.brunostjohn.switch.hwtest.silo\($0)", target: shared) }
+        silos = (0 ..< count).map { DispatchQueue(label: "com.brunostjohn.switch.hwtest.silo\($0)", target: shared) }
     }
 
     func block(sync: Bool, spinMicroseconds: Double = 0) {
@@ -81,17 +81,18 @@ struct DispatchSyncTest: HWTest {
                 ("every sync block ran exactly once (\(wantSyncs))", syncs == wantSyncs),
                 ("every async block ran exactly once (\(wantAsyncs))", asyncs == wantAsyncs),
                 ("no two blocks of the serial hierarchy ran at once (overlaps 0)", overlaps == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// One generation: `threads` new threads, each syncing onto its own silo; whether they all finished.
     static func generation(_ hierarchy: SyncHierarchy) -> Bool {
         let group = DispatchGroup()
-        for index in 0..<threads {
+        for index in 0 ..< threads {
             group.enter()
             let thread = Thread {
                 let silo = hierarchy.silos[index]
-                for step in 1...iterations {
+                for step in 1 ... iterations {
                     silo.sync { hierarchy.block(sync: true) }
                     if step % asyncEvery == 0 {
                         hierarchy.shared.async { hierarchy.block(sync: false, spinMicroseconds: 20) }

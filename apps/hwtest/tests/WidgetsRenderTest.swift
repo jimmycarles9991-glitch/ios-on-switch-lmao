@@ -9,10 +9,11 @@ import Metal
 /// TVWidgetExtension was jetsammed at 30 MB half a second after its first draw).
 /// - WidgetKit's archiver sizes its image limit for a 2x screen: the limit's helper reads no -scale
 ///   (switch_ui_scale_sites_24B119.h). At the display's 1.25 it refused GameCenter's 310 x 310 artwork.
-/// - A widget's draw, a 305 x 305 target cleared and drawn once, runs on raw, and a chunk the raw device makes for it
+/// - A widget's draw, a 305 x 305 target cleared and drawn once, runs on raw, and a chunk the device makes for it
 ///   is no larger than what the device already held, its first size (a sixteenth of the render server's 4 MiB) or the
-///   target (raw_gpu.cpp chunkSize). A fixed 4 MiB chunk breaks that while the app holds less; once it holds 4 MiB the
+///   target (gpu.cpp chunkSize). A fixed 4 MiB chunk breaks that while the app holds less; once it holds 4 MiB the
 ///   bound holds either way, so the boot's jetsam lines for widget extensions remain the check of what they hold.
+/// headers_left= the app's raw device's texture headers not held (of 8191) once every GPU test before this one has run.
 struct WidgetsRenderTest: HWTest {
     let id = "system.widgets_render"
     let name = "Widgets archive 2x images and draw on raw in proportion"
@@ -28,7 +29,8 @@ struct WidgetsRenderTest: HWTest {
         var failures: [String] = []
         // the site is 24B119's; 21H461's WidgetKit is not patched
         let twentySeven = ProcessInfo.processInfo.isOperatingSystemAtLeast(
-            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0))
+            OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+        )
         if twentySeven, let limit = Self.archiveImageLimit() {
             metrics.set("limit_stock", limit.stock)
             metrics.set("limit_2x", limit.patched)
@@ -43,7 +45,7 @@ struct WidgetsRenderTest: HWTest {
 
         let gpu = try GPU.make()
         let pipeline = try gpu.render(fragment: "solid_fragment", format: .bgra8Unorm)
-        let held = RawFacade.memory(of: gpu.device)
+        let held = GM20BFacade.memory(of: gpu.device)
         let before = Self.footprint()
         let target = try gpu.texture(.bgra8Unorm, Self.side, Self.side)
         let timing = try await gpu.run { commands in
@@ -55,17 +57,20 @@ struct WidgetsRenderTest: HWTest {
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(pipeline)
             GPU.draw(
-                encoder, corners: GPU.quad(x0: -0.5, y0: -0.5, x1: 0.5, y1: 0.5, z: 0), color: SIMD4(1, 0.5, 0, 1))
+                encoder, corners: GPU.quad(x0: -0.5, y0: -0.5, x1: 0.5, y1: 0.5, z: 0), color: SIMD4(1, 0.5, 0, 1)
+            )
             encoder.endEncoding()
         }
         let grown = Self.footprint() &- before
-        metrics.set("dev", RawFacade.kind(of: gpu.device))
+        metrics.set("dev", GM20BFacade.kind(of: gpu.device))
         metrics.set("path", timing.path)
         metrics.set("grown_kb", Int(Int64(bitPattern: grown) >> 10))
-        if RawFacade.kind(of: gpu.device) == "raw" && timing.path != "raw" {
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" && timing.path != "gm20b" {
             failures.append("the widget's draw went \(timing.path)")
         }
-        if let pool = held["pool"], let now = RawFacade.memory(of: gpu.device)["pool"] {
+        let memory = GM20BFacade.memory(of: gpu.device)
+        if let left = memory["headers_left"] { metrics.set("headers_left", left) }
+        if let pool = held["pool"], let now = memory["pool"] {
             let bound = max(Self.firstChunk, pool, Self.targetBound)
             metrics.set("pool_kb", now >> 10)
             metrics.set("pool_grown_kb", (now - pool) >> 10)
@@ -99,10 +104,10 @@ struct WidgetsRenderTest: HWTest {
     /// WidgetKit is not loaded or holds no such helper.
     static func archiveImageLimit() -> (stock: Int, patched: Int)? {
         guard dlopen("/System/Library/Frameworks/WidgetKit.framework/WidgetKit", RTLD_NOW) != nil else { return nil }
-        for image in 0..<_dyld_image_count() {
+        for image in 0 ..< _dyld_image_count() {
             guard let name = _dyld_get_image_name(image),
-                String(cString: name).hasSuffix("/WidgetKit.framework/WidgetKit"),
-                let header = _dyld_get_image_header(image)
+                  String(cString: name).hasSuffix("/WidgetKit.framework/WidgetKit"),
+                  let header = _dyld_get_image_header(image)
             else { continue }
             var size: UInt = 0
             let text = header.withMemoryRebound(to: mach_header_64.self, capacity: 1) {
@@ -110,7 +115,8 @@ struct WidgetsRenderTest: HWTest {
             }
             guard let text else { return nil }
             let words = UnsafeBufferPointer(
-                start: UnsafeRawPointer(text).assumingMemoryBound(to: UInt32.self), count: Int(size) / 4)
+                start: UnsafeRawPointer(text).assumingMemoryBound(to: UInt32.self), count: Int(size) / 4
+            )
             let found = count(words)
             return found.stock + found.patched > 0 ? found : nil
         }
@@ -123,8 +129,8 @@ struct WidgetsRenderTest: HWTest {
         var stock = 0
         var patched = 0
         guard w.count > 8 else { return (0, 0) }
-        for i in 1..<(w.count - 6)
-        where w[i] == 0x4ea0_1c0a && w[i + 1] == 0x4ea1_1c2b && w[i + 2] == 0xaa14_03e0 && w[i + 4] == 0x1e60_094a
+        for i in 1 ..< (w.count - 6)
+            where w[i] == 0x4ea0_1c0a && w[i + 1] == 0x4ea1_1c2b && w[i + 2] == 0xaa14_03e0 && w[i + 4] == 0x1e60_094a
             && w[i + 5] == 0xaa14_03e0 && isBl(w[i - 1])
         {
             if isBl(w[i + 3]) && isBl(w[i + 6]) {

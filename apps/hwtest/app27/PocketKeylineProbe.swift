@@ -122,7 +122,8 @@ enum PocketKeylineProbe {
         let dark = view.traitCollection.userInterfaceStyle == .dark
         let layers = Layers(
             keyline: keyline, pocket: pocket, container: container, fill: rgba(keyline.backgroundColor),
-            wants: wants(dark: dark))
+            wants: wants(dark: dark)
+        )
         metrics.set("keyline", fill(keyline.backgroundColor))
         metrics.set("keyline_want", text(layers.wants[0]) + "/SRGB")
         metrics.set("keyline_verdict", KeylineClaim.fillVerdict(layers.fill, wants: layers.wants))

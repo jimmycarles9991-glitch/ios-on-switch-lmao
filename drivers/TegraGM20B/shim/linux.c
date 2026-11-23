@@ -9,6 +9,7 @@
 #include <core/device.h>
 
 #include "../TegraGM20BComp.h"
+#include "../SwitchGpuChannelEpoch.h"
 
 struct task_struct nvxnu_task = {0, "kernel"};
 struct tegra_sku_info tegra_sku_info;
@@ -683,6 +684,8 @@ static long pool_take(unsigned long n, unsigned long align, int ready_only, unsi
 		pool_used += n;
 	}
 	spin_unlock(&pool_lock);
+	if (start < 0 && !ready_only)
+		switch_gpu_channel_pool_refused();
 	return start < 0 ? -ENOMEM : start;
 }
 
@@ -699,6 +702,7 @@ static void pool_free(unsigned long first, unsigned long n)
 	switch_gpu_pool_remember(&pool_extents, first, n, 0);
 	pool_used -= n;
 	spin_unlock(&pool_lock);
+	switch_gpu_channel_pool_given_back();
 }
 
 unsigned long nvxnu_pool_used_pages(void)
@@ -921,6 +925,7 @@ void nvxnu_pool_free_zeroed(unsigned long long pa, unsigned long size)
 	pool_clean_free += n;
 	pool_used -= n;
 	spin_unlock(&pool_lock);
+	switch_gpu_channel_pool_given_back();
 }
 
 /* A range a scrub claimed but cannot vouch for goes back dirty, to be claimed and zeroed again. */

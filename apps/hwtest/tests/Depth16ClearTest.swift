@@ -4,12 +4,12 @@ import HWTestGPU
 import Metal
 
 /// Depth16Unorm clears: Metal stores code floor(f x 65535) of the clear depth as a float f, the product exact (an M4 Max,
-/// macOS 27.2: 3,880 clears swept, 0.25 -> 0x3fff where rounding to nearest gives 0x4000). The raw path hands the chip
+/// macOS 27.2: 3,880 clears swept, 0.25 -> 0x3fff where rounding to nearest gives 0x4000). The driver hands the chip
 /// the code's value plus a quarter code, so its clears land on Metal's code whatever the chip's float-to-unorm rounding;
-/// a sweep of codes and of values between codes is read back by a blit, on the raw path.
+/// a sweep of codes and of values between codes is read back by a blit, on the driver.
 struct Depth16ClearTest: HWTest {
-    let id = "gpu.raw.depth16_clear"
-    let name = "Depth16Unorm clears store Metal's code, on the raw path"
+    let id = "gpu.gm20b.depth16_clear"
+    let name = "Depth16Unorm clears store Metal's code, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 120 }
 
@@ -19,8 +19,8 @@ struct Depth16ClearTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         var clears: [Double] = [0.25, 0.5, 0.75, 1.0, 0, 0.0014801251239795529, 0.0029602502479591057]
         for c in stride(from: 1, to: 65535, by: 4093) {
             for frac in [0.0, 0.25, 0.5, 0.75] { clears.append((Double(c) + frac) / 65535) }
@@ -40,7 +40,8 @@ struct Depth16ClearTest: HWTest {
                 b.copy(
                     from: depth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 1, y: 1, z: 0),
                     sourceSize: MTLSize(width: 1, height: 1, depth: 1), to: out, destinationOffset: 2 * i,
-                    destinationBytesPerRow: 2, destinationBytesPerImage: 2)
+                    destinationBytesPerRow: 2, destinationBytesPerImage: 2
+                )
                 b.endEncoding()
             }
             paths.insert(timing.path)
@@ -62,7 +63,7 @@ struct Depth16ClearTest: HWTest {
         metrics.set("wrong_down", down)
         metrics.set("first_wrong", wrong.isEmpty ? "-" : wrong.joined(separator: ","))
         var failures: [String] = []
-        if paths != ["raw"] { failures.append("a clear went off the raw path") }
+        if paths != ["gm20b"] { failures.append("a clear went off the driver") }
         if up + down != 0 { failures.append("\(up + down) of \(clears.count) clears not Metal's code") }
         return failures.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics)
     }

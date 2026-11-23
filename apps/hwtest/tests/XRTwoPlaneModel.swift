@@ -1,6 +1,6 @@
 import Foundation
 
-/// gpu.raw.xr_two_plane's CPU model of RGB10A8_2P_XR10 texels (the alpha byte above the code word, raw_xr.h): Metal's
+/// gpu.gm20b.xr_two_plane's CPU model of RGB10A8_2P_XR10 texels (the alpha byte above the code word, xr.h): Metal's
 /// values of their codes, source-over blending of premultiplied colours stored back as codes after each draw (the
 /// storage and barrier forms fetch the stored codes), and bilinear samples.
 enum XRTwoPlaneModel {
@@ -10,7 +10,7 @@ enum XRTwoPlaneModel {
         return SIMD4(channel(20), channel(10), channel(0), Double(t >> 32 & 0xff) / 255)
     }
 
-    /// raw_xr.h writeCode of each channel, as XRTwoPlaneTest.code but without rounding through a Float
+    /// xr.h writeCode of each channel, as XRTwoPlaneTest.code but without rounding through a Float
     static func texel(_ v: SIMD4<Double>) -> UInt64 {
         let code = { (value: Double) -> UInt64 in
             let k = Int((min(abs(value), 1.5) * 510).rounded(.toNearestOrEven))
@@ -54,7 +54,7 @@ enum XRTwoPlaneModel {
     /// texel, its four channels' values, with sub-texel weights of `weight`: Metal's 1/3, or the 8-bit fraction a
     /// texture unit computes
     static func bilinear(_ texels: [UInt64], width: Int, height: Int, weight: Double) -> [SIMD4<Double>] {
-        (0..<(width * height)).map { i in
+        (0 ..< (width * height)).map { i in
             let (x, y) = (i % width, i / width)
             let (x1, y1) = (min(x + 1, width - 1), min(y + 1, height - 1))
             let top = values(texels[y * width + x]) * (1 - weight) + values(texels[y * width + x1]) * weight
@@ -69,7 +69,7 @@ enum XRTwoPlaneModel {
         var apart = 0
         for (pixel, t) in texels.enumerated() {
             let v = values(t)
-            for c in 0..<4 where halves[pixel * 4 + c] != Float16(v[c]).bitPattern { apart += 1 }
+            for c in 0 ..< 4 where halves[pixel * 4 + c] != Float16(v[c]).bitPattern { apart += 1 }
         }
         return apart
     }
@@ -82,7 +82,7 @@ enum XRTwoPlaneModel {
         let order = { (h: UInt16) in h & 0x8000 != 0 ? -Int(h & 0x7fff) : Int(h) }
         var apart = 0, steps = 0
         for pixel in exact.indices {
-            for c in 0..<4 {
+            for c in 0 ..< 4 {
                 let a = order(Float16(exact[pixel][c]).bitPattern)
                 let b = order(Float16(fixed[pixel][c]).bitPattern)
                 let got = order(halves[pixel * 4 + c])

@@ -3,13 +3,13 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The raw facade's event jobs (drivers/TegraGM20BMetal/raw/runtime/RawMetalEventJobs.mm, debug runtimes): jobs of no
+/// The facade's event jobs (drivers/TegraGM20BMetal/TegraGM20BMetalEventJobs.mm, debug runtimes): jobs of no
 /// work it made, by what they carried, and the signals whose value the CPU set after the work before them.
 enum EventJobs {
     static func read(_ device: MTLDevice) -> [String: Int] {
-        let selector = NSSelectorFromString("switchRawEvents")
+        let selector = NSSelectorFromString("switchMetalEvents")
         guard let device = device as? NSObject, device.responds(to: selector),
-            let answer = device.perform(selector)?.takeUnretainedValue() as? [String: NSNumber]
+              let answer = device.perform(selector)?.takeUnretainedValue() as? [String: NSNumber]
         else { return [:] }
         return answer.mapValues(\.intValue)
     }
@@ -29,7 +29,7 @@ final class HandlerValue<T>: @unchecked Sendable {
 }
 
 /// Events: every event the device makes is a kernel event, plain ones too. A command buffer of a signal alone and a
-/// signal after an indirect dispatch each go to the GPU in a job of no work, on the raw path; a listener on an event made from the first's
+/// signal after an indirect dispatch each go to the GPU in a job of no work, on the driver; a listener on an event made from the first's
 /// handle hears its GPU signal; a plain event orders another queue's copy after a fill; a command buffer that ends in a
 /// wait completes (where its producer stood then is logged, the two completions being unordered). No signal's value is
 /// set by the CPU.
@@ -64,7 +64,7 @@ struct NativeSharedEventTest: NativeObjectTest {
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
         guard let plain = device.makeEvent(), let shared = device.makeSharedEvent(),
-            let other = device.makeCommandQueue()
+              let other = device.makeCommandQueue()
         else { throw TestFailure("no event or second queue") }
         guard let alias = device.makeSharedEvent(handle: shared.makeSharedEventHandle()) else {
             throw TestFailure("no event from the shared event's handle")
@@ -83,16 +83,16 @@ struct NativeSharedEventTest: NativeObjectTest {
         let heard = DispatchSemaphore(value: 0)
         let reached = HandlerValue<UInt64>(0)
         alias.notify(MTLSharedEventListener(dispatchQueue: DispatchQueue(label: "hwtest.native.listener")), atValue: 2)
-        {
-            _, value in
-            reached.value = value
-            heard.signal()
-        }
+            {
+                _, value in
+                reached.value = value
+                heard.signal()
+            }
         let length = 1 << 16
         let source = try gpu.buffer(length), target = try gpu.buffer(length)
         let filled = try await gpu.run { commands in
             let fill = commands.makeBlitCommandEncoder()!
-            fill.fill(buffer: source, range: 0..<length, value: 0x3c)
+            fill.fill(buffer: source, range: 0 ..< length, value: 0x3c)
             fill.endEncoding()
             commands.encodeSignalEvent(shared, value: 2)
         }
@@ -111,14 +111,14 @@ struct NativeSharedEventTest: NativeObjectTest {
         let copied = Self.completion(of: waiter)
         waiter.commit()
         let fill = producer.makeBlitCommandEncoder()!
-        fill.fill(buffer: source, range: 0..<length, value: 0x5a)
+        fill.fill(buffer: source, range: 0 ..< length, value: 0x5a)
         fill.endEncoding()
         producer.encodeSignalEvent(plain, value: 1)
         producer.commit()
         if !(await Self.waited(copied, seconds: 5)) {
             work.failures.append("the copy waiting on a plain event never ran")
         }
-        work.paths += [RawFacade.path(of: waiter), RawFacade.path(of: producer)]
+        work.paths += [GM20BFacade.path(of: waiter), GM20BFacade.path(of: producer)]
         let wrong = UnsafeRawBufferPointer(start: target.contents(), count: length).filter { $0 != 0x5a }.count
         metrics.set("wrong_bytes", wrong)
         if wrong != 0 { work.failures.append("\(wrong) copied bytes miss the fill the event signalled") }
@@ -133,14 +133,14 @@ struct NativeSharedEventTest: NativeObjectTest {
         let tailDone = Self.completion(of: tail)
         tail.commit()
         let lateFill = late.makeBlitCommandEncoder()!
-        lateFill.fill(buffer: target, range: 0..<length, value: 0x11)
+        lateFill.fill(buffer: target, range: 0 ..< length, value: 0x11)
         lateFill.endEncoding()
         late.encodeSignalEvent(shared, value: 3)
         late.commit()
         if !(await Self.waited(tailDone, seconds: 5)) {
             work.failures.append("a command buffer ending in a wait never completed")
         }
-        work.paths += [RawFacade.path(of: tail), RawFacade.path(of: late)]
+        work.paths += [GM20BFacade.path(of: tail), GM20BFacade.path(of: late)]
         metrics.set("producer_at_waiter", Int(lateAtTail.value.rawValue))
 
         let kernel = try gpu.compute("fma_loop")
@@ -155,7 +155,8 @@ struct NativeSharedEventTest: NativeObjectTest {
             encoder.setBytes(&iterations, length: 4, index: 1)
             encoder.dispatchThreadgroups(
                 indirectBuffer: arguments, indirectBufferOffset: 0,
-                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+            )
             encoder.endEncoding()
             commands.encodeSignalEvent(shared, value: 4)
         }

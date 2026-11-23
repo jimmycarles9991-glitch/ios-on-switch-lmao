@@ -25,7 +25,6 @@ enum {
 	SWITCH_GPU_BACKING_CPU_NO_CACHE = 1u << 4,
 	SWITCH_GPU_BACKING_CPU_CONCURRENT = 1u << 5,
 	SWITCH_GPU_BACKING_CPU_PRESERVE_DIRTY = 1u << 6,
-	SWITCH_GPU_BACKING_UNLISTED = 1u << 7,
 	SWITCH_GPU_BACKING_NO_CPU_EXCLUSION = 1u << 8,
 	/* a display read lease taken behind writer promises: no admission waits for it (SwitchGpuWriterPromise.h) */
 	SWITCH_GPU_BACKING_PROMISED = 1u << 9,
@@ -183,8 +182,35 @@ int switch_gpu_backing_cpu_track(struct switch_gpu_backing *backing);
 
 enum {
 	SWITCH_GPU_BACKING_STALE = -116,
-	SWITCH_GPU_BACKING_DEPENDENCY_FAILED = -125
+	SWITCH_GPU_BACKING_DEPENDENCY_FAILED = -125,
+	/* Why a backing does not hold the frame its writer was to leave, the numbers of TegraScanoutCopy.h's
+	 * TEGRA_SCANOUT_SOURCE_*. GONE: the writer's client ended it (its channel torn down, an app's channel killed, a
+	 * shared event its job waited on failed, an engine job cancelled). FAILED: accepted work failed on the GPU (a
+	 * compositor channel killed, an engine's own failure). REFUSED: the write was never accepted (its submission
+	 * refused, its writer promise given up). */
+	SWITCH_GPU_BACKING_WRITER_GONE = -3,
+	SWITCH_GPU_BACKING_WRITER_FAILED = -5,
+	SWITCH_GPU_BACKING_WRITE_REFUSED = -8,
 };
+
+/* An engine that can tell why a token of its failed registers this once: one of the three above, else 0. A host1x
+ * engine keeps why with the job's result, decided where its physical result fails: an input's why
+ * (switch_gpu_backing_tokens_failure over its producers), else its own failure (WRITER_FAILED); a cancelled job GONE. */
+typedef int (*switch_gpu_backing_failure)(const struct switch_gpu_backing_token *);
+int switch_gpu_backing_register_failure(uint32_t engine, switch_gpu_backing_failure failure);
+/* Why a token whose status or physical status is negative failed: WRITER_GONE, WRITER_FAILED or WRITE_REFUSED, as its
+ * engine answers. An engine with no answer: GONE for DEPENDENCY_FAILED (cancelled), else FAILED. Thread context, any
+ * backing's section. */
+int switch_gpu_backing_token_failure(const struct switch_gpu_backing_token *token);
+/* The first of the tokens that failed (its status or physical status negative), as switch_gpu_backing_token_failure
+ * answers; 0 when none did. An engine whose job failed for one of its inputs answers that input's why from this. */
+int switch_gpu_backing_tokens_failure(const struct switch_gpu_backing_token *tokens,
+				      uint32_t count);
+/* A write that will never come (a submission's final refusal, a given-up writer promise's cancel): the backing does not
+ * hold the frame its client asked for until its next write (switch_gpu_backing_snapshot_read refuses it
+ * WRITE_REFUSED). writes_refused marks the WRITE uses of a refused submission. Thread context, no backing's lock held. */
+void switch_gpu_backing_write_refused(struct switch_gpu_backing *backing);
+void switch_gpu_backing_writes_refused(const struct switch_gpu_backing_use *uses, uint32_t count);
 
 /* The caller retains the generation word through commit/abort. Its owner changes it only under the logical
  * backing's full CPU WRITE lease, including invalidation when replacing a descriptor's attachment. */
@@ -216,9 +242,10 @@ struct switch_gpu_backing_transaction {
 };
 
 /* begin sorts/merges the caller's use array and claims its backings in allocation order: their locks, held across
- * dependency encoding, the kick and publication. An ordered begin (begin_held, begin_ordered) holds the ownership order
+ * dependency encoding, the kick and publication. An ordered begin (begin_held) holds the ownership order
  * instead, and its uses' locks only while one of them is claimed or CPU-dirty. A GPU job publishes after private
- * validation and finishes after GP_PUT, keeping the ownership order between them. Every success must end with commit
+ * validation and finishes once its channel's submitted seqno names it, before GP_PUT, keeping the ownership order between
+ * them. Every success must end with commit
  * or publish/finish, and every refusal with abort. No
  * token can be lost at commit.
  * The transaction keeps the caller's array, not a copy: commit and abort find the backings to record and unlock in it,
@@ -226,10 +253,8 @@ struct switch_gpu_backing_transaction {
  * debug kernels refuse it with one line). A begin that fails leaves the transaction empty, and commit and abort of an
  * empty transaction do nothing.
  * Failed work fails no later use: its records retire as completed ones do, and what a failed writer wrote is undefined
- * (logged once). Nothing here, in dependencies, or in a CPU acquire, wait or snapshot returns its errno.
- * An UNLISTED use is one the engine cannot vouch for (a legacy submission's private BOs and unlisted imports): CPU
- * access and the kernel's other engines still order after the job, as after a writer when WRITE is set, but no GM20B
- * job waits for it, it waits for nothing and CPU owners never refuse it.
+ * (logged once). Nothing here, in dependencies, or in a CPU acquire or wait returns its errno; a snapshot or export of
+ * what it wrote is refused with why (switch_gpu_backing_token_failure).
  * NO_CPU_EXCLUSION: CPU owners holding the backing now do not refuse the use (a GM20B user submission: no submission
  * ABI refuses for a CPU lock). An owner ordered itself after earlier work when it acquired; this job orders the next
  * acquire. While a CPU writer holds the backing every begin cleans what it wrote so far, and its release the rest. */
@@ -264,14 +289,6 @@ int switch_gpu_backing_begin_held(struct switch_gpu_backing_use *uses, uint32_t 
 				  uint32_t guard_count,
 				  const struct switch_gpu_backing_token *completion,
 				  struct switch_gpu_backing_transaction *transaction);
-/* begin_conversion_checked, any lease count, ordered, taking its own references on the uses */
-int switch_gpu_backing_begin_ordered(struct switch_gpu_backing_use *uses, uint32_t count,
-				     struct switch_gpu_cpu_lease *const *leases,
-				     uint32_t lease_count,
-				     const struct switch_gpu_backing_guard *guards,
-				     uint32_t guard_count,
-				     const struct switch_gpu_backing_token *completion,
-				     struct switch_gpu_backing_transaction *transaction);
 int switch_gpu_backing_dependencies(const struct switch_gpu_backing_transaction *transaction,
 				    struct switch_gpu_backing_token *out, uint32_t capacity,
 				    uint32_t *needed);
@@ -279,7 +296,7 @@ int switch_gpu_backing_dependencies(const struct switch_gpu_backing_transaction 
  * connection's own) as tokens after the *needed already in `out`, read under the locks the transaction holds on their
  * backings: *needed grows by them, -28 past capacity. The reader acquires them on the GPU, so its reads read what the
  * promised writes leave, and commit records them so: the promised job does not wait for them, which wait for it. */
-/* A writer promise was given up on (SwitchGpuWriterPromise.h): CPU threads asleep behind one go on. Thread context, no
+/* A writer promise was given up on (SwitchGpuWriterPromise.h): CPU threads asleep behind one wake. Thread context, no
  * backing's lock held. */
 void switch_gpu_backing_promise_sleepers_wake(void);
 int switch_gpu_backing_promise_dependencies(struct switch_gpu_backing_transaction *transaction,
@@ -320,7 +337,9 @@ int switch_gpu_backing_export_read(struct switch_gpu_backing *backing,
 				   struct switch_gpu_cpu_lease **lease);
 /* A retained immutable physical view; a zero producer means current CPU-authored bytes, cleaned for engines. A surface
  * with writer promises pending (SwitchGpuWriterPromise.h) is snapshotted at once, behind a lease no admission of the
- * promised job waits for: the reader orders behind the promises on the GPU or does not show the frame from the CPU. */
+ * promised job waits for: the reader orders behind the promises on the GPU or does not show the frame from the CPU.
+ * With none pending, a surface whose current writer failed, whose last write was refused or whose promise was given up
+ * is refused with why (WRITER_GONE, WRITER_FAILED, WRITE_REFUSED), and so is an export of it. */
 int switch_gpu_backing_snapshot_read(struct switch_gpu_backing *backing,
 				     struct switch_gpu_backing_token *producer,
 				     struct switch_gpu_cpu_lease **lease);
@@ -331,6 +350,20 @@ int switch_gpu_backing_snapshot_read_promises(struct switch_gpu_backing *backing
 					      struct switch_gpu_cpu_lease **lease,
 					      struct switch_gpu_backing_token *promises,
 					      uint32_t capacity);
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+/* Debug kernels: the surface as a snapshot lease's snapshot found it. content is the generation its reader sees: its
+ * newest recorded write's (an engine job's or a CPU lease's), or past the `promised` writer promises still pending, as
+ * a read ordered behind them sees it; writer the current writer it took (zero: none, the CPU's bytes). */
+struct switch_gpu_scanout_look {
+	uint64_t allocation, content;
+	struct switch_gpu_backing_token writer;
+	uint32_t surface;
+	int promised;
+};
+
+void switch_gpu_cpu_lease_look(const struct switch_gpu_cpu_lease *lease,
+			       struct switch_gpu_scanout_look *look);
+#endif
 /* Writer promises (SwitchGpuWriterPromise.h): the engine registered once; a surface's ref to one added (-28: it has
  * SWITCH_GPU_BACKING_PROMISES pending) or dropped by the word's fence-pool offset; the tokens of the ones pending but
  * the asking connection's own (fence-pool offsets [own_first, own_end)), the count or -28; and how many are pending. */

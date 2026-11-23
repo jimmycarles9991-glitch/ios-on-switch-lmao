@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// The 2D solid fill against the methods of x1-units' reference fill (raw_probe_ops.h, defb0dac0) and xf86-video-nouveau's
+// The 2D solid fill against the methods of x1-units' reference fill (probe_ops.h, defb0dac0) and xf86-video-nouveau's
 // EXA fill: the destination's own format and one packed word, SRCCOPY, clip at the surface.
 #include <cstdint>
 #include <vector>

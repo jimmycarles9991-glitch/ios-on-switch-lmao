@@ -8,6 +8,11 @@
 #define SWITCH_MMIO_HOST_MODEL        1
 #define SWITCH_DCACHE_OP(op, address) ((void)(address))
 #define SWITCH_DCACHE_BARRIER()       ((void)0)
+#include "../../../kits/SwitchMMIO/SwitchMMIO.h"
+
+// The host model's publishing write is a plain store, so the drivers' publishing writes are counted here instead.
+void switch_test_publish(volatile uint8_t *base, uint32_t offset, uint32_t value);
+#define switch_mmio_write32_publish switch_test_publish
 #include "../TegraHost1x.cpp"
 #include "../SwitchHost1xChannels.cpp"
 
@@ -20,7 +25,9 @@ uint32_t gAllocated;
 std::vector<std::array<uint32_t, TEGRA_HOST1X_CHANNELS>> gDemands;  // every channel's DMAPUT at each demand
 std::vector<switch_host1x_fence *> gFencesAdded;
 std::vector<std::pair<uint32_t, uint32_t>> gRegisterWrites;
-bool gCpuIncrements;
+bool gCpuIncrements, gPublishing;
+uint32_t gStuckSyncpt;                   // a syncpoint whose CPU increments do not take
+std::vector<uint32_t> gPlainIncrements;  // CPU increments written without ordering the stores before them
 uint32_t gDisplayTeardowns;
 uint32_t gFailedProducer;
 int gProducerPhysical;
@@ -72,12 +79,22 @@ extern "C" void switch_mmio_model_write32(uintptr_t address, uint32_t bits)
     gRegisterWrites.emplace_back(offset, bits);
     if (offset == kSyncOffset + SYNC_CH_TEARDOWN && (bits & (1u << TEGRA_HOST1X_CHANNEL_DISPLAY)))
         ++gDisplayTeardowns;
-    if (gCpuIncrements && offset >= kSyncOffset + 0xf60 && offset < kSyncOffset + 0xf78) {
+    const bool increment = offset >= kSyncOffset + 0xf60 && offset < kSyncOffset + 0xf78;
+    if (increment && !gPublishing)
+        gPlainIncrements.push_back(bits);
+    if (gCpuIncrements && increment) {
         const uint32_t first = (offset - kSyncOffset - 0xf60) / 4 * 32;
         for (uint32_t bit = 0; bit < 32; ++bit)
-            if (bits & (1u << bit))
+            if ((bits & (1u << bit)) && first + bit != gStuckSyncpt)
                 ++syncpoint(first + bit);
     }
+}
+
+void switch_test_publish(volatile uint8_t *base, uint32_t offset, uint32_t value)
+{
+    gPublishing = true;
+    switch_mmio_write32(base, offset, value);
+    gPublishing = false;
 }
 
 extern "C" int switch_gpu_backing_token_status(const switch_gpu_backing_token *)
@@ -243,7 +260,9 @@ struct Host1xSubmit : testing::Test {
         gFencesAdded.clear();
         gRegisterWrites.clear();
         gDisplayStream = nullptr;
-        gCpuIncrements = false;
+        gCpuIncrements = gPublishing = false;
+        gStuckSyncpt = 0;
+        gPlainIncrements.clear();
         gDisplayTeardowns = 0;
         gFailedProducer = 0;
         gProducerPhysical = 0;
@@ -585,7 +604,6 @@ TEST_F(Host1xSubmit, DisplayStreamWaitsThenWritesAndCompletesOnlyOnItsOwnSyncpoi
     stream.fence.signaled(&stream.fence, 0);
     EXPECT_EQ(done.calls, 1u);
     EXPECT_EQ(done.status, 0);
-    EXPECT_FALSE(stream.queued);
     EXPECT_EQ(gDisplayStream, nullptr);
 }
 
@@ -628,7 +646,7 @@ TEST_F(Host1xSubmit, AFailedProducerTearsDownTheControllerStreamBeforeEitherSync
     EXPECT_EQ(
         switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
         -5);
-    EXPECT_FALSE(stream.queued);
+    EXPECT_EQ(gDisplayStream, nullptr);
 }
 
 namespace {
@@ -669,7 +687,7 @@ void alternatingFailures(bool vicFirst)
     stream.fence.signaled(&stream.fence, 0);
     EXPECT_EQ(done.calls, 1u);
     EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
-    EXPECT_FALSE(stream.queued);
+    EXPECT_EQ(gDisplayStream, nullptr);
 }
 }  // namespace
 
@@ -703,7 +721,7 @@ TEST_F(Host1xSubmit, AnUnrelatedFailedProducerCannotCancelTheControllerStream)
     ASSERT_EQ(tegra_host1x_syncpt_release_failed(gFailedProducer, 1, 1), 0);
     EXPECT_EQ(gDisplayTeardowns, 0u);
     EXPECT_EQ(stream.status, 0);
-    EXPECT_TRUE(stream.queued);
+    EXPECT_EQ(gDisplayStream, &stream);
     EXPECT_EQ(done.calls, 0u);
     syncpoint(producer) = 1;
     execution.run();
@@ -734,15 +752,91 @@ TEST_F(Host1xSubmit, AWithdrawnStreamOwnsItsFenceUntilTheCallbackDrains)
     stream.fence.signaled(&stream.fence, 0);
     EXPECT_EQ(done.calls, 1u);
     EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
-    const uint32_t generation = stream.generation;
     ASSERT_EQ(
         switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
         0);
-    EXPECT_EQ(stream.generation, generation + 1);
     syncpoint(stream.syncpt) = stream.fence.threshold;
     stream.fence.signaled(&stream.fence, 0);
     EXPECT_EQ(done.calls, 2u);
     EXPECT_EQ(done.status, 0);
+}
+
+// A filter waiter on another CPU that sees a released syncpoint move reads the failure stored before it, so every CPU
+// increment of a release, the display stream's and the producer's, orders those stores first.
+TEST_F(Host1xSubmit, EveryCpuReleaseIncrementIsAPublishingWrite)
+{
+    SwitchHost1xDisplayStream stream;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&gFailedProducer), 0);
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const uint32_t from = syncpoint(gFailedProducer);
+    const switch_gpu_backing_token token = {from + 1, 1, SWITCH_GPU_ENGINE_VIC, gFailedProducer};
+    const uint32_t word = 0xdc0, address = 0x20000000;
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    gCpuIncrements = true;
+    ASSERT_EQ(tegra_host1x_syncpt_release_failed(gFailedProducer, from + 2, 2), 0);
+    EXPECT_EQ(syncpoint(stream.syncpt), stream.fence.threshold);
+    EXPECT_EQ(syncpoint(gFailedProducer), from + 2);
+    EXPECT_TRUE(gPlainIncrements.empty());
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
+}
+
+// A CPU increment that does not take is a hardware fact, whichever syncpoint it was: one line naming it, never a
+// cancelled display stream that leaves the failed producer's waiters stuck behind an error code.
+TEST_F(Host1xSubmit, ACpuIncrementThatDoesNotTakePanics)
+{
+    SwitchHost1xDisplayStream stream;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&gFailedProducer), 0);
+    ASSERT_EQ(switch_host1x_display_start(&stream), 0);
+    const uint32_t from = syncpoint(gFailedProducer);
+    const switch_gpu_backing_token token = {from + 1, 1, SWITCH_GPU_ENGINE_NVDEC, gFailedProducer};
+    const uint32_t word = 0xdc0, address = 0x20000000;
+    DisplayCompletion done;
+    ASSERT_EQ(
+        switch_host1x_display_submit(&stream, &token, 1, &word, &address, 1, 0x500, 5, DisplayCompletion::heard, &done),
+        0);
+    gCpuIncrements = true;
+    gStuckSyncpt = stream.syncpt;
+    EXPECT_THROW(tegra_host1x_syncpt_release_failed(gFailedProducer, from + 1, 1), std::runtime_error);
+    IOLockUnlock(gSubmitLock);
+    stream.fence.signaled(&stream.fence, 0);
+    EXPECT_EQ(done.status, SwitchHost1xDisplayStream::kCancelled);
+
+    gStuckSyncpt = gFailedProducer;
+    EXPECT_THROW(tegra_host1x_syncpt_release_failed(gFailedProducer, from + 1, 1), std::runtime_error);
+    IOLockUnlock(gSubmitLock);
+}
+
+// The cancelled jobs' failure is propagated once, from the value the stopped engine reached, however many increments
+// the CPU then makes.
+TEST_F(Host1xSubmit, ReleaseThroughPropagatesTheFailureOnceForAllItsIncrements)
+{
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&gFailedProducer), 0);
+    gProducerPhysical = -5;
+    gCpuIncrements = true;
+    const uint32_t from = syncpoint(gFailedProducer);
+    ASSERT_EQ(tegra_host1x_syncpt_release_through(gFailedProducer, from + 5), 0);
+    EXPECT_EQ(syncpoint(gFailedProducer), from + 5);
+    EXPECT_EQ(gFailurePasses, 1u);
+    EXPECT_TRUE(gPlainIncrements.empty());
+}
+
+TEST_F(Host1xSubmit, AReleaseOfASyncpointNotHandedOutOrFartherThanAskedIsRefusedBeforeAnyScan)
+{
+    uint32_t id = 0;
+    ASSERT_EQ(tegra_host1x_syncpt_alloc(&id), 0);
+    gCpuIncrements = true;
+    const uint32_t from = syncpoint(id);
+    EXPECT_EQ(tegra_host1x_syncpt_release_failed(9, 2, 2), TEGRA_HOST1X_EINVAL) << "the boot chain's";
+    EXPECT_EQ(tegra_host1x_syncpt_release_failed(id + 1, 2, 2), TEGRA_HOST1X_EINVAL) << "not handed out yet";
+    EXPECT_EQ(tegra_host1x_syncpt_release_failed(id, from + 3, 2), TEGRA_HOST1X_EINVAL);
+    EXPECT_EQ(tegra_host1x_syncpt_release_failed(id, from, 2), TEGRA_HOST1X_OK);
+    EXPECT_EQ(gFailurePasses, 0u);
+    EXPECT_EQ(syncpoint(id), from);
+    EXPECT_EQ(gDisplayTeardowns, 0u);
 }
 
 }  // namespace

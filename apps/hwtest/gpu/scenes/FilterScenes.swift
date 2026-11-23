@@ -19,7 +19,8 @@ struct MipmapScene: GPUScene {
         for (format, size) in formats {
             let levels = Int(log2(Double(size))) + 1
             let texture = try gpu.texture(
-                format.metal, size, size, usage: [.shaderRead, .renderTarget], mipmaps: levels)
+                format.metal, size, size, usage: [.shaderRead, .renderTarget], mipmaps: levels
+            )
             let bytes = Patterns.bytes(Patterns.busy(width: size, height: size, channels: format.channels), format)
             let base = format.raster(bytes, width: size, height: size)
             try await gpu.blitUpload(
@@ -32,11 +33,12 @@ struct MipmapScene: GPUScene {
             }
             paths.append("\(format.rawValue):\(generated.path)")
             var reference = base
-            for level in 1..<levels {
+            for level in 1 ..< levels {
                 reference = Self.halved(reference, format)
                 let got = try await gpu.raster(texture, format, level: level)
                 result.compare(
-                    "\(format.rawValue) \(size) level \(level)", got, reference, tolerance: 2.01 * format.step())
+                    "\(format.rawValue) \(size) level \(level)", got, reference, tolerance: 2.01 * format.step()
+                )
             }
         }
         let (width, height) = (100, 60)
@@ -44,22 +46,24 @@ struct MipmapScene: GPUScene {
         let color: [Float] = [0.2, 0.4, 0.6, 1]
         try await gpu.blitUpload(
             [UploadRect(x: 0, y: 0, width: width, height: height)],
-            [Patterns.repeated(TexelFormat.rgba8Unorm.encode(color), count: width * height)], into: odd, texel: 4)
+            [Patterns.repeated(TexelFormat.rgba8Unorm.encode(color), count: width * height)], into: odd, texel: 4
+        )
         try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.generateMipmaps(for: odd)
             blit.endEncoding()
         }
-        for level in 1..<7 {
+        for level in 1 ..< 7 {
             let got = try await gpu.raster(odd, .rgba8Unorm, level: level)
             let want = Raster(width: got.width, height: got.height, channels: 4) { _, _, c in color[c] }
             result.compare(
-                "rgba8Unorm 100x60 level \(level)", got, TexelFormat.rgba8Unorm.quantized(want), tolerance: 1.01 / 255)
+                "rgba8Unorm 100x60 level \(level)", got, TexelFormat.rgba8Unorm.quantized(want), tolerance: 1.01 / 255
+            )
         }
         result.metrics.set("paths", paths.joined(separator: ","))
-        if RawFacade.kind(of: gpu.device) == "raw" {
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
             let off = paths.filter { !$0.hasSuffix(":raw") }
-            result.expect(off.isEmpty, "generateMipmaps off the raw path: \(off.joined(separator: ","))")
+            result.expect(off.isEmpty, "generateMipmaps off the driver: \(off.joined(separator: ","))")
         }
         return result
     }

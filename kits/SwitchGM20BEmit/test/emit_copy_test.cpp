@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // switch_gm20b_copy_rect against the copy emitters the drivers had before they moved onto the kit, for the same copies:
-// word for word against the raw path's (raw_copy.h's emitCopy, kept here as handCopy), with every remap form raw uses,
+// word for word against the driver's (raw_copy.h's emitCopy, kept here as handCopy), with every remap form raw uses,
 // and method for method against the kernel's hand-encoded row and relayout copies, whose launch took two words where
-// the immediate form takes one. raw's emitCopy (raw_kit.h) is then the kit's, word for word.
+// the immediate form takes one. raw's emitCopy (kit.h) is then the kit's, word for word.
 #include <cstdint>
 #include <vector>
 
@@ -10,7 +10,7 @@
 
 #include "drivers/TegraGM20B/TegraGM20BCopyPush.h"
 #include "drivers/TegraGM20B/TegraGM20BLayout.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_kit.h"
+#include "drivers/TegraGM20BMetal/kit.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BEmitCopy.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BPushDecode.h"
 #include "push_words.h"
@@ -41,9 +41,9 @@ Side tiled(uint64_t va, uint32_t rowTexels, uint32_t height, uint32_t depth, uin
 }
 
 // raw's sideOf: a block-linear side's pitch is its row stride
-raw::CopySurface rawSide(const Side &s, uint32_t bpp)
+gm20b::CopySurface gm20bSide(const Side &s, uint32_t bpp)
 {
-    raw::CopySurface c;
+    gm20b::CopySurface c;
     c.va = s.va;
     c.pitch = s.tiled ? s.rowTexels * bpp : s.pitch;
     c.blockLinear = s.tiled;
@@ -75,28 +75,29 @@ switch_gm20b_copy_surface kitSide(const Side &s, uint32_t bpp)
     return c;
 }
 
-// raw_copy.h's emitCopy, the raw path's copy before the kit's; a block-linear side's width is its row stride in texels
-void handCopy(raw::Push &p, const raw::CopySurface &source, uint32_t sourceWidth, const raw::CopySurface &destination,
-              uint32_t destinationWidth, uint32_t width, uint32_t height, uint32_t remap, bool ordered)
+// raw_copy.h's emitCopy, the driver's copy before the kit's; a block-linear side's width is its row stride in texels
+void handCopy(gm20b::Push &p, const gm20b::CopySurface &source, uint32_t sourceWidth,
+              const gm20b::CopySurface &destination, uint32_t destinationWidth, uint32_t width, uint32_t height,
+              uint32_t remap, bool ordered)
 {
-    p.m(0x0708, remap, raw::SUBC_COPY);
+    p.m(0x0708, remap, gm20b::SUBC_COPY);
     p.inc(0x0400,
           {uint32_t(source.va >> 32), uint32_t(source.va), uint32_t(destination.va >> 32), uint32_t(destination.va),
            source.pitch, destination.pitch, width, height},
-          raw::SUBC_COPY);
+          gm20b::SUBC_COPY);
     uint32_t launch = (ordered ? 2u : 1u) | 1u << 2 | 1u << 9 | 1u << 10;
-    const auto surface = [&](const raw::CopySurface &s, uint32_t sideWidth, uint32_t method, uint32_t pitchBit) {
+    const auto surface = [&](const gm20b::CopySurface &s, uint32_t sideWidth, uint32_t method, uint32_t pitchBit) {
         if (s.blockLinear)
             p.inc(method,
                   {uint32_t(s.blockHeight) << 4 | uint32_t(s.blockDepth) << 8 | 1u << 12, sideWidth, s.height, s.depth,
                    s.layer, s.y << 16 | s.x},
-                  raw::SUBC_COPY);
+                  gm20b::SUBC_COPY);
         else
             launch |= pitchBit;
     };
     surface(source, sourceWidth, 0x0728, 1u << 7);
     surface(destination, destinationWidth, 0x070c, 1u << 8);
-    p.m(0x0300, launch, raw::SUBC_COPY);
+    p.m(0x0300, launch, gm20b::SUBC_COPY);
 }
 
 constexpr uint32_t remapOf(uint32_t x, uint32_t y, uint32_t z, uint32_t w, uint32_t size, uint32_t src, uint32_t dst)
@@ -157,16 +158,16 @@ TEST(EmitCopy, WordForWordTheRawPathsCopy)
                                          : NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_PIPELINED);
         ours.resize(nv_push_dw_count(&p));
 
-        raw::Push r{theirs.data(), theirs.data() + theirs.size()};
-        handCopy(r, rawSide(c.src, c.bpp), c.src.rowTexels, rawSide(c.dst, c.bpp), c.dst.rowTexels, c.width, c.height,
-                 raw::copyTexelRemap(c.bpp), c.ordered);
+        gm20b::Push r{theirs.data(), theirs.data() + theirs.size()};
+        handCopy(r, gm20bSide(c.src, c.bpp), c.src.rowTexels, gm20bSide(c.dst, c.bpp), c.dst.rowTexels, c.width,
+                 c.height, gm20b::copyTexelRemap(c.bpp), c.ordered);
         theirs.resize(size_t(r.at - theirs.data()));
 
         EXPECT_EQ(Words(ours), Words(theirs)) << c.name;
     }
 }
 
-// Every remap the raw path copies with (raw_gpu.cpp copyBufferTexels, raw_shader_tests.h): texels of size x count bytes
+// Every remap the driver copies with (gpu.cpp copyBufferTexels, shader_tests.h): texels of size x count bytes
 // on each side, components NO_WRITE (6) or moved between sides of different component counts
 struct RemapCase {
     const char *name;
@@ -187,16 +188,16 @@ const RemapCase kRemaps[] = {
     {"XR color word in, alpha word kept", 6u << 4 | 3u << 16 | 1u << 24, false},
 };
 
-TEST(EmitCopy, RawCopiesAreTheHandEncodedOnes)
+TEST(EmitCopy, GM20BCopiesAreTheHandEncodedOnes)
 {
     std::vector<Case> cases(std::begin(kCases), std::end(kCases));
     for (const Case &c : cases)
         for (const bool ordered : {false, true}) {
             std::vector<uint32_t> ours(SWITCH_GM20B_COPY_RECT_WORDS(1)), theirs(64);
-            raw::Push o{ours.data(), ours.data() + ours.size()}, t{theirs.data(), theirs.data() + theirs.size()};
-            const uint32_t remap = raw::copyTexelRemap(c.bpp);
-            raw::emitCopy(o, rawSide(c.src, c.bpp), rawSide(c.dst, c.bpp), c.width, c.height, remap, ordered);
-            handCopy(t, rawSide(c.src, c.bpp), c.src.rowTexels, rawSide(c.dst, c.bpp), c.dst.rowTexels, c.width,
+            gm20b::Push o{ours.data(), ours.data() + ours.size()}, t{theirs.data(), theirs.data() + theirs.size()};
+            const uint32_t remap = gm20b::copyTexelRemap(c.bpp);
+            gm20b::emitCopy(o, gm20bSide(c.src, c.bpp), gm20bSide(c.dst, c.bpp), c.width, c.height, remap, ordered);
+            handCopy(t, gm20bSide(c.src, c.bpp), c.src.rowTexels, gm20bSide(c.dst, c.bpp), c.dst.rowTexels, c.width,
                      c.height, remap, ordered);
             ours.resize(size_t(o.at - ours.data()));
             theirs.resize(size_t(t.at - theirs.data()));
@@ -208,9 +209,10 @@ TEST(EmitCopy, RawCopiesAreTheHandEncodedOnes)
         const Side block = tiled(0x3400000000, 96, 40, 1, 2, 4, 8, 3, 0), rows = pitch(0x5000040, 4096);
         const Side &src = c.tiledSource ? block : rows, &dst = c.tiledSource ? rows : block;
         std::vector<uint32_t> ours(SWITCH_GM20B_COPY_RECT_WORDS(1)), theirs(64);
-        raw::Push o{ours.data(), ours.data() + ours.size()}, t{theirs.data(), theirs.data() + theirs.size()};
-        raw::emitCopy(o, rawSide(src, srcBpp), rawSide(dst, dstBpp), 33, 17, c.remap, false);
-        handCopy(t, rawSide(src, srcBpp), src.rowTexels, rawSide(dst, dstBpp), dst.rowTexels, 33, 17, c.remap, false);
+        gm20b::Push o{ours.data(), ours.data() + ours.size()}, t{theirs.data(), theirs.data() + theirs.size()};
+        gm20b::emitCopy(o, gm20bSide(src, srcBpp), gm20bSide(dst, dstBpp), 33, 17, c.remap, false);
+        handCopy(t, gm20bSide(src, srcBpp), src.rowTexels, gm20bSide(dst, dstBpp), dst.rowTexels, 33, 17, c.remap,
+                 false);
         ours.resize(size_t(o.at - ours.data()));
         theirs.resize(size_t(t.at - theirs.data()));
         EXPECT_EQ(Words(ours), Words(theirs)) << c.name;

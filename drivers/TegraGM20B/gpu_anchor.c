@@ -34,13 +34,6 @@ static struct TegraGM20BAbiClockAnchors *page_anchors(u32 page)
 						    TegraGM20BClockAnchorOffset);
 }
 
-/* anchors_lock held: anchor n of the table into `to`, then its count */
-static void mirror(struct TegraGM20BAbiClockAnchors *to, u32 n)
-{
-	*tgm_clock_anchor_slot(to, n) = *tgm_clock_anchor_slot(&anchors, n);
-	__atomic_store_n(&to->published, n + 1, __ATOMIC_RELEASE);
-}
-
 /* Right after a power-up's timer init (and its reseed), before any channel runs: every GPU time of the power-up is at or
  * above this anchor */
 void tgm_clock_anchor_publish(struct nvkm_device *device)
@@ -54,7 +47,7 @@ void tgm_clock_anchor_publish(struct nvkm_device *device)
 	*tgm_clock_anchor_slot(&anchors, n) = a;
 	anchors.published = n + 1;
 	for (page = 0; tgm_fence_pages.va && page < TGM_FENCE_USER_PAGES; page++)
-		mirror(page_anchors(page), n);
+		tgm_clock_anchor_mirror(page_anchors(page), &anchors, n);
 	mutex_unlock(&anchors_lock);
 }
 
@@ -69,6 +62,6 @@ void tgm_clock_anchors_fill(u32 page)
 			 ? anchors.published - TegraGM20BClockAnchorSlots
 			 : 0;
 	     n < anchors.published; n++)
-		mirror(to, n);
+		tgm_clock_anchor_mirror(to, &anchors, n);
 	mutex_unlock(&anchors_lock);
 }

@@ -71,7 +71,8 @@ public enum GlassSidebarVerdict {
                 if let first = phase.black.first { metrics.set(phase.name + "_first", Int(first)) }
                 if !phase.black.isEmpty {
                     reasons.append(
-                        "\(phase.name): \(phase.black.count) of \(phase.frames) frames show the \(subject) black")
+                        "\(phase.name): \(phase.black.count) of \(phase.frames) frames show the \(subject) black"
+                    )
                 }
             }
             guard probe, index + 1 < reads.count else { continue }
@@ -80,7 +81,8 @@ public enum GlassSidebarVerdict {
             if rise.faults { reasons.append("\(phase.name): glass-mem \(rise.text)") }
             if !phase.moving, let after = pools(after: index, phases, reads).first {
                 metrics.set(
-                    phase.name + "_pool", GlassPool(word: reads[index].pool).text + ">" + GlassPool(word: after).text)
+                    phase.name + "_pool", GlassPool(word: reads[index].pool).text + ">" + GlassPool(word: after).text
+                )
             }
         }
         if partial > 0 { reasons.append("\(partial) frames show the \(subject) partly black") }

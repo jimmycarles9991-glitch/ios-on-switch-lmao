@@ -482,11 +482,11 @@ struct Display : OSObject {
     std::vector<uint64_t> retired;
     // DC A's frame end (SwitchFrameEndDisplay.h) as NativeLegacyDisplay keeps it: INT_MASK, the filter's hand-off, its
     // dev counters, the colour unit the filter runs.
-    static constexpr uint32_t kDcIntMask = 0x038, kVblankInt = 1u << 2, kFrameEndInt = 1u << 1, kVpulse2Int = 1u << 5;
+    static constexpr uint32_t kDcIntMask = 0x038, kVblankInt = 1u << 2, kFrameEndInt = 1u << 1;
     IOSimpleLock *intMaskLock = IOSimpleLockAlloc();
     bool intMaskLive = true, scanoutStopped = false, scanoutQuiescing = false, tapeAttached = false, vsyncArmed = false;
     uint32_t stFeFolded = 0, stVblanks = 0, stVsyncFolded = 0, fePeriodN = 0;
-    uint64_t vblankTime = 0, vblankContinuous = 0, vpulseTime = 0, vpulseContinuous = 0, scanoutStopFrames = 0;
+    uint64_t vblankTime = 0, vblankContinuous = 0, scanoutStopFrames = 0;
     uint64_t tapeFrames = 0, feLast = 0, vsyncInterval = 0, fePeriodSum = 0, fePeriodMin = UINT64_MAX, fePeriodMax = 0;
     TegraDisplayColor *color = nullptr;
     IOFilterInterruptEventSource vblankSource;
@@ -498,7 +498,7 @@ struct Display : OSObject {
     IOTimerEventSource *flipTimer = &flipTimerStore, *gpuDeadline = &gpuDeadlineStore;
     IOWorkLoop loop;
     bool settleArmed = false, planeHeldSet = false;
-    unsigned gpuDeadlines = 0, donePasses = 0;
+    unsigned donePasses = 0;
     uint64_t gpuDoneAt = 0, gpuSequence = 0;
 
     IOWorkLoop *getWorkLoop()
@@ -565,7 +565,7 @@ struct Display : OSObject {
         completionFlip = {};
         completionFlipOwner = nullptr;
         frameEndUnmasked = false;
-        intMaskTakes = feTaken = vblankTaken = vpulseTaken = feHandled = vblankHandled = vpulseHandled = 0;
+        intMaskTakes = feTaken = vblankTaken = feHandled = vblankHandled = 0;
         flipDeadlineArmed = offerAged = false;
         flipDeadlineFrames = gpuOfferDeadline = 0;
         completionPassFolds = kickWaiting = false;

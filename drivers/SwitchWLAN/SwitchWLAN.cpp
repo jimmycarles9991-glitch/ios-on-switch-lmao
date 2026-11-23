@@ -74,6 +74,19 @@ constexpr uint32_t kStatsQuietMs = 60000, kStatsTrickleFrames = 100;
 #endif
 constexpr uint32_t kRetryFirstMs = 2000, kRetryMaxMs = 60000;
 
+// The scan table's clock. 24B119 turns a network's age into a timestamp on the clock that counts sleep
+// (SwitchWLANScan.h), so a network seen before a sleep has to age through it.
+uint64_t scanNowNs()
+{
+#ifdef SWITCH_IPSW_KIND_24B119
+    uint64_t ns = 0;
+    absolutetime_to_nanoseconds(mach_continuous_time(), &ns);
+    return ns;
+#else
+    return swlan::nowNs();
+#endif
+}
+
 // Firmware commands (brcmfmac fwil_types.h / nxk wl.rs).
 constexpr uint32_t WLC_GET_VERSION = 1, WLC_UP = 2, WLC_DOWN = 3, WLC_GET_RATE = 12, WLC_SET_INFRA = 20, WLC_SCAN = 50;
 constexpr uint32_t WLC_DISASSOC = 52, WLC_GET_PM = 85;
@@ -769,7 +782,7 @@ void SwitchWLAN::onFrame(void *context, const uint8_t *frame, size_t length, uin
 void SwitchWLAN::escanResult(const swlan::Event &event)
 {
     const uint8_t *data = event.data;
-    const uint64_t now = swlan::nowNs();
+    const uint64_t now = scanNowNs();
     if (event.length >= 10 && abortedSync_ && abortedSync_ != scanSync_ && swlan::le16(data + 8) == abortedSync_)
         return;
     if (event.length >= 12) {
@@ -1366,7 +1379,7 @@ bool SwitchWLAN::readJoinedBss(swlan_bss &out)
     IOFreeData(info, kRoom);
     if (ok) {
         locked([&] {
-            keepBss(out, swlan::nowNs());
+            keepBss(out, scanNowNs());
         });
     }
     return ok;
@@ -2800,7 +2813,7 @@ int SwitchWLAN::bssGet(int index, swlan_bss *out)
         if (index < 0 || static_cast<unsigned>(index) >= bssCount_)
             return;
         *out = bss_[index];
-        out->age_ms = static_cast<uint32_t>((swlan::nowNs() - bssSeenNs_[index]) / 1000000);
+        out->age_ms = static_cast<uint32_t>((scanNowNs() - bssSeenNs_[index]) / 1000000);
         result = 0;
     });
     return result;

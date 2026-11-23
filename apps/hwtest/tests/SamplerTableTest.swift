@@ -4,15 +4,15 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The device's 2048 sampler header slots (drivers/TegraGM20BMetal/raw/runtime raw_gpu.cpp takeHeader). Samplers of one
+/// The device's 2048 sampler header slots (drivers/TegraGM20BMetal gpu.cpp takeHeader). Samplers of one
 /// descriptor share their compare form's slot, so 1500 of them all live. A draw sampling a converted '420f' texture
 /// through a wrapping sampler takes one more header for the texture's address map. With every slot taken, a new sampler
 /// is nil, and the draw's command buffer fails with MTLCommandBufferErrorOutOfMemory, as Metal does for a resource it
-/// has no room for. Once the samplers are released, the same draw completes. Nothing may ask for the m2v device
-/// (m2v_needs_asked names what did).
+/// has no room for: the only command buffer that fails, the facade's enc.planarclamp (failed_why=). Once the samplers
+/// are released, the same draw completes.
 struct SamplerTableTest: HWTest {
-    let id = "gpu.raw.sampler_table"
-    let name = "Samplers share header slots; a full table is nil and an out-of-memory command buffer, never m2v"
+    let id = "gpu.gm20b.sampler_table"
+    let name = "Samplers share header slots; a full table is nil and an out-of-memory command buffer"
     let subsystem = Subsystem.metal
 
     static let width = 64, height = 48
@@ -43,22 +43,26 @@ struct SamplerTableTest: HWTest {
         var made: CVPixelBuffer?
         let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary]
         CVPixelBufferCreate(
-            nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, attributes as CFDictionary, &made)
+            nil, width, height, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, attributes as CFDictionary, &made
+        )
         guard let pixels = made, let surface = CVPixelBufferGetIOSurface(pixels)?.takeUnretainedValue() else {
             throw TestFailure("no '420f' IOSurface pixel buffer")
         }
         CVBufferSetAttachment(
-            pixels, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate)
+            pixels, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, .shouldPropagate
+        )
         CVPixelBufferLockBaseAddress(pixels, [])
-        for plane in 0..<2 {
+        for plane in 0 ..< 2 {
             guard let base = CVPixelBufferGetBaseAddressOfPlane(pixels, plane) else { continue }
             memset(
                 base, 128,
-                CVPixelBufferGetBytesPerRowOfPlane(pixels, plane) * CVPixelBufferGetHeightOfPlane(pixels, plane))
+                CVPixelBufferGetBytesPerRowOfPlane(pixels, plane) * CVPixelBufferGetHeightOfPlane(pixels, plane)
+            )
         }
         CVPixelBufferUnlockBaseAddress(pixels, [])
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: MTLPixelFormat(rawValue: 500)!, width: width, height: height, mipmapped: false)
+            pixelFormat: MTLPixelFormat(rawValue: 500)!, width: width, height: height, mipmapped: false
+        )
         descriptor.usage = .shaderRead
         guard let texture = device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0) else {
             throw TestFailure("no converted 4:2:0 texture")
@@ -94,34 +98,35 @@ struct SamplerTableTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
-        let before = OwnAnswersTest.needs(gpu.device)
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
+        let before = GM20BFacade.counters(of: gpu.device)
         var metrics = Metrics()
         var wrong: [String] = []
 
-        var held = (0..<1500).compactMap { _ in gpu.device.makeSamplerState(descriptor: Self.distinct(1)) }
+        var held = (0 ..< 1500).compactMap { _ in gpu.device.makeSamplerState(descriptor: Self.distinct(1)) }
         metrics.set("one_descriptor_samplers", held.count)
         if held.count != 1500 { wrong.append("shared_compare_form") }
 
         let state = try gpu.render(
-            vertex: "device_textured_vertex", fragment: "sampled_fragment", format: .bgra8Unorm)
+            vertex: "device_textured_vertex", fragment: "sampled_fragment", format: .bgra8Unorm
+        )
         let (pixels, planar) = try Self.grey(gpu.device)
         let target = try gpu.texture(.bgra8Unorm, Self.width, Self.height)
         guard let first = gpu.device.makeSamplerState(descriptor: Self.wrapping(lodMax: 4)),
-            let afterFull = gpu.device.makeSamplerState(descriptor: Self.wrapping(lodMax: 8))
+              let afterFull = gpu.device.makeSamplerState(descriptor: Self.wrapping(lodMax: 8))
         else { throw TestFailure("no wrapping sampler") }
         let control = try Self.draw(gpu, state, planar, first, into: target)
         metrics.set("control_status", Int(control.status.rawValue))
         if control.status != .completed { wrong.append("control_draw") }
         let at = (Self.height / 2 * Self.width + Self.width / 2) * 4
-        let centre = Array(try await gpu.read(target, bytesPerPixel: 4)[at..<at + 4])
+        let centre = Array(try await gpu.read(target, bytesPerPixel: 4)[at ..< at + 4])
         metrics.set("control_bgra", centre.map(String.init).joined(separator: ","))
         if !zip(centre, [128, 128, 128, 255]).allSatisfy({ abs(Int($0) - $1) <= 2 }) {
             wrong.append("control_pixel")
         }
 
-        for i in 0..<4096 {
+        for i in 0 ..< 4096 {
             guard let s = gpu.device.makeSamplerState(descriptor: Self.distinct(i)) else { break }
             held.append(s)
         }
@@ -142,9 +147,11 @@ struct SamplerTableTest: HWTest {
         if freed.status != .completed { wrong.append("freed_draw") }
         withExtendedLifetime(pixels) {}
 
-        let asked = OwnAnswersTest.needs(gpu.device).filter { $0.value > (before[$0.key] ?? 0) }.keys.sorted()
-        metrics.set("m2v_needs_asked", asked.isEmpty ? "-" : asked.joined(separator: ","))
-        if !asked.isEmpty { wrong.append("m2v") }
+        let failed = FailedCounts.judged(
+            before: before, after: GM20BFacade.counters(of: gpu.device), expecting: ["enc.planarclamp": 1],
+            own: gpu.paths, &metrics
+        )
+        if !failed.1 { wrong.append(failed.0) }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 }

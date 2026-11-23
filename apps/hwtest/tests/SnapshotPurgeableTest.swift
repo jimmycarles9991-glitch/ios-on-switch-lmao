@@ -78,7 +78,8 @@ struct SnapshotPurgeableTest: HWTest {
                 ("the texture is left uncompressed", !file.compressed),
                 ("APFS marks the texture purgeable (errno \(mark))", mark == 0),
                 ("no snapshot of this app is compressed", own.compressed == 0),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// A snapshot-sized picture with a screen's flat regions and edges.
@@ -87,11 +88,12 @@ struct SnapshotPurgeableTest: HWTest {
             let context = CGContext(
                 data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                 space: CGColorSpace(name: CGColorSpace.sRGB)!,
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+            )
         else { return nil }
         context.setFillColor(CGColor(red: 0.95, green: 0.95, blue: 0.97, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        for row in 0..<20 {
+        for row in 0 ..< 20 {
             let shade = CGFloat(row % 5) / 8
             context.setFillColor(CGColor(red: shade, green: 0.4 + shade / 2, blue: 0.9 - shade, alpha: 1))
             context.fill(CGRect(x: 24, y: 40 + row * 60, width: 48, height: 48))

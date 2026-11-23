@@ -131,10 +131,6 @@ void nvxnu_log(const char *, ...)
 	++logs;
 }
 
-void switch_sync_push(struct nvif_push *)
-{
-}
-
 u32 nvxnu_wake_seq(void)
 {
 	return wakeSeq.load(std::memory_order_acquire);
@@ -224,15 +220,6 @@ enum tgm_hang tgm_hang_recover(struct tgm_chan *, const char *, u32, u64)
 void tgm_chan_hung(struct tgm_chan *, const char *, uint32_t, uint64_t)
 {
 	std::abort();
-}
-
-void tgm_hold_need(struct nvkm_device *, unsigned int)
-{
-}
-
-int vm_imports(struct tgm_vm *, u64)
-{
-	return 0;
 }
 }
 

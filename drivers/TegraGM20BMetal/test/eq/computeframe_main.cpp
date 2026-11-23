@@ -2,7 +2,7 @@
 // computeeq's raw side: computeframe's raw and pack modes alone (no frontend), over the eq capture
 #include <cstdio>
 #include <cstring>
-#include "../../raw/test/computeframe.h"
+#include "../../harness/computeframe.h"
 
 int main(int argc, char **argv)
 {

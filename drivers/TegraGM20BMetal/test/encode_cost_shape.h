@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// hw_test_app's gpu.path.encode_cost command buffer on the raw facade over the kernel model (raw_scale_frames.h's device
+// hw_test_app's gpu.path.encode_cost command buffer on the facade over the kernel model (scale_frames.h's device
 // and BGRA8 state): 6 passes into a 256x256 BGRA8 target, the first clearing it and the rest loading it, each beside a
 // memoryless RGBA16Float colour 1 cleared and not stored, each of a render pass descriptor made for it; each draw bound
 // as CAState.bind binds it (a strip of four 48-byte vertices at vertex buffer 1, the identity transform at 2, 256 zero
 // bytes at vertex 0 and 3 and fragment 0 to 3, all by setBytes) under a scissor of its own.
 #pragma once
-#include "raw_scale_frames.h"
+#include "scale_frames.h"
 #include <dispatch/dispatch.h>
 #include <map>
 #include <string>
@@ -25,8 +25,8 @@
 @end
 
 @interface NSObject (EncodeCostShape)
-- (NSDictionary<NSString *, NSNumber *> *)switchRawEncodeProfile;  // RawMetalEncodeCounters.mm (debug builds)
-- (NSString *)switchRawPath;                                       // RawMetalCommandBuffer.mm
+- (NSDictionary<NSString *, NSNumber *> *)switchMetalEncodeProfile;  // TegraGM20BMetalEncodeCounters.mm (debug builds)
+- (NSString *)switchMetalPath;                                       // TegraGM20BMetalCommandBuffer.mm
 @end
 
 namespace encode_cost {
@@ -130,20 +130,20 @@ inline NSArray<id<MTLCommandBuffer>> *batchUnpooled(int draws)
     return made;
 }
 
-// Each completed; the command buffers by switchRawPath ("failed" for one that did not complete)
+// Each completed; the command buffers by switchMetalPath ("failed" for one that did not complete)
 inline std::map<std::string, unsigned> finish(NSArray<id<MTLCommandBuffer>> *buffers)
 {
     std::map<std::string, unsigned> paths;
     for (id<MTLCommandBuffer> cb in buffers) {
         [cb waitUntilCompleted];
-        paths[cb.status == MTLCommandBufferStatusCompleted ? [(id)cb switchRawPath].UTF8String : "failed"]++;
+        paths[cb.status == MTLCommandBufferStatusCompleted ? [(id)cb switchMetalPath].UTF8String : "failed"]++;
     }
     return paths;
 }
 
 // `count` command buffers at `draws` committed and completed, then destroyed: their recordings back with the runtime
 // (a command buffer's last reference can be the completion thread's, which it drops after waitUntilCompleted returns).
-// False where one did not complete on the raw path or outlived its completion by 5 s.
+// False where one did not complete on the driver or outlived its completion by 5 s.
 template <typename Recorded> bool settle(int draws, int count, Recorded recorded)
 {
     static char goneKey;
@@ -153,7 +153,7 @@ template <typename Recorded> bool settle(int draws, int count, Recorded recorded
         NSArray<id<MTLCommandBuffer>> *done = batch(draws, count);
         recorded();
         const std::map<std::string, unsigned> paths = finish(done);
-        raw = paths.size() == 1 && paths.begin()->first == "raw";
+        raw = paths.size() == 1 && paths.begin()->first == "gm20b";
         for (id<MTLCommandBuffer> cb in done) {
             EncodeCostGone *sentinel = [EncodeCostGone new];
             sentinel.gone = gone;
@@ -173,7 +173,7 @@ inline bool settle(int draws, int count = kBuffers)
 
 inline NSDictionary<NSString *, NSNumber *> *profile()
 {
-    return [(id)scale_frames::opened().device switchRawEncodeProfile];
+    return [(id)scale_frames::opened().device switchMetalEncodeProfile];
 }
 
 }  // namespace encode_cost

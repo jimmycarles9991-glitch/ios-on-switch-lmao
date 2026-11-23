@@ -9,7 +9,7 @@
 #include "../../kits/SwitchDMA/SwitchDMAPages.h"
 
 namespace {
-// Grown to the largest decode yet and kept: decodes run one at a time under the job lock, and each returns only once
+// Grown to the largest decode yet and kept: decodes run one at a time on the engine thread, and each returns only once
 // VIC has read the buffer, so the next may write it.
 switch_dma_pages *gPages;
 switch_gpu_backing *gBacking;
@@ -103,24 +103,18 @@ int tegra_nvjpg_repack(TegraNVJPGJob *engine, const TegraNVJPGPlan *plan, const 
         *why = "no memory for the planes VIC re-packs";
         return error;
     }
-    const SwitchNVJPGMapping *mapping = switch_nvjpg_mapping(gBacking, gPages->count);
-    if (!mapping) {
-        *why = "repack mapping could not be allocated";
-        IOLog("TegraNVJPG: repack mapping failed for %u pages; this decode fails\n", gPages->count);
-        return -12;
-    }
-    const uint64_t out = mapping->address;
-    tegra_nvjpg_lock();
+    const SwitchNVJPGMapping *mapping =
+        switch_nvjpg_mapping(switch_nvjpg_backing(gBacking), gPages->count, plan->writeEnd, why);
+    if (!mapping)
+        return -28;
+    engine->bitstream = bitstream;
+    for (uint32_t i = 0; i < plan->planes; ++i)
+        engine->plane[i] = mapping->address + plan->planeStart[i];
     Wait wait = {};
-    int ret = out && bitstream ? 0 : -12;
-    if (!ret) {
-        engine->bitstream = bitstream;
-        for (uint32_t i = 0; i < plan->planes; ++i)
-            engine->plane[i] = out + plan->planeStart[i];
-        Queue q = {plan, request, destination, &wait};
-        const TegraNVJPGFollow follow = {queueRepack, &q};
-        ret = tegra_nvjpg_run(engine, status, busyUs, &follow);
-    }
+    Queue q = {plan, request, destination, &wait};
+    const TegraNVJPGFollow follow = {queueRepack, &q};
+    tegra_nvjpg_lock();
+    const int ret = tegra_nvjpg_run(engine, status, busyUs, &follow);
     tegra_nvjpg_unlock();
     if (wait.queued) {
         IOLockLock(gWaitLock);

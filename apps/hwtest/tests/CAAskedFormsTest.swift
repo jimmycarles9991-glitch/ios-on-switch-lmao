@@ -3,9 +3,9 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The Core Animation states the raw pack holds by deduction (ca_asked.log): those this device's QuartzCore asks for where
-/// Apple's offline compilation manifest names another colour precision (raw/pack/ca/deepcolour.py), and those device logs
-/// named as made at run time (precompile/ca-names). Each is made on the raw facade and has to come out of the pack
+/// The Core Animation states the pack holds by deduction (ca_asked.log): those this device's QuartzCore asks for where
+/// Apple's offline compilation manifest names another colour precision (pack/ca/deepcolour.py), and those device logs
+/// named as made at run time (precompile/ca-names). Each is made on the facade and has to come out of the pack
 /// (switchPackHit): a miss costs Core Animation a compile at an app's launch. QuartzCore names them by CADeviceUseCIF10,
 /// which this process reads as QuartzCore does (MobileGestalt's HasExtendedColorDisplay, the CAEnableDeepFramebuffer
 /// preference over it): it has to be the answer the pack was made for.
@@ -21,21 +21,22 @@ struct CAAskedFormsTest: HWTest {
     /// MobileGestalt cannot be asked
     static func cif10() -> Bool? {
         guard let gestalt = dlopen("/usr/lib/libMobileGestalt.dylib", RTLD_NOW),
-            let symbol = dlsym(gestalt, "MGGetBoolAnswer")
+              let symbol = dlsym(gestalt, "MGGetBoolAnswer")
         else { return nil }
         guard unsafeBitCast(symbol, to: BoolAnswer.self)("HasExtendedColorDisplay" as CFString) else { return false }
         var exists: DarwinBoolean = false
         let preference = CFPreferencesGetAppBooleanValue(
-            "CAEnableDeepFramebuffer" as CFString, kCFPreferencesCurrentApplication, &exists)
+            "CAEnableDeepFramebuffer" as CFString, kCFPreferencesCurrentApplication, &exists
+        )
         return exists.boolValue ? preference : true
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         guard let url = Bundle.main.url(forResource: "ca_asked", withExtension: "log"),
-            let text = try? String(contentsOf: url, encoding: .utf8)
+              let text = try? String(contentsOf: url, encoding: .utf8)
         else { return .fail("ca_asked.log is not in the app's bundle") }
         let header = text.prefix { $0 != "\n" }
         let lines = text.split(separator: "\n").compactMap { PipelineLine(String($0)) }
@@ -52,7 +53,7 @@ struct CAAskedFormsTest: HWTest {
         var failed: [String] = []
         var slowest = 0.0
         let started = DispatchTime.now().uptimeNanoseconds
-        let missesBefore = RawFacade.counters(of: gpu.device)["pack_misses"] ?? 0
+        let missesBefore = GM20BFacade.counters(of: gpu.device)["pack_misses"] ?? 0
         var unanswered = 0
         for line in lines {
             let made = DispatchTime.now().uptimeNanoseconds
@@ -61,13 +62,13 @@ struct CAAskedFormsTest: HWTest {
                 continue
             }
             slowest = max(slowest, Double(DispatchTime.now().uptimeNanoseconds - made) / 1e6)
-            switch RawFacade.packHit(state) {
+            switch GM20BFacade.packHit(state) {
             case .some(true): break
             case .some(false): missed.append(line.shortLabel)
             case .none: unanswered += 1
             }
         }
-        metrics.set("process_pack_misses", (RawFacade.counters(of: gpu.device)["pack_misses"] ?? 0) - missesBefore)
+        metrics.set("process_pack_misses", (GM20BFacade.counters(of: gpu.device)["pack_misses"] ?? 0) - missesBefore)
         metrics.set("made_ms", Double(DispatchTime.now().uptimeNanoseconds - started) / 1e6)
         metrics.set("slowest_ms", slowest)
         metrics.set("pack_misses", missed.count)

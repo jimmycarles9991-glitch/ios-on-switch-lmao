@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-/// gpu.raw.mip_lod: a mipmapped texture sampled through the bound sampler at the level of detail its coordinates'
+/// gpu.gm20b.mip_lod: a mipmapped texture sampled through the bound sampler at the level of detail its coordinates'
 /// derivatives give (textured_vertex's uv), with no bias or with the shader's bias from buffer 0
 struct MipLodVertex {
     float4 position [[position]];

@@ -10,6 +10,9 @@ struct SwitchNativeScanout {
 };
 
 // turns: a picture TegraVIC recorded turned (SwitchVICTurn.h) too, for window A's column scan; view.turn says which.
+// -2: no picture to scan (none, or one retired until the next publication: the surface shows its rows); -95: one the
+// caller may not scan as it is; -16: a publication or a writer holds the surface now; SWITCH_GPU_BACKING_STALE: the
+// picture was replaced under this acquire.
 int switch_native_scanout_acquire(OSObject *surface, SwitchNativeScanout *scanout, bool turns = false);
 int switch_native_scanout_pitch(OSObject *surface, SwitchNativeScanout *scanout);
 // The same with the backing the caller already holds for the surface: no IOSurface cache lookup.

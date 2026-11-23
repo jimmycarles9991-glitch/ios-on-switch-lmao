@@ -2,8 +2,9 @@
  * Copyright © 2026 Bruno St John
  * SPDX-License-Identifier: MIT
  *
- * Switch: a raw-path fragment program rounds what it writes to a 16-bit
- * float colour target to nearest even itself (nvk_switch_round.c).
+ * Switch: a raw-path fragment program's float outputs to a 16-bit float
+ * colour target, narrowed where NAK can see the half they hold
+ * (nvk_switch_round.c).
  */
 
 #ifndef NVK_SWITCH_ROUND_H
@@ -15,10 +16,11 @@
 #include "nir.h"
 
 /* GM20B's ROP converts an f32 colour to a 16-bit float target rounding
- * toward zero, and the 3D class has no rounding control; Metal rounds to
- * nearest even. Each 32-bit float output to colour attachment j of
- * `targets` (bit j) becomes f2f32(f2f16_rtne(value)), which the ROP then
- * stores exactly, denormals included.
+ * toward zero, as Apple's GPU stores a float output there at its default
+ * textureWriteRoundingMode. Each 32-bit float output to colour attachment j
+ * of `targets` (bit j) becomes f2f32(f2f16_rtz(value)), which stores what
+ * the value would: NAK folds it into a value that is a half held in an f32
+ * and removes it from any other (nak_nir_strip_half_rounding.c).
  */
 bool switch_nvk_round_half_outputs(nir_shader *nir, uint32_t targets);
 

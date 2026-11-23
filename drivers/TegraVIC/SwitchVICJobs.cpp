@@ -40,7 +40,7 @@ constexpr uint32_t kThiMethod0 = 0x40;
 constexpr uint64_t kQueueUs = 2000000, kMaxBoundUs = 30000000, kAcquireUs = 2000000;
 constexpr uint32_t kBatchMax = 3;
 static_assert(kBatchMax * (2 + 3 * TEGRA_VIC_MAX_METHODS) +
-                  SWITCH_HOST1X_WAIT_WORDS * (2 + SWITCH_GPU_BRIDGE_MAX_TOKENS) <=
+                  SWITCH_HOST1X_WAIT_WORDS * (2 + SwitchHost1xProducers::kMax) <=
               SWITCH_HOST1X_ARENA_WORDS);
 
 using Results = SwitchHost1xResults<SWITCH_GPU_ENGINE_VIC>;
@@ -48,6 +48,11 @@ using Results = SwitchHost1xResults<SWITCH_GPU_ENGINE_VIC>;
 int tokenStatus(const switch_gpu_backing_token *token)
 {
     return Results::status(token);
+}
+
+int tokenFailure(const switch_gpu_backing_token *token)
+{
+    return Results::why(token);
 }
 
 int waitSequence(uint64_t sequence)
@@ -125,7 +130,7 @@ struct Retirement {
     static void physical(uint32_t slot, int result)
     {
         auto &job = gQueue.jobs[slot];
-        Results::physical(job.outcome, result);
+        Results::physical(job.outcome, result, result < 0 ? Stages::why(slot, job.bridge) : 0);
         switch_gpu_bridge_release(&job.bridge);
         switch_vic_semantics_physical(0);
     }
@@ -201,6 +206,7 @@ bool switch_vic_jobs_start(const TegraVICBuffer &configs, uint32_t syncpt, uint3
         !switch_vic_semantics_start(syncpt, semanticRetired))
         return false;
     (void)switch_gpu_backing_register_filter_status(SWITCH_GPU_ENGINE_VIC, switch_vic_token_filter_status);
+    (void)switch_gpu_backing_register_failure(SWITCH_GPU_ENGINE_VIC, tokenFailure);
     switch_vic_semantics_physical(completed);
     return true;
 }
@@ -372,6 +378,7 @@ retry:
         }
     }
     bool bridgeRequired = false;
+    SwitchHost1xProducers producers;
     for (uint32_t i = 0; i < needed; ++i) {
         auto &dependency = dependencies.tokens[i];
         const int physical = switch_gpu_backing_token_physical_status(&dependency, 0);
@@ -380,8 +387,7 @@ retry:
             dependency = {};
             continue;
         }
-        if (!ready && (dependency.engine == SWITCH_GPU_ENGINE_VIC || dependency.engine == SWITCH_GPU_ENGINE_NVDEC ||
-                       dependency.engine == SWITCH_GPU_ENGINE_NVENC))
+        if (!ready && producers.add(dependency))
             continue;
         if (!ready &&
             (dependency.engine == SWITCH_GPU_ENGINE_GM20B || dependency.engine == SWITCH_GPU_ENGINE_PROMISE)) {
@@ -413,7 +419,10 @@ retry:
         }
         goto retry;
     }
-    uint32_t capacity = SWITCH_HOST1X_WAIT_WORDS * (needed + 2);
+    uint32_t bridgeSyncpoint = 0, bridgeThreshold = 0;
+    const bool bridged = dependencies.acquire(&bridgeSyncpoint, &bridgeThreshold);
+    const uint32_t waits = (bridged ? 1 : 0) + (acquire ? 1 : 0) + producers.foreignCount(gSyncpt);
+    uint32_t capacity = SWITCH_HOST1X_WAIT_WORDS * waits;
     for (uint32_t j = 0; j < count; ++j)
         capacity += 2 + 3 * jobs[j].count;
     uint32_t *words = nullptr;
@@ -439,22 +448,15 @@ retry:
         SWITCH_VIC_REFUSED("semantic or event binding");
         return error;
     }
-    uint32_t n = 0, bridgeSyncpoint = 0, bridgeThreshold = 0;
-    if (dependencies.acquire(&bridgeSyncpoint, &bridgeThreshold))
+    uint32_t n = 0;
+    if (bridged)
         n += tegra_host1x_op_wait_syncpt(words + n, bridgeSyncpoint, bridgeThreshold);
     if (acquire)
         n += tegra_host1x_op_wait_syncpt(words + n, acquire->syncpt, acquire->threshold);
-    SwitchHost1xProducers producers;
-    for (uint32_t i = 0; i < needed; ++i) {
-        if (dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_NVDEC ||
-            dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_NVENC) {
-            n += tegra_host1x_op_wait_syncpt(words + n, dependencies.tokens[i].queue,
-                                             static_cast<uint32_t>(dependencies.tokens[i].value));
-            producers.add(dependencies.tokens[i]);
-        } else if (dependencies.tokens[i].engine == SWITCH_GPU_ENGINE_VIC) {
-            producers.add(dependencies.tokens[i]);
-        }
-    }
+    for (uint32_t i = 0; i < SwitchHost1xProducers::kMax; ++i)
+        if (producers.foreign(i, gSyncpt))
+            n += tegra_host1x_op_wait_syncpt(words + n, producers.tokens[i].queue,
+                                             static_cast<uint32_t>(producers.tokens[i].value));
     for (uint32_t j = 0; j < count; ++j) {
         const auto &job = jobs[j];
         const uint64_t offset = static_cast<uint64_t>(gQueue.configurationSlot(j)) * kSwitchVICConfigStride;
@@ -603,7 +605,7 @@ extern "C" bool switch_vic_host1x_cancelled(uint32_t syncpt, uint32_t reached)
             continue;
         const int source = Results::sourceFailure(job.outcome, &job.bridge, switch_gpu_bridge_source_failure);
         if (Stages::producerCancelled(slot, syncpt, reached, source < 0))
-            changed |= Results::physical(job.outcome, Stages::kCancelled);
+            changed |= Results::physical(job.outcome, Stages::kCancelled, Stages::why(slot, job.bridge));
     }
     IOLockUnlock(gLock);
     return changed;

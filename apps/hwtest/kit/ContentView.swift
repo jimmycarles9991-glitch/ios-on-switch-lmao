@@ -130,7 +130,8 @@ struct TestRow: View {
                     }
                     if !outcome.detail.isEmpty {
                         Text(outcome.detail).font(.caption).foregroundStyle(
-                            outcome.verdict == .fail ? .red : .secondary)
+                            outcome.verdict == .fail ? .red : .secondary
+                        )
                     }
                 }
             }

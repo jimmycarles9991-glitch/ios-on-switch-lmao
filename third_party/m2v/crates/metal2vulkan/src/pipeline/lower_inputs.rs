@@ -45,12 +45,11 @@ pub struct LoweringInputs {
     /// function compiles as without it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dropped_vertex_layer: bool,
-    /// A fragment function's storage-form images (its interlocked attachments, their extended-range
-    /// shadows, the shader-side stencil's shadow) are 2D arrays of a layered pass's layers, each
-    /// access at the texel of the invocation's pixel in the layer its primitive renders (its
-    /// `Layer` input; `VariantKey::layered_storage`): the variant a pass of more than one layer
-    /// runs on. Such a function depends on `RuntimeFact::LayeredStorage`; any other compiles as
-    /// without it.
+    /// A fragment function's storage-form images (its interlocked attachments, the shader-side
+    /// stencil's shadow) are 2D arrays of a layered pass's layers, each access at the texel of the
+    /// invocation's pixel in the layer its primitive renders (its `Layer` input;
+    /// `VariantKey::layered_storage`): the variant a pass of more than one layer runs on. Such a
+    /// function depends on `RuntimeFact::LayeredStorage`; any other compiles as without it.
     #[cfg_attr(feature = "serde", serde(default))]
     pub layered_storage: bool,
     /// A kernel's stage-input descriptor (`MTLComputePipelineDescriptor.stageInputDescriptor`): how
@@ -126,13 +125,8 @@ pub struct LoweringInputs {
     /// (`RequireOrdered`) or read unordered (`AcceptUnordered`). `Device::compile_render_pipeline`
     /// sets it for a `Function` fragment stage that declares a `[[color(n)]]` input on such a
     /// device, and a fragment compiled on its own for such a pipeline compiles under the same
-    /// state; without it such a function is `NeedsInput(FramebufferFetch)`. On a device that orders
-    /// fetch through rasterization-order input attachments, the state of each extended-range
-    /// attachment the function writes where the pipeline blends it, whose blend the function
-    /// computes over its input attachment (its depth, coverage and amplification bits unset,
-    /// which that blend does not read); without it such a function is
-    /// `NeedsInput(FramebufferFetch)` there too. `None` on every other device and for every other
-    /// function.
+    /// state; without it such a function is `NeedsInput(FramebufferFetch)`. `None` on every other
+    /// device and for every other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub framebuffer_fetch: Option<FramebufferFetchInputs>,
     /// Texture slots bound in an 8-bit sRGB format whose raw codes the function reads
@@ -306,28 +300,24 @@ pub struct LoweringInputs {
     /// sample's fetch joins them into the raw texel the one-image form holds.
     #[cfg_attr(feature = "serde", serde(default))]
     pub two_plane_textures: BTreeSet<SlotRef>,
-    /// The color attachments the fragment function's render pipeline gives one of Apple's
-    /// extended-range formats, by color index ([`ExtendedRangeColor`]): each such attachment
-    /// holds the format's raw texels (`metal::format::ExtendedRange::raw_format`), so the
-    /// function writes it through an output variable of the raw format's unsigned components and
-    /// stores the texel Metal stores for its `float` or `half` output (a `float` rounded to `half`
-    /// first, nearest even, then encoded as a kernel write encodes it). A dual-source second
-    /// output to such an attachment is `NotImplemented(Format)`. `Device::compile_render_pipeline`
-    /// sets it for a `Function` fragment stage from the pipeline's color attachments, and a
-    /// fragment compiled on its own for such a pipeline compiles under the same map: link refuses
-    /// one compiled under another as `NeedsInput(ColorWrites)`. Empty for any other function.
+    /// The color attachments the fragment function's render pipeline gives one of Apple's padded
+    /// or bfloat formats, by color index ([`ExtendedRangeColor`]): each such attachment holds the
+    /// format's raw texels (`metal::format::ExtendedRange::raw_format`), so the function writes it
+    /// through an output variable of the raw format's unsigned components and stores the texel
+    /// Metal stores for its `float` or `half` output. A dual-source second output to such an
+    /// attachment is `NotImplemented(Format)`. `Device::compile_render_pipeline` sets it for a
+    /// `Function` fragment stage from the pipeline's color attachments, and a fragment compiled on
+    /// its own for such a pipeline compiles under the same map: link refuses one compiled under
+    /// another as `NeedsInput(ColorWrites)`. Empty for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub extended_range_colors: BTreeMap<u32, ExtendedRangeColor>,
-    /// On a profile whose consumer holds `RGB10A8_2P_XR10` in Metal's two planes
-    /// (`VkProperty::TwoPlaneExtendedRange`), the color index each such attachment's alpha byte
-    /// is held at, by the attachment's own index (`color_writes::two_plane_alphas`): the raw
-    /// texel's color word goes to the attachment's own index as `R32_UINT` and its alpha byte to
-    /// this one as `R8_UINT`, for its writes, its input attachment and its storage form alike.
-    /// `Device::compile_render_pipeline` sets it from the pipeline's color attachments, and link
-    /// refuses a fragment compiled under another map as `NeedsInput(ColorWrites)`. Empty
-    /// elsewhere.
+    /// The color attachments held in an `RGBA16Float` stand-in of one of Apple's extended-range
+    /// formats, by color index ([`StandInColor`]): the function's color outputs there carry
+    /// Metal's clamp of them. `Device::compile_render_pipeline` sets it for a `Function` fragment
+    /// stage from the pipeline's color attachments (`ColorAttachmentDescriptor::stand_in`). Empty
+    /// for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
-    pub two_plane_alphas: BTreeMap<u32, u32>,
+    pub stand_in_colors: BTreeMap<u32, StandInColor>,
     /// The color attachments the fragment function reads (`[[color(n)]]`) that its render
     /// pipeline gives an 8-bit four-channel sRGB format (`RGBA8Unorm_sRGB`, `BGRA8Unorm_sRGB`),
     /// by color index. Read through an input attachment, such an attachment's value is the
@@ -449,6 +439,13 @@ pub struct LoweringInputs {
     /// `RuntimeFact::ShaderStencilTest`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub shader_stencil: bool,
+    /// Under `shader_tests`, the depth attachment is `Depth16Unorm`
+    /// (`VariantKey::shader_tests_unorm16`): the stand-in holds its codes as floats, and the
+    /// function tests the code Metal stores for the fragment's depth (rounded to nearest from the
+    /// exact product with 65535) against the stand-in's code, writes that code, and states it in
+    /// `RuntimeFact::ShaderTests`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shader_tests_unorm16: bool,
     /// A vertex function's fragment function runs its draw's depth test itself at more than one
     /// sample from each sample's computed depth (`VariantKey::window_depth_varying`): the function
     /// also writes its position's window depth `z / w` to a no-perspective varying
@@ -558,16 +555,6 @@ pub struct LoweringInputs {
     /// for any other function.
     #[cfg_attr(feature = "serde", serde(default))]
     pub half_output_lanes: BTreeMap<u32, [Option<HalfOutputLane>; 4]>,
-    /// The extended-range color attachments, by color index, whose `half` shadow the draw's
-    /// render pass instance holds (`VariantKey::extended_shadows`): Metal's tile memory holds
-    /// such an attachment as `half` through the pass and rounds it to the codes once at the
-    /// store, so a function that reads one in the interlocked storage form reads the shadow's texel
-    /// (`ResourceKind::ExtendedShadow`) as the tile value, and a write stores the value it computes
-    /// there as well as the codes. Each is a single-sample attachment the function writes or reads
-    /// in the storage form under `framebuffer_fetch`; any other is
-    /// `NotImplemented(FramebufferFetch)`. Empty for any other function.
-    #[cfg_attr(feature = "serde", serde(default))]
-    pub extended_shadows: BTreeSet<u32>,
     /// Sampled texture slots bound to a texture whose format's numeric class (`Float`, `Sint` or
     /// `Uint`) is not the class the function declares there, by the bound format's class
     /// (`VariantKey::cross_class`): each such slot is declared as an image of the bound class,
@@ -723,29 +710,26 @@ pub enum FactorLane {
     Output(u8),
 }
 
-/// How a fragment function writes a color attachment of one of Apple's extended-range formats
-/// (`LoweringInputs::extended_range_colors`), as Metal stores its output there (measured on an
-/// Apple M3 Max and an M4, EVs XRR-rtp1-m3 and -m4): a `float` output is rounded to `half` (nearest
-/// even), a `half` one is taken as it is, and the value is stored as a kernel write stores it.
-/// Under blending Metal first clamps the output to the format's range (each color channel to the
-/// values of codes 0 and 1022 as `half`s, an `_sRGB` color channel of `BGRA10_XR_sRGB` to its
-/// decoded codes 0 and 1022, a NaN to the low end; alpha to `[0, 1]`, a NaN to 0).
+/// How a fragment function writes a color attachment of one of Apple's padded or bfloat formats
+/// (`LoweringInputs::extended_range_colors`), as Metal stores its output there: a padded form's
+/// `float` output is rounded to `half` toward zero and stored as a kernel write stores it, a
+/// bfloat form's rounded to `half` and stored as the bfloat code nearest it (see
+/// [`nearest_even`](Self::nearest_even)); a `half` output is taken as it is. Any of Apple's other
+/// extended-range formats is held in an `RGBA16Float` stand-in ([`StandInColor`]).
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ExtendedRangeColor {
     /// The attachment's format.
     pub form: metal::format::ExtendedRange,
-    /// The pipeline enables blending at the attachment, with factors one and zero for color and
-    /// alpha and the operation add (any other blend is not built): the output is clamped to the
-    /// format's range first.
+    /// The pipeline enables blending at the attachment, which no form here builds
+    /// (`NotImplemented(Format)`).
     pub blended: bool,
     /// A bfloat attachment of a pipeline whose `textureWriteRoundingMode` is
     /// `metal::TextureWriteRoundingMode::NearestEven`: a `float` output rounds to `half` to
     /// nearest even, where at the default mode it rounds toward zero, a finite value past 65504
-    /// saturating there. False for every other form, whose store is measured at the default mode
-    /// alone: an extended-range form's `float` output rounds to nearest even, a padded one's toward
-    /// zero.
+    /// saturating there. False for a padded form, whose store is measured at the default mode
+    /// alone: its `float` output rounds toward zero.
     pub nearest_even: bool,
 }
 
@@ -767,6 +751,58 @@ impl ExtendedRangeColor {
             nearest_even: self.form.bfloat()
                 && rounding == metal::TextureWriteRoundingMode::NearestEven,
             ..self
+        }
+    }
+}
+
+/// A color attachment held in an `RGBA16Float` stand-in of one of Apple's extended-range formats
+/// (`LoweringInputs::stand_in_colors`): the stand-in is Metal's tile, which the pipeline's blend
+/// reads and writes in the device's float blender, so the output carries Metal's own clamp (an
+/// Apple M4 under macOS 27.2.1, xr-float probe "write" and "tile"): a blended output's color lanes
+/// to the source range of Metal's blend ([`extended_range::SOURCE_RANGE`],
+/// `BGRA10_XR_sRGB`'s [`extended_range::SRGB_SOURCE_RANGE`]), an unblended one's to that range's
+/// low end and code 1023's value, and alpha to `[0, 1]`; a NaN to the low end.
+///
+/// [`extended_range::SOURCE_RANGE`]: crate::lower::arith::extended_range::SOURCE_RANGE
+/// [`extended_range::SRGB_SOURCE_RANGE`]: crate::lower::arith::extended_range::SRGB_SOURCE_RANGE
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct StandInColor {
+    /// The extended-range format the attachment stands in for.
+    pub form: metal::format::ExtendedRange,
+    /// The pipeline blends the attachment.
+    pub blended: bool,
+}
+
+impl StandInColor {
+    /// The stand-in of an attachment of `form`, blended where `blended`.
+    pub fn new(form: metal::format::ExtendedRange, blended: bool) -> StandInColor {
+        StandInColor { form, blended }
+    }
+
+    /// The lowest and highest value of an output's color lanes.
+    pub(crate) fn color_bounds(self) -> (f32, f32) {
+        use crate::lower::arith::extended_range::{SOURCE_RANGE, SRGB_SOURCE_RANGE};
+        use crate::metal::format::ExtendedRange;
+        let srgb = matches!(
+            self.form,
+            ExtendedRange::Bgr10 { srgb: true }
+                | ExtendedRange::Bgra10 { srgb: true }
+                | ExtendedRange::Planes { srgb: true }
+        );
+        let range = match self.form {
+            ExtendedRange::Bgra10 { srgb: true } => SRGB_SOURCE_RANGE,
+            _ => SOURCE_RANGE,
+        };
+        // Unblended, the low end is the blend source range's, where a later blend reads the tile
+        // (an M4 Max: `BGR10_XR_sRGB`'s tile after an unblended -2.0 then a blended 1.0 stores
+        // code 656, -0.7529's, not code 0's -0.527); the high end is code 1023's value as a
+        // `half`, sRGB 1.6748046875 and linear 639/510.
+        match (self.blended, srgb) {
+            (true, _) => range,
+            (false, true) => (range.0, 1715.0 / 1024.0),
+            (false, false) => (range.0, 1283.0 / 1024.0),
         }
     }
 }
@@ -1026,7 +1062,7 @@ pub struct FetchedAttachment {
     #[cfg_attr(feature = "serde", serde(default))]
     pub replaces: bool,
     /// The descriptor's blend where it enables blending, which the function computes in the
-    /// shader for an extended-range attachment (`metal::format::ExtendedRange`) it writes.
+    /// shader where its storage form blends.
     #[cfg_attr(feature = "serde", serde(default))]
     pub equation: Option<BlendEquation>,
 }

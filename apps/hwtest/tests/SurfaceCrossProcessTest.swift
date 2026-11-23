@@ -3,8 +3,8 @@ import Darwin
 import Foundation
 import HWTestCore
 import HWTestGPU
-import IOSurface
 import ImageIO
+import IOSurface
 import Metal
 import SwitchTexturePattern
 
@@ -34,7 +34,7 @@ struct SurfaceCrossProcessTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else { return .skip("the default device is not the raw facade") }
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else { return .skip("the default device is not the facade") }
         let acceptor = TexturePeerAcceptor()
         let listener = NSXPCListener.anonymous()
         listener.delegate = acceptor
@@ -84,12 +84,14 @@ struct SurfaceCrossProcessTest: HWTest {
                     metrics.set("\(label)_\(reader)_first", first)
                     metrics.set(
                         "\(label)_\(reader)_gob",
-                        !jpeg && Self.readAsGobs(got, surface, channels: channels) ? 1 : 0)
+                        !jpeg && Self.readAsGobs(got, surface, channels: channels) ? 1 : 0
+                    )
                     if jpeg && wrong > 0 {
                         metrics.set("\(label)_\(reader)_explained", JPEGSurfaceDecode.explained(got, surface))
                     }
                     checks.append(
-                        ("\(label): the \(reader) read is the peer's rows (\(wrong) bytes differ)", wrong == 0))
+                        ("\(label): the \(reader) read is the peer's rows (\(wrong) bytes differ)", wrong == 0)
+                    )
                 }
                 if order == "held" || order == "handoff" { _ = await Self.ask(connection) { $0.dropSurfaces($1) } }
             }
@@ -160,10 +162,11 @@ struct SurfaceCrossProcessTest: HWTest {
         let start = DispatchTime.now().uptimeNanoseconds
         surface.lock(options: .readOnly, seed: nil)
         var out = [UInt8](repeating: 0, count: surface.width * surface.height * 4)
-        for y in 0..<surface.height {
+        for y in 0 ..< surface.height {
             out.withUnsafeMutableBytes {
                 $0.baseAddress!.advanced(by: y * surface.width * 4).copyMemory(
-                    from: surface.baseAddress + y * surface.bytesPerRow, byteCount: surface.width * 4)
+                    from: surface.baseAddress + y * surface.bytesPerRow, byteCount: surface.width * 4
+                )
             }
         }
         surface.unlock(options: .readOnly, seed: nil)
@@ -179,12 +182,14 @@ struct SurfaceCrossProcessTest: HWTest {
         let png = NSMutableData()
         surface.lock(options: .readOnly, seed: nil)
         if let provider = CGDataProvider(
-            dataInfo: nil, data: surface.baseAddress, size: surface.bytesPerRow * height, releaseData: { _, _, _ in }),
-            let image = CGImage(
-                width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: surface.bytesPerRow,
-                space: space, bitmapInfo: CGBitmapInfo(rawValue: bgra), provider: provider, decode: nil,
-                shouldInterpolate: false, intent: .defaultIntent),
-            let destination = CGImageDestinationCreateWithData(png as CFMutableData, "public.png" as CFString, 1, nil)
+            dataInfo: nil, data: surface.baseAddress, size: surface.bytesPerRow * height, releaseData: { _, _, _ in }
+        ),
+           let image = CGImage(
+               width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: surface.bytesPerRow,
+               space: space, bitmapInfo: CGBitmapInfo(rawValue: bgra), provider: provider, decode: nil,
+               shouldInterpolate: false, intent: .defaultIntent
+           ),
+           let destination = CGImageDestinationCreateWithData(png as CFMutableData, "public.png" as CFString, 1, nil)
         {
             CGImageDestinationAddImage(destination, image, nil)
             CGImageDestinationFinalize(destination)
@@ -192,12 +197,13 @@ struct SurfaceCrossProcessTest: HWTest {
         surface.unlock(options: .readOnly, seed: nil)
         var out = [UInt8](repeating: 0, count: width * height * 4)
         guard let source = CGImageSourceCreateWithData(png as CFData, nil),
-            let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
+              let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { return out }
         out.withUnsafeMutableBytes {
             let context = CGContext(
                 data: $0.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-                space: space, bitmapInfo: bgra)
+                space: space, bitmapInfo: bgra
+            )
             context?.setBlendMode(.copy)
             context?.draw(decoded, in: CGRect(x: 0, y: 0, width: width, height: height))
         }
@@ -215,10 +221,10 @@ struct SurfaceCrossProcessTest: HWTest {
 
     /// The pattern into every texel through the surface's own mapping, with or without a lock around it
     static func write(_ surface: IOSurface) {
-        for y in 0..<surface.height {
+        for y in 0 ..< surface.height {
             let row = surface.baseAddress + y * surface.bytesPerRow
-            for x in 0..<surface.width {
-                for c in 0..<4 { row.storeBytes(of: byte(x, y, c), toByteOffset: x * 4 + c, as: UInt8.self) }
+            for x in 0 ..< surface.width {
+                for c in 0 ..< 4 { row.storeBytes(of: byte(x, y, c), toByteOffset: x * 4 + c, as: UInt8.self) }
             }
         }
     }
@@ -226,12 +232,14 @@ struct SurfaceCrossProcessTest: HWTest {
     /// Its texels as rows, through this process's own GPU import of it (a blit into a buffer), and that texture
     static func gpuRows(_ gpu: GPU, _ surface: IOSurface) async throws -> ([UInt8], MTLTexture) {
         let d = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: surface.width, height: surface.height, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: surface.width, height: surface.height, mipmapped: false
+        )
         d.usage = .shaderRead
         d.storageMode = .shared
         guard
             let t = gpu.device.makeTexture(
-                descriptor: d, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0)
+                descriptor: d, iosurface: unsafeBitCast(surface, to: IOSurfaceRef.self), plane: 0
+            )
         else { throw TestFailure("no texture over IOSurface \(surface.width)") }
         let row = surface.width * 4
         let out = try gpu.buffer(row * surface.height)
@@ -240,7 +248,8 @@ struct SurfaceCrossProcessTest: HWTest {
             blit.copy(
                 from: t, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(),
                 sourceSize: MTLSize(width: surface.width, height: surface.height, depth: 1), to: out,
-                destinationOffset: 0, destinationBytesPerRow: row, destinationBytesPerImage: 0)
+                destinationOffset: 0, destinationBytesPerRow: row, destinationBytesPerImage: 0
+            )
             blit.endEncoding()
         }
         return ([UInt8](UnsafeRawBufferPointer(start: out.contents(), count: row * surface.height)), t)
@@ -250,9 +259,9 @@ struct SurfaceCrossProcessTest: HWTest {
     /// (-1: none)
     static func wrong(_ got: [UInt8], _ surface: IOSurface, channels: Int = 4) -> (Int, Int) {
         var wrong = 0, first = -1
-        for y in 0..<surface.height {
-            for x in 0..<surface.width {
-                for c in 0..<channels where got[(y * surface.width + x) * 4 + c] != byte(x, y, c) {
+        for y in 0 ..< surface.height {
+            for x in 0 ..< surface.width {
+                for c in 0 ..< channels where got[(y * surface.width + x) * 4 + c] != byte(x, y, c) {
                     wrong += 1
                     if first < 0 { first = (y * surface.width + x) * 4 + c }
                 }
@@ -272,16 +281,16 @@ struct SurfaceCrossProcessTest: HWTest {
         let yLog2 = blockHeightLog2(surface.height)
         let pitch = surface.bytesPerRow
         var tiled = [UInt8](repeating: 0, count: pitch * surface.height + 64 * 8 * 16)
-        for y in 0..<surface.height {
-            for xB in 0..<(surface.width * 4) {
+        for y in 0 ..< surface.height {
+            for xB in 0 ..< (surface.width * 4) {
                 let at = gobOffset(rowBytes, yLog2, xB, y)
                 if at < tiled.count { tiled[at] = byte(xB / 4, y, xB % 4) }
             }
         }
         let rows = min(8, surface.height)
-        for y in 0..<rows {
-            for xB in 0..<(surface.width * 4)
-            where xB % 4 < channels && got[y * surface.width * 4 + xB] != tiled[y * pitch + xB] {
+        for y in 0 ..< rows {
+            for xB in 0 ..< (surface.width * 4)
+                where xB % 4 < channels && got[y * surface.width * 4 + xB] != tiled[y * pitch + xB] {
                 return false
             }
         }

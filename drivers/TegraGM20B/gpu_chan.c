@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Channel creation and teardown, timeslices and fence pages.
 #include "gpu_internal.h"
+#include "SwitchGpuChannelEpoch.h"
 
 #define CHAN_SEMA_BYTES \
 	0x2000 /* nvif's GET semaphore at +0; stats stamps at CHAN_STAMPS, push profile at CHAN_PROF */
@@ -255,6 +256,9 @@ static int chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *
 	}
 	mutex_lock(&tgm_live_lock);
 	chan->id = ++tgm_live_ids;
+#if DEVELOPMENT || DEBUG
+	switch_gpu_chan_named(chan);
+#endif
 	chan->timeline = switch_gpu_timeline_create(chan->id, chan->fence_cpu);
 	if (!chan->timeline) {
 		mutex_unlock(&tgm_live_lock);
@@ -284,7 +288,9 @@ int tgm_chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *fen
 	int ret = 0;
 
 	tgm_gate_enter();
+	switch_gpu_channel_create_begins();
 	ret = chan_new(vm, vm_owner, fence_cpu, fence_gpu_va, owner, critical, 0, pchan);
+	switch_gpu_channel_create_ends();
 	gate_leave();
 	return ret;
 }
@@ -294,7 +300,9 @@ int tgm_chan_new_copy(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t
 		      struct tgm_chan **pchan)
 {
 	tgm_gate_enter();
+	switch_gpu_channel_create_begins();
 	const int ret = chan_new(vm, vm_owner, fence_cpu, fence_gpu_va, owner, critical, 1, pchan);
+	switch_gpu_channel_create_ends();
 	gate_leave();
 	return ret;
 }
@@ -306,6 +314,8 @@ static void chan_abandon(struct tgm_chan *chan)
 
 	if (chan->kernel)
 		tgm_chan_hung(chan, "channel destroy", chan->submitted, NSEC_PER_SEC);
+	/* its owner is gone: the kill fails a dead client's work (WRITER_GONE), the compositor's too */
+	WRITE_ONCE(chan->critical, 0);
 	mutex_lock(&tgm_live_lock);
 	tgm_chan_isolate(chan, HANG_REPORT "destroyed with its work still running 1 s later", now);
 	mutex_unlock(&tgm_live_lock);
@@ -358,7 +368,6 @@ void tgm_chan_del(struct tgm_chan **pchan)
 	switch_gpu_busy_close(&tgm_busy, chan->chid);
 	mutex_lock(&tgm_live_lock);
 	list_del(&chan->live);
-	order_forget(chan);
 	mutex_unlock(&tgm_live_lock);
 	switch_gpu_chan_table_set(&tgm_chan_table, chan->chid, NULL);
 	nvxnu_pass_barrier();
@@ -372,6 +381,7 @@ void tgm_chan_del(struct tgm_chan **pchan)
 	}
 	mutex_unlock(&tgm_gpu.lock);
 	*pchan = NULL;
+	switch_gpu_channel_epoch_move();
 	nvxnu_wword_wake(&tgm_waiter_words[waiter], 0);
 }
 struct fences_state tgm_fence_pages;
@@ -413,6 +423,7 @@ int tgm_fence_page_get(volatile uint32_t **va, uint64_t *pa)
 		memset(tgm_fence_pages.made[i], 0, sizeof(tgm_fence_pages.made[i]));
 		tgm_clock_anchors_fill(i);
 		*va = (volatile uint32_t *)((u8 *)tgm_fence_pages.va + i * TGM_FENCE_SLOT);
+		switch_gpu_channel_epoch_fill(*va);
 		*pa = tgm_fence_pages.pa + i * TGM_FENCE_SLOT;
 		ret = 0;
 		break;
@@ -505,17 +516,8 @@ int tgm_fence_kernel(unsigned int which, volatile uint32_t **va, uint64_t *page_
 	return 0;
 }
 
-/* order between the channels of a task:
- * Two drivers in one process (the render server's raw GM20B path and NVK) each have their own connection, address space and
- * channels, and Metal's order between their command buffers is the order the process submits them in. tgm_chan_order
- * (TegraGM20BABI.h method 14) keeps it on the GPU, with no CPU wait: it queues semaphore ACQUIRE_GEQs (acquire switch on, as
- * the present's) on the fence words of the task's other channels, which the waiting channel's next tgm_chan_exec kicks as an
- * entry of their own ahead of its pushes. Every address space maps the whole fence pool read-only for them (tgm_fences_map, from
- * tgm_vm_new), as the present's does. Each acquire names a seqno already submitted when it was queued (AfterTask: the other
- * channels' last; BeforeTask: one up to the channel's last), and a channel's entries run in order, so no two submissions can
- * wait for each other. A source channel's teardown waits for it to go idle and drops what was queued on it (order_forget),
- * so no acquire is left on a fence page handed out again; one already kicked has passed by then. A waiter stuck on one is a
- * hang like any other (tgm_chan_check_progress), and its line names the acquire (tgm_chan_hung). */
+/* Every address space maps the whole fence pool read-only (tgm_fences_map, from tgm_vm_new), as the present's does, so a
+ * job's semaphore acquires on other channels' fence words need no CPU wait. */
 static DEFINE_MUTEX(fences_mem_lock);
 struct tgm_mem *tgm_fences_mem; /* the whole pool as GPU memory, made once and kept */
 
@@ -536,11 +538,4 @@ int tgm_fences_map(struct tgm_vm *vm)
 	if (!ret)
 		ret = tgm_vm_kmap_raw(vm, tgm_fences_mem, TGM_FENCE_BYTES, 1, &vm->fences_va);
 	return ret;
-}
-
-void tgm_chan_set_group(struct tgm_chan *chan, const void *group)
-{
-	mutex_lock(&tgm_live_lock);
-	chan->group = group;
-	mutex_unlock(&tgm_live_lock);
 }

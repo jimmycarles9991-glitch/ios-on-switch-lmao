@@ -39,11 +39,12 @@ public enum ScanoutReadback {
         let (kr, _) = readback(gpu, arm)
         guard kr == KERN_SUCCESS else {
             return .unavailable(
-                kr == GPUConnection.kIOReturnUnsupported ? "release_kernel" : "arm_" + GPUConnection.hex(kr))
+                kr == GPUConnection.kIOReturnUnsupported ? "release_kernel" : "arm_" + GPUConnection.hex(kr)
+            )
         }
         defer { _ = readback(gpu, disarm) }
         var reply: [UInt8] = []
-        for _ in 0..<30 {
+        for _ in 0 ..< 30 {
             await MainActor.run { nudge() }
             try? await Task.sleep(nanoseconds: 100_000_000)
             let (kr, answer) = readback(gpu, query)
@@ -67,7 +68,7 @@ public enum ScanoutReadback {
         }
         defer { gpu.unmap(scanout) }
         let rowBytes = width * 4
-        let copyRows = (0..<height).filter { y in
+        let copyRows = (0 ..< height).filter { y in
             memcmp(framebuffer.base + y * rowBytes, scanout.base + y * rowBytes, rowBytes) != 0
         }.count
         return .frame(
@@ -75,7 +76,9 @@ public enum ScanoutReadback {
                 framebuffer: raster(framebuffer.base, width: width, height: height),
                 scanout: raster(scanout.base, width: width, height: height),
                 direct: GPUConnection.uint32(reply, 16) & 1 != 0, copyRows: copyRows,
-                sequence: Int(GPUConnection.uint64(reply, 32))))
+                sequence: Int(GPUConnection.uint64(reply, 32))
+            )
+        )
     }
 
     static func readback(_ gpu: GPUConnection, _ op: UInt32) -> (kern_return_t, [UInt8]) {
@@ -85,7 +88,7 @@ public enum ScanoutReadback {
     static func raster(_ base: UnsafeRawPointer, width: Int, height: Int) -> Raster {
         let bytes = base.assumingMemoryBound(to: UInt8.self)
         var samples = [Float](repeating: 0, count: width * height * 3)
-        for i in 0..<(width * height) {
+        for i in 0 ..< (width * height) {
             samples[i * 3] = Float(bytes[i * 4 + 2]) / 255
             samples[i * 3 + 1] = Float(bytes[i * 4 + 1]) / 255
             samples[i * 3 + 2] = Float(bytes[i * 4]) / 255

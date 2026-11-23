@@ -1,7 +1,4 @@
 # drivers/NativeMobileDisplay on the host:
-#   vsync_phase_test                    VsyncPhase.h (r17-touch) against a model compositor at 60 Hz: r8a's quiet
-#                                       windows, periodic and rare stalls, a 20 Hz client, a copying compositor, one too
-#                                       slow for any phase
 #   switch_interaction_test             SwitchInteraction.h: the presents of a touch interaction window, its line
 #   switch_frame_stall_test             SwitchFrameStall.h: the frame ends at which the screen stopped mid-animation
 #   switch_sbim_test                    SwitchSBIM.h: libEDR's enableSBIM dictionaries (iOS 27), as
@@ -13,8 +10,8 @@
 #                                       on a working unit and failing at its own stage, undone, for each fault
 #   request_state_test                  NativeLegacyRequest.h: which swaps the legacy backend shows itself, the fill,
 #                                       the frame scans and colour counts, IOSurface bounds, the bounded row copy
-#   native_legacy_display_source_test   how NativeLegacyDisplay.cpp drives the ring, direct scanout, the vsync phase and
-#                                       the probe, and hangs its panic restore on SwitchDiag's hook (the driver itself
+#   native_legacy_display_source_test   how NativeLegacyDisplay.cpp drives the ring, direct scanout, the vsync and the
+#                                       probe, and hangs its panic restore on SwitchDiag's hook (the driver itself
 #                                       is not built for the host); iOS 17's IOMobileFramebufferLegacy table keeps its
 #                                       values
 #   display_planes_test                 NativePlanes.h (r18-planes): every swap Core Animation can build from the
@@ -90,14 +87,6 @@ load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
-
-host_test(
-    name = "vsync_phase_test",
-    srcs = [
-        "vsync_phase_test.cpp",
-        "//drivers/NativeMobileDisplay:VsyncPhase.h",
-    ],
-)
 
 host_test(
     name = "switch_interaction_test",
@@ -449,6 +438,7 @@ host_test(
     srcs = [
         "switch_landscape_test.cpp",
         "//drivers/TegraVIC/test:TegraVICProbe.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
         "//drivers/TegraVIC:TegraVICFormats.h",
         "//drivers/NativeMobileDisplay:NativeColumnScan.h",
@@ -686,6 +676,7 @@ host_test(
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
         "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -719,6 +710,7 @@ host_test(
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
         "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -751,6 +743,7 @@ host_test(
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
         "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -771,6 +764,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchDirectSlots.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICPresent.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
@@ -807,9 +801,12 @@ host_test(
     name = "switch_source_wait_test",
     srcs = [
         "switch_source_wait_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchUnshownSource.h",
+        "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
         "//drivers/NativeMobileDisplay:SwitchSourceWaitDisplay.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -829,6 +826,7 @@ host_test(
         "//drivers/NativeMobileDisplay:SwitchSourceReadyDisplay.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
@@ -883,6 +881,8 @@ host_test(
     name = "switch_plane_conversion_test",
     srcs = [
         "switch_plane_conversion_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchUnshownSource.h",
+        "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
         "//drivers/NativeMobileDisplay:SwitchPlaneConversionDisplay.h",
         "//drivers/NativeMobileDisplay:SwitchScanoutBuffer.h",
         "//drivers/NativeMobileDisplay:NativePlanes.h",
@@ -893,6 +893,7 @@ host_test(
         "//drivers/TegraVIC:SwitchVICScanoutConvert.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -1113,6 +1114,7 @@ host_test(
         "//drivers/TegraVIC:SwitchSurfaceColor.h",
         "//drivers/TegraVIC:SwitchNativeVICImage.h",
         "//drivers/TegraVIC:SwitchVICScanoutCompose.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICCompose.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
@@ -1221,10 +1223,13 @@ host_test(
     name = "switch_vic_scanout_test",
     srcs = [
         "switch_vic_scanout_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchUnshownSource.h",
+        "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
         "//drivers/NativeMobileDisplay:SwitchVICScanoutDisplay.h",
         "//drivers/TegraVIC:SwitchVICScanoutConvert.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:TegraVICConfig.h",
@@ -1310,6 +1315,7 @@ host_test(
         "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
         "//drivers/TegraVIC:SwitchNativeScanout.h",
         "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
         "//drivers/TegraVIC:TegraVICSurface.h",
         "//drivers/TegraVIC:TegraVICRequest.h",
         "//drivers/TegraVIC:SwitchSurfaceColor.h",

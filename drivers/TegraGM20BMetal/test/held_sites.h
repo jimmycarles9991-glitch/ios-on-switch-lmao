@@ -103,16 +103,18 @@ inline Owner mainOwner(const Frame &f)
             return Owner::Model;
     for (const char *test :
          {"held_blocks_test::", "encode_cost::", "harness::", "scale_frames::", "held_sites::", "testing::", "main",
-          "RawFacadeHeldBlocks", "-[Harness", "+[Harness", "facade::", "-[EncodeCostGone"})
+          "GM20BFacadeHeldBlocks", "-[Harness", "+[Harness", "facade::", "-[EncodeCostGone"})
         if (startsWith(f.symbol, test))
             return Owner::Test;
     return Owner::Runtime;
 }
 
-// Standard library code instantiated into this binary (std::__1's, whatever its return type): whoever called it decides
+// Standard library code instantiated into this binary (std::__1's, whatever its return type, and the lambdas inside it
+// that libc++ 22's map insert and vector growth run, _ZZ local entities): whoever called it decides
 inline bool library(const Frame &f)
 {
-    for (const char *std : {"_ZNSt3__1", "_ZNKSt3__1", "_ZSt", "__ZNSt3__1", "__ZNKSt3__1"})
+    for (const char *std : {"_ZNSt3__1", "_ZNKSt3__1", "_ZSt", "_ZZNSt3__1", "_ZZNKSt3__1", "__ZNSt3__1", "__ZNKSt3__1",
+                            "__ZZNSt3__1", "__ZZNKSt3__1"})
         if (startsWith(f.mangled, std))
             return true;
     return false;
@@ -120,9 +122,12 @@ inline bool library(const Frame &f)
 
 struct Site {
     std::vector<uintptr_t> frames;  // from the first outside the allocator, innermost first
-    Owner owner = Owner::Apple;
+    Owner owner = Owner::Apple;     // as its first block's frames decide it
+    uintptr_t ownerFrame = 0;       // the frame that decided it (0: none of this binary's)
     long blocks = 0;
+    long otherOwner = 0;  // blocks whose own frames decide another owner
     uint64_t bytes = 0;
+    std::map<std::string, long> threads;
 };
 
 struct Window {
@@ -140,6 +145,14 @@ struct Window {
         return n;
     }
 };
+
+inline std::string threadName(const held_sites_event &e)
+{
+    if (e.encoding)
+        return "encoding thread";
+    const size_t n = strnlen(e.thread, sizeof e.thread);
+    return n ? std::string(e.thread, n) : "unnamed thread";
+}
 
 // The log's live blocks (`all`: every allocation) grouped by their first `depth` frames past the allocator
 inline Window collect(const held_sites_event *events, size_t count, bool overflow, size_t depth, bool all = false)
@@ -184,19 +197,26 @@ inline Window collect(const held_sites_event *events, size_t count, bool overflo
         while (first < e.frames && allocator(name(e.frame[first])))
             first++;
         std::vector<uintptr_t> key(e.frame + first, e.frame + std::min<size_t>(e.frames, first + depth));
+        Owner owner = Owner::Apple;
+        uintptr_t ownerFrame = 0;
+        for (size_t k = first; k < e.frames; k++) {
+            const Frame &f = name(e.frame[k]);
+            if (f.main && !library(f)) {
+                owner = mainOwner(f);
+                ownerFrame = e.frame[k];
+                break;
+            }
+        }
         Site &s = bySite[key];
         if (!s.blocks) {
             s.frames = key;
-            for (size_t k = first; k < e.frames; k++) {
-                const Frame &f = name(e.frame[k]);
-                if (f.main && !library(f)) {
-                    s.owner = mainOwner(f);
-                    break;
-                }
-            }
+            s.owner = owner;
+            s.ownerFrame = ownerFrame;
         }
         s.blocks++;
+        s.otherOwner += owner != s.owner;
         s.bytes += e.size;
+        s.threads[threadName(e)]++;
     }
     for (auto &[key, site] : bySite)
         w.sites.push_back(std::move(site));
@@ -222,6 +242,116 @@ inline void print(const Window &w, const char *label, double per, long least)
         }
         printf("\n");
     }
+}
+
+inline std::string shortName(uintptr_t pc)
+{
+    if (!pc)
+        return "no frame of this binary";
+    const Frame f = frame(pc);
+    std::string name = f.symbol.empty() ? f.image : f.symbol;
+    for (size_t at; (at = name.find("(anonymous namespace)::")) != std::string::npos;)
+        name.erase(at, strlen("(anonymous namespace)::"));
+    const size_t close = name.rfind(')');
+    if (close != std::string::npos && name.find("-[") == std::string::npos && name.find("+[") == std::string::npos) {
+        int depth = 0;
+        for (size_t i = close + 1; i-- > 0;) {
+            depth += name[i] == ')' ? 1 : name[i] == '(' ? -1 : 0;
+            if (!depth) {
+                if (i)
+                    name.resize(i);
+                break;
+            }
+        }
+    }
+    if (name.size() > 90)
+        name = name.substr(0, 40) + "..." + name.substr(name.size() - 47);
+    char offset[24];
+    snprintf(offset, sizeof offset, "+0x%lx", (unsigned long)f.offset);
+    return name + offset;
+}
+
+struct ArmCounts {
+    long n[2] = {};
+};
+
+inline std::string countsLine(const char *label, const std::map<std::string, ArmCounts> &counts)
+{
+    std::string out = label;
+    for (const auto &[name, arms] : counts)
+        out += " " + name + " " + std::to_string(arms.n[0]) + " vs " + std::to_string(arms.n[1]) + ";";
+    return out + "\n";
+}
+
+// The sites, matched by frames, whose blocks `owner` takes differ between windows `a` and `b` of `per` `unit`s each,
+// most different first: the counts, each window's owner of the site and the frame that decided it, the site's blocks
+// by thread in both, the blocks whose own frames decide another owner, and the site's frames (innermost first)
+inline std::string differences(const Window &a, const Window &b, Owner owner, const std::string &aName,
+                               const std::string &bName, double per, const char *unit, size_t most = 12)
+{
+    struct Pair {
+        const Site *site[2] = {};
+        long counted[2] = {};
+    };
+
+    std::map<std::vector<uintptr_t>, Pair> bySite;
+    std::map<std::string, ArmCounts> byThread;
+    const Window *windows[2] = {&a, &b};
+    for (int k = 0; k < 2; k++)
+        for (const Site &s : windows[k]->sites) {
+            Pair &p = bySite[s.frames];
+            p.site[k] = &s;
+            if (s.owner != owner)
+                continue;
+            p.counted[k] = s.blocks;
+            for (const auto &thread : s.threads)
+                byThread[thread.first].n[k] += thread.second;
+        }
+    std::vector<const Pair *> differing;
+    for (const auto &entry : bySite)
+        if (entry.second.counted[0] != entry.second.counted[1])
+            differing.push_back(&entry.second);
+    std::sort(differing.begin(), differing.end(), [](const Pair *x, const Pair *y) {
+        return std::labs(x->counted[1] - x->counted[0]) > std::labs(y->counted[1] - y->counted[0]);
+    });
+    char line[256];
+    snprintf(line, sizeof line, "%s allocations, %s vs %s, over %g %ss each%s\n", ownerName(owner), aName.c_str(),
+             bName.c_str(), per, unit, a.overflow || b.overflow ? " (the log overflowed)" : "");
+    std::string out = line + countsLine("  by thread:", byThread);
+    out += "  " + std::to_string(differing.size()) + " sites differ:\n";
+    for (size_t i = 0; i < differing.size() && i < most; i++) {
+        const Pair &p = *differing[i];
+        std::string owners[2] = {"absent", "absent"}, decided[2] = {"absent", "absent"};
+        std::map<std::string, ArmCounts> threads;
+        long other[2] = {};
+        for (int k = 0; k < 2; k++) {
+            const Site *s = p.site[k];
+            if (!s)
+                continue;
+            owners[k] = ownerName(s->owner);
+            decided[k] = shortName(s->ownerFrame);
+            other[k] = s->otherOwner;
+            for (const auto &thread : s->threads)
+                threads[thread.first].n[k] += thread.second;
+        }
+        snprintf(line, sizeof line, "    %ld vs %ld (%+.2f per %s), owner %s vs %s, decided by %s", p.counted[0],
+                 p.counted[1], double(p.counted[1] - p.counted[0]) / per, unit, owners[0].c_str(), owners[1].c_str(),
+                 decided[0].c_str());
+        out += line;
+        out += decided[0] == decided[1] ? "\n" : " vs " + decided[1] + "\n";
+        out += countsLine("      threads:", threads);
+        if (other[0] || other[1])
+            out += "      blocks another owner's frames decide: " + std::to_string(other[0]) + " vs " +
+                   std::to_string(other[1]) + "\n";
+        const std::vector<uintptr_t> &frames = (p.site[0] ? p.site[0] : p.site[1])->frames;
+        out += "      frames:";
+        for (size_t f = 0; f < frames.size(); f++)
+            out += (f ? " < " : " ") + shortName(frames[f]);
+        out += "\n";
+    }
+    if (differing.size() > most)
+        out += "    (" + std::to_string(differing.size() - most) + " more)\n";
+    return out;
 }
 
 }  // namespace held_sites

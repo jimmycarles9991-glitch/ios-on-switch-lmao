@@ -55,7 +55,7 @@ struct NativeParallelEncoderTest: NativeObjectTest {
                 throw TestFailure("makeParallelRenderCommandEncoder returned nil")
             }
             parallelObjects.append(parallel)
-            let subs = (0..<3).compactMap { _ in parallel.makeRenderCommandEncoder() }
+            let subs = (0 ..< 3).compactMap { _ in parallel.makeRenderCommandEncoder() }
             guard subs.count == 3 else { throw TestFailure("a sub-encoder was nil") }
             DispatchQueue.concurrentPerform(iterations: 3) { i in
                 let encoder = subs[i]
@@ -81,8 +81,8 @@ struct NativeParallelEncoderTest: NativeObjectTest {
         work.paths.append(drawn.path)
         let pixels = try await gpu.read(color, bytesPerPixel: 4)
         var wrong = 0
-        for y in 0..<size {
-            for x in 0..<size where Array(pixels.pixel(x, y, width: size)) != Self.want(x, y) { wrong += 1 }
+        for y in 0 ..< size {
+            for x in 0 ..< size where Array(pixels.pixel(x, y, width: size)) != Self.want(x, y) { wrong += 1 }
         }
         metrics.set("wrong_pixels", wrong)
         if wrong != 0 {
@@ -101,7 +101,7 @@ struct NativeParallelEncoderTest: NativeObjectTest {
         work.paths.append(empty.path)
         try await clampedGroup(gpu, &work, &metrics)
         let magenta = try await gpu.read(cleared, bytesPerPixel: 4)
-        let unclear = (0..<256).filter {
+        let unclear = (0 ..< 256).filter {
             Array(magenta.pixel($0 % 16, $0 / 16, width: 16)) != [255, 0, 255, 255]
         }.count
         metrics.set("unclear_pixels", unclear)
@@ -123,8 +123,8 @@ struct NativeParallelEncoderTest: NativeObjectTest {
             pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
             pass.colorAttachments[0].storeAction = .store
             guard let parallel = commands.makeParallelRenderCommandEncoder(descriptor: pass),
-                let a = parallel.makeRenderCommandEncoder(), let b = parallel.makeRenderCommandEncoder(),
-                let c = parallel.makeRenderCommandEncoder()
+                  let a = parallel.makeRenderCommandEncoder(), let b = parallel.makeRenderCommandEncoder(),
+                  let c = parallel.makeRenderCommandEncoder()
             else { throw TestFailure("no parallel encoder or sub-encoder") }
             a.setRenderPipelineState(pipeline)
             GPU.draw(a, corners: GPU.fullScreen, color: SIMD4(1, 0, 0, 1))
@@ -140,9 +140,9 @@ struct NativeParallelEncoderTest: NativeObjectTest {
             parallel.endEncoding()
         }
         metrics.set("clamped_group_path", timing.path)
-        if timing.path != "raw" { work.failures.append("the clamped group went \(timing.path)") }
+        if timing.path != "gm20b" { work.failures.append("the clamped group went \(timing.path)") }
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let wrong = (0..<size * size).filter {
+        let wrong = (0 ..< size * size).filter {
             let want: [UInt8] = $0 % size < size / 2 ? [255, 0, 0, 255] : [0, 255, 0, 255]
             return Array(pixels.pixel($0 % size, $0 / size, width: size)) != want
         }.count

@@ -65,7 +65,7 @@ Queue::Record *queued(Queue &q, Submission &s)
 
 tgm_scan::SubmissionRead readRecord(const Queue::Record &record)
 {
-	return tgm_scan::readSubmission(record.push, record.count, nullptr, record.rawMacros,
+	return tgm_scan::readSubmission(record.push, record.count, nullptr, record.metalMacros,
 					kBudget);
 }
 

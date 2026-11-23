@@ -74,7 +74,8 @@ public enum RenderBoxCorner {
         let drawn = try await draw(gpu, list, side: side, storage: storage)
         return judge(
             drawn, cpuAlpha(list, side: side), side: side, radius: radius,
-            storage: storage == .private ? "private" : "shared")
+            storage: storage == .private ? "private" : "shared"
+        )
     }
 
     /// RenderBox's CPU drawing of the mask, its alpha by row
@@ -96,8 +97,8 @@ public enum RenderBoxCorner {
             let got = Int(drawn[i]), want = Int(reference[i])
             cell.maxDiff = max(cell.maxDiff, abs(got - want))
             if abs(got - want) > tolerance { cell.beyond += 1 }
-            if (8...247).contains(got) { cell.partial += 1 }
-            if (8...247).contains(want) { cell.referencePartial += 1 }
+            if (8 ... 247).contains(got) { cell.partial += 1 }
+            if (8 ... 247).contains(want) { cell.referencePartial += 1 }
         }
         return cell
     }
@@ -106,8 +107,8 @@ public enum RenderBoxCorner {
     public static func cornerPixels(side: Int, corner: Int) -> [(Int, Int)] {
         let c = min(corner, side / 2)
         var out: [(Int, Int)] = []
-        for y in 0..<side where y < c || y >= side - c {
-            for x in 0..<side where x < c || x >= side - c { out.append((y, x)) }
+        for y in 0 ..< side where y < c || y >= side - c {
+            for x in 0 ..< side where x < c || x >= side - c { out.append((y, x)) }
         }
         return out
     }
@@ -116,13 +117,13 @@ public enum RenderBoxCorner {
     public static func reduce(_ alpha: [Double], from: Int, to: Int) -> [Double] {
         let scale = Double(from) / Double(to)
         var out = [Double](repeating: 0, count: to * to)
-        for y in 0..<to {
-            for x in 0..<to {
+        for y in 0 ..< to {
+            for x in 0 ..< to {
                 let x0 = Double(x) * scale, x1 = x0 + scale, y0 = Double(y) * scale, y1 = y0 + scale
                 var sum = 0.0
-                for sy in Int(y0)..<min(from, Int(y1.rounded(.up))) {
+                for sy in Int(y0) ..< min(from, Int(y1.rounded(.up))) {
                     let hy = min(y1, Double(sy + 1)) - max(y0, Double(sy))
-                    for sx in Int(x0)..<min(from, Int(x1.rounded(.up))) {
+                    for sx in Int(x0) ..< min(from, Int(x1.rounded(.up))) {
                         let hx = min(x1, Double(sx + 1)) - max(x0, Double(sx))
                         sum += alpha[sy * from + sx] * hx * hy
                     }
@@ -172,13 +173,15 @@ public enum RenderBoxCorner {
 
     static func draw(_ gpu: GPU, _ list: AnyObject, side: Int, storage: MTLStorageMode) async throws -> [UInt8] {
         guard let deviceType = NSClassFromString("RBDevice") as? NSObject.Type,
-            let drawableType = NSClassFromString("RBDrawable") as? NSObject.Type
+              let drawableType = NSClassFromString("RBDrawable") as? NSObject.Type
         else { throw TestFailure("no RBDevice") }
         let initWith = NSSelectorFromString("initWithDevice:")
         let rbDevice = unsafeBitCast(deviceType.instanceMethod(for: initWith), to: InitObject.self)(
-            deviceType.perform(NSSelectorFromString("alloc")).takeUnretainedValue(), initWith, gpu.device)
+            deviceType.perform(NSSelectorFromString("alloc")).takeUnretainedValue(), initWith, gpu.device
+        )
         let drawable = unsafeBitCast(drawableType.instanceMethod(for: initWith), to: InitObject.self)(
-            drawableType.perform(NSSelectorFromString("alloc")).takeUnretainedValue(), initWith, rbDevice)
+            drawableType.perform(NSSelectorFromString("alloc")).takeUnretainedValue(), initWith, rbDevice
+        )
         let target = try gpu.texture(.bgra8Unorm, side, side, storage: storage)
         let (format, formatSel) = try method(drawable, "setPixelFormat:", SetUInt.self)
         format(drawable, formatSel, MTLPixelFormat.bgra8Unorm.rawValue)
@@ -203,7 +206,7 @@ public enum RenderBoxCorner {
         }
         guard completedInTime else { throw TestFailure("RenderBox's drawing never completed") }
         let bytes = try await gpu.read(target, bytesPerPixel: 4)
-        return (0..<(side * side)).map { bytes[$0 * 4 + 3] }
+        return (0 ..< (side * side)).map { bytes[$0 * 4 + 3] }
     }
 
     /// True for the first caller only, whichever thread it is on
@@ -227,11 +230,12 @@ public enum RenderBoxCorner {
                 let context = CGContext(
                     data: raw.baseAddress, width: side, height: side, bitsPerComponent: 8, bytesPerRow: side * 4,
                     space: CGColorSpaceCreateDeviceRGB(),
-                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+                ),
                 let (draw, selector) = try? method(list, "renderInContext:options:", RenderInContext.self)
             else { return }
             draw(list, selector, context, nil)
         }
-        return (0..<(side * side)).map { bytes[$0 * 4 + 3] }
+        return (0 ..< (side * side)).map { bytes[$0 * 4 + 3] }
     }
 }

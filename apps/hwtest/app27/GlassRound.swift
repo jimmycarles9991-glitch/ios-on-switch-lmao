@@ -26,7 +26,8 @@ struct GlassStage {
         root.addSubview(grey)
         glass = UIVisualEffectView(effect: UIGlassEffect(style: .regular))
         glass.frame = Snapshots.aligned(
-            CGRect(x: 0, y: screen.height / 4, width: screen.width, height: screen.height / 2))
+            CGRect(x: 0, y: screen.height / 4, width: screen.width, height: screen.height / 2)
+        )
         root.addSubview(glass)
         stage.addSubview(root)
         Self.built += 1
@@ -69,6 +70,7 @@ struct GlassRound {
         }
         await context.clearStage()
         return GlassRound(
-            level: GlassStage.level(picture), recording: recording, picture: picture, firstInProcess: first)
+            level: GlassStage.level(picture), recording: recording, picture: picture, firstInProcess: first
+        )
     }
 }

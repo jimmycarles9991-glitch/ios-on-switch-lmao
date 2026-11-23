@@ -3,12 +3,12 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// A runtime sampler with a compare function on the raw path (drivers/TegraGM20BMetal/raw/runtime/raw_sampler.h
+/// A runtime sampler with a compare function on the driver (drivers/TegraGM20BMetal/sampler.h
 /// compareHeader): one state samples a depth image through it by comparison and another plainly, in one pass, so each
 /// draw takes the sampler header its state's use names (m2v makes the slot's sampler per use). Each texel is compared
 /// against 0.5 under Less and GreaterEqual: 1 where reference OP texel holds, as Vulkan's Dref and Metal define it.
 struct CompareSamplerTest: HWTest {
-    let id = "gpu.raw.compare_sampler"
+    let id = "gpu.gm20b.compare_sampler"
     let name = "A sampler's compare function on raw: compared and plain reads of one depth image through one sampler"
     let subsystem = Subsystem.metal
 
@@ -27,8 +27,8 @@ struct CompareSamplerTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let fill = try gpu.render(fragment: "compare_fill_depth", format: .r32Float, depth: .depth32Float)
         let depthWrite = MTLDepthStencilDescriptor()
         depthWrite.depthCompareFunction = .always
@@ -59,7 +59,8 @@ struct CompareSamplerTest: HWTest {
                 encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 encoder.endEncoding()
-            }.path)
+            }.path
+        )
         for function in [MTLCompareFunction.less, .greaterEqual] {
             let descriptor = MTLSamplerDescriptor()
             descriptor.compareFunction = function
@@ -86,12 +87,13 @@ struct CompareSamplerTest: HWTest {
                         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                         encoder.endEncoding()
                     }
-                }.path)
+                }.path
+            )
             let comparedBytes = try await gpu.read(comparedOut, bytesPerPixel: 4)
             let plainBytes = try await gpu.read(plainOut, bytesPerPixel: 4)
             var comparedOff = 0, plainWorst: Float = 0
-            for y in 0..<Self.side {
-                for x in 0..<Self.side {
+            for y in 0 ..< Self.side {
+                for x in 0 ..< Self.side {
                     let at = 4 * (x + Self.side * y)
                     let got = comparedBytes.withUnsafeBytes { $0.load(fromByteOffset: at, as: Float.self) }
                     let plain = plainBytes.withUnsafeBytes { $0.load(fromByteOffset: at, as: Float.self) }
@@ -105,8 +107,8 @@ struct CompareSamplerTest: HWTest {
             if comparedOff > 0 { wrong.append("\(label)_compared") }
             if plainWorst > 1e-6 { wrong.append("\(label)_plain") }
         }
-        metrics.set("paths", paths.allSatisfy { $0 == "raw" } ? "raw" : paths.joined(separator: ","))
-        if paths.contains(where: { $0 != "raw" }) { wrong.append("paths") }
+        metrics.set("paths", paths.allSatisfy { $0 == "gm20b" } ? "gm20b" : paths.joined(separator: ","))
+        if paths.contains(where: { $0 != "gm20b" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 }

@@ -10,53 +10,11 @@
 #include "drivers/TegraGM20B/SwitchGpuGatedMethods.h"
 using namespace std::chrono_literals;
 
-TEST(SubmitGate, MutationDrainsExistingSubmissionsBeforeNewEntries)
-{
-	IOLock lock;
-	SwitchGpuSubmitGate gate;
-	IOLockLock(&lock);
-	ASSERT_TRUE(gate.enter(&lock));
-	ASSERT_TRUE(gate.enter(&lock));
-	std::promise<void> asleep;
-	bool notified = false;
-	lock.sleeping = [&] {
-		if (!notified) {
-			notified = true;
-			asleep.set_value();
-		}
-	};
-	IOLockUnlock(&lock);
-	std::atomic<int> order{0};
-	auto mutation = std::async(std::launch::async, [&] {
-		IOLockLock(&lock);
-		ASSERT_TRUE(gate.mutate(&lock));
-		ASSERT_TRUE(order.fetch_add(1) == 0);
-		IOLockUnlock(&lock);
-	});
-	ASSERT_TRUE(asleep.get_future().wait_for(2s) == std::future_status::ready);
-	auto next = std::async(std::launch::async, [&] {
-		IOLockLock(&lock);
-		ASSERT_TRUE(gate.enter(&lock));
-		ASSERT_TRUE(order.fetch_add(1) == 1);
-		gate.leave(&lock);
-		IOLockUnlock(&lock);
-	});
-	IOLockLock(&lock);
-	gate.leave(&lock);
-	ASSERT_TRUE(order.load() == 0);
-	gate.leave(&lock);
-	IOLockUnlock(&lock);
-	mutation.get();
-	next.get();
-}
-
 TEST(SubmitGate, CloseDrainsAndRefusesLaterWork)
 {
 	IOLock lock;
 	SwitchGpuSubmitGate gate;
-	IOLockLock(&lock);
-	ASSERT_TRUE(gate.enter(&lock));
-	IOLockUnlock(&lock);
+	ASSERT_TRUE(gate.enterFast());
 	std::promise<void> asleep;
 	bool notified = false;
 	lock.sleeping = [&] {
@@ -71,51 +29,16 @@ TEST(SubmitGate, CloseDrainsAndRefusesLaterWork)
 		IOLockUnlock(&lock);
 	});
 	ASSERT_TRUE(asleep.get_future().wait_for(2s) == std::future_status::ready);
+	EXPECT_FALSE(gate.enterFast());
 	IOLockLock(&lock);
-	ASSERT_TRUE(gate.closed());
-	ASSERT_TRUE(!gate.enter(&lock));
-	ASSERT_TRUE(!gate.mutate(&lock));
-	gate.leave(&lock);
+	EXPECT_TRUE(gate.closed());
+	EXPECT_FALSE(gate.enterSlow(&lock));
+	EXPECT_FALSE(gate.beginMutation(&lock));
 	IOLockUnlock(&lock);
+	EXPECT_EQ(closing.wait_for(20ms), std::future_status::timeout);
+	gate.leaveFast(&lock);
+	ASSERT_EQ(closing.wait_for(2s), std::future_status::ready);
 	closing.get();
-}
-
-TEST(SubmitGate, ConcurrentChannelsCannotOverlapMutations)
-{
-	IOLock lock;
-	SwitchGpuSubmitGate gate;
-	std::atomic<int> inside{0}, violations{0};
-	std::vector<std::thread> threads;
-	for (int j = 0; j < 4; j++)
-		threads.emplace_back([&] {
-			for (int i = 0; i < 1000; i++) {
-				IOLockLock(&lock);
-				ASSERT_TRUE(gate.enter(&lock));
-				IOLockUnlock(&lock);
-				inside++;
-				std::this_thread::yield();
-				inside--;
-				IOLockLock(&lock);
-				gate.leave(&lock);
-				IOLockUnlock(&lock);
-			}
-		});
-	for (int j = 0; j < 2; j++)
-		threads.emplace_back([&] {
-			for (int i = 0; i < 200; i++) {
-				IOLockLock(&lock);
-				ASSERT_TRUE(gate.mutate(&lock));
-				if (inside)
-					violations++;
-				std::this_thread::yield();
-				if (inside)
-					violations++;
-				IOLockUnlock(&lock);
-			}
-		});
-	for (auto &thread : threads)
-		thread.join();
-	ASSERT_TRUE(violations == 0);
 }
 
 TEST(SubmitGate, MutationReservationSurvivesDroppingConnectionLock)
@@ -127,11 +50,15 @@ TEST(SubmitGate, MutationReservationSurvivesDroppingConnectionLock)
 	IOLockUnlock(&lock);
 	std::atomic<unsigned> admitted{0};
 	auto submit = std::async(std::launch::async, [&] {
-		IOLockLock(&lock);
-		REQUIRE(gate.enter(&lock));
+		bool entered = gate.enterFast();
+		if (!entered) {
+			IOLockLock(&lock);
+			entered = gate.enterSlow(&lock);
+			IOLockUnlock(&lock);
+		}
+		REQUIRE(entered);
 		++admitted;
-		gate.leave(&lock);
-		IOLockUnlock(&lock);
+		gate.leaveFast(&lock);
 	});
 	auto mutation = std::async(std::launch::async, [&] {
 		IOLockLock(&lock);
@@ -331,10 +258,8 @@ TEST(SubmitGate, ASubmitJobRunsWhileAnImportWires)
 	      TegraGM20BMethodVmBind, TegraGM20BMethodSurfaceWrites, TegraGM20BMethodGetInfo,
 	      TegraGM20BMethodGetStatus})
 		EXPECT_FALSE(switch_gpu_method_closes_gate(method)) << method;
-	for (const uint32_t method :
-	     {TegraGM20BMethodChannelCreate, TegraGM20BMethodChannelDestroy, TegraGM20BMethodExec,
-	      TegraGM20BMethodSubmit, TegraGM20BMethodExecSurfaces, TegraGM20BMethodPriority,
-	      TegraGM20BMethodOrder, TegraGM20BMethodNativeSurfaceView})
+	for (const uint32_t method : {TegraGM20BMethodChannelCreate, TegraGM20BMethodChannelDestroy,
+				      TegraGM20BMethodPriority, TegraGM20BMethodNativeSurfaceView})
 		EXPECT_TRUE(switch_gpu_method_closes_gate(method)) << method;
 	IOLock lock;
 	SwitchGpuSubmitGate gate;

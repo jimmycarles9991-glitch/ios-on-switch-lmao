@@ -420,7 +420,7 @@ TEST_F(Views, ReadOnlyLocksAfterTheFirstReuseItsRowsUntilTheGpuWrites)
 	}
 	EXPECT_EQ(gMoves.size(), 1u);
 	EXPECT_EQ(gScratchesReclaimed - reclaimed, 2);
-	tgm_coherency_wrote(s.coh, 1, 7, 1);
+	tgm_coherency_wrote(s.coh, 7, 1);
 	ASSERT_EQ(tegra_gm20b_iosurface_view(client(1), kLock, s.id, kReadOnly), 0);
 	ASSERT_EQ(tegra_gm20b_iosurface_view(client(1), kUnlock, s.id, kReadOnly), 0);
 	EXPECT_EQ(gMoves.size(), 2u);
@@ -464,7 +464,7 @@ TEST_F(Views, AvoidSyncWithAWriterRunningIsRefusedAndMovesNothing)
 	Tiled s(0xa0400000, 85);
 	map(1, s.id, 0x70000);
 	gGpu.completed[9] = 2;
-	tgm_coherency_wrote(s.coh, 0, 9, 3);  // channel 9 has not completed seqno 3
+	tgm_coherency_wrote(s.coh, 9, 3);  // channel 9 has not completed seqno 3
 	gMoves.clear();
 	EXPECT_NE(tegra_gm20b_iosurface_view(client(1), kLock, s.id, kAvoidSync), 0);
 	EXPECT_TRUE(gMoves.empty());

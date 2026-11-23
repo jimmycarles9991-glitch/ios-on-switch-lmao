@@ -9,7 +9,7 @@ import HWTestKit
 /// (drivers/TegraVIC/SwitchVICPitchProbe.h): nine 1:1 BGRA copies with no bounce at 320, 576 and 2880 bytes a row
 /// against 256-multiple controls, each compared in the kernel.
 enum X1VICPitchProbe {
-    static let magic: UInt32 = 0x5650_4954  // 'VPIT'
+    static let magic: UInt32 = 0x5650_4954 // 'VPIT'
     static let replyBytes = 340
     static let cases = 9
     static let firstControl = 6
@@ -25,8 +25,8 @@ enum X1VICPitchProbe {
         case .success(let words): reply = words
         }
         var wrong: [String: Int] = [:]
-        for i in 0..<cases {
-            let r = Array(reply[(4 + 9 * i)..<(4 + 9 * (i + 1))])
+        for i in 0 ..< cases {
+            let r = Array(reply[(4 + 9 * i) ..< (4 + 9 * (i + 1))])
             let name = "p\(r[0])_\(r[1])"
             metrics.set(name + "_status", Int(Int32(bitPattern: r[3])))
             metrics.set(name + "_outside", Int(r[8]))

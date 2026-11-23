@@ -1,0 +1,562 @@
+// SPDX-License-Identifier: MIT
+// A draw's fragment uniforms come from the form it draws, on gm20b::Device (device_harness.h), read back as the methods
+// it submitted. The set-0 entries a kept upload stands for (PackPipeline::memoryEntries) and the uniform buffers it binds
+// are those of the pipeline formFor and prepare pick: a storage form's barrier twin, or a residual-0 variant of a pack
+// state. Drawn twice or more with other fragment uniform contents at one binding, each draw binds, or uploads in its
+// set, the bytes that draw bound.
+#include "device_harness.h"
+#include "../record.h"
+#include "../mme.h"
+#include "../set_reads.h"
+#include "../../../kits/SwitchGM20B/SwitchGM20B3D.h"
+#include <map>
+
+namespace {
+
+constexpr uint32_t kRGBA8 = 70, kTriangle = 3, kFragment = 2, kSlot = 1, kResidualWord = 4;
+constexpr uint32_t kFragmentGroup = 4, kFragmentProgram = 5, kRootSetWord = 0x38;
+// MOV R0, c[1][0x0]: a program reading the first set-0 descriptor from the set it binds at constant buffer 1
+constexpr uint64_t kReadSetEntry0 = 0x4c98ull << 48 | 1ull << 34;
+
+struct Method {
+    uint32_t method, value;
+};
+
+// The 3D subchannel's methods of `words`, in order (INC, NON_INC, ONE_INC and IMMD headers)
+std::vector<Method> methods(const std::vector<uint32_t> &words)
+{
+    std::vector<Method> out;
+    for (size_t i = 0; i < words.size();) {
+        const uint32_t h = words[i++], op = h >> 29, count = (h >> 16) & 0x1fff, subc = (h >> 13) & 7,
+                       method = (h & 0xfff) << 2;
+        if (op == 4) {
+            if (subc == 0)
+                out.push_back({method, count});
+            continue;
+        }
+        if (op != 1 && op != 3 && op != 5)
+            continue;
+        for (uint32_t k = 0; k < count && i < words.size(); k++, i++)
+            if (subc == 0)
+                out.push_back({method + 4 * (op == 1 ? k : op == 5 && k ? 1 : 0), words[i]});
+    }
+    return out;
+}
+
+std::vector<Method> submitted()
+{
+    std::vector<Method> out;
+    for (const kernel_model::Job &job : kernel_model::model.jobs) {
+        const std::vector<Method> m = methods(job.words);
+        out.insert(out.end(), m.begin(), m.end());
+    }
+    return out;
+}
+
+// The address of each constant buffer bound at the fragment stage's slot `slot`, in order
+std::vector<uint64_t> fragmentBinds(const std::vector<Method> &m, uint32_t slot)
+{
+    std::vector<uint64_t> out;
+    uint32_t high = 0, low = 0;
+    for (const Method &x : m)
+        if (x.method == NVB197_SET_CONSTANT_BUFFER_SELECTOR_B)
+            high = x.value;
+        else if (x.method == NVB197_SET_CONSTANT_BUFFER_SELECTOR_C)
+            low = x.value;
+        else if (x.method == NVB197_BIND_GROUP_CONSTANT_BUFFER(kFragmentGroup) && (x.value & 1) &&
+                 (x.value >> 4 & 0x1f) == slot)
+            out.push_back(uint64_t(high) << 32 | low);
+    return out;
+}
+
+// Each value root table word `offset` took (LOAD_CONSTANT_BUFFER from LOAD_CONSTANT_BUFFER_OFFSET), in order
+std::vector<uint32_t> rootWordValues(const std::vector<Method> &m, uint32_t offset)
+{
+    std::vector<uint32_t> out;
+    uint32_t at = 0;
+    for (const Method &x : m)
+        if (x.method == NVB197_LOAD_CONSTANT_BUFFER_OFFSET) {
+            at = x.value;
+        } else if (x.method >= NVB197_LOAD_CONSTANT_BUFFER(0) && x.method <= NVB197_LOAD_CONSTANT_BUFFER(15)) {
+            if (at == offset)
+                out.push_back(x.value);
+            at += 4;
+        }
+    return out;
+}
+
+std::vector<uint32_t> valuesOf(const std::vector<Method> &m, uint32_t method)
+{
+    std::vector<uint32_t> out;
+    for (const Method &x : m)
+        if (x.method == method)
+            out.push_back(x.value);
+    return out;
+}
+
+bool drawMacro(uint32_t method)
+{
+    const uint32_t first = NVB197_CALL_MME_MACRO(0), last = NVB197_CALL_MME_MACRO(127);
+    return method >= first && method <= last && (method - first) % 8 == 0 &&
+           gm20b::mme::countedAsDraw((method - first) / 8);
+}
+
+// A uniform buffer entry of the fragment stage at set-0 byte 0, its residual in root push word kResidualWord
+gm20b::PackEntry fragmentUniform()
+{
+    return {0, gm20b::EntryUbo, kFragment, kSlot, uint8_t((kResidualWord + 1) << 2), 16, 0};
+}
+
+void describe(gm20b::PackPipeline &p, uint64_t keyHash)
+{
+    p.keyHash = keyHash;
+    p.flags = gm20b::PipelinePushMetadata;
+    gm20b::setEntryCount(p, 1);
+    p.entry[0] = fragmentUniform();
+    p.setBytes = 16;
+    p.pushMask = 1u << kResidualWord;
+    for (gm20b::PackUniformRange &u : p.uniform)
+        u.entry = gm20b::kNoUniform;
+}
+
+// A state of one fragment uniform buffer whose fragment program reads it as `fragmentCbufs` and code `code` say
+gm20b::RuntimeRecord record(uint64_t keyHash, std::vector<uint8_t> fragmentCbufs, uint64_t code = 0)
+{
+    gm20b::RuntimeRecord r;
+    r.keyString = "samples=1 c0=70 ds=0/0 form " + std::to_string(keyHash);
+    for (gm20b::CapturedProgram &p : r.programs) {
+        p.image.assign(80 + 64, 0);
+        p.gprs = 8;
+        p.cbufTypes = {gm20b::CbufRoot};
+    }
+    r.programs[1].cbufTypes = std::move(fragmentCbufs);
+    memcpy(r.programs[1].image.data() + 80 + 8, &code, sizeof code);
+    describe(r.pipeline, keyHash);
+    const gm20b::CapturedProgram &fs = r.programs[1];
+    r.pipeline.memoryEntries = 0;
+    gm20b::programSetReads(fs.image.data() + 80, fs.image.size() - 80, fs.cbufTypes.data(),
+                           uint32_t(fs.cbufTypes.size()), fs.boundTextures, gm20b::SetEntries(r.pipeline, nullptr),
+                           &r.pipeline.memoryEntries);
+    r.blob = {0x1a00, 0x1111};
+    return r;
+}
+
+class DrawnFormUniforms : public harness::DeviceTest {
+protected:
+    gm20b::Texture target;
+    gm20b::Buffer buffer;
+    gm20b::CommandBuffer *cb = nullptr;
+    gm20b::RenderEncoder *e = nullptr;
+
+    void SetUp() override
+    {
+        DeviceTest::SetUp();
+        ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
+        ASSERT_TRUE(dev.createBuffer(4096, buffer));
+        ASSERT_EQ(buffer.va % 256, 0u);
+        for (uint32_t i = 0; i < 1024; i++)
+            memcpy(buffer.cpu + 4 * i, &i, 4);
+    }
+
+    gm20b::Pipeline *add(const gm20b::RuntimeRecord &r)
+    {
+        std::string why;
+        gm20b::Pipeline *pl = dev.addRecord(r, false, why);
+        EXPECT_NE(pl, nullptr) << why;
+        return pl;
+    }
+
+    void begin(gm20b::Pipeline *pl)
+    {
+        cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        gm20b::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.count = 1;
+        e = cb->render(pass);
+        ASSERT_NE(e, nullptr);
+        e->setPipeline(pl);
+    }
+
+    // A draw of the fragment uniform buffer bound at `offset` into the test's buffer
+    void drawAt(uint64_t offset)
+    {
+        e->setBuffer(kFragment, kSlot, &buffer, offset);
+        const char *why = nullptr;
+        EXPECT_TRUE(e->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+    }
+
+    void end()
+    {
+        e->end();
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+    }
+};
+
+// The storage form reads nothing of the buffer, so it keeps its set; the twin binds the buffer itself
+TEST_F(DrawnFormUniforms, ABarrierTwinBindsEachDrawsOwnUniformBuffer)
+{
+    gm20b::Pipeline *storage = add(record(0xf0a, {gm20b::CbufRoot}));
+    gm20b::Pipeline *twin = add(record(0xf0b, {gm20b::CbufRoot, gm20b::CbufUbo}));
+    ASSERT_TRUE(storage && twin);
+    EXPECT_EQ(storage->memoryEntries, 0u);
+    storage->storageBits = 1;
+    storage->barrierTwin = twin;
+    dev.nextForms.barrierFetch = true;
+    begin(storage);
+    drawAt(0);
+    drawAt(256);
+    end();
+    EXPECT_EQ(fragmentBinds(submitted(), kSlot), (std::vector<uint64_t>{buffer.va, buffer.va + 256}));
+}
+
+// A twin whose program reads the buffer's descriptor from set 0 has the entry in its mask, so each draw uploads a set
+// that names its own buffer
+TEST_F(DrawnFormUniforms, ABarrierTwinReadingTheSetUploadsItForEachDraw)
+{
+    gm20b::Pipeline *storage = add(record(0xf1a, {gm20b::CbufRoot}));
+    gm20b::Pipeline *twin = add(record(0xf1b, {gm20b::CbufRoot, gm20b::CbufSet}, kReadSetEntry0));
+    ASSERT_TRUE(storage && twin);
+    EXPECT_EQ(twin->memoryEntries, 1u);
+    storage->storageBits = 1;
+    storage->barrierTwin = twin;
+    dev.nextForms.barrierFetch = true;
+    begin(storage);
+    const uint64_t offsets[] = {0, 256};
+    for (uint64_t offset : offsets)
+        drawAt(offset);
+    end();
+    const std::vector<Method> m = submitted();
+    const std::vector<uint32_t> low = rootWordValues(m, kRootSetWord), high = rootWordValues(m, kRootSetWord + 4);
+    ASSERT_EQ(low.size(), 2u);
+    ASSERT_EQ(high.size(), 2u);
+    EXPECT_NE(low[0], low[1]);
+    for (size_t i = 0; i < 2; i++) {
+        const uint64_t setVa = uint64_t(high[i]) << 32 | low[i];
+        const uint8_t *words = gm20b::DeviceHarness::upload(dev, setVa, 16);
+        ASSERT_NE(words, nullptr);
+        uint64_t va = 0;
+        memcpy(&va, words, 8);
+        EXPECT_EQ(va, buffer.va + offsets[i]) << i;
+    }
+}
+
+constexpr uint64_t kVariantKey = 0xf2a;
+constexpr uint32_t kGenericProgram = 1, kVariantProgram = 2;
+constexpr uint32_t kIteratedProgram[] = {0x10003201, 0x30006001, 0x0000ca19, 0x30006001,
+                                         0x1000ca11, 0x00509031, 0x30384201, 0x00609029};
+
+// A pack of one state whose fragment program has a variant for a residual-0 uniform buffer (pack.h
+// AssumeUniformAligned), the generic program and the variant both reading the fragment buffer at constant buffer 1
+std::string variantPack(bool requiredTurned = false, bool iterated = false)
+{
+    constexpr uint32_t kPrograms = 0x400, kPipelines = 0x500,
+                       kVariants = (kPipelines + 2 * sizeof(gm20b::PackPipeline) + 0xff) & ~0xffu,
+                       kStrings = kVariants + 0x100, kBlob = kStrings + 0x100, kIterated = kBlob + 0x100,
+                       kHeap = (kIterated + sizeof(gm20b::PackIteratedBlend) + 0xfff) & ~0xfffu, kSlotBytes = 0x100;
+    std::vector<uint8_t> file(kHeap + 3 * kSlotBytes, 0);
+    gm20b::PackHeader h = {};
+    memcpy(h.magic, "GM20BPK1", 8);
+    h.version = gm20b::kPackVersion;
+    h.programs = 3;
+    h.pipelines = 2;
+    gm20b::PackProgram programs[3] = {};
+    for (uint32_t i = 0; i < 3; i++) {
+        programs[i].heapOffset = kSlotBytes * i;
+        programs[i].program = programs[i].heapOffset + 0x30;
+        programs[i].bytes = kSlotBytes;
+        programs[i].gprs = 8;
+        programs[i].cbufs = i ? 2 : 1;
+        programs[i].cbufType[0] = gm20b::CbufRoot;
+        programs[i].cbufType[1] = gm20b::CbufUbo;
+    }
+    gm20b::PackPipeline pp = {};
+    describe(pp, kVariantKey);
+    pp.keyString = 1;
+    pp.vs = 0;
+    pp.fs = kGenericProgram;
+    pp.blobDwords = 2;
+    pp.uniform[0] = {0, 1, 0, 0};
+    pp.variantCount[1] = 1;
+    const gm20b::PackVariant variant = {requiredTurned ? gm20b::AssumeTurned : gm20b::AssumeUniformAligned,
+                                        kVariantProgram};
+    gm20b::PackPipeline pipelines[2] = {pp, pp};
+    pipelines[1].keyHash = kVariantKey + 1;
+    pipelines[1].variantCount[1] = 0;
+    if (iterated) {
+        pipelines[0].flags |= gm20b::PipelineFetchFreeForm;
+        pipelines[0].fetchRung[0] = gm20b::FetchIteratedBlend;
+        pipelines[0].iterated = 1;
+        pipelines[0].blobDwords = pipelines[1].blobDwords = 4;
+    }
+    const char strings[] = "\0samples=1 c0=70 ds=0/0 variant";
+    const char iteratedStrings[] = "\0samples=1 c0=70:15:0 c1=70:0:0 ds=0/0 variant";
+    const uint32_t blob[] = {0x1a00, 0x1111, 0x1a04, 0};
+    const auto put = [&](gm20b::PackSectionId id, uint32_t at, const void *bytes, size_t n) {
+        h.section[id] = {at, n};
+        memcpy(file.data() + at, bytes, n);
+    };
+    put(gm20b::PackPrograms, kPrograms, programs, sizeof programs);
+    put(gm20b::PackPipelines, kPipelines, pipelines, sizeof pipelines);
+    put(gm20b::PackVariants, kVariants, &variant, sizeof variant);
+    put(gm20b::PackStrings, kStrings, iterated ? iteratedStrings : strings,
+        iterated ? sizeof iteratedStrings : sizeof strings);
+    put(gm20b::PackBlob, kBlob, blob, sizeof blob);
+    if (iterated) {
+        gm20b::PackIteratedBlend blend = {};
+        blend.count = sizeof kIteratedProgram / sizeof *kIteratedProgram;
+        blend.enable = 1;
+        blend.uniformSlot = gm20b::kNoUniform;
+        blend.alphaSource = 0x4001;
+        blend.alphaDest = 0x4303;
+        blend.name = gm20b::Pack::fnv("dif", 3);
+        memcpy(blend.program, kIteratedProgram, sizeof kIteratedProgram);
+        put(gm20b::PackIterated, kIterated, &blend, sizeof blend);
+    }
+    h.section[gm20b::PackHeap] = {kHeap, 3 * kSlotBytes};
+    if (requiredTurned) {
+        const uint32_t localBytes = 0x400;
+        memcpy(file.data() + kHeap + programs[kVariantProgram].program + 4, &localBytes, sizeof localBytes);
+    }
+    memcpy(file.data(), &h, sizeof h);
+    const char *dir = getenv("TEST_TMPDIR");
+    const std::string path = std::string(dir ? dir : "/tmp") + "/variant-pack.bin";
+    FILE *f = fopen(path.c_str(), "wb");
+    fwrite(file.data(), 1, file.size(), f);
+    fclose(f);
+    return path;
+}
+
+class VariantUniforms : public testing::Test {
+protected:
+    gm20b::Device dev;
+    gm20b::Texture target;
+    gm20b::Buffer buffer;
+
+    void SetUp() override
+    {
+        kernel_model::model = {};
+        std::string err;
+        ASSERT_TRUE(dev.open(variantPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+        ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
+        ASSERT_TRUE(dev.createBuffer(4096, buffer));
+        ASSERT_EQ(buffer.va % 256, 0u);
+    }
+};
+
+// An aligned binding draws the variant, an offset one the generic program, an aligned one the variant again: each
+// draw binds its buffer's 256-byte base, and the root's residual word (0 until written) moves to its offset past it
+TEST_F(VariantUniforms, AResidualZeroVariantSwapBindsEachDrawsOwnUniformBuffer)
+{
+    gm20b::Pipeline *pl = dev.pipeline(kVariantKey);
+    ASSERT_NE(pl, nullptr);
+    const uint64_t placed = dev.stats.programsPlaced;
+    EXPECT_EQ(placed, 3u);
+    ASSERT_EQ(pl->chosen.size(), 2u);
+    EXPECT_NE(pl->chosen[0], pl);
+    EXPECT_EQ(dev.variant(*pl, gm20b::AssumeUniformAligned), pl->chosen[0]);
+    EXPECT_EQ(dev.variant(*pl, 0), pl);
+    EXPECT_EQ(dev.stats.programsPlaced, placed);
+    gm20b::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    gm20b::PassDesc pass;
+    pass.color[0].texture = &target;
+    pass.count = 1;
+    gm20b::RenderEncoder *e = cb->render(pass);
+    ASSERT_NE(e, nullptr);
+    e->setPipeline(pl);
+    const uint64_t offsets[] = {0, 16, 256};
+    for (uint64_t offset : offsets) {
+        e->setBuffer(kFragment, kSlot, &buffer, offset);
+        const char *why = nullptr;
+        EXPECT_TRUE(e->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+    }
+    e->end();
+    uint32_t seqno = 0;
+    EXPECT_TRUE(cb->commit(seqno));
+    const std::vector<Method> m = submitted();
+    std::vector<uint32_t> programs;
+    for (uint32_t v : valuesOf(m, NVB197_SET_PIPELINE_PROGRAM(kFragmentProgram)))
+        if (programs.empty() || programs.back() != v)
+            programs.push_back(v);
+    ASSERT_EQ(programs.size(), 3u);
+    EXPECT_NE(programs[0], programs[1]);
+    EXPECT_EQ(programs[0], programs[2]);
+    EXPECT_EQ(rootWordValues(m, 0x700 + 4 * kResidualWord), (std::vector<uint32_t>{16, 0}));
+    EXPECT_EQ(fragmentBinds(m, kSlot), (std::vector<uint64_t>{buffer.va, buffer.va, buffer.va + 256}));
+    EXPECT_EQ(dev.stats.programsPlaced, placed);
+}
+
+TEST(RequiredVariantPreparation, NoShaderLocalMemoryRefusesCreationBeforePublishingATurnedState)
+{
+    kernel_model::model = {};
+    gm20b::Device dev;
+    std::string error;
+    ASSERT_TRUE(dev.open(variantPack(true).c_str(), 0, error, gm20b::Device::Role::Client)) << error;
+    gm20b::Pipeline *plain = dev.pipeline(kVariantKey + 1);
+    ASSERT_NE(plain, nullptr);
+    kernel_model::model.refuseAllocs = true;
+    EXPECT_EQ(dev.pipeline(kVariantKey), nullptr);
+    EXPECT_EQ(dev.pipeline(kVariantKey + 1), plain);
+    kernel_model::model.refuseAllocs = false;
+    gm20b::Pipeline *turned = dev.pipeline(kVariantKey);
+    ASSERT_NE(turned, nullptr);
+    EXPECT_NE(dev.variant(*turned, gm20b::AssumeTurned), turned);
+}
+
+TEST(PreparedIteratedBlend, ResidentAndInlineBaseAndDerivedProgramsEnableAndRestoreTheBlend)
+{
+    for (const bool inlineState : {false, true}) {
+        SCOPED_TRACE(inlineState);
+        kernel_model::model = {};
+        gm20b::Device dev;
+        std::string error;
+        ASSERT_TRUE(dev.open(variantPack(false, true).c_str(), 0, error, gm20b::Device::Role::Client)) << error;
+        gm20b::Pipeline *base = dev.pipeline(kVariantKey, gm20b::PackForm::FetchFree),
+                        *plain = dev.pipeline(kVariantKey + 1);
+        ASSERT_NE(base, nullptr);
+        ASSERT_NE(plain, nullptr);
+        gm20b::Pipeline *derived = dev.variant(*base, gm20b::AssumeUniformAligned);
+        ASSERT_NE(derived, base);
+        ASSERT_TRUE(bool(base->segment));
+        ASSERT_TRUE(bool(derived->segment));
+        gm20b::Texture target[2];
+        for (auto &texture : target)
+            ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, texture));
+        gm20b::Buffer buffer;
+        ASSERT_TRUE(dev.createBuffer(4096, buffer));
+        gm20b::CommandBuffer *cb = dev.begin();
+        ASSERT_NE(cb, nullptr);
+        cb->inlineStates(inlineState);
+        gm20b::PassDesc pass;
+        pass.count = 2;
+        for (uint32_t i = 0; i < 2; i++)
+            pass.color[i].texture = &target[i];
+        gm20b::RenderEncoder *encoder = cb->render(pass);
+        ASSERT_NE(encoder, nullptr);
+        encoder->setPipeline(base);
+        const char *why = nullptr;
+        for (const uint64_t offset : {0u, 16u}) {
+            encoder->setBuffer(kFragment, kSlot, &buffer, offset);
+            ASSERT_TRUE(encoder->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+        }
+        encoder->setPipeline(plain);
+        ASSERT_TRUE(encoder->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+        encoder->end();
+        uint32_t sequence = 0;
+        ASSERT_TRUE(cb->commit(sequence));
+        bool baseResident = false, derivedResident = false;
+        for (const auto &job : kernel_model::model.jobs)
+            for (const auto &push : job.pushes) {
+                baseResident |= push.va == base->segment.va;
+                derivedResident |= push.va == derived->segment.va;
+            }
+        EXPECT_EQ(baseResident, !inlineState);
+        EXPECT_EQ(derivedResident, !inlineState);
+        std::map<uint32_t, uint32_t> state;
+        uint32_t draws = 0;
+        std::vector<uint32_t> program;
+        for (const Method &method : submitted()) {
+            state[method.method] = method.value;
+            if (method.method == NVB197_LOAD_ITERATED_BLEND_INSTRUCTION)
+                program.push_back(method.value);
+            if (!drawMacro(method.method))
+                continue;
+            if (draws++ < 2) {
+                EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND], 1u);
+                EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND_PASS], 8u);
+                EXPECT_EQ(state[0x12e4], 0u);
+                EXPECT_EQ(state[0x133c], 1u);
+                EXPECT_EQ(state[0x1340], 0x8006u);
+                EXPECT_EQ(state[0x1344], 0x4001u);
+                EXPECT_EQ(state[0x1348], 0x4000u);
+                EXPECT_EQ(state[0x134c], 0x8006u);
+                EXPECT_EQ(state[0x1350], 0x4001u);
+                EXPECT_EQ(state[0x1358], 0x4303u);
+                EXPECT_EQ(state[0x1360], 1u);
+                EXPECT_EQ(state[0x13a8], 1u);
+                EXPECT_EQ(state[NVB197_SET_CT_SELECT] & 0xf, 1u);
+                ASSERT_GE(program.size(), 8u);
+                EXPECT_EQ(std::vector<uint32_t>(program.end() - 8, program.end()),
+                          std::vector<uint32_t>(std::begin(kIteratedProgram), std::end(kIteratedProgram)));
+            } else {
+                EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND], 0u);
+                EXPECT_EQ(state[0x12e4], 1u);
+                EXPECT_EQ(state[0x13a8], 0u);
+                EXPECT_EQ(state[NVB197_SET_CT_SELECT] & 0xf, 2u);
+            }
+        }
+        EXPECT_EQ(draws, 3u);
+    }
+}
+
+// A rung-3 state drawn last in one pass and first in the next, the next in the same command buffer or the one after: the
+// first pass's end set its iterated blend back, so the next pass's draw runs its segment again
+void drawRung3InTwoPasses(bool acrossCommandBuffers)
+{
+    kernel_model::model = {};
+    gm20b::Device dev;
+    std::string error;
+    ASSERT_TRUE(dev.open(variantPack(false, true).c_str(), 0, error, gm20b::Device::Role::Client)) << error;
+    gm20b::Pipeline *base = dev.pipeline(kVariantKey, gm20b::PackForm::FetchFree);
+    ASSERT_NE(base, nullptr);
+    ASSERT_TRUE(bool(base->segment));
+    ASSERT_TRUE(base->segment.keptAcrossPasses);
+    gm20b::Texture target[2];
+    for (auto &texture : target)
+        ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, texture));
+    gm20b::Buffer buffer;
+    ASSERT_TRUE(dev.createBuffer(4096, buffer));
+    ASSERT_EQ(buffer.va % 256, 0u);
+    gm20b::PassDesc pass;
+    pass.count = 2;
+    for (uint32_t i = 0; i < 2; i++)
+        pass.color[i].texture = &target[i];
+    gm20b::CommandBuffer *cb = dev.begin();
+    ASSERT_NE(cb, nullptr);
+    uint32_t sequence = 0;
+    for (int k = 0; k < 2; k++) {
+        if (k && acrossCommandBuffers) {
+            ASSERT_TRUE(cb->commit(sequence));
+            cb = dev.begin();
+            ASSERT_NE(cb, nullptr);
+        }
+        gm20b::RenderEncoder *encoder = cb->render(pass);
+        ASSERT_NE(encoder, nullptr);
+        encoder->setPipeline(base);
+        encoder->setBuffer(kFragment, kSlot, &buffer, 16);  // unaligned: the base program, not its residual-0 variant
+        const char *why = nullptr;
+        ASSERT_TRUE(encoder->draw(kTriangle, 0, 3, 1, 0, &why)) << (why ? why : "");
+        encoder->end();
+    }
+    ASSERT_TRUE(cb->commit(sequence));
+    uint32_t segmentRuns = 0;
+    for (const kernel_model::Job &job : kernel_model::model.jobs)
+        for (const auto &push : job.pushes)
+            segmentRuns += push.va == base->segment.va;
+    EXPECT_EQ(segmentRuns, 2u);
+    std::map<uint32_t, uint32_t> state;
+    uint32_t draws = 0;
+    for (const Method &method : submitted()) {
+        state[method.method] = method.value;
+        if (!drawMacro(method.method))
+            continue;
+        draws++;
+        EXPECT_EQ(state[NVB197_SET_ITERATED_BLEND] & 1, 1u) << "draw " << draws;
+        EXPECT_EQ(state[NVB197_SET_BLEND_STATE_PER_TARGET], 0u) << "draw " << draws;
+    }
+    EXPECT_EQ(draws, 2u);
+}
+
+TEST(PreparedIteratedBlend, TheNextPassAfterOneEndingInARung3StateBindsItsSegmentAgain)
+{
+    drawRung3InTwoPasses(false);
+}
+
+TEST(PreparedIteratedBlend, TheNextCommandBufferAfterOneEndingInARung3StateBindsItsSegmentAgain)
+{
+    drawRung3InTwoPasses(true);
+}
+
+}  // namespace

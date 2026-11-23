@@ -22,7 +22,7 @@ final class SceneTests: XCTestCase {
         return GPU(device: device, queue: queue, library: library)
     }
 
-    /// Scenes whose reference off the raw path is Metal's safe math. gpu.sm53_probe's rounds each half op to half
+    /// Scenes whose reference off the driver is Metal's safe math. gpu.sm53_probe's rounds each half op to half
     /// before it widens; the apps' -ffast-math lets Apple's compiler keep the f32 result instead (MSL 1.6.3, 8).
     private static let safeMathScenes: Set = ["gpu.sm53_probe"]
 
@@ -33,30 +33,31 @@ final class SceneTests: XCTestCase {
         for scene in Scenes.all {
             let result = try await scene.run(Self.safeMathScenes.contains(scene.id) ? safeMath : gpu)
             XCTAssertTrue(
-                result.passed, "\(scene.id) on \(host): \(result.reasons(limit: 4).joined(separator: "; "))")
+                result.passed, "\(scene.id) on \(host): \(result.reasons(limit: 4).joined(separator: "; "))"
+            )
         }
     }
 
     func testKernelShadowOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.kernel_shadow" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.kernel_shadow" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
     }
 
     func testXRKernelStoreOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.xr_kernel_store" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.xr_kernel_store" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
     }
 
     func testXRKernelReadOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.xr_kernel_read" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.xr_kernel_read" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
     }
 
     func testFramebufferFetchOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.framebuffer_fetch" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.framebuffer_fetch" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
         XCTAssertEqual(result.checks.count, 56)
@@ -64,14 +65,14 @@ final class SceneTests: XCTestCase {
 
     func testFramebufferFetchDepthOnThisMac() async throws {
         let gpu = try makeGPU()
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.framebuffer_fetch_depth" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.framebuffer_fetch_depth" })
         let result = try await scene.run(gpu)
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
         XCTAssertEqual(result.checks.count, [1, 2, 4, 8].filter(gpu.device.supportsTextureSampleCount).count * 6)
     }
 
     func testFetchBlendOrderOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.fetch_blend_order" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.fetch_blend_order" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
         XCTAssertEqual(result.checks.count, 29)
@@ -85,21 +86,21 @@ final class SceneTests: XCTestCase {
     }
 
     func testInterlockSpinOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.interlock_spin" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.interlock_spin" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
         XCTAssertEqual(result.checks.count, 2 * 3 * 5)
     }
 
     func testArchiveMissOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.archive_miss" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.archive_miss" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
     }
 
     func testStoredMSAAOnThisMac() async throws {
         let gpu = try makeGPU()
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.stored_msaa" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.stored_msaa" })
         let result = try await scene.run(gpu)
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
         let perCount = gpu.device.areProgrammableSamplePositionsSupported ? 20 : 19
@@ -107,7 +108,7 @@ final class SceneTests: XCTestCase {
     }
 
     func testPassFusionOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.pass_fusion" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.pass_fusion" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
         XCTAssertEqual(result.checks.count, 12)
@@ -132,7 +133,7 @@ final class SceneTests: XCTestCase {
     }
 
     func testRasterOrderOnThisMac() async throws {
-        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.raw.raster_order" })
+        let scene = try XCTUnwrap(Scenes.all.first { $0.id == "gpu.gm20b.raster_order" })
         let result = try await scene.run(makeGPU())
         XCTAssertTrue(result.passed, result.reasons(limit: 8).joined(separator: "; "))
     }

@@ -12,13 +12,21 @@ public protocol GPUScene: Sendable {
     /// The longest one run may take on one device.
     var timeout: TimeInterval { get }
     func run(_ gpu: GPU) async throws -> SceneResult
-    /// Failures found in the default device's metrics, which carry its prefix (raw_ on the facade).
+    /// Failures found in the default device's metrics, which carry its prefix (gm20b_ on the facade).
     func judge(_ metrics: inout Metrics) -> [String]
+    /// The command buffers the scene's own work fails on the facade, by predicate ("none": an error no predicate
+    /// gave); every other command buffer of the run, a framework's included, must complete (FailedCounts).
+    var expectedFailures: [String: Int] { get }
+    /// The scene's work is a framework's (Core Animation's shaders and states, MPS, Core Image): no call of the run may
+    /// be one Metal's validation stops (FailedCounts.skipCheck).
+    var framework: Bool { get }
 }
 
 extension GPUScene {
     public var timeout: TimeInterval { 60 }
     public func judge(_ metrics: inout Metrics) -> [String] { [] }
+    public var expectedFailures: [String: Int] { [:] }
+    public var framework: Bool { false }
 }
 
 public struct SceneCheck: Sendable {
@@ -82,7 +90,9 @@ public struct SceneResult: Sendable {
         pictures.append(
             ScenePicture(
                 label: label, golden: golden ?? label, metalFormat: metalFormat, signature: signature, bytes: bytes,
-                width: width, height: height, before: before, cleared: cleared))
+                width: width, height: height, before: before, cleared: cleared
+            )
+        )
         metrics.set("hash_" + label, String(signature.hash, radix: 16))
     }
 
@@ -108,7 +118,8 @@ public struct SceneResult: Sendable {
         }
         return compare(
             label, format.raster(got, width: width, height: height), format.raster(want, width: width, height: height),
-            tolerance: tolerance)
+            tolerance: tolerance
+        )
     }
 
     /// A failure that is no picture (a value out of range, a call that returned nil).
@@ -116,10 +127,10 @@ public struct SceneResult: Sendable {
         if !condition { problems.append(problem()) }
     }
 
-    /// What the scene could not make: on the raw facade a failure, every Core Animation library, state and texture being
+    /// What the scene could not make: on the facade a failure, every Core Animation library, state and texture being
     /// the device's to make; elsewhere (a Mac without that QuartzCore) a note.
     public mutating func unavailable(_ what: String, on device: MTLDevice) {
-        if RawFacade.kind(of: device) == "raw" { problems.append(what) } else { notes.append(what) }
+        if GM20BFacade.kind(of: device) == "gm20b" { problems.append(what) } else { notes.append(what) }
     }
 
     public var failed: [SceneCheck] { checks.filter { !$0.diff.matches } }

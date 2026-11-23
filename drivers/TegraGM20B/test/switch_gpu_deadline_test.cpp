@@ -87,7 +87,7 @@ TEST_F(GpuDeadline, ExpiredAndDisabledRequestsDoNothing)
 	EXPECT_EQ(scheduled, 0u);
 }
 
-// One SubmitAddress carrying `batches` work batches, kicked as tgm_chan_fence_job kicks it: every seqno it releases.
+// One SubmitJob carrying `batches` work batches, kicked as tgm_chan_fence_job kicks it: every seqno it releases.
 constexpr u32 kChid = 9;
 
 u32 kick(u32 submitted, u32 batches)

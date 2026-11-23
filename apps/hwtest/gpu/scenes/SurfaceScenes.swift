@@ -42,11 +42,13 @@ struct SurfaceLockScene: GPUScene {
             format, width, height,
             Raster(width: width, height: height, channels: format.channels) {
                 _, _, _ in 0
-            })
+            }
+        )
         let rect = UploadRect(x: width / 4, y: height / 4, width: width / 2, height: height / 3)
         try gpu.finish([
             try gpu.clearAndFill(
-                target.texture, clear: [0.2, 0.4, 0.6, 1], rect: rect, color: [1, 0.5, 0, 1], pipeline: pipeline)
+                target.texture, clear: [0.2, 0.4, 0.6, 1], rect: rect, color: [1, 0.5, 0, 1], pipeline: pipeline
+            ),
         ])
         model.fill([0.2, 0.4, 0.6, 1])
         model.fill([1, 0.5, 0, 1], rect)
@@ -67,7 +69,8 @@ struct SurfaceLockScene: GPUScene {
         let label = "\(format.rawValue) \(width)x\(height) cpu-first"
         let target = try SurfaceTarget.make(gpu, format, width, height, usage: [.shaderRead])
         var model = TexelImage(
-            format, width, height, Patterns.busy(width: width, height: height, channels: format.channels))
+            format, width, height, Patterns.busy(width: width, height: height, channels: format.channels)
+        )
         try target.cpuWrite(UploadRect(x: 0, y: 0, width: width, height: height), model.bytes)
         try await result.compareBothWays(label + " sampled", target.texture, model, gpu: gpu)
         try await cycles(label, gpu, target, &model, &result)
@@ -82,10 +85,12 @@ struct SurfaceLockScene: GPUScene {
         for (cycle, rect) in Self.writes.enumerated() {
             let clipped = UploadRect(
                 x: rect.x, y: rect.y, width: min(rect.width, target.width - rect.x),
-                height: min(rect.height, target.height - rect.y))
+                height: min(rect.height, target.height - rect.y)
+            )
             let bytes = Patterns.bytes(
                 Patterns.busy(width: clipped.width, height: clipped.height, channels: format.channels, seed: cycle + 3),
-                format)
+                format
+            )
             try target.cpuWrite(clipped, bytes)
             model.write(clipped, bytes)
             try await result.compareBothWays("\(label) cycle \(cycle) \(clipped.name)", target.texture, model, gpu: gpu)
@@ -96,6 +101,7 @@ struct SurfaceLockScene: GPUScene {
     func compareCPU(_ label: String, _ target: SurfaceTarget, _ model: TexelImage, _ result: inout SceneResult) throws {
         result.compare(
             label, bytes: try target.cpuRead(), expected: model.bytes, format: target.format, width: target.width,
-            height: target.height, tolerance: target.format.step() * 1.01)
+            height: target.height, tolerance: target.format.step() * 1.01
+        )
     }
 }

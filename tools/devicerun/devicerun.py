@@ -12,10 +12,10 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 
-from tools.devicerun import raw_stats
+from tools.devicerun import renamed
 from tools.devicerun.checks import FRAME_PREFIX, GROUPS
 from tools.devicerun.morning import CHECKLIST
-from tools.devicerun.reports import crash_rows, frame_rows
+from tools.devicerun.reports import crash_rows, frame_rows, headline, rolled_up
 from tools.devicerun.rules import FAIL, Check, Event, Result, evaluate, match
 
 OBSERVED_WIDTH = 110
@@ -26,10 +26,14 @@ def quote(text: str) -> str:
 
 
 def clause(check: Check) -> str:
-    literals = ' OR '.join(f'eventMessage CONTAINS {quote(lit)}' for lit in check.literals())
+    literals = ' OR '.join(
+        f'eventMessage CONTAINS {quote(spelled)}' for lit in check.literals() for spelled in renamed.spellings(lit)
+    )
     parts = [f'({literals})']
     if check.process == 'kernel':
         parts.append('process BEGINSWITH "kernel"')
+    elif check.process.startswith('!'):
+        parts.append(f'NOT (process BEGINSWITH {quote(check.process[1:])})')
     elif check.process:
         parts.append(f'process == {quote(check.process)}')
     if check.subsystem:
@@ -120,8 +124,8 @@ def selected(label: str | None) -> dict[str, list[Check]]:
 
 
 def all_checks(label: str | None) -> list[Check]:
-    """Return the selected groups' checks and the summaries' own (rows of their own, not one per check)."""
-    return [c for group in selected(label).values() for c in group] + [raw_stats.CHECK]
+    """Return the selected groups' checks."""
+    return [c for group in selected(label).values() for c in group]
 
 
 def checklist(label: str | None) -> str:
@@ -135,8 +139,7 @@ def evaluate_all(
     groups_in = selected(label)
     results, frame_lines = run_checks(records, all_checks(label))
     by_check = {r.check.name: r for r in results}
-    groups = [(name, [by_check[c.name] for c in group]) for name, group in groups_in.items()]
-    groups.append(('raw', raw_stats.rows(by_check[raw_stats.CHECK.name])))
+    groups = [(name, rolled_up([by_check[c.name] for c in group])) for name, group in groups_in.items()]
     groups.append(('frames', frame_rows(frame_lines)))
     groups.append(('crashes', crash_rows(crashes)))
     return groups
@@ -164,6 +167,7 @@ def main(argv: list[str] | None = None) -> int:
         records = log_show(args.archive, predicate(checks), args.start, args.end)
     print(checklist(args.boot_label))
     groups = evaluate_all(records, args.crashes, args.boot_label)
+    print(headline(groups))
     print(table(groups))
     if args.tsv:
         write_tsv(args.tsv, groups)

@@ -55,7 +55,7 @@ enum X1ConstantColourProbe {
         { commands in
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass(target))!
             encoder.setRenderPipelineState(state)
-            for _ in 0..<count { GPU.draw(encoder, corners: quad, color: program) }
+            for _ in 0 ..< count { GPU.draw(encoder, corners: quad, color: program) }
             encoder.endEncoding()
         }
     }
@@ -76,16 +76,20 @@ enum X1ConstantColourProbe {
         Arm(name: "float", words: floatWords, after: off, blend: false, expected: bgra(constant), judged: false),
         Arm(
             name: "float_nops", words: stageOff + floatWords, after: off + stageOn, blend: false,
-            expected: bgra(constant), judged: true),
+            expected: bgra(constant), judged: true
+        ),
         Arm(
             name: "packed_nops", words: stageOff + words(constant.map { UInt32(code($0)) }), after: off + stageOn,
-            blend: false, expected: bgra(constant), judged: false),
+            blend: false, expected: bgra(constant), judged: false
+        ),
         Arm(
             name: "blend_nops", words: stageOff + words([0.4, 0.05, 0.15, 0.5].map { Float($0).bitPattern }),
-            after: off + stageOn, blend: true, expected: bgra([0.4, 0.05, 0.15, 0.5 + 0.5]), judged: false),
+            after: off + stageOn, blend: true, expected: bgra([0.4, 0.05, 0.15, 0.5 + 0.5]), judged: false
+        ),
         Arm(
             name: "nops_only", words: stageOff, after: stageOn, blend: false, expected: bgra(constant),
-            judged: false),
+            judged: false
+        ),
     ]
 
     static let probe = X1Probe(
@@ -101,13 +105,15 @@ enum X1ConstantColourProbe {
             let target = try gpu.texture(.bgra8Unorm, size, size)
             let state = try gpu.render(
                 fragment: "solid_fragment", format: .bgra8Unorm,
-                configure: arm.blend ? X1RawProbes.sourceOver : { _ in })
+                configure: arm.blend ? X1RawProbes.sourceOver : { _ in }
+            )
             do {
                 if arm.words.isEmpty {
                     paths.append(try await gpu.run(draw(state, target, quad: quad, count: 1)).path)
                 } else {
-                    let drawn = try await RawMethods.draw(
-                        gpu, before: arm.words, after: arm.after, draw(state, target, quad: quad, count: 1))
+                    let drawn = try await GM20BMethods.draw(
+                        gpu, before: arm.words, after: arm.after, draw(state, target, quad: quad, count: 1)
+                    )
                     paths.append(drawn.path)
                     emitted += drawn.emitted
                 }
@@ -117,8 +123,8 @@ enum X1ConstantColourProbe {
             }
             let bytes = try await gpu.read(target, bytesPerPixel: 4)
             var covered = 0, outside = 0
-            for y in 0..<size {
-                for x in 0..<size {
+            for y in 0 ..< size {
+                for x in 0 ..< size {
                     let inside = x >= 8 && x < 40 && y >= 8 && y < 24
                     let texel = Array(bytes.pixel(x, y, width: size))
                     let differs = zip(texel, arm.expected).contains { abs(Int($0) - Int($1)) > 1 }
@@ -138,11 +144,12 @@ enum X1ConstantColourProbe {
         let big = try gpu.texture(.bgra8Unorm, 1280, 720)
         let state = try gpu.render(fragment: "solid_fragment", format: .bgra8Unorm)
         var onMs = 0.0, offMs = 0.0
-        for _ in 0..<3 {
+        for _ in 0 ..< 3 {
             offMs += try await gpu.run(draw(state, big, quad: GPU.fullScreen, count: 32)).gpuMilliseconds
-            if let on = try? await RawMethods.draw(
+            if let on = try? await GM20BMethods.draw(
                 gpu, before: stageOff + floatWords, after: off + stageOn,
-                draw(state, big, quad: GPU.fullScreen, count: 32))
+                draw(state, big, quad: GPU.fullScreen, count: 32)
+            )
             {
                 onMs += on.gpuMilliseconds
                 emitted += on.emitted

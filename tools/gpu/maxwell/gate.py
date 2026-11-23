@@ -7,7 +7,7 @@ usage: gate.py <before dump> <after dump> --corpus <R lines>... [--invocations N
            each fetch-free form of the dump with the ROP unit that stands in for its fetch against its storage form,
            counted per rung (rungcheck.py)
        gate.py --selectors <dump> [--invocations N] [--seed S] [--bound B]
-           each selector variant of the dump (directcheck DIRECTCHECK_SELECTORS, runtime/raw_pack_selectors.h) against
+           each selector variant of the dump (directcheck DIRECTCHECK_SELECTORS, runtime/pack_selectors.h) against
            its state's generic program with its config's compared bytes pinned and the uniform bind residuals 0, as
            the variant reads them; with the instructions a quad issued on each (selectorgate.py)
 

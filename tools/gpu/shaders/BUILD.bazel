@@ -52,17 +52,8 @@ py_test(
 )
 
 py_binary(
-    name = "precompile",
-    srcs = ["precompile.py"],
-)
-
-py_binary(
     name = "native_seed",
-    srcs = [
-        "native_seed.py",
-        "precompile.py",
-    ],
-    main = "native_seed.py",
+    srcs = ["native_seed.py"],
 )
 
 py_test(
@@ -70,7 +61,6 @@ py_test(
     srcs = [
         "native_seed.py",
         "native_seed_test.py",
-        "precompile.py",
     ],
     data = ["//kits/SwitchSeedPack:seedpack"],
     deps = ["@rules_python//python/runfiles"],
@@ -112,7 +102,6 @@ py_binary(
     srcs = ["merge.py"],
     deps = [
         ":replies",
-        "//tools/gpu:nvk_twin",
         "//tools/gpu:seed_pack",
     ],
 )
@@ -132,11 +121,9 @@ py_test(
     srcs = [
         "merge.py",
         "merge_test.py",
-        "precompile.py",
     ],
     deps = [
         ":replies",
-        "//tools/gpu:nvk_twin",
         "//tools/gpu:seed_pack",
     ],
 )

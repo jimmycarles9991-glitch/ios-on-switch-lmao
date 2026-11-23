@@ -25,8 +25,11 @@ void switch_gpu_timeline_semantic_visibility(struct switch_gpu_timeline *,
 void switch_gpu_timeline_visibility(struct switch_gpu_timeline *timeline,
 				    const volatile uint32_t *visible);
 int switch_gpu_timeline_promote(const struct switch_gpu_backing_token *token);
-/* Failure publication is safe under NVKM event spin locks; close requires those callbacks to be unregistered. */
-void switch_gpu_timeline_failed(struct switch_gpu_timeline *timeline, uint32_t completed);
+/* Failure publication is safe under NVKM event spin locks; close requires those callbacks to be unregistered. A kill of
+ * a compositor channel (critical, TegraGM20BGpu.h tgm_chan_new) fails its unfinished tokens WRITER_FAILED; any other
+ * kill and a close fail them WRITER_GONE (switch_gpu_backing_token_failure). */
+void switch_gpu_timeline_failed(struct switch_gpu_timeline *timeline, uint32_t completed,
+				int compositor);
 void switch_gpu_timeline_close(struct switch_gpu_timeline *timeline);
 void switch_gpu_timeline_token(struct switch_gpu_timeline *timeline, uint32_t value,
 			       struct switch_gpu_backing_token *token);

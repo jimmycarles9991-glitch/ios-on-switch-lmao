@@ -106,9 +106,10 @@ public struct Metrics: Equatable, Sendable {
     /// The fields the log line carries, in order.
     public var logged: [(String, MetricValue)] { keys.filter { !reportOnly.contains($0) }.map { ($0, values[$0]!) } }
 
-    /// Moves the longest fields but `kept` to the report until the line's fields fit in `budget` characters, and
-    /// counts them in report_only=.
+    /// Moves the longest fields but `kept` and a failure's cause (FailedCounts.causeKeys) to the report until the
+    /// line's fields fit in `budget` characters, and counts them in report_only=.
     public mutating func fitLog(within budget: Int, keeping kept: Set<String>) {
+        let kept = kept.union(FailedCounts.causeKeys)
         let width = { (field: (String, MetricValue)) in field.0.count + field.1.logText.count + 2 }
         var total = logged.map(width).reduce(0, +)
         while total > budget, let longest = logged.filter({ !kept.contains($0.0) }).max(by: { width($0) < width($1) }) {
@@ -146,12 +147,19 @@ public struct Outcome: Sendable {
         Outcome(.skip, metrics, detail: detail)
     }
 
-    /// FAIL naming the command buffers of the test's own off the raw path, ahead of whatever else it found; unchanged
+    /// FAIL naming the command buffers of the test's own off the driver, ahead of whatever else it found; unchanged
     /// when there are none.
     public func failing(offRaw: PathTally) -> Outcome {
         guard !offRaw.isEmpty else { return self }
-        let reason = "command buffers off the raw path: \(offRaw.text)"
+        let reason = "command buffers off the driver: \(offRaw.text)"
         return Outcome(.fail, metrics, detail: detail.isEmpty ? reason : reason + "; " + detail, proof: proof)
+    }
+
+    /// FAIL with `check`'s label ahead of whatever else the test found where the check does not hold; unchanged where
+    /// it does.
+    public func failing(unless check: (String, Bool)) -> Outcome {
+        guard !check.1 else { return self }
+        return Outcome(.fail, metrics, detail: detail.isEmpty ? check.0 : check.0 + "; " + detail, proof: proof)
     }
 
     /// FAIL naming the metric keys the test could not log, ahead of whatever else it found; unchanged without any.

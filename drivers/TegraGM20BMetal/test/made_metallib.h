@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // A made-up universal metallib (an Apple GPU slice, then an AIR64 slice whose function list names the given functions,
-// function i's HASH filled with `seed + i`), as raw_metallib.h reads a framework's
+// function i's HASH filled with `seed + i`), as metallib.h reads a framework's
 #pragma once
 #include <cstdint>
 #include <cstring>

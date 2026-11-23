@@ -202,6 +202,32 @@ void restartLocked(uint32_t channel)
     dropJobs(gChannels[channel]);
 }
 
+// A filter waiter on another CPU that sees the syncpoint move reads the failure stored before it
+// (SwitchHost1xStages.h fenceReached), so no increment may reach host1x ahead of that store.
+void releaseLocked(uint32_t id, uint32_t threshold)
+{
+    struct Registers {
+        uint32_t read(uint32_t offset)
+        {
+            return syncRead(offset);
+        }
+
+        void publish(uint32_t offset, uint32_t value)
+        {
+            switch_mmio_write32_publish(gChannelSync, offset, value);
+        }
+
+        void barrier()
+        {
+            __asm__ volatile("dsb sy" ::: "memory");
+        }
+    } registers;
+
+    if (switch_host1x_release_failed(registers, id, threshold))
+        panic("TegraHost1x: syncpoint %u stays at %u after the CPU's increments to %u", id,
+              tegra_host1x_syncpt_read(id), threshold);
+}
+
 #if SWITCH_HOST1X_STATS
 void statsLine()
 {

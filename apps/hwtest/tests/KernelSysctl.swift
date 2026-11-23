@@ -41,6 +41,6 @@ enum KernelSysctl {
         error == EPERM
             ? "the sandbox denies the app's read of \(names) (EPERM)"
             : error == ENOENT
-                ? "the kernel has no \(names) (ENOENT: a release kernel)" : "\(names) unreadable (errno \(error))"
+            ? "the kernel has no \(names) (ENOENT: a release kernel)" : "\(names) unreadable (errno \(error))"
     }
 }

@@ -49,7 +49,7 @@ enum DeviceInfo {
     static func mainImageUUID() -> String {
         guard let header = _dyld_get_image_header(0) else { return "" }
         var command = UnsafeRawPointer(header).advanced(by: MemoryLayout<mach_header_64>.size)
-        for _ in 0..<header.pointee.ncmds {
+        for _ in 0 ..< header.pointee.ncmds {
             let load = command.load(as: load_command.self)
             if load.cmd == UInt32(LC_UUID) {
                 return UUID(uuid: command.load(as: uuid_command.self).uuid).uuidString

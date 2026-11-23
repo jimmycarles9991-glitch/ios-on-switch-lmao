@@ -9,7 +9,7 @@ use crate::descriptors::{
     DescriptorFunction, NmbComputePipelineDescriptorOf, NmbConstant, NmbRenderPipelineDescriptorOf, attribute_out,
     compute_descriptor, e, get, guard, release, specialization,
 };
-use crate::direct::RAW_HEAP_ELEMENTS;
+use crate::direct_abi::SWITCH_METAL_HEAP_ELEMENTS;
 use metal2vulkan::device::{
     Device, DeviceDescription, DevicePolicy, FramebufferFetchPolicy, NativeShaderTarget, VkExtension, VkFeature,
 };
@@ -54,7 +54,7 @@ fn devices(p: &Profile) -> Result<Devices, String> {
     let made = |d: Result<Device, metal2vulkan::error::Error>| {
         d.map(|d| {
             d.with_native_target(NativeShaderTarget::Sm53)
-                .with_heap_elements(RAW_HEAP_ELEMENTS)
+                .with_heap_elements(SWITCH_METAL_HEAP_ELEMENTS)
         })
         .map_err(e("compile device"))
     };
@@ -68,7 +68,7 @@ fn devices(p: &Profile) -> Result<Devices, String> {
     Ok(Devices {
         native: runtime
             .with_native_target(NativeShaderTarget::Sm53)
-            .with_heap_elements(RAW_HEAP_ELEMENTS),
+            .with_heap_elements(SWITCH_METAL_HEAP_ELEMENTS),
         barrier: made(Device::new(barrier, p.policy))?,
         ordered: made(Device::new_with_center_fragment_depth(p.enabled.clone(), ordered))?,
         runtime,

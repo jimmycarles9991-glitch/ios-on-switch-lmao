@@ -5,22 +5,22 @@
 #include <cstring>
 #include <vector>
 #include "TegraGM20BCompilerABI.h"
-#include "../raw/runtime/RawCompileRequest.h"
-#include "../raw/runtime/RawDirect.h"
-#include "../raw/runtime/RawPipelineKey.h"
-#include "../raw/runtime/RawRenderKey.h"
-#include "../raw/runtime/raw_cache.h"
-#include "../raw/runtime/raw_reflection_blob.h"
-#include "../raw/runtime/RawOffline.h"
+#include "../TegraGM20BMetalCompileRequest.h"
+#include "../TegraGM20BMetalDirect.h"
+#include "../TegraGM20BMetalPipelineKey.h"
+#include "../TegraGM20BMetalRenderKey.h"
+#include "../gm20b_cache.h"
+#include "../reflection_blob.h"
+#include "../TegraGM20BMetalOffline.h"
 #include "compiler_request.h"
 
 namespace switch_compiler {
 namespace {
 
-id<MTLFunction> function(id<MTLLibrary> library, const raw::RequestStage &s, std::string &why)
+id<MTLFunction> function(id<MTLLibrary> library, const gm20b::RequestStage &s, std::string &why)
 {
     MTLFunctionConstantValues *values = nil;
-    if (s.specialized && !(values = raw::constantValuesOf(s.constants)))
+    if (s.specialized && !(values = gm20b::constantValuesOf(s.constants)))
         return why = "constants it cannot read: " + s.constants, nil;
     if (!s.specialized && !s.constants.empty())
         return why = "constants of a function made without them", nil;
@@ -40,53 +40,34 @@ id<MTLFunction> function(id<MTLLibrary> library, const raw::RequestStage &s, std
     }
     if (!made)
         why = "no function " + s.function + (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
-    else if (raw::constantsText(values) != s.constants)
+    else if (gm20b::constantsText(values) != s.constants)
         return why = "constants that do not read back as given", nil;
     return made;
 }
 
-int32_t resultOf(raw::CompileOutcome outcome)
+int32_t resultOf(gm20b::CompileOutcome outcome)
 {
-    return outcome == raw::CompileOutcome::Made      ? TegraGM20BCompileMade
-           : outcome == raw::CompileOutcome::Refused ? TegraGM20BCompileRefused
-                                                     : TegraGM20BCompileFailed;
-}
-
-bool functions(const raw::CompileRequest &r, const Libraries &libraries, std::vector<id<MTLFunction>> &out,
-               std::string &why)
-{
-    std::vector<id<MTLLibrary>> made;
-    for (const raw::RequestLibrary &l : r.libraries) {
-        id<MTLLibrary> library = libraries(l, why);
-        if (!library)
-            return false;
-        made.push_back(library);
-    }
-    for (const raw::RequestStage &s : r.stages) {
-        id<MTLFunction> f = function(made[s.library], s, why);
-        if (!f)
-            return false;
-        out.push_back(f);
-    }
-    return true;
+    return outcome == gm20b::CompileOutcome::Made      ? TegraGM20BCompileMade
+           : outcome == gm20b::CompileOutcome::Refused ? TegraGM20BCompileRefused
+                                                       : TegraGM20BCompileFailed;
 }
 
 // `p`'s descriptor over the functions of `libraries`, checked to key as `p` was keyed
 MTLRenderPipelineDescriptor *descriptor(const Prepared &p, const Libraries &libraries, uint64_t stack, std::string &why)
 {
-    const raw::CompileRequest &r = p.request;
+    const gm20b::CompileRequest &r = p.request;
     std::vector<id<MTLFunction>> made;
     if (!functions(r, libraries, made, why))
         return nil;
     MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
-    raw::applyFields(r.fields, d);
+    gm20b::applyFields(r.fields, d);
     d.vertexFunction = made[0];
-    if (const size_t f = raw::fragmentStage(r); f != raw::kNoStage)
+    if (const size_t f = gm20b::fragmentStage(r); f != gm20b::kNoStage)
         d.fragmentFunction = made[f];
     if (uint64_t(made[0].patchType) != r.fields.patchType)
         return why = "a vertex function of another patch type than its request names", nil;
     NSMutableDictionary<NSString *, NSMutableArray *> *linked = [NSMutableDictionary dictionary];
-    for (size_t i = raw::firstLinked(r); i < r.stages.size(); ++i) {
+    for (size_t i = gm20b::firstLinked(r); i < r.stages.size(); ++i) {
         NSString *tag = @(r.stages[i].tag.c_str());
         if (!linked[tag])
             linked[tag] = [NSMutableArray array];
@@ -97,43 +78,45 @@ MTLRenderPipelineDescriptor *descriptor(const Prepared &p, const Libraries &libr
     d.fragmentLinkedFunctions.functions = linked[@"fl"];
     d.fragmentLinkedFunctions.privateFunctions = linked[@"fp"];
     bool own = false;
-    raw::requestPackKey(r, own);
-    raw::CacheKey runtime;
-    if (!raw::renderCacheKey(d, p.packKey, own, stack, runtime) || runtime.key != p.key.key ||
+    gm20b::requestPackKey(r, own);
+    gm20b::CacheKey runtime;
+    if (!gm20b::renderCacheKey(d, p.packKey, own, stack, runtime) || runtime.key != p.key.key ||
         memcmp(runtime.vertexAir, p.key.vertexAir, sizeof runtime.vertexAir) ||
         memcmp(runtime.fragmentAir, p.key.fragmentAir, sizeof runtime.fragmentAir))
         return why = "functions m2v keys otherwise than their libraries", nil;
     return d;
 }
 
-int32_t render(const Prepared &p, const Libraries &libraries, raw::Direct &direct, uint64_t stack, std::string &entry,
+int32_t render(const Prepared &p, const Libraries &libraries, gm20b::Direct &direct, uint64_t stack, std::string &entry,
                std::string &why)
 {
     MTLRenderPipelineDescriptor *d = descriptor(p, libraries, stack, why);
     if (!d)
         return TegraGM20BCompileUnavailable;
-    raw::RuntimeRecord record;
-    const raw::CompileOutcome outcome = direct.make(d, p.packKey, record, why, raw::probeTexturesOf(p.request.variant));
-    if (outcome != raw::CompileOutcome::Failed)
-        entry = raw::encodeEntry(p.key, outcome == raw::CompileOutcome::Made ? &record : nullptr, why);
+    gm20b::RuntimeRecord record;
+    const gm20b::CompileOutcome outcome =
+        direct.make(d, p.packKey, record, why, gm20b::probeTexturesOf(p.request.variant));
+    if (outcome != gm20b::CompileOutcome::Failed)
+        entry = gm20b::encodeEntry(p.key, outcome == gm20b::CompileOutcome::Made ? &record : nullptr, why);
     return resultOf(outcome);
 }
 
 // A compute request's state over `made`, its stages' functions: the kernel, its linked functions ("kl" visible, "kp"
 // private, "kb" binary, "kg" grouped), its stage input and limits
-MTLComputePipelineDescriptor *computeDescriptor(const raw::CompileRequest &r, const std::vector<id<MTLFunction>> &made)
+MTLComputePipelineDescriptor *computeDescriptor(const gm20b::CompileRequest &r,
+                                                const std::vector<id<MTLFunction>> &made)
 {
     MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
     d.computeFunction = made[0];
     d.maxTotalThreadsPerThreadgroup = r.kernel.maxThreads;
     d.threadGroupSizeIsMultipleOfThreadExecutionWidth = r.kernel.multipleOfWidth;
-    d.stageInputDescriptor = raw::stageInOf(r.kernel.stageIn);
+    d.stageInputDescriptor = gm20b::stageInOf(r.kernel.stageIn);
     if (made.size() > 1) {
         NSMutableArray *visible = [NSMutableArray array], *hidden = [NSMutableArray array],
                        *binary = [NSMutableArray array];
         NSMutableDictionary<NSString *, NSMutableArray *> *groups = [NSMutableDictionary dictionary];
         for (size_t i = 1; i < made.size(); ++i) {
-            const raw::RequestStage &stage = r.stages[i];
+            const gm20b::RequestStage &stage = r.stages[i];
             if (stage.tag == "kg") {
                 NSString *name = [[NSString alloc] initWithBytes:stage.group.data()
                                                           length:stage.group.size()
@@ -158,17 +141,18 @@ MTLComputePipelineDescriptor *computeDescriptor(const raw::CompileRequest &r, co
     return d;
 }
 
-int32_t kernel(const Prepared &p, const Libraries &libraries, raw::Direct &direct, std::string &entry, std::string &why)
+int32_t kernel(const Prepared &p, const Libraries &libraries, gm20b::Direct &direct, std::string &entry,
+               std::string &why)
 {
     std::vector<id<MTLFunction>> made;
     if (!functions(p.request, libraries, made, why))
         return TegraGM20BCompileUnavailable;
     MTLComputePipelineDescriptor *d = computeDescriptor(p.request, made);
     const NmbDirectDispatch dispatch = p.request.kernel.dispatch();
-    raw::ComputeRecord record;
-    const raw::CompileOutcome outcome = direct.kernel(d, dispatch, p.packKey, record, why);
-    if (outcome != raw::CompileOutcome::Failed)
-        entry = raw::encodeKernelEntry(p.key, outcome == raw::CompileOutcome::Made ? &record : nullptr, why);
+    gm20b::ComputeRecord record;
+    const gm20b::CompileOutcome outcome = direct.kernel(d, dispatch, p.packKey, record, why);
+    if (outcome != gm20b::CompileOutcome::Failed)
+        entry = gm20b::encodeKernelEntry(p.key, outcome == gm20b::CompileOutcome::Made ? &record : nullptr, why);
     return resultOf(outcome);
 }
 
@@ -176,7 +160,7 @@ int32_t reflection(const Prepared &p, const Libraries &libraries, uint64_t stack
 {
     std::string blob;
     bool made = false;
-    if (raw::computeReflection(p.request)) {
+    if (gm20b::computeReflection(p.request)) {
         std::vector<id<MTLFunction>> kernel;
         if (!functions(p.request, libraries, kernel, why))
             return TegraGM20BCompileUnavailable;
@@ -187,11 +171,30 @@ int32_t reflection(const Prepared &p, const Libraries &libraries, uint64_t stack
             return TegraGM20BCompileUnavailable;
         made = offline::renderReflection(d, blob, why);
     }
-    entry = raw::encodeReflectionEntry(p.key, made ? &blob : nullptr, why);
+    entry = gm20b::encodeReflectionEntry(p.key, made ? &blob : nullptr, why);
     return made ? TegraGM20BCompileMade : TegraGM20BCompileRefused;
 }
 
 }  // namespace
+
+bool functions(const gm20b::CompileRequest &r, const Libraries &libraries, std::vector<id<MTLFunction>> &out,
+               std::string &why)
+{
+    std::vector<id<MTLLibrary>> made;
+    for (const gm20b::RequestLibrary &l : r.libraries) {
+        id<MTLLibrary> library = libraries(l, why);
+        if (!library)
+            return false;
+        made.push_back(library);
+    }
+    for (const gm20b::RequestStage &s : r.stages) {
+        id<MTLFunction> f = function(made[s.library], s, why);
+        if (!f)
+            return false;
+        out.push_back(f);
+    }
+    return true;
+}
 
 int32_t makeReflectionEntry(const Prepared &p, const Libraries &libraries, uint64_t stack, std::string &entry,
                             std::string &why)
@@ -201,9 +204,9 @@ int32_t makeReflectionEntry(const Prepared &p, const Libraries &libraries, uint6
     }
 }
 
-id<MTLLibrary> offlineLibrary(const raw::RequestLibrary &l, const std::string &systemRoot, std::string &why)
+id<MTLLibrary> offlineLibrary(const gm20b::RequestLibrary &l, const std::string &systemRoot, std::string &why)
 {
-    static RawOfflineDevice *const device = [RawOfflineDevice new];
+    static GM20BOfflineDevice *const device = [GM20BOfflineDevice new];
     NSError *error = nil;
     id<MTLLibrary> made = nil;
     if (l.system) {
@@ -222,12 +225,12 @@ id<MTLLibrary> offlineLibrary(const raw::RequestLibrary &l, const std::string &s
     return made;
 }
 
-int32_t makeEntry(const Prepared &p, const Libraries &libraries, raw::Direct &direct, uint64_t stack,
+int32_t makeEntry(const Prepared &p, const Libraries &libraries, gm20b::Direct &direct, uint64_t stack,
                   std::string &entry, std::string &why)
 {
     @autoreleasepool {
-        return p.request.kind == raw::RequestKind::Kernel ? kernel(p, libraries, direct, entry, why)
-                                                          : render(p, libraries, direct, stack, entry, why);
+        return p.request.kind == gm20b::RequestKind::Kernel ? kernel(p, libraries, direct, entry, why)
+                                                            : render(p, libraries, direct, stack, entry, why);
     }
 }
 

@@ -2,9 +2,8 @@
 //! assemblers (`llvm-as`, `xcrun metal-as`, `spirv-as`), the committed fixture directories, a
 //! synthetic metallib writer ([`metallib`]), a tool's identity, the MoltenVK toolchain the MSL
 //! checks reproduce, and the generated-program fuzzers ([`fuzz`]) the product's CPU-interpreter
-//! tests and validation's device tests both run, the extended-range blend and bicubic tables both
-//! check ([`xr_blends`], [`xr_bicubic`]), and the store-buffering litmus kernel both compile
-//! ([`litmus`]).
+//! tests and validation's device tests both run, the extended-range bicubic table both check
+//! ([`xr_bicubic`]), and the store-buffering litmus kernel both compile ([`litmus`]).
 //!
 //! The product runs no external tool and takes this crate for its tests alone: it is the
 //! product's path-only dev-dependency, which `cargo publish` drops, and a dependency of
@@ -25,12 +24,14 @@ pub mod metallib;
 pub mod spirv;
 pub mod tools;
 pub mod xr_bicubic;
-pub mod xr_blends;
 
 /// The validation crate's `fixtures/public` beside this crate
 /// (`crates/metal2vulkan-validation/fixtures/public`, read-only).
 pub fn fixtures_dir() -> PathBuf {
-    if let (Some(root), Some(workspace)) = (std::env::var_os("TEST_SRCDIR"), std::env::var_os("TEST_WORKSPACE")) {
+    if let (Some(root), Some(workspace)) = (
+        std::env::var_os("TEST_SRCDIR"),
+        std::env::var_os("TEST_WORKSPACE"),
+    ) {
         return PathBuf::from(root)
             .join(workspace)
             .join("third_party/m2v/crates/metal2vulkan-validation/fixtures/public");
@@ -44,6 +45,13 @@ pub fn fixtures_dir() -> PathBuf {
 /// [`fixtures_dir`]'s `engine` (read-only; the engine's own fixtures).
 pub fn engine_dir() -> PathBuf {
     fixtures_dir().join("engine")
+}
+
+/// FNV-1a 64 of `bytes`.
+pub fn fnv(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xCBF2_9CE4_8422_2325, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3)
+    })
 }
 
 /// Why an external tool could not assemble a fixture or compile a module.
@@ -80,8 +88,8 @@ fn assemble(cmd: &str, pre: &[&OsStr], input: Stdio) -> Result<Vec<u8>, Assemble
 
 /// [`assemble`] of the text in the file `input`.
 fn assemble_file(cmd: &str, pre: &[&OsStr], input: &Path) -> Result<Vec<u8>, AssembleError> {
-    let text =
-        std::fs::File::open(input).map_err(|e| AssembleError::Rejected(format!("read {}: {e}", input.display())))?;
+    let text = std::fs::File::open(input)
+        .map_err(|e| AssembleError::Rejected(format!("read {}: {e}", input.display())))?;
     assemble(cmd, pre, text.into())
 }
 
@@ -93,7 +101,8 @@ pub fn llvm_assemble(ll: &Path) -> Result<Vec<u8>, AssembleError> {
 /// Opaque-pointer bitcode of the LLVM text `text` (`llvm-as`), which a test generates rather than
 /// reads from a fixture: the same bitcode [`llvm_assemble`] makes of that text in a file.
 pub fn llvm_assemble_text(text: &str) -> Result<Vec<u8>, AssembleError> {
-    let (input, mut feed) = std::io::pipe().map_err(|e| AssembleError::Rejected(format!("pipe: {e}")))?;
+    let (input, mut feed) =
+        std::io::pipe().map_err(|e| AssembleError::Rejected(format!("pipe: {e}")))?;
     std::thread::scope(|scope| {
         // Written beside the tool's run, so neither its input nor its output pipe fills while the
         // other waits. The writer's end closes when the text is written, which ends the input.

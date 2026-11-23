@@ -4,9 +4,9 @@
 usage: build.py --xcode-env <xcode.env> --translate <translator .a> --compile <switch_compile.o>
                 --metal-abi <MetalABI.h> --raw <shader tools' raw/> --out <dir>
 
-directrun links the raw runtime's direct compile as the pack generator's directpack does (raw/pack/rawpack.py tool),
+directrun links the runtime's direct compile as the pack generator's directpack does (pack/make_pack.py tool),
 over the native translator, beside the shader tools' mock GM20B (rpath @executable_path). The counter resolve
-kernel is the source the raw device compiles for itself (raw/runtime/raw_counter_kernel.h kResolveSource).
+kernel is the source the device compiles for itself (counter_kernel.h kResolveSource).
 """
 
 import argparse
@@ -17,10 +17,10 @@ import sys
 from pathlib import Path
 
 HERE = Path('tools/gpu/maxwell/direct')
-RUNTIME = Path('drivers/TegraGM20BMetal/raw/runtime')
-METAL = Path('drivers/NativeMetal')
-LINKED = Path('drivers/TegraGM20BMetal/raw/test/linked')
-DIRECT_RUNTIME = ('raw_direct', 'raw_direct_compute', 'raw_record_parts', 'raw_emit', 'raw_pack', 'raw_metallib')
+RUNTIME = Path('drivers/TegraGM20BMetal')
+PLUGIN = Path('drivers/TegraGM20BMetal/plugin')
+LINKED = Path('drivers/TegraGM20BMetal/harness/linked')
+DIRECT_RUNTIME = ('direct', 'direct_compute', 'record_parts', 'emit', 'pack', 'metallib')
 RESOLVE = re.compile(r'kResolveSource = R"\((.*?)\)";', re.DOTALL)
 
 
@@ -42,9 +42,9 @@ def main() -> None:
     work.mkdir()
     env = {'PATH': '/usr/bin:/bin', 'DEVELOPER_DIR': xcode['DEVELOPER_DIR'], 'ZERO_AR_DATE': '1', 'HOME': str(work)}
     env['TMPDIR'] = str(work)
-    counter = RESOLVE.search((RUNTIME / 'raw_counter_kernel.h').read_text())
+    counter = RESOLVE.search((RUNTIME / 'counter_kernel.h').read_text())
     if not counter:
-        sys.exit('no kResolveSource in raw_counter_kernel.h')
+        sys.exit('no kResolveSource in counter_kernel.h')
     (work / 'counter.metal').write_text(counter.group(1))
     airs = []
     for source in (HERE / 'exec.metal', work / 'counter.metal'):
@@ -55,7 +55,7 @@ def main() -> None:
     for source, name, flags in (
         (LINKED / 'caller.metal', 'linked-caller', []),
         (LINKED / 'callee.metal', 'linked-callee', []),
-        (METAL / 'test/neutral_compute.metal', 'neutral', ['-fno-fast-math']),
+        (HERE / 'neutral_compute.metal', 'neutral', ['-fno-fast-math']),
         (Path('drivers/TegraGM20BMetal/test/grouped_pointer.metal'), 'grouped-pointer', []),
     ):
         air = work / (name + '.air')
@@ -67,7 +67,7 @@ def main() -> None:
     ]
     includes = [
         '-I',
-        METAL,
+        PLUGIN,
         '-I',
         Path(args.metal_abi).parent,
         '-I',
@@ -77,15 +77,15 @@ def main() -> None:
     ]
     includes += ['-I', 'third_party/mesa/src/nouveau/headers']
     objcxx = [
-        RUNTIME / 'RawDirect.mm',
-        RUNTIME / 'RawOffline.mm',
-        RUNTIME / 'RawOfflineReflection.mm',
-        RUNTIME / 'RawRenderKey.mm',
+        RUNTIME / 'TegraGM20BMetalDirect.mm',
+        RUNTIME / 'TegraGM20BMetalOffline.mm',
+        RUNTIME / 'TegraGM20BMetalOfflineReflection.mm',
+        RUNTIME / 'TegraGM20BMetalRenderKey.mm',
     ]
     for name, source in (
         ('directrun', HERE / 'directrun.mm'),
-        ('linkcheck', RUNTIME.parent / 'test/linkcheck.mm'),
-        ('neutral_compute', METAL / 'test/neutral_compute.mm'),
+        ('linkcheck', RUNTIME / 'harness/linkcheck.mm'),
+        ('neutral_compute', HERE / 'neutral_compute.mm'),
     ):
         run(
             [
@@ -111,10 +111,6 @@ def main() -> None:
                 out,
                 '-lmock_iokit',
                 '-Wl,-rpath,@executable_path',
-                *[
-                    f'-Wl,-U,_native_bridge_metal_{symbol}'
-                    for symbol in ('render_direct', 'compute_direct', 'function_metallib', 'function_library_name')
-                ],
                 '-lobjc',
                 *frameworks,
                 '-o',

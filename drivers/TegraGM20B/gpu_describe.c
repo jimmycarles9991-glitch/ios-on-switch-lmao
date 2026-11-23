@@ -41,17 +41,10 @@ void tgm_chan_describe(struct tgm_chan *chan, char *buf, unsigned int len)
 void tgm_chan_hung(struct tgm_chan *chan, const char *who, uint32_t seqno, uint64_t waited_ns)
 {
 	char state[TGM_HANG_LINE];
-	char order[64] = "";
-	const struct tgm_order *w = &chan->waited;
 	tgm_chan_describe(chan, state, sizeof(state));
-	/* still waiting for another channel of its task (tgm_chan_order) */
-	if (w->cpu && (s32)(READ_ONCE(*w->cpu) - w->seqno) < 0) {
-		scnprintf(order, sizeof(order), ", order wait on chan %llu fence %u (at %u)", w->id,
-			  w->seqno, READ_ONCE(*w->cpu));
-	}
 	nvxnu_panic("tegra-gm20b: %s: fence %u still pending after %llu ms and no GPU error "
-		    "reported: %s%s",
-		    who, seqno, waited_ns / 1000000, state, order);
+		    "reported: %s",
+		    who, seqno, waited_ns / 1000000, state);
 }
 
 void tgm_engine_state(char *buf, unsigned int len)
@@ -85,6 +78,45 @@ void tgm_engine_state(char *buf, unsigned int len)
 	r.hdr_shadow = nvkm_rd32(device, 0x040118);
 	tgm_engine_format(buf, len, &r);
 }
+
+#if DEVELOPMENT || DEBUG
+/* Channels' processes by uid, for lines that name a writer by its token alone where no lock may be taken. A later
+ * channel whose uid lands on the same slot takes it over; the earlier one then reads as unknown. */
+#define CHAN_NAMES 512
+
+static struct chan_name {
+	u32 uid;
+	char owner[17];
+} chan_names[CHAN_NAMES];
+
+void switch_gpu_chan_named(const struct tgm_chan *chan)
+{
+	struct chan_name *name = &chan_names[(u32)chan->id % CHAN_NAMES];
+
+	__atomic_store_n(&name->uid, 0, __ATOMIC_RELAXED);
+	__atomic_thread_fence(__ATOMIC_RELEASE);
+	memcpy(name->owner, chan->owner, sizeof(name->owner));
+	__atomic_store_n(&name->uid, (u32)chan->id, __ATOMIC_RELEASE);
+}
+
+void switch_gpu_writer_process(const struct switch_gpu_backing_token *token, char *process,
+			       size_t size)
+{
+	const struct chan_name *name = &chan_names[token->queue % CHAN_NAMES];
+	char owner[sizeof(name->owner)];
+
+	if (token->engine == SWITCH_GPU_ENGINE_GM20B &&
+	    __atomic_load_n(&name->uid, __ATOMIC_ACQUIRE) == token->queue) {
+		memcpy(owner, name->owner, sizeof(owner));
+		__atomic_thread_fence(__ATOMIC_ACQUIRE);
+		if (__atomic_load_n(&name->uid, __ATOMIC_RELAXED) == token->queue) {
+			scnprintf(process, size, "%.16s", owner);
+			return;
+		}
+	}
+	scnprintf(process, size, "-");
+}
+#endif
 
 static const char *chid_owner(int chid)
 {

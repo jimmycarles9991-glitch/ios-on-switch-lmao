@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// directrun: the raw path's direct compile (drivers/TegraGM20BMetal/raw/runtime/RawDirect.h) of the states and kernels
+// directrun: the driver's direct compile (drivers/TegraGM20BMetal/TegraGM20BMetalDirect.h) of the states and kernels
 // of exec.metal and the counter resolve kernel, as the runtime makes each at its creation, written as JSON for
 // direct_exec_test.py to execute: each record's programs, set-0 entries, push words and the fields its draws or
 // dispatches write.
@@ -11,13 +11,14 @@
 #include <cstdio>
 #include <map>
 #include <string>
-#include "raw/runtime/RawDirect.h"
-#include "raw/runtime/RawOffline.h"
-#include "raw/runtime/RawPipelineKey.h"
-#include "raw/runtime/raw_counter_kernel.h"
-#include "raw/runtime/raw_emit.h"
-#include "raw/runtime/raw_fragment_tests.h"
-#include "raw/runtime/raw_stage_textures.h"
+#include "TegraGM20BMetalDirect.h"
+#include "TegraGM20BMetalOffline.h"
+#include "TegraGM20BMetalPipelineKey.h"
+#include "compute_key.h"
+#include "counter_kernel.h"
+#include "emit.h"
+#include "fragment_tests.h"
+#include "stage_textures.h"
 
 namespace {
 
@@ -45,8 +46,8 @@ NSArray *words(const uint32_t *values, size_t count)
     return out;
 }
 
-// A program's uniform buffers past set-0 byte 496 (raw_pack.h PackProgram::farUbos): [constant buffer slot, set-0 byte]
-NSArray *farUbos(const raw::CapturedProgram &p)
+// A program's uniform buffers past set-0 byte 496 (pack.h PackProgram::farUbos): [constant buffer slot, set-0 byte]
+NSArray *farUbos(const gm20b::CapturedProgram &p)
 {
     NSMutableArray *out = [NSMutableArray array];
     for (size_t c = 0; c < p.farUbos.size(); c++)
@@ -55,7 +56,7 @@ NSArray *farUbos(const raw::CapturedProgram &p)
     return out;
 }
 
-NSDictionary *program(const raw::CapturedProgram &p)
+NSDictionary *program(const gm20b::CapturedProgram &p)
 {
     return @{
         @"image" : hexOf(p.image),
@@ -68,7 +69,7 @@ NSDictionary *program(const raw::CapturedProgram &p)
 
 // What a draw through argument buffers binds of the record: the root table's and ExecutionStatus's push words + 1 of each
 // stage (vertex, fragment), the stages' root-table slots and set 1's heap arrays
-NSDictionary *arguments(const raw::PackPipeline &p)
+NSDictionary *arguments(const gm20b::PackPipeline &p)
 {
     NSMutableArray *heap = [NSMutableArray array];
     for (uint32_t k = 0; k < p.heapArrays; k++)
@@ -82,13 +83,13 @@ NSDictionary *arguments(const raw::PackPipeline &p)
     };
 }
 
-NSDictionary *stateJson(const raw::RuntimeRecord &r)
+NSDictionary *stateJson(const gm20b::RuntimeRecord &r)
 {
-    const raw::PackPipeline &p = r.pipeline;
+    const gm20b::PackPipeline &p = r.pipeline;
     NSMutableArray *entries = [NSMutableArray array];
-    const raw::SetEntries all = raw::entriesOf(r);
+    const gm20b::SetEntries all = gm20b::entriesOf(r);
     for (uint32_t i = 0; i < all.size(); i++) {
-        const raw::PackEntry &e = all[i];
+        const gm20b::PackEntry &e = all[i];
         [entries
             addObject:@[ @(e.offset), @(e.kind), @(e.stage), @(e.slot), @(e.samplerKind), @(e.sampler), @(e.pad) ]];
     }
@@ -98,12 +99,12 @@ NSDictionary *stateJson(const raw::RuntimeRecord &r)
     NSMutableArray *extras = [NSMutableArray array];
     for (const auto &[m, v] : r.extras)
         [extras addObject:@[ @(m), @(v) ]];
-    const bool tess = raw::tessellates(p);
+    const bool tess = gm20b::tessellates(p);
     NSMutableDictionary *out = [@{
         @"programs" : @[ program(r.programs[0]), program(r.programs[1]) ],
         @"tess_programs" : tess ? @[ program(r.tessPrograms[0]), program(r.tessPrograms[1]) ] : @[],
         @"entries" : entries,
-        @"entry_count" : @(raw::entryCount(p)),
+        @"entry_count" : @(gm20b::entryCount(p)),
         @"spill" : @[
             words(r.spill.data(), std::min<size_t>(p.spillWords[0], r.spill.size())),
             words(r.spill.data() + std::min<size_t>(p.spillWords[0], r.spill.size()),
@@ -135,9 +136,18 @@ NSDictionary *stateJson(const raw::RuntimeRecord &r)
     return out;
 }
 
-NSDictionary *kernelJson(const raw::ComputeRecord &r)
+// A kernel record's sampler headers, word 0 first, as its sampler entries number them (CONSTEXPR | n)
+NSArray *samplerHeaders(const gm20b::ComputeRecord &r)
 {
-    const raw::PackKernel &k = r.kernel;
+    NSMutableArray *out = [NSMutableArray array];
+    for (const auto &h : r.samplers)
+        [out addObject:words(h.data(), uint32_t(h.size()))];
+    return out;
+}
+
+NSDictionary *kernelJson(const gm20b::ComputeRecord &r)
+{
+    const gm20b::PackKernel &k = r.kernel;
     NSMutableArray *entries = [NSMutableArray array];
     for (uint32_t i = 0; i < k.entries; i++)
         [entries addObject:@[ @(k.entry[i].offset), @(k.entry[i].kind), @(k.entry[i].slot), @(k.entry[i].window) ]];
@@ -156,26 +166,34 @@ NSDictionary *kernelJson(const raw::ComputeRecord &r)
         @"stage_in_region_word" : @(k.stageInRegionWord),
         @"stage_in_stride" : strides,
         @"qmd" : words(k.qmd, 64),
+        @"samplers" : samplerHeaders(r),
+        @"maps_stated" : @(k.mapsStated),
     };
 }
 
 // A field as [byte offset, bytes]
 #define SWITCH_FIELD(type, field) @[ @(offsetof(type, field)), @(sizeof(type::field)) ]
 
-// The counter resolve kernel's buffers as raw_counter_kernel.h and TegraGM20BClockABI.h lay them out: its records, its
-// parameters and the kernel's clock anchor table
+// The counter resolve kernels' buffers as counter_kernel.h and TegraGM20BClockABI.h lay them out: its records, its
+// parameters (the byte resolve's with its shift) and the kernel's clock anchor table
 NSDictionary *counterLayout()
 {
-    using raw::counters::Record;
-    using raw::counters::ResolveParams;
+    using gm20b::counters::Record;
+    using gm20b::counters::ResolveBytesParams;
+    using gm20b::counters::ResolveParams;
     return @{
         @"record" : @{
             @"bytes" : @(sizeof(Record)),
             @"payload" : SWITCH_FIELD(Record, payload),
             @"units" : SWITCH_FIELD(Record, units)
         },
-        @"sample_bytes" : @(raw::counters::kSampleBytes),
+        @"sample_bytes" : @(gm20b::counters::kSampleBytes),
         @"params" : @{@"bytes" : @(sizeof(ResolveParams)), @"count" : SWITCH_FIELD(ResolveParams, count)},
+        @"bytes_params" : @{
+            @"bytes" : @(sizeof(ResolveBytesParams)),
+            @"count" : SWITCH_FIELD(ResolveBytesParams, count),
+            @"shift" : SWITCH_FIELD(ResolveBytesParams, shift)
+        },
         @"anchors" : @{
             @"bytes" : @(sizeof(TegraGM20BAbiClockAnchors)),
             @"published" : SWITCH_FIELD(TegraGM20BAbiClockAnchors, published),
@@ -192,28 +210,28 @@ NSDictionary *counterLayout()
 
 class Runner {
 public:
-    Runner(id<MTLLibrary> library, raw::Direct &direct) : library_(library), direct_(direct)
+    Runner(id<MTLLibrary> library, gm20b::Direct &direct) : library_(library), direct_(direct)
     {}
 
-    // `tests`: the test class the state is made for (its " | tests=" variant, raw_fragment_tests.h), 0 for none
+    // `tests`: the test class the state is made for (its " | tests=" variant, fragment_tests.h), 0 for none
     void state(NSString *name, NSString *vertex, NSString *fragment, void (^setUp)(MTLRenderPipelineDescriptor *),
-               uint8_t tests = 0, const raw::CubicBinds &cubic = {})
+               uint8_t tests = 0, const gm20b::CubicBinds &cubic = {})
     {
         MTLRenderPipelineDescriptor *d = [MTLRenderPipelineDescriptor new];
         d.vertexFunction = [library_ newFunctionWithName:vertex];
         d.fragmentFunction = [library_ newFunctionWithName:fragment];
         d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
         setUp(d);
-        const raw::StageKey v = {vertex.UTF8String, ""}, f = {fragment.UTF8String, ""};
-        const std::string key = raw::pipelineKey(d, &v, &f, "", "") + (cubic.empty() ? "" : cubic.key());
-        raw::RuntimeRecord record;
+        const gm20b::StageKey v = {vertex.UTF8String, ""}, f = {fragment.UTF8String, ""};
+        const std::string key = gm20b::pipelineKey(d, &v, &f, "", "") + (cubic.empty() ? "" : cubic.key());
+        gm20b::RuntimeRecord record;
         std::string why;
-        raw::ProbeTextures probe;
+        gm20b::ProbeTextures probe;
         probe.fragmentTests = tests;
         probe.cubic = cubic;
         if (!d.vertexFunction || !d.fragmentFunction)
             why = "no function";
-        else if (direct_.make(d, key, record, why, probe) == raw::CompileOutcome::Made) {
+        else if (direct_.make(d, key, record, why, probe) == gm20b::CompileOutcome::Made) {
             NSMutableDictionary *made = [stateJson(record) mutableCopy];
             made[@"key"] = @(key.c_str());
             states_[name] = made;
@@ -222,20 +240,36 @@ public:
         refused_[name] = @(why.c_str());
     }
 
+    // `textures` and `samplers`: what the dispatch binds, which its key names (compute_key.h ":am" with a map)
     void kernel(NSString *name, NSString *function, uint32_t threads, void (^setUp)(MTLComputePipelineDescriptor *),
-                const std::map<uint32_t, uint32_t> &memory = {})
+                const std::map<uint32_t, uint32_t> &memory = {}, const std::vector<gm20b::BoundTexture> &textures = {},
+                const std::vector<gm20b::BoundSampler> &samplers = {})
     {
         MTLComputePipelineDescriptor *d = [MTLComputePipelineDescriptor new];
         d.computeFunction = [library_ newFunctionWithName:function];
         setUp(d);
         const uint32_t shape[3] = {threads, 1, 1};
-        raw::KernelDispatch dispatch(shape, memory);
-        raw::ComputeRecord record;
+        gm20b::KernelDispatch dispatch(shape, memory);
+        for (const gm20b::BoundTexture &t : textures) {
+            MTLTextureDescriptor *td = [MTLTextureDescriptor new];
+            td.pixelFormat = MTLPixelFormat(t.pixelFormat);
+            td.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
+            dispatch.texture(t.slot, td);
+        }
+        for (const gm20b::BoundSampler &s : samplers) {
+            MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
+            sd.minFilter = MTLSamplerMinMagFilter(s.minFilter);
+            sd.magFilter = MTLSamplerMinMagFilter(s.magFilter);
+            sd.sAddressMode = sd.tAddressMode = sd.rAddressMode = MTLSamplerAddressMode(s.sAddress);
+            dispatch.sampler(s.slot, sd);
+        }
+        const std::string key = std::string("kernel ") + function.UTF8String +
+                                " | tex=" + gm20b::computeTextures(textures.data(), textures.size()) + " | smp=";
+        gm20b::ComputeRecord record;
         std::string why;
         if (!d.computeFunction)
             why = "no function";
-        else if (direct_.kernel(d, dispatch.dispatch(), std::string("kernel ") + function.UTF8String, record, why) ==
-                 raw::CompileOutcome::Made) {
+        else if (direct_.kernel(d, dispatch.dispatch(), key, record, why) == gm20b::CompileOutcome::Made) {
             kernels_[name] = kernelJson(record);
             return;
         }
@@ -269,13 +303,13 @@ public:
             @"refused" : refused_,
             @"answers" : answers_,
             @"layouts" : @{@"counter" : counterLayout()},
-            @"stage_textures" : @(raw::kStageTextures),
+            @"stage_textures" : @(gm20b::kStageTextures),
         };
     }
 
 private:
     id<MTLLibrary> library_;
-    raw::Direct &direct_;
+    gm20b::Direct &direct_;
     NSMutableDictionary *states_ = [NSMutableDictionary dictionary], *kernels_ = [NSMutableDictionary dictionary],
                         *refused_ = [NSMutableDictionary dictionary], *answers_ = [NSMutableDictionary dictionary];
 };
@@ -296,15 +330,15 @@ void make(Runner &run)
               });
     for (const auto &[name, format] : {std::pair{@"cubic_vertex_half", MTLPixelFormatRGBA16Float},
                                        std::pair{@"cubic_vertex_float", MTLPixelFormatRGBA32Float}}) {
-        raw::CubicBinds cubic;
-        cubic.samplers.push_back({0, 0, 0, 0, 0, true, raw::kCubicVertex});
-        cubic.textures.push_back({0, uint32_t(format), raw::kCubicVertex});
+        gm20b::CubicBinds cubic;
+        cubic.samplers.push_back({0, 0, 0, 0, 0, true, gm20b::kCubicVertex});
+        cubic.textures.push_back({0, uint32_t(format), gm20b::kCubicVertex});
         run.state(name, @"cubic_vertex", @"wide_fragment",
                   ^(MTLRenderPipelineDescriptor *){
                   },
                   0, cubic);
     }
-    raw::CubicBinds fragmentOnly;
+    gm20b::CubicBinds fragmentOnly;
     fragmentOnly.samplers.push_back({0, 0, 0, 0, 0, true});
     fragmentOnly.textures.push_back({0, uint32_t(MTLPixelFormatRGBA16Float)});
     run.state(@"cubic_fragment_only", @"cubic_vertex", @"wide_fragment",
@@ -374,6 +408,12 @@ void make(Runner &run)
         layout(v, 0, MTLVertexFormatFloat2, 1, MTLBufferLayoutStrideDynamic);
         d.vertexDescriptor = v;
     });
+    run.state(@"five_dynamic", @"five_dynamic_vertex", @"wide_fragment", ^(MTLRenderPipelineDescriptor *d) {
+        MTLVertexDescriptor *v = [MTLVertexDescriptor vertexDescriptor];
+        for (uint32_t k = 0; k < 5; k++)
+            layout(v, k, MTLVertexFormatFloat2, k + 1, MTLBufferLayoutStrideDynamic);
+        d.vertexDescriptor = v;
+    });
     run.state(@"shadow_stencil", @"shadow_vertex", @"shadow_fragment", ^(MTLRenderPipelineDescriptor *d) {
         d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
         d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
@@ -387,7 +427,7 @@ void make(Runner &run)
             d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
             d.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
         },
-        uint8_t(raw::FragmentTests::StencilWrite));
+        uint8_t(gm20b::FragmentTests::StencilWrite));
     run.state(@"wide_set", @"wide_set_vertex", @"wide_set_fragment", ^(MTLRenderPipelineDescriptor *d) {
         d.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
     });
@@ -425,9 +465,29 @@ void make(Runner &run)
                ^(MTLComputePipelineDescriptor *){
                },
                {{0, (48u << 10) + 16}});
-    run.kernel(@"counter_resolve", @(raw::counters::kResolveFunction), raw::counters::kResolveThreads,
+    run.kernel(@"counter_resolve", @(gm20b::counters::kResolveFunction), gm20b::counters::kResolveThreads,
                ^(MTLComputePipelineDescriptor *){
                });
+    run.kernel(@"counter_resolve_bytes", @(gm20b::counters::kResolveBytesFunction), gm20b::counters::kResolveThreads,
+               ^(MTLComputePipelineDescriptor *){
+               });
+    // a texture raw samples through an image it converts (NativeMetalKernelTextures.rs), its sampler repeating and
+    // nearest (the translator emulates a converted texture's linear filter with fetches of its own)
+    constexpr uint64_t kRepeat = MTLSamplerAddressModeRepeat;
+    const std::vector<gm20b::BoundSampler> repeat = {{0, 0, 0, 0, kRepeat, kRepeat, kRepeat, 1, 0, 0, 0, 1000, true}};
+    const auto convertedAt = [&](NSString *name, NSString *function, uint64_t format, uint8_t map) {
+        gm20b::BoundTexture t = {0, format, MTLTextureType2D, 1, 1, {2, 3, 4, 5}};
+        t.addressMap = map;
+        run.kernel(name, function, 32,
+                   ^(MTLComputePipelineDescriptor *){
+                   },
+                   {}, {t}, repeat);
+    };
+    convertedAt(@"converted_r10_packed", @"converted_sample_kernel", 588, 0);
+    convertedAt(@"converted_rg10_packed", @"converted_sample_kernel", 589, 0);
+    convertedAt(@"converted_420", @"converted_sample_kernel", 500, 1);
+    convertedAt(@"converted_420_p3", @"converted_sample_kernel", 500, 3);
+    convertedAt(@"converted_r10_packed_write", @"converted_write_kernel", 588, 0);
 }
 
 }  // namespace
@@ -439,16 +499,16 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: directrun <exec.metallib> <out.json>\n");
             return 2;
         }
-        RawOfflineDevice *dev = [RawOfflineDevice new];
+        GM20BOfflineDevice *dev = [GM20BOfflineDevice new];
         NSError *error = nil;
         id<MTLLibrary> library = [dev newLibraryWithURL:[NSURL fileURLWithPath:@(argv[1])] error:&error];
         if (!library) {
             fprintf(stderr, "directrun: %s\n", dev ? error.localizedDescription.UTF8String : "no device");
             return 1;
         }
-        raw::PackRules rules;
-        rules.varying = raw::emittableMethods();
-        raw::Direct direct(std::move(rules), false, offline::translator());
+        gm20b::PackRules rules;
+        rules.varying = gm20b::emittableMethods();
+        gm20b::Direct direct(std::move(rules), false, offline::translator());
         Runner run(library, direct);
         make(run);
         NSData *json = [NSJSONSerialization dataWithJSONObject:run.results()

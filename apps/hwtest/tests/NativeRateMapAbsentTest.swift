@@ -9,16 +9,17 @@ import Metal
 /// the device makes none.
 struct NativeRateMapAbsentTest: NativeObjectTest {
     let id = "metal.native.rate_map_absent"
-    let name = "No rate maps: answered NO, none made, a pass carrying one drawn at full rate on the raw path"
+    let name = "No rate maps: answered NO, none made, a pass carrying one drawn at full rate on the driver"
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         var work = NativeWork()
-        let answered = (1...4).filter { gpu.device.supportsRasterizationRateMap(layerCount: $0) }
+        let answered = (1 ... 4).filter { gpu.device.supportsRasterizationRateMap(layerCount: $0) }
         metrics.set("supported_layer_counts", answered.isEmpty ? "-" : answered.map(String.init).joined(separator: ","))
         if !answered.isEmpty { work.failures.append("rate maps answered YES for \(answered)") }
         let layer = MTLRasterizationRateLayerDescriptor(sampleCount: MTLSize(width: 2, height: 2, depth: 0))
         let descriptor = MTLRasterizationRateMapDescriptor(
-            screenSize: MTLSize(width: 32, height: 32, depth: 0), layer: layer)
+            screenSize: MTLSize(width: 32, height: 32, depth: 0), layer: layer
+        )
         let made = gpu.device.makeRasterizationRateMap(descriptor: descriptor)
         metrics.set("made", made.map { NSStringFromClass(type(of: $0 as AnyObject)) } ?? "nil")
         if made != nil { work.failures.append("a rate map was made") }
@@ -27,14 +28,14 @@ struct NativeRateMapAbsentTest: NativeObjectTest {
         let pass = ClientErrors.pass(target)
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 0.8)
         pass.rasterizationRateMap = ForeignRateMap(device: gpu.device)
-        let before = RawFacade.counters(of: gpu.device)["m2v"] ?? 0
+        let before = GM20BFacade.counters(of: gpu.device)
         var status = MTLCommandBufferStatus.notEnqueued
         let timing = try await gpu.run(tolerateError: true) { commands in
             commands.makeRenderCommandEncoder(descriptor: pass)!.endEncoding()
             commands.addCompletedHandler { status = $0.status }
         }
         work.paths.append(timing.path)
-        ClientErrors.record(gpu, before, status, &work, &metrics)
+        ClientErrors.record(gpu, before, timing, status, &work, &metrics)
         try await ClientErrors.texel(gpu, target, want: ClientErrors.colour, slack: 1, field: "texel", &work, &metrics)
         return work
     }

@@ -11,7 +11,7 @@ import HWTestGPU
 /// <case>_answer names the answer the engine gave. fractional= judges the offsets, dimensions= the widths,
 /// alpha_override= the request flag.
 enum X1VICFractionProbe {
-    static let magic: UInt32 = 0x5646_5241  // 'VFRA'
+    static let magic: UInt32 = 0x5646_5241 // 'VFRA'
     static let cases = 13
     static let caseWords = 13
     static let replyBytes = 16 + 4 * caseWords * cases
@@ -27,7 +27,7 @@ enum X1VICFractionProbe {
 
     static func answer(_ r: [UInt32]) -> String {
         let names = r[2] == 0 || r[2] == 3 ? ["lerp", "trunc", "round"] : ["claim", "source", "opaque"]
-        return (0..<3).first { r[4 + $0] == 0 }.map { names[$0] } ?? "none"
+        return (0 ..< 3).first { r[4 + $0] == 0 }.map { names[$0] } ?? "none"
     }
 
     static let probe = X1Probe(
@@ -44,8 +44,8 @@ enum X1VICFractionProbe {
         var fractional = true
         var alphaOverride = true
         var dimensions = true
-        for i in 0..<min(Int(reply[1]), cases) {
-            let r = Array(reply[(4 + caseWords * i)..<(4 + caseWords * (i + 1))])
+        for i in 0 ..< min(Int(reply[1]), cases) {
+            let r = Array(reply[(4 + caseWords * i) ..< (4 + caseWords * (i + 1))])
             let name = caseName(r)
             metrics.set(name + "_status", Int(Int32(bitPattern: r[3])))
             metrics.set(name + "_answer", answer(r))
@@ -67,7 +67,8 @@ enum X1VICFractionProbe {
         let finding = ProbeFinding.counted(wrong, paths: [], metrics: metrics)
         guard reply[2] != 0, Int(reply[1]) == cases else {
             return ProbeFinding(
-                .inconclusive, finding.metrics, note: "the integer-offset or source-alpha copy was wrong")
+                .inconclusive, finding.metrics, note: "the integer-offset or source-alpha copy was wrong"
+            )
         }
         return finding
     }

@@ -10,8 +10,8 @@ import Metal
 /// to layer 1 and viewport 1: layer 0 holds red in its left half alone, layer 1 green in its right half alone, every
 /// command buffer raw (raw refused such a mapping, whose macro word holds 16 bits, and m2v has no amplification).
 struct AmplificationWideOffsetTest: NativeObjectTest {
-    let id = "gpu.raw.amplification_wide_offset"
-    let name = "Vertex amplification view mapping offsets past 16 bits draw into slice and viewport 0 on the raw path"
+    let id = "gpu.gm20b.amplification_wide_offset"
+    let name = "Vertex amplification view mapping offsets past 16 bits draw into slice and viewport 0 on the driver"
 
     static let size = 32
 

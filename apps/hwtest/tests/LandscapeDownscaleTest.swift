@@ -29,9 +29,10 @@ struct LandscapeDownscaleTest: HWTest {
         let asset = AVURLAsset(url: context.media.appendingPathComponent(clip.file))
         let duration = try await asset.load(.duration)
         let composition = AVMutableComposition()
-        for _ in 0..<4 {
+        for _ in 0 ..< 4 {
             try await composition.insertTimeRange(
-                CMTimeRange(start: .zero, duration: duration), of: asset, at: composition.duration)
+                CMTimeRange(start: .zero, duration: duration), of: asset, at: composition.duration
+            )
         }
         nonisolated(unsafe) let timeline = composition
         let player = await MainActor.run { AVPlayer(playerItem: AVPlayerItem(asset: timeline)) }
@@ -71,6 +72,7 @@ struct LandscapeDownscaleTest: HWTest {
                     "the display server asked VIC for no job (vic_jobs_display 0)",
                     playing.vicJobs[LandscapeSample.displayServer] == 0
                 ),
-            ], metrics)
+            ], metrics
+        )
     }
 }

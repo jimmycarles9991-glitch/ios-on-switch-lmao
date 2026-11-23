@@ -5,20 +5,20 @@ import Metal
 
 /// Tile shading on a device that does not claim Apple4 (tile shaders and imageblocks are Apple4 in Metal's feature set
 /// tables): a tile render state is refused at creation with an error, and a tile dispatch inside a raw render pass is
-/// answered zero (the error line raw:call.tile) while the pass and its command buffer stay on the raw path and complete.
+/// answered zero (the error line gm20b:call.tile) while the pass and its command buffer stay on the driver and complete.
 /// Before, both went to m2v.
 struct TileRefusedTest: NativeObjectTest {
-    let id = "gpu.raw.tile_refused"
-    let name = "Tile shading is refused as a device without Apple4 refuses it, on the raw path"
+    let id = "gpu.gm20b.tile_refused"
+    let name = "Tile shading is refused as a device without Apple4 refuses it, on the driver"
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        struct Tile { half4 colour [[color(0)]]; };
-        kernel void tile_clear(imageblock<Tile, imageblock_layout_implicit> block, ushort2 at [[thread_position_in_threadgroup]]) {
-            block.write(Tile{half4(1)}, at);
-        }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    struct Tile { half4 colour [[color(0)]]; };
+    kernel void tile_clear(imageblock<Tile, imageblock_layout_implicit> block, ushort2 at [[thread_position_in_threadgroup]]) {
+        block.write(Tile{half4(1)}, at);
+    }
+    """
 
     func exercise(_ gpu: GPU, _ metrics: inout Metrics) async throws -> NativeWork {
         let device = gpu.device
@@ -27,7 +27,7 @@ struct TileRefusedTest: NativeObjectTest {
         metrics.set("apple4", apple4 ? "yes" : "no")
         if apple4 { work.failures.append("the device claims Apple4, whose tile shaders it has no form of") }
         if let library = try? await device.makeLibrary(source: Self.source, options: nil),
-            let function = library.makeFunction(name: "tile_clear")
+           let function = library.makeFunction(name: "tile_clear")
         {
             let d = MTLTileRenderPipelineDescriptor()
             d.tileFunction = function

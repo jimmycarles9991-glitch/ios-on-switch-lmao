@@ -67,8 +67,10 @@ extern "C" {
 #endif
 // Provided by the GPU driver (weak in NativeLegacyDisplay: absent, every frame is copied on the CPU). Called under the display's
 // work-loop gate in thread context (usually the compositor's thread inside its swap submission): queue the copy and return, never
-// wait for the GPU here. 0: accepted, and native_legacy_gpu_complete follows exactly once for it. Anything else: declined (GPU
-// not up, channel busy or dead, source not importable), no completion; the display copies that frame on the CPU. One offer is
+// wait for the GPU here. 0: accepted, and native_legacy_gpu_complete follows exactly once for it. TEGRA_SCANOUT_SOURCE_*:
+// refused, no completion, for why below: nothing of the frame is shown, the CPU copy included (LOST panics). kIOReturnCannotLock:
+// a writer holds the source, and the display offers it again once the writer leaves. Anything else: declined (GPU not up, channel
+// busy or dead, source not importable), no completion; VIC copies that frame, or the CPU while VIC is not up. One offer is
 // outstanding at a time: the next comes only after the previous one's completion. The copy waits only for work its producers
 // had already submitted at the offer.
 int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy);
@@ -77,8 +79,8 @@ int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy);
 // as tegra_gm20b_scanout_copy otherwise: one offer outstanding per display, native_legacy_gpu_complete once for it.
 int tegra_gm20b_scanout_fence(void *display, uint64_t pa);
 // Provided by NativeLegacyDisplay: the offer's copy is done (status 0: every byte of the target is in DRAM, the copy engine's writes
-// flushed past the GPU L2 before the semaphore release that raised the completion) or failed (status != 0: the target may hold a
-// partial frame; the display does not flip to it). Thread context with interrupts on (a producer's work loop or work item; its
+// flushed past the GPU L2 before the semaphore release that raised the completion) or its frame is not there (a
+// TEGRA_SCANOUT_SOURCE_*: the display does not flip to it; any other status after an accepted offer panics). Thread context with interrupts on (a producer's work loop or work item; its
 // interrupt filter calls tgm_present_filter_callout's fn instead); it records the status, writes window A's flip for a frame the
 // display armed (an IOSimpleLock and six registers, SwitchCompletionFlipDisplay.h) and signals the display's work loop, and never
 // sleeps.
@@ -91,14 +93,22 @@ void native_legacy_gpu_complete(void *display, int status);
 // job, a semantic wait in front) never call it. fn only stores to memory and registers under a simple lock of its own.
 // Registered once.
 void tgm_present_filter_callout(void (*fn)(void *ctx, int status), void *ctx);
-// status: the compositor's rendering of the source never finished (its channel faulted or hung and was killed): the source
-// holds a partial frame, and the display shows nothing of it, neither through the copy nor the CPU.
+// Why a swapped frame is not there (an offer's answer or its completion's status), the GPU driver's SwitchGpuBacking.h
+// WRITER_GONE, WRITER_FAILED and WRITE_REFUSED. The display shows nothing of the frame, through the copy or the CPU, and
+// retires its swap unshown, the panel keeping the frame before it.
+// GONE: the client whose work was to write it is gone (its channel torn down, an app's channel killed by recovery, a
+// shared event its work waited on failed with its signaller). Not a display failure.
+#define TEGRA_SCANOUT_SOURCE_GONE (-3)
+// LOST: accepted work for it failed on the GPU (a compositor channel killed by recovery, an engine that names no cause):
+// the kernel's own failure, which no frame may hide.
 #define TEGRA_SCANOUT_SOURCE_LOST (-5)
+// REFUSED: the write was never accepted (its submission refused, its writer promise given up); its client was told.
+#define TEGRA_SCANOUT_SOURCE_REFUSED (-8)
 // Provided by the GPU driver (weak in NativeLegacyDisplay): whether the display's accepted offer is still the GPU driver's, its
 // completion not yet delivered. The driver owns an accepted offer's deadline: 1 s after the offer it names the channel and
-// seqno the copy waits for, kills a client's hung channel (the offer then completes, TEGRA_SCANOUT_SOURCE_LOST when the
-// killed work was the frame's) or panics. The display's own deadline only catches a completion lost between the two: it
-// waits while this says 1, up to ten of its 1 s deadlines. Any context; never waits.
+// seqno the copy waits for, kills a client's hung channel (the offer then completes with the kill's TEGRA_SCANOUT_SOURCE_*
+// when the killed work was the frame's) or panics. The display's own deadline, 10 s after the offer, only catches a completion
+// lost between the two, and says whether this still said 1. Any context; never waits.
 int tegra_gm20b_scanout_outstanding(const void *display);
 // Provided by the GPU driver, debug kernels (weak in NativeLegacyDisplay): window A shows a frame no offer carried (a
 // direct frame flipped from the kick, a CPU, VIC or blank frame), so the scanout read-back has no frame before the next

@@ -797,7 +797,6 @@ codec_enum! {
         TileMap, SeparateTexture(f0), SeparateSampler(f0),
         RawTexture,
         TexturePlane,
-        ExtendedShadow(f0),
     }
     AccelerationStructureLevel { Primitive, Instance }
     SamplerRef { Slot(f0), Constexpr(f0) }
@@ -824,7 +823,6 @@ codec_enum! {
         DepthClampRange,
         ViewportMirrors,
         VertexDepthClamp,
-        BlendColor,
         ShaderTestsState,
         TextureHalfChannels(f0),
         CaptureAddress,
@@ -961,7 +959,6 @@ codec_enum! {
         MetalHalfArithmetic, MetalHalfStorageWrites, MetalHalfStorageNans, MetalFloatStorageNans,
         MetalFragmentSimdgroups, MetalVertexSimdgroups, CenterFragCoordDepth, SampleFragCoordDepth,
         MetalHalfTexelWrites, MetalNormStorageWrites, Unorm8LinearFilter, DeviceSampling, NativeSm53Half,
-        TwoPlaneExtendedRange,
     }
     VkLimit {
         MaxComputeWorkGroupSize(f0), MaxComputeWorkGroupCount(f0), MaxComputeWorkGroupInvocations,
@@ -1052,7 +1049,7 @@ codec_struct! {
         early_fragment_tests, extended_range_colors, unattached_colors, half_bit_colors,
         sample_mask, rotated_colors, rotated_factors, rotated_blends, srgb_fetches,
         half_output_lanes, texture_write_rounding, uniform_outputs, uniform_inputs,
-        instanced_attributes, selected_colors, half_blend_colors, two_plane_alphas,
+        instanced_attributes, selected_colors, half_blend_colors,
     }
     SelectedWrite { lanes, rounds, nans }
     ExtendedRangeColor { form, blended, nearest_even }
@@ -1165,12 +1162,11 @@ codec_enum! {
         ConstexprSampled { slot, modes },
         CubicSampler { slot },
         CubicArgumentSampler { stage },
-        ShaderTests { formatless, multisampled, planes },
+        ShaderTests { formatless, multisampled, planes, unorm16 },
         StorageTextureHalfChannels { slot },
         CapturedPositions { form },
         HeapRawSamples { stage, sampler },
         ShaderStencilTest { formatless },
-        ExtendedRangeInputBlend { color, blend, kept },
         CrossClassReads { slot },
         StorageTextureWriteRounding { slot, halves },
         HeapWriteRounding { stage, halves },
@@ -1205,7 +1201,7 @@ codec_struct! {
     }
     DirectArgumentUse { stage, gap }
     UnwrittenFragmentInputs { names, gap }
-    ReflectionBinding { name, binding_type, access, index, used, argument, kind }
+    ReflectionBinding { name, binding_type, access, index, used, argument, array_length, kind }
     BufferBinding { alignment, data_size, data_type, struct_type, pointer_type }
     ThreadgroupBinding { alignment, data_size }
     ObjectPayloadBinding { alignment, data_size }
@@ -1325,10 +1321,8 @@ codec_enum! {
         ComputedSampleDepth,
         ArgumentPixelSamplerScaling,
         HalfOutputPrecision,
-        ExtendedRangeBlendSource,
         DiscardDropsSimdgroupStores,
         HelperBranchDropsSimdgroupStores,
-        ExtendedRangeFloatBlendSource,
         AnisotropicFilter,
         DeviceAnisotropicFilter,
         DevicePointSize,
@@ -1354,7 +1348,6 @@ codec_enum! {
         SeparateTexture { texture, sampler }, SeparateSampler { stage, sampler },
         RawTexture(f0),
         TexturePlane(f0),
-        ExtendedShadow(f0),
     }
     VertexStride { Static(f0), PerBind }
 }

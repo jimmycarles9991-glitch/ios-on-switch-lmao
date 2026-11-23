@@ -20,8 +20,8 @@ public enum IconEdgeBand {
     public static func asymmetry(_ alpha: [UInt8], side: Int) -> Asymmetry {
         var out = Asymmetry()
         guard side > 2 * band, alpha.count >= side * side else { return out }
-        for k in 0..<band {
-            for i in 0..<side {
+        for k in 0 ..< band {
+            for i in 0 ..< side {
                 let left = Int(alpha[i * side + k]), right = Int(alpha[i * side + side - 1 - k])
                 let top = Int(alpha[k * side + i]), bottom = Int(alpha[(side - 1 - k) * side + i])
                 if abs(right - left) > codes { out.right += 1 }

@@ -16,7 +16,7 @@ use super::*;
 use crate::pipeline::layout::BindingSource;
 
 /// Apple's rows of kind `kind` in `planes_m4.txt`, each a row of hex words.
-fn apple(kind: &str) -> Vec<Vec<u32>> {
+pub(super) fn apple(kind: &str) -> Vec<Vec<u32>> {
     include_str!("planes_m4.txt")
         .lines()
         .filter(|l| l.split(' ').next() == Some(kind))
@@ -65,10 +65,78 @@ declare void @air.write_texture_2d.{suffix}(ptr addrspace(1), <2 x i32>, {vec4},
 
 const PLANES: ExtendedRange = ExtendedRange::Planes { srgb: false };
 
-/// The raw GM20B path's device shape (`two_plane::gm20b`), its attachments in one image and its
-/// storage images formatless: no committed profile is vendored here.
+/// The raw GM20B path's device shape ([`raw_device`]): no committed profile is vendored here.
 fn gm20b() -> [(&'static str, Device); 1] {
-    [("gm20b", super::two_plane::gm20b(false, true))]
+    [("gm20b", raw_device())]
+}
+
+/// A device of the raw GM20B path's shape: every format the translator asks about supports
+/// everything, its framebuffer fetch reads unordered input attachments, and it reads and writes
+/// storage images without a format, as the raw path's NVK does.
+pub(super) fn raw_device() -> Device {
+    use crate::device::description::FormatProperties;
+    use crate::device::profile::Limits;
+    use crate::device::requirements::{ApiVersion, VkFeature};
+    use crate::device::FramebufferFetchPolicy;
+    use crate::vk;
+    let mut desc = DeviceDescription::new(ApiVersion::V1_3);
+    desc.limits = Limits {
+        max_compute_work_group_size: [1024, 1024, 64],
+        max_compute_work_group_count: [65535; 3],
+        max_compute_work_group_invocations: 1024,
+        max_push_constants_size: 128,
+        max_bound_descriptor_sets: 4,
+        max_per_stage_descriptor_samplers: 16,
+        max_per_stage_descriptor_uniform_buffers: 16,
+        max_per_stage_descriptor_storage_buffers: 16,
+        max_per_stage_descriptor_sampled_images: 16,
+        max_per_stage_descriptor_storage_images: 8,
+        max_per_stage_descriptor_input_attachments: 8,
+        max_per_stage_resources: 64,
+        max_descriptor_set_samplers: 64,
+        max_descriptor_set_uniform_buffers: 64,
+        max_descriptor_set_storage_buffers: 64,
+        max_descriptor_set_sampled_images: 64,
+        max_descriptor_set_storage_images: 64,
+        max_descriptor_set_input_attachments: 8,
+        max_image_dimension_2d: 16384,
+        max_image_array_layers: 2048,
+        max_vertex_input_attributes: 32,
+        max_vertex_input_bindings: 32,
+        max_vertex_input_attribute_offset: 2047,
+        max_vertex_input_binding_stride: 2048,
+        max_vertex_output_components: 128,
+        max_fragment_input_components: 128,
+        max_fragment_output_attachments: 8,
+        max_fragment_combined_output_resources: 16,
+        max_color_attachments: 8,
+        max_storage_buffer_range: 1 << 27,
+        max_uniform_buffer_range: 65536,
+        min_storage_buffer_offset_alignment: 16,
+        min_uniform_buffer_offset_alignment: 16,
+        framebuffer_color_sample_counts: vk::SampleCountFlags::COUNT_1,
+        framebuffer_depth_sample_counts: vk::SampleCountFlags::COUNT_1,
+        ..Limits::default()
+    };
+    for &f in crate::device::description::FormatSupport::queries() {
+        let all = vk::FormatFeatureFlags2::from_raw(u64::MAX);
+        let mut props = FormatProperties::default();
+        props.optimal_tiling = all;
+        props.linear_tiling = all;
+        props.buffer = all;
+        props.color_attachment_sample_counts = vk::SampleCountFlags::COUNT_1;
+        desc.formats.formats.insert(f, props);
+    }
+    desc.features.extend([
+        VkFeature::FragmentStoresAndAtomics,
+        VkFeature::ShaderStorageImageExtendedFormats,
+        VkFeature::IndependentBlend,
+        VkFeature::ShaderStorageImageReadWithoutFormat,
+        VkFeature::ShaderStorageImageWriteWithoutFormat,
+    ]);
+    let mut policy = DevicePolicy::default();
+    policy.framebuffer_fetch = FramebufferFetchPolicy::AcceptUnordered;
+    Device::new(desc, policy).expect("test device")
 }
 
 /// The plane image of texture slot `index`, its texels `texels(n)`.

@@ -29,7 +29,8 @@ extension NativeArgumentEncoderTest {
             compute.setBuffer(out, offset: 0, index: 1)
             compute.dispatchThreadgroups(
                 MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
             compute.endEncoding()
         }
         let words = out.contents().bindMemory(to: SIMD4<Float>.self, capacity: 2)
@@ -56,12 +57,13 @@ extension NativeArgumentEncoderTest {
             compute.useResource(colour, usage: .read)
             compute.setBuffer(arguments, offset: 0, index: 0)
             compute.setBuffer(out, offset: 0, index: 1)
-            for slot in 2...29 {
+            for slot in 2 ... 29 {
                 compute.setBuffer(values, offset: Self.spillOffset(slot), index: slot)
             }
             compute.dispatchThreadgroups(
                 MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1)
+            )
             compute.endEncoding()
         }
         let word = out.contents().bindMemory(to: SIMD4<Float>.self, capacity: 1)[0]

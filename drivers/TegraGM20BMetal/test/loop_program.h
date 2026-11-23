@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // The compute encoder's loop words for one command buffer laid down over predication_model.h's memory, as
-// raw_compute.cpp lays them: launches named 1, 2, ... in encode order, each a QMD the hardware writes a word of.
+// compute.cpp lays them: launches named 1, 2, ... in encode order, each a QMD the hardware writes a word of.
 #pragma once
 #include <cstdint>
 #include <cstring>
@@ -9,19 +9,19 @@
 
 #include <gtest/gtest.h>
 
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_kit.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_loop_copies.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_loop_ranges.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_predication.h"
+#include "drivers/TegraGM20BMetal/kit.h"
+#include "drivers/TegraGM20BMetal/loop_copies.h"
+#include "drivers/TegraGM20BMetal/loop_ranges.h"
+#include "drivers/TegraGM20BMetal/predication.h"
 #include "drivers/TegraGM20BMetal/test/predication_model.h"
 #include "kits/SwitchGM20BEmit/SwitchGM20BEmitPredicate.h"
 
 namespace loop_program {
 
+using gm20b::PredicateCompare;
 using predication_model::Gpu;
 using predication_model::kBase;
-using raw::PredicateCompare;
-using Answer = raw::Predication::Answer;
+using Answer = gm20b::Predication::Answer;
 
 constexpr uint64_t kWords = kBase, kQmds = kBase + 0x2000, kRecord = kBase + 0x3000, kSlots = kBase + 0x4000;
 constexpr uint64_t kPush = kBase + 0x10000;
@@ -34,26 +34,26 @@ inline uint64_t word(uint32_t i)
 
 struct LoopProgram {
     Gpu gpu{1 << 20};
-    raw::Predication predication;
-    raw::LoopCopies loops;
-    raw::PushBatches entries;
-    raw::BatchWork batches;
+    gm20b::Predication predication;
+    gm20b::LoopCopies loops;
+    gm20b::PushBatches entries;
+    gm20b::BatchWork batches;
     uint32_t *chunk = reinterpret_cast<uint32_t *>(gpu.at(kPush));
-    raw::Push p{chunk, chunk + 4096};
+    gm20b::Push p{chunk, chunk + 4096};
     uint32_t *start = p.at;
     uint64_t nextSlot = kSlots;
     uint32_t launches = 0;
     bool qmdsIntact = true;
 
-    raw::LoopStream stream()
+    gm20b::LoopStream stream()
     {
         return {p, start, entries, gpu.memory.data(), kBase};
     }
 
-    raw::PredicateSlot slot()
+    gm20b::PredicateSlot slot()
     {
-        const raw::PredicateSlot s{gpu.at(nextSlot), nextSlot};
-        nextSlot += raw::Predication::kSlotBytes;
+        const gm20b::PredicateSlot s{gpu.at(nextSlot), nextSlot};
+        nextSlot += gm20b::Predication::kSlotBytes;
         return s;
     }
 
@@ -65,7 +65,7 @@ struct LoopProgram {
         uint32_t words[kQmdWords] = {id};
         memcpy(gpu.at(qmd), words, sizeof words);
         if (loops.open())
-            raw::kit(p, switch_gm20b_compute_inline_words, qmd, words, kQmdWords);
+            gm20b::kit(p, switch_gm20b_compute_inline_words, qmd, words, kQmdWords);
         predication.guard(p);
         p.m(NVB1C0_SEND_PCAS_A, id, predication_model::kCompute);
         p.m(NVB1C0_SEND_SIGNALING_PCAS_B, 0, predication_model::kCompute);
@@ -79,13 +79,13 @@ struct LoopProgram {
     {
         loops.closeSegment(stream());
         chunk += 4096;
-        p = raw::Push{chunk, chunk + 4096};
+        p = gm20b::Push{chunk, chunk + 4096};
         loops.openSegment(stream());
     }
 
     void startIf(uint32_t w, PredicateCompare c, uint32_t reference)
     {
-        ASSERT_EQ(predication.startIf(p, slot(), word(w), raw::predicateTest(c, reference)), Answer::Done);
+        ASSERT_EQ(predication.startIf(p, slot(), word(w), gm20b::predicateTest(c, reference)), Answer::Done);
     }
 
     void startElse()
@@ -108,7 +108,7 @@ struct LoopProgram {
     Answer startWhile(uint32_t w, PredicateCompare c, uint32_t reference)
     {
         halting();
-        const raw::PredicateTest test = raw::predicateTest(c, reference);
+        const gm20b::PredicateTest test = gm20b::predicateTest(c, reference);
         return loops.start(stream(), predication, slot(), false, word(w), &test);
     }
 
@@ -121,13 +121,14 @@ struct LoopProgram {
     // `tag` names the loop in the record it leaves where it would run past its copies
     Answer endWhile(uint32_t tag = 0)
     {
-        return loops.end(stream(), predication, batches, raw::BatchWork::kLimit, kRecord, kStamp, tag, 0, nullptr);
+        return loops.end(stream(), predication, batches, gm20b::BatchWork::kLimit, kRecord, kStamp, tag, 0, nullptr);
     }
 
     Answer endDoWhile(uint32_t w, PredicateCompare c, uint32_t reference, uint32_t tag = 0)
     {
-        const raw::PredicateTest test = raw::predicateTest(c, reference);
-        return loops.end(stream(), predication, batches, raw::BatchWork::kLimit, kRecord, kStamp, tag, word(w), &test);
+        const gm20b::PredicateTest test = gm20b::predicateTest(c, reference);
+        return loops.end(stream(), predication, batches, gm20b::BatchWork::kLimit, kRecord, kStamp, tag, word(w),
+                         &test);
     }
 
     // The command buffer's GP entries run; each launch's program does `effect`
@@ -146,10 +147,10 @@ struct LoopProgram {
         return gpu.launched;
     }
 
-    // A loop would run past its copies: the record names the command buffer and the loop (raw_loop_ranges.h)
-    raw::LoopContinue record()
+    // A loop would run past its copies: the record names the command buffer and the loop (loop_ranges.h)
+    gm20b::LoopContinue record()
     {
-        return raw::loopContinue(kStamp, gpu.word(kRecord), gpu.word(kRecord + 4));
+        return gm20b::loopContinue(kStamp, gpu.word(kRecord), gpu.word(kRecord + 4));
     }
 
     bool overflowed()

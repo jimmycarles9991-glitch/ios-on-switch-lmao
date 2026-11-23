@@ -9,11 +9,11 @@ import Metal
 /// are the keyline's translucent white as a whole-pixel row, as a row with fractional edges (a half point at 1.59
 /// pixels a point) and as a column, and a tinted row, so a channel swap shows. Every attachment is read back: the
 /// fill writes the colour target alone. With the other two attachments private, then memoryless as Core Animation
-/// makes them, which the raw path's storage form can view.
+/// makes them, which the driver's storage form can view.
 public enum KeylineReplica {
     public static let state = """
-        R ok=1 label=com.apple.coreanimation.PBGRABsovXmw_A3Xhfc samples=1 topo=0 ds=0/0 c0=80:15:1:1:5:0:1:5:0 c1=115:0:0:1:0:0:1:0:0 c2=55:0:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 a1=29:16:1:48:1:1 a2=29:24:1:48:1:1 a3=27:32:1:48:1:1 | v fixed_vert_lph_spc fc_generic:53:00 fc_perspective:53:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_vertex_layout:49:00 | f fixed_frag_lph_cpf fc_attachment_count:49:03 fc_blend_function:49:3f fc_clamp_color:53:00 fc_color_inputs0:49:00 fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 fc_color_opcodes0:52:00000000 fc_color_opcodes1:52:00000000 fc_color_opcodes_ext0:50:0000 fc_color_opcodes_ext1:50:0000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00 fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:00 fc_filter0:49:00 fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00 fc_has_asg_77_weights:53:00 fc_has_attachment_0:53:00 fc_has_attachment_1:53:00 fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 fc_has_color_cube1:53:00 fc_has_color_params:53:00 fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00 fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 fc_has_image_0B:53:00 fc_has_image_0C:53:00 fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 fc_has_lod_bias:53:00 fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 fc_has_premultiply:53:00 fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 fc_image_function1:49:00 fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 fc_perspective:53:00 fc_plane_count0:49:00 fc_plane_count1:49:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_texture_function:49:00 fc_unbounded_range:53:00 fc_vertex_layout:49:00 |
-        """
+    R ok=1 label=com.apple.coreanimation.PBGRABsovXmw_A3Xhfc samples=1 topo=0 ds=0/0 c0=80:15:1:1:5:0:1:5:0 c1=115:0:0:1:0:0:1:0:0 c2=55:0:0:1:0:0:1:0:0 a0=31:0:1:48:1:1 a1=29:16:1:48:1:1 a2=29:24:1:48:1:1 a3=27:32:1:48:1:1 | v fixed_vert_lph_spc fc_generic:53:00 fc_perspective:53:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_vertex_layout:49:00 | f fixed_frag_lph_cpf fc_attachment_count:49:03 fc_blend_function:49:3f fc_clamp_color:53:00 fc_color_inputs0:49:00 fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 fc_color_opcodes0:52:00000000 fc_color_opcodes1:52:00000000 fc_color_opcodes_ext0:50:0000 fc_color_opcodes_ext1:50:0000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00 fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:00 fc_filter0:49:00 fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00 fc_has_asg_77_weights:53:00 fc_has_attachment_0:53:00 fc_has_attachment_1:53:00 fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 fc_has_color_cube1:53:00 fc_has_color_params:53:00 fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00 fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 fc_has_image_0B:53:00 fc_has_image_0C:53:00 fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 fc_has_lod_bias:53:00 fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 fc_has_premultiply:53:00 fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 fc_image_function1:49:00 fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 fc_perspective:53:00 fc_plane_count0:49:00 fc_plane_count1:49:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_texture_function:49:00 fc_unbounded_range:53:00 fc_vertex_layout:49:00 |
+    """
 
     public static let width = 64
     public static let height = 16
@@ -46,7 +46,7 @@ public enum KeylineReplica {
 
     public struct Drawn: Sendable {
         public let path: String
-        /// How the raw path drew the fill (the facade's counters): storage, barrier.<why the storage form fell back>,
+        /// How the driver drew the fill (the facade's counters): storage, barrier.<why the storage form fell back>,
         /// split or whole; "-" off the facade
         public let form: String
         /// The colour target, BGRA bytes, and the other two attachments' bytes where they were kept
@@ -57,7 +57,7 @@ public enum KeylineReplica {
 
     public static func draw(gpu: GPU, memoryless: Bool) async throws -> Drawn {
         guard let line = PipelineLine(state) else { throw TestFailure("the replica's state line does not parse") }
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         let library = try gpu.device.makeLibrary(URL: CAState.library)
         let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
         let target = try gpu.texture(.bgra8Unorm, width, height)
@@ -71,7 +71,8 @@ public enum KeylineReplica {
             clear.colorAttachments[0].loadAction = .clear
             clear.colorAttachments[0].clearColor = MTLClearColor(
                 red: Double(backdrop[0]) / 255, green: Double(backdrop[1]) / 255, blue: Double(backdrop[2]) / 255,
-                alpha: 1)
+                alpha: 1
+            )
             clear.colorAttachments[0].storeAction = .store
             commands.makeRenderCommandEncoder(descriptor: clear)!.endEncoding()
             let pass = MTLRenderPassDescriptor()
@@ -82,7 +83,8 @@ public enum KeylineReplica {
                 pass.colorAttachments[index].texture = texture
                 pass.colorAttachments[index].loadAction = .clear
                 pass.colorAttachments[index].clearColor = MTLClearColor(
-                    red: Double(value[0]), green: Double(value[1]), blue: Double(value[2]), alpha: Double(value[3]))
+                    red: Double(value[0]), green: Double(value[1]), blue: Double(value[2]), alpha: Double(value[3])
+                )
                 pass.colorAttachments[index].storeAction = memoryless ? .dontCare : .store
             }
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
@@ -97,14 +99,15 @@ public enum KeylineReplica {
             encoder.endEncoding()
         }
         if timing.path.hasPrefix("error:") { throw TestFailure("the replica's draw: \(timing.path)") }
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         let color = try await gpu.read(target, bytesPerPixel: 4)
         var kept: ([UInt8], [UInt8])?
         if !memoryless {
             kept = (try await gpu.read(second, bytesPerPixel: 8), try await gpu.read(thirdTarget, bytesPerPixel: 4))
         }
         return Drawn(
-            path: timing.path, form: form(before: before, after: after), color: color, other: kept?.0, third: kept?.1)
+            path: timing.path, form: form(before: before, after: after), color: color, other: kept?.0, third: kept?.1
+        )
     }
 
     /// R, G, B, A of the colour target at a pixel: the backdrop with every mark that covers the pixel's centre blended
@@ -114,7 +117,7 @@ public enum KeylineReplica {
         for mark in marks where mark.covers(x, y) {
             let a = KeylineClaim.half(Double(mark.alpha))
             let source = mark.rgb.map { KeylineClaim.half(Double($0 * mark.alpha)) } + [a]
-            value = (0..<4).map { ((source[$0] + value[$0] * (1 - a)) * 255).rounded() / 255 }
+            value = (0 ..< 4).map { ((source[$0] + value[$0] * (1 - a)) * 255).rounded() / 255 }
         }
         return value.map { Int(($0 * 255).rounded()) }
     }
@@ -131,15 +134,15 @@ public enum KeylineReplica {
         var count = 0
         let otherBits = other.flatMap { withUnsafeBytes(of: Float16($0).bitPattern.littleEndian) { Array($0) } }
         let thirdBits = withUnsafeBytes(of: third.bitPattern.littleEndian) { Array($0) }
-        for y in 0..<height {
-            for x in 0..<width {
+        for y in 0 ..< height {
+            for x in 0 ..< width {
                 let (got, want) = (rgba(drawn, x, y), expected(x, y))
-                var wrong = (0..<4).first { abs(got[$0] - want[$0]) > 1 }.map { "c0." + ["r", "g", "b", "a"][$0] }
+                var wrong = (0 ..< 4).first { abs(got[$0] - want[$0]) > 1 }.map { "c0." + ["r", "g", "b", "a"][$0] }
                 let at = y * width + x
-                if wrong == nil, let kept = drawn.other, Array(kept[(at * 8)..<(at * 8 + 8)]) != otherBits {
+                if wrong == nil, let kept = drawn.other, Array(kept[(at * 8) ..< (at * 8 + 8)]) != otherBits {
                     wrong = "c1"
                 }
-                if wrong == nil, let kept = drawn.third, Array(kept[(at * 4)..<(at * 4 + 4)]) != thirdBits {
+                if wrong == nil, let kept = drawn.third, Array(kept[(at * 4) ..< (at * 4 + 4)]) != thirdBits {
                     wrong = "c2"
                 }
                 guard let wrong else { continue }
@@ -154,11 +157,11 @@ public enum KeylineReplica {
     public static func others(_ drawn: Drawn, _ x: Int, _ y: Int) -> String {
         guard let second = drawn.other, let third = drawn.third else { return "-" }
         let at = y * width + x
-        let halves = (0..<4).map { c in
+        let halves = (0 ..< 4).map { c in
             let bits = UInt16(second[at * 8 + c * 2]) | UInt16(second[at * 8 + c * 2 + 1]) << 8
             return String(format: "%g", Float(Float16(bitPattern: bits)))
         }
-        let word = (0..<4).reduce(UInt32(0)) { $0 | UInt32(third[at * 4 + $1]) << (8 * $1) }
+        let word = (0 ..< 4).reduce(UInt32(0)) { $0 | UInt32(third[at * 4 + $1]) << (8 * $1) }
         return halves.joined(separator: ",") + "/" + String(format: "%g", Float(bitPattern: word))
     }
 
@@ -167,7 +170,8 @@ public enum KeylineReplica {
         let y = { (p: Float) in 1 - p / Float(height) * 2 }
         let a = mark.alpha
         let color = SIMD4<Float16>(
-            Float16(mark.rgb[0] * a), Float16(mark.rgb[1] * a), Float16(mark.rgb[2] * a), Float16(a))
+            Float16(mark.rgb[0] * a), Float16(mark.rgb[1] * a), Float16(mark.rgb[2] * a), Float16(a)
+        )
         return CAState.rectangle(x0: x(mark.x0), y0: y(mark.y1), x1: x(mark.x1), y1: y(mark.y0), color: color)
     }
 

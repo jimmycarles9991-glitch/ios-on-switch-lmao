@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// The depths Metal's draws store into Depth32Float on the raw path, against an M4 Max's (macOS 27.2.1): in clip mode
+/// The depths Metal's draws store into Depth32Float on the driver, against an M4 Max's (macOS 27.2.1): in clip mode
 /// every depth within 0 to 1, whether a finite bias, a viewport depth range past 1 or a fragment function's own depth
 /// takes it out; in clamp mode from the viewport's lower depth but at least 0 to its higher, a fragment function's own
 /// depth to 1 at most. A flat triangle over the target, its depth read back at the middle.
@@ -16,8 +16,8 @@ import Metal
 /// the clamp's top 1 plus the most a constant bias adds where that is known); the case fails where GM20B is not the
 /// model's, so a boot measures the model. 9 of the 22 meet Metal's: unbiased and non-negative constant biases above 1.
 struct DepthClipBoundsTest: HWTest {
-    let id = "gpu.raw.depth_clip_bounds"
-    let name = "Depth32Float depths stay within Metal's bounds in clip and clamp mode on the raw path"
+    let id = "gpu.gm20b.depth_clip_bounds"
+    let name = "Depth32Float depths stay within Metal's bounds in clip and clamp mode on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 60 }
 
@@ -71,34 +71,36 @@ struct DepthClipBoundsTest: HWTest {
         ] {
             for (bias, value) in biases {
                 let metalValue = bias == "-" ? low : metal[bias]!
-                // the range's top meets 1 plus the most a known bias adds (raw_depth_bounds.h topDepthBias)
+                // the range's top meets 1 plus the most a known bias adds (depth_bounds.h topDepthBias)
                 let known = bias == "0" || bias == "u" || bias == "3m"
                 let biased = bias == "-" ? (name == "kC1" ? 0.5579071 : 0.3079071) : known ? metalValue : model
                 rows.append(
                     Row(
                         label: "\(name)/\(bias)", clamp: true, range: range, z: z, bias: value, metal: metalValue,
-                        model: biased))
+                        model: biased
+                    )
+                )
             }
         }
         return rows
     }()
 
     static let source = """
-        #include <metal_stdlib>
-        using namespace metal;
-        vertex float4 bounds_vertex(uint v [[vertex_id]], constant float &z [[buffer(0)]]) {
-            const float2 p[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
-            return float4(p[v], z, 1);
-        }
-        fragment float4 bounds_colour() { return float4(1, 0, 0, 1); }
-        struct Depth { float4 colour [[color(0)]]; float depth [[depth(any)]]; };
-        fragment Depth bounds_depth(constant float &d [[buffer(0)]]) { return {float4(1, 0, 0, 1), d}; }
-        """
+    #include <metal_stdlib>
+    using namespace metal;
+    vertex float4 bounds_vertex(uint v [[vertex_id]], constant float &z [[buffer(0)]]) {
+        const float2 p[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
+        return float4(p[v], z, 1);
+    }
+    fragment float4 bounds_colour() { return float4(1, 0, 0, 1); }
+    struct Depth { float4 colour [[color(0)]]; float depth [[depth(any)]]; };
+    fragment Depth bounds_depth(constant float &d [[buffer(0)]]) { return {float4(1, 0, 0, 1), d}; }
+    """
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let n = Self.n
         let library = try await gpu.device.makeLibrary(source: Self.source, options: nil)
         func state(_ fragment: String) throws -> MTLRenderPipelineState {
@@ -134,7 +136,9 @@ struct DepthClipBoundsTest: HWTest {
                 e.setViewport(
                     MTLViewport(
                         originX: 0, originY: 0, width: Double(n), height: Double(n), znear: arm.range.0,
-                        zfar: arm.range.1))
+                        zfar: arm.range.1
+                    )
+                )
                 if arm.clamp { e.setDepthClipMode(.clamp) }
                 e.setDepthBias(arm.bias, slopeScale: 0, clamp: 0)
                 var z = arm.z
@@ -146,7 +150,8 @@ struct DepthClipBoundsTest: HWTest {
                 b.copy(
                     from: depth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                     sourceSize: MTLSize(width: n, height: n, depth: 1), to: out, destinationOffset: 0,
-                    destinationBytesPerRow: n * 4, destinationBytesPerImage: n * n * 4)
+                    destinationBytesPerRow: n * 4, destinationBytesPerImage: n * n * 4
+                )
                 b.endEncoding()
             }.path
             paths.append(path)
@@ -175,7 +180,9 @@ struct DepthClipBoundsTest: HWTest {
                     e.setViewport(
                         MTLViewport(
                             originX: 0, originY: 0, width: Double(n), height: Double(n), znear: row.range.0,
-                            zfar: row.range.1))
+                            zfar: row.range.1
+                        )
+                    )
                     if row.clamp { e.setDepthClipMode(.clamp) }
                     e.setDepthBias(row.bias.0, slopeScale: row.bias.1, clamp: row.bias.2)
                     var z = row.z
@@ -186,9 +193,11 @@ struct DepthClipBoundsTest: HWTest {
                     b.copy(
                         from: depth, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
                         sourceSize: MTLSize(width: n, height: n, depth: 1), to: out, destinationOffset: 0,
-                        destinationBytesPerRow: n * 4, destinationBytesPerImage: n * n * 4)
+                        destinationBytesPerRow: n * 4, destinationBytesPerImage: n * n * 4
+                    )
                     b.endEncoding()
-                }.path)
+                }.path
+            )
             let got = Double(out.contents().load(fromByteOffset: 4 * (n / 2) * (n + 1), as: Float.self))
             measured.append(String(format: "%@=%.7f", row.label, got))
             if abs(got - row.model) > 1e-6 { offModel.append(row.label) }
@@ -202,7 +211,7 @@ struct DepthClipBoundsTest: HWTest {
         metrics.set("per_vertex_off_model", offModel.isEmpty ? "-" : offModel.joined(separator: ","))
         metrics.set("per_vertex_off_metal", "\(offMetal) of \(Self.rows.count)")
         metrics.set("paths", Set(paths).sorted().joined(separator: ","))
-        if paths.contains(where: { $0 != "raw" }) { failures.append("paths") }
+        if paths.contains(where: { $0 != "gm20b" }) { failures.append("paths") }
         return failures.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: ","), metrics)
     }
 }

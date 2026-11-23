@@ -2,7 +2,7 @@ import Foundation
 import HWTestCore
 
 /// The other channel of a `compete` experiment: the app's known program drawn 64 times over 1280x720, a command buffer
-/// at a time, on a second bench device (its own kernel connection, GPU VM and channel: raw_gpu.cpp Device::open and
+/// at a time, on a second bench device (its own kernel connection, GPU VM and channel: gpu.cpp Device::open and
 /// openChannel), from a thread of its own until the experiment ends.
 final class BenchCompetition {
     private let runner: BenchRunner
@@ -21,11 +21,11 @@ final class BenchCompetition {
                 [
                     "id": "competitor", "kind": "known", "draws": [64], "readback": "none",
                     "target": ["format": "bgra8unorm", "width": 1280, "height": 720],
-                ]
+                ],
             ],
         ]
         guard let data = try? JSONSerialization.data(withJSONObject: batch),
-            let decoded = try? BenchBatch.decode(data), case .experiment(let e) = decoded.entries[0]
+              let decoded = try? BenchBatch.decode(data), case .experiment(let e) = decoded.entries[0]
         else { return nil }
         (self.runner, experiment) = (runner, e)
     }

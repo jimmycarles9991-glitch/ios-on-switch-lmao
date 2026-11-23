@@ -185,21 +185,6 @@ impl Device {
         Device(Arc::new(inner))
     }
 
-    /// A compile-only profile whose consumer holds each `RGB10A8_2P_XR10` attachment in Metal's
-    /// two planes (`VkProperty::TwoPlaneExtendedRange`). Its artifacts must not be submitted to
-    /// Vulkan: their color attachments are not the descriptor's.
-    pub fn with_two_plane_extended_range(&self) -> Device {
-        let mut inner = (*self.0).clone();
-        inner
-            .profile
-            .fields
-            .enabled
-            .properties
-            .insert(VkProperty::TwoPlaneExtendedRange);
-        inner.fingerprint = inner.profile.fingerprint();
-        Device(Arc::new(inner))
-    }
-
     /// The translation-relevant profile.
     pub fn profile(&self) -> &DeviceProfile {
         &self.0.profile

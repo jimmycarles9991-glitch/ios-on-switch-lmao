@@ -128,6 +128,14 @@ static void layout(void)
     FIELD(slotStruct[0].colorMatrixStruct, matrix_coeff23, m0, MATRIX_C23);
     FIELD(slotStruct[0].colorMatrixStruct, matrix_enable, m0, MATRIX_ENABLE);
     FIELD(slotStruct[0].colorMatrixStruct, matrix_r_shift, m0, MATRIX_SHIFT);
+    FIELD(outputConfig, RegammaMode, TEGRA_VIC_OUTPUT, OUT_REGAMMA);
+    FIELD(slotStruct[0].slotConfig, ClipEnabled, s0, SLOT_CLIP_ENABLED);
+    FIELD(slotStruct[0].slotConfig, DegammaMode, s0, SLOT_DEGAMMA);
+    const uint32_t g0 = TEGRA_VIC_SLOTS + TEGRA_VIC_SLOT_GAMUT;
+    FIELD(slotStruct[0].gamutMatrixStruct, matrix_coeff00, g0, MATRIX_C00);
+    FIELD(slotStruct[0].gamutMatrixStruct, matrix_coeff23, g0, MATRIX_C23);
+    FIELD(slotStruct[0].gamutMatrixStruct, matrix_enable, g0, MATRIX_ENABLE);
+    FIELD(slotStruct[0].gamutMatrixStruct, matrix_r_shift, g0, MATRIX_SHIFT);
 }
 
 // --- colour ---------------------------------------------------------------------------------------------------------

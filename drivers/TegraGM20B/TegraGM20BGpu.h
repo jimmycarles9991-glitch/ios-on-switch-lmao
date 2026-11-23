@@ -140,6 +140,11 @@ int switch_gpu_vm_split(struct tgm_vm *vm, struct switch_gpu_mapping **mapping, 
 /* switch_gpu_vm_map_volatile's runs, every entry pending: no PTE is written until switch_gpu_vm_install. */
 int switch_gpu_vm_prepare(struct tgm_vm *vm, uint64_t va, uint64_t range, struct tgm_mem *mem,
 			  uint64_t offset, uint8_t kind, struct switch_gpu_mapping **mapping);
+/* MapSparse: [va, va + range) gets the sparse PTE, so every page reads 0 and drops writes with no fault; 128 KiB pages
+ * where the VA allows. now: written GPU-ordered, as a map; else every entry pending, as switch_gpu_vm_prepare's. It is
+ * split, installed and unmapped as any mapping, with no memory (mem NULL) or kind. */
+int switch_gpu_vm_sparse(struct tgm_vm *vm, uint64_t va, uint64_t range, int now,
+			 struct switch_gpu_mapping **mapping);
 /* Maps a mapping's pending entries (GPU-ordered, as switch_gpu_vm_map_volatile). One that cannot be mapped leaves the
  * mapping, unmapped; -ENOMEM then. switch_gpu_vm_unmap skips pending entries. */
 int switch_gpu_vm_install(struct tgm_vm *vm, struct switch_gpu_mapping *mapping,
@@ -171,7 +176,7 @@ int tgm_vm_kmap(struct tgm_vm *vm, struct tgm_mem *mem, uint64_t bytes, uint64_t
 /* Channels: GPFIFO on the GR runlist, subchannels 0..4 = 3D, compute, M2MF, 2D, copy. The channel releases
  * its seqno (4 bytes) to fence_gpu_va; fence_cpu is the kernel's write-combined view of the same word. owner (the
   * creating process) names it in nvkm's reports and our panic lines. critical: the compositor's (with a vm_owner: its
- * connection asked for the top GPU priority, tgm_chan_set_level) or the
+ * connection is high and its task holds the UI-critical marker, TegraGM20BSchedPolicy.h tgm_compositor) or the
  * kernel's; the compositor's get its GPU priority (TegraGM20BSched.h). A GPU error nvkm pins on a client's channel, or a
  * hang the GPU is stuck on, kills only that channel (tgm_chan_error then non-zero, its fence released) instead of
  * panicking. */
@@ -180,10 +185,11 @@ int tgm_chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *fen
 int tgm_chan_new_copy(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *fence_cpu,
 		      uint64_t fence_gpu_va, const char *owner, int critical,
 		      struct tgm_chan **pchan);
-/* The channel's runlist level (TegraGM20BSchedPolicy.h enum tgm_level), from its connection's GPU priority: high makes it
- * the compositor's (its kicks preempt app work, the deadline's holds leave it, the compositor's timeslice). Serialized
- * with the channel's submissions. */
-void tgm_chan_set_level(struct tgm_chan *chan, unsigned int level);
+/* The channel's runlist level (TegraGM20BSchedPolicy.h enum tgm_level), from its connection's GPU priority: high,
+ * its kicks preempt app work, the deadline's holds leave it and it has the compositor's timeslice. `critical` apart:
+ * whether it is the compositor's (tgm_compositor: its kill fails its work as LOST, its jobs are the frame's).
+ * Serialized with the channel's submissions. */
+void tgm_chan_set_level(struct tgm_chan *chan, unsigned int level, int critical);
 /* GPU for every process (client fault isolation, 64 connections, client pool quota) */
 int tgm_all_clients(void);
 /* pool bytes not allocated */
@@ -207,9 +213,8 @@ struct tgm_push {
 };
 /* Append the pushes, then the fence (WFI semaphore release of the next seqno), then kick. User mappings are
  * L2-cacheable: the L2's clean lines are invalidated on the GPU before the pushes are fetched and its dirty lines
- * written back before the seqno is released (gpu_inline.h l2_on). The pushes run after what the acquires tgm_chan_order
- * queued for the channel wait for. -EBUSY when the GPFIFO stays full for 1 s (a panic from the self-test on), -EIO on a
- * dead channel. */
+ * written back before the seqno is released (gpu_inline.h l2_on). -EBUSY when the GPFIFO stays full for 1 s (a panic
+ * from the self-test on), -EIO on a dead channel. */
 struct tgm_prof;
 int tgm_chan_exec(struct tgm_chan *chan, const struct tgm_push *push, uint32_t count,
 		  uint32_t *seqno, const struct tgm_prof *prof);
@@ -276,7 +281,8 @@ int switch_gpu_chan_exec_job(struct tgm_chan *chan, const struct tgm_push *push,
 			     const struct switch_gpu_release *releases, uint32_t release_count);
 /* switch_gpu_chan_exec_job with acquires on event words as well (SwitchGpuWordWait.h). `owned`, the job's ownership
  * ordered transaction (SwitchGpuBacking.h) or NULL, is published once nothing can fail the job. Its backing locks are
- * released before GP_PUT, and the ownership order after it. A return of 0 finished it; an error leaves it for abort. */
+ * released then, and the ownership order once the channel's submitted seqno names the job, before GP_PUT. A return of 0
+ * finished it; an error leaves it for abort. */
 struct switch_gpu_word_wait;
 struct switch_gpu_backing_transaction;
 int switch_gpu_chan_exec_events(struct tgm_chan *chan, const struct tgm_push *push, uint32_t count,
@@ -320,10 +326,16 @@ void tgm_promise_claim(const volatile uint32_t *first, struct switch_gpu_promise
 int tgm_promise_park(uint32_t offset, uint32_t value, const char *waiter, const char *who,
 		     const struct switch_gpu_giveup_job *reader, int display);
 void tgm_promise_leave(uint32_t offset, uint32_t value, int display);
-/* The GPU's power-down (system sleep and rail-gating) and power-up: the give-up's call stays armed and touches no
- * register meanwhile, and every promise still waited on gets its whole second from the power-up */
+/* The GPU's power-down (system sleep and rail-gating) and power-up: the give-up's call keeps holders' bounds and touches
+ * no register meanwhile, and the hang rule looks at every kept promise still waited on from the power-up */
 void tgm_promise_suspend(void);
 void tgm_promise_resume(void);
+/* Method 34 Arm: the holder's bound on a promise (SwitchGpuPromiseGiveUp.h; `fails`: its command buffer fails there), in
+ * place of the default every promise has; its end at a keep or a release: 1 when a bound its command buffer fails at
+ * passed first, where a keep is refused; and its return when the job that kept it was refused */
+void tgm_promise_hold(uint32_t offset, uint32_t value, uint64_t ns, int fails);
+int tgm_promise_unhold(uint32_t offset, uint32_t value);
+void tgm_promise_rehold(uint32_t offset, uint32_t value);
 void tgm_promise_kept(uint32_t offset, uint32_t value, struct tgm_chan *chan,
 		      const struct switch_gpu_backing_token *job);
 void tgm_present_promise_kept(uint32_t offset, uint32_t value,
@@ -378,17 +390,6 @@ void tgm_chan_need(struct tgm_chan *chan, uint32_t seqno);
 void tgm_chan_need_uid(uint32_t uid, uint32_t seqno);
 void tgm_chan_need_tokens(const struct switch_gpu_backing_token *tokens, uint32_t count);
 void tgm_chan_quiet_wake(struct tgm_chan *chan);
-/* The group a channel belongs to (its connection's task): tgm_chan_order relates the channels of one group. */
-void tgm_chan_set_group(struct tgm_chan *chan, const void *group);
-/* GPU-side order between the channels of chan's group (TegraGM20BABI.h method 14), no CPU wait: semaphore acquires the
- * channels' next tgm_chan_exec starts with. TGM_ORDER_AFTER: chan's next submission waits for the last submission of every
- * other channel of the group with work pending; TGM_ORDER_BEFORE: every other channel's next submission waits for chan to
- * complete `seqno` (0: its last submission; a later one is -EINVAL). *queued: the acquires queued. -ENODEV: an address
- * space has no view of the fence pages; -ENOSPC: a channel has TGM_ORDER_MAX acquires queued from other channels. */
-#define TGM_ORDER_AFTER 1u
-#define TGM_ORDER_BEFORE 2u
-#define TGM_ORDER_MAX 16
-int tgm_chan_order(struct tgm_chan *chan, uint32_t flags, uint32_t seqno, uint32_t *queued);
 /* 0 healthy; else the CONTRACT.md error code (1 MMU fault, 2 GR exception, 3 host error, 4 timeout). Only before the
  * self-test passed, or under client fault isolation for a client's channel: an error on a kernel channel panics
  * (nvkm's report in the panic string). */
@@ -459,7 +460,7 @@ void tgm_fence_kill_clear(volatile uint32_t *fence);
  * given, and returns at once: 0, or -EBUSY (one in flight), -EINVAL, -ENODEV. done(arg, status) runs exactly once for an
  * accepted present, from its completion work item, when its bytes are in DRAM: status 0, or the producers' failure.
  * One not done in 1 s is the present's deadline's (gpu_present_deadline.c).
- * tgm_present_outstanding: whether the copy accepted with `arg` is not completed yet (its callback not returned). */
+ * tgm_present_outstanding: whether the copy accepted with `arg` is not completed yet (its callback not called). */
 int tgm_present_open(struct tgm_vm **pvm);
 int tgm_present_map(uint64_t va, struct tgm_mem *mem, uint64_t bytes, uint8_t kind);
 int tgm_present_unmap(uint64_t va, uint64_t bytes);
@@ -475,14 +476,18 @@ int tgm_present_outstanding(const void *arg);
 int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 				   const struct switch_gpu_backing_token *dependencies,
 				   uint32_t dependency_count);
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+/* Debug kernels (gpu_describe.c): the process whose channel a GM20B token names (its queue is the channel's uid), as
+ * named at the channel's creation; "-" for another engine's token or a channel no longer known. Takes no lock. */
+void switch_gpu_writer_process(const struct switch_gpu_backing_token *token, char *process,
+			       size_t size);
+#endif
 void tgm_present_pass(void);
 /* SwitchGpuPresentFilter.cpp: the armed watch's token, read by the nonstall interrupt's primary filter
  * (tgm_present_filter); attached once armed, detached at its claim before its tokens drop and before done runs. */
 void tgm_present_filter_attach(const struct switch_gpu_backing_token *token);
 void tgm_present_filter_detach(void);
 void tgm_present_filter(void);
-/* Host import bookkeeping: `pa` is the import's first page; add 1 when made, 0 when released (gpu_sync.c vm_imports). */
-void tgm_vm_import_note(struct tgm_vm *vm, uint64_t pa, int add);
 
 /* Clean+invalidate the CPU caches over pages of ordinary RAM (by physical address), so the GPU, which does not snoop
  * them, reads what the CPU wrote and no dirty line is later written back over what the GPU wrote. */
@@ -493,9 +498,8 @@ void tgm_cpu_clean_pages(const uint64_t *pas, uint32_t npages);
  * IOSurface) and the import's page list; it returns the entry the import holds (NULL without memory: no lazy
  * coherency). The importer cleans its pages itself, then says so (cleaned), unless *covered: a live import of the
  * same surface that finished its clean, kept clean since by the traps, already spans them. gpu_writes: the import does
- * not say the GPU only reads it (TegraGM20BImportGpuReads). put at release; wrote from Exec, for a writable import a
- * submission may have written: it marks only a surface the GPU may write. take_stats returns and zeroes the traps' lock
- * invalidations and unlock cleans (count, bytes each). */
+ * not say the GPU only reads it (TegraGM20BImportGpuReads). put at release; wrote from SubmitJob, for an import a job
+ * lists as written. take_stats returns and zeroes the traps' lock invalidations and unlock cleans (count, bytes each). */
 struct tgm_coh;
 int tgm_coherency_init(void);
 struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, const uint64_t *pas,
@@ -508,23 +512,12 @@ struct switch_gpu_backing;
 int tgm_coherency_pin(struct tgm_coh *c, struct switch_gpu_backing *backing, void *surface,
 		      void (*release_surface)(void *));
 void tgm_coherency_put(struct tgm_coh *c);
-/* always: mark it even if the GPU only samples it (TegraGM20BPushImportsWritten). uid, seqno: the submission (channel
- * tgm_chan_uid, its fence seqno) that may have written it, which a CPU lock waits for. */
-void tgm_coherency_wrote(struct tgm_coh *c, int always, uint32_t uid, uint32_t seqno);
-/* The submissions an entry keeps as its writers: the raw path's channel and m2v's, in each of two processes. A later one
- * of the same channel takes its slot, and so does any once its writer completed; past that the entry loses track. */
+/* uid, seqno: the submission (channel tgm_chan_uid, its fence seqno) that may have written it, which a CPU lock waits
+ * for. */
+void tgm_coherency_wrote(struct tgm_coh *c, uint32_t uid, uint32_t seqno);
+/* The submissions an entry keeps as its writers. A later one of the same channel takes its slot, and so does any once its
+ * writer completed; past that the entry loses track. */
 #define TGM_COH_WRITERS 4
-/* A submission whose ExecSurfaces (method 17) listed the surface as written: wrote with `always`, and a listed writer too,
- * which another channel's listed Exec waits for on the GPU. */
-void tgm_coherency_wrote_listed(struct tgm_coh *c, uint32_t uid, uint32_t seqno);
-/* The listed writers (uid << 32 | seqno) `c` names, done or not; *lost: nonzero when listed writers found no slot since
- * tgm_coherency_lost_seen(c, *lost) last cleared it (some submissions that may write it are not among them); *pa: the
- * surface's first page. */
-uint32_t tgm_coherency_writers(const struct tgm_coh *c, uint64_t out[TGM_COH_WRITERS],
-			       uint32_t *lost, uint64_t *pa);
-/* Every channel that imports the surface completed what it had submitted: the count `lost` read goes, unless more were
- * lost since. */
-void tgm_coherency_lost_seen(struct tgm_coh *c, uint32_t lost);
 /* Also the locks that waited for GPU writes and the AvoidSync locks refused (count each). */
 void tgm_coherency_take_stats(uint64_t out[6]);
 /* XNU's iokit_user_client_trap, after an IOSurfaceRootUserClient trap ran: index 2 lock, 3 unlock (IOConnectTrap3 p1 the
@@ -605,13 +598,6 @@ void tgm_copy_wait(uint32_t uid, uint32_t seqno, const struct tgm_relayout_write
 /* The GPU address in `vm` (one that maps every connection's fence page, as every tgm_vm_new space does) of channel uid's
  * fence seqno; -ENOENT when it is gone or killed (its work is complete or abandoned). */
 int tgm_writer_fence_va(struct tgm_vm *vm, uint32_t uid, uint64_t *va);
-/* Method 17's acquires (TegraGM20BFences.h): chan's next submission waits on the GPU for each writer (uid << 32 | seqno) of
- * another live channel that has not completed it, queued as tgm_chan_order's; follow_importers, for the last submission of
- * every other channel whose address space imports the surface whose first page is `pa` and has work pending (*pending:
- * how many). 0, or tgm_chan_order's -ENODEV (no view of the fence pages) or -ENOSPC (TGM_ORDER_MAX channels queued): the
- * rest go unqueued. */
-int tgm_chan_follow(struct tgm_chan *chan, const uint64_t *writers, uint32_t n);
-int tgm_chan_follow_importers(struct tgm_chan *chan, uint64_t pa, uint32_t *pending);
 /* A GPU client made (add 1) or removed (add -1) a bind of the whole surface holding `c` with TEGRA_SCANOUT_TILED_KIND:
  * the surface is tiled while any such bind lives, whatever other binds of it say (tegra_gm20b_surface_tiled). */
 void tgm_coherency_tiled_bind(struct tgm_coh *c, int add);
@@ -806,8 +792,8 @@ void tgm_stats_wait(uint32_t waiter, int woken, int done);
  * (SwitchGpuQuiet.h enum switch_gpu_loud). */
 void tgm_stats_loud(struct tgm_chan *chan, uint32_t reason);
 
-/* A SubmitAddress by phase (TegraGM20BUserClient.cpp): resolving its uses under the connection lock, owning them
- * (backing locks, dependency scan, room waits), chan_exec, and the commit after it. The "exec by process" line. */
+/* A SubmitJob by phase (TegraGM20BUserClientJobSubmit.cpp): resolving its uses, owning them (backing locks, dependency
+ * scan, room waits), chan_exec, and the commit after it (switch_gpu_job_submitted). */
 enum {
 	TGM_SUBMIT_RESOLVE,
 	TGM_SUBMIT_LOCK,
@@ -815,9 +801,7 @@ enum {
 	TGM_SUBMIT_COMMIT,
 	TGM_SUBMIT_PHASES
 };
-#if TGM_STATS
-void tgm_stats_submit(struct tgm_chan *chan, const uint64_t ns[TGM_SUBMIT_PHASES]);
-#endif
+
 void tgm_stats_bo_free(uint64_t ns);
 void tgm_stats_prefault(uint64_t bytes);
 

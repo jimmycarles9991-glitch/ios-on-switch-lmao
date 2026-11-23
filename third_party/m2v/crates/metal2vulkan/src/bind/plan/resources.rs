@@ -994,9 +994,11 @@ impl ResourcePlanner<'_> {
                 if ycbcr_writes_stored(pixel_format));
         // A texture of one of Apple's extended-range formats joins the variant, under which the
         // function reads and writes its raw texels through a view of their unsigned integer
-        // format: a texture's, not yet a texture buffer's or a sparse texture's.
+        // format: a texture's, and a two-plane format's texture buffer (`words_alone`), not
+        // another texture buffer's or a sparse texture's.
         let extended = match compat {
             Some(s) => match ExtendedRange::of(s.pixel_format()) {
+                form @ Some(ExtendedRange::Planes { .. }) if !s.sparse() => form,
                 Some(_) if matches!(s, TextureShape::Buffer { .. }) || s.sparse() => {
                     return Err(BindError::Unsupported(Unsupported::not_implemented(
                         Feature::Format,
@@ -1006,6 +1008,12 @@ impl ResourcePlanner<'_> {
             },
             None => None,
         };
+        // A two-plane format's texture buffer is viewed as its color words alone (`R32_UINT`), as
+        // Metal reads and writes one over an IOSurface plane: its alpha reads 0 and a write stores
+        // the word alone, bits 30 and 31 clear (an Apple M4 Max, kernel and fragment writes
+        // alike). The function declares the slot so (`lower::texture::slot`).
+        let words_alone = matches!(extended, Some(ExtendedRange::Planes { .. }))
+            && matches!(compat, Some(TextureShape::Buffer { .. }));
         let two_planes = self.two_planes(slot, extended, compat.as_ref());
         let base = match extended {
             Some(_) => ImageHandleClass {
@@ -1028,6 +1036,7 @@ impl ResourcePlanner<'_> {
         };
         let accessed = storage && (t.access.read || t.access.write) && !ulong_atomic;
         let choice = match compat {
+            _ if words_alone => None,
             Some(TextureShape::Texture { .. }) if ycbcr_write => Some((
                 StorageImageChoice::new(
                     vk::Format::R32G32B32A32_UINT,
@@ -1146,6 +1155,7 @@ impl ResourcePlanner<'_> {
                 let view = match choice {
                     // The `R64_UINT` view of a `ulong` slot's bytes.
                     _ if ulong_atomic => Some(vk::Format::R64_UINT),
+                    _ if words_alone => Some(vk::Format::R32_UINT),
                     // The storage texel view reads the choice's view format (an alias of the
                     // bound format's bytes), which must itself support the usage.
                     Some(c) => Some(

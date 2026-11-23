@@ -4,16 +4,16 @@ import Metal
 
 /// Raster order groups: one instanced draw of full-target quads, each fragment folding its instance into its pixel's
 /// word through a read-write texture in raster order group 0 (word * 3 + instance + 1), so a word is the CPU's only if
-/// every pixel's fragments ran one at a time in submission order. On the raw device the answer is reported beside it, and
-/// ordered_draws= counts the draws of a state the raw path runs in the pixel interlock (debug builds).
+/// every pixel's fragments ran one at a time in submission order. On the device the answer is reported beside it, and
+/// ordered_draws= counts the draws of a state the driver runs in the pixel interlock (debug builds).
 struct RasterOrderScene: GPUScene {
-    let id = "gpu.raw.raster_order"
+    let id = "gpu.gm20b.raster_order"
     let name = "Raster order group: ordered read-modify-write of every pixel by 48 overlapping quads"
 
     static let size = 64
     static let quads = 48
 
-    static var expected: UInt32 { (0..<UInt32(quads)).reduce(0) { $0 &* 3 &+ $1 &+ 1 } }
+    static var expected: UInt32 { (0 ..< UInt32(quads)).reduce(0) { $0 &* 3 &+ $1 &+ 1 } }
 
     func run(_ gpu: GPU) async throws -> SceneResult {
         var result = SceneResult()
@@ -24,13 +24,14 @@ struct RasterOrderScene: GPUScene {
         ) { $0.colorAttachments[0].writeMask = [] }
         let zeros = try gpu.buffer(Self.size * Self.size * 4)
         memset(zeros.contents(), 0, zeros.length)
-        let before = RawFacade.counters(of: gpu.device)["raster_ordered_draws"]
+        let before = GM20BFacade.counters(of: gpu.device)["raster_ordered_draws"]
         let timing = try await gpu.run { commands in
             let blit = commands.makeBlitCommandEncoder()!
             blit.copy(
                 from: zeros, sourceOffset: 0, sourceBytesPerRow: Self.size * 4, sourceBytesPerImage: 0,
                 sourceSize: MTLSize(width: Self.size, height: Self.size, depth: 1), to: words, destinationSlice: 0,
-                destinationLevel: 0, destinationOrigin: MTLOrigin())
+                destinationLevel: 0, destinationOrigin: MTLOrigin()
+            )
             blit.endEncoding()
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = target
@@ -47,9 +48,9 @@ struct RasterOrderScene: GPUScene {
         let wrong = got.filter { $0 != Self.expected }.count
         result.metrics.set("path", timing.path)
         result.metrics.set("wrong_pixels", wrong)
-        if RawFacade.kind(of: gpu.device) == "raw" {
-            result.expect(timing.path == "raw", "the ordered draw left raw: \(timing.path)")
-            if let before, let after = RawFacade.counters(of: gpu.device)["raster_ordered_draws"] {
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
+            result.expect(timing.path == "gm20b", "the ordered draw left raw: \(timing.path)")
+            if let before, let after = GM20BFacade.counters(of: gpu.device)["raster_ordered_draws"] {
                 result.metrics.set("ordered_draws", after - before)
                 result.expect(after > before, "the draw's state is not raster ordered (no pixel interlock)")
             }

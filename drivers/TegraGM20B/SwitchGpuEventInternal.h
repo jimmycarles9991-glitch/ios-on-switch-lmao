@@ -10,6 +10,7 @@
 struct SwitchGpuEventRecord {
 	SwitchGpuEventRecord *disposeNext;
 	uint32_t refs, kind;
+	uint32_t quota;  // switch_gpu_events_reserve's
 };
 
 enum {
@@ -52,6 +53,7 @@ OSDeclareDefaultStructors(switch_gpu_event_watch) public : bool initialize();
 	void (*completed)(void *, uint64_t, int) = nullptr;
 	void *context = nullptr;
 	int result = 0, terminalStatus = 0;
+	uint32_t quota = 0;  // switch_gpu_events_reserve's
 	bool arming = true, done = false, terminal = false;
 };
 
@@ -94,5 +96,6 @@ int switch_gpu_event_waits_query_locked(switch_gpu_event_waits *);
 int switch_gpu_event_waits_producers_locked(const switch_gpu_event_waits *);
 void switch_gpu_event_dispose(SwitchGpuEventRecord *);
 void switch_gpu_events_dispose();
-bool switch_gpu_events_reserve();
-void switch_gpu_events_unreserve();
+// One event record from the pool, counted against the calling task unless it is a compositor's (`quota` 0)
+bool switch_gpu_events_reserve(uint32_t *quota);
+void switch_gpu_events_unreserve(uint32_t quota);

@@ -3,10 +3,10 @@ import HWTestCore
 import Metal
 
 /// Dispatches of more threadgroups down or deep than one QMD's grid holds (65535): raw launches them in slices based
-/// where each starts (raw/runtime/raw_dispatch_bands.h kQmdGroups), where it once refused them as compute.nokernel. Each
+/// where each starts (dispatch_bands.h kQmdGroups), where it once refused them as compute.nokernel. Each
 /// threadgroup writes its index plus one at its index, so a threadgroup run twice, never or in the wrong place shows.
 struct GridSlicesScene: GPUScene {
-    let id = "gpu.raw.grid_slices"
+    let id = "gpu.gm20b.grid_slices"
     let name = "Dispatches past the 65535 threadgroups down or deep one launch holds"
 
     static let grids = [MTLSize(width: 2, height: 70000, depth: 1), MTLSize(width: 1, height: 3, depth: 70001)]
@@ -30,7 +30,7 @@ struct GridSlicesScene: GPUScene {
             let words = out.contents().assumingMemoryBound(to: UInt32.self)
             var wrong = 0
             var first = -1
-            for i in 0..<count where words[i] != UInt32(i + 1) {
+            for i in 0 ..< count where words[i] != UInt32(i + 1) {
                 wrong += 1
                 if first < 0 { first = i }
             }
@@ -39,8 +39,8 @@ struct GridSlicesScene: GPUScene {
             result.expect(wrong == 0, "grid \(n): \(wrong) of \(count) threadgroups wrong, the first at \(first)")
         }
         result.metrics.set("paths", paths.joined(separator: ","))
-        if RawFacade.kind(of: gpu.device) == "raw" {
-            result.expect(paths.allSatisfy { $0 == "raw" }, "the dispatches took \(paths), not raw")
+        if GM20BFacade.kind(of: gpu.device) == "gm20b" {
+            result.expect(paths.allSatisfy { $0 == "gm20b" }, "the dispatches took \(paths), not raw")
         }
         return result
     }

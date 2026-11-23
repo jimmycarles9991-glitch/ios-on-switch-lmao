@@ -23,7 +23,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::bind::{BindState, BoundBuffer, BoundTexture, StageTable, TextureFacts, WriteSource};
 use crate::budget::{Budget, SPIRV_WORDS};
-use crate::device::{Device, DeviceDescription, DevicePolicy};
+use crate::device::profile::{DeviceProfile, GuestIsolation};
+use crate::device::{ContainmentPolicy, Device, DeviceDescription, DevicePolicy};
 use crate::error::Feature;
 use crate::library::{FunctionConstantValues, Library};
 use crate::lower::select::{LowerInputs, Plan};
@@ -48,7 +49,7 @@ mod heap;
 mod kernel_planes;
 mod samples;
 mod targets;
-mod two_plane;
+mod texel_buffer_words;
 
 const HEADER: &str = "target datalayout = \"e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32\"\ntarget triple = \"air64_v28-apple-macosx26.0.0\"\n\n";
 
@@ -484,10 +485,31 @@ fn reads_and_writes_of_every_code_are_metals() {
 /// robustness returns (`-0.752941`).
 #[test]
 fn reads_outside_the_texture_are_metals_zero() {
+    reads_outside_are_metals_zero(profiles());
+}
+
+/// So it is without containment, where every other access is the device's: Metal defines the
+/// texel, and no device's robustness returns it.
+#[test]
+fn reads_outside_the_texture_are_metals_zero_without_containment() {
+    let off = DevicePolicy {
+        containment: ContainmentPolicy::UnsafeOff,
+        isolation: GuestIsolation::Off,
+        ..DevicePolicy::default()
+    };
+    reads_outside_are_metals_zero(
+        ["lavapipe", "moltenvk-m3"]
+            .into_iter()
+            .map(|stem| (stem, profile(stem, off).expect("profile")))
+            .collect(),
+    );
+}
+
+fn reads_outside_are_metals_zero(profiles: Vec<(&'static str, DeviceProfile)>) {
     let Some(bc) = assemble("outside", &kernel(Source::Read, false, SIDE)) else {
         return;
     };
-    for (stem, p) in profiles() {
+    for (stem, p) in profiles {
         for form in FORMS {
             let what = format!("{form:?} on {stem}");
             let (plan, m) = typed_module_with(&bc, "k", &p, &inputs(form, Source::Read))

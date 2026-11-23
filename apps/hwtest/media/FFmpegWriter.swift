@@ -80,13 +80,14 @@ enum FFmpegWriter {
         let lumaBytes = clip.width * clip.height
         var frame = Data(count: lumaBytes * 3 / 2)
         let pattern = clip.pattern
-        for index in 0..<clip.frames {
+        for index in 0 ..< clip.frames {
             frame.withUnsafeMutableBytes { bytes in
                 let base = bytes.baseAddress!
                 PatternWriter.writeLuma(pattern, frame: index, into: .init(base: base, rowBytes: clip.width))
                 PatternWriter.writeChromaPlanar(
                     pattern, cb: .init(base: base + lumaBytes, rowBytes: clip.width / 2),
-                    cr: .init(base: base + lumaBytes * 5 / 4, rowBytes: clip.width / 2))
+                    cr: .init(base: base + lumaBytes * 5 / 4, rowBytes: clip.width / 2)
+                )
             }
             try input.fileHandleForWriting.write(contentsOf: frame)
         }

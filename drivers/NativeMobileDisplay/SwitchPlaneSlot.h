@@ -71,19 +71,16 @@ template <unsigned Slots> struct PlaneForgets {
         __atomic_store_n(&mapped[k], id, __ATOMIC_RELAXED);
     }
 
-    // The retirement thread. False: the ring was full and the ID is lost (its slot goes back by least recent use).
-    bool forget(uint64_t id)
+    // The retirement thread.
+    void forget(uint64_t id)
     {
         bool slot = false;
         for (unsigned k = 0; k < Slots && !slot; ++k)
             slot = id && __atomic_load_n(&mapped[k], __ATOMIC_RELAXED) == id;
         if (!slot)
-            return true;
-        if (head - __atomic_load_n(&tail, __ATOMIC_ACQUIRE) == kIds)
-            return false;
+            return;
         ids[head % kIds] = id;
         __atomic_store_n(&head, head + 1, __ATOMIC_RELEASE);
-        return true;
     }
 
     // The gate.

@@ -39,11 +39,13 @@ enum SnapshotFiles {
         if b.count >= 0x48, b.prefix(8) == [0x41, 0x41, 0x50, 0x4c, 0x0d, 0x0a, 0x1a, 0x0a] {
             return String(
                 format: "AAPL texture format 0x%x %ux%u lzfse %u", le32(b, 0x20), le32(b, 0x28), le32(b, 0x2c),
-                le32(b, 0x44))
+                le32(b, 0x44)
+            )
         }
         if b.count >= 0x2c, b.prefix(8) == [0xab, 0x4b, 0x54, 0x58, 0x20, 0x31, 0x31, 0xbb] {
             return String(
-                format: "KTX 1 texture internal format 0x%x %ux%u", le32(b, 0x1c), le32(b, 0x24), le32(b, 0x28))
+                format: "KTX 1 texture internal format 0x%x %ux%u", le32(b, 0x1c), le32(b, 0x24), le32(b, 0x28)
+            )
         }
         return b.prefix(8).map { String(format: "%02x", $0) }.joined()
     }
@@ -56,7 +58,7 @@ enum SnapshotFiles {
         guard !data.isEmpty, FileManager.default.createFile(atPath: path, contents: nil) else { return false }
         var chunks: [Data] = []
         for start in stride(from: 0, to: data.count, by: chunk) {
-            let source = [UInt8](data[start..<min(start + chunk, data.count)])
+            let source = [UInt8](data[start ..< min(start + chunk, data.count)])
             var out = [UInt8](repeating: 0, count: source.count + 4096)
             let size = compression_encode_buffer(&out, out.count, source, source.count, nil, COMPRESSION_LZFSE)
             guard size > 0 else { return false }

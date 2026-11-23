@@ -22,7 +22,8 @@ extern "C" int switch_gpu_backing_register_semantics(uint32_t engine, const swit
     return 0;
 }
 
-TEST_F(Events, DecodeFailuresRemainExactAcrossHardwareCompletedConsumers)
+// An event producer's failure ends the decode's wait as its completion does, and a consumer of the decode runs after it
+TEST_F(Events, AProducersFailureEndsTheDecodesWaitAcrossHardwareCompletedConsumers)
 {
     using Results = SwitchHost1xResults<SWITCH_GPU_ENGINE_NVDEC>;
     ASSERT_TRUE(switch_nvdec_semantics_start(162, recordRetired));
@@ -62,23 +63,23 @@ TEST_F(Events, DecodeFailuresRemainExactAcrossHardwareCompletedConsumers)
     EXPECT_EQ(switch_gpu_event_waits_status(c), 0);
     EXPECT_EQ(Results::status(&independent), 1);
     finish(source, -5);
-    EXPECT_EQ(switch_gpu_event_waits_status(a), -5);
-    EXPECT_EQ(switch_gpu_event_waits_status(c), -5);
-    EXPECT_EQ(Results::status(&first), -5);
-    EXPECT_EQ(Results::status(&dependent), -5);
+    EXPECT_EQ(switch_gpu_event_waits_status(a), 1);
+    EXPECT_EQ(switch_gpu_event_waits_status(c), 1);
+    EXPECT_EQ(Results::status(&first), 1);
+    EXPECT_EQ(Results::status(&dependent), 1);
     EXPECT_EQ(Results::status(&independent), 1);
     EXPECT_EQ(adapter.physical_status(&first, 0), 1);
     switch_gpu_event_waits *captured = nullptr;
-    EXPECT_EQ(adapter.snapshot(&first, &captured), -5);
+    EXPECT_EQ(adapter.snapshot(&first, &captured), 0);
     EXPECT_EQ(adapter.snapshot(&independent, &captured), 0);
-    EXPECT_EQ(native->value, 0u);
+    EXPECT_EQ(native->value, 19u) << "the failed signal moved the value";
     EXPECT_EQ(std::count(retired.begin(), retired.end(), a), 1);
     EXPECT_EQ(std::count(retired.begin(), retired.end(), b), 1);
     EXPECT_EQ(std::count(retired.begin(), retired.end(), c), 1);
-    Results::complete(&ra, -5);
+    Results::complete(&ra, 0);
     Results::complete(&rb, 0);
-    Results::complete(&rc, -5);
-    EXPECT_EQ(Results::waitLegacy(1), -5);
+    Results::complete(&rc, 0);
+    EXPECT_EQ(Results::waitLegacy(1), 0);
     EXPECT_EQ(Results::waitLegacy(2), 0);
     switch_gpu_event_waits_release(&a);
     switch_gpu_event_waits_release(&b);

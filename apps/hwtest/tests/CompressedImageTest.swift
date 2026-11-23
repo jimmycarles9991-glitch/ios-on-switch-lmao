@@ -4,7 +4,7 @@ import UIKit
 
 /// An asset catalog image compiled GPU-compressed (assets/Compressed.xcassets, ASTC): CoreUI hands Core Animation its blocks,
 /// the render server lays them out through the device's texture layout and samples a no-copy texture over that memory
-/// (drivers/TegraGM20BMetal/raw/runtime/RawMetalNoCopy.mm). Shown at one texel a pixel, its composite has to match the
+/// (drivers/TegraGM20BMetal/TegraGM20BMetalNoCopy.mm). Shown at one texel a pixel, its composite has to match the
 /// CPU's drawing of the same image and must not be blank (a nil texture draws nothing).
 struct CompressedImageTest: HWTest {
     let id = "ui.compressed_image"
@@ -21,7 +21,9 @@ struct CompressedImageTest: HWTest {
             view.frame = Snapshots.aligned(
                 CGRect(
                     x: 40, y: 40, width: image.size.width * image.scale / scale,
-                    height: image.size.height * image.scale / scale))
+                    height: image.size.height * image.scale / scale
+                )
+            )
             stage.addSubview(view)
             return view
         } _: { view in

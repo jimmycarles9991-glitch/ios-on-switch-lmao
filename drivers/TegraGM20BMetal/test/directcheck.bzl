@@ -14,7 +14,7 @@ def _crawl_root(crawl):
             return f.short_path
     fail("the crawl's root is none of its files")
 
-def _raw_directcheck_impl(ctx):
+def _directcheck_impl(ctx):
     tools = seed_tool_files(ctx.attr.tools)
     crawl = ctx.attr.crawl[CrawlInfo]
     out = ctx.actions.declare_directory(ctx.attr.name)
@@ -56,8 +56,8 @@ def _raw_directcheck_impl(ctx):
         OutputGroupInfo(native_tools = depset([out])),
     ]
 
-raw_directcheck = rule(
-    implementation = _raw_directcheck_impl,
+gm20b_directcheck = rule(
+    implementation = _directcheck_impl,
     doc = "directcheck and its inputs, as one JSON file whose runfiles hold them.",
     attrs = {
         "ipsw": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
@@ -72,7 +72,7 @@ raw_directcheck = rule(
         "metal_abi": attr.label(mandatory = True, allow_single_file = True),
         "tools": attr.label(mandatory = True, doc = "the shader tools the pack was made with (//gpu/seed:tools)"),
         "crawl": attr.label(mandatory = True, providers = [CrawlInfo]),
-        "pack": attr.label(mandatory = True, providers = [OutputGroupInfo], doc = "//gpu/seed:raw_pack"),
+        "pack": attr.label(mandatory = True, providers = [OutputGroupInfo], doc = "//gpu/seed:pack"),
         "_build": attr.label(
             default = "//drivers/TegraGM20BMetal/test:directcheck_build",
             executable = True,

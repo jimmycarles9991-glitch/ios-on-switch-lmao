@@ -119,6 +119,9 @@ struct Display {
 
     // SwitchDirectVisibleDisplay.h's: the slot's backing held scanned from its mapping to its drop.
     switch_gpu_backing *scanoutHeld[kSlots] = {};
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+    switch_gpu_scanout_look directLook = {};
+#endif
 
     void holdScanoutBacking(unsigned k)
     {
@@ -175,6 +178,17 @@ void switch_native_scanout_release(SwitchNativeScanout *snapshot)
     *snapshot = {};
 }
 
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+namespace {
+switch_gpu_scanout_look nextLook;
+}
+
+void switch_gpu_cpu_lease_look(const switch_gpu_cpu_lease *, switch_gpu_scanout_look *look)
+{
+    *look = nextLook;
+}
+#endif
+
 namespace {
 class DirectSlots : public testing::Test {
 protected:
@@ -197,6 +211,9 @@ protected:
         error = heldError = 0;
         leases = lookups = heldSnapshots = 0;
         heldSeen = nullptr;
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+        nextLook = {};
+#endif
         display = new Display;
     }
 
@@ -310,3 +327,21 @@ TEST_F(DirectSlots, ARepeatSwapOfASlotsSurfaceTakesNoCacheLookup)
     EXPECT_EQ(lookups, 2u);
     display->releaseIdleDirectReads();
 }
+
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+// Debug kernels' direct flip lines report the swap's own snapshot, also when the slot keeps an earlier frame's lease of
+// the same contents.
+TEST_F(DirectSlots, AFlipReportsItsOwnSnapshotWhenTheSlotKeepsItsLease)
+{
+    nextLook.promised = 1;
+    ASSERT_EQ(offer(), 3);
+    EXPECT_EQ(display->directLook.promised, 1);
+    display->ring.ready(3);
+    nextLook = {};
+    nextLook.writer = {5, 1, SWITCH_GPU_ENGINE_GM20B, 2};
+    ASSERT_EQ(offer(), 3);
+    EXPECT_EQ(leases, 1u) << "the slot gave up the lease it holds";
+    EXPECT_EQ(display->directLook.promised, 0);
+    EXPECT_EQ(display->directLook.writer.value, 5u);
+}
+#endif

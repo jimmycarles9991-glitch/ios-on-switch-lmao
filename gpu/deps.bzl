@@ -1,19 +1,17 @@
 """The GPU bundle's external inputs (MODULE.bazel `gpu` extension).
 
-@gpu_device_data  what only a Switch makes (precompile/harvest.py --pack): the driver records m2v wrote, the Metal
-               libraries Core Image compiled there and the compiler's replies that made them (the frontend's msl/
-               cache, which the seed carries so no process compiles Core Image's sources on first use), one tar
-               pinned by sha256 (DEVICE_DATA), fetched into the repository
+@gpu_device_data  what only a Switch makes (precompile/harvest.py --pack): the Metal libraries Core Image compiled
+               there and the compiler's replies that made them (the frontend's msl/ cache, which the seed carries so
+               no process compiles Core Image's sources on first use), one tar pinned by sha256 (DEVICE_DATA), fetched
+               into the repository
                cache once from ~/Library/Application Support/switch-ios/gpu-device-data/ (or
                $SWITCH_HOME/gpu-device-data/), where harvest.py --pack writes it; never from a checkout. Empty on a
                machine that has never harvested a console (CI, anyone else's Mac): the seed is made without it.
 @gpu_llvm_as   bin/llvm-as of the LLVM 23.1.4 release.
 """
 
-# @gpu_device_data: the tar harvest.py --pack wrote (<state dir>/gpu-device-data/<file>), by its sha256. Its records are of the
-# NVK identities the device booted (vendor, device, driver version, pipelineCacheUUID); the seed takes its own NVK's.
-# Without the tar the seed has no device records and lacks the corpus lines of Core Image's device-compiled kernels,
-# which the device compiles on first use.
+# @gpu_device_data: the tar harvest.py --pack wrote (<state dir>/gpu-device-data/<file>), by its sha256. Without the tar
+# the seed lacks the corpus lines of Core Image's device-compiled kernels, which the device compiles on first use.
 DEVICE_DATA = {
     "file": "m2v-device-15a8018125e4fec3.tar",
     "sha256": "15a8018125e4fec3be68057d5d7bac1963f71a4849b0168f0094e566e6108aa3",
@@ -24,7 +22,7 @@ def _run(rctx, args):
     if result.return_code:
         fail("{} failed ({}):\n{}{}".format(" ".join([str(a) for a in args]), result.return_code, result.stdout, result.stderr))
 
-# --- Cargo.lock reading (gpu/nvk/repos.bzl vendors bindgen's and cbindgen's crates with it) ----------------------------
+# --- Cargo.lock reading (third_party/mesa/bazel/repos.bzl vendors bindgen's and cbindgen's crates with it) ---------
 
 def lock_packages(text):
     """The [[package]] tables of a Cargo.lock as dicts of their string keys."""
@@ -80,7 +78,7 @@ def _device_data_impl(rctx):
     if DEVICE_DATA:
         # Only a repository cache miss reads the file (the first fetch on a machine): from the tools' state directory,
         # where harvest.py --pack writes it, never from a checkout. The device's data is Apple-derived (Core Image's
-        # compiled kernels, NVK's records of Apple's shaders), so it stays out of the repository, like the IPSW.
+        # compiled kernels), so it stays out of the repository, like the IPSW.
         where = state_dir(rctx) + "/gpu-device-data/" + DEVICE_DATA["file"]
         fetched = rctx.download_and_extract(
             url = "file://" + where.replace(" ", "%20"),
@@ -101,11 +99,6 @@ def _device_data_impl(rctx):
 package(default_visibility = ["//visibility:public"])
 
 # {file} (sha256 {sha256}): precompile/harvest.py --pack of the device's m2v caches.
-filegroup(
-    name = "records",
-    srcs = glob(["records/**"], allow_empty = True),
-)
-
 filegroup(
     name = "libraries",
     srcs = glob(["data/**"], allow_empty = True),

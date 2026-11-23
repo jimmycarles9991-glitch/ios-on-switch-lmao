@@ -3,16 +3,16 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// Rule fetch.blend (drivers/TegraGM20BMetal/raw/runtime/raw_fetch_rungs.h fixedBlendAcceptable) on the chip: N
+/// Rule fetch.blend (drivers/TegraGM20BMetal/fetch_rungs.h fixedBlendAcceptable) on the chip: N
 /// premultiplied source-over layers into one BGRA8 target, drawn once through the ROP's blend and once by a program that
 /// fetches the destination and blends it (the fetch rung the rule would replace), each against Metal's exact blend
 /// computed here (every layer stored as the nearest code). Sources are 8-bit codes or codes plus sixteenths (a
 /// shader-computed colour), from shaders/FixedBlendRule.metal's hash. The rule's claim: the ROP stays within 2 codes for
 /// 8-bit sources at any depth and for computed sources up to 2 layers; 8 computed layers are reported (x1-units' model
 /// says 4). Then 8 layers over 1280x720 both ways give each route's GPU time. The rule's further formats are
-/// gpu.raw.fixed_blend_formats'.
+/// gpu.gm20b.fixed_blend_formats'.
 struct FixedBlendRuleTest: HWTest {
-    let id = "gpu.raw.fixed_blend_rule"
+    let id = "gpu.gm20b.fixed_blend_rule"
     let name = "Fixed-function blend against the fetch rung: codes within the rule's bounds, GPU time both ways"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 90 }
@@ -42,9 +42,9 @@ struct FixedBlendRuleTest: HWTest {
     /// Metal's result of `layers` source-overs at (x, y), RGBA codes
     static func reference(_ x: Int, _ y: Int, layers: Int, computed: Bool) -> [Int] {
         var d = clear.map { ($0 * 255).rounded() }
-        for layer in 0..<layers {
+        for layer in 0 ..< layers {
             let s = source(x, y, layer: layer, computed: computed)
-            d = (0..<4).map { c in (min(max(s[c] + d[c] / 255 * (1 - s[3]), 0), 1) * 255).rounded() }
+            d = (0 ..< 4).map { c in (min(max(s[c] + d[c] / 255 * (1 - s[3]), 0), 1) * 255).rounded() }
         }
         return d.map { Int($0) }
     }
@@ -55,8 +55,8 @@ struct FixedBlendRuleTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let rop = try gpu.render(fragment: "rule_rop_fragment", format: .bgra8Unorm) { d in
             let a = d.colorAttachments[0]!
             a.isBlendingEnabled = true
@@ -86,14 +86,14 @@ struct FixedBlendRuleTest: HWTest {
         }
         let big = try gpu.texture(.bgra8Unorm, 1280, 720)
         var ropMs = 0.0, fetchMs = 0.0
-        for _ in 0..<3 {
+        for _ in 0 ..< 3 {
             ropMs += try await gpu.run(Self.layers(rop, big, count: 8, computed: true)).gpuMilliseconds
             fetchMs += try await gpu.run(Self.layers(fetch, big, count: 8, computed: true)).gpuMilliseconds
         }
         metrics.set("rop_gpu_ms_8_layers_720p", ropMs / 3, digits: 3)
         metrics.set("fetch_gpu_ms_8_layers_720p", fetchMs / 3, digits: 3)
-        metrics.set("paths", paths.allSatisfy { $0 == "raw" } ? "raw" : paths.joined(separator: ","))
-        if paths.contains(where: { $0 != "raw" }) { wrong.append("paths") }
+        metrics.set("paths", paths.allSatisfy { $0 == "gm20b" } ? "gm20b" : paths.joined(separator: ","))
+        if paths.contains(where: { $0 != "gm20b" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
@@ -107,13 +107,14 @@ struct FixedBlendRuleTest: HWTest {
             pass.colorAttachments[0].texture = target
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: clear[0], green: clear[1], blue: clear[2], alpha: clear[3])
+                red: clear[0], green: clear[1], blue: clear[2], alpha: clear[3]
+            )
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(state)
             var corners = GPU.fullScreen
             encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
-            for layer in 0..<count {
+            for layer in 0 ..< count {
                 var key = SIMD2<UInt32>(UInt32(layer), computed ? 1 : 0)
                 encoder.setFragmentBytes(&key, length: MemoryLayout<SIMD2<UInt32>>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -155,7 +156,7 @@ struct FixedBlendRuleTest: HWTest {
         switch format {
         case .rgba16Float:
             let at = (y * size + x) * 8
-            return (0..<4).map { Int(bytes[at + 2 * $0]) | Int(bytes[at + 2 * $0 + 1]) << 8 }
+            return (0 ..< 4).map { Int(bytes[at + 2 * $0]) | Int(bytes[at + 2 * $0 + 1]) << 8 }
         case .bgra8Unorm_srgb:
             let t = Array(bytes.pixel(x, y, width: size))
             return [Int(t[2]), Int(t[1]), Int(t[0]), Int(t[3])]
@@ -167,12 +168,12 @@ struct FixedBlendRuleTest: HWTest {
 
     static func errors(_ bytes: [UInt8], layers: Int, computed: Bool) -> Errors {
         var e = Errors()
-        for y in 0..<size {
-            for x in 0..<size {
+        for y in 0 ..< size {
+            for x in 0 ..< size {
                 let want = reference(x, y, layers: layers, computed: computed)
                 let texel = Array(bytes.pixel(x, y, width: size))
                 let got = [Int(texel[2]), Int(texel[1]), Int(texel[0]), Int(texel[3])]
-                for c in 0..<4 {
+                for c in 0 ..< 4 {
                     let d = abs(got[c] - want[c])
                     e.worst = max(e.worst, d)
                     e.off += d > 0 ? 1 : 0

@@ -32,7 +32,7 @@ enum {
 	TegraGM20BReadbackInFlight = 2, /* its present is queued */
 	TegraGM20BReadbackDone = 3,
 	TegraGM20BReadbackFailed =
-		4, /* status: the present's (TEGRA_SCANOUT_SOURCE_LOST) or an errno */
+		4, /* status: the present's (TEGRA_SCANOUT_SOURCE_GONE, _LOST, _REFUSED) or an errno */
 
 	/* TegraGM20BAbiReadbackReply.flags */
 	TegraGM20BReadbackDirect = 1u

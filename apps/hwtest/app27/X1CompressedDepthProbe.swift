@@ -3,12 +3,12 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// copy.ce_compressed for zetas (drivers/TegraGM20BMetal/raw/runtime/raw_comp.h): the copy engine copying a compressed
+/// copy.ce_compressed for zetas (drivers/TegraGM20BMetal/comp.h): the copy engine copying a compressed
 /// Depth32Float or multisampled Depth32Float_Stencil8 zeta (kinds ZF32_2CZ, ZF32_MS2/MS4_2CZ, ZF32_X24S8_MS2/MS4_2CSZV)
 /// into the shader's depth-test images and back, as the facade does around framebuffer-fetching draws that test depth in
 /// the shader. Every case runs as shipped (each kind is copyEngineReadsCompressed's); the same pass drawn on plain memory
-/// (switchRawProbePlainMemory:) is the reference. PASS: every round's picture with compressed zetas is the reference's
-/// byte for byte and zeta_ce_copies moved; INCONCLUSIVE: no switch, the work left the raw path, or no copy went through
+/// (switchMetalProbePlainMemory:) is the reference. PASS: every round's picture with compressed zetas is the reference's
+/// byte for byte and zeta_ce_copies moved; INCONCLUSIVE: no switch, the work left the driver, or no copy went through
 /// compressed memory (the facade had none made yet).
 ///
 /// T-v2's run died on the draws of a multisampled case with INVALID_A_A_COMBINATION03 (class error 0x134 at
@@ -32,7 +32,7 @@ enum X1CompressedDepthProbe {
     ]
 
     static func plainMemory(_ device: MTLDevice, _ on: Bool) -> Bool {
-        flag(device, "switchRawProbePlainMemory:", on)
+        flag(device, "switchMetalProbePlainMemory:", on)
     }
 
     static func flag(_ device: MTLDevice, _ name: String, _ on: Bool) -> Bool {
@@ -55,10 +55,10 @@ enum X1CompressedDepthProbe {
         let reference = try await scene.draw()
         _ = plainMemory(gpu.device, false)
         var bad = 0, compressed = 0
-        for _ in 0..<attempts where compressed < rounds {
-            let before = RawFacade.compression(of: gpu.device)["zeta_ce_copies"] ?? 0
+        for _ in 0 ..< attempts where compressed < rounds {
+            let before = GM20BFacade.compression(of: gpu.device)["zeta_ce_copies"] ?? 0
             let picture = try await scene.draw()
-            if (RawFacade.compression(of: gpu.device)["zeta_ce_copies"] ?? 0) > before {
+            if (GM20BFacade.compression(of: gpu.device)["zeta_ce_copies"] ?? 0) > before {
                 compressed += 1
                 if picture != reference { bad += 1 }
             }
@@ -71,7 +71,8 @@ enum X1CompressedDepthProbe {
         var metrics = Metrics()
         metrics.set("rule", "copy.ce_compressed_depth")
         guard plainMemory(gpu.device, false) else {
-            return ProbeFinding(.inconclusive, metrics, note: "the facade has no zeta probe switch (a release build)")
+            let why = GM20BFacade.missing("switchMetalProbePlainMemory:", on: gpu.device)
+            return ProbeFinding(.inconclusive, metrics, note: why)
         }
         defer { _ = plainMemory(gpu.device, false) }
         let journal = ProbeJournal(probe: "gpu.x1.ce_compressed_depth")
@@ -84,14 +85,14 @@ enum X1CompressedDepthProbe {
             let arms = samples > 1 ? aaArms : [("as_is", [], [])]
             for (arm, before, after) in arms {
                 journal.starting("\(name) \(arm)")
-                if !before.isEmpty, let refusal = RawMethods.arm(gpu.device, before: before, after: after) {
+                if !before.isEmpty, let refusal = GM20BMethods.arm(gpu.device, before: before, after: after) {
                     metrics.set("\(name)_aa", LogLine.sanitized(refusal))
                     refused.append(name)
                     continue cases
                 }
                 do {
                     let (bad, compressed) = try await rounds(gpu, scene)
-                    let emitted = before.isEmpty ? 0 : RawMethods.disarm(gpu.device)
+                    let emitted = before.isEmpty ? 0 : GM20BMethods.disarm(gpu.device)
                     if !before.isEmpty && emitted == 0 {
                         metrics.set("\(name)_aa", "\(arm)_not_emitted")
                         refused.append(name)
@@ -104,7 +105,7 @@ enum X1CompressedDepthProbe {
                     engaged += compressed
                     continue cases
                 } catch {
-                    if !before.isEmpty { _ = RawMethods.disarm(gpu.device) }
+                    if !before.isEmpty { _ = GM20BMethods.disarm(gpu.device) }
                     killed.append("\(name):\(arm)")
                 }
             }
@@ -148,10 +149,12 @@ enum X1CompressedDepthProbe {
             resolved = samples > 1 ? try gpu.texture(.rgba8Unorm, size, size) : nil
             fetch = try gpu.render(
                 vertex: "fetch_depth_vertex", fragment: "fetch_add_fragment", format: .rgba8Unorm, samples: samples,
-                depth: format, stencil: stencil ? format : .invalid)
+                depth: format, stencil: stencil ? format : .invalid
+            )
             plain = try gpu.render(
                 vertex: "fetch_depth_vertex", fragment: "solid_fragment", format: .rgba8Unorm, samples: samples,
-                depth: format, stencil: stencil ? format : .invalid)
+                depth: format, stencil: stencil ? format : .invalid
+            )
             let descriptor = MTLDepthStencilDescriptor()
             descriptor.depthCompareFunction = .less
             descriptor.isDepthWriteEnabled = true

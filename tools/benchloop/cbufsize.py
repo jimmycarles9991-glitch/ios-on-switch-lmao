@@ -2,7 +2,7 @@
 
 Each cell reads one word c[1][offset] into all four channels of an RGBA32F texel, with the shader data (word i is the
 float 1000 + i) bound at exactly `dataBound` bytes (CB_SELECTOR_A's size; the bench's records bypass the
-runtime's 256-byte rounding, raw_cbuf.h). NVK binds every buffer at a 256-byte multiple; the split twin's frontier was
+runtime's 256-byte rounding, cbuf.h). NVK binds every buffer at a 256-byte multiple; the split twin's frontier was
 bound at 16, 32, 64, 480 or 672 and read wrong below its size until rounded. On T-v4c these cells ran through the
 rounding, so they read the zeroed bytes past the data, not the chip's bound.
 """

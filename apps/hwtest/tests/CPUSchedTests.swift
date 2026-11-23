@@ -35,7 +35,7 @@ enum SchedProbe {
         stop.initialize(to: false)
         accounts.initialize(repeating: switch_sched_spin(), count: max(count, 1))
         let group = DispatchGroup()
-        for index in 0..<count {
+        for index in 0 ..< count {
             start(qos, group) { switch_sched_spin(stop, accounts + index) }
         }
         body()
@@ -59,7 +59,7 @@ enum SchedProbe {
             switch_sched_timer_wakes(period, UInt32(count), late)
         }
         group.wait()
-        return ((0..<count).map { microseconds(late[$0]) }, realtime.pointee)
+        return ((0 ..< count).map { microseconds(late[$0]) }, realtime.pointee)
     }
 
     /// A user-interactive waiter woken by a utility-class signaller: microseconds from signal to running.
@@ -75,7 +75,7 @@ enum SchedProbe {
         start(.userInteractive, group) { switch_sched_handoff_wait(handoff, latency) }
         start(.utility, group) { switch_sched_handoff_signal(handoff, gap) }
         group.wait()
-        return (0..<count).map { microseconds(latency[$0]) }
+        return (0 ..< count).map { microseconds(latency[$0]) }
     }
 }
 
@@ -137,6 +137,7 @@ struct CPUSchedTest: HWTest {
                     "timer wakes from idle: p99 under 1 ms past the coalescing slack",
                     Stats.percentile(idle, 0.99) < idleBound
                 ),
-            ], metrics)
+            ], metrics
+        )
     }
 }

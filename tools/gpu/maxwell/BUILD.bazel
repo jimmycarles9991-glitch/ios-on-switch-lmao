@@ -1,4 +1,4 @@
-# Maxwell machine-code tools: nakstat, the raw path's shader scoreboard, and gate, which runs two compilers' programs
+# Maxwell machine-code tools: nakstat, the driver's shader scoreboard, and gate, which runs two compilers' programs
 # of the same states on the host (interp.py) and compares their outputs bit for bit.
 #
 #   bazel run //tools/gpu/maxwell:nakstat -- --pack <pack.bin> --corpus $PWD/tools/gpu/maxwell/scoreboard.log
@@ -9,7 +9,7 @@
 #   bazel run //tools/gpu/maxwell:storecheck -- <pack.bin> --corpus ...   (what storage forms do with each fetched colour)
 #   bazel run //tools/gpu/maxwell:ticketcheck -- <pack.bin>   (each interlock ticket reader's wait and header bit)
 #
-# direct_exec_test runs the raw path's direct compile of direct/exec.metal's states and kernels and the counter resolve
+# direct_exec_test runs the driver's direct compile of direct/exec.metal's states and kernels and the counter resolve
 # kernel (direct/directrun.mm, built on this Mac beside the shader tools' mock GM20B) and executes their programs here.
 #
 # opcodes.txt is yuzu's maxwell.inc, verbatim (GPL-2.0-or-later, its notice kept).
@@ -120,7 +120,7 @@ py_library(
         ":isa",
         ":nakstat",
         ":rop",
-        "//drivers/TegraGM20BMetal:raw_pack",
+        "//drivers/TegraGM20BMetal:pack",
         "//tools/benchloop:lib",
     ],
 )
@@ -201,14 +201,10 @@ py_test(
     name = "ticketcheck_pack_test",
     size = "medium",
     srcs = ["ticketcheck_test.py"],
-    data = ["//gpu/seed:raw_pack"],
-    env = {"TICKETCHECK_PACK": "$(rootpath //gpu/seed:raw_pack)/pack.bin"},
+    data = ["//gpu/seed:pack"],
+    env = {"TICKETCHECK_PACK": "$(rootpath //gpu/seed:pack)/pack.bin"},
     main = "ticketcheck_test.py",
-    # m2v: //gpu/seed:raw_pack's probe runs NVK until the pack generator stops needing it
-    tags = [
-        "m2v",
-        "pack",
-    ],
+    tags = ["pack"],
     deps = [":ticketcheck_lib"],
 )
 
@@ -285,19 +281,20 @@ direct_runner(
     srcs = [
         "direct/directrun.mm",
         "direct/exec.metal",
-        "//drivers/TegraGM20BMetal:raw/test/linkcheck.mm",
-        "//drivers/TegraGM20BMetal:raw/test/linked/caller.metal",
-        "//drivers/TegraGM20BMetal:raw/test/linked/callee.metal",
+        "//drivers/TegraGM20BMetal:harness/linkcheck.mm",
+        "//drivers/TegraGM20BMetal:harness/linked/caller.metal",
+        "//drivers/TegraGM20BMetal:harness/linked/callee.metal",
         "//drivers/TegraGM20BMetal/test:grouped_pointer.metal",
-        "//drivers/NativeMetal/test:neutral_compute.mm",
-        "//drivers/NativeMetal/test:neutral_compute.metal",
-        "//drivers/TegraGM20BMetal:raw_runtime_headers",
+        "direct/neutral_compute.metal",
+        "direct/neutral_compute.mm",
+        "//drivers/TegraGM20BMetal:gm20b_runtime_headers",
         "//drivers/TegraGM20B:TegraGM20BClockABI.h",
-        "//drivers/TegraGM20BMetal:raw_stack_sources",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
+        "//drivers/TegraGM20BMetal:stack_key_sources",
         "//kits/SwitchGM20B:class_headers",
     ],
-    metal_abi = "//drivers/NativeMetal/abi:MetalABI.h",
-    tools = "//gpu/seed:local_raw_tools",
+    metal_abi = "//drivers/TegraGM20BMetal/abi:MetalABI.h",
+    tools = "//gpu/seed:local_tools",
     translate = "//gpu:translate_host",
     visibility = ["//drivers/TegraGM20BMetal/test:__pkg__"],
 )
@@ -307,11 +304,11 @@ py_test(
     srcs = ["direct_consumers_test.py"],
     args = [
         "$(rootpath :direct_runner)",
-        "$(rootpath //gpu/seed:raw_pack)",
+        "$(rootpath //gpu/seed:pack)",
     ],
     data = [
         ":direct_runner",
-        "//gpu/seed:raw_pack",
+        "//gpu/seed:pack",
     ],
     tags = [
         "pack",

@@ -8,22 +8,23 @@ from tools.devicerun.rules import FAIL, INFO, NO_DATA, PASS
 
 REFUSAL = 'com.brunostjohn.switch.refusal'
 RAW = 'com.brunostjohn.switch.TegraGM20BMetal'
-MERCURY_M2V = (
-    'MercuryPosterExtension[467] cb.m2v: command buffer on m2v (encode): a storage buffer bound at an offset that is '
-    'not a multiple of 16 [first predicate enc.ubo]'
+MERCURY_FAILED = (
+    'MercuryPosterExtension[467] pass.fmt: a command buffer failed (MTLCommandBufferErrorDomain 1): a colour '
+    'attachment the driver renders no form of'
 )
-CAMERA_M2V = (
-    "cameracaptured[64] cb.m2v: command buffer on m2v (compute): a kernel's buffer bound at an offset that is not a "
-    'multiple of 16 [first predicate compute]'
+CAMERA_FAILED = (
+    'cameracaptured[64] compute: a command buffer failed (MTLCommandBufferErrorDomain 9): a dispatch with no compute '
+    "state set: Metal's validation error"
 )
 WATCHDOG = (
     '[extension<com.apple.MercuryPoster:467] Provision violated for watchdog scene-create: '
     '<FBSProcessResourceProvision: 0xd281501e0; allowance: <; FBSProcessResourceAllowance; type: realTime; '
     'timeValue: 10.0s>; violated: YES>'
 )
-ABORT = 'raw: waitUntilScheduled of command buffer 0xda48d2400 not done after 20 s: abort() for the stack'
+ABORT = 'SwitchMetal: waitUntilScheduled of command buffer 0xda48d2400 not done after 20 s: abort() for the stack'
 BEHIND_M2V = (
-    'raw: raw command buffer waiting for the m2v work before it, command buffer 0x7bf660400 not done after 20 s: '
+    'SwitchMetal: raw command buffer waiting for the m2v work before it, command buffer 0x7bf660400 not done after '
+    '20 s: '
     'abort() for the stack'
 )
 PORTRAIT = 'currentTallest: 0.600000, upper: 0.615638, lower: 0.224219'
@@ -59,15 +60,15 @@ def results(*records: dict) -> dict:
 class Lockscreen(unittest.TestCase):
     def test_boot_15_fails_the_lock_screen_checks(self):
         got = results(
-            record('MercuryPosterExtension', MERCURY_M2V, REFUSAL),
+            record('MercuryPosterExtension', MERCURY_FAILED, REFUSAL),
             record('PosterBoard', WATCHDOG),
             record('backboardd', ABORT, RAW),
             record('backboardd', BEHIND_M2V, RAW, second=2),
             record('MercuryPosterExtension', PORTRAIT),
             record('MercuryPosterExtension', LANDSCAPE, second=1),
         )
-        self.assertEqual(got['lockscreen.m2v'].verdict, FAIL)
-        self.assertIn('enc.ubo', got['lockscreen.m2v'].observed)
+        self.assertEqual(got['lockscreen.failed'].verdict, FAIL)
+        self.assertIn('MercuryPosterExtension/pass.fmt', got['lockscreen.failed'].observed)
         self.assertEqual(got['lockscreen.scene-watchdog'].verdict, FAIL)
         self.assertIn('com.apple.MercuryPoster', got['lockscreen.scene-watchdog'].observed)
         self.assertEqual(got['lockscreen.display-abort'].verdict, FAIL)
@@ -78,10 +79,10 @@ class Lockscreen(unittest.TestCase):
 
     def test_a_clean_lock_screen_passes(self):
         got = results(
-            record('cameracaptured', CAMERA_M2V, REFUSAL),
+            record('cameracaptured', CAMERA_FAILED, REFUSAL),
             record('MercuryPosterExtension', PORTRAIT),
         )
-        self.assertEqual(got['lockscreen.m2v'].verdict, PASS)
+        self.assertEqual(got['lockscreen.failed'].verdict, PASS)
         self.assertEqual(got['lockscreen.scene-watchdog'].verdict, PASS)
         self.assertEqual(got['lockscreen.display-abort'].verdict, PASS)
         self.assertEqual(got['lockscreen.hero-fits-time'].verdict, INFO)

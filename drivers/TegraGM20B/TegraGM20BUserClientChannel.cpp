@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // VM binds, surface layouts, channels, and the hung submission's interlocks (the push scan: TegraGM20BPushScanRun.cpp).
 #include "TegraGM20BUserClientInternal.h"
+#include "TegraGM20BFencePageABI.h"
 #include "TegraGM20BLayoutAsk.h"
 #include "TegraGM20BRecord.h"
+#include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
 // lock_ held. A Map into VA no binding holds publishes its binding with the submit gate open: no job in flight can have
 // resolved that VA. A cut (an Unmap, or a Map over a live binding) closes the gate first: its retirement snapshot and the
@@ -10,10 +12,16 @@
 IOReturn AGXDeviceUserClient::vmBind(const TegraGM20BAbiVmBind *in, uint32_t count)
 {
 	const bool cuts = bindCuts(in, count);
-	if (cuts && !submitGate_.beginMutation(lock_))
+	if (cuts && !submitGate_.beginMutation(lock_)) {
+		switch_refusal("vm-bind", "shut",
+			       "%u bind ops: the connection's submissions are shut", count);
 		return kIOReturnNotOpen;
+	}
 	BindingTable::Snapshot *snapshot = BindingTable::prepare(nbinds_ + 2 * count);
 	IOReturn ret = snapshot ? kIOReturnSuccess : kIOReturnNoMemory;
+	if (!snapshot)
+		switch_refusal("vm-bind", "memory", "no memory for a binding table of %u",
+			       nbinds_ + 2 * count);
 	bool changed = false;
 	for (uint32_t i = 0; !ret && i < count; i++)
 		ret = bindOp(in->ops[i], changed);
@@ -38,11 +46,9 @@ bool AGXDeviceUserClient::bindCuts(const TegraGM20BAbiVmBind *in, uint32_t count
 		const Binding *b = after ? &binds_[after - 1] : nullptr;
 		if (!b || b->va + b->range <= op.va)
 			continue;
-		const bool same = op.op != TegraGM20BBindUnmap && b->va == op.va &&
-				  b->range == op.range && b->bo == findBo(op.handle) &&
-				  b->bo_offset == op.bo_offset && b->retirement->kind == op.kind &&
-				  b->retirement->vol == (op.op == TegraGM20BBindMapVolatile);
-		if (!same)
+		const bool mapsBo =
+			op.op == TegraGM20BBindMap || op.op == TegraGM20BBindMapVolatile;
+		if (!bindingIs(*b, op, mapsBo ? findBo(op.handle) : nullptr))
 			return true;
 	}
 	return false;
@@ -51,23 +57,32 @@ bool AGXDeviceUserClient::bindCuts(const TegraGM20BAbiVmBind *in, uint32_t count
 IOReturn AGXDeviceUserClient::bindOp(const TegraGM20BAbiBindOp &op, bool &changed)
 {
 	if (((op.va | op.range | op.bo_offset) & 0xfff) || !op.range || op.va < TGM_USER_VA_START ||
-	    op.range > TGM_KERNEL_VA || op.va > TGM_KERNEL_VA - op.range || op.kind > 0xff)
+	    op.range > TGM_KERNEL_VA || op.va > TGM_KERNEL_VA - op.range || op.kind > 0xff) {
+		switch_refusal("vm-bind", "arguments",
+			       "op %u of VA %#llx+%#llx, BO %llu at %#llx, kind %#x: not whole "
+			       "pages, outside the "
+			       "client's VA, or no PTE kind",
+			       op.op, op.va, op.range, op.handle, op.bo_offset, op.kind);
 		return kIOReturnBadArgument;
-	if (op.op == TegraGM20BBindMapSparse)
-		return kIOReturnUnsupported;  // InfoSparse is not advertised in v1
+	}
 	const uint64_t start = statsNowNs();
-	const bool unmap = op.op == TegraGM20BBindUnmap;
-	if (!unmap && op.op != TegraGM20BBindMap && op.op != TegraGM20BBindMapVolatile)
+	const bool unmap = op.op == TegraGM20BBindUnmap, sparse = op.op == TegraGM20BBindMapSparse;
+	if (!unmap && !sparse && op.op != TegraGM20BBindMap && op.op != TegraGM20BBindMapVolatile) {
+		switch_refusal("vm-bind", "op", "op %u of VA %#llx+%#llx: no such bind op", op.op,
+			       op.va, op.range);
 		return kIOReturnBadArgument;
-	Bo *bo = unmap ? nullptr : findBo(op.handle);
-	if (!unmap && (!bo || op.bo_offset > bo->bytes || op.range > bo->bytes - op.bo_offset)) {
+	}
+	Bo *bo = unmap || sparse ? nullptr : findBo(op.handle);
+	if (!unmap && !sparse &&
+	    (!bo || op.bo_offset > bo->bytes || op.range > bo->bytes - op.bo_offset)) {
 		noteBind(TGM_BIND_REFUSED, op.va, op.range, bo, op.bo_offset, uint8_t(op.kind));
+		switch_refusal("vm-bind", "bo", "a map of VA %#llx+%#llx from BO %llu at %#llx: %s",
+			       op.va, op.range, op.handle, op.bo_offset,
+			       !bo ? "no such BO" : "past the BO's end");
 		return kIOReturnBadArgument;
 	}
 	const Binding *same = switch_gpu_binding_find(binds_, nbinds_, op.va, op.range);
-	if (!unmap && same && same->va == op.va && same->range == op.range && same->bo == bo &&
-	    same->bo_offset == op.bo_offset && same->retirement->kind == op.kind &&
-	    same->retirement->vol == (op.op == TegraGM20BBindMapVolatile))
+	if (same && bindingIs(*same, op, bo))
 		return kIOReturnSuccess;
 	// Everything a cut and the new binding need, before any binding changes.
 	if (nbinds_ + 2 > cap_binds_) {
@@ -75,8 +90,12 @@ IOReturn AGXDeviceUserClient::bindOp(const TegraGM20BAbiBindOp &op, bool &change
 		while (cap < nbinds_ + 2)
 			cap *= 2;
 		Binding *grown = IONew(Binding, cap);
-		if (!grown)
+		if (!grown) {
+			switch_refusal("vm-bind", "memory",
+				       "no memory for %u bindings (VA %#llx+%#llx)", cap, op.va,
+				       op.range);
 			return kIOReturnNoMemory;
+		}
 		if (binds_) {
 			memcpy(grown, binds_, sizeof(Binding) * nbinds_);
 			IODelete(binds_, Binding, cap_binds_);
@@ -107,10 +126,19 @@ IOReturn AGXDeviceUserClient::bindOp(const TegraGM20BAbiBindOp &op, bool &change
 			IODelete(record, RetiredBinding, 1);
 		if (unmap && !cut)
 			tgm_stats_bind(0, op.range >> 12, statsNowNs() - start);
+		if (cut)
+			switch_refusal(
+				"vm-bind", "cut",
+				"op %u of VA %#llx+%#llx: what it overlaps was not cut (%#x)",
+				op.op, op.va, op.range, cut);
 		return cut;
 	}
-	if (const IOReturn mapped = mapRange(op, bo, record, queued))
+	if (const IOReturn mapped = mapRange(op, bo, record, queued)) {
+		switch_refusal("vm-bind", "map",
+			       "op %u of VA %#llx+%#llx, BO %llu, kind %#x: no PTEs made (%#x)",
+			       op.op, op.va, op.range, op.handle, op.kind, mapped);
 		return mapped;
+	}
 	changed = true;
 	switch_gpu_path_taken(SWITCH_GPU_PATH_VOLATILE_BIND,
 			      op.op == TegraGM20BBindMapVolatile ? 1 : 0);
@@ -134,14 +162,23 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 						TegraGM20BAbiSurfaceLayoutInfo *out, bool canonical)
 {
 	Bo *bo = findBo(in->handle);
-	if (!bo || !bo->wired || !bo->coh)
+	if (!bo || !bo->wired || !bo->coh) {
+		switch_refusal("iosurface-layout", "import",
+			       "BO %llu: %s: no surface layout asked of it", in->handle,
+			       !bo ? "no BO of this connection" : "not an imported IOSurface");
 		return kIOReturnBadArgument;
+	}
+	const uint32_t surfaceId = tgm_coh_surface_id(bo->coh);
 	const bool firstAsk = !bo->layoutAsked;
 	bo->layoutAsked = true;
 	SwitchGpuSurfaceGeometry surface = {};
-	if (switch_gpu_surface_geometry(tgm_coh_surface_id(bo->coh), task_, bo->pas, bo->npages,
-					&surface))
+	if (switch_gpu_surface_geometry(surfaceId, task_, bo->pas, bo->npages, &surface)) {
+		switch_refusal(
+			"iosurface-layout", "geometry",
+			"IOSurface %u: import %llu of %u pages is not its memory in this task",
+			surfaceId, in->handle, bo->npages);
 		return kIOReturnBadArgument;
+	}
 	tgm_coh *coh = bo->coh;
 	OSObject *object = bo->surface;
 	const uint64_t first = bo->pas[0];
@@ -183,10 +220,21 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 		out->align = 4096;
 	}
 	if (layout > 0) {
-		if (!described)
+		if (!described) {
+			switch_refusal("iosurface-layout", "undescribed",
+				       "IOSurface %u: decided block-linear, but no layout of it is "
+				       "described",
+				       surfaceId);
 			return kIOReturnNotReady;
+		}
 		// method 16's askers lay the shape out themselves, at NIL's block height
 		const bool readable = canonical || (same && tgm_layout_nil_height(&tiled));
+		if (!readable)
+			switch_refusal("iosurface-layout", "other-shape",
+				       "IOSurface %u: block-linear at %ux%u x%u, not the %ux%u x%u "
+				       "rows %u asked",
+				       surfaceId, tiled.width, tiled.height, tiled.bpp, in->width,
+				       in->height, in->bpp, in->bytes_per_row);
 		*out = {readable ? uint32_t(TegraGM20BLayoutTiled)
 				 : uint32_t(TegraGM20BLayoutOtherShape),
 			tiled.width,
@@ -199,21 +247,36 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 			tiled.align,
 			tiled.bytes};
 	} else if (layout < 0) {
+		switch_refusal(
+			"iosurface-layout", "decided-other",
+			"IOSurface %u: laid out for another shape than %ux%u x%u rows %u (%d)",
+			surfaceId, in->width, in->height, in->bpp, in->bytes_per_row, layout);
 		out->layout = TegraGM20BLayoutOtherShape;
 	}
 	return kIOReturnSuccess;
 }
 
-// lock_ held. The connection's level from its priority and GPU denial (TegraGM20BSchedPolicy.h), for every channel it has.
+// lock_ held. The connection's level from its priority and GPU denial (TegraGM20BSchedPolicy.h), for every channel
+// it has, and whether it is the compositor (tgm_compositor).
 void AGXDeviceUserClient::applyLevel(bool allChannels)
 {
 	level_ = tgm_priority_level(priority_, backgroundPriority_,
 				    static_cast<int>(backgroundRole_));
-	critical_ = level_ == TGM_LEVEL_HIGH;
+	const bool wasCritical = critical_;
+	critical_ = tgm_compositor(static_cast<enum tgm_level>(level_),
+				   static_cast<int>(restartNoKill_));
+	if (critical_ != wasCritical) {
+		const bool reserved = events_.compositor(ownerPid_, critical_);
+		if (critical_ && !compositorLogged_) {
+			compositorLogged_ = true;
+			IOLog("tegra-gm20b: %s[%d] is the compositor%s\n", owner_, ownerPid_,
+			      reserved ? "" : ", its event records counted as an app's");
+		}
+	}
 	if (allChannels)
 		for (uint32_t i = 0; i < kMaxChannels; ++i)
 			if (chans_[i]) {
-				tgm_chan_set_level(chans_[i], level_);
+				tgm_chan_set_level(chans_[i], level_, static_cast<int>(critical_));
 				channelLevels_[i] = level_;
 			}
 }
@@ -238,16 +301,16 @@ IOReturn AGXDeviceUserClient::channelCreate(const TegraGM20BAbiChannelCreate *in
 				owner_, static_cast<int>(critical_), &chans_[slot]));
 	if (ret)
 		return ret;
-	switch_gpu_chan_visibility(chans_[slot], fence_va_ + 128 + slot,
-				   fence_gpu_ + 512 + uint64_t(slot) * 4);
+	switch_gpu_chan_visibility(
+		chans_[slot], fence_va_ + TegraGM20BFencePageVisibleFirst / 4 + slot,
+		fence_gpu_ + TegraGM20BFencePageVisibleFirst + uint64_t(slot) * 4);
 	auto *semantic = reinterpret_cast<volatile TegraGM20BAbiFenceSemantic *>(fence + 4);
 	switch_gpu_chan_semantic_visibility(chans_[slot], semantic);
 	auto *identity = reinterpret_cast<volatile TegraGM20BAbiFenceIdentity *>(fence + 8);
 	__atomic_store_n(&identity->channel_uid, switch_gpu_chan_identity(chans_[slot]),
 			 __ATOMIC_RELEASE);
-	tgm_chan_set_group(chans_[slot], task_);  // Order relates the channels of one task
 	if (level_ != TGM_LEVEL_FOREGROUND && !critical_)
-		tgm_chan_set_level(chans_[slot], level_);
+		tgm_chan_set_level(chans_[slot], level_, 0);
 	channelLevels_[slot] = level_;
 	leanChannels_[slot] = copyOnly != 0;
 	faultLogged_[slot] = false;
@@ -258,33 +321,6 @@ IOReturn AGXDeviceUserClient::channelCreate(const TegraGM20BAbiChannelCreate *in
 	out->fence_offset = slot * 64;
 	out->reserved = 0;
 	return kIOReturnSuccess;
-}
-
-// Method 14: GPU-side order between this channel and the task's other channels (gpu_sync.c tgm_chan_order); the peers are found by
-// task in gpu_sync.c, only the caller's own channel is named here.
-IOReturn AGXDeviceUserClient::order(const TegraGM20BAbiOrder *in, TegraGM20BAbiOrderReply *out)
-{
-	static_assert(TegraGM20BOrderAfterTask == TGM_ORDER_AFTER &&
-			      TegraGM20BOrderBeforeTask == TGM_ORDER_BEFORE &&
-			      TegraGM20BMaxOrderWaits == TGM_ORDER_MAX,
-		      "order flags");
-	if (!in->channel || in->channel > kMaxChannels || !chans_[in->channel - 1])
-		return kIOReturnBadArgument;
-	uint32_t queued = 0;
-	const IOReturn ret =
-		ioreturn(tgm_chan_order(chans_[in->channel - 1], in->flags, in->seqno, &queued));
-	out->waits = queued;
-	out->reserved = 0;
-	return ret;
-}
-
-// Method 17: what the channel's next Exec touches (TegraGM20BExecSurfaces.h).
-IOReturn AGXDeviceUserClient::execSurfaces(const TegraGM20BAbiExecSurfaces *in)
-{
-	static_assert(tgm_fences::kChannels == kMaxChannels, "channel slots");
-	if (!in->channel || in->channel > kMaxChannels || !chans_[in->channel - 1])
-		return kIOReturnBadArgument;
-	return surfaces_.set(in->channel - 1, in) ? kIOReturnSuccess : kIOReturnNoMemory;
 }
 
 IOReturn AGXDeviceUserClient::channelDestroy(const TegraGM20BAbiChannel *in)
@@ -299,17 +335,18 @@ IOReturn AGXDeviceUserClient::channelDestroy(const TegraGM20BAbiChannel *in)
 				switch_gpu_set_killed(set, in->channel - 1);
 	hangHolder_ = current_thread();
 	tgm_chan_del(&chans_[in->channel - 1]);
+	releasePromises(false);
 	eventChannels_[in->channel - 1].reset();
 	admissions_[in->channel - 1].end();
 	admissionCookies_[in->channel - 1] = 0;
 	hangHolder_ = nullptr;
-	surfaces_.forget(in->channel - 1);
 	scheduleRetirement();
 	return kIOReturnSuccess;
 }
 
 // The kernel's view of the push at [va, va + bytes) through the binding that holds it (`hit`: the last one found, tried
-// first): pool BOs write-combined, cached and system BOs their kernel mapping. Null for a host import (no kernel mapping).
+// first): pool BOs write-combined, cached and system BOs their kernel mapping. Null for a host import (no kernel
+// mapping) and a sparse binding (no BO).
 // lock_ held, or a channel's submit lock: it reads the published bindings.
 const uint32_t *AGXDeviceUserClient::pushView(uint64_t va, uint64_t bytes,
 					      const BindingTable::Entry *&hit) const
@@ -317,7 +354,7 @@ const uint32_t *AGXDeviceUserClient::pushView(uint64_t va, uint64_t bytes,
 	if (!hit || !switch_gpu_binding_contains(*hit, va, bytes))
 		hit = bindTable_.find(va, bytes);
 	const void *base = nullptr;
-	if (hit) {
+	if (hit && hit->bo) {
 		if (hit->bo->pool_va) {
 			base = hit->bo->pool_va;
 		} else {

@@ -126,11 +126,26 @@ impl SM50Op for OpIAdd3 {
         swap_srcs_if_not_reg(src2, src1, GPR);
         b.copy_alu_src_if_not_reg(src0, GPR, SrcType::I32);
         b.copy_alu_src_if_not_reg(src2, GPR, SrcType::I32);
+        // GM20B traps (ILLEGAL_INSTR_ENCODING) on the constant-buffer form with
+        // A and B negated. IADD gives that pair of bits to .PO and Volta's
+        // IADD3 refuses it, so A and B are never both negated and a constant
+        // buffer is never negated.
+        if matches!(src1.src_ref, SrcRef::CBuf(_)) && src1.src_mod.is_ineg() {
+            b.copy_alu_src(src1, GPR, SrcType::I32);
+        }
         b.copy_alu_src_if_ineg_imm(src1, GPR, SrcType::I32);
+        if src0.src_mod.is_ineg() && src1.src_mod.is_ineg() {
+            if src2.src_mod.is_ineg() {
+                b.copy_alu_src_and_lower_ineg(src1, GPR, SrcType::I32);
+            } else {
+                std::mem::swap(src1, src2);
+            }
+        }
         b.copy_alu_src_if_i20_overflow(src1, GPR, SrcType::I32);
     }
 
     fn encode(&self, e: &mut SM50Encoder<'_>) {
+        assert!(self.srcs[0].is_unmodified() || self.srcs[1].is_unmodified());
         match &self.srcs[1].src_ref {
             SrcRef::Zero | SrcRef::Reg(_) => {
                 e.set_opcode(0x5cc0);
@@ -138,10 +153,12 @@ impl SM50Op for OpIAdd3 {
                 e.set_field(31..39, 0_u8); // parts, no shift
             }
             SrcRef::Imm32(imm32) => {
+                assert!(self.srcs[1].is_unmodified());
                 e.set_opcode(0x38c0);
                 e.set_src_imm_i20(20..39, 56, *imm32);
             }
             SrcRef::CBuf(cb) => {
+                assert!(self.srcs[1].is_unmodified());
                 e.set_opcode(0x4cc0);
                 e.set_src_cb(20..39, cb);
             }
@@ -293,5 +310,89 @@ mod sm53_int3_tests {
             Some((2, true, false))
         );
         assert_eq!(lop32i_form(LogicOp3 { lut: 0x96 }), None);
+    }
+
+    fn cbuf(offset: u16) -> Src {
+        SrcRef::CBuf(CBufRef {
+            buf: CBuf::Binding(2),
+            offset,
+        })
+        .into()
+    }
+
+    /// The op legalize leaves for srcs over three SSA values, and how many
+    /// instructions it put before it
+    fn legalized_iadd3(
+        srcs: impl FnOnce(Src, Src, Src) -> [Src; 3],
+    ) -> (OpIAdd3, usize) {
+        use crate::const_tracker::ConstTracker;
+        use crate::ssa_value::SSAValueAllocator;
+        let sm = ShaderModelInfo::new(53, 64);
+        let mut alloc = SSAValueAllocator::new();
+        let mut consts = ConstTracker::new();
+        let [x, y, z] = [(); 3].map(|_| alloc.alloc(RegFile::GPR));
+        let mut op = OpIAdd3 {
+            dst: alloc.alloc(RegFile::GPR).into(),
+            overflow: [Dst::None, Dst::None],
+            srcs: srcs(x.into(), y.into(), z.into()),
+        };
+        let mut b = LegalizeBuilder::new(&sm, &mut alloc, &mut consts);
+        op.legalize(&mut b);
+        (op, b.into_vec().len())
+    }
+
+    fn negs(op: &OpIAdd3) -> [bool; 3] {
+        [0, 1, 2].map(|i| op.srcs[i].src_mod.is_ineg())
+    }
+
+    /// GM20B traps on 4ccc000800270707: IADD3 R7, -R7, -c[0x2][0x8], R0
+    #[test]
+    fn a_negated_cbuf_is_read_into_a_register() {
+        for (op, copies) in [
+            legalized_iadd3(|x, _, z| [x.ineg(), cbuf(8).ineg(), z]),
+            legalized_iadd3(|x, _, z| [cbuf(8).ineg(), x.ineg(), z]),
+        ] {
+            assert!(op.srcs[1].as_ssa().is_some());
+            assert_eq!(negs(&op), [true, false, true]);
+            assert_eq!(copies, 1);
+        }
+    }
+
+    #[test]
+    fn negated_a_and_b_move_b_to_c() {
+        let (op, copies) = legalized_iadd3(|x, y, z| [x.ineg(), y.ineg(), z]);
+        assert_eq!(negs(&op), [true, false, true]);
+        assert_eq!(copies, 0);
+        let (op, copies) =
+            legalized_iadd3(|x, y, z| [x.ineg(), y.ineg(), z.ineg()]);
+        assert_eq!(negs(&op), [true, false, true]);
+        assert_eq!(copies, 1);
+    }
+
+    #[test]
+    fn an_unnegated_cbuf_stays_an_operand() {
+        let (op, copies) = legalized_iadd3(|x, _, z| [x.ineg(), cbuf(8), z]);
+        assert!(matches!(op.srcs[1].src_ref, SrcRef::CBuf(_)));
+        assert_eq!(copies, 0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn the_cbuf_form_never_encodes_a_negated_cbuf() {
+        encode(OpIAdd3 {
+            dst: dst(),
+            overflow: [Dst::None, Dst::None],
+            srcs: [gpr(7), cbuf(8).ineg(), gpr(0)],
+        });
+    }
+
+    #[test]
+    #[should_panic]
+    fn a_and_b_are_never_encoded_both_negated() {
+        encode(OpIAdd3 {
+            dst: dst(),
+            overflow: [Dst::None, Dst::None],
+            srcs: [gpr(5).ineg(), gpr(5).ineg(), gpr(0)],
+        });
     }
 }

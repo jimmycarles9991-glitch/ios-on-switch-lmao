@@ -104,12 +104,12 @@ struct A64XSelfTest: HWTest {
         }
         let (offset, length) = (UnsafeRawPointer(mapped) - #dsohandle, Int(size))
         guard file.count >= offset + length,
-            file.prefix(4).elementsEqual(withUnsafeBytes(of: MH_MAGIC_64.littleEndian, Array.init))
+              file.prefix(4).elementsEqual(withUnsafeBytes(of: MH_MAGIC_64.littleEndian, Array.init))
         else { throw TestFailure("the executable is not the thin image this process maps") }
         let words = length / 4
         let rewritten = file.withUnsafeBytes { disk in
             let memory = UnsafeRawPointer(mapped)
-            return (0..<words).reduce(0) { count, index in
+            return (0 ..< words).reduce(0) { count, index in
                 let at = index * 4
                 let changed =
                     disk.loadUnaligned(fromByteOffset: offset + at, as: UInt32.self)

@@ -72,9 +72,9 @@ static const struct {
 } render_server_threads[] = {
     {"com.apple.coreanimation.render-server", CA_RENDER, "render-server"},
     {"com.apple.coreanimation.display.primary", CA_DISPLAY, "display.primary"},
-    {"com.brunostjohn.switch.raw.submit", RAW_SUBMIT, "raw.submit"},
-    {"com.brunostjohn.switch.raw.completion", RAW_COMPLETION, "raw.completion"},
-    {"com.brunostjohn.switch.raw.pool", RAW_POOL, "raw.pool"},
+    {"com.brunostjohn.switch.gm20b.submit", RAW_SUBMIT, "raw.submit"},
+    {"com.brunostjohn.switch.gm20b.completion", RAW_COMPLETION, "raw.completion"},
+    {"com.brunostjohn.switch.gm20b.pool", RAW_POOL, "raw.pool"},
     {"metal2vulkan-scheduler", M2V_SCHEDULER, "m2v.scheduler"},
     {"metal2vulkan-queue-wait-0", M2V_QUEUE_WAIT, "m2v.queue-wait-0"},
     {"metal2vulkan-completion", M2V_COMPLETION, "m2v.completion"},

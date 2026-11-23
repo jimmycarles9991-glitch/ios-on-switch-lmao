@@ -1,6 +1,6 @@
 # QuartzCore's FragmentShaderConfig per IPSW kind (<build>.txt: its fragment buffer slot, length and padding), which
-# Core Animation's generic merge states (..Xghfc) branch on. The selected kind's layout is raw_ca_selector_layout.h:
-# #include "raw_ca_selector_layout.h" with -I$(GENDIR)/drivers/TegraGM20BMetal/precompile/ca-selectors.
+# Core Animation's generic merge states (..Xghfc) branch on. The selected kind's layout is ca_selector_layout.h:
+# #include "ca_selector_layout.h" with -I$(GENDIR)/drivers/TegraGM20BMetal/precompile/ca-selectors.
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python:py_binary.bzl", "py_binary")
 load("@rules_python//python:py_test.bzl", "py_test")
@@ -33,14 +33,14 @@ py_test(
 genrule(
     name = "layout",
     srcs = select({"//ipsw:" + kind: [kind + ".txt"] for kind in ("21H461", "24B119")}),
-    outs = ["raw_ca_selector_layout.h"],
+    outs = ["ca_selector_layout.h"],
     cmd = "$(execpath :ca_selectors) $< $@",
     tools = [":ca_selectors"],
 )
 
 cc_library(
     name = "layout_h",
-    hdrs = [":raw_ca_selector_layout.h"],
+    hdrs = [":ca_selector_layout.h"],
 )
 
 host_test(
@@ -50,19 +50,19 @@ host_test(
     deps = [":layout_h"],
 )
 
-# The raw pack's PackSelectors section (raw/runtime/raw_pack_selectors.h): the runtime's lookup over the bytes the
-# generator writes (raw/pack/selector_section.py, which pack_selectors_test.py holds to the same bytes)
+# The pack's PackSelectors section (pack_selectors.h): the runtime's lookup over the bytes the
+# generator writes (pack/selector_section.py, which pack_selectors_test.py holds to the same bytes)
 host_test(
     name = "pack_selectors_cpp_test",
     srcs = [
         "pack_selectors_test.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_pack_selectors.h",
-        "//drivers/TegraGM20BMetal:raw/pack/selector_configs.h",
+        "//drivers/TegraGM20BMetal:pack_selectors.h",
+        "//drivers/TegraGM20BMetal:pack/selector_configs.h",
     ],
     cxx_std = "c++17",
 )
 
-# The IPSW kinds' tables, of which //gpu/seed:raw_pack takes the selected kind's
+# The IPSW kinds' tables, of which //gpu/seed:pack takes the selected kind's
 filegroup(
     name = "tables",
     srcs = glob(["*.txt"]),
@@ -71,5 +71,5 @@ filegroup(
 py_test(
     name = "pack_selectors_test",
     srcs = ["pack_selectors_test.py"],
-    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+    deps = ["//drivers/TegraGM20BMetal:pack"],
 )

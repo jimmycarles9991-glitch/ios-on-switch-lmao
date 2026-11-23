@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // See record_digest.h.
 #include "drivers/TegraGM20BMetal/test/records/record_digest.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_set_entries.h"
+#include "drivers/TegraGM20BMetal/set_entries.h"
 
 #include <CommonCrypto/CommonDigest.h>
 #include <algorithm>
@@ -13,7 +13,7 @@
 namespace records {
 namespace {
 
-using namespace raw;
+using namespace gm20b;
 
 template <class T> void put(std::vector<uint8_t> &out, const T &value)
 {
@@ -160,7 +160,7 @@ uint32_t traits(const Pack &pack, const PackPipeline &pp)
     for (uint16_t format : pp.writtenFormat)
         if (format)
             t |= TraitWritten;
-    if ((pp.flags & PipelineTwoPlane) || pp.xrSlots)
+    if (pp.xrSlots)
         t |= TraitTwoPlane;
     for (uint8_t r : pp.fetchRung)
         rung = std::max<uint32_t>(rung, r & kFetchRungMask);

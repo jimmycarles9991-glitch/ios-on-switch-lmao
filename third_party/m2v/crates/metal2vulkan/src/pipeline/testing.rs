@@ -10,8 +10,8 @@
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use crate::budget::{Budget, Meter, SPIRV_WORDS};
 use crate::device::profile::DeviceProfile;
@@ -21,13 +21,15 @@ use crate::library::{FunctionArtifact, FunctionConstantValues};
 use crate::lower::select::LowerInputs;
 use crate::lower::select::Plan;
 use crate::pipeline::compile::{
-    EntryRef, LinkedSource, compile_bitcode, compile_bitcode_kept, specialized_bitcode_entry,
+    compile_bitcode, compile_bitcode_kept, specialized_bitcode_entry, EntryRef, LinkedSource,
 };
-use crate::pipeline::link::{LinkInputs, LinkTable, link};
+use crate::pipeline::link::{link, LinkInputs, LinkTable};
 use crate::pipeline::relocate::relocate;
 use crate::spirv::ir::TypedModule;
 use crate::spirv::testing::check_words_valid;
-pub use metal2vulkan_devtools::{AssembleError, engine_dir, fixtures_dir, llvm_assemble, metal_assemble};
+pub use metal2vulkan_devtools::{
+    engine_dir, fixtures_dir, llvm_assemble, metal_assemble, AssembleError,
+};
 
 /// A scratch directory, removed on drop.
 struct Scratch(PathBuf);
@@ -64,19 +66,29 @@ pub const EXACT_SAMPLING: DevicePolicy = DevicePolicy {
 
 /// Committed profile `stem` (`validation/profiles/<stem>.json`) derived under `policy`.
 pub fn profile(stem: &str, policy: DevicePolicy) -> Result<DeviceProfile, String> {
-    let path = fixtures_dir().join("../../profiles").join(format!("{stem}.json"));
+    let path = fixtures_dir()
+        .join("../../profiles")
+        .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let desc = DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
+    let desc =
+        DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
     let dev = Device::new(desc, policy).map_err(|e| format!("{stem}: {e}"))?;
     Ok(dev.profile().clone())
 }
 
 /// Committed profile `stem` derived under `policy`, with `storage` storage buffers a stage
 /// (`maxPerStageDescriptorStorageBuffers`).
-pub fn profile_with_storage_buffers(stem: &str, policy: DevicePolicy, storage: u32) -> Result<DeviceProfile, String> {
-    let path = fixtures_dir().join("../../profiles").join(format!("{stem}.json"));
+pub fn profile_with_storage_buffers(
+    stem: &str,
+    policy: DevicePolicy,
+    storage: u32,
+) -> Result<DeviceProfile, String> {
+    let path = fixtures_dir()
+        .join("../../profiles")
+        .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut desc = DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
+    let mut desc =
+        DeviceDescription::from_khronos_json(&text, None).map_err(|e| format!("{stem}: {e}"))?;
     desc.limits.max_per_stage_descriptor_storage_buffers = storage;
     let dev = Device::new(desc, policy).map_err(|e| format!("{stem}: {e}"))?;
     Ok(dev.profile().clone())
@@ -123,7 +135,11 @@ pub fn meter() -> Meter {
 
 /// Compile entry `entry` of `bitcode` for `p` with no function constants and default lowering
 /// inputs.
-pub fn compile(bitcode: &[u8], entry: &str, p: &DeviceProfile) -> Result<Arc<FunctionArtifact>, Error> {
+pub fn compile(
+    bitcode: &[u8],
+    entry: &str,
+    p: &DeviceProfile,
+) -> Result<Arc<FunctionArtifact>, Error> {
     compile_with(bitcode, entry, p, &LowerInputs::new())
 }
 
@@ -131,7 +147,10 @@ pub fn compile(bitcode: &[u8], entry: &str, p: &DeviceProfile) -> Result<Arc<Fun
 /// `p`: how they take its float outputs (`LoweringInputs::color_writes`) and which hold
 /// extended-range texels (`LoweringInputs::extended_range_colors`), as
 /// `Device::compile_render_pipeline` derives them.
-pub fn fragment_inputs(r: &crate::pipeline::link::RenderLinkInputs, p: &DeviceProfile) -> LowerInputs {
+pub fn fragment_inputs(
+    r: &crate::pipeline::link::RenderLinkInputs,
+    p: &DeviceProfile,
+) -> LowerInputs {
     let mut inputs = LowerInputs::new();
     inputs.color_writes = crate::pipeline::color_writes::color_writes(
         0..r.color_attachments.len() as u32,
@@ -139,12 +158,26 @@ pub fn fragment_inputs(r: &crate::pipeline::link::RenderLinkInputs, p: &DevicePr
         (r.alpha_to_coverage, r.texture_write_rounding_mode),
         p,
     );
-    inputs.extended_range_colors =
-        crate::pipeline::color_writes::extended_range_colors(&r.color_attachments, r.texture_write_rounding_mode);
-    inputs.two_plane_alphas = crate::pipeline::two_plane::alphas(&r.color_attachments, p);
+    inputs.extended_range_colors = crate::pipeline::color_writes::extended_range_colors(
+        &r.color_attachments,
+        r.texture_write_rounding_mode,
+    );
+    inputs.stand_in_colors = r
+        .color_attachments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let c = c.as_ref()?;
+            let s =
+                crate::pipeline::lower_inputs::StandInColor::new(c.stand_in?, c.blending_enabled);
+            Some((i as u32, s))
+        })
+        .collect();
     inputs.rotated_colors = crate::pipeline::color_writes::rotated_colors(&r.color_attachments);
-    inputs.half_output_lanes = crate::pipeline::color_writes::half_output_lanes(&r.color_attachments);
-    inputs.rotated_factors = crate::pipeline::color_writes::rotated_factors(&r.color_attachments, p);
+    inputs.half_output_lanes =
+        crate::pipeline::color_writes::half_output_lanes(&r.color_attachments);
+    inputs.rotated_factors =
+        crate::pipeline::color_writes::rotated_factors(&r.color_attachments, p);
     inputs.rotated_blends = crate::pipeline::color_writes::rotated_blends(&r.color_attachments, p);
     inputs.texture_write_rounding = r.texture_write_rounding_mode;
     inputs
@@ -192,7 +225,11 @@ pub fn compile_kept(
 /// constants and default lowering inputs: the module `compile` serializes (P9 applied,
 /// verified), which the CPU interpreter runs. It compiles again, apart from [`compile`];
 /// [`compile_kept`] returns both from one compile.
-pub fn typed_module(bitcode: &[u8], entry: &str, p: &DeviceProfile) -> Result<(Plan, TypedModule), Error> {
+pub fn typed_module(
+    bitcode: &[u8],
+    entry: &str,
+    p: &DeviceProfile,
+) -> Result<(Plan, TypedModule), Error> {
     typed_module_with(bitcode, entry, p, &LowerInputs::new())
 }
 
@@ -204,7 +241,13 @@ pub fn typed_module_with(
     p: &DeviceProfile,
     inputs: &LowerInputs,
 ) -> Result<(Plan, TypedModule), Error> {
-    typed_module_of(bitcode, entry, p, (inputs, &[]), &FunctionConstantValues::defaults())
+    typed_module_of(
+        bitcode,
+        entry,
+        p,
+        (inputs, &[]),
+        &FunctionConstantValues::defaults(),
+    )
 }
 
 /// [`typed_module`] with the function constants `consts` supplied: the module a pipeline built with
@@ -236,7 +279,13 @@ pub fn typed_module_linked_with(
     linked: &[LinkedSource<'_>],
     inputs: &LowerInputs,
 ) -> Result<(Plan, TypedModule), Error> {
-    typed_module_of(bitcode, entry, p, (inputs, linked), &FunctionConstantValues::defaults())
+    typed_module_of(
+        bitcode,
+        entry,
+        p,
+        (inputs, linked),
+        &FunctionConstantValues::defaults(),
+    )
 }
 
 /// Entry `entry` of `bitcode` as a compile specializes it before selection: its function
@@ -253,7 +302,13 @@ pub fn specialized_entry(
     m: &mut Meter,
 ) -> Result<crate::air::Entry, Error> {
     let inputs = LowerInputs::new();
-    specialized_bitcode_entry(bitcode, EntryRef::Name(entry), (consts, linked, &inputs), p, m)
+    specialized_bitcode_entry(
+        bitcode,
+        EntryRef::Name(entry),
+        (consts, linked, &inputs),
+        p,
+        m,
+    )
 }
 
 fn typed_module_of(
@@ -264,11 +319,19 @@ fn typed_module_of(
     consts: &FunctionConstantValues,
 ) -> Result<(Plan, TypedModule), Error> {
     let m = &mut meter();
-    let spec = specialized_bitcode_entry(bitcode, EntryRef::Name(entry), (consts, linked, inputs), p, m)?;
+    let spec = specialized_bitcode_entry(
+        bitcode,
+        EntryRef::Name(entry),
+        (consts, linked, inputs),
+        p,
+        m,
+    )?;
     let memory = crate::memory::static_root::analyze_memory(&spec, p, m)?;
     let plan = crate::lower::select::select(&spec, &memory, p, inputs, m)?;
     let crate::lower::emit::Emitted {
-        mut module, loop_free, ..
+        mut module,
+        loop_free,
+        ..
     } = crate::lower::emit::emit_module(&spec, &plan, m)?;
     crate::spirv::roll::roll_entry(&mut module, m)?;
     crate::spirv::dead::take_outside_loops(&mut module, &loop_free, m)?;
@@ -278,7 +341,10 @@ fn typed_module_of(
 }
 
 /// Link `a` alone and relocate it: the table and the final words, without L3.
-pub fn link_standalone(a: &FunctionArtifact, p: &DeviceProfile) -> Result<(LinkTable, Vec<u32>), Error> {
+pub fn link_standalone(
+    a: &FunctionArtifact,
+    p: &DeviceProfile,
+) -> Result<(LinkTable, Vec<u32>), Error> {
     let table = link(&[a], &LinkInputs::standalone(), p)?.table;
     let words = relocate(a, &table)?;
     Ok((table, words))
@@ -288,7 +354,10 @@ pub fn link_standalone(a: &FunctionArtifact, p: &DeviceProfile) -> Result<(LinkT
 /// profile's environments and relaxations). Returns the table and the final words. A key the
 /// function reads as data left a specialization constant fails it: a read of the key's constant the
 /// entry hook did not reach, which would make a pipeline per bound value.
-pub fn link_and_validate(a: &FunctionArtifact, p: &DeviceProfile) -> Result<(LinkTable, Vec<u32>), String> {
+pub fn link_and_validate(
+    a: &FunctionArtifact,
+    p: &DeviceProfile,
+) -> Result<(LinkTable, Vec<u32>), String> {
     if let Some(c) = a.interface.spec.iter().find(|c| c.key.read_as_data()) {
         return Err(format!("{:?} is still a specialization constant", c.key));
     }
@@ -360,7 +429,11 @@ pub fn without_math_routines(words: &[u32]) -> Vec<u32> {
             keep[range.clone()].fill(false);
         }
     }
-    words.iter().zip(keep).filter_map(|(w, k)| k.then_some(*w)).collect()
+    words
+        .iter()
+        .zip(keep)
+        .filter_map(|(w, k)| k.then_some(*w))
+        .collect()
 }
 
 /// The instructions of the module `words` after its header: each opcode with its whole
@@ -370,8 +443,12 @@ fn instructions(words: &[u32]) -> Result<Vec<(crate::spv::Op, &[u32])>, String> 
     let mut at = words.get(5..).ok_or("no SPIR-V header")?;
     while let Some(first) = at.first() {
         let count = (first >> 16) as usize;
-        let inst = at.get(..count).filter(|_| count > 0).ok_or("truncated instruction")?;
-        let op = crate::spv::Op::from_u32(first & 0xffff).ok_or_else(|| format!("opcode {}", first & 0xffff))?;
+        let inst = at
+            .get(..count)
+            .filter(|_| count > 0)
+            .ok_or("truncated instruction")?;
+        let op = crate::spv::Op::from_u32(first & 0xffff)
+            .ok_or_else(|| format!("opcode {}", first & 0xffff))?;
         insts.push((op, inst));
         at = at.get(count..).unwrap_or_default();
     }
@@ -386,8 +463,8 @@ pub fn atomics_on_places(words: &[u32]) -> Result<usize, String> {
     let insts = instructions(words)?;
     let mut defs = std::collections::HashMap::new();
     for (op, inst) in &insts {
-        let (typed, result) =
-            crate::spirv_binary::instruction_result_shape(*op).ok_or_else(|| format!("{op:?}: no grammar"))?;
+        let (typed, result) = crate::spirv_binary::instruction_result_shape(*op)
+            .ok_or_else(|| format!("{op:?}: no grammar"))?;
         if result {
             let id = inst.get(if typed { 2 } else { 1 }).ok_or("no result id")?;
             defs.insert(*id, *op);
@@ -452,7 +529,9 @@ pub fn interlocked_coherence(words: &[u32]) -> Result<CoherentAccesses, String> 
     let mut types: HashMap<u32, u32> = HashMap::new();
     let mut roots: HashMap<u32, u32> = HashMap::new();
     let at = |inst: &[u32], i: usize| -> Result<u32, String> {
-        inst.get(i).copied().ok_or_else(|| "a short instruction".to_string())
+        inst.get(i)
+            .copied()
+            .ok_or_else(|| "a short instruction".to_string())
     };
     for (op, inst) in &insts {
         match op {
@@ -467,7 +546,9 @@ pub fn interlocked_coherence(words: &[u32]) -> Result<CoherentAccesses, String> 
                 wide.insert(at(inst, 1)?);
             }
             // Storage (sampled = 2), not subpass data.
-            Op::TypeImage if at(inst, 7)? == 2 && at(inst, 3)? != crate::spv::Dim::SubpassData as u32 => {
+            Op::TypeImage
+                if at(inst, 7)? == 2 && at(inst, 3)? != crate::spv::Dim::SubpassData as u32 =>
+            {
                 storage_images.insert(at(inst, 1)?);
             }
             Op::Constant => {
@@ -567,7 +648,11 @@ pub fn interlocked_coherence(words: &[u32]) -> Result<CoherentAccesses, String> 
         }
         // `Aligned`'s literal precedes the scopes; `MakePointerAvailable`'s precedes
         // `MakePointerVisible`'s.
-        let (make, before) = if load { (0x10, mask & 0x8 != 0) } else { (0x8, false) };
+        let (make, before) = if load {
+            (0x10, mask & 0x8 != 0)
+        } else {
+            (0x8, false)
+        };
         let scope_at = mask_at + 1 + usize::from(mask & 0x2 != 0) + usize::from(before);
         let scope = inst.get(scope_at).copied();
         if mask & 0x20 == 0 || mask & make == 0 || !scope.is_some_and(device_scope) {
@@ -626,8 +711,8 @@ pub fn atomic_place_scan_steps(words: &[u32]) -> Result<usize, String> {
             lengths.push(0);
             continue;
         }
-        let (typed, result) =
-            crate::spirv_binary::instruction_result_shape(*op).ok_or_else(|| format!("{op:?}: no grammar"))?;
+        let (typed, result) = crate::spirv_binary::instruction_result_shape(*op)
+            .ok_or_else(|| format!("{op:?}: no grammar"))?;
         if result {
             let id = inst.get(if typed { 2 } else { 1 }).ok_or("no result id")?;
             defs.insert(*id, (*op, block, pos));
@@ -701,7 +786,10 @@ pub struct MoltenVkMslArgs {
 pub fn moltenvk_msl_args(words: &[u32]) -> Result<MoltenVkMslArgs, String> {
     use crate::spv::{BuiltIn, Decoration, ExecutionMode, ExecutionModel, FPFastMathMode, Op};
     let insts = instructions(words)?;
-    let entries = insts.iter().filter(|(op, _)| *op == Op::EntryPoint).collect::<Vec<_>>();
+    let entries = insts
+        .iter()
+        .filter(|(op, _)| *op == Op::EntryPoint)
+        .collect::<Vec<_>>();
     let [(_, entry)] = entries.as_slice() else {
         return Err(format!(
             "{} entry points (a MoltenVK pipeline stage names one)",
@@ -723,7 +811,10 @@ pub fn moltenvk_msl_args(words: &[u32]) -> Result<MoltenVkMslArgs, String> {
                 "--msl-agx-manual-cube-grad-fixup",
             ],
         ),
-        Some(ExecutionModel::Vertex) => ("vert", &["--flip-vert-y", "--msl-agx-manual-cube-grad-fixup"]),
+        Some(ExecutionModel::Vertex) => (
+            "vert",
+            &["--flip-vert-y", "--msl-agx-manual-cube-grad-fixup"],
+        ),
         other => return Err(format!("execution model {other:?} ({model})")),
     };
     let spirv_cross = [
@@ -763,7 +854,9 @@ pub fn moltenvk_msl_args(words: &[u32]) -> Result<MoltenVkMslArgs, String> {
         match (op, inst.get(1..).unwrap_or_default()) {
             (Op::ExecutionMode, [target, mode, ..]) if *target == id => {
                 if *mode == ExecutionMode::SignedZeroInfNanPreserve as u32 {
-                    fast &= !(FPFastMathMode::NSZ | FPFastMathMode::NOT_INF | FPFastMathMode::NOT_NAN).bits();
+                    fast &=
+                        !(FPFastMathMode::NSZ | FPFastMathMode::NOT_INF | FPFastMathMode::NOT_NAN)
+                            .bits();
                 } else if *mode == ExecutionMode::ContractionOff as u32 {
                     fast &= !FPFastMathMode::ALLOW_CONTRACT.bits();
                 }
@@ -775,7 +868,9 @@ pub fn moltenvk_msl_args(words: &[u32]) -> Result<MoltenVkMslArgs, String> {
                     .get(flags)
                     .ok_or_else(|| format!("FPFastMathDefault flags %{flags} is no constant"))?;
             }
-            (Op::Decorate, [_, decoration, mask]) if *decoration == Decoration::FPFastMathMode as u32 => {
+            (Op::Decorate, [_, decoration, mask])
+                if *decoration == Decoration::FPFastMathMode as u32 =>
+            {
                 fast &= mask;
             }
             (Op::Decorate, [target, decoration, rest @ ..])
@@ -784,7 +879,8 @@ pub fn moltenvk_msl_args(words: &[u32]) -> Result<MoltenVkMslArgs, String> {
                 let place = (*target, member);
                 if *decoration == Decoration::Invariant as u32 {
                     invariant.insert(place);
-                } else if *decoration == Decoration::BuiltIn as u32 && rest.first() == Some(&(BuiltIn::Position as u32))
+                } else if *decoration == Decoration::BuiltIn as u32
+                    && rest.first() == Some(&(BuiltIn::Position as u32))
                 {
                     position.insert(place);
                 }
@@ -848,7 +944,8 @@ fn msl_tool(cmd: &str, args: &[&std::ffi::OsStr]) -> Result<(), AssembleError> {
         Err(metal2vulkan_devtools::tools::ToolError::Launch { executable, .. }) => {
             let why = format!("{cmd} not found ({})", executable.display());
             assert!(
-                cmd != "spirv-cross" || std::env::var_os(REQUIRE_SPIRV_CROSS).is_none_or(|v| v != "1"),
+                cmd != "spirv-cross"
+                    || std::env::var_os(REQUIRE_SPIRV_CROSS).is_none_or(|v| v != "1"),
                 "{REQUIRE_SPIRV_CROSS}=1: {why}"
             );
             Err(AssembleError::Missing(why))
@@ -859,7 +956,11 @@ fn msl_tool(cmd: &str, args: &[&std::ffi::OsStr]) -> Result<(), AssembleError> {
 
 /// Convert the module `words` to MSL in `scratch` with `spirv-cross` and `args` (MoltenVK's
 /// options, [`moltenvk_msl_args`]); returns the MSL path.
-fn convert_to_msl(words: &[u32], args: &MoltenVkMslArgs, scratch: &Scratch) -> Result<PathBuf, AssembleError> {
+fn convert_to_msl(
+    words: &[u32],
+    args: &MoltenVkMslArgs,
+    scratch: &Scratch,
+) -> Result<PathBuf, AssembleError> {
     let spv = scratch.0.join("module.spv");
     let msl = scratch.0.join("module.metal");
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -888,7 +989,9 @@ pub fn moltenvk_msl(words: &[u32]) -> Result<String, AssembleError> {
 /// MoltenVK's pipeline creation would.
 pub fn moltenvk_msl_compile(words: &[u32]) -> Result<(), AssembleError> {
     if !cfg!(target_os = "macos") {
-        return Err(AssembleError::Missing("the Metal compiler needs macOS".to_owned()));
+        return Err(AssembleError::Missing(
+            "the Metal compiler needs macOS".to_owned(),
+        ));
     }
     let args = moltenvk_msl_args(words).map_err(AssembleError::Rejected)?;
     let scratch = Scratch::new().map_err(|e| AssembleError::Missing(format!("scratch: {e}")))?;
@@ -908,7 +1011,11 @@ pub fn moltenvk_msl_compile(words: &[u32]) -> Result<(), AssembleError> {
         e => e,
     })?;
     let msl = convert_to_msl(words, &args, &scratch)?;
-    let mut compile = args.metal.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>();
+    let mut compile = args
+        .metal
+        .iter()
+        .map(std::ffi::OsStr::new)
+        .collect::<Vec<_>>();
     compile.extend([msl.as_os_str(), "-o".as_ref(), air.as_os_str()]);
     msl_tool("xcrun", &compile)
 }

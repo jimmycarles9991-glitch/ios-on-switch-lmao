@@ -3,7 +3,7 @@
 
 usage: rungcheck.py <dump dir> --corpus <R lines>... [--invocations N] [--seed S]
 
-The dump is directcheck's DIRECTCHECK_DUMP of a corpus whose lines carry fetch-free tags (raw/pack/ca/fetchfree.py):
+The dump is directcheck's DIRECTCHECK_DUMP of a corpus whose lines carry fetch-free tags (pack/ca/fetchfree.py):
 <dir>/<key hash>.json the storage form, <dir>/free/<key hash>.json its fetch-free form. Both programs run the same quads
 (quad.py) on the same seeded attributes, constant buffers and texture samples, every texture an 8-bit premultiplied
 image and the destination 8-bit premultiplied codes, as Core Animation's are. The storage form's stored texel is
@@ -11,14 +11,14 @@ converted to codes by the ROP's store rule; the fetch-free form's output goes th
 fetch: rung 2 the chip's 8-bit integer blender (tools/benchloop/blend_models.py chip, with the form's own factors), or
 on an RGBA16Float target its float blender (each factor, term and the sum rounded to f32, the source not clamped, the
 sum stored toward zero to half: rop.py),
-rung 3 the iterated blend program the form names (raw/pack/iterated/emu.py, every pass rounded to half) over the source
-the form's SET_PS_SATURATE clamps to [0, 1] on an 8-bit target (raw_fetch_free.h iteratedBlendWords). On an RGBA16Float
+rung 3 the iterated blend program the form names (pack/iterated/emu.py, every pass rounded to half) over the source
+the form's SET_PS_SATURATE clamps to [0, 1] on an 8-bit target (fetch_free.h iteratedBlendWords). On an RGBA16Float
 target the destination is the half of its code, the source is not clamped, the storage form's texel is rounded to half
 as its store converts it and the ROP's result toward zero as it stores it (x1-bench3 BENCH3.md section 8); a channel's
 difference is in 8-bit codes up to 1 and relative above it (half_codes). A colour
 matrix form's program and constants are those the GPU's macro makes of the matrix uniform both programs read
 (fetchfree_link.py finds it as the pack does). The uniform buffers' bind residuals read as 0. Each state gets the
-largest difference in codes over every written channel; rule fetch.blend allows 2 (raw_fetch_rungs.h).
+largest difference in codes over every written channel; rule fetch.blend allows 2 (fetch_rungs.h).
 """
 
 import argparse
@@ -33,8 +33,8 @@ from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'drivers/TegraGM20BMetal/raw/pack/iterated'))
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'drivers/TegraGM20BMetal/raw/pack'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'drivers/TegraGM20BMetal/pack/iterated'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'drivers/TegraGM20BMetal/pack'))
 
 import emu
 import fetchfree_link
@@ -52,7 +52,7 @@ PER_TARGET = 0x1E00  # SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA(j), then its op, 
 OP_ADD, OP_SUBTRACT, OP_REVERSE, OP_MIN, OP_MAX = 0x8006, 0x800A, 0x800B, 0x8007, 0x8008
 BOUND = 2
 FETCH_HANDLE = 0x7E5E0000  # a fetched colour's handle word: this, its colour in the low byte
-ENTRY_FETCH = 3  # runtime/raw_pack.h EntryFetch
+ENTRY_FETCH = 3  # runtime/pack.h EntryFetch
 # a generic attribute's vec4 is seeded premultiplied (w the largest), as Core Animation's vertex colours are
 GENERIC = 0x80
 RGBA16_FLOAT = 115  # MTLPixelFormatRGBA16Float
@@ -310,7 +310,7 @@ def matrix_words(stored: dict, free: dict) -> tuple[int, int, int, int] | None:
 def matrix_program(seeded: Seeded, at: tuple[int, int, int, int]) -> object:
     """Give the program and constants SWITCH_GM20B_MACRO_VCM_CONSTANTS makes of the matrix uniform's 11 arguments.
 
-    A uniform of the rows alone is followed by a clamp pair of 0 (raw_gpu.cpp matrixConstants).
+    A uniform of the rows alone is followed by a clamp pair of 0 (gpu.cpp matrixConstants).
     """
     lanes = seeded.inputs(0, -1, {at[0]: at[2]})
     words = [lanes.cbuf(at[0], at[1] + 4 * k) for k in range(at[3])]

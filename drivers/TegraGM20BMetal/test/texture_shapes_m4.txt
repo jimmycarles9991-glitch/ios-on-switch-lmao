@@ -1,5 +1,5 @@
 # newTextureWithDescriptor: on an Apple M4 Max (macOS 27), probed at 16x16 (16x1 1D, 16x16x4 3D): the shapes of 21
-# formats the raw path left to m2v at studio x1-m2v-forms 55dbe964e (m2vf-targets2 probe/shapes), then every shape of
+# formats the driver left to m2v at studio x1-m2v-forms 55dbe964e (m2vf-targets2 probe/shapes), then every shape of
 # formats 22, 32, 62, 112 and 241 (m2vf-shapes probe/shapes_all) and of 222 and 31 (m2vf-shapes2 probe/shapes_all). M
 # made, V a validation stop, N nil; format, MTLTextureType, MTLStorageMode, levels, samples, arrayLength,
 # MTLTextureUsage

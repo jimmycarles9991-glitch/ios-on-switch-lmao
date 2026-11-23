@@ -36,7 +36,7 @@ std::vector<Captured> capture()
 }
 
 // NVIDIA's userspace's CSAA_ENABLE of 0 (context.tsv), where NVK keeps the golden context's 1
-bool rawOwn(const switch_gm20b_context_method &m)
+bool gm20bOwn(const switch_gm20b_context_method &m)
 {
     return m.subc == 0 && m.mthd == SWITCH_NVB197_SET_CSAA_ENABLE && m.data == 0;
 }
@@ -45,7 +45,7 @@ std::vector<switch_gm20b_context_method> nvkShared()
 {
     std::vector<switch_gm20b_context_method> out;
     for (const switch_gm20b_context_method &m : switch_gm20b_context)
-        if (!rawOwn(m))
+        if (!gm20bOwn(m))
             out.push_back(m);
     return out;
 }

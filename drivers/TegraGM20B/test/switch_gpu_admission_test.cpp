@@ -40,6 +40,27 @@ TEST_F(Backing, AdmissionWriterBlocksCpuButLeavesGpuDependencyChainingAvailable)
 	switch_gpu_backing_release(b);
 }
 
+// IOSurface's lock only bounds CPU access (IOSurfaceRef.h): a command buffer of several jobs reads a surface another
+// process keeps locked for writing, as one job does, and its write to it still waits for the lock's end
+TEST_F(Backing, AnAdmissionsReadGoesOnBesideACpuWriterAndItsWriteWaits)
+{
+	auto *b = backing();
+	ASSERT_EQ(switch_gpu_backing_cpu_acquire(b, 0, 4096, kWrite | avoid), 0);
+	SwitchGpuAdmission admission;
+	switch_gpu_backing_use read{b, kRead | SWITCH_GPU_BACKING_NO_CPU_EXCLUSION, 0};
+	EXPECT_EQ(switch_gpu_backing_admission_ready(b, kRead), 1);
+	EXPECT_EQ(switch_gpu_backing_admission_ready(b, kWrite), 0);
+	EXPECT_EQ(admission.begin(&read, 1, nullptr, 0, nullptr, 0), 0);
+	EXPECT_TRUE(admission.covers(&read, 1));
+	admission.end();
+	switch_gpu_backing_use write{b, kWrite, 0};
+	EXPECT_EQ(admission.begin(&write, 1, nullptr, 0, nullptr, 0), -16);
+	EXPECT_EQ(switch_gpu_backing_cpu_release(b, 0, 4096, kWrite | avoid), 0);
+	EXPECT_EQ(admission.begin(&write, 1, nullptr, 0, nullptr, 0), 0);
+	admission.end();
+	switch_gpu_backing_release(b);
+}
+
 TEST_F(Backing, AdmissionFailureDoesNotReserveEarlierResources)
 {
 	auto *a = backing(), *b = backing();

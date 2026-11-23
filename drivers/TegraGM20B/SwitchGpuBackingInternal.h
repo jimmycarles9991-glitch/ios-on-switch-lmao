@@ -71,7 +71,16 @@ struct switch_gpu_backing {
 	uint32_t mapping_engines;
 	uint32_t
 		mapped_engines;  // atomic: 1 << engine for each engine that mapped it (switch_gpu_backing_note_mapped)
+	// The content a refused write was to make current (switch_gpu_backing_write_refused). It is never counted up: any
+	// later write moves content to it, which ends the refusal with no store of its own.
+	uint64_t refused_content;
 };
+
+// The backing's last write was refused after its current content was made: it does not hold the frame asked of it.
+inline bool switch_gpu_backing_write_refused_locked(const switch_gpu_backing *backing)
+{
+	return backing->refused_content == backing->content + 1;
+}
 
 struct switch_gpu_cpu_lease {
 	switch_gpu_cpu_lease *next;
@@ -79,6 +88,10 @@ struct switch_gpu_cpu_lease {
 	uint64_t offset, bytes;
 	uint32_t access;
 	switch_gpu_backing_token producer;
+#if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
+	// a snapshot's (snapshot_read); initialized here so the leases' positional brace inits need not name it
+	switch_gpu_scanout_look look = {};
+#endif
 };
 
 // The ownership order (SwitchGpuBackingOrder.cpp): one lock under which every party reads and changes the backings'
@@ -183,9 +196,10 @@ extern "C" int tgm_promise_abandoned(uint32_t offset, uint32_t value);
 extern "C" int switch_gpu_ready_waiting(void);
 
 // Writer promises (SwitchGpuWriterPromise.h), under the backing's lock: the pending ones but the asking connection's own
-// as tokens (at most capacity, -28 past it), or with no tokens their count. One given up on is not pending: its users go
-// on without its writes. A CPU reader cannot acquire one on the GPU: it sleeps as for a CPU writer until the promised
-// job is submitted or the promise is given back or up.
+// as tokens (at most capacity, -28 past it), or with no tokens their count. One given up on is not pending: nothing waits
+// for it, and a snapshot of the surface is refused (switch_gpu_backing_promise_given_up_locked). A CPU reader cannot
+// acquire one on the GPU: it sleeps as for a CPU writer until the promised job is submitted or the promise is given back
+// or up.
 inline int switch_gpu_backing_promises_locked(const switch_gpu_backing *backing, uint32_t own_first,
 					      uint32_t own_end, switch_gpu_backing_token *tokens,
 					      uint32_t capacity)
@@ -217,6 +231,17 @@ inline bool switch_gpu_backing_promise_pending_locked(const switch_gpu_backing *
 {
 	return backing->promise_count &&
 	       switch_gpu_backing_promises_locked(backing, 0, 0, nullptr, 0) > 0;
+}
+
+// A promise on it was given up on (SwitchGpuPromiseGiveUp.h): its job never wrote, and the frame it promised is missing
+// while the ref stays (until the promise's cancel, which marks the backing refused, or the job's late submission).
+inline bool switch_gpu_backing_promise_given_up_locked(const switch_gpu_backing *backing)
+{
+	switch_gpu_backing_assert_held(backing);
+	for (uint32_t i = 0; i < backing->promise_count; ++i)
+		if (tgm_promise_abandoned(backing->promises[i].offset, backing->promises[i].value))
+			return true;
+	return false;
 }
 
 // cpu_readers and cpu_writers change only under the backing's lock, and a job reads them before it takes that lock

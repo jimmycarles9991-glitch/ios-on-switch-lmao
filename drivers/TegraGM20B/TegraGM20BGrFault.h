@@ -2,7 +2,6 @@
 #ifndef TEGRA_GM20B_GR_FAULT_H
 #define TEGRA_GM20B_GR_FAULT_H
 
-#include <core/device.h>
 #include <engine/fifo/chan.h>
 #include <engine/fifo/runl.h>
 
@@ -10,34 +9,18 @@
  * TEX alone), before it acknowledges it: GR holds the faulting method until then (gpu_fault.c). */
 void tgm_gr_fault(int chid);
 
-static inline void switch_gpu_gr_fault_stop(struct nvkm_device *device, bool *held,
-					    struct nvkm_chan *chan, int chid)
+/* chan: the channel on FECS's current context (0x409b00) at the interrupt, the one nvgpu's gk20a_gr_isr recovers
+ * (gr_fecs_current_ctx_r). Stopped, and its group recovered: nvkm_runl_rc preempts it under runl->mutex, as every
+ * PFIFO_PREEMPT write is made. GR's FIFO access is the interrupt's to turn back on at its end, as nouveau's and nvgpu's
+ * handlers do. Held off until nvkm_runl_rc was done (C24, C32), GR sat in a busy context load through the whole of its
+ * preempt wait (2000 PTIMER ms, 3.26 s), and the channels waiting behind it hit the context-switch timeout. */
+static inline void switch_gpu_gr_fault_stop(struct nvkm_chan *chan, int chid)
 {
-	if (!chan || atomic_read(&chan->errored) == 2) {
-		tgm_gr_fault(chid);
-		return;
-	}
-	*held = true;
-	nvkm_mask(device, 0x400500, 0x00010001, 0);
 	tgm_gr_fault(chid);
+	if (!chan)
+		return;
 	nvkm_chan_error(chan, false);
 	nvkm_runl_rc_cgrp(chan->cgrp);
 }
-
-static inline void switch_gpu_gr_fault_access(struct nvkm_device *device, bool held)
-{
-	nvkm_wr32(device, 0x400500, held ? 0 : 0x00010001);
-}
-
-static inline void switch_gpu_gr_fault_release(struct nvkm_device *device, bool *held,
-					       const atomic_t *pending)
-{
-	if (*held && !atomic_read(pending)) {
-		*held = false;
-		switch_gpu_gr_fault_access(device, false);
-	}
-}
-
-void switch_gpu_gr_fault_recovered(struct nvkm_runl *runl);
 
 #endif /* TEGRA_GM20B_GR_FAULT_H */

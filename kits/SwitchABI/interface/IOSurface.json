@@ -23,6 +23,24 @@
     },
     "memoryRegions": {
       "doc": "The address ranges of the creating task's memory a surface was made over (0: none), which that task writes without IOSurfaceLock; IOSurface moves no seed for them."
+    },
+    "bulkSize": {
+      "doc": "The bulk attachment structure getBulkAttachments copies."
+    },
+    "bulkYCbCrMatrix": {
+      "doc": "The bulk attachment byte holding kIOSurfaceYCbCrMatrix's ITU-T H.273 code point (2: none)."
+    },
+    "bulkColorPrimaries": {
+      "doc": "The byte holding kIOSurfaceColorPrimaries' H.273 code point."
+    },
+    "bulkTransferFunction": {
+      "doc": "The byte holding kIOSurfaceTransferFunction's H.273 code point."
+    },
+    "bulkChromaTop": {
+      "doc": "The byte holding kIOSurfaceChromaLocationTopField (1 Left .. 6 Bottom, 0 none)."
+    },
+    "bulkChromaBottom": {
+      "doc": "The byte holding kIOSurfaceChromaLocationBottomField."
     }
   },
   "functions": {
@@ -182,6 +200,12 @@
       "doc": "IOSurface::getSeed(): the shared entry's +0xc word, which IOSurface::lock moves for a lock without kIOSurfaceLockReadOnly, the device write end moves for an engine's write, and a surface made over its creator's memory starts at 1; the entry is zeroed when made, so a surface nothing wrote reads 0",
       "symbols": [
         "tegra_gm20b_ios_seed"
+      ]
+    },
+    "bulk_attachments": {
+      "doc": "IOSurface::getBulkAttachments(void *out, size_t *size): under the surface lock, the bulk attachments (the colour tags IOSurface.framework keeps as code points instead of property values) into out, at most bulkSize bytes and the rest of *size zeroed, *size set to what was copied",
+      "symbols": [
+        "switch_surface_bulk_attachments"
       ]
     }
   }

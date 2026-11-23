@@ -57,7 +57,7 @@ bool planeLandscapeDecide(const native_planes::Roles &roles, uint32_t width, uin
     switch_display::Overlay video = {};
     const int slot = planeLandscapeSlotFor(layer.surface, layer.layer, width, height, video.image);
     if (planeRetry(slot)) {
-        d.waitSlot = true;
+        planeWaits(d, "the landscape route's slot waits", slot);
         return true;
     }
     if (slot < 0)

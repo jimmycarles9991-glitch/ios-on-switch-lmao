@@ -236,13 +236,35 @@ int SwitchGpuEventClient::cancel(uint64_t handle, uint64_t cookie)
 	return 0;
 }
 
+bool SwitchGpuEventClient::compositor(int pid, bool on)
+{
+	IOLockLock(lock_);
+	const bool change = !closed_ && (compositorPid_ != 0) != on;
+	if (change)
+		compositorPid_ = on ? pid : 0;
+	IOLockUnlock(lock_);
+	if (!change)
+		return true;
+	const int counted = switch_gpu_events_compositor(pid, on);
+	if (counted) {
+		IOLockLock(lock_);
+		compositorPid_ = 0;
+		IOLockUnlock(lock_);
+	}
+	return !counted;
+}
+
 void SwitchGpuEventClient::stop()
 {
 	if (!lock_)
 		return;
 	IOLockLock(lock_);
 	closed_ = true;
+	const int compositorPid = compositorPid_;
+	compositorPid_ = 0;
 	IOLockUnlock(lock_);
+	if (compositorPid)
+		switch_gpu_events_compositor(compositorPid, 0);
 	for (;;) {
 		IOLockLock(lock_);
 		Watch *watch = watches_;

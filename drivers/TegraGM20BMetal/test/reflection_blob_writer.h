@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
-// A reflection blob (raw/runtime/raw_reflection_blob.h) of an NmbReflectionNode table as m2v's compute artifact holds it
-// (translate/NativeMetalReflection.rs Reflection::of: node 0 the root, its edges the bindings), laid out as the bridge's
-// Reflection::blob lays the same bindings out: no root, every other node one index down, the root's bindings stage 0's.
+// A reflection blob (reflection_blob.h) of an NmbReflectionNode table, as the translator's
+// Reflection::blob lays out a state's (translate/NativeMetalReflection.rs): each stage's bindings a range of the edges.
+// `of` takes a table as m2v's compute artifact held it (Reflection::of: node 0 the root, its edges the bindings): no
+// root in the blob, every other node one index down, the root's bindings stage 0's.
 #pragma once
 #include <cstdint>
 #include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
-#include "../raw/runtime/raw_reflection_blob.h"
-#include "bridge/NativeMetalComputeArtifact.h"
+#include "../reflection_blob.h"
+#include "NativeMetalComputeArtifact.h"
 
 namespace reflection_blob {
 
@@ -18,39 +19,53 @@ inline void word(std::string &out, uint32_t w)
     out.append(reinterpret_cast<const char *>(&w), sizeof w);
 }
 
-// `nodes` and `edges` as m2v's table; `stages`: 1 (compute) or 5 (render, the root's bindings the vertex stage's)
-inline std::string of(const std::vector<NmbReflectionNode> &nodes, const std::vector<uint32_t> &edges, uint32_t stages)
+// `nodes` (children and members before their parents) and `edges`, `stages` each stage's bindings
+inline std::string blob(const std::vector<NmbReflectionNode> &nodes, const std::vector<uint32_t> &edges,
+                        const std::vector<gm20b::ReflectionRange> &stages)
 {
-    const auto down = [](uint32_t i) {
-        return i == raw::kReflectionAbsent ? i : i - 1;
-    };
-    std::string names, body;
+    std::string names;
     std::vector<uint32_t> nameAt;
-    for (size_t i = 1; i < nodes.size(); i++) {
-        nameAt.push_back(nodes[i].name ? uint32_t(names.size()) + 1 : 0);
-        if (nodes[i].name)
-            names.append(nodes[i].name, strlen(nodes[i].name) + 1);
+    for (const NmbReflectionNode &n : nodes) {
+        nameAt.push_back(n.name ? uint32_t(names.size()) + 1 : 0);
+        if (n.name)
+            names.append(n.name, strlen(n.name) + 1);
     }
-    std::string out(raw::kReflectionMagic, sizeof raw::kReflectionMagic);
-    for (const uint32_t w :
-         {raw::kReflectionVersion, stages, uint32_t(nodes.size() - 1), uint32_t(edges.size()), uint32_t(names.size())})
+    std::string out(gm20b::kReflectionMagic, sizeof gm20b::kReflectionMagic);
+    for (const uint32_t w : {gm20b::kReflectionVersion, uint32_t(stages.size()), uint32_t(nodes.size()),
+                             uint32_t(edges.size()), uint32_t(names.size())})
         word(out, w);
-    for (uint32_t s = 0; s < stages; s++) {
-        word(out, s ? 0 : nodes[0].first);
-        word(out, s ? 0 : nodes[0].count);
+    for (const gm20b::ReflectionRange &s : stages) {
+        word(out, s.first);
+        word(out, s.count);
     }
-    for (size_t i = 1; i < nodes.size(); i++) {
+    for (size_t i = 0; i < nodes.size(); i++) {
         const NmbReflectionNode &n = nodes[i];
-        for (const uint32_t w : {n.kind, n.flags, nameAt[i - 1], n.first, n.count})
+        for (const uint32_t w : {n.kind, n.flags, nameAt[i], n.first, n.count})
             word(out, w);
         for (const uint32_t child : n.children)
-            word(out, down(child));
+            word(out, child);
         word(out, 0);
         out.append(reinterpret_cast<const char *>(n.values), sizeof n.values);
     }
     for (const uint32_t e : edges)
-        word(out, down(e));
+        word(out, e);
     return out + names;
+}
+
+// `nodes` and `edges` as m2v's table; `stages`: 1 (compute) or 5 (render, the root's bindings the vertex stage's)
+inline std::string of(const std::vector<NmbReflectionNode> &nodes, const std::vector<uint32_t> &edges, uint32_t stages)
+{
+    const auto down = [](uint32_t i) {
+        return i == gm20b::kReflectionAbsent ? i : i - 1;
+    };
+    std::vector<NmbReflectionNode> rest(nodes.begin() + 1, nodes.end());
+    for (NmbReflectionNode &n : rest)
+        std::transform(std::begin(n.children), std::end(n.children), std::begin(n.children), down);
+    std::vector<uint32_t> lowered(edges.size());
+    std::transform(edges.begin(), edges.end(), lowered.begin(), down);
+    std::vector<gm20b::ReflectionRange> ranges(stages, gm20b::ReflectionRange{0, 0});
+    ranges[0] = {nodes[0].first, nodes[0].count};
+    return blob(rest, lowered, ranges);
 }
 
 struct Entry {
@@ -59,7 +74,7 @@ struct Entry {
     std::string blob;
 };
 
-// The PackReflections section of `entries` as raw/pack/packfile.py reflection_bytes lays it out (each blob its own here)
+// The PackReflections section of `entries` as pack/packfile.py reflection_bytes lays it out (each blob its own here)
 inline std::string section(std::vector<Entry> entries)
 {
     std::stable_sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {

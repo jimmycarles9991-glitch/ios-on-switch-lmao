@@ -18,7 +18,6 @@
 #include "TegraHost1x.h"
 #include "SwitchHost1xChannels.h"
 #include "SwitchHost1xCpuIncrement.h"
-#include "SwitchHost1xFailureRelease.h"
 #include "SwitchHost1xIntr.h"
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "../TegraSMMU/TegraSMMU.h"
@@ -230,8 +229,7 @@ extern "C" int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshol
 {
     if (!gHost || !gSubmitLock || gState != 1)
         return TEGRA_HOST1X_ENODEV;
-    if (id < kFirstOwn || id >= kSyncpts || id >= __atomic_load_n(&gNextSyncpt, __ATOMIC_ACQUIRE) || !max_increments ||
-        max_increments > 2)
+    if (id < kFirstOwn || id >= kSyncpts || id >= __atomic_load_n(&gNextSyncpt, __ATOMIC_ACQUIRE))
         return TEGRA_HOST1X_EINVAL;
     const uint32_t reached = tegra_host1x_syncpt_read(id);
     const int32_t distance = static_cast<int32_t>(threshold - reached);
@@ -245,28 +243,9 @@ extern "C" int tegra_host1x_syncpt_release_failed(uint32_t id, uint32_t threshol
         changed |= switch_vic_host1x_cancelled != nullptr && switch_vic_host1x_cancelled(id, reached);
     } while (changed);
     IOLockLock(gSubmitLock);
-
-    struct Registers {
-        uint32_t read(uint32_t offset)
-        {
-            return sync(offset);
-        }
-
-        void write(uint32_t offset, uint32_t value)
-        {
-            syncWrite(offset, value);
-        }
-
-        void barrier()
-        {
-            __asm__ volatile("dsb sy" ::: "memory");
-        }
-    } registers;
-
-    const uint32_t allocated = __atomic_load_n(&gNextSyncpt, __ATOMIC_ACQUIRE);
-    const int cancelled = gState == 1 ? switch_host1x_channels_cancel_display(allocated) : TEGRA_HOST1X_ENODEV;
-    const int result =
-        cancelled ? cancelled : switch_host1x_release_failed(registers, id, threshold, max_increments, allocated);
+    const int result = gState == 1 ? TEGRA_HOST1X_OK : TEGRA_HOST1X_ENODEV;
+    if (!result)
+        switch_host1x_channels_release_failed(id, threshold);
     IOLockUnlock(gSubmitLock);
     return result;
 }

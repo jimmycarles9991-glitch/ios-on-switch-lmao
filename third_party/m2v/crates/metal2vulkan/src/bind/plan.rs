@@ -759,11 +759,6 @@ pub enum WriteSource {
     /// the stand-in's view says, in `GENERAL` layout
     /// ([`StandInUse`](crate::pipeline::StandInUse)).
     DepthStandIn,
-    /// The `half` shadow of the render pass's extended-range color attachment `color_index`
-    /// (`BindingSource::ExtendedShadow`): the consumer's `R16G16B16A16_SFLOAT` single-sample 2D
-    /// storage image of the attachment's extent, in `GENERAL` layout, holding Metal's tile value
-    /// of each texel of the pass (`VariantKey::extended_shadows`).
-    ExtendedShadow { color_index: u32 },
     /// The stand-in of the render pass's stencil attachment that a fragment function that runs
     /// the draw's stencil test itself tests and writes (`ShaderTestsUse::stencil`): the
     /// consumer's `R8_UINT` storage image of the attachment's extent and the pipeline's samples,

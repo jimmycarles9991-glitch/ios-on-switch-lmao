@@ -28,6 +28,14 @@ int switch_chan_new_make(uint32_t chid, int critical);
 /* The timeslice the driver records as written (gpu_ramfc_probe.c's expected value), and the channel's teardown */
 uint32_t switch_chan_new_recorded_timeslice(void);
 void switch_chan_new_delete(void);
+/* Work outstanding on the channel at its teardown, which kills it after the bounded wait (chan_abandon); whether it was
+ * critical at that kill, -1 before one */
+void switch_chan_new_leave_running(void);
+int switch_chan_new_isolated_critical(void);
+/* tgm_chan_set_level at the high level or the foreground one, and what the channel then is */
+void switch_chan_new_set_level(int high, int critical);
+int switch_chan_new_high(void);
+int switch_chan_new_critical(void);
 /* A job on the channel: the host saves what it holds, loads RAMFC from memory, runs it and saves it back. */
 void switch_chan_new_job(void);
 

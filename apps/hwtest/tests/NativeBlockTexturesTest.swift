@@ -23,23 +23,27 @@ struct NativeBlockTexturesTest: NativeObjectTest {
     static let shapes: [Shape] = [
         Shape(
             name: "astc_shared", format: .astc_4x4_ldr, blockBytes: 16, type: .type2D, width: 64, height: 40, layers: 1,
-            levels: 5, storage: .shared),
+            levels: 5, storage: .shared
+        ),
         Shape(
             name: "etc2_shared_array", format: .etc2_rgb8, blockBytes: 8, type: .type2DArray, width: 32, height: 32,
-            layers: 3, levels: 1, storage: .shared),
+            layers: 3, levels: 1, storage: .shared
+        ),
         Shape(
             name: "eac_private", format: .eac_rgba8, blockBytes: 16, type: .type2DArray, width: 32, height: 16,
-            layers: 2, levels: 3, storage: .private),
+            layers: 2, levels: 3, storage: .private
+        ),
         Shape(
             name: "astc_private_array", format: .astc_4x4_ldr, blockBytes: 16, type: .type2DArray, width: 64,
-            height: 64, layers: 2, levels: 4, storage: .private),
+            height: 64, layers: 2, levels: 4, storage: .private
+        ),
     ]
 
     /// Every byte of level `level`, slice `slice`: distinct across the texture's images
     static func blocks(_ s: Shape, _ level: Int, _ slice: Int) -> (bytes: [UInt8], row: Int, rows: Int) {
         let across = (max(1, s.width >> level) + 3) / 4, down = (max(1, s.height >> level) + 3) / 4
         let row = across * s.blockBytes
-        let bytes = (0..<(row * down)).map { UInt8(truncatingIfNeeded: $0 * 7 + level * 31 + slice * 61 + 1) }
+        let bytes = (0 ..< (row * down)).map { UInt8(truncatingIfNeeded: $0 * 7 + level * 31 + slice * 61 + 1) }
         return (bytes, row, down)
     }
 
@@ -56,7 +60,8 @@ struct NativeBlockTexturesTest: NativeObjectTest {
         Self.etcBlock.withUnsafeBytes {
             t.replace(
                 region: MTLRegionMake2D(0, 0, 4, 4), mipmapLevel: 0, slice: 0, withBytes: $0.baseAddress!,
-                bytesPerRow: 8, bytesPerImage: 0)
+                bytesPerRow: 8, bytesPerImage: 0
+            )
         }
         let out = try gpu.buffer(16 * 16)
         let pipeline = try gpu.compute("sample_texture")
@@ -66,12 +71,14 @@ struct NativeBlockTexturesTest: NativeObjectTest {
             e.setTexture(t, index: 0)
             e.setBuffer(out, offset: 0, index: 0)
             e.dispatchThreads(
-                MTLSize(width: 4, height: 4, depth: 1), threadsPerThreadgroup: MTLSize(width: 4, height: 4, depth: 1))
+                MTLSize(width: 4, height: 4, depth: 1), threadsPerThreadgroup: MTLSize(width: 4, height: 4, depth: 1)
+            )
             e.endEncoding()
         }
         paths.append(timing.path)
         let texels = UnsafeBufferPointer(
-            start: out.contents().bindMemory(to: SIMD4<Float>.self, capacity: 16), count: 16)
+            start: out.contents().bindMemory(to: SIMD4<Float>.self, capacity: 16), count: 16
+        )
         return texels.filter { [$0.x, $0.y, $0.z, $0.w].map { Int(($0 * 255).rounded()) } != [138, 138, 138, 255] }
             .count
     }
@@ -97,21 +104,23 @@ struct NativeBlockTexturesTest: NativeObjectTest {
             }
             work.objects.append(t)
             var wrong = 0
-            for level in 0..<s.levels {
-                for slice in 0..<s.layers {
+            for level in 0 ..< s.levels {
+                for slice in 0 ..< s.layers {
                     let (bytes, row, rows) = Self.blocks(s, level, slice)
                     let size = MTLSize(width: max(1, s.width >> level), height: max(1, s.height >> level), depth: 1)
                     if s.storage == .shared {
                         bytes.withUnsafeBytes {
                             t.replace(
                                 region: MTLRegion(origin: MTLOrigin(), size: size), mipmapLevel: level, slice: slice,
-                                withBytes: $0.baseAddress!, bytesPerRow: row, bytesPerImage: 0)
+                                withBytes: $0.baseAddress!, bytesPerRow: row, bytesPerImage: 0
+                            )
                         }
                         var back = [UInt8](repeating: 0, count: bytes.count)
                         back.withUnsafeMutableBytes {
                             t.getBytes(
                                 $0.baseAddress!, bytesPerRow: row, bytesPerImage: 0,
-                                from: MTLRegion(origin: MTLOrigin(), size: size), mipmapLevel: level, slice: slice)
+                                from: MTLRegion(origin: MTLOrigin(), size: size), mipmapLevel: level, slice: slice
+                            )
                         }
                         wrong += zip(back, bytes).filter { $0 != $1 }.count
                     } else {
@@ -121,7 +130,8 @@ struct NativeBlockTexturesTest: NativeObjectTest {
                             blit.copy(
                                 from: staging, sourceOffset: 0, sourceBytesPerRow: row, sourceBytesPerImage: 0,
                                 sourceSize: size, to: t, destinationSlice: slice, destinationLevel: level,
-                                destinationOrigin: MTLOrigin())
+                                destinationOrigin: MTLOrigin()
+                            )
                             blit.endEncoding()
                         }
                         work.paths.append(timing.path)
@@ -132,7 +142,8 @@ struct NativeBlockTexturesTest: NativeObjectTest {
                         blit.copy(
                             from: t, sourceSlice: slice, sourceLevel: level, sourceOrigin: MTLOrigin(),
                             sourceSize: size,
-                            to: out, destinationOffset: 0, destinationBytesPerRow: row, destinationBytesPerImage: 0)
+                            to: out, destinationOffset: 0, destinationBytesPerRow: row, destinationBytesPerImage: 0
+                        )
                         blit.endEncoding()
                     }
                     work.paths.append(timing.path)

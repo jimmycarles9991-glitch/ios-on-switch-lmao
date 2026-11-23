@@ -349,7 +349,7 @@ TEST_F(NVJPGGate, AllocationsKeepDisjointMappingsUntilTheirOwnRelease)
     gSmmuRangeFlushes.clear();
     gSmmuFlushAlls = 0;
 
-    const uint64_t first = tegra_nvjpg_pages_map(kWindow, pages.data(), 300, true);
+    const uint64_t first = tegra_nvjpg_pages_map(kWindow, pages.data(), 300, 0, true);
     ASSERT_EQ(first, base);
     for (uint32_t i = 0; i < 300; ++i)
         ASSERT_EQ(gDomain.translate(first + i * 4096ULL), pages[i]) << "page " << i;
@@ -362,35 +362,83 @@ TEST_F(NVJPGGate, AllocationsKeepDisjointMappingsUntilTheirOwnRelease)
     EXPECT_EQ(f.iova, first);
     EXPECT_EQ(f.iovaBytes, 300u * 4096);
 
-    const uint64_t second = tegra_nvjpg_pages_map(kWindow, pages.data(), 100, false);
-    ASSERT_EQ(second, first + TegraSMMUSpace::round(300u * 4096));
+    const uint64_t second = tegra_nvjpg_pages_map(kWindow, pages.data(), 100, 0, false);
+    ASSERT_EQ(second, first + TegraSMMUSpace::round(300u * 4096) + TegraSMMUSpace::kGranule);
     EXPECT_EQ(gDomain.translate(first + 299 * 4096ULL), pages[299]);
     EXPECT_EQ(gDomain.translate(second + 99 * 4096ULL), pages[99]);
     ASSERT_EQ(gSmmuRangeFlushes.size(), 2u);
     EXPECT_EQ(gSmmuRangeFlushes.back().iova, second);
     EXPECT_EQ(gSmmuRangeFlushes.back().iovaBytes, 100u * 4096);
 
-    tegra_nvjpg_pages_unmap(first, 300);
+    tegra_nvjpg_pages_unmap(kWindow, first, 300);
     EXPECT_EQ(gDomain.translate(first), UINT64_MAX);
     EXPECT_EQ(gDomain.translate(second), pages[0]);
     ASSERT_EQ(gSmmuRangeFlushes.size(), 3u);
     EXPECT_EQ(gSmmuRangeFlushes.back().iovaBytes, 300u * 4096);
-    EXPECT_EQ(tegra_nvjpg_pages_map(kWindow, pages.data(), 300, true), first);
-    tegra_nvjpg_pages_unmap(first, 300);
-    tegra_nvjpg_pages_unmap(second, 100);
-    const size_t flushes = gSmmuRangeFlushes.size();
-    tegra_nvjpg_pages_unmap(0, 0);
-    EXPECT_EQ(tegra_nvjpg_pages_map(kWindow, pages.data(), 0, true), 0u);
-    EXPECT_EQ(gSmmuRangeFlushes.size(), flushes);
+    EXPECT_EQ(tegra_nvjpg_pages_map(kWindow, pages.data(), 300, 0, true), first);
+    tegra_nvjpg_pages_unmap(kWindow, first, 300);
+    tegra_nvjpg_pages_unmap(kWindow, second, 100);
     EXPECT_EQ(gSmmuFlushAlls, 0u);
 }
 
-TEST_F(NVJPGGate, UnalignedAndUnreachablePagesNeverReachThePageTable)
+// Every process's destinations share the output window, packed back to back: a write past one mapping must fault in
+// the SMMU, never land in the next one.
+TEST_F(NVJPGGate, AnUnmappedGranuleFollowsEveryMapping)
 {
-    uint64_t page = 1ULL << 34;
-    const uint64_t free = gSpaces[TEGRA_NVJPG_WINDOW_OUT].bytesFree();
-    EXPECT_EQ(tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_OUT, &page, 1, true), 0u);
-    page = 0x90000001;
-    EXPECT_EQ(tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_OUT, &page, 1, true), 0u);
-    EXPECT_EQ(gSpaces[TEGRA_NVJPG_WINDOW_OUT].bytesFree(), free);
+    constexpr uint32_t kWindow = TEGRA_NVJPG_WINDOW_OUT;
+    constexpr uint32_t kGranulePages = TegraSMMUSpace::kGranule / 4096;
+    std::vector<uint64_t> pages(kGranulePages);
+    for (uint32_t i = 0; i < kGranulePages; ++i)
+        pages[i] = 0x90000000ULL + i * 4096ULL;
+    const uint64_t first = tegra_nvjpg_pages_map(kWindow, pages.data(), kGranulePages, 0, true);
+    const uint64_t second = tegra_nvjpg_pages_map(kWindow, pages.data(), kGranulePages, 0, true);
+    ASSERT_NE(first, 0u);
+    ASSERT_NE(second, 0u);
+    EXPECT_EQ(second - first, 2 * TegraSMMUSpace::kGranule);
+    for (uint64_t at = first + TegraSMMUSpace::kGranule; at < second; at += 4096)
+        EXPECT_EQ(gDomain.translate(at), UINT64_MAX) << "guard page " << (at - first) / 4096;
+    tegra_nvjpg_pages_unmap(kWindow, first, kGranulePages);
+    tegra_nvjpg_pages_unmap(kWindow, second, kGranulePages);
+    EXPECT_EQ(gSpaces[kWindow].bytesFree(), gSpaces[kWindow].bytesTotal());
+}
+
+// The sink entries after a mapping's pages all point at the one arena page, writable only where the pages are.
+TEST_F(NVJPGGate, SinkEntriesFollowThePagesAndThenTheGuard)
+{
+    const std::vector<uint64_t> pages{0x90000000, 0x90002000};
+    const uint64_t out = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_OUT, pages.data(), 2, 3, true);
+    const uint64_t in = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_IN, pages.data(), 2, 1, false);
+    ASSERT_NE(out, 0u);
+    ASSERT_NE(in, 0u);
+    EXPECT_EQ(gDomain.translate(out + 4096), pages[1]);
+    for (uint64_t page = 2; page < 5; ++page)
+        EXPECT_EQ(gDomain.translate(out + page * 4096), gSink.pa) << "sink entry " << page;
+    EXPECT_EQ(gDomain.translate(out + 5 * 4096), UINT64_MAX);
+    EXPECT_NE(*gDomain.pte(out + 4 * 4096, false) & TegraSMMUDomain::kWrite, 0u);
+    EXPECT_EQ(gDomain.translate(in + 2 * 4096), gSink.pa);
+    EXPECT_EQ(*gDomain.pte(in + 2 * 4096, false) & TegraSMMUDomain::kWrite, 0u);
+    EXPECT_EQ(gDomain.translate(in + 3 * 4096), UINT64_MAX);
+    tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_OUT, out, 5);
+    tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_IN, in, 3);
+    EXPECT_EQ(gDomain.translate(out + 4 * 4096), UINT64_MAX);
+    EXPECT_EQ(gDomain.translate(in + 2 * 4096), UINT64_MAX);
+}
+
+// An unmap the window's allocator does not recognise (a wrong window, or an address inside another mapping) clears
+// no page entry: they may belong to a live surface.
+TEST_F(NVJPGGate, AnUnmapTheWindowDoesNotHoldLeavesThePageEntries)
+{
+    const std::vector<uint64_t> pages{0x90000000, 0x90001000, 0x90002000};
+    const uint64_t address = tegra_nvjpg_pages_map(TEGRA_NVJPG_WINDOW_OUT, pages.data(), 3, 0, true);
+    ASSERT_NE(address, 0u);
+    const size_t flushes = gSmmuRangeFlushes.size();
+    tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_OUT, address + 4096, 1);
+    tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_IN, address, 3);
+    for (uint32_t i = 0; i < 3; ++i)
+        EXPECT_EQ(gDomain.translate(address + i * 4096ULL), pages[i]) << "page " << i;
+    EXPECT_EQ(gSmmuRangeFlushes.size(), flushes);
+    EXPECT_TRUE(logged("which window 1 does not hold"));
+    EXPECT_TRUE(logged("which window 0 does not hold"));
+    tegra_nvjpg_pages_unmap(TEGRA_NVJPG_WINDOW_OUT, address, 3);
+    EXPECT_EQ(gDomain.translate(address), UINT64_MAX);
 }

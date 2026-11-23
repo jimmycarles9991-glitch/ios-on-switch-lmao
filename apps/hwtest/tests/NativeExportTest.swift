@@ -29,15 +29,18 @@ struct NativeExportTest: HWTest {
     static let h264 = NativeExportTest(
         id: "decode.native_export",
         name: "H.264 720p: pictures exported natively against VIC copies, by the decoder's count", codec: .h264,
-        probe: "V1")
+        probe: "V1"
+    )
     static let main10 = NativeExportTest(
         id: "decode.native_export_main10",
         name: "HEVC Main 10 720p: P010 pictures exported natively against VIC copies, by the decoder's count",
-        codec: .hevc10, probe: "V12")
+        codec: .hevc10, probe: "V12"
+    )
     static let main10To8 = NativeExportTest(
         id: "decode.native_export_main10_8bit",
         name: "HEVC Main 10 720p into '420v': NVDEC's 8-bit display buffers exported natively, by the decoder's count",
-        codec: .hevc10, probe: "V13", outputBitDepth: 8)
+        codec: .hevc10, probe: "V13", outputBitDepth: 8
+    )
 
     /// SwitchNVDECPark's capacity and the retired-publication ring's (16 each). A session that allocated a decoder
     /// buffer or a surface object per picture passes it within the clip; one cycling a fixed set stays at its pool's
@@ -52,7 +55,7 @@ struct NativeExportTest: HWTest {
     /// kernel, which does not count.
     static func poolProblem(_ routes: [String: Int]) -> String? {
         guard let allocated = routes["buffers_allocated"], let objects = routes["native_objects"],
-            let exports = routes["native_exports"], let recycles = routes["recycles"]
+              let exports = routes["native_exports"], let recycles = routes["recycles"]
         else { return nil }
         let exported = routes["exported"] ?? 0
         if let surfaces = routes["native_surfaces"] {
@@ -77,7 +80,8 @@ struct NativeExportTest: HWTest {
         let result = try Decompressor.decode(
             demuxed.samples, format: demuxed.format, pattern: clip.pattern,
             bitDepth: outputBitDepth > 0 ? outputBitDepth : clip.codec.bitDepth,
-            fps: clip.fps)
+            fps: clip.fps
+        )
         var metrics = Metrics()
         metrics.set("frames", result.frames)
         metrics.set("matched", result.matched)
@@ -94,8 +98,9 @@ struct NativeExportTest: HWTest {
                 note: notNative != 0
                     ? "\(notNative) pictures were copied, not exported"
                     : wrong != 0
-                        ? "\(wrong) pictures differ from the pattern"
-                        : pool ?? "the kernel does not count the session's buffers (a release kernel)")
+                    ? "\(wrong) pictures differ from the pattern"
+                    : pool ?? "the kernel does not count the session's buffers (a release kernel)"
+            )
         } else {
             finding = ProbeFinding(.inconclusive, metrics, note: "the decoder does not answer SwitchPictureRoutes")
         }

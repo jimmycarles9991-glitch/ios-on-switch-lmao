@@ -32,6 +32,10 @@ struct PresentSurface {
 	uint32_t npages, kind;
 	uint64_t *pas;
 	tgm_mem *mem;
+#if DEVELOPMENT || DEBUG
+	// the content generation its last accepted present showed, and that present
+	uint64_t shownContent, shownAt;
+#endif
 };
 
 // TegraScanoutCopy.h: the boot framebuffer and the display's two other buffers
@@ -49,8 +53,15 @@ void releasePresentBacking(void *owner)
 	memory->release();
 }
 
+#if DEVELOPMENT || DEBUG
+void logUnshown(int status);
+#endif
+
 void presentDone(void *display, int status)
 {
+#if DEVELOPMENT || DEBUG
+	logUnshown(status);
+#endif
 	native_legacy_gpu_complete(display, status);
 }
 
@@ -193,6 +204,128 @@ IOLock *presentLock()
 	return gPresentLock;
 }
 
+static_assert(SWITCH_GPU_BACKING_WRITER_GONE == TEGRA_SCANOUT_SOURCE_GONE &&
+		      SWITCH_GPU_BACKING_WRITER_FAILED == TEGRA_SCANOUT_SOURCE_LOST &&
+		      SWITCH_GPU_BACKING_WRITE_REFUSED == TEGRA_SCANOUT_SOURCE_REFUSED,
+	      "a present's completion passes why its frame is missing to the display as is");
+
+// Why a frame its writer did not leave is missing (SwitchGpuBacking.h)
+bool unshown(int status)
+{
+	return status == SWITCH_GPU_BACKING_WRITER_GONE ||
+	       status == SWITCH_GPU_BACKING_WRITER_FAILED ||
+	       status == SWITCH_GPU_BACKING_WRITE_REFUSED;
+}
+
+// An offer refused for such a frame answers why (TegraScanoutCopy.h); any other refusal is a decline.
+int offerStatus(int ret)
+{
+	return unshown(ret) ? ret : ioreturn(ret);
+}
+
+#if DEVELOPMENT || DEBUG
+// An accepted present's surfaces as its snapshot found them. Read from the snapshot's leases before the offer, whose
+// completion may release them on another CPU; counted under gPresentLock; logged after it is let go.
+struct PresentShown {
+	switch_gpu_scanout_look looks[2];
+	uint32_t looked, dependencies;
+	bool alsoWritten;
+	uint64_t present, lastShown;
+	uint32_t againNth;  // from 1, the line's place among its kind; 0: nothing shown again
+	// an offer refused for a frame its writer did not leave: why, the surface offered and the line's place
+	int refused;
+	uint32_t refusedSurface, refusedNth;
+	uint64_t refusedAllocation;
+};
+
+uint64_t gPresents;
+uint32_t gShownAgain, gRefused;
+
+const char *whyUnshown(int status)
+{
+	return status == SWITCH_GPU_BACKING_WRITER_GONE     ? "its writer's client is gone"
+	       : status == SWITCH_GPU_BACKING_WRITE_REFUSED ? "its write was never accepted"
+							    : "its writer failed on the GPU";
+}
+
+// An accepted present that ends without its frame (its completion's status): one line, as a refused offer's.
+void logUnshown(int status)
+{
+	if (!unshown(status))
+		return;
+	const uint32_t nth = __atomic_add_fetch(&gRefused, 1u, __ATOMIC_RELAXED);
+	if (switch_gpu_refusal::logged(nth - 1))
+		IOLog("SwitchGpu: present %llu ended unshown: %s (%d) (%u so far)\n",
+		      __atomic_load_n(&gPresents, __ATOMIC_RELAXED), whyUnshown(status), status,
+		      nth);
+}
+
+// ret: the snapshot's; nothing to read unless it was taken
+PresentShown presentLooks(int ret, uint32_t dependencies, bool alsoWritten)
+{
+	PresentShown shown = {};
+	if (ret)
+		return shown;
+	for (; shown.looked < gPresentSnapshot.leaseCount; ++shown.looked)
+		switch_gpu_cpu_lease_look(gPresentSnapshot.leases[shown.looked],
+					  &shown.looks[shown.looked]);
+	shown.dependencies = dependencies;
+	shown.alsoWritten = alsoWritten;
+	return shown;
+}
+
+// gPresentLock held; ret: the offer's, counted only when accepted. source: the GPU address presentSurface gave the
+// source (0: none, a plane's fence). A pending writer promise is a write still to come, so its surface is not shown
+// again whatever its generation. offered: the surface the offer named, described for a refusal's line.
+void presentShown(PresentShown &shown, int ret, uint64_t source, switch_gpu_backing *offered)
+{
+	if (unshown(ret)) {
+		switch_gpu_backing_info info = {};
+		switch_gpu_backing_describe(offered, &info);
+		shown.refused = ret;
+		shown.refusedSurface = info.surface_id;
+		shown.refusedAllocation = info.allocation_id;
+		shown.refusedNth = __atomic_add_fetch(&gRefused, 1u, __ATOMIC_RELAXED);
+	}
+	if (ret)
+		return;
+	shown.present = __atomic_add_fetch(&gPresents, 1u, __ATOMIC_RELAXED);
+	if (!source)
+		return;
+	PresentSurface &s = gSurfaces[(source - kPresentSurface) / kPresentSurfaceSpan];
+	const switch_gpu_scanout_look &look = shown.looks[0];
+	if (s.shownAt && s.shownContent == look.content && !look.promised) {
+		shown.lastShown = s.shownAt;
+		shown.againNth = ++gShownAgain;
+	}
+	s.shownContent = look.content;
+	s.shownAt = shown.present;
+}
+
+void logPresentShown(const PresentShown &shown)
+{
+	char process[17];
+	if (shown.refused && switch_gpu_refusal::logged(shown.refusedNth - 1))
+		IOLog("SwitchGpu: present of surface %u (allocation %llu) refused: %s (%d) (%u so "
+		      "far)\n",
+		      shown.refusedSurface, shown.refusedAllocation, whyUnshown(shown.refused),
+		      shown.refused, shown.refusedNth);
+	if (!shown.againNth || !switch_gpu_refusal::logged(shown.againNth - 1))
+		return;
+	const switch_gpu_scanout_look &look = shown.looks[0];
+	switch_gpu_writer_process(&look.writer, process, sizeof(process));
+	IOLog("SwitchGpu: present %llu shows surface %u (allocation %llu) again with nothing "
+	      "written since present %llu, %llu presents ago (generation %llu, writer engine %u "
+	      "queue %u (%s) job %llu); %s (%u so far)\n",
+	      shown.present, look.surface, look.allocation, shown.lastShown,
+	      shown.present - shown.lastShown, look.content, look.writer.engine, look.writer.queue,
+	      process, look.writer.value,
+	      shown.dependencies || shown.alsoWritten ? "a window B change goes with it"
+						      : "nothing else changes with it",
+	      shown.againNth);
+}
+#endif
+
 }  // namespace
 
 extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
@@ -253,6 +386,9 @@ extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
 		switch_gpu_backing_release(also);
 	}
 	const bool ownershipBusy = ret == -16;
+#if DEVELOPMENT || DEBUG
+	PresentShown shown = presentLooks(ret, copy->dependencyCount, copy->alsoWritten != 0);
+#endif
 	if (!ret) {
 		gPresentSnapshot.display = copy->display;
 #if TGM_STATS
@@ -281,13 +417,16 @@ extern "C" int tegra_gm20b_scanout_copy(const struct TegraScanoutCopy *copy)
 	}
 	if (ret)
 		gPresentSnapshot.cancel();
+#if DEVELOPMENT || DEBUG
+	presentShown(shown, ret, source, sourceBacking);
+#endif
 	IOLockUnlock(gPresentLock);
+#if DEVELOPMENT || DEBUG
+	logPresentShown(shown);
+#endif
 	if (ownershipBusy)
 		return kIOReturnCannotLock;
-	return (ret == SWITCH_GPU_BACKING_DEPENDENCY_FAILED || ret == -5)
-		       ? TEGRA_SCANOUT_SOURCE_LOST
-	       : ret ? ioreturn(ret)
-		     : 0;
+	return offerStatus(ret);
 }
 
 #if TGM_STATS
@@ -322,6 +461,9 @@ extern "C" int tegra_gm20b_scanout_fence(void *display, uint64_t pa)
 	if (!ret)
 		ret = gPresentSnapshot.add(backing);
 	const bool ownershipBusy = !presentBusy && ret == -16;
+#if DEVELOPMENT || DEBUG
+	PresentShown shown = presentLooks(ret, 0, false);
+#endif
 	if (!ret) {
 		gPresentSnapshot.display = display;
 		gPresentSnapshot.done = presentDone;
@@ -332,16 +474,19 @@ extern "C" int tegra_gm20b_scanout_fence(void *display, uint64_t pa)
 	}
 	if (ret && !presentBusy)
 		gPresentSnapshot.cancel();
+#if DEVELOPMENT || DEBUG
+	presentShown(shown, ret, 0, backing);
+#endif
 	IOLockUnlock(gPresentLock);
+#if DEVELOPMENT || DEBUG
+	logPresentShown(shown);
+#endif
 	switch_gpu_backing_release(backing);
 	if (presentBusy)
 		return kIOReturnBusy;
 	if (ownershipBusy)
 		return kIOReturnCannotLock;
-	return (ret == SWITCH_GPU_BACKING_DEPENDENCY_FAILED || ret == -5)
-		       ? TEGRA_SCANOUT_SOURCE_LOST
-	       : ret ? ioreturn(ret)
-		     : 0;
+	return offerStatus(ret);
 }
 
 extern "C" int tegra_gm20b_scanout_outstanding(const void *display)

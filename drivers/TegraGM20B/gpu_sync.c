@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Channel progress and order, CPU syncs and GPU writers.
+// Channel progress, CPU syncs and GPU writers.
 #include "gpu_internal.h"
 
 uint32_t tgm_chan_submitted(struct tgm_chan *chan)
@@ -48,128 +48,6 @@ uint64_t tgm_chan_killed_ns(struct tgm_chan *chan)
 uint32_t tgm_chan_waiter(struct tgm_chan *chan)
 {
 	return (uint32_t)(chan->id % TGM_WAITERS);
-}
-
-/* tgm_live_lock held: `waiter`'s next submission waits for `source` to complete `seqno` (one entry per source, the later seqno) */
-static int order_add(struct tgm_chan *waiter, struct tgm_chan *source, u32 seqno)
-{
-	uintptr_t off = (uintptr_t)source->fence_cpu - (uintptr_t)tgm_fence_pages.va;
-	u32 i = 0;
-
-	if (!waiter->vm->fences_va || !tgm_fence_pages.va || off >= TGM_FENCE_BYTES)
-		return -ENODEV;
-	for (i = 0; i < waiter->norder; i++) {
-		if (waiter->order[i].id != source->id)
-			continue;
-		if ((s32)(seqno - waiter->order[i].seqno) > 0)
-			waiter->order[i].seqno = seqno;
-		return 0;
-	}
-	if (waiter->norder == TGM_ORDER_MAX) {
-		for (i = 0; i < waiter->norder;) {
-			if ((s32)(READ_ONCE(*waiter->order[i].cpu) - waiter->order[i].seqno) >= 0)
-				waiter->order[i] = waiter->order[--waiter->norder];
-			else
-				i++;
-		}
-		if (waiter->norder == TGM_ORDER_MAX)
-			return -ENOSPC;
-	}
-	waiter->order[waiter->norder].va = waiter->vm->fences_va + off;
-	waiter->order[waiter->norder].cpu = source->fence_cpu;
-	waiter->order[waiter->norder].id = source->id;
-	waiter->order[waiter->norder].seqno = seqno;
-	waiter->order[waiter->norder].chid = source->chid;
-	waiter->norder++;
-	return 0;
-}
-
-int tgm_chan_order(struct tgm_chan *chan, uint32_t flags, uint32_t seqno, uint32_t *queued)
-{
-	struct tgm_chan *other = NULL;
-	u32 n = 0;
-	u32 last = 0;
-	int ret = 0;
-
-	*queued = 0;
-	if (chan->kernel || !flags || (flags & ~(TGM_ORDER_AFTER | TGM_ORDER_BEFORE)))
-		return -EINVAL;
-	if (READ_ONCE(chan->error))
-		return -EIO;
-	if (flags & TGM_ORDER_BEFORE) {
-		if (!seqno)
-			seqno = chan->submitted;
-		if ((s32)(seqno - chan->submitted) > 0)
-			return -EINVAL; /* only submitted work: an acquire never waits for a later submission */
-		if ((s32)(tgm_chan_completed(chan) - seqno) >= 0)
-			flags &= ~TGM_ORDER_BEFORE; /* done already: nothing to wait for */
-	}
-	mutex_lock(&tgm_live_lock);
-	list_for_each_entry(other, &tgm_live_chans, live)
-	{
-		if (other == chan || other->kernel || !chan->group || other->group != chan->group ||
-		    READ_ONCE(other->error))
-			continue;
-		last = READ_ONCE(other->submitted);
-		if ((flags & TGM_ORDER_AFTER) && (s32)(tgm_chan_completed(other) - last) < 0) {
-			ret = order_add(chan, other, last);
-			if (ret)
-				break;
-			n++;
-		}
-		if (flags & TGM_ORDER_BEFORE) {
-			ret = order_add(other, chan, seqno);
-			if (ret)
-				break;
-			n++;
-		}
-	}
-	mutex_unlock(&tgm_live_lock);
-	*queued = n;
-	return ret;
-}
-
-/* From tgm_chan_exec, before a submission's own entries: the acquires tgm_chan_order queued for it, as one entry. One whose
- * source passed its seqno already is left out. 1 if any was pushed. */
-int switch_gpu_order_waits_locked(struct tgm_chan *chan)
-{
-	struct nvif_push *push = &chan->chan.push;
-	const struct tgm_order *wait = chan->order;
-	u32 i = 0;
-	u32 n = 0;
-	u32 kicked = 0;
-
-	n = chan->norder;
-	chan->norder = 0;
-	for (i = 0; i < n; i++) {
-		if ((s32)(READ_ONCE(*wait[i].cpu) - wait[i].seqno) >= 0)
-			continue;
-		/* nouveau's NVDEF/NVVAL/PUSH_* macros compute in int and repeat their branches. */
-		/* NOLINTBEGIN(bugprone-signed-bitwise,bugprone-branch-clone) */
-		PUSH_MTHD(push, NV906F, SEMAPHOREA,
-			  NVVAL(NV906F, SEMAPHOREA, OFFSET_UPPER, upper_32_bits(wait[i].va)),
-			  SEMAPHOREB, lower_32_bits(wait[i].va), SEMAPHOREC, wait[i].seqno,
-			  SEMAPHORED,
-			  NVDEF(NV906F, SEMAPHORED, OPERATION, ACQ_GEQ) |
-				  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
-		/* NOLINTEND(bugprone-signed-bitwise,bugprone-branch-clone) */
-		chan->waited = wait[i];
-		kicked++;
-		/* the compositor never waits behind an app channel the deadline holds */
-		if (chan->high)
-			tgm_hold_need(tgm_gpu.device, wait[i].chid);
-	}
-	if (kicked)
-		PUSH_KICK(push);
-	return kicked != 0;
-}
-
-int tgm_order_waits(struct tgm_chan *chan)
-{
-	mutex_lock(&tgm_live_lock);
-	const int result = switch_gpu_order_waits_locked(chan);
-	mutex_unlock(&tgm_live_lock);
-	return result;
 }
 
 static int sync_wait(u64 id, u32 seqno, u64 end)
@@ -406,59 +284,6 @@ void tgm_writers_wait_all(void)
 {
 	while (tegra_gm20b_sync_for_cpu(NULL, 0, TGM_WRITER_HANG_NS) == -ETIMEDOUT) {
 	}
-}
-
-/* Implicit order between processes (TegraGM20BABI.h method 17, TegraGM20BFences.h): a submission's acquires on the writers of
- * the surfaces it touches, queued as tgm_chan_order's are. Each writer names a submission kicked before the call (Exec records
- * it once tgm_chan_exec returned), so no two submissions can wait for each other. */
-int tgm_chan_follow(struct tgm_chan *chan, const uint64_t *writers, uint32_t n)
-{
-	struct tgm_fence_source state;
-	struct tgm_chan *src = NULL;
-	uint32_t i = 0;
-	int ret = 0;
-
-	mutex_lock(&tgm_live_lock);
-	for (i = 0; i < n && !ret; i++) {
-		src = live_by_uid(tgm_fence_uid(writers[i]));
-		if (!src || src->kernel)
-			continue;
-		state.self = src == chan;
-		state.killed = READ_ONCE(src->error) != 0;
-		state.completed = tgm_chan_completed(src);
-		if (tgm_fence_wanted(writers[i], &state))
-			ret = order_add(chan, src, tgm_fence_seqno(writers[i]));
-	}
-	mutex_unlock(&tgm_live_lock);
-	return ret;
-}
-
-int tgm_chan_follow_importers(struct tgm_chan *chan, uint64_t pa, uint32_t *pending)
-{
-	struct tgm_fence_source state;
-	struct tgm_chan *other = NULL;
-	u32 last = 0;
-	int ret = 0;
-
-	*pending = 0;
-	mutex_lock(&tgm_live_lock);
-	list_for_each_entry(other, &tgm_live_chans, live)
-	{
-		if (other->kernel || !vm_imports(other->vm, pa))
-			continue;
-		last = READ_ONCE(other->submitted);
-		state.self = other == chan;
-		state.killed = READ_ONCE(other->error) != 0;
-		state.completed = tgm_chan_completed(other);
-		if (!tgm_fence_wanted((u64)(u32)other->id << 32 | last, &state))
-			continue;
-		(*pending)++;
-		ret = order_add(chan, other, last);
-		if (ret)
-			break;
-	}
-	mutex_unlock(&tgm_live_lock);
-	return ret;
 }
 
 void tgm_cpu_clean_pages(const uint64_t *pas, uint32_t npages)

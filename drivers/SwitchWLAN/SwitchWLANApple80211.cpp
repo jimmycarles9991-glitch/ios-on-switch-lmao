@@ -97,46 +97,13 @@ void post_link_event(bool up, int reason)
     post_event(kEvLinkChanged, &ev, sizeof ev);
 }
 
-// APPLE80211_C_FLAG_*: 20 MHz 0x2, 40 MHz 0x4 (0x200: its extension channel above), 80 MHz 0x400, 160 MHz 0x800;
-// 2.4 GHz 0x8, 5 GHz 0x10; active scanning 0x80; DFS 0x100.
-void fill_channel(channel &c, uint32_t mhz, uint16_t bw = 20, uint8_t center = 0)
-{
-    c.version = 1;
-    if (mhz >= 4900) {
-        c.channel = (mhz - 5000) / 5;
-        c.flags = 0x10;
-    } else {
-        c.channel = mhz == 2484 ? 14 : (mhz - 2407) / 5;
-        c.flags = 0x8;
-    }
-    if (bw >= 160) {
-        c.flags |= 0x800;
-    } else if (bw >= 80) {
-        c.flags |= 0x400;
-    } else if (bw >= 40) {
-        c.flags |= 0x4u | (center > c.channel ? 0x200u : 0u);
-    } else {
-        c.flags |= 0x2;
-    }
-}
-
 void fill_result(scan_result &r, const swlan_bss &b)
 {
-    memset(&r, 0, sizeof r);
-    r.version = 1;
-    fill_channel(r.ch, b.freq_mhz, b.bw_mhz, b.center);
-    r.noise_known = 1;
-    r.noise = -95;
-    r.rssi = b.signal_dbm;
-    r.snr = static_cast<int16_t>(b.signal_dbm + 95);
-    r.beacon_interval = b.beacon_int;
-    r.capability = b.caps;
-    memcpy(r.bssid, b.bssid, 6);
-    r.ssid_length = b.ssid_len;
-    memcpy(r.ssid, b.ssid, 32);
-    r.age_ms = b.age_ms;
-    r.elements_length = b.ie_len > sizeof r.elements ? sizeof r.elements : b.ie_len;
-    memcpy(r.elements, b.ie, r.elements_length);
+    uint64_t now = 0;
+#ifdef SWITCH_IPSW_KIND_24B119
+    absolutetime_to_nanoseconds(mach_continuous_time(), &now);
+#endif
+    fill_scan_result(r, b, now);
 }
 
 int copy_out(const apple80211req &rq, const void *src, size_t size)

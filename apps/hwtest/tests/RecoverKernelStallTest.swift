@@ -25,8 +25,8 @@ struct RecoverKernelStallTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         guard let connection = GPUConnection() else { return .fail("no TegraGM20B connection") }
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
         let probeBench: BenchRunner
         do {
@@ -48,7 +48,7 @@ struct RecoverKernelStallTest: HWTest {
         await MainActor.run { compositor.measure() }
         defer { _ = PresentCopyResetTest.call(connection, PresentCopyResetTest.disarm) }
 
-        let load = try (0..<Self.loadBuffers).map { _ in try Self.bands(gpu, bands, target) }
+        let load = try (0 ..< Self.loadBuffers).map { _ in try Self.bands(gpu, bands, target) }
         let (kr, _) = PresentCopyResetTest.call(connection, Self.armAgain)
         var reply: [UInt8] = []
         if kr == KERN_SUCCESS { reply = await PresentCopyResetTest.settle(connection, {}) }
@@ -89,7 +89,8 @@ struct RecoverKernelStallTest: HWTest {
                 ("the frame was copied again on the GPU", redone >= 2),
                 ("the display flipped it: status 0, no CPU copy", status == 0),
                 ("the compositor kept presenting within the bound", shown.frames > 0 && gapMs <= Self.gapBoundMs),
-            ], metrics)
+            ], metrics
+        )
     }
 
     /// One command buffer of full-screen draws, each over ten milliseconds of GR's work (DrawBands.metal), committed
@@ -101,7 +102,7 @@ struct RecoverKernelStallTest: HWTest {
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(pipeline)
-            for _ in 0..<drawsPerBuffer { encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3) }
+            for _ in 0 ..< drawsPerBuffer { encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3) }
             encoder.endEncoding()
         }
     }

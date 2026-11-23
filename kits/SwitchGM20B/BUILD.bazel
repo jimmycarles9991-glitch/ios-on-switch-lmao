@@ -83,15 +83,15 @@ cc_library(
     hdrs = [":SwitchGM20BCaps.h"],
 )
 
-# Rows graded below chip, and where the device's answers and the raw path's format table disagree with the table. Run
+# Rows graded below chip, and where the device's answers and the driver's format table disagree with the table. Run
 # from the workspace, it also checks that every cited file and line exists.
 py_binary(
     name = "caps_report",
     srcs = ["caps/caps_report.py"],
     data = SWITCH_GM20B_CAPS_INPUTS + [
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_device_answers.h",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_gpu.cpp",
-        "//drivers/TegraGM20BMetal:raw/runtime/raw_zeta.h",
+        "//drivers/TegraGM20BMetal:device_answers.h",
+        "//drivers/TegraGM20BMetal:gpu.cpp",
+        "//drivers/TegraGM20BMetal:zeta.h",
         "//kits/SwitchGM20BEmit:SwitchGM20BMacroSlots.h",
     ],
     main = "caps/caps_report.py",

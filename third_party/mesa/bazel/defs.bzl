@@ -2,8 +2,6 @@
 
   mesa_cc_library   one meson static_library's objects: cc_library with exactly meson's compile flags for that target
                     (mesa_args), one action per source, so an edit recompiles that file only
-  mesa_archive      a meson .a: the objects of mesa_cc_library targets in meson's member order (link order is code
-                    layout), archived by the toolchain's ar
   mesa_platform     the transition into the configuration NVK builds in: the iOS or macOS user platform and Rust 1.96.1
   cargo_tool        bindgen and cbindgen (host tools, from their own Cargo.lock)
 
@@ -14,11 +12,7 @@ spelling: __FILE__ of a source is ../mesa/<path> and of a generated file <path> 
 meson build directory next to the source tree that main's dylibs were built in.
 """
 
-load("@rules_cc//cc:action_names.bzl", "ACTION_NAMES")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
-load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
-load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("//kernel/rules:common.bzl", "XCODE_EXECUTION")
 load(":flags.bzl", "MESA_CPP_ARGS", "MESA_C_ARGS", "MESA_PRE_ARGS")
 
@@ -171,62 +165,6 @@ def mesa_genrule(**kwargs):
         **kwargs: the genrule's attributes.
     """
     native.genrule(target_compatible_with = MESA_ONLY, **kwargs)
-
-def _objects(target):
-    objects = []
-    for linker_input in target[CcInfo].linking_context.linker_inputs.to_list():
-        if linker_input.owner != target.label:
-            continue
-        for library in linker_input.libraries:
-            objects.extend(library.objects)
-    return objects
-
-def _mesa_archive_impl(ctx):
-    out = ctx.actions.declare_file(ctx.attr.out)
-    objects = []
-    for lib in ctx.attr.libs:
-        objects.extend(_objects(lib))
-    cc_toolchain = find_cc_toolchain(ctx)
-    features = cc_common.configure_features(ctx = ctx, cc_toolchain = cc_toolchain)
-    ar = cc_common.get_tool_for_action(feature_configuration = features, action_name = ACTION_NAMES.cpp_link_static_library)
-    env = cc_common.get_environment_variables(
-        feature_configuration = features,
-        action_name = ACTION_NAMES.cpp_link_static_library,
-        variables = cc_common.empty_variables(),
-    )
-    args = ctx.actions.args()
-    args.add("rcs", out)
-    args.add_all(objects)
-    ctx.actions.run(
-        executable = ar,
-        arguments = [args],
-        inputs = depset(objects, transitive = [cc_toolchain.all_files]),
-        outputs = [out],
-        env = env,
-        mnemonic = "MesaArchive",
-        progress_message = "Archiving %{output}",
-        execution_requirements = XCODE_EXECUTION,
-    )
-    return [DefaultInfo(files = depset([out]))]
-
-_mesa_archive = rule(
-    implementation = _mesa_archive_impl,
-    doc = "One of meson's .a files: the objects of `libs`, each in its srcs order, in this order (meson's ar order).",
-    attrs = {
-        "libs": attr.label_list(mandatory = True, providers = [CcInfo], doc = "mesa_cc_library targets, in member order"),
-        "out": attr.string(mandatory = True, doc = "the archive's name, as meson's"),
-    },
-    toolchains = use_cc_toolchain(),
-    fragments = ["cpp"],
-)
-
-def mesa_archive(**kwargs):
-    """A meson .a made of several libraries' objects (see _mesa_archive), built only in NVK's configuration.
-
-    Args:
-        **kwargs: name, out, libs.
-    """
-    _mesa_archive(target_compatible_with = MESA_ONLY, **kwargs)
 
 def _mesa_file_impl(ctx):
     out = ctx.outputs.out

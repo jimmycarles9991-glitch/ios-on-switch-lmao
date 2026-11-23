@@ -11,11 +11,11 @@
 #include <string>
 #include <vector>
 #include "drivers/TegraGM20BMetal/test/records/golden_files.h"
-#include "drivers/TegraGM20BMetal/raw/runtime/raw_set_entries.h"
+#include "drivers/TegraGM20BMetal/set_entries.h"
 
 namespace {
 
-using namespace raw;
+using namespace gm20b;
 
 struct Built {
     std::vector<PackProgram> programs;

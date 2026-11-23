@@ -7,8 +7,8 @@ import Metal
 
 /// A render state and a kernel no pack or store holds, made by the shader compiler with NAK's stage compile linked into
 /// the plugin (third_party/mesa/src/nouveau/switch_compile): the plugin image exports switch_compile_stage, the state is
-/// the raw facade's, compiled by the compiler rather than in this process, its kernel computes every element, and no m2v
-/// device opened for either. Before the stage compile left NVK, the plugin had no such export and the compiler found
+/// the facade's, compiled by the compiler rather than in this process, its kernel computes every element, and no
+/// command buffer failed. Before the stage compile left NVK, the plugin had no such export and the compiler found
 /// NAK's exports in libvulkan_nouveau.dylib.
 struct CompileStageLibraryTest: HWTest {
     let id = "gpu.compile.stage_library"
@@ -18,8 +18,8 @@ struct CompileStageLibraryTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade")
         }
         var metrics = Metrics()
         let plugin = Self.pluginImage()
@@ -28,32 +28,28 @@ struct CompileStageLibraryTest: HWTest {
         metrics.set("stage_compile", export)
         metrics.set("nvk_loaded", Self.imageLoaded("libvulkan_nouveau.dylib") ? 1 : 0)
 
-        let before = RawFacade.counters(of: gpu.device)
-        let openedBefore = Self.opened(gpu.device)
-        let salt = UInt32.random(in: 1...UInt32.max) ^ 0x6e61_6b6c
+        let before = GM20BFacade.counters(of: gpu.device)
+        let salt = UInt32.random(in: 1 ... UInt32.max) ^ 0x6e61_6b6c
         let state = try pipeline(gpu, salt: salt)
-        let compile = RawFacade.compile(of: state) ?? [:]
+        let compile = GM20BFacade.compile(of: state) ?? [:]
         let how = compile["how"] as? String ?? "none"
-        let packed = RawFacade.packed(state)
+        let packed = GM20BFacade.packed(state)
         let wrong = try await kernel(gpu, salt: salt)
-        let after = RawFacade.counters(of: gpu.device)
-        let here = (after["compiled_here"] ?? 0) - (before["compiled_here"] ?? 0)
-        let opened = Self.opened(gpu.device) - openedBefore
+        let after = GM20BFacade.counters(of: gpu.device)
 
         metrics.set("how", how)
         metrics.set("packed", packed.map { $0 ? 1 : 0 } ?? -1)
         metrics.set("kernel_wrong", wrong)
-        metrics.set("compiled_here", here)
-        metrics.set("m2v_opened", opened)
+        let failed = FailedCounts.judged(before: before, after: after, own: gpu.paths, &metrics)
         return .judged(
             [
                 ("the plugin image exports switch_compile_stage", export == "plugin"),
                 ("the state is the facade's, made at its creation", packed == false),
                 ("compiled by the shader compiler", how == "compiled"),
                 ("the salted kernel's every element exact", wrong == 0),
-                ("nothing compiled in this process", here == 0),
-                ("no m2v device opened for them", opened == 0),
-            ], metrics, proof: "salt \(salt)")
+                failed,
+            ], metrics, proof: "salt \(salt)"
+        )
     }
 
     func pipeline(_ gpu: GPU, salt: UInt32) throws -> MTLRenderPipelineState {
@@ -81,20 +77,17 @@ struct CompileStageLibraryTest: HWTest {
             encoder.setBuffer(data, offset: 0, index: 0)
             encoder.dispatchThreads(
                 MTLSize(width: count, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }
         let values = data.contents().bindMemory(to: UInt32.self, capacity: count)
-        return (0..<count).filter { values[$0] != UInt32($0) ^ salt }.count
-    }
-
-    static func opened(_ device: MTLDevice) -> Int {
-        (RawFacade.m2vRecord(of: device)["opens"] as? NSNumber)?.intValue ?? 0
+        return (0 ..< count).filter { values[$0] != UInt32($0) ^ salt }.count
     }
 
     /// The loaded TegraGM20BMetal plugin's path
     static func pluginImage() -> String? {
-        for i in 0..<_dyld_image_count() {
+        for i in 0 ..< _dyld_image_count() {
             guard let name = _dyld_get_image_name(i) else { continue }
             let path = String(cString: name)
             if path.hasSuffix("/TegraGM20BMetal.bundle/TegraGM20BMetal") { return path }
@@ -103,7 +96,7 @@ struct CompileStageLibraryTest: HWTest {
     }
 
     static func imageLoaded(_ suffix: String) -> Bool {
-        (0..<_dyld_image_count()).contains { i in
+        (0 ..< _dyld_image_count()).contains { i in
             _dyld_get_image_name(i).map { String(cString: $0).hasSuffix("/" + suffix) } ?? false
         }
     }

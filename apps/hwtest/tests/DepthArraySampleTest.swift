@@ -4,19 +4,19 @@ import HWTestGPU
 import Metal
 
 /// A depth 2D array sampled whole by a draw (enc.notic before: a stored depth array had no texture header, its samples
-/// m2v's): drivers/TegraGM20BMetal/raw/runtime/raw_multisample.cpp createOwnedZeta gives a ShaderRead one NIL's array
+/// m2v's): drivers/TegraGM20BMetal/multisample.cpp createOwnedZeta gives a ShaderRead one NIL's array
 /// header. Each layer is cleared to its own depth, then pixel x reads layer x. The draw's command buffer must stay raw;
 /// the clears' path is reported.
 struct DepthArraySampleTest: HWTest {
-    let id = "gpu.raw.depth_array_sample"
-    let name = "A depth 2D array sampled by a draw reads each layer's depth, on the raw path"
+    let id = "gpu.gm20b.depth_array_sample"
+    let name = "A depth 2D array sampled by a draw reads each layer's depth, on the driver"
     let subsystem = Subsystem.metal
     var timeout: TimeInterval { 30 }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let kind = RawFacade.kind(of: gpu.device)
-        guard kind == "raw" else { return .skip("the default device is not the raw facade (\(kind))") }
+        let kind = GM20BFacade.kind(of: gpu.device)
+        guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         let d = MTLTextureDescriptor()
         d.pixelFormat = .depth32Float
         d.textureType = .type2DArray
@@ -28,7 +28,7 @@ struct DepthArraySampleTest: HWTest {
         guard let depths = gpu.device.makeTexture(descriptor: d) else { throw TestFailure("no depth array") }
         let scratch = try gpu.texture(.rgba8Unorm, 8, 8)
         let fill = try await gpu.run { commands in
-            for slice in 0..<3 {
+            for slice in 0 ..< 3 {
                 let p = MTLRenderPassDescriptor()
                 p.colorAttachments[0].texture = scratch
                 p.colorAttachments[0].loadAction = .clear
@@ -57,14 +57,14 @@ struct DepthArraySampleTest: HWTest {
             e.endEncoding()
         }.path
         let bytes = try await gpu.read(target, bytesPerPixel: 4)
-        let values = (0..<3).map { bytes.loaded(as: Float.self, at: $0) }
+        let values = (0 ..< 3).map { bytes.loaded(as: Float.self, at: $0) }
         var metrics = Metrics()
         metrics.set("fill_path", fill)
         metrics.set("path", path)
         metrics.set("depths", values.map { String($0) }.joined(separator: ","))
         var wrong: [String] = []
         if values != [0.25, 0.5, 0.75] { wrong.append("depths") }
-        if path != "raw" { wrong.append("path") }
+        if path != "gm20b" { wrong.append("path") }
         return wrong.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(wrong.joined(separator: ","), metrics)
     }
 }

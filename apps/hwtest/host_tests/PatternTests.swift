@@ -21,11 +21,13 @@ struct Picture {
         luma.withUnsafeMutableBytes {
             PatternWriter.writeLuma(
                 pattern, frame: frame,
-                into: .init(base: $0.baseAddress!, rowBytes: rowBytes, sampleBytes: sampleBytes))
+                into: .init(base: $0.baseAddress!, rowBytes: rowBytes, sampleBytes: sampleBytes)
+            )
         }
         chroma.withUnsafeMutableBytes {
             PatternWriter.writeChromaInterleaved(
-                pattern, into: .init(base: $0.baseAddress!, rowBytes: rowBytes, sampleBytes: sampleBytes))
+                pattern, into: .init(base: $0.baseAddress!, rowBytes: rowBytes, sampleBytes: sampleBytes)
+            )
         }
     }
 
@@ -36,16 +38,16 @@ struct Picture {
 
     func meanLuma(_ region: Region) -> Double {
         var sum = 0.0
-        for y in region.y..<(region.y + region.height) {
-            for x in region.x..<(region.x + region.width) { sum += sample(luma, y * pattern.width + x) }
+        for y in region.y ..< (region.y + region.height) {
+            for x in region.x ..< (region.x + region.width) { sum += sample(luma, y * pattern.width + x) }
         }
         return sum / Double(region.width * region.height)
     }
 
     func meanChroma(_ region: Region) -> (cb: Double, cr: Double) {
         var (cb, cr, count) = (0.0, 0.0, 0.0)
-        for cy in (region.y / 2)..<((region.y + region.height) / 2) {
-            for cx in (region.x / 2)..<((region.x + region.width) / 2) {
+        for cy in (region.y / 2) ..< ((region.y + region.height) / 2) {
+            for cx in (region.x / 2) ..< ((region.x + region.width) / 2) {
                 cb += sample(chroma, cy * pattern.width + cx * 2)
                 cr += sample(chroma, cy * pattern.width + cx * 2 + 1)
                 count += 1
@@ -99,7 +101,8 @@ final class PatternTests: XCTestCase {
             expected: 2, luma: picture.meanLuma,
             chroma: {
                 let (cb, cr) = picture.meanChroma($0); return (cr, cb)
-            })
+            }
+        )
         XCTAssertEqual(result.frame, 2)
         XCTAssertGreaterThan(result.chromaError, 12)
     }
@@ -107,7 +110,8 @@ final class PatternTests: XCTestCase {
     func testCodecNoiseWithinToleranceStillPasses() {
         let picture = Picture(Pattern(width: 256, height: 128, clip: 7), frame: 9)
         let result = PatternChecker(picture.pattern).check(
-            expected: 9, luma: { picture.meanLuma($0) + ($0.x % 3 == 0 ? 6 : -6) }, chroma: picture.meanChroma)
+            expected: 9, luma: { picture.meanLuma($0) + ($0.x % 3 == 0 ? 6 : -6) }, chroma: picture.meanChroma
+        )
         XCTAssertTrue(result.matches(frame: 9, tolerance: 12), "\(result)")
     }
 
@@ -116,12 +120,13 @@ final class PatternTests: XCTestCase {
         var pixels = [UInt8](repeating: 0, count: pattern.width * pattern.height * 4)
         pixels.withUnsafeMutableBytes {
             PatternWriter.writeRGB(
-                pattern, into: .init(base: $0.baseAddress!, rowBytes: pattern.width * 4), channels: 4)
+                pattern, into: .init(base: $0.baseAddress!, rowBytes: pattern.width * 4), channels: 4
+            )
         }
         let result = PatternChecker(pattern).checkRGB { region in
             var sum = (0.0, 0.0, 0.0)
-            for y in region.y..<(region.y + region.height) {
-                for x in region.x..<(region.x + region.width) {
+            for y in region.y ..< (region.y + region.height) {
+                for x in region.x ..< (region.x + region.width) {
                     let at = (y * pattern.width + x) * 4
                     sum = (sum.0 + Double(pixels[at]), sum.1 + Double(pixels[at + 1]), sum.2 + Double(pixels[at + 2]))
                 }
@@ -161,12 +166,13 @@ final class SupportTests: XCTestCase {
     }
 
     func testPercentilesAndDroppedFrames() {
-        let values = (1...100).map(Double.init)
+        let values = (1 ... 100).map(Double.init)
         XCTAssertEqual(Stats.percentile(values, 0.5), 50)
         XCTAssertEqual(Stats.percentile(values, 0.99), 99)
         XCTAssertEqual(Stats.percentile([], 0.5), 0)
         let period = 1.0 / 60
         XCTAssertEqual(
-            Stats.droppedFrames(intervals: [period, period * 2, period * 1.02, period * 3.1], period: period), 3)
+            Stats.droppedFrames(intervals: [period, period * 2, period * 1.02, period * 3.1], period: period), 3
+        )
     }
 }

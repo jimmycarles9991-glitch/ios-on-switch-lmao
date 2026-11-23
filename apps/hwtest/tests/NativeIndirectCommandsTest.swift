@@ -13,13 +13,13 @@ import Metal
 /// here (its creation is a metric).
 struct NativeIndirectCommandsTest: NativeObjectTest {
     let id = "metal.native.indirect_commands"
-    let name = "Indirect command buffers of inherited state: encoded once, executed by range on the raw path"
+    let name = "Indirect command buffers of inherited state: encoded once, executed by range on the driver"
 
     static let size = 64
 
     /// Four quads, each a quarter of the target's columns, as quad_vertex reads them (four corners each)
     static var quarters: [SIMD4<Float>] {
-        (0..<4).flatMap { q in GPU.pixelQuad(q * size / 4, 0, (q + 1) * size / 4, size, width: size, height: size) }
+        (0 ..< 4).flatMap { q in GPU.pixelQuad(q * size / 4, 0, (q + 1) * size / 4, size, width: size, height: size) }
     }
 
     static func pass(_ target: MTLTexture) -> MTLRenderPassDescriptor {
@@ -33,7 +33,7 @@ struct NativeIndirectCommandsTest: NativeObjectTest {
 
     /// Columns whose pixels are not green where `drawn` holds their quarter, black elsewhere
     static func wrong(_ pixels: [UInt8], drawn: Set<Int>) -> Int {
-        (0..<size * size).filter { i in
+        (0 ..< size * size).filter { i in
             let quarter = (i % size) / (size / 4)
             let want: [UInt8] = drawn.contains(quarter) ? [0, 255, 0, 255] : [0, 0, 0, 255]
             return Array(pixels.pixel(i % size, i / size, width: size)) != want
@@ -51,15 +51,19 @@ struct NativeIndirectCommandsTest: NativeObjectTest {
         var work = NativeWork(objects: [commands])
         let indices = try gpu.buffer([UInt16](arrayLiteral: 4, 5, 6, 7))
         commands.indirectRenderCommandAt(0).drawPrimitives(
-            .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: 0)
+            .triangleStrip, vertexStart: 0, vertexCount: 4, instanceCount: 1, baseInstance: 0
+        )
         commands.indirectRenderCommandAt(1).drawIndexedPrimitives(
             .triangleStrip, indexCount: 4, indexType: .uint16, indexBuffer: indices, indexBufferOffset: 0,
-            instanceCount: 1, baseVertex: 0, baseInstance: 0)
+            instanceCount: 1, baseVertex: 0, baseInstance: 0
+        )
         commands.indirectRenderCommandAt(2).drawPrimitives(
-            .triangleStrip, vertexStart: 8, vertexCount: 4, instanceCount: 1, baseInstance: 0)
+            .triangleStrip, vertexStart: 8, vertexCount: 4, instanceCount: 1, baseInstance: 0
+        )
         commands.indirectRenderCommandAt(2).reset()
         commands.indirectRenderCommandAt(3).drawPrimitives(
-            .triangleStrip, vertexStart: 12, vertexCount: 4, instanceCount: 2, baseInstance: 0)
+            .triangleStrip, vertexStart: 12, vertexCount: 4, instanceCount: 2, baseInstance: 0
+        )
 
         let pipeline = try gpu.render(fragment: "solid_fragment", format: .rgba8Unorm) {
             $0.supportIndirectCommandBuffers = true
@@ -68,14 +72,15 @@ struct NativeIndirectCommandsTest: NativeObjectTest {
         let second = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
         let edited = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
         let ranged = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
-        for (target, range, edit) in [(whole, 0..<4, false), (second, 1..<2, false), (edited, 0..<4, true)] {
+        for (target, range, edit) in [(whole, 0 ..< 4, false), (second, 1 ..< 2, false), (edited, 0 ..< 4, true)] {
             let timing = try await gpu.run { buffer in
                 if edit {
                     let blit = buffer.makeBlitCommandEncoder()!
-                    blit.resetCommandsInBuffer(commands, range: 0..<1)
+                    blit.resetCommandsInBuffer(commands, range: 0 ..< 1)
                     blit.copyIndirectCommandBuffer(
-                        commands, sourceRange: 3..<4, destination: commands, destinationIndex: 2)
-                    blit.optimizeIndirectCommandBuffer(commands, range: 0..<4)
+                        commands, sourceRange: 3 ..< 4, destination: commands, destinationIndex: 2
+                    )
+                    blit.optimizeIndirectCommandBuffer(commands, range: 0 ..< 4)
                     blit.endEncoding()
                 }
                 let encoder = buffer.makeRenderCommandEncoder(descriptor: Self.pass(target))!
@@ -92,9 +97,10 @@ struct NativeIndirectCommandsTest: NativeObjectTest {
         }
         let fresh = try device.makeIndirectCommandBuffer(descriptor: descriptor, maxCommandCount: 4, options: [])!
         work.objects.append(fresh)
-        for q in 0..<4 {
+        for q in 0 ..< 4 {
             fresh.indirectRenderCommandAt(q).drawPrimitives(
-                .triangleStrip, vertexStart: 4 * q, vertexCount: 4, instanceCount: 1, baseInstance: 0)
+                .triangleStrip, vertexStart: 4 * q, vertexCount: 4, instanceCount: 1, baseInstance: 0
+            )
         }
         let staged = try gpu.buffer([UInt32](arrayLiteral: 1, 2))
         guard let rangeBuffer = device.makeBuffer(length: 8, options: .storageModePrivate) else {

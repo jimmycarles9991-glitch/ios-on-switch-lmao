@@ -35,7 +35,7 @@ public enum BenchDifference {
     /// Bits [at, at + width) of the little-endian texel at byte `start`
     static func field(_ bytes: [UInt8], _ start: Int, _ at: Int, _ width: Int) -> Int {
         var v = 0
-        for bit in 0..<width {
+        for bit in 0 ..< width {
             let b = at + bit
             v |= Int(bytes[start + b / 8] >> UInt8(b % 8) & 1) << bit
         }

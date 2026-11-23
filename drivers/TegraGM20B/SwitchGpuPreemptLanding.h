@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 /* Debug kernels: where a compositor kick's preempt of an app landed (hold.c). GM20B leaves a graphics context only at a
- * wait for idle, and the raw path's banded draws end each band in a seqno release (raw_draw_bands.h), so a preempt asked
+ * wait for idle, and the driver's banded draws end each band in a seqno release (draw_bands.h), so a preempt asked
  * mid-job should land at a band's release: the app's last release seen before the compositor's start stamp, at or after
  * the ask, names it. That release ending a batch inside a job is a landing mid-job; ending the job's last batch, at the
  * job's end; none between the ask and the start (the switch came elsewhere, or the release is not read yet), unknown.

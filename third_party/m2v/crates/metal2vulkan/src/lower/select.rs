@@ -1370,8 +1370,6 @@ fn select_body(
     // The `half` outputs' last operations Metal computes at `float` precision, after the pairs
     // it fuses and before any of them is selected.
     arith::output_precision::plan(cx, m)?;
-    // A blended extended-range output whose source Metal may round otherwise than the model.
-    arith::output_precision::note_extended_range_sources(cx, m)?;
 
     let mut blocks = 0u64;
     for (b, block) in body.blocks.iter() {

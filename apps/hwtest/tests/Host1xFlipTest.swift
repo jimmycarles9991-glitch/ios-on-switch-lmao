@@ -22,10 +22,12 @@ struct Host1xFlipTest: HWTest {
 
     static let trial = Host1xFlipTest(
         id: "display.x1.host1x_flip", name: "Window A flipped by host1x behind its producer's syncpoint", flips: 60,
-        forced: false)
+        forced: false
+    )
     static let teardown = Host1xFlipTest(
         id: "display.x1.host1x_flip_teardown",
-        name: "A failed producer's host1x flip torn down and written by the display instead", flips: 30, forced: true)
+        name: "A failed producer's host1x flip torn down and written by the display instead", flips: 30, forced: true
+    )
 
     func run(_ context: TestContext) async throws -> Outcome {
         guard case .value(let before) = KernelSysctl.integer(Self.counter, as: Int32.self) else {
@@ -37,7 +39,7 @@ struct Host1xFlipTest: HWTest {
         var request = Int32(flips) | (forced ? Self.forcedFailure : 0)
         let started = sysctlbyname(Self.sysctl, nil, nil, &request, MemoryLayout<Int32>.size) == 0 ? 0 : errno
         var line = ""
-        for _ in 0..<150 {
+        for _ in 0 ..< 150 {
             guard case .value(let read) = KernelSysctl.string(Self.sysctl) else { break }
             line = read
             if started != 0 || !line.hasPrefix("host1x_flip=running") { break }

@@ -5,11 +5,12 @@
 
 use metal2vulkan::bind::SamplerDescriptor;
 use metal2vulkan::library::{FunctionConstantValue, FunctionConstantValues};
+use metal2vulkan::metal::format::ExtendedRange;
 use metal2vulkan::metal::{
     AttributeFormat, BlendFactor, BlendOperation, ColorWriteMask, CompareFunction, DataType, IndexType, PixelFormat,
     PrimitiveTopologyClass, SamplerAddressMode, SamplerBorderColor, SamplerMinMagFilter, SamplerMipFilter,
     StepFunction, TessellationControlPointIndexType, TessellationFactorFormat, TessellationFactorStepFunction,
-    TessellationPartitionMode, VertexFormat, VertexStepFunction, Winding,
+    TessellationPartitionMode, TextureWriteRoundingMode, VertexFormat, VertexStepFunction, Winding,
 };
 use metal2vulkan::pipeline::{
     ColorAttachmentDescriptor, ComputePipelineDescriptor, FunctionDescriptor, LinkedFunction, LinkedFunctions,
@@ -32,8 +33,10 @@ pub fn set_error(why: String) {
     });
 }
 
-/// Runs `body`, turning an error or a panic into the per-thread reason and `fallback`.
+/// Runs `body`, turning an error or a panic into the per-thread reason and `fallback`. A call that succeeds leaves no
+/// reason, so a caller tells an answer that is `fallback` from a failure.
 pub fn guard<T>(fallback: T, body: impl FnOnce() -> Result<T, String>) -> T {
+    LAST.with(|last| last.borrow_mut().clear());
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(Ok(value)) => value,
         Ok(Err(why)) => {
@@ -82,24 +85,10 @@ where
         .ok_or_else(|| format!("{what} {value} is not a Metal value"))
 }
 
-/// The error of `what` as the caller's text, and m2v's refusal of work iPadOS sent, logged once per call and kind of error
-/// in the process (kits/SwitchRefusal: an error line, kept in release). The kind is the error's variant and first field
-/// (`NotImplemented(Format`, `Unsupported(Unsupported { feature: FramebufferFetch`) without digits, so a value that varies
-/// per call makes no line of its own.
+/// The error of `what` as the caller's text: the shader compiler logs each request it refuses once, with this text and the
+/// function it is of (compiler/compiler_service.mm)
 pub fn e<E: std::fmt::Debug>(what: &'static str) -> impl FnOnce(E) -> String {
-    move |error| {
-        let text = format!("{what}: {error:?}");
-        let kind: String = text[what.len() + 2..]
-            .split([',', ')'])
-            .next()
-            .unwrap_or_default()
-            .chars()
-            .filter(|c| !c.is_ascii_digit())
-            .collect();
-        let key = switch_refusal::key_with(switch_refusal::key("m2v", what), switch_refusal::key("", &kind));
-        switch_refusal::refuse(c"m2v", what, key, || text.clone());
-        text
-    }
+    move |error| format!("{what}: {error:?}")
 }
 
 #[unsafe(no_mangle)]
@@ -403,6 +392,7 @@ pub struct NmbRenderPipelineDescriptorOf<F> {
     pub control_point_index_type: u64,
     pub factor_scale_enabled: u64,
     pub max_amplification: u64,
+    pub texture_write_rounding: u64,
 }
 
 pub fn optional_format(value: u64) -> Result<Option<PixelFormat>, String> {
@@ -424,6 +414,24 @@ pub fn stage_linked<F: DescriptorFunction>(
     linked.functions = linked_functions(functions, count)?;
     linked.private_functions = linked_functions(private, private_count)?;
     Ok(linked)
+}
+
+/// The extended-range form an attachment of MTLPixelFormat `raw` (`format`) renders through the RGBA16Float stand-in of
+/// (format_standin.h): Apple's extended-range formats, 550 to 555
+fn stand_in_of(raw: u64, format: PixelFormat) -> Option<ExtendedRange> {
+    (550..=555).contains(&raw).then(|| ExtendedRange::of(format)).flatten()
+}
+
+/// `factor` of a colour (`rgb`) or alpha blend where the destination alpha is 1 (standin_blend.h alphaOneFactor): a
+/// BGR10_XR form's stand-in holds an alpha the format does not
+fn alpha_one(factor: BlendFactor, rgb: bool) -> BlendFactor {
+    match factor {
+        BlendFactor::DestinationAlpha => BlendFactor::One,
+        BlendFactor::OneMinusDestinationAlpha => BlendFactor::Zero,
+        BlendFactor::SourceAlphaSaturated if rgb => BlendFactor::Zero,
+        BlendFactor::SourceAlphaSaturated => BlendFactor::One,
+        f => f,
+    }
 }
 
 pub fn render_descriptor<F: DescriptorFunction>(
@@ -454,7 +462,14 @@ pub fn render_descriptor<F: DescriptorFunction>(
         if c.format == 0 {
             continue;
         }
-        let mut a = ColorAttachmentDescriptor::new(raw::<PixelFormat>(c.format, "color format")?);
+        let format = raw::<PixelFormat>(c.format, "color format")?;
+        let stand_in = stand_in_of(c.format, format);
+        let mut a = ColorAttachmentDescriptor::new(if stand_in.is_some() {
+            PixelFormat::RGBA16Float
+        } else {
+            format
+        });
+        a.stand_in = stand_in;
         a.write_mask = raw::<ColorWriteMask>(c.write_mask, "write mask")?;
         a.blending_enabled = c.blending != 0;
         a.source_rgb_blend_factor = raw::<BlendFactor>(c.source_rgb, "blend factor")?;
@@ -463,6 +478,12 @@ pub fn render_descriptor<F: DescriptorFunction>(
         a.source_alpha_blend_factor = raw::<BlendFactor>(c.source_alpha, "blend factor")?;
         a.destination_alpha_blend_factor = raw::<BlendFactor>(c.destination_alpha, "blend factor")?;
         a.alpha_blend_operation = raw::<BlendOperation>(c.alpha_operation, "blend operation")?;
+        if matches!(stand_in, Some(ExtendedRange::Bgr10 { .. })) {
+            a.source_rgb_blend_factor = alpha_one(a.source_rgb_blend_factor, true);
+            a.destination_rgb_blend_factor = alpha_one(a.destination_rgb_blend_factor, true);
+            a.source_alpha_blend_factor = alpha_one(a.source_alpha_blend_factor, false);
+            a.destination_alpha_blend_factor = alpha_one(a.destination_alpha_blend_factor, false);
+        }
         *slot = Some(a);
     }
     out.depth_format = optional_format(d.depth_format)?;
@@ -508,6 +529,12 @@ pub fn render_descriptor<F: DescriptorFunction>(
         out.tessellation = Some(t);
     }
     out.max_vertex_amplification_count = d.max_amplification.max(1) as u32;
+    out.texture_write_rounding_mode = TextureWriteRoundingMode::from_raw(d.texture_write_rounding).map_err(|_| {
+        format!(
+            "textureWriteRoundingMode {} is not a Metal value",
+            d.texture_write_rounding
+        )
+    })?;
     Ok(out)
 }
 
@@ -544,4 +571,25 @@ pub fn sampler_descriptor(d: &NmbSamplerDescriptor) -> Result<SamplerDescriptor,
     out.lod_min_clamp = d.lod_min;
     out.lod_max_clamp = d.lod_max;
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{guard, nmb_last_error};
+    use std::ffi::CStr;
+
+    fn last_error() -> String {
+        // SAFETY: nmb_last_error's string lives until this thread's next guarded call.
+        unsafe { CStr::from_ptr(nmb_last_error()) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn a_call_that_succeeds_leaves_no_reason_of_an_earlier_failure() {
+        assert_eq!(guard(-1, || Err::<i64, _>("no vertex attributes".to_string())), -1);
+        assert_eq!(last_error(), "no vertex attributes");
+        assert_eq!(guard(-1, || Ok(-1)), -1);
+        assert_eq!(last_error(), "");
+    }
 }

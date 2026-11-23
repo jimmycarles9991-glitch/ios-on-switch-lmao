@@ -65,7 +65,7 @@ public enum X1Channel: Sendable, Equatable {
 
 /// How a unit turns an exact value into a code.
 public enum X1Rounding: String, CaseIterable, Sendable {
-    case nearest  // ties away from zero: Metal's unorm rule
+    case nearest // ties away from zero: Metal's unorm rule
     case tiesDown = "ties_down"
     case tiesEven = "ties_even"
     case down

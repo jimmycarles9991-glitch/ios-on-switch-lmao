@@ -16,7 +16,7 @@ public enum TexelFormat: String, CaseIterable, Sendable {
         case .r8Unorm, .a8Unorm, .stencil8: return 1
         case .rg8Unorm, .r16Float, .depth16Unorm: return 2
         case .rgba8Unorm, .bgra8Unorm, .rgba8Srgb, .bgra8Srgb, .rg16Float, .r32Float, .rgb10a2Unorm, .bgr10a2Unorm,
-            .bgr10XR, .depth32Float:
+             .bgr10XR, .depth32Float:
             return 4
         case .rgba16Float, .bgra10XR: return 8
         case .rgba32Float: return 16
@@ -123,10 +123,11 @@ public enum TexelFormat: String, CaseIterable, Sendable {
         case .rgba8Unorm, .rgba8Srgb, .r8Unorm, .a8Unorm, .rg8Unorm:
             return Raster(
                 width: width, height: height, channels: channels, levels: levels,
-                samples: bytes[0..<count].map { Float($0) / 255 })
+                samples: bytes[0 ..< count].map { Float($0) / 255 }
+            )
         case .rgba32Float, .r32Float, .depth32Float:
             let samples = bytes.withUnsafeBytes { raw in
-                (0..<(count / 4)).map { raw.loadUnaligned(fromByteOffset: $0 * 4, as: Float.self) }
+                (0 ..< (count / 4)).map { raw.loadUnaligned(fromByteOffset: $0 * 4, as: Float.self) }
             }
             return Raster(width: width, height: height, channels: channels, levels: levels, samples: samples)
         default:
@@ -135,7 +136,7 @@ public enum TexelFormat: String, CaseIterable, Sendable {
         var samples: [Float] = []
         samples.reserveCapacity(width * height * channels)
         for at in stride(from: 0, to: width * height * bytesPerTexel, by: bytesPerTexel) {
-            samples += decode(bytes[at..<(at + bytesPerTexel)])
+            samples += decode(bytes[at ..< (at + bytesPerTexel)])
         }
         return Raster(width: width, height: height, channels: channels, levels: levels, samples: samples)
     }
@@ -143,10 +144,10 @@ public enum TexelFormat: String, CaseIterable, Sendable {
     /// What an exact GPU would read back after storing `raster`: each texel through this format and back.
     public func quantized(_ raster: Raster) -> Raster {
         var out = raster
-        for y in 0..<raster.height {
-            for x in 0..<raster.width {
+        for y in 0 ..< raster.height {
+            for x in 0 ..< raster.width {
                 let stored = decode(encode(raster.pixel(x, y))[...])
-                for c in 0..<channels { out[x, y, c] = stored[c] }
+                for c in 0 ..< channels { out[x, y, c] = stored[c] }
             }
         }
         return Raster(width: out.width, height: out.height, channels: channels, levels: levels, samples: out.samples)
@@ -172,10 +173,10 @@ public enum TexelFormat: String, CaseIterable, Sendable {
     }
 
     static func bytes<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
-        (0..<(T.bitWidth / 8)).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
+        (0 ..< (T.bitWidth / 8)).map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) }
     }
 
     static func word(_ bytes: [UInt8], _ at: Int, _ count: Int) -> UInt32 {
-        (0..<count).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << ($1 * 8) }
+        (0 ..< count).reduce(UInt32(0)) { $0 | UInt32(bytes[at + $1]) << ($1 * 8) }
     }
 }

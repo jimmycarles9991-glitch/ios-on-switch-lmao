@@ -25,7 +25,7 @@ struct VideoEncodeBFramesTest: HWTest {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
         var bytes = [UInt8](repeating: 0, count: min(CMBlockBufferGetDataLength(block), 32))
         guard bytes.count > 6,
-            CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes.count, destination: &bytes) == noErr
+              CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes.count, destination: &bytes) == noErr
         else { return nil }
         var bit = 5 * 8
         func ue() -> Int {
@@ -36,20 +36,20 @@ struct VideoEncodeBFramesTest: HWTest {
             }
             bit += 1
             var value = 0
-            for _ in 0..<zeros where bit < bytes.count * 8 {
+            for _ in 0 ..< zeros where bit < bytes.count * 8 {
                 value = value << 1 | Int(bytes[bit / 8] >> (7 - bit % 8) & 1)
                 bit += 1
             }
             return (1 << zeros) - 1 + value
         }
-        _ = ue()  // first_mb_in_slice
+        _ = ue() // first_mb_in_slice
         return (ue() % 5, bytes[4] & 0x60 != 0)
     }
 
     static func attachment(_ sample: CMSampleBuffer, _ key: CFString) -> Bool? {
         guard
             let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
-                as? [[CFString: Any]]
+            as? [[CFString: Any]]
         else { return nil }
         return attachments.first?[key] as? Bool
     }
@@ -59,7 +59,8 @@ struct VideoEncodeBFramesTest: HWTest {
         let pattern = Pattern(width: width, height: height, clip: 0x7004)
         var settings = CompressorSettings(
             codec: .h264, width: width, height: height, fps: fps, bitrate: 12_000_000, realTime: false,
-            requireHardware: true)
+            requireHardware: true
+        )
         settings.allowReordering = true
         let encoded = try Compressor.encode(settings, pattern: pattern, frames: Self.frames)
         let slices = encoded.decodeOrder.map(Self.slice)
@@ -74,7 +75,8 @@ struct VideoEncodeBFramesTest: HWTest {
         let rising = zip(decodeTimes, decodeTimes.dropFirst()).allSatisfy { $0 < $1 }
         let reordered = zip(decodeTimes, encoded.decodeOrder.map(\.presentationTimeStamp)).filter { $0 != $1 }.count
         let decoded = try Decompressor.decode(
-            encoded.decodeOrder, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps, temporal: true)
+            encoded.decodeOrder, format: encoded.format, pattern: pattern, bitDepth: 8, fps: fps, temporal: true
+        )
         var metrics = Metrics()
         metrics.set("fps", Double(Self.frames) / encoded.seconds, digits: 1)
         metrics.set("mbps", Double(encoded.bytes * 8) / (Double(Self.frames) / Double(fps)) / 1e6, digits: 2)
@@ -101,6 +103,7 @@ struct VideoEncodeBFramesTest: HWTest {
                     "every input, held frames' too, written by VIC from its own surface, none copied or refused",
                     VideoEncodeTest.allByVIC(encoded.routes, Self.frames)
                 ),
-            ], metrics, proof: encoded.usingHardware ? "encoder=\(encoded.encoderID)" : "")
+            ], metrics, proof: encoded.usingHardware ? "encoder=\(encoded.encoderID)" : ""
+        )
     }
 }

@@ -25,7 +25,7 @@ Steps:
                    if a card still has it; and stages hekate's "Dump Joy-Con BT" (the FAT's switchroot/joycon_mac.ini,
                    only read) as <Data>/Switch/bluetooth/{host-address, joycon-pairing.plist}, removed when the FAT has
                    none (joycon_pairing.py; --no-joycon-pairing skips it)
-  4 GPU bundle     <Data>/ngpu/addons/TegraGM20BMetal.{bundle,m2v-seed,raw} from --//deploy:gpu_bundle, via the
+  4 GPU bundle     <Data>/ngpu/addons/TegraGM20BMetal.{bundle,seed,pack} from --//deploy:gpu_bundle, via the
                    plugin's stager, which copies only the files whose sha256 the card does not already hold and
                    reads nothing more when the card's list matches the build (its CDHashes must be in the same
                    build's kernel window: deploy the boot package built with that bundle); --remove-gpu removes it
@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import plistlib
+import shutil
 import sys
 import time
 from collections.abc import Callable
@@ -214,7 +215,35 @@ def _confirmed(args: argparse.Namespace, card: cards.Card) -> None:
         raise cards.RefusedError('not confirmed')
 
 
+# The plugin's cache folders before the driver left raw/ (its cacheCandidates then, harvest.py's --volume list): the
+# plugin makes the new ones afresh and nothing reads these. Containers a process closed (no read and search) are left.
+RENAMED_CACHES = (
+    'tmp/m2v',
+    'tmp/m2v-*',
+    'mobile/tmp/*/m2v',
+    'mobile/Library/Caches/m2v',
+    'root/Library/Caches/m2v',
+    'folders/*/*/C/m2v',
+    'folders/*/*/T/m2v',
+    'containers/Data/System/*/Library/Caches/m2v',
+    'containers/Data/System/*/Library/Caches/m2v-*',
+    'containers/Data/System/*/tmp/m2v',
+    'mobile/Containers/Data/*/*/Library/Caches/m2v',
+    'mobile/Containers/Data/*/*/Library/Caches/m2v-*',
+    'mobile/Containers/Data/*/*/tmp/m2v',
+)
+
+
+def _remove_renamed_caches(data_root: Path, log: host.Log) -> None:
+    for pattern in RENAMED_CACHES:
+        for folder in sorted(data_root.glob(pattern)):
+            if folder.is_dir() and not folder.is_symlink():
+                shutil.rmtree(folder)
+                log('gpu: removed', folder.relative_to(data_root), '(the cache folder before the rename)')
+
+
 def _stage_gpu(args: argparse.Namespace, data_root: Path, log: host.Log) -> None:
+    _remove_renamed_caches(data_root, log)
     command = [sys.executable, args.stager, str(data_root)]
     command += ['--remove'] if args.remove_gpu else ['--build', args.gpu_bundle, '--progress']
     with progress.step('gpu: staging the Metal bundle'):

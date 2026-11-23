@@ -1,9 +1,9 @@
 import Darwin
 import Foundation
-import SwiftUI
 import notify
+import SwiftUI
 
-/// The render server's blur-texture probe (TegraGM20BMetal raw_glass_mem.h, debug builds). HW Test's glass tests arm it
+/// The render server's blur-texture probe (TegraGM20BMetal glass_mem.h, debug builds). HW Test's glass tests arm it
 /// for their own run; the main screen's watch arms it for five minutes of normal use (scroll Settings, come back). While
 /// armed, its copy-engine reads run on every compositor frame, so the tests that measure frames refuse to run under it.
 public enum GlassMemWatch {

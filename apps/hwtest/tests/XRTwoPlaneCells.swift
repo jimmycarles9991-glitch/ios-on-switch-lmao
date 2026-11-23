@@ -4,9 +4,9 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.xr_two_plane's cells beyond the planes' own bytes, each against the CPU model (XRTwoPlaneModel): blended
-/// draws of the app's own state (made on the device, its storage form alone), Core Animation's source-over in the pack
-/// record's storage form and in its barrier form (raw_probe_forms.h fetch=barrier), each within one code, a surface
+/// gpu.gm20b.xr_two_plane's cells beyond the planes' own bytes, each against the CPU model (XRTwoPlaneModel): blended
+/// draws of the app's own state (made on the device, blended by the ROP in the stand-in, no interlock), Core Animation's
+/// source-over of its framebuffer fetch in the pack record's storage form and in its barrier form (probe_forms.h fetch=barrier), each within one code, a surface
 /// whose alpha rows miss a pitch target's 128 bytes, and samples through the texture's header pair
 /// (nvk_switch_xr_planes.h): nearest exact, linear within a half step of Metal's filter, and gathers of alpha and red.
 struct XRTwoPlaneCells {
@@ -31,32 +31,34 @@ struct XRTwoPlaneCells {
             a.sourceAlphaBlendFactor = .one
             a.destinationAlphaBlendFactor = .oneMinusSourceAlpha
         }
-        let before = RawFacade.counters(of: gpu.device)["interlock_draws"] ?? 0
+        let before = GM20BFacade.counters(of: gpu.device)["interlock_draws"] ?? 0
         try await gpu.run { commands in
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = texture
             pass.colorAttachments[0].loadAction = .clear
             let c = XRTwoPlaneTest.clear
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
+                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w)
+            )
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(draw)
             for b in Self.blends {
                 let r = b.rect
                 GPU.draw(
-                    encoder, corners: GPU.pixelQuad(r.0, r.1, r.2, r.3, width: width, height: height), color: b.color)
+                    encoder, corners: GPU.pixelQuad(r.0, r.1, r.2, r.3, width: width, height: height), color: b.color
+                )
             }
             encoder.endEncoding()
         }
-        let interlocked = (RawFacade.counters(of: gpu.device)["interlock_draws"] ?? 0) - before
+        let interlocked = (GM20BFacade.counters(of: gpu.device)["interlock_draws"] ?? 0) - before
         var want = [UInt64](repeating: XRTwoPlaneTest.texel(XRTwoPlaneTest.clear), count: width * height)
         for b in Self.blends {
             let half = SIMD4<Float16>(b.color)
             let source = SIMD4<Double>(Double(half.x), Double(half.y), Double(half.z), Double(half.w))
             let r = b.rect
-            for y in r.1..<r.3 {
-                for x in r.0..<r.2 { want[y * width + x] = XRTwoPlaneModel.over(source, want[y * width + x]) }
+            for y in r.1 ..< r.3 {
+                for x in r.0 ..< r.2 { want[y * width + x] = XRTwoPlaneModel.over(source, want[y * width + x]) }
             }
         }
         let (wrong, offByOne) = XRTwoPlaneModel.apart(XRTwoPlaneTest.planes(buffer), want)
@@ -64,30 +66,30 @@ struct XRTwoPlaneCells {
     }
 
     /// Core Animation's untextured source-over fill into 'b3a8' beside its memoryless 550 and R32Float, verbatim from the
-    /// corpus: the pack's record fetches the 550 colour and blends over it in the program (its storage form, and its
-    /// barrier twin), both planes' (" | xr2p")
+    /// corpus: the pack's record fetches the 550 colour's stand-in and blends over it in the program (its storage form,
+    /// and its barrier twin)
     static let fetchLine =
         "R ok=1 label=com.apple.coreanimation.Pb3a8BsovXmw_A3Xhfx samples=1 topo=0 ds=0/0"
-        + " c0=550:15:1:1:5:0:1:5:0 c1=550:0:0:1:0:0:1:0:0 c2=55:0:0:1:0:0:1:0:0"
-        + " a0=31:0:1:48:1:1 a1=29:16:1:48:1:1 a2=29:24:1:48:1:1 a3=27:32:1:48:1:1"
-        + " | v fixed_vert_lph_spc lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib"
-        + " fc_generic:53:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_vertex_layout:49:00"
-        + " | f fixed_frag_lph_cph lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib"
-        + " fc_attachment_count:49:03 fc_blend_function:49:3a fc_clamp_color:53:00 fc_color_inputs0:49:00"
-        + " fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 fc_color_opcodes0:52:00000000"
-        + " fc_color_opcodes1:52:00000000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00"
-        + " fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:01"
-        + " fc_filter0:49:00 fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00"
-        + " fc_has_asg_77_weights:53:00 fc_has_attachment_0:53:00 fc_has_attachment_1:53:00"
-        + " fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 fc_has_color_cube1:53:00 fc_has_color_params:53:00"
-        + " fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00"
-        + " fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 fc_has_image_0B:53:00 fc_has_image_0C:53:00"
-        + " fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 fc_has_lod_bias:53:00"
-        + " fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 fc_has_premultiply:53:00"
-        + " fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 fc_image_function1:49:00"
-        + " fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 fc_plane_count0:49:00"
-        + " fc_plane_count1:49:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_texture_function:49:00"
-        + " fc_unbounded_range:53:00 fc_vertex_layout:49:00 | "
+            + " c0=550:15:1:1:5:0:1:5:0 c1=550:0:0:1:0:0:1:0:0 c2=55:0:0:1:0:0:1:0:0"
+            + " a0=31:0:1:48:1:1 a1=29:16:1:48:1:1 a2=29:24:1:48:1:1 a3=27:32:1:48:1:1"
+            + " | v fixed_vert_lph_spc lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib"
+            + " fc_generic:53:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_vertex_layout:49:00"
+            + " | f fixed_frag_lph_cph lib=/System/Library/Frameworks/QuartzCore.framework/default.metallib"
+            + " fc_attachment_count:49:03 fc_blend_function:49:3a fc_clamp_color:53:00 fc_color_inputs0:49:00"
+            + " fc_color_inputs1:49:00 fc_color_opaque0:53:00 fc_color_opaque1:53:00 fc_color_opcodes0:52:00000000"
+            + " fc_color_opcodes1:52:00000000 fc_coord_function0:49:00 fc_coord_function1:49:00 fc_debug_xr:53:00"
+            + " fc_dest_count:49:00 fc_dest_index:49:00 fc_destination_function:49:00 fc_extended_range:53:01"
+            + " fc_filter0:49:00 fc_filter1:49:00 fc_framebuffer_fetch:53:01 fc_generic:53:00"
+            + " fc_has_asg_77_weights:53:00 fc_has_attachment_0:53:00 fc_has_attachment_1:53:00"
+            + " fc_has_attachment_2:53:00 fc_has_color_cube0:53:00 fc_has_color_cube1:53:00 fc_has_color_params:53:00"
+            + " fc_has_color_trc0:53:00 fc_has_color_trc1:53:00 fc_has_edr_factor:53:00 fc_has_gamma_luts:53:00"
+            + " fc_has_hdr_scale:53:00 fc_has_image_0A:53:00 fc_has_image_0B:53:00 fc_has_image_0C:53:00"
+            + " fc_has_image_1A:53:00 fc_has_image_1B:53:00 fc_has_image_1C:53:00 fc_has_lod_bias:53:00"
+            + " fc_has_lut_tex:53:00 fc_has_noise_scale:53:00 fc_has_noise_tex:53:00 fc_has_premultiply:53:00"
+            + " fc_has_ycbcr_matrix:53:00 fc_image_count:49:00 fc_image_function0:49:00 fc_image_function1:49:00"
+            + " fc_memoryless_index0:49:00 fc_memoryless_index1:49:00 fc_noise_width:49:00 fc_plane_count0:49:00"
+            + " fc_plane_count1:49:00 fc_texcoord_count0:49:00 fc_texcoord_count1:49:00 fc_texture_function:49:00"
+            + " fc_unbounded_range:53:00 fc_vertex_layout:49:00 | "
 
     static let fetches: [(x0: Float, y0: Float, x1: Float, y1: Float, color: SIMD4<Float16>)] = [
         (-0.9, -0.8, 0.3, 0.5, SIMD4(0.25, 0.5, -0.125, 0.5)),
@@ -109,7 +111,7 @@ struct XRTwoPlaneCells {
         let scratch = try [XRTwoPlaneTest.format, .r32Float].map {
             try gpu.texture($0, width, height, usage: [.renderTarget], storage: .memoryless)
         }
-        let before = RawFacade.counters(of: gpu.device)
+        let before = GM20BFacade.counters(of: gpu.device)
         try await gpu.run { commands in
             if barrier { try Self.forms(commands, "fetch=barrier") }
             let pass = MTLRenderPassDescriptor()
@@ -117,7 +119,8 @@ struct XRTwoPlaneCells {
             pass.colorAttachments[0].loadAction = .clear
             let c = XRTwoPlaneTest.clear
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
+                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w)
+            )
             pass.colorAttachments[0].storeAction = .store
             for (index, texture) in scratch.enumerated() {
                 pass.colorAttachments[index + 1].texture = texture
@@ -129,29 +132,31 @@ struct XRTwoPlaneCells {
             for f in Self.fetches {
                 CAState.bind(
                     encoder, vertices: CAState.rectangle(x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, color: f.color),
-                    source: nil)
+                    source: nil
+                )
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
             encoder.endEncoding()
         }
-        let after = RawFacade.counters(of: gpu.device)
+        let after = GM20BFacade.counters(of: gpu.device)
         let moved = { (name: String) in (after[name] ?? 0) - (before[name] ?? 0) }
         var want = [UInt64](repeating: XRTwoPlaneTest.texel(XRTwoPlaneTest.clear), count: width * height)
         for f in Self.fetches {
             let source = SIMD4<Double>(Double(f.color.x), Double(f.color.y), Double(f.color.z), Double(f.color.w))
             for i in want.indices
-            where XRTwoPlaneModel.covers(
-                i % width, i / width, x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, width: width, height: height)
+                where XRTwoPlaneModel.covers(
+                    i % width, i / width, x0: f.x0, y0: f.y0, x1: f.x1, y1: f.y1, width: width, height: height
+                )
             {
                 want[i] = XRTwoPlaneModel.over(source, want[i])
             }
         }
         let (wrong, offByOne) = XRTwoPlaneModel.apart(XRTwoPlaneTest.planes(buffer), want)
-        return (wrong, offByOne, moved("interlock_draws"), moved("fetch_whole") + moved("fetch_sequential"))
+        return (wrong, offByOne, moved("interlock_draws"), moved("fetch_sequential"))
     }
 
     /// Texels wrong after a clear and a draw into a surface 60 wide: its alpha plane's rows (64 bytes) miss the 128 a
-    /// pitch target's address and rows take (raw_gpu.cpp linearTarget), so the pass draws its planes through shadows
+    /// pitch target's address and rows take (gpu.cpp linearTarget), so the pass draws its planes through shadows
     func narrowWrong() async throws -> Int {
         let (width, height) = (60, 40)
         let (buffer, texture) = try XRTwoPlaneTest.surfaceTexture(gpu, width: width, height: height)
@@ -165,7 +170,8 @@ struct XRTwoPlaneCells {
             pass.colorAttachments[0].texture = texture
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w))
+                red: Double(c.x), green: Double(c.y), blue: Double(c.z), alpha: Double(c.w)
+            )
             pass.colorAttachments[0].storeAction = .store
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(draw)
@@ -201,19 +207,19 @@ struct XRTwoPlaneCells {
             encoder.endEncoding()
         }
         let bytes = try await gpu.read(target, bytesPerPixel: 8)
-        return (0..<(width * height * 4)).map { bytes.loaded(as: UInt16.self, at: $0) }
+        return (0 ..< (width * height * 4)).map { bytes.loaded(as: UInt16.self, at: $0) }
     }
 
     /// Samples drawn through the header pair: the state's sampled variant is made on the device at its first draw
-    /// (RawMetalCubic.mm renderVariant), its stand-in drawn until then, so the samples are taken again until the
+    /// (TegraGM20BMetalCubic.mm renderVariant), its stand-in drawn until then, so the samples are taken again until the
     /// facade's header-pair binds move, up to two seconds
     func pairSamples(
         _ texture: MTLTexture, _ fragment: String, shift: Float = 1.0 / 3
     ) async throws -> (halves: [UInt16], paired: Bool) {
-        for _ in 0..<200 {
-            let before = RawFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0
+        for _ in 0 ..< 200 {
+            let before = GM20BFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0
             let halves = try await Self.samples(gpu, texture, fragment, shift: shift)
-            if (RawFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0) > before { return (halves, true) }
+            if (GM20BFacade.counters(of: gpu.device)["xr_pair_binds"] ?? 0) > before { return (halves, true) }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
         return (try await Self.samples(gpu, texture, fragment, shift: shift), false)
@@ -232,10 +238,10 @@ struct XRTwoPlaneCells {
                 : Float16(Double(Int(t >> 20 & 0x3ff) - 384) / 510).bitPattern
         }
         var wrong = 0
-        for y in 0..<(XRTwoPlaneTest.height - 1) {
-            for x in 0..<(w - 1) {
+        for y in 0 ..< (XRTwoPlaneTest.height - 1) {
+            for x in 0 ..< (w - 1) {
                 let i = y * w + x
-                let got = (0..<4).map { halves[i * 4 + $0] }.sorted()
+                let got = (0 ..< 4).map { halves[i * 4 + $0] }.sorted()
                 let around = [want[i], want[i + 1], want[i + w], want[i + w + 1]].map(value).sorted()
                 if got != around { wrong += 1 }
             }
@@ -243,11 +249,11 @@ struct XRTwoPlaneCells {
         return (wrong, paired)
     }
 
-    /// raw_probe_forms.h: the raw command buffer's barrier forms (debug builds' RawMetalProbe.mm)
+    /// probe_forms.h: the raw command buffer's barrier forms (debug builds' TegraGM20BMetalProbe.mm)
     static func forms(_ commands: MTLCommandBuffer, _ forms: String) throws {
-        let selector = NSSelectorFromString("switchRawProbeForms:")
+        let selector = NSSelectorFromString("switchMetalProbeForms:")
         guard let object = commands as? NSObject, object.responds(to: selector) else {
-            throw TestFailure("the facade has no switchRawProbeForms: (a release plug-in)")
+            throw TestFailure("the facade has no switchMetalProbeForms: (a release plug-in)")
         }
         if let refusal = object.perform(selector, with: forms)?.takeUnretainedValue() as? String {
             throw TestFailure(refusal)

@@ -26,13 +26,13 @@ struct CompileSharedTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade")
         }
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
 
-        let store = RawFacade.compilerStore(of: gpu.device) ?? ""
+        let store = GM20BFacade.compilerStore(of: gpu.device) ?? ""
         metrics.set("store", store.isEmpty ? "none" : String(store.prefix(16)))
         checks.append(("the process maps the shader compiler's store", !store.isEmpty))
         let previousStore = UserDefaults.standard.string(forKey: Self.storeKey)
@@ -44,7 +44,7 @@ struct CompileSharedTest: HWTest {
             metrics.set("relaunch_how", "first_run_of_this_store")
         }
 
-        let salt = UInt32.random(in: 1...UInt32.max)
+        let salt = UInt32.random(in: 1 ... UInt32.max)
         UserDefaults.standard.set(Int(salt), forKey: Self.saltKey)
         UserDefaults.standard.set(store, forKey: Self.storeKey)
         let pair = try await together(gpu, salt: salt)
@@ -82,13 +82,14 @@ struct CompileSharedTest: HWTest {
     }
 
     func made(_ state: MTLRenderPipelineState) throws -> Made {
-        guard let answer = RawFacade.compile(of: state) else {
-            throw TestFailure("the state answers no switchRawCompile (a release build?)")
+        guard let answer = GM20BFacade.compile(of: state) else {
+            throw TestFailure("the state answers no switchMetalCompile (a release build?)")
         }
         return Made(
             how: answer["how"] as? String ?? "?", waitUs: (answer["wait_us"] as? NSNumber)?.intValue ?? 0,
             qos: (answer["qos"] as? NSNumber)?.intValue ?? 0,
-            ranClass: (answer["ran_class"] as? NSNumber)?.intValue ?? 0)
+            ranClass: (answer["ran_class"] as? NSNumber)?.intValue ?? 0
+        )
     }
 
     /// The same state created on two threads released together
@@ -96,7 +97,7 @@ struct CompileSharedTest: HWTest {
         let start = DispatchSemaphore(value: 0)
         let results = Results()
         let group = DispatchGroup()
-        for slot in 0..<2 {
+        for slot in 0 ..< 2 {
             group.enter()
             DispatchQueue.global(qos: .userInitiated).async {
                 start.wait()
@@ -124,11 +125,12 @@ struct CompileSharedTest: HWTest {
             encoder.setBuffer(data, offset: 0, index: 0)
             encoder.dispatchThreads(
                 MTLSize(width: count, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+            )
             encoder.endEncoding()
         }
         let values = data.contents().bindMemory(to: UInt32.self, capacity: count)
-        return (0..<count).filter { values[$0] != UInt32($0) ^ salt }.count
+        return (0 ..< count).filter { values[$0] != UInt32($0) ^ salt }.count
     }
 
     final class Results: @unchecked Sendable {
@@ -144,7 +146,7 @@ struct CompileSharedTest: HWTest {
         func all() throws -> [Made] {
             lock.lock()
             defer { lock.unlock() }
-            return try (0..<2).map { try made[$0]!.get() }
+            return try (0 ..< 2).map { try made[$0]!.get() }
         }
     }
 }

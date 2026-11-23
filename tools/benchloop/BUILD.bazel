@@ -197,7 +197,7 @@ APP_SOURCES = [
 py_library(
     name = "rung3_lib",
     srcs = ["rung3.py"],
-    deps = ["//drivers/TegraGM20BMetal:raw_pack"],
+    deps = ["//drivers/TegraGM20BMetal:pack"],
 )
 
 py_binary(
@@ -214,7 +214,7 @@ py_test(
     data = ["//kits/SwitchGM20BEmit:mme/switch_gm20b_macros.c"],
     deps = [
         ":protocol",
-        "//drivers/TegraGM20BMetal:raw_pack",
+        "//drivers/TegraGM20BMetal:pack",
     ],
 )
 

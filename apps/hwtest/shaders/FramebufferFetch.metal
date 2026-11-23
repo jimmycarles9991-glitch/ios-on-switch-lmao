@@ -114,3 +114,41 @@ fragment float4 fetch_derivative_fragment(FetchPosition v [[stage_in]], float4 p
     const float f = v.position.x * 0.25f + v.position.y * 0.5f;
     return float4(dfdx(f) * 2.0f, abs(dfdy(f)), fwidth(f) * 0.5f, previous.a);
 }
+
+struct FetchCountVertex {
+    float4 position [[position]];
+    uint instance [[flat]];
+};
+
+// tests/FetchShapes.swift: each vertex at points[vertex_id], so a draw's vertexStart and indices pick the points
+vertex FetchCountVertex fetch_count_vertex(uint vid [[vertex_id]], uint instance [[instance_id]],
+                                           constant float4 *points [[buffer(0)]])
+{
+    return {points[vid], instance};
+}
+
+struct FetchCountPoint {
+    float4 position [[position]];
+    float size [[point_size]];
+};
+
+vertex FetchCountPoint fetch_count_point_vertex(uint vid [[vertex_id]], constant float4 *points [[buffer(0)]])
+{
+    return {points[vid], 1};
+}
+
+// One code of a 5-bit red channel more than the fetched one a fragment
+fragment float4 fetch_count_fragment(float4 previous [[color(0)]])
+{
+    return float4(previous.r + 1.0f / 31, previous.gb, 1);
+}
+
+fragment float4 fetch_count_primitive_fragment(uint primitive [[primitive_id]], float4 previous [[color(0)]])
+{
+    return float4(previous.r + 1.0f / 31, float(primitive) / 31, previous.b, 1);
+}
+
+fragment float4 fetch_count_instance_fragment(FetchCountVertex v [[stage_in]], float4 previous [[color(0)]])
+{
+    return float4(previous.r + 1.0f / 31, previous.g, float(v.instance) / 31, 1);
+}

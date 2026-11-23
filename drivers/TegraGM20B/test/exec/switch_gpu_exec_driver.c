@@ -61,8 +61,23 @@ void _enable_preemption(void)
 {
 }
 
+static void (*idle_raised)(void *context);
+static void *idle_context;
+
+void switch_exec_idle_low(void (*raised)(void *context), void *context)
+{
+	idle_raised = raised;
+	idle_context = context;
+	tgm_idle.on = tgm_idle.low = raised != NULL;
+	/* idle_stats' periodic line, which takes tgm_idle.clk, stays out of the window */
+	tgm_idle.log_start = nvxnu_nanotime();
+}
+
 u64 tgm_idle_raise(void)
 {
+	if (idle_raised)
+		idle_raised(idle_context);
+	tgm_idle.low = 0;
 	return 0;
 }
 

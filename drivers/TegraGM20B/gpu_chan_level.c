@@ -18,7 +18,7 @@ static void chan_timeslice(u32 chid, u32 value)
 	tgm_ramfc_write(chid, RAMFC_TIMESLICE, value);
 }
 
-void tgm_chan_set_level(struct tgm_chan *chan, unsigned int level)
+void tgm_chan_set_level(struct tgm_chan *chan, unsigned int level, int critical)
 {
 	int high = level == TGM_LEVEL_HIGH;
 	u64 now = nvxnu_nanotime();
@@ -26,6 +26,7 @@ void tgm_chan_set_level(struct tgm_chan *chan, unsigned int level)
 
 	if (chan->kernel)
 		return;
+	WRITE_ONCE(chan->critical, critical);
 	if (high == chan->high) {
 		tgm_sched_level(tgm_gpu.device, chan->chid, level);
 		return;
@@ -39,14 +40,12 @@ void tgm_chan_set_level(struct tgm_chan *chan, unsigned int level)
 			WRITE_ONCE(chan->jobs.job[i].waits, 1);
 		}
 		WRITE_ONCE(chan->tracked, 0);
-		chan->critical = 1;
 		/* chan_completion reads the job records once it sees high */
 		__atomic_store_n(&chan->high, 1, __ATOMIC_RELEASE);
 		switch_gpu_busy_level(&tgm_busy, chan->chid, 0);
 		tgm_sched_level(tgm_gpu.device, chan->chid, TGM_LEVEL_HIGH);
 	} else {
 		WRITE_ONCE(chan->high, 0);
-		chan->critical = 0;
 		switch_gpu_busy_level(&tgm_busy, chan->chid, 1);
 		tgm_sched_level(tgm_gpu.device, chan->chid, level);
 	}

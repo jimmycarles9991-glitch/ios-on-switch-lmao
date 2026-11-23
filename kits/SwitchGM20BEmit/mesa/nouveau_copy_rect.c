@@ -10,7 +10,7 @@
  *  - the caller's push, sized with SWITCH_GM20B_COPY_RECT_WORDS, instead of an NVK command buffer's;
  *  - plain surfaces (switch_gm20b_copy_surface) instead of nil and Vulkan types;
  *  - SET_SRC_ORIGIN and SET_DST_ORIGIN continue the block-size method run (they follow SET_*_LAYER): one header
- *    word fewer per block-linear side, as the raw path's copies already emit them.
+ *    word fewer per block-linear side, as the driver's copies already emit them.
  */
 
 #include "../SwitchGM20BEmitCopy.h"

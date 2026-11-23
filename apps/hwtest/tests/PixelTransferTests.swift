@@ -20,11 +20,11 @@ struct PixelTransferTest: HWTest {
         let attributes = PatternPixels.attributes(width: width, height: height, format: format)
         guard
             CVPixelBufferCreate(nil, width, height, format, attributes as CFDictionary, &destination)
-                == kCVReturnSuccess,
+            == kCVReturnSuccess,
             let destination
         else { throw TestFailure("CVPixelBufferCreate \(width)x\(height)") }
         let start = CFAbsoluteTimeGetCurrent()
-        for _ in 0..<Self.runs {
+        for _ in 0 ..< Self.runs {
             let status = VTPixelTransferSessionTransferImage(session, from: source, to: destination)
             guard status == noErr else { throw TestFailure("VTPixelTransferSessionTransferImage: \(status)") }
         }
@@ -40,19 +40,25 @@ struct PixelTransferTest: HWTest {
         defer { VTPixelTransferSessionInvalidate(session) }
         let clip: UInt16 = 0x71C
         let uhd = try PatternPixels.make(
-            Pattern(width: 3840, height: 2160, clip: clip), frame: 5, bitDepth: 8, pool: nil)
+            Pattern(width: 3840, height: 2160, clip: clip), frame: 5, bitDepth: 8, pool: nil
+        )
         let hd = try PatternPixels.make(
-            Pattern(width: 1920, height: 1080, clip: clip), frame: 5, bitDepth: 8, pool: nil)
+            Pattern(width: 1920, height: 1080, clip: clip), frame: 5, bitDepth: 8, pool: nil
+        )
         // Pattern.rgb is BT.601; tag the source so the conversion uses the same matrix.
         CVBufferSetAttachment(hd, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_601_4, .shouldPropagate)
         let (scaled, scaleMs) = try transfer(
-            session, from: uhd, width: 1920, height: 1080, format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+            session, from: uhd, width: 1920, height: 1080, format: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        )
         let (converted, convertMs) = try transfer(
-            session, from: hd, width: 1280, height: 720, format: kCVPixelFormatType_32BGRA)
+            session, from: hd, width: 1280, height: 720, format: kCVPixelFormatType_32BGRA
+        )
         let scaledCheck = PatternPixels.check(
-            scaled, pattern: Pattern(width: 1920, height: 1080, clip: clip), expected: 5)
+            scaled, pattern: Pattern(width: 1920, height: 1080, clip: clip), expected: 5
+        )
         let convertedCheck = PatternPixels.checkBGRA(
-            converted, pattern: Pattern(width: 1280, height: 720, clip: clip), expected: 5)
+            converted, pattern: Pattern(width: 1280, height: 720, clip: clip), expected: 5
+        )
         var metrics = Metrics()
         metrics.set("scale_4k_1080p_ms", scaleMs, digits: 2)
         metrics.set("convert_1080p_720p_bgra_ms", convertMs, digits: 2)
@@ -62,6 +68,7 @@ struct PixelTransferTest: HWTest {
             [
                 ("4K -> 1080p NV12 keeps the pattern", scaledCheck.matches(frame: 5, tolerance: 12)),
                 ("1080p NV12 -> 720p BGRA keeps the pattern", convertedCheck.matches(frame: 5, tolerance: 16)),
-            ], metrics)
+            ], metrics
+        )
     }
 }

@@ -1,0 +1,116 @@
+# drivers/TegraGM20BMetal/plugin's headers on the host:
+#   limits_table_test       LimitsTable.h: the device's answers in the base class's limits table, past a field the base
+#                           class reads elsewhere (21H461's minConstantBufferAlignmentBytes)
+#   queue_priority_test     QueuePriority.h: the process's GPU priority from its Metal queues' (Core Animation's)
+#   gpu_memory_release_test GpuMemoryRelease.h: the idle release waits for the command buffers in flight and comes at the
+#                           deadline their drain sets; a release asked for (memory pressure's) runs with work in flight
+#   image_filter_link_test  ImageFilterLink.h: Core Image's filter-function link request for the system's Metal compiler
+#   metallib_entries_test   MetallibEntries.h: a metallib's function list, which entries Metal answers as extern, and a
+#                           function's patch from its TESS tag (Xcode's bytes for it)
+#   metallib_slice_test     MetallibSlice.h: the AIR slice of a universal metallib each IPSW's Metal loads, on its own
+#                           CoreImage.metallib and QuartzCore library
+#   core_image_probe_test   the selected IPSW's Core Image libraries: the kernels Core Image asks ci_stdlib for first are
+#                           ci_filters', so a real device misses there too
+#   switch_compile_reply_test  SwitchCompileReply.h: the Metal compiler's reply envelope
+#
+#   bazel test //drivers/TegraGM20BMetal/plugin/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_test")
+
+lint_files()
+
+host_test(
+    name = "limits_table_test",
+    srcs = [
+        "limits_table_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/LimitsTable.h",
+    ],
+    cxx_std = "c++17",
+    deps = ["//drivers/TegraGM20BMetal/abi:metal_abi"],
+)
+
+host_test(
+    name = "queue_priority_test",
+    srcs = [
+        "queue_priority_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/QueuePriority.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "gpu_memory_release_test",
+    srcs = [
+        "gpu_memory_release_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/GpuMemoryRelease.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "image_filter_link_test",
+    srcs = [
+        "image_filter_link_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/ImageFilterLink.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "metallib_entries_test",
+    srcs = [
+        "metallib_entries_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/MetallibEntries.h",
+    ],
+    cxx_std = "c++17",
+)
+
+host_test(
+    name = "metallib_slice_test",
+    srcs = [
+        "metallib_slice_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/MetallibEntries.h",
+        "//drivers/TegraGM20BMetal:plugin/MetallibSlice.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "@ipsw//:crawl_qc",
+        "@ipsw//:crawl_tree",
+    ],
+    env = {"SWITCH_QUARTZCORE": "$(rootpath @ipsw//:crawl_qc)"},
+    deps = ["//drivers/TegraGM20BMetal/abi:metal_abi"],
+)
+
+host_test(
+    name = "core_image_probe_test",
+    srcs = [
+        "core_image_probe_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/MetallibEntries.h",
+    ],
+    cxx_std = "c++17",
+    data = [
+        "@ipsw//:crawl_qc",
+        "@ipsw//:crawl_tree",
+    ],
+    env = {"SWITCH_QUARTZCORE": "$(rootpath @ipsw//:crawl_qc)"},
+    deps = ["//drivers/TegraGM20BMetal/abi:metal_abi"],
+)
+
+host_test(
+    name = "switch_compile_reply_test",
+    srcs = [
+        "switch_compile_reply_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/SwitchCompileReply.h",
+    ],
+    copts = [
+        "-x",
+        "objective-c++",
+        "-fobjc-arc",
+        "-Wno-deprecated-declarations",
+    ],
+    cxx_std = "c++17",
+    linkopts = [
+        "-framework",
+        "Foundation",
+    ],
+)

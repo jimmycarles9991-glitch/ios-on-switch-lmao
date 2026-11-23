@@ -20,7 +20,7 @@ build:rbe --noremote_local_fallback
 build:rbe --noremote_upload_local_results
 build:remote --disk_cache=
 build:rbe --remote_download_outputs=minimal
-build:rbe "--remote_download_regex=.*/(gpu/raw_stack\.txt|testlogs/.+/test\.(log|xml))$"
+build:rbe "--remote_download_regex=.*/(gpu/stack_key\.txt|testlogs/.+/test\.(log|xml))$"
 build:noremote --remote_cache= --remote_executor=
 ```
 

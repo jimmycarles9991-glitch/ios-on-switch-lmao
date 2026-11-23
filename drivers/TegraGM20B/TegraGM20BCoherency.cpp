@@ -3,29 +3,27 @@
 // whoever touches an imported IOSurface on the CPU pays, at its IOSurfaceLock/Unlock. Those are IOKit traps
 // (IOConnectTrap3 index 2 lock, 3 unlock, p1 the surface ID, p2 the lock options), which XNU's iokit_user_client_trap
 // hands to tegra_gm20b_iosurface_trap after the trap ran.
-//  - GPU -> CPU: Exec marks each writable import GPU-dirty (tgm_coherency_wrote), if the GPU may write the surface at
-//    all: an import without TegraGM20BImportGpuReads, or a SurfaceWrites naming it (the Metal frontends send one before
-//    a surface is first rendered, blitted or stored into). The next lock of the surface, in any process, invalidates
-//    its lines once and clears the mark, so the CPU reads what the GPU wrote rather than lines it cached before (a
-//    fresh surface's zeros came back as 16x1 black runs in a GPU-rendered launch snapshot). A surface the GPU only
-//    samples (an app's backing store in the render server) is never marked, so the app's lock to redraw it costs no
-//    invalidate.
+//  - GPU -> CPU: a SubmitJob marks each import it writes GPU-dirty (tgm_coherency_wrote). The next lock of the surface,
+//    in any process, invalidates its lines once and clears the mark, so the CPU reads what the GPU wrote rather than
+//    lines it cached before (a fresh surface's zeros came back as 16x1 black runs in a GPU-rendered launch snapshot). A
+//    surface the GPU only samples (an app's backing store in the render server) is never marked, so the app's lock to
+//    redraw it costs no invalidate.
 //  - Lock and GPU work in flight: IOSurfaceLock is where a CPU reader synchronises with the GPU (Apple's: a lock without
 //    kIOSurfaceLockAvoidSync waits for the GPU's pending writes; with it, a lock that would have to wait fails with
 //    kIOReturnCannotLock), and readers count on it: a snapshot's reader locks its surface right after the render
-//    server's reply, its render maybe still running. So Exec also records each marking submission (channel, seqno) on
+//    server's reply, its render maybe still running. So a job also records each marking submission (channel, seqno) on
 //    the entry, and a lock (tegra_gm20b_iosurface_lock_will, before the trap) sleeps on those channels' fence
 //    interrupts until they completed, then the trap invalidates. Only a lock of a surface whose writers are still
 //    running waits.
 //  - CPU -> GPU: an unlock that was not read-only cleans the surface, so the GPU reads what the CPU wrote. Read-only
 //    imports included: the GPU samples what an app redraws into them. The clean runs before IOSurface's own unlock, which
-//    moves the seed: Core Animation samples a surface again once its seed moved, and the raw path keeps a YCbCr
+//    moves the seed: Core Animation samples a surface again once its seed moved, and the driver keeps a YCbCr
 //    surface's converted image until it moves again, so a clean after it let the render server convert lines still
 //    dirty in the writer's cache and keep that image.
 //  - Import: the importer cleans the pages for what the CPU wrote before. Memory imported without a surface ID (no-copy
 //    buffers, Core Animation's shared-memory images) never sees a lock, so the import clean is all it gets.
 // Entries are keyed by the surface's first physical page (the display asks by that, tegra_gm20b_surface_tiled) and,
-// when the importer named the IOSurface, by its ID too. An import holds a reference to its entry, so Exec's dirty
+// when the importer named the IOSurface, by its ID too. An import holds a reference to its entry, so a job's dirty
 // mark is one store through the import's own pointer. Cache maintenance runs under the entry's own lock, never the
 // registry's, so a large surface's clean does not hold up other surfaces' locks and imports.
 #include <IOKit/IOLib.h>
@@ -62,8 +60,8 @@ struct tgm_coh {
 	IOLock *lock;   // pas, npages: the cache ops and a larger import's list
 	uint64_t *pas;  // the largest page list imported for it
 	uint32_t npages;
-	int writable;  // some import lets the GPU write it
-	int gpuWrites;  // atomic: an import or a SurfaceWrites says the GPU may write it, so submissions mark it
+	int writable;      // some import lets the GPU write it
+	int gpuWrites;     // atomic: an import or a SurfaceWrites said the GPU may write it
 	int cleaned;       // atomic: an import of it finished its own clean
 	int gpuDirty;      // atomic: the GPU may have written it since the last CPU lock
 	uint64_t written;  // atomic: submissions that may have written it
@@ -74,11 +72,6 @@ struct tgm_coh {
 	uint64_t writers
 		[TGM_COH_WRITERS];  // atomic: marking submissions, channel uid << 32 | seqno (0: free slot)
 	int writersLost;  // atomic: one found no slot: a lock waits for every channel's submitted work
-	// atomic: the writers whose submission listed the surface as written (ExecSurfaces), what another channel's listed
-	// Exec waits for on the GPU; a mark without a list names every import, written or not, so it is a writer above only
-	uint64_t listed[TGM_COH_WRITERS];
-	uint32_t
-		listedLost;  // atomic: listed writers that found no slot since tgm_coherency_lost_seen cleared it
 	uint32_t traced;  // atomic: CPU lock and unlock lines logged for it (debug kernels)
 };
 
@@ -513,39 +506,10 @@ static void wrote(tgm_coh *c, uint32_t uid, uint32_t seqno)
 	__atomic_store_n(&c->gpuDirty, 1, __ATOMIC_RELEASE);
 }
 
-extern "C" void tgm_coherency_wrote(struct tgm_coh *c, int always, uint32_t uid, uint32_t seqno)
+extern "C" void tgm_coherency_wrote(struct tgm_coh *c, uint32_t uid, uint32_t seqno)
 {
-	if (c && (always || __atomic_load_n(&c->gpuWrites, __ATOMIC_RELAXED)))
+	if (c)
 		wrote(c, uid, seqno);
-}
-
-extern "C" void tgm_coherency_wrote_listed(struct tgm_coh *c, uint32_t uid, uint32_t seqno)
-{
-	if (!c)
-		return;
-	wrote(c, uid, seqno);
-	if (!noteWriter(c->listed, uid, seqno))
-		__atomic_add_fetch(&c->listedLost, 1, __ATOMIC_ACQ_REL);
-}
-
-extern "C" uint32_t tgm_coherency_writers(const struct tgm_coh *c, uint64_t out[TGM_COH_WRITERS],
-					  uint32_t *lost, uint64_t *pa)
-{
-	uint32_t n = 0;
-	for (const uint64_t &slot : c->listed) {
-		const uint64_t w = __atomic_load_n(&slot, __ATOMIC_ACQUIRE);
-		if (w)
-			out[n++] = w;
-	}
-	*lost = __atomic_load_n(&c->listedLost, __ATOMIC_ACQUIRE);
-	*pa = c->pa;
-	return n;
-}
-
-extern "C" void tgm_coherency_lost_seen(struct tgm_coh *c, uint32_t lost)
-{
-	__atomic_compare_exchange_n(&c->listedLost, &lost, 0u, false, __ATOMIC_ACQ_REL,
-				    __ATOMIC_RELAXED);
 }
 
 // Whether `c` has a writer still running; with `wait`, sleeps until none has, and frees the completed slots.

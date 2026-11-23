@@ -24,8 +24,8 @@ public struct CAGoldens: Sendable {
             var attachments: [Int: Signature] = [:]
             for field in fields.dropFirst(2) {
                 guard field.hasPrefix("c"), let equals = field.firstIndex(of: "="),
-                    let index = Int(field[field.index(after: field.startIndex)..<equals]),
-                    let signature = Signature(text: String(field[field.index(after: equals)...]))
+                      let index = Int(field[field.index(after: field.startIndex) ..< equals]),
+                      let signature = Signature(text: String(field[field.index(after: equals)...]))
                 else { continue }
                 attachments[index] = signature
             }

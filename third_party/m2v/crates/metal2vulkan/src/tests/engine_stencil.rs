@@ -15,16 +15,16 @@ use crate::library::Library;
 use crate::lower::select::LowerInputs;
 use crate::metal::state::DepthStencilDescriptor;
 use crate::metal::{CompareFunction, PixelFormat, StencilOperation};
-use crate::pipeline::RenderPipeline;
 use crate::pipeline::descriptor::{FunctionDescriptor, RenderPipelineDescriptor, StageSource};
 use crate::pipeline::facts::RuntimeFact;
 use crate::pipeline::layout::BindingSource;
 use crate::pipeline::stage_io::StageBuiltin;
 use crate::pipeline::sym::{PushField, SyntheticBinding};
 use crate::pipeline::testing::{
-    AssembleError, compile, compile_with, engine_dir, fixtures_dir, interlocked_coherence, link_and_validate,
-    llvm_assemble,
+    compile, compile_with, engine_dir, fixtures_dir, interlocked_coherence, link_and_validate,
+    llvm_assemble, AssembleError,
 };
+use crate::pipeline::RenderPipeline;
 use crate::spirv::testing::committed_profiles;
 use crate::vk;
 
@@ -51,7 +51,9 @@ fn device(stem: &str) -> Device {
 
 /// Committed profile `stem` with `features` removed from its description.
 fn device_without(stem: &str, features: &[VkFeature]) -> Device {
-    let path = fixtures_dir().join("../../profiles").join(format!("{stem}.json"));
+    let path = fixtures_dir()
+        .join("../../profiles")
+        .join(format!("{stem}.json"));
     let text = std::fs::read_to_string(path).expect("profile");
     let mut desc = DeviceDescription::from_khronos_json(&text, None).expect("description");
     for f in features {
@@ -78,7 +80,9 @@ fn the_stencil_output_takes_the_extension_the_shadow_or_a_refusal_naming_both() 
             forms[0] += 1;
             let a = result.unwrap_or_else(|e| panic!("{stem}: {e}"));
             assert!(
-                !a.facts.iter().any(|x| matches!(x, RuntimeFact::ShadowStencil { .. })),
+                !a.facts
+                    .iter()
+                    .any(|x| matches!(x, RuntimeFact::ShadowStencil { .. })),
                 "{stem}"
             );
             link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
@@ -101,19 +105,20 @@ fn the_stencil_output_takes_the_extension_the_shadow_or_a_refusal_naming_both() 
                     .any(|pf| pf.field == PushField::ShadowStencilState),
                 "{stem}"
             );
-            assert!(
-                a.requirements
-                    .features
-                    .contains(&VkFeature::FragmentShaderPixelInterlock)
-            );
-            let (_, words) = link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+            assert!(a
+                .requirements
+                .features
+                .contains(&VkFeature::FragmentShaderPixelInterlock));
+            let (_, words) =
+                link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
             let n = interlocked_coherence(&words).unwrap_or_else(|e| panic!("{stem}: {e}"));
             assert_eq!(n.storage_image, 2, "{stem}: the shadow's read and write");
             // Compiled for a multisampled pipeline: a multisampled shadow, tested per sample of
             // the invocation's coverage, the samples that pass written to `SampleMask`.
             let mut inputs = LowerInputs::new();
             inputs.multisampled = true;
-            let ms = compile_with(&bc, ENTRY, &p, &inputs).unwrap_or_else(|e| panic!("{stem}: multisampled: {e}"));
+            let ms = compile_with(&bc, ENTRY, &p, &inputs)
+                .unwrap_or_else(|e| panic!("{stem}: multisampled: {e}"));
             assert!(
                 ms.facts.contains(&RuntimeFact::ShadowStencil {
                     formatless: false,
@@ -122,14 +127,22 @@ fn the_stencil_output_takes_the_extension_the_shadow_or_a_refusal_naming_both() 
                 "{stem}: {:?}",
                 ms.facts
             );
-            assert!(
-                ms.requirements
-                    .features
-                    .contains(&VkFeature::ShaderStorageImageMultisample)
-            );
-            assert!(ms.interface.io.builtins.contains(&StageBuiltin::SampleMaskOut));
-            assert!(!ms.interface.io.builtins.contains(&StageBuiltin::SampleMaskIn));
-            let (_, words) = link_and_validate(&ms, &p).unwrap_or_else(|e| panic!("{stem}: multisampled L3: {e}"));
+            assert!(ms
+                .requirements
+                .features
+                .contains(&VkFeature::ShaderStorageImageMultisample));
+            assert!(ms
+                .interface
+                .io
+                .builtins
+                .contains(&StageBuiltin::SampleMaskOut));
+            assert!(!ms
+                .interface
+                .io
+                .builtins
+                .contains(&StageBuiltin::SampleMaskIn));
+            let (_, words) = link_and_validate(&ms, &p)
+                .unwrap_or_else(|e| panic!("{stem}: multisampled L3: {e}"));
             let n = interlocked_coherence(&words).unwrap_or_else(|e| panic!("{stem}: {e}"));
             assert_eq!(n.storage_image, 2, "{stem}: the shadow's read and write");
         } else {
@@ -146,7 +159,9 @@ fn the_stencil_output_takes_the_extension_the_shadow_or_a_refusal_naming_both() 
                         "{stem}"
                     );
                     assert!(
-                        a[1].contains(&Capability::Feature(VkFeature::FragmentShaderPixelInterlock)),
+                        a[1].contains(&Capability::Feature(
+                            VkFeature::FragmentShaderPixelInterlock
+                        )),
                         "{stem}: {a:?}"
                     );
                 }
@@ -191,7 +206,10 @@ fn refusal(r: Result<RenderPipeline, Error>) -> (Feature, Needs) {
 /// `maintenance8` for the copies. Link refuses alpha to coverage as needing the extension.
 #[test]
 fn the_render_pipeline_states_the_shadow_and_refuses_what_it_cannot_order() {
-    let (Some(io), Some(stencil)) = (assemble(&engine_dir().join("stage_io.ll")), stencil_fixture()) else {
+    let (Some(io), Some(stencil)) = (
+        assemble(&engine_dir().join("stage_io.ll")),
+        stencil_fixture(),
+    ) else {
         return;
     };
     let dev = device("nvidia-rtx50-linux");
@@ -201,11 +219,10 @@ fn the_render_pipeline_states_the_shadow_and_refuses_what_it_cannot_order() {
         .expect("pipeline");
     let s = p.graphics.shadow_stencil.expect("the shadow");
     assert_eq!((s.format, s.formatless), (vk::Format::R8_UINT, false));
-    assert!(
-        p.requirements
-            .formats
-            .contains(&(vk::Format::R8_UINT, FormatUsage::StorageImage))
-    );
+    assert!(p
+        .requirements
+        .formats
+        .contains(&(vk::Format::R8_UINT, FormatUsage::StorageImage)));
     let b_shadow = p.layout.sets.iter().flat_map(|s| &s.bindings).find(|b| {
         b.source
             == BindingSource::Synthetic {
@@ -214,7 +231,10 @@ fn the_render_pipeline_states_the_shadow_and_refuses_what_it_cannot_order() {
             }
     });
     assert!(b_shadow.is_some(), "{:?}", p.layout.sets);
-    assert_eq!(b_shadow.map(|b| b.ty), Some(vk::DescriptorType::STORAGE_IMAGE));
+    assert_eq!(
+        b_shadow.map(|b| b.ty),
+        Some(vk::DescriptorType::STORAGE_IMAGE)
+    );
     let none = dev
         .compile_render_pipeline(&render(&io, &stencil, false), &b)
         .expect("pipeline without a stencil");
@@ -226,35 +246,43 @@ fn the_render_pipeline_states_the_shadow_and_refuses_what_it_cannot_order() {
     let mut ms = render(&io, &stencil, true);
     ms.raster_sample_count = 4;
     let four = dev.compile_render_pipeline(&ms, &b).expect("four samples");
-    let s = four.graphics.shadow_stencil.expect("the multisampled shadow");
-    assert_eq!((s.format, s.formatless, s.samples), (vk::Format::R8_UINT, false, 4));
+    let s = four
+        .graphics
+        .shadow_stencil
+        .expect("the multisampled shadow");
+    assert_eq!(
+        (s.format, s.formatless, s.samples),
+        (vk::Format::R8_UINT, false, 4)
+    );
     // The shadow's writes are the product's: a function that writes no memory of its own runs
     // per pixel, as on Metal, and tests each covered sample.
     assert!(!four.graphics.sample_shading);
-    assert!(four.requirements.features.contains(&VkFeature::Maintenance8));
-    assert!(
-        four.requirements
-            .features
-            .contains(&VkFeature::ShaderStorageImageMultisample)
-    );
-    assert!(
-        four.requirements
-            .properties
-            .contains(&VkProperty::StorageImageSampleCount(4))
-    );
+    assert!(four
+        .requirements
+        .features
+        .contains(&VkFeature::Maintenance8));
+    assert!(four
+        .requirements
+        .features
+        .contains(&VkFeature::ShaderStorageImageMultisample));
+    assert!(four
+        .requirements
+        .properties
+        .contains(&VkProperty::StorageImageSampleCount(4)));
     let mut ms_none = render(&io, &stencil, false);
     ms_none.raster_sample_count = 4;
     let four_none = dev
         .compile_render_pipeline(&ms_none, &b)
         .expect("four samples without a stencil");
     assert!(four_none.graphics.shadow_stencil.is_none());
-    assert!(!four_none.requirements.features.contains(&VkFeature::Maintenance8));
-    assert!(
-        four_none
-            .requirements
-            .properties
-            .contains(&VkProperty::StorageImageSampleCount(4))
-    );
+    assert!(!four_none
+        .requirements
+        .features
+        .contains(&VkFeature::Maintenance8));
+    assert!(four_none
+        .requirements
+        .properties
+        .contains(&VkProperty::StorageImageSampleCount(4)));
     // A device without `maintenance8` cannot copy a multisampled shadow.
     let no_copy = device_without("nvidia-rtx50-linux", &[VkFeature::Maintenance8]);
     assert_eq!(
@@ -273,7 +301,9 @@ fn the_render_pipeline_states_the_shadow_and_refuses_what_it_cannot_order() {
         refusal(dev.compile_render_pipeline(&a2c, &b)),
         (
             Feature::StencilExport,
-            Needs::AnyOf(vec![vec![Capability::Extension(VkExtension::ExtShaderStencilExport)]])
+            Needs::AnyOf(vec![vec![Capability::Extension(
+                VkExtension::ExtShaderStencilExport
+            )]])
         )
     );
 }
@@ -307,7 +337,8 @@ fn words(p: &RenderPipeline, dev: &Device, state: &BindState) -> Result<[u32; 2]
         .find(|w| w.offset <= offset && offset + 8 <= w.offset + w.bytes.len() as u32)
         .expect("the push write");
     let at = (offset - w.offset) as usize;
-    let word = |i: usize| u32::from_le_bytes(w.bytes[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
+    let word =
+        |i: usize| u32::from_le_bytes(w.bytes[at + 4 * i..at + 4 * i + 4].try_into().unwrap());
     Ok([word(0), word(1)])
 }
 
@@ -317,7 +348,10 @@ fn words(p: &RenderPipeline, dev: &Device, state: &BindState) -> Result<[u32; 2]
 /// more than one layer as not implemented.
 #[test]
 fn the_binder_writes_the_shadow_and_the_encoders_stencil_state() {
-    let (Some(io), Some(stencil)) = (assemble(&engine_dir().join("stage_io.ll")), stencil_fixture()) else {
+    let (Some(io), Some(stencil)) = (
+        assemble(&engine_dir().join("stage_io.ll")),
+        stencil_fixture(),
+    ) else {
         return;
     };
     let dev = device("nvidia-rtx50-linux");
@@ -374,7 +408,9 @@ fn the_binder_writes_the_shadow_and_the_encoders_stencil_state() {
             (u.feature, u.needs),
             (
                 Feature::StencilExport,
-                Needs::AnyOf(vec![vec![Capability::Extension(VkExtension::ExtShaderStencilExport)]])
+                Needs::AnyOf(vec![vec![Capability::Extension(
+                    VkExtension::ExtShaderStencilExport
+                )]])
             )
         ),
         other => panic!("{other:?}"),
@@ -393,22 +429,30 @@ fn the_binder_writes_the_shadow_and_the_encoders_stencil_state() {
     let variant = dev
         .compile_render_variant(&render(&io, &stencil, true), &plan.variant, &b)
         .expect("layered stencil variant");
-    assert!(
-        variant
-            .dependencies
-            .iter()
-            .any(|d| d.fact == RuntimeFact::LayeredStorage)
-    );
-    let again = variant.plan(&dev, &layered.shape()).expect("layered variant plan");
+    assert!(variant
+        .dependencies
+        .iter()
+        .any(|d| d.fact == RuntimeFact::LayeredStorage));
+    let again = variant
+        .plan(&dev, &layered.shape())
+        .expect("layered variant plan");
     assert_eq!(again.variant, plan.variant);
-    assert!(again.descriptors.iter().any(|d| d.source == WriteSource::ShadowStencil));
+    assert!(again
+        .descriptors
+        .iter()
+        .any(|d| d.source == WriteSource::ShadowStencil));
 
     // Without a stencil attachment a neutral stands in and nothing is attached.
     let none = dev
         .compile_render_pipeline(&render(&io, &stencil, false), &b)
         .expect("pipeline without a stencil");
-    let plan = none.plan(&dev, &BindState::default().shape()).expect("plan");
-    assert!(!plan.descriptors.iter().any(|w| w.source == WriteSource::ShadowStencil));
+    let plan = none
+        .plan(&dev, &BindState::default().shape())
+        .expect("plan");
+    assert!(!plan
+        .descriptors
+        .iter()
+        .any(|w| w.source == WriteSource::ShadowStencil));
     let [front, back] = words(&none, &dev, &BindState::default()).expect("words");
     assert_eq!((front >> 31, back >> 31), (0, 0));
 }
@@ -419,7 +463,10 @@ fn the_binder_writes_the_shadow_and_the_encoders_stencil_state() {
 /// and no shadow, inside the interlock, and passes L3.
 #[test]
 fn a_stated_stencil_write_after_the_depth_test_runs_both_tests_in_the_function() {
-    let (Some(io), Some(stencil)) = (assemble(&engine_dir().join("stage_io.ll")), stencil_fixture()) else {
+    let (Some(io), Some(stencil)) = (
+        assemble(&engine_dir().join("stage_io.ll")),
+        stencil_fixture(),
+    ) else {
         return;
     };
     let dev = device("nvidia-rtx50-linux");
@@ -442,11 +489,18 @@ fn a_stated_stencil_write_after_the_depth_test_runs_both_tests_in_the_function()
         plan.variant
     );
     let unstated = p.plan(&dev, &BindState::default().shape()).expect("plan");
-    assert!(!unstated.variant.shader_tests, "the shadow where nothing is stated");
+    assert!(
+        !unstated.variant.shader_tests,
+        "the shadow where nothing is stated"
+    );
     // The variant, compiled, plans itself under the same draw, binds both stand-ins and no
     // shadow, and instantiates the draw's words.
     let v = dev
-        .compile_render_variant(&render(&io, &stencil, true), &plan.variant, &Budget::standard())
+        .compile_render_variant(
+            &render(&io, &stencil, true),
+            &plan.variant,
+            &Budget::standard(),
+        )
         .expect("variant");
     assert!(v.graphics.shadow_stencil.is_none());
     assert!(v.graphics.shader_tests.is_some_and(|t| t.stencil.is_some()));
@@ -454,9 +508,16 @@ fn a_stated_stencil_write_after_the_depth_test_runs_both_tests_in_the_function()
     assert_eq!(own.variant, plan.variant, "the variant names itself");
     let sources: Vec<&WriteSource> = own.descriptors.iter().map(|w| &w.source).collect();
     assert!(sources.contains(&&WriteSource::DepthStandIn), "{sources:?}");
-    assert!(sources.contains(&&WriteSource::StencilStandIn), "{sources:?}");
-    assert!(!sources.contains(&&WriteSource::ShadowStencil), "{sources:?}");
-    own.instantiate_draw(&state, &draw()).expect("the draw's words");
+    assert!(
+        sources.contains(&&WriteSource::StencilStandIn),
+        "{sources:?}"
+    );
+    assert!(
+        !sources.contains(&&WriteSource::ShadowStencil),
+        "{sources:?}"
+    );
+    own.instantiate_draw(&state, &draw())
+        .expect("the draw's words");
 
     let Some(bc) = stencil_fixture() else {
         return;
@@ -469,13 +530,19 @@ fn a_stated_stencil_write_after_the_depth_test_runs_both_tests_in_the_function()
         if f.fragment.stencil_export || !f.fragment.pixel_interlock {
             continue;
         }
-        let a = compile_with(&bc, ENTRY, &profile, &inputs).unwrap_or_else(|e| panic!("{stem}: {e}"));
+        let a =
+            compile_with(&bc, ENTRY, &profile, &inputs).unwrap_or_else(|e| panic!("{stem}: {e}"));
         assert!(
-            a.facts.iter().any(|x| matches!(x, RuntimeFact::ShaderTests { .. }))
+            a.facts
+                .iter()
+                .any(|x| matches!(x, RuntimeFact::ShaderTests { .. }))
                 && a.facts
                     .iter()
                     .any(|x| matches!(x, RuntimeFact::ShaderStencilTest { .. }))
-                && !a.facts.iter().any(|x| matches!(x, RuntimeFact::ShadowStencil { .. })),
+                && !a
+                    .facts
+                    .iter()
+                    .any(|x| matches!(x, RuntimeFact::ShadowStencil { .. })),
             "{stem}: {:?}",
             a.facts
         );
@@ -486,8 +553,12 @@ fn a_stated_stencil_write_after_the_depth_test_runs_both_tests_in_the_function()
                 && !fields.contains(&PushField::ShadowStencilState),
             "{stem}: {fields:?}"
         );
-        let (_, words) = link_and_validate(&a, &profile).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
+        let (_, words) =
+            link_and_validate(&a, &profile).unwrap_or_else(|e| panic!("{stem}: L3: {e}"));
         let n = interlocked_coherence(&words).unwrap_or_else(|e| panic!("{stem}: {e}"));
-        assert!(n.storage_image >= 4, "{stem}: each stand-in's read and write: {n:?}");
+        assert!(
+            n.storage_image >= 4,
+            "{stem}: each stand-in's read and write: {n:?}"
+        );
     }
 }

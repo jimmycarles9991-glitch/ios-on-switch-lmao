@@ -21,12 +21,16 @@ enum X1VICKernelTest {
     /// The reply's words, or why there are none.
     static func call(_ magic: UInt32, replyBytes: Int) -> Result<[UInt32], TestFailure> {
         guard let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW),
-            let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(iokit, "IOServiceGetMatchingService"),
-            let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
-            let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
+              let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(
+                  iokit,
+                  "IOServiceGetMatchingService"
+              ),
+              let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
+              let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
         else { return .failure(TestFailure("no IOKit")) }
         let vic = unsafeBitCast(service, to: Service.self)(
-            0, unsafeBitCast(matching, to: Matching.self)("AppleM2ScalerCSCDriver"))
+            0, unsafeBitCast(matching, to: Matching.self)("AppleM2ScalerCSCDriver")
+        )
         guard vic != 0 else { return .failure(TestFailure("no AppleM2ScalerCSCDriver service")) }
         var connection: mach_port_t = 0
         let opened = unsafeBitCast(open, to: Open.self)(vic, mach_task_self_, 0, &connection)
@@ -41,7 +45,8 @@ enum X1VICKernelTest {
         let kr = request.withUnsafeBytes { input in
             reply.withUnsafeMutableBytes { output in
                 unsafeBitCast(call, to: Call.self)(
-                    connection, selector, input.baseAddress, input.count, output.baseAddress, &size)
+                    connection, selector, input.baseAddress, input.count, output.baseAddress, &size
+                )
             }
         }
         guard kr == KERN_SUCCESS, size == replyBytes else {
@@ -52,7 +57,7 @@ enum X1VICKernelTest {
 
     /// A fourcc's four characters, lower-cased for a metric key.
     static func name(_ fourcc: UInt32) -> String {
-        String((0..<4).map { Character(UnicodeScalar(UInt8(truncatingIfNeeded: fourcc >> (24 - 8 * $0)))) })
+        String((0 ..< 4).map { Character(UnicodeScalar(UInt8(truncatingIfNeeded: fourcc >> (24 - 8 * $0)))) })
             .lowercased()
     }
 }

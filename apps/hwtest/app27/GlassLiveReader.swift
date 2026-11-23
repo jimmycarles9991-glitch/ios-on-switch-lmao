@@ -43,7 +43,8 @@ final class LiveReader {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(
-                    returning: reader?.loop(until: deadline, after: after) ?? record(until: deadline, after: after))
+                    returning: reader?.loop(until: deadline, after: after) ?? record(until: deadline, after: after)
+                )
             }
         }
     }
@@ -98,12 +99,13 @@ final class LiveReader {
     private func judge(_ frame: ScanoutSession.Frame, ms: Double) {
         let turned = frame.width == uiPixels.height && frame.height == uiPixels.width
         let image = LiveImage(base: frame.first, width: frame.width, height: frame.height, turned: turned)
-        let glassRegion = image.rect(uiX: 0.35...0.65, uiY: 0.42...0.58)
-        let stripRegion = image.rect(uiX: 0.05...0.95, uiY: 0.05...0.2)
+        let glassRegion = image.rect(uiX: 0.35 ... 0.65, uiY: 0.42 ... 0.58)
+        let stripRegion = image.rect(uiX: 0.05 ... 0.95, uiY: 0.05 ... 0.2)
         let glass = image.glass(glassRegion)
         let now = Kept(
             sequence: frame.sequence, whole: image.hash(), glass: image.hash(glassRegion),
-            strip: image.hash(stripRegion), image: image.copy())
+            strip: image.hash(stripRegion), image: image.copy()
+        )
         let consecutive = frame.sequence > 0 && kept?.sequence == frame.sequence - 1 ? kept : nil
         let second = LiveImage(base: frame.second, width: frame.width, height: frame.height, turned: turned)
         var end: LiveImage.Glass?
@@ -124,7 +126,9 @@ final class LiveReader {
                 sequence: frame.sequence, atPresent: glass.verdict, black: glass.black, mean: glass.mean,
                 backdropChanged: consecutive.map { $0.strip != now.strip }, endVerdict: end?.verdict,
                 endBlack: end?.black, changedOnScreen: changed, glassChangedOnScreen: glassChanged,
-                buffers: [], ms: ms))
+                buffers: [], ms: ms
+            )
+        )
         save(frame, now: now, consecutive: consecutive, glass: glass, end: end, changed: changed == true)
         kept = now
     }

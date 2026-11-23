@@ -3,14 +3,14 @@
 A draw that moved from its golden is refused unless one of these says why:
 
   form       a fetching state the golden drew in its storage form, drawn now by another of its forms the rules take:
-             its barrier twin a triangle at a time (rule fetch.twin, raw_twin_rule.h) or its fetch-free form (rule
-             fetch.blend, raw_fetch_rungs.h); its programs, registers and barriers are that form's, its geometry and
+             its barrier twin a triangle at a time (rule fetch.twin, twin_rule.h) or its fetch-free form (rule
+             fetch.blend, fetch_rungs.h); its programs, registers and barriers are that form's, its geometry and
              targets the golden's wherever the golden keeps them field by field
   pushword   a draw whose golden already differs from NVK's in push words only one driver's programs read (eq_rules.py
              push, words 17 and 18), every draw of its pass since one that took another form one too: those words hold
              what the draws before left there, which raw's programs never read; nothing but its stages moved wherever
              the golden keeps it field by field
-  opening    a pass's first draw opened by a relaxed form (raw_barrier_forms.h): the pixel barrier where every
+  opening    a pass's first draw opened by a relaxed form (barrier_forms.h): the pixel barrier where every
              dependency is a held cell (barrier.pass_pixel), or nothing behind a job's planner entry
              (barrier.entry_no_drain), in place of the drain's wait and shader-cache flush
   follows    a draw after a draw of its pass that took another form: the shader barrier that ordered it after that

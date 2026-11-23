@@ -38,18 +38,11 @@ static inline void tgm_hang_engine(uint32_t eng, char *buf, unsigned long len)
 		 status[(eng >> 13) & 7]);
 }
 
-/* Debug kernels: beside a hang's line, what the channel it blames was itself waiting for and how
- * the channel the wait ran out on (late) stood. A blamed channel whose own order acquire waits on
- * a channel that keeps completing work is behind slow or starved work, not hung; one whose source
- * does not move either is part of a stall the line alone cannot tell apart. */
+/* Debug kernels: beside a hang's line, how long the channel it blames has not progressed and how the channel the wait
+ * ran out on (late) stood. */
 struct tgm_hang_detail {
 	uint32_t chid;
 	uint64_t stalled_ms; /* since its fence last moved, or it last went from idle to work */
-	int waits;           /* its last order acquire has not passed */
-	uint32_t wait_chid, wait_seqno, wait_at;
-	int source_live;                        /* the acquire's source is a live channel: */
-	uint32_t source_done, source_submitted; /* its fence */
-	uint64_t source_ms;                     /* and how long it has not moved */
 	uint32_t late_chid, late_done, late_submitted;
 	uint64_t late_ms;
 };
@@ -57,18 +50,8 @@ struct tgm_hang_detail {
 static inline void tgm_hang_detail_format(char *buf, unsigned long len,
 					  const struct tgm_hang_detail *d)
 {
-	char wait[120] = "waits on no other channel";
-	char source[64] = "";
-
-	if (d->waits && d->source_live)
-		snprintf(source, sizeof(source), " (ch %u: %u/%u, moved %llu ms ago)", d->wait_chid,
-			 d->source_done, d->source_submitted, (unsigned long long)d->source_ms);
-	if (d->waits)
-		snprintf(wait, sizeof(wait), "waits on ch %u fence %u, at %u%s", d->wait_chid,
-			 d->wait_seqno, d->wait_at, d->source_live ? source : " (no live channel)");
-	snprintf(buf, len,
-		 "ch %u (no progress for %llu ms) %s; late ch %u: %u/%u, moved %llu ms ago",
-		 d->chid, (unsigned long long)d->stalled_ms, wait, d->late_chid, d->late_done,
+	snprintf(buf, len, "ch %u (no progress for %llu ms); late ch %u: %u/%u, moved %llu ms ago",
+		 d->chid, (unsigned long long)d->stalled_ms, d->late_chid, d->late_done,
 		 d->late_submitted, (unsigned long long)d->late_ms);
 }
 

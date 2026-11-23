@@ -69,6 +69,17 @@ impl NativeShaderTarget {
         self == Self::Sm53
     }
 
+    /// Whether the device's color store makes Metal's byte of an 8-bit sRGB channel from the value
+    /// as computed: NaN 0, clamped to [0, 1], the byte of `x * 4095` rounded to nearest even
+    /// through Metal's twelve-bit thresholds (`srgb::SRGB_ENCODE_FIRST`). GM20B's ROP encodes sRGB
+    /// itself; that its byte is Metal's is not measured: it rests on HW Test `gpu.raw.srgb_encode`.
+    /// A correctly rounded sRGB encode differs from Metal's at 1,643 of the 15,361 halves in
+    /// [0, 1], each by one code, so the test passes only for a ROP that quantizes to twelve bits as
+    /// Metal does.
+    pub(crate) fn stores_srgb_code(self) -> bool {
+        self == Self::Sm53
+    }
+
     pub(crate) fn half(self, operation: HalfOperation) -> bool {
         self.half_rules(operation).is_some()
     }

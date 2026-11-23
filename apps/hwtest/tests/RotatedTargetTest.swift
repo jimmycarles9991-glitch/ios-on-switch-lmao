@@ -5,22 +5,22 @@ import IOSurface
 import Metal
 
 /// gpu.x1.rotated_target (METALMAP d26): passes into a texture Metal's rotation SPI turns over an IOSurface plane (a
-/// CAMetalLayer drawable on the turned display), rotations 1 to 4, against the same draws into a plain texture turned by
-/// Metal's measured store map (metal2vulkan-runtime rotated.rs). The raw path draws straight into the plane through the
-/// viewport coordinate swizzle, a state that reads the plane's axes through its turned variant (its position, one axis's
-/// derivative), a private depth texture neither loaded nor stored through a backing laid out as the plane, a 4x resolve
-/// into the plane through the resolve state's turned variant, a private colour texture stored beside the plane, a
-/// private depth texture loaded beside it and a private depth/stencil texture stored then loaded beside it (each through a
-/// stand-in laid out as the plane, turned in and back by the pack's turn copies and stencil bits), rotation 4's load, which Metal makes transposed in each tile a draw reaches (its expected bytes
-/// the reference pass loading pass 1's frame flipped top to bottom, every tile reached by a full-frame draw whose fragments
-/// are discarded), loads whose draws reach some tiles alone (RotatedReachCells.swift: rotation 4's plane and a second
-/// plane of rotation 4 beside the target), a load with no draw, which leaves the plane as it is, a second plane of another
-/// turn and frame beside it and private textures of other sizes (RotatedMixedCells.swift: each landing by its own store map
-/// over the render area, a turned attachment of a frame past the area loaded as Metal loads it): those cells FAIL when they
-/// run anywhere else (path= other than raw).
-/// native_cells / native_raw count the required cells and those that ran raw; tie_wrong counts the pixels the plane's
-/// rasteriser decides apart from the frame's where an edge runs through pixel centres (its tie rule turns too); r4_edge_wrong
-/// those of a rotation-4 load whose rectangle ends on tile edges, which Metal's reach takes past them.
+/// CAMetalLayer drawable on the turned display), rotations 1 to 4, against the same draws into a plain texture turned
+/// by Metal's measured store map. The driver draws straight into the plane through the viewport coordinate swizzle, a
+/// state that reads the plane's axes through its turned variant (its position, one axis's derivative), a private depth
+/// texture neither loaded nor stored through a backing laid out as the plane, a 4x resolve into the plane through the
+/// resolve state's turned variant, a private colour texture stored beside the plane, a private depth texture loaded
+/// beside it and a private depth/stencil texture stored then loaded beside it (each through a stand-in laid out as the
+/// plane, turned in and back by the pack's turn copies and stencil bits), rotation 4's load, which Metal makes
+/// transposed in each tile a draw reaches (its expected bytes the reference pass loading pass 1's frame flipped top to
+/// bottom, every tile reached by a full-frame draw whose fragments are discarded), loads whose draws reach some tiles
+/// alone (RotatedReachCells.swift: rotation 4's plane and a second plane of rotation 4 beside the target), a load with
+/// no draw, which leaves the plane as it is, a second plane of another turn and frame beside it and private textures of
+/// other sizes (RotatedMixedCells.swift: each landing by its own store map over the render area, a turned attachment of
+/// a frame past the area loaded as Metal loads it): those cells FAIL when they run anywhere else (path= other than
+/// raw). native_cells / native_raw count the required cells and those that ran raw; tie_wrong counts the pixels the
+/// plane's rasteriser decides apart from the frame's where an edge runs through pixel centres (its tie rule turns too);
+/// r4_edge_wrong those of a rotation-4 load whose rectangle ends on tile edges, which Metal's reach takes past them.
 struct RotatedTargetTest: HWTest {
     let id = "gpu.x1.rotated_target"
     let name = "Rotated drawables: rendered straight into the turned plane, each rotation"
@@ -37,18 +37,19 @@ struct RotatedTargetTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        let raw = RawFacade.kind(of: gpu.device) == "raw"
-        let heapFullBefore = RawFacade.counters(of: gpu.device)["heap_full"] ?? 0
+        let raw = GM20BFacade.kind(of: gpu.device) == "gm20b"
+        let heapFullBefore = GM20BFacade.counters(of: gpu.device)["heap_full"] ?? 0
         let states = try RotatedStates(gpu)
         var metrics = Metrics()
         var failures: [String] = []
         var r4Load = PathTally()
         var native = 0, nativeRaw = 0, tieWrong = 0, edgeWrong = 0
-        for turn in 1...4 {
+        for turn in 1 ... 4 {
             for shape in Self.shapes {
                 let cells = RotatedCells(
                     gpu: gpu, states: states, turn: turn, width: shape.width, height: shape.height,
-                    aligned: shape.aligned)
+                    aligned: shape.aligned
+                )
                 guard let plane = try cells.makePlane() else {
                     return .fail("the device makes no texture with the rotation SPI", metrics, proof: gpu.proof)
                 }
@@ -60,7 +61,7 @@ struct RotatedTargetTest: HWTest {
                     case .native:
                         if raw {
                             native += 1
-                            if result.path == "raw" {
+                            if result.path == "gm20b" {
                                 nativeRaw += 1
                             } else {
                                 failures.append("\(name) ran \(result.path)")
@@ -79,7 +80,7 @@ struct RotatedTargetTest: HWTest {
         metrics.set("r4_edge_wrong", edgeWrong)
         metrics.set("r4_load_paths", r4Load.isEmpty ? "-" : r4Load.text)
         metrics.set("paths", gpu.paths.text)
-        metrics.set("heap_full", (RawFacade.counters(of: gpu.device)["heap_full"] ?? 0) - heapFullBefore)
+        metrics.set("heap_full", (GM20BFacade.counters(of: gpu.device)["heap_full"] ?? 0) - heapFullBefore)
         return failures.isEmpty
             ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics, proof: gpu.proof)
     }
@@ -87,9 +88,9 @@ struct RotatedTargetTest: HWTest {
 
 enum RotatedCell: String, CaseIterable {
     case clear, draw, load, idleLoad, partLoad, pointLoad, edgeLoad, besideR4, points, fetch, position, derivative,
-        fwidth, depth, resolve, beside, keptDepth, keptStencil, turns, frames, sized, tie, keptPair, keptPair16
+         fwidth, depth, resolve, beside, keptDepth, keptStencil, turns, frames, sized, tie, keptPair, keptPair16
 
-    /// gpu.raw.turned_separate_pair's (TurnedSeparatePairTest), and this test's: every other
+    /// gpu.gm20b.turned_separate_pair's (TurnedSeparatePairTest), and this test's: every other
     static let pairCells: [RotatedCell] = [.keptPair, .keptPair16]
     static let targetCells = allCases.filter { !pairCells.contains($0) }
 
@@ -113,9 +114,11 @@ struct RotatedStates {
         fetch = try make("rotated_fetch_fragment")
         discarded = try make("rotated_discard_fragment")
         depthTested = try gpu.render(
-            vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, depth: .depth32Float)
+            vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, depth: .depth32Float
+        )
         multisampled = try gpu.render(
-            vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, samples: 4)
+            vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, samples: 4
+        )
         pair = try gpu.render(vertex: "rotated_vertex", fragment: "rotated_pair_fragment", format: .bgra8Unorm) {
             $0.colorAttachments[1].pixelFormat = .bgra8Unorm
         }
@@ -181,7 +184,8 @@ struct RotatedCells {
         ]
         guard let surface = IOSurface(properties: properties) else { throw TestFailure("IOSurface creation failed") }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false)
+            pixelFormat: .bgra8Unorm, width: w, height: h, mipmapped: false
+        )
         descriptor.usage = .renderTarget
         descriptor.storageMode = .shared
         guard descriptor.responds(to: NSSelectorFromString("setRotation:")) else { return nil }
@@ -211,13 +215,13 @@ struct RotatedCells {
             let plain = try await gpu.run { pass($0, reference) }.path
             beside.turnedRun = true
             let turned = try await gpu.run { pass($0, plane.texture) }.path
-            if referencePath.isEmpty || referencePath == "raw" { referencePath = plain }
-            if path.isEmpty || path == "raw" { path = turned }
+            if referencePath.isEmpty || referencePath == "gm20b" { referencePath = plain }
+            if path.isEmpty || path == "gm20b" { path = turned }
         }
         guard checked else { return Result(path: path, referencePath: referencePath, wrong: 0) }
         var wrongBeside = try await secondPlaneWrong()
         let pairs = beside.textures.count / 2
-        for i in 0..<pairs {
+        for i in 0 ..< pairs {
             let a = try await gpu.read(beside.textures[i], bytesPerPixel: 4)
             let b = try await gpu.read(beside.textures[i + pairs], bytesPerPixel: 4)
             wrongBeside += zip(a, b).filter { $0 != $1 }.count
@@ -228,11 +232,11 @@ struct RotatedCells {
         }
         defer { plane.surface.unlock(options: .readOnly, seed: nil) }
         // the plain run's 4x resolve into a private texture nothing reads as data takes the 2D engine, within one code
-        // of Metal (raw_resolve_rule.h resolve.twod); a turned target's takes the exact resolve pass
+        // of Metal (resolve_rule.h resolve.twod); a turned target's takes the exact resolve pass
         let slack = cell == .resolve ? 1 : 0
         var wrong = 0
-        for y in 0..<h {
-            for x in 0..<w {
+        for y in 0 ..< h {
+            for x in 0 ..< w {
                 let (px, py) = stored(x, y)
                 let at = plane.surface.baseAddress + py * plane.rowBytes + px * 4
                 let got = UnsafeRawBufferPointer(start: at, count: 4)
@@ -283,17 +287,18 @@ struct RotatedCells {
                     let points = centres.map { c in
                         SIMD4<Float>(
                             (Float(c.0) + 0.5) / Float(width) * 2 - 1,
-                            1 - (Float(c.1) + 0.5) / Float(height) * 2, 0.5, 1)
+                            1 - (Float(c.1) + 0.5) / Float(height) * 2, 0.5, 1
+                        )
                     }
                     shapes(e, points, [1, 1, 0, 1], states.plain, primitive: .point, perColor: points.count)
-                }
+                },
             ]
         case .fetch:
             return [
                 encode(load: .clear) { e in
                     shapes(e, rect(4, 2, 40, 30), [1, 0, 0, 1], states.plain)
                     shapes(e, rect(20, 10, 70, 50), [0, 0, 1, 1], states.fetch)
-                }
+                },
             ]
         case .position:
             return [encode(load: .clear) { e in shapes(e, rect(0, 0, 96, 64), [1, 1, 1, 1], states.position) }]
@@ -324,7 +329,7 @@ struct RotatedCells {
         case .tie:
             return [
                 encode(load: .clear) { e in shapes(e, halfPixelRect(10.5, 5.5, 30.5, 20.5), [1, 1, 1, 1], states.plain)
-                }
+                },
             ]
         }
     }
@@ -386,8 +391,9 @@ struct RotatedCells {
     /// rectangle of the first pass hides the second's where they overlap
     private func keptDepth(_ commands: MTLCommandBuffer, _ target: MTLTexture) {
         guard let depth = try? gpu.texture(.depth32Float, width, height, usage: .renderTarget),
-            let depthOnly = try? gpu.render(
-                vertex: "rotated_vertex", fragment: "rotated_fragment", format: .invalid, depth: .depth32Float)
+              let depthOnly = try? gpu.render(
+                  vertex: "rotated_vertex", fragment: "rotated_fragment", format: .invalid, depth: .depth32Float
+              )
         else { return }
         let at = { (r: [SIMD4<Float>], z: Float) in r.map { SIMD4<Float>($0.x, $0.y, z, 1) } }
         let first = MTLRenderPassDescriptor()
@@ -419,14 +425,16 @@ struct RotatedCells {
     private func keptStencil(_ commands: MTLCommandBuffer, _ target: MTLTexture) {
         let zs = MTLPixelFormat.depth32Float_stencil8
         guard let zeta = try? gpu.texture(zs, width, height, usage: .renderTarget),
-            let tested = try? gpu.render(
-                vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, depth: zs, stencil: zs),
-            let blue = try? gpu.render(
-                vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, depth: zs, stencil: zs,
-                configure: { $0.colorAttachments[0].writeMask = .blue }),
-            let writes = zetaState(.lessEqual, writes: true, stencil: .always, replace: true),
-            let equal = zetaState(.always, writes: false, stencil: .equal, replace: false),
-            let beyond = zetaState(.lessEqual, writes: false, stencil: .always, replace: false)
+              let tested = try? gpu.render(
+                  vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, depth: zs, stencil: zs
+              ),
+              let blue = try? gpu.render(
+                  vertex: "rotated_vertex", fragment: "rotated_fragment", format: .bgra8Unorm, depth: zs, stencil: zs,
+                  configure: { $0.colorAttachments[0].writeMask = .blue }
+              ),
+              let writes = zetaState(.lessEqual, writes: true, stencil: .always, replace: true),
+              let equal = zetaState(.always, writes: false, stencil: .equal, replace: false),
+              let beyond = zetaState(.lessEqual, writes: false, stencil: .always, replace: false)
         else { return }
         let at = { (r: [SIMD4<Float>], z: Float) in r.map { SIMD4<Float>($0.x, $0.y, z, 1) } }
         let whole = rect(0, 0, width, height)
@@ -510,7 +518,8 @@ struct RotatedCells {
 
     func rect(_ x0: Int, _ y0: Int, _ x1: Int, _ y1: Int, reversed: Bool = false) -> [SIMD4<Float>] {
         let c = GPU.pixelQuad(
-            x0, y0, x1, y1, width: width, height: height)
+            x0, y0, x1, y1, width: width, height: height
+        )
         return reversed ? [c[0], c[2], c[1], c[1], c[2], c[3]] : [c[0], c[1], c[2], c[1], c[3], c[2]]
     }
 

@@ -3,7 +3,7 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// index.past_limit (kits/SwitchGM20B caps row 3D-B11, raw_gpu.cpp drawIndexed): what GM20B's index fetch reads past
+/// index.past_limit (kits/SwitchGM20B caps row 3D-B11, gpu.cpp drawIndexed): what GM20B's index fetch reads past
 /// SET_INDEX_BUFFER_C/D's limit. Core Animation's fill draws a strip of five 16-bit indices from a buffer holding
 /// [1, 2, 3, 4, 5, 5, 5, 5] under the probe form index=8, so the fetch ends after [1, 2, 3, 4]. The strip's first two
 /// triangles cover the bottom-left quarter (`quarter`: the draw ran); its third, (3, 4, fifth index), covers pixel `p0`
@@ -13,7 +13,8 @@ import Metal
 enum X1IndexLimitProbe {
     static let probe = X1Probe(
         id: "gpu.x1.index_past_limit", name: "The index fetch reads index 0 past its limit", probe: "index.past_limit",
-        risky: true, timeout: 60, body: run)
+        risky: true, timeout: 60, body: run
+    )
 
     static let size = 64
     static let quarter = (16, 48), p0 = (48, 12), p5 = (44, 51)
@@ -26,7 +27,8 @@ enum X1IndexLimitProbe {
         let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
         let target = try gpu.texture(.bgra8Unorm, size, size)
         let scratch = try gpu.texture(
-            CACorpus.colorFormat(line, 1), size, size, usage: [.renderTarget], storage: .memoryless)
+            CACorpus.colorFormat(line, 1), size, size, usage: [.renderTarget], storage: .memoryless
+        )
         let white = SIMD4<Float16>(1, 1, 1, 1)
         let corners: [(Float, Float)] = [(1, 1), (-1, -1), (0, -1), (-1, 0), (0, 0), (1, -1)]
         let vertices = corners.map { CAState.Vertex($0.0, $0.1, u: 0, v: 0, color: white) }
@@ -44,7 +46,8 @@ enum X1IndexLimitProbe {
             encoder.setRenderPipelineState(pipeline)
             CAState.bind(encoder, vertices: vertices, source: nil)
             encoder.drawIndexedPrimitives(
-                type: .triangleStrip, indexCount: 5, indexType: .uint16, indexBuffer: indices, indexBufferOffset: 0)
+                type: .triangleStrip, indexCount: 5, indexType: .uint16, indexBuffer: indices, indexBufferOffset: 0
+            )
             encoder.endEncoding()
         }
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
@@ -55,8 +58,8 @@ enum X1IndexLimitProbe {
         metrics.set("quarter", drawn(quarter))
         metrics.set("p0", drawn(p0))
         metrics.set("p5", drawn(p5))
-        if batch.path != "raw" || (batch.taken["index_limits"] ?? 0) == 0 {
-            return ProbeFinding(.inconclusive, metrics, note: "the draw did not take the index=8 form on the raw path")
+        if batch.path != "gm20b" || (batch.taken["index_limits"] ?? 0) == 0 {
+            return ProbeFinding(.inconclusive, metrics, note: "the draw did not take the index=8 form on the driver")
         }
         if !drawn(quarter) {
             return ProbeFinding(.inconclusive, metrics, note: "the strip's first triangles drew nothing")
@@ -71,7 +74,8 @@ enum X1IndexLimitProbe {
         case (false, false):
             metrics.set("past_limit", "stops")
             return ProbeFinding(
-                .fail, metrics, note: "the fetch stopped at its limit: the strip's last triangle dropped")
+                .fail, metrics, note: "the fetch stopped at its limit: the strip's last triangle dropped"
+            )
         case (true, true):
             metrics.set("past_limit", "both")
             return ProbeFinding(.inconclusive, metrics, note: "both probe pixels drawn")

@@ -26,7 +26,7 @@ struct GameControllerTest: HWTest {
         }
         guard
             let controller = GCController.controllers().first(where: { $0.extendedGamepad != nil })
-                ?? GCController.controllers().first
+            ?? GCController.controllers().first
         else {
             return .fail("GCControllerDidConnect without a controller")
         }
@@ -51,7 +51,7 @@ struct GameControllerTest: HWTest {
         let pushed: Float? = await context.interact("Push the thumbstick all the way in any direction") { waiter in
             controller.physicalInputProfile.valueDidChangeHandler = { _, element in
                 guard let stick = element as? GCControllerDirectionPad,
-                    !stick.aliases.isDisjoint(with: JoyConInputTest.thumbsticks)
+                      !stick.aliases.isDisjoint(with: JoyConInputTest.thumbsticks)
                 else { return }
                 let reach = max(abs(stick.xAxis.value), abs(stick.yAxis.value))
                 if reach >= 0.8 { waiter.resume(reach) }

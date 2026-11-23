@@ -8,7 +8,7 @@ final class PresentTimeVerdictTests: XCTestCase {
 
     /// A drawable every fourth refresh asked for four refreshes after its commit, shown `offset` seconds after that.
     static func run(_ count: Int = 45, offset: (Int) -> Double? = { _ in 0 }) -> [Frame] {
-        (0..<count).map { i in
+        (0 ..< count).map { i in
             let committed = 100 + Double(i) * 4 * period
             let target = committed + 4 * period
             guard let late = offset(i) else { return Frame(committed: committed, target: target, handled: committed) }
@@ -43,7 +43,7 @@ final class PresentTimeVerdictTests: XCTestCase {
     func testNoRunOrNoLeadCannotPass() {
         XCTAssertTrue(Self.failed([]).contains("submitted>=40"))
         XCTAssertTrue(Self.failed([]).contains("every_target_a_period_ahead"))
-        let asap = (0..<45).map { i -> Frame in
+        let asap = (0 ..< 45).map { i -> Frame in
             let at = 100 + Double(i) * 4 * Self.period
             return Frame(committed: at, target: at, presented: at + 2 * Self.period, handled: at + 2 * Self.period)
         }

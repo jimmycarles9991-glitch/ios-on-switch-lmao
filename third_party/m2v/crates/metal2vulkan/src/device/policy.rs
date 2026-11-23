@@ -123,7 +123,11 @@ impl Default for DevicePolicy {
 pub enum ContainmentPolicy {
     /// Every access stays inside the resources the binder supplied (the default).
     Contained,
-    /// No containment. Only valid with `GuestIsolation::Off`; recorded in the fingerprint.
+    /// No containment, for a consumer whose device keeps a guest's stray access inside that
+    /// guest's own memory (its own GPU address space): every buffer, arena and texture access is
+    /// the access the function spells, out of bounds what the device does, save an
+    /// extended-range texture's read, which keeps Metal's out-of-bounds texel (no device's
+    /// robustness returns it). Only valid with `GuestIsolation::Off`; recorded in the fingerprint.
     UnsafeOff,
 }
 

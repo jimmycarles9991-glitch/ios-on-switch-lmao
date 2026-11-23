@@ -4,7 +4,7 @@
  * method numbers are far from theirs, and a kernel without them answers kIOReturnUnsupported (no compiler: clients compile in
  * process).
  *
- * A client asks for a render state's record (Compile: its request, raw/runtime/raw_compile_request.h, in its own memory at
+ * A client asks for a render state's record (Compile: its request, compile_request.h, in its own memory at
  * `address`, copied at the call): synchronously, the calling thread sleeping in the kernel until the request completes, or
  * with IOConnectCallAsyncStructMethod, whose callback gets TegraGM20BCompileAnswerWords words: the cookie, the result with
  * the generation in its high half, then TegraGM20BAbiCompileTimes' words in order. Each request completes exactly once, by

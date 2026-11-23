@@ -18,7 +18,8 @@ struct WorkloopSyncTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         var result = switch_workloop_result()
         let ran = switch_workloop_probe(
-            UInt32(Self.generations), UInt32(Self.waiters), UInt32(Self.rounds), false, &result)
+            UInt32(Self.generations), UInt32(Self.waiters), UInt32(Self.rounds), false, &result
+        )
         let handoffs = Self.generations * Self.waiters * Self.rounds
 
         var metrics = Metrics()
@@ -37,6 +38,7 @@ struct WorkloopSyncTest: HWTest {
                 ("no kevent_id error (errors 0)", result.errors == 0),
                 ("the waker never waited 10 s (stuck 0)", result.stuck == 0),
                 ("most waits parked in the kernel", Int(result.parked) * 2 > handoffs),
-            ], metrics)
+            ], metrics
+        )
     }
 }

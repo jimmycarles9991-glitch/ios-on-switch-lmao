@@ -11,6 +11,7 @@ import Metal
 /// the Mac's (round0).
 struct CADrawThenCopyScene: GPUScene {
     let id = "gpu.ca.draw_then_copy"
+    let framework = true
     let name = "CA fill draws then a blit copy in one command buffer: the copy reads every draw"
 
     static let (width, height, rounds, draws) = (720, 1280, 20, 64)
@@ -30,14 +31,16 @@ struct CADrawThenCopyScene: GPUScene {
             return result
         }
         let target = try SurfaceTarget.make(
-            gpu, .bgra8Unorm, Self.width, Self.height, rowBytes: Self.width * 4, usage: [.renderTarget, .shaderRead])
+            gpu, .bgra8Unorm, Self.width, Self.height, rowBytes: Self.width * 4, usage: [.renderTarget, .shaderRead]
+        )
         let copy = try gpu.texture(.bgra8Unorm, Self.width, Self.height, usage: [.shaderRead])
         // Core Animation's fill state declares a second colour attachment
         let colour1 = try gpu.texture(
             CACorpus.colorFormat(CACorpus.state("PBGRAXm_A2Xhf")!, 1), Self.width, Self.height, usage: [.renderTarget],
-            storage: .memoryless)
+            storage: .memoryless
+        )
         var stale = 0
-        for round in 0..<Self.rounds {
+        for round in 0 ..< Self.rounds {
             let timing = try await gpu.run(tolerateError: true) { commands in
                 let pass = MTLRenderPassDescriptor()
                 pass.colorAttachments[0].texture = target.texture
@@ -49,13 +52,15 @@ struct CADrawThenCopyScene: GPUScene {
                 pass.colorAttachments[1].storeAction = .dontCare
                 let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
                 encoder.setRenderPipelineState(pipeline)
-                for draw in 0..<Self.draws {
+                for draw in 0 ..< Self.draws {
                     let (x0, y0) = (Float(draw % 8) * 0.25 - 1, Float(draw / 8) * 0.25 - 1)
                     CAState.bind(
                         encoder,
                         vertices: CAState.rectangle(
-                            x0: x0, y0: y0, x1: x0 + 0.5, y1: y0 + 0.5, color: Self.colour(round, draw)),
-                        source: nil)
+                            x0: x0, y0: y0, x1: x0 + 0.5, y1: y0 + 0.5, color: Self.colour(round, draw)
+                        ),
+                        source: nil
+                    )
                     encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 }
                 encoder.endEncoding()
@@ -63,7 +68,8 @@ struct CADrawThenCopyScene: GPUScene {
                 let size = MTLSize(width: Self.width, height: Self.height, depth: 1)
                 blit.copy(
                     from: target.texture, sourceSlice: 0, sourceLevel: 0, sourceOrigin: MTLOrigin(), sourceSize: size,
-                    to: copy, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin())
+                    to: copy, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin()
+                )
                 blit.endEncoding()
             }
             result.expect(!timing.path.hasPrefix("error:"), "round \(round): \(timing.path)")
@@ -73,15 +79,18 @@ struct CADrawThenCopyScene: GPUScene {
             if round == 0 || copied != drawn {
                 result.compare(
                     "round \(round): the copy against the surface", bytes: copied, expected: drawn,
-                    format: .bgra8Unorm, width: Self.width, height: Self.height, tolerance: 0)
+                    format: .bgra8Unorm, width: Self.width, height: Self.height, tolerance: 0
+                )
                 result.compare(
                     "round \(round): the CPU lock against the surface", bytes: try target.cpuRead(), expected: drawn,
-                    format: .bgra8Unorm, width: Self.width, height: Self.height, tolerance: 0)
+                    format: .bgra8Unorm, width: Self.width, height: Self.height, tolerance: 0
+                )
             }
             if round == 0 {
                 result.picture(
                     "round0", bytes: drawn, metalFormat: MTLPixelFormat.bgra8Unorm.rawValue, width: Self.width,
-                    height: Self.height, cleared: Self.sentinelTexel)
+                    height: Self.height, cleared: Self.sentinelTexel
+                )
             }
             result.metrics.set("path\(round)", timing.path)
         }

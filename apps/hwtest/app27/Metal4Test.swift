@@ -7,7 +7,7 @@ import Metal
 /// metal4=0 and the test passes with mtl4=0; every family answer is logged, so a wrong yes shows. Where the family is
 /// there, an MTL4 queue, allocator and one empty command buffer must complete: the queue signals a shared event after
 /// it, and the test's timeout fails a signal that never comes. The MTL4 entry points are probed with
-/// respondsToSelector: first, because the raw facade forwards a selector it lacks to its m2v twin and one neither
+/// respondsToSelector: first, because the facade forwards a selector it lacks to its m2v twin and one neither
 /// answers raises, which would end the suite.
 struct Metal4Test: HWTest {
     let id = "metal4.device"
@@ -39,7 +39,7 @@ struct Metal4Test: HWTest {
             return .fail("the Metal 4 family without \(missing.joined(separator: ", "))", metrics)
         }
         guard let queue = device.makeMTL4CommandQueue(), let allocator = device.makeCommandAllocator(),
-            let commands = device.makeCommandBuffer(), let event = device.makeSharedEvent()
+              let commands = device.makeCommandBuffer(), let event = device.makeSharedEvent()
         else { return .fail("an MTL4 queue, allocator, command buffer or event was nil", metrics) }
         commands.beginCommandBuffer(allocator: allocator)
         commands.endCommandBuffer()
@@ -57,7 +57,7 @@ struct Metal4Test: HWTest {
     /// The families base+1 ... base+count the device supports, as "1,2,3" ("-" for none). By raw value: iOS 27
     /// deprecates the Common names.
     static func families(_ device: MTLDevice, base: Int, count: Int) -> String {
-        let supported = (1...count).filter { MTLGPUFamily(rawValue: base + $0).map(device.supportsFamily) ?? false }
+        let supported = (1 ... count).filter { MTLGPUFamily(rawValue: base + $0).map(device.supportsFamily) ?? false }
         return supported.isEmpty ? "-" : supported.map(String.init).joined(separator: ",")
     }
 }

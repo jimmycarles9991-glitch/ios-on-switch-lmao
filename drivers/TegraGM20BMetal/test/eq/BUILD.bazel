@@ -1,4 +1,4 @@
-# eq: raw's frame against the NVK side's, draw by draw, with no NVK, m2v or mock kernel: rawframe draws over the kernel
+# eq: raw's frame against the NVK side's, draw by draw, with no NVK, m2v or mock kernel: frame draws over the kernel
 # model, eq_capture.cpp decodes what it submits with nvdec, and draw_goldens.py holds the log to per-draw goldens written
 # from raw's log where it differed from NVK's (eq.sh's settings) only as eq_rules.py allows, while NVK could still be run
 # (testdata: each IPSW kind's frame corpus and goldens).
@@ -16,14 +16,20 @@ GM20B_METAL = "//drivers/TegraGM20BMetal"
 # What decodes raw's submissions (eq_capture.cpp over the kernel model, nvdec with the MME simulator and the 2D engine)
 CAPTURE_SRCS = [
     "eq_capture.cpp",
-    "//drivers/TegraGM20BMetal/test:raw_kernel_model.h",
-] + [GM20B_METAL + ":raw/" + f for f in [
+    "//drivers/TegraGM20BMetal/test:kernel_model.h",
+] + [GM20B_METAL + ":" + f for f in [
     "fx/test/twod_sim.cpp",
     "fx/test/twod_sim.h",
     "pack/nvdec.cpp",
     "pack/nvdec.h",
     "pack/nvdec_comp.h",
     "pack/nvdec_compute.cpp",
+    "pack/nvdec_copy.cpp",
+    "pack/nvdec_draw.cpp",
+    "pack/nvdec_load.cpp",
+    "pack/nvdec_methods.h",
+    "pack/nvdec_state.cpp",
+    "pack/nvdec_text.cpp",
     "pack/probe_record.h",
     "pack/mesa/mme_bitpack_helpers.h",
     "pack/mesa/mme_fermi.c",
@@ -45,10 +51,10 @@ CAPTURE_CONLYOPTS = [
 ]
 
 CAPTURE_COPTS = [
-    "-DSWITCH_RAW_HARNESS_MARKS",
+    "-DSWITCH_METAL_HARNESS_MARKS",
     "-DNVDEC_TWOD",
     "-Idrivers/TegraGM20B",
-    "-Idrivers/TegraGM20BMetal/raw/runtime",
+    "-Idrivers/TegraGM20BMetal",
     "-Ikits/SwitchGM20BEmit/mesa",
     "-I$(GENDIR)/kits/SwitchGM20BEmit/gen",
     "-Ithird_party/mesa/src/nouveau/headers",
@@ -65,18 +71,18 @@ CAPTURE_LINKOPTS = [
 ]
 
 CAPTURE_DEPS = [
-    "//drivers/TegraGM20BMetal/test:raw_runtime_marked",
+    "//drivers/TegraGM20BMetal/test:runtime_marked",
     "//kits/SwitchGM20B:classes",
     "//kits/SwitchGM20BEmit:emit_ndebug",
     "//kits/SwitchGM20BEmit:macros_h",
 ]
 
 cc_binary(
-    name = "rawframe",
+    name = "frame",
     testonly = True,
     srcs = CAPTURE_SRCS + [
-        GM20B_METAL + ":raw/test/frame.h",
-        GM20B_METAL + ":raw/test/rawframe.cpp",
+        GM20B_METAL + ":harness/frame.h",
+        GM20B_METAL + ":harness/frame.cpp",
     ],
     conlyopts = CAPTURE_CONLYOPTS,
     copts = CAPTURE_COPTS,
@@ -91,8 +97,8 @@ cc_binary(
     testonly = True,
     srcs = CAPTURE_SRCS + [
         "computeframe_main.cpp",
-        GM20B_METAL + ":raw/test/computeframe.h",
-        GM20B_METAL + ":raw/test/computeframe_raw.cpp",
+        GM20B_METAL + ":harness/computeframe.h",
+        GM20B_METAL + ":harness/computeframe.cpp",
     ],
     conlyopts = CAPTURE_CONLYOPTS,
     copts = CAPTURE_COPTS,
@@ -110,15 +116,15 @@ py_library(
         "eq_rebase.py",
         "eq_rules.py",
     ],
-    data = [GM20B_METAL + ":raw_pack_generator"],
+    data = [GM20B_METAL + ":pack_generator"],
     imports = ["."],
 )
 
 # the pack link's pack.json, layouts.txt and programs.bin (its `report` output group), which name raw's programs for nvdec
 filegroup(
-    name = "raw_pack_report",
+    name = "pack_report",
     testonly = True,
-    srcs = ["//gpu/seed:raw_pack"],
+    srcs = ["//gpu/seed:pack"],
     output_group = "report",
 )
 
@@ -155,14 +161,14 @@ py_test(
     ],
 )
 
-# rawframe over 2,000 draws of the kernel model's capture took 249 s of a moderate timeout's 300 on the laptop
+# frame over 2,000 draws of the kernel model's capture took 249 s of a moderate timeout's 300 on the laptop
 py_test(
     name = "eq_test",
     timeout = "long",
     srcs = ["eq_test.py"],
     args = [
-        "$(rootpath :rawframe)",
-        "$(rootpath //gpu/seed:raw_pack)/pack.bin",
+        "$(rootpath :frame)",
+        "$(rootpath //gpu/seed:pack)/pack.bin",
     ] + select({
         "//ipsw:21H461": [
             "21H461",
@@ -173,11 +179,11 @@ py_test(
             "drivers/TegraGM20BMetal/test/eq/testdata",
             "--qc27",
         ],
-    }) + ["$(rootpaths :raw_pack_report)"],
+    }) + ["$(rootpaths :pack_report)"],
     data = [
-        ":raw_pack_report",
-        ":rawframe",
-        "//gpu/seed:raw_pack",
+        ":pack_report",
+        ":frame",
+        "//gpu/seed:pack",
     ] + glob(
         ["testdata/*"],
         exclude = ["testdata/compute_*"],
@@ -191,7 +197,7 @@ py_test(
     srcs = ["computeeq_test.py"],
     args = [
         "$(rootpath :computeframe)",
-        "$(rootpath //gpu/seed:raw_pack)/pack.bin",
+        "$(rootpath //gpu/seed:pack)/pack.bin",
     ] + select({
         "//ipsw:21H461": [
             "21H461",
@@ -204,7 +210,7 @@ py_test(
     }),
     data = [
         ":computeframe",
-        "//gpu/seed:raw_pack",
+        "//gpu/seed:pack",
     ] + glob(["testdata/**"]),
     tags = ["pack"],
     deps = [":draw_goldens"],

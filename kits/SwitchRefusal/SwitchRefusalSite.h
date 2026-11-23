@@ -3,7 +3,7 @@
 // that refuses on every frame costs one call and one relaxed load once its line is out, and its text is formatted only
 // the first time. domain and reason must be string literals.
 //
-//   SWITCH_REFUSE("raw", "tex.shape", "%ux%u format %u", w, h, format);
+//   SWITCH_REFUSE("gm20b", "tex.shape", "%ux%u format %u", w, h, format);
 //   SWITCH_REFUSE_DETAIL("frontend", "selector.zero", uintptr_t(sel), "-[%s %s]", cls, name);  // a line per detail
 #ifndef SWITCH_REFUSAL_SITE_H
 #define SWITCH_REFUSAL_SITE_H

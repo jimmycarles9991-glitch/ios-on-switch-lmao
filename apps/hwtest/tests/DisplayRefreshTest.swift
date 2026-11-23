@@ -42,7 +42,8 @@ struct DisplayRefreshTest: HWTest {
                 ("all six keys", values.count == Self.keys.count),
                 ("min_mach within 1% of period_mach", abs(minMach - period) <= period / 100),
                 ("max_mach == min_mach (an internal panel)", internalPanel),
-            ], metrics)
+            ], metrics
+        )
     }
 
     static func machTicks(seconds: Double) -> Double {
@@ -57,18 +58,20 @@ struct DisplayRefreshTest: HWTest {
     static func dictionary() -> (found: Bool, status: kern_return_t?, values: [String: Any]?) {
         guard
             let library = dlopen(
-                "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_NOW)
+                "/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer", RTLD_NOW
+            )
         else { return (false, nil, nil) }
         defer { dlclose(library) }
         guard let mainDisplay = dlsym(library, "IOMobileFramebufferGetMainDisplay"),
-            let copyProperty = dlsym(library, "IOMobileFramebufferCopyProperty")
+              let copyProperty = dlsym(library, "IOMobileFramebufferCopyProperty")
         else { return (false, nil, nil) }
         var display: Unmanaged<CFTypeRef>?
         let status = unsafeBitCast(mainDisplay, to: MainDisplay.self)(&display)
         defer { display?.release() }
         guard status == KERN_SUCCESS, let display else { return (false, status, nil) }
         let value = unsafeBitCast(copyProperty, to: CopyProperty.self)(
-            display.takeUnretainedValue(), "IOMFBDisplayRefresh" as CFString)
+            display.takeUnretainedValue(), "IOMFBDisplayRefresh" as CFString
+        )
         return (true, status, value?.takeRetainedValue() as? [String: Any])
     }
 }

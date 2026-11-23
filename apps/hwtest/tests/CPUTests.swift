@@ -6,14 +6,14 @@ enum Workload {
     static func run(seed: UInt64, rounds: Int) -> UInt64 {
         var state = seed | 1
         var hash: UInt64 = 0xCBF2_9CE4_8422_2325
-        for _ in 0..<rounds {
+        for _ in 0 ..< rounds {
             state ^= state << 13
             state ^= state >> 7
             state ^= state << 17
             hash = (hash ^ state) &* 0x100_0000_01B3
         }
         var escaped: UInt64 = 0
-        for column in 0..<(rounds / 64) {
+        for column in 0 ..< (rounds / 64) {
             let (cx, cy) = (Double(column % 512) / 256 - 1.5, Double(seed % 256) / 128 - 1)
             var (x, y) = (0.0, 0.0)
             var iteration = 0
@@ -77,6 +77,7 @@ struct CPUMultiTest: HWTest {
                 ("every core active (\(cores) of hw.physicalcpu)", cores == DeviceInfo.sysctlInt("hw.physicalcpu")),
                 ("scales to at least 75% of \(cores) cores", speedup >= 0.75 * Double(cores)),
                 ("threads agree with one thread", multi.results.first == single.results.first),
-            ], metrics)
+            ], metrics
+        )
     }
 }

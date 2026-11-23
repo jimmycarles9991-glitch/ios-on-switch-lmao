@@ -1,385 +1,35 @@
 // SPDX-License-Identifier: MIT
-//! The raw GM20B path's direct compile of a compute state at one dispatch shape (NativeMetalDirect.h): what m2v's
+//! The driver's direct compile of a compute state at one dispatch shape (NativeMetalDirect.h): what m2v's
 //! translator makes of the kernel for the three dispatches the pack's kernel probe ran
-//! (drivers/TegraGM20BMetal/raw/pack/kernels.py), with no pipeline state, command buffer or capture. Only the
+//! (drivers/TegraGM20BMetal/pack/kernels.py), with no pipeline state, command buffer or capture. Only the
 //! translator's public API is used. A runtime device lends its compile device and its Vulkan device, on which the
 //! variant's layout and samplers are made too; the offline compile (the pack generator's, and the compile context's:
 //! NativeMetalCompile.rs) runs on the compile profile's native device with the layout as data alone.
 
-use crate::address_maps;
-use crate::descriptors::{
-    DescriptorFunction, NmbComputePipelineDescriptorOf, NmbSamplerDescriptor, compute_descriptor, e, get, guard, raw,
-    sampler_descriptor,
+use crate::descriptors::{DescriptorFunction, NmbComputePipelineDescriptorOf, compute_descriptor, e, get, guard};
+use crate::direct::compile_error;
+use crate::direct_abi::{HEAP_ARRAYS, NmbDirectStage};
+use crate::direct_compute_abi::{NmbDirectDispatch, NmbDirectKernel};
+use crate::direct_compute_binds::{Run, bind_state, dropped_stores, mapped_samplers};
+use crate::direct_compute_words::{
+    access_masks, arguments_of, layout_of, push_words, record_residuals, region_word, stage_in_words,
 };
-use crate::direct::{
-    HEAP_ARRAYS, Layout, NMB_DIRECT_IMMUTABLE, NmbDirectBinding, NmbDirectSamplerState, NmbDirectStage, NmbDirectWrite,
-    compile_error, residual_words, sampler_state, spill_table, write_of,
-};
+use crate::direct_compute_writes::{Samplers, kernel_write};
+use crate::direct_layout::Layout;
+use crate::direct_writes::{residual_words, spill_table};
 use crate::offline::{Devices, NmbOfflineComputePipelineDescriptor, offline_devices};
 use ash::vk as avk;
 use metal2vulkan::Budget;
-use metal2vulkan::bind::{
-    BindState, BindingPlan, BoundBuffer, BoundSampler, BoundTexture, Dispatch, DispatchCommands, FieldLocation,
-    ImageSource, NeutralResource, PushHole, SamplerSource, StageInRegion, StageTable, TextureFacts, UseTarget,
-    WriteSource, heap_class_code,
-};
+use metal2vulkan::bind::{BindState, BindingPlan, Dispatch, DispatchCommands};
 use metal2vulkan::cache::VariantKey;
-use metal2vulkan::metal::format::{ChromaSubsampling, YCbCrReads, ycbcr_format};
-use metal2vulkan::metal::sampler::AddressModeMap;
-use metal2vulkan::metal::{PixelFormat, SamplerAddressMode, TextureSwizzleChannels, TextureType, TextureUsage};
 use metal2vulkan::pipeline::{
-    BindingSource, ComputePipeline, ComputePipelineDescriptor, NativePipeline, NativeProgram, NativeRecord,
-    PipelineLayout, PushField, SamplerRef, SlotClass, Stage, StageSource,
+    ComputePipeline, ComputePipelineDescriptor, NativePipeline, NativeProgram, NativeRecord, SlotClass, SlotInterface,
+    Stage, StageSource,
 };
 use std::ffi::{CString, c_void};
 use std::sync::Arc;
 
-const SLOTS: u32 = 31;
-const TAG_BYTES: u32 = 4096;
-const MOVED_OFFSET: u64 = 256;
 const GRID: [u32; 3] = [3, 5, 2];
-
-#[repr(C)]
-pub struct NmbDirectBoundTexture {
-    pub slot: u32,
-    pub planes: u32,
-    pub pixel_format: u64,
-    pub texture_type: u64,
-    pub usage: u64,
-    pub levels: u64,
-    pub array_length: u64,
-    pub samples: u64,
-}
-
-#[repr(C)]
-pub struct NmbDirectBoundSampler {
-    pub slot: u32,
-    pub descriptor: NmbSamplerDescriptor,
-}
-
-#[repr(C)]
-pub struct NmbDirectDispatch {
-    pub threads: [u32; 3],
-    pub memory: [u32; 31],
-    pub textures: *const NmbDirectBoundTexture,
-    pub texture_count: u32,
-    pub samplers: *const NmbDirectBoundSampler,
-    pub sampler_count: u32,
-    pub region_mode: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct NmbDirectKernelWrite {
-    pub write: NmbDirectWrite,
-    pub view_format: u32,
-    pub components: [u32; 4],
-    pub plane: u32,
-    pub sampler: u64,
-    pub sampler_state: NmbDirectSamplerState,
-    pub has_sampler: bool,
-}
-
-#[repr(C)]
-pub struct NmbDirectKernel {
-    pub device: u64,
-    pub layout: u64,
-    pub layout_data: *const crate::direct::NmbDirectLayout,
-    pub set0: u64,
-    pub set0_bindings: *const NmbDirectBinding,
-    pub set0_binding_count: u32,
-    pub stage: NmbDirectStage,
-    pub writes: *const NmbDirectKernelWrite,
-    pub write_count: u32,
-    pub push_mask: u32,
-    pub push: [u32; 32],
-    pub moved_mask: u32,
-    pub moved: [u32; 32],
-    pub bound_mask: u32,
-    pub bound: [u32; 32],
-    pub moved_same: bool,
-    pub bound_same: bool,
-    pub region_word: i32,
-    pub regions: u32,
-    pub push_holes: u32,
-    pub variant: *const std::ffi::c_char,
-    pub buffer_reads: u32,
-    pub buffer_writes: u32,
-    pub texture_reads: u32,
-    pub texture_writes: u32,
-    pub root_table_word: u8,
-    pub status_word: u8,
-    pub other_holes: u32,
-    pub root_slots: u32,
-    pub set1: u64,
-    pub heap_arrays: u32,
-    pub heap_class: [u32; HEAP_ARRAYS],
-    pub spill: *const u32,
-    pub moved_spill: *const u32,
-    pub bound_spill: *const u32,
-    pub spill_words: u32,
-    pub moved_spill_words: u32,
-    pub bound_spill_words: u32,
-    pub residual_word: [u8; 32],
-    pub stage_in_region_word: i32,
-    pub stage_in_strides: [[u32; 2]; 4],
-}
-
-/// The kernel's reads through argument buffers the raw path fills (NativeMetalDirect.rs holes_of and heap_of for a draw): its
-/// root-table and ExecutionStatus address holes (push word + 1), the others counted, the buffer slots its root table holds
-/// an entry for as the bound dispatch names them, and its set 1's heap arrays
-fn arguments_of(
-    commands: &DispatchCommands,
-    bound: &DispatchCommands,
-    layout: &PipelineLayout,
-    sets: &Layout<'_>,
-    kernel: &mut NmbDirectKernel,
-) -> Result<(), String> {
-    for hole in &commands.push_holes {
-        let (word, offset) = match *hole {
-            PushHole::RootTableAddress { offset, .. } => (&mut kernel.root_table_word, offset),
-            PushHole::ExecutionStatusAddress { offset, .. } => (&mut kernel.status_word, offset),
-            _ => {
-                kernel.other_holes += 1;
-                continue;
-            }
-        };
-        if offset % 4 != 0 || offset > 128 - 8 {
-            return Err("an address push hole outside the root push window".into());
-        }
-        let encoded = (offset / 4 + 1) as u8;
-        if *word != 0 && *word != encoded {
-            return Err("the kernel's address push hole at two places".into());
-        }
-        *word = encoded;
-    }
-    if let Some(table) = &bound.root_table {
-        let field = |root: usize, at: usize| {
-            table
-                .bytes
-                .get(32 * root + at..32 * root + at + 8)
-                .and_then(|b| b.try_into().ok())
-                .map_or(0, u64::from_le_bytes)
-        };
-        let first = (field(1, 8) as usize).min(table.bytes.len() / 32);
-        for root in 2..first {
-            if field(root, 0) == 0 {
-                continue;
-            }
-            if root - 2 >= 31 {
-                return Err("a root table entry past the buffer slots".into());
-            }
-            kernel.root_slots |= 1 << (root - 2);
-        }
-    }
-    let Some((at, set)) = layout.sets.iter().enumerate().find(|(_, s)| s.set == 1) else {
-        return Ok(());
-    };
-    kernel.set1 = sets.set_at(at);
-    kernel.heap_arrays = set.bindings.len() as u32;
-    for b in &set.bindings {
-        let code = match &b.source {
-            BindingSource::Heap(class) => heap_class_code(class).unwrap_or(0),
-            _ => 0,
-        };
-        if let Some(slot) = kernel.heap_class.get_mut(b.binding as usize) {
-            *slot = code;
-        }
-    }
-    Ok(())
-}
-
-fn access_masks(plans: [&BindingPlan; 3]) -> [u32; 4] {
-    let mut masks = [0u32; 4];
-    for use_ in plans.into_iter().flat_map(|p| &p.uses) {
-        let UseTarget::Slot(slot) = use_.resource else {
-            if use_.access.write {
-                masks[1] = u32::MAX;
-                masks[3] = u32::MAX;
-            }
-            continue;
-        };
-        if slot.stage != Stage::Kernel || slot.index >= 32 {
-            continue;
-        }
-        let base = match slot.class {
-            SlotClass::Buffer => 0,
-            SlotClass::Texture => 2,
-            SlotClass::Sampler => continue,
-        };
-        masks[base] |= u32::from(use_.access.read) << slot.index;
-        masks[base + 1] |= u32::from(use_.access.write) << slot.index;
-    }
-    masks
-}
-
-/// Which of the probe's dispatches a bind state is: 4096 inline bytes at every slot, the same bytes `MOVED_OFFSET` into a
-/// buffer of each slot's own, or each of those bound `1 + slot % 15` bytes further (pack/probe_bind.h probeComputeCode)
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Run {
-    Bytes,
-    Moved,
-    Bound,
-}
-
-fn counted<'a, T>(items: *const T, count: u32) -> &'a [T] {
-    if items.is_null() || count == 0 {
-        return &[];
-    }
-    // SAFETY: the caller's counted array, live for the call.
-    unsafe { std::slice::from_raw_parts(items, count as usize) }
-}
-
-/// The address-mode map (address_maps.rs) of a texture of `pf` the raw path samples through an image it converts: a
-/// two-plane YCbCr format's
-fn converted_map(pf: PixelFormat) -> u8 {
-    ycbcr_format(pf).map_or(0, |y| {
-        address_maps::converted_map(
-            !matches!(y.subsampling, ChromaSubsampling::Chroma444),
-            matches!(y.reads, YCbCrReads::Codes),
-        )
-    })
-}
-
-/// Map `map` (address_maps.rs) as the translator's
-fn address_modes(map: u8) -> AddressModeMap {
-    let edge = SamplerAddressMode::ClampToEdge;
-    let mut out = AddressModeMap::IDENTITY;
-    if map & address_maps::WRAPPED != 0 {
-        for mode in [
-            SamplerAddressMode::MirrorClampToEdge,
-            SamplerAddressMode::Repeat,
-            SamplerAddressMode::MirrorRepeat,
-        ] {
-            out = out.with(mode, edge);
-        }
-    }
-    if map & address_maps::CLAMPS != 0 {
-        for mode in [SamplerAddressMode::ClampToZero, SamplerAddressMode::ClampToBorderColor] {
-            out = out.with(mode, edge);
-        }
-    }
-    out
-}
-
-/// The map of the texture a dispatch binds at `slot`, 0 for none
-fn bound_map(ask: &NmbDirectDispatch, slot: u32) -> u8 {
-    counted(ask.textures, ask.texture_count)
-        .iter()
-        .find(|t| t.slot == slot)
-        .and_then(|t| raw::<PixelFormat>(t.pixel_format, "pixel format").ok())
-        .map_or(0, converted_map)
-}
-
-/// `state` with each runtime sampler the kernel samples a converted texture through mapped by that texture's map, as
-/// m2v binds it (metal2vulkan-runtime address_map.rs `sampler_maps`): the pairs are the layout's. A sampler two textures
-/// need under different modes fails the dispatch's command buffer ("fails: ", RawDirect.mm), as m2v's
-/// `SharedSamplerSlot` does.
-fn mapped_samplers(layout: &PipelineLayout, ask: &NmbDirectDispatch, state: &BindState) -> Result<BindState, String> {
-    let mut pairs = Vec::new();
-    for b in layout.sets.iter().flat_map(|s| &s.bindings) {
-        if let BindingSource::CombinedTextureSampler { texture, sampler }
-        | BindingSource::SeparateTexture { texture, sampler } = &b.source
-            && texture.stage == Stage::Kernel
-            && let SamplerRef::Slot(index) = &sampler.sampler
-        {
-            pairs.push((texture.index, *index));
-        }
-    }
-    let samplers = counted(ask.samplers, ask.sampler_count);
-    let modes_of = |slot: u32| {
-        samplers
-            .iter()
-            .find(|s| s.slot == slot)
-            .map(|s| [s.descriptor.s_address, s.descriptor.t_address, s.descriptor.r_address])
-    };
-    let maps = address_maps::sampler_maps(&pairs, |slot| bound_map(ask, slot), modes_of).map_err(|shared| {
-        format!(
-            "fails: kernel sampler slot {} samples texture slots {} and {}, whose address-mode maps give it two sets \
-             of modes, which one sampler cannot hold (m2v's SharedSamplerSlot)",
-            shared.sampler, shared.textures[0], shared.textures[1]
-        )
-    })?;
-    let mut mapped = state.clone();
-    if let Some(table) = mapped.stages.get_mut(&Stage::Kernel) {
-        for (slot, map) in maps {
-            if let Some(bound) = table.samplers.get_mut(&slot) {
-                bound.desc = address_modes(map).sampler(bound.desc);
-            }
-        }
-    }
-    Ok(mapped)
-}
-
-fn facts_of(t: &NmbDirectBoundTexture) -> Result<TextureFacts, String> {
-    let pf = raw::<PixelFormat>(t.pixel_format, "pixel format")?;
-    let mut facts = TextureFacts::new(raw::<TextureType>(t.texture_type, "texture type")?, pf);
-    facts.address_modes = address_modes(converted_map(pf));
-    facts.usage = raw::<TextureUsage>(t.usage, "texture usage")?;
-    facts.sample_count = u32::try_from(t.samples.max(1)).map_err(e("sample count"))?;
-    facts.array_length = u32::try_from(t.array_length.max(1)).map_err(e("array length"))?;
-    facts.mipmap_level_count = u32::try_from(t.levels.max(1)).map_err(e("levels"))?;
-    facts.two_planes = t.planes != 0;
-    Ok(facts)
-}
-
-fn bind_state(run: Run, dispatch: &NmbDirectDispatch, stage_in: bool) -> Result<BindState, String> {
-    let mut table = StageTable::default();
-    for slot in 0..SLOTS {
-        let bound = if run == Run::Bytes {
-            BoundBuffer::Bytes {
-                len: TAG_BYTES,
-                attribute_stride: None,
-            }
-        } else {
-            let address = 0x1_0000_0000u64 + (u64::from(slot) << 16);
-            let code = if run == Run::Bound { 1 + u64::from(slot % 15) } else { 0 };
-            BoundBuffer::Buffer {
-                length: MOVED_OFFSET + u64::from(TAG_BYTES),
-                offset: MOVED_OFFSET + code,
-                gpu_address: address,
-                device_address: Some(address),
-                attribute_stride: None,
-            }
-        };
-        table.buffers.insert(slot, bound);
-    }
-    for t in counted(dispatch.textures, dispatch.texture_count) {
-        let bound = if raw::<TextureType>(t.texture_type, "texture type")? == TextureType::TextureBuffer {
-            // the texel buffer view raw binds is the texture's own header (Device::createTexelBuffer), not this range
-            BoundTexture::Buffer {
-                pixel_format: raw::<PixelFormat>(t.pixel_format, "pixel format")?,
-                offset: 0,
-                length: u64::from(TAG_BYTES),
-                bytes_per_row: u64::from(TAG_BYTES),
-                resource_id: None,
-                swizzle: TextureSwizzleChannels::default(),
-            }
-        } else {
-            BoundTexture::Texture {
-                facts: facts_of(t)?,
-                resource_id: None,
-            }
-        };
-        table.textures.insert(t.slot, bound);
-    }
-    for s in counted(dispatch.samplers, dispatch.sampler_count) {
-        table
-            .samplers
-            .insert(s.slot, BoundSampler::new(sampler_descriptor(&s.descriptor)?));
-    }
-    for (index, &length) in dispatch.memory.iter().enumerate() {
-        if length != 0 {
-            table.threadgroup_lengths.insert(index as u32, length);
-        }
-    }
-    let mut state = BindState::default();
-    state.stages.insert(Stage::Kernel, table);
-    if stage_in {
-        state.stage_in_region = Some(StageInRegion::new([0; 3], [1; 3]));
-    }
-    Ok(state)
-}
 
 /// The kernel compiled under variant `key`, as the runtime compiles a state's variant: the function under the key's lowering
 /// inputs with the descriptor's stage input and call stack depth, then the pipeline of it
@@ -444,7 +94,16 @@ fn settle(
         None => compiled(compile, descriptor, key, budget),
     };
     let base = pipeline(&VariantKey::new())?;
-    let state = mapped_samplers(&base.layout, ask, state)?;
+    let access = |slot: u32| match base
+        .interface
+        .slots
+        .iter()
+        .find(|(s, _)| s.stage == Stage::Kernel && s.class == SlotClass::Texture && s.index == slot)
+    {
+        Some((_, SlotInterface::Texture(t))) => Some(t.access),
+        _ => None,
+    };
+    let state = dropped_stores(access, ask, mapped_samplers(&base.layout, ask, state)?)?;
     let shape = state.shape();
     let plan = base.plan(compile, &shape).map_err(e("plan"))?;
     let wanted = plan.dispatch_variant(dispatch).map_err(e("dispatch variant"))?;
@@ -467,244 +126,6 @@ fn settle(
         commands,
         state,
     })
-}
-
-fn push_words(commands: &DispatchCommands) -> (u32, [u32; 32]) {
-    let (mut mask, mut words) = (0u32, [0u32; 32]);
-    let Some(region) = commands.regions.first() else {
-        return (mask, words);
-    };
-    for write in &region.push_constants {
-        for (k, word) in write.bytes.chunks(4).enumerate() {
-            let at = write.offset as usize / 4 + k;
-            if at < 32 && word.len() == 4 {
-                words[at] = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
-                mask |= 1 << at;
-            }
-        }
-    }
-    (mask, words)
-}
-
-/// What a write is in the record: its binding, kind, source and slot (not the range, which the offsets move)
-fn layout_of(plan: &BindingPlan) -> Vec<(u32, u32, u32, i32, u32)> {
-    plan.descriptors
-        .iter()
-        .map(|w| {
-            let source = match &w.source {
-                WriteSource::Buffer { slot } | WriteSource::InlineBytes { slot } => slot.index,
-                WriteSource::Texture { slot, .. } | WriteSource::Sampler { slot, .. } => slot.index,
-                _ => u32::MAX,
-            };
-            (
-                w.set,
-                w.binding,
-                w.array_element,
-                avk::DescriptorType::from(w.ty).as_raw(),
-                source,
-            )
-        })
-        .collect()
-}
-
-/// A stage-in kernel's push words the raw dispatch writes: its StageInRegion's and each dynamic layout's StageInStride
-fn stage_in_words(plan: &BindingPlan) -> Result<(i32, [[u32; 2]; 4]), String> {
-    let (mut region, mut strides, mut n) = (-1, [[0u32; 2]; 4], 0);
-    for p in &plan.push.fields {
-        let FieldLocation::PushWindow { offset } = p.location else {
-            continue;
-        };
-        match p.field {
-            PushField::StageInRegion => region = (offset / 4) as i32,
-            PushField::StageInStride(index) => {
-                if n == strides.len() {
-                    return Err("more than four stage-in layouts of a dynamic stride".into());
-                }
-                strides[n] = [index, offset / 4 + 1];
-                n += 1;
-            }
-            _ => {}
-        }
-    }
-    Ok((region, strides))
-}
-
-fn region_word(plan: &BindingPlan) -> i32 {
-    plan.push
-        .fields
-        .iter()
-        .find_map(|p| match (p.field, p.location) {
-            (PushField::DispatchRegion, FieldLocation::PushWindow { offset }) => Some((offset / 4) as i32),
-            _ => None,
-        })
-        .unwrap_or(-1)
-}
-
-/// The samplers a dispatch's sampler writes take: their states, and the Vulkan samplers made of them where there is a
-/// device, destroyed with it
-struct Samplers<'d> {
-    device: Option<&'d ash::Device>,
-    made: Vec<avk::Sampler>,
-}
-
-impl Samplers<'_> {
-    /// The sampler a write takes (its handle, 0 with no device, and its state); none where the dispatch binds none
-    fn make(
-        &mut self,
-        compile: &metal2vulkan::device::Device,
-        state: &BindState,
-        source: &SamplerSource,
-        image_format: Option<metal2vulkan::vk::Format>,
-    ) -> Result<Option<(u64, NmbDirectSamplerState)>, String> {
-        if let SamplerSource::Neutral(NeutralResource::Sampler { compare }) = source {
-            let info = avk::SamplerCreateInfo::default()
-                .mag_filter(avk::Filter::NEAREST)
-                .min_filter(avk::Filter::NEAREST)
-                .mipmap_mode(avk::SamplerMipmapMode::NEAREST)
-                .address_mode_u(avk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_v(avk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(avk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .max_lod(avk::LOD_CLAMP_NONE)
-                .compare_enable(*compare)
-                .compare_op(avk::CompareOp::NEVER);
-            let state = sampler_state(&info, avk::SamplerReductionMode::WEIGHTED_AVERAGE, None);
-            return Ok(Some((self.create(&info)?, state)));
-        }
-        let SamplerSource::Slot {
-            slot,
-            compare,
-            integer,
-            opaque_black,
-        } = source
-        else {
-            return Ok(None);
-        };
-        let Some(bound) = state
-            .stages
-            .get(&Stage::Kernel)
-            .and_then(|table| table.samplers.get(&slot.index))
-        else {
-            return Ok(None);
-        };
-        let desc =
-            metal2vulkan::bind::sampler_desc(compile, &bound.desc, *compare, *integer, *opaque_black, image_format)
-                .map_err(e("sampler"))?;
-        let mut reduction = avk::SamplerReductionModeCreateInfo::default();
-        let mut border = avk::SamplerBorderColorComponentMappingCreateInfoEXT::default();
-        let info = metal2vulkan::ash_interop::sampler_create_info(&desc, &mut reduction, &mut border);
-        let made = sampler_state(
-            &info,
-            desc.reduction.into(),
-            desc.border_components.map(avk::ComponentMapping::from),
-        );
-        Ok(Some((self.create(&info)?, made)))
-    }
-
-    fn create(&mut self, info: &avk::SamplerCreateInfo<'_>) -> Result<u64, String> {
-        let Some(device) = self.device else {
-            return Ok(0);
-        };
-        // SAFETY: `info` and its chain are live for the call.
-        let sampler = unsafe { device.create_sampler(info, None) }.map_err(e("sampler"))?;
-        self.made.push(sampler);
-        Ok(avk::Handle::as_raw(sampler))
-    }
-}
-
-impl Drop for Samplers<'_> {
-    fn drop(&mut self) {
-        let Some(device) = self.device else {
-            return;
-        };
-        for &sampler in &self.made {
-            // SAFETY: made here; NVK only read its header.
-            unsafe { device.destroy_sampler(sampler, None) };
-        }
-    }
-}
-
-impl NmbDirectKernelWrite {
-    fn take_sampler(&mut self, made: Option<(u64, NmbDirectSamplerState)>) {
-        if let Some((sampler, state)) = made {
-            (self.sampler, self.sampler_state, self.has_sampler) = (sampler, state, true);
-        }
-    }
-}
-
-fn view_parts(view: &metal2vulkan::bind::ImageViewDesc) -> (u32, [u32; 4]) {
-    let components = if view.shader_swizzle {
-        view.components
-    } else {
-        TextureSwizzleChannels::DEFAULT.compose(view.components)
-    };
-    let c = avk::ComponentMapping::from(components);
-    (
-        avk::Format::from(view.format).as_raw() as u32,
-        [c.r, c.g, c.b, c.a].map(|s| s.as_raw() as u32),
-    )
-}
-
-/// Whether binding `(set, binding)` of `layout` is a two-plane texture's alpha plane
-fn alpha_plane(layout: &PipelineLayout, set: u32, binding: u32) -> bool {
-    layout
-        .sets
-        .iter()
-        .filter(|s| s.set == set)
-        .flat_map(|s| &s.bindings)
-        .any(|b| b.binding == binding && matches!(b.source, BindingSource::TexturePlane(_)))
-}
-
-fn kernel_write(
-    w: &metal2vulkan::bind::DescriptorWrite,
-    (commands, layout): (&DispatchCommands, &PipelineLayout),
-    compile: &metal2vulkan::device::Device,
-    state: &BindState,
-    samplers: &mut Samplers<'_>,
-) -> Result<NmbDirectKernelWrite, String> {
-    let mut out = NmbDirectKernelWrite {
-        write: write_of(w, &commands.descriptor_ranges),
-        view_format: 0,
-        components: [0; 4],
-        plane: u32::from(alpha_plane(layout, w.set, w.binding)),
-        sampler: 0,
-        sampler_state: NmbDirectSamplerState::default(),
-        has_sampler: false,
-    };
-    match &w.source {
-        WriteSource::Texture { view, .. } => (out.view_format, out.components) = view_parts(view),
-        WriteSource::TexelBuffer { format, .. } => out.view_format = format.as_raw() as u32,
-        WriteSource::Sampler {
-            slot,
-            compare,
-            integer,
-            opaque_black,
-        } => {
-            let source = SamplerSource::Slot {
-                slot: *slot,
-                compare: *compare,
-                integer: *integer,
-                opaque_black: *opaque_black,
-            };
-            out.take_sampler(samplers.make(compile, state, &source, None)?);
-        }
-        WriteSource::Neutral(neutral @ NeutralResource::Sampler { .. }) => {
-            out.take_sampler(samplers.make(compile, state, &SamplerSource::Neutral(*neutral), None)?);
-        }
-        WriteSource::CombinedImageSampler { image, sampler } => {
-            let format = match image {
-                ImageSource::Texture { view, .. } => {
-                    (out.view_format, out.components) = view_parts(view);
-                    Some(view.format)
-                }
-                ImageSource::Neutral(_) => None,
-            };
-            if out.write.sampler != NMB_DIRECT_IMMUTABLE {
-                out.take_sampler(samplers.make(compile, state, sampler, format)?);
-            }
-        }
-        _ => {}
-    }
-    Ok(out)
 }
 
 /// nmb_compute_pipeline_direct's answer for a kernel of offline functions, made on the compile profile's device with no
@@ -818,12 +239,21 @@ pub fn direct(
         &budget,
         artifact,
     )?;
+    // InlineBytes have no buffer hazard entries; the moved and bound plans expose those accesses.
+    let [buffer_reads, buffer_writes, texture_reads, texture_writes] =
+        access_masks([&plain.plan, &moved.plan, &bound.plan]);
     let region = |s: &Settled| s.commands.regions.first().map(|r| r.specialization.clone());
     let same = |s: &Settled| {
         s.plan.variant == plain.plan.variant
             && region(s) == region(&plain)
             && layout_of(&s.plan) == layout_of(&plain.plan)
     };
+    let residual_word = record_residuals(
+        [&moved.plan.variant, &bound.plan.variant],
+        region(&bound) != region(&moved),
+        &[layout_of(&moved.plan), layout_of(&bound.plan)],
+        residual_words(&plain.plan, Stage::Kernel),
+    )?;
     let (push_mask, push) = push_words(&plain.commands);
     let (stage_in_region_word, stage_in_strides) = stage_in_words(&plain.plan)?;
     let (moved_mask, moved_push) = push_words(&moved.commands);
@@ -863,9 +293,6 @@ pub fn direct(
     let entry = CString::new(stage.entry_point.as_str()).unwrap_or_default();
     let variant = CString::new(format!("{:?}", plain.plan.variant)).unwrap_or_default();
     let semantic = plain.pipeline.pipeline.program.as_ref().map(SemanticView::of);
-    // InlineBytes have no buffer hazard entries; the moved and bound plans expose those accesses.
-    let [buffer_reads, buffer_writes, texture_reads, texture_writes] =
-        access_masks([&plain.plan, &moved.plan, &bound.plan]);
     let mut kernel = NmbDirectKernel {
         device: vulkan.map_or(0, |d| avk::Handle::as_raw(d.handle())),
         layout: avk::Handle::as_raw(layout.pipeline),
@@ -900,7 +327,6 @@ pub fn direct(
         bound_mask,
         bound: bound_push,
         moved_same,
-        bound_same: same(&bound),
         region_word: region_word(&plain.plan),
         regions: plain.commands.regions.len() as u32,
         push_holes: plain.commands.push_holes.len() as u32,
@@ -922,7 +348,7 @@ pub fn direct(
         spill_words: plain_spill.len() as u32,
         moved_spill_words: moved_spill.len() as u32,
         bound_spill_words: bound_spill.len() as u32,
-        residual_word: residual_words(&plain.plan, Stage::Kernel),
+        residual_word,
         stage_in_region_word,
         stage_in_strides,
     };

@@ -3,20 +3,18 @@ import HWTestCore
 import HWTestGPU
 import Metal
 
-/// gpu.raw.private_compression's shape arms (raw_private_comp.h privateShapeCompresses): a private target of each shape
+/// gpu.gm20b.private_compression's shape arms (private_comp.h privateShapeCompresses): a private target of each shape
 /// the device lays out on compressed memory, made until it binds some, drawn and read whole, against the same work with
 /// compression held off. `<arm>_made` is its comptags when made, `<arm>_compressed` after the work, `<arm>_paths` the
-/// command buffers' paths; it fails where the bytes differ, the target was not compressed or the work left the raw path.
+/// command buffers' paths; it fails where the bytes differ, the target was not compressed or the work left the driver.
 /// The mips arm draws into level 1 after generating the levels, the 3D engine's target there a level of the chain.
 extension PrivateCompressionTest {
     struct ShapeRun {
         var bytes: [UInt8] = []
         var made = 0, compressed = 0
         var paths: [String] = []
-        var musts: [(String, Int)] = []  // facts of the compressed run that must read 1
+        var musts: [(String, Int)] = [] // facts of the compressed run that must read 1
     }
-
-    static let moveSelector = NSSelectorFromString("switchRawProbeMovePlain:")
 
     static let shapeArms = ["mips", "array", "ms4", "shader_write", "view_id"]
     /// Clear colours the boot ZBC table holds (black, white, zero), one a slice
@@ -43,7 +41,7 @@ extension PrivateCompressionTest {
             if differ > 0 { wrong.append("\(arm)_bytes_differ") }
             if run.made != 1 || run.compressed != 1 { wrong.append("\(arm)_not_compressed") }
             if reference.made == 1 { wrong.append("\(arm)_reference_compressed") }
-            if run.paths.contains(where: { $0 != "raw" }) { wrong.append("\(arm)_path") }
+            if run.paths.contains(where: { $0 != "gm20b" }) { wrong.append("\(arm)_path") }
             for (name, value) in run.musts {
                 metrics.set("\(arm)_\(name)", value)
                 if value != 1 { wrong.append("\(arm)_\(name)") }
@@ -71,18 +69,15 @@ extension PrivateCompressionTest {
                 e.setFragmentTexture(texture, index: 0)
                 e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 e.endEncoding()
-            }.path)
+            }.path
+        )
         return try await gpu.read(grid, bytesPerPixel: 4)
     }
 
-    /// `make` until what it made binds compressed memory (20 tries), or once where `plain`
+    /// What `make` makes on compressed memory (CompressionSettled.remade), or once where `plain`
     func made(_ facade: NSObject, plain: Bool, _ make: () throws -> MTLTexture) async throws -> MTLTexture {
-        var made = try make()
-        for _ in 0..<20 where !plain && comptags(facade, made) == 0 {
-            try await Task.sleep(nanoseconds: 50_000_000)
-            made = try make()
-        }
-        return made
+        guard let device = facade as? MTLDevice, !plain else { return try make() }
+        return try await CompressionSettled.remade(device, make)
     }
 
     func shapeArm(_ arm: String, _ gpu: GPU, _ facade: NSObject, plain: Bool) async throws -> ShapeRun {
@@ -106,11 +101,11 @@ extension PrivateCompressionTest {
                 e.setRenderPipelineState(state ?? pattern)
                 var corners =
                     slant
-                    ? [
-                        SIMD4<Float>(-1, -1, 0.5, 1), SIMD4(0.3, -1, 0.5, 1), SIMD4(-1, 1, 0.5, 1),
-                        SIMD4(-0.2, 1, 0.5, 1),
-                    ]
-                    : half ? GPU.quad(x0: -1, y0: -1, x1: 0, y1: 1, z: 0.5) : GPU.fullScreen
+                        ? [
+                            SIMD4<Float>(-1, -1, 0.5, 1), SIMD4(0.3, -1, 0.5, 1), SIMD4(-1, 1, 0.5, 1),
+                            SIMD4(-0.2, 1, 0.5, 1),
+                        ]
+                        : half ? GPU.quad(x0: -1, y0: -1, x1: 0, y1: 1, z: 0.5) : GPU.fullScreen
                 e.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
                 e.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
                 e.endEncoding()
@@ -126,16 +121,18 @@ extension PrivateCompressionTest {
                     let blit = commands.makeBlitCommandEncoder()!
                     blit.generateMipmaps(for: target)
                     blit.endEncoding()
-                }.path)
+                }.path
+            )
             run.paths.append(try await gpu.run(draw(target, level: 1, half: true, clear: 1)).path)
-            for level in 0..<target.mipmapLevelCount {
+            for level in 0 ..< target.mipmapLevelCount {
                 run.bytes += try await gpu.read(target, bytesPerPixel: 4, level: level)
             }
             run.compressed = comptags(facade, target)
         case "array":
             let target = try await made(facade, plain: plain) {
                 let d = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: .bgra8Unorm, width: 128, height: 128, mipmapped: false)
+                    pixelFormat: .bgra8Unorm, width: 128, height: 128, mipmapped: false
+                )
                 d.textureType = .type2DArray
                 d.arrayLength = 3
                 d.storageMode = .private
@@ -144,8 +141,8 @@ extension PrivateCompressionTest {
                 return t
             }
             run.made = comptags(facade, target)
-            for slice in 0..<3 { run.paths.append(try await gpu.run(draw(target, slice: slice, half: true)).path) }
-            for slice in 0..<3 { run.bytes += try await gpu.read(target, bytesPerPixel: 4, slice: slice) }
+            for slice in 0 ..< 3 { run.paths.append(try await gpu.run(draw(target, slice: slice, half: true)).path) }
+            for slice in 0 ..< 3 { run.bytes += try await gpu.read(target, bytesPerPixel: 4, slice: slice) }
             run.compressed = comptags(facade, target)
         case "ms4":
             let target = try await made(facade, plain: plain) { try gpu.texture(.bgra8Unorm, 64, 64, samples: 4) }
@@ -173,31 +170,28 @@ extension PrivateCompressionTest {
                     e.setTexture(target, index: 0)
                     e.dispatchThreads(
                         MTLSize(width: 64, height: 128, depth: 1),
-                        threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1))
+                        threadsPerThreadgroup: MTLSize(width: 8, height: 8, depth: 1)
+                    )
                     e.endEncoding()
-                }.path)
+                }.path
+            )
             run.bytes = try await gpu.read(target, bytesPerPixel: 4)
             run.compressed = comptags(facade, target)
         case "view_id":
-            // a view and a gpuResourceID taken while compressed keep it compressed; after the move an m2v twin takes,
-            // work through the view lands in the plain memory and the ID is the same
+            // a view and a gpuResourceID taken while compressed keep it there through the work done through the view
             let target = try await made(facade, plain: plain) { try gpu.texture(.bgra8Unorm, 128, 128) }
             run.made = comptags(facade, target)
             guard let view = target.makeTextureView(pixelFormat: .bgra8Unorm) else {
                 throw TestFailure("no view made")
             }
             let id = target.gpuResourceID._impl
-            run.compressed = comptags(facade, target)
             run.paths.append(try await gpu.run(draw(view, half: true)).path)
             run.bytes += try await gpu.read(target, bytesPerPixel: 4)
-            if !plain {
-                let moved = facade.perform(Self.moveSelector, with: target)?.takeUnretainedValue() as? NSNumber
-                run.musts.append(("moved", moved?.boolValue == true ? 1 : 0))
-                run.musts.append(("id_kept", target.gpuResourceID._impl == id ? 1 : 0))
-            }
             run.paths.append(try await gpu.run(draw(view, half: true, clear: 1)).path)
             run.bytes += try await gpu.read(target, bytesPerPixel: 4)
             run.bytes += try await gpu.read(view, bytesPerPixel: 4)
+            run.compressed = comptags(facade, target)
+            if !plain { run.musts.append(("id_kept", target.gpuResourceID._impl == id ? 1 : 0)) }
         default:
             throw TestFailure("no shape arm \(arm)")
         }

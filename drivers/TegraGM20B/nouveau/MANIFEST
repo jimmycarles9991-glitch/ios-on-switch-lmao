@@ -3,7 +3,8 @@ Exceptions: nvkm/engine/device/base.c is trimmed to the nv12b (GM20B) chipset on
 include/nvif/os.h is not vendored (../shim/include/nvif/os.h replaces it).
 nvkm/subdev/ltc/gm20b.c is not upstream: GM20B's compbit backing store after nvgpu's ltc_gm20b.c.
 nvkm/engine/gr/gf100.c and gf100.h give every channel's context a zcull image of its own (ctxsw mode separate buffer, as
-nvgpu's gr_gk20a_ctx_zcull_setup binds one), so the raw path's zcull regions hold across context switches.
+nvgpu's gr_gk20a_ctx_zcull_setup binds one; ../../TegraGM20BZcullContext.h), so the raw path's zcull regions hold across
+context switches.
 nvkm/engine/gr/gk20a.c enables TEX exceptions next to SM ones in TPC_EXCEPTION_EN (0x419d0c = 0x3, nvgpu's value);
 nvkm/engine/gr/gf100.c takes a trap with TEX exceptions alone as nvgpu does (gf100_gr_trap_tex, ../../TegraGM20BTexTrap.h):
 reported with dev_warn, the ESR written back, no TRAP error and so no channel kill.
@@ -15,7 +16,8 @@ handler: the kext completes the channels with work in flight at each interrupt p
 nvif/chan506f.c writes GPFIFO entries with plain stores into the write-combined ring, and its kick writes GP_PUT
 after one store barrier (DSB ST) with no publishing barrier of its own.
 nvkm/engine/gr/gf100.c tells the kext of each channel error gf100_gr_intr reports, before acknowledging it
-(tgm_gr_fault, ../../TegraGM20BGrFault.h), so the kill names the job GR stopped in.
+(tgm_gr_fault, ../../TegraGM20BGrFault.h), so the kill names the job GR stopped in, and stops that channel and recovers
+its group, as nvgpu's gk20a_gr_isr recovers the TSG on FECS's current context.
 nvkm/engine/device/tegra.c powers the GPU up and down with ../../platform.c's rail ungate and gate, the Tegra X1 TRM's
 GM20b sequence (12.2.7.17), in place of mainline's clock, reset and clamp calls.
 nvkm/subdev/privring/gk20a.c resets the PRI ring (PMC_ENABLE bit 5, at init and from its interrupt) through

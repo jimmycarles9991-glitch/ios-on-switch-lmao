@@ -10,7 +10,7 @@ import sys
 
 PUBLISH = '\tif (owned)\n\t\tswitch_gpu_backing_publish(owned);\n'
 FINISH = '\tif (owned)\n\t\tswitch_gpu_backing_finish(owned);\n'
-VALIDATE = '\tret = backing_waits(chan, dependencies, dependency_count, unsettled, 0);\n'
+VALIDATE = '\tret = backing_waits(chan, dependencies, dependency_count, unsettled);\n'
 USER_ENTRIES = '\tlast = switch_gpu_job_emit(pushes, count, chan->submitted, &emitter);\n'
 DOORBELL = '\tchan_doorbell(chan);\n'
 EMPTY_COMMIT = '\t\tif (owned)\n\t\t\tswitch_gpu_backing_commit(owned);\n\t\t*seqno = chan->submitted;\n'
@@ -22,14 +22,20 @@ MUTANTS = {
     ],
     'after_doorbell': [
         (PUBLISH, ''),
-        (DOORBELL, DOORBELL + PUBLISH),
+        (FINISH, ''),
+        (DOORBELL, DOORBELL + PUBLISH + FINISH),
     ],
     'before_checks': [
         (PUBLISH, ''),
         (VALIDATE, PUBLISH + VALIDATE),
     ],
-    'before_finish': [
-        (DOORBELL + FINISH, FINISH + DOORBELL),
+    'finish_after_doorbell': [
+        (FINISH, ''),
+        (DOORBELL, DOORBELL + FINISH),
+    ],
+    'finish_at_publish': [
+        (FINISH, ''),
+        (PUBLISH, PUBLISH + FINISH),
     ],
     'no_empty_commit': [
         (EMPTY_COMMIT, '\t\t*seqno = chan->submitted;\n'),

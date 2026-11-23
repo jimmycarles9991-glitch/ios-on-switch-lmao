@@ -6,9 +6,8 @@ import Metal
 
 /// Subsampled two-plane YCbCr textures of an odd width or height: Metal makes one used only to be read and none it may
 /// write (render target, shader write or Unknown usage; an M4 Max answers nil for 8- and 10-bit, packed, sRGB and code
-/// formats). The raw path answers nil as Metal does, before anything is made, with the error line `raw ycbcr.odd`; the
-/// read-only one is its own and drawn raw. twin_asks counts the m2v twins asked for meanwhile (before: one per writable
-/// texture, refused there too).
+/// formats). The driver answers nil as Metal does, before anything is made, with the error line `raw ycbcr.odd`; the
+/// read-only one is its own and drawn raw.
 struct YcbcrOddSizeTest: HWTest {
     let id = "gpu.ycbcr_odd"
     let name = "Odd-size subsampled YCbCr textures: nil where Metal makes none, read-only ones drawn raw"
@@ -25,14 +24,9 @@ struct YcbcrOddSizeTest: HWTest {
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
-        guard RawFacade.kind(of: gpu.device) == "raw" else {
-            return .skip("the default device is not the raw facade (\(RawFacade.kind(of: gpu.device)))")
+        guard GM20BFacade.kind(of: gpu.device) == "gm20b" else {
+            return .skip("the default device is not the facade (\(GM20BFacade.kind(of: gpu.device)))")
         }
-        let asks = {
-            ((RawFacade.m2vRecord(of: gpu.device)["needs"] as? [String: Any])?["a texture's twin"] as? NSNumber)?
-                .intValue ?? 0
-        }
-        let before = asks()
         var made: [String] = [], unread: [String] = []
         var readable: [MTLTexture] = []
         for shape in Self.shapes {
@@ -43,7 +37,8 @@ struct YcbcrOddSizeTest: HWTest {
             else { throw TestFailure("no 16x8 surface for \(shape.format)") }
             for usage in Self.writable + [[.shaderRead]] {
                 let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: format, width: shape.width, height: shape.height, mipmapped: false)
+                    pixelFormat: format, width: shape.width, height: shape.height, mipmapped: false
+                )
                 descriptor.usage = usage
                 let texture = gpu.device.makeTexture(descriptor: descriptor, iosurface: surface, plane: 0)
                 let label = "\(shape.format)_\(shape.width)x\(shape.height)_u\(usage.rawValue)"
@@ -54,7 +49,6 @@ struct YcbcrOddSizeTest: HWTest {
                 }
             }
         }
-        let twinAsks = asks() - before
         let state = try gpu.render(fragment: "texel_read", format: .rgba32Float)
         for texture in readable {
             let target = try gpu.texture(.rgba32Float, texture.width, texture.height)
@@ -72,17 +66,15 @@ struct YcbcrOddSizeTest: HWTest {
                 encoder.endEncoding()
             }
         }
-        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "raw" }
+        let raw = !gpu.paths.isEmpty && gpu.paths.paths.keys.allSatisfy { $0 == "gm20b" }
         var metrics = Metrics()
         metrics.set("writable_made", made.isEmpty ? "-" : made.joined(separator: ","))
         metrics.set("read_only_nil", unread.isEmpty ? "-" : unread.joined(separator: ","))
-        metrics.set("twin_asks", twinAsks)
         metrics.set("paths", gpu.paths.isEmpty ? "-" : gpu.paths.text)
         let checks = [
             ("no writable odd-size texture made, as Metal makes none", made.isEmpty),
             ("every read-only odd-size texture made", unread.isEmpty),
-            ("no m2v twin asked for", twinAsks == 0),
-            ("the read-only ones drawn on the raw path", raw),
+            ("the read-only ones drawn on the driver", raw),
         ]
         return .judged(checks, metrics, proof: gpu.proof)
     }

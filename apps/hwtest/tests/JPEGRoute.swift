@@ -48,12 +48,16 @@ enum JPEGRoute {
     /// The count, or why there is none.
     static func decodes() -> Result<Counts, TestFailure> {
         guard let iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW),
-            let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(iokit, "IOServiceGetMatchingService"),
-            let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
-            let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
+              let matching = dlsym(iokit, "IOServiceMatching"), let service = dlsym(
+                  iokit,
+                  "IOServiceGetMatchingService"
+              ),
+              let open = dlsym(iokit, "IOServiceOpen"), let release = dlsym(iokit, "IOObjectRelease"),
+              let close = dlsym(iokit, "IOServiceClose"), let call = dlsym(iokit, "IOConnectCallStructMethod")
         else { return .failure(TestFailure("no IOKit")) }
         let jpeg = unsafeBitCast(service, to: Service.self)(
-            0, unsafeBitCast(matching, to: Matching.self)("AppleJPEGDriver"))
+            0, unsafeBitCast(matching, to: Matching.self)("AppleJPEGDriver")
+        )
         guard jpeg != 0 else { return .failure(TestFailure("no AppleJPEGDriver service")) }
         var connection: mach_port_t = 0
         let opened = unsafeBitCast(open, to: Open.self)(jpeg, mach_task_self_, 0, &connection)
@@ -71,7 +75,8 @@ enum JPEGRoute {
         let kr = request.withUnsafeBytes { input in
             reply.withUnsafeMutableBytes { output in
                 unsafeBitCast(call, to: Call.self)(
-                    connection, 7, input.baseAddress, input.count, output.baseAddress, &size)
+                    connection, 7, input.baseAddress, input.count, output.baseAddress, &size
+                )
             }
         }
         guard kr == KERN_SUCCESS, size == requestBytes else {
@@ -84,7 +89,9 @@ enum JPEGRoute {
                     failed: words.load(fromByteOffset: 16, as: UInt64.self),
                     refused: words.load(fromByteOffset: 24, as: UInt64.self),
                     asked: formatNames.indices.map { words.load(fromByteOffset: 32 + 8 * $0, as: UInt64.self) },
-                    outputMaps: words.load(fromByteOffset: 32 + 8 * formatNames.count, as: UInt64.self))
-            })
+                    outputMaps: words.load(fromByteOffset: 32 + 8 * formatNames.count, as: UInt64.self)
+                )
+            }
+        )
     }
 }

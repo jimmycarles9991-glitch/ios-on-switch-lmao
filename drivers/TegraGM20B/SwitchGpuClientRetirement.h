@@ -116,8 +116,10 @@ void AGXDeviceUserClient::retireBatch()
 	while (ready) {
 		auto *next = ready->next;
 		noteBind(TGM_BIND_GONE, ready->va, ready->range, ready->bo, 0, ready->kind);
-		--ready->bo->bindings;
-		readyBo(ready->bo);
+		if (ready->bo) {
+			--ready->bo->bindings;
+			readyBo(ready->bo);
+		}
 		IODelete(ready, RetiredBinding, 1);
 		ready = next;
 	}
@@ -268,8 +270,10 @@ void AGXDeviceUserClient::reap(bool force)
 		auto *record = retired_;
 		retired_ = record->next;
 		switch_gpu_vm_unmap(vm_, &record->mapping);
-		--record->bo->bindings;
-		readyBo(record->bo);
+		if (record->bo) {
+			--record->bo->bindings;
+			readyBo(record->bo);
+		}
 		IODelete(record, RetiredBinding, 1);
 	}
 	retiredTail_ = &retired_;
@@ -318,7 +322,6 @@ void AGXDeviceUserClient::drainResources()
 	IOLockLock(lock_);
 	while (nbinds_)
 		unbindOverlaps(binds_[0].va, binds_[0].range, nullptr);
-	surfaces_.clear();
 	boIndex_.clear();
 	while (bos_) {
 		auto *bo = bos_;
@@ -376,7 +379,6 @@ IOReturn AGXDeviceUserClient::freeBo(Bo **p)
 	*p = bo->next;
 	switch_gpu_backing_member_freed(bo->backing);
 	boIndex_.erase(bo->handle);
-	surfaces_.remove(bo->handle);
 	for (uint32_t i = 0; i < nbinds_;) {
 		if (binds_[i].bo == bo) {
 			unbindOverlaps(binds_[i].va, binds_[i].range, bo);
