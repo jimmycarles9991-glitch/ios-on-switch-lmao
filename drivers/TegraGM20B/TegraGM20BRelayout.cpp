@@ -92,6 +92,20 @@ tgm_chan *channel()
 void tgm_relayout_finish_cpu(const tgm_relayout_pages *, const tgm_relayout_pages *,
 			     const tgm_layout *, uint32_t, tgm_relayout_op);
 
+// Written under gRelayout.lock (one move at a time), taken by the stats tick: moves, ns, longest ns
+uint64_t gInPlace[3];
+
+void countInPlace(tgm_relayout_op op, uint64_t started)
+{
+	if (!TGM_STATS || (op != TGM_RELAYOUT_TILE_IN_PLACE && op != TGM_RELAYOUT_UNTILE_IN_PLACE))
+		return;
+	const uint64_t ns = tgm_timestamp_ns() - started;
+	__atomic_fetch_add(&gInPlace[0], 1, __ATOMIC_RELAXED);
+	__atomic_fetch_add(&gInPlace[1], ns, __ATOMIC_RELAXED);
+	if (ns > __atomic_load_n(&gInPlace[2], __ATOMIC_RELAXED))
+		__atomic_store_n(&gInPlace[2], ns, __ATOMIC_RELAXED);
+}
+
 // A copy that faulted leaves its own partial writes, and its writers' (complete, an Internal job's possibly still there),
 // in the GPU's L2, behind which the CPU would read and write: this move's finish, or the caller's tgm_relayout_by_cpu. The faulted channel is gone: a new one's empty
 // External job flushes the whole L2. Without a channel only the LTC's MMIO flush could, which polls.
@@ -151,12 +165,16 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 	}
 	SwitchGpuRelayoutMapping *surfaceMap = nullptr, *rowsMap = nullptr;
 	bool finish = false;
+	bool restorePitch = false;
+	bool compressed = false;
 	int ret = switch_gpu_relayout_mapping(r.space.vm, &gRelayout.mappings, surface.pas,
 					      surface.npages, true, &surfaceMap);
 	if (!ret)
 		ret = switch_gpu_relayout_mapping(r.space.vm, &gRelayout.mappings, rows.pas,
 						  rows.npages, false, &rowsMap);
 	if (!ret) {
+		compressed =
+			surfaceMap->tiledKind != 0u && surfaceMap->tiledKind != TGM_LAYOUT_KIND;
 		const uint64_t pushVa = kPushVa + slot * kPage;
 		__atomic_store_n(words + kCheckpointWord, 0u, __ATOMIC_RELEASE);
 		const tgm_relayout_move m = {surfaceMap->tiled,
@@ -173,6 +191,7 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 		if (r.users)
 			tgm_stats_unlocked(TGM_UNLOCKED_RELAYOUT_BESIDE, 0);
 #endif
+		const uint64_t started = TGM_STATS ? tgm_timestamp_ns() : 0;
 		ret = tgm_chan_exec(chan, &push, 1, &seqno, nullptr);
 		if (!ret) {
 			tgm_relayout_writer acquired[TGM_RELAYOUT_MAX_WAITS];
@@ -182,21 +201,35 @@ int move(const tgm_relayout_pages &surface, const tgm_relayout_pages &rows, cons
 				tgm_copy_wait(tgm_chan_uid(chan), seqno, acquired, nwaits);
 			});
 			ret = tgm_chan_error(chan) ? -5 : 0;
-			finish = ret && __atomic_load_n(words + kCheckpointWord, __ATOMIC_ACQUIRE);
+			const uint32_t reached =
+				__atomic_load_n(words + kCheckpointWord, __ATOMIC_ACQUIRE);
+			const bool checkpoint = ret && reached != 0u;
+			if (checkpoint && op == TGM_RELAYOUT_TILE_IN_PLACE && compressed)
+				restorePitch = true;
+			else if (checkpoint)
+				finish = true;
+			if (!ret)
+				countInPlace(op, started);
 		}
 	}
 	releaseSlot(slot);
 	switch_gpu_relayout_mapping_put(rowsMap);
 	switch_gpu_relayout_mapping_put(surfaceMap);
-	if (ret && tgm_chan_error(chan)) {
+	if (ret && (tgm_chan_error(chan) || compressed)) {
 		switch_gpu_relayout_cache_clear(r.space.vm, &gRelayout.mappings);
-		if (!flushForCpu())
+		if (tgm_chan_error(chan) && !flushForCpu())
 			switch_refusal("iosurface-layout", "fault-unflushed",
 				       "a faulted relayout leaves the GPU's L2 unflushed for the "
 				       "CPU's move: "
 				       "no copy channel");
 	}
-	if (finish) {
+	if (restorePitch) {
+		// Copy 1 already saved intact pitch rows before Copy 2 faulted mid-compression;
+		// restore them so the caller's pitch fallback does not expose half-compressed bytes.
+		tgm_cpu_clean_pages(rows.pas, rows.npages);
+		tgm_relayout_finish_cpu(&surface, &rows, &l, bytesPerRow,
+					TGM_RELAYOUT_UNTILE_IN_PLACE);
+	} else if (finish) {
 		tgm_cpu_clean_pages(rows.pas, rows.npages);
 		tgm_relayout_finish_cpu(&surface, &rows, &l, bytesPerRow, op);
 		ret = 0;
@@ -285,6 +318,12 @@ extern "C" void tgm_relayout_cpu_stats(uint64_t *moves, uint64_t *bytes)
 {
 	*moves = __atomic_exchange_n(&cpuMoves, 0, __ATOMIC_RELAXED);
 	*bytes = __atomic_exchange_n(&cpuMoveBytes, 0, __ATOMIC_RELAXED);
+}
+
+extern "C" void tgm_relayout_in_place_stats(uint64_t out[3])
+{
+	for (uint32_t i = 0; i < 3; i++)
+		out[i] = __atomic_exchange_n(&gInPlace[i], 0, __ATOMIC_RELAXED);
 }
 
 extern "C" int tgm_relayout_init(void)

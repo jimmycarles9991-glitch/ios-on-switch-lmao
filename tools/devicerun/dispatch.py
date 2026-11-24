@@ -5,10 +5,17 @@ when their cohort queue's drainer retained a voucher read from a reused stack, C
 into CoreFoundation's __AUTH_CONST. reports.py's crash.stale-sync-waiter row reads the same crashes from the .ips files.
 """
 
-from tools.devicerun.rules import Check
+from tools.devicerun.hwtest import SUBSYSTEM as HWTEST_SUBSYSTEM, SUITE
+from tools.devicerun.rules import REPORT, Check
 
 OWNER = 'r132-locationd'
 KERNEL = 'kernel'
+# Each run of HW Test's dispatch.sync_handoff, a window back from its line by its ms=: its retargeted queues wake their
+# waiters from the other workloop, which the kernel's SwitchWL handoff probe logs as wait-unheld and drop-wake (and
+# end-enoent when a cancel beats the wait) for HW Test itself.
+HANDOFF_RUNS = 'dispatch.sync-handoff-runs'
+HANDOFF = 'SwitchWL handoff '
+HWTEST_PROCESS = r': SwitchHWTest\w*\['
 
 DISPATCH = [
     Check(
@@ -52,5 +59,47 @@ DISPATCH = [
             'a thread over its CPU limit, where its loop runs; slice KU (11-10): locationd thread 0x624, 50% for 3 '
             'min, before this line existed'
         ),
+    ),
+    Check(
+        HANDOFF_RUNS,
+        OWNER,
+        'HWTEST dispatch.sync_handoff ',
+        REPORT,
+        subsystem=HWTEST_SUBSYSTEM,
+        regex=(
+            r'^HWTEST dispatch\.sync_handoff (?:PASS|FAIL) .*\bretarget_crossed=(?P<crossed>\d+)\b'
+            r'.* ms=(?P<ms>[\d.]+)(?: why=|$)'
+        ),
+        show=('crossed',),
+        source='apps/hwtest/tests/DispatchSyncHandoffTest.swift',
+        note='each run of dispatch.sync_handoff and its rounds whose waiter was woken from the other workloop',
+    ),
+    Check(
+        'boot.workloop-handoff',
+        OWNER,
+        HANDOFF,
+        process=KERNEL,
+        regex=r'SwitchWL handoff (?P<kind>[a-z-]+) #(?P<n>\d+): (?P<who>[^\[]+)\[\d+\]',
+        show=('kind', 'who'),
+        during=HANDOFF_RUNS,
+        excusable=r'SwitchWL handoff (?:wait-unheld|drop-wake|end-enoent) #\d+' + HWTEST_PROCESS,
+        source='kernel/switch/diag/workloop.c',
+        note=(
+            "a dispatch_sync hand-off the workloop contract allows only for a queue retargeted mid-sync (HW Test's "
+            "own, in its window, are expected) or never: per kind and process; a line's #n is the running count"
+        ),
+    ),
+    Check(
+        'boot.workloop-handoff-live',
+        OWNER,
+        HANDOFF,
+        'count > 0',
+        process=KERNEL,
+        regex=r'SwitchWL handoff (?P<kind>wait-unheld|drop-wake) #\d+' + HWTEST_PROCESS,
+        show=('kind',),
+        needs=HANDOFF_RUNS,
+        applies=f'{SUITE} ios=27',
+        source='kernel/switch/diag/workloop.c',
+        note="dispatch.sync_handoff's cross-workloop wakes reach the probe; without these lines it is not running",
     ),
 ]

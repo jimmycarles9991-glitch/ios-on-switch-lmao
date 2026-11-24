@@ -26,7 +26,11 @@
 #include "TegraGM20BCompilerABI.h"
 #include "TegraGM20BFencePageABI.h"
 #include "TegraGM20BJobABI.h"
+#include "TegraGM20BVolatileABI.h"
 #include <IOKit/IOKitLib.h>
+#include <mach/mach.h>
+#include <mach/memory_object_types.h>
+#include <unistd.h>
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -52,11 +56,37 @@ inline void (*checkJob)(const uint32_t *words, const TegraGM20BAbiPush *pushes, 
 // or answers it (anything but KERN_SUCCESS)
 inline std::atomic<int (*)(uint32_t method, const void *input)> arriving{nullptr};
 
+enum class ParkState : uint8_t {
+    Live = 0,
+    Parked,
+    Reclaimed,
+};
+
+struct BoVmBacking {
+    mach_port_t entry = MACH_PORT_NULL;
+    uint64_t va = 0;
+    uint64_t bytes = 0;
+    bool ownsVa = false;
+
+    ~BoVmBacking()
+    {
+        if (ownsVa && va && bytes)
+            vm_deallocate(mach_task_self(), vm_address_t(va), vm_size_t(bytes));
+        if (entry != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), entry);
+    }
+};
+
 struct BoState {
     bool import = false, cached = false, cpuReached = false;
     bool hostWritten = false;         // a CPU write lease released on it since a job last named it
     uint32_t set = 0;                 // the set it is a member of, 0: none
-    uint64_t address = 0, bytes = 0;  // an import's host range
+    uint64_t address = 0, bytes = 0;  // an import's host range (or BoAlloc bytes)
+    bool control = false, coherent = false, system = false, poolVa = false;
+    ParkState parkState = ParkState::Live;
+    bool mapped = false, parkedGuard = false, mappedFixed = false;
+    uint64_t mappedVa = 0, parkedVa = 0;
+    std::shared_ptr<BoVmBacking> vm = nullptr;
 };
 
 struct SetState {
@@ -116,6 +146,7 @@ struct Model {
     std::map<uint64_t, BoState> bos;
     std::map<uint64_t, std::pair<uint64_t, uint64_t>> imports;  // handle: the host pages imported and their bytes
     std::map<uint64_t, std::pair<uint64_t, uint64_t>> binds;    // va: the BO bound there and its bytes
+    std::map<uint64_t, uint32_t> bindKinds;                     // va: the PTE kind it was bound with
 
     // Where the host holds the BO bound at `va` (its allocation, or the pages an import named), null: none bound there
     uint8_t *host(uint64_t va)
@@ -136,6 +167,10 @@ struct Model {
         };
         if (!within(bound->second.second))
             return nullptr;
+        const auto bo = bos.find(handle);
+        if (bo != bos.end() && bo->second.vm && bo->second.mapped && bo->second.parkState == ParkState::Live &&
+            within(bo->second.bytes))
+            return reinterpret_cast<uint8_t *>(uintptr_t(bo->second.mappedVa)) + offset;
         if (const auto held = memory.find(uint32_t(handle)); held != memory.end() && within(held->second.size()))
             return held->second.data() + offset;
         if (const auto pages = imports.find(handle); pages != imports.end() && within(pages->second.second))
@@ -188,8 +223,16 @@ struct Model {
     uint64_t storeBytes = 0;
     uint32_t storeGeneration = 1;
     std::function<int32_t(const std::string &request)> compiler;
+    bool asyncCompile = false;
+    std::function<int(uint64_t cookie)> compileWait;
     std::vector<std::string> compileRequests;  // each compile's request bytes, as the client sent them
-    unsigned refuse = 0;                       // submissions refused from now, with `refusal`
+
+    struct CompileCall {
+        uint32_t qos = 0, flags = 0;
+    };
+
+    std::vector<CompileCall> compileCalls;
+    unsigned refuse = 0;  // submissions refused from now, with `refusal`
     // a SubmitJob use of no BO the connection holds or binds refused kIOReturnBadArgument, as the kernel refuses it (off:
     // the tests whose uses name memory the model never bound)
     bool unknownUsesRefused = false;
@@ -199,9 +242,84 @@ struct Model {
     bool refuseAllocs = false;  // every BoAlloc answered kIOReturnNoMemory
     // the next BoAllocs and BoImports refused, kIOReturnNoMemory: memory the kernel has none of, pages it cannot wire
     unsigned refuseAllocCount = 0, refuseImports = 0;
-    // GetInfo's client VA end: a gm20b::Device's shader heap reserves a 4 GiB program window in its quarter
+    // GetInfo's client VA range: a gm20b::Device's shader heap reserves a 4 GiB program window in its quarter
+    uint64_t vaStart = 0x1000000;
     uint64_t vaEnd = uint64_t(1) << 40;
     uint32_t infoFlags = 0;  // GetInfo's flags beyond the model's own (TegraGM20BInfoTiledCache)
+    bool coherentFromPool = true;
+    bool forceParkBusy = false, forceUnparkBusy = false;
+    uint64_t overrideUnparkBytes = 0, maxBoBytes = 0;
+    uint64_t parkCapBytes = 0, parkedBytes = 0;
+    unsigned refuseParkCount = 0, refuseUnparkCount = 0;
+    int refuseParkError = kIOReturnBusy;
+    unsigned parkCalls = 0, parkRefusals = 0, unparkResident = 0, unparkReclaimed = 0, reclaims = 0, fixedMaps = 0,
+             badUnmaps = 0;
+    std::vector<uint64_t> parkedOrder;
+
+    bool boParkEnabled() const
+    {
+        return (infoFlags & TegraGM20BInfoBoPark) != 0;
+    }
+
+    bool reclaimParked(uint64_t handle)
+    {
+        const auto it = bos.find(handle);
+        if (it == bos.end() || it->second.parkState != ParkState::Parked)
+            return false;
+        BoState &bo = it->second;
+        parkedOrder.erase(std::remove(parkedOrder.begin(), parkedOrder.end(), handle), parkedOrder.end());
+        parkedBytes -= bo.bytes;
+        for (auto bound = binds.begin(); bound != binds.end();)
+            bound = bound->second.first == handle ? binds.erase(bound) : std::next(bound);
+        if (bo.vm && bo.vm->entry != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), bo.vm->entry);
+            bo.vm->entry = MACH_PORT_NULL;
+        }
+        bo.parkState = ParkState::Reclaimed;
+        reclaims++;
+        return true;
+    }
+
+    unsigned reclaimAllParked()
+    {
+        const std::vector<uint64_t> order = parkedOrder;
+        unsigned n = 0;
+        for (uint64_t handle : order)
+            n += reclaimParked(handle);
+        return n;
+    }
+
+    void reclaimToCap()
+    {
+        while (parkCapBytes && parkedBytes > parkCapBytes && !parkedOrder.empty())
+            reclaimParked(parkedOrder.front());
+    }
+
+    struct PackImageConfig {
+        bool enabled = false;
+        uint32_t status = TegraGM20BPackStatusReady;
+        int error = KERN_SUCCESS;
+        bool allowCpuWire = true;
+        uint64_t gpuVa = TGM_PACK_WINDOW_VA;
+        uint64_t cpuAddress = 0;
+        uint64_t tier0HeapBytes = 0;
+        uint64_t heapBytes = 0;
+        uint64_t stack = 0;
+        uint64_t waitedNs = 0;
+        uint64_t vmPageBytes = 0;
+        std::function<void()> onMap;
+    };
+
+    struct PackImageCall {
+        uint32_t flags = 0;
+        std::vector<TegraGM20BAbiPackCpuRange> cpuRanges;
+        uint32_t status = 0;
+        int kr = KERN_SUCCESS;
+    };
+
+    PackImageConfig packImage;
+    std::vector<PackImageCall> packImageCalls;
+    uint64_t packMappedVa = 0, packMappedBytes = 0;
     // A test's answer to a method the model does not implement, its reply written into `output`; unset, every such
     // method is refused kIOReturnUnsupported, as a kernel without the feature refuses it (ZcullInfo: no zcull RAM)
     std::function<kern_return_t(uint32_t method, void *output)> otherMethod;
@@ -211,7 +329,8 @@ struct Model {
     int refusal = kIOReturnNoResources;
     unsigned notResponding = 0;  // WaitFences answered kIOReturnNotResponding while GetStatus calls the channel healthy
     bool foreignTakesFreedSlot = false;
-    unsigned creates = 0, destroys = 0, staleReads = 0;
+    bool volatileWrites = true;
+    unsigned creates = 0, destroys = 0, staleReads = 0, cpuAcquireCalls = 0;
     // the channel epoch's count (channelEpochMoves)
     uint32_t epoch = 0;
     std::vector<uint64_t> freed;             // BoFree's handles, in order
@@ -446,11 +565,18 @@ struct Model {
             if (const uint64_t bo = resolve(shared[i]))
                 named.push_back(bo);
         for (const uint64_t bo : named) {
+            if (bos.count(bo) && bos.at(bo).parkState != ParkState::Live)
+                return kIOReturnNotReady;
             if (held != admitted.end() &&
                 std::find(held->second.second.begin(), held->second.second.end(), bo) == held->second.second.end())
                 return kIOReturnBadArgument;
             if (held == admitted.end() && lockedByCpu(bo))
                 return kIOReturnCannotLock;
+        }
+        if (set) {
+            for (const auto &m : set->members)
+                if (bos.count(m.handle) && bos.at(m.handle).parkState != ParkState::Live)
+                    return kIOReturnNotReady;
         }
         if (admission & TegraGM20BJobAdmissionBegin)
             admitted[head->channel] = {cookie, named};
@@ -498,8 +624,8 @@ struct Model {
 
     void endGeneration(uint32_t index)
     {
-        reinterpret_cast<volatile uint32_t *>(fences.bytes)[TegraGM20BSetGenerationWord + index] =
-            ++sets[index].generation;
+        __atomic_store_n(&reinterpret_cast<volatile uint32_t *>(fences.bytes)[TegraGM20BSetGenerationWord + index],
+                         ++sets[index].generation, __ATOMIC_RELEASE);
     }
 
     int setCreate(const TegraGM20BAbiResourceSetCreate &in, TegraGM20BAbiResourceSetCreateReply &out)
@@ -573,6 +699,10 @@ struct Model {
         const auto it = bos.find(handle);
         if (it == bos.end())
             return;
+        if (it->second.parkState == ParkState::Parked) {
+            parkedOrder.erase(std::remove(parkedOrder.begin(), parkedOrder.end(), handle), parkedOrder.end());
+            parkedBytes -= it->second.bytes;
+        }
         if (const uint32_t set = it->second.set) {
             auto &members = sets[set - 1].members;
             members.erase(std::remove_if(members.begin(), members.end(),
@@ -655,6 +785,7 @@ inline Model &model = *new Model;
 // held through every call but a WaitFence, and by a test GPU's reads of the model
 inline std::mutex &callLock = *new std::mutex;
 constexpr io_connect_t kFirstConnection = 42;
+constexpr uint32_t kMethodCompileWait = 0x534b;
 
 // What a test put in the model for a device's threads to call or read, under callLock: each connection's bound,
 // jobAdded and compiler hooks and the compiler store it served, which the model reads and calls only under callLock, so
@@ -670,9 +801,12 @@ inline void clearHooks()
         m.jobAdded = nullptr;
         m.promiseCalled = nullptr;
         m.compiler = nullptr;
+        m.asyncCompile = false;
+        m.compileWait = nullptr;
         m.compilerFlags = 0;
         m.store = nullptr;
         m.storeBytes = 0;
+        m.packImage.onMap = nullptr;
         if (m.blockUntil)
             m.blockUntil = nullptr;
     };
@@ -709,7 +843,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
             return kr;
     kernel_model::Model &model = kernel_model::connected(connection);
     std::unique_lock<std::mutex> hold(kernel_model::callLock, std::defer_lock);
-    if (method != TegraGM20BMethodWaitFence)
+    if (method != TegraGM20BMethodWaitFence && method != kernel_model::kMethodCompileWait)
         hold.lock();
     switch (method) {
     case TegraGM20BMethodGetInfo: {
@@ -717,13 +851,16 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         info = {};
         info.abi_version = TegraGM20BAbiVersion;
         info.flags = TegraGM20BInfoKernelMap | TegraGM20BInfoSubmitAddress | TegraGM20BInfoKillRecord |
-                     TegraGM20BInfoCpuAccess | TegraGM20BInfoChannelEpoch | model.infoFlags;
+                     TegraGM20BInfoCpuAccess | TegraGM20BInfoChannelEpoch |
+                     (model.volatileWrites ? TegraGM20BInfoVolatileWrites : 0u) |
+                     (model.packImage.enabled ? TegraGM20BInfoPackImage : 0u) | model.infoFlags;
         info.fence_token = kernel_model::kFenceToken;
         info.cls_copy = 0xb0b5;
         info.cls_eng3d = 0xb197;
-        info.va_start = 0x1000000;
+        info.va_start = model.vaStart;
         info.va_end = model.vaEnd;
         info.page_size = 4096;
+        info.max_bo_bytes = model.maxBoBytes;
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodBoAlloc: {
@@ -740,8 +877,34 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         if (model.refuseAllocs)
             return kIOReturnNoMemory;
         const uint32_t token = uint32_t(model.nextHandle);
-        model.memory[token].assign(in.bytes, 0);
-        model.bos[model.nextHandle] = {false, !(in.flags & TegraGM20BBoCoherent), 0};
+        const bool control = (in.flags & TegraGM20BBoControl) != 0;
+        const bool coherent = (in.flags & TegraGM20BBoCoherent) != 0;
+        const bool system = (in.flags & TegraGM20BBoSystem) != 0;
+        if (system && (!coherent || control || (in.flags & (TegraGM20BBoCompressible | TegraGM20BBoContiguous))))
+            return kIOReturnBadArgument;
+        if (in.flags && model.maxBoBytes && in.bytes > model.maxBoBytes)
+            return kIOReturnBadArgument;
+        kernel_model::BoState state = {};
+        state.cached = !coherent;
+        state.bytes = in.bytes;
+        state.control = control;
+        state.coherent = coherent;
+        state.system = system;
+        state.poolVa = coherent && !control && !system && model.coherentFromPool;
+        if (model.boParkEnabled() && !control) {
+            auto vm = std::make_shared<kernel_model::BoVmBacking>();
+            memory_object_size_t sz = in.bytes;
+            mach_port_t entry = MACH_PORT_NULL;
+            const vm_prot_t prot = MAP_MEM_NAMED_CREATE | VM_PROT_READ | VM_PROT_WRITE;
+            if (mach_make_memory_entry_64(mach_task_self(), &sz, 0, prot, &entry, MACH_PORT_NULL) != KERN_SUCCESS)
+                return kIOReturnNoMemory;
+            vm->entry = entry;
+            vm->bytes = in.bytes;
+            state.vm = std::move(vm);
+        } else {
+            model.memory[token].assign(in.bytes, 0);
+        }
+        model.bos[model.nextHandle] = std::move(state);
         *static_cast<TegraGM20BAbiBoAllocReply *>(output) = {model.nextHandle++, token, 0};
         return KERN_SUCCESS;
     }
@@ -751,7 +914,12 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
             return kIOReturnNoMemory;
         }
         const auto &in = *static_cast<const TegraGM20BAbiBoImport *>(input);
-        model.bos[model.nextHandle] = {true, true, false, false, 0, in.address, in.bytes};
+        kernel_model::BoState imported = {};
+        imported.import = true;
+        imported.cached = true;
+        imported.address = in.address;
+        imported.bytes = in.bytes;
+        model.bos[model.nextHandle] = std::move(imported);
         model.imports[model.nextHandle] = {in.address, in.bytes};
         *static_cast<TegraGM20BAbiBoAllocReply *>(output) = {model.nextHandle++, 0, 0};
         return KERN_SUCCESS;
@@ -760,19 +928,131 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         model.freed.push_back(static_cast<const TegraGM20BAbiBoFree *>(input)->handle);
         model.freeBo(static_cast<const TegraGM20BAbiBoFree *>(input)->handle);
         return KERN_SUCCESS;
+    case TegraGM20BMethodBoPark: {
+        if (!model.boParkEnabled())
+            return kIOReturnUnsupported;
+        const auto &in = *static_cast<const TegraGM20BAbiBoPark *>(input);
+        const auto it = model.bos.find(in.handle);
+        if (it == model.bos.end() || it->second.parkState != kernel_model::ParkState::Live)
+            return kIOReturnBadArgument;
+        kernel_model::BoState &bo = it->second;
+        if (bo.import || bo.control || bo.poolVa || !bo.vm || bo.vm->entry == MACH_PORT_NULL)
+            return kIOReturnUnsupported;
+        if (!bo.mapped)
+            return kIOReturnNotFound;
+        if (bo.set != 0 || model.inFlight || model.lockedByCpu(in.handle) || model.forceParkBusy) {
+            model.parkRefusals++;
+            return kIOReturnBusy;
+        }
+        if (model.refuseParkCount) {
+            model.refuseParkCount--;
+            model.parkRefusals++;
+            return model.refuseParkError;
+        }
+        const bool guard = (in.flags & TegraGM20BParkGuard) != 0;
+        vm_address_t at = vm_address_t(bo.mappedVa);
+        if (vm_allocate(mach_task_self(), &at, vm_size_t(bo.bytes), VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE) !=
+            KERN_SUCCESS)
+            return kIOReturnBusy;
+        if (guard)
+            vm_protect(mach_task_self(), at, vm_size_t(bo.bytes), TRUE, VM_PROT_NONE);
+        bo.parkState = kernel_model::ParkState::Parked;
+        bo.parkedVa = bo.mappedVa;
+        bo.parkedGuard = guard;
+        bo.mapped = false;
+        bo.mappedVa = 0;
+        model.parkCalls++;
+        model.parkedOrder.push_back(in.handle);
+        model.parkedBytes += bo.bytes;
+        model.reclaimToCap();
+        return KERN_SUCCESS;
+    }
+    case TegraGM20BMethodBoUnpark: {
+        if (!model.boParkEnabled())
+            return kIOReturnUnsupported;
+        const auto &in = *static_cast<const TegraGM20BAbiBoUnpark *>(input);
+        auto &reply = *static_cast<TegraGM20BAbiBoUnparkReply *>(output);
+        reply = {};
+        const auto it = model.bos.find(in.handle);
+        if (it == model.bos.end())
+            return kIOReturnBadArgument;
+        kernel_model::BoState &bo = it->second;
+        if (model.forceUnparkBusy &&
+            (bo.parkState == kernel_model::ParkState::Parked || bo.parkState == kernel_model::ParkState::Reclaimed))
+            return kIOReturnBusy;
+        if (bo.parkState == kernel_model::ParkState::Reclaimed) {
+            model.unparkReclaimed++;
+            reply = {bo.parkedVa, bo.bytes, TegraGM20BUnparkReclaimed, 0};
+            return KERN_SUCCESS;
+        }
+        if (bo.parkState != kernel_model::ParkState::Parked || !bo.vm || bo.vm->entry == MACH_PORT_NULL)
+            return kIOReturnBadArgument;
+        if (model.refuseUnparkCount) {
+            model.refuseUnparkCount--;
+            return kIOReturnNoMemory;
+        }
+        vm_address_t at = vm_address_t(bo.parkedVa);
+        if (vm_map(mach_task_self(), &at, vm_size_t(bo.bytes), 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, bo.vm->entry, 0,
+                   FALSE, VM_PROT_READ | VM_PROT_WRITE, VM_PROT_READ | VM_PROT_WRITE, VM_INHERIT_NONE) != KERN_SUCCESS)
+            return kIOReturnNoMemory;
+        bo.parkState = kernel_model::ParkState::Live;
+        bo.mapped = true;
+        bo.mappedVa = uint64_t(at);
+        bo.vm->va = uint64_t(at);
+        bo.vm->ownsVa = true;
+        bo.parkedVa = 0;
+        bo.parkedGuard = false;
+        model.parkedOrder.erase(std::remove(model.parkedOrder.begin(), model.parkedOrder.end(), in.handle),
+                                model.parkedOrder.end());
+        model.parkedBytes -= bo.bytes;
+        model.unparkResident++;
+        const uint64_t replyBytes = model.overrideUnparkBytes ? model.overrideUnparkBytes : bo.bytes;
+        reply = {bo.mappedVa, replyBytes, TegraGM20BUnparkResident, 0};
+        return KERN_SUCCESS;
+    }
     case TegraGM20BMethodVmBind: {
         const auto &b = *static_cast<const TegraGM20BAbiVmBind *>(input);
+        if (model.packMappedBytes) {
+            const uint64_t packEnd = model.packMappedVa + model.packMappedBytes;
+            for (uint32_t i = 0; i < b.count; i++) {
+                const TegraGM20BAbiBindOp &op = b.ops[i];
+                if (op.range && op.va < packEnd && model.packMappedVa < op.va + op.range)
+                    return kIOReturnBadArgument;
+            }
+        }
+        for (uint32_t i = 0; i < b.count; i++) {
+            const TegraGM20BAbiBindOp &op = b.ops[i];
+            if ((op.op == TegraGM20BBindMap || op.op == TegraGM20BBindMapVolatile) && model.bos.count(op.handle) &&
+                model.bos.at(op.handle).parkState != kernel_model::ParkState::Live)
+                return kIOReturnNotReady;
+            if (op.range) {
+                for (const auto &[bva, entry] : model.binds) {
+                    const uint64_t bhandle = entry.first, brange = entry.second;
+                    if (!brange || op.va >= bva + brange || bva >= op.va + op.range)
+                        continue;
+                    const auto bit = model.bos.find(bhandle);
+                    if (bit != model.bos.end() && bit->second.parkState != kernel_model::ParkState::Live)
+                        return kIOReturnNotReady;
+                }
+            }
+        }
         for (uint32_t i = 0; i < b.count; i++) {
             const TegraGM20BAbiBindOp &op = b.ops[i];
             model.binds[op.va] = {op.handle, op.range};
+            model.bindKinds[op.va] = op.kind;
             if (model.bound)
                 model.bound(op);
         }
         return KERN_SUCCESS;
     }
-    case TegraGM20BMethodCpuAcquire:
-        model.cpuLease(static_cast<const TegraGM20BAbiCpuAccess *>(input)->handle);
+    case TegraGM20BMethodCpuAcquire: {
+        const uint64_t handle = static_cast<const TegraGM20BAbiCpuAccess *>(input)->handle;
+        if (model.bos.count(handle) && model.bos.at(handle).parkState != kernel_model::ParkState::Live)
+            return kIOReturnNotReady;
+        model.cpuAcquireCalls++;
+        model.cpuLease(handle);
         return KERN_SUCCESS;
+    }
     case TegraGM20BMethodCpuRelease:
         model.cpuReleased(*static_cast<const TegraGM20BAbiCpuAccess *>(input));
         return KERN_SUCCESS;
@@ -787,12 +1067,64 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
     case TegraGM20BMethodMap: {
         const auto &in = *static_cast<const TegraGM20BAbiMap *>(input);
         auto &reply = *static_cast<TegraGM20BAbiMapReply *>(output);
-        if (in.token == kernel_model::kFenceToken)
+        if (in.token == kernel_model::kFenceToken) {
             reply = {uint64_t(uintptr_t(model.fences.bytes)), sizeof model.fences.bytes};
-        else if (in.token == TegraGM20BCompilerStoreToken)
+            return KERN_SUCCESS;
+        }
+        if (in.token == TegraGM20BCompilerStoreToken) {
             reply = {uint64_t(uintptr_t(model.store)), model.storeBytes};
-        else
-            reply = {uint64_t(uintptr_t(model.memory[in.token].data())), model.memory[in.token].size()};
+            return KERN_SUCCESS;
+        }
+        if (const auto it = model.bos.find(in.token); it != model.bos.end() && it->second.vm) {
+            kernel_model::BoState &bo = it->second;
+            if (bo.parkState != kernel_model::ParkState::Live || bo.vm->entry == MACH_PORT_NULL)
+                return kIOReturnNotReady;
+            const vm_prot_t prot = (in.flags & TegraGM20BMapReadOnly) ? VM_PROT_READ : (VM_PROT_READ | VM_PROT_WRITE);
+            if (in.flags & TegraGM20BMapFixed) {
+                if (!in.address || bo.mapped)
+                    return kIOReturnBadArgument;
+                for (const auto &[otherHandle, other] : model.bos)
+                    if (other.parkState == kernel_model::ParkState::Live && other.mapped &&
+                        in.address < other.mappedVa + other.bytes && other.mappedVa < in.address + bo.bytes)
+                        return kIOReturnBusy;
+                vm_address_t regionAddr = vm_address_t(in.address);
+                vm_size_t regionSize = 0;
+                vm_region_basic_info_data_64_t info = {};
+                mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+                mach_port_t obj = MACH_PORT_NULL;
+                if (vm_region_64(mach_task_self(), &regionAddr, &regionSize, VM_REGION_BASIC_INFO_64,
+                                 reinterpret_cast<vm_region_info_t>(&info), &count, &obj) != KERN_SUCCESS ||
+                    regionAddr > in.address || regionAddr + regionSize < in.address + bo.bytes)
+                    return kIOReturnNotFound;
+                vm_address_t at = vm_address_t(in.address);
+                if (vm_map(mach_task_self(), &at, vm_size_t(bo.bytes), 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE,
+                           bo.vm->entry, 0, FALSE, prot, prot, VM_INHERIT_NONE) != KERN_SUCCESS)
+                    return kIOReturnNoMemory;
+                for (auto &[otherHandle, other] : model.bos)
+                    if (otherHandle != it->first && other.vm && other.parkState != kernel_model::ParkState::Live &&
+                        other.parkedVa == in.address)
+                        other.vm->ownsVa = false;
+                bo.vm->va = uint64_t(at);
+                bo.vm->ownsVa = true;
+                bo.mapped = true;
+                bo.mappedVa = uint64_t(at);
+                bo.mappedFixed = true;
+                model.fixedMaps++;
+                reply = {bo.mappedVa, bo.bytes};
+                return KERN_SUCCESS;
+            }
+            vm_address_t at = 0;
+            if (vm_map(mach_task_self(), &at, vm_size_t(bo.bytes), 0, VM_FLAGS_ANYWHERE, bo.vm->entry, 0, FALSE, prot,
+                       prot, VM_INHERIT_NONE) != KERN_SUCCESS)
+                return kIOReturnNoMemory;
+            bo.vm->va = uint64_t(at);
+            bo.vm->ownsVa = true;
+            bo.mapped = true;
+            bo.mappedVa = uint64_t(at);
+            reply = {bo.mappedVa, bo.bytes};
+            return KERN_SUCCESS;
+        }
+        reply = {uint64_t(uintptr_t(model.memory[in.token].data())), model.memory[in.token].size()};
         return KERN_SUCCESS;
     }
     case TegraGM20BMethodChannelCreate:
@@ -820,8 +1152,23 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         *static_cast<TegraGM20BAbiCpuCompleteReply *>(output) = {in.range_count, 0, 0, 0, 0, 0};
         return KERN_SUCCESS;
     }
-    case TegraGM20BMethodUnmap:
+    case TegraGM20BMethodUnmap: {
+        const auto &in = *static_cast<const TegraGM20BAbiUnmap *>(input);
+        if (const auto it = model.bos.find(in.token); it != model.bos.end() && it->second.vm) {
+            kernel_model::BoState &bo = it->second;
+            if (bo.parkState != kernel_model::ParkState::Live || !bo.mapped || bo.mappedVa != in.address) {
+                model.badUnmaps++;
+                return kIOReturnBadArgument;
+            }
+            if (bo.vm->ownsVa)
+                vm_deallocate(mach_task_self(), vm_address_t(in.address), vm_size_t(bo.bytes));
+            bo.vm->va = 0;
+            bo.vm->ownsVa = false;
+            bo.mapped = false;
+            bo.mappedVa = 0;
+        }
         return KERN_SUCCESS;
+    }
     case TegraGM20BMethodEventImport: {
         if (!model.kernelEvents)
             return kIOReturnUnsupported;
@@ -855,6 +1202,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
     }
     case TegraGM20BMethodCompile: {
         const auto &in = *static_cast<const TegraGM20BAbiCompile *>(input);
+        model.compileCalls.push_back({in.qos, in.flags});
         model.compileRequests.emplace_back(reinterpret_cast<const char *>(uintptr_t(in.address)), size_t(in.bytes));
         const size_t at = std::min<size_t>(model.compiles++, model.compileResults.size() - 1);
         auto &reply = *static_cast<TegraGM20BAbiCompileReply *>(output);
@@ -867,6 +1215,16 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         }
         reply.result = model.compileResults[at];
         return KERN_SUCCESS;
+    }
+    case kernel_model::kMethodCompileWait: {
+        std::function<int(uint64_t)> wait;
+        {
+            std::lock_guard<std::mutex> l(kernel_model::callLock);
+            wait = model.compileWait;
+        }
+        if (!wait || !input)
+            return kIOReturnNotFound;
+        return wait(*static_cast<const uint64_t *>(input));
     }
     case TegraGM20BMethodSurfaceLayout:
         *static_cast<TegraGM20BAbiSurfaceLayoutReply *>(output) = {model.surfaceLayout, 0};
@@ -904,6 +1262,72 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t connection, uint3
         *static_cast<TegraGM20BAbiClockAnchorsReply *>(output) = {
             kernel_model::kFenceToken + TegraGM20BClockAnchorOffset, kernel_model::kFenceToken, 0};
         return KERN_SUCCESS;
+    case TegraGM20BMethodPackImageMap: {
+        if (!model.packImage.enabled)
+            return kIOReturnUnsupported;
+        const auto &in = *static_cast<const TegraGM20BAbiPackImageMap *>(input);
+        auto &out = *static_cast<TegraGM20BAbiPackImageMapReply *>(output);
+        out = {};
+        const auto record = [&](int kr) {
+            kernel_model::Model::PackImageCall call;
+            call.flags = in.flags;
+            const uint32_t n = std::min<uint32_t>(in.cpu_range_count, TegraGM20BMaxPackCpuRanges);
+            call.cpuRanges.assign(in.cpu_ranges, in.cpu_ranges + n);
+            call.status = out.status;
+            call.kr = kr;
+            model.packImageCalls.push_back(std::move(call));
+            return kr;
+        };
+        if (in.flags != 0 || in.cpu_range_count > TegraGM20BMaxPackCpuRanges)
+            return record(kIOReturnBadArgument);
+        for (uint32_t i = in.cpu_range_count; i < TegraGM20BMaxPackCpuRanges; ++i)
+            if (in.cpu_ranges[i].address || in.cpu_ranges[i].bytes)
+                return record(kIOReturnBadArgument);
+        const uint64_t vmPage = model.packImage.vmPageBytes ? model.packImage.vmPageBytes : uint64_t(getpagesize());
+        uint64_t wiredBytes = 0;
+        for (uint32_t i = 0; i < in.cpu_range_count; ++i) {
+            const uint64_t addr = in.cpu_ranges[i].address, bytes = in.cpu_ranges[i].bytes;
+            if (!addr || !bytes || (addr & (vmPage - 1)) || (bytes & (vmPage - 1)) || addr > UINT64_MAX - bytes ||
+                bytes > (64ULL << 20) - wiredBytes)
+                return record(kIOReturnBadArgument);
+            wiredBytes += bytes;
+        }
+        if (model.packMappedBytes)
+            return record(kIOReturnExclusiveAccess);
+        if (in.cpu_range_count && !model.packImage.allowCpuWire)
+            return record(kIOReturnNotPermitted);
+        if (const auto hook = model.packImage.onMap) {
+            hold.unlock();
+            hook();
+            hold.lock();
+        }
+        if (model.packImage.error != KERN_SUCCESS)
+            return record(model.packImage.error);
+        if (model.packImage.status != TegraGM20BPackStatusReady) {
+            out.status = model.packImage.status;
+            out.waited_ns = model.packImage.waitedNs;
+            return record(KERN_SUCCESS);
+        }
+        if (model.packMappedBytes)
+            return record(kIOReturnExclusiveAccess);
+        const uint64_t va = model.packImage.gpuVa;
+        const uint64_t bytes = model.packImage.tier0HeapBytes;
+        const uint64_t packEnd = va + bytes;
+        for (const auto &[bva, bound] : model.binds)
+            if (bva < packEnd && va < bva + bound.second)
+                return record(kIOReturnBadArgument);
+        model.packMappedVa = va;
+        model.packMappedBytes = bytes;
+        out.status = TegraGM20BPackStatusReady;
+        out.gpu_va = va;
+        out.cpu_address = model.packImage.cpuAddress;
+        out.tier0_heap_bytes = bytes;
+        out.heap_bytes = model.packImage.heapBytes;
+        out.stack = model.packImage.stack;
+        out.cpu_wired_bytes = wiredBytes;
+        out.waited_ns = model.packImage.waitedNs;
+        return record(KERN_SUCCESS);
+    }
     default:
         return model.otherMethod ? model.otherMethod(method, output) : kIOReturnUnsupported;
     }
@@ -925,7 +1349,9 @@ extern "C" kern_return_t IOServiceOpen(io_service_t, task_port_t, uint32_t, io_c
     }
     *connection = model.nextConnection++;
     auto &other = model.others[*connection] = std::make_unique<kernel_model::Model>();
+    other->vaStart = model.vaStart;
     other->vaEnd = model.vaEnd;
+    other->packImage = model.packImage;
     other->opened = true;
     other->epochWord() = model.epoch;
     const uint32_t published = model.anchors.published;

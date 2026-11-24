@@ -286,7 +286,8 @@ TEST(EmitMme, TheMacrosTakeNvksDrawSlots)
     EXPECT_EQ(SWITCH_GM20B_MACRO_CLEAR_LAYERS, 26);
     EXPECT_EQ(SWITCH_GM20B_MACRO_FETCH_DRAW, 27);
     EXPECT_EQ(SWITCH_GM20B_MACRO_FETCH_DRAW_INDEXED, 28);
-    EXPECT_EQ(SWITCH_GM20B_MACRO_METAL_END, 29);
+    EXPECT_EQ(SWITCH_GM20B_MACRO_BAND_DRAW, 29);
+    EXPECT_EQ(SWITCH_GM20B_MACRO_METAL_END, 30);
 }
 
 TEST(EmitMme, TheScratchRangesAreTheTables)
@@ -317,9 +318,41 @@ TEST(EmitMme, TheMacrosFitTheRawPathsCodeSpace)
                          count(switch_gm20b_macro_icb_gate) + count(switch_gm20b_macro_icb_bind) +
                          count(switch_gm20b_macro_icb_patches) + count(switch_gm20b_macro_amplify) +
                          count(switch_gm20b_macro_amplify_indexed) + count(switch_gm20b_macro_clear_layers) +
-                         count(switch_gm20b_macro_fetch_draw) + count(switch_gm20b_macro_fetch_draw_indexed);
+                         count(switch_gm20b_macro_fetch_draw) + count(switch_gm20b_macro_fetch_draw_indexed) +
+                         count(switch_gm20b_macro_band_draw);
     RecordProperty("words", int(words));
     EXPECT_LE(words, uint32_t(SWITCH_GM20B_MACRO_CODE_WORDS));
+}
+
+TEST(EmitMme, BandDrawEmitsDisjointScissorBandsWithClassWfiBetweenAndRestoresScissor)
+{
+    EXPECT_TRUE(run(switch_gm20b_macro_band_draw, count(switch_gm20b_macro_band_draw),
+                    {0, 0x5000000, 0, 3, 0, 0, 720, 0x2d00000})
+                    .empty());
+    for (uint32_t bands : {1u, 2u, 5u, 45u}) {
+        const uint32_t x0 = 16, x1 = 1264, y0 = 10, y1 = 713;
+        const uint32_t horiz = x0 | (x1 << 16);
+        const uint32_t step = (y1 - y0) / bands;
+        const uint32_t orig_vert = y0 | (y1 << 16);
+        const auto got = run(switch_gm20b_macro_band_draw, count(switch_gm20b_macro_band_draw),
+                             {bands, horiz, 4, 3, y0, step, y1, orig_vert});
+        std::vector<Method> want;
+        want.push_back({NVB197_SET_SCISSOR_ENABLE(0), NVB197_SET_SCISSOR_ENABLE_V_TRUE});
+        want.push_back({NVB197_SET_SCISSOR_HORIZONTAL(0), horiz});
+        for (uint32_t i = 0; i < bands; ++i) {
+            const uint32_t by0 = y0 + i * step;
+            const uint32_t by1 = i + 1 == bands ? y1 : by0 + step;
+            want.push_back({NVB197_SET_SCISSOR_VERTICAL(0), by0 | (by1 << 16)});
+            want.push_back({NVB197_BEGIN, 0});
+            want.push_back({NVB197_SET_VERTEX_ARRAY_START, 4});
+            want.push_back({NVB197_DRAW_VERTEX_ARRAY, 3});
+            want.push_back({NVB197_END, 0});
+            if (i + 1 < bands)
+                want.push_back({NVB197_WAIT_FOR_IDLE, 0});
+        }
+        want.push_back({NVB197_SET_SCISSOR_VERTICAL(0), orig_vert});
+        EXPECT_EQ(got, want) << bands;
+    }
 }
 
 }  // namespace

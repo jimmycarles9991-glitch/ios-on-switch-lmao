@@ -90,6 +90,8 @@ host_test(
     data = [
         "//drivers/SwitchTouch:SwitchHIDDevice.cpp",
         "//drivers/SwitchTouch:SwitchTouch.cpp",
+        "//kits/SwitchABI:kinds/21H461/IOHIDDevice.json",
+        "//kits/SwitchABI:kinds/24B119/IOHIDDevice.json",
     ],
 )
 

@@ -10,7 +10,8 @@ extension NativeArgumentEncoderTest {
     static let heapTextures = [8, 512]
 
     /// Where a pass that samples a heap's first and last textures through an argument buffer went, whether each half
-    /// drew its texture's colour, and the encode profile's events of its command buffer
+    /// drew its texture's colour (where not, the two halves' bytes: a half that reads the other texture's colour, or
+    /// 0.0.0.0 for a texture not reached), and the encode profile's events of its command buffer
     func drawHeapThroughArguments(_ gpu: GPU, textures count: Int) async throws -> (String, [String: Double]) {
         guard let function = gpu.library.makeFunction(name: "argument_textures_fragment"),
               let sampler = gpu.device.makeSamplerState(descriptor: MTLSamplerDescriptor())
@@ -54,10 +55,10 @@ extension NativeArgumentEncoderTest {
             events = ["uses", "use_adds"].reduce(into: [:]) { $0[$1] = (after[$1] ?? 0) - (before[$1] ?? 0) }
         }
         let pixels = try await gpu.read(target, bytesPerPixel: 4)
-        let exact =
-            Array(pixels.pixel(1, 4, width: 8)) == [255, 0, 0, 255]
-                && Array(pixels.pixel(6, 4, width: 8)) == [0, 0, 255, 255]
-        return ("\(drawn?.path ?? "none")/\(exact ? "exact" : "wrong")", events)
+        let (left, right) = (Array(pixels.pixel(1, 4, width: 8)), Array(pixels.pixel(6, 4, width: 8)))
+        let exact = left == [255, 0, 0, 255] && right == [0, 0, 255, 255]
+        let seen = [left, right].map { $0.map { String($0, radix: 16) }.joined(separator: ".") }.joined(separator: "_")
+        return ("\(drawn?.path ?? "none")/\(exact ? "exact" : "wrong/" + seen)", events)
     }
 
     /// heap_draw_path for each heap, and heap_use_cost: "constant" where both heaps' command buffers named the same,
@@ -74,7 +75,7 @@ extension NativeArgumentEncoderTest {
                 metrics.set("draw_error", "\(error)".replacingOccurrences(of: " ", with: "_"))
             }
             metrics.set("heap_draw_path_\(count)", path)
-            if path != "raw/exact" { failures.append("heap_draw_path_\(count) \(path), not raw/exact") }
+            if path != "gm20b/exact" { failures.append("heap_draw_path_\(count) \(path), not gm20b/exact") }
         }
         guard counts.count == 2, !counts[0].values.allSatisfy({ $0 == 0 }) else {
             metrics.set("heap_use_cost", "unmeasured")

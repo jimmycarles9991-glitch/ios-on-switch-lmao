@@ -9,7 +9,10 @@ package(default_visibility = ["//visibility:public"])
 
 lint_files()
 
-exports_files(["to_card.py"])
+exports_files([
+    "stage_image.py",
+    "to_card.py",
+])
 
 py_library(
     name = "lib",
@@ -62,13 +65,36 @@ py_binary(
     deps = [":lib"],
 )
 
-py_binary(
-    name = "image",
-    srcs = ["image.py"],
+py_library(
+    name = "image_lib",
+    srcs = [
+        "image.py",
+        "pack_action.py",
+        "stage_image.py",
+    ],
+    imports = ["../.."],
     deps = [
         ":lib",
         "@rules_python//python/runfiles",
     ],
+)
+
+py_binary(
+    name = "image",
+    srcs = ["image.py"],
+    deps = [":image_lib"],
+)
+
+py_binary(
+    name = "pack_action",
+    srcs = ["pack_action.py"],
+    deps = [":image_lib"],
+)
+
+py_binary(
+    name = "stage_image",
+    srcs = ["stage_image.py"],
+    deps = [":image_lib"],
 )
 
 # Bazel runs it for iOS 27's deltas and translated cryptexes (install/translated.bzl).
@@ -333,4 +359,11 @@ py_test(
         ":lib",
         ":sii_fixture",
     ],
+)
+
+py_test(
+    name = "stage_image_test",
+    size = "small",
+    srcs = ["stage_image_test.py"],
+    deps = [":image_lib"],
 )

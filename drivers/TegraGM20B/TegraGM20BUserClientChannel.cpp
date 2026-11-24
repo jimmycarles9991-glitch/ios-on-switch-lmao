@@ -57,7 +57,9 @@ bool AGXDeviceUserClient::bindCuts(const TegraGM20BAbiVmBind *in, uint32_t count
 IOReturn AGXDeviceUserClient::bindOp(const TegraGM20BAbiBindOp &op, bool &changed)
 {
 	if (((op.va | op.range | op.bo_offset) & 0xfff) || !op.range || op.va < TGM_USER_VA_START ||
-	    op.range > TGM_KERNEL_VA || op.va > TGM_KERNEL_VA - op.range || op.kind > 0xff) {
+	    op.range > TGM_KERNEL_VA || op.va > TGM_KERNEL_VA - op.range || op.kind > 0xff ||
+	    (packClient_.gpuBytes && op.va < TGM_PACK_WINDOW_VA + packClient_.gpuBytes &&
+	     op.va + op.range > TGM_PACK_WINDOW_VA)) {
 		switch_refusal("vm-bind", "arguments",
 			       "op %u of VA %#llx+%#llx, BO %llu at %#llx, kind %#x: not whole "
 			       "pages, outside the "
@@ -182,6 +184,8 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 	tgm_coh *coh = bo->coh;
 	OSObject *object = bo->surface;
 	const uint64_t first = bo->pas[0];
+	const bool canCompress =
+		canonical && bo->backingMemory && bo->mem && tgm_mem_can_compress(bo->mem);
 	tgm_coh_hold_asker(coh);
 	if (object)
 		object->retain();
@@ -190,9 +194,11 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 	const bool same = switch_gpu_surface_shape_matches(surface, in->width, in->height, in->bpp,
 							   in->bytes_per_row);
 	const bool exclusive = switch_gpu_surface_layout_exclusive(object, true) == 0;
-	const int writes = tgm_layout_ask_flags(
-		exclusive, packed, surface.client_memory, canonical || same,
-		(in->flags & TegraGM20BLayoutWrites) != 0, tgm_surface_unwritten(object), firstAsk);
+	const int writes =
+		tgm_layout_ask_flags(exclusive, packed, surface.client_memory, canonical || same,
+				     (in->flags & TegraGM20BLayoutWrites) != 0,
+				     tgm_surface_unwritten(object), firstAsk) |
+		(canCompress ? TGM_LAYOUT_ASK_COMPRESS : 0);
 	const uint32_t width = uint32_t(surface.width), height = uint32_t(surface.height),
 		       pitch = uint32_t(surface.pitch);
 	const int layout =
@@ -204,6 +210,8 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 		switch_gpu_surface_layout_exclusive(object, false);
 	tgm_layout tiled = {};
 	const bool described = layout > 0 && tegra_gm20b_surface_layout(first, &tiled);
+	const uint32_t surfaceKind = described ? tegra_gm20b_surface_kind(first) : 0u;
+	const bool compressed = surfaceKind != 0u && surfaceKind != TGM_LAYOUT_KIND;
 	tgm_coh_put_asker(coh);
 	if (object)
 		object->release();
@@ -228,13 +236,24 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 			return kIOReturnNotReady;
 		}
 		// method 16's askers lay the shape out themselves, at NIL's block height
-		const bool readable = canonical || (same && tgm_layout_nil_height(&tiled));
-		if (!readable)
+		const bool shapeOk = (canonical || (same && tgm_layout_nil_height(&tiled))) &&
+				     (canonical || !compressed);
+		const Bo *current = findBo(in->handle);
+		const bool boCanCompress =
+			!compressed || (current && current->backingMemory && current->mem &&
+					tgm_mem_can_compress(current->mem));
+		const bool readable = shapeOk && boCanCompress;
+		if (!shapeOk)
 			switch_refusal("iosurface-layout", "other-shape",
 				       "IOSurface %u: block-linear at %ux%u x%u, not the %ux%u x%u "
 				       "rows %u asked",
 				       surfaceId, tiled.width, tiled.height, tiled.bpp, in->width,
 				       in->height, in->bpp, in->bytes_per_row);
+		else if (!boCanCompress)
+			switch_refusal("iosurface-layout", "uncompressible-bo",
+				       "IOSurface %u: compressed (kind %#x), but BO %llu cannot "
+				       "bind compressed",
+				       surfaceId, surfaceKind, in->handle);
 		*out = {readable ? uint32_t(TegraGM20BLayoutTiled)
 				 : uint32_t(TegraGM20BLayoutOtherShape),
 			tiled.width,
@@ -243,7 +262,7 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 			tiled.row_bytes,
 			tiled.y_log2,
 			tiled.rows,
-			0,
+			readable && canonical && compressed ? surfaceKind : 0u,
 			tiled.align,
 			tiled.bytes};
 	} else if (layout < 0) {

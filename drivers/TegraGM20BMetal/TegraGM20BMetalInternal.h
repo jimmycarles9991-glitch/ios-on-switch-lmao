@@ -160,6 +160,7 @@ struct SwitchMetalRawRetirement {
 struct SwitchMetalMove {
     const std::function<void()> *work;
     dispatch_semaphore_t done;
+    bool yieldAll = true;
 };
 
 // A change of the submit worker's schedule another thread hands it (GM20BState::schedule)
@@ -201,11 +202,10 @@ struct GM20BState {
     dispatch_queue_t handlers;           // where scheduled handlers run (in order, never inside commit)
     gm20b::ProgressGate progress;        // whether a completion wakes the submit worker (progress_gate.h)
     std::atomic<uint32_t> committed{0};  // command buffers committed and not finished (the arenas' purge)
-    std::atomic<bool> orphanCheck{
-        false};  // the device idled: an encode ahead no one can commit goes (gm20bPipelineOrphans)
     // the submit worker is about to wait or waits for a change: a command buffer's hand-offs after its first wake it only
     // then (gm20bPublishEncoder; with its _published, a store then a load on each side, both sequentially consistent)
     std::atomic<bool> submitAsleep{false};
+    std::atomic<uint32_t> submitThread{0};  // mach thread port name of submitLoop, for OwnedWord priority inheritance
     // ranges handed to the kernel and not completed (gm20bRangeHandedOff): the idle deadline's drain and its
     // in-flight count, which a command buffer parked on an event the CPU has not signalled holds no part of
     std::atomic<uint32_t> rangesInFlight{0};
@@ -278,7 +278,7 @@ std::string libraryName(SwitchMetalFunction *f);
 @end
 
 // A packed state's variants placed with its own record at creation (TegraGM20BMetalCubic.mm)
-void packedVariants(SwitchMetalPipeline *p, uint64_t keyHash);
+void packedVariants(SwitchMetalPipeline *p, const gm20b::PackRun &run);
 // A state this process made: the variants its creation already names (its test classes), made and waited for before
 // the creation returns, as the pack builder makes a packed state's
 void gm20bMadeVariants(SwitchMetalPipeline *p, MTLRenderPipelineDescriptor *d);
@@ -359,6 +359,7 @@ bool gm20bRenderArchiveMissed(MTLRenderPipelineDescriptor *d, MTLPipelineOption 
 // ask the runtime for, and the state handed to its creator once its record is there, or nil with its error
 SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipelineDescriptor *d, MTLPipelineOption o,
                                         NSError **error);
+bool gm20bMakeRecord(SwitchMetalPipeline *p, MTLRenderPipelineDescriptor *d, NSError **error);
 bool gm20bNeedsRecord(SwitchMetalPipeline *p);
 gm20b::Completion::Ask gm20bRecordAsk(SwitchMetalPipeline *p, MTLRenderPipelineDescriptor *d);
 id<MTLRenderPipelineState> gm20bFinishState(SwitchMetalPipeline *p, MTLRenderPipelineDescriptor *d, MTLPipelineOption o,
@@ -477,6 +478,7 @@ bool gm20bInSubmission();
 // encode ahead open (a Move change from any other thread, which waits for it)
 bool gm20bOnSubmitWorker();
 void gm20bRunOnSubmitWorker(const std::function<void()> &work);
+void gm20bReleaseAhead(bool yieldOpen);
 
 // `move` with no submission running and no encode ahead holding the device's command buffer: at once inside the submit
 // worker's own submission, else on the worker in its order
@@ -543,6 +545,9 @@ void gm20bPoolEncoders();
 void gm20bPoolCommandBuffers();
 // cb's state changed: its waiters woken, with no lock
 void gm20bChanged(SwitchMetalCommandBuffer *cb);
+void gm20bSetCompileWaits(SwitchMetalCommandBuffer *cb, std::vector<std::function<bool()>> waits);
+void gm20bClearCompileWaits(SwitchMetalCommandBuffer *cb);
+void gm20bNoteCompileWaitReady(SwitchMetalCommandBuffer *cb);
 // its scheduled or completed handlers (`list`) taken, once its sent flag was exchanged: under its lock only where `added`
 // says one was added
 NSArray *gm20bTakeHandlers(SwitchMetalCommandBuffer *cb, NSMutableArray *__strong &list, std::atomic<bool> &added);
@@ -600,7 +605,8 @@ void submitLoop();
 bool admitComputeDispatch(SwitchMetalCommandBuffer *cb, size_t at,
                           const gm20b::ComputeKernelSet<gm20b::ComputeState> *kernels, const char **why);
 // 1 ready, 0 still being made, -1 refused (`why`), -2 failed to compile
-int computeReadiness(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &range, const char **why);
+int computeReadiness(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &range, const char **why,
+                     std::vector<std::function<bool()>> &compileWaits);
 // TegraGM20BMetalComputeAdmission.mm: an admitted dispatch's textures and buffers, and the encoder's resources it may reach
 void kernelUses(SwitchMetalCommandBuffer *cb, size_t at, std::vector<gm20b::KernelUse> &uses);
 
@@ -608,7 +614,11 @@ void kernelUses(SwitchMetalCommandBuffer *cb, size_t at, std::vector<gm20b::Kern
 // passes' copies and the kept surface imports held until then
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
 struct SwitchMetalPassTrim;
-void logGivenBack(size_t relieved, const SwitchMetalPassTrim &passes, const gm20b::Device::Trimmed &kept);
+void logGivenBack(size_t relieved, const SwitchMetalPassTrim &passes, const gm20b::Device::Trimmed &kept,
+                  const gm20b::Device::PurgeStats &purge);
+// The memory line, on the stall line's tick (its queue owns the line's state): what the device holds by kind beside the
+// process's footprint and its limit, whenever either moved since the last
+void gm20bMemoryTick();
 #endif
 
 // TegraGM20BMetalRates.mm

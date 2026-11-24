@@ -171,17 +171,17 @@ constexpr bool resolvesInto(uint32_t attachment, uint32_t into)
 }
 
 // A multisampled attachment whose resolve an M4 Max makes the mean of its samples' codes, rounded half up, in every channel
-// (harness/resolvecodesoracle.mm: the signed normalized formats, 2x and 4x): the 2D engine's resolve of its codes
-// (resolve_twod.cpp resolveFormat), whose rounding HW Test gpu.gm20b.resolve_codes holds to that rule. BGR10_XR's is its
+// (harness/resolvecodesoracle.mm: the signed normalized formats, 2x and 4x), and the 2D engine's resolve of its codes
+// (resolve_twod.cpp resolveFormat) makes the same: the 16-bit ones (HW Test gpu.gm20b.resolve_codes, boot 2: 0 off).
+// The engine's box of 8-bit signed codes rounds a tie toward zero, a positive one a code under Metal's (that rule gives
+// every count of resolve_codes' six 8-bit cases and resolve_codes_parts' four on boot 2), and no 902d method sets its
+// rounding (cl902d.h): those resolve by the pack's state of their codes (samples.h resolveState). BGR10_XR's is its
 // stand-in's (formatResolveState)
 constexpr bool codesResolvedByTwod(uint32_t format)
 {
     switch (format) {
-    case 12:   // R8Snorm
     case 22:   // R16Snorm
-    case 32:   // RG8Snorm
     case 62:   // RG16Snorm
-    case 72:   // RGBA8Snorm
     case 112:  // RGBA16Snorm
         return true;
     default:

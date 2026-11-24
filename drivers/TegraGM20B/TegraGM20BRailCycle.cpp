@@ -8,6 +8,7 @@
 #include <sys/sysctl.h>
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 #include "TegraGM20BGpu.h"
+#include "TegraGM20BNapll.h"
 
 #if TGM_STATS
 namespace
@@ -19,7 +20,8 @@ struct sysctl_oid gOid;
 
 bool gpcpllAsSet(const struct tgm_rail_look &look)
 {
-	return (look.cfg & 0x20001) == 0x20001 && look.vco_ok && look.pl == look.expect_pl;
+	return tgm_napll_cfg_running(look.cfg, look.dvfs1) && look.vco_ok &&
+	       look.pl == look.expect_pl;
 }
 
 void cycle(int cycles)

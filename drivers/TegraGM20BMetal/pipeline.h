@@ -125,9 +125,6 @@ struct Pipeline {
     const PackVariant *variants[2] = {};
     uint8_t variantCount[2] = {};
     std::vector<Pipeline *> chosen;
-    uint16_t selectorCount = 0;
-    uint32_t selectorAssume = 0;
-    bool selectorVariant = false;
 
     // DEVELOPMENT: a Core Animation state's name, whose draws log their form and quads (RenderEncoder::probeDraw): a solid
     // fill into its three-colour pass (..Xmw_A3Xhfc, the scroll edge keyline's state: fillState) its first draws and thin
@@ -136,14 +133,11 @@ struct Pipeline {
     const char *caName = nullptr;
     bool fillState = false;
     const char *spanName = nullptr;  // DEVELOPMENT: the driver's own states' name in the long span line (span_marks.h)
-    // what Core Animation's name for the state says its draws are (ca_route.h CaRoute)
-    uint8_t caRoute = 0;
     uint32_t probeGeneration = 0;
     uint8_t probeLines = 0, probeThinLines = 0;
     // rotation.h: its fragment program has a turned variant (AssumeTurned), or reads a turned plane's axes with none; a
     // runtime record's turned variant's pipeline (a pack record's is one of `chosen`)
     bool turnedVariant = false, turnRefused = false;
-    bool malformed = false;  // a pack record whose entries its draws cannot write (entriesRefusal): never placed
     // the fragment slots its programs read two-plane RGB10A8_2P_XR10 textures at through their header pairs (PackPipeline)
     uint16_t xrSlots = 0;
     uint16_t writtenSlots = 0;  // the fragment slots its programs write textures at (written_textures.h)

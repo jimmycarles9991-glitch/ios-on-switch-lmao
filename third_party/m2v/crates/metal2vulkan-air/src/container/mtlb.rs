@@ -229,6 +229,13 @@ impl Fields<'_> {
 }
 
 pub(super) fn parse(bytes: &[u8]) -> Result<Metallib<'_>, Error> {
+    parse_hashes(bytes, true)
+}
+
+/// [`parse`], each function's `HASH` taken as its tag states it where `verify` is false: a library read from a sealed
+/// volume, whose bitcode is then read only when a function of it is compiled. A library that states no hash (Core
+/// Image's own) is hashed either way.
+pub(super) fn parse_hashes(bytes: &[u8], verify: bool) -> Result<Metallib<'_>, Error> {
     let have = bytes.len() as u64;
     let Some(head) = bytes.get(..HEADER_LEN) else {
         return Err(container_error(
@@ -372,6 +379,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Metallib<'_>, Error> {
         let p = parsed
             .get_mut(i)
             .ok_or_else(|| container_error(ContainerError::BadOffset, entry))?;
+        if !verify && !own_hash {
+            continue;
+        }
         let digest = match hashed {
             Some((s, l, digest)) if s == start && l == len => digest,
             _ => {

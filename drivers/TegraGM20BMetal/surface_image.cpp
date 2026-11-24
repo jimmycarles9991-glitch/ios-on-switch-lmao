@@ -23,15 +23,12 @@ bool Device::createSurfaceImage(uint64_t surfaceId, void *base, uint64_t allocBy
         (uintptr_t(base) & (page - 1)) || !shape(width, height, format, t))
         return false;
     Import *i = new Import;
-    if (!k_.importPages(base, bytes, i->bo, uint32_t(surfaceId))) {
+    if (!k_.importPages(base, bytes, i->bo, uint32_t(surfaceId)) || !k_.bindImport(base, i->bo, TGM_LAYOUT_KIND)) {
         delete i;
         return false;
     }
+    DeferredFrees deferred(*this);
     std::lock_guard<gm20b::Mutex> l(lock_);
-    if (!k_.bindImport(base, i->bo, TGM_LAYOUT_KIND)) {
-        delete i;
-        return false;
-    }
     i->kind = TGM_LAYOUT_KIND;
     i->refs = 1;
     i->id = surfaceId;
@@ -42,7 +39,7 @@ bool Device::createSurfaceImage(uint64_t surfaceId, void *base, uint64_t allocBy
     SWITCH_METAL_DIAGNOSTIC(stats.importsMade++);
     SWITCH_METAL_DIAGNOSTIC(stats.importBytes += i->bo.bytes);
     if (!(t.tic = allocTic())) {
-        release(i);
+        release(i, deferred);
         return false;
     }
     t.import = i;

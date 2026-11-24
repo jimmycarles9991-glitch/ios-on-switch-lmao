@@ -118,6 +118,7 @@
 #include <vm/vm_mteinfo_internal.h>
 #include <vm/vm_memtag.h>
 #endif /* HAS_MTE */
+#include <switch/prefetch_vm.h>
 
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
@@ -2316,7 +2317,7 @@ dont_look_for_page:
 
 			if (m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-				VM_PAGE_CONSUME_CLUSTERED(m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 			}
 			assert(!m->vmp_cleaning);
 
@@ -2337,6 +2338,12 @@ dont_look_for_page:
 
 			vm_object_paging_end(object);
 			vm_object_unlock(object);
+			if (__improbable(fault_info->switch_wake)) {
+				fault_info->switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 
 			my_fault = DBG_COW_FAULT;
 			counter_inc(&vm_statistics_cow_faults);
@@ -2476,6 +2483,7 @@ dont_look_for_page:
 					vm_object_unlock(copy_object);
 					vm_object_deallocate(copy_object);
 					thread_interrupt_level(interruptible_state);
+					SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info->switch_wake);
 
 					return VM_FAULT_RETRY;
 				}
@@ -2505,6 +2513,7 @@ dont_look_for_page:
 				vm_object_unlock(copy_object);
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info->switch_wake);
 
 				return VM_FAULT_MEMORY_SHORTAGE;
 			}
@@ -2527,7 +2536,7 @@ dont_look_for_page:
 
 			if (m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-				VM_PAGE_CONSUME_CLUSTERED(m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 			}
 			/*
 			 * If there's a pager, then immediately
@@ -2653,7 +2662,7 @@ done:
 			 */
 			if (m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-				VM_PAGE_CONSUME_CLUSTERED(m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 			}
 			vm_fault_is_sequential(object, offset, fault_info->behavior);
 			vm_fault_deactivate_behind(object, offset, fault_info);
@@ -2679,6 +2688,12 @@ done:
 
 backoff:
 	thread_interrupt_level(interruptible_state);
+	if (__improbable(fault_info->switch_wake)) {
+		fault_info->switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 
 	if (wait_result == THREAD_INTERRUPTED) {
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_INTERRUPTED), 0 /* arg */);
@@ -4091,7 +4106,7 @@ vm_fault_enter_prepare(
 
 				VM_PAGE_COUNT_AS_PAGEIN(m);
 			}
-			VM_PAGE_CONSUME_CLUSTERED(m);
+			VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 		}
 	}
 
@@ -4483,6 +4498,12 @@ vm_fault_complete(
 	}
 	vm_object_unlock(object);
 	vm_fault_unlock_ctx(ctx, vml_ctx_for_vaddr);
+	if (__improbable(fault_info->switch_wake)) {
+		fault_info->switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 }
 
 uint64_t vm_fault_resilient_media_initiate = 0;
@@ -5888,7 +5909,7 @@ FastPmapEnter:
 
 			if (cur_m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(cur_m);
-				VM_PAGE_CONSUME_CLUSTERED(cur_m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(cur_m, fault_info->switch_wake);
 				vm_fault_is_sequential(cur_object, cur_offset, fault_info->behavior);
 			}
 			need_collapse = TRUE;
@@ -6754,6 +6775,12 @@ handle_copy_delay:
 	} else {
 		vm_object_unlock(object);
 	}
+	if (__improbable(fault_info->switch_wake)) {
+		fault_info->switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 
 	/*
 	 * no object locks are held at this point
@@ -7063,6 +7090,12 @@ handle_copy_delay:
 			}
 
 			vm_fault_unlock_ctx(ctx, vml_ctx_for_vaddr);
+			if (__improbable(fault_info->switch_wake)) {
+				fault_info->switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 
 			if (kr != KERN_SUCCESS) {
 				goto done;
@@ -7221,6 +7254,12 @@ cleanup:
 
 	vm_object_deallocate(object);
 	vm_fault_unlock_ctx(ctx, vml_ctx_for_vaddr);
+	if (__improbable(fault_info->switch_wake)) {
+		fault_info->switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 
 #undef  RELEASE_PAGE
 
@@ -7538,6 +7577,7 @@ vm_fault_wire_object_pages(
 			ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_COPY_MEMORY_SHORTAGE), 0 /* arg */);
 			OS_FALLTHROUGH;
 		case VM_FAULT_INTERRUPTED:
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 			vm_fault_unwire_object_pages(map, object, start_offset, wire_size - amount_left);
 			return MACH_SEND_INTERRUPTED;
 		case VM_FAULT_SUCCESS_NO_VM_PAGE:
@@ -7553,11 +7593,13 @@ vm_fault_wire_object_pages(
 				amount_left -= effective_page_size;
 				offset += effective_page_size;
 				vm_object_unlock(object);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 
 				continue;
 			}
 
 			vm_object_unlock(object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 			OS_FALLTHROUGH;
 		case VM_FAULT_MEMORY_ERROR:
 			/*
@@ -7575,6 +7617,7 @@ vm_fault_wire_object_pages(
 				 */
 			} else if (vm_page_is_guard(page)) {
 				vm_object_unlock(object);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 				amount_left -= effective_page_size;
 				offset += effective_page_size;
 				continue;
@@ -7583,6 +7626,7 @@ vm_fault_wire_object_pages(
 			 * Fail the wiring and unwire what we've wired so far.
 			 */
 			vm_object_unlock(object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 			vm_fault_unwire_object_pages(map, object, start_offset, wire_size - amount_left);
 			if (error) {
 				return error;
@@ -7607,6 +7651,12 @@ vm_fault_wire_object_pages(
 		vm_object_paging_end(object);
 
 		vm_object_unlock(object);
+		if (__improbable(fault_info.switch_wake)) {
+			fault_info.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 
 		amount_left -= effective_page_size;
 		offset += effective_page_size;
@@ -7756,6 +7806,12 @@ vm_fault_unwire_object_pages(
 
 		vm_page_wakeup_done(result_object, result_page);
 		vm_fault_cleanup(result_object, top_page);
+		if (__improbable(fault_info.switch_wake)) {
+			fault_info.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 	}
 }
 
@@ -7881,6 +7937,12 @@ vm_fault_unwire(
 			vm_page_wakeup_done(result_object, result_page);
 		}
 		vm_fault_cleanup(result_object, top_page);
+		if (__improbable(fault_info.switch_wake)) {
+			fault_info.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 	}
 
 	/*
@@ -8120,6 +8182,12 @@ wakeup_unlock_and_deallocate:
 unlock_and_deallocate:
 	vm_object_paging_end(object);
 	vm_object_unlock(object);
+	if (__improbable(fault_info.switch_wake)) {
+		fault_info.switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 	vm_object_deallocate(object);
 
 	return kr;
@@ -8307,6 +8375,7 @@ RetryDestinationFault:;
 			/* success but no VM page: fail the copy */
 			vm_object_paging_end(dst_object);
 			vm_object_unlock(dst_object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_dst.switch_wake);
 			OS_FALLTHROUGH;
 		case VM_FAULT_MEMORY_ERROR:
 			if (vm_fault_page_kr) {
@@ -8342,6 +8411,12 @@ RetryDestinationFault:;
 		vm_page_unlock_queues();
 		vm_page_wakeup_done(dst_object, dst_page);
 		vm_object_unlock(dst_object);
+		if (__improbable(fault_info_dst.switch_wake)) {
+			fault_info_dst.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 
 		if (dst_top_page != VM_PAGE_NULL) {
 			vm_object_lock(dst_object);
@@ -8407,6 +8482,7 @@ RetrySourceFault:;
 					/* success but no VM page: fail */
 					vm_object_paging_end(src_object);
 					vm_object_unlock(src_object);
+					SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_src.switch_wake);
 					OS_FALLTHROUGH;
 				case VM_FAULT_MEMORY_ERROR:
 					vm_fault_copy_dst_cleanup(dst_page);
@@ -8428,6 +8504,12 @@ RetrySourceFault:;
 			}
 			assert((src_prot & VM_PROT_READ) != VM_PROT_NONE);
 			vm_object_unlock(result_page_object);
+			if (__improbable(fault_info_src.switch_wake)) {
+				fault_info_src.switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 		}
 
 		assert(dst_object == VM_PAGE_OBJECT(dst_page));
@@ -8622,6 +8704,8 @@ RetrySourceFault:;
 	} while (amount_left > 0);
 
 done:
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_dst.switch_wake);
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_src.switch_wake);
 	*copy_size -= amount_left;
 	if (kr != KERN_SUCCESS) {
 		*dst_entry_p = VM_MAP_ENTRY_NULL;

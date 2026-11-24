@@ -6,10 +6,17 @@
 // waiting on them, level with every busy daemon. Committers at a QoS class (an app's threads) leave them at their own.
 #pragma once
 #include "lock.h"
+#include <dispatch/dispatch.h>
 #include <algorithm>
 #include <mutex>
 #include <pthread.h>
 #include <vector>
+
+// libdispatch SPI (dispatch/private/queue_private.h): a root queue over threads of its own, `configure` run on each as it
+// starts
+extern "C" dispatch_queue_global_t dispatch_pthread_root_queue_create(const char *label, unsigned long flags,
+                                                                      const pthread_attr_t *attr,
+                                                                      dispatch_block_t configure);
 
 namespace gm20b {
 
@@ -76,6 +83,30 @@ inline Followers &followers()
 {
     static Followers &f = *new Followers;
     return f;
+}
+
+// The process's one root queue whose threads follow the committers: work a frame waits for that runs on a queue (scheduled
+// handlers, which Core Animation's render thread waits for in waitUntilScheduled; shared event notifications, which wake
+// the submit worker) is not left to a QoS queue's workers, which XNU clamps to 37 in a daemon, below the fixed-priority
+// render thread
+inline dispatch_queue_global_t followingRoot()
+{
+    static const dispatch_queue_global_t root =
+        dispatch_pthread_root_queue_create("com.brunostjohn.switch.gm20b.following", 0, nullptr, ^{
+            pthread_setname_np("com.brunostjohn.switch.gm20b.following");
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            followers().join();
+        });
+    return root;
+}
+
+inline dispatch_queue_t followingSerial(const char *label)
+{
+    const dispatch_queue_t queue =
+        dispatch_queue_create(label, dispatch_queue_attr_make_initially_inactive(DISPATCH_QUEUE_SERIAL));
+    dispatch_set_target_queue(queue, followingRoot());
+    dispatch_activate(queue);
+    return queue;
 }
 
 }  // namespace gm20b

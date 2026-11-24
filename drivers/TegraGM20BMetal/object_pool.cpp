@@ -14,14 +14,16 @@
 
 namespace {
 
-constexpr uint32_t kPools = 4, kKept = 32;
+constexpr uint32_t kPools = 4, kKeptMost = 256;
 
 struct InstancePool {
     std::atomic<Class> cls{nullptr};
     size_t size = 0;
     void (*dropped)(void *) = nullptr;
-    gm20b::TakePool<void *, kKept> blocks;
+    gm20b::TakePool<void *, kKeptMost> blocks;
     std::atomic<uint64_t> made{0}, freed{0};
+    // instances alive now, and the most alive at once: a dealloc keeps its block while fewer than that are kept
+    std::atomic<uint32_t> alive{0}, most{0};
 };
 
 InstancePool gPools[kPools];
@@ -86,6 +88,10 @@ id pooledAlloc(id self, SEL, void *)
             return nullptr;
         pool->made.fetch_add(1, std::memory_order_relaxed);
     }
+    const uint32_t alive = pool->alive.fetch_add(1, std::memory_order_relaxed) + 1;
+    uint32_t most = pool->most.load(std::memory_order_relaxed);
+    while (alive > most && !pool->most.compare_exchange_weak(most, alive, std::memory_order_relaxed)) {
+    }
     return objc_constructInstance(cls, block);
 }
 
@@ -102,8 +108,9 @@ void pooledDealloc(id self, SEL)
     if (pool->dropped)
         pool->dropped(self);
     objc_destructInstance(self);
+    pool->alive.fetch_sub(1, std::memory_order_relaxed);
     uint32_t node;
-    void **slot = pool->blocks.room(node);
+    void **slot = pool->blocks.kept() < pool->most.load(std::memory_order_relaxed) ? pool->blocks.room(node) : nullptr;
     if (!slot) {
         pool->freed.fetch_add(1, std::memory_order_relaxed);
         free(self);
@@ -134,6 +141,11 @@ bool gm20bPoolInstances(Class cls, void (*dropped)(void *object))
                            reinterpret_cast<IMP>(pooledAlloc), "@@:^{_NSZone=}");
 }
 
+void *gm20bPoolNew(Class cls)
+{
+    return pooledAlloc(reinterpret_cast<id>(cls), nullptr, nullptr);
+}
+
 uint64_t gm20bPoolMade(Class cls)
 {
     const InstancePool *pool = poolOf(cls);
@@ -144,4 +156,16 @@ uint64_t gm20bPoolFreed(Class cls)
 {
     const InstancePool *pool = poolOf(cls);
     return pool ? pool->freed.load(std::memory_order_relaxed) : 0;
+}
+
+uint32_t gm20bPoolMost(Class cls)
+{
+    const InstancePool *pool = poolOf(cls);
+    return pool ? pool->most.load(std::memory_order_relaxed) : 0;
+}
+
+uint32_t gm20bPoolKept(Class cls)
+{
+    InstancePool *pool = poolOf(cls);
+    return pool ? pool->blocks.kept() : 0;
 }

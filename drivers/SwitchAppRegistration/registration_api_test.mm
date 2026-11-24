@@ -1,6 +1,12 @@
 #import "app_registration.mm"
 #include <gtest/gtest.h>
 
+// No test here registers a package; bootstrap_apps_test covers package_records.mm.
+NSArray<NSDictionary *> *switch_package_install_info(NSArray<NSDictionary *> *, NSError **)
+{
+    return nil;
+}
+
 static NSMutableDictionary<NSString *, NSURL *> *switch_test_urls;
 static NSString *switch_test_removed_identifier;
 static NSURL *switch_test_removed_url;

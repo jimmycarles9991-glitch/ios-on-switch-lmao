@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Why a cached BoAlloc found no zeroed spare (TegraGM20BUserClientPool.cpp spareTake) and zeroed fresh pages on the
-// allocating thread instead, and how deep a size class is kept warm after that.
+// The size classes of cached BoAllocs and which ready spares serve each (TegraGM20BUserClientSpares.cpp spareTake), the
+// classes kept ready from boot, why a BoAlloc found no zeroed spare and zeroed fresh pages on the allocating thread
+// instead, and how deep a size class is kept warm after that.
 #pragma once
 #include <stdint.h>
 
@@ -15,6 +16,53 @@ enum switch_gpu_spare_miss : uint8_t {
 
 constexpr uint64_t SWITCH_GPU_SPARE_UNIT_BYTES = 128ULL << 10;
 constexpr uint64_t SWITCH_GPU_SPARE_UNITS_FROM = 512ULL << 10;
+constexpr uint64_t SWITCH_GPU_SPARE_CAP_BYTES = 96ULL << 20;
+
+// The size classes cached BoAllocs and their spares are made in: 4 KiB to 64 KiB by doubling, then four to an octave, to
+// 256 MiB (kMaxBoBytes)
+constexpr uint32_t SWITCH_GPU_SPARE_CLASSES = 53;
+
+constexpr uint64_t switch_gpu_spare_class_bytes(uint32_t c)
+{
+	return c < 5 ? 4096ULL << c : ((64ULL << 10) << ((c - 5) / 4)) * (5 + (c - 5) % 4) / 4;
+}
+
+// The smallest class of at least `bytes`; SWITCH_GPU_SPARE_CLASSES past the largest
+constexpr uint32_t switch_gpu_spare_class_up(uint64_t bytes)
+{
+	uint32_t c = 0;
+	while (c < SWITCH_GPU_SPARE_CLASSES && switch_gpu_spare_class_bytes(c) < bytes)
+		c++;
+	return c;
+}
+
+// Whether a ready spare of class `spare` serves a BoAlloc of class `asked`: its own class, or a larger one up to about
+// twice its size (the BO is the spare's first pages)
+constexpr bool switch_gpu_spare_serves(uint32_t asked, uint32_t spare)
+{
+	return spare >= asked && spare <= asked + (asked < 5 ? 1 : 4);
+}
+
+struct switch_gpu_spare_warm {
+	uint64_t bytes;
+	uint16_t ready;
+};
+
+// The classes kept ready from boot, before a miss teaches any a depth. 24 MiB: an app's launch target, Photos' 1792x1472
+// RGBA16F attachment in backboardd (22 Nov: 17.3 ms of zero-fill and clean on its render thread, no spare of the class)
+constexpr switch_gpu_spare_warm SWITCH_GPU_SPARE_WARM[] = {
+	{64ULL << 10, 8}, {4ULL << 20, 2}, {8ULL << 20, 1}, {16ULL << 20, 2}, {24ULL << 20, 1}};
+
+constexpr uint64_t switch_gpu_spare_warm_bytes()
+{
+	uint64_t bytes = 0;
+	for (const switch_gpu_spare_warm &w : SWITCH_GPU_SPARE_WARM)
+		bytes += w.bytes * w.ready;
+	return bytes;
+}
+
+static_assert(switch_gpu_spare_warm_bytes() <= SWITCH_GPU_SPARE_CAP_BYTES,
+	      "the refill makes no spare past the cap: a warm class above it is never ready");
 
 struct switch_gpu_spare_units {
 	uint32_t units;

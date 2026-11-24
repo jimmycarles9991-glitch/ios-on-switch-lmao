@@ -81,7 +81,7 @@ def _arguments(argv: list[str]) -> tuple[Path, Path | None, bool, bool]:
 
 def _check_volume(data: Path) -> None:
     info = plistlib.loads(
-        subprocess.run(['diskutil', 'info', '-plist', str(data)], capture_output=True, check=True).stdout
+        subprocess.run(['/usr/sbin/diskutil', 'info', '-plist', str(data)], capture_output=True, check=True).stdout
     )
     if info.get('VolumeUUID') != DATA_UUID or info.get('MountPoint') != str(data) or not info.get('WritableVolume'):
         sys.exit(f'{data} is not the iPadOS Data volume {DATA_UUID} mounted read-write')
@@ -275,7 +275,7 @@ def main() -> None:
     done = sync(data, wanted, report)
     _merge_preferences(data)
     report('flushing to the card')
-    subprocess.run(['sync'], check=True)
+    subprocess.run(['/bin/sync'], check=True)
     staged = sorted({p.split('/')[2] for p in wanted})
     print('staged', data / BUNDLE, staged, done)
 

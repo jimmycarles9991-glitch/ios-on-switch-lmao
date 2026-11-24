@@ -10,20 +10,28 @@ py_library(
     srcs = [
         "apps.py",
         "audio.py",
+        "battery.py",
         "checks.py",
+        "commit.py",
+        "cpu.py",
         "cut.py",
         "devicerun.py",
         "dispatch.py",
         "hwtest.py",
         "joycon.py",
+        "launch.py",
         "lockscreen.py",
+        "memory.py",
         "morning.py",
+        "motion.py",
         "protection.py",
         "reports.py",
         "rules.py",
+        "springboard.py",
         "stutter.py",
         "textures.py",
     ],
+    visibility = ["//tools/perf:__pkg__"],
     deps = [
         ":renamed",
         "//tools/frames:lib",
@@ -83,6 +91,22 @@ py_test(
     deps = [":lib"],
 )
 
+# battery.py's checks over boot 2's dasd and powerd lines.
+py_test(
+    name = "battery_test",
+    size = "small",
+    srcs = ["battery_test.py"],
+    deps = [":lib"],
+)
+
+# motion.py's checks over boot 2's CoreMotion lines.
+py_test(
+    name = "motion_test",
+    size = "small",
+    srcs = ["motion_test.py"],
+    deps = [":lib"],
+)
+
 # lockscreen.py's checks over boot 15's lock-screen lines.
 py_test(
     name = "lockscreen_test",
@@ -120,6 +144,46 @@ py_test(
     name = "textures_test",
     size = "small",
     srcs = ["textures_test.py"],
+    deps = [":lib"],
+)
+
+# commit.py's summaries over the commit and touch-delivery lines (why commits wait, the commit path).
+py_test(
+    name = "commit_test",
+    size = "small",
+    srcs = ["commit_test.py"],
+    deps = [":lib"],
+)
+
+# launch.py's summaries: the memory clock around each launch, page-ins, the cryptex cache.
+py_test(
+    name = "launch_test",
+    size = "small",
+    srcs = ["launch_test.py"],
+    deps = [":lib"],
+)
+
+# cpu.py's summaries over the kernel probes' lines (who used the CPU, the interrupt sources, translation traps).
+py_test(
+    name = "cpu_test",
+    size = "small",
+    srcs = ["cpu_test.py"],
+    deps = [":lib"],
+)
+
+# springboard.py: the first SpringBoard of a boot finishes launching inside backboardd's check-in watchdog.
+py_test(
+    name = "springboard_test",
+    size = "small",
+    srcs = ["springboard_test.py"],
+    deps = [":lib"],
+)
+
+# memory.py's kill and small-daemon rows over lines in the Metal driver's and XNU's formats.
+py_test(
+    name = "memory_test",
+    size = "small",
+    srcs = ["memory_test.py"],
     deps = [":lib"],
 )
 

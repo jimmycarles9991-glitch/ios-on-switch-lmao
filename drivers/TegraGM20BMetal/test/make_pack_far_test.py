@@ -18,6 +18,7 @@ import directlink
 import packfile
 
 HEAD_ENTRIES_HIGH = 31  # PackPipeline.entriesHigh
+WRITES_MEMORY = 1  # runtime/pack.h kProgramWritesMemory
 
 
 def buffers(count: int) -> list[dict]:
@@ -115,7 +116,7 @@ class FarTest(unittest.TestCase):
         data, _ = packfile.pack_bytes(pack)
         header = struct.unpack_from(f'<{2 * packfile.SECTIONS}Q', data, 24)
         programs, blob_at, blob_bytes = header[0], header[2 * 5], header[2 * 5 + 1]
-        size = 44
+        size = packfile.PROGRAM_BYTES
         self.assertEqual(data[programs + 41 : programs + 44], bytes(3))
         table_at = int.from_bytes(data[programs + size + 41 : programs + size + 44], 'little') - 1
         self.assertGreaterEqual(table_at, 0)
@@ -125,6 +126,142 @@ class FarTest(unittest.TestCase):
         self.assertEqual(directlink.program_id(far), directlink.program_id(far))
         self.assertNotEqual(directlink.program_id(far), directlink.program_id(dict(far, far_ubos=[0, 41, 0])))
         self.assertEqual(directlink.program_id(near), directlink.program_id(dict(near, far_ubos=[])))
+
+
+class FastKeysTest(unittest.TestCase):
+    """The PackFastKeys section (runtime/pack.h PackFastKey): each fast key the run of its state's records.
+
+    The runtime searches the pipelines unchecked, so a link of records out of key hash order fails.
+    """
+
+    KEYS = sorted(('samples=1 | v a | f b', 'samples=4 | v a | f b'), key=lambda k: packfile.fnv(k.encode()))
+
+    def test_a_fast_key_names_its_states_records(self):
+        first, second = (packfile.fnv(k.encode()) for k in self.KEYS)
+        pipes = [dict(record(0), key=key) for key in (self.KEYS[0], self.KEYS[0], self.KEYS[1])]
+        section, _ = packfile.fast_key_bytes({5: second, 3: first, 9: 1234}, pipes)
+        runs = [struct.unpack_from('<QII', section, 16 * i) for i in range(len(section) // 16)]
+        self.assertEqual(runs, [(3, 0, 2), (5, 2, 1)])
+
+    def test_records_out_of_key_hash_order_fail_the_link(self):
+        pipes = [dict(record(0), key=self.KEYS[1]), dict(record(0), key=self.KEYS[0])]
+        with self.assertRaisesRegex(ValueError, 'key hash order'):
+            packfile.pack_bytes(packfile.Pack(pipes, [], [], {}, [], bytearray(), []))
+
+
+class TiersTest(unittest.TestCase):
+    """Each section's tier 0 first, then tier 1, each in key order; the header's tier0 table names tier 0's part.
+
+    Tier 0 is the launch set (pack/make_pack.py COLD_TIERS): the runtime reads its part alone for any state of it.
+    """
+
+    KEYS = FastKeysTest.KEYS
+
+    def state(self, tier: int, image: bytes, key: str = 'samples=1 | v a | f b', twin: int = 0) -> dict:
+        vertex = {'image': bytes(80) + image, 'data': b'', 'cbufs': [], 'far_ubos': []}
+        fragment = {'image': bytes(80) + image + b'f', 'data': b'', 'cbufs': [], 'far_ubos': []}
+        ids = [directlink.program_id(p) for p in (vertex, fragment)]
+        pipeline = packfile.pipeline_bytes(dict(record(0), key=key, stride_twin=twin), 0, 0)
+        probe = {'records': [{'prog': {1: (ids[0],), 5: (ids[1],)}}]}
+        return {'key': key, 'tier': tier, 'pipeline': pipeline, 'programs': [vertex, fragment], 'probe': probe}
+
+    def test_tier_zeros_programs_come_first_and_end_on_the_boundary(self):
+        shared, cold, launch = self.state(1, b'shared'), self.state(1, b'cold'), self.state(0, b'launch')
+        launch['programs'][0] = shared['programs'][0]
+        launch['probe']['records'][0]['prog'][1] = shared['probe']['records'][0]['prog'][1]
+        programs = {directlink.program_id(p): p for rec in (shared, cold, launch) for p in rec['programs']}
+        (_, _, recs), _, launch_programs, launch_heap = directlink.lay_out_tiers(
+            [shared, cold, launch], programs, {}, []
+        )
+        self.assertEqual(launch_programs, 2)
+        self.assertEqual({recs[i]['id'] for i in range(2)}, {directlink.program_id(p) for p in launch['programs']})
+        self.assertEqual(launch_heap % directlink.TIER_ALIGN, 0)
+        last = max(recs[i]['heap_offset'] + recs[i]['bytes'] for i in range(2))
+        self.assertGreaterEqual(launch_heap - last, directlink.PREFETCH)
+        self.assertTrue(all(r['heap_offset'] >= launch_heap for r in recs[2:]))
+
+    def test_a_state_takes_its_lowest_lines_tier_and_its_stride_twin_its_lowest_referrers(self):
+        twin = self.state(1, b'twin', key=self.KEYS[0])
+        launch = self.state(1, b'launch', key=self.KEYS[1], twin=packfile.key_hash(twin))
+        lines = [(5, packfile.key_hash(launch), 1), (7, packfile.key_hash(twin), 1), (5, packfile.key_hash(launch), 0)]
+        fast, tiers = directlink.fast_keys(lines)
+        self.assertEqual(fast, {5: packfile.key_hash(launch), 7: packfile.key_hash(twin)})
+        directlink.set_tiers([twin, launch], tiers)
+        self.assertEqual((launch['tier'], twin['tier']), (0, 0))
+        alone = self.state(1, b'alone', key=self.KEYS[0])
+        directlink.set_tiers([alone], tiers)
+        self.assertEqual(alone['tier'], 1)
+
+    def test_the_header_names_tier_zeros_part_and_fast_keys_go_by_tier(self):
+        first, second = (packfile.fnv(k.encode()) for k in self.KEYS)
+        pipes = [dict(record(0), key=self.KEYS[1], tier=0), dict(record(0), key=self.KEYS[0], tier=1)]
+        section, launch = packfile.fast_key_bytes({9: second, 3: first}, pipes)
+        self.assertEqual(launch, 1)
+        self.assertEqual([struct.unpack_from('<QII', section, 16 * i) for i in range(2)], [(9, 0, 1), (3, 1, 1)])
+        programs = [{'cbufs': [], 'heap_offset': 0, 'program': 0x30, 'bytes': 256, 'data_offset': 0, 'data_bytes': 0}]
+        pack = packfile.Pack(pipes, programs * 2, [], {}, [], bytearray(0x200), [], tier0_programs=1, tier0_heap=0x100)
+        pack.fast_keys = {9: second, 3: first}
+        data, _ = packfile.pack_bytes(pack)
+        sections = struct.unpack_from(f'<{2 * packfile.SECTIONS}Q', data, 24)
+        tier0 = struct.unpack_from(f'<{packfile.SECTIONS}Q', data, 24 + 16 * packfile.SECTIONS + 16)
+        self.assertEqual(tier0[0], packfile.PROGRAM_BYTES)
+        self.assertEqual(tier0[1], directlink.PIPELINE_BYTES)
+        self.assertEqual(tier0[7], 0x100)
+        self.assertEqual(tier0[15], 16)
+        self.assertEqual(sections[2 * 7] % packfile.TIER_ALIGN, 0)
+        self.assertIn('heap 0 (0)', packfile.sections_line(data))
+
+    def test_a_programs_facts_go_from_its_record_into_the_pack(self):
+        words = 7 | 2 << 8 | WRITES_MEMORY << 16
+        blob = b''.join(struct.pack('<I', len(b)) + b for b in (bytes(84), b'', b'', b'')) + struct.pack('<I', words)
+        made = directlink.program(directlink.Reader(blob))
+        self.assertEqual((made['gprs'], made['bound_textures'], made['facts']), (7, 2, WRITES_MEMORY))
+        heap, index, recs = bytearray(), {}, []
+        packfile.place_graphics('p', {'p': made}, heap, index, recs)
+        data, _ = packfile.pack_bytes(packfile.Pack([], recs, [], {}, [], heap, []))
+        programs = struct.unpack_from('<Q', data, 24)[0]
+        self.assertEqual(struct.unpack_from('<I', data, programs + 44)[0], WRITES_MEMORY)
+
+    def test_tier_ones_records_before_tier_zeros_fail_the_link(self):
+        pipes = [dict(record(0), key=self.KEYS[0], tier=1), dict(record(0), key=self.KEYS[1], tier=0)]
+        with self.assertRaisesRegex(ValueError, 'tier'):
+            packfile.pack_bytes(packfile.Pack(pipes, [], [], {}, [], bytearray(), []))
+
+    def test_a_split_fragment_shared_by_both_tiers_is_laid_out_once_in_tier_zero(self):
+        launch = self.state(0, b'shared-split', key=self.KEYS[0])
+        cold = self.state(1, b'other-vs', key=self.KEYS[1])
+        cold['programs'][1] = launch['programs'][1]
+        cold['probe']['records'][0]['prog'][5] = launch['probe']['records'][0]['prog'][5]
+        whole = directlink.program_id(launch['programs'][1])
+        split_fs = {'image': bytes(80) + b'per-pixel', 'data': b'', 'cbufs': [6], 'far_ubos': []}
+        prologue = {'image': bytes(80) + b'prologue', 'data': b'', 'cbufs': [], 'far_ubos': []}
+        fs_id, pro_id = directlink.program_id(split_fs), directlink.program_id(prologue)
+        programs = {directlink.program_id(p): p for rec in (launch, cold) for p in rec['programs']} | {
+            fs_id: split_fs,
+            pro_id: prologue,
+        }
+        found = {
+            whole: {
+                'fs': fs_id,
+                'prologue': pro_id,
+                'frontier_bytes': 16,
+                'frontier_cbuf': 0,
+                'prologue_cbufs': 1,
+                'shader_data_cbuf': 0xFF,
+                'ubo_cbufs': [],
+                'threshold': 10,
+                'batch_version': 0,
+                'batch_threads': 0,
+                'qmd': [0] * 64,
+                'cost': dict.fromkeys(packfile.SPLIT_COST_FIELDS, 0),
+            }
+        }
+        (_, _, recs), split_recs, launch_programs, _ = directlink.lay_out_tiers([launch, cold], programs, found, [])
+        self.assertEqual(len(split_recs), 1)
+        self.assertLess(split_recs[0]['whole'], launch_programs)
+        self.assertLess(split_recs[0]['fs'], launch_programs)
+        self.assertLess(split_recs[0]['prologue'], launch_programs)
+        self.assertEqual(len(recs), 5)
 
 
 if __name__ == '__main__':

@@ -66,9 +66,14 @@ struct Asked : Work {
     int32_t pid = 0;      // the process that asked first, whose share of the store the record takes
     dispatch_semaphore_t done = nullptr;  // signalled once it ran, for the replay that waits on it
 #if SWITCH_DEBUG
-    uint64_t takenNs = 0;
+    uint64_t takenNs = 0, preparedNs = 0;  // the kernel handed it over, and it was prepared
 #endif
 };
+
+#if SWITCH_DEBUG
+// When the take thread's request came out of the kernel (0: the replay's own)
+thread_local uint64_t tTakenNs;
+#endif
 
 // What a stored entry answers, -1 for one that is not `k`'s whole, or a library the front end refused (retired, and made
 // again: the store is not named by what the front end ran with)
@@ -191,6 +196,9 @@ int32_t Service::run(Work &work)
     Asked &asked = static_cast<Asked &>(work);
     const Prepared &p = asked.prepared;
     const qos_class_t workerClass = qos_class_self();
+#if SWITCH_DEBUG
+    tJobSplit = {};
+#endif
     std::string entry, why;
     if (store_.find(p.name, entry)) {
         const int32_t stored = storedResult(entry, p.key);
@@ -203,24 +211,27 @@ int32_t Service::run(Work &work)
     entry.clear();
     compileStarted();
     int32_t result = engine_.compile(p, entry, why);
+#if SWITCH_DEBUG
+    const uint64_t publishing = uptimeNs();
+#endif
     if (!entry.empty() && !publish(&p.name, p.key, entry, result == TegraGM20BCompileMade, why))
         result = TegraGM20BCompileFailed;
+#if SWITCH_DEBUG
+    tJobSplit.storeNs = uptimeNs() - publishing;
+#endif
     compileEnded();
-    if (result == TegraGM20BCompileFailed || result == TegraGM20BCompileUnavailable)
+    const bool refused = result == TegraGM20BCompileRefused || (result == TegraGM20BCompileFailed && failsForGood(why));
+    if (!refused && (result == TegraGM20BCompileFailed || result == TegraGM20BCompileUnavailable))
         os_log_error(logger(), "SwitchShaderCompiler: pid %d's state not made: %{public}s | %{public}.300s", asked.pid,
                      why.c_str(), p.key.key.c_str());
-    if (result == TegraGM20BCompileRefused) {
+    if (refused) {
         const RefusalLine line = refusalLine(p.request, asked.pid, why);
         switch_refusal_k(
             switch_refusal_key_with(switch_refusal_key("m2v", line.reason), switch_refusal_key(line.text.c_str(), "")),
             "m2v", line.reason, "%s", line.text.c_str());
     }
 #if SWITCH_DEBUG
-    os_log(logger(),
-           "SwitchShaderCompiler: %{public}s in %llu ms, queued %llu ms (class 0x%x) for pid %d: %{public}.400s",
-           resultName(result), (unsigned long long)((tJobTimes.compile_end - tJobTimes.compile_start) / 1000000),
-           (unsigned long long)(asked.takenNs ? (tJobTimes.compile_start - asked.takenNs) / 1000000 : 0),
-           unsigned(workerClass), asked.pid, p.key.key.c_str());
+    logJob(logger(), result, asked.takenNs, asked.preparedNs, unsigned(workerClass), asked.pid, p.key.key);
 #endif
     return packed(result, false, workerClass);
 }
@@ -256,7 +267,8 @@ bool Service::submit(Prepared prepared, std::string request, const Waiter &waite
     work->request = std::move(request);
     work->done = done;
 #if SWITCH_DEBUG
-    work->takenNs = uptimeNs();
+    work->takenNs = tTakenNs;
+    work->preparedNs = uptimeNs();
 #endif
     const gm20b::Digest name = prepared.name;
     work->prepared = std::move(prepared);
@@ -281,6 +293,7 @@ void Service::take(uint64_t stack)
         exit(1);
     }
 #if SWITCH_DEBUG
+    tTakenNs = uptimeNs();
     dieIfArmedFor(reply.pid);
 #endif
     const bool waited = reply.flags & TegraGM20BCompileWaited;
@@ -463,6 +476,14 @@ void Service::serve()
     };
     hooks.lower = [](void *token) {
         pthread_override_qos_class_end_np(static_cast<pthread_override_t>(token));
+    };
+    hooks.registerWorker = [this](uint32_t worker) {
+        const TegraGM20BAbiCompilerServe in = {0, worker, 0};
+        call(TegraGM20BMethodCompilerServe, &in, sizeof in, nullptr, 0);
+    };
+    hooks.serve = [this](uint64_t id, uint32_t worker) {
+        const TegraGM20BAbiCompilerServe in = {id, worker, 0};
+        call(TegraGM20BMethodCompilerServe, &in, sizeof in, nullptr, 0);
     };
     hooks.idle = idle;
     pool_ = std::make_unique<Pool>(std::move(hooks));

@@ -200,7 +200,7 @@ _UNITS = {
 
 # Each unit's includes with the hashed files its only inputs: a header outside them is not found and the build fails.
 def _includes_checked(ctx):
-    headers = ctx.files.srcs + [ctx.file.metal_abi, ctx.file._selector_layout]
+    headers = ctx.files.srcs + [ctx.file.metal_abi]
     includes = []
     for marker in ctx.files.include_markers + [ctx.file.metal_abi]:
         includes += ["-I", marker.dirname]
@@ -223,7 +223,7 @@ def _includes_checked(ctx):
 def _stack_key_impl(ctx):
     out = ctx.actions.declare_file(ctx.attr.name + ".txt")
     files = depset(
-        ctx.files.srcs + ctx.files.readers + [ctx.file.metal_abi, ctx.file.compile, ctx.file._selector_layout],
+        ctx.files.srcs + ctx.files.readers + [ctx.file.metal_abi, ctx.file.compile],
         transitive = [ctx.attr.bridge[_CrateSourcesInfo].files],
     )
     args = ctx.actions.args()
@@ -268,7 +268,6 @@ stack_key = rule(
         "include_markers": attr.label_list(allow_files = True, doc = "one file per -I directory of srcs' units"),
         "metal_abi": attr.label(mandatory = True, allow_single_file = True, doc = "the IPSW kind's MetalABI.h"),
         "compile": attr.label(mandatory = True, allow_single_file = True, doc = "the stage compile's iOS object"),
-        "_selector_layout": attr.label(default = "//drivers/TegraGM20BMetal/precompile/ca-selectors:ca_selector_layout.h", allow_single_file = True),
         "ipsw": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
         "_tool": attr.label(default = "//tools/gpu:stack_key", executable = True, cfg = "exec"),
         "_xcode_run": attr.label(default = "//tools/gpu:xcode_run", executable = True, cfg = "exec"),

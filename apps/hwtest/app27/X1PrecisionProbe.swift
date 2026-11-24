@@ -80,7 +80,7 @@ enum X1PrecisionProbe {
                     let ran = try await run(gpu, arm) { rig.encode($0, state) }
                     paths.append(ran.path)
                     emitted += ran.emitted
-                    let counts = try await rig.counts(pair)
+                    let counts = try await rig.counts(pair, models: .chipAndSeparate)
                     fields.append("\(pair.name):\(counts.chip)/\(counts.separate)")
                 }
             } catch {

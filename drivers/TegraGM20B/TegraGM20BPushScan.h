@@ -130,6 +130,7 @@ inline void metalMacro(PushCounts &c, PushParse &p, uint32_t slot, uint32_t firs
 	case SWITCH_GM20B_MACRO_AMPLIFY_INDEXED:
 	case SWITCH_GM20B_MACRO_FETCH_DRAW:
 	case SWITCH_GM20B_MACRO_FETCH_DRAW_INDEXED:
+	case SWITCH_GM20B_MACRO_BAND_DRAW:
 		countDraw(c, p);
 		break;
 	case SWITCH_GM20B_MACRO_CLEAR_LAYERS:
@@ -151,7 +152,7 @@ inline void pushMethod(PushCounts &c, PushParse &p, uint32_t subc, uint32_t mthd
 		} else if (mthd == 0x0050) {  // SET_REFERENCE (NVK's host barrier)
 			c.setRef++;
 		} else if (mthd == 0x0034 &&
-			   (data & 0x1f) == 0x0e) {  // MEM_OP_D L2_SYSMEM_INVALIDATE
+			   (data >> 27) == 0x0eu) {  // MEM_OP_D L2_SYSMEM_INVALIDATE
 			c.l2Inval++;
 		} else if (mthd == 0x0078) {  // WFI
 			c.hostWfi++;

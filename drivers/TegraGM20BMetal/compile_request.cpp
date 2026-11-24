@@ -13,7 +13,7 @@ namespace {
 
 // Any change to a field's bytes or meaning takes the next magic: the compiler's request log (compiler/compiler_log.h)
 // keeps requests across builds and replays them, so a request of another layout must be refused whole
-constexpr char kRequestMagic[8] = {'S', 'W', 'C', 'R', 'E', 'Q', '0', '6'};
+constexpr char kRequestMagic[8] = {'S', 'W', 'C', 'R', 'E', 'Q', '0', '7'};
 constexpr char kNameMagic[8] = {'S', 'W', 'R', 'A', 'W', 'N', 'M', '2'};
 // A cubic bind's sampler flag byte: bit 0 normalized, bit 1 the vertex stage, no other; its texture's slot byte's top
 // bit: the vertex stage. Each stage binds up to 16 samplers

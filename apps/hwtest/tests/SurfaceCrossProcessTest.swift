@@ -35,24 +35,7 @@ struct SurfaceCrossProcessTest: HWTest {
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         guard GM20BFacade.kind(of: gpu.device) == "gm20b" else { return .skip("the default device is not the facade") }
-        let acceptor = TexturePeerAcceptor()
-        let listener = NSXPCListener.anonymous()
-        listener.delegate = acceptor
-        listener.resume()
-        defer {
-            acceptor.connection?.invalidate()
-            listener.invalidate()
-        }
-        let endpoint = listener.endpoint
-        if let why = await NativeSharedTexturePeerTest.offThread({ NativeSharedTexturePeerTest.startPeer(endpoint) }) {
-            throw TestFailure("no texture peer: \(why)")
-        }
-        let connected = await NativeSharedTexturePeerTest.offThread {
-            acceptor.accepted.wait(timeout: .now() + 20) == .success
-        }
-        guard connected, let connection = acceptor.connection else {
-            throw TestFailure("the texture peer never connected")
-        }
+        let connection = try await TexturePeerLink.connection()
         var metrics = Metrics()
         var checks: [(String, Bool)] = []
         for size in Self.sizes {
@@ -96,6 +79,7 @@ struct SurfaceCrossProcessTest: HWTest {
                 if order == "held" || order == "handoff" { _ = await Self.ask(connection) { $0.dropSurfaces($1) } }
             }
         }
+        checks.append(await TexturePeerLink.startedOnce(&metrics))
         return .judged(checks, metrics, proof: gpu.proof)
     }
 

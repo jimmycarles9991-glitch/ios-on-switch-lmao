@@ -152,6 +152,7 @@
 #include <sys/trust_caches.h>
 #include <libkern/amfi/amfi.h>
 #include <IOKit/IOBSD.h>
+#include <switch/diag.h>
 
 #if VM_MAP_DEBUG_APPLE_PROTECT
 SYSCTL_INT(_vm, OID_AUTO, map_debug_apple_protect, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_debug_apple_protect, 0, "");
@@ -866,6 +867,7 @@ log_unnest_badness(
 	    vm_map_offset_t, s,
 	    vm_map_offset_t, e,
 	    vm_map_offset_t, lowest_unnestable_addr);
+	switch_diag_unnest((uint64_t)s, (uint64_t)e);
 #if defined(__x86_64__)
 	printf("%s[%d] triggered unnest of range 0x%qx->0x%qx of DYLD shared region in VM map %p. While not abnormal for debuggers, this increases system memory footprint until the target exits.\n", current_proc()->p_comm, proc_getpid(current_proc()), (uint64_t)s, (uint64_t)e, (void *) VM_KERNEL_ADDRPERM(m));
 #else

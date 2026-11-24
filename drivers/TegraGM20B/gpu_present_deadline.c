@@ -25,9 +25,9 @@ static const char *const watch_late_names[] = {
  * submission order: the deadline is set again. Anything else should have delivered the watch already (its pass, a kill
  * or a teardown): the pass gets a wake's grace, then the lost interrupt panics. tgm_present.lock and tgm_live_lock
  * held. */
-static int watch_late(int physical, u64 age, struct tgm_chan **waited, u32 *seqno)
+static int watch_late(const struct switch_gpu_backing_token *token, int physical, u64 age,
+		      struct tgm_chan **waited, u32 *seqno)
 {
-	const struct switch_gpu_backing_token *token = &tgm_present.watch.token;
 	struct tgm_chan *chan = live_by_uid(token->queue);
 	const u64 now = nvxnu_nanotime();
 	const char *why = "it failed and no kill delivered it";
@@ -46,11 +46,13 @@ static int watch_late(int physical, u64 age, struct tgm_chan **waited, u32 *seqn
 		why = watch_late_names[where];
 	}
 	if (where == SWITCH_GPU_QUIET_QUEUED) {
+		tgm_present.late = 0;
 		*waited = chan;
 		*seqno = end;
 		return 0;
 	}
 	if (where == SWITCH_GPU_QUIET_OWED) {
+		tgm_present.late = 0;
 		tgm_present.recovered = now;
 		tgm_present.recheck = TGM_PRESENT_NS;
 		nvxnu_work_schedule_after(tgm_present.deadline_work, TGM_PRESENT_NS);
@@ -63,8 +65,7 @@ static int watch_late(int physical, u64 age, struct tgm_chan **waited, u32 *seqn
 					  TGM_PRESENT_WAKE_GRACE_NS - (now - tgm_present.late));
 		return 1;
 	}
-	if (__atomic_load_n(&tgm_present.watch.state, __ATOMIC_ACQUIRE) !=
-	    SWITCH_GPU_PRESENT_WATCH_ARMED)
+	if (switch_gpu_present_watch_state(&tgm_present.watch) != SWITCH_GPU_PRESENT_WATCH_ARMED)
 		return 1;
 	nvxnu_panic(
 		"tegra-gm20b: present watch lost %llu ms after the offer: producer uid %u fence %u "
@@ -79,6 +80,8 @@ void tgm_present_deadline(void *arg)
 	struct tgm_chan *chan = NULL;
 	struct tgm_chan *waited = NULL;
 	struct switch_gpu_present_pending pending;
+	struct switch_gpu_backing_token watch_tokens[SWITCH_GPU_PRESENT_WATCH_MAX];
+	struct switch_gpu_backing_token late_token = {0};
 	char state[TGM_HANG_LINE];
 	char what[96], current_owner[96], next_owner[96];
 	struct tgm_chan *late = NULL;
@@ -86,11 +89,13 @@ void tgm_present_deadline(void *arg)
 	u32 seqno = 0;
 	u32 eng;
 	u32 watch = 0;
+	u32 watch_count = 0;
+	u32 watch_pending = 0;
 	int watched = 0;
 
 	(void)arg;
 	mutex_lock(&tgm_present.lock);
-	watch = __atomic_load_n(&tgm_present.watch.state, __ATOMIC_ACQUIRE);
+	watch = switch_gpu_present_watch_state(&tgm_present.watch);
 	if ((!__atomic_load_n(&tgm_present.pending, __ATOMIC_ACQUIRE) &&
 	     watch != SWITCH_GPU_PRESENT_WATCH_ARMED) ||
 	    __atomic_load_n(&tgm_present.redoing, __ATOMIC_ACQUIRE)) {
@@ -114,11 +119,37 @@ void tgm_present_deadline(void *arg)
 	}
 	/* Timeline status may lock engine state; never query it while holding tgm_live_lock. */
 	pending = switch_gpu_present_tokens_pending(&tgm_present.tokens);
-	if (!tgm_present.pending)
-		watched = switch_gpu_backing_token_physical_status(&tgm_present.watch.token, 0);
+	if (!tgm_present.pending &&
+	    switch_gpu_present_watch_snapshot(&tgm_present.watch, watch_tokens, &watch_count,
+					      &watch_pending) == SWITCH_GPU_PRESENT_WATCH_ARMED &&
+	    watch_count) {
+		int all_done = 1;
+		u32 chosen = 0;
+		u32 i;
+
+		for (i = 0; i < watch_count; ++i) {
+			const int st =
+				switch_gpu_backing_token_physical_status(&watch_tokens[i], 0);
+			if (st < 0) {
+				late_token = watch_tokens[i];
+				watched = st;
+				all_done = 0;
+				break;
+			}
+			if (!st)
+				all_done = 0;
+			else if ((watch_pending & (1u << i)) && !chosen)
+				chosen = i + 1u;
+		}
+		if (all_done) {
+			const u32 idx = chosen ? chosen - 1u : 0u;
+			late_token = watch_tokens[idx];
+			watched = 1;
+		}
+	}
 	mutex_lock(&tgm_live_lock);
 	if (watched) {
-		if (watch_late(watched, age, &waited, &seqno)) {
+		if (watch_late(&late_token, watched, age, &waited, &seqno)) {
 			mutex_unlock(&tgm_live_lock);
 			mutex_unlock(&tgm_present.lock);
 			return;

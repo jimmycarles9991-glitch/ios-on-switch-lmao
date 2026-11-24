@@ -59,6 +59,9 @@ uint32_t leaseCount;
 void (*irq)(void *);
 void *irqContext;
 std::map<uint64_t, switch_gpu_backing *> allocations;
+std::map<uint64_t, uint32_t> surfaceKinds;
+std::map<switch_gpu_backing *, tgm_mem *> canonicalMemories;
+uint8_t lastMappedKind;
 // The GPU as gpu_exec.c drives it, for the tests that run what the queue submits: the host fetches each push through the
 // page table and the L2 (gm20b_gpu_memory.h), after the L2 invalidate chan_exec puts ahead of a submission that is not
 // explicit, is host-written, or follows a GPU-ordered map (the TLB invalidate's flush).
@@ -190,7 +193,7 @@ extern "C" int tgm_vm_kmap(tgm_vm *, tgm_mem *, uint64_t, uint64_t *va)
 
 // Cacheable unless volatile, as SwitchGpuVmMap.h maps with the L2 on.
 extern "C" int switch_gpu_vm_map_volatile(tgm_vm *, uint64_t va, uint64_t bytes, tgm_mem *mem,
-					  uint64_t offset, uint8_t, int readOnly, int vol,
+					  uint64_t offset, uint8_t kind, int readOnly, int vol,
 					  switch_gpu_mapping **out)
 {
 	mappedSinceExec = true;
@@ -201,9 +204,41 @@ extern "C" int switch_gpu_vm_map_volatile(tgm_vm *, uint64_t va, uint64_t bytes,
 		return 0;
 	}
 	++maps;
+	lastMappedKind = kind;
 	memory.map(va, allocations.at(mem->pages[0])->bytes, readOnly != 0, !vol);
 	*out = new switch_gpu_mapping{va, bytes};
 	return 0;
+}
+
+extern "C" uint32_t tegra_gm20b_surface_kind(uint64_t page)
+{
+	const auto found = surfaceKinds.find(page);
+	return found == surfaceKinds.end() ? 0u : found->second;
+}
+
+extern "C" int switch_gpu_backing_tgm_mem(switch_gpu_backing *backing, uint32_t, tgm_mem **out)
+{
+	const auto found = canonicalMemories.find(backing);
+	if (found == canonicalMemories.end())
+		return -95;
+	*out = found->second;
+	return 0;
+}
+
+extern "C" int switch_gpu_backing_tgm_mem_existing(switch_gpu_backing *backing, uint32_t,
+						   tgm_mem **out)
+{
+	const auto found = canonicalMemories.find(backing);
+	if (found == canonicalMemories.end())
+		return -2;
+	*out = found->second;
+	return 0;
+}
+
+extern "C" int switch_gpu_backing_tgm_mem_existing_or_direct(switch_gpu_backing *backing,
+							     uint32_t count, tgm_mem **out)
+{
+	return switch_gpu_backing_tgm_mem_existing(backing, count, out);
 }
 
 extern "C" int switch_gpu_vm_map(tgm_vm *vm, uint64_t va, uint64_t bytes, tgm_mem *mem,
@@ -556,6 +591,9 @@ protected:
 		syncpts.clear();
 		gpu = {};
 		allocations.clear();
+		surfaceKinds.clear();
+		canonicalMemories.clear();
+		lastMappedKind = 0;
 	}
 
 	void TearDown() override
@@ -928,4 +966,30 @@ TEST_F(CheckedCopy, PartialInitializationReturnsItsControlAllocation)
 	EXPECT_EQ(queue.space.words, nullptr);
 	EXPECT_EQ(queue.dependencies, nullptr);
 	EXPECT_EQ(execs, 0u);
+}
+
+TEST_F(CheckedCopy, CopyMappingChecksTiledKindAndEvictsIdleConflictingSlot)
+{
+	auto a = allocation();
+	tgm_mem canonical{a.second->pages.data()};
+	canonicalMemories[a.second] = &canonical;
+	SwitchGpuCopyMappings cache{};
+	SwitchGpuCopyMapping *first = nullptr, *second = nullptr;
+	ASSERT_EQ(switch_gpu_copy_mapping(&space, &cache, a.first, 0, a.second, 0, 4096, true,
+					  &first),
+		  0);
+	EXPECT_EQ(first->mapping->tiledKind, 0xfeu);
+	EXPECT_EQ(lastMappedKind, 0xfeu);
+	switch_gpu_copy_mapping_put(first);
+
+	surfaceKinds[a.second->pages[0]] = 0xdbu;
+	ASSERT_EQ(switch_gpu_copy_mapping(&space, &cache, a.first, 0, a.second, 0, 4096, true,
+					  &second),
+		  0);
+	EXPECT_EQ(second->mapping->tiledKind, 0xdbu);
+	EXPECT_EQ(second->mapping->memory, &canonical);
+	EXPECT_EQ(lastMappedKind, 0xdbu);
+	EXPECT_EQ(unmaps, 2u);
+	switch_gpu_copy_mapping_put(second);
+	switch_gpu_copy_mappings_clear(&space, &cache);
 }

@@ -61,6 +61,7 @@
 #include "../SwitchUSB/SwitchPD.h"
 #include "SwitchBattery.h"
 #include "SwitchChargePolicy.h"
+#include "SwitchBatteryPack.h"
 #include "../SwitchPower/SwitchPower.h"
 #include "../SwitchPower/SwitchSensors.h"
 #include "../SwitchSuspend/SwitchWake.h"
@@ -565,7 +566,12 @@ class SwitchBattery : public IOPMPowerSource {
     bool boosting = false;     // this boot's OTG boost, as of the last reading
     bool statsDue = true;
     unsigned refreshes = 0, lostInARow = 0;
-    uint64_t pdWord = 0;  // SwitchPD's last state (packPd), written on its work loop
+    uint64_t pdWord = 0;               // SwitchPD's last state (packPd), written on its work loop
+    OSString *serialString = nullptr;  // publishSerial's, also the pack's BatteryData Serial
+#if SWITCH_IPSW_KIND_24B119
+    AppleSmartBatteryPack *pack = nullptr;  // published with the battery (SwitchBatteryPack.h)
+    SwitchPackReading packReading = {};
+#endif
 
     static void timerFired(OSObject *owner, IOTimerEventSource *sender);
     static void alertFired(OSObject *owner, IOInterruptEventSource *sender, int count);
@@ -624,7 +630,7 @@ void SwitchBattery::publishSerial()
     serial[17] = '\0';
     if (OSString *value = OSString::withCString(serial)) {
         setKey(kIOPMPSSerialKey, value);
-        value->release();
+        serialString = value;
         serialPublished = true;
     }
 }
@@ -673,6 +679,13 @@ void SwitchBattery::free()
         timer->release();
     }
     OSSafeReleaseNULL(loop);
+#if SWITCH_IPSW_KIND_24B119
+    if (pack) {
+        pack->detach(this);
+        OSSafeReleaseNULL(pack);
+    }
+#endif
+    OSSafeReleaseNULL(serialString);
     IOPMPowerSource::free();
 }
 
@@ -853,6 +866,13 @@ bool SwitchBattery::refresh()
         adapter->release();
     }
     updateStatus();
+#if SWITCH_IPSW_KIND_24B119
+    packReading = {r.rawCapacity,  r.fullCapacity, r.designCapacity, static_cast<int>(r.millivolts),
+                   r.avgMilliamps, r.centiCelsius, r.cycles,         r.percent,
+                   r.full};
+    if (pack)
+        pack->update(packReading, serialString);
+#endif
     // Acknowledge: re-centre the gauge's windows (releases ALRT).
     const uint16_t around = switch_max17050_talrt(r.milliCelsius);
     const uint16_t window =
@@ -1253,6 +1273,9 @@ void SwitchBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
     } else if (self->identify() && self->refresh()) {  // the first reading also arms the gauge window
         __atomic_store_n(&self->published, true, __ATOMIC_RELEASE);
         self->registerService();
+#if SWITCH_IPSW_KIND_24B119
+        self->pack = AppleSmartBatteryPack::publish(self, self->packReading, self->serialString);
+#endif
         IOLog("SwitchBattery: started\n");
     }
     sender->setTimeoutMS(self->published ? kRefreshMS : kIdentifyRetryMS);

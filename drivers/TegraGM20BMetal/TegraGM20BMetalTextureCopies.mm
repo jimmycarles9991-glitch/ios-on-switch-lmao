@@ -247,6 +247,9 @@ SwitchMetalTexture *cpuOwner(SwitchMetalTexture *t)
                                bytesPerImage:image];
         return;
     }
+#if SWITCH_METAL_DIAGNOSTICS
+    _replaceCount.fetch_add(1, std::memory_order_relaxed);
+#endif
     if (gm20bDecodedReplace(self, r, level, slice, bytes, row, image))
         return;
 #if SWITCH_METAL_DIAGNOSTICS

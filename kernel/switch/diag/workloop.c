@@ -14,6 +14,7 @@
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <os/atomic_private.h>
+#include <os/log.h>
 #include <sys/event_private.h>
 #include <sys/proc.h>
 
@@ -56,5 +57,58 @@ void switch_diag_wl_touched(uint32_t command, uint32_t sfflags, uint64_t workloo
            name, pid, thread_tid(self), workloop, ident, waiter == self ? "this" : "another",
            thread_tid((thread_t)(uintptr_t)waiter), sfflags);
 }
+
+#if XNU_12377_121_6
+#include "workloop_line.h"
+
+#define WL_HANDOFF_PROCESSES 64
+
+static struct {
+    int pid;
+    uint32_t seen[SWITCH_WL_KINDS];
+} wl_handoff[WL_HANDOFF_PROCESSES];
+
+/* The running count of `kind` in this process; 0 once every slot holds another process. */
+static uint32_t wl_handoff_seen(int pid, enum switch_wl_kind kind)
+{
+    for (unsigned int i = 0; i < WL_HANDOFF_PROCESSES; i++) {
+        int owner = os_atomic_load(&wl_handoff[i].pid, relaxed);
+        if (owner != pid &&
+            (owner != 0 || (!os_atomic_cmpxchgv(&wl_handoff[i].pid, 0, pid, &owner, relaxed) && owner != pid))) {
+            continue;
+        }
+        return os_atomic_inc(&wl_handoff[i].seen[kind], relaxed);
+    }
+    return 0;
+}
+
+void switch_diag_wl_hold(struct switch_wl_event *event, const void *owner, const void *servicer)
+{
+    *event = (struct switch_wl_event){
+        .held = true,
+        .owner = owner,
+        .servicer = servicer,
+        .owner_tid = owner ? thread_tid((thread_t)(uintptr_t)owner) : 0,
+        .servicer_tid = servicer ? thread_tid((thread_t)(uintptr_t)servicer) : 0,
+    };
+}
+
+void switch_diag_wl_event(enum switch_wl_kind kind, struct switch_wl_event *event)
+{
+    const int pid = proc_selfpid();
+    const uint32_t n = wl_handoff_seen(pid, kind);
+    if (n == 0 || !switch_wl_counted(n)) {
+        return;
+    }
+    if (event->waiter) {
+        event->waiter_tid = thread_tid((thread_t)(uintptr_t)event->waiter);
+    }
+    thread_t self = current_thread();
+    char name[32], line[320];
+    proc_selfname(name, sizeof(name));
+    switch_wl_format(line, sizeof(line), kind, n, name, pid, thread_tid(self), self, event);
+    os_log(OS_LOG_DEFAULT, "%s", line);
+}
+#endif
 
 #endif

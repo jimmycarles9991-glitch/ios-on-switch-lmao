@@ -115,6 +115,51 @@ public enum CAStateSweep {
         return Drawn(path: timing.path, attachments: attachments)
     }
 
+    /// The console's resolution, at which a state's cost is timed (tests/CAStateSweepTest.swift).
+    public static let passWidth = 1280
+    public static let passHeight = 720
+
+    /// The GPU milliseconds of one full-screen pass of the state at 1280x720: every attachment cleared, one rectangle
+    /// over the whole target with `draw`'s bindings; the median of `runs` command buffers, each GPU-timed.
+    public static func passMilliseconds(
+        _ line: PipelineLine, library: MTLLibrary, gpu: GPU, runs: Int = 5
+    ) async throws -> Double {
+        let pipeline = try CAState.pipeline(line, library: library, device: gpu.device)
+        var targets: [MTLTexture] = []
+        for color in line.colors.sorted(by: { $0.index < $1.index }) {
+            guard let format = MTLPixelFormat(rawValue: color.format) else {
+                throw Unsupported(description: "attachment format \(color.format)")
+            }
+            targets.append(try gpu.texture(format, passWidth, passHeight))
+        }
+        let source = try patternTexture(gpu)
+        let sampler = try linearSampler(gpu.device)
+        var times: [Double] = []
+        for _ in 0 ..< runs {
+            let timing = try await gpu.run { commands in
+                let pass = MTLRenderPassDescriptor()
+                for (index, target) in targets.enumerated() {
+                    pass.colorAttachments[index].texture = target
+                    pass.colorAttachments[index].loadAction = .clear
+                    pass.colorAttachments[index].clearColor = clear
+                    pass.colorAttachments[index].storeAction = .store
+                }
+                let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
+                encoder.setRenderPipelineState(pipeline)
+                bind(encoder, source: source, sampler: sampler)
+                var vertices = CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(0.9, 0.2, 0.6, 0.5))
+                encoder.setVertexBytes(
+                    &vertices, length: MemoryLayout<CAState.Vertex>.stride * vertices.count, index: 1
+                )
+                encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: vertices.count)
+                encoder.endEncoding()
+            }
+            guard timing.gpuTimed else { throw TestFailure("the 720p pass has no GPU time (\(timing.path))") }
+            times.append(timing.gpuMilliseconds)
+        }
+        return times.sorted()[times.count / 2]
+    }
+
     /// What the readback buffer holds before the blit: bytes a blit must leave alone (550's pad) still read as it.
     public static let sentinel: UInt8 = 0xA5
 

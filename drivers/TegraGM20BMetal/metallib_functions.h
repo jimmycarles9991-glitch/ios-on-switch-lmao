@@ -42,6 +42,7 @@ struct MetallibFunctions {
     size_t sliceBytes = 0;
     bool listed = false;                              // its whole function list read, which may name none
     std::unordered_map<std::string, uint32_t> types;  // each listed function's metalFunctionType (0: m2v answers it)
+    std::unordered_map<std::string, uint8_t> tess;    // each patch function's TESS tag (MetallibEntries.h decodeTess)
     // In list order, as Metal's functionNames and externFunctionNames answer them (MetallibEntries.h kMetallibExternType)
     std::vector<std::string> names, externs;
 
@@ -55,6 +56,8 @@ struct MetallibFunctions {
         const bool whole =
             switch_metal::forEachMetallibEntry(file + at, size, [&](const switch_metal::MetallibEntry &e) {
                 types[e.name] = e.type ? metalFunctionType(*e.type) : 0;
+                if (e.tess)
+                    tess[e.name] = *e.tess;
                 (e.type == switch_metal::kMetallibExternType ? externs : names).push_back(e.name);
                 return true;
             });

@@ -29,6 +29,11 @@ int xnu_stall_episode_kind(void);
 
 const char *xnu_stall_wait_name(unsigned hint);
 unsigned xnu_stall_wait_names(void);
+bool xnu_stall_owner_is_thread(int pid, uint64_t tid);
+bool xnu_stall_owner_known(int pid, uint64_t tid);
+bool xnu_stall_hop_present(int pid, uint64_t tid, bool locked);
+bool xnu_stall_rwlock_wait(unsigned hint);
+uint64_t xnu_stall_rwlock_of(uint64_t event, unsigned hint, bool allow_typed);
 // 0 raw, 1 dsc, 2 main.
 int xnu_stall_user_where(uint64_t pc, uint64_t sr_base, uint64_t sr_size, uint64_t sr_slide, uint64_t header,
                          uint64_t *value);

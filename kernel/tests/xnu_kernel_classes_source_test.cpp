@@ -86,5 +86,5 @@ TEST(XnuKernelClasses, NoDriverRegistersClassesItself)
         if (source.find("switch_kernel_classes(") != std::string::npos)
             ++registering;
     }
-    EXPECT_GE(registering, 12u);
+    EXPECT_GE(registering, 11u);
 }

@@ -91,10 +91,12 @@ static bool storageLaidOut(SwitchMetalCommandBuffer *cb, gm20b::RenderEncoder &o
 }
 
 // A Depth16Unorm a draw of the pass after `open` tests in its shader is the converted zeta only where `open` began it so
-// (TegraGM20BMetalRangeForms.mm depth16Tested)
+// (TegraGM20BMetalRangeForms.mm depth16Tested); a zeta of any other format is the same however its pass began
 static bool testedLaidOut(SwitchMetalCommandBuffer *cb, size_t open, size_t next)
 {
-    return !cb->_passes[cb->_plan.legacy(next).x].shaderTestsDepth ||
+    const SwitchMetalPass &pass = cb->_passes[cb->_plan.legacy(next).x];
+    __unsafe_unretained SwitchMetalTexture *depth = (SwitchMetalTexture *)pass.zeta[0].texture;
+    return !pass.shaderTestsDepth || !depth || depth->_raw.format != MTLPixelFormatDepth16Unorm ||
            cb->_passes[cb->_plan.legacy(open).x].shaderTestsDepth;
 }
 
@@ -288,6 +290,10 @@ bool SwitchMetalRangeEncode::seal(size_t to)
     cb->_seqno = seq;
     cb->_channelGeneration = generation_;
     cb->_stamp = cb->_segs.size() == 1 && !cb->_segs.front().event ? rc->stamp : 0;
+#if SWITCH_METAL_DIAGNOSTICS
+    if (!cb->_firstStamp)
+        cb->_firstStamp = rc->stamp;
+#endif
     cb->_rangeLoopStamp = rc->loopsLaid ? rc->stamp : 0;
     SWITCH_METAL_DIAGNOSTIC(d_->stats.levelPasses += levelPasses_);
     SWITCH_METAL_DIAGNOSTIC(gRM->stats.draws += rc->draws);

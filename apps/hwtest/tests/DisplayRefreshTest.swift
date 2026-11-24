@@ -3,20 +3,23 @@ import Darwin
 import HWTestCore
 import UIKit
 
-/// IOMFBDisplayRefresh from IOMobileFramebufferCopyProperty, which QuartzCore's AppleDisplay::update_display_limits
-/// reads (24B119) and IOMobileFramebufferLegacy::setDisplayRefreshProperties publishes. Its shortest refresh interval
-/// is the panel's period at its highest rate, and on a fixed-rate internal panel the longest is the same (the family
-/// answers 1/24 s for an external display); *_mach fields are mach ticks, period_mach the period expected.
+/// IOMFBDisplayRefresh, which QuartzCore's AppleDisplay::update_display_limits reads (24B119) and
+/// IOMobileFramebufferLegacy::setDisplayRefreshProperties publishes. Its shortest refresh interval is the panel's period
+/// at its highest rate, and on a fixed-rate internal panel the longest is the same (the family answers 1/24 s for an
+/// external display); *_mach fields are mach ticks, period_mach the period expected. The app's sandbox denies it
+/// IOMobileFramebufferCopyProperty's read of the property (iokit-get-properties on AppleCLCD), so the values come from
+/// the display's copy, kern.switch_display_refresh_* (debug kernels; source= says which was read).
 struct DisplayRefreshTest: HWTest {
     let id = "display.refresh_dictionary"
     let name = "The display publishes IOMFBDisplayRefresh"
     let subsystem = Subsystem.compositor
 
-    static let keys: [(key: String, field: String)] = [
-        ("displayMinRefreshInterval", "min"), ("displayMinRefreshIntervalMachTime", "min_mach"),
-        ("displayMaxRefreshInterval", "max"), ("displayMaxRefreshIntervalMachTime", "max_mach"),
-        ("displayRefreshStep", "step"), ("displayRefreshStepMachTime", "step_mach"),
+    static let keys = [
+        "displayMinRefreshInterval", "displayMinRefreshIntervalMachTime", "displayMaxRefreshInterval",
+        "displayMaxRefreshIntervalMachTime", "displayRefreshStep", "displayRefreshStepMachTime",
     ]
+    /// Each key's field, and the display's kern.switch_display_refresh_<field>.
+    static let counters = ["min", "min_mach", "max", "max_mach", "step", "step_mach"]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let fps = await MainActor.run { UIScreen.main.maximumFramesPerSecond }
@@ -29,16 +32,30 @@ struct DisplayRefreshTest: HWTest {
         metrics.set("present", found != nil)
         metrics.set("period_mach", Int(period))
         var values: [String: Int64] = [:]
-        for (key, field) in Self.keys {
-            guard let number = found?[key] as? NSNumber else { continue }
-            values[field] = number.int64Value
-            metrics.set(field, Int(number.int64Value))
+        var unread: Int32 = 0
+        for (key, field) in zip(Self.keys, Self.counters) {
+            if let number = found?[key] as? NSNumber {
+                values[field] = number.int64Value
+                continue
+            }
+            switch KernelSysctl.integer("kern.switch_display_refresh_" + field, as: Int64.self) {
+            case .value(let value) where value >= 0: values[field] = value
+            case .value: break
+            case .failed(let error): unread = error
+            }
+        }
+        if found == nil, values.isEmpty, unread != 0 {
+            return .skip(KernelSysctl.unreadable("kern.switch_display_refresh_*", unread), metrics)
+        }
+        metrics.set("source", found != nil ? "property" : "sysctl")
+        for field in Self.counters {
+            if let value = values[field] { metrics.set(field, Int(value)) }
         }
         let minMach = Double(values["min_mach"] ?? 0)
         let internalPanel = values["max_mach"].map { $0 == values["min_mach"] } ?? false
         return .judged(
             [
-                ("IOMobileFramebufferCopyProperty returns IOMFBDisplayRefresh", found != nil),
+                ("the display published IOMFBDisplayRefresh", !values.isEmpty),
                 ("all six keys", values.count == Self.keys.count),
                 ("min_mach within 1% of period_mach", abs(minMach - period) <= period / 100),
                 ("max_mach == min_mach (an internal panel)", internalPanel),

@@ -12,6 +12,7 @@ volatile uint64_t gSystemCoherent, gSystemCoherentBytes;
 volatile uint64_t gClientPoolBytes, gOrphanBytes, gOrphans;
 // Compressible BOs (pool chunks), every client's
 volatile uint64_t gCompressibleBytes, gCompressibles;
+volatile uint64_t gSmmuCompressibleBytes, gSmmuCompressibles;
 
 void pushOrphan(PoolOrphan *orphan)
 {

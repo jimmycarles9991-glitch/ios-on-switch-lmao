@@ -27,8 +27,8 @@
 
 namespace gm20b {
 
-constexpr uint64_t kCompGranule = 1ull << 17;
-constexpr uint32_t kCompAlignLog2 = 17;
+constexpr uint64_t kCompGranule = 1ull << 16;
+constexpr uint32_t kCompAlignLog2 = 16;
 
 enum : uint32_t {
     kCompKindC32 = 0xdb,   // NV_MMU_PTE_KIND_C32_2CRA

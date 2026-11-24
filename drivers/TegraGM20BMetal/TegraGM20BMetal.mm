@@ -128,13 +128,24 @@ static struct {
     gm20b::Device *dev = nullptr;
     gm20b::OpenFailure failure = gm20b::OpenFailure::Structural;
     bool started = false;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    uint64_t openNs = 0, warmNs = 0, waitedNs = 0;
+#endif
 } gPrepared;
 
 static gm20b::OpenFailure gOpenFailure = gm20b::OpenFailure::Structural;  // metal_device_open's last nil
 
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+static gm20b::Device *openDevice(const char *packPath, uint64_t stack, gm20b::Device::Role role, std::string &err,
+                                 gm20b::OpenFailure &failure, uint64_t *openNs = nullptr, uint64_t *warmNs = nullptr)
+#else
 static gm20b::Device *openDevice(const char *packPath, uint64_t stack, gm20b::Device::Role role, std::string &err,
                                  gm20b::OpenFailure &failure)
+#endif
 {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t began = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
     gm20b::Device *dev = new gm20b::Device;
     dev->heapHolds(gm20b::heapHolds);
     if (!dev->open(packPath, stack, err, role)) {
@@ -144,7 +155,16 @@ static gm20b::Device *openDevice(const char *packPath, uint64_t stack, gm20b::De
     }
     if (role == gm20b::Device::Role::Client)
         return dev;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    const uint64_t opened = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
     dev->warm();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (openNs && warmNs) {
+        *openNs = opened - began;
+        *warmNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - opened;
+    }
+#endif
     return dev;
 }
 
@@ -161,14 +181,34 @@ void metal_prepare(const char *packPath, uint64_t stack)
         pthread_setname_np("com.brunostjohn.switch.gm20b.open");
         std::string err;
         gm20b::OpenFailure failure = gm20b::OpenFailure::Structural;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        uint64_t openNs = 0, warmNs = 0;
+        gm20b::Device *dev = openDevice(gPrepared.path.c_str(), gPrepared.stack, gm20b::Device::Role::RenderServer, err,
+                                        failure, &openNs, &warmNs);
+#else
         gm20b::Device *dev =
             openDevice(gPrepared.path.c_str(), gPrepared.stack, gm20b::Device::Role::RenderServer, err, failure);
+#endif
         std::lock_guard<gm20b::Mutex> m(gPrepared.lock);
         gPrepared.dev = dev;
         gPrepared.err = err;
         gPrepared.failure = failure;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+        gPrepared.openNs = openNs;
+        gPrepared.warmNs = warmNs;
+#endif
     });
 }
+
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+void metal_prepare_split(uint64_t *open_ns, uint64_t *warm_ns, uint64_t *waited_ns)
+{
+    std::lock_guard<gm20b::Mutex> l(gPrepared.lock);
+    *open_ns = gPrepared.openNs;
+    *warm_ns = gPrepared.warmNs;
+    *waited_ns = gPrepared.waitedNs;
+}
+#endif
 
 void metal_complete_states(const char *cacheDir, const char *nativeSeed)
 {
@@ -177,33 +217,14 @@ void metal_complete_states(const char *cacheDir, const char *nativeSeed)
             std::make_unique<gm20b::Completion>(*gRM->raw, cacheDir, gRM->raw->pack().header()->stack, nativeSeed);
 }
 
-// libdispatch SPI (dispatch/private/queue_private.h): a root queue over threads of its own, `configure` run on each as it
-// starts.
-extern "C" dispatch_queue_global_t dispatch_pthread_root_queue_create(const char *label, unsigned long flags,
-                                                                      const pthread_attr_t *attr,
-                                                                      dispatch_block_t configure);
-
-// Scheduled handlers hold up the frame as the submit and completion threads do (Core Animation's render thread waits for
-// them in waitUntilScheduled), so they run on threads that follow the committers (follow.h), not on a QoS queue's
-// workers, which XNU clamps to 37 in a daemon: below the fixed-priority render thread waiting on them.
 dispatch_queue_t followingRootQueue()
 {
-    static const dispatch_queue_global_t root =
-        dispatch_pthread_root_queue_create("com.brunostjohn.switch.gm20b.following", 0, nullptr, ^{
-            pthread_setname_np("com.brunostjohn.switch.gm20b.following");
-            pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
-            gm20b::followers().join();
-        });
-    return root;
+    return gm20b::followingRoot();
 }
 
 dispatch_queue_t followingSerialQueue(const char *label)
 {
-    const dispatch_queue_t queue =
-        dispatch_queue_create(label, dispatch_queue_attr_make_initially_inactive(DISPATCH_QUEUE_SERIAL));
-    dispatch_set_target_queue(queue, followingRootQueue());
-    dispatch_activate(queue);
-    return queue;
+    return gm20b::followingSerial(label);
 }
 
 // The device class: a subclass of _MTLDevice (conforming to MTLDevice and MTLDeviceSPI, with no instance variables of its own:
@@ -260,9 +281,15 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
     {
         std::unique_lock<gm20b::Mutex> m(gPrepared.lock);
         if (gPrepared.started && gPrepared.thread.joinable()) {
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+            const uint64_t joining = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+#endif
             m.unlock();
             gPrepared.thread.join();  // what is left of it: it began with the plugin
             m.lock();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+            gPrepared.waitedNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - joining;
+#endif
         }
         if (gPrepared.started && gPrepared.path == packPath && gPrepared.stack == stack) {
             prepared = true;
@@ -322,18 +349,22 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
     r->listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:r->handlers];
     gRawRelease.startOnPressure(
         [](void *) {
-            gRM->orphanCheck.store(true, std::memory_order_release);
-            gRM->schedule.wake();
+            gm20bReleaseAhead(gRM->raw->hasBoundVolatileArena());
             const SwitchMetalPassTrim passes = gm20bPassTrim();
             const gm20b::Device::Trimmed kept = gRM->raw->trim();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+            gm20b::Device::PurgeStats purge;
+            gRM->raw->purgeArenas(gRM->committed, &purge);
+#else
             gRM->raw->purgeArenas(gRM->committed);
+#endif
             gRM->raw->trimArenas(gRM->committed);
             releaseRecordings();
             // A daemon over its inactive jetsam limit is killed when it goes inactive, without a pressure notification that
             // would have made malloc give back the dirty pages its zones keep free (a compile's working memory)
             const size_t relieved = malloc_zone_pressure_relief(nullptr, 0);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-            logGivenBack(relieved, passes, kept);
+            logGivenBack(relieved, passes, kept, purge);
 #else
             (void)relieved;
             (void)passes;
@@ -341,24 +372,34 @@ id<MTLDevice> metal_device_open(const char *packPath, uint64_t stack, uint64_t r
 #endif
         },
         nullptr);
-    // A process that opens the device and draws nothing gives back the room its first queue kept.
-    r->idle.drained(clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     const bool renderServer = dev->role() == gm20b::Device::Role::RenderServer;
+    // A client that opens the device and draws nothing gives back the room its first queue kept.
+    if (renderServer)
+        r->idle.pressureOnly();
+    else
+        r->idle.drained(clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
     if (renderServer)
         os_log(gm20bLog(), "SwitchMetal: shader heap %llu KB, each program placed at its state's first use",
                (unsigned long long)(dev->heapBytes() >> 10));
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    {  // the stall line's timer (gm20bStallTick): its own, so nothing the render server's other threads hold delays it; another
-        // process's rides the wakeups it takes anyway
+    {  // the stall line's timer (gm20bStallTick): one a process, on a serial queue of its own, which alone runs the tick
+        // and so owns its state. Nothing the render server's other threads hold delays it; another process's rides the
+        // wakeups it takes anyway. On a global queue a source's ticks are kept apart only inside libdispatch, where
+        // ThreadSanitizer cannot see it.
         static dispatch_source_t stall;
-        stall =
-            dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0));
-        dispatch_source_set_timer(stall, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC,
-                                  renderServer ? NSEC_PER_SEC / 4 : 5 * NSEC_PER_SEC);
-        dispatch_source_set_event_handler(stall, ^{
-            gm20bStallTick();
+        static dispatch_once_t once;
+        dispatch_once(&once, ^{
+            dispatch_queue_t ticks = dispatch_queue_create(
+                "com.brunostjohn.switch.gm20b.stall",
+                dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+            stall = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, ticks);
+            dispatch_source_set_timer(stall, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC), 5 * NSEC_PER_SEC,
+                                      renderServer ? NSEC_PER_SEC / 4 : 5 * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(stall, ^{
+                gm20bStallTick();
+            });
+            dispatch_resume(stall);
         });
-        dispatch_resume(stall);
     }
     watchFetchBarrierWay(dev);
     watchKeylineProbe();

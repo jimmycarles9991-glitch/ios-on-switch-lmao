@@ -113,8 +113,9 @@ void tgm_hold_stats(char *buf, unsigned int len);
 
 /* The deadline (deadline.c). */
 void tgm_deadline_init(struct nvkm_device *device);
-/* gpu_exec.c: a high channel kicked (compositor: one of the compositor's, not the present's); app: it found an app on the GPU. */
-void tgm_deadline_kicked(int compositor, int app);
+/* gpu_exec.c: a high channel kicked (compositor: one of the compositor's, not the present's); app: it found an app on
+ * the GPU. Returns 1 for a compositor kick that is not its frame's first. */
+int tgm_deadline_kicked(int compositor, int app);
 /* gpu_exec.c, an app channel's kick, between its publication barrier and its doorbell: plain loads unless the frame
  * end kept a window for a slow app's work; then it opens the window and takes the holds due by now in the gate if no pass
  * holds it, and wakes the owner to do it if one does. 1 when it took them. */

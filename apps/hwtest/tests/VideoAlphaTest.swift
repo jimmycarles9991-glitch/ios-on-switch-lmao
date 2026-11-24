@@ -84,7 +84,7 @@ struct VideoAlphaTest: HWTest {
         if !reasons.isEmpty {
             let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try? composited.png()?.write(to: directory.appendingPathComponent("composited.png"))
+            try? composited.png()?.place(at: directory.appendingPathComponent("composited.png"))
             return .fail(LogLine.fitted(reasons), metrics)
         }
         return .pass(metrics)

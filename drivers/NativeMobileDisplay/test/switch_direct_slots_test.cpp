@@ -56,17 +56,36 @@ public:
     }
 };
 
-void *tegra_gm20b_surface_hold(uint64_t, int *)
-{
-    return nullptr;
+namespace {
+void *nextHoldPtr;
+unsigned surfaceHoldCalls, surfaceUnholdCalls;
+bool surfaceIsCompressed, compressDuringHold;
 }
 
-void tegra_gm20b_surface_unhold(void *)
-{}
+void *tegra_gm20b_surface_hold(uint64_t, int *tiled)
+{
+    ++surfaceHoldCalls;
+    if (compressDuringHold)
+        surfaceIsCompressed = true;
+    if (nextHoldPtr)
+        *tiled = 1;
+    return nextHoldPtr;
+}
+
+void tegra_gm20b_surface_unhold(void *hold)
+{
+    if (hold)
+        ++surfaceUnholdCalls;
+}
 
 int tegra_gm20b_surface_layout(uint64_t, tgm_layout *)
 {
     return 0;
+}
+
+extern "C" int tegra_gm20b_surface_compressed(uint64_t)
+{
+    return surfaceIsCompressed ? 1 : 0;
 }
 
 namespace {
@@ -211,6 +230,9 @@ protected:
         error = heldError = 0;
         leases = lookups = heldSnapshots = 0;
         heldSeen = nullptr;
+        nextHoldPtr = nullptr;
+        surfaceHoldCalls = surfaceUnholdCalls = 0;
+        surfaceIsCompressed = compressDuringHold = false;
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
         nextLook = {};
 #endif
@@ -345,3 +367,44 @@ TEST_F(DirectSlots, AFlipReportsItsOwnSnapshotWhenTheSlotKeepsItsLease)
     EXPECT_EQ(display->directLook.writer.value, 5u);
 }
 #endif
+
+TEST_F(DirectSlots, PostHoldCompressionRaceUnwindsNewSlotCleanly)
+{
+    nextHoldPtr = reinterpret_cast<void *>(0xdead);
+    compressDuringHold = true;
+    EXPECT_EQ(offer(), -1);
+    EXPECT_EQ(leases, 0u);
+    EXPECT_EQ(memory.prepares, 0u);
+    EXPECT_EQ(memory.refs, 1u);
+    EXPECT_EQ(surface.refs, 1u);
+    EXPECT_EQ(display->probeDomain.maps, 1u);
+    EXPECT_EQ(display->probeDomain.unmaps, 1u);
+    EXPECT_EQ(surfaceHoldCalls, 1u);
+    EXPECT_EQ(surfaceUnholdCalls, 1u);
+    EXPECT_EQ(display->scanoutHeld[0], nullptr);
+}
+
+TEST_F(DirectSlots, PostHoldCompressionRaceRejectsIdleAndBusyCachedSlotsWithoutLeaking)
+{
+    ASSERT_EQ(offer(), 3);
+    display->releaseIdleDirectReads();
+    EXPECT_EQ(leases, 0u);
+
+    nextHoldPtr = reinterpret_cast<void *>(0xbeef);
+    compressDuringHold = true;
+    EXPECT_EQ(offer(), -1);
+    EXPECT_EQ(leases, 0u);
+    EXPECT_EQ(memory.prepares, 0u);
+    EXPECT_EQ(display->probeDomain.unmaps, 1u);
+    EXPECT_EQ(surfaceUnholdCalls, 1u);
+
+    surfaceIsCompressed = compressDuringHold = false;
+    nextHoldPtr = nullptr;
+    ASSERT_EQ(offer(), 3);
+    display->ring.ready(3);
+    display->releaseIdleDirectReads();
+    surfaceIsCompressed = true;
+    EXPECT_EQ(offer(), -1);
+    EXPECT_EQ(leases, 1u);
+    EXPECT_EQ(display->probeDomain.unmaps, 1u);
+}

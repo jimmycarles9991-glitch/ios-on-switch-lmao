@@ -48,9 +48,9 @@ static inline struct switch_gpu_kicked_job *switch_gpu_jobs_next(struct switch_g
 }
 
 /* Before the kick: the job releasing first .. last, as kicked behind an app until the kick's result says otherwise. */
-static inline struct switch_gpu_kicked_job *switch_gpu_jobs_kick(struct switch_gpu_jobs *jobs,
-								 uint32_t first, uint32_t last,
-								 uint64_t kick_ns, int quiet)
+static inline struct switch_gpu_kicked_job *
+switch_gpu_jobs_kick_waits(struct switch_gpu_jobs *jobs, uint32_t first, uint32_t last,
+			   uint64_t kick_ns, int quiet, int waits)
 {
 	struct switch_gpu_kicked_job *job = switch_gpu_jobs_next(jobs);
 
@@ -59,11 +59,19 @@ static inline struct switch_gpu_kicked_job *switch_gpu_jobs_kick(struct switch_g
 	__atomic_store_n(&job->kick_ns, kick_ns, __ATOMIC_RELAXED);
 	__atomic_store_n(&job->behind, -1, __ATOMIC_RELAXED);
 	__atomic_store_n(&job->app, 1, __ATOMIC_RELAXED);
+	__atomic_store_n(&job->waits, waits ? 1 : 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&job->quiet, quiet ? 1 : 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&job->first, first, __ATOMIC_RELEASE);
 	__atomic_store_n(&job->last, last, __ATOMIC_RELEASE);
 	jobs->kicked++;
 	return job;
+}
+
+static inline struct switch_gpu_kicked_job *switch_gpu_jobs_kick(struct switch_gpu_jobs *jobs,
+								 uint32_t first, uint32_t last,
+								 uint64_t kick_ns, int quiet)
+{
+	return switch_gpu_jobs_kick_waits(jobs, first, last, kick_ns, quiet, 0);
 }
 
 /* A copy of the record holding `seqno`; 0 if none does (never kicked here, or refilled since, the copy included). */

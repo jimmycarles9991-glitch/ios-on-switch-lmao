@@ -6272,3 +6272,116 @@ _IOMemoryDescriptorMixedData::getLength() const
 {
 	return _data ? _length : 0;
 }
+
+#include <switch/park_mapping_internal.h>
+
+namespace {
+struct SwitchDescAccessor : IOMemoryDescriptor {
+	static IOOptionBits
+	flags(const IOMemoryDescriptor *desc)
+	{
+		return static_cast<const SwitchDescAccessor *>(desc)->_flags;
+	}
+};
+
+struct SwitchGmdAccessor : IOGeneralMemoryDescriptor {
+	static const IOMemoryReference *
+	memRef(const IOGeneralMemoryDescriptor *gmd)
+	{
+		return static_cast<const SwitchGmdAccessor *>(gmd)->_memRef;
+	}
+};
+}
+
+extern "C" bool
+switch_iokit_desc_is_physical(const IOMemoryDescriptor *desc)
+{
+	if (!desc) {
+		return false;
+	}
+	const IOOptionBits type = SwitchDescAccessor::flags(desc) & kIOMemoryTypeMask;
+	return type == kIOMemoryTypePhysical || type == kIOMemoryTypePhysical64;
+}
+
+extern "C" bool
+switch_iokit_map_is_unique(const IOMemoryMap *map)
+{
+	if (!map) {
+		return false;
+	}
+	LOCK;
+	const bool unique = map->getRetainCount() == 2;
+	UNLOCK;
+	return unique;
+}
+
+extern "C" bool
+switch_iokit_gmd_entries(const IOGeneralMemoryDescriptor *gmd, struct switch_iokit_mem_entry *entries,
+    uint32_t capacity, uint32_t *count_out, bool *has_map_ref_out)
+{
+	if (count_out) {
+		*count_out = 0;
+	}
+	if (has_map_ref_out) {
+		*has_map_ref_out = false;
+	}
+	if (!gmd) {
+		return false;
+	}
+	LOCK;
+	const IOMemoryReference *ref = SwitchGmdAccessor::memRef(gmd);
+	if (ref && ref->mapRef) {
+		if (has_map_ref_out) {
+			*has_map_ref_out = true;
+		}
+		ref = ref->mapRef;
+	}
+	const uint32_t count = ref ? ref->count : 0u;
+	if (count_out) {
+		*count_out = count;
+	}
+	const bool fits = count <= capacity;
+	if (fits && entries) {
+		for (uint32_t i = 0; i < count; ++i) {
+			entries[i].port = ref->entries[i].entry;
+			entries[i].offset = ref->entries[i].offset;
+			entries[i].size = ref->entries[i].size;
+		}
+	}
+	UNLOCK;
+	return fits;
+}
+
+extern "C" bool
+switch_iokit_map_check_or_neuter(IOMemoryMap *map, const IOMemoryDescriptor *expected_mem,
+    task_t task, uint64_t address, uint64_t bytes, bool neuter)
+{
+	if (!map || !expected_mem || task == TASK_NULL) {
+		return false;
+	}
+	LOCK;
+	const bool ok = map->fAddressTask == task && map->fAddress == address &&
+	    map->fLength == bytes && map->fOffset == 0 &&
+	    map->getMemoryDescriptor() == expected_mem && !map->fSuperMap &&
+	    map->fAddressMap != NULL && map->getRetainCount() == 2;
+	if (ok && neuter) {
+		map->fOptions |= kIOMapOverwrite;
+		map->unmap();
+	}
+	UNLOCK;
+	return ok;
+}
+
+extern "C" void
+switch_iokit_map_neuter_after_park(IOMemoryMap *map)
+{
+	if (!map) {
+		return;
+	}
+	LOCK;
+	if (map->fAddressMap != NULL) {
+		map->fOptions |= kIOMapOverwrite;
+		map->unmap();
+	}
+	UNLOCK;
+}

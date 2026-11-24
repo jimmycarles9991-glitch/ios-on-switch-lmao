@@ -100,6 +100,27 @@ TEST(SwitchFrameTickets, CapacityNeverEvictsAnInFlightTicket)
     EXPECT_EQ(tickets.find(&requests[7])->gpu, 0u);
     EXPECT_EQ(tickets.totals.accepted, SwitchFrameTickets::kCapacity + 2);
 }
+
+// Each shown swap's frame end against its requested presentation, in whole periods rounded, until the window takes
+// them: on time within half a period either way, late, early, past either end of the bins, and a swap with no request.
+TEST(SwitchFrameTickets, ShownMinusRequestedInPeriodsPerWindow)
+{
+    SwitchFrameTickets tickets;
+    constexpr uint64_t kPeriod = 16667, kRequested = 10000000;
+    tickets.lagged(kRequested, kRequested + 8000, kPeriod);
+    tickets.lagged(kRequested, kRequested - 8000, kPeriod);
+    tickets.lagged(kRequested, kRequested + kPeriod + 2000, kPeriod);
+    tickets.lagged(kRequested, kRequested - kPeriod, kPeriod);
+    tickets.lagged(kRequested, kRequested - 5 * kPeriod, kPeriod);
+    tickets.lagged(kRequested, kRequested + 9 * kPeriod, kPeriod);
+    tickets.lagged(0, kRequested, kPeriod);
+    const SwitchFrameTickets::Lag lag = tickets.takeLag();
+    const uint32_t expected[SwitchFrameTickets::kLagBins] = {1, 1, 2, 1, 0, 0, 1};
+    for (unsigned i = 0; i < SwitchFrameTickets::kLagBins; ++i)
+        EXPECT_EQ(lag.bins[i], expected[i]) << "periods " << static_cast<int>(i) + SwitchFrameTickets::kLagEarliest;
+    EXPECT_EQ(lag.unknown, 1u);
+    EXPECT_EQ(tickets.takeLag().unknown, 0u) << "the next window starts empty";
+}
 #else
 static_assert(std::is_empty<SwitchFrameTickets>::value, "Release carries no frame tracking state");
 

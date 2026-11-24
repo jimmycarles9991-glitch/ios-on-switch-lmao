@@ -26,7 +26,8 @@ Device::PlainMem *Device::largestPlain(uint32_t tag, uint32_t memory, bool layer
     return best;
 }
 
-Device::Backing *Device::plainBacking(const Texture &m, uint32_t tag, bool blockLinear)
+Device::Backing *Device::plainBacking(std::unique_lock<gm20b::Mutex> &l, const Texture &m, uint32_t tag,
+                                      bool blockLinear, DeferredFrees &deferred)
 {
     Texture t;
     fx::MipChain c;
@@ -71,28 +72,34 @@ Device::Backing *Device::plainBacking(const Texture &m, uint32_t tag, bool block
         made->layered = layered;
         made->align = align;
         const uint64_t want = sizeClassBytes(bytes, kBlAlign);
-        const bool ok = memory == kPlainPool ? poolAlloc(want, made->span)
+        const bool ok = memory == kPlainPool ? poolAlloc(l, want, made->span)
                         : memory == kPlainBl
-                            ? blAlloc(want, align, made->span)
-                            : tiledAlloc(zChunks_[memory - kPlainZeta], kZetaFormatInfo[memory - kPlainZeta].kind, want,
-                                         align, made->span);
+                            ? blAlloc(l, want, align, made->span)
+                            : tiledAlloc(l, zChunks_[memory - kPlainZeta], kZetaFormatInfo[memory - kPlainZeta].kind,
+                                         want, align, made->span);
         if (!ok || (made->span.va & (align - 1))) {
             if (ok)
-                freePlainSpan(*made);
+                freePlainSpan(*made, deferred);
             return nullptr;
         }
-        SWITCH_METAL_DIAGNOSTIC(stats.backingBytes += made->span.bytes);
-        SWITCH_METAL_DIAGNOSTIC(glassMemEvent("memoryless plain memory made", made->span.bytes));
-        plainMems_.push_back(std::move(made));
-        mem = plainMems_.back().get();
-        // the views of its tag's smaller memory: no pass takes them again (an animated layer seldom asks a size twice), so it
-        // goes back once their last uses complete rather than 10 s on
-        for (Backing *b : backings_)
-            if (b->plain && b->plain != mem && b->plain->holds(tag, memory, layered))
-                b->retired = true;
-        backingsChanged();
-        compRearm_ = true;  // an idle process gives it back when it turns stale
-        compStart();
+        PlainMem *existing = largestPlain(tag, memory, layered);
+        if (existing && existing->span.bytes >= bytes && !(existing->span.va & (align - 1))) {
+            freePlainSpan(*made, deferred);
+            mem = existing;
+        } else {
+            SWITCH_METAL_DIAGNOSTIC(stats.backingBytes += made->span.bytes);
+            SWITCH_METAL_DIAGNOSTIC(glassMemEvent("memoryless plain memory made", made->span.bytes));
+            plainMems_.push_back(std::move(made));
+            mem = plainMems_.back().get();
+            // the views of its tag's smaller memory: no pass takes them again (an animated layer seldom asks a size twice), so it
+            // goes back once their last uses complete rather than 10 s on
+            for (Backing *b : backings_)
+                if (b->plain && b->plain != mem && b->plain->holds(tag, memory, layered))
+                    b->retired = true;
+            backingsChanged();
+            compRearm_ = true;  // an idle process gives it back when it turns stale
+            compStart();
+        }
     }
     t.va = mem->span.va;
     t.storage = {t.va, bytes, false};
@@ -100,7 +107,7 @@ Device::Backing *Device::plainBacking(const Texture &m, uint32_t tag, bool block
     if (m.zeta) {  // a depth resolve's or a turn copy's source samples it
         if (!(t.tic = allocTic())) {
             if (!mem->views)
-                dropPlain(mem);
+                dropPlain(mem, deferred);
             return nullptr;
         }
         writeTic(t);
@@ -108,7 +115,7 @@ Device::Backing *Device::plainBacking(const Texture &m, uint32_t tag, bool block
     if (!m.zeta) {
         if (!(t.tic = allocTic())) {
             if (!mem->views)
-                dropPlain(mem);
+                dropPlain(mem, deferred);
             return nullptr;
         }
         if (blockLinear) {
@@ -130,27 +137,27 @@ Device::Backing *Device::plainBacking(const Texture &m, uint32_t tag, bool block
     return b;
 }
 
-void Device::freePlainSpan(PlainMem &mem)
+void Device::freePlainSpan(PlainMem &mem, DeferredFrees &deferred)
 {
     if (mem.memory == kPlainPool)
-        poolFree(mem.span);
+        poolFree(mem.span, deferred);
     else if (mem.memory == kPlainBl)
-        blFree(mem.span);
+        blFree(mem.span, deferred);
     else
-        tiledFree(zChunks_[mem.memory - kPlainZeta], mem.span);
+        tiledFree(zChunks_[mem.memory - kPlainZeta], mem.span, deferred);
 }
 
-void Device::dropPlain(PlainMem *mem)
+void Device::dropPlain(PlainMem *mem, DeferredFrees &deferred)
 {
     SWITCH_METAL_DIAGNOSTIC(stats.backingBytes -= mem->span.bytes);
     SWITCH_METAL_DIAGNOSTIC(glassMemEvent("memoryless plain memory freed", mem->span.bytes));
-    freePlainSpan(*mem);
+    freePlainSpan(*mem, deferred);
     plainMems_.erase(std::find_if(plainMems_.begin(), plainMems_.end(), [&](const std::unique_ptr<PlainMem> &p) {
         return p.get() == mem;
     }));
 }
 
-void Device::plainFree(Backing &b)
+void Device::plainFree(Backing &b, DeferredFrees &deferred)
 {
     if (b.texture.tic)
         freeTic(b.texture.tic);
@@ -158,7 +165,7 @@ void Device::plainFree(Backing &b)
     PlainMem *mem = b.plain;
     b.plain = nullptr;
     if (!--mem->views)
-        dropPlain(mem);
+        dropPlain(mem, deferred);
 }
 
 Texture *Device::lastBacking(const Texture &m, uint32_t tag, bool blockLinear, bool compression, bool copied)
@@ -176,7 +183,8 @@ Texture *Device::lastBacking(const Texture &m, uint32_t tag, bool blockLinear, b
     return nullptr;
 }
 
-Texture *Device::backing(const Texture &m, uint32_t tag, bool blockLinear, bool compression, bool copied)
+Texture *Device::backing(std::unique_lock<gm20b::Mutex> &l, DeferredFrees &deferred, const Texture &m, uint32_t tag,
+                         bool blockLinear, bool compression, bool copied)
 {
     BackingAsk ask{m.width,     m.height,    m.format, tag,         std::max(m.layers, 1u), m.samples, m.zeta,
                    blockLinear, compression, copied,   kindProbes()};
@@ -225,7 +233,7 @@ Texture *Device::backing(const Texture &m, uint32_t tag, bool blockLinear, bool 
     }
     if (plain)
         return asked(plain);
-    Backing *view = plainBacking(m, tag, blockLinear);
+    Backing *view = plainBacking(l, m, tag, blockLinear, deferred);
     if (!view)
         return nullptr;
     backings_.push_back(view);
@@ -236,7 +244,7 @@ Texture *Device::backing(const Texture &m, uint32_t tag, bool blockLinear, bool 
 // one (a compressed backing, or one on larger memory of its tag, replaced it) as soon as its last use completed, as no pass
 // takes it again; one on compressed or shared plain memory after 10 s unused too, also while the process commits nothing
 // (comp.h backingStale; the compressed-memory thread trims then).
-void Device::trimBackings()
+void Device::trimBackings(DeferredFrees &deferred)
 {
     // the counts before the backings' stamps: a commit stores its stamps before it moves them
     const uint64_t committed = commits(), closedNow = closedCount_.load(std::memory_order_acquire);
@@ -248,10 +256,10 @@ void Device::trimBackings()
                (!b->submitted.load(std::memory_order_relaxed) || done(b->lastUse.load(std::memory_order_relaxed)));
     };
     const size_t ready = comp_.ready.size();
-    compTrim(now);
+    compTrim(now, deferred);
     for (auto it = spares_.begin(); it != spares_.end();) {
         if (committed - it->freedAt > 600) {
-            freeChunk(chunks_[it->chunk]);
+            freeChunk(chunks_[it->chunk], deferred);
             it = spares_.erase(it);
             continue;
         }
@@ -270,9 +278,9 @@ void Device::trimBackings()
             if (b->tag < lastBackings_.size() && lastBackings_[b->tag] == b)
                 lastBackings_[b->tag] = nullptr;
             if (b->comp) {
-                compFree(*b);
+                compFree(*b, deferred);
             } else if (b->plain) {
-                plainFree(*b);
+                plainFree(*b, deferred);
             }
             trimmedBackings_.push_back(b);
             trimmedPending_.store(true, std::memory_order_release);

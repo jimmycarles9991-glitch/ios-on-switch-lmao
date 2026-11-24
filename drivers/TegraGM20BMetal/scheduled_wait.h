@@ -2,8 +2,16 @@
 // When waitUntilScheduled returns (TegraGM20BMetalCommandBuffer.mm), and which waits of a queue's head let the command buffers
 // committed behind it count as scheduled before their work is submitted (TegraGM20BMetalSchedule.mm).
 #pragma once
+#include <cstdint>
 
 namespace gm20b {
+
+constexpr uint32_t kEarlySchedulePasses = 4;
+
+constexpr bool earlySchedule(bool compositor, bool workerBusy, uint32_t remainingPasses, bool multiRange)
+{
+    return compositor && (workerBusy || multiRange || remainingPasses >= kEarlySchedulePasses);
+}
 
 enum class HeadWait {
     event,     // a shared event value nothing reached yet

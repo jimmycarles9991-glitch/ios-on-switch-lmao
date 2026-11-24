@@ -41,9 +41,9 @@ TEST(GM20BMemSource, OnlyTheRefillThreadMakesSparesOfUnits)
 TEST(GM20BMemSource, AUnitIsOneAlignedContiguousRun)
 {
 	const std::string buffer = unit("SwitchGpuCachedBuffer.cpp");
-	const CodeText part = Block(buffer, "IOMemoryDescriptor *part(uint64_t bytes, bool unit)");
-	EXPECT_TRUE(part.has("unit ? kOptions | kIOMemoryPhysicallyContiguous : kOptions"));
-	EXPECT_TRUE(part.has("unit ? kReach & ~(SWITCH_GPU_SPARE_UNIT_BYTES - 1) : kReach"));
+	EXPECT_TRUE(Block(buffer, "bool switch_gpu_cached_buffer_units(")
+			    .has("switch_iokit_fresh_memory(SWITCH_GPU_SPARE_UNIT_BYTES, "
+				 "SWITCH_GPU_SPARE_UNIT_BYTES, &cpu)"));
 	EXPECT_TRUE(Block(buffer, "bool switch_gpu_cached_buffer_alone(")
 			    .has("getRetainCount() == (buffer.map ? 2 : 1)"));
 }

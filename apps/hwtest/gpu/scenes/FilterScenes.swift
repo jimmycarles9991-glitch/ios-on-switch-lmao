@@ -62,7 +62,7 @@ struct MipmapScene: GPUScene {
         }
         result.metrics.set("paths", paths.joined(separator: ","))
         if GM20BFacade.kind(of: gpu.device) == "gm20b" {
-            let off = paths.filter { !$0.hasSuffix(":raw") }
+            let off = paths.filter { !$0.hasSuffix(":gm20b") }
             result.expect(off.isEmpty, "generateMipmaps off the driver: \(off.joined(separator: ","))")
         }
         return result

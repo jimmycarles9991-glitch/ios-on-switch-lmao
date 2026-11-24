@@ -28,7 +28,7 @@ extern "C" int proc_selfpid(void);
 
 namespace
 {
-void drain(tgm_coh *c, tgm_tiled &t);
+int drain(tgm_coh *c, tgm_tiled &t);
 
 constexpr uint32_t kLock = 2, kLockReadOnly = 0x1, kLockAvoidSync = 0x2;
 #if TGM_STATS
@@ -110,22 +110,28 @@ void noteReused(const tgm_coh *c, bool same)
 #endif
 }
 
-// A move the copy engine could not make is the CPU's (tgm_relayout_by_cpu cannot fail)
-void move(tgm_coh *c, const tgm_tiled &t, const tgm_relayout_pages &rows, int op)
+int move(tgm_coh *c, const tgm_tiled &t, const tgm_relayout_pages &rows, int op)
 {
 	const tgm_relayout_pages pages = tgm_coh_pages(c);
 	tgm_relayout_writer writers[TGM_RELAYOUT_MAX_WAITS];
 	const uint32_t n = tgm_coh_writers(c, writers, TGM_RELAYOUT_MAX_WAITS);
-	if (const int ret =
-		    tgm_relayout(&pages, &rows, &t.layout, t.bytes_per_row, op, writers, n)) {
+	const int ret = tgm_relayout(&pages, &rows, &t.layout, t.bytes_per_row, op, writers, n);
+	if (!ret)
+		return 0;
+	if (t.kind != 0u && t.kind != TGM_LAYOUT_KIND) {
 		switch_refusal(
 			"iosurface-layout", "ce-move-failed",
-			"IOSurface %u: the copy engine did not move its texels for the CPU (%d): "
-			"the CPU did",
+			"IOSurface %u: the copy engine did not move its compressed texels (%d)",
 			tgm_coh_surface_id(c), ret);
-		tgm_coh_wait_visible(c);
-		tgm_relayout_by_cpu(&pages, &rows, &t.layout, t.bytes_per_row, op, writers, n);
+		return ret;
 	}
+	switch_refusal("iosurface-layout", "ce-move-failed",
+		       "IOSurface %u: the copy engine did not move its texels for the CPU (%d): "
+		       "the CPU did",
+		       tgm_coh_surface_id(c), ret);
+	tgm_coh_wait_visible(c);
+	tgm_relayout_by_cpu(&pages, &rows, &t.layout, t.bytes_per_row, op, writers, n);
+	return 0;
 }
 
 // The rows the last read-only locks gave back, if no GPU submission may have written the texels since they were moved
@@ -171,7 +177,10 @@ int fill(tgm_coh *c, tgm_tiled &t, uint32_t options)
 		return 1;
 	}
 	tgm_cpu_clean_pages(rows.pas, rows.npages);
-	move(c, t, rows, TGM_RELAYOUT_TO_ROWS);
+	if (move(c, t, rows, TGM_RELAYOUT_TO_ROWS)) {
+		tgm_scratch_put(scratch);
+		return 1;
+	}
 	tgm_cpu_clean_pages(rows.pas, rows.npages);
 	t.scratch = scratch;
 	return 0;
@@ -187,7 +196,10 @@ bool mergeBack(tgm_coh *c, const tgm_tiled &t)
 	if (!gpu)
 		return false;
 	tgm_cpu_clean_pages(gpuRows.pas, gpuRows.npages);
-	move(c, t, gpuRows, TGM_RELAYOUT_TO_ROWS);
+	if (move(c, t, gpuRows, TGM_RELAYOUT_TO_ROWS)) {
+		tgm_scratch_put(gpu);
+		return false;
+	}
 	tgm_cpu_clean_pages(gpuRows.pas, gpuRows.npages);
 	void *maps[3] = {};
 	auto *merged = static_cast<uint64_t *>(tgm_scratch_map(gpu, &maps[0]));
@@ -198,17 +210,19 @@ bool mergeBack(tgm_coh *c, const tgm_tiled &t)
 		tgm_view_merge(merged, rows, base, bytes / sizeof(uint64_t));
 	for (void *map : maps)
 		tgm_scratch_unmap(map);
+	bool wroteBack = false;
 	if (mapped) {
 		tgm_cpu_clean_pages(gpuRows.pas, gpuRows.npages);
-		move(c, t, gpuRows, TGM_RELAYOUT_TO_TILED);
+		wroteBack = move(c, t, gpuRows, TGM_RELAYOUT_TO_TILED) == 0;
 	}
 	tgm_scratch_put(gpu);
-	return mapped;
+	return wroteBack;
 }
 
 // The last unlock: what a writer left in the scratch back into the texels, behind the GPU's writers
-void drain(tgm_coh *c, tgm_tiled &t)
+int drain(tgm_coh *c, tgm_tiled &t)
 {
+	int failed = 0;
 	if (t.wrote) {
 		tgm_relayout_pages rows;
 		tgm_scratch_pages(t.scratch, &rows);
@@ -221,8 +235,14 @@ void drain(tgm_coh *c, tgm_tiled &t)
 				       "CPU write lock: the unlock writes the lock's rows over it",
 				       tgm_coh_surface_id(c));
 		}
-		if (!merged)
-			move(c, t, rows, TGM_RELAYOUT_TO_TILED);
+		if (!merged) {
+			failed = move(c, t, rows, TGM_RELAYOUT_TO_TILED);
+			if (failed)
+				switch_refusal("iosurface-layout", "unlock-writeback-failed",
+					       "IOSurface %u: compressed unlock writeback failed "
+					       "(%d)",
+					       tgm_coh_surface_id(c), failed);
+		}
 	}
 	if (t.base) {
 		tgm_scratch_put(t.base);
@@ -238,6 +258,7 @@ void drain(tgm_coh *c, tgm_tiled &t)
 	}
 	t.scratch = nullptr;
 	t.wrote = t.stranded = 0;
+	return failed;
 }
 
 // Every refusal comes before anything is held, so a refused lock leaves the surface as it found it, and a lock that goes
@@ -297,11 +318,11 @@ int lock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, 
 	return 0;
 }
 
-void unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, bool &released)
+int unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t options, bool &released)
 {
 	tgm_cpu_view v;
 	if (!t.locks || tgm_cpu_view_of(client, id, &v) <= 0)
-		return;
+		return 0;
 	if (!(options & kLockReadOnly))
 		t.wrote = 1;
 	const int i = findView(t, v);
@@ -319,11 +340,13 @@ void unlock(tgm_coh *c, tgm_tiled &t, void *client, uint32_t id, uint32_t option
 		}
 		removeView(t, static_cast<uint32_t>(i));
 	}
+	int failed = 0;
 	if (!--t.locks) {
 		if (t.scratch)
-			drain(c, t);
+			failed = drain(c, t);
 		released = true;
 	}
+	return failed;
 }
 
 // A deferred surface (TegraGM20BCoherency.cpp: its last GPU import went while it was block-linear) has its texels moved
@@ -375,7 +398,7 @@ extern "C" int tgm_views_trap(void *client, uint32_t index, uint32_t id, uint32_
 		if (index == kLock) {
 			refused = lock(c, *t, client, id, options, held);
 		} else {
-			unlock(c, *t, client, id, options, released);
+			refused = unlock(c, *t, client, id, options, released);
 		}
 		released = released && wasHeld;
 		if (held) {
@@ -404,7 +427,11 @@ extern "C" void tgm_views_gpu_writes(struct tgm_coh *c)
 			static_cast<uint64_t>(tgm_coh_pages(c).npages) << 12, 0, &rows);
 		if (base) {
 			tgm_cpu_clean_pages(rows.pas, rows.npages);
-			move(c, *t, rows, TGM_RELAYOUT_TO_ROWS);
+			if (move(c, *t, rows, TGM_RELAYOUT_TO_ROWS)) {
+				tgm_scratch_put(base);
+				tgm_coh_unlock(c);
+				return;
+			}
 			tgm_cpu_clean_pages(rows.pas, rows.npages);
 			t->base = base;
 			if (!t->merged) {
@@ -454,11 +481,15 @@ extern "C" int tegra_gm20b_surface_rows(uint64_t pa, void **rows, void **memory,
 			tgm_scratch_get(uint64_t(tgm_coh_pages(c).npages) << 12, 0, &pages);
 		if (scratch) {
 			tgm_cpu_clean_pages(pages.pas, pages.npages);
-			move(c, *t, pages, TGM_RELAYOUT_TO_ROWS);
-			tgm_cpu_clean_pages(pages.pas, pages.npages);
-			*rows = scratch;
-			*memory = tgm_scratch_memory(scratch);
-			got = 1;
+			if (move(c, *t, pages, TGM_RELAYOUT_TO_ROWS)) {
+				tgm_scratch_put(scratch);
+				got = -5;
+			} else {
+				tgm_cpu_clean_pages(pages.pas, pages.npages);
+				*rows = scratch;
+				*memory = tgm_scratch_memory(scratch);
+				got = 1;
+			}
 		} else {
 			switch_refusal(
 				"iosurface-layout", "no-scratch",

@@ -16,7 +16,11 @@
 //! rounds a render state's half-float channels to nearest even ([`HALF_NEAREST`]), which no device
 //! does for a conversion it stores after a blend or as Metal's default: the function rounds each
 //! such channel itself on every profile, MoltenVK's included, where the channel stores the output
-//! as written.
+//! as written. So does an unblended extended-range attachment's `RGBA16Float` stand-in
+//! (`ColorAttachmentDescriptor::stand_in`) under either mode: Metal's tile of those formats holds
+//! a float output as the half nearest it (an M4 Max, all six formats, colours from -1.5 to 2.0:
+//! every texel stores the nearest half's bytes, where the half toward zero's differ in up to 1098
+//! of 4096).
 //!
 //! The rounding is exact only where nothing after the shader changes the value: an attachment
 //! that blends with factors other than one and zero keeps the device's conversion
@@ -107,8 +111,9 @@ pub(crate) fn exact_writes(
             true => metal_stored(&c),
             false => attachment_write(&c, coverage_alpha),
         };
-        let write = match rounding {
-            TextureWriteRoundingMode::NearestEven => {
+        let unblended_stand_in = c.stand_in.is_some() && (!c.blending_enabled || replaces(&c));
+        let write = match (rounding, unblended_stand_in) {
+            (TextureWriteRoundingMode::NearestEven, _) | (_, true) => {
                 write.map(|w| nearest_even(w, &c, coverage_alpha))
             }
             _ => write,

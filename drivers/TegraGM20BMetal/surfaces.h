@@ -12,6 +12,7 @@ namespace gm20b {
 enum class JobVisibility : uint8_t {
     Legacy,
     Internal,
+    Volatile,
     External
 };
 

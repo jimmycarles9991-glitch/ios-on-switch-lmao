@@ -95,16 +95,33 @@ bool kernelSamplersMapped(Plan &plan, const State &state, const gm20b::PackKerne
     return kept && !constant && (unchanged || allMapped);
 }
 
-gm20b::KernelUse textureUse(SwitchMetalTexture *t, bool writes)
+// The record's view of header `b` at its texture entry `x` (view.h)
+gm20b::SlotView entryView(const gm20b::PackKernelEntry &x, const gm20b::Texture &b)
 {
-    const bool derived = !writes && t->_raw.standIn;
+    const gm20b::FormatInfo *f = gm20b::formatInfo(b.format);
+    return f ? gm20b::slotView(x.window, f->tic0, gm20b::swizzledWord0(f->tic0, b.swizzle), f->bpp,
+                               gm20b::blockCompressed(f))
+             : gm20b::SlotView::Own;
+}
+
+// Whether the record's entry `x` reads `t` through its stand-in: a load of an extended-range texture whose record views
+// the slot as the stand-in's own format (compute.cpp); else it reads the texture's codes
+bool readsStandIn(const gm20b::PackKernelEntry &x, SwitchMetalTexture *t, bool writes)
+{
+    return t && !writes && x.kind == gm20b::KernelTexture && t->_raw.standIn &&
+           entryView(x, *t->_raw.standIn) == gm20b::SlotView::Own;
+}
+
+// `standIn`: the dispatch reads the texture through its stand-in, drawn from texels a write leaves stale
+gm20b::KernelUse textureUse(SwitchMetalTexture *t, bool writes, bool standIn)
+{
     if (gm20b::xrPlanesPooled(t->_raw))  // its kernels read and store its planes' pools (xr_pools.h)
-        return {(__bridge const void *)t, gm20b::kernelTextureSpan(*t->_raw.luma), true, writes, derived};
+        return {(__bridge const void *)t, gm20b::kernelTextureSpan(*t->_raw.luma), true, writes, standIn};
     if (const gm20b::TexelRows *rows = t->_raw.texelRows)  // its texels lie in its surface's image (texel_rows.h)
-        return {(__bridge const void *)t, {rows->import->bo.va, rows->import->layout.bytes}, true, writes, derived};
-    const gm20b::KernelTextureForm form = gm20b::kernelTextureForm(t->_raw);
+        return {(__bridge const void *)t, {rows->import->bo.va, rows->import->layout.bytes}, true, writes, standIn};
+    const gm20b::KernelTextureForm form = gm20b::kernelTextureForm(t->_raw, standIn);
     return {(__bridge const void *)t, gm20b::kernelTextureSpan(t->_raw), form == gm20b::KernelTextureForm::Shadow,
-            writes, derived};
+            writes, standIn};
 }
 
 gm20b::KernelUse bufferUse(SwitchMetalBuffer *b, uint64_t offset, bool writes)
@@ -132,10 +149,11 @@ void kernelUses(SwitchMetalCommandBuffer *cb, size_t at, std::vector<gm20b::Kern
         for (uint32_t i = 0; i < record.entries; ++i) {
             const auto &e = record.entry[i];
             const bool writes = gm20b::kernelEntryWrites(record, i);
-            if (e.kind == gm20b::KernelTexture && e.slot < 31 && textures[e.slot])
-                uses.push_back(textureUse((__bridge SwitchMetalTexture *)textures[e.slot], writes));
-            else if (e.kind == gm20b::KernelBuffer && e.slot < 31 &&
-                     bindings[e.slot].source == gm20b::BufferBinding::Source::Buffer && bindings[e.slot].object)
+            if (e.kind == gm20b::KernelTexture && e.slot < 31 && textures[e.slot]) {
+                SwitchMetalTexture *t = (__bridge SwitchMetalTexture *)textures[e.slot];
+                uses.push_back(textureUse(t, writes, readsStandIn(e, t, writes)));
+            } else if (e.kind == gm20b::KernelBuffer && e.slot < 31 &&
+                       bindings[e.slot].source == gm20b::BufferBinding::Source::Buffer && bindings[e.slot].object)
                 uses.push_back(
                     bufferUse((__bridge SwitchMetalBuffer *)bindings[e.slot].object, bindings[e.slot].offset, writes));
         }
@@ -146,9 +164,10 @@ void kernelUses(SwitchMetalCommandBuffer *cb, size_t at, std::vector<gm20b::Kern
         const SwitchMetalPlanControl &control = plan.control(use);
         id resource = (__bridge id)control.object;
         const bool writes = control.value & MTLResourceUsageWrite;
-        if ([resource isKindOfClass:[SwitchMetalTexture class]])
-            uses.push_back(textureUse((SwitchMetalTexture *)resource, writes));
-        else if (SwitchMetalBuffer *buffer = cpuBufferOfResource(resource))
+        if ([resource isKindOfClass:[SwitchMetalTexture class]]) {
+            SwitchMetalTexture *t = (SwitchMetalTexture *)resource;
+            uses.push_back(textureUse(t, writes, !writes && t->_raw.standIn));
+        } else if (SwitchMetalBuffer *buffer = cpuBufferOfResource(resource))
             uses.push_back(bufferUse(buffer, 0, writes));
     }
 }
@@ -183,8 +202,11 @@ bool admitComputeDispatch(SwitchMetalCommandBuffer *cb, size_t at,
             const bool texture = x.kind == gm20b::KernelTexture || x.kind == gm20b::KernelTexturePlane;
             SwitchMetalTexture *t = texture && x.slot < 31 ? textureAt(x.slot) : nil;
             const bool writes = gm20b::kernelEntryWrites(*k->rec, e);
+            // a load of an extended-range texture binds its stand-in where the record's view is the stand-in's own,
+            // else its codes (compute.cpp)
+            const bool standIn = readsStandIn(x, t, writes);
             const gm20b::KernelTextureForm form =
-                t ? gm20b::kernelTextureForm(t->_raw) : gm20b::KernelTextureForm::InPlace;
+                t ? gm20b::kernelTextureForm(t->_raw, standIn) : gm20b::KernelTextureForm::InPlace;
             if (form == gm20b::KernelTextureForm::Shadow)
                 shadowSlots |= 1u << x.slot;
             // a sampler entry that holds its pairs samples a converted texture with the modes its kernel was compiled with,
@@ -208,16 +230,6 @@ bool admitComputeDispatch(SwitchMetalCommandBuffer *cb, size_t at,
                     *why = "a kernel stores a texture with no memory a shader can address";
                 return false;
             }
-            auto viewOf = [&](const gm20b::Texture &b) {
-                const gm20b::FormatInfo *f = gm20b::formatInfo(b.format);
-                return f ? gm20b::slotView(x.window, f->tic0, gm20b::swizzledWord0(f->tic0, b.swizzle), f->bpp,
-                                           gm20b::blockCompressed(f))
-                         : gm20b::SlotView::Own;
-            };
-            // a load of an extended-range texture binds its stand-in where the record's view is the stand-in's own,
-            // else its codes (compute.cpp)
-            const bool standIn = t && !writes && x.kind == gm20b::KernelTexture && t->_raw.standIn &&
-                                 viewOf(*t->_raw.standIn) == gm20b::SlotView::Own;
             const bool twoPlanes = form == gm20b::KernelTextureForm::TwoPlanes;
             // a load of a texture made without ShaderRead, which Metal's validation stops
             if (twoPlanes && !writes && !(t->_descriptor.usage & MTLTextureUsageShaderRead)) {
@@ -234,7 +246,7 @@ bool admitComputeDispatch(SwitchMetalCommandBuffer *cb, size_t at,
             const gm20b::Texture *plane = !twoPlanes                            ? nullptr
                                           : x.kind == gm20b::KernelTexturePlane ? t->_raw.chroma
                                                                                 : t->_raw.luma;
-            if (twoPlanes && !standIn && (!plane || viewOf(*plane) == gm20b::SlotView::None)) {
+            if (twoPlanes && !standIn && (!plane || entryView(x, *plane) == gm20b::SlotView::None)) {
                 imageRefused(cb, x.slot, TermTwoPlanesBare, t, k->rec->keyHash);
                 return refuse(imageTermName(TermTwoPlanesBare));
             }
@@ -247,8 +259,8 @@ bool admitComputeDispatch(SwitchMetalCommandBuffer *cb, size_t at,
                     cb->_xrStandIns.insert(t);
             }
             const gm20b::SlotView view = !t || !t->_raw.tic || standIn ? gm20b::SlotView::Own
-                                         : twoPlanes                   ? viewOf(*plane)
-                                                                       : viewOf(t->_raw);
+                                         : twoPlanes                   ? entryView(x, *plane)
+                                                                       : entryView(x, t->_raw);
             // a record that views a slot in texels of another size is a pack or compiler defect (neither pack holds
             // one): the command buffer fails, naming it
             if (view == gm20b::SlotView::None) {
@@ -291,7 +303,8 @@ bool admitComputeDispatch(SwitchMetalCommandBuffer *cb, size_t at,
     return true;
 }
 
-int computeReadiness(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &range, const char **why)
+int computeReadiness(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &range, const char **why,
+                     std::vector<std::function<bool()>> &compileWaits)
 {
     using Job = gm20b::ComputeKernelSet<gm20b::ComputeState>;
     const auto &dispatches = cb->_plan.pendingComputes(range.from, range.to);
@@ -301,7 +314,8 @@ int computeReadiness(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &ran
     for (size_t at : dispatches) {
         auto *job = static_cast<Job *>(cb->_plan.dispatch(at).pending);
         std::function<void()> observer;
-        if (cb->_variantObserved.insert(job).second) {
+        const bool firstSeen = cb->_variantObserved.insert(job).second;
+        if (firstSeen) {
             void *queue = (__bridge void *)cb->_queue;
             observer = [queue] {
                 wakeSubmit(queue);
@@ -316,8 +330,20 @@ int computeReadiness(SwitchMetalCommandBuffer *cb, const SwitchMetalSegment &ran
             *why = "a compute kernel the shader compiler refused";
             return -1;
         }
-        if (state == Job::State::Pending)
+        if (state == Job::State::Pending) {
             pending = true;
+            if (firstSeen) {
+                __weak SwitchMetalCommandBuffer *weakCb = cb;
+                job->observeWait([weakCb] {
+                    if (SwitchMetalCommandBuffer *strong = weakCb)
+                        gm20bNoteCompileWaitReady(strong);
+                });
+            }
+            if (auto it = cb->_computeJobs.find(job); it != cb->_computeJobs.end())
+                compileWaits.push_back([keep = it->second] {
+                    return keep->waitPending();
+                });
+        }
     }
     if (pending)
         return 0;

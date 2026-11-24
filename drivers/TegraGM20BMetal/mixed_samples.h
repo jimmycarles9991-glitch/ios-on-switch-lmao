@@ -48,4 +48,64 @@ inline void tirOff(Push &p)
     p.m(NVB197_SET_ANTI_ALIAS_RASTER, NVB197_SET_ANTI_ALIAS_RASTER_SAMPLES_MODE_1X1);
 }
 
+// HW Test's rows of a mixed pass's methods (Device::probeTir, debug builds; gpu.gm20b.zc_mixed, gpu.gm20b.mixed_end_rows),
+// which ask GM20B which combinations its class takes where the header does not say: the class killed boot 2's mixed
+// passes with INVALID_TIR_COMBINATION05 at the first draw of one given a zcull region, and INVALID_VALUE at the pass end's
+// SET_ANTI_ALIAS_RASTER 1X1. A row's word: bit 0 armed; bit 1 a zcull region; bit 2 the region over the zeta's sample
+// grid (2x2 a pixel), not its pixels; bit 3 the region's words after the raster state, not before the clears; bit 4
+// SET_TIR left DISABLED; bits 8-11 the pass end's order (TirEnd); bits 12-15 the raster value TirEnd::Value writes.
+constexpr uint32_t kTirProbeZcull = 1u << 1, kTirProbeSampleGrid = 1u << 2, kTirProbeZcullAfter = 1u << 3,
+                   kTirProbeModeOff = 1u << 4;
+
+enum class TirEnd : uint32_t {
+    Mode,            // tirOff: SET_TIR DISABLED, then SET_ANTI_ALIAS_RASTER 1X1
+    RasterFirst,     // SET_ANTI_ALIAS_RASTER 1X1, then SET_TIR DISABLED
+    ZetaOff,         // SET_ZT_SELECT 0 first (the next pass's targets select their own), then tirOff
+    ModeOnly,        // SET_TIR DISABLED alone, the raster count left
+    RasterDisabled,  // SET_RASTER_ENABLE FALSE around tirOff
+    Value,           // SET_TIR DISABLED, SET_ANTI_ALIAS_RASTER of the row's value, then ZetaOff's reset
+};
+
+inline TirEnd tirProbeEnd(uint32_t probe)
+{
+    return TirEnd(probe >> 8 & 15);
+}
+
+inline uint32_t tirProbeRaster(uint32_t probe)
+{
+    return probe >> 12 & 15;
+}
+
+// A mixed pass's end under probe row `probe`
+inline void tirOffProbed(Push &p, uint32_t probe)
+{
+    switch (tirProbeEnd(probe)) {
+    case TirEnd::RasterFirst:
+        p.m(NVB197_SET_ANTI_ALIAS_RASTER, NVB197_SET_ANTI_ALIAS_RASTER_SAMPLES_MODE_1X1);
+        p.m(NVB197_SET_TIR, NVB197_SET_TIR_MODE_DISABLED);
+        return;
+    case TirEnd::ZetaOff:
+        p.m(NVB197_SET_ZT_SELECT, 0);
+        tirOff(p);
+        return;
+    case TirEnd::ModeOnly:
+        p.m(NVB197_SET_TIR, NVB197_SET_TIR_MODE_DISABLED);
+        return;
+    case TirEnd::RasterDisabled:
+        p.m(NVB197_SET_RASTER_ENABLE, NVB197_SET_RASTER_ENABLE_V_FALSE);
+        tirOff(p);
+        p.m(NVB197_SET_RASTER_ENABLE, NVB197_SET_RASTER_ENABLE_V_TRUE);
+        return;
+    case TirEnd::Value:
+        p.m(NVB197_SET_TIR, NVB197_SET_TIR_MODE_DISABLED);
+        p.m(NVB197_SET_ANTI_ALIAS_RASTER, tirProbeRaster(probe));
+        p.m(NVB197_SET_ZT_SELECT, 0);
+        p.m(NVB197_SET_ANTI_ALIAS_RASTER, NVB197_SET_ANTI_ALIAS_RASTER_SAMPLES_MODE_1X1);
+        return;
+    case TirEnd::Mode:
+        break;
+    }
+    tirOff(p);
+}
+
 }  // namespace gm20b

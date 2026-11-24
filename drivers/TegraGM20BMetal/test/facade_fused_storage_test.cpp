@@ -4,8 +4,9 @@
 // array storage view the fetch reads, also where it follows a clear pass of the texture in the same command buffer,
 // whose begin laid the texture out as a pitch target (TegraGM20BMetalRangeSeal.mm storageLaidOut: no fusion into that pass).
 // A state's storage form of one layer drawn after a clear pass of a private block-linear texture is fused into that pass,
-// whose begin laid the texture out as the form binds it (HW Test gpu.gm20b.pass_fusion's fetched pass).
-#include "facade_variant_compiler.h"
+// whose begin laid the texture out as the form binds it (HW Test gpu.gm20b.pass_fusion's fetched pass), and so is one
+// that tests a Depth32Float in its shader (that scene's depth arms): only a Depth16Unorm's begin differs then.
+#include "facade_pass_scene.h"
 #include "bazel/testing/fresh_process.h"
 
 #include <unistd.h>
@@ -141,6 +142,39 @@ void storageFetchIntoAPrivateTextureAfterItsClear()
     EXPECT_EQ(clearThenDraw(device, state, target), 1) << "the storage form's pass was not fused into the clear's";
 }
 
+void shaderDepthTestAfterAClearOfItsDepth32Float()
+{
+    RenderCompiler compiler;
+    compiler.shapes = pass_scene::testsDepthInItsShader;
+    id<MTLDevice> device = nil;
+    id<MTLLibrary> library = served(compiler, "fused-depth", writePack(packKey(MTLPixelFormatBGRA8Unorm)), device);
+    ASSERT_TRUE(library != nil);
+    MTLRenderPipelineDescriptor *d = descriptor(library, MTLPixelFormatBGRA8Unorm);
+    d.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:d error:nil];
+    __unsafe_unretained SwitchMetalPipeline *made = (SwitchMetalPipeline *)state;
+    ASSERT_TRUE(made && made->_raw && made->_raw->rec &&
+                (made->_raw->rec->shaderTests.flags & gm20b::kShaderTestDepth));
+    id<MTLTexture> colour = pass_scene::attachmentTexture(device, MTLPixelFormatBGRA8Unorm, 32, 32);
+    id<MTLTexture> depth = pass_scene::attachmentTexture(device, MTLPixelFormatDepth32Float, 32, 32);
+    ASSERT_TRUE(colour != nil && depth != nil);
+    MTLRenderPassDescriptor *loads = pass_scene::pass(colour, depth, MTLLoadActionLoad);
+    loads.colorAttachments[0].loadAction = MTLLoadActionLoad;
+    const long long before = fusedPasses(device);
+    id<MTLCommandBuffer> commands = [[device newCommandQueue] commandBuffer];
+    [[commands renderCommandEncoderWithDescriptor:pass_scene::pass(colour, depth, MTLLoadActionClear)] endEncoding];
+    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:loads];
+    [encoder setRenderPipelineState:state];
+    [encoder setDepthStencilState:pass_scene::depthWrite(device)];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4 instanceCount:1];
+    [encoder endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    EXPECT_EQ(commands.status, MTLCommandBufferStatusCompleted) << commands.error.description.UTF8String;
+    EXPECT_EQ(pass_scene::path(commands), "gm20b");
+    EXPECT_EQ(fusedPasses(device) - before, 1) << "the shader-tested Depth32Float pass was not fused into the clear's";
+}
+
 }  // namespace
 
 TEST(GM20BFacadeFusedStorage, ALayeredFetchIntoALinearTextureAfterItsClearIsRaws)
@@ -151,4 +185,9 @@ TEST(GM20BFacadeFusedStorage, ALayeredFetchIntoALinearTextureAfterItsClearIsRaws
 TEST(GM20BFacadeFusedStorage, AStorageFetchIntoAPrivateTextureFusesWithItsClear)
 {
     switch_ios::test::ExpectPassesInFreshProcess(storageFetchIntoAPrivateTextureAfterItsClear);
+}
+
+TEST(GM20BFacadeFusedStorage, AStorageFormTestingADepth32FloatInItsShaderFusesWithItsClear)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(shaderDepthTestAfterAClearOfItsDepth32Float);
 }

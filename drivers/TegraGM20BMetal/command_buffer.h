@@ -19,6 +19,7 @@
 #include "draw_times.h"
 #include "event_release.h"
 #include "geometry.h"
+#include "heap.h"
 #include "heap_members.h"
 #include "kernel.h"
 #include "loop_copies.h"
@@ -40,6 +41,7 @@
 #include "stats.h"
 #include "stencil_bits.h"
 #include "surfaces.h"
+#include "tiled_cache.h"
 #include "turn_copy.h"
 #include "use_memo.h"
 #include "zcull_planes.h"
@@ -281,17 +283,40 @@ private:
     BatchWork batchWork_;
     uint64_t batchLimit() const;
     DirtyRanges dirty_;
-    std::vector<Texture *> backings_;         // memoryless backings it uses
-    std::vector<const HeapMembers *> heaps_;  // useHeap's, each kept alive by the facade's command buffer
-    void nameHeaps();                         // lock_ held
+    std::vector<Texture *> backings_;                   // memoryless backings it uses
+    std::vector<const HeapMembers *> heaps_;            // useHeap's, each kept alive by the facade's command buffer
+    void nameHeaps(std::unique_lock<gm20b::Mutex> &l);  // lock_ held
     SurfaceList surfaces_;
     ZcullPlanes zcullPlanes_;  // the depths' regions this command buffer's passes stored (zcull_planes.h)
     std::vector<SetUse> memberUses_;
     uint32_t memberRemovals_ = 0;
     bool memberHostWritten_ = false;
+    bool arenaKindInvalidate_ = false;
+    bool pendingKindSwitch_ = false;
+    uint32_t kindSwitchGen_ = 0;
+    uint32_t encodersOpened_ = 0;
+    BlitEncoder *activeBlit_ = nullptr;
+    bool inRender_ = false;
+    bool passBufferWrites_ = false;
+    bool prevBufferWrites_ = false;
+    bool tiledCacheDirty_ = false;
+    std::map<uint64_t, KindRanges> cbArenaKinds_;
+    std::map<uint64_t, uint64_t> cbCrossSeen_;
+    bool hasEncodedWork() const;
+    void requestKindSwitch();
+
+    bool takeKindSwitch()
+    {
+        const bool pending = pendingKindSwitch_;
+        pendingKindSwitch_ = false;
+        return pending;
+    }
+
+    void noteArenaKind(const ArenaStorage *arena);
     UseMemo named_;  // (use_memo.h)
     JobVisibility visibility_ = JobVisibility::Legacy;
     bool externalWrites_ = false;
+    bool volatileWrites_ = false;
     EventPublication publication_;
     BarrierEngine lastEngine_ = BarrierEngine::None;  // the engine of the work encoded last (barrier_forms.h)
     PassChain chain_;                                 // the passes since the last drain (pass_hazard.h)
@@ -344,6 +369,7 @@ private:
     BlitEncoder blit_;
     uint64_t pushStart_ = 0, uploadStart_ = 0;
     uint32_t rootPush_[32] = {};
+    uint32_t tiledCacheSize_ = kTiledCacheDefaultSize;
     uint32_t restart_ = 0;                  // SET_DA_PRIMITIVE_RESTART_INDEX as the GPU will hold it
     uint32_t rtLayer_ = ~0u;                // and SET_RT_LAYER (~0: not known)
     uint32_t alphaHeld_ = ~0u;              // and SET_ANTI_ALIAS_ALPHA_CONTROL (~0: not known)

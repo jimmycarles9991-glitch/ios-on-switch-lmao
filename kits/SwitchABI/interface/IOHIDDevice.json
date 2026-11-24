@@ -130,6 +130,11 @@
       "decl": "virtual IOReturn handleReport(IOMemoryDescriptor *, unsigned, IOOptionBits)",
       "mangled": "__ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptorjj",
       "pac": "_ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptor15IOHIDReportTypej"
+    },
+    "handleReportWithTime": {
+      "decl": "virtual IOReturn handleReportWithTime(uint64_t, IOMemoryDescriptor *, unsigned, IOOptionBits)",
+      "mangled": "__ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptorjj",
+      "pac": "_ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptor15IOHIDReportTypej"
     }
   }
 }

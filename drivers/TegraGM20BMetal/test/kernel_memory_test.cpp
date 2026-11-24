@@ -20,6 +20,15 @@ struct Model {
     std::vector<TegraGM20BAbiBindOp> binds;
     std::vector<TegraGM20BAbiCpuAccess> acquires;
     std::vector<uint32_t> importFlags;
+    std::vector<TegraGM20BAbiBoPark> parks;
+    std::vector<TegraGM20BAbiBoUnpark> unparks;
+    std::vector<TegraGM20BAbiMap> fixedMaps;
+    std::vector<uint64_t> frees;
+    std::vector<TegraGM20BAbiUnmap> unmaps;
+    bool advertiseBoPark = true;
+    uint32_t nextUnparkStatus = TegraGM20BUnparkResident;
+    uint64_t nextUnparkAddress = 0x5000000;
+    uint64_t nextUnparkBytes = 0x10000;
     kern_return_t surfaceWrites = KERN_SUCCESS;
 } model;
 
@@ -34,7 +43,7 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t, uint32_t method,
         auto &info = *static_cast<TegraGM20BAbiInfo *>(output);
         info = {};
         info.abi_version = TegraGM20BAbiVersion;
-        info.flags = kInfoFlags;
+        info.flags = kInfoFlags | (model.advertiseBoPark ? uint32_t(TegraGM20BInfoBoPark) : 0u);
         info.va_start = 0x1000000;
         info.va_end = 0x100000000;
         info.page_size = 4096;
@@ -57,6 +66,11 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t, uint32_t method,
     case TegraGM20BMethodMap: {
         const auto &in = *static_cast<const TegraGM20BAbiMap *>(input);
         auto &bytes = model.pages[in.token];
+        if (in.flags & TegraGM20BMapFixed) {
+            model.fixedMaps.push_back(in);
+            *static_cast<TegraGM20BAbiMapReply *>(output) = {in.address, bytes.size()};
+            return KERN_SUCCESS;
+        }
         *static_cast<TegraGM20BAbiMapReply *>(output) = {uint64_t(uintptr_t(bytes.data())), bytes.size()};
         return KERN_SUCCESS;
     }
@@ -66,9 +80,22 @@ extern "C" kern_return_t IOConnectCallStructMethod(mach_port_t, uint32_t method,
     case TegraGM20BMethodCpuAcquire:
         model.acquires.push_back(*static_cast<const TegraGM20BAbiCpuAccess *>(input));
         return KERN_SUCCESS;
-    case TegraGM20BMethodCpuRelease:
+    case TegraGM20BMethodBoPark:
+        model.parks.push_back(*static_cast<const TegraGM20BAbiBoPark *>(input));
+        return KERN_SUCCESS;
+    case TegraGM20BMethodBoUnpark: {
+        model.unparks.push_back(*static_cast<const TegraGM20BAbiBoUnpark *>(input));
+        *static_cast<TegraGM20BAbiBoUnparkReply *>(output) = {model.nextUnparkAddress, model.nextUnparkBytes,
+                                                              model.nextUnparkStatus, 0};
+        return KERN_SUCCESS;
+    }
     case TegraGM20BMethodBoFree:
+        model.frees.push_back(static_cast<const TegraGM20BAbiBoFree *>(input)->handle);
+        return KERN_SUCCESS;
     case TegraGM20BMethodUnmap:
+        model.unmaps.push_back(*static_cast<const TegraGM20BAbiUnmap *>(input));
+        return KERN_SUCCESS;
+    case TegraGM20BMethodCpuRelease:
         return KERN_SUCCESS;
     default:
         std::abort();
@@ -213,4 +240,61 @@ TEST_F(GM20BKernelMemory, ASurfaceWritesTheKernelRefusedMarksEveryLaterImportWri
     EXPECT_EQ(model.importFlags[0] & TegraGM20BImportGpuReads, uint32_t(TegraGM20BImportGpuReads));
     EXPECT_EQ(model.importFlags[1] & TegraGM20BImportGpuReads, uint32_t(TegraGM20BImportGpuReads));
     EXPECT_EQ(model.importFlags[2] & TegraGM20BImportGpuReads, 0u);
+}
+
+TEST_F(GM20BKernelMemory, BoParkUnparkMapAtAndFreeParkedSkipUnmap)
+{
+    EXPECT_TRUE(kernel.supportsBoPark());
+    gm20b::Bo bo;
+    ASSERT_TRUE(kernel.alloc(0x10000, false, bo));
+    const uint64_t handle = bo.handle;
+    const uint32_t token = bo.token;
+
+    ASSERT_EQ(kernel.park(handle, true), KERN_SUCCESS);
+    ASSERT_EQ(kernel.park(handle, false), KERN_SUCCESS);
+    ASSERT_EQ(model.parks.size(), 2u);
+    EXPECT_EQ(model.parks[0].handle, handle);
+    EXPECT_EQ(model.parks[0].flags, uint32_t(TegraGM20BParkGuard));
+    EXPECT_EQ(model.parks[1].flags, 0u);
+
+    uint64_t address = 0, bytes = 0;
+    uint32_t status = 0;
+    model.nextUnparkStatus = TegraGM20BUnparkResident;
+    ASSERT_EQ(kernel.unpark(handle, address, bytes, status), KERN_SUCCESS);
+    EXPECT_EQ(address, model.nextUnparkAddress);
+    EXPECT_EQ(bytes, model.nextUnparkBytes);
+    EXPECT_EQ(status, uint32_t(TegraGM20BUnparkResident));
+
+    model.nextUnparkStatus = TegraGM20BUnparkReclaimed;
+    ASSERT_EQ(kernel.unpark(handle, address, bytes, status), KERN_SUCCESS);
+    EXPECT_EQ(status, uint32_t(TegraGM20BUnparkReclaimed));
+
+    constexpr uint64_t kFixedVa = 0x70000000;
+    ASSERT_TRUE(kernel.mapAt(token, 0x10000, kFixedVa));
+    ASSERT_EQ(model.fixedMaps.size(), 1u);
+    EXPECT_EQ(model.fixedMaps[0].token, token);
+    EXPECT_EQ(model.fixedMaps[0].flags, uint32_t(TegraGM20BMapFixed));
+    EXPECT_EQ(model.fixedMaps[0].address, kFixedVa);
+
+    const size_t unmapsBefore = model.unmaps.size();
+    bo.parked = true;
+    kernel.free(bo);
+    EXPECT_EQ(model.unmaps.size(), unmapsBefore);
+    ASSERT_FALSE(model.frees.empty());
+    EXPECT_EQ(model.frees.back(), handle);
+
+    gm20b::Bo sysBo;
+    ASSERT_TRUE(kernel.alloc(0x10000, true, sysBo, 0, 0x10000, false, false, true, 0, true));
+    ASSERT_FALSE(model.allocFlags.empty());
+    EXPECT_EQ(model.allocFlags.back(), uint32_t(TegraGM20BBoCoherent | TegraGM20BBoSystem));
+    kernel.free(sysBo);
+
+    model = {};
+    model.advertiseBoPark = false;
+    gm20b::Kernel noPark;
+    std::string err;
+    ASSERT_TRUE(noPark.open(err)) << err;
+    EXPECT_FALSE(noPark.supportsBoPark());
+    EXPECT_EQ(noPark.park(1, true), kIOReturnUnsupported);
+    EXPECT_EQ(noPark.unpark(1, address, bytes, status), kIOReturnUnsupported);
 }

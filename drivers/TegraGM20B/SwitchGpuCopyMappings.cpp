@@ -3,6 +3,18 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include "SwitchGpuCopyMappings.h"
 #include "SwitchGpuBacking.h"
+#include "TegraGM20BLayout.h"
+
+extern "C" __attribute__((weak)) uint32_t tegra_gm20b_surface_kind(uint64_t)
+{
+	return 0;
+}
+
+extern "C" __attribute__((weak)) int
+switch_gpu_backing_tgm_mem_existing(struct switch_gpu_backing *, uint32_t, struct tgm_mem **)
+{
+	return -2;
+}
 
 namespace
 {
@@ -53,17 +65,35 @@ int switch_gpu_copy_mapping(tgm_vm *vm, SwitchGpuCopyMappings *cache,
 	if (descriptorOffset > descriptorBytes || bytes > descriptorBytes - descriptorOffset ||
 	    backingOffset > backingBytes || bytes > backingBytes - backingOffset)
 		return -22;
+	uint32_t surfaceKind = 0u;
+	if (tiled && info.pages && info.page_count)
+		surfaceKind = tegra_gm20b_surface_kind(info.pages[0]);
+	const uint32_t wantKind = tiled ? (surfaceKind ? surfaceKind : TGM_LAYOUT_KIND) : 0u;
+	tgm_mem *canonical = nullptr;
+	const bool hasCanonical =
+		switch_gpu_backing_tgm_mem_existing(backing, info.page_count, &canonical) == 0;
 	for (auto &entry : cache->descriptors) {
 		auto *map = entry.mapping;
 		if (entry.descriptor == descriptor && map && map->backing == backing &&
 		    map->allocation == info.allocation_id &&
-		    map->generation == info.allocation_generation && (!tiled || map->tiled) &&
+		    map->generation == info.allocation_generation &&
+		    (!tiled || (map->tiled && map->tiledKind == wantKind)) &&
+		    (!hasCanonical || map->memory == canonical) &&
 		    contains(entry, descriptorOffset, backingOffset, bytes)) {
 			++entry.users;
 			entry.lastUse = ++cache->clock;
 			*out = &entry;
 			return 0;
 		}
+	}
+	for (auto &candidate : cache->descriptors) {
+		auto *map = candidate.mapping;
+		if (candidate.descriptor && !candidate.users && map && map->backing == backing &&
+		    map->allocation == info.allocation_id &&
+		    map->generation == info.allocation_generation &&
+		    ((tiled && (!map->tiled || map->tiledKind != wantKind)) ||
+		     (hasCanonical && map->memory != canonical)))
+			discard(candidate);
 	}
 	SwitchGpuCopyMapping *entry = nullptr;
 	for (auto &candidate : cache->descriptors)

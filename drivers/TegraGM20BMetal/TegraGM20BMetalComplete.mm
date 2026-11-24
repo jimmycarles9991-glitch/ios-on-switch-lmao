@@ -7,6 +7,7 @@
 #include "TegraGM20BMetalInternal.h"
 #include "TegraGM20BMetalRenderKey.h"
 #include "answer_class.h"
+#include "ca_catch_all.h"
 #include "compute.h"
 #include "gpu.h"
 
@@ -42,6 +43,22 @@ void logHarvestParts(uint64_t name, NSString *label, const std::string &key)
         os_log(gm20bLog(), "SwitchMetal: harvest %016llx %zu/%zu %{public}s", (unsigned long long)name, i + 1, parts,
                text.substr(i * kPart, kPart).c_str());
 }
+
+void Completion::logInProcessCa(const Ask &a, const CacheKey &k, RecordCache::Found found)
+{
+    NSString *label = a.descriptor.label ?: a.facade.label;
+    const char *utf8 = label.length ? label.UTF8String : nullptr;
+    if (!caLabelSpec(utf8))
+        return;
+    {
+        std::lock_guard<gm20b::Mutex> hold(inProcessCaLock_);
+        if (!inProcessCaSeen_.insert(utf8).second)
+            return;
+    }
+    gInProcessCaLogged.fetch_add(1, std::memory_order_relaxed);
+    os_log(gm20bLog(), "SwitchMetal: in-process state the pack lacks %016llx (%{public}s): label=%{public}s",
+           (unsigned long long)k.name(), found == RecordCache::Found::Record ? "record" : "refusal", utf8);
+}
 #endif
 
 Completion::Completion(Device &device, const char *cacheDir, uint64_t stack, const char *seedDir)
@@ -59,7 +76,7 @@ Completion::Completion(Device &device, const char *cacheDir, uint64_t stack, con
         return Compiler::Outcome::Failed;
     });
     const gm20b::Kernel &kernel = device_.kernel();
-    remote_ = std::make_unique<Remote>(
+    remote_ = std::make_shared<Remote>(
         KernelTransport{kernel.connection(), kernel.tunnelled(), kernel.tunnelSelector()}, stack_);
     Remote *remote = remote_.get();
     const RecordCache *cache = &cache_;
@@ -144,6 +161,7 @@ void Completion::askVariant(Ask asked, Ready ready)
 void Completion::create(Ask asked, Ready ready)
 {
     asked.qos = uint32_t(qos_class_self());
+    asked.waited = false;
     request(std::move(asked), std::make_shared<Pending>(pending_, std::move(ready), true));
 }
 
@@ -176,7 +194,8 @@ void Completion::request(Ask asked, std::shared_ptr<Pending> pending)
         // the installed seed's, this process's or the disk's answer, kept in the process table
         RuntimeRecord known;
         std::string why;
-        if (compiler_->lookup(k, known, why) != RecordCache::Found::None) {
+        if (const RecordCache::Found found = compiler_->lookup(k, known, why); found != RecordCache::Found::None) {
+            SWITCH_METAL_DIAGNOSTIC(logInProcessCa(a, k, found));
             const RuntimeRecord *kept = nullptr;
             if (compiler_->ask(k, nullptr, &kept) == Compiler::State::Ready && kept)
                 place(k, kept, caTransform, a.qos, pending);
@@ -230,11 +249,14 @@ Pipeline *Completion::makeNow(Ask a, std::string &failure)
     std::string why;
     Compiler::State state = Compiler::State::Refused;
     SWITCH_METAL_DIAGNOSTIC(noteObtained({"table", 0, uint32_t(qos_class_self()), 0}));
-    switch (compiler_->lookup(k, record, why)) {
+    const RecordCache::Found found = compiler_->lookup(k, record, why);
+    switch (found) {
     case RecordCache::Found::Record:
+        SWITCH_METAL_DIAGNOSTIC(logInProcessCa(a, k, found));
         state = Compiler::State::Ready;
         break;
     case RecordCache::Found::Refusal:
+        SWITCH_METAL_DIAGNOSTIC(logInProcessCa(a, k, found));
         state = Compiler::State::Refused;
         break;
     case RecordCache::Found::None:

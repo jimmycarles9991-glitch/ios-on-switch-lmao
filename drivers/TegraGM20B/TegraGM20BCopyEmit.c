@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "SwitchGM20BEmitBarrier.h"
 #include "SwitchGM20BEmitCopy.h"
 #include "TegraGM20BCopyEmit.h"
 #include "TegraGM20BRelayout.h"
@@ -6,6 +7,8 @@
 #include "nv_push_clb0b5.h"
 
 _Static_assert(TGM_COPY_RECT_DWORDS == SWITCH_GM20B_COPY_RECT_WORDS(1), "the kit's copy bound");
+_Static_assert(TGM_RELAYOUT_CHECKPOINT_DWORDS == SWITCH_GM20B_KIND_SWITCH_WORDS + 5,
+	       "the checkpoint: the kit's kind switch and a semaphore release");
 
 static struct nv_push tgm_push(uint32_t *w, uint32_t words)
 {
@@ -184,15 +187,7 @@ uint32_t tgm_relayout_checkpoint(uint32_t *w, uint64_t address)
 	if (!address)
 		return 0;
 	struct nv_push p = tgm_push(w, TGM_RELAYOUT_CHECKPOINT_DWORDS);
-	P_MTHD(&p, NVB06F, WFI);
-	P_NVB06F_WFI(&p, NVB06F_WFI_SCOPE_CURRENT_SCG_TYPE);
-	P_MTHD(&p, NVB06F, FB_FLUSH);
-	P_NVB06F_FB_FLUSH(&p, 0);
-	P_MTHD(&p, NVB06F, MEM_OP_C);
-	P_NVB06F_MEM_OP_C(&p, {0});
-	P_NVB06F_MEM_OP_D(&p, {.operation = OPERATION_L2_FLUSH_DIRTY});
-	P_MTHD(&p, NVB06F, FB_FLUSH);
-	P_NVB06F_FB_FLUSH(&p, 0);
+	switch_gm20b_kind_switch(&p);
 	P_MTHD(&p, NVB06F, SEMAPHOREA);
 	P_NVB06F_SEMAPHOREA(&p, (uint32_t)(address >> 32));
 	P_NVB06F_SEMAPHOREB(&p, (uint32_t)address >> 2);

@@ -56,6 +56,7 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_shared_region.h>
+#include <switch/prefetch_vm.h>
 
 #include <sys/kdebug_triage.h>
 
@@ -504,6 +505,7 @@ shared_region_pager_data_request(
 	fault_info.io_sync = FALSE;
 	fault_info.mark_zf_absent = FALSE;
 	fault_info.batch_pmap_op = FALSE;
+	fault_info.switch_wake = FALSE;
 	interruptible = fault_info.interruptible;
 
 	pager = shared_region_pager_lookup(mem_obj);
@@ -608,6 +610,7 @@ retry_src_fault:
 			/* success but no VM page: fail */
 			vm_object_paging_end(src_top_object);
 			vm_object_unlock(src_top_object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 			OS_FALLTHROUGH;
 		case VM_FAULT_MEMORY_ERROR:
 			/* the page is not there ! */
@@ -677,6 +680,12 @@ retry_src_fault:
 		assert(src_page->vmp_busy);
 		assert(src_page_object->paging_in_progress > 0);
 		vm_object_unlock(src_page_object);
+		if (__improbable(fault_info.switch_wake)) {
+			fault_info.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 
 		/*
 		 * Process the original contents of the source page

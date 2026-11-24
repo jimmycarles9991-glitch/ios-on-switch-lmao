@@ -4,6 +4,8 @@
 // back a state whose draws go elsewhere, and the client compiles nothing itself, with no compiler at all too. The m2v stand-in makes each library's twin
 // of the same metallib (facade_compute.h), so the facade keys the state as on the device.
 #include "facade_compute.h"
+#include "../archive.h"
+#include "../ca_catch_all.h"
 #include "../TegraGM20BMetalCompileRequest.h"
 #include "../compile_request.h"
 #include "../render_key.h"
@@ -15,6 +17,7 @@
 #include "bazel/testing/source_text.h"
 
 #include <gtest/gtest.h>
+#include <filesystem>
 
 // Another device's vertex function, as a render state's creation reads one
 @interface ForeignVertexFunction : NSObject
@@ -121,6 +124,30 @@ TEST(GM20BFacadeCreation, DebugAndReleaseClientsCompleteStatesAlike)
                   switch_ios::test::Configured(source, "SWITCH_DEBUG", false))
             << file;
     }
+}
+
+TEST(GM20BFacadeCreation, ClientRuntimeUsesNoThreadCpuClockOrThreadInfo)
+{
+    size_t checked = 0;
+    for (const char *dir : {"..", "../plugin"}) {
+        const std::filesystem::path root = switch_ios::test::PackagePath(dir);
+        ASSERT_TRUE(std::filesystem::is_directory(root)) << root;
+        for (const auto &entry : std::filesystem::directory_iterator(root)) {
+            if (!entry.is_regular_file())
+                continue;
+            const std::string ext = entry.path().extension().string();
+            if (ext != ".mm" && ext != ".cpp" && ext != ".h")
+                continue;
+            const std::string rel = std::string(dir) + "/" + entry.path().filename().string();
+            const std::string source = switch_ios::test::SourceText(rel);
+            ++checked;
+            for (const char *forbidden :
+                 {"CLOCK_THREAD_CPUTIME_ID", "CLOCK_PROCESS_CPUTIME_ID", "thread_selfusage", "thread_info("}) {
+                EXPECT_TRUE(switch_ios::test::Occurrences(source, forbidden).empty()) << rel << " uses " << forbidden;
+            }
+        }
+    }
+    EXPECT_GT(checked, 0u);
 }
 
 TEST(GM20BFacadeCreation, ARequestTheCompilerDoesNotTakeIsAskedOnceMoreThenFails)
@@ -333,6 +360,200 @@ TEST(GM20BFacadeCreation, AStateTheCompilerRefusedFailsTheCreation)
         EXPECT_EQ(state, nil);
         EXPECT_NE(text(error.localizedDescription).find("the shader compiler refused the state"), std::string::npos)
             << text(error);
+    });
+}
+
+std::string packArchivesSection(const std::string &path, std::vector<uint64_t> keys)
+{
+    std::sort(keys.begin(), keys.end());
+    const std::string canonical = gm20b::inventoryPath(path);
+    const uint32_t counts[2] = {1, uint32_t(keys.size())};
+    const gm20b::PackArchive entry = {gm20b::Pack::fnv(canonical.data(), canonical.size()), 0, uint32_t(keys.size())};
+    std::string out(sizeof counts + sizeof entry + keys.size() * sizeof(uint64_t), '\0');
+    memcpy(out.data(), counts, sizeof counts);
+    memcpy(out.data() + sizeof counts, &entry, sizeof entry);
+    if (!keys.empty())
+        memcpy(out.data() + sizeof counts + sizeof entry, keys.data(), keys.size() * sizeof(uint64_t));
+    return out;
+}
+
+TEST(GM20BFacadeCreation, FailOnBinaryArchiveMissSkipsCompileForExcludedArchiveState)
+{
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        const std::string archivePath = dir() + "/archive.metallib";
+        const uint8_t header[8] = {'M', 'T', 'L', 'B', 1, 0, 2, 0};
+        std::ofstream(archivePath, std::ios::binary).write(reinterpret_cast<const char *>(header), sizeof header);
+        const std::string declaredKey = packKey(MTLPixelFormatRGBA8Unorm);
+        const std::string section =
+            packArchivesSection(archivePath, {gm20b::Pack::fnv(declaredKey.data(), declaredKey.size())});
+        kernel_model::model.compilerFlags = kServing;
+        kernel_model::model.compileResults = {TegraGM20BCompileUnavailable};
+        id<MTLDevice> device = open(writePack(packKey(MTLPixelFormatBGRA8Unorm), {}, {}, true, "", {}, {}, section));
+        ASSERT_TRUE(device != nil);
+        const std::string cache = dir() + "/cache";
+        mkdir(cache.c_str(), 0700);
+        metal_complete_states(cache.c_str(), nullptr);
+        NSError *error = nil;
+        id<MTLLibrary> library =
+            [device newLibraryWithURL:[NSURL fileURLWithPath:@(writeMetallib().c_str())] error:&error];
+        ASSERT_TRUE(library != nil);
+        MTLBinaryArchiveDescriptor *ad = [MTLBinaryArchiveDescriptor new];
+        ad.url = [NSURL fileURLWithPath:@(archivePath.c_str())];
+        id<MTLBinaryArchive> archive = [device newBinaryArchiveWithDescriptor:ad error:&error];
+        ASSERT_TRUE(archive != nil) << text(error);
+
+        MTLRenderPipelineDescriptor *excluded = descriptor(library, MTLPixelFormatRGBA16Float);
+        excluded.binaryArchives = @[ archive ];
+        id<MTLRenderPipelineState> missing =
+            [device newRenderPipelineStateWithDescriptor:excluded
+                                                 options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                              reflection:nil
+                                                   error:&error];
+        EXPECT_EQ(missing, nil);
+        ASSERT_TRUE(error != nil);
+        EXPECT_EQ(error.code, 3);
+        EXPECT_EQ(kernel_model::model.compiles, 0u);
+
+        MTLRenderPipelineDescriptor *declared = descriptor(library, MTLPixelFormatRGBA8Unorm);
+        declared.binaryArchives = @[ archive ];
+        error = nil;
+        EXPECT_EQ([device newRenderPipelineStateWithDescriptor:declared
+                                                       options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                    reflection:nil
+                                                         error:&error],
+                  nil);
+        EXPECT_GT(kernel_model::model.compiles, 0u);
+    });
+}
+
+TEST(GM20BFacadeCreation, StandInTargetStateHonorsDeviceArchiveAndArchiveMiss)
+{
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        kernel_model::model.compilerFlags = kServing;
+        kernel_model::model.compileResults = {TegraGM20BCompileUnavailable};
+        id<MTLDevice> device = open(writePack(packKey(MTLPixelFormatRGBA8Unorm_sRGB)));
+        ASSERT_TRUE(device != nil);
+        const std::string cache = dir() + "/cache";
+        mkdir(cache.c_str(), 0700);
+        metal_complete_states(cache.c_str(), nullptr);
+        NSError *error = nil;
+        id<MTLLibrary> frameworkLib =
+            [device newLibraryWithURL:[NSURL fileURLWithPath:@(writeMetallib().c_str())] error:&error];
+        ASSERT_TRUE(frameworkLib != nil);
+        const std::string bytes = made_metallib::universal({"v", "f"}, 0x61, 0xEE, {0, 1});
+        dispatch_data_t data =
+            dispatch_data_create(bytes.data(), bytes.size(), nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+        id<MTLLibrary> appLib = [device newLibraryWithData:data error:&error];
+        ASSERT_TRUE(appLib != nil);
+
+        id<MTLBinaryArchive> empty =
+            [device newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&error];
+        ASSERT_TRUE(empty != nil);
+
+        MTLRenderPipelineDescriptor *packedStandIn = descriptor(frameworkLib, MTLPixelFormatR8Unorm_sRGB);
+        packedStandIn.binaryArchives = @[ empty ];
+        id<MTLRenderPipelineState> hit =
+            [device newRenderPipelineStateWithDescriptor:packedStandIn
+                                                 options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                              reflection:nil
+                                                   error:&error];
+        ASSERT_TRUE(hit != nil) << text(error);
+        EXPECT_TRUE(((SwitchMetalPipeline *)hit)->_packed);
+        EXPECT_EQ(error, nil);
+        EXPECT_EQ(kernel_model::model.compiles, 0u);
+
+        dispatch_semaphore_t answered = dispatch_semaphore_create(0);
+        __block id<MTLRenderPipelineState> asyncHit = nil;
+        __block NSError *asyncError = nil;
+        [device newRenderPipelineStateWithDescriptor:packedStandIn
+                                             options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                   completionHandler:^(id<MTLRenderPipelineState> made, MTLRenderPipelineReflection *,
+                                                       NSError *failed) {
+                                       asyncHit = made;
+                                       asyncError = failed;
+                                       dispatch_semaphore_signal(answered);
+                                   }];
+        ASSERT_EQ(dispatch_semaphore_wait(answered, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))), 0);
+        EXPECT_TRUE(asyncHit != nil) << text(asyncError);
+        EXPECT_EQ(asyncError, nil);
+        EXPECT_EQ(kernel_model::model.compiles, 0u);
+
+        MTLRenderPipelineDescriptor *unpackedStandIn = descriptor(frameworkLib, MTLPixelFormatA1BGR5Unorm);
+        unpackedStandIn.binaryArchives = @[ empty ];
+        id<MTLRenderPipelineState> missed =
+            [device newRenderPipelineStateWithDescriptor:unpackedStandIn
+                                                 options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                              reflection:nil
+                                                   error:&error];
+        EXPECT_EQ(missed, nil);
+        ASSERT_TRUE(error != nil);
+        EXPECT_EQ(error.code, 3);
+        EXPECT_EQ(kernel_model::model.compiles, 0u);
+
+        id<MTLBinaryArchive> freshEmpty =
+            [device newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&error];
+        ASSERT_TRUE(freshEmpty != nil);
+        MTLRenderPipelineDescriptor *appStandIn = descriptor(appLib, MTLPixelFormatR8Unorm_sRGB);
+        appStandIn.binaryArchives = @[ freshEmpty ];
+        error = nil;
+        EXPECT_EQ([device newRenderPipelineStateWithDescriptor:appStandIn
+                                                       options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                    reflection:nil
+                                                         error:&error],
+                  nil);
+        ASSERT_TRUE(error != nil);
+        EXPECT_EQ(error.code, 3);
+        EXPECT_EQ(kernel_model::model.compiles, 0u);
+
+        error = nil;
+        ASSERT_TRUE([empty addRenderPipelineFunctionsWithDescriptor:unpackedStandIn error:&error]) << text(error);
+        EXPECT_EQ([device newRenderPipelineStateWithDescriptor:unpackedStandIn
+                                                       options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                    reflection:nil
+                                                         error:&error],
+                  nil);
+        EXPECT_GT(kernel_model::model.compiles, 0u);
+    });
+}
+
+TEST(GM20BFacadeCreation, AnInProcessCoreAnimationMissLogsOncePerLabel)
+{
+    switch_ios::test::ExpectPassesInFreshProcess([] {
+        RefusingCompiler compiler;
+        ASSERT_TRUE(compiler.serve());
+        const auto [device, library] = opened(kernel_model::model.compilerFlags);
+        ASSERT_TRUE(library != nil);
+
+        MTLRenderPipelineDescriptor *first = unpacked(library);
+        first.label = @"com.apple.coreanimation.PBGRAXm_TimgA2Xhf_Isrc";
+        EXPECT_NE(created(device, first).find("refused"), std::string::npos);
+        EXPECT_EQ(gm20b::gInProcessCaLogged.load(std::memory_order_relaxed), 0u);
+
+        EXPECT_NE(created(device, first).find("refused"), std::string::npos);
+        EXPECT_EQ(gm20b::gInProcessCaLogged.load(std::memory_order_relaxed), 1u);
+
+        EXPECT_NE(created(device, first).find("refused"), std::string::npos);
+        EXPECT_EQ(gm20b::gInProcessCaLogged.load(std::memory_order_relaxed), 1u);
+
+        MTLRenderPipelineDescriptor *plain = unpacked(library);
+        plain.label = @"not.coreanimation";
+        EXPECT_NE(created(device, plain).find("refused"), std::string::npos);
+        EXPECT_EQ(gm20b::gInProcessCaLogged.load(std::memory_order_relaxed), 1u);
+
+        MTLRenderPipelineDescriptor *second = unpacked(library);
+        second.label = @"com.apple.coreanimation.PBGRAXmw_TimgA3Xhf_Isrc";
+        EXPECT_NE(created(device, second).find("refused"), std::string::npos);
+        EXPECT_EQ(gm20b::gInProcessCaLogged.load(std::memory_order_relaxed), 2u);
+
+        MTLRenderPipelineDescriptor *asyncDesc = unpacked(library);
+        asyncDesc.label = @"com.apple.coreanimation.PBGRAXmw_TimgA3Xhfp_Isrc";
+        dispatch_semaphore_t answered = dispatch_semaphore_create(0);
+        [device newRenderPipelineStateWithDescriptor:asyncDesc
+                                   completionHandler:^(id<MTLRenderPipelineState>, NSError *) {
+                                       dispatch_semaphore_signal(answered);
+                                   }];
+        ASSERT_EQ(dispatch_semaphore_wait(answered, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))), 0);
+        EXPECT_EQ(gm20b::gInProcessCaLogged.load(std::memory_order_relaxed), 3u);
     });
 }
 

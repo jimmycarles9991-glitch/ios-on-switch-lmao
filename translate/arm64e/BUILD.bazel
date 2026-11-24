@@ -55,6 +55,7 @@ MACHO_SRCS = [
     "macho/fips.c",
     "macho/macho.c",
     "macho/pretranslate.c",
+    "macho/pt_edits.c",
     "macho/pt_entries.c",
     "macho/pt_verify.c",
     "macho/sha256.c",
@@ -67,6 +68,7 @@ MACHO_HDRS = [
     "macho/fips.h",
     "macho/macho.h",
     "macho/pretranslate.h",
+    "macho/pt_edits.h",
     "macho/sha256.h",
     "macho/stub_split.h",
 ]

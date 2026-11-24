@@ -38,7 +38,9 @@ SWITCH_OBJECTS = {
         ("bsd/kern/ubc_subr.c", "security/bootstrap_signature.c", []),
         ("bsd/kern/kern_exec.c", "security/entitlements_factory.c", []),
         ("bsd/kern/kern_exec.c", "boot/icon_cache.c", []),
+        ("bsd/kern/kern_exec.c", "boot/icon_cache_sweep.c", [], ["12377.121.6"]),
         ("bsd/kern/kern_exit.c", "diag/exit.c", []),
+        ("bsd/kern/kdebug.c", "recorder/recorder.c", []),
         ("bsd/kern/kern_event.c", "diag/workloop.c", []),
         ("bsd/net/necp.c", "diag/necp.c", [], ["12377.121.6"]),
         ("bsd/net/necp.c", "diag/necp_table.c", [], ["12377.121.6"]),
@@ -46,6 +48,8 @@ SWITCH_OBJECTS = {
         ("bsd/kern/lockdown_mode.c", "sysctl/lockdown.c", [], ["12377.121.6"]),
         ("bsd/kern/kern_shutdown.c", "shutdown/shutdown.c", []),
         ("bsd/vfs/vfs_lookup.c", "vfs/pretranslated.c", []),
+        ("bsd/vfs/vfs_cluster.c", "vm/prefetch.c", ["-include", "{owner_header}"]),
+        ("bsd/vfs/vfs_cluster.c", "vm/prefetch_save.c", []),
         ("bsd/vfs/kpi_vfs.c", "vfs/auth_fs.c", []),
         ("bsd/vfs/vfs_syscalls.c", "vfs/identity.c", []),
         ("bsd/vfs/vfs_syscalls.c", "vfs/fsctl_diag.c", []),
@@ -58,23 +62,37 @@ SWITCH_OBJECTS = {
         ("bsd/kern/kern_codesigning.c", "prelink/shims.c", [], ["12377.121.6"]),
     ],
     "iokit": [
+        ("iokit/Kernel/IOBufferMemoryDescriptor.cpp", "iokit/fresh_memory.cpp", []),
         ("iokit/Kernel/IOMemoryDescriptor.cpp", "iokit/memory_attachment.cpp", []),
+        ("iokit/Kernel/IOMemoryDescriptor.cpp", "iokit/park_mapping.cpp", []),
         ("iokit/Kernel/IOUserClient.cpp", "iokit/iosurface.cpp", []),
         ("iokit/Kernel/IOUserClient.cpp", "security/app_capabilities.cpp", []),
     ],
     "osfmk": [
         ("osfmk/vm/vm_map.c", "security/dyld_policy.c", [], ["12377.121.6"]),
+        ("osfmk/vm/vm_map.c", "vm/park_vm.c", []),
         ("osfmk/arm/model_dep.c", "diag/threads.c", []),
         ("osfmk/ipc/ipc_kmsg.c", "diag/frames.c", []),
         ("osfmk/arm64/arm_vm_init.c", "ram/ram.c", [_KERNEL_VIRT_BASE]),
         ("osfmk/arm64/cpu.c", "idle/idle.c", []),
         ("osfmk/kern/timer_call.c", "sched/stats.c", []),
         ("osfmk/kern/timer_call.c", "sched/render.c", []),
+        ("osfmk/kern/timer_call.c", "sched/cpu.c", []),
+        ("osfmk/kern/timer_call.c", "sched/watch.c", []),
+        ("osfmk/kern/timer_call.c", "sched/watch_write.c", []),
+        ("osfmk/kern/timer_call.c", "sched/commit.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall_snapshot.c", []),
+        ("osfmk/kern/sched_prim.c", "diag/stall_chain.c", []),
         ("osfmk/kern/sched_prim.c", "diag/stall_frame.c", []),
         ("osfmk/kern/sched_prim.c", "diag/heartbeat.c", []),
         ("osfmk/kern/sched_prim.c", "sched/busy.c", []),
+        ("osfmk/kern/sched_prim.c", "sched/user_turnstile.c", []),
+        ("osfmk/kern/sched_prim.c", "diag/unnest.c", []),
+        ("osfmk/vm/bsd_vm.c", "diag/pagein.c", []),
+        ("osfmk/vm/vm_pageout.c", "vm/prefetch_vm.c", []),
+        ("osfmk/kern/sched_prim.c", "recorder/watch.c", []),
+        ("osfmk/kperf/kperf.c", "recorder/sample.c", []),
         ("osfmk/kern/exception.c", "diag/crash.c", []),
         ("osfmk/kern/host.c", "vm/stats.c", [], ["12377.121.6"]),
     ],
@@ -118,6 +136,36 @@ def switch_copts(component, copts):
     for obj, flags in SWITCH_APPLE_COPTS.get(component, {}).items():
         out[obj] = out.get(obj, []) + flags
     return out
+
+# The objects whose hooks <switch/recorder.h> expands under --//kernel:recorder, per component.
+_RECORDER_OBJECTS = {
+    "bsd": [
+        "bsd/kern/kdebug.c",
+        "bsd/kern/kdebug_common.c",
+        "bsd/kern/kern_shutdown.c",
+        "switch:recorder/recorder.c",
+    ],
+    "osfmk": [
+        "osfmk/kperf/kperf.c",
+        "osfmk/kperf/kptimer.c",
+        "switch:diag/stall.c",
+        "switch:recorder/sample.c",
+        "switch:recorder/watch.c",
+        "switch:sched/stats.c",
+    ],
+}
+
+def with_recorder(component, copts):
+    """A component's `copts` with SWITCH_RECORDER on the objects that expand the recorder's hooks (--//kernel:recorder).
+
+    Args:
+        component: osfmk, bsd, ...
+        copts: the component's per-object copts.
+
+    Returns:
+        The copts with the define on those objects.
+    """
+    return copts | {obj: copts.get(obj, []) + ["-DSWITCH_RECORDER=1"] for obj in _RECORDER_OBJECTS.get(component, [])}
 
 def with_kprof(component, copts):
     """A component's `copts` with SWITCH_KPROF for switch_kprof.c (--//kernel:kprof), the one object that reads it.

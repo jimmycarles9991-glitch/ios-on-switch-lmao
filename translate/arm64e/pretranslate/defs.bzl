@@ -9,12 +9,14 @@ PretranslatedInfo = provider(
         "tool": "the arm64e CLI (File)",
         "tool_run": "its FilesToRunProvider",
         "apple_trustcaches": "Apple's trust cache IM4Ps, for each translated binary's launch-constraint category",
+        "edits": "optional checked byte-edit table (File or None)",
         "runfiles": "runfiles the driver and tool need",
     },
 )
 
 def _pretranslate_role_impl(ctx):
-    runfiles = ctx.runfiles(files = ctx.files.apple_trustcaches)
+    extra = [ctx.file.edits] if ctx.file.edits else []
+    runfiles = ctx.runfiles(files = ctx.files.apple_trustcaches + extra)
     runfiles = runfiles.merge(ctx.attr.driver[DefaultInfo].default_runfiles)
     runfiles = runfiles.merge(ctx.attr.tool[DefaultInfo].default_runfiles)
     return [
@@ -26,6 +28,7 @@ def _pretranslate_role_impl(ctx):
             tool = ctx.executable.tool,
             tool_run = ctx.attr.tool[DefaultInfo].files_to_run,
             apple_trustcaches = ctx.files.apple_trustcaches,
+            edits = ctx.file.edits,
             runfiles = runfiles,
         ),
     ]
@@ -38,5 +41,6 @@ pretranslate_role = rule(
         "driver": attr.label(mandatory = True, executable = True, cfg = "exec"),
         "tool": attr.label(mandatory = True, executable = True, cfg = "exec"),
         "apple_trustcaches": attr.label_list(allow_files = True),
+        "edits": attr.label(allow_single_file = True),
     },
 )

@@ -257,8 +257,8 @@ public:
     }
 
 private:
-    // the GPU's 15 colour and 15 depth entries, and a few its full table refused
-    static constexpr uint32_t kEntries = 40;
+    // the GPU's 15 colour and 15 depth entries, plus headroom for seen, in-flight and refused values
+    static constexpr uint32_t kEntries = 64;
 
     struct Entry {
         TegraGM20BAbiZbc key;
@@ -266,16 +266,20 @@ private:
         uint8_t seen;
     };
 
-    // A new entry's place: a free one, else the next value only seen so far in turn; null when every one is asked for
+    // A new entry's place: a free one, else the next value only seen so far in turn, else the next refused one in turn
+    // (it holds no GPU entry); null only when every slot is Held, Wanted or Asking
     Entry *slot()
     {
         if (count_ < kEntries)
             return &entries_[count_++];
-        for (uint32_t i = 0; i < kEntries; i++) {
-            Entry &x = entries_[(evict_ + i) % kEntries];
-            if (x.state == Seen) {
-                evict_ = (evict_ + i + 1) % kEntries;
-                return &x;
+        for (const State victim : {Seen, Refused}) {
+            uint32_t &cursor = victim == Seen ? evict_ : evictRefused_;
+            for (uint32_t i = 0; i < kEntries; i++) {
+                Entry &x = entries_[(cursor + i) % kEntries];
+                if (x.state == victim) {
+                    cursor = (cursor + i + 1) % kEntries;
+                    return &x;
+                }
             }
         }
         return nullptr;
@@ -291,7 +295,7 @@ private:
 
     gm20b::Mutex lock_;
     Entry entries_[kEntries] = {};
-    uint32_t count_ = 0, evict_ = 0;
+    uint32_t count_ = 0, evict_ = 0, evictRefused_ = 0;
     bool fullSaid_[2] = {};
 };
 

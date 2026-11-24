@@ -83,7 +83,10 @@ public enum X1Unorm10Probe {
             blend(attachment)
         }
         let target = try gpu.texture(format, width, offsets)
-        let data = try gpu.buffer(values.map { SIMD4<Float>($0, $0, $0, 1) })
+        let padded = X1Unorm10Layout.paddedRows(offsets)
+        var input = values.map { SIMD4<Float>($0, $0, $0, 1) }
+        input.append(contentsOf: repeatElement(SIMD4<Float>(0, 0, 0, 0), count: width * (padded - offsets)))
+        let data = try gpu.buffer(input)
         let timing = try await gpu.run(tolerateError: true) { commands in
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = target
@@ -93,10 +96,10 @@ public enum X1Unorm10Probe {
             let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
             encoder.setRenderPipelineState(state)
             var corners = GPU.fullScreen
-            var row = UInt32(width)
+            var size = SIMD2<UInt32>(UInt32(width), UInt32(offsets))
             encoder.setVertexBytes(&corners, length: MemoryLayout<SIMD4<Float>>.stride * 4, index: 0)
             encoder.setFragmentBuffer(data, offset: 0, index: 0)
-            encoder.setFragmentBytes(&row, length: 4, index: 1)
+            encoder.setFragmentBytes(&size, length: MemoryLayout<SIMD2<UInt32>>.size, index: 1)
             encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             encoder.endEncoding()
         }

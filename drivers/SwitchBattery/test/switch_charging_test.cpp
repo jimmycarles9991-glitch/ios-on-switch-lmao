@@ -25,6 +25,7 @@
 #include <gtest/gtest.h>
 #include "bazel/testing/fresh_process.h"
 #include "../SwitchBattery.h"
+#include "../SwitchBatteryPack.h"
 #include "../SwitchChargePolicy.h"
 #include "../../SwitchSuspend/SwitchWakeSources.h"
 #include "../../SwitchUSB/SwitchPD.h"
@@ -1313,6 +1314,47 @@ static void policy()
     check(chargerSetting(Zone::Cool).reg02 == 0x10 && chargerSetting(Zone::Hot).reg02 == 0x00, "zone ICHG");
 }
 
+// iPadOS 27 reads the battery through an AppleSmartBatteryPack beside the power source (SwitchBatteryPack.h); 21H461
+// reads none, so its kernel publishes none.
+static void batteryPack()
+{
+    bootWithNintendoCharger();
+    advance(2300);
+    AppleSmartBatteryPack *pack = nullptr;
+    for (IOService *s : IOService::published())
+        if (auto *p = dynamic_cast<AppleSmartBatteryPack *>(s))
+            pack = p;
+#if SWITCH_IPSW_KIND_24B119
+    check(pack && pack->provider == battery(), "pack published under the battery");
+    if (!pack)
+        return;
+    auto *id = dynamic_cast<OSNumber *>(pack->getProperty("ID"));
+    check(id && id->value == 0, "pack ID 0, the one powerd looks for");
+    auto data = [pack] {
+        auto *d = dynamic_cast<OSDictionary *>(pack->getProperty("BatteryData"));
+        return d ? *d : OSDictionary();
+    };
+    OSDictionary d = data();
+    check(d.numbers["VirtualTemperature"] == 3000,
+          "VirtualTemperature 30.00 C: " + std::to_string(d.numbers["VirtualTemperature"]));
+    check(d.numbers["RemainingCapacity"] == 2586 && d.numbers["MaxCapacity"] == 4310 &&
+              d.numbers["NominalChargeCapacity"] == 4310 && d.numbers["DesignCapacity"] == 4310,
+          "capacities in mAh");
+    check(d.numbers["Voltage"] == 3900 && d.numbers["AverageCurrent"] == 1800 && d.numbers["StateOfCharge"] == 60,
+          "voltage, average current, state of charge");
+    check(d.numbers.count("FullyCharged") && d.numbers["FullyCharged"] == 0 && !d.booleans.count("FullyCharged"),
+          "FullyCharged is a number: powerd reads it as SInt32");
+    check(d.strings["Serial"] == battery()->strings[kIOPMPSSerialKey] && d.strings["Serial"].size() == 17,
+          "the battery's serial");
+    gGauge.setTemp(4600);
+    advance(300);
+    check(data().numbers["VirtualTemperature"] == 4600,
+          "VirtualTemperature follows the gauge's alert: " + std::to_string(data().numbers["VirtualTemperature"]));
+#else
+    check(!pack, "no pack on 21H461");
+#endif
+}
+
 // One process per scenario: the drivers keep globals.
 static void run(void (*scenario)())
 {
@@ -1370,6 +1412,11 @@ TEST(SwitchCharging, Rebalance)
 TEST(SwitchCharging, OursAlready)
 {
     run(oursAlready);
+}
+
+TEST(SwitchCharging, BatteryPack)
+{
+    run(batteryPack);
 }
 
 TEST(SwitchCharging, SettingsLost)

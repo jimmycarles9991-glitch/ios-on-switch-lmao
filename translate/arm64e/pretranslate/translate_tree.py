@@ -19,6 +19,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -88,9 +89,63 @@ def run_tool(tool: str, *args: str) -> str:
     return subprocess.run([tool, *args], capture_output=True, text=True, check=True).stdout
 
 
-def pretranslate_file(tool: str, src: Path, out_path: Path, report_path: Path) -> dict:
+def load_edits(path: Path | None) -> dict[str, list[dict]]:
+    """Read an optional checked byte-edit table ({files: {path: [{fileoff, stock, at, patched}]}})."""
+    if path is None:
+        return {}
+    data = json.loads(path.read_text())
+    files_map = data.get('files', {})
+    if not isinstance(files_map, dict):
+        raise ValueError(f'{path}: files must be an object')
+    out: dict[str, list[dict]] = {}
+    for target, entries in files_map.items():
+        if not isinstance(target, str) or not target.startswith('/') or not isinstance(entries, list) or not entries:
+            raise ValueError(f'{path}: invalid edit entry for {target!r}')
+        norm = []
+        for entry in entries:
+            fileoff = entry['fileoff']
+            if isinstance(fileoff, bool) or not isinstance(fileoff, (int, str)):
+                raise ValueError(f'{path}: {target}: invalid fileoff {fileoff!r}')
+            off = fileoff if isinstance(fileoff, int) else int(fileoff.strip(), 0)
+            if off < 0:
+                raise ValueError(f'{path}: {target}: negative fileoff {fileoff!r}')
+            at_raw = entry.get('at', 0)
+            if isinstance(at_raw, bool) or not isinstance(at_raw, int):
+                raise ValueError(f'{path}: {target}: invalid at {at_raw!r}')
+            at = at_raw
+            stock = entry['stock']
+            patched = entry.get('patched', '')
+            if (
+                not isinstance(stock, str)
+                or not stock
+                or len(stock) % 2
+                or not re.fullmatch(r'[0-9a-fA-F]+', stock)
+                or not isinstance(patched, str)
+                or len(patched) % 2
+                or not re.fullmatch(r'[0-9a-fA-F]*', patched)
+            ):
+                raise ValueError(f'{path}: {target}: invalid hex bytes')
+            if at < 0 or at + len(patched) // 2 > len(stock) // 2:
+                raise ValueError(f'{path}: {target}: patch range exceeds stock length')
+            norm.append({'fileoff': hex(off), 'stock': stock.lower(), 'at': at, 'patched': patched.lower()})
+        out[target] = norm
+    return out
+
+
+def _edit_args(edits: list[dict]) -> list[str]:
+    args: list[str] = []
+    for e in edits:
+        args.extend(['-e', f'{e["fileoff"]}:{e["stock"]}:{e["at"]}:{e["patched"]}'])
+    return args
+
+
+def _edit_sha(edits: list[dict]) -> str:
+    return hashlib.sha256(json.dumps(edits, sort_keys=True).encode()).hexdigest() if edits else ''
+
+
+def pretranslate_file(tool: str, src: Path, out_path: Path, report_path: Path, edits: list[dict] = ()) -> dict:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    run_tool(tool, 'pretranslate', '-r', str(report_path), str(src), str(out_path))
+    run_tool(tool, 'pretranslate', '-r', str(report_path), *_edit_args(list(edits)), str(src), str(out_path))
     return json.loads(report_path.read_text())
 
 
@@ -99,17 +154,20 @@ class Translator(NamedTuple):
     version: str
 
 
-def _memoized(translator: Translator, src: Path, dst: Path, memo: Path, in_sha: str) -> dict:
-    """Translate src, or reuse an earlier run whose report records the same input and translator (resume)."""
+def _memoized(translator: Translator, src: Path, dst: Path, memo: Path, in_sha: str, edits: list[dict] = ()) -> dict:
+    """Translate src, or reuse an earlier run whose report records the same input, translator, and edits (resume)."""
+    edit_sha = _edit_sha(list(edits))
     if memo.exists():
         prev = json.loads(memo.read_text())
-        if prev.get('_in') == in_sha and prev.get('_tool') == translator.version:
+        if prev.get('_in') == in_sha and prev.get('_tool') == translator.version and prev.get('_edits', '') == edit_sha:
             translated = any(s['status'] == 'translated' for s in prev['slices'])
             if translated == dst.exists():
                 return prev
-    r = pretranslate_file(translator.tool, src, dst, memo)
+    r = pretranslate_file(translator.tool, src, dst, memo, edits)
     r['_in'] = in_sha
     r['_tool'] = translator.version
+    if edit_sha:
+        r['_edits'] = edit_sha
     memo.write_text(json.dumps(r))
     return r
 
@@ -190,6 +248,7 @@ def _arguments() -> argparse.Namespace:
     ap.add_argument(
         '--memo', type=Path, help='keep translations here across runs, keyed by their inputs (default: none)'
     )
+    ap.add_argument('--edits', type=Path, help='checked byte-edit table JSON applied before re-signing')
     ap.add_argument('--progress', action='store_true', help='print how far it is (progress DONE/TOTAL files)')
     return ap.parse_args()
 
@@ -197,6 +256,7 @@ def _arguments() -> argparse.Namespace:
 def main() -> None:
     args = _arguments()
     memo = Memo(args.memo) if args.memo else None
+    edits_by_path = load_edits(args.edits)
 
     out = args.out
     out.mkdir(parents=True, exist_ok=True)
@@ -216,25 +276,36 @@ def main() -> None:
     cache = args.volume / CACHE_DIR
     _report(args, 'finding the Mach-O files')
     machos = sorted(_machos(args.volume, cache))
+    seen_paths = {'/' + str(p.relative_to(args.volume)) for p in machos}
+    missing = sorted(set(edits_by_path) - seen_paths)
+    if missing:
+        raise SystemExit(f'{args.role}: edit target(s) not found in volume: {", ".join(missing)}')
 
     def translate(src: Path) -> tuple[Path, Path, str, dict]:
         rel = src.relative_to(args.volume)
         dst = out / 'files' / rel
         in_sha = hashing.sha256_file(src)
         record = work / (str(rel).replace('/', '_') + '.json')
+        file_edits = edits_by_path.get('/' + str(rel), [])
+        edit_sha = _edit_sha(file_edits)
         if memo:
+            parts = ['file', in_sha, translator.version]
+            if edit_sha:
+                parts.append(edit_sha)
             r = memo.run(
-                ['file', in_sha, translator.version],
+                parts,
                 dst,
-                lambda: pretranslate_file(translator.tool, src, dst, record.with_suffix('.report.json')),
+                lambda: pretranslate_file(translator.tool, src, dst, record.with_suffix('.report.json'), file_edits),
             )
         else:
-            r = _memoized(translator, src, dst, record, in_sha)
+            r = _memoized(translator, src, dst, record, in_sha, file_edits)
         return rel, dst, in_sha, r
 
     for rel, dst, in_sha, r in _in_order(args, translate, machos, 'files'):
         translated = [s for s in r['slices'] if s['status'] == 'translated']
         if not translated:
+            if '/' + str(rel) in edits_by_path:
+                raise SystemExit(f'{args.role}: edited binary /{rel} was not translated')
             dst.unlink(missing_ok=True)
             continue
         manifest['files'].append(

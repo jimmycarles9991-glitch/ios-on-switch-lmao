@@ -4,7 +4,7 @@ import HWTestGPU
 public enum Registry {
     /// The GPU scenes come first: the first of them reproduces the process's first command buffer.
     static let gpuScenes: [any HWTest] =
-        Scenes.all.map { GPUSceneTest(scene: $0) } + [CAStateSweepTest(), CAAskedFormsTest()]
+        Scenes.all.map { GPUSceneTest(scene: $0) } + [PackHitCostTest(), CAStateSweepTest(), CAAskedFormsTest()]
 
     static let metal: [any HWTest] = [
         MetalDeviceTest(), MetalComputeTest(), MetalColorPassTest(), MetalDepthStencilTest(), MetalMSAATest(),
@@ -27,7 +27,9 @@ public enum Registry {
         AlphaToCoverageTest(),
         IconCornersTest(), TextureBufferTest(), IconSmallSizesTest(), IconPasscodeTest(), IconCalendarTest(),
         CompileSharedTest(), CompileFirstDrawTest(), CompileStageLibraryTest(), CompileAnswerLatencyTest(),
-        DrawBandsTest(), DispatchPiecesTest(), PosterTargetsTest(),
+        CompileSharedStagesTest(),
+        DrawBandsTest(), DispatchPiecesTest(), ProbeCtaTest(), ProbeMacroWfiTest(), ForeignWaitIsolationTest(),
+        PosterTargetsTest(),
         PushScanTargetsTest(), ResolveCostTest(), JobRefusalLinesTest(),
         MsaaFirstUseTest(), StoredDepthTest(), ZetaMoveTest(), ZetaKeptTest(), ZcViewFormatsTest(),
         ZcZetaLayersTest(), ZcZetaShadowTest(), ZcMixedTest(), ZcStencilCriterionTest(),
@@ -54,6 +56,7 @@ public enum Registry {
         VertexOnlyStateTest(), RenderReflectionTest(), ComputeReflectionTest(), ReflectionKindsTest(),
         FunctionPointerAnswersTest(), ScratchOrderTest(), FencePageRegionsTest(), Depth16MultisampleResolveTest(),
         InvalidRequestsTest(), HeapAliasableUsedTest(), CompressionSettledTest(), TextureTransferFailedTest(),
+        HeapAliasedKindsTest(),
         X1ViewportsTest(), X1ThreadsPerThreadgroupTest(), X1Mme2Test(),
         DecodePvrtcTest(), DecodeAstcNarrowTest(), DecodeAstcHdrTest(), DecodeNativeAstcPrecisionTest(),
         DecodeFreshTest(), DecodeReadbackTest(), DecodeViewsTest(), DecodeViewLifetimeTest(), DecodeUploadCostTest(),
@@ -71,7 +74,7 @@ public enum Registry {
             ResolveCodesPartsTest(), RtalPastLayersTest(), XrPlanesImagesTest(), Bgra10XrResolveTest(),
             ViewSliceTargetTest(), NoRenderUsageTest(), P3YcbcrStoreSubsampledTest(), PlaneInBlocksTest(),
             Rg8SrgbTargetTest(), TextureBufferTargetTest(), ZetaApartTest(), ZetaResolvePartsTest(),
-            YcbcrNoRenderUsageTest(), MixedSamplesTest(),
+            YcbcrNoRenderUsageTest(), MixedSamplesTest(), MixedEndRowsTest(),
             SameBitsTest(), Depth16LayeredTestsTest(), LayersPastTest(), LayersPastDepthTest(), TexelBufferReachTest(),
             FetchTessellatedTest(), PlanarRenderThenSampleTest(), XrTexelBufferStoresTest(),
             XrTexelBufferSurfaceTest(), TurnedStandInTargetsTest(), Bgra10XrSrgbEmptyPassTest(), StorageFormsTest(),
@@ -149,24 +152,28 @@ public enum Registry {
 
     static let connectivityAndStorage: [any HWTest] = [
         NetworkPathTest(), ReachabilityTest(), BluetoothTest(), USBStorageTest(), SequentialStorageTest(),
-        RandomStorageTest(), WiFiLinkTest(),
+        RandomStorageTest(), StorageIOTest(), WiFiLinkTest(),
     ]
 
     static let cpuAndSystem: [any HWTest] = [
         CPUSingleTest(), CPUMultiTest(), A64XSelfTest(), CryptoKitTest(), CommonCryptoTest(), KeychainTest(),
+        CPUAtomicsTest(),
         LocalAuthenticationTest(), IdentityTest(), PowerStateTest(), ThermalTest(), SocThermThrottleTest(),
         MemoryTest(), UnionDirectoryTest(), OverlayAppsTest(), OverlayAppRecordsTest(), IconCacheTest(),
         IconCacheResetTest(), CPUClockTest(), CPUDfllLandingTest(), CPUSustainedTest(), CPUSchedTest(),
-        CPUIPIPingPongTest(),
+        CPUIPIPingPongTest(), HogPacingTest(),
         DispatchSyncTest(), DispatchSyncWorkloopTest(), WorkloopSyncTest(), WidgetsRenderTest(), IconRenderTest(),
-        SnapshotPurgeableTest(),
+        DispatchSyncHandoffTest(),
+        SnapshotPurgeableTest(), RecorderHangDumpTest(),
     ]
 
     static let compositor: [any HWTest] =
-        UISceneTests.all + [VideoAlphaTest()] + PacingTests.all + [ScalePacingTest()]
+        UISceneTests.all + [VideoAlphaTest()] + PacingTests.all
+            + [ScalePacingTest(), TitleScrollTest(), AnimTimingTest()]
 
     public static let all: [any HWTest] =
         [CPUAsyncTimersTest(), RegDumpQuietTest()] + gpuScenes + metal + gm20bRoutes + GPUPathTests.all
+            + [FrameRecordCostTest()]
             + NativeObjectTests.all
             + NativeCallTests.all + video + images + audio
             + display + compositor + sensorsAndInput + connectivityAndStorage

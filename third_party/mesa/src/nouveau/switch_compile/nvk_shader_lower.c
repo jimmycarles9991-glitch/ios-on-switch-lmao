@@ -13,7 +13,6 @@
 #include "nvk_switch_push.h"
 #include "nvk_switch_round.h"
 #include "nvk_switch_turn.h"
-#include "nvk_switch_ubo_fold.h"
 #include "nvk_switch_xr_planes.h"
 
 #include "vk_nir_convert_ycbcr.h"
@@ -272,8 +271,6 @@ switch_nvk_lower(const struct switch_nvk_target *t, nir_shader *nir,
             nvk_ssbo_addr_format(rs));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
             nvk_ubo_addr_format(t->info, rs));
-   NIR_PASS(_, nir, switch_nvk_fold_ubo, cbuf_map,
-            switch_nvk_ubo_fold_current);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass,
             lower_load_intrinsic, nir_metadata_none, (void *)t->info);
 

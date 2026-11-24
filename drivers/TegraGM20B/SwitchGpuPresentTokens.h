@@ -59,6 +59,25 @@ static inline int switch_gpu_present_tokens_promised(const struct switch_gpu_pre
 	return 0;
 }
 
+static inline int
+switch_gpu_present_tokens_need_l2_flush(const struct switch_gpu_present_tokens *held,
+					int (*external)(const struct switch_gpu_backing_token *))
+{
+	uint32_t i;
+	for (i = 0; i < held->count; ++i) {
+		const struct switch_gpu_backing_token *token = &held->tokens[i];
+		/* Promise and CE tokens register no visibility ops and cannot prove DRAM visibility. */
+		if (token->engine == SWITCH_GPU_ENGINE_PROMISE ||
+		    token->engine == SWITCH_GPU_ENGINE_CE)
+			return 1;
+		if (token->engine != SWITCH_GPU_ENGINE_GM20B)
+			continue;
+		if (external(token) != 1)
+			return 1;
+	}
+	return 0;
+}
+
 static inline void switch_gpu_present_tokens_drop(struct switch_gpu_present_tokens *held)
 {
 	while (held->count)

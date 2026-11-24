@@ -80,4 +80,24 @@ TEST(JobVisibility, EventsAndHostWritesCarryOverToTheChannel)
 	EXPECT_TRUE(flags & SWITCH_GPU_SUBMIT_FORCE_FENCE);
 	EXPECT_TRUE(flags & SWITCH_GPU_SUBMIT_HOST_WRITTEN);
 	EXPECT_FALSE(flags & SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
+	EXPECT_FALSE(flags & SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY);
+}
+
+TEST(JobVisibility, VolatileWritesSelectVolatileVisibilityUnlessExternalRequired)
+{
+	const uint32_t vol =
+		switch_gpu_job_visibility(TegraGM20BJobVolatileWrites, false, false, false);
+	EXPECT_TRUE(vol & SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT);
+	EXPECT_TRUE(vol & SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY);
+	EXPECT_FALSE(vol & SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
+
+	const uint32_t both = uint32_t(TegraGM20BJobVolatileWrites) | TegraGM20BJobExternal;
+	for (uint32_t overridden : {
+		     switch_gpu_job_visibility(both, false, false, false),
+		     switch_gpu_job_visibility(TegraGM20BJobVolatileWrites, true, false, false),
+		     switch_gpu_job_visibility(TegraGM20BJobVolatileWrites, false, true, false),
+	     }) {
+		EXPECT_TRUE(overridden & SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
+		EXPECT_FALSE(overridden & SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY);
+	}
 }

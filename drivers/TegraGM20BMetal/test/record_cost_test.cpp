@@ -316,11 +316,12 @@ TEST(GM20BRecordCost, CompositorScaleFrame)
     print("unchanged-state draw", difference(repeated, one), 300, "draw");
     printRetainSites("changed-state draw retains", doubled, frame);
     printRetainSites("unchanged-state draw retains", repeated, one);
-    // the API calls' own messages alone: 6 a compositor draw, 1 a draw with nothing set before it, 3 an encoder's
-    // begin, state and end (plus the pass copy's own at a new shape), and no allocation once the recording is warm
+    // the API calls' own messages alone: 6 a compositor draw, 1 a draw with nothing set before it, 3 an encoder of a
+    // kept shape's begin, state and end and 1 its release (its block comes from the pool with no message), and no
+    // allocation once the recording is warm
     EXPECT_EQ(difference(doubled, frame).counts.sends, uint64_t(6 * kDraws));
     EXPECT_EQ(difference(repeated, one).counts.sends, 300u);
-    EXPECT_LE(encoders.counts.sends, uint64_t(7 * kEncoders));
+    EXPECT_LE(encoders.counts.sends, uint64_t(4 * kEncoders));
     EXPECT_EQ(frame.counts.mallocs, 0u);
     // an encoder of a kept pass shape takes no lock: the pass cache is its thread's alone (gm20bPassTrim stops the thread)
     EXPECT_EQ(encoders.counts.locks, 0u);
@@ -474,7 +475,259 @@ TEST(GM20BRecordCost, ChangedStateDrawByCall)
     EXPECT_LT(fewest[Calls] / draws, 5200);
 }
 
+// The submit worker's render encoder made again for each pass (gm20b::RenderEncoder::remake): its binding tables keep
+// their storage and only the slots the last pass set are cleared (measured 2,276 instructions on 24B119's kind, where
+// destroying and value-initialising its 19,408 bytes measured 3,667)
+TEST(GM20BRecordCost, APassEncoderIsMadeAgainWithoutItsWholeBindingTables)
+{
+    auto *e = new gm20b::RenderEncoder();
+    const auto *sampler = reinterpret_cast<const gm20b::Sampler *>(uintptr_t(0x1000));
+    double fewest = 1e30;
+    for (int round = 0; round < 8; round++) {
+        constexpr int kRemakes = 4000;
+        const Counts before = counts();
+        for (int i = 0; i < kRemakes; i++) {
+            for (uint32_t slot = 0; slot < 4; slot++)
+                e->setSampler(2, slot, sampler + slot);
+            e->remake();
+        }
+        fewest = std::min(fewest, double(counts().instructions - before.instructions) / kRemakes);
+    }
+    delete e;
+    printf("record cost pass encoder remake %.0f instr (%zu bytes)\n", fewest, sizeof(gm20b::RenderEncoder));
+    EXPECT_LT(fewest, 3000.0);
+}
+
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// The frame rates line over frames of kept pass shapes: every pass a hit, each command buffer counted once, and each
+// blocked waitUntilScheduled's time split whole into its parts
+TEST(GM20BRecordCost, TheFrameLineCountsKeptPassesAndWhereWaitsWent)
+{
+    Bench &b = bench();
+    ASSERT_TRUE(b.device != nil && b.state != nil);
+    const auto frame = [&](uint32_t f) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [b.queue commandBuffer];
+            compositorFrame(cb, b, passes(b, kEncoders), kDraws, f);
+            [cb commit];
+            [cb waitUntilScheduled];
+            [cb waitUntilCompleted];
+        }
+    };
+    for (uint32_t f = 0; f < uint32_t(kWarm); f++)
+        frame(f);
+    char line[1024];
+    (void)metal_frame_rates(line, sizeof line);
+    constexpr int kFrames = 4;
+    for (uint32_t f = 0; f < kFrames; f++)
+        frame(f);
+    ASSERT_GT(metal_frame_rates(line, sizeof line), 0u);
+    unsigned long long opened = 0, hits = 0, kept = 0, unkept = 0, unkeyed = 0, counters = 0, owned = 0;
+    ASSERT_EQ(sscanf(line, "frame pass=%llu hit=%llu kept=%llu unkept=%llu unkeyed=%llu counters=%llu owned=%llu",
+                     &opened, &hits, &kept, &unkept, &unkeyed, &counters, &owned),
+              7)
+        << line;
+    EXPECT_EQ(opened, unsigned(kFrames * kEncoders)) << line;
+    EXPECT_EQ(hits, opened) << line;
+    const char *ahead = strstr(line, " ahead=");
+    unsigned long long encodedAhead = 0, buffers = 0;
+    ASSERT_TRUE(ahead && sscanf(ahead, " ahead=%llu/%llu", &encodedAhead, &buffers) == 2) << line;
+    EXPECT_EQ(buffers, unsigned(kFrames)) << line;
+    const char *ws = strstr(line, " ws=");
+    unsigned long long waits = 0, waited = 0, parts[5] = {};
+    ASSERT_TRUE(ws && sscanf(ws, " ws=%llu/%lluus(queued %llu parked %llu encoding %llu handlers %llu other %llu)",
+                             &waits, &waited, &parts[0], &parts[1], &parts[2], &parts[3], &parts[4]) == 7)
+        << line;
+    EXPECT_EQ(parts[0] + parts[1] + parts[2] + parts[3] + parts[4], waited) << line;
+}
+
+#if SWITCH_METAL_DIAGNOSTICS
+TEST(GM20BRecordCost, TheFrameLineReportsEnqueueTimingAndLateBoundWrites)
+{
+    Bench &b = bench();
+    ASSERT_TRUE(b.device != nil && b.state != nil);
+    const std::vector<MTLRenderPassDescriptor *> into = passes(b, 1);
+    char line[1024];
+    (void)metal_frame_rates(line, sizeof line);
+
+    const float vertices[16] = {0, 0, 0, 1, 0.25f, 0, 0, 1, 0, 0.25f, 0, 1, 0.25f, 0.25f, 0, 1};
+    const float transform[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float colour[4] = {0.25f, 0.5f, 0.75f, 1};
+    id<MTLBuffer> sharedBuf =
+        [b.device newBufferWithBytes:transform length:sizeof transform options:MTLResourceStorageModeShared];
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                  width:16
+                                                                                 height:16
+                                                                              mipmapped:NO];
+    td.storageMode = MTLStorageModeShared;
+    td.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> sharedTex = [b.device newTextureWithDescriptor:td];
+    IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef) @{
+        (id)kIOSurfaceWidth : @16,
+        (id)kIOSurfaceHeight : @16,
+        (id)kIOSurfaceBytesPerElement : @4,
+        (id)kIOSurfaceBytesPerRow : @64,
+        (id)kIOSurfaceAllocSize : @(16 * 64),
+        (id)kIOSurfacePixelFormat : @(uint32_t('BGRA'))
+    });
+    ASSERT_TRUE(sharedBuf != nil && sharedTex != nil && surface != nullptr);
+    id<MTLTexture> surfaceTex = [b.device newTextureWithDescriptor:td iosurface:surface plane:0];
+    ASSERT_NE(surfaceTex, nil);
+
+    const auto recordPass = [&](id<MTLCommandBuffer> cb) {
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:into[0]];
+        [e setRenderPipelineState:b.state];
+        [e setVertexBytes:vertices length:sizeof vertices atIndex:0];
+        [e setVertexBuffer:sharedBuf offset:0 atIndex:2];
+        [e setFragmentBytes:colour length:sizeof colour atIndex:0];
+        [(id<RecordCostCoreAnimationSPI>)e setFragmentTexture:sharedTex
+                                               atTextureIndex:0
+                                                 samplerState:b.sampler
+                                               atSamplerIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [(id<RecordCostCoreAnimationSPI>)e setFragmentTexture:surfaceTex
+                                               atTextureIndex:0
+                                                 samplerState:b.sampler
+                                               atSamplerIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+        [e endEncoding];
+    };
+
+    for (int mode = 0; mode < 3; mode++) {
+        id<MTLCommandBuffer> cb = [b.queue commandBuffer];
+        if (mode == 0)
+            [cb enqueue];
+        recordPass(cb);
+        if (mode == 1)
+            [cb enqueue];
+        [cb commit];
+        [cb waitUntilCompleted];
+        ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+    }
+    ASSERT_GT(metal_frame_rates(line, sizeof line), 0u);
+    const char *enq = strstr(line, " enq=");
+    unsigned long long beforeFirst = 0, beforeCommit = 0, never = 0;
+    ASSERT_TRUE(enq && sscanf(enq, " enq=%llu/%llu/%llu", &beforeFirst, &beforeCommit, &never) == 3) << line;
+    EXPECT_EQ(beforeFirst, 1u) << line;
+    EXPECT_EQ(beforeCommit, 1u) << line;
+    EXPECT_EQ(never, 1u) << line;
+
+    const SEL setPeriod = sel_registerName("switchMetalProbeLateWritePeriod:");
+    ASSERT_TRUE([(id)b.device respondsToSelector:setPeriod]);
+    NSNumber *prevPeriod = ((NSNumber * (*)(id, SEL, NSNumber *)) objc_msgSend)(b.device, setPeriod, @1);
+
+    struct RestorePeriod {
+        id device;
+        SEL sel;
+        NSNumber *prev;
+
+        ~RestorePeriod()
+        {
+            ((void (*)(id, SEL, NSNumber *))objc_msgSend)(device, sel, prev);
+        }
+    } restore{b.device, setPeriod, prevPeriod};
+
+    (void)metal_frame_rates(line, sizeof line);
+    {
+        id<MTLCommandBuffer> clean = [b.queue commandBuffer];
+        recordPass(clean);
+        [clean commit];
+        [clean waitUntilCompleted];
+        ASSERT_EQ(clean.status, MTLCommandBufferStatusCompleted);
+    }
+    ASSERT_GT(metal_frame_rates(line, sizeof line), 0u);
+    const char *latew = strstr(line, " latew=");
+    unsigned long long sampled = 0, bufW = 0, repW = 0, surfW = 0;
+    ASSERT_TRUE(latew && sscanf(latew, " latew=%llu/%llu/%llu/%llu", &sampled, &bufW, &repW, &surfW) == 4) << line;
+    EXPECT_EQ(sampled, 1u) << line;
+    EXPECT_EQ(bufW, 0u) << line;
+    EXPECT_EQ(repW, 0u) << line;
+    EXPECT_EQ(surfW, 0u) << line;
+
+    {
+        id<MTLCommandBuffer> dirty = [b.queue commandBuffer];
+        recordPass(dirty);
+        static_cast<uint8_t *>(sharedBuf.contents)[0] ^= 0xff;
+        const uint32_t pixels[16 * 16] = {};
+        [sharedTex replaceRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0 withBytes:pixels bytesPerRow:64];
+        IOSurfaceLock(surface, 0, nullptr);
+        IOSurfaceUnlock(surface, 0, nullptr);
+        [dirty commit];
+        [dirty waitUntilCompleted];
+        ASSERT_EQ(dirty.status, MTLCommandBufferStatusCompleted);
+    }
+    ASSERT_GT(metal_frame_rates(line, sizeof line), 0u);
+    latew = strstr(line, " latew=");
+    ASSERT_TRUE(latew && sscanf(latew, " latew=%llu/%llu/%llu/%llu", &sampled, &bufW, &repW, &surfW) == 4) << line;
+    EXPECT_EQ(sampled, 1u) << line;
+    EXPECT_EQ(bufW, 1u) << line;
+    EXPECT_EQ(repW, 1u) << line;
+    EXPECT_EQ(surfW, 1u) << line;
+    CFRelease(surface);
+}
+#endif
+
+// The recording thread prepares an encoder's range only where the submit worker may encode it ahead of the commit, which
+// reads it as the tape is written: a command buffer too short to be handed to the worker leaves every range to the
+// worker's turn, and one handed has each encoder prepared once
+TEST(GM20BRecordCost, OnlyAnEncodeAheadHasTheRecordingThreadPrepareRanges)
+{
+    Bench &b = bench();
+    ASSERT_TRUE(b.device != nil && b.state != nil);
+    std::atomic<uint64_t> &prepared = gm20b::frameCpuCounts().recordPrepares;
+    const auto run = [&](const std::function<void(id<MTLCommandBuffer>)> &record) {
+        @autoreleasepool {
+            id<MTLCommandBuffer> cb = [b.queue commandBuffer];
+            const uint64_t before = prepared.load();
+            record(cb);
+            const uint64_t made = prepared.load() - before;
+            [cb commit];
+            [cb waitUntilCompleted];
+            EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+            EXPECT_EQ(prepared.load() - before, made) << "the commit prepared ranges on the recording thread";
+            return made;
+        }
+    };
+    const std::vector<MTLRenderPassDescriptor *> into = passes(b, kEncoders);
+    const uint64_t shortOne = run([&](id<MTLCommandBuffer> cb) {
+        id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:into[0]];
+        [e setRenderPipelineState:b.state];
+        compositorDraw(e, b, 0, 0);
+        [e endEncoding];
+    });
+    EXPECT_EQ(shortOne, 0u);
+    const uint64_t frame = run([&](id<MTLCommandBuffer> cb) {
+        compositorFrame(cb, b, into, kDraws, 0);
+    });
+    EXPECT_LE(frame, uint64_t(kEncoders));
+}
+
+// A wait's time goes to its parts in order, none past the wait: before the worker took it, parked, encoding, the
+// handler queue's hop from its scheduling, then the rest
+TEST(GM20BRecordCost, AScheduledWaitSplitsIntoItsParts)
+{
+    gm20b::ScheduleNotes n;
+    n.takenUs = 1300;
+    n.parkedUs = 200;
+    n.encodeUs = 400;
+    n.scheduledUs = 2000;
+    const gm20b::ScheduledWait w = gm20b::splitScheduledWait(n, 1000, 2500);
+    EXPECT_EQ(w.queued, 300u);
+    EXPECT_EQ(w.parked, 200u);
+    EXPECT_EQ(w.encoding, 400u);
+    EXPECT_EQ(w.handlers, 500u);
+    EXPECT_EQ(w.other, 100u);
+    gm20b::ScheduleNotes never;
+    EXPECT_EQ(gm20b::splitScheduledWait(never, 1000, 1700).queued, 700u);
+    gm20b::ScheduleNotes late;
+    late.takenUs = 900;
+    late.encodeUs = 5000;
+    const gm20b::ScheduledWait clipped = gm20b::splitScheduledWait(late, 1000, 1600);
+    EXPECT_EQ(clipped.queued, 0u);
+    EXPECT_EQ(clipped.encoding, 600u);
+    EXPECT_EQ(clipped.total(), 600u);
+}
+
 // The jobs of compositor frames, each with an encoder of indexed draws after them (the first of a new state, the rest of
 // the same one), as job_words.h's text: what a change of the recording path must leave as it is
 TEST(GM20BRecordCost, CompositorFrameWords)

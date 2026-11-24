@@ -44,6 +44,8 @@ emit.cpp	kViewportClipBase	nv	NVDEF(NVB197, SET_VIEWPORT_CLIP_CONTROL, PIXEL_MIN
 emit.cpp	kOps	nv	{NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_ADD, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_SUBTRACT, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_FUNC_REVERSE_SUBTRACT, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_MIN, NVB197_SET_BLEND_PER_TARGET_COLOR_OP_V_OGL_MAX}
 emit.cpp	kFactors	nv	{NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ZERO, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_SRC_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_DST_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_DST_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_DST_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_DST_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC_ALPHA_SATURATE, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_CONSTANT_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_ONE_MINUS_CONSTANT_ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC1COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_INVSRC1COLOR, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_SRC1ALPHA, NVB197_SET_BLEND_PER_TARGET_COLOR_SOURCE_COEFF_V_OGL_INVSRC1ALPHA}
 tiled_cache.h	kTiledCacheFlushWords	policy	push words of a flush
+tiled_cache.h	kTiledCacheSizeWords	policy	push words of a tile-size update
+tiled_cache.h	kTiledCacheDefaultSize	policy	initial tile size (128x128)
 stamps.h	kStampWords	policy	push words of a stamp
 stamps.h	kPtimerNsNum	policy	PTIMER to ns on this part (stamps.h)
 stamps.h	kPtimerNsDen	policy	PTIMER to ns on this part (stamps.h)
@@ -96,6 +98,9 @@ mme.h	kAmplify	policy	raw macro slot
 mme.h	kAmplifyIndexed	policy	raw macro slot
 mme.h	kAmplifyCallWords	policy	push words of an amplify call: its header and an indexed draw's five words
 mme.h	kAmplificationScratchWords	policy	push words of the amplify macros' scratch writes: the count, both maps, a state's words
+mme.h	kBandDraw	policy	raw macro slot
+mme.h	kBandDrawCallWords	policy	push words of a band draw macro call
+mme.h	kBandDrawMaxWords	policy	push words of a band draw macro call with scissor restore
 fx_mip.cpp	kSubc2D	policy	gm20b::SUBC_2D, the kernel binding of FERMI_TWOD_A (gpu_chan.c)
 fx_mip.cpp	kSubc3D	policy	gm20b::SUBC_3D, the kernel binding of MAXWELL_B (gpu_chan.c)
 nvdec.cpp	kListedIndices	policy	decoder table size

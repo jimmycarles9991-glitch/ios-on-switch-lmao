@@ -54,6 +54,23 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         switch_native_scanout_release(&scanout);
         return -95;
     }
+    switch_gpu_backing *const backing = scanout.view.native;
+    const auto releaseLocalBacking = [&] {
+        if (!backing)
+            return;
+        switch_gpu_backing_scanout(backing, 0);
+        switch_gpu_backing_release(backing);
+    };
+    if (backing) {
+        switch_gpu_backing_retain(backing);
+        switch_gpu_backing_scanout(backing, 1);
+    }
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (allocation.page_count && tegra_gm20b_surface_compressed(allocation.pages[0] & ~0xfffULL)) {
+        releaseLocalBacking();
+        switch_native_scanout_release(&scanout);
+        return -95;
+    }
     int mapped = -1;
     for (unsigned k = 0; k < kPlaneSlots; ++k) {
         auto &slot = planeSlots[k];
@@ -63,6 +80,7 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
             continue;
         if (slot.native->lease && slot.native->allocation.content_generation == allocation.content_generation) {
             slot.used = ++planeSlotUses;
+            releaseLocalBacking();
             switch_native_scanout_release(&scanout);
             return int(k);
         }
@@ -74,6 +92,8 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         planeUseRelease(unsigned(mapped));
         switch_native_scanout_deliver(slot.native);
         switch_native_scanout_release(slot.native);
+        planeReleaseScanoutBacking(unsigned(mapped));
+        slot.scanoutBacking = backing;
         *slot.native = scanout;
         scanout = {};
         slot.tiled = image.surfaceKind != 0;
@@ -82,6 +102,7 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
     }
     const int placed = planeSlotPlace(image.readLow, image.readHigh, avoid);
     if (placed < 0) {
+        releaseLocalBacking();
         switch_native_scanout_release(&scanout);
         return placed;
     }
@@ -90,6 +111,7 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
         slot.native = IONewZero(SwitchNativeScanout, 1);
     const uint32_t first = uint32_t(image.readLow >> 12), count = uint32_t((image.readHigh - image.readLow) >> 12);
     if (!slot.native || !probeDomain.map(slot.iova, allocation.pages + first, count, false)) {
+        releaseLocalBacking();
         planeDropSlot(unsigned(placed));
         switch_native_scanout_release(&scanout);
         return -1;
@@ -98,6 +120,7 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
     slot.mappedGeneration = allocation.allocation_generation;
     planeForgets.publish(unsigned(placed), slot.mappedAllocation);
     switch_gpu_backing_note_mapped(scanout.view.native, SWITCH_GPU_ENGINE_DISPLAY);
+    slot.scanoutBacking = backing;
     *slot.native = scanout;
     scanout = {};
     slot.tiled = image.surfaceKind != 0;

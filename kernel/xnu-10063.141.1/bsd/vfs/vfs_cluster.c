@@ -101,6 +101,10 @@
 #include <stdbool.h>
 
 #include <vfs/vfs_disk_conditioner.h>
+#include <kern/sched_prim.h>
+#include <kern/thread.h>
+#include <switch/prefetch_quiesce.h>
+#include <switch/prefetch_vm.h>
 
 #if 0
 #undef KERNEL_DEBUG
@@ -198,9 +202,19 @@ static void cluster_syncup(vnode_t vp, off_t newEOF, int (*)(buf_t, void *), voi
 static void cluster_read_upl_release(upl_t upl, int start_pg, int last_pg, int take_reference);
 static inline bool switch_cluster_is_image(vnode_t vp);
 static inline int switch_cluster_cryptex_index(mount_t mp);
+static inline int switch_cluster_volume_index(mount_t mp);
 static void switch_cluster_record(vnode_t vp, int index, off_t offset, uint64_t size);
-/* SwitchBootPrefetch (r17-launch): the cryptex file reads being recorded (switch_cluster_record_start), if any. */
-static struct switch_record_entry *switch_record_log;
+static struct switch_quiesce switch_record_gate;
+static int switch_record_drain_event;
+static thread_t switch_record_skip_thread;
+#if DEVELOPMENT || DEBUG
+static uint64_t switch_prefetch_demand_bytes[SWITCH_PREFETCH_VOLUMES];
+static uint64_t switch_prefetch_replay_reqs;
+static uint64_t switch_prefetch_replay_gt64k;
+static uint64_t switch_prefetch_demand_reqs;
+static uint64_t switch_prefetch_demand_gt64k;
+static uint64_t switch_prefetch_demand_abs;
+#endif
 /* Switch (r14-launch, r17-launch): the cryptex images' reads, for a debug kernel's kprof image line: through the image
  * files (DiskImages; cached-read calls, those that missed, windows read ahead and their bytes, card reads issued for an
  * image and bytes), then through the direct read map (SwitchCryptex.cpp: requests, bytes, card reads). */
@@ -1288,13 +1302,43 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		size = non_rounded_size;
 	}
 	upl_end_offset = upl_offset + size;
+#if DEVELOPMENT || DEBUG
+	uint64_t switch_demand_start = 0;
+#endif
 
-	/* SwitchBootPrefetch (r17-launch): a recording boot notes every read of a cryptex volume's file. */
-	if ((flags & CL_READ) && !(flags & CL_PAGEOUT) && os_atomic_load(&switch_record_log, relaxed) != NULL) {
-		const int index = switch_cluster_cryptex_index(mp);
-
-		if (index >= 0) {
-			switch_cluster_record(vp, index, f_offset, (uint64_t)non_rounded_size);
+	bool switch_track_read = (flags & CL_READ) && !(flags & CL_PAGEOUT);
+#if !(DEVELOPMENT || DEBUG)
+	switch_track_read = switch_track_read && __improbable(switch_quiesce_is_armed(&switch_record_gate));
+#endif
+	if (switch_track_read) {
+		const int switch_vol = switch_cluster_volume_index(mp);
+		if (switch_vol >= 0) {
+			const bool switch_is_replay =
+			    os_atomic_load(&switch_record_skip_thread, relaxed) == current_thread();
+			if (!switch_is_replay && switch_quiesce_is_armed(&switch_record_gate)) {
+				switch_cluster_record(vp, switch_vol, f_offset, (uint64_t)non_rounded_size);
+			}
+#if DEVELOPMENT || DEBUG
+			if (switch_is_replay) {
+				os_atomic_inc(&switch_prefetch_replay_reqs, relaxed);
+				if ((uint64_t)non_rounded_size > 65536u) {
+					os_atomic_inc(&switch_prefetch_replay_gt64k, relaxed);
+				}
+			} else {
+				os_atomic_add(&switch_prefetch_demand_bytes[switch_vol], (uint64_t)non_rounded_size, relaxed);
+				os_atomic_inc(&switch_prefetch_demand_reqs, relaxed);
+				if ((uint64_t)non_rounded_size > 65536u) {
+					os_atomic_inc(&switch_prefetch_demand_gt64k, relaxed);
+				}
+				if (flags & CL_ASYNC) {
+					if (upl != NULL) {
+						switch_vm_prefetch_mark_demand_upl(upl);
+					}
+				} else {
+					switch_demand_start = mach_absolute_time();
+				}
+			}
+#endif
 		}
 	}
 	/* r14-launch: every card read of a cryptex image (demand, window), for the kprof image line. */
@@ -2146,6 +2190,11 @@ cluster_io(vnode_t vp, upl_t upl, vm_offset_t upl_offset, off_t f_offset, int no
 		buf_biodone(real_bp);
 	}
 	KERNEL_DEBUG((FSDBG_CODE(DBG_FSRW, 22)) | DBG_FUNC_END, (int)f_offset, size, upl_offset, retval, 0);
+#if DEVELOPMENT || DEBUG
+	if (switch_demand_start != 0) {
+		os_atomic_add(&switch_prefetch_demand_abs, mach_absolute_time() - switch_demand_start, relaxed);
+	}
+#endif
 
 	return retval;
 }
@@ -4043,17 +4092,23 @@ switch_cluster_is_image(vnode_t vp)
 }
 
 /*
- * Switch (r17-launch): the two cryptex volumes' mounts (System 0, App 1; SwitchCryptex.cpp registers them right
- * after SwitchRawMount.h mounts them), for the boot prefetch recording below and the kprof waits line's "cx".
+ * Switch: the four boot-prefetch mounts (System 0, App 1, root 2, Data 3), for recording and the kprof waits line.
  */
-static mount_t switch_cryptex_mounts[2];
+static mount_t switch_prefetch_mounts[SWITCH_PREFETCH_VOLUMES];
 
-void switch_cluster_register_cryptex_mount(unsigned int index, mount_t mp);
+void
+switch_cluster_register_mount(unsigned int index, mount_t mp)
+{
+	if (index < SWITCH_PREFETCH_VOLUMES) {
+		os_atomic_store(&switch_prefetch_mounts[index], mp, release);
+	}
+}
+
 void
 switch_cluster_register_cryptex_mount(unsigned int index, mount_t mp)
 {
 	if (index < 2) {
-		os_atomic_store(&switch_cryptex_mounts[index], mp, release);
+		switch_cluster_register_mount(index, mp);
 	}
 }
 
@@ -4063,11 +4118,25 @@ switch_cluster_cryptex_index(mount_t mp)
 	if (mp == NULL) {
 		return -1;
 	}
-	if (os_atomic_load(&switch_cryptex_mounts[0], acquire) == mp) {
-		return 0;
+	if (os_atomic_load(&switch_prefetch_mounts[SWITCH_PREFETCH_VOL_SYSTEM], relaxed) == mp) {
+		return SWITCH_PREFETCH_VOL_SYSTEM;
 	}
-	if (os_atomic_load(&switch_cryptex_mounts[1], acquire) == mp) {
-		return 1;
+	if (os_atomic_load(&switch_prefetch_mounts[SWITCH_PREFETCH_VOL_APP], relaxed) == mp) {
+		return SWITCH_PREFETCH_VOL_APP;
+	}
+	return -1;
+}
+
+static inline int
+switch_cluster_volume_index(mount_t mp)
+{
+	if (mp == NULL) {
+		return -1;
+	}
+	for (unsigned int i = 0; i < SWITCH_PREFETCH_VOLUMES; ++i) {
+		if (os_atomic_load(&switch_prefetch_mounts[i], relaxed) == mp) {
+			return (int)i;
+		}
 	}
 	return -1;
 }
@@ -4079,28 +4148,34 @@ switch_cluster_is_cryptex_mount(mount_t mp)
 	return switch_cluster_cryptex_index(mp) >= 0;
 }
 
-/*
- * SwitchBootPrefetch recording (r17-launch): on a boot with no valid prefetch list, SwitchCryptex arms a log
- * (allocated once, never freed: a read racing the stop may still be writing an entry) and every read of a cryptex
- * volume's file that goes to the device (cluster_io: page-in clusters, cached-read misses, read-ahead) appends one entry
- * here: the vnode and its vid (never dereferenced here), the cryptex, the file range and the whole second since the log
- * was armed. Entries past the capacity are counted, not stored. SwitchCryptex stops it after the first frame, names
- * the files and saves their ranges as the next boots' page-in runs (it reads only entries whose `when` is set, which is
- * stored last).
- */
-struct switch_record_entry {
-	vnode_t  vp;
-	uint64_t offset;
-	uint32_t length;
-	uint32_t vid;
-	uint16_t index;
-	uint16_t when;  /* 1 + whole seconds since armed; 0 while the entry is being written */
-	uint32_t reserved;
-};
 static uint32_t switch_record_capacity, switch_record_next;
 static uint64_t switch_record_start, switch_record_second;
 
-void switch_cluster_record_start(struct switch_record_entry *log, uint32_t capacity);
+static void
+switch_record_quiesce_wake(void *arg __unused)
+{
+	thread_wakeup((event_t)&switch_record_drain_event);
+}
+
+static void
+switch_record_quiesce_wait(struct switch_quiesce *q, void *arg __unused)
+{
+	for (;;) {
+		assert_wait((event_t)&switch_record_drain_event, THREAD_UNINT);
+		if (!switch_quiesce_mark_stopping(q)) {
+			clear_wait(current_thread(), THREAD_AWAKENED);
+			break;
+		}
+		thread_block(THREAD_CONTINUE_NULL);
+	}
+}
+
+void
+switch_cluster_record_set_skip_thread(void *thread)
+{
+	os_atomic_store(&switch_record_skip_thread, (thread_t)thread, release);
+}
+
 void
 switch_cluster_record_start(struct switch_record_entry *log, uint32_t capacity)
 {
@@ -4108,40 +4183,55 @@ switch_cluster_record_start(struct switch_record_entry *log, uint32_t capacity)
 	switch_record_start = mach_absolute_time();
 	switch_record_capacity = capacity;
 	os_atomic_store(&switch_record_next, 0, relaxed);
-	os_atomic_store(&switch_record_log, log, release);
+	switch_quiesce_start(&switch_record_gate, log);
 }
 
-/* Stops the recording; returns how many entries were appended (some may be past the capacity). */
-uint32_t switch_cluster_record_stop(void);
 uint32_t
 switch_cluster_record_stop(void)
 {
-	os_atomic_store(&switch_record_log, (struct switch_record_entry *)NULL, release);
-	return os_atomic_load(&switch_record_next, relaxed);
+	(void)switch_quiesce_stop(&switch_record_gate, switch_record_quiesce_wait, NULL);
+	return os_atomic_load(&switch_record_next, acquire);
 }
 
 static void
 switch_cluster_record(vnode_t vp, int index, off_t offset, uint64_t size)
 {
-	struct switch_record_entry *log = os_atomic_load(&switch_record_log, acquire);
-	uint32_t slot;
-	uint64_t elapsed;
-
-	if (log == NULL || offset < 0 || size == 0 || size > UINT32_MAX || vp->v_type != VREG) {
+	if (offset < 0 || size == 0 || size > UINT32_MAX || vp->v_type != VREG ||
+	    (vp->v_flag & (VISNAMEDSTREAM | VSYSTEM | VSWAP)) != 0) {
 		return;
 	}
-	slot = os_atomic_inc_orig(&switch_record_next, relaxed);
-	if (slot >= switch_record_capacity) {
+	struct switch_record_entry *log =
+	    (struct switch_record_entry *)switch_quiesce_enter(&switch_record_gate, switch_record_quiesce_wake, NULL);
+	if (log == NULL) {
 		return;
 	}
-	elapsed = (mach_absolute_time() - switch_record_start) / switch_record_second;
-	log[slot].vp = vp;
-	log[slot].offset = (uint64_t)offset;
-	log[slot].length = (uint32_t)size;
-	log[slot].vid = (uint32_t)vp->v_id;
-	log[slot].index = (uint16_t)index;
-	os_atomic_store(&log[slot].when, (uint16_t)(elapsed < 65534 ? elapsed + 1 : 65535), release);
+	const uint32_t slot = os_atomic_inc_orig(&switch_record_next, relaxed);
+	if (slot < switch_record_capacity) {
+		const uint64_t elapsed = (mach_absolute_time() - switch_record_start) / switch_record_second;
+		log[slot].vp = vp;
+		log[slot].offset = (uint64_t)offset;
+		log[slot].length = (uint32_t)size;
+		log[slot].vid = (uint32_t)vp->v_id;
+		log[slot].index = (uint16_t)index;
+		os_atomic_store(&log[slot].when, (uint16_t)(elapsed < 65534 ? elapsed + 1 : 65535), release);
+	}
+	switch_quiesce_leave(&switch_record_gate, switch_record_quiesce_wake, NULL);
 }
+
+#if DEVELOPMENT || DEBUG
+void
+switch_cluster_prefetch_snapshot(struct switch_cluster_io_snapshot *out)
+{
+	for (unsigned v = 0; v < SWITCH_PREFETCH_VOLUMES; ++v) {
+		out->demand_bytes[v] = os_atomic_load(&switch_prefetch_demand_bytes[v], relaxed);
+	}
+	out->replay_reqs = os_atomic_load(&switch_prefetch_replay_reqs, relaxed);
+	out->replay_gt64k = os_atomic_load(&switch_prefetch_replay_gt64k, relaxed);
+	out->demand_reqs = os_atomic_load(&switch_prefetch_demand_reqs, relaxed);
+	out->demand_gt64k = os_atomic_load(&switch_prefetch_demand_gt64k, relaxed);
+	out->demand_abs = os_atomic_load(&switch_prefetch_demand_abs, relaxed);
+}
+#endif
 
 #if DEVELOPMENT || DEBUG
 /* r17-launch: one request of the direct read map (SwitchCryptex.cpp): its bytes and the card reads it took. */

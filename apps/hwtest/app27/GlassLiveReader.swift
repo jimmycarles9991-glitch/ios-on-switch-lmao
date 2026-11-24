@@ -1,4 +1,5 @@
 import Foundation
+import HWTestCore
 import UIKit
 
 /// ui.glass_live's read-back loop, on a thread of its own so the display link keeps its frames: each presented frame
@@ -161,7 +162,7 @@ final class LiveReader {
         guard !saved.contains(name), let png = LiveImage.png(bgra, width: frame.width, height: frame.height) else {
             return
         }
-        try? png.write(to: directory.appendingPathComponent(name))
+        try? png.place(at: directory.appendingPathComponent(name))
         saved.append(name)
     }
 }

@@ -16,7 +16,10 @@
 #include "TegraGM20BRelayout.h"
 #include "TegraGM20BTiled.h"
 #include "TegraGM20BTiledDecision.h"
+#include "SwitchGpuBacking.h"
 #include "SwitchGpuPathStats.h"
+#include "SwitchGpuSmmu.h"
+#include "SwitchGpuSurfaceComp.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #if TGM_STATS
 #include <os/log.h>
@@ -58,7 +61,7 @@ void note(Decision, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t)
 // `samples`: the asker only samples a surface nothing wrote as far as its seed tells (TGM_LAYOUT_ASK_UNWRITTEN). A CPU
 // writer without IOSurfaceLock leaves the seed at 0, so that surface may hold rows: its tiling move is never skipped.
 Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint32_t bpp,
-		uint32_t bytesPerRow, bool writes, bool samples, bool fit)
+		uint32_t bytesPerRow, bool writes, bool samples, bool fit, bool compress)
 {
 	if (!writes && !samples)
 		return PitchSampledFirst;
@@ -73,6 +76,25 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 	    static_cast<uint64_t>(bytesPerRow) * height > bytes)
 		return PitchShape;
 	t.bytes_per_row = bytesPerRow;
+	const struct switch_gpu_backing *backing = tgm_coh_backing(c);
+	const int scanned = backing ? switch_gpu_backing_scanned(backing) : 0;
+	const int smmuReady = switch_gpu_smmu_ready();
+	uint32_t compKind =
+		compress && writes
+			? switch_gpu_surface_comp_kind(width, height, bpp, bytes, t.layout.bytes,
+						       scanned, tgm_coh_compressible(c), smmuReady)
+			: 0u;
+	if (compKind) {
+		// Publish pendingKind before re-checking scanout_holds (paired with display slots'
+		// post-hold surfaceCompressed check) so direct scanout and compression cannot both win.
+		tgm_coh_set_pending_kind(c, compKind);
+		__atomic_thread_fence(__ATOMIC_SEQ_CST);
+		if (backing && switch_gpu_backing_scanned(backing)) {
+			tgm_coh_set_pending_kind(c, 0);
+			compKind = 0;
+		}
+	}
+	t.kind = compKind ? compKind : TGM_LAYOUT_KIND;
 	if (writes && tgm_coh_fresh(c)) {
 		tgm_tiled_count(TGM_RELAYOUT_FRESH);
 		return DecidedTiled;
@@ -104,6 +126,8 @@ Decision decide(tgm_coh *c, tgm_tiled &t, uint32_t width, uint32_t height, uint3
 	} else {
 		tgm_tiled_count(TGM_RELAYOUT_MOVED);
 	}
+	if (ret)
+		t.kind = 0;
 	return ret ? PitchMoveFailed : DecidedTiled;
 }
 }  // namespace
@@ -128,7 +152,8 @@ int askLayout(struct tgm_coh *c, uint32_t width, uint32_t height, uint32_t bpp,
 		bzero(t, sizeof(*t));
 		const Decision d = decide(c, *t, width, height, bpp, bytes_per_row,
 					  (writes & TGM_LAYOUT_ASK_WRITES) != 0,
-					  (writes & TGM_LAYOUT_ASK_UNWRITTEN) != 0, fit);
+					  (writes & TGM_LAYOUT_ASK_UNWRITTEN) != 0, fit,
+					  (writes & TGM_LAYOUT_ASK_COMPRESS) != 0);
 		t->retry = static_cast<int>(d == PitchMoveFailed);
 		__atomic_store_n(&t->tiled, static_cast<int>(d == DecidedTiled), __ATOMIC_RELEASE);
 		if (t->tiled)
@@ -143,6 +168,7 @@ int askLayout(struct tgm_coh *c, uint32_t width, uint32_t height, uint32_t bpp,
 		__atomic_store_n(
 			slot, t,
 			__ATOMIC_RELEASE);  // complete before anyone outside the entry lock reads it
+		tgm_coh_set_pending_kind(c, 0);
 	}
 	int layout = 0;
 	if (t && t->tiled) {

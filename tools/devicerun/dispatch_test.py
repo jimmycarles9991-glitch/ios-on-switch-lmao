@@ -5,10 +5,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.devicerun import devicerun
+from tools.devicerun import devicerun, hwtest
 from tools.devicerun.dispatch import DISPATCH
 from tools.devicerun.reports import stale_sync_waiter
-from tools.devicerun.rules import FAIL, PASS
+from tools.devicerun.rules import FAIL, NA, NO_DATA, PASS
 
 SETUP = '{"msg":"locationd main - setup"}'
 FAULT = (
@@ -20,13 +20,30 @@ UNMAPPED = 'SwitchCrash: user pc dsc 0x1af3e5f80 lr dsc 0x1af3e5f80, frames dsc 
 HOG = 'SwitchCPU: user pc dsc 0x23c991a54 lr dsc 0x18054264c, frames dsc 0x1af3e5f80 dsc 0x1af3d4b74'
 
 
+# kernel/tests/xnu_workloop_handoff_test.cpp formats these same lines.
+WAIT_UNHELD = (
+    'SwitchWL handoff wait-unheld #1: SwitchHWTest[412] thread 0x2f1c workloop 0x10471c0c0 ident 0x2a03 dq_state '
+    '0x60000000002a03 fflags 0x4 flags 0x11 owner none servicer 0x2f20'
+)
+DROP_WAKE = (
+    'SwitchWL handoff drop-wake #16: locationd[73] thread 0x336 workloop 0xc1d0a4000 ident 0x4c03 dq_state 0x0 '
+    'fflags 0x28 flags 0x6 owner other servicer self waiter 0x341'
+)
+HANDOFF_RUN = 'HWTEST dispatch.sync_handoff PASS finished=1 retarget_crossed=16 overlaps=0 ms=8000.0'
+SUITE_27 = 'HWTEST suite PASS pass=1 fail=0 skip=0 ios=27 ms=1.0'
+SUITE_17 = 'HWTEST suite PASS pass=1 fail=0 skip=0 ios=17 ms=1.0'
+
+
 def record(process: str, message: str, second: int = 0) -> dict:
-    path = 'kernel.development' if process == 'kernel' else '/usr/libexec/' + process
+    path = {
+        'kernel': 'kernel.development',
+        'hwtest': '/Applications/SwitchHWTest.app/SwitchHWTest',
+    }.get(process, '/usr/libexec/' + process)
     return {
         'timestamp': f'2026-11-09 16:45:{second:02d}.000000+0000',
         'bootUUID': '18AB01C1',
         'processImagePath': path,
-        'subsystem': 'com.apple.locationd.Core' if process == 'locationd' else '',
+        'subsystem': {'locationd': 'com.apple.locationd.Core', 'hwtest': hwtest.SUBSYSTEM}.get(process, ''),
         'category': '',
         'messageType': 'Default',
         'eventMessage': message,
@@ -34,7 +51,8 @@ def record(process: str, message: str, second: int = 0) -> dict:
 
 
 def results(*records: dict) -> dict:
-    found, _ = devicerun.run_checks(list(records), DISPATCH)
+    suite = [check for check in hwtest.HWTEST if check.name == hwtest.SUITE]
+    found, _ = devicerun.run_checks(list(records), DISPATCH + suite)
     return {r.check.name: r for r in found}
 
 
@@ -84,6 +102,51 @@ class Dispatch(unittest.TestCase):
         self.assertEqual(got['dispatch.early-sync-wait'].verdict, FAIL)
         self.assertIn('locationd[73]', got['dispatch.early-sync-wait'].observed)
         self.assertEqual(results(record('locationd', SETUP, 1))['dispatch.early-sync-wait'].verdict, PASS)
+
+
+class WorkloopHandoff(unittest.TestCase):
+    def test_a_daemons_handoff_lines_fail_per_kind_and_process(self):
+        got = results(record('kernel', DROP_WAKE, 2), record('kernel', DROP_WAKE.replace('#16', '#32'), 3))
+        self.assertEqual(got['boot.workloop-handoff'].verdict, FAIL)
+        self.assertIn('drop-wake/locationd x2', got['boot.workloop-handoff'].observed)
+
+    def test_hwtests_own_lines_in_its_run_are_expected_and_prove_the_probe_runs(self):
+        got = results(
+            record('kernel', WAIT_UNHELD, 3),
+            record('kernel', WAIT_UNHELD.replace('wait-unheld', 'drop-wake'), 4),
+            record('hwtest', HANDOFF_RUN, 9),
+            record('hwtest', SUITE_27, 10),
+        )
+        self.assertEqual(got['boot.workloop-handoff'].verdict, PASS)
+        self.assertIn('expected', got['boot.workloop-handoff'].observed)
+        self.assertEqual(got['boot.workloop-handoff-live'].verdict, PASS)
+
+    def test_hwtests_lines_outside_its_run_fail(self):
+        got = results(record('hwtest', HANDOFF_RUN, 9), record('kernel', WAIT_UNHELD, 30))
+        self.assertEqual(got['boot.workloop-handoff'].verdict, FAIL)
+
+    def test_stale_wake_and_owner_dead_still_fail_inside_hwtests_run(self):
+        for kind in ('stale-wake', 'owner-dead'):
+            with self.subTest(kind=kind):
+                got = results(
+                    record('kernel', WAIT_UNHELD.replace('wait-unheld', kind), 4),
+                    record('hwtest', HANDOFF_RUN, 9),
+                )
+                self.assertEqual(got['boot.workloop-handoff'].verdict, FAIL)
+                self.assertIn(f'{kind}/SwitchHWTest x1', got['boot.workloop-handoff'].observed)
+
+    def test_process_names_with_spaces_match_and_fail(self):
+        line = DROP_WAKE.replace('locationd[73]', 'App Store[91]')
+        got = results(record('kernel', line, 2))
+        self.assertEqual(got['boot.workloop-handoff'].verdict, FAIL)
+        self.assertIn('drop-wake/App Store x1', got['boot.workloop-handoff'].observed)
+
+    def test_a_run_without_probe_lines_fails_on_27_and_is_not_applicable_on_17(self):
+        live = 'boot.workloop-handoff-live'
+        run = record('hwtest', HANDOFF_RUN, 9)
+        self.assertEqual(results(run, record('hwtest', SUITE_27, 10))[live].verdict, FAIL)
+        self.assertEqual(results(run, record('hwtest', SUITE_17, 10))[live].verdict, NA)
+        self.assertEqual(results(record('hwtest', SUITE_27, 10))[live].verdict, NO_DATA)
 
 
 class StaleSyncWaiter(unittest.TestCase):

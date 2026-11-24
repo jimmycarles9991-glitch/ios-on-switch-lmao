@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * A process that crashes, by Apple's own rule for a crash report (debug kernels): a signal that dumps core, a
- * code-signing kill, or an exit reason that asks for a report (abort_with_reason, EXC_GUARD, ...). Its exit reason,
- * then its fault (diag/crash.c).
+ * A process that exits (debug kernels): its CPU since the last scheduling report (sched/cpu.c), and, when it crashed by
+ * Apple's own rule for a crash report (a signal that dumps core, a code-signing kill, or an exit reason that asks for a
+ * report: abort_with_reason, EXC_GUARD, ...), its exit reason, then its fault (diag/crash.c).
  */
 
 #include <switch/diag.h>
+#include <switch/sched.h>
 
 #include <libkern/libkern.h>
 #include <sys/codesign.h>
@@ -22,6 +23,7 @@ void switch_diag_proc_exit(proc_t p, int rv)
     const os_reason_t reason = p->p_exit_reason;
     const uint64_t flags = reason != OS_REASON_NULL ? reason->osr_flags : 0;
 
+    switch_sched_cpu_exited(proc_task(p));
     if ((flags & OS_REASON_FLAG_NO_CRASH_REPORT) ||
         !(hassigprop(WTERMSIG(rv), SA_CORE) || (proc_getcsflags(p) & CS_KILLED) ||
           (flags & OS_REASON_FLAG_GENERATE_CRASH_REPORT))) {

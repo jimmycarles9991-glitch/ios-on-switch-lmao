@@ -141,6 +141,7 @@ pub use table::FunctionHandle;
 // The vocabulary the pipeline surface reaches: render-pipeline keys, runtime facts and their
 // mechanisms, and the link symbols artifacts, layouts, and plans name.
 pub use compile::api::{CompileReport, RenderPipelineKeys};
+pub use compile::kept::{KeptStages, keep_compiled_stages, kept_compiled_stages};
 pub use native::{NativeFunction, NativePipeline, NativeProgram, NativeRecord};
 // Translating one entry of a bare module.
 pub use compile::{

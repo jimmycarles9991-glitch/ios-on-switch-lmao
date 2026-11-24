@@ -54,11 +54,16 @@ uint64_t SwitchEMC::takeAsked()
 }
 #endif
 
-// The CPU governor's tick (interrupts masked, one CPU at a time): the loop woken once when the hold has ended, instead of
-// a hold timer chasing the last frame.
-void SwitchEMC::tick(uint64_t now)
+// The CPU governor's tick (interrupts masked, one CPU at a time), ending a window with `busy` of CPU time: the loop woken
+// once when the hold has ended, instead of a hold timer chasing the last frame, and at once for a window of work that
+// found the EMC not held at its top rate.
+void SwitchEMC::tick(uint64_t now, uint64_t busy)
 {
-    if (!switch_emc_hold_tick(&holdState, now, hintUntil(), switch_idle_last_frame()))
+    const bool topHeld = __atomic_load_n(&gTopHeld, __ATOMIC_ACQUIRE);
+#if DEVELOPMENT || DEBUG
+    noteWindow(busy, topHeld);
+#endif
+    if (!switch_emc_hold_tick(&holdState, now, busy, hintUntil(), switch_idle_last_frame(), topHeld))
         return;
     const auto cpu = static_cast<unsigned>(cpu_number());
     if (cpu < switchperf::kSignalCpus)
@@ -68,13 +73,16 @@ void SwitchEMC::tick(uint64_t now)
 IOReturn SwitchEMC::retickAction(OSObject *owner, void *, void *, void *, void *)
 {
     auto *self = static_cast<SwitchEMC *>(owner);
-    if (self->governing)
-        self->program();
+    if (!self->governing)
+        return kIOReturnSuccess;
+    if (!switchperf::running())
+        self->moveTo(self->count - 1, SWITCH_EMC_REASON_UNTICKED);
+    self->program();
     return kIOReturnSuccess;
 }
 
-// The CPU governor started or stopped (thread context): the hold is programmed again, its end watched by the tick or by
-// the hold timer.
+// The CPU governor started or stopped (thread context): the hold is programmed again; with no tick nothing accounts
+// for the CPUs' work, so the EMC goes to its top rate and is held there until the tick runs again.
 void SwitchEMC::retick()
 {
     loop->runAction(&SwitchEMC::retickAction, this);

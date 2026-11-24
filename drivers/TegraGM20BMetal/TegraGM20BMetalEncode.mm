@@ -224,17 +224,28 @@ bool SwitchMetalRangeEncode::borderHeaders(size_t from, size_t to)
     return true;
 }
 
-// What an encode ahead cannot take from [from, until): work it is not built for, or what only the commit makes final
-uint32_t SwitchMetalRangeEncode::ineligible(size_t from, size_t until)
+// What an encode ahead cannot take from [from, until): work it is not built for, or what only the commit makes final;
+// `stopAt`: the first command of the encoder it is in, or the command itself between encoders (an event)
+uint32_t SwitchMetalRangeEncode::ineligible(size_t from, size_t until, size_t &stopAt)
 {
     const SwitchMetalCommandPlan &plan = cb_->_plan;
+    size_t begin = from;
+    bool inside = false;
     for (size_t at = from; at < until; ++at) {
         const Op op = plan.operation(at).op;
+        const bool begins = SwitchMetalCommandPlan::isEncoderBegin(op);
+        if (begins) {
+            begin = at;
+            inside = true;
+        }
+        stopAt = inside ? begin : at;
         if (op == OpSignalEvent || op == OpWaitEvent || op == OpCompute || op == OpDispatch || isKernelCommand(op) ||
             op == OpExecuteCommands || op == OpDrawPatches || op == OpDrawPatchesIndirect || op == OpPredicate ||
             op == OpResetCommands || op == OpCopyCommands)
             return VetoOps;
-        if (!SwitchMetalCommandPlan::isEncoderBegin(op))
+        if (op == OpEnd)
+            inside = false;
+        if (!begins)
             continue;
         const size_t end = plan.encoderEnd(at);
         // its images are converted from their surfaces at the seeds the commit makes final (conversions)
@@ -289,12 +300,26 @@ bool SwitchMetalRangeEncode::enter(size_t begin)
 
 bool SwitchMetalRangeEncode::step(size_t until)
 {
-    if (!whole_)
-        if (const uint32_t veto = ineligible(at_, until)) {
-            rc_->abandon();
-            abandoned_ = true;
-            return stop(veto);
+    if (!whole_) {
+        until = std::min(until, to_);
+        // the encoder beginning at `until` too: the end before it is encoded now and looks into it
+        size_t scan = until;
+        if (ahead_ && until < to_ && until < ended_ &&
+            SwitchMetalCommandPlan::isEncoderBegin(cb_->_plan.operation(until).op))
+            scan = std::min(cb_->_plan.encoderEnd(until), ended_);
+        size_t stopAt = 0;
+        if (const uint32_t veto = ineligible(at_, scan, stopAt)) {
+            const bool clean = stopAt > at_ || (stopAt == at_ && betweenEncoders());
+            if (!ahead_ || !clean) {
+                rc_->abandon();
+                abandoned_ = true;
+                return stop(veto);
+            }
+            halt_ = to_ = stopAt;
+            until = std::min(until, stopAt);
+            cb_->_aheadStopped.fetch_or(veto, std::memory_order_relaxed);
         }
+    }
     SWITCH_METAL_ENCODE_BEGIN(loopSpan, Loop);
     for (; at_ < until; ++at_) {
         if (!whole_ && SwitchMetalCommandPlan::isEncoderBegin(cb_->_plan.operation(at_).op) && !enter(at_))
@@ -347,6 +372,7 @@ void SwitchMetalRangeEncode::reset()
         rc_->abandon();
     sealed_ = abandoned_ = ahead_ = producerPending_ = false;
     veto_ = 0;
+    ended_ = halt_ = 0;
     firstContents_.reset();
     counters_.reset();
     ce_.reset();
@@ -405,7 +431,7 @@ SwitchMetalEncoded encodeRaw(SwitchMetalCommandBuffer *cb, size_t from, size_t t
     // nothing, and the range is encoded whole
     if (gm20bPipelineTake(cb, from)) {
         const bool encoded = encode.resume(to, why) && encode.step(to) && encode.seal(to);
-        const bool stopped = !encoded && encode.vetoed();
+        const uint32_t veto = !encoded ? encode.vetoed() : 0;
         const bool waits = encode.producerPending();
         encode.reset();
         if (encoded) {
@@ -413,7 +439,8 @@ SwitchMetalEncoded encodeRaw(SwitchMetalCommandBuffer *cb, size_t from, size_t t
             return SwitchMetalEncoded::submitted;
         }
         cb->_released.clear();
-        if (!stopped)
+        gm20bPipelineAbandoned(cb, veto);
+        if (!veto)
             return waits ? SwitchMetalEncoded::producerPending : SwitchMetalEncoded::stopped;
     }
     const bool encoded = encode.open(cb, from, to, true, why) && encode.step(to) && encode.seal(to);

@@ -16,9 +16,10 @@ namespace gm20b {
 // internal fence drains the pipeline mid-pass and raises a CPU interrupt.
 struct BatchWork {
     static constexpr uint64_t kLimit = 64ull * 1024 * 1024;
-    static constexpr uint64_t kRenderServerLimit = 16 * kLimit;
+    static constexpr uint64_t kRenderServerLimit = 128 * kLimit;
     static constexpr uint64_t kSaturated = kRenderServerLimit;  // at least every limit: ends the batch
     static constexpr uint32_t kOperations = 128;
+    static constexpr uint32_t kRenderServerOps = 2048;
     uint64_t work = 0;
     uint32_t operations = 0;
 
@@ -30,7 +31,10 @@ struct BatchWork {
     bool add(uint64_t estimate, uint64_t limit = kLimit)
     {
         work = std::min(kSaturated, work + std::min(kSaturated, estimate));
-        return ++operations >= kOperations || work >= limit;
+        if (operations < UINT32_MAX)
+            ++operations;
+        const uint32_t maxOps = limit >= kRenderServerLimit ? kRenderServerOps : kOperations;
+        return operations >= maxOps || work >= limit;
     }
 };
 

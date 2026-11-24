@@ -249,7 +249,8 @@ TEST(Emit3D, RenderTargetsAsRawWritesThem)
 TEST(Emit3D, BarriersAsRawWritesThem)
 {
     expectRawSays("kit(p_, switch_gm20b_pass_barrier, tiledCache(dev_->k_.info()));");
-    expectRawSays("kit(p, switch_gm20b_pass_barrier, false);");
+    expectRawSays("kit(p, switch_gm20b_pass_drain, false);");
+    expectRawSays("kit(p, switch_gm20b_pixel_shader_barrier_sysmem);");
     expectRawSays("kit(p, switch_gm20b_pixel_shader_barrier);\n}");
     for (const bool tiled : {false, true}) {
         EXPECT_EQ(Words(ours([&](nv_push *p) {
@@ -258,9 +259,20 @@ TEST(Emit3D, BarriersAsRawWritesThem)
                   Words(theirs([&](gm20b::Push &p) {
                       if (tiled)
                           p.m(uint32_t(driver::tiled_cache_h::c_TILED_CACHE_FLUSH), 0);
-                      p.m(uint32_t(g::c_WAIT_FOR_IDLE), 0);
                       p.m(uint32_t(g::c_INVALIDATE_SHADER_CACHES),
                           uint32_t(g::c_kFlushData | g::c_kInvalidateData | g::c_kInvalidateConstant));
+                      p.m(uint32_t(g::c_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI), 0);
+                  })));
+    }
+    for (const bool constants : {false, true}) {
+        EXPECT_EQ(Words(ours([&](nv_push *p) {
+                      switch_gm20b_pass_drain(p, constants);
+                  })),
+                  Words(theirs([&](gm20b::Push &p) {
+                      p.m(uint32_t(g::c_WAIT_FOR_IDLE), 0);
+                      p.m(uint32_t(g::c_INVALIDATE_SHADER_CACHES_NO_WFI),
+                          uint32_t(NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, GLOBAL_DATA, TRUE) |
+                                   (constants ? NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, CONSTANT, TRUE) : 0u)));
                       p.m(uint32_t(g::c_INVALIDATE_TEXTURE_DATA_CACHE_NO_WFI), 0);
                   })));
     }
@@ -269,6 +281,13 @@ TEST(Emit3D, BarriersAsRawWritesThem)
               })),
               Words(theirs([&](gm20b::Push &p) {
                   p.m(uint32_t(g::c_PIXEL_SHADER_BARRIER), 0);
+                  p.m(uint32_t(g::c_INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED), 0);
+              })));
+    EXPECT_EQ(Words(ours([&](nv_push *p) {
+                  switch_gm20b_pixel_shader_barrier_sysmem(p);
+              })),
+              Words(theirs([&](gm20b::Push &p) {
+                  p.m(uint32_t(g::c_PIXEL_SHADER_BARRIER), 1);
                   p.m(uint32_t(g::c_INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED), 0);
               })));
 }

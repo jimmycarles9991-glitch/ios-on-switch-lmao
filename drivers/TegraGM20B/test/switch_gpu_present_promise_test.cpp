@@ -30,7 +30,8 @@ TEST(PresentPromise, APromisedFrameIsPresentedByTheInterruptOfTheJobThatKeepsIt)
 	Producer a{kA, Channel(40)};
 	Display d({&a});
 	ASSERT_EQ(d.offer(&kPromise, 1), 0);
-	EXPECT_EQ(d.watch.state, uint32_t(SWITCH_GPU_PRESENT_WATCH_PROMISED));
+	EXPECT_EQ(switch_gpu_present_watch_state(&d.watch),
+		  uint32_t(SWITCH_GPU_PRESENT_WATCH_PROMISED));
 	a.channel.run();
 	EXPECT_EQ(d.presented, 0u);
 	const auto job = a.token(a.channel.submit(1, true));
@@ -51,7 +52,8 @@ TEST(PresentPromise, AJobSubmittedBeforeTheArmIsWatchedFromTheStart)
 	const auto job = a.token(a.channel.submit(1, false));
 	d.kept(kWord, kValue, job);
 	ASSERT_EQ(d.offer(&kPromise, 1), 0);
-	EXPECT_EQ(d.watch.state, uint32_t(SWITCH_GPU_PRESENT_WATCH_ARMED));
+	EXPECT_EQ(switch_gpu_present_watch_state(&d.watch),
+		  uint32_t(SWITCH_GPU_PRESENT_WATCH_ARMED));
 	a.channel.run();
 	EXPECT_EQ(shown(d), 1u);
 }

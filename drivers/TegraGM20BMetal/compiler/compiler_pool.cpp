@@ -35,8 +35,8 @@ uint32_t qosOf(Band band)
 Pool::Pool(Hooks hooks, unsigned workers) : hooks_(std::move(hooks))
 {
     for (unsigned i = 0; i < workers; ++i)
-        workers_.emplace_back([this] {
-            workerLoop();
+        workers_.emplace_back([this, slot = i + 1] {
+            workerLoop(slot);
         });
 }
 
@@ -80,15 +80,19 @@ bool Pool::submit(const Name &name, std::unique_ptr<Work> work, const Waiter &as
         return false;
     }
     job.waiters.push_back(waiter);
+    const uint32_t serveSlot = job.running && !job.primaryDone && waiter.id ? job.workerSlot : 0;
     const Band band = waiter.split ? Band::Background : waiter.band;
-    if (band <= job.band)
-        return false;
-    job.band = band;
-    if (job.running && !job.primaryDone) {
-        if (void *token = hooks_.raise(job.worker, band))
-            job.raises.push_back(token);
-        stats_.raised++;
+    if (band > job.band) {
+        job.band = band;
+        if (job.running && !job.primaryDone) {
+            if (void *token = hooks_.raise(job.worker, band))
+                job.raises.push_back(token);
+            stats_.raised++;
+        }
     }
+    l.unlock();
+    if (serveSlot && hooks_.serve)
+        hooks_.serve(waiter.id, serveSlot);
     return false;
 }
 
@@ -120,8 +124,10 @@ std::shared_ptr<Pool::Job> Pool::next()
     return best;
 }
 
-void Pool::workerLoop()
+void Pool::workerLoop(unsigned slot)
 {
+    if (hooks_.registerWorker)
+        hooks_.registerWorker(slot);
     hooks_.setBand(Band::Interactive);
     std::unique_lock<std::mutex> l(lock_);
     for (;;) {
@@ -133,10 +139,20 @@ void Pool::workerLoop()
             return;
         job->running = true;
         job->worker = pthread_self();
+        job->workerSlot = slot;
         job->foreground = job->band > Band::Background;
         (job->foreground ? foregroundRunning_ : backgroundStarting_)++;
         const Band band = job->band;
+        std::vector<uint64_t> ids;
+        if (hooks_.serve) {
+            ids.reserve(job->waiters.size());
+            for (const Waiter &w : job->waiters)
+                if (w.id)
+                    ids.push_back(w.id);
+        }
         l.unlock();
+        for (uint64_t id : ids)
+            hooks_.serve(id, slot);
         hooks_.setBand(band);
         const int32_t split = hooks_.run(*job->work, [&](int32_t result) {
             primary(job, result);

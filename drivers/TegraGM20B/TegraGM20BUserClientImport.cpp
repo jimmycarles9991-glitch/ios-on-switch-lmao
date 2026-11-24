@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // BoImport: a task's pages wired for the GPU.
 #include "TegraGM20BUserClientInternal.h"
+#include "SwitchGpuSmmu.h"
+#include "TegraGM20BComp.h"
 #include "TegraGM20BRecord.h"
 #include "TegraGM20BSurfacePrefault.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
@@ -35,6 +37,30 @@ void describeRegion(task_t task, uint64_t address, char *out, size_t size)
 }
 
 #endif
+
+// The import's pages found a registered backing at their first page that would not take them: one line per collision,
+// naming the backing met (its IOSurface, pages, GPU memory flags, engine mappings, CPU and GPU holders, owner)
+void refuseBacking(const uint64_t *pas, uint32_t npages, const void *owner,
+		   const TegraGM20BAbiBoImport *in)
+{
+	static const char *const kWhy[] = {"backing",
+					   "backing.other-pages",
+					   "backing.grows-fixed",
+					   "backing.grows-mapped",
+					   "backing.grows-unowned",
+					   "backing.grows-held",
+					   "backing.other-surface"};
+	switch_gpu_backing_found found = {};
+	const switch_gpu_backing_collision why =
+		switch_gpu_backing_collision_at(pas, npages, in->surface_id, owner, &found);
+	switch_refusal("bo-import", kWhy[why],
+		       "IOSurface %u, %u pages at %#llx: met backing %llu (IOSurface %u, %u pages, "
+		       "memory %#x, engines %#x, cpu %u/%u, admissions %u/%u, owned %d)",
+		       in->surface_id, npages, in->address, found.id, found.surface_id, found.pages,
+		       found.gpu_memory_flags, found.mapping_engines, found.cpu_readers,
+		       found.cpu_writers, found.gpu_admission_readers, found.gpu_admission_writers,
+		       found.owned);
+}
 }  // namespace
 
 // The page list of a prepared descriptor: one getPhysicalSegment per physically contiguous run (each call is a walk of the
@@ -103,11 +129,11 @@ private:
 IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 				       TegraGM20BAbiBoAllocReply *out)
 {
-	if (!in->bytes || ((in->address | in->bytes) & 0xfff) || in->bytes > kMaxBoBytes) {
+	if (!switch_gpu_bo_import_args_ok(in->address, in->bytes)) {
 		switch_refusal(
 			"bo-import", "arguments",
-			"IOSurface %u: %llu bytes at %#llx are not whole pages, or past %llu",
-			in->surface_id, in->bytes, in->address, uint64_t(kMaxBoBytes));
+			"IOSurface %u: %llu bytes at %#llx are not whole pages, wrap, or past %llu",
+			in->surface_id, in->bytes, in->address, uint64_t(SWITCH_GPU_MAX_BO_BYTES));
 		return kIOReturnBadArgument;
 	}
 	// before this import's own wiring, which sets the pages' modified bits
@@ -174,13 +200,6 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 			bo->representationValue = 1;
 		}
 	}
-	if (!ret && !bo->wiring) {
-		ret = ioreturn(
-			tgm_mem_new_waited(vm_, bo->pas, bo->npages, &bo->mem, &cost.lock_ns));
-		if (!ret && in->surface_id)
-			publishWiring(bo, in);
-	}
-	lap(2);
 	if (ret) {
 		char region[192] = "";
 #if TGM_STATS
@@ -213,19 +232,71 @@ IOReturn AGXDeviceUserClient::boImport(const TegraGM20BAbiBoImport *in,
 				    ? switch_gpu_surface_imported(bo->surface, bo->backing)
 				    : 0;
 	const int tracked = !pinned && !adopted ? switch_gpu_backing_cpu_track(bo->backing) : 0;
+	if (!bo->backing) {
+		refuseBacking(bo->pas, bo->npages, bo, in);
+		releaseBo(bo);
+		return kIOReturnNoMemory;
+	}
 	if (pinned || adopted || tracked) {
-		// backing: its pages registered for no backing; pin: the coherency entry holds another backing; adopt: the
-		// surface's CPU leases hold another; track: no room to track its CPU writes
-		const char *step = !bo->backing ? "backing"
-				   : pinned     ? "pin"
-				   : adopted    ? "adopt"
-						: "track";
+		// pin: the coherency entry holds another backing; adopt: the surface's CPU leases hold another; track: no
+		// room to track its CPU writes
+		const char *step = pinned ? "pin" : adopted ? "adopt" : "track";
 		const int refused = pinned ? pinned : adopted ? adopted : tracked;
 		switch_refusal("bo-import", step, "IOSurface %u: %llu bytes at %#llx refused (%d)",
 			       in->surface_id, in->bytes, in->address, refused);
 		releaseBo(bo);
 		return ioreturn(refused);
 	}
+	const bool wantBackingMem = in->surface_id != 0 && (bo->npages % TGM_COMP_PAGES) == 0 &&
+				    switch_gpu_smmu_ready() && switch_gpu_compression_on();
+	tgm_mem *canonical = nullptr;
+	bool gotCanonical = false;
+	if (wantBackingMem && !bo->mem) {
+		gotCanonical = switch_gpu_backing_tgm_mem(bo->backing, bo->npages, &canonical) == 0;
+		if (!gotCanonical)
+			gotCanonical = switch_gpu_backing_tgm_mem_existing_or_direct(
+					       bo->backing, bo->npages, &canonical) == 0;
+	} else {
+		gotCanonical = switch_gpu_backing_tgm_mem_existing_or_direct(
+				       bo->backing, bo->npages, &canonical) == 0;
+	}
+	if (gotCanonical) {
+		bo->mem = canonical;
+		bo->backingMemory = true;
+		bo->ownsMem = false;
+	} else if (!bo->mem) {
+		ret = ioreturn(
+			tgm_mem_new_waited(vm_, bo->pas, bo->npages, &bo->mem, &cost.lock_ns));
+		if (ret) {
+			releaseBo(bo);
+			return ret;
+		}
+		bo->ownsMem = true;
+	}
+	if (!bo->wiring && in->surface_id) {
+		publishWiring(bo, in);
+		// A racing publish that won with canonical memory leaves w->mem == nullptr and
+		// destroys our fallback sharedMem; recover canonical or fresh fallback memory.
+		if (!bo->mem) {
+			if (switch_gpu_backing_tgm_mem_existing_or_direct(bo->backing, bo->npages,
+									  &canonical) == 0) {
+				bo->mem = canonical;
+				bo->backingMemory = true;
+				bo->ownsMem = false;
+			} else {
+				ret = ioreturn(tgm_mem_new_waited(vm_, bo->pas, bo->npages,
+								  &bo->mem, &cost.lock_ns));
+				if (ret) {
+					releaseBo(bo);
+					return ret;
+				}
+				bo->ownsMem = true;
+			}
+		}
+	}
+	lap(2);
+	if (bo->backingMemory && bo->mem && tgm_mem_can_compress(bo->mem))
+		tgm_coherency_set_compressible(bo->coh, 1);
 	int fresh = 0;
 	if (bo->surface) {
 		tgm_record *record = tgm_record_of(bo->surface);
@@ -295,6 +366,7 @@ void AGXDeviceUserClient::adoptWiring(Bo *bo, SharedWiring *w)
 	bo->pas = w->pas;
 	bo->mem = w->mem;
 	bo->readOnly = w->readOnly;
+	bo->ownsMem = false;
 }
 
 // The import's own wiring becomes the task's for this range; when another import published one meanwhile, the import
@@ -304,7 +376,16 @@ void AGXDeviceUserClient::publishWiring(Bo *bo, const TegraGM20BAbiBoImport *in)
 	SharedWiring *made = IONew(SharedWiring, 1);
 	if (!made)
 		return;
+	tgm_mem *const backingMem = bo->backingMemory ? bo->mem : nullptr;
+	tgm_mem *const sharedMem = bo->ownsMem ? bo->mem : nullptr;
+	if (sharedMem)
+		bo->ownsMem = false;
 	*made = {nullptr,   task_,   in->address, in->bytes, in->surface_id, 0,
-		 bo->wired, bo->pas, bo->npages,  bo->mem,   bo->readOnly};
+		 bo->wired, bo->pas, bo->npages,  sharedMem, bo->readOnly};
 	adoptWiring(bo, sharedWiringPublish(made));
+	if (backingMem) {
+		bo->mem = backingMem;
+		bo->backingMemory = true;
+		bo->ownsMem = false;
+	}
 }

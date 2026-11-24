@@ -30,6 +30,8 @@ std::atomic<uint64_t> gNow{1'000'000'000};
 std::atomic<sched_perfcontrol_callbacks *> gCallbacks;
 std::atomic<uint64_t> gDeadline;
 std::atomic<unsigned> gSignals;
+std::atomic<uint64_t> gEmcCpuTime;  // what the last tick handed the EMC
+std::atomic<unsigned> gGpuHint;     // the last hint the GPU's idle clock took
 unsigned gTouchSent;
 
 constexpr uint64_t kMs = 1'000'000;  // the stand-in timebase counts nanoseconds
@@ -244,8 +246,10 @@ void tegra_dfll_cpu_status(unsigned long *target_hz, unsigned long *measured_hz,
     *vdd_mv = 0;
 }
 
-void tegra_gm20b_perf_hint(unsigned int)
-{}
+void tegra_gm20b_perf_hint(unsigned int hint)
+{
+    gGpuHint.store(hint, std::memory_order_relaxed);
+}
 
 void tegra_gm20b_idle_tick(void)
 {}
@@ -253,8 +257,10 @@ void tegra_gm20b_idle_tick(void)
 void switch_emc_hint(unsigned int)
 {}
 
-void switch_emc_tick(uint64_t)
-{}
+void switch_emc_tick(uint64_t, uint64_t busy)
+{
+    gEmcCpuTime.store(busy, std::memory_order_relaxed);
+}
 
 void switch_emc_retick(void)
 {}
@@ -341,6 +347,30 @@ TEST_F(SwitchPerfCallouts, AMovingFingerWakesTheOwnerOnce)
     EXPECT_EQ(gSignals.load() - signals, 1u);
 }
 
+// RunningBoard brings a prewarmed app to the front: no exec, but its task's role turns foreground. The owner applies the
+// top at once and the GPU's idle clock takes it as a launch; another role is no launch.
+TEST_F(SwitchPerfCallouts, AForegroundRoleBoostsLikeALaunch)
+{
+    load(5, 30);
+    ASSERT_LT(switchperf::take(nullptr, 0), kTop) << "an idle load lowered the clock";
+    gGpuHint = 0;
+    switch_perf_role(false);
+    EXPECT_LT(own(), kTop);
+    EXPECT_EQ(gGpuHint.load(), 0u);
+    switch_perf_role(true);
+    EXPECT_EQ(own(), kTop);
+    EXPECT_EQ(gGpuHint.load(), unsigned{SWITCH_PERF_HINT_LAUNCH});
+}
+
+// The tick hands the EMC its window's CPU time, summed over the CPUs: the EMC holds its top rate while the CPUs work.
+TEST_F(SwitchPerfCallouts, TheEmcTickTakesTheWindowsCpuTime)
+{
+    load(50, 2);
+    EXPECT_EQ(gEmcCpuTime.load(), 4 * 4 * kMs) << "four CPUs, each busy 4 ms of an 8 ms window";
+    load(0, 1);
+    EXPECT_EQ(gEmcCpuTime.load(), 0u);
+}
+
 // The DFLL's thermal cap and thermalmonitord's ceiling apply at once, from their own threads, both ways.
 TEST_F(SwitchPerfCallouts, ThermalLimitsApplyAtOnce)
 {
@@ -420,7 +450,7 @@ TEST_F(SwitchPerfCallouts, TheTenSecondLineCountsTheOwnersWakes)
     }
     const std::string text = line;
     EXPECT_EQ(text.rfind("SwitchPerf governor: 10", 0), 0u) << text;
-    EXPECT_NE(text.find("boosts touch 1 frame 0 launch 0"), std::string::npos) << text;
+    EXPECT_NE(text.find("boosts touch 1 frame 0 launch 0 (0 foreground)"), std::string::npos) << text;
     EXPECT_NE(text.find("; owner wakes: tick "), std::string::npos) << text;
     EXPECT_NE(text.find(", touch 1, frame 0, launch 0"), std::string::npos) << text;
 }

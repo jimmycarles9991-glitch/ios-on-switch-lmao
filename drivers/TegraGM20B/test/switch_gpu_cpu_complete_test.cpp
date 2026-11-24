@@ -46,7 +46,8 @@ public:
 	struct Bo {
 		uint64_t handle, bytes;
 		switch_gpu_backing *backing;
-		bool chunked = false, nativeView = false, representation = false;
+		bool chunked = false, smmuCompressible = false, nativeView = false,
+		     representation = false;
 	};
 
 	struct Gate {
@@ -473,10 +474,11 @@ TEST_F(CpuComplete, AdapterRefusesUnmaintainableViews)
 	TegraGM20BAbiCpuRange range{20, 64, 64};
 	TegraGM20BAbiCpuComplete request{17, reinterpret_cast<uint64_t>(&range), 1, 1, 1, 0};
 	TegraGM20BAbiCpuCompleteReply reply{};
-	for (unsigned flag = 0; flag < 3; ++flag) {
+	for (unsigned flag = 0; flag < 4; ++flag) {
 		client.bos[0].chunked = flag == 0;
-		client.bos[0].nativeView = flag == 1;
-		client.bos[0].representation = flag == 2;
+		client.bos[0].smmuCompressible = flag == 1;
+		client.bos[0].nativeView = flag == 2;
+		client.bos[0].representation = flag == 3;
 		EXPECT_EQ(client.cpuComplete(&request, &reply), kIOReturnBadArgument);
 	}
 	EXPECT_TRUE(cache.empty());

@@ -298,8 +298,9 @@ bool Completion::remoteLater(const Ask &a, const CacheKey &k, std::function<void
     const std::string request = encodeRequest(r);
     const uint64_t began = nowUs();
     const Ask asked = a;
+    uint64_t cookie = 0;
     const bool sent = remote_->compileAsync(
-        request, true, a.qos,
+        request, a.waited, a.qos,
         [this, asked, k, name, began, settle, done, again](Remote::Answer answer, const Remote::Answered &answered) {
             RuntimeRecord made;
             std::string refusal;
@@ -321,7 +322,15 @@ bool Completion::remoteLater(const Ask &a, const CacheKey &k, std::function<void
             case AskNext::End:
                 return done(nullptr);
             }
+        },
+        &cookie);
+    if (sent && a.bindWait && cookie) {
+        std::weak_ptr<Remote> weak = remote_;
+        a.bindWait([weak = std::move(weak), cookie] {
+            const auto remote = weak.lock();
+            return remote && remote->waitAsync(cookie);
         });
+    }
     if (!sent)
         done(nullptr);
     return true;

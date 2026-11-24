@@ -3,6 +3,7 @@
 // reads and writes are uses of its blit encoder in the command buffer's plan, as a copy's are, so a new texture's first
 // contents (TegraGM20BMetalFresh.mm) are written ahead of that encoder, never over what the op wrote.
 #include "facade_harness.h"
+#include "TegraGM20BGrPreemptABI.h"
 
 namespace {
 
@@ -119,6 +120,58 @@ TEST(FacadeProbe, AScaleWritesWhereItsTextureIsAtEncode)
         w->_raw.va = before;
         EXPECT_NE(std::find(gWords.begin(), gWords.end(), uint32_t(after)), gWords.end());
         EXPECT_EQ(std::find(gWords.begin(), gWords.end(), uint32_t(before)), gWords.end());
+    }
+}
+
+TEST(FacadeProbe, ComputeCtaProbeSendsGrPreemptMethodForDeviceChannel)
+{
+    @autoreleasepool {
+        id<MTLDevice> dev = facade::device();
+        ASSERT_NE(dev, nil);
+        static TegraGM20BAbiGrPreempt seen = {};
+        static unsigned calls = 0;
+        seen = {};
+        calls = 0;
+        uint32_t stored = TegraGM20BGrPreemptWfi;
+        kernel_model::arriving.store(
+            [](uint32_t method, const void *input) -> int {
+                if (method == TegraGM20BMethodGrPreempt) {
+                    seen = *static_cast<const TegraGM20BAbiGrPreempt *>(input);
+                    ++calls;
+                }
+                return KERN_SUCCESS;
+            },
+            std::memory_order_release);
+        kernel_model::model.otherMethod = [&](uint32_t method, void *output) -> kern_return_t {
+            if (method != TegraGM20BMethodGrPreempt)
+                return kIOReturnUnsupported;
+            auto *reply = static_cast<TegraGM20BAbiGrPreemptReply *>(output);
+            reply->old_mode = stored;
+            stored = seen.mode;
+            reply->readback = stored;
+            return KERN_SUCCESS;
+        };
+        const auto toggle = [&](BOOL on) -> NSString * {
+            return ((NSString * (*)(id, SEL, NSNumber *))
+                        objc_msgSend)(dev, NSSelectorFromString(@"switchMetalProbeComputeCta:"), @(on));
+        };
+        NSString *onReply = toggle(YES);
+        EXPECT_STREQ(onReply.UTF8String, "old=0 readback=1");
+        EXPECT_EQ(calls, 1u);
+        EXPECT_GT(seen.channel, 0u);
+        EXPECT_EQ(seen.mode, uint32_t(TegraGM20BGrPreemptCta));
+        EXPECT_EQ(seen.reserved[0], 0u);
+        EXPECT_EQ(seen.reserved[1], 0u);
+
+        NSString *offReply = toggle(NO);
+        EXPECT_STREQ(offReply.UTF8String, "old=1 readback=0");
+        EXPECT_EQ(calls, 2u);
+        EXPECT_EQ(seen.mode, uint32_t(TegraGM20BGrPreemptWfi));
+
+        kernel_model::model.otherMethod = nullptr;
+        NSString *errReply = toggle(YES);
+        EXPECT_TRUE([errReply hasPrefix:@"error=0x"]);
+        kernel_model::arriving.store(nullptr, std::memory_order_release);
     }
 }
 

@@ -7,82 +7,13 @@
 #include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 #include "../pack.h"
-#include "../pack_selectors.h"
 #include "../variants.h"
 #include "SwitchGM20BContext.h"
 
 namespace {
-
-std::string writeSelectorPack(const std::vector<uint32_t> &selectors, const char *name, uint64_t bytes = 0)
-{
-    std::vector<uint8_t> file(0x3000, 0);
-    gm20b::PackHeader h = {};
-    memcpy(h.magic, "GM20BPK1", 8);
-    h.version = gm20b::kPackVersion;
-    h.pipelines = 2;
-    h.programs = 4;
-    h.section[gm20b::PackPipelines] = {0x200, 2 * sizeof(gm20b::PackPipeline)};
-    h.section[gm20b::PackPrograms] = {0x1400, 4 * sizeof(gm20b::PackProgram)};
-    h.section[gm20b::PackSelectors] = {0x2000, bytes ? bytes : selectors.size() * sizeof(uint32_t)};
-    memcpy(file.data(), &h, sizeof h);
-    if (!selectors.empty())
-        memcpy(file.data() + 0x2000, selectors.data(), selectors.size() * sizeof(uint32_t));
-    const std::string path = std::string(getenv("TEST_TMPDIR") ?: "/tmp") + "/" + name;
-    FILE *f = fopen(path.c_str(), "wb");
-    fwrite(file.data(), 1, file.size(), f);
-    fclose(f);
-    return path;
-}
-
-TEST(GM20BPack, SelectorTablesAreTrustedAfterTheirDomainIsLoaded)
-{
-    const std::vector<uint32_t> selectors = {1, 0, 0, 16, 2, gm20b::AssumeUniformAligned, 1, 1, 2, 2};
-    gm20b::Pack pack;
-    std::string err;
-    ASSERT_TRUE(pack.load(writeSelectorPack(selectors, "selectors.bin").c_str(), 0, err, 2)) << err;
-    const auto *records = pack.section<gm20b::PackPipeline>(gm20b::PackPipelines);
-    const gm20b::PackSelectorTable *table = pack.selectors(records[0]);
-    ASSERT_NE(table, nullptr);
-    ASSERT_EQ(table->configs, 2u);
-    EXPECT_EQ(gm20b::selectorConfigs(*table)[1].id, 2u);
-    EXPECT_EQ(gm20b::selectorConfigs(*table)[1].program, 2u);
-    EXPECT_EQ(pack.selectors(records[1]), nullptr);
-    gm20b::Pack empty;
-    ASSERT_TRUE(empty.load(writeSelectorPack({}, "selectors-empty.bin").c_str(), 0, err, 0)) << err;
-    EXPECT_EQ(empty.selectors(empty.section<gm20b::PackPipeline>(gm20b::PackPipelines)[0]), nullptr);
-    gm20b::Pack wrongDomain;
-    EXPECT_FALSE(wrongDomain.load(writeSelectorPack(selectors, "selectors-wrong-domain.bin").c_str(), 0, err, 0));
-}
-
-TEST(GM20BPack, MalformedSelectorSectionsAreRefusedAtLoad)
-{
-    const std::vector<uint32_t> selectors = {1, 0, 0, 16, 2, gm20b::AssumeUniformAligned, 1, 1, 2, 2};
-    for (const auto &[word, value] : std::vector<std::pair<size_t, uint32_t>>{
-             {0, 100}, {2, 2}, {3, 8}, {3, 17}, {3, 40}, {4, 0}, {4, 3}, {6, 0}, {6, 3}, {8, 1}, {9, 4}}) {
-        SCOPED_TRACE(word);
-        SCOPED_TRACE(value);
-        auto invalid = selectors;
-        invalid[word] = value;
-        gm20b::Pack pack;
-        std::string err;
-        EXPECT_FALSE(pack.load(writeSelectorPack(invalid, "selectors-invalid.bin").c_str(), 0, err, 2));
-        EXPECT_NE(err.find("invalid selector section"), std::string::npos) << err;
-    }
-    for (const uint32_t second : {0u, 1u}) {
-        const std::vector<uint32_t> records = {2, 0, 1, 24, second, 24, 1, 0, 1, 1};
-        gm20b::Pack pack;
-        std::string err;
-        EXPECT_FALSE(pack.load(writeSelectorPack(records, "selectors-records-invalid.bin").c_str(), 0, err, 2));
-        EXPECT_NE(err.find("record index"), std::string::npos) << err;
-    }
-    for (const uint64_t bytes : {uint64_t(4), UINT64_MAX}) {
-        gm20b::Pack pack;
-        std::string err;
-        EXPECT_FALSE(pack.load(writeSelectorPack(selectors, "selectors-truncated.bin", bytes).c_str(), 0, err, 2));
-    }
-}
 
 // A pack of one pipeline whose fragment stage has `variants` variants, its header saying `version`
 std::string writePack(uint32_t version, uint32_t variants, const char *name)
@@ -295,6 +226,50 @@ TEST(GM20BPack, ARecordAProcessMadeIsNotThePacks)
     EXPECT_FALSE(gm20b::packHolds(pack, &made));
     EXPECT_FALSE(gm20b::packHolds(pack, nullptr));
     EXPECT_FALSE(gm20b::packHolds(pack, pack.find(7) + 3));
+}
+
+// A pack of records of `keys` in that order, and `fast` as its PackFastKeys section
+std::string writeKeys(const std::vector<uint64_t> &keys, const std::vector<gm20b::PackFastKey> &fast, const char *name)
+{
+    std::vector<uint8_t> file(0x1000, 0);
+    gm20b::PackHeader h = {};
+    memcpy(h.magic, "GM20BPK1", 8);
+    h.version = gm20b::kPackVersion;
+    h.pipelines = uint32_t(keys.size());
+    h.section[gm20b::PackPipelines] = {0x200, keys.size() * sizeof(gm20b::PackPipeline)};
+    h.section[gm20b::PackFastKeys] = {0xF00, fast.size() * sizeof(gm20b::PackFastKey)};
+    memcpy(file.data(), &h, sizeof h);
+    for (size_t i = 0; i < keys.size(); i++) {
+        gm20b::PackPipeline pp = {};
+        pp.keyHash = keys[i];
+        pp.fs = gm20b::kNoProgram;
+        memcpy(file.data() + 0x200 + i * sizeof pp, &pp, sizeof pp);
+    }
+    memcpy(file.data() + 0xF00, fast.data(), fast.size() * sizeof(gm20b::PackFastKey));
+    const std::string path = std::string(getenv("TEST_TMPDIR") ?: "/tmp") + "/" + name;
+    FILE *f = fopen(path.c_str(), "wb");
+    fwrite(file.data(), 1, file.size(), f);
+    fclose(f);
+    return path;
+}
+
+TEST(PackFastKeys, AFastKeyFindsItsStatesRecordsWithNoSearch)
+{
+    gm20b::Pack pack;
+    std::string err;
+    ASSERT_TRUE(pack.load(writeKeys({3, 7, 7, 9}, {{11, 0, 1}, {12, 1, 2}, {13, 3, 1}}, "fast.pack").c_str(), 0, err))
+        << err;
+    const auto state = [&pack](uint64_t fast) {
+        const gm20b::PackRun run = pack.fastRun(fast);
+        return std::make_pair(run.records ? run.first->keyHash : 0, run.records);
+    };
+    EXPECT_EQ(state(11), std::make_pair(uint64_t(3), 1u));
+    EXPECT_EQ(state(12), std::make_pair(uint64_t(7), 2u));
+    EXPECT_EQ(state(13), std::make_pair(uint64_t(9), 1u));
+    EXPECT_EQ(state(10), std::make_pair(uint64_t(0), 0u));
+    EXPECT_EQ(state(14), std::make_pair(uint64_t(0), 0u));
+    EXPECT_EQ(pack.run(7).first, pack.fastRun(12).first);
+    EXPECT_EQ(pack.run(8).records, 0u);
 }
 
 TEST(GM20BPack, RefusesAPackOfAnotherVersion)

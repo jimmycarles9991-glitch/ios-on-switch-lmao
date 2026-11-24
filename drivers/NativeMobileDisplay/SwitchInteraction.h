@@ -9,11 +9,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "SwitchSlowPresent.h"
+
 class SwitchInteraction {
 public:
     static constexpr uint64_t kTailUs = 1000000;
-    static constexpr uint64_t kStillUs = 250000;  // the display's kGapUs: a longer interval is a screen that went still
-    static constexpr unsigned kCauses = 6;        // NativeLegacyDisplay's long-present causes, in its order
+    static constexpr uint64_t kStillUs = switch_slow_present::kGapUs;  // a longer interval: a screen that went still
+    static constexpr unsigned kCauses = switch_slow_present::kCauses;
 
     // Whether a window is open at nowUs for a run of touches that began at beganUs with its last contact at lastDownUs
     // (0: no touch yet).
@@ -65,19 +67,23 @@ public:
         open = false;
         if (!size)
             return 0;
-        const int n = snprintf(
-            out, size,
-            "%llu ms (touch %llu ms), %u presents: 1:%u 2:%u 3:%u 4+:%u, %llu periods lost, worst %llu.%llu ms, "
-            "still %u; long idle %u ca %u gpu %u queue %u latch %u rate %u",
-            static_cast<unsigned long long>((last - began) / 1000),
-            static_cast<unsigned long long>((lastDownUs - began) / 1000), presents, bins[0], bins[1], bins[2], bins[3],
-            static_cast<unsigned long long>(lost), static_cast<unsigned long long>(worstUs / 1000),
-            static_cast<unsigned long long>(worstUs / 100 % 10), still, causes[0], causes[1], causes[2], causes[3],
-            causes[4], causes[5]);
-        if (n < 0)
-            return 0;
-        const size_t length = static_cast<size_t>(n);
-        return length < size ? length : size - 1;
+        size_t at = 0;
+        const auto add = [&](int n) {
+            if (n > 0)
+                at += static_cast<size_t>(n);
+            if (at >= size)
+                at = size - 1;
+        };
+        add(snprintf(out, size,
+                     "%llu ms (touch %llu ms), %u presents: 1:%u 2:%u 3:%u 4+:%u, %llu periods lost, worst %llu.%llu "
+                     "ms, still %u; long",
+                     static_cast<unsigned long long>((last - began) / 1000),
+                     static_cast<unsigned long long>((lastDownUs - began) / 1000), presents, bins[0], bins[1], bins[2],
+                     bins[3], static_cast<unsigned long long>(lost), static_cast<unsigned long long>(worstUs / 1000),
+                     static_cast<unsigned long long>(worstUs / 100 % 10), still));
+        for (unsigned c = 0; c < kCauses; ++c)
+            add(snprintf(out + at, size - at, " %s %u", switch_slow_present::kNames[c], causes[c]));
+        return at;
     }
 
 private:

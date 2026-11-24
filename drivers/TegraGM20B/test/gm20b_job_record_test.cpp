@@ -52,6 +52,9 @@ TEST(JobRecord, PartsFollowTheHeader)
 	ASSERT_NE(parsed.events, nullptr);
 	EXPECT_EQ(parsed.events->signal_count, 2u);
 	EXPECT_EQ(Record({1, 0, 0, 0, 0, 0}).parse().events, nullptr);
+	EXPECT_TRUE(Record({1, 1, 0, 0, 0, TegraGM20BJobVolatileWrites}).parse().valid());
+	const uint32_t volatileQuiet = uint32_t(TegraGM20BJobVolatileWrites) | TegraGM20BJobQuiet;
+	EXPECT_TRUE(Record({1, 1, 0, 0, 0, volatileQuiet}).parse().valid());
 }
 
 TEST(JobRecord, MalformedRecordsAreRefused)

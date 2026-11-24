@@ -182,7 +182,8 @@ IOReturn switch_hid_post(IOService *device, const void *report, size_t length);
 // (SwitchMotion) or after a bus read (SwitchTouch: the touch interrupt's time, r17-touch):
 // IOHIDDevice::handleReportWithTime, which handleReport calls with the current time. Times must increase from report to
 // report (IOHIDEventDriver takes an element whose time equals the report's as part of it). The touch device's edge
-// wrapper is installed on this path too. kIOReturnUnsupported where switch_hid_supports_timestamps() is false.
+// wrapper is installed on this path too. Every Switch HID device takes it on both iOS builds: the call's slot is each
+// kind's table's (kits/SwitchABI/kinds/<kind>/IOHIDDevice.json). switch_hid_supports_timestamps: a Switch HID device.
 IOReturn switch_hid_post_at(IOService *device, const void *report, size_t length, uint64_t timestamp);
 bool switch_hid_supports_timestamps(IOService *device);
 

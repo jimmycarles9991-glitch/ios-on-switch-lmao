@@ -125,6 +125,28 @@ STUTTER = [
         "needs it leaves that frame's GPU work on a slow EMC",
     ),
     Check(
+        'stutter.emc-work-late',
+        OWNER,
+        POWER,
+        'sum(late) == 0',
+        process=KERNEL,
+        regex=r'(?P<unheld>\d+) work windows unheld \((?P<late>\d+) late\)',
+        source='drivers/SwitchPower/SwitchEMCStats.h',
+        note='8 ms windows with 0.7 ms or more of CPU time that found the EMC not held at 1600 MHz: the first of a '
+        'run raises it, so a late one is a second window of CPU work on a slow EMC',
+    ),
+    Check(
+        'stutter.emc-refused',
+        OWNER,
+        POWER,
+        'sum(refused) == 0',
+        process=KERNEL,
+        regex=r'late\), (?P<refused>\d+) refused',
+        source='drivers/SwitchPower/SwitchEMCClock.h',
+        note='EMC moves the BPMP firmware or the display memory plan refused: a refused raise leaves work on a slow '
+        'EMC',
+    ),
+    Check(
         'stutter.render-core-wait',
         OWNER,
         RENDER,

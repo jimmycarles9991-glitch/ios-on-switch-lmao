@@ -41,9 +41,10 @@ struct NativePlanSink {
             if (stage == 3)
                 compute->setBytesAt(slot, chunk.va + binding.offset, binding.length, &chunk);
             else
-                render->setBytesAt(
-                    stage, slot, chunk.va + binding.offset, binding.length,
-                    binding.shadow ? cb->_shadow.data() + binding.shadow - 1 : chunk.cpu + binding.offset, &chunk);
+                render->setBytesAt(stage, slot, chunk.va + binding.offset, binding.length,
+                                   binding.shadow ? cb->_shadow.data() + binding.shadow - 1
+                                                  : (stage == 1 && chunk.wc ? nullptr : chunk.cpu + binding.offset),
+                                   &chunk);
             return;
         }
         __unsafe_unretained SwitchMetalBuffer *object = (__bridge SwitchMetalBuffer *)binding.object;

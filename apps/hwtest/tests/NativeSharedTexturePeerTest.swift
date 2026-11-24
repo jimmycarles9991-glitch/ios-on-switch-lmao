@@ -23,47 +23,6 @@ import XPC
     func ready(_ pid: Int32)
 }
 
-/// The app's anonymous listener's side: the peer connects to it, and its connection is the one the app writes through.
-final class TexturePeerAcceptor: NSObject, NSXPCListenerDelegate, SharedTexturePeerHost, @unchecked Sendable {
-    let accepted = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
-    private var held: NSXPCConnection?
-
-    var connection: NSXPCConnection? {
-        lock.lock()
-        defer { lock.unlock() }
-        return held
-    }
-
-    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard held == nil else { return false }
-        let interface = NSXPCInterface(with: SharedTexturePeer.self)
-        let classes = NSSet(object: MTLSharedTextureHandle.self) as! Set<AnyHashable>
-        interface.setClasses(
-            classes, for: #selector(SharedTexturePeer.write(_:reply:)), argumentIndex: 0, ofReply: false
-        )
-        let surfaces = NSSet(object: IOSurface.self) as! Set<AnyHashable>
-        interface.setClasses(
-            surfaces, for: #selector(SharedTexturePeer.renderSurface(_:keep:reply:)), argumentIndex: 0,
-            ofReply: false
-        )
-        interface.setClasses(
-            surfaces, for: #selector(SharedTexturePeer.makeSurfaceWidth(_:height:keep:reply:)), argumentIndex: 0,
-            ofReply: true
-        )
-        connection.remoteObjectInterface = interface
-        connection.exportedInterface = NSXPCInterface(with: SharedTexturePeerHost.self)
-        connection.exportedObject = self
-        connection.resume()
-        held = connection
-        return true
-    }
-
-    func ready(_ pid: Int32) { accepted.signal() }
-}
-
 /// Shared textures across two processes: the app makes one of each shape the driver now shares (a mipmapped 2D
 /// texture, a 2D array, a cube and a cube array, a 3D texture, a 4-sample texture, a 1D texture and a mipmapped ASTC
 /// one and a one-level ASTC one, each where the device makes the private texture of its descriptor) and sends each
@@ -269,20 +228,7 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         metrics.set("shapes", made.isEmpty ? "-" : made.map(\.0).joined(separator: ","))
         metrics.set("unmade", unmade.isEmpty ? "-" : unmade.joined(separator: ","))
 
-        let acceptor = TexturePeerAcceptor()
-        let listener = NSXPCListener.anonymous()
-        listener.delegate = acceptor
-        listener.resume()
-        defer {
-            acceptor.connection?.invalidate()
-            listener.invalidate()
-        }
-        let endpoint = listener.endpoint
-        if let why = await Self.offThread({ Self.startPeer(endpoint) }) { throw TestFailure("no texture peer: \(why)") }
-        let connected = await Self.offThread { acceptor.accepted.wait(timeout: .now() + 20) == .success }
-        guard connected, let connection = acceptor.connection else {
-            throw TestFailure("the texture peer never connected")
-        }
+        let connection = try await TexturePeerLink.connection()
         metrics.set("peer_pid", Int(connection.processIdentifier))
         if connection.processIdentifier == getpid() { work.failures.append("the peer is this process") }
 
@@ -319,6 +265,8 @@ struct NativeSharedTexturePeerTest: NativeObjectTest {
         }
         metrics.set("peer_paths", peerPaths.isEmpty ? "-" : peerPaths.joined(separator: ","))
         metrics.set("peer_peak_kb", peerPeak)
+        let (once, startedOnce) = await TexturePeerLink.startedOnce(&metrics)
+        if !startedOnce { work.failures.append(once) }
         return work
     }
 }

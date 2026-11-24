@@ -26,6 +26,9 @@ constexpr uint32_t kDraw = SWITCH_GM20B_MACRO_DRAW, kDrawIndexed = SWITCH_GM20B_
                    kAmplify = SWITCH_GM20B_MACRO_AMPLIFY, kAmplifyIndexed = SWITCH_GM20B_MACRO_AMPLIFY_INDEXED,
                    kClearLayers = SWITCH_GM20B_MACRO_CLEAR_LAYERS, kFetchDraw = SWITCH_GM20B_MACRO_FETCH_DRAW,
                    kFetchDrawIndexed = SWITCH_GM20B_MACRO_FETCH_DRAW_INDEXED;
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+constexpr uint32_t kBandDraw = SWITCH_GM20B_MACRO_BAND_DRAW;
+#endif
 
 constexpr bool countedAsDraw(uint32_t slot)
 {
@@ -45,6 +48,10 @@ static_assert(!countedAsDraw(kMatrix) && !countedAsDraw(kIcbRange) && !countedAs
 static_assert(kFetchDrawIndexed < SWITCH_GM20B_MACRO_METAL_END &&
                   SWITCH_GM20B_MACRO_METAL_END <= SWITCH_GM20B_MACRO_SLOTS,
               "every raw slot is one CALL_MME_MACRO takes");
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+static_assert(!countedAsDraw(kBandDraw) && kBandDraw < SWITCH_GM20B_MACRO_METAL_END,
+              "the debug band draw macro sits past the draw range");
+#endif
 static_assert(kDraw > SWITCH_GM20B_MACRO_NVK_SET_ANTI_ALIAS && kDraw > SWITCH_GM20B_MACRO_NVK_CLEAR,
               "no raw slot is one the profile reads as NVK's clear or anti-alias");
 // An indirect command buffer's draws (icb.h) and dispatches (icb_compute.h): a draw passes its index before an
@@ -92,6 +99,14 @@ constexpr Program kDrawProgram = program(switch_gm20b_macro_draw),
                   kClearLayersProgram = program(switch_gm20b_macro_clear_layers),
                   kFetchDrawProgram = program(switch_gm20b_macro_fetch_draw),
                   kFetchDrawIndexedProgram = program(switch_gm20b_macro_fetch_draw_indexed);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+constexpr Program kBandDrawProgram = program(switch_gm20b_macro_band_draw);
+constexpr size_t kBandDrawProgramWords = std::size(switch_gm20b_macro_band_draw);
+constexpr size_t kBandDrawPrograms = 1;
+#else
+constexpr size_t kBandDrawProgramWords = 0;
+constexpr size_t kBandDrawPrograms = 0;
+#endif
 constexpr size_t kProgramWords =
     std::size(switch_gm20b_macro_draw) + std::size(switch_gm20b_macro_draw_indexed) +
     std::size(switch_gm20b_macro_indirect) + std::size(switch_gm20b_macro_indexed_indirect) +
@@ -101,10 +116,10 @@ constexpr size_t kProgramWords =
     std::size(switch_gm20b_macro_icb_gate) + std::size(switch_gm20b_macro_icb_bind) +
     std::size(switch_gm20b_macro_icb_patches) + std::size(switch_gm20b_macro_amplify) +
     std::size(switch_gm20b_macro_amplify_indexed) + std::size(switch_gm20b_macro_clear_layers) +
-    std::size(switch_gm20b_macro_fetch_draw) + std::size(switch_gm20b_macro_fetch_draw_indexed);
+    std::size(switch_gm20b_macro_fetch_draw) + std::size(switch_gm20b_macro_fetch_draw_indexed) + kBandDrawProgramWords;
 static_assert(kProgramWords <= SWITCH_GM20B_MACRO_CODE_WORDS, "install() loads every program from code word 0");
 // each program's 5 load words, the zero page's 2, the root address's 3
-constexpr size_t kContextWords = 18 * 5 + kProgramWords + 2 + 3;
+constexpr size_t kContextWords = (18 + kBandDrawPrograms) * 5 + kProgramWords + 2 + 3;
 constexpr size_t kCallWords = 4, kParamsCallWords = 6;
 
 // Every program from code word 0, over NVK's, then the zero page's address (256-byte aligned below 2^40, >> 8) into the
@@ -137,6 +152,9 @@ inline void install(Push &push, uint64_t root, uint64_t zero)
     load(kClearLayers, kClearLayersProgram.words, kClearLayersProgram.size);
     load(kFetchDraw, kFetchDrawProgram.words, kFetchDrawProgram.size);
     load(kFetchDrawIndexed, kFetchDrawIndexedProgram.words, kFetchDrawIndexedProgram.size);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    load(kBandDraw, kBandDrawProgram.words, kBandDrawProgram.size);
+#endif
     push.inc(NVB197_SET_MME_SHADOW_SCRATCH(SWITCH_GM20B_SCRATCH_ZERO_PAGE), {uint32_t(zero >> 8)});
     push.inc(NVB197_SET_MME_SHADOW_SCRATCH(SWITCH_GM20B_SCRATCH_ROOT_HI), {uint32_t(root >> 32), uint32_t(root)});
 }
@@ -248,6 +266,35 @@ inline void draw(Push &push, DrawParams &held, bool indexed, uint32_t first, uin
     *push.at++ = baseInstance;
     held = {root, baseInstance, baseVertex, false};
 }
+
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+constexpr uint32_t kBandDrawCallWords = 9;
+constexpr uint32_t kBandDrawMaxWords = 20;
+
+inline void bandDraw(Push &push, DrawParams &held, uint32_t bands, uint32_t first, uint32_t count, uint32_t root,
+                     uint32_t baseInstance, uint16_t x0, uint16_t x1, uint16_t y0, uint16_t y1)
+{
+    if (held.unknown || held.root != root || held.baseInstance != baseInstance || held.baseVertex != 0) {
+        const uint32_t v[2] = {root, baseInstance};
+        push.m(NVB197_LOAD_CONSTANT_BUFFER_OFFSET, 0);
+        push.nonInc(NVB197_LOAD_CONSTANT_BUFFER(0), v, 2);
+        push.m(NVB197_SET_GLOBAL_BASE_INSTANCE_INDEX, baseInstance);
+        push.m(NVB197_SET_GLOBAL_BASE_VERTEX_INDEX, 0);
+        push.m(NVB197_SET_VERTEX_ID_BASE, 0);
+        held = {root, baseInstance, 0, false};
+    }
+    const uint32_t step = bands ? uint32_t(y1 - y0) / bands : 0;
+    *push.at++ = Push::hdr(5, SUBC_3D, kMacroCall + 8 * kBandDraw, 8);
+    *push.at++ = bands;
+    *push.at++ = uint32_t(x0) | (uint32_t(x1) << 16);
+    *push.at++ = first;
+    *push.at++ = count;
+    *push.at++ = y0;
+    *push.at++ = step;
+    *push.at++ = y1;
+    *push.at++ = uint32_t(y0) | (uint32_t(y1) << 16);
+}
+#endif
 
 // The fetch macros' BEGIN words (SwitchGM20BMacroSlots.h FETCH_BEGIN, NEXT, CONTINUED), by BEGIN's SPLIT_MODE (30:29),
 // INSTANCE_ID (27:26) and PRIMITIVE_ID (24:24) fields: an instance's first BEGIN opens its split draw, the first instance's

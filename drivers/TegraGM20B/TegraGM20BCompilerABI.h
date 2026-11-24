@@ -31,6 +31,8 @@ enum {
 	TegraGM20BMethodCompilerComplete = 0x5347,
 	TegraGM20BMethodCompilerDecline = 0x5348,
 	TegraGM20BMethodCompilerAnnounce = 0x5349,
+	TegraGM20BMethodCompilerServe = 0x534a,
+	TegraGM20BMethodCompileWait = 0x534b,
 
 	TegraGM20BCompilerStoreToken =
 		0x53430001, /* Map (method 12), read only: the registered store */
@@ -71,6 +73,7 @@ enum {
 	TegraGM20BCompilePendingPerClient = 16,
 	TegraGM20BCompilePending = 256,
 	TegraGM20BCompileQueuedBytes = 512u << 20,
+	TegraGM20BCompilerMaxWorkers = 8,
 };
 
 struct TegraGM20BAbiCompilerInfoReply {
@@ -133,6 +136,20 @@ struct TegraGM20BAbiCompilerComplete {
 	int32_t result;
 	uint32_t how;
 	struct TegraGM20BAbiCompileTimes times;
+};
+
+/* Serve (compiler only): register the calling worker in `worker` (id == 0), or bind taken request
+ * `id` to the worker registered in `worker` (1..TegraGM20BCompilerMaxWorkers; 0 binds to caller). */
+struct TegraGM20BAbiCompilerServe {
+	uint64_t id;
+	uint32_t worker, flags;
+};
+
+/* CompileWait (client): sleep on an in-flight asynchronous Compile belonging to the calling
+ * connection with `cookie`, donating this thread's turnstile priority to its serving thread. */
+struct TegraGM20BAbiCompileWait {
+	uint64_t cookie;
+	uint32_t flags, reserved;
 };
 
 #endif

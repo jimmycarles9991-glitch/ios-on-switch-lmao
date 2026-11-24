@@ -56,6 +56,7 @@
 #include <vm/vm_ubc.h>
 #include <vm/vm_page_internal.h>
 #include <vm/vm_object_internal.h>
+#include <switch/prefetch_vm.h>
 
 #include <sys/kdebug_triage.h>
 #include <sys/random.h>
@@ -517,6 +518,7 @@ retry:
 	case VM_FAULT_SUCCESS_NO_VM_PAGE:
 		vm_object_paging_end(object);
 		vm_object_unlock(object);
+		SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info->switch_wake);
 		return KERN_MEMORY_ERROR;
 	default:
 		return KERN_MEMORY_ERROR;
@@ -533,6 +535,7 @@ retry:
 	vm_page_wakeup_done(page_object, page);
 	vm_object_paging_end(page_object);
 	vm_object_unlock(page_object);
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info->switch_wake);
 	if (top_page != VM_PAGE_NULL) {
 		vm_object_lock(object);
 		VM_PAGE_FREE(top_page);
@@ -710,6 +713,7 @@ shared_region_pager_data_request(
 	fault_info.io_sync = FALSE;
 	fault_info.mark_zf_absent = FALSE;
 	fault_info.batch_pmap_op = FALSE;
+	fault_info.switch_wake = FALSE;
 	interruptible = fault_info.interruptible;
 
 	pager = shared_region_pager_lookup(mem_obj);
@@ -820,6 +824,7 @@ retry_src_fault:
 			/* success but no VM page: fail */
 			vm_object_paging_end(src_top_object);
 			vm_object_unlock(src_top_object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 			OS_FALLTHROUGH;
 		case VM_FAULT_MEMORY_ERROR:
 			/* the page is not there ! */
@@ -888,6 +893,12 @@ retry_src_fault:
 		assert(src_page->vmp_busy);
 		assert(src_page_object->paging_in_progress > 0);
 		vm_object_unlock(src_page_object);
+		if (__improbable(fault_info.switch_wake)) {
+			fault_info.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 
 		/*
 		 * Process the original contents of the source page

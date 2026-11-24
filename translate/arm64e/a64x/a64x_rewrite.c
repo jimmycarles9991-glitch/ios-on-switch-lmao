@@ -4,8 +4,8 @@
  *  - a64x_rewrite1(): the 4-byte-for-4-byte rewrites. Pointer authentication is the identity (user's rule):
  *    nothing is ever signed, every authentication succeeds, PACGA yields 0.
  *  - a64x_stub(): out-of-line ARMv8.0 code for an instruction that needs more than one word (LSE atomics, far
- *    LDRA). The site becomes `B stub`; the stub ends with `B site+4`. The stub is the sequence LLVM emits for the
- *    same C11 operation on ARMv8.0 (LDAXR/STLXR loops), so memory ordering is at least as strong as the original.
+ *    LDRA). The site becomes `B stub`; the stub ends with `B site+4`. An LSE stub is an exclusive loop with the
+ *    instruction's acquire (LDAXR) and release (STLXR) bits, plus a DMB ISH where it has both (emit_full_barrier).
  *  - a64x_dead_regs(): which X registers are provably dead at a site (written before read on the straight-line
  *    path after it), so a stub can use them instead of spilling.
  *
@@ -113,7 +113,8 @@ static inline uint32_t enc_stxp(bool x, bool rel, uint32_t rs, uint32_t rt, uint
     return (x ? 0xC8200000u : 0x88200000u) | (rel ? 1u << 15 : 0) | (rs << 16) | (rt2 << 10) | (rn << 5) | rt;
 }
 
-#define CLREX 0xD503305Fu
+#define CLREX   0xD503305Fu
+#define DMB_ISH 0xD5033BBFu
 
 /* STP/LDP Xt1, Xt2, [SP, #imm] (signed offset, scaled by 8) */
 static inline uint32_t enc_stp_sp(uint32_t t1, uint32_t t2, int32_t off)
@@ -372,6 +373,41 @@ bool a64x_regs(uint32_t w, uint32_t *rd_mask, uint32_t *wr_mask)
         return true;
     }
     return false;
+}
+
+uint32_t a64x_stub_gprs(uint32_t w)
+{
+    uint32_t rs = BITS(w, 20, 16), rn = BITS(w, 9, 5), rt = BITS(w, 4, 0);
+    switch (a64x_classify(w)) {
+    case A64X_LSE_CASP:
+        return XMASK(rs) | XMASK(rn) | XMASK(rt) | (rs < 30 ? XMASK(rs + 1) : 0) | (rt < 30 ? XMASK(rt + 1) : 0);
+    case A64X_LSE_CAS:
+    case A64X_LSE_LDOP:
+    case A64X_LSE_SWP:
+        return XMASK(rs) | XMASK(rn) | XMASK(rt);
+    case A64X_PAC_LDRA:
+        return XMASK(rn) | XMASK(rt);
+    case A64X_JSCVT:
+        return XMASK(rt);
+    case A64X_FP16: {
+        /* conversions between half precision and a general register (integer or fixed point) */
+        bool to_fp = BITS(w, 18, 16) == 2 || BITS(w, 18, 16) == 3;
+        if ((w & 0x7F20FC00u) == 0x1E200000u) {
+            return to_fp || BITS(w, 18, 16) == 7 ? XMASK(rn) : XMASK(rt);
+        }
+        if ((w & 0x7F200000u) == 0x1E000000u) {
+            return to_fp ? XMASK(rn) : XMASK(rt);
+        }
+        return 0;
+    }
+    default:
+        return 0;
+    }
+}
+
+bool a64x_bl_site_ok(uint32_t orig, uint32_t site_word)
+{
+    return (site_word & 0xFC000000u) != 0x94000000u || !(a64x_stub_gprs(orig) & XMASK(30));
 }
 
 uint32_t a64x_dead_regs(const uint32_t *next, int n)
@@ -810,6 +846,20 @@ static uint32_t emit_base(struct emit *e, uint32_t rn, uint32_t frame, uint32_t 
     return adr;
 }
 
+/*
+ * An LSE atomic with acquire and release orders every access before it against every access after it. LDAXR and
+ * STLXR are two half barriers: a later load from another address may still be satisfied while the store-release
+ * waits in the store buffer, so the store-buffering pattern can read both old values. A DMB ISH once the
+ * store-exclusive has succeeded closes that, as in Linux's fully ordered LL/SC atomics (commit 8e86f0b409a4).
+ * A failed compare of CASAL/CASPAL stores nothing and is only an acquire load: the LDAXR is all it needs.
+ */
+static void emit_full_barrier(struct emit *e, bool acq, bool rel)
+{
+    if (acq && rel) {
+        put(e, DMB_ISH);
+    }
+}
+
 static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead, uint32_t *out, int max)
 {
     uint32_t size = BITS(w, 31, 30), rs = BITS(w, 20, 16), rn = BITS(w, 9, 5), rt = BITS(w, 4, 0);
@@ -878,6 +928,7 @@ static int stub_ldop_swp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t
     }
     put(&e, enc_stxr(size, rel, st, nw, base));
     put(&e, enc_cbnz(false, st, (int64_t)(loop - here(&e))));
+    emit_full_barrier(&e, acq, rel);
     if (minmax) {
         put(&e, enc_msr_nzcv(nz));
     }
@@ -910,6 +961,7 @@ static int stub_cas(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead
 	 *        cbnz  tmp, fail
 	 *        stlxr tmp, Rt, [base]
 	 *        cbnz  tmp, loop
+	 *        dmb   ish             ; CASAL only
 	 *        b     done
 	 *  fail: clrex
 	 *  done: mov   Rs, old
@@ -924,6 +976,7 @@ static int stub_cas(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dead
     put(&e, 0); /* cbnz tmp, fail (patched) */
     put(&e, enc_stxr(size, rel, tmp, rt, base));
     put(&e, enc_cbnz(false, tmp, (int64_t)(loop - here(&e))));
+    emit_full_barrier(&e, acq, rel);
     put(&e, 0x14000002u); /* b done (skip clrex) */
     uint64_t fail = here(&e);
     put(&e, CLREX);
@@ -961,7 +1014,7 @@ static int stub_casp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dea
 	 *  loop: ldaxp o1, o2, [base]
 	 *        eor t1, o1, Rs ; eor t2, o2, Rs+1 ; orr t1, t1, t2
 	 *        cbnz t1, fail
-	 *        stlxp t1, Rt, Rt+1, [base] ; cbnz t1, loop ; b done
+	 *        stlxp t1, Rt, Rt+1, [base] ; cbnz t1, loop ; dmb ish (CASPAL only) ; b done
 	 *  fail: stlxp t1, o1, o2, [base] ; cbnz t1, loop     (store back: the pair read is only atomic if a store succeeds)
 	 *  done: mov Rs, o1 ; mov Rs+1, o2
 	 */
@@ -974,6 +1027,7 @@ static int stub_casp(uint32_t w, uint64_t stub_pc, uint64_t ret_pc, uint32_t dea
     put(&e, 0);
     put(&e, enc_stxp(x, rel, t1, rt, rt + 1, base));
     put(&e, enc_cbnz(false, t1, (int64_t)(loop - here(&e))));
+    emit_full_barrier(&e, acq, rel);
     put(&e, 0x14000003u); /* b done */
     uint64_t fail = here(&e);
     put(&e, enc_stxp(x, rel, t1, o1, o2, base));

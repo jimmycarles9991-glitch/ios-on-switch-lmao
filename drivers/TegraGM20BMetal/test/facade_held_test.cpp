@@ -23,14 +23,14 @@ namespace {
 
 using namespace drawn;
 
-// The event clock held and moved on by `ms` (switchMetalProbeAdvanceEventClock:), and a command buffer on another queue
-// completed, so the submit worker has judged its parked waits against it
+// The event clock held and moved on by `ms` (switchMetalProbeAdvanceEventClock:), then synchronized twice with the
+// submit worker so applyChanges(), waiting.expire() and any expired head's turn have all run
 void advanceEventClock(id<MTLDevice> device, id<MTLCommandQueue> other, long long ms)
 {
+    (void)other;
     ((id (*)(id, SEL, id))objc_msgSend)(device, sel_registerName("switchMetalProbeAdvanceEventClock:"), @(ms));
-    id<MTLCommandBuffer> fence = [other commandBuffer];
-    [fence commit];
-    [fence waitUntilCompleted];
+    gm20bRunOnSubmitWorker([] {});
+    gm20bRunOnSubmitWorker([] {});
 }
 
 // A command buffer that signals `done` (in `order`) as it completes, committed

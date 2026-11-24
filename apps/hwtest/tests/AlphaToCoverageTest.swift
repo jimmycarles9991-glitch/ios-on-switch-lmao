@@ -31,8 +31,12 @@ struct AlphaToCoverageTest: HWTest {
         guard gpu.device.supportsTextureSampleCount(Self.samples) else { return .skip("no 4x MSAA") }
         var metrics = Metrics()
         var wrong: [String] = []
+        var plainBytes: [UInt8] = []
         for (name, toOne) in [("coverage", false), ("coverage_one", true)] {
-            let r = try await reading(gpu, alphaToOne: toOne)
+            let (r, bytes) = try await reading(
+                gpu, fragment: "a2c_ramp_fragment", alphaToCoverage: true, alphaToOne: toOne
+            )
+            if !toOne { plainBytes = bytes }
             metrics.set("\(name)_path", r.path)
             metrics.set("\(name)_not_whole", r.notWhole)
             metrics.set("\(name)_off_alpha", r.offAlpha)
@@ -42,12 +46,35 @@ struct AlphaToCoverageTest: HWTest {
             if r.path != "gm20b" { wrong.append("\(name)_path") }
             if r.notWhole > 0 || r.offAlpha > 0 || r.falling > 0 || r.alphaNotWhole > 0 { wrong.append(name) }
         }
+        let (fetchCovered, fetchCoveredBytes) = try await reading(
+            gpu, fragment: "a2c_fetch_ramp_fragment", alphaToCoverage: true, alphaToOne: false
+        )
+        let (fetchPlain, fetchPlainBytes) = try await reading(
+            gpu, fragment: "a2c_fetch_ramp_fragment", alphaToCoverage: false, alphaToOne: false
+        )
+        var diffPlain = 0
+        var diffUnflagged = 0
+        for p in 0 ..< (Self.width * Self.height) {
+            let g = p * 4 + 1
+            if fetchCoveredBytes[g] != plainBytes[g] { diffPlain += 1 }
+            if fetchCoveredBytes[g] != fetchPlainBytes[g] { diffUnflagged += 1 }
+        }
+        metrics.set("fetch_coverage_path", fetchCovered.path)
+        metrics.set("fetch_plain_path", fetchPlain.path)
+        metrics.set("fetch_coverage_diff_plain", diffPlain)
+        metrics.set("fetch_coverage_diff_unflagged", diffUnflagged)
+        if fetchCovered.path != "gm20b" { wrong.append("fetch_coverage_path") }
+        if fetchPlain.path != "gm20b" { wrong.append("fetch_plain_path") }
+        if diffPlain > 0 { wrong.append("fetch_coverage_match") }
+        if diffUnflagged == 0 { wrong.append("fetch_coverage_distinct") }
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
-    func reading(_ gpu: GPU, alphaToOne: Bool) async throws -> Reading {
-        let state = try gpu.render(fragment: "a2c_ramp_fragment", format: .bgra8Unorm, samples: Self.samples) { d in
-            d.isAlphaToCoverageEnabled = true
+    func reading(
+        _ gpu: GPU, fragment: String, alphaToCoverage: Bool, alphaToOne: Bool
+    ) async throws -> (Reading, [UInt8]) {
+        let state = try gpu.render(fragment: fragment, format: .bgra8Unorm, samples: Self.samples) { d in
+            d.isAlphaToCoverageEnabled = alphaToCoverage
             d.isAlphaToOneEnabled = alphaToOne
         }
         let ms = try gpu.texture(.bgra8Unorm, Self.width, Self.height, usage: [.renderTarget], samples: Self.samples)
@@ -94,6 +121,6 @@ struct AlphaToCoverageTest: HWTest {
                 last = covered
             }
         }
-        return r
+        return (r, bytes)
     }
 }

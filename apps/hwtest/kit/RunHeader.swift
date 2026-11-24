@@ -4,6 +4,7 @@ import SwiftUI
 /// The top of the list: the run's progress while it runs, then one big PASS / FAIL count and what failed.
 struct RunHeader: View {
     @ObservedObject var suite: Suite
+    @ObservedObject var list: RunList
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -11,9 +12,15 @@ struct RunHeader: View {
                 Label(suite.notice, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             }
             if let report = suite.report {
-                if suite.running { progress(report) } else { counts(report) }
-                failures(report)
-                Text("Report: Documents/hwtest/\(report.fileName)").font(.caption2).foregroundStyle(.secondary)
+                if suite.running {
+                    progress(list.progress)
+                    failures(list.progress.failed)
+                } else {
+                    counts(report)
+                    failures(report.results.filter { $0.verdict == .fail }.map(\.id))
+                }
+                Text("Report: Library/Application Support/hwtest/\(report.fileName)")
+                    .font(.caption2).foregroundStyle(.secondary)
             } else {
                 Text("Tap Run All. The run needs nothing else from you.").font(.headline)
             }
@@ -21,14 +28,13 @@ struct RunHeader: View {
         .padding(.vertical, 6)
     }
 
-    func progress(_ report: Report) -> some View {
-        let finished = report.results.count
-        let planned = max(report.summary.planned, 1)
-        let current = report.run.current.flatMap { id in suite.rows.first { $0.id == id }?.test.name } ?? ""
+    func progress(_ progress: RunList.Progress) -> some View {
+        let planned = max(progress.planned, 1)
         return VStack(alignment: .leading, spacing: 6) {
-            ProgressView(value: Double(min(finished, planned)), total: Double(planned))
-            Text("\(finished) of \(report.summary.planned) · \(current)").font(.headline).lineLimit(1)
-            Text("\(report.summary.pass) pass · \(report.summary.fail) fail · \(report.summary.skip) skip so far")
+            ProgressView(value: Double(min(progress.finished, planned)), total: Double(planned))
+            Text("\(progress.finished) of \(progress.planned) · \(list.current?.test.name ?? "")")
+                .font(.headline).lineLimit(1)
+            Text("\(progress.pass) pass · \(progress.fail) fail · \(progress.skip) skip so far")
                 .font(.footnote).foregroundStyle(.secondary)
         }
     }
@@ -49,8 +55,7 @@ struct RunHeader: View {
         }
     }
 
-    @ViewBuilder func failures(_ report: Report) -> some View {
-        let failed = report.results.filter { $0.verdict == .fail }.map(\.id)
+    @ViewBuilder func failures(_ failed: [String]) -> some View {
         if !failed.isEmpty {
             Text("Failed: " + failed.prefix(12).joined(separator: ", ") + (failed.count > 12 ? ", …" : ""))
                 .font(.footnote.monospaced()).foregroundStyle(.red)

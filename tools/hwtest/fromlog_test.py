@@ -32,6 +32,26 @@ class FromLog(unittest.TestCase):
         finished = fromlog.report([*LINES, 'HWTEST suite FAIL pass=1 fail=1 skip=1 ios=27 ms=1.0'], {}, 'B', '')
         self.assertEqual(finished['run']['status'], 'done')
 
+    def test_a_line_in_pieces_is_read_whole(self):
+        prefix = '2026-11-22 00:13:42.120 Df SwitchHWTest[560:2f1c] [com.brunostjohn.switch.hwtest:suite] '
+        lines = [
+            prefix + 'HWTEST ui.scale_pacing FAIL open_shown=41 ms=20200.5',
+            '2026-11-22 00:13:42.121 Df backboardd[61:44c] unrelated',
+            prefix + 'HWTEST ui.scale_pacing +1  zoom_rounds=5 why=close_rou',
+            prefix + 'HWTEST ui.scale_pacing +2 nd_3_missed',
+            prefix + 'HWTEST metal.native.blit +1  stray=1',
+            prefix + 'HWTEST metal.native.blit PASS ms=31.0',
+        ]
+        report = fromlog.report(lines, {}, 'B', '')
+        entries = {e['id']: e for e in report['results']}
+        self.assertEqual(list(entries), ['ui.scale_pacing', 'metal.native.blit'])
+        pacing = entries['ui.scale_pacing']
+        self.assertEqual(pacing['detail'], 'close round 3 missed')
+        self.assertEqual((pacing['metrics'], pacing['milliseconds']), ({'open_shown': 41, 'zoom_rounds': 5}, 20200.5))
+        self.assertEqual(
+            pacing['log'], 'HWTEST ui.scale_pacing FAIL open_shown=41 ms=20200.5 zoom_rounds=5 why=close_round_3_missed'
+        )
+
     def test_import_lands_in_the_history_as_a_comparable_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

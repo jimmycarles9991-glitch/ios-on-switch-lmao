@@ -2,6 +2,7 @@
 // The ABI dispatch: run's method switch.
 #include "TegraGM20BUserClientInternal.h"
 #include "TegraGM20BClockABI.h"
+#include "TegraGM20BGrPreemptABI.h"
 #include "TegraGM20BZcullABI.h"
 
 static IOReturn zbcAdd(const TegraGM20BAbiZbc *in, TegraGM20BAbiZbcReply *out)
@@ -95,6 +96,13 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	case TegraGM20BMethodBoFree:
 		wantIn = sizeof(TegraGM20BAbiBoFree);
 		break;
+	case TegraGM20BMethodBoPark:
+		wantIn = sizeof(TegraGM20BAbiBoPark);
+		break;
+	case TegraGM20BMethodBoUnpark:
+		wantIn = sizeof(TegraGM20BAbiBoUnpark);
+		wantOut = sizeof(TegraGM20BAbiBoUnparkReply);
+		break;
 	case TegraGM20BMethodCpuComplete:
 		wantIn = sizeof(TegraGM20BAbiCpuComplete);
 		wantOut = sizeof(TegraGM20BAbiCpuCompleteReply);
@@ -178,6 +186,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	case TegraGM20BMethodClockAnchors:
 		wantOut = sizeof(TegraGM20BAbiClockAnchorsReply);
 		break;
+	case TegraGM20BMethodPackImageMap:
+		wantIn = sizeof(TegraGM20BAbiPackImageMap);
+		wantOut = sizeof(TegraGM20BAbiPackImageMapReply);
+		break;
 #if TGM_STATS
 	case TegraGM20BMethodReadback:
 		wantIn = sizeof(TegraGM20BAbiReadback);
@@ -190,6 +202,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	case TegraGM20BMethodCopyReset:
 		wantIn = sizeof(TegraGM20BAbiCopyReset);
 		wantOut = sizeof(TegraGM20BAbiCopyResetReply);
+		break;
+	case TegraGM20BMethodGrPreempt:
+		wantIn = sizeof(TegraGM20BAbiGrPreempt);
+		wantOut = sizeof(TegraGM20BAbiGrPreemptReply);
 		break;
 #endif
 #if SWITCH_GPU_PATH_STATS
@@ -221,6 +237,17 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	case TegraGM20BMethodBoImport:
 		if (static_cast<const TegraGM20BAbiBoImport *>(in)->flags &
 		    ~static_cast<uint32_t>(TegraGM20BImportGpuReads))
+			return kIOReturnBadArgument;
+		break;
+	case TegraGM20BMethodBoPark:
+		if (!reservedZero(static_cast<const TegraGM20BAbiBoPark *>(in)->reserved) ||
+		    (static_cast<const TegraGM20BAbiBoPark *>(in)->flags &
+		     ~static_cast<uint32_t>(TegraGM20BParkGuard)))
+			return kIOReturnBadArgument;
+		break;
+	case TegraGM20BMethodBoUnpark:
+		if (!reservedZero(static_cast<const TegraGM20BAbiBoUnpark *>(in)->reserved) ||
+		    static_cast<const TegraGM20BAbiBoUnpark *>(in)->flags)
 			return kIOReturnBadArgument;
 		break;
 	case TegraGM20BMethodSurfaceWrites:
@@ -306,9 +333,14 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	if (method == TegraGM20BMethodCpuComplete)
 		return cpuComplete(static_cast<const TegraGM20BAbiCpuComplete *>(in),
 				   static_cast<TegraGM20BAbiCpuCompleteReply *>(out));
-	if (method == TegraGM20BMethodCpuAcquire || method == TegraGM20BMethodCpuRelease)
-		return cpuAccess(static_cast<const TegraGM20BAbiCpuAccess *>(in),
-				 method == TegraGM20BMethodCpuRelease);
+	if (method == TegraGM20BMethodCpuAcquire || method == TegraGM20BMethodCpuRelease) {
+		const auto *access = static_cast<const TegraGM20BAbiCpuAccess *>(in);
+		const IOReturn ret = cpuAccess(access, method == TegraGM20BMethodCpuRelease);
+		if (method == TegraGM20BMethodCpuAcquire && ret == kIOReturnBadArgument &&
+		    cpuAcquireParkedRefusal(access))
+			return kIOReturnNotReady;
+		return ret;
+	}
 	// BoAlloc and BoImport make the BO without lock_ (the wiring, zero-fill and clean are the calling thread's own) and
 	// take it to publish the BO. Map and Unmap take lock_ themselves (Map's clientMemoryForType must run without it).
 	if (method == TegraGM20BMethodBoAlloc)
@@ -317,12 +349,22 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	if (method == TegraGM20BMethodBoImport)
 		return boImport(static_cast<const TegraGM20BAbiBoImport *>(in),
 				static_cast<TegraGM20BAbiBoAllocReply *>(out));
+	if (method == TegraGM20BMethodBoPark)
+		return boPark(static_cast<const TegraGM20BAbiBoPark *>(in));
+	if (method == TegraGM20BMethodBoUnpark)
+		return boUnpark(static_cast<const TegraGM20BAbiBoUnpark *>(in),
+				static_cast<TegraGM20BAbiBoUnparkReply *>(out));
+	if (method == TegraGM20BMethodBoFree)
+		return boFreeMethod(static_cast<const TegraGM20BAbiBoFree *>(in));
 	if (method == TegraGM20BMethodMap) {
 		return mapToken(static_cast<const TegraGM20BAbiMap *>(in),
 				static_cast<TegraGM20BAbiMapReply *>(out));
 	}
 	if (method == TegraGM20BMethodUnmap)
 		return unmapToken(static_cast<const TegraGM20BAbiUnmap *>(in));
+	if (method == TegraGM20BMethodPackImageMap)
+		return packImageMap(static_cast<const TegraGM20BAbiPackImageMap *>(in),
+				    static_cast<TegraGM20BAbiPackImageMapReply *>(out));
 	if (method == TegraGM20BMethodClockAnchors) {
 		*static_cast<TegraGM20BAbiClockAnchorsReply *>(out) = {
 			fence_gpu_ + TegraGM20BClockAnchorOffset, kFenceToken, 0};
@@ -379,6 +421,18 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 #if TGM_STATS
 		else if (op == TegraGM20BPathsOpTargetPeaks)
 			tgm_target_peaks_line(reply->line, sizeof(reply->line));
+		else if (op == TegraGM20BPathsOpForeignWaits) {
+			struct tgm_foreign_waits totals = {};
+			tgm_foreign_waits_totals(&totals);
+			snprintf(reply->line, sizeof(reply->line),
+				 "foreign_jobs=%llu foreign_fences=%llu foreign_promises=%llu "
+				 "foreign_events=%llu foreign_host1x=%llu",
+				 static_cast<unsigned long long>(totals.jobs),
+				 static_cast<unsigned long long>(totals.fences),
+				 static_cast<unsigned long long>(totals.promises),
+				 static_cast<unsigned long long>(totals.events),
+				 static_cast<unsigned long long>(totals.host1x));
+		}
 #endif
 		else
 			return kIOReturnBadArgument;
@@ -404,11 +458,10 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 		ret = nativeSurfaceView(static_cast<const TegraGM20BAbiNativeSurfaceView *>(in),
 					static_cast<TegraGM20BAbiNativeSurfaceViewReply *>(out));
 		break;
-	case TegraGM20BMethodBoFree:
-		ret = boFree(static_cast<const TegraGM20BAbiBoFree *>(in));
-		break;
 	case TegraGM20BMethodVmBind:
-		ret = vmBind(static_cast<const TegraGM20BAbiVmBind *>(in), count);
+		ret = vmBindParkedRefusal(static_cast<const TegraGM20BAbiVmBind *>(in), count);
+		if (!ret)
+			ret = vmBind(static_cast<const TegraGM20BAbiVmBind *>(in), count);
 		break;
 	case TegraGM20BMethodChannelCreate:
 		ret = channelCreate(static_cast<const TegraGM20BAbiChannelCreate *>(in),
@@ -440,6 +493,22 @@ IOReturn AGXDeviceUserClient::run(uint32_t method, const void *in, uint32_t inSi
 	case TegraGM20BMethodPriority:
 		ret = setPriority(*static_cast<const TegraGM20BAbiPriority *>(in));
 		break;
+#if TGM_STATS
+	case TegraGM20BMethodGrPreempt: {
+		const auto *input = static_cast<const TegraGM20BAbiGrPreempt *>(in);
+		auto *reply = static_cast<TegraGM20BAbiGrPreemptReply *>(out);
+		*reply = {};
+		if (input->reserved[0] || input->reserved[1] || !input->channel ||
+		    input->channel > kMaxChannels || !chans_[input->channel - 1] ||
+		    input->mode > TegraGM20BGrPreemptCta) {
+			ret = kIOReturnBadArgument;
+			break;
+		}
+		ret = ioreturn(tgm_chan_gr_preempt(chans_[input->channel - 1], input->mode,
+						   &reply->old_mode, &reply->readback));
+		break;
+	}
+#endif
 	default:
 		ret = kIOReturnUnsupported;
 		break;

@@ -16,6 +16,14 @@ struct GPUPaths {
     let counts: [String: Int]
 
     static let method: UInt32 = 0x5050
+    static let foreignWaitsOp: UInt32 = 6
+
+    static func foreignWaits(_ connection: GPUConnection?) -> [String: Int]? {
+        guard let connection else { return nil }
+        let (kr, reply) = connection.call(method, GPUConnection.words([foreignWaitsOp, 0]), outputSize: 512)
+        guard kr == KERN_SUCCESS else { return nil }
+        return parse(String(decoding: reply.prefix { $0 != 0 }, as: UTF8.self)).counts
+    }
 
     enum Reading {
         case counts(GPUPaths)
@@ -616,6 +624,8 @@ enum GPUPathTests {
         SetSurvivesTrimPathTest(), SurfaceLocksSideBySideTest.blockLinear, SurfaceLocksSideBySideTest.pitchLinear,
         ImportBesideSubmitsTest(), TransferBesideReadbackTest(), CommitLatencyPathTest(), AheadMovesTest(),
         FreshSurfaceImportPathTest(), NativeSurfaceRepublishedPathTest(), HolderTimeoutPathTest(),
+        IdleRedrawPathTest(), LaunchTargetPathTest(), FreshSparePathTest(), TeardownFreePathTest(),
+        ParkedBoPathTest(),
     ]
 }
 

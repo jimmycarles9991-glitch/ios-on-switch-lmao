@@ -20,6 +20,41 @@ public:
         uint64_t missedDeadline = 0, overflow = 0;
     } totals;
 
+    // Since the last take (the display's stats window): each shown swap's frame end minus its requested presentation, in
+    // refresh periods rounded, from kLagEarliest or earlier to kLagEarliest + kLagBins - 1 or later; unknown, a swap
+    // with no request.
+    static constexpr int kLagEarliest = -2;
+    static constexpr unsigned kLagBins = 7;
+
+    struct Lag {
+        uint32_t bins[kLagBins] = {};
+        uint32_t unknown = 0;
+    };
+
+    void lagged(uint64_t requested, uint64_t shownAt, uint64_t period)
+    {
+        if (!requested || !period) {
+            ++lag.unknown;
+            return;
+        }
+        const int64_t p = static_cast<int64_t>(period);
+        const int64_t late = static_cast<int64_t>(shownAt - requested);
+        const int64_t periods = late >= 0 ? (late + p / 2) / p : -((p / 2 - late) / p);
+        int64_t bin = periods - kLagEarliest;
+        if (bin < 0)
+            bin = 0;
+        if (bin >= static_cast<int64_t>(kLagBins))
+            bin = kLagBins - 1;
+        ++lag.bins[bin];
+    }
+
+    Lag takeLag()
+    {
+        const Lag taken = lag;
+        lag = {};
+        return taken;
+    }
+
     Ticket *find(const void *request)
     {
         for (auto &ticket : entries) {
@@ -102,6 +137,7 @@ public:
 private:
     Ticket entries[kCapacity] = {};
     uint64_t next = 0, lastShown = 0;
+    Lag lag;
 #else
     Ticket *find(const void *)
     {

@@ -38,8 +38,8 @@ IOReturn AGXDeviceUserClient::cpuComplete(const TegraGM20BAbiCpuComplete *input,
 	for (uint32_t i = 0; !result && i < input->range_count; ++i) {
 		const auto &range = ranges[i];
 		const Bo *bo = findBo(range.handle);
-		if (!bo || !bo->backing || bo->chunked || bo->nativeView || bo->representation ||
-		    !range.bytes || range.offset > bo->bytes ||
+		if (!bo || !bo->backing || bo->chunked || bo->smmuCompressible || bo->nativeView ||
+		    bo->representation || !range.bytes || range.offset > bo->bytes ||
 		    range.bytes > bo->bytes - range.offset) {
 			result = kIOReturnBadArgument;
 			break;

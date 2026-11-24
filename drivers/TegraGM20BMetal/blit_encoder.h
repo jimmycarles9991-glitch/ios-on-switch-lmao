@@ -98,6 +98,15 @@ public:
     // Every copy and 2D blit before it completes before any after it starts: NVK's wait between transfers
     // (nvk_cmd_flush_wait_dep), as the copy engine starts a PIPELINED launch before the ones before it have landed
     void barrier();
+    // Between this encoder's accesses of the same memory through two PTE kinds (a pool image's texels and its kind-0
+    // view, Device::blPitchVa): everything before completes and the L2 drops its lines (switch_gm20b_kind_switch)
+    void crossKinds();
+
+    bool emitted() const
+    {
+        return p_.at != opened_;
+    }
+
     // A counter sample on the copy engine now; `afterCopies`: once the copies before it landed
     void timestamp(uint64_t va, bool afterCopies);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG

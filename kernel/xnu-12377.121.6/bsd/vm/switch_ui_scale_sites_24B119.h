@@ -56,6 +56,17 @@
  *   counter is the 19.2 MHz oscillator's (625/12), which no clock divides to 24 MHz. Unknown, it logs a fault per
  *   timestamp of every hang analysis watchdogd runs and leaves the times unconverted. The 24 MHz row becomes 19.2 MHz
  *   and 625/12; the block is the only reader of both. At every scale.
+ * - CoreMotion (.11), CLPlatformInfo::queryMotionCaps()'s word for hardware type 225 (J181, from /product's
+ *   product-id): J181's word says its motion coprocessor (the AOP) serves device motion, so CoreMotion opens the AOP's
+ *   page-0xff0c services, which nothing on the Switch can publish, and retries until it gives up. The word becomes
+ *   J181's without every bit whose reader takes a coprocessor service (1 CLSPU, 4 and 5 SPU and AP-with-AOP-bias
+ *   6-axis, 6 compass through the SPU, 7 always-on, 9 3-axis and sideband, 11 MagicMount, 15 and 16 on-body,
+ *   22 AOP2 transport, 26 activity, 33 sideband fusion, 36 pedometer events): bits 8 (the AOP orientation service,
+ *   which SwitchMotion publishes), 21, 28 and 32 stay. Device motion then fuses on the CPU
+ *   (CLSensorFusionServiceLegacy) from SwitchMotion's accelerometer and gyroscope. The case's mov w20, #0 repeats
+ *   the dispatch's, so the case loads the low half in its three slots and branches to the hardware type case at
+ *   0x1a8771e40, whose movk x21, #0x1, lsl #32; b to the tail gives the upper half. locationd has its own copy of the
+ *   table, outside the cache. At every scale.
  * 21H461's other sites are not here. 27's -[_UIBatteryView _fillLayerFrame:cornerRadius:] fills the body's own
  * frame (no inset), so SpringBoard's and Control Center's batteries have no gap to even out. +[PKIconImageCache
  * settingsIconCacheWithScale:] returns nil at every scale and 24B119 ships no iconCache artwork. Control Center's
@@ -286,6 +297,22 @@ static const struct switch_us_site switch_us_sites_24B119[] = {
 			  { 0x1f, 0x20, 0x03, 0xd5, 0x42, 0x00, 0x80, 0x52 } },
 		},
 		"SpringBoard", "iPad native canvas eligibility", true,
+	},
+	{   /* .11 */
+		{ 0x13, 0xd1, 0x27, 0xbc, 0x9e, 0xd2, 0x36, 0x63, 0xa6, 0x80, 0xfd, 0x90, 0x2f, 0xbb, 0xd2, 0x51 },
+		0x1a8770000ULL, 0x370000ULL, 0x1000ULL, 1, 2,
+		{
+			/* 0x1a8771e20, case 225: mov w20, #0; mov x21, #0x8bf2; movk x21, #0x1461, lsl #16; then the shared
+			 * movk x21, #0x13, lsl #32; b tail -> mov x21, #0x100; movk x21, #0x1020, lsl #16; b 0x1a8771e40 */
+			{ 0x371e20ULL, 20, 0, 12, SWITCH_US_FIXED,
+			  { 0x14, 0x00, 0x80, 0x52, 0x55, 0x7e, 0x91, 0xd2, 0x35, 0x8c, 0xa2, 0xf2, 0x75, 0x02, 0xc0, 0xf2,
+			    0x4e, 0x01, 0x00, 0x14 },
+			  { 0x15, 0x20, 0x80, 0xd2, 0x15, 0x04, 0xa2, 0xf2, 0x06, 0x00, 0x00, 0x14 } },
+			/* 0x1a8771e40: movk x21, #0x1, lsl #32; b tail. Checked, not written. */
+			{ 0x371e40ULL, 8, 0, 0, SWITCH_US_FIXED,
+			  { 0x35, 0x00, 0xc0, 0xf2, 0x49, 0x01, 0x00, 0x14 }, { 0 } },
+		},
+		"CoreMotion", "motion capabilities of J181 without its motion coprocessor", true,
 	},
 };
 

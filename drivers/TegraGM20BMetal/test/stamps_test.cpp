@@ -64,6 +64,25 @@ TEST(GM20BStamps, ACommandBuffersTwoReleasesTimeIt)
                 HasSubstr("emitEndStamp(p, d.stamps_.va, stamp);"));
 }
 
+TEST(GM20BStamps, CommandBufferStartAndEndStampsAvoidHostWfi)
+{
+    uint32_t start[kStampWords], end[kStampWords];
+    Push ps{start, start + kStampWords}, pe{end, end + kStampWords};
+    const uint64_t pageVa = 0xc0'0000'0000ull;
+    emitStartStamp(ps, pageVa, 9);
+    emitEndStamp(pe, pageVa, 9);
+    ASSERT_EQ(ps.at, start + kStampWords);
+    ASSERT_EQ(pe.at, end + kStampWords);
+    EXPECT_EQ(start[0], Push::hdr(1, 0, NVB197_SET_REPORT_SEMAPHORE_A, 4));
+    EXPECT_EQ(uint64_t(start[1]) << 32 | start[2], pageVa + stampOffset(9) + offsetof(StampSlot, start));
+    EXPECT_EQ(start[3], 9u);
+    EXPECT_EQ(start[4], kDrawStampRelease);
+    EXPECT_EQ(end[0], Push::hdr(1, 0, NVB197_SET_REPORT_SEMAPHORE_A, 4));
+    EXPECT_EQ(uint64_t(end[1]) << 32 | end[2], pageVa + stampOffset(9) + offsetof(StampSlot, end));
+    EXPECT_EQ(end[3], 9u);
+    EXPECT_EQ(end[4], kDrawStampRelease);
+}
+
 // A measured draw's two releases (band_rates.h): 3D report semaphores at the end of the pipeline, after the earlier
 // draws' writes, writing PTIMER, never stalling the front end; each in its own slot past the command buffers' page
 TEST(GM20BStamps, AMeasuredDrawsReleasesTimeIt)
@@ -166,8 +185,8 @@ TEST(GM20BStamps, UnstampedTimesAreTheHostsWindow)
     expectMetalsOrder(orderedTimes(1.0, 1.010, 1.010, false, 0));
 }
 
-// The last release waits for idle (RELEASE_WFI EN). It adds no wait while the kernel follows every user push with its own wait
-// for idle and a fence release that waits too, and it is the command buffer's last method, after the tiled cache's flush
+// Start and end stamps release via 3D report semaphores (no host WFI); the end release follows the tiled cache's flush
+// and precedes the kernel's fence release, which waits for idle.
 TEST(GM20BStamps, TheEndReleaseWaitsNoLongerThanTheKernelsFence)
 {
     const std::string gpu = SourceText("../../TegraGM20B/gpu_inline.h") + SourceText("../../TegraGM20B/gpu_exec.c");

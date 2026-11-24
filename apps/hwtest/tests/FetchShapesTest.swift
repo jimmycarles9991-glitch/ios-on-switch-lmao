@@ -6,8 +6,8 @@ import Metal
 /// Destination-reading draws, each scene (FetchShapes.swift) drawn into each FetchTarget cleared to 0; its fragment adds
 /// one red code to the colour it read, so a pixel's red counts the fragments that reached it in order. On B5G6R5Unorm,
 /// whose fetching states have no storage form, each call is one call of the driver's fetch macro (mme.h,
-/// RenderEncoder::fetchDraw): the GPU loops over the draw's primitives and instances, one BEGIN each behind the fetch
-/// barrier, the strip's assembly kept between them. On BGR5A1Unorm each call is drawn whole inside the pixel interlock.
+/// RenderEncoder::fetchDraw): the GPU loops over the draw's primitives and instances, one BEGIN each over that
+/// primitive's own vertices behind the fetch barrier. On BGR5A1Unorm each call is drawn whole inside the pixel interlock.
 /// Each test proves one shape on both routes: the primitive count, a long list, strip restart and split-mode parity,
 /// points and lines, primitive_id, instance_id, the absolute vertex_id, the indirect forms, and the draws of an indirect
 /// command buffer; and that each call was one call's words on the CPU (FetchRoute). Fields per target (_b5g6r5,
@@ -29,7 +29,8 @@ struct FetchShapeTest: HWTest {
         ),
         FetchShapeTest(
             id: "gpu.gm20b.fetch_strip_restart",
-            name: "A fetching indexed strip keeps its winding across primitives and restarts", shapes: [.stripRestart]
+            name: "A fetching strip keeps its winding across primitives, and an indexed one across restarts",
+            shapes: [.stripRestart, .stripRun]
         ),
         FetchShapeTest(id: "gpu.gm20b.fetch_points", name: "Fetching points each read the last", shapes: [.points]),
         FetchShapeTest(

@@ -112,6 +112,14 @@ MEDIA = [
     "heic_grid.heic",
 ]
 
+# Every Mac golden file the device's scene and Core Animation checks read (core/CAGoldens.swift)
+GOLDEN_FILES = [
+    "goldens/ca_21H461.txt",
+    "goldens/ca_24B119.txt",
+    "goldens/scenes_21H461.txt",
+    "goldens/scenes_24B119.txt",
+]
+
 swift_test(
     name = "core_test",
     size = "small",
@@ -122,11 +130,12 @@ swift_test(
         "//tools/benchloop:generated_batches.json",
         "//tools/benchloop:testdata/golden_batch.json",
         "//tools/benchloop:testdata/split_capture_batch.json",
-    ],
+    ] + GOLDEN_FILES,
     env = {
         "BENCH_GENERATED": "$(rlocationpath //tools/benchloop:generated_batches.json)",
         "BENCH_GOLDEN": "$(rlocationpath //tools/benchloop:testdata/golden_batch.json)",
         "BENCH_CAPTURE": "$(rlocationpath //tools/benchloop:testdata/split_capture_batch.json)",
+        "HWTEST_GOLDEN_FILES": " ".join(["$(rlocationpath %s)" % f for f in GOLDEN_FILES]),
         "HWTEST_MEDIA": " ".join(MEDIA),
         "TEXPEER_ENTITLEMENTS": "$(rlocationpath peer/texpeer.entitlements)",
     },
@@ -555,8 +564,16 @@ cc_library(
         "//drivers/TegraGM20BMetal:compiler/SwitchShaderCompilerJetsam.h",
     ],
     hdrs = ["system/switch_compiler_probe.h"],
-    aspect_hints = [":compiler_probe_module"],
     copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+# The probe's header alone, as :bench_api is the bench's
+cc_library(
+    name = "compiler_probe_api",
+    hdrs = ["system/switch_compiler_probe.h"],
+    aspect_hints = [":compiler_probe_module"],
+    implementation_deps = [":compiler_probe"],
     target_compatible_with = ["@platforms//os:ios"],
 )
 
@@ -575,6 +592,43 @@ cc_library(
     copts = ["-O2"],
     target_compatible_with = ["@platforms//os:ios"],
 )
+
+swift_interop_hint(
+    name = "atomics_module",
+    module_name = "SwitchAtomics",
+)
+
+# cpu.atomics' forms and harness, compiled like a64x_probe for each app's deployment target: LSE instructions in the
+# iOS 27 app, the ARMv8.0 sequences of their stubs in the iOS 17 one (atomics/test runs both on the Mac).
+cc_library(
+    name = "atomics",
+    srcs = [
+        "atomics/switch_atomics.c",
+        "atomics/switch_atomics_forms.S",
+        "atomics/switch_atomics_hammer.c",
+        "atomics/switch_atomics_harness.S",
+        "atomics/switch_atomics_internal.h",
+        "atomics/switch_atomics_library.c",
+        "atomics/switch_atomics_list.h",
+        "atomics/switch_atomics_litmus.c",
+    ],
+    hdrs = ["atomics/switch_atomics.h"],
+    aspect_hints = [":atomics_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
+exports_files([
+    "atomics/switch_atomics.c",
+    "atomics/switch_atomics_forms.S",
+    "atomics/switch_atomics_hammer.c",
+    "atomics/switch_atomics_harness.S",
+    "atomics/switch_atomics_internal.h",
+    "atomics/switch_atomics_library.c",
+    "atomics/switch_atomics_list.h",
+    "atomics/switch_atomics_litmus.c",
+    "atomics/switch_atomics.h",
+])
 
 # The texture peer's jetsam limits, which //overlay:jetsam_properties merges into iOS 27's overlay in debug
 exports_files(["peer/com.brunostjohn.switch.texpeer.jetsam.plist"])
@@ -618,6 +672,7 @@ cc_library(
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
+        "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
         "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
         "//drivers/TegraGM20BMetal:fx/fx_image.cpp",
         "//drivers/TegraGM20BMetal:fx/fx_mip.cpp",
@@ -648,6 +703,8 @@ cc_library(
         "//drivers/TegraGM20BMetal:draw_inputs.cpp",
         "//drivers/TegraGM20BMetal:draw_shader_tests.cpp",
         "//drivers/TegraGM20BMetal:memory.cpp",
+        "//drivers/TegraGM20BMetal:parked_arena.cpp",
+        "//drivers/TegraGM20BMetal:parked_chunks.cpp",
         "//drivers/TegraGM20BMetal:pass_backings.cpp",
         "//drivers/TegraGM20BMetal:pass_begin.cpp",
         "//drivers/TegraGM20BMetal:pass_clears.cpp",
@@ -686,7 +743,6 @@ cc_library(
     ],
     hdrs = ["bench/switch_bench.h"],
     additional_compiler_inputs = ["//drivers/TegraGM20BMetal:completed.cpp"],
-    aspect_hints = [":bench_module"],
     copts = [
         "-O2",
         "-std=c++17",
@@ -712,6 +768,16 @@ cc_library(
     ],
 )
 
+# The bench's header alone, which Swift imports. A Swift compile takes every header in its C modules' compilation
+# contexts as inputs; behind implementation_deps the driver's headers stay out of kit's, and the apps still link :bench.
+cc_library(
+    name = "bench_api",
+    hdrs = ["bench/switch_bench.h"],
+    aspect_hints = [":bench_module"],
+    implementation_deps = [":bench"],
+    target_compatible_with = ["@platforms//os:ios"],
+)
+
 # The bench's records on the host, over a pack with the template state the Switch's pack gave it
 host_test(
     name = "bench_records_test",
@@ -726,12 +792,12 @@ host_test(
         "//drivers/TegraGM20BMetal:own_states.h",
         "//drivers/TegraGM20BMetal:pack.cpp",
         "//drivers/TegraGM20BMetal:pack.h",
-        "//drivers/TegraGM20BMetal:pack_selectors.h",
         "//drivers/TegraGM20BMetal:record.h",
         "//drivers/TegraGM20BMetal:record_parts.cpp",
         "//drivers/TegraGM20BMetal:descriptors.h",
         "//drivers/TegraGM20BMetal:record_parts.h",
         "//drivers/TegraGM20BMetal:set_entries.h",
+        "//drivers/TegraGM20BMetal:program_stores.h",
         "//drivers/TegraGM20BMetal:set_reads.h",
         "//drivers/TegraGM20BMetal:spill_table.h",
     ],
@@ -757,8 +823,9 @@ swift_library(
     target_compatible_with = ["@platforms//os:ios"],
     deps = [
         ":a64x_probe",
-        ":bench",
-        ":compiler_probe",
+        ":atomics",
+        ":bench_api",
+        ":compiler_probe_api",
         ":core",
         ":cpu_clock",
         ":gpu",
@@ -767,6 +834,7 @@ swift_library(
         ":texpeer_pattern",
         ":video",
         ":workloop_probe",
+        "//apps/hwtest/dispatch:sync_handoff",
     ],
 )
 

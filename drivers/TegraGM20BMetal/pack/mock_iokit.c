@@ -529,7 +529,7 @@ static kern_return_t mock_call(mach_port_t c, uint32_t sel, const void *in, size
                                       .va_start = at + 0x1000,
                                       .va_end = at + window,
                                       .page_size = 4096,
-                                      .big_page_size = 0x20000,
+                                      .big_page_size = 0x10000,
                                       .max_bo_bytes = 256ull << 20};
         strcpy(i.chip_name, "GM20B");
         strcpy(i.device_name, "NVIDIA Tegra X1 (GM20B)");

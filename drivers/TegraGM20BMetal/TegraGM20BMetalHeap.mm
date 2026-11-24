@@ -294,10 +294,14 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
         return answer(false);
     // whether the pages had gone and the new volatility in one step: no purge falls between the answer and the promise
     const MTLPurgeableState old = answer(gRM->raw->setArenaVolatile(_arena - 1, !keep));
-    if (keep)
-        resident(self);
-    else if (state == MTLPurgeableStateEmpty)
+    if (keep) {
+        if (!resident(self) && gRM->raw->setArenaVolatileIfPurged(_arena - 1)) {
+            int expected = MTLPurgeableStateNonVolatile;
+            _purgeable.compare_exchange_strong(expected, MTLPurgeableStateVolatile);
+        }
+    } else if (state == MTLPurgeableStateEmpty) {
         gRM->raw->purgeArena(_arena - 1, gRM->committed);
+    }
     return old;
 }
 
@@ -326,7 +330,7 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
     SwitchMetalBuffer *made = (SwitchMetalBuffer *)b;
     made->_heap = self;
     made->_heapBytes = need.size;
-    gm20bHeapHold(self, {made->_raw.va, made->_raw.length, made->_raw.hostVisible});
+    gm20bHeapHold(self, {made->_raw.va, made->_raw.length, made->_raw.hostVisible, made->_raw.gpuVolatile});
     return (id<MTLBuffer>)b;
 }
 
@@ -357,8 +361,8 @@ void gm20bHeapForget(SwitchMetalHeap *heap, uint64_t va)
     made->_heap = self;
     made->_heapBytes = need.size;
     const gm20b::Texture::StorageRange storage = made->_raw.storageRange();
-    gm20bHeapHold(self,
-                  {storage.bytes ? storage.va : made->_raw.va, storage.bytes ? storage.bytes : 1, storage.hostVisible});
+    gm20bHeapHold(self, {storage.bytes ? storage.va : made->_raw.va, storage.bytes ? storage.bytes : 1,
+                         storage.hostVisible, storage.gpuVolatile});
     return (id<MTLTexture>)t;
 }
 

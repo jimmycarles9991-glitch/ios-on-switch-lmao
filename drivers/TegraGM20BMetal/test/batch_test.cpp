@@ -127,20 +127,22 @@ TEST(BatchWork, OverflowAndZeroDimensionsCannotWrapTheBudget)
     EXPECT_TRUE(work.add(1));
 }
 
-// A glass frame's draws as admission sees them: full-screen scissors at ~70 fragment instructions. A client's batch ends
-// at each; the render server's holds sixteen, and a saturated estimate (an indirect draw) still ends it.
-TEST(BatchWork, TheRenderServerCutsSixteenTimesLessOften)
+TEST(BatchWork, TheRenderServerCutsOnlyAtItsHigherSafetyCeiling)
 {
     using W = gm20b::BatchWork;
     const uint64_t fullScreen = W::product(1280 * 720, 73);
-    W client, server;
+    W client, server, serverOps;
     EXPECT_TRUE(client.add(fullScreen));
     uint32_t draws = 0;
     while (!server.add(fullScreen, W::kRenderServerLimit))
         ++draws;
-    EXPECT_EQ(draws, 15u);
+    EXPECT_EQ(draws, 127u);
+    for (uint32_t i = 1; i < W::kRenderServerOps; ++i)
+        EXPECT_FALSE(serverOps.add(1, W::kRenderServerLimit)) << i;
+    EXPECT_TRUE(serverOps.add(1, W::kRenderServerLimit));
     W indirect;
     EXPECT_TRUE(indirect.add(W::kSaturated, W::kRenderServerLimit));
+    EXPECT_TRUE(indirect.add(W::kSaturated + W::kSaturated, W::kRenderServerLimit));
 }
 
 namespace {

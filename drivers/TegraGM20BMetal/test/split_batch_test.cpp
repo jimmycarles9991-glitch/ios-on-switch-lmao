@@ -94,3 +94,22 @@ TEST(GM20BSplitBatch, WireLayoutPreservesEveryCapturedPushAndBuffer)
         EXPECT_EQ(u32(156 + 16 * i), 0u);
     }
 }
+
+TEST(GM20BSplitBatch, ManyKeysAndRepeatedResetsKeepEveryRecord)
+{
+    gm20b::SplitBatchPlanner planner;
+    for (uint32_t round = 0; round < 4; ++round) {
+        constexpr uint32_t kKeys = 64, kRecords = kKeys * 3;
+        planner.clear(kRecords);
+        for (uint32_t i = 0; i < kRecords; ++i)
+            planner.append({(i + round) % kKeys, 0x1000ull * ((i + round) % kKeys), 256, 64}, i);
+        ASSERT_EQ(planner.runs().size(), kKeys);
+        std::set<uint32_t> seen;
+        for (const auto &run : planner.runs()) {
+            EXPECT_EQ(run.count, 3u);
+            for (uint32_t i = run.first; i != gm20b::SplitBatchPlanner::kEnd; i = planner.next(i))
+                EXPECT_TRUE(seen.insert(i).second);
+        }
+        EXPECT_EQ(seen.size(), kRecords);
+    }
+}

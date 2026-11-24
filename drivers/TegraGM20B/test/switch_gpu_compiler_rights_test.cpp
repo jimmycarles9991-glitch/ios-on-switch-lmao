@@ -65,6 +65,8 @@ protected:
 	void SetUp() override
 	{
 		gRights.reset();
+		gTurnstiles.reset();
+		gCurrentThread = &gDefaultThread;
 		IOLock *lock = switch_gpu_compiler::brokerLock();
 		ASSERT_NE(lock, nullptr);
 		ASSERT_EQ(gBroker.requests, nullptr);
@@ -83,6 +85,8 @@ protected:
 		EXPECT_EQ(gRights.orphanSends, 0u)
 			<< "an answer went to a port the kernel held no right to";
 		EXPECT_EQ(gRights.held(), 0) << "a send right was never released";
+		EXPECT_EQ(gTurnstiles.underflows, 0u) << "a thread reference was released twice";
+		EXPECT_EQ(gTurnstiles.held(), 0) << "a thread reference was leaked";
 	}
 
 	void registerCompiler(bool restarts = true)

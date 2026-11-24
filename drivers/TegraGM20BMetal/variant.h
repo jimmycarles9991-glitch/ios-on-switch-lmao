@@ -5,13 +5,14 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
 
 namespace gm20b {
 
-template <typename T> class Variant {
+template <typename T> class Variant : public std::enable_shared_from_this<Variant<T>> {
 public:
     enum class State : uint8_t {
         Pending,
@@ -30,6 +31,8 @@ public:
         return state() == State::Ready ? value_ : nullptr;
     }
 
+    using WaitFn = std::function<bool()>;
+
     State observe(std::function<void()> observer)
     {
         const State ready = state();
@@ -40,6 +43,48 @@ public:
         if (current == State::Pending && observer)
             observers_.push_back(std::move(observer));
         return current;
+    }
+
+    void setWait(WaitFn wait)
+    {
+        std::vector<std::function<void()>> notify;
+        {
+            std::lock_guard<gm20b::Mutex> lock(lock_);
+            if (state() != State::Pending)
+                return;
+            wait_ = std::move(wait);
+            notify = waitObservers_;
+        }
+        for (auto &observer : notify)
+            observer();
+    }
+
+    void observeWait(std::function<void()> observer)
+    {
+        if (!observer)
+            return;
+        bool already = false;
+        {
+            std::lock_guard<gm20b::Mutex> lock(lock_);
+            if (state() != State::Pending)
+                return;
+            already = static_cast<bool>(wait_);
+            waitObservers_.push_back(observer);
+        }
+        if (already)
+            observer();
+    }
+
+    bool waitPending() const
+    {
+        WaitFn fn;
+        {
+            std::lock_guard<gm20b::Mutex> lock(lock_);
+            if (state() != State::Pending || !wait_)
+                return false;
+            fn = wait_;
+        }
+        return fn();
     }
 
     bool publish(T *value)
@@ -75,7 +120,8 @@ public:
 private:
     bool settle(T *value, State settled, bool unserved = false)
     {
-        std::vector<std::function<void()>> observers;
+        std::vector<std::function<void()>> observers, waitObservers;
+        WaitFn wait;
         {
             std::lock_guard<gm20b::Mutex> lock(lock_);
             if (state() != State::Pending)
@@ -84,6 +130,8 @@ private:
             unserved_.store(unserved, std::memory_order_release);
             state_.store(settled, std::memory_order_release);
             observers.swap(observers_);
+            waitObservers.swap(waitObservers_);
+            wait = std::move(wait_);
         }
         for (auto &observer : observers)
             observer();
@@ -94,7 +142,8 @@ private:
     std::atomic<State> state_{State::Pending};
     std::atomic<bool> unserved_{false};
     T *value_ = nullptr;
-    std::vector<std::function<void()>> observers_;
+    std::vector<std::function<void()>> observers_, waitObservers_;
+    WaitFn wait_;
 };
 
 }  // namespace gm20b

@@ -5,14 +5,27 @@ void AGXDeviceUserClient::accountRelease(Bo *bo)
 {
 	if (bo->handle && (bo->pool_va || bo->chunked))
 		pool_bytes_ -= bo->bytes;
+	if (bo->handle && bo->smmuCompressible)
+		smmu_compressible_bytes_ -= bo->bytes;
 	if (bo->handle && bo->pool_va && (bo->flags & TegraGM20BBoControl))
 		control_bytes_ -= bo->controlCharge;
+#ifdef KERNEL
+	if (SWITCH_GPU_OWNER_COUNTS && bo->handle && !bo->parkReclaimed)
+		ownerMemory_.change(bo->ownerKind, bo->bytes, false);
+#else
 	if (SWITCH_GPU_OWNER_COUNTS && bo->handle)
 		ownerMemory_.change(bo->ownerKind, bo->bytes, false);
+#endif
 }
 
 void AGXDeviceUserClient::readyBo(Bo *bo)
 {
+#ifdef KERNEL
+	if (bo->parkState == SwitchGpuParkState::Reclaiming && !bo->bindings && !bo->zombieLink) {
+		parkFinishReclaimLocked(bo);
+		return;
+	}
+#endif
 	if (!bo->zombieLink || bo->bindings)
 		return;
 	*bo->zombieLink = bo->next;
@@ -87,6 +100,22 @@ void AGXDeviceUserClient::retireBatch()
 		retireRemaining_ = retiredCount_;
 		retireScanEpoch_ = __atomic_load_n(&retirementEpoch_, __ATOMIC_ACQUIRE);
 	}
+	bool clean[batch] = {};
+	uint32_t readyCount = 0;
+	const auto bindingExternal = [&](const RetiredBinding *binding) {
+		for (uint32_t slot = 0; slot < kMaxChannels; ++slot) {
+			const auto &snapshot = binding->snapshots[slot];
+			if (!snapshot.engine || !chans_[slot])
+				continue;
+			switch_gpu_backing_token current = {};
+			switch_gpu_chan_next_token(chans_[slot], &current);
+			if (snapshot.queue == current.queue &&
+			    snapshot.reset_generation == current.reset_generation &&
+			    !tgm_chan_visible_at(chans_[slot], uint32_t(snapshot.value)))
+				return false;
+		}
+		return true;
+	};
 	for (uint32_t checked = 0; retired_ && retireRemaining_ && checked < batch; ++checked) {
 		auto *record = retired_;
 		retired_ = record->next;
@@ -95,6 +124,7 @@ void AGXDeviceUserClient::retireBatch()
 		--retireRemaining_;
 		if (bindingIdle(record)) {
 			--retiredCount_;
+			clean[readyCount++] = bindingExternal(record);
 			record->next = unmapping_;
 			unmapping_ = record;
 		} else {
@@ -107,9 +137,19 @@ void AGXDeviceUserClient::retireBatch()
 	logFaultBindings();
 	releasePromises(false);
 	IOLockUnlock(lock_);
+	bool flushed = false;
+	uint32_t idx = readyCount;
 	IOLockLock(unmapLock_);
-	for (auto *record = ready; record; record = record->next)
+	for (auto *record = ready; record; record = record->next) {
+		const bool external = idx ? clean[--idx] : false;
+		if (flushed)
+			switch_gpu_mapping_mark_l2_flushed(record->mapping);
+		else if (external)
+			switch_gpu_mapping_mark_l2_clean(record->mapping);
+		if (!flushed && switch_gpu_mapping_needs_ltc_flush(record->mapping))
+			flushed = true;
 		switch_gpu_vm_unmap(vm_, &record->mapping);
+	}
 	IOLockUnlock(unmapLock_);
 	IOLockLock(lock_);
 	unmapping_ = nullptr;
@@ -200,6 +240,19 @@ void AGXDeviceUserClient::releaseLeft()
 	IOLockLock(lock_);
 	const Left left = left_;
 	left_ = {};
+#ifdef KERNEL
+	while ((left.bos || left.indexes || left.bindings || reclaimDeferredCount_) &&
+	       submitGate_.mutating())
+		IOLockSleep(lock_, &submitGate_, THREAD_UNINT);
+	const uint64_t reclaimSeq = reclaimDeferredCount_ ? reclaimSeq_ : 0u;
+	IOLockUnlock(lock_);
+	if (!left.bos && !left.indexes && !left.bindings && !reclaimSeq)
+		return;
+	passSubmitters(true);
+	dropLeft(left);
+	if (reclaimSeq)
+		drainDeferredReclaims(reclaimSeq);
+#else
 	while ((left.bos || left.indexes || left.bindings) && submitGate_.mutating())
 		IOLockSleep(lock_, &submitGate_, THREAD_UNINT);
 	IOLockUnlock(lock_);
@@ -207,6 +260,7 @@ void AGXDeviceUserClient::releaseLeft()
 		return;
 	passSubmitters(true);
 	dropLeft(left);
+#endif
 }
 
 void AGXDeviceUserClient::releaseWork(thread_call_param_t owner, thread_call_param_t)
@@ -266,9 +320,14 @@ void AGXDeviceUserClient::reap(bool force)
 {
 	if (!force)
 		return;
+	bool flushed = false;
 	while (retired_) {
 		auto *record = retired_;
 		retired_ = record->next;
+		if (flushed)
+			switch_gpu_mapping_mark_l2_flushed(record->mapping);
+		else if (switch_gpu_mapping_needs_ltc_flush(record->mapping))
+			flushed = true;
 		switch_gpu_vm_unmap(vm_, &record->mapping);
 		if (record->bo) {
 			--record->bo->bindings;
@@ -291,10 +350,16 @@ void AGXDeviceUserClient::drainResources()
 	IOLockLock(lock_);
 	submitGate_.close(lock_);
 	__atomic_store_n(&retirementStopped_, 1u, __ATOMIC_RELEASE);
+#ifdef KERNEL
+	parkUnlinkAllLocked();
+#endif
 	IOLockUnlock(lock_);
 	events_.stop();
 	resources_.stop();
 	releaseMappings();
+#ifdef KERNEL
+	drainParkedRanges();
+#endif
 #if TGM_STATS
 	tgm_readback_closed(this);
 #endif
@@ -377,6 +442,10 @@ IOReturn AGXDeviceUserClient::freeBo(Bo **p)
 	if (bound && !snapshot)
 		return kIOReturnNoMemory;
 	*p = bo->next;
+#ifdef KERNEL
+	parkUnlinkLocked(bo, false);
+	bo->parkedVa = 0;
+#endif
 	switch_gpu_backing_member_freed(bo->backing);
 	boIndex_.erase(bo->handle);
 	for (uint32_t i = 0; i < nbinds_;) {

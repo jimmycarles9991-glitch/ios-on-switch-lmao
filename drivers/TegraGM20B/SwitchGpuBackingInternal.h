@@ -74,6 +74,8 @@ struct switch_gpu_backing {
 	// The content a refused write was to make current (switch_gpu_backing_write_refused). It is never counted up: any
 	// later write moves content to it, which ends the refusal with no store of its own.
 	uint64_t refused_content;
+	// Monotonic latch under switch_gpu_backing_enter: once direct PA addresses this backing, SMMU IOVA is forbidden.
+	bool gpu_direct_pa;
 };
 
 // The backing's last write was refused after its current content was made: it does not hold the frame asked of it.

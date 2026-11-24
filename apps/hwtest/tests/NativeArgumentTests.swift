@@ -111,7 +111,7 @@ struct NativeArgumentEncoderTest: NativeObjectTest {
                 metrics.set("draw_error", "\(error)".replacingOccurrences(of: " ", with: "_"))
             }
             metrics.set(key, path)
-            if path != "raw/exact" { work.failures.append("\(key) \(path), not raw/exact") }
+            if path != "gm20b/exact" { work.failures.append("\(key) \(path), not gm20b/exact") }
         }
         var nested = "error"
         do {
@@ -120,7 +120,7 @@ struct NativeArgumentEncoderTest: NativeObjectTest {
             metrics.set("draw_error", "\(error)".replacingOccurrences(of: " ", with: "_"))
         }
         metrics.set("nested_draw_path", nested)
-        if nested != "raw/exact" { work.failures.append("nested_draw_path \(nested), not raw/exact") }
+        if nested != "gm20b/exact" { work.failures.append("nested_draw_path \(nested), not gm20b/exact") }
         await heapUseCost(gpu, &metrics, &work.failures)
         return work
     }

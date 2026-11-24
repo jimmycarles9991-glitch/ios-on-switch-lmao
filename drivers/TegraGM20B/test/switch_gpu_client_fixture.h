@@ -109,7 +109,7 @@ void thread_call_cancel_wait(Call *call)
 }
 
 struct tgm_chan {
-	uint32_t completed = 0, submitted = 1, queue = 1;
+	uint32_t completed = 0, submitted = 1, queue = 1, visible = 0;
 	uint64_t generation = 1, fault = 0;
 	int error = 0;
 };
@@ -157,6 +157,11 @@ uint32_t tgm_chan_submitted(tgm_chan *chan)
 	return chan->submitted;
 }
 
+int tgm_chan_visible_at(tgm_chan *chan, uint32_t seqno)
+{
+	return chan && !chan->error && int32_t(chan->visible - seqno) >= 0;
+}
+
 // The seqnos a retiring binding asked its channels' interrupts for (quiet job ends, SwitchGpuQuiet.h)
 std::vector<uint32_t> asked;
 
@@ -178,6 +183,7 @@ struct switch_gpu_mapping {
 	std::vector<uint8_t> *buffer = nullptr;
 	uint64_t offset = 0;
 	bool pending = false, big = false, vol = false, sparse = false;
+	bool read_only = false, compressed = false, l2_clean = false;
 };
 
 struct tgm_mem {
@@ -263,10 +269,12 @@ int switch_gpu_mapping_installed(const switch_gpu_mapping *mapping)
 
 int installError;
 
-int switch_gpu_vm_install(void *, switch_gpu_mapping *mapping, tgm_mem *, uint8_t, int, int vol)
+int switch_gpu_vm_install(void *, switch_gpu_mapping *mapping, tgm_mem *, uint8_t, int read_only,
+			  int vol)
 {
 	if (installError)
 		return installError;
+	mapping->read_only = read_only != 0;
 	mapping->vol = vol != 0;
 	if (mapping->pending)
 		installPtes(mapping);
@@ -286,9 +294,10 @@ int switch_gpu_vm_prepare(void *, uint64_t va, uint64_t range, tgm_mem *mem, uin
 }
 
 int switch_gpu_vm_map_volatile(void *, uint64_t va, uint64_t range, tgm_mem *mem, uint64_t offset,
-			       uint8_t, int, int vol, switch_gpu_mapping **out)
+			       uint8_t, int read_only, int vol, switch_gpu_mapping **out)
 {
 	*out = new switch_gpu_mapping{9000, va, range, mem->buffer, offset, true, false, vol != 0};
+	(*out)->read_only = read_only != 0;
 	installPtes(*out);
 	return 0;
 }
@@ -319,10 +328,34 @@ bool newWorkBlocked()
 	return bindWord && int32_t(*bindWord - bindTarget) < 0;
 }
 
+unsigned unmapFlushes = 0;
+
+int switch_gpu_mapping_needs_ltc_flush(const switch_gpu_mapping *mapping)
+{
+	if (!mapping || mapping->pending || mapping->sparse || mapping->vol || mapping->read_only ||
+	    mapping->l2_clean)
+		return 0;
+	return 1;
+}
+
+void switch_gpu_mapping_mark_l2_clean(switch_gpu_mapping *mapping)
+{
+	if (mapping && !mapping->compressed)
+		mapping->l2_clean = true;
+}
+
+void switch_gpu_mapping_mark_l2_flushed(switch_gpu_mapping *mapping)
+{
+	if (mapping)
+		mapping->l2_clean = true;
+}
+
 void switch_gpu_vm_unmap(void *, switch_gpu_mapping **mapping)
 {
 	if (!*mapping)
 		return;
+	if (switch_gpu_mapping_needs_ltc_flush(*mapping))
+		++unmapFlushes;
 	if (!(*mapping)->pending) {
 		std::lock_guard<std::mutex> held(gpuMemoryLock);
 		gpuMemory.unmap((*mapping)->va, (*mapping)->bytes);
@@ -386,7 +419,7 @@ public:
 		Bo *next = nullptr;
 		uint64_t handle = 1, bytes = 4096, controlCharge = 0;
 		void *pool_va = nullptr;
-		bool chunked = false, readOnly = false;
+		bool chunked = false, smmuCompressible = false, readOnly = false;
 		tgm_mem *mem = nullptr;
 		uint32_t bindings = 0, flags = 0;
 		Bo **zombieLink = nullptr;
@@ -508,7 +541,8 @@ public:
 	uint32_t promisesKept_ = 0;
 	uint32_t retiredCount_ = 0, retireRemaining_ = 0, retirementPending_ = 0,
 		 retirementStopped_ = 0;
-	uint64_t retirementEpoch_ = 0, retireScanEpoch_ = 0, pool_bytes_ = 0, control_bytes_ = 0;
+	uint64_t retirementEpoch_ = 0, retireScanEpoch_ = 0, pool_bytes_ = 0, control_bytes_ = 0,
+		 smmu_compressible_bytes_ = 0;
 	SwitchGpuOwnerMemory ownerMemory_ = {};
 	Binding binds_[256] = {};
 	uint32_t nbinds_ = 0;

@@ -67,14 +67,14 @@ struct UIGlassABTest: HWTest {
                 )
                 if round.black {
                     let name = "\(arm.rawValue)-\(isControl ? "control" : "arm")-\(entries.count).png"
-                    try? round.picture.png()?.write(to: directory.appendingPathComponent(name))
+                    try? round.picture.png()?.place(at: directory.appendingPathComponent(name))
                 }
             }
             metrics.set(arm.rawValue, Self.field(armed) + "|c" + Self.field(control))
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted]
-        try? encoder.encode(entries).write(to: directory.appendingPathComponent("rounds.json"))
+        try? encoder.encode(entries).place(at: directory.appendingPathComponent("rounds.json"))
         var line = Metrics()
         line.set("arm_black", entries.filter { !$0.control && $0.black }.count)
         line.set("control_black", entries.filter { $0.control && $0.black }.count)

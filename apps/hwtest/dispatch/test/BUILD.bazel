@@ -1,0 +1,28 @@
+# dispatch.sync_handoff's probe on this Mac, whose libdispatch and kernel are Apple's own: a healthy run passes every
+# check and wakes a retargeted queue's waiter from the other workloop, and each of the probe's own checks fires on the
+# break made for it.
+#
+#   bazel test --config=remote //apps/hwtest/dispatch/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+
+lint_files()
+
+host_library(
+    name = "sync_handoff",
+    srcs = [
+        "//apps/hwtest/dispatch:switch_sync_handoff.c",
+        "//apps/hwtest/dispatch:switch_sync_internal.h",
+        "//apps/hwtest/dispatch:switch_sync_shapes.c",
+        "//apps/hwtest/dispatch:switch_sync_watch.c",
+        "//apps/hwtest/dispatch:switch_v80_atomics.h",
+    ],
+    hdrs = ["//apps/hwtest/dispatch:switch_sync_handoff.h"],
+    copts = ["-O2"],
+)
+
+host_test(
+    name = "switch_sync_handoff_test",
+    srcs = ["switch_sync_handoff_test.cpp"],
+    deps = [":sync_handoff"],
+)

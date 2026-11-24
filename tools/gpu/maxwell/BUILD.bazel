@@ -127,10 +127,7 @@ py_library(
 
 py_binary(
     name = "gate",
-    srcs = [
-        "gate.py",
-        "selectorgate.py",
-    ],
+    srcs = ["gate.py"],
     data = ["scoreboard.log"],
     visibility = ["//visibility:public"],
     deps = [
@@ -140,14 +137,6 @@ py_binary(
         ":rungcheck_lib",
         ":rop",
     ],
-)
-
-py_test(
-    name = "selectorgate_test",
-    size = "small",
-    srcs = ["selectorgate_test.py"],
-    data = ["testdata/image_draw_fragment.hex"],
-    deps = [":gate"],
 )
 
 py_binary(

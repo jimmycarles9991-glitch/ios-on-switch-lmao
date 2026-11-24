@@ -4,6 +4,7 @@
 #include "lock.h"
 #include "kernel.h"
 #include "TegraGM20BClockABI.h"
+#include "TegraGM20BVolatileABI.h"
 #include "encode_profile.h"
 
 #include <IOKit/IOKitLib.h>
@@ -16,7 +17,7 @@
 namespace gm20b {
 namespace {
 constexpr uint64_t kVaGranule = 0x10000;
-constexpr uint64_t kBigPageAlignment = 0x20000;
+constexpr uint64_t kBigPageAlignment = 0x10000;
 }  // namespace
 
 Kernel::~Kernel()
@@ -94,9 +95,29 @@ bool Kernel::open(std::string &err)
         err = "GetInfo failed";
         return false;
     }
+    volatileWrites_ = (info_.flags & TegraGM20BInfoVolatileWrites) != 0;
     const uint64_t start = (info_.va_start + kVaGranule - 1) & ~(kVaGranule - 1);
-    vaFree_[start] = (info_.va_end & ~(kVaGranule - 1)) - start;
+    uint64_t end = info_.va_end & ~(kVaGranule - 1);
+    if (supportsPackImage() && end > TGM_PACK_WINDOW_VA)
+        end = TGM_PACK_WINDOW_VA;
+    if (end > start)
+        vaFree_[start] = end - start;
     return true;
+}
+
+int Kernel::packImageMap(const TegraGM20BAbiPackCpuRange *cpuRanges, uint32_t cpuRangeCount,
+                         TegraGM20BAbiPackImageMapReply &reply)
+{
+    reply = {};
+    if (!supportsPackImage())
+        return kIOReturnUnsupported;
+    if (cpuRangeCount > TegraGM20BMaxPackCpuRanges || (cpuRangeCount && !cpuRanges))
+        return kIOReturnBadArgument;
+    TegraGM20BAbiPackImageMap in = {};
+    in.cpu_range_count = cpuRangeCount;
+    for (uint32_t i = 0; i < cpuRangeCount; ++i)
+        in.cpu_ranges[i] = cpuRanges[i];
+    return call(TegraGM20BMethodPackImageMap, &in, sizeof in, &reply, sizeof reply);
 }
 
 uint64_t Kernel::allocVa(uint64_t bytes, uint64_t align)
@@ -160,12 +181,14 @@ bool Kernel::bind(uint64_t va, uint64_t handle, uint64_t range, uint32_t kind, b
 }
 
 bool Kernel::alloc(uint64_t bytes, bool coherent, Bo &bo, uint32_t kind, uint64_t align, bool gpuVolatile, bool control,
-                   bool cpu)
+                   bool cpu, uint64_t at, bool systemOnly)
 {
     bytes = (bytes + info_.page_size - 1) & ~uint64_t(info_.page_size - 1);
     TegraGM20BAbiBoAlloc a = {bytes, 12, coherent ? uint32_t(TegraGM20BBoCoherent) : 0u};
     if (control && coherent && !kind)
         a.flags |= TegraGM20BBoControl;
+    if (systemOnly && coherent && !control)
+        a.flags |= TegraGM20BBoSystem;
     TegraGM20BAbiBoAllocReply r = {};
     bo = {};
     if (call(TegraGM20BMethodBoAlloc, &a, sizeof a, &r, sizeof r) != KERN_SUCCESS) {
@@ -185,7 +208,11 @@ bool Kernel::alloc(uint64_t bytes, bool coherent, Bo &bo, uint32_t kind, uint64_
     }
     bo.cpu = reinterpret_cast<uint8_t *>(uintptr_t(addr));
     bo.mapped = size;
-    bo.va = bo.vaBase = allocVa(bytes, align);
+    bo.control = control;
+    if (control)
+        controlMapped_.fetch_add(size, std::memory_order_relaxed);
+    bo.va = bo.vaBase = at ? at : allocVa(bytes, align);
+    bo.vaReserved = at != 0;
     if (!bo.va) {
         setError("out of GPU VA");
         free(bo);
@@ -245,8 +272,10 @@ bool Kernel::priority(uint32_t priority, uint32_t background)
 }
 
 uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
-                               bool writes, tgm_layout *canonical)
+                               bool writes, tgm_layout *canonical, uint32_t *kind)
 {
+    if (kind)
+        *kind = 0;
     const TegraGM20BAbiSurfaceLayout in = {
         bo.handle, width, height, bpp, bytesPerRow, writes ? uint32_t(TegraGM20BLayoutWrites) : 0, 0};
     if (canonical && (info_.flags & TegraGM20BInfoCanonicalSurfaceLayout)) {
@@ -259,15 +288,18 @@ uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, ui
                 (unsigned long long)bo.handle, width, height, bpp, bytesPerRow, kr);
             return TegraGM20BLayoutOtherShape;
         }
-        if (out.layout == TegraGM20BLayoutTiled)
+        if (out.layout == TegraGM20BLayoutTiled) {
             *canonical = {out.width, out.height,          out.bpp,   out.pitch,
                           out.rows,  uint8_t(out.y_log2), out.align, out.bytes};
-        else if (out.layout == TegraGM20BLayoutOtherShape)
+            if (kind)
+                *kind = out.kind ? out.kind : TGM_LAYOUT_KIND;
+        } else if (out.layout == TegraGM20BLayoutOtherShape) {
             os_log_error(
                 OS_LOG_DEFAULT,
                 "SwitchMetal: SurfaceLayoutInfo of import %llu (%ux%u x%u, rows %u): laid out for another shape: no "
                 "texture over it",
                 (unsigned long long)bo.handle, width, height, bpp, bytesPerRow);
+        }
         return out.layout;
     }
     if (!(info_.flags & TegraGM20BInfoSurfaceLayout))
@@ -288,6 +320,8 @@ uint32_t Kernel::surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, ui
             (unsigned long long)bo.handle, width, height, bpp);
         return TegraGM20BLayoutOtherShape;
     }
+    if (out.layout == TegraGM20BLayoutTiled && kind)
+        *kind = TGM_LAYOUT_KIND;
     if (out.layout == TegraGM20BLayoutOtherShape)
         os_log_error(
             OS_LOG_DEFAULT,
@@ -409,7 +443,7 @@ void Kernel::unbind(uint64_t va, uint64_t range)
 void Kernel::free(Bo &bo)
 {
     const bool listed = bo.handle && freeObserver_ && freeObserver_->leaving(bo.handle);
-    if (bo.token && bo.cpu)
+    if (bo.token && bo.cpu && !bo.parked)
         unmap(bo.token, uint64_t(uintptr_t(bo.cpu)));
     if (bo.handle) {
         TegraGM20BAbiBoFree f = {bo.handle};
@@ -417,11 +451,59 @@ void Kernel::free(Bo &bo)
     }
     if (bo.allocated)
         allocated_.fetch_sub(bo.bytes, std::memory_order_relaxed);
+    if (bo.control)
+        controlMapped_.fetch_sub(bo.mapped, std::memory_order_relaxed);
     if (bo.vaBase && !bo.vaReserved)
         freeVa(bo.vaBase, bo.bytes);
     bo = {};
     if (listed)
         freeObserver_->left(*this);
+}
+
+int Kernel::park(uint64_t handle, bool guardNone)
+{
+    if (!supportsBoPark())
+        return kIOReturnUnsupported;
+    if (!handle)
+        return kIOReturnBadArgument;
+    const TegraGM20BAbiBoPark in = {handle, guardNone ? uint32_t(TegraGM20BParkGuard) : 0u, 0};
+    return call(TegraGM20BMethodBoPark, &in, sizeof in, nullptr, 0);
+}
+
+int Kernel::unpark(uint64_t handle, uint64_t &address, uint64_t &bytes, uint32_t &status)
+{
+    address = 0;
+    bytes = 0;
+    status = 0;
+    if (!supportsBoPark())
+        return kIOReturnUnsupported;
+    if (!handle)
+        return kIOReturnBadArgument;
+    const TegraGM20BAbiBoUnpark in = {handle, 0, 0};
+    TegraGM20BAbiBoUnparkReply r = {};
+    const int kr = call(TegraGM20BMethodBoUnpark, &in, sizeof in, &r, sizeof r);
+    if (kr == KERN_SUCCESS) {
+        address = r.address;
+        bytes = r.bytes;
+        status = r.status;
+    }
+    return kr;
+}
+
+bool Kernel::mapAt(uint32_t token, uint64_t bytes, uint64_t fixedVa, bool readOnly)
+{
+    if (!(info_.flags & TegraGM20BInfoKernelMap) || !token || !fixedVa)
+        return false;
+    const TegraGM20BAbiMap in = {
+        token, uint32_t(TegraGM20BMapFixed) | (readOnly ? uint32_t(TegraGM20BMapReadOnly) : 0u), fixedVa};
+    TegraGM20BAbiMapReply r = {};
+    if (call(TegraGM20BMethodMap, &in, sizeof in, &r, sizeof r) != KERN_SUCCESS)
+        return false;
+    if (r.address != fixedVa || r.bytes < bytes) {
+        unmap(token, r.address);
+        return false;
+    }
+    return true;
 }
 
 bool Kernel::channel(uint32_t engines, uint32_t &channel, const volatile uint32_t *&fence)

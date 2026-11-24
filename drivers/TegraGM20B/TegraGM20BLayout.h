@@ -164,6 +164,8 @@ static inline void tgm_layout_read(const struct tgm_layout *l, const uint8_t *ti
 // (VIC, NVDEC, NVJPG, NVENC, the display) program a block-linear one with out->y_log2 GOBs a block and out->row_bytes,
 // and order their work after the GPU's on it as they do for a pitch one. Thread context; never waits for the GPU.
 int tegra_gm20b_surface_layout(uint64_t pa, struct tgm_layout *out);
+uint32_t tegra_gm20b_surface_kind(uint64_t pa);
+int tegra_gm20b_surface_compressed(uint64_t pa);
 
 // For a kernel CPU reader of a block-linear IOSurface, by the physical address of any byte of it (`pa`): the surface's bytes
 // as a CPU lock sees them (its texels as rows bytes_per_row apart, from its first byte) in a scratch, the copy engine's,

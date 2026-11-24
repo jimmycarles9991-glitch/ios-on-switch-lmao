@@ -220,6 +220,7 @@ public:
     std::map<std::string, long long> numbers;
     std::map<std::string, std::string> strings;
     std::map<std::string, OSObject *> objects;  // as given (not retained: the tests keep them alive)
+    std::map<std::string, bool> booleans;       // the keys whose value is an OSBoolean (also in `numbers`)
 
     static OSDictionary *withCapacity(unsigned)
     {
@@ -232,8 +233,10 @@ public:
             numbers[key] = (long long)(int32_t)n->value;
         if (auto *s = dynamic_cast<const OSString *>(value))
             strings[key] = s->text;
-        if (auto *b = dynamic_cast<const OSBoolean *>(value))
+        if (auto *b = dynamic_cast<const OSBoolean *>(value)) {
             numbers[key] = b->value;
+            booleans[key] = b->value;
+        }
         objects[key] = const_cast<OSObject *>(value);
         return true;
     }
@@ -294,6 +297,32 @@ public:
     void registerService()
     {
         registered = true;
+        published().push_back(this);
+    }
+
+    // Every registered service, in order, for the tests to find what a driver published.
+    static std::vector<IOService *> &published()
+    {
+        static std::vector<IOService *> all;
+        return all;
+    }
+
+    std::map<std::string, OSObject *> properties;  // retained, as the registry does
+
+    bool setProperty(const char *key, OSObject *value)
+    {
+        value->retain();
+        auto &slot = properties[key];
+        if (slot)
+            slot->release();
+        slot = value;
+        return true;
+    }
+
+    OSObject *getProperty(const char *key) const
+    {
+        auto it = properties.find(key);
+        return it == properties.end() ? nullptr : it->second;
     }
 
     void setName(const char *n)

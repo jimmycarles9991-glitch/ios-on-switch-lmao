@@ -178,6 +178,7 @@ void RenderEncoder::copySeparateZeta(Push &p, uint8_t aspects, bool toAttachment
         cb_->use(*separate_.stencil, !toAttachment);
     cb_->use(zeta, toAttachment);
     tiledCacheDrain(p, dev_->k_.info());
+    cb_->tiledCacheDirty_ = false;
     p.m(WAIT_FOR_IDLE, 0);
     if (toAttachment)
         p.m(INVALIDATE_SHADER_CACHES, kFlushData | kInvalidateData);

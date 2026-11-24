@@ -202,6 +202,7 @@ typedef struct thread_watchlist {
 #endif /* CONFIG_TASKWATCH */
 
 extern int memorystatus_update_priority_for_appnap(proc_t p, boolean_t is_appnap);
+extern void switch_perf_role(bool foreground); /* Switch: drivers/SwitchPower/SwitchPerfGovernor.cpp */
 
 /* Importance Inheritance related helper functions */
 
@@ -1194,6 +1195,7 @@ task_policy_update_internal_locked(task_t task, bool in_create, task_pend_token_
 
 	/* Reflect task role transitions into the coalition role counters */
 	if (prev.tep_role != next.tep_role) {
+		switch_perf_role(next.tep_role == TASK_FOREGROUND_APPLICATION);
 		if (task_policy_update_coalition_focal_tasks(task, prev.tep_role, next.tep_role, pend_token)) {
 			update_sfi = true;
 		}

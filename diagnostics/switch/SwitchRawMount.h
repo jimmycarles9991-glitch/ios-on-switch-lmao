@@ -5,11 +5,13 @@
 #include "storage/block_backend.h"
 #include <sys/fcntl.h>
 #include <switch/auth_fs.h>
+#include <switch/boot_steps.h>
 
 #define SWITCH_RAW_DATA_UUID    "D1B1D053-D0A6-496C-8625-A947A3DA863E"
 #define SWITCH_RAW_PREBOOT_UUID "4AA4A761-5138-439D-9A30-D4138F6887FA"
 extern int switch_raw_volume_status(const char *, dev_t *, char *, size_t, uint64_t *);
 extern int native_owner_publish_raw_boot_manifest(dev_t, const char *, dev_t, const char *);
+extern volatile int native_owner_boot_manifest_status; /* IOKitBSDInit.cpp: why the last publish failed, 1 to 4 */
 
 static int native_switch_raw_wait(const char *uuid, dev_t *device, char path[64])
 {
@@ -130,6 +132,8 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
     if (device)
         vnode_put(device);
     int error = 0;
+    struct switch_boot_steps steps;
+    switch_boot_steps_begin(&steps);
     if (!(vfs_flags(os_mount) & MNT_RDONLY) || !native_verified_block_root_authorized(os_device)) {
         printf("SwitchRawBoot: root is not the read-only SD OS volume\n");
         return EAUTH;
@@ -142,6 +146,7 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
                     native_switch_raw_directory(p, scratch, "/private/preboot", os_mount, 0));
     SWITCH_RAW_STEP("Preboot mount",
                     native_switch_raw_mount(p, scratch, "/private/preboot", path, preboot_device, 0, &preboot_mount));
+    switch_boot_steps_mark(&steps, "Preboot");
     static const char *const directories[] = {"/private/preboot/Cryptexes", "/private/preboot/Cryptexes/OS",
                                               "/private/preboot/Cryptexes/App",
 #if XNU_12377_121_6
@@ -152,6 +157,7 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
     };
     for (unsigned i = 0; i < sizeof(directories) / sizeof(directories[0]); ++i)
         SWITCH_RAW_STEP(directories[i], native_switch_raw_directory(p, scratch, directories[i], preboot_mount, 1));
+    switch_boot_steps_mark(&steps, "directories");
     dev_t cache_device = NODEV;
     /* Real iOS grafts these cryptexes onto the Preboot volume (libignition), so LaunchServices files their bundles
      * under the Preboot container and keeps them. We attach-and-mount instead, so record each cryptex mount_t and
@@ -175,9 +181,11 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
         switch_cryptex_mounted(i, cryptex_mount);  // SwitchCryptex.cpp: the cluster layer's record, the prefetch
         if (!i)
             cache_device = image_volume;
+        switch_boot_steps_mark(&steps, i ? "App cryptex" : "System cryptex");
     }
     native_owner_cryptex_host = preboot_mount;
     switch_auth_fs_init();
+    switch_boot_steps_mark(&steps, "auth fs");
     /* dyld looks for code that only the OS cryptex has under the cryptex prefix that libignition reports. Ignition is
      * off here, so show each directory holding such code through the root's own: every one of 21H461's and 24B119's
      * (Mach-O files of the cryptex outside its dyld cache whose path the System volume lacks), each where the selected
@@ -207,9 +215,12 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
         if ((error = native_switch_raw_union(p, scratch, source, cryptex_only[i])))
             printf("SwitchRawBoot: %s cryptex union failed: %d\n", cryptex_only[i], error);
     }
+    switch_boot_steps_mark(&steps, "cryptex unions");
     if (!native_owner_publish_raw_boot_manifest(os_device, SWITCH_OS_VOLUME_UUID, cache_device,
                                                 SWITCH_SYSTEM_CRYPTEX_UUID))
-        printf("SwitchRawBoot: boot-manifest-hash not published (continuing)\n");
+        printf("SwitchRawBoot: boot-manifest-hash not published (status %d, continuing)\n",
+               native_owner_boot_manifest_status);
+    switch_boot_steps_mark(&steps, "boot manifest");
     /* Same development dyld mode as the FAT profile; no signature-policy change. */
     dyld_flags |= UINT64_C(8);
     commpage_update_dyld_flags(dyld_flags);
@@ -228,6 +239,7 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
     native_owner_cache_native_union = 0;
     native_owner_cache_stage = 6;
     native_owner_cache_status = native_owner_cache_mount_status = 0;
+    switch_boot_steps_log(&steps, "cryptex setup");
     return 0;
 }
 

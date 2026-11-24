@@ -74,3 +74,54 @@ int a64x_stub_split(const uint32_t *st, int n, uint64_t laid, const uint64_t *ad
     }
     return nout;
 }
+
+static bool acquire_release(uint32_t w)
+{
+    switch (a64x_classify(w)) {
+    case A64X_LSE_LDOP:
+    case A64X_LSE_SWP:
+        return ((w >> 22) & 3) == 3;
+    case A64X_LSE_CAS:
+    case A64X_LSE_CASP:
+        return ((w >> 22) & 1) && ((w >> 15) & 1);
+    default:
+        return false;
+    }
+}
+
+static bool store_release_exclusive(uint32_t w)
+{
+    return (w & 0x3FE08000u) == 0x08008000u || (w & 0xBFE08000u) == 0x88208000u;
+}
+
+/* DMB or DSB over the outer-shareable, inner-shareable or full system domain, loads and stores */
+static bool full_barrier(uint32_t w)
+{
+    uint32_t crm = (w >> 8) & 0xF;
+    return (w & 0xFFFFF0DFu) == 0xD503309Fu && (crm == 0x3 || crm == 0xB || crm == 0xF);
+}
+
+bool a64x_stub_ordered(uint32_t was, uint64_t site, uint32_t now,
+                       bool (*word_at)(const void *ctx, uint64_t at, uint32_t *w), const void *ctx)
+{
+    if (!acquire_release(was))
+        return true;
+    bool bl = (now & 0xFC000000u) == 0x94000000u, stored = false;
+    if (!bl && (now & 0xFC000000u) != 0x14000000u)
+        return false;
+    uint64_t pc = site + (uint64_t)((int64_t)(int32_t)(now << 6) >> 4);
+    for (int step = 0; step < 4 * A64X_STUB_MAX; step++) {
+        uint32_t w;
+        if (!word_at(ctx, pc, &w))
+            return false;
+        bool b = (w & 0xFC000000u) == 0x14000000u;
+        uint64_t t = pc + (uint64_t)((int64_t)(int32_t)(w << 6) >> 4);
+        if (bl ? w == 0xD65F03C0u : b && t == site + 4)
+            return false;
+        if (stored && full_barrier(w))
+            return true;
+        stored |= store_release_exclusive(w);
+        pc = b ? t : pc + 4;
+    }
+    return false;
+}

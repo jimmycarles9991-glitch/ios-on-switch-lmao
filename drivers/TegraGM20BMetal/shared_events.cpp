@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include "follow.h"
 #include "lock.h"
 #include "shared_events.h"
 #include <IOKit/IOKitLib.h>
@@ -45,7 +46,7 @@ struct SharedEvents::State {
         port = IONotificationPortCreate(kIOMainPortDefault);
         if (!port)
             return false;
-        queue = dispatch_queue_create("com.brunostjohn.switch.gm20b.events", DISPATCH_QUEUE_SERIAL);
+        queue = followingSerial("com.brunostjohn.switch.gm20b.events");
         IONotificationPortSetDispatchQueue(port, queue);
         return true;
     }

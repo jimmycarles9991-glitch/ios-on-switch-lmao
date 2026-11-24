@@ -32,8 +32,6 @@ public enum X1BlendProbes {
     ]
 
     static let halves: [Float16] = (0 ..< 256).map { Float16(Double($0) / 255) }
-    static let texels = (0 ..< 256).map { X1Reference.texel($0, top: 255) }
-    static let cases: [(UInt16, UInt16)] = (0 ..< 256).flatMap { a in (0 ... a).map { (UInt16($0), UInt16(a)) } }
 
     /// The probe's target, its destination codes and the cases' buffers; one pair's draw (after the destination's
     /// copy) and its comparison
@@ -46,14 +44,14 @@ public enum X1BlendProbes {
             self.gpu = gpu
             var initial = [UInt8](repeating: 0, count: width * height * 4)
             for p in 0 ..< width * height {
-                let (b, g, r, a) = destination(p)
+                let (b, g, r, a) = X1Reference.blendDestination(p)
                 initial[p * 4] = UInt8(b)
                 initial[p * 4 + 1] = UInt8(g)
                 initial[p * 4 + 2] = UInt8(r)
                 initial[p * 4 + 3] = UInt8(a)
             }
             staging = try gpu.buffer(initial)
-            caseBuffer = try gpu.buffer(cases.map { SIMD2<UInt16>($0.0, $0.1) })
+            caseBuffer = try gpu.buffer(X1Reference.blendCases.map { SIMD2<UInt16>($0.0, $0.1) })
             halfBuffer = try gpu.buffer(halves)
             target = try gpu.texture(.bgra8Unorm, width, height, usage: [.renderTarget, .shaderRead])
         }
@@ -91,16 +89,15 @@ public enum X1BlendProbes {
             encoder.endEncoding()
         }
 
-        public func counts(_ pair: Pair) async throws -> Counts {
-            compare(pair, try await gpu.read(target, bytesPerPixel: 4))
+        public func counts(_ pair: Pair, models: X1Reference.BlendModels = .all) async throws -> Counts {
+            let bytes = try await gpu.read(target, bytesPerPixel: 4)
+            return bytes.withUnsafeBytes {
+                X1Reference.blendCounts($0, source: pair.source.1, destination: pair.destination.1, models: models)
+            }
         }
     }
 
-    /// The destination's codes at pixel p: (blue, green, red, alpha) in memory order.
-    static func destination(_ p: Int) -> (Int, Int, Int, Int) {
-        let d = p & 255
-        return (255 - d, (d * 7 + 3) & 255, d, d)
-    }
+    public typealias Counts = X1Reference.BlendCounts
 
     public static func exact(_ gpu: GPU) async throws -> ProbeFinding {
         var wrong: [String: Int] = [:]
@@ -127,52 +124,5 @@ public enum X1BlendProbes {
         metrics.set("model", chipMisses == 0 ? "chip" : "none")
         metrics.set("chip_misses", chipMisses)
         return ProbeFinding.counted(wrong, paths: paths, metrics: metrics)
-    }
-
-    /// Per channel against Metal's half arithmetic (separate, fma, exact on the half inputs), the chip's blend (the
-    /// model the device's counts single out), each product rounded alone, and the real result of the inputs; up and
-    /// down count channels above and below Metal's separate code.
-    public struct Counts: Sendable {
-        public var fma = 0, separate = 0, exact = 0, chip = 0, perProduct = 0, real = 0, up = 0, down = 0, maxDiff = 0
-        public var first: String?
-
-        mutating func add(
-            _ have: Int, _ s: Double, _ sa: Double, _ dc: Int, _ da: Int, _ pair: Pair, p: Int, channel: Int
-        ) {
-            let texel = X1BlendProbes.texels[dc], daTexel = X1BlendProbes.texels[da]
-            let fs = pair.source.1.value(sa: sa, da: daTexel), fd = pair.destination.1.value(sa: sa, da: daTexel)
-            let want = X1Reference.unorm(X1Reference.halfSeparate(s, fs, texel, fd), top: 255)
-            if have != want {
-                separate += 1
-                if have > want { up += 1 } else { down += 1 }
-                if first == nil { first = "\(p).\(channel):\(have),want_\(want)" }
-            }
-            if have != X1Reference.unorm(X1Reference.halfFMA(s, fs, texel, fd), top: 255) { fma += 1 }
-            if have != X1Reference.unorm(X1Reference.exact(s, fs, texel, fd), top: 255) { exact += 1 }
-            let s8 = X1Reference.store(s), sa8 = X1Reference.store(sa)
-            let f1 = pair.source.1.code(sa: sa8, da: da), f2 = pair.destination.1.code(sa: sa8, da: da)
-            if have != X1Reference.chipBlend(s8, f1, dc, f2) { chip += 1 }
-            if have != X1Reference.perProductBlend(s8, f1, dc, f2) { perProduct += 1 }
-            let real =
-                s * pair.source.1.exact(sa: sa, da: da) + Double(dc) / 255 * pair.destination.1.exact(sa: sa, da: da)
-            if have != X1Reference.unorm(real, top: 255) { self.real += 1 }
-            maxDiff = max(maxDiff, abs(have - want))
-        }
-    }
-
-    /// Every channel of every case against every model's code.
-    static func compare(_ pair: Pair, _ bytes: [UInt8]) -> Counts {
-        var counts = Counts()
-        let halfValues = halves.map(Double.init)
-        for p in 0 ..< (cases.count * 256) {
-            let (si, ai) = cases[p >> 8]
-            let (s, sa) = (halfValues[Int(si)], halfValues[Int(ai)])
-            let (b, g, r, a) = destination(p)
-            counts.add(Int(bytes[p * 4]), s, sa, b, a, pair, p: p, channel: 0)
-            counts.add(Int(bytes[p * 4 + 1]), s, sa, g, a, pair, p: p, channel: 1)
-            counts.add(Int(bytes[p * 4 + 2]), s, sa, r, a, pair, p: p, channel: 2)
-            counts.add(Int(bytes[p * 4 + 3]), sa, sa, a, a, pair, p: p, channel: 3)
-        }
-        return counts
     }
 }

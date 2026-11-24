@@ -27,11 +27,8 @@ bool functions(const gm20b::CompileRequest &r, const Libraries &libraries, std::
 int32_t makeEntry(const Prepared &p, const Libraries &libraries, gm20b::Direct &direct, uint64_t stack,
                   std::string &entry, std::string &why);
 // A Reflection request's entry (reflection_blob.h encodeReflectionEntry): the state's reflection as the pack generator
-// makes it (TegraGM20BMetalOffline.h), of `libraries`' offline functions (offlineLibrary), with no compile context
+// makes it (TegraGM20BMetalOffline.h), of `libraries`' offline functions, with no compile context
 int32_t makeReflectionEntry(const Prepared &p, const Libraries &libraries, uint64_t stack, std::string &entry,
                             std::string &why);
-// The library `l` names as the translator alone makes it (TegraGM20BMetalOffline.h GM20BOfflineDevice): a system library read
-// from its volume under `systemRoot`, any other from the request's bytes; nil with `why`
-id<MTLLibrary> offlineLibrary(const gm20b::RequestLibrary &l, const std::string &systemRoot, std::string &why);
 
 }  // namespace switch_compiler

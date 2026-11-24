@@ -1,13 +1,103 @@
 // SPDX-License-Identifier: MIT
 // CPU access to the driver's memory, and leases: a heap resource made aliasable (makeArenaAliasable) gives its placement
 // back and keeps its arena by a lease, dropped by destroyTexture/destroyBuffer, so the arena is freed only once no work of it
-// can still reach it.
+// can still reach it. What teardown detaches is freed synchronously once lock_ is let go (DeferredFrees).
 #include "lock.h"
 #include "gpu.h"
+#include <CoreFoundation/CoreFoundation.h>
+#include <mach/mach.h>
 #include <os/log.h>
 #include <algorithm>
 
 namespace gm20b {
+
+// A BoFree waits for the connection's submit gate when another thread holds it, and a surface's last release is an IPC
+// to the IOSurface kext: neither may hold up threads waiting on lock_. Each caller detaches into its own stack-local
+// DeferredFrees and flushes it synchronously after unlocking lock_.
+void Device::DeferredFrees::add(const Retired &r)
+{
+    switch (r.kind) {
+    case RetireKind::None:
+        break;
+    case RetireKind::Chunk:
+        dev_.retiring_.chunkBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        dev_.retiring_.chunkCount.fetch_add(1, std::memory_order_relaxed);
+        break;
+    case RetireKind::WcShared:
+        dev_.retiring_.wcBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        dev_.retiring_.wcSharedBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        dev_.retiring_.wcMapped.fetch_add(r.accountMapped, std::memory_order_relaxed);
+        break;
+    case RetireKind::WcDedicated:
+        dev_.retiring_.wcBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        dev_.retiring_.wcMapped.fetch_add(r.accountMapped, std::memory_order_relaxed);
+        break;
+    case RetireKind::SharedHeap:
+        dev_.retiring_.heapBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        break;
+    case RetireKind::GpuHeap:
+        dev_.retiring_.gpuHeapBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        break;
+    case RetireKind::KeptImport:
+        dev_.retiring_.keptBytes.fetch_add(r.accountBytes, std::memory_order_relaxed);
+        break;
+    }
+    items_.push_back(r);
+}
+
+void Device::DeferredFrees::flush()
+{
+    if (items_.empty() && !compFreed_)
+        return;
+    std::vector<Retired> items;
+    items.swap(items_);
+    const bool compFreed = compFreed_;
+    compFreed_ = false;
+    for (Retired &r : items)
+        dev_.freeNow(r);
+    if (compFreed) {
+        std::lock_guard<gm20b::Mutex> l(dev_.lock_);
+        dev_.compGaveBack();
+    }
+}
+
+void Device::freeNow(Retired &r)
+{
+    if (r.bo.handle)
+        k_.free(r.bo);
+    if (r.va)
+        k_.releaseVa(r.va, r.vaBytes);
+    if (r.host)
+        vm_deallocate(mach_task_self(), vm_address_t(r.host), r.hostBytes);
+    if (r.owner)
+        CFRelease(r.owner);
+    switch (r.kind) {
+    case RetireKind::None:
+        break;
+    case RetireKind::Chunk:
+        retiring_.chunkBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        retiring_.chunkCount.fetch_sub(1, std::memory_order_relaxed);
+        break;
+    case RetireKind::WcShared:
+        retiring_.wcBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        retiring_.wcSharedBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        retiring_.wcMapped.fetch_sub(r.accountMapped, std::memory_order_release);
+        break;
+    case RetireKind::WcDedicated:
+        retiring_.wcBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        retiring_.wcMapped.fetch_sub(r.accountMapped, std::memory_order_release);
+        break;
+    case RetireKind::SharedHeap:
+        retiring_.heapBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        break;
+    case RetireKind::GpuHeap:
+        retiring_.gpuHeapBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        break;
+    case RetireKind::KeptImport:
+        retiring_.keptBytes.fetch_sub(r.accountBytes, std::memory_order_relaxed);
+        break;
+    }
+}
 
 void reportCpuReleaseFailure()
 {
@@ -23,7 +113,7 @@ Bo Device::bufferBoLocked(const Buffer &buffer) const
     const uint32_t index = buffer.span.chunk;
     if (buffer.arena)
         return index < arenas_.size() && !arenas_[index].purged ? arenas_[index].bo : Bo{};
-    const auto &chunks = buffer.wc ? wcChunks_ : chunks_;
+    const auto &chunks = buffer.wc ? (buffer.gpuVolatile ? volatileWcChunks_ : wcChunks_) : chunks_;
     return index < chunks.size() ? chunks[index].bo : Bo{};
 }
 
@@ -65,11 +155,13 @@ bool Device::arenaCpuRangesLocked(const ArenaStorage &storage, const void *cpu, 
 void Device::releaseHostArena(void *owner, uint32_t index)
 {
     auto &device = *static_cast<Device *>(owner);
-    std::lock_guard<gm20b::Mutex> lock(device.lock_);
+    DeferredFrees deferred(device);
+    std::unique_lock<gm20b::Mutex> lock(device.lock_);
+    device.waitArena(lock, index);
     Arena &arena = device.arenas_[index];
     --arena.leases;
-    if (arena.dying && !arena.leases)
-        device.freeArena(arena);
+    if (arena.dying && !arena.leases && !arena.aliasLeases)
+        device.freeArena(arena, deferred);
 }
 
 bool Device::hostArenaAccess(const ArenaStorage &storage, const void *cpu, uint64_t bytes, bool write,
@@ -77,7 +169,8 @@ bool Device::hostArenaAccess(const ArenaStorage &storage, const void *cpu, uint6
 {
     std::vector<HostAccess::Range> ranges;
     {
-        std::lock_guard<gm20b::Mutex> lock(lock_);
+        std::unique_lock<gm20b::Mutex> lock(lock_);
+        waitArena(lock, storage.arena);
         if (!arenaCpuRangesLocked(storage, cpu, bytes, ranges))
             return false;
         ++arenas_[storage.arena].leases;
@@ -91,17 +184,36 @@ CpuCompletion Device::captureCpuCompletion(uint32_t seqno, uint64_t generation,
     CpuCompletion result;
     if (buffers.empty())
         return result;
-    std::lock_guard<gm20b::Mutex> lock(lock_);
-    if (generation != channelGeneration() || !channelReady_.load(std::memory_order_acquire) || fence_ == &kNoFence) {
+    std::unique_lock<gm20b::Mutex> lock(lock_);
+    for (;;) {
+        bool waited = false;
+        for (const Buffer *buffer : buffers) {
+            if (!buffer || !buffer->hostVisible || buffer->wc || !buffer->cpu)
+                continue;
+            const uint32_t index = buffer->span.storage                    ? buffer->span.storage->arena
+                                   : buffer->arena && buffer->span.valid() ? buffer->span.chunk
+                                                                           : ~0u;
+            if (index < arenas_.size() && arenas_[index].busy) {
+                waitArena(lock, index);
+                waited = true;
+                break;
+            }
+        }
+        if (!waited)
+            break;
+    }
+    const volatile uint32_t *fence = fence_.load(std::memory_order_acquire);
+    const uint32_t ch = channel_.load(std::memory_order_acquire);
+    if (generation != channelGeneration() || !channelReady_.load(std::memory_order_acquire) || fence == &kNoFence) {
         result.valid = false;
         return result;
     }
     const auto *identity = reinterpret_cast<const volatile TegraGM20BAbiFenceIdentity *>(
-        reinterpret_cast<const volatile uint8_t *>(fence_) + sizeof(TegraGM20BAbiFence) +
+        reinterpret_cast<const volatile uint8_t *>(fence) + sizeof(TegraGM20BAbiFence) +
         sizeof(TegraGM20BAbiFenceSemantic));
     result.channelUid = __atomic_load_n(&identity->channel_uid, __ATOMIC_ACQUIRE);
     result.generation = generation;
-    result.channel = channel_;
+    result.channel = ch;
     result.seqno = seqno;
     for (const Buffer *buffer : buffers) {
         if (!buffer || !buffer->hostVisible || buffer->wc || !buffer->cpu)
@@ -137,11 +249,17 @@ bool Device::hostAccess(const Buffer &buffer, const void *cpu, uint64_t bytes, b
 {
     if (!hostRangeContains(buffer.cpu, buffer.length, cpu, bytes))
         return false;
+    // WC + VOL=1 bypasses both CPU D-cache and GPU L2; taking a kernel CPU lease would evict the volatile chunk from
+    // ResourceSet, stall on host1x-bridge, and bump host_epoch.
+    if (buffer.wc && buffer.gpuVolatile)
+        return true;
     if (buffer.span.storage)
         return hostArenaAccess(*buffer.span.storage, cpu, bytes, write, access);
     Bo bo;
     {
-        std::lock_guard<gm20b::Mutex> lock(lock_);
+        std::unique_lock<gm20b::Mutex> lock(lock_);
+        if (buffer.arena && buffer.span.valid())
+            waitArena(lock, buffer.span.chunk);
         bo = bufferBoLocked(buffer);
     }
     return access.acquire(k_, bo, cpu, bytes, write);
@@ -166,10 +284,11 @@ bool Device::hostAccess(const Texture &texture, const void *cpu, uint64_t reques
     Bo bo;
     uint64_t bytes = 0;
     {
-        std::lock_guard<gm20b::Mutex> lock(lock_);
+        std::unique_lock<gm20b::Mutex> lock(lock_);
         if (texture.span.valid()) {
             const uint32_t index = texture.span.chunk;
             if (texture.arena) {
+                waitArena(lock, index);
                 if (index >= arenas_.size() || arenas_[index].purged)
                     return false;
                 bo = arenas_[index].bo;
@@ -208,7 +327,7 @@ Lease *Device::leaseSpan(Lease *&lease, const Span &span, Memory from)
     if (!lease) {
         lease = new Lease{this, 1, from, span, nullptr};
         if (from == Memory::Arena)
-            arenas_[span.chunk].leases++;
+            arenas_[span.chunk].aliasLeases++;
     }
     lease->refs++;
     return lease;
@@ -216,12 +335,14 @@ Lease *Device::leaseSpan(Lease *&lease, const Span &span, Memory from)
 
 void Device::makeArenaAliasable(Span &span, Lease *&lease)
 {
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    waitArena(l, span.chunk);
     Lease *hold = leaseSpan(lease, span, Memory::Arena);
     arenas_[span.chunk].place.release(span.offset, span.bytes);
     // Aliasing returns placement, while recorded uses still own the mappings and their storage cuts.
     hold->placed = false;
-    dropLocked(hold);
+    dropLocked(l, hold, deferred);
 }
 
 // An extended-range texture's stand-in was placed in the arena beside it (arenaTexture), counted in its footprint
@@ -232,56 +353,65 @@ void Device::makeArenaAliasable(Texture &t)
             makeArenaAliasable(placed->span, placed->lease);
 }
 
-void Device::dropLocked(Lease *lease)
+void Device::dropLocked(std::unique_lock<gm20b::Mutex> &l, Lease *lease, DeferredFrees &deferred)
 {
     if (--lease->refs)
         return;
     switch (lease->from) {
     case Memory::Pool:
-        poolFree(lease->span);
+        poolFree(lease->span, deferred);
         break;
     case Memory::Wc:
-        wcFree(lease->span);
+        wcFree(lease->span, deferred);
+        break;
+    case Memory::VolatileWc:
+        volatileWcFree(lease->span, deferred);
         break;
     case Memory::Import:
-        release(lease->import);
+        release(lease->import, deferred);
         break;
     case Memory::Bl:
-        blFree(lease->span);
+        blFree(lease->span, deferred);
         break;
     case Memory::Arena:
-        arenas_[lease->span.chunk].leases--;
+        waitArena(l, lease->span.chunk);
+        arenas_[lease->span.chunk].aliasLeases--;
         if (lease->placed)
-            arenaFree(lease->span);
+            arenaFree(l, lease->span, deferred);
         else {
             delete lease->span.storage;
-            if (arenas_[lease->span.chunk].dying && !arenas_[lease->span.chunk].leases)
-                freeArena(arenas_[lease->span.chunk]);
+            if (arenas_[lease->span.chunk].dying && !arenas_[lease->span.chunk].leases &&
+                !arenas_[lease->span.chunk].aliasLeases)
+                freeArena(arenas_[lease->span.chunk], deferred);
         }
         break;
     }
     delete lease;
 }
 
-void Device::freeSpan(Span &span, Memory from, Lease *&lease)
+void Device::freeSpan(std::unique_lock<gm20b::Mutex> &l, Span &span, Memory from, Lease *&lease,
+                      DeferredFrees &deferred)
 {
     if (lease) {
-        dropLocked(lease);
+        dropLocked(l, lease, deferred);
     } else if (span.valid()) {
         switch (from) {
         case Memory::Pool:
-            poolFree(span);
+            poolFree(span, deferred);
             break;
         case Memory::Wc:
-            wcFree(span);
+            wcFree(span, deferred);
+            break;
+        case Memory::VolatileWc:
+            volatileWcFree(span, deferred);
             break;
         case Memory::Import:
             break;
         case Memory::Bl:
-            blFree(span);
+            blFree(span, deferred);
             break;
         case Memory::Arena:
-            arenaFree(span);
+            arenaFree(l, span, deferred);
             break;
         }
     }

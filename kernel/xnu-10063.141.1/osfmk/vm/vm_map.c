@@ -115,6 +115,7 @@
 #include <vm/vm_protos.h>
 #include <vm/vm_shared_region.h>
 #include <vm/vm_map_store.h>
+#include <switch/prefetch_vm.h>
 
 #include <san/kasan.h>
 
@@ -2355,6 +2356,7 @@ vm_map_pmap_enter(
 		    &object_lock_type); /* Exclusive lock mode. Will remain unchanged.*/
 
 		vm_object_unlock(object);
+		SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 
 		offset += PAGE_SIZE_64;
 		addr += PAGE_SIZE;
@@ -11818,6 +11820,7 @@ vm_map_copyout_internal(
 				    &object_lock_type); /*Exclusive mode lock. Will remain unchanged.*/
 
 				vm_object_unlock(object);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 
 				offset += PAGE_SIZE_64;
 				va += PAGE_SIZE;

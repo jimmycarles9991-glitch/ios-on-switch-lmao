@@ -114,6 +114,7 @@
 #include <sys/persona.h>
 #include <sys/reason.h>
 #include <switch/pretranslated.h>
+#include <switch/boot_steps.h>
 #include <switch/protection.h>
 #include <switch/a64x.h>
 #if SYSV_SHM
@@ -6902,7 +6903,7 @@ static const char *const native_switch_bluetoothd_environment[] = {
 	"BT_HCI_TRANSPORT=H4BC:POSIX:com.apple.uart.bluetooth,3000000", NULL
 };
 static const char *const native_switch_backboardd_environment[] = {
-	"CA_DISABLE_DETACHED=1", NULL
+	"CA_DISABLE_DETACHED=1", "CA_DISABLE_GENERIC_SHADERS=1", NULL
 };
 
 /* The extra environment strings for imgp's executable, NULL-terminated, or NULL for none. */
@@ -8240,6 +8241,9 @@ native_owner_cache_checkpoint(int status, int authorized)
 #include "SwitchPanicSave.h"
 #include <switch/prefs.h>
 #include <switch/icon_cache.h>
+#include <switch/boot_sync.h>
+#include <switch/prefetch_vm.h>
+#include <switch/setup_state.h>
 #endif
 
 static int
@@ -8396,6 +8400,10 @@ volatile int native_owner_data_status = -1;
 volatile int native_owner_data_stage = 0;
 volatile int native_owner_data_readonly = -1;
 volatile dev_t native_owner_data_device = NODEV;
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && \
+    defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+static mount_t native_owner_data_mount = NULL;
+#endif
 uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
 uint8_t native_owner_data_seed_sha256[32];
 char native_owner_data_device_path[64];
@@ -8601,7 +8609,13 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
 			    observed_root, observed_mobile);
 	}
 #endif
-	if (!error) native_owner_data_stage = 4;
+	if (!error) {
+#if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && \
+    defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+		native_owner_data_mount = data_mount;
+#endif
+		native_owner_data_stage = 4;
+	}
 	if (!error) native_gpu_addon_prepare(p, scratch);
 done:
 	if (data_root) vnode_put(data_root);
@@ -8641,43 +8655,67 @@ native_switch_watchdog_attributes(vnode_t vp, mount_t data_mount, int directory,
  * What launchd's exec changed on Data this boot (files replaced or removed, directories made). On r7p5/r7p6 the policy
  * step (eight synchronous file replacements, five directory syncs and a volume sync on the SD card) put about 2.1 s
  * between the Data mount and launchd's exec, on the boot's critical path, though the files were the same every boot.
- * Now a file that already holds the bytes, owner and mode it would get is left alone, and a directory or volume sync
- * only runs once something has changed: every sync that persists a change still runs where it did, in the same order;
- * the skipped ones had nothing to persist.
+ * Now a file that already holds the bytes, owner and mode it would get is left alone, and nothing is synced until the
+ * boot's first durable change (<switch/boot_sync.h>): from it on, every sync runs where it did, in the same order.
+ * An ordinary boot's changes are all REDONE (timed's marker; on a deploy boot, IconServices' cache) and go out
+ * unsynced.
  */
+#if DEVELOPMENT || DEBUG
 static unsigned int native_switch_policy_written, native_switch_policy_unchanged;
+#define NATIVE_SWITCH_COUNT(counter) ((counter)++)
+#else
+#define NATIVE_SWITCH_COUNT(counter) ((void)0)
+#endif
+static struct switch_boot_sync native_switch_sync;
 
-/* Whether path already is a regular file on data_mount with exactly these bytes, owner, group and mode. */
-static bool
-native_switch_file_unchanged(const char *path, const char *bytes, int length, mount_t data_mount, uid_t owner,
-    gid_t group, mode_t mode)
+/* Why path is not already a regular file on data_mount with these bytes (with our_keys: a plist holding every key
+ * the XML `bytes` sets, with its value, among any others), owner, group and mode; NULL when it is. */
+static const char *
+native_switch_file_differs(const char *path, const char *bytes, int length, mount_t data_mount, uid_t owner,
+    gid_t group, mode_t mode, bool our_keys)
 {
 	vfs_context_t context = vfs_context_current();
 	vnode_t vp = NULLVP;
 	struct vnode_attr attributes;
-	bool same = false;
+	const char *why = "absent";
 
-	if (length <= 0 || length > 64 * 1024 || vnode_open(path, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, context)) return false;
+	if (length <= 0 || length > 64 * 1024) return "too large";
+	if (vnode_open(path, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, context)) return why;
 	VATTR_INIT(&attributes);
 	VATTR_WANTED(&attributes, va_uid);
 	VATTR_WANTED(&attributes, va_gid);
 	VATTR_WANTED(&attributes, va_mode);
 	VATTR_WANTED(&attributes, va_data_size);
-	if (vnode_mount(vp) == data_mount && vnode_isreg(vp) && !VNOP_GETATTR(vp, &attributes, context) &&
-	    VATTR_IS_SUPPORTED(&attributes, va_uid) && VATTR_IS_SUPPORTED(&attributes, va_gid) &&
-	    VATTR_IS_SUPPORTED(&attributes, va_mode) && VATTR_IS_SUPPORTED(&attributes, va_data_size) &&
-	    attributes.va_uid == owner && attributes.va_gid == group && (attributes.va_mode & 07777) == mode &&
-	    attributes.va_data_size == (uint64_t)length) {
-		char *existing = kalloc_data((vm_size_t)length, Z_WAITOK);
-		int residual = length;
-		if (existing && !vn_rdwr(UIO_READ, vp, existing, length, 0, UIO_SYSSPACE, 0, vfs_context_ucred(context),
-		    &residual, vfs_context_proc(context)) && residual == 0) {
-			same = memcmp(existing, bytes, (size_t)length) == 0;
+	if (vnode_mount(vp) != data_mount || !vnode_isreg(vp) || VNOP_GETATTR(vp, &attributes, context) ||
+	    !VATTR_IS_SUPPORTED(&attributes, va_uid) || !VATTR_IS_SUPPORTED(&attributes, va_gid) ||
+	    !VATTR_IS_SUPPORTED(&attributes, va_mode) || !VATTR_IS_SUPPORTED(&attributes, va_data_size)) {
+		why = "not a regular Data file";
+	} else if (attributes.va_uid != owner || attributes.va_gid != group || (attributes.va_mode & 07777) != mode) {
+		why = "owner or mode";
+	} else if (our_keys ? attributes.va_data_size > 64 * 1024 : attributes.va_data_size != (uint64_t)length) {
+		why = "size";
+	} else {
+		const int size = (int)attributes.va_data_size;
+		char *existing = size ? kalloc_data((vm_size_t)size, Z_WAITOK) : NULL;
+		int residual = size;
+		why = "bytes";
+		if (existing && !vn_rdwr(UIO_READ, vp, existing, size, 0, UIO_SYSSPACE, 0, vfs_context_ucred(context),
+		    &residual, vfs_context_proc(context)) && residual == 0 &&
+		    (our_keys ? switch_prefs_holds((const uint8_t *)existing, (size_t)size, bytes, (size_t)length) :
+		    !memcmp(existing, bytes, (size_t)length))) {
+			why = NULL;
 		}
-		kfree_data(existing, (vm_size_t)length);
+		if (existing) kfree_data(existing, (vm_size_t)size);
 	}
 	(void)vnode_close(vp, FREAD, context);
-	return same;
+	return why;
+}
+
+static bool
+native_switch_file_unchanged(const char *path, const char *bytes, int length, mount_t data_mount, uid_t owner,
+    gid_t group, mode_t mode)
+{
+	return native_switch_file_differs(path, bytes, length, data_mount, owner, group, mode, false) == NULL;
 }
 
 static int
@@ -8691,6 +8729,7 @@ native_switch_watchdog_directory(proc_t p, user_addr_t scratch, const char *path
 		int32_t result = 0;
 		if ((error = copyout(path, request.path, strlen(path) + 1))) return error;
 		if ((error = mkdir(p, &request, &result))) return error;
+		(void)switch_boot_sync_change(&native_switch_sync, SWITCH_BOOT_DURABLE, path);
 		created = 1;
 		error = vnode_open(path, FREAD | O_DIRECTORY | O_NOFOLLOW_ANY, 0, 0, &vp, vfs_context_current());
 	}
@@ -8707,41 +8746,32 @@ native_switch_watchdog_directory(proc_t p, user_addr_t scratch, const char *path
 		error = vnode_setattr(vp, &attributes, vfs_context_current());
 	}
 	if (!error) error = native_switch_watchdog_attributes(vp, data_mount, 1, 0);
-	if (created) native_switch_policy_written++;
-	/* Persists a new directory, or names changed in it; nothing to persist while nothing changed. */
-	if (!error && native_switch_policy_written) error = VNOP_FSYNC(vp, MNT_WAIT, vfs_context_current());
+	if (created) NATIVE_SWITCH_COUNT(native_switch_policy_written);
+	/* Persists a new directory, or names a durable change made in it; nothing to persist before one. */
+	if (!error && switch_boot_sync_due(&native_switch_sync)) error = VNOP_FSYNC(vp, MNT_WAIT, vfs_context_current());
 	int close_error = vnode_close(vp, FREAD, vfs_context_current());
 	return error ? error : close_error;
 }
 
+/* path replaced by a file with these bytes, owner, group and mode: written beside it, then renamed over it. */
 static int
-native_switch_watchdog_file(proc_t p, user_addr_t scratch, const char *path, const char *bytes, int length, mount_t data_mount,
-    uid_t owner, gid_t group, mode_t mode)
+native_switch_replace_file(proc_t p, user_addr_t scratch, const char *path, const char *bytes, int length,
+    mount_t data_mount, uid_t owner, gid_t group, mode_t mode, enum switch_boot_change change)
 {
-	/* An empty marker is created once; the policy is replaced atomically every boot
-	 * so edits to its job list reach existing Data volumes. Root-owned, as launchd requires. */
 	vfs_context_t context = vfs_context_current();
 	vnode_t vp = NULLVP;
 	char temporary[192];
-	int error;
-	if (!length) {
-		error = vnode_open(path, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, context);
-		if (!error) return vnode_close(vp, FREAD, context);
-		if (error != ENOENT) return error;
-	} else if (native_switch_file_unchanged(path, bytes, length, data_mount, owner, group, mode)) {
-		native_switch_policy_unchanged++;
-		return 0;
-	}
-	native_switch_policy_written++;
+	const int io = switch_boot_sync_change(&native_switch_sync, change, path) ? IO_SYNC : 0;
+	NATIVE_SWITCH_COUNT(native_switch_policy_written);
 	int size = snprintf(temporary, sizeof(temporary), "%s.Switch-%s", path, bootsessionuuid_string);
 	if (size < 0 || (size_t)size >= sizeof(temporary)) return ENAMETOOLONG;
-	error = vnode_open(temporary, FREAD | FWRITE | O_CREAT | O_TRUNC | O_NOFOLLOW_ANY, mode, 0, &vp, context);
+	int error = vnode_open(temporary, FREAD | FWRITE | O_CREAT | O_TRUNC | O_NOFOLLOW_ANY, mode, 0, &vp, context);
 	if (error) return error;
 	if (vnode_mount(vp) != data_mount || !vnode_isreg(vp)) error = EINVAL;
 	if (!error && length) {
 		int residual = length;
-		error = vn_rdwr(UIO_WRITE, vp, (caddr_t)bytes, length, 0, UIO_SYSSPACE, IO_SYNC,
-		    vfs_context_ucred(context), &residual, p);
+		error = vn_rdwr(UIO_WRITE, vp, (caddr_t)bytes, length, 0, UIO_SYSSPACE, io, vfs_context_ucred(context),
+		    &residual, p);
 		if (!error && residual) error = EIO;
 	}
 	if (!error) {
@@ -8767,12 +8797,51 @@ native_switch_watchdog_file(proc_t p, user_addr_t scratch, const char *path, con
 	return error;
 }
 
-/* unlink(2) for the policy step: a removal is a change the step's syncs have to persist. */
 static int
-native_switch_unlink(proc_t p, struct unlink_args *request, int32_t *result)
+native_switch_data_file(proc_t p, user_addr_t scratch, const char *path, const char *bytes, int length, mount_t data_mount,
+    uid_t owner, gid_t group, mode_t mode, enum switch_boot_change change)
 {
-	int error = unlink(p, request, result);
-	if (!error) native_switch_policy_written++;
+	/* An empty marker is created once; a file is replaced atomically whenever it differs, so edits to the policy's job
+	 * list reach existing Data volumes. Root-owned, as launchd requires. */
+	vfs_context_t context = vfs_context_current();
+	vnode_t vp = NULLVP;
+	if (!length) {
+		int error = vnode_open(path, FREAD | O_NOFOLLOW_ANY, 0, 0, &vp, context);
+		if (!error) return vnode_close(vp, FREAD, context);
+		if (error != ENOENT) return error;
+	} else {
+		const char *why = native_switch_file_differs(path, bytes, length, data_mount, owner, group, mode, false);
+		if (!why) {
+			NATIVE_SWITCH_COUNT(native_switch_policy_unchanged);
+			return 0;
+		}
+#if DEVELOPMENT || DEBUG
+		printf("SwitchRawBoot: %s written: %s\n", path, why);
+#endif
+	}
+	return native_switch_replace_file(p, scratch, path, bytes, length, data_mount, owner, group, mode, change);
+}
+
+/* A change of the step is DURABLE unless its caller states that the next boot redoes it. */
+static int
+native_switch_watchdog_file(proc_t p, user_addr_t scratch, const char *path, const char *bytes, int length, mount_t data_mount,
+    uid_t owner, gid_t group, mode_t mode)
+{
+	return native_switch_data_file(p, scratch, path, bytes, length, data_mount, owner, group, mode, SWITCH_BOOT_DURABLE);
+}
+
+/* unlink(2) for the policy step: a removal is a change the step's syncs persist unless it is REDONE. */
+static int
+native_switch_unlink(proc_t p, user_addr_t scratch, const char *path, enum switch_boot_change change)
+{
+	struct unlink_args request = {.path = scratch + 0x900};
+	int32_t result = 0;
+	int error = copyout(path, request.path, strlen(path) + 1);
+	if (!error) error = unlink(p, &request, &result);
+	if (!error) {
+		NATIVE_SWITCH_COUNT(native_switch_policy_written);
+		(void)switch_boot_sync_change(&native_switch_sync, change, path);
+	}
 	return error;
 }
 
@@ -8789,7 +8858,8 @@ native_switch_mkdir(proc_t p, user_addr_t scratch, const char *path, uid_t owner
 	struct mkdir_args request = {.path = scratch + 0x900, .mode = 0755};
 	int32_t result = 0;
 	if ((error = copyout(path, request.path, strlen(path) + 1)) || (error = mkdir(p, &request, &result))) return error;
-	native_switch_policy_written++;
+	NATIVE_SWITCH_COUNT(native_switch_policy_written);
+	(void)switch_boot_sync_change(&native_switch_sync, SWITCH_BOOT_DURABLE, path);
 	if ((error = vnode_lookup(path, 0, &vp, vfs_context_current()))) return error;
 	struct vnode_attr attributes;
 	VATTR_INIT(&attributes);
@@ -8921,9 +8991,7 @@ native_switch_system_app_migration(proc_t p, user_addr_t scratch, mount_t data_m
 		vnode_put(vp);
 		if (vnode_lookup(sentinel, 0, &vp, context)) return;
 		vnode_put(vp);
-		struct unlink_args request = {.path = scratch + 0x900};
-		int32_t result = 0;
-		if (!(error = copyout(sentinel, request.path, sizeof(sentinel)))) error = native_switch_unlink(p, &request, &result);
+		error = native_switch_unlink(p, scratch, sentinel, SWITCH_BOOT_DURABLE);
 		printf("SwitchRawBoot: last boot's data migration did not finish; not run again (%d)\n", error);
 		return;
 	}
@@ -9081,10 +9149,7 @@ native_switch_springboard_keys_release(proc_t p, user_addr_t scratch, mount_t da
 	if (result == SWITCH_PREFS_DROPPED) {
 		error = native_switch_watchdog_file(p, scratch, plist, bytes, (int)edited, data_mount, 501, 501, 0600);
 	} else if (result == SWITCH_PREFS_EMPTY) {
-		struct unlink_args request = {.path = scratch + 0x900};
-		int32_t unlinked = 0;
-		error = copyout(plist, request.path, sizeof(plist));
-		if (!error) error = native_switch_unlink(p, &request, &unlinked);
+		error = native_switch_unlink(p, scratch, plist, SWITCH_BOOT_DURABLE);
 	}
 	if (bytes) kfree_data(bytes, (vm_size_t)length);
 	if (error == ENOENT) error = 0;  /* no SpringBoard plist yet */
@@ -9177,14 +9242,11 @@ native_switch_portrait_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 		changed |= marked[i] != (orientation == 3 + i);
 	}
 	if (!changed) return;
-	struct unlink_args request = {.path = scratch + 0x900};
-	int32_t result = 0;
-	int error = copyout(cache, request.path, sizeof(cache));
-	if (!error) error = native_switch_unlink(p, &request, &result);
+	int error = native_switch_unlink(p, scratch, cache, SWITCH_BOOT_DURABLE);
 	if (error == ENOENT) error = 0;
 	for (unsigned int i = 0; i < 2 && !error; ++i) {
 		if (marked[i] && orientation != 3 + i) {
-			if (!(error = copyout(marker[i], request.path, strlen(marker[i]) + 1))) error = native_switch_unlink(p, &request, &result);
+			error = native_switch_unlink(p, scratch, marker[i], SWITCH_BOOT_DURABLE);
 		} else if (!marked[i] && orientation == 3 + i) {
 			error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
 			if (!error) error = native_switch_watchdog_file(p, scratch, marker[i], "", 0, data_mount, 0, 0, 0644);
@@ -9216,13 +9278,10 @@ native_switch_gamut_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	const int marked = !vnode_lookup(marker, 0, &vp, vfs_context_current());
 	if (vp) vnode_put(vp);
 	if (marked == srgb) return;
-	struct unlink_args request = {.path = scratch + 0x900};
-	int32_t result = 0;
-	int error = copyout(cache, request.path, sizeof(cache));
-	if (!error) error = native_switch_unlink(p, &request, &result);
+	int error = native_switch_unlink(p, scratch, cache, SWITCH_BOOT_DURABLE);
 	if (error == ENOENT) error = 0;
 	if (!error && marked) {
-		if (!(error = copyout(marker, request.path, sizeof(marker)))) error = native_switch_unlink(p, &request, &result);
+		error = native_switch_unlink(p, scratch, marker, SWITCH_BOOT_DURABLE);
 	} else if (!error) {
 		error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
 		if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
@@ -9262,10 +9321,7 @@ native_switch_identity_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	char text[24];
 	const int length = snprintf(text, sizeof(text), "%016llx\n", digest);
 	if (native_switch_file_unchanged(marker, text, length, data_mount, 0, 0, 0644)) return;
-	struct unlink_args request = {.path = scratch + 0x900};
-	int32_t result = 0;
-	int error = copyout(cache, request.path, sizeof(cache));
-	if (!error) error = native_switch_unlink(p, &request, &result);
+	int error = native_switch_unlink(p, scratch, cache, SWITCH_BOOT_DURABLE);
 	if (error == ENOENT) error = 0;
 	if (!error) error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
 	if (!error) error = native_switch_watchdog_file(p, scratch, marker, text, length, data_mount, 0, 0, 0644);
@@ -9317,41 +9373,126 @@ native_switch_icon_cache_write(void *context, const char *relative, const char *
 	char path[256];
 	int error = native_switch_icon_cache_path(path, relative);
 	if (!error) {
-		error = native_switch_watchdog_file(data->p, data->scratch, path, bytes, (int)length, data->data_mount, 0, 0,
-		    0644);
+		error = native_switch_data_file(data->p, data->scratch, path, bytes, (int)length, data->data_mount, 0, 0, 0644,
+		    SWITCH_BOOT_REDONE);
 	}
 	return error;
 }
 
 static int
-native_switch_icon_cache_unlink(void *context, const char *relative)
+native_switch_icon_cache_mkdir(void *context, const char *relative, unsigned int mode)
 {
 	const struct native_switch_icon_cache_data *data = context;
-	struct unlink_args request = {.path = data->scratch + 0x900};
-	int32_t result = 0;
 	char path[256];
 	int error = native_switch_icon_cache_path(path, relative);
-	if (!error) error = copyout(path, request.path, strlen(path) + 1);
-	if (!error) error = native_switch_unlink(data->p, &request, &result);
+	if (error) return error;
+	vnode_t vp = NULLVP;
+	error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOFOLLOW_ANY, &vp, vfs_context_current());
+	if (!error) {
+		if (vnode_mount(vp) != data->data_mount || vnode_mountedhere(vp) != NULL) error = EXDEV;
+		else if (vnode_vtype(vp) == VLNK) error = ELOOP;
+		else if (!vnode_isdir(vp)) error = ENOTDIR;
+		else {
+			struct vnode_attr attributes;
+			VATTR_INIT(&attributes);
+			VATTR_SET(&attributes, va_uid, 0);
+			VATTR_SET(&attributes, va_gid, 0);
+			VATTR_SET(&attributes, va_mode, (mode_t)mode);
+			error = vnode_setattr(vp, &attributes, vfs_context_current());
+		}
+		vnode_put(vp);
+		return error;
+	}
+	if (error != ENOENT) return error;
+	struct mkdir_args request = {.path = data->scratch + 0x900, .mode = (int)mode};
+	int32_t result = 0;
+	if ((error = copyout(path, request.path, strlen(path) + 1)) || (error = mkdir(data->p, &request, &result))) {
+		return error;
+	}
+	NATIVE_SWITCH_COUNT(native_switch_policy_written);
+	(void)switch_boot_sync_change(&native_switch_sync, SWITCH_BOOT_REDONE, path);
+	if ((error = vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOFOLLOW_ANY, &vp, vfs_context_current()))) {
+		return error;
+	}
+	if (vnode_mount(vp) != data->data_mount || vnode_mountedhere(vp) != NULL || !vnode_isdir(vp)) error = EXDEV;
+	else {
+		struct vnode_attr attributes;
+		VATTR_INIT(&attributes);
+		VATTR_SET(&attributes, va_uid, 0);
+		VATTR_SET(&attributes, va_gid, 0);
+		VATTR_SET(&attributes, va_mode, (mode_t)mode);
+		error = vnode_setattr(vp, &attributes, vfs_context_current());
+	}
+	vnode_put(vp);
 	return error;
+}
+
+static int
+native_switch_icon_cache_rename(void *context, const char *from_rel, const char *to_rel)
+{
+	const struct native_switch_icon_cache_data *data = context;
+	char from[256], to[256];
+	int error = native_switch_icon_cache_path(from, from_rel);
+	if (!error) error = native_switch_icon_cache_path(to, to_rel);
+	if (error) return error;
+	vnode_t vp = NULLVP;
+	error = vnode_lookup(from, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOFOLLOW_ANY, &vp, vfs_context_current());
+	if (error) return error;
+	if (vnode_mount(vp) != data->data_mount || vnode_mountedhere(vp) != NULL) error = EXDEV;
+	else if (vnode_vtype(vp) == VLNK) error = ELOOP;
+	else if (!vnode_isdir(vp)) error = ENOTDIR;
+	vnode_put(vp);
+	if (error) return error;
+	struct renameatx_np_args request = {.fromfd = AT_FDCWD, .from = data->scratch + 0xa00,
+	    .tofd = AT_FDCWD, .to = data->scratch + 0xb00, .flags = RENAME_NOFOLLOW_ANY | RENAME_EXCL};
+	int32_t result = 0;
+	if ((error = copyout(from, request.from, strlen(from) + 1)) ||
+	    (error = copyout(to, request.to, strlen(to) + 1))) return error;
+	error = renameatx_np(data->p, &request, &result);
+	if (!error) {
+		NATIVE_SWITCH_COUNT(native_switch_policy_written);
+		(void)switch_boot_sync_change(&native_switch_sync, SWITCH_BOOT_REDONE, to);
+	}
+	return error;
+}
+
+static bool
+native_switch_icon_cache_exists(void *context, const char *relative)
+{
+	const struct native_switch_icon_cache_data *data = context;
+	char path[256];
+	vnode_t vp = NULLVP;
+	if (native_switch_icon_cache_path(path, relative)) return false;
+	if (vnode_lookup(path, VNODE_LOOKUP_NOFOLLOW | VNODE_LOOKUP_NOFOLLOW_ANY, &vp, vfs_context_current())) {
+		return false;
+	}
+	const bool present = vnode_mount(vp) == data->data_mount && vnode_isdir(vp) && vnode_mountedhere(vp) == NULL;
+	vnode_put(vp);
+	return present;
 }
 
 static int
 native_switch_icon_cache_folders(void *context, const char *relative, int (*visit)(void *walk, const char *name),
     void *walk)
 {
-	enum { kEntries = 2048 };
+	enum { kEntries = 2048, kNames = 4096 };
+	const struct native_switch_icon_cache_data *data = context;
 	vfs_context_t vfs = vfs_context_current();
 	vnode_t folder = NULLVP;
 	char path[256];
-	(void)context;
 	int error = native_switch_icon_cache_path(path, relative);
 	if (!error) error = vnode_open(path, FREAD | O_DIRECTORY | O_NOFOLLOW_ANY, 0, 0, &folder, vfs);
 	if (error) return error;
+	if (vnode_mount(folder) != data->data_mount || vnode_mountedhere(folder) != NULL) {
+		(void)vnode_close(folder, FREAD, vfs);
+		return EXDEV;
+	}
 	char *entries = kalloc_data(kEntries, Z_WAITOK);
+	char *names = kalloc_data(kNames, Z_WAITOK);
+	size_t used = 0;
 	UIO_STACKBUF(uio_buf, 1);
 	uio_t uio = uio_createwithbuffer(1, 0, UIO_SYSSPACE, UIO_READ, uio_buf, sizeof(uio_buf));
-	if (!entries) error = ENOMEM;
+	if (!entries || !names) error = ENOMEM;
 	for (int eof = 0, count = 0; !error && !eof;) {
 		uio_reset(uio, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
 		uio_addiov(uio, CAST_USER_ADDR_T(entries), kEntries);
@@ -9359,15 +9500,43 @@ native_switch_icon_cache_folders(void *context, const char *relative, int (*visi
 		const size_t filled = kEntries - (size_t)uio_resid(uio);
 		if (!filled) eof = 1;
 		for (size_t at = 0; !error && at < filled;) {
-			const struct dirent *entry = (const struct dirent *)(entries + at);
-			if (!entry->d_reclen) break;
-			at += entry->d_reclen;
-			if (entry->d_ino && entry->d_type == DT_DIR && entry->d_name[0] != '.') error = visit(walk, entry->d_name);
+			if (filled - at < offsetof(struct dirent, d_name)) {
+				error = EIO;
+				break;
+			}
+			struct dirent entry;
+			memcpy(&entry, entries + at, offsetof(struct dirent, d_name));
+			if (entry.d_reclen < offsetof(struct dirent, d_name) || entry.d_reclen > filled - at) {
+				error = EIO;
+				break;
+			}
+			const char *name = entries + at + offsetof(struct dirent, d_name);
+			const size_t max_name = entry.d_reclen - offsetof(struct dirent, d_name);
+			const size_t cap = entry.d_namlen < max_name ? entry.d_namlen : max_name;
+			at += entry.d_reclen;
+			if (!entry.d_ino || entry.d_type != DT_DIR || !cap || name[0] == '.') continue;
+			const size_t nlen = strnlen(name, cap);
+			if (!nlen) continue;
+			if (used + nlen + 1 > kNames) {
+				error = E2BIG;
+				break;
+			}
+			memcpy(names + used, name, nlen);
+			names[used + nlen] = '\0';
+			used += nlen + 1;
 		}
 	}
 	if (entries) kfree_data(entries, kEntries);
 	const int close_error = vnode_close(folder, FREAD, vfs);
-	return error ? error : close_error;
+	if (!error) error = close_error;
+	/* Visit after closing folder so renameatx_np never mutates an open readdir stream. */
+	for (size_t at = 0; !error && at < used;) {
+		const char *name = names + at;
+		at += strlen(name) + 1;
+		error = visit(walk, name);
+	}
+	if (names) kfree_data(names, kNames);
+	return error;
 }
 
 static void
@@ -9376,17 +9545,19 @@ native_switch_icon_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	struct native_switch_icon_cache_data data = {.p = p, .scratch = scratch, .data_mount = data_mount};
 	const struct switch_icon_cache_ops ops = {
 		.context = &data, .read = native_switch_icon_cache_read, .holds = native_switch_icon_cache_holds,
-		.write = native_switch_icon_cache_write, .unlink = native_switch_icon_cache_unlink,
-		.folders = native_switch_icon_cache_folders,
+		.write = native_switch_icon_cache_write, .folders = native_switch_icon_cache_folders,
+		.mkdir = native_switch_icon_cache_mkdir, .rename = native_switch_icon_cache_rename,
+		.exists = native_switch_icon_cache_exists, .session = bootsessionuuid_string,
 	};
 	struct switch_icon_cache_result result;
 	switch_icon_cache_drop(&ops, &result);
+	switch_icon_cache_sweep_arm(data_mount, result.trash_pending);
 	if (result.error) {
 		printf("SwitchRawBoot: icon cache for GPU build %s NOT dropped: %d\n", result.build, result.error);
 	}
 #if DEVELOPMENT || DEBUG
 	else if (result.requested) {
-		printf("SwitchRawBoot: icon cache for GPU build %s: %d __cache_info__ dropped\n", result.build, result.dropped);
+		printf("SwitchRawBoot: icon cache for GPU build %s: %d folder(s) moved to trash\n", result.build, result.dropped);
 	}
 #endif
 }
@@ -9409,13 +9580,10 @@ native_switch_als_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	const int marked = !vnode_lookup(marker, 0, &vp, vfs_context_current());
 	if (vp) vnode_put(vp);
 	if (marked == als) return;
-	struct unlink_args request = {.path = scratch + 0x900};
-	int32_t result = 0;
-	int error = copyout(cache, request.path, sizeof(cache));
-	if (!error) error = native_switch_unlink(p, &request, &result);
+	int error = native_switch_unlink(p, scratch, cache, SWITCH_BOOT_DURABLE);
 	if (error == ENOENT) error = 0;
 	if (!error && marked) {
-		if (!(error = copyout(marker, request.path, sizeof(marker)))) error = native_switch_unlink(p, &request, &result);
+		error = native_switch_unlink(p, scratch, marker, SWITCH_BOOT_DURABLE);
 	} else if (!error) {
 		error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
 		if (!error) error = native_switch_watchdog_file(p, scratch, marker, "", 0, data_mount, 0, 0, 0644);
@@ -9455,16 +9623,13 @@ native_switch_timed_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 	if (cached) kfree_data(cached, (vm_size_t)cached_length);
 	int error = 0;
 	if (!keep) {
-		struct unlink_args request = {.path = scratch + 0x900};
-		int32_t result = 0;
-		error = copyout(cache, request.path, sizeof(cache));
-		if (!error) error = native_switch_unlink(p, &request, &result);
+		error = native_switch_unlink(p, scratch, cache, SWITCH_BOOT_REDONE);
 		if (error == ENOENT) error = 0;
 	}
 	if (!error) error = native_switch_mkdir(p, scratch, "/private/var/Switch", 0, 0755);
 	if (!error) {
-		error = native_switch_watchdog_file(p, scratch, marker, bootsessionuuid_string, uuid_length, data_mount, 0, 0,
-		    0644);
+		error = native_switch_data_file(p, scratch, marker, bootsessionuuid_string, uuid_length, data_mount, 0, 0, 0644,
+		    SWITCH_BOOT_REDONE);
 	}
 	if (!keep || error) {
 		printf("SwitchRawBoot: timed's cache %s (%d)\n", keep ? "kept" : "dropped, not saved in this clock's last boot", error);
@@ -9499,15 +9664,11 @@ native_switch_ui_scale_cache(proc_t p, user_addr_t scratch, mount_t data_mount)
 		else other = true;
 	}
 	if (switch_ui_scale_is_unit(scale) ? !other : current) return;
-	struct unlink_args request = {.path = scratch + 0x900};
-	int32_t result = 0;
-	int error = copyout(cache, request.path, sizeof(cache));
-	if (!error) error = native_switch_unlink(p, &request, &result);
+	int error = native_switch_unlink(p, scratch, cache, SWITCH_BOOT_DURABLE);
 	if (error == ENOENT) error = 0;
 	for (unsigned i = 0; i < SWITCH_UI_SCALES && !error; i++) {
 		if (markers[i][0] == '\0' || switch_ui_scale_same(&switch_ui_scales[i], scale)) continue;
-		error = copyout(markers[i], request.path, strlen(markers[i]) + 1);
-		if (!error) error = native_switch_unlink(p, &request, &result);
+		error = native_switch_unlink(p, scratch, markers[i], SWITCH_BOOT_DURABLE);
 	}
 	if (!error && !switch_ui_scale_is_unit(scale)) {
 		char marker[48];
@@ -9543,9 +9704,7 @@ native_switch_portrait_display(proc_t p, user_addr_t scratch, mount_t data_mount
 		vnode_t vp = NULLVP;
 		if (vnode_lookup(path, 0, &vp, vfs_context_current())) return;
 		vnode_put(vp);
-		struct unlink_args request = {.path = scratch + 0x900};
-		int32_t result = 0;
-		if (!(error = copyout(path, request.path, sizeof(path)))) error = native_switch_unlink(p, &request, &result);
+		error = native_switch_unlink(p, scratch, path, SWITCH_BOOT_DURABLE);
 	} else {
 		error = native_switch_mkdir(p, scratch, directory, 0, 0755);
 		if (!error) error = native_switch_mkdir(p, scratch, user, 0, 0755);
@@ -9557,15 +9716,20 @@ native_switch_portrait_display(proc_t p, user_addr_t scratch, mount_t data_mount
 /* The state a restored iPad has after Setup and data migration, plus no
  * SpringBoard watchdogs. Keys follow UniXNU's skip-setup seed and ios-sweet's root tweaks.
  *
- * Each domain is written one of three ways: replacing the user's plist every boot (kSetupUser: domains whose every key is
- * ours), seeding it only when it is missing (kSetupOnce), or as a managed preference (kSetupManaged: /private/var/Managed
+ * Each domain is written one of three ways: replacing the user's plist when it no longer holds our keys with our
+ * values (kSetupUser: cfprefsd saves these domains with keys of its own beside ours, which stay), seeding it only when
+ * it is missing (kSetupOnce), or as a managed preference (kSetupManaged: /private/var/Managed
  * Preferences/mobile/<domain>.plist, root 0644, rewritten every boot), which CFPreferences reads over the user's plist key
  * by key and so leaves the user's other keys alone. com.apple.springboard is managed: its user plist also keeps what
  * backboardd and SpringBoard save there, above all the display brightness (SBBacklightLevel2, BKSSpringBoardDefaults
  * brightness), which backboardd restores at start (BKDisplayBrightnessUpdateTransactionManager
  * synchronizeALSPreferencesAndSystemDisplayBrightness). Rewriting that plist every boot reset the brightness to the
  * default 0.5 at each boot (every boot logged since 10-30). Should the managed file not be written, the user's plist is
- * replaced as before (one line). */
+ * replaced as before (one line).
+ * A kSetupUser body holds booleans and integers only, the values switch_prefs_holds reads: a value of another kind
+ * never holds, and its domain would be rewritten, and synced, every boot. A key taken out of a kSetupUser body stays
+ * in the files the OS has saved since: it comes out of them once, as SpringBoard's never-dim keys did
+ * (native_switch_springboard_keys_release). */
 enum native_switch_setup_kind { kSetupUser, kSetupOnce, kSetupManaged };
 enum native_switch_setup_scale { kSetupAnyScale, kSetupUnitScale, kSetupFractionalScale };
 
@@ -9581,10 +9745,7 @@ native_switch_unseed(proc_t p, user_addr_t scratch, const char *name, const char
 	char path[160];
 	snprintf(path, sizeof(path), "/private/var/mobile/Library/Preferences/%s.plist", name);
 	if (!native_switch_file_unchanged(path, body, (int)strlen(body), data_mount, 501, 501, 0600)) return;
-	struct unlink_args request = {.path = scratch + 0x900};
-	int32_t result = 0;
-	int error = copyout(path, request.path, strlen(path) + 1);
-	if (!error) error = native_switch_unlink(p, &request, &result);
+	int error = native_switch_unlink(p, scratch, path, SWITCH_BOOT_DURABLE);
 	printf("SwitchRawBoot: %s: the other scale's seed removed (%d)\n", name, error);
 }
 
@@ -9610,7 +9771,8 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 		enum native_switch_setup_scale scale;
 	} prefs[] = {
 		{"com.apple.purplebuddy", SWITCH_PLIST("<key>SetupDone</key><true/><key>SetupFinishedAllSteps</key><true/>"
-		    "<key>SetupVersion</key><integer>11</integer><key>daemonizeNeedsToRun</key><false/>"), kSetupUser},
+		    "<key>SetupVersion</key><integer>" SWITCH_SETUP_VERSION "</integer><key>daemonizeNeedsToRun</key><false/>"),
+		    kSetupUser},
 		{"com.apple.purplebuddy.notbackedup", SWITCH_PLIST("<key>ShouldRunDiagnosticsMiniBuddy</key><false/>"
 		    "<key>ShouldRunHSA2MiniBuddy</key><false/><key>ShouldRunKeychainSyncMiniBuddy</key><false/>"
 		    "<key>ShouldRunMesaMiniBuddy</key><false/><key>ShouldRunPaymentMiniBuddy</key><false/>"
@@ -9686,7 +9848,18 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 			vnode_put(existing);
 			continue;
 		}
-		error = native_switch_watchdog_file(p, scratch, path, body, (int)strlen(body), data_mount, 501, 501, 0600);
+		const bool our_keys = prefs[i].kind == kSetupUser;
+		const int length = (int)strlen(body);
+		const char *why = native_switch_file_differs(path, body, length, data_mount, 501, 501, 0600, our_keys);
+		if (!why) {
+			NATIVE_SWITCH_COUNT(native_switch_policy_unchanged);
+			continue;
+		}
+#if DEVELOPMENT || DEBUG
+		printf("SwitchRawBoot: %s written: %s%s\n", path, our_keys ? "our keys do not hold: " : "", why);
+#endif
+		error = native_switch_replace_file(p, scratch, path, body, length, data_mount, 501, 501, 0600,
+		    SWITCH_BOOT_DURABLE);
 	}
 	if (error) printf("SwitchRawBoot: first-boot state failed at %s: %d\n", path, error);
 	else {
@@ -9710,17 +9883,18 @@ native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)
 /* The last boot's panic, kept in RAM across the warm reset (SwitchPanicSave.c):
  * /private/var/Switch/panic-<UTC time>.log, root 0644, written as the policy files are, and its panic stackshot (zlib
  * kcdata: every task's threads, kernel and user frames, wait info) as panic-<UTC time>.kcdata next to it; the record is
- * cleared once the text is on Data. A failure is logged and the record kept for the next boot. A copy of both goes to
- * mobile's CrashReporter directory as Switch-panic-<UTC time>.*, where `idevicecrashreport` fetches them over USB;
- * a failure there is only logged. */
-static void
-native_switch_panic_save(proc_t p, user_addr_t scratch, mount_t data_mount)
+ * cleared by the step's end, after the volume sync (switch_boot_sync_finish). A failure is logged and the record kept
+ * for the next boot. A copy of both goes to mobile's CrashReporter directory as Switch-panic-<UTC time>.*, where
+ * `idevicecrashreport` fetches them over USB; a failure there is only logged. Returns whether a record was pending,
+ * with its path and its write's error. */
+static bool
+native_switch_panic_save(proc_t p, user_addr_t scratch, mount_t data_mount, char path[96], int *saved)
 {
 	static const char crash_reporter[] = "/private/var/mobile/Library/Logs/CrashReporter";
-	char path[96], other[160];
+	char other[160];
 	uint32_t length = 0, shot_length = 0;
-	const char *text = switch_panic_save_pending(&length, path, sizeof(path));
-	if (!text) return;
+	const char *text = switch_panic_save_pending(&length, path, 96);
+	if (!text) return false;
 	const char *shot = (const char *)switch_panic_save_pending_stackshot(&shot_length);
 	const char *name = strrchr(path, '/') + 1;          /* panic-<UTC>[-damaged].log */
 	const size_t stem = strlen(name) - strlen(".log");
@@ -9743,13 +9917,33 @@ native_switch_panic_save(proc_t p, user_addr_t scratch, mount_t data_mount)
 		}
 		if (copy_error) printf("SwitchPanicSave: copy to %s failed: %d\n", crash_reporter, copy_error);
 	}
-	switch_panic_save_done(error, path);
+	*saved = error;
+	return true;
+}
+
+struct native_switch_finish_data {
+	vnode_t data_root;
+	char panic_path[96];
+};
+
+static int
+native_switch_sync_volume(void *context)
+{
+	return VNOP_FSYNC(((const struct native_switch_finish_data *)context)->data_root, MNT_WAIT, vfs_context_current());
+}
+
+static void
+native_switch_release_panic(void *context, int error)
+{
+	switch_panic_save_done(error, ((const struct native_switch_finish_data *)context)->panic_path);
 }
 
 static int
 native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 {
+#if DEVELOPMENT || DEBUG
 	const uint64_t policy_started = mach_absolute_time();
+#endif
 	/* Jobs with no hardware or accounts here (UniXNU-sheng BootWatchdogPolicy.c "lite" set, which disabled locationd
 	 * with them: there the three deadlocked each other). locationd runs since r17: third-party apps' CoreMotion
 	 * (CMMotionManager accelerometer, gyroscope and device motion) is served by it over XPC from the console IMU's
@@ -9789,6 +9983,7 @@ native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 	    "<key>com.apple.fairplayd.A2</key><true/>" \
 	    "<key>com.apple.adid</key><true/>" \
 	    "<key>com.apple.lskdd</key><true/>" \
+	    "<key>com.apple.prngseedd</key><true/>" \
 	    "</dict></plist>\n"
 	/* This file is the only override database 21H461 launchd reads: no disabled.<uid>.plist exists. launchd reads it
 	 * once, between its finish-demo-restore and sysstatuscheck boot tasks. The user/501 domain shares the system
@@ -9849,14 +10044,25 @@ native_switch_watchdog_policy(proc_t p, user_addr_t scratch)
 	    "/private/var/db/com.apple.xpc.launchd", data_mount);
 	if (!error) error = native_switch_watchdog_directory(p, scratch, "/private/var/db", data_mount);
 	if (!error) error = native_switch_setup_state(p, scratch, data_mount);
-	if (!error) native_switch_panic_save(p, scratch, data_mount);
-	if (!error && native_switch_policy_written) error = VNOP_FSYNC(data_root, MNT_WAIT, vfs_context_current());
+	struct native_switch_finish_data finish_data = {.data_root = data_root};
+	struct switch_boot_finish finish = {.context = &finish_data, .sync_volume = native_switch_sync_volume,
+	    .release_panic = native_switch_release_panic};
+	if (!error) {
+		finish.panic_written = native_switch_panic_save(p, scratch, data_mount, finish_data.panic_path,
+		    &finish.panic_error);
+	}
+	error = switch_boot_sync_finish(&native_switch_sync, error, &finish);
 	int close_error = vnode_close(data_root, FREAD, vfs_context_current());
 	if (!error) error = close_error;
+#if DEVELOPMENT || DEBUG
 	uint64_t policy_ns = 0;
 	absolutetime_to_nanoseconds(mach_absolute_time() - policy_started, &policy_ns);
-	if (!error) printf("Switch: persistent Data launchd preferences ready (%u written, %u unchanged, %llu ms)\n",
-	    native_switch_policy_written, native_switch_policy_unchanged, policy_ns / NSEC_PER_MSEC);
+	if (!error) {
+		printf("Switch: persistent Data launchd preferences ready (%u written, %u unchanged, %u durable, %llu ms)%s%s\n",
+		    native_switch_policy_written, native_switch_policy_unchanged, native_switch_sync.durable,
+		    policy_ns / NSEC_PER_MSEC, native_switch_sync.durable ? ": synced from " : "", native_switch_sync.first);
+	}
+#endif
 	return error;
 }
 #endif
@@ -10011,6 +10217,8 @@ load_init_program(proc_t p)
 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size,
 	    VM_MAP_KERNEL_FLAGS_ANYWHERE());
 	user_addr_t init_envp = USER_ADDR_NULL;
+	struct switch_boot_steps steps;
+	switch_boot_steps_begin(&steps);
 #if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
 	switch_root_event(9,0,0);
@@ -10020,6 +10228,7 @@ load_init_program(proc_t p)
 	switch_root_event(10,cache_error,0);
 #endif
 	if (cache_error) panic("offline owner SystemOS mount failed: %d", cache_error);
+	switch_boot_steps_mark(&steps, "cryptexes");
 #endif
 #if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT
@@ -10030,23 +10239,34 @@ load_init_program(proc_t p)
 	switch_root_event(12,data_error,0);
 #endif
 	if (data_error) panic("offline scratch Data mount failed: %d", data_error);
+	switch_boot_steps_mark(&steps, "Data and its files");
 #if defined(XNU_SWITCH_VERIFIED_ROOT) && XNU_SWITCH_VERIFIED_ROOT && \
     defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
 	int watchdog_error = native_switch_watchdog_policy(p, (user_addr_t)scratch_addr);
 	if (watchdog_error) printf("SwitchRawBoot: watchdogd launchd policy not written: %d (continuing)\n", watchdog_error);
+	switch_boot_steps_mark(&steps, "watchdog policy");
+	if (native_owner_data_mount != NULL && rootvnode != NULLVP && switch_prefetch_volumes_mounted != NULL) {
+		switch_prefetch_volumes_mounted(vnode_mount(rootvnode), native_owner_data_mount);
+	}
 	/* The NVRAM saved on Data (drivers/SwitchNVRAM, /private/var/Switch/nvram.bin): restored now, so that userland
 	 * sees it from its first read, and saved there from now on. */
 	extern uint32_t switch_nvram_data_mounted(void);
 	int nvram_error = native_switch_mkdir(p, (user_addr_t)scratch_addr, "/private/var/Switch", 0, 0755);
 	if (nvram_error) printf("SwitchRawBoot: /private/var/Switch not made: %d (NVRAM not saved)\n", nvram_error);
 	(void)switch_nvram_data_mounted();
+	switch_boot_steps_mark(&steps, "NVRAM and Bluetooth");
 	/* Owner overlay unions over sealed directories (SwitchRawMount.h), now that Data is mounted. */
 	native_switch_raw_overlay(p, (user_addr_t)scratch_addr);
+	switch_boot_steps_mark(&steps, "overlay");
 	switch_bootstrap_capture();
+	switch_boot_steps_mark(&steps, "bootstrap");
 	switch_pretranslated_capture();
+	switch_boot_steps_mark(&steps, "pretranslated");
 	switch_protection_capture();
+	switch_boot_steps_mark(&steps, "protection");
 #endif
 #endif
+	switch_boot_steps_log(&steps, "before launchd");
 #if CONFIG_MEMORYSTATUS
 	(void) memorystatus_init_at_boot_snapshot();
 #endif /* CONFIG_MEMORYSTATUS */

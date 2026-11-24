@@ -5,10 +5,13 @@ test's ID prefix stands in for its subsystem, and a run without the suite's summ
 """
 
 import re
+from collections.abc import Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
+LITERAL = 'HWTEST '
 LINE = re.compile(r'HWTEST (?P<id>[a-z0-9_.]+) (?P<verdict>PASS|FAIL|SKIP)(?P<fields>(?: \S+)*)$')
+CONTINUED = re.compile(r'^HWTEST (?P<id>\S+) \+\d+ ')
 BOOT = re.compile(
     r'^(?P<when>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\.\d+ \S+ \[0:0\] === system boot: (?P<uuid>[0-9A-F-]+)'
 )
@@ -57,11 +60,33 @@ def boot_of(boot_log: Path) -> tuple[str, str]:
     return '', ''
 
 
+def joined(lines: Iterable[str]) -> Iterator[str]:
+    """Return the HW Test lines in `lines` from `HWTEST ` on, each with its continuations appended to its first piece.
+
+    As tools/devicerun/hwtest.py `joined`: the app logs a line's pieces before its next line.
+    """
+    held = None
+    for line in lines:
+        start = line.find(LITERAL)
+        if start < 0:
+            continue
+        message = line[start:].rstrip()
+        if continued := CONTINUED.match(message):
+            if held is not None and held.split(' ', 2)[1] == continued['id']:
+                held += message[continued.end() :]
+            continue
+        if held is not None:
+            yield held
+        held = message
+    if held is not None:
+        yield held
+
+
 def report(lines: list[str], identity: dict, boot: str, started: str) -> dict:
     results = {}
     finished = False
-    for line in lines:
-        match = LINE.search(line.rstrip())
+    for line in joined(lines):
+        match = LINE.match(line)
         if not match:
             continue
         if match['id'] == 'suite':

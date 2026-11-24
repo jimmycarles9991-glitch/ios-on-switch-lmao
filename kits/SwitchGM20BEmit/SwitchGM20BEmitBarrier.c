@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "SwitchGM20BEmitBarrier.h"
 
+#include "nv_push_clb06f.h"
 #include "nv_push_clb197.h"
 
 static bool has(uint32_t caches, uint32_t cache)
@@ -62,12 +63,41 @@ void switch_gm20b_pixel_shader_barrier(struct nv_push *p)
     __push_immd(p, SUBC_NVB197, SWITCH_NVB197_INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED, 0);
 }
 
+void switch_gm20b_pixel_shader_barrier_sysmem(struct nv_push *p)
+{
+    P_IMMD(p, NVB197, PIXEL_SHADER_BARRIER, SYSMEMBAR_ENABLE_TRUE);
+    __push_immd(p, SUBC_NVB197, SWITCH_NVB197_INVALIDATE_TEXTURE_DATA_CACHE_PIXEL_ORDERED, 0);
+}
+
 void switch_gm20b_pass_barrier(struct nv_push *p, bool tiled_cache)
 {
     if (tiled_cache)
         switch_gm20b_tiled_cache_flush(p);
-    switch_gm20b_wait_for_idle(p);
     switch_gm20b_invalidate_shader_caches(p, SWITCH_GM20B_SHADER_FLUSH_DATA | SWITCH_GM20B_SHADER_DATA |
                                                  SWITCH_GM20B_SHADER_CONSTANTS);
     switch_gm20b_invalidate_texture_data(p);
+}
+
+void switch_gm20b_pass_drain(struct nv_push *p, bool invalidate_constants)
+{
+    const uint32_t caches = SWITCH_GM20B_SHADER_DATA | (invalidate_constants ? SWITCH_GM20B_SHADER_CONSTANTS : 0u);
+    switch_gm20b_wait_for_idle(p);
+    switch_gm20b_invalidate_shader_caches_no_wfi(p, caches);
+    switch_gm20b_invalidate_texture_data(p);
+}
+
+void switch_gm20b_kind_switch(struct nv_push *p)
+{
+    P_MTHD(p, NVB06F, WFI);
+    P_NVB06F_WFI(p, NVB06F_WFI_SCOPE_CURRENT_SCG_TYPE);
+    P_MTHD(p, NVB06F, FB_FLUSH);
+    P_NVB06F_FB_FLUSH(p, 0);
+    P_MTHD(p, NVB06F, MEM_OP_C);
+    P_NVB06F_MEM_OP_C(p, {0});
+    P_NVB06F_MEM_OP_D(p, {.operation = OPERATION_L2_FLUSH_DIRTY});
+    P_MTHD(p, NVB06F, FB_FLUSH);
+    P_NVB06F_FB_FLUSH(p, 0);
+    P_MTHD(p, NVB06F, MEM_OP_C);
+    P_NVB06F_MEM_OP_C(p, {0});
+    P_NVB06F_MEM_OP_D(p, {.operation = OPERATION_L2_SYSMEM_INVALIDATE});
 }

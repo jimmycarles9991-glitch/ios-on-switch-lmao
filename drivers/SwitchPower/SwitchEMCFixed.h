@@ -27,5 +27,6 @@ IOReturn SwitchEMC::holdFixedRate()
     __atomic_store_n(&gTopHeld, true, __ATOMIC_RELEASE);
     if (!programMemory(now, now, true))
         uncoveredDisplayMemory(now, "the rate the warm boot restored");
+    programGpuMc(now);
     return kIOReturnSuccess;
 }

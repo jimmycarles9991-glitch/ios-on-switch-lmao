@@ -123,7 +123,8 @@ struct vm_object_fault_info {
 	/* boolean_t */ fi_used_for_tpro:1,
 	/* boolean_t */ fi_change_wiring:1,
 	/* boolean_t */ fi_no_sleep:1,
-	    __vm_object_fault_info_unused_bits:19;
+	/* boolean_t */ switch_wake:1,
+	    __vm_object_fault_info_unused_bits:18;
 	int             pmap_options;
 };
 

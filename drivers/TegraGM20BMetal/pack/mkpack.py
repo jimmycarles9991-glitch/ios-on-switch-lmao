@@ -393,19 +393,25 @@ def split_registers(simple: list[dict], post: dict[int, dict[int, int]]) -> tupl
     return varying, baseline
 
 
+def place_programs(simple: list[dict], programs: dict[str, dict], laid: tuple) -> None:
+    """Append the states' programs to the heap image `laid` holds, in first-use order."""
+    used: dict[str, None] = {}  # in first-use order; a list's membership test made this quadratic in states
+    for p in simple:
+        for st in (1, 5):
+            pid = p['records'][0]['prog'][st][0] if st in p['records'][0]['prog'] else None
+            if pid is not None:
+                used.setdefault(pid)
+    for pid in used:
+        packfile.place_graphics(pid, programs, *laid)
+
+
 def lay_out_programs(
     simple: list[dict], programs: dict[str, dict], report: list[str]
 ) -> tuple[bytearray, dict[str, int], list[dict]]:
     # programs used, heap layout
-    used = []
-    for p in simple:
-        for st in (1, 5):
-            pid = p['records'][0]['prog'][st][0] if st in p['records'][0]['prog'] else None
-            if pid is not None and pid not in used:
-                used.append(pid)
-    heap, prog_index, prog_recs = bytearray(), {}, []
-    for pid in used:
-        packfile.place_graphics(pid, programs, heap, prog_index, prog_recs)
+    laid = bytearray(), {}, []
+    place_programs(simple, programs, laid)
+    heap, prog_index, prog_recs = laid
     data = sum(1 for pr in prog_recs if pr['data_bytes'])
     report.append(f'{len(prog_recs)} programs ({data} with shader data), shader heap image {len(heap) // 1024} KiB')
     return heap, prog_index, prog_recs

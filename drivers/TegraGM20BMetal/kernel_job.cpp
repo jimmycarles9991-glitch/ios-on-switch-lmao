@@ -3,6 +3,7 @@
 #include "lock.h"
 #include "kernel.h"
 #include "TegraGM20BJobABI.h"
+#include "TegraGM20BVolatileABI.h"
 
 #include <IOKit/IOReturn.h>
 #include <mach/kern_return.h>
@@ -78,11 +79,16 @@ bool Kernel::submitJob(const KernelJob &job, uint32_t &seqno, int *result)
     thread_local std::vector<uint64_t> storage;
     storage.resize((bytes + sizeof(uint64_t) - 1) / sizeof(uint64_t));
     auto *at = reinterpret_cast<uint8_t *>(storage.data());
-    const uint32_t flags =
-        (job.visibility != JobVisibility::Internal ? uint32_t(TegraGM20BJobExternal) : 0u) |
-        (job.hostWritten ? uint32_t(TegraGM20BJobHostWritten) : 0u) | (events ? uint32_t(TegraGM20BJobHasEvents) : 0u) |
-        (released ? uint32_t(TegraGM20BJobEventReleases) : 0u) | (job.quiet ? uint32_t(TegraGM20BJobQuiet) : 0u) |
-        (job.promiseCount ? uint32_t(TegraGM20BJobFulfills) : 0u) | job.admissionFlags;
+    const uint32_t visibilityFlags =
+        job.visibility == JobVisibility::External || job.visibility == JobVisibility::Legacy
+            ? uint32_t(TegraGM20BJobExternal)
+        : job.visibility == JobVisibility::Volatile ? uint32_t(TegraGM20BJobVolatileWrites)
+                                                    : 0u;
+    const uint32_t flags = visibilityFlags | (job.hostWritten ? uint32_t(TegraGM20BJobHostWritten) : 0u) |
+                           (events ? uint32_t(TegraGM20BJobHasEvents) : 0u) |
+                           (released ? uint32_t(TegraGM20BJobEventReleases) : 0u) |
+                           (job.quiet ? uint32_t(TegraGM20BJobQuiet) : 0u) |
+                           (job.promiseCount ? uint32_t(TegraGM20BJobFulfills) : 0u) | job.admissionFlags;
     const TegraGM20BAbiJob header = {job.channel, job.pushCount, job.set, job.generation, job.useCount, flags};
     memcpy(at, &header, sizeof header);
     at += sizeof header;

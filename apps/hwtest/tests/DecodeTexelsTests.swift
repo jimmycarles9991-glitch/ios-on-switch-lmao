@@ -69,7 +69,8 @@ struct DecodePvrtcTest: HWTest {
 /// 12-bit k, the nearest 16-bit code of k / 4095 (`astc_narrow_linear_off` 0), which no 8-bit target would hold as
 /// another code than Apple's (`astc_narrow_linear_8bit_off` 0; the largest distance from Apple's value in 16-bit codes
 /// reported, at most 0.4999 on an M4 Max: harness/decodeoracle.mm). The sRGB forms read Apple's sRGB table of the
-/// codes (`astc_narrow_srgb_codes_off` 0, by the nearest table code; the largest distance reported). Red: a block
+/// codes (`astc_narrow_srgb_codes_off` 0, by the nearest table code; the largest distance and, of the channels off,
+/// those read undecoded and decoded twice reported: `astc_narrow_srgb_forms`, DecodeJudge.Tally.forms). Red: a block
 /// decoded wrongly (endpoint mode, partition, dual plane, void extent, the error colour), or a blit offset or row
 /// misread.
 struct DecodeAstcNarrowTest: HWTest {
@@ -94,9 +95,7 @@ struct DecodeAstcNarrowTest: HWTest {
             let points = set.points
             let read = try await DecodeScene.read(gpu, texture, points.map(\.at))
             if format == 185 || format == 191 {
-                let tally = DecodeJudge.rgba8(read, points.map { DecodeJudge.word($0.texel.want) }, srgb: true)
-                srgb.off += tally.off
-                srgb.maxDiff = max(srgb.maxDiff, tally.maxDiff)
+                srgb.add(DecodeJudge.rgba8(read, points.map { DecodeJudge.word($0.texel.want) }, srgb: true))
                 srgbTexels += read.count
             } else {
                 let judged = DecodeJudge.unorm16(read, points.map(\.texel.want))
@@ -112,6 +111,7 @@ struct DecodeAstcNarrowTest: HWTest {
         metrics.set("astc_narrow_linear_8bit_off", linear.eightBitOff)
         metrics.set("astc_narrow_srgb_codes_off", srgb.off)
         metrics.set("astc_narrow_srgb_max_diff", Double(srgb.maxDiff), digits: 6)
+        metrics.set("astc_narrow_srgb_forms", srgb.forms)
         metrics.set("astc_narrow_texels", linearTexels + srgbTexels)
         metrics.set("unmade", unmade.isEmpty ? "-" : unmade.map(String.init).joined(separator: ","))
         return .judged(

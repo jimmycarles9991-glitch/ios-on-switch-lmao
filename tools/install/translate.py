@@ -59,6 +59,8 @@ def make_delta(args: argparse.Namespace, log: host.Log) -> None:
         command = [args.driver, '--role', args.role, '--tool', args.tool, '--volume', str(root), '--out', args.out]
         for trust in args.apple_trustcache:
             command += ['--apple-trustcache', trust]
+        if args.edits:
+            command += ['--edits', args.edits]
         for pairs in args.cdhash_pairs:
             command += ['--cdhash-pairs', pairs]
         log.quiet('$', ' '.join(command))
@@ -89,6 +91,7 @@ def arguments(argv: list[str] | None) -> argparse.Namespace:
     d.add_argument('--driver', required=True)
     d.add_argument('--tool', required=True)
     d.add_argument('--apple-trustcache', action='append', default=[])
+    d.add_argument('--edits', help='checked byte-edit table JSON')
     d.add_argument('--cdhash-pairs', action='append', default=[])
     d.add_argument('--out', required=True)
     c = commands.add_parser('cryptex')

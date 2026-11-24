@@ -8,7 +8,10 @@
 #pragma once
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
+#include <IOKit/IOLocks.h>
 #include <IOKit/IOUserClient.h>
+#include <kern/thread.h>
+#include <switch/user_turnstile.h>
 #include "TegraGM20BCompilerABI.h"
 
 namespace switch_gpu_compiler
@@ -20,9 +23,11 @@ struct Request {
 	uint64_t id, cookie, size, client;
 	const void *owner;
 	IOBufferMemoryDescriptor *bytes;  // the request, until it is taken
-	uint32_t qos, flags, attempts, how;
+	uint32_t qos, flags, attempts, how, waiters;
 	int32_t pid, result;
-	bool async, waiter, taken, copying, done, abandoned;
+	bool async, taken, copying, done, abandoned, sendPending, waitedAsync;
+	thread_t inheritor;
+	switch_user_turnstile turnstile;
 	TegraGM20BAbiCompileTimes times;  // the compiler's, at its Complete
 	OSAsyncReference64 reference;
 };
@@ -35,6 +40,8 @@ struct Client {
 struct Broker {
 	IOLock *lock;
 	const void *compiler, *announced;
+	thread_t taker;
+	thread_t workers[TegraGM20BCompilerMaxWorkers];
 	IOMemoryDescriptor *store;
 	uint64_t storeBytes, stack, nextId, nextClient;
 	uint32_t generation, pending, losses;
@@ -53,6 +60,8 @@ IOLock *brokerLock();
 uint64_t clientId(const void *owner);
 void unlink(Request *request);
 void dropBytes(Request *request);
+void setInheritor(Request *request, thread_t target);
+void replaceThread(thread_t &slot, thread_t target);
 void freeRequest(Request *request);
 void finish(Request *request, int32_t result, Request **sends, uint32_t how = 0);
 void send(Request *sends, uint32_t generation);

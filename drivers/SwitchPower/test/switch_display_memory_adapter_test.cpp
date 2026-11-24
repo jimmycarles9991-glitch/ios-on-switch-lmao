@@ -9,6 +9,7 @@
 #include "../../NativeMobileDisplay/SwitchDisplayMemoryEnvelope.h"
 #include "../SwitchDisplayBandwidth.h"
 #include "../SwitchDisplayMemoryState.h"
+#include "../SwitchGpuMcLa.h"
 #include "../SwitchEMCGovernor.h"
 
 uint64_t mach_absolute_time()
@@ -87,10 +88,17 @@ public:
     unsigned carRate = 0;
     uint32_t khz[3] = {204000, 1331200, 1600000};
     unsigned count = 3, cur = 0, starts = 0, watermarks = 0;
-    uint64_t residency[3] = {}, since = 0;
-    unsigned moves = 0;
-    bool governing = false, refusalLogged = false, bpmpChangeLogged = false;
+    uint64_t residency[3] = {}, since = 0, busyTotal = 0, busyMark = 0;
+    unsigned moves = 0, refusals = 0;
+    bool governing = false, refusalLogged = false, planRefusalLogged = false, bpmpChangeLogged = false;
     uint64_t floorBytes() const;
+
+    void account(uint64_t now)
+    {
+        residency[cur] += now - since;
+        since = now;
+    }
+
     unsigned memoryFloor(unsigned) const;
     void uncoveredDisplayMemory(uint32_t, const char *);
 
@@ -100,6 +108,13 @@ public:
     }
 
     bool programMemory(uint32_t, uint32_t, bool = false);
+
+    void programGpuMc(uint32_t dramKhz, bool = false)
+    {
+        if (memoryQualified)
+            switch_mc::programGpuMc(mcRegs, dramKhz);
+    }
+
     static IOReturn memoryAction(OSObject *, void *, void *, void *, void *);
     static IOReturn governAction(OSObject *, void *, void *, void *, void *);
     unsigned reconcileRate(uint32_t, bool = false);

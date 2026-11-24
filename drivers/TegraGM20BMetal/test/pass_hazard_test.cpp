@@ -273,4 +273,101 @@ TEST(PassHazard, EachDrainSaysWhy)
     EXPECT_EQ(gm20b::drainCause(after(big), depth), gm20b::DrainCause::Depth);
 }
 
+TEST(PassHazard, IndependentPassesNeedNoBarrierWhileSharedScratchKeepsPixelBarrier)
+{
+    const HazardImage a = image(0x10000, gm20b::kHazardBgra8, 1280, 720),
+                      b = image(0x900000, gm20b::kHazardBgra8, 640, 360),
+                      sharedTex = image(0x1200000, gm20b::kHazardBgra8, 64, 64),
+                      backing = image(0x2000000, gm20b::kHazardRgba16f, 320, 180);
+    PassUses first = pass(1280, 720);
+    first.write(a);
+    first.sample(sharedTex, false);
+    PassChain chain;
+    gm20b::advanceChain(chain, first, true);
+
+    PassUses disjoint = pass(640, 360);
+    disjoint.write(b);
+    disjoint.sample(sharedTex, false);
+    EXPECT_TRUE(gm20b::passesIndependent(chain, disjoint));
+
+    PassUses readsA = pass(640, 360);
+    readsA.write(b);
+    readsA.sample(a, false);
+    EXPECT_FALSE(gm20b::passesIndependent(chain, readsA));
+
+    PassUses writesSharedTex = pass(64, 64);
+    writesSharedTex.write(sharedTex);
+    EXPECT_FALSE(gm20b::passesIndependent(chain, writesSharedTex));
+
+    PassUses withScratch = pass(320, 180);
+    withScratch.write(a);
+    withScratch.scratchWrite(backing);
+    PassChain scratchChain;
+    gm20b::advanceChain(scratchChain, withScratch, true);
+    PassUses nextScratch = pass(320, 180);
+    nextScratch.write(b);
+    nextScratch.scratchWrite(backing);
+    EXPECT_FALSE(gm20b::passesIndependent(scratchChain, nextScratch));
+    EXPECT_TRUE(gm20b::pixelBarrierHolds(scratchChain, nextScratch));
+}
+
+TEST(PassHazard, VolatilePitchTextureIsExcludedFromPlainAndPixelBarrier)
+{
+    struct MockTexture {
+        struct Import {
+            uint64_t base = 0, bytes = 0;
+        };
+
+        struct Chain {
+            struct {
+                uint64_t bytes = 0;
+            } layout;
+        };
+
+        struct {
+            uint64_t bytes = 0;
+        } span;
+
+        struct {
+            bool gpuVolatile = false;
+        } storage;
+
+        uint64_t va = 0, layerBytes = 0;
+        uint32_t format = 0, width = 0, height = 0, pitch = 0, depth = 1, layers = 1;
+        uint8_t samples = 1;
+        bool comptags = false, blockLinear = false, memoryless = false, zeta = false, planar = false;
+        const Import *import = nullptr;
+        const Chain *chain = nullptr;
+    };
+
+    MockTexture cached;
+    cached.va = 0x10000;
+    cached.format = gm20b::kHazardBgra8;
+    cached.width = 320;
+    cached.height = 180;
+    cached.pitch = 320 * 4;
+    cached.storage.gpuVolatile = false;
+
+    MockTexture vol = cached;
+    vol.storage.gpuVolatile = true;
+
+    const HazardImage cachedImg = gm20b::hazardImage(cached);
+    const HazardImage volImg = gm20b::hazardImage(vol);
+    EXPECT_TRUE(cachedImg.plain);
+    EXPECT_EQ(cachedImg.layout, HazardLayout::Pitch);
+    EXPECT_FALSE(volImg.plain);
+    EXPECT_EQ(volImg.layout, HazardLayout::Pitch);
+
+    PassUses cachedLevel = pass(160, 90);
+    cachedLevel.write(image(0x200000, gm20b::kHazardBgra8, 160, 90));
+    cachedLevel.sample(cachedImg, false);
+    EXPECT_TRUE(gm20b::pixelBarrierHolds(after(cachedImg), cachedLevel));
+
+    PassUses volLevel = pass(160, 90);
+    volLevel.write(image(0x200000, gm20b::kHazardBgra8, 160, 90));
+    volLevel.sample(volImg, false);
+    EXPECT_FALSE(gm20b::pixelBarrierHolds(after(volImg), volLevel));
+    EXPECT_EQ(gm20b::drainCause(after(volImg), volLevel), gm20b::DrainCause::Read);
+}
+
 }  // namespace

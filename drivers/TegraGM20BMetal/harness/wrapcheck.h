@@ -13,7 +13,8 @@ struct DeviceHarness {
     template <class Expect> static void wrap(Device &device, Pipeline &pipeline, Expect expect)
     {
         expect(device.wait(device.submitted()), "pre-wrap work physically retires");
-        expect(mock_iokit_seed_sequence(device.channel_, UINT32_MAX), "idle channel accepts deterministic wrap seed");
+        expect(mock_iokit_seed_sequence(device.channel_.load(std::memory_order_acquire), UINT32_MAX),
+               "idle channel accepts deterministic wrap seed");
         device.lastSeqno_ = UINT32_MAX;
         device.push_.inflight.clear();
         device.upload_.inflight.clear();
@@ -41,7 +42,7 @@ struct DeviceHarness {
         encoder->end();
         uint64_t uploadVa;
         *device.alloc(device.upload_, 64, 64, uploadVa) = 42;
-        mock_iokit_pause(device.channel_, true);
+        mock_iokit_pause(device.channel_.load(std::memory_order_acquire), true);
         uint32_t sequence = UINT32_MAX;
         expect(cb->commit(sequence) && sequence == 0, "actual encoder publishes wrapped sequence zero");
         expect(!device.done(sequence), "zero does not retire while physical completion is pending");
@@ -58,6 +59,7 @@ struct DeviceHarness {
         expect(hasZero(device.push_) && hasZero(device.upload_), "abandon preserves the earlier zero submission");
         Device::Backing *held = nullptr;
         {
+            Device::DeferredFrees deferred(device);
             std::lock_guard<std::mutex> lock(device.lock_);
             for (auto *backing : device.backings_)
                 if (backing->texture.width == 17 && backing->texture.height == 13 && backing->submitted &&
@@ -66,15 +68,16 @@ struct DeviceHarness {
             expect(held != nullptr, "transient backing records a valid zero last use");
             if (held)
                 held->retired = true;
-            device.trimBackings();
+            device.trimBackings(deferred);
             expect(std::find(device.backings_.begin(), device.backings_.end(), held) != device.backings_.end(),
                    "idle trimming retains the backing before zero physically retires");
         }
-        mock_iokit_pause(device.channel_, false);
+        mock_iokit_pause(device.channel_.load(std::memory_order_acquire), false);
         expect(device.wait(sequence) && device.done(sequence), "zero completes through the ordinary fence wait");
         {
+            Device::DeferredFrees deferred(device);
             std::lock_guard<std::mutex> lock(device.lock_);
-            device.trimBackings();
+            device.trimBackings(deferred);
             expect(std::find(device.backings_.begin(), device.backings_.end(), held) == device.backings_.end(),
                    "retired transient backing releases after zero completion");
         }
@@ -97,10 +100,10 @@ struct DeviceHarness {
         } state{{UINT32_MAX, 0, 0, 0}, {2, 0, 0, TegraGM20BFenceSemanticPending}, {(uint64_t(5) << 48) | 19}};
 
         static_assert(offsetof(FenceState, semantic) == sizeof(TegraGM20BAbiFence));
-        const auto *originalFence = device.fence_;
+        const auto *originalFence = device.fence_.load(std::memory_order_acquire);
         auto &flags = const_cast<TegraGM20BAbiInfo &>(device.k_.info()).flags;
         const auto originalFlags = flags;
-        device.fence_ = &state.physical.completed;
+        device.fence_.store(&state.physical.completed, std::memory_order_release);
         expect(!device.done(0), "zero semantic state cannot bypass physical retirement");
         state.physical.completed = 0;
         expect(!device.done(0), "physically complete zero remains pending on semantic authority");
@@ -120,7 +123,7 @@ struct DeviceHarness {
         const auto snapshot =
             device.captureCpuCompletion(0, device.channelGeneration(), {&alias, &cached, &wc, &hidden});
         expect(snapshot.valid && snapshot.channelUid == state.identity.channel_uid &&
-                   snapshot.channel == device.channel_ && snapshot.seqno == 0,
+                   snapshot.channel == device.channel_.load(std::memory_order_acquire) && snapshot.seqno == 0,
                "accepted cached snapshot retains full kernel identity and valid zero prefix");
         expect(snapshot.ranges.size() == 1 && snapshot.ranges[0].bytes == cached.length,
                "cached buffer aliases coalesce while WC and private inputs are excluded");
@@ -140,7 +143,7 @@ struct DeviceHarness {
                "cached range outside its BO cannot reach completion maintenance");
         expect(device.captureCpuCompletion(0, device.channelGeneration(), {&wc, &hidden}).ranges.empty(),
                "GPU-only buffers need no CPU completion ranges");
-        device.fence_ = originalFence;
+        device.fence_.store(originalFence, std::memory_order_release);
         flags = originalFlags;
         device.destroyBuffer(cached);
         device.destroyBuffer(wc);

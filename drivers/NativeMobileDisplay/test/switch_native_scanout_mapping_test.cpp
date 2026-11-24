@@ -16,6 +16,10 @@ protected:
     {
         delete display;
         EXPECT_EQ(leases, 0u);
+        for (const auto &entry : backingRefs)
+            EXPECT_EQ(entry.second, 0);
+        for (const auto &entry : backingScanoutHolds)
+            EXPECT_EQ(entry.second, 0);
     }
 
     int admit()
@@ -273,4 +277,123 @@ TEST_F(NativeScanoutMapping, AShownFrameDeliversAtItsLatchAndADroppedOneWhenItsS
     display->planeReleaseLease(1);
     EXPECT_EQ(deliveries, 2u);
     EXPECT_EQ(leases, 1u);
+}
+
+TEST_F(NativeScanoutMapping, PlaneSlotForHoldsScanoutBeforeCompressionCheckAndUnwindsCleanly)
+{
+    auto *backing = reinterpret_cast<switch_gpu_backing *>(0x2000);
+    IOMemoryDescriptor memory;
+    memory.length = 64 * 1024;
+    findPaBackings[memory.pa] = backing;
+
+    unsigned checks = 0;
+    int holdsDuringCheck = -1;
+    onSurfaceCompressedCheck = [&](uint64_t pa) {
+        EXPECT_EQ(pa, memory.pa);
+        ++checks;
+        holdsDuringCheck = backingScanoutHolds[backing];
+    };
+
+    surfaceCompressedFlag = true;
+    EXPECT_EQ(display->planeSlotFor(&memory, 0, memory.length, false), -1);
+    EXPECT_EQ(checks, 1u);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
+    EXPECT_EQ(memory.prepares, memory.completes);
+    EXPECT_EQ(memory.refs, 1u);
+    EXPECT_EQ(display->probeDomain.unmaps, 1u);
+
+    surfaceCompressedFlag = false;
+    holdsDuringCheck = -1;
+    const int slot = display->planeSlotFor(&memory, 0, memory.length, false);
+    ASSERT_GE(slot, 0);
+    EXPECT_EQ(checks, 2u);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 1);
+    EXPECT_EQ(backingRefs[backing], 1);
+
+    display->planeDropSlot(unsigned(slot));
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
+
+    // Backing registered after initial map: cache hit acquires scanout hold before compression check.
+    findPaBackings.clear();
+    onSurfaceCompressedCheck = {};
+    const int lateSlot = display->planeSlotFor(&memory, 0, memory.length, false);
+    ASSERT_GE(lateSlot, 0);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+
+    findPaBackings[memory.pa] = backing;
+    surfaceCompressedFlag = true;
+    holdsDuringCheck = -1;
+    onSurfaceCompressedCheck = [&](uint64_t) {
+        holdsDuringCheck = backingScanoutHolds[backing];
+    };
+    EXPECT_EQ(display->planeSlotFor(&memory, 0, memory.length, false), -1);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
+}
+
+TEST_F(NativeScanoutMapping, PlaneNativeSlotForHoldsScanoutBeforeCompressionCheckAndReleasesOnLeaseAndDrop)
+{
+    auto *backing = nextNative.view.native;
+    unsigned checks = 0;
+    int holdsDuringCheck = -1;
+    onSurfaceCompressedCheck = [&](uint64_t pa) {
+        EXPECT_EQ(pa, pages[0]);
+        ++checks;
+        holdsDuringCheck = backingScanoutHolds[backing];
+    };
+
+    surfaceCompressedFlag = true;
+    EXPECT_EQ(admit(), -95);
+    EXPECT_EQ(checks, 1u);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
+    EXPECT_EQ(leases, 0u);
+    EXPECT_EQ(display->probeDomain.maps, 0u);
+
+    surfaceCompressedFlag = false;
+    holdsDuringCheck = -1;
+    ASSERT_EQ(admit(), 0);
+    EXPECT_EQ(checks, 2u);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 1);
+    EXPECT_EQ(backingRefs[backing], 1);
+
+    // Active same-generation hit keeps the existing slot hold without leaking a duplicate hold.
+    ASSERT_EQ(admit(), 0);
+    EXPECT_EQ(backingScanoutHolds[backing], 1);
+    EXPECT_EQ(backingRefs[backing], 1);
+
+    display->planeReleaseLease(0);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
+    EXPECT_EQ(leases, 0u);
+
+    // Surface compressed while idle: slot reuse acquires scanout hold before check and rejects.
+    ++nextNative.allocation.content_generation;
+    surfaceCompressedFlag = true;
+    holdsDuringCheck = -1;
+    EXPECT_EQ(admit(), -95);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
+    EXPECT_EQ(leases, 0u);
+
+    // Uncompressed reuse takes back the scanout hold and releases cleanly in planeDropSlot.
+    surfaceCompressedFlag = false;
+    holdsDuringCheck = -1;
+    ASSERT_EQ(admit(), 0);
+    EXPECT_EQ(holdsDuringCheck, 1);
+    EXPECT_EQ(backingScanoutHolds[backing], 1);
+    EXPECT_EQ(backingRefs[backing], 1);
+    EXPECT_EQ(display->probeDomain.maps, 1u);
+
+    display->planeDropSlot(0);
+    EXPECT_EQ(backingScanoutHolds[backing], 0);
+    EXPECT_EQ(backingRefs[backing], 0);
 }

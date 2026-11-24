@@ -71,24 +71,27 @@ void gm20bCopyPlanes(gm20b::BlitEncoder *be, gm20b::CommandBuffer *rc, const gm2
         BufferRows rows;
         bufferRows(at, row, h, rowBytes, unit, intoTexture, rows);
         const uint64_t first = bufferRow(rows, at, row, 0);
-        if (!b.wc)
+        if (b.hostVisible && !b.wc && b.cpu)
             rc->clean(b.cpu + first, bufferRow(rows, at, row, h - 1) - first + rowBytes, !intoTexture);
         copyRows(be, b.va, rows, at, row, t, x, y, z + k, w, h, intoTexture, aspect);
     }
 }
 
 // A no-copy texture copied into a pool image (gm20b::Texture::callerPages): what a copy wrote into the image goes on to the
-// caller's memory, which stays the texture's contents, after it on the copy engine
+// caller's memory, which stays the texture's contents, after it on the copy engine. The copy reads the image through its
+// kind-0 view after the blit wrote its texels through 0xfe, and later commands use the texels again: a kind switch on
+// each side (gpu.astc.layouts blitin_back read the caller's blocks in FermiColor order without them)
 static void copyToCallerPages(gm20b::BlitEncoder *be, gm20b::CommandBuffer *rc, SwitchMetalTexture *t)
 {
     t = t->_levelsOwner ?: t;
     const gm20b::Texture &x = t->_raw;
     if (!x.callerPages)
         return;
-    be->access(memoryOf(t), x.callerPages);
     rc->use(x.callerPages, true);
     rc->clean(x.callerPages->bo.cpu, x.storage.bytes, true);
+    be->crossKinds();
     be->copyBytes(x.imagePitchVa, x.callerPages->bo.va, x.storage.bytes);
+    be->crossKinds();
 }
 
 // The image a buffer copy moves of `t`'s level: a texture held through a surface's planes moves plane 0's bytes, at the
@@ -274,9 +277,9 @@ bool encodeBlit(SwitchMetalCommandBuffer *cb, const Cmd &c, gm20b::CommandBuffer
         useBuffer(rc, t, true);
         be->access(memoryOf(s), memoryOf(t));
         const uint64_t n = extra(cb, c.x + 1), dof = extra(cb, c.x);
-        if (!s->_raw.wc)
+        if (s->_raw.hostVisible && !s->_raw.wc && s->_raw.cpu)
             rc->clean(s->_raw.cpu + c.c, n);
-        if (!t->_raw.wc)
+        if (t->_raw.hostVisible && !t->_raw.wc && t->_raw.cpu)
             rc->clean(t->_raw.cpu + dof, n, true);
         be->copyBytes(s->_raw.va + c.c, t->_raw.va + dof, n);
         break;
@@ -286,7 +289,7 @@ bool encodeBlit(SwitchMetalCommandBuffer *cb, const Cmd &c, gm20b::CommandBuffer
         const uint64_t n = extra(cb, c.x);
         useBuffer(rc, t, true);
         be->access(nullptr, memoryOf(t));
-        if (!t->_raw.wc)
+        if (t->_raw.hostVisible && !t->_raw.wc && t->_raw.cpu)
             rc->clean(t->_raw.cpu + c.c, n, true);
         be->fillBytes(t->_raw.va + c.c, n, uint8_t(c.a));
         break;

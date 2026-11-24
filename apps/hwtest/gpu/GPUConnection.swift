@@ -9,6 +9,11 @@ public final class GPUConnection {
         public let token: UInt32
         public let address: UInt64
         public var base: UnsafeRawPointer { UnsafeRawPointer(bitPattern: UInt(address))! }
+
+        public init(token: UInt32, address: UInt64) {
+            self.token = token
+            self.address = address
+        }
     }
 
     typealias Matching = @convention(c) (UnsafePointer<CChar>) -> UnsafeMutableRawPointer?
@@ -63,11 +68,12 @@ public final class GPUConnection {
 
     deinit { _ = close(connection) }
 
-    public func map(_ token: UInt32, bytes: Int) -> Mapping? {
-        let (kr, reply) = call(Self.mapMethod, Self.words([token, Self.mapReadOnly, 0, 0]), outputSize: 16)
+    public func map(_ token: UInt32, bytes: Int, readOnly: Bool = true) -> Mapping? {
+        let flags: UInt32 = readOnly ? Self.mapReadOnly : 0
+        let (kr, reply) = call(Self.mapMethod, Self.words([token, flags, 0, 0]), outputSize: 16)
         guard kr == KERN_SUCCESS else { return nil }
         let mapping = Mapping(token: token, address: Self.uint64(reply, 0))
-        guard Int(Self.uint64(reply, 8)) >= bytes else {
+        guard mapping.address != 0 && Int(Self.uint64(reply, 8)) >= bytes else {
             unmap(mapping)
             return nil
         }

@@ -4,6 +4,8 @@
 #import "TegraGM20BMetalIndirectCompute.h"
 #include "TegraGM20BMetalDirect.h"
 #include "compute_key.h"
+#include "word_wait.h"
+#include <atomic>
 
 using SwitchMetalKernelJob = gm20b::ComputeKernelJob<gm20b::ComputeState>;
 
@@ -11,11 +13,36 @@ namespace {
 
 void waitFor(SwitchMetalKernelJob &job)
 {
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    if (job.observe([done] {
-            dispatch_semaphore_signal(done);
-        }) == SwitchMetalKernelJob::State::Pending)
-        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+    if (job.state() != SwitchMetalKernelJob::State::Pending)
+        return;
+
+    struct State {
+        gm20b::ChangeWord changed;
+        std::atomic<uint32_t> waitGen{1};
+    };
+
+    auto shared = std::make_shared<State>();
+    if (job.observe([shared] {
+            shared->changed.changed();
+        }) != SwitchMetalKernelJob::State::Pending)
+        return;
+    job.observeWait([shared] {
+        shared->waitGen.fetch_add(1, std::memory_order_acq_rel);
+        shared->changed.changed();
+    });
+    uint32_t triedGen = 0;
+    while (job.state() == SwitchMetalKernelJob::State::Pending) {
+        const uint32_t gen = shared->waitGen.load(std::memory_order_acquire);
+        if (gen != triedGen) {
+            if (!job.waitPending())
+                triedGen = gen;
+            continue;
+        }
+        shared->changed.waitOnce([&] {
+            return job.state() != SwitchMetalKernelJob::State::Pending ||
+                   shared->waitGen.load(std::memory_order_acquire) != triedGen;
+        });
+    }
 }
 
 std::shared_ptr<SwitchMetalKernelJob> requestKernel(SwitchMetalComputeState *state,

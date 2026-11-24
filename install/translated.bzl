@@ -24,6 +24,8 @@ def _pretranslated_delta_impl(ctx):
     args.add("--driver", info.driver)
     args.add("--tool", info.tool)
     args.add_all(info.apple_trustcaches, before_each = "--apple-trustcache")
+    if info.edits:
+        args.add("--edits", info.edits)
     pairs = [delta[DeltaInfo] for delta in ctx.attr.pairs]
     for pair in pairs:
         args.add("--cdhash-pairs", "{}/{}.cdhash-pairs".format(pair.dir.path, pair.role))
@@ -31,7 +33,7 @@ def _pretranslated_delta_impl(ctx):
     ctx.actions.run(
         executable = ctx.executable._translate,
         arguments = [args],
-        inputs = [ctx.file.image, ctx.file.pins] + info.apple_trustcaches + [pair.dir for pair in pairs],
+        inputs = [ctx.file.image, ctx.file.pins] + info.apple_trustcaches + ([info.edits] if info.edits else []) + [pair.dir for pair in pairs],
         tools = [info.driver_run, info.tool_run],
         outputs = [out],
         mnemonic = "Pretranslate",
@@ -88,5 +90,76 @@ translated_cryptex = rule(
         "pins": attr.label(mandatory = True, allow_single_file = True, doc = "the IPSW's pins: the cryptex's UUID"),
         "apfs_tool": attr.label(mandatory = True, cfg = "exec", allow_single_file = True),
         "_translate": attr.label(default = "//tools/install:translate", executable = True, cfg = "exec"),
+    },
+)
+
+def _delta_metadata_impl(ctx):
+    delta = ctx.attr.delta[DeltaInfo]
+    out = ctx.actions.declare_directory(ctx.label.name)
+    ctx.actions.run_shell(
+        command = """set -e
+src="$1"
+dst="$2"
+role="$3"
+for name in "${role}.manifest.json" "${role}.trustcache" "${role}.cdhash-pairs" a64x-cache-pretranslated.bin; do
+    if [ -f "$src/$name" ]; then
+        /bin/cp "$src/$name" "$dst/$name"
+    fi
+done
+""",
+        arguments = [delta.dir.path, out.path, delta.role],
+        inputs = [delta.dir],
+        outputs = [out],
+        mnemonic = "DeltaMetadata",
+        progress_message = "Extracting %s delta metadata (%%{label})" % delta.role,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+delta_metadata = rule(
+    implementation = _delta_metadata_impl,
+    doc = "The small metadata files of a cryptex delta (manifest, trustcache, cdhash-pairs, cache list), without its " +
+          "translated binaries (already sealed into translated_<role>).",
+    attrs = {
+        "delta": attr.label(mandatory = True, providers = [DeltaInfo]),
+    },
+)
+
+def _packed_image_impl(ctx):
+    out = ctx.actions.declare_directory(ctx.label.name)
+    args = ctx.actions.args()
+    args.add("--out", out.path)
+    args.add("--apfs-tool", ctx.file.apfs_tool.path)
+    input_sets = []
+    for name, target in sorted(ctx.attr.inputs.items()):
+        found = target[DefaultInfo].files.to_list()
+        if len(found) > 1:
+            fail("{} ({}) must be one file or directory, not {}".format(name, target.label, len(found)))
+        if found:
+            args.add("--" + name.replace("_", "-"), found[0].path)
+            input_sets.append(target[DefaultInfo].files)
+            input_sets.append(target[DefaultInfo].default_runfiles.files)
+    for extra in ctx.attr.extra_inputs:
+        input_sets.append(extra[DefaultInfo].files)
+        input_sets.append(extra[DefaultInfo].default_runfiles.files)
+    ctx.actions.run(
+        executable = ctx.executable._pack,
+        arguments = [args],
+        inputs = depset(transitive = input_sets),
+        tools = [ctx.file.apfs_tool],
+        outputs = [out],
+        mnemonic = "ImagePack",
+        progress_message = "Composing, populating and packing the install image (%{label})",
+        execution_requirements = _REQUIREMENTS,
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+packed_image = rule(
+    implementation = _packed_image_impl,
+    doc = "Compose, populate, prove fit and pack one iOS version's NAME.SII.* folder as a Bazel action.",
+    attrs = {
+        "inputs": attr.string_keyed_label_dict(allow_files = True),
+        "extra_inputs": attr.label_list(allow_files = True),
+        "apfs_tool": attr.label(mandatory = True, cfg = "exec", allow_single_file = True),
+        "_pack": attr.label(default = "//tools/install:pack_action", executable = True, cfg = "exec"),
     },
 )

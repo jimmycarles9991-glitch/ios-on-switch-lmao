@@ -261,6 +261,12 @@ bool prepare(const std::string &bytes, uint64_t stack, SystemLibraries &system, 
     return true;
 }
 
+bool failsForGood(const std::string &why)
+{
+    static const std::string fails = "m2v refused its translation: fails: ";
+    return !why.compare(0, fails.size(), fails);
+}
+
 RefusalLine refusalLine(const gm20b::CompileRequest &r, int32_t pid, const std::string &why)
 {
     const auto named = [&](size_t i) {

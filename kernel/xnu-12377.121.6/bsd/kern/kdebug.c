@@ -68,6 +68,7 @@
 
 #include <machine/pal_routines.h>
 #include <machine/atomic.h>
+#include <switch/recorder.h>
 
 
 extern unsigned int wake_nkdbufs;
@@ -3348,7 +3349,7 @@ kdbg_set_typefilter_string(const char *filter_desc)
 				printf("kdebug: class 0x%lx is invalid\n", allow_value);
 				return;
 			}
-			printf("kdebug: C 0x%lx\n", allow_value);
+			SWITCH_RECORDER_QUIET(printf("kdebug: C 0x%lx\n", allow_value));
 			typefilter_allow_class(kdbg_typefilter, (uint8_t)allow_value);
 			break;
 		case 'S':
@@ -3356,7 +3357,7 @@ kdbg_set_typefilter_string(const char *filter_desc)
 				printf("kdebug: class-subclass 0x%lx is invalid\n", allow_value);
 				return;
 			}
-			printf("kdebug: S 0x%lx\n", allow_value);
+			SWITCH_RECORDER_QUIET(printf("kdebug: S 0x%lx\n", allow_value));
 			typefilter_allow_csc(kdbg_typefilter, (uint16_t)allow_value);
 			break;
 		default:
@@ -3507,9 +3508,9 @@ kdbg_dump_trace_to_file(const char *filename, bool reenable)
 	 * Wait to synchronize the file to capture the I/O in the
 	 * TRACE_WRITING_EVENTS interval.
 	 */
-	ret = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+	ret = SWITCH_RECORDER_FSYNC(VNOP_FSYNC(vp, MNT_WAIT, ctx));
 	if (ret == KERN_SUCCESS) {
-		ret = VNOP_IOCTL(vp, F_FULLFSYNC, (caddr_t)NULL, 0, ctx);
+		ret = SWITCH_RECORDER_FSYNC(VNOP_IOCTL(vp, F_FULLFSYNC, (caddr_t)NULL, 0, ctx));
 	}
 
 	/*
@@ -3528,7 +3529,7 @@ kdbg_dump_trace_to_file(const char *filename, bool reenable)
 
 out_close:
 	vnode_close(vp, FWRITE, ctx);
-	sync(current_proc(), (void *)NULL, (int *)NULL);
+	SWITCH_RECORDER_SYNC(sync(current_proc(), (void *)NULL, (int *)NULL));
 
 out:
 	if (reenable_trace != 0) {

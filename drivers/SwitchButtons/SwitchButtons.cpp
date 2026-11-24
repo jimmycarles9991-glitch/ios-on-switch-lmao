@@ -39,6 +39,12 @@
 #include "SwitchButtons.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 
+#if SWITCH_RECORDER
+// XNU kernel/switch/recorder (--//kernel:recorder): the owner saw a hitch; freeze the ring into a dump.
+extern "C" __attribute__((weak)) void switch_recorder_mark(void)
+{}
+#endif
+
 namespace {
 constexpr unsigned kPmicBus = 5;
 constexpr uint8_t kPmic = 0x3c;
@@ -324,6 +330,11 @@ void SwitchButtons::btClicks(OSObject *owner, IOInterruptEventSource *, int)
     if (!self)
         return;
     const uint8_t which = __atomic_exchange_n(&self->clicks, static_cast<uint8_t>(0), __ATOMIC_ACQ_REL);
+#if SWITCH_RECORDER
+    // A Bluetooth controller's Capture.
+    if (which & SWITCH_BT_CAPTURE)
+        switch_recorder_mark();
+#endif
 
     const struct {
         uint8_t bt, button;

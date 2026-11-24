@@ -6,8 +6,8 @@
 //! [`RelocatableModule`](crate::spirv::serialize::RelocatableModule) and plain metadata: decoded
 //! AIR, the plan, and the typed module are dropped before it returns. Every entry point here runs
 //! under `catch_unwind`, so a panic anywhere in the core is `Error::Internal(Panic)`, never an
-//! unwind into the caller. The crate keeps no memo; the caller caches the result under its
-//! [`FunctionCompileKey`].
+//! unwind into the caller. A process may keep its compiled stages by their [`FunctionCompileKey`]
+//! ([`kept`]); otherwise the caller caches the result under it.
 //!
 //! The public surface (`Device::compile_function`, `function_compile_key`,
 //! `compile_compute_pipeline`, `compile_render_pipeline`, and the pipeline keys) is [`api`]; the
@@ -17,6 +17,7 @@ pub mod api;
 mod buffer_encoders;
 mod entry;
 pub mod key;
+pub mod kept;
 mod numbered;
 mod partition;
 #[cfg(test)]
@@ -429,9 +430,9 @@ pub fn guarded<T>(f: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
 }
 
 /// Compile function `f` of its library with `consts`, linking `linked`, for profile `p`, as the
-/// opaque [`CompiledFunction`], from inputs given or derived (`inputs`). No memo inside; the result
-/// is keyed by `FunctionCompileKey` for the caller's cache. Its artifact carries the provenance a
-/// pipeline checks and the kernel facts its Metal info needs.
+/// opaque [`CompiledFunction`], from inputs given or derived (`inputs`), or as the process kept it
+/// under its `FunctionCompileKey` ([`kept`]). Its artifact carries the provenance a pipeline checks
+/// and the kernel facts its Metal info needs.
 pub fn compile_stage(
     f: &Function,
     consts: &FunctionConstantValues,
@@ -454,13 +455,16 @@ pub(crate) fn compile_native_stage(
     m: &mut Meter,
 ) -> Result<crate::pipeline::NativeFunction, Error> {
     guarded(|| with_request(&f.function, &f.constants, (&f.linked, &f.libraries), inputs, |r| {
-        let (artifact, _, mut program) = compile_payload(r, p, m, SPIRV_WORDS,
-            crate::pipeline::native::capture, |module, _, _, _| Ok(module))?;
-        if let Some(program) = &mut program {
-            let linked = crate::pipeline::link::link_compute(&artifact.interface, p)?;
-            program.link(&linked.table)?;
-        }
-        Ok(crate::pipeline::NativeFunction { artifact, program })
+        let keyed = key_one(r, p, m)?;
+        kept::native(keyed.key, m, |m| {
+            let (artifact, _, mut program) = compile_keyed(r, p, m, SPIRV_WORDS, keyed,
+                crate::pipeline::native::capture, |module, _, _, _| Ok(module))?;
+            if let Some(program) = &mut program {
+                let linked = crate::pipeline::link::link_compute(&artifact.interface, p)?;
+                program.link(&linked.table)?;
+            }
+            Ok(crate::pipeline::NativeFunction { artifact, program })
+        })
     }))
 }
 
@@ -1929,7 +1933,17 @@ pub(crate) fn specialized_bitcode_entry(
 }
 
 /// [`ordered_entry`], then analyze and select.
-fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned, Error> {
+/// What a compile is keyed by, before its plan: the key, the specialized entry and what its code
+/// read before specialization, the lowering inputs, and whether the entry observes its partition.
+struct Keyed {
+    key: FunctionCompileKey,
+    spec: air::Entry,
+    before: reflection::UnspecializedReads,
+    inputs: LowerInputs,
+    partition_oblivious: bool,
+}
+
+fn key_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Keyed, Error> {
     let Specialized {
         air_hash,
         entry,
@@ -1957,6 +1971,23 @@ fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned
         &inputs,
         (&linked, &r.dynamic.key()),
     );
+    Ok(Keyed {
+        key,
+        spec,
+        before,
+        inputs,
+        partition_oblivious,
+    })
+}
+
+fn plan_keyed(keyed: Keyed, p: &DeviceProfile, m: &mut Meter) -> Result<Planned, Error> {
+    let Keyed {
+        key,
+        spec,
+        before,
+        inputs,
+        partition_oblivious,
+    } = keyed;
     let memory = crate::memory::plan::analyze_memory(&spec, p, m)?;
     let plan = crate::lower::select::select(&spec, &memory, p, &inputs, m)?;
     let kernel = KernelFacts {
@@ -1981,13 +2012,26 @@ fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned
     })
 }
 
+fn plan_one(r: &Request<'_>, p: &DeviceProfile, m: &mut Meter) -> Result<Planned, Error> {
+    let keyed = key_one(r, p, m)?;
+    plan_keyed(keyed, p, m)
+}
+
 fn compile_one(
     r: &Request<'_>,
     p: &DeviceProfile,
     m: &mut Meter,
     word_cap: u64,
 ) -> Result<Arc<FunctionArtifact>, Error> {
-    compile_kept(r, p, m, word_cap, |_, _| Ok(())).map(|(artifact, _, ())| artifact)
+    let keyed = key_one(r, p, m)?;
+    let compile = |m: &mut Meter, keyed: Keyed| {
+        compile_keyed(r, p, m, word_cap, keyed, |_, _| Ok(()), serialize_module)
+            .map(|(artifact, _, ())| artifact)
+    };
+    if word_cap != SPIRV_WORDS {
+        return compile(m, keyed);
+    }
+    kept::artifact(keyed.key, m, |m| compile(m, keyed))
 }
 
 /// [`compile_one`], also returning the plan and what `keep` takes of the finished typed module
@@ -2025,13 +2069,26 @@ fn compile_payload<K, M>(
     keep: impl FnOnce(&TypedModule, &mut Meter) -> Result<K, Error>,
     finish: impl FnOnce(TypedModule, &DeviceProfile, &mut Meter, u64) -> Result<M, Error>,
 ) -> Result<(Arc<FunctionArtifact<M>>, Plan, K), Error> {
+    let keyed = key_one(r, p, m)?;
+    compile_keyed(r, p, m, word_cap, keyed, keep, finish)
+}
+
+fn compile_keyed<K, M>(
+    r: &Request<'_>,
+    p: &DeviceProfile,
+    m: &mut Meter,
+    word_cap: u64,
+    keyed: Keyed,
+    keep: impl FnOnce(&TypedModule, &mut Meter) -> Result<K, Error>,
+    finish: impl FnOnce(TypedModule, &DeviceProfile, &mut Meter, u64) -> Result<M, Error>,
+) -> Result<(Arc<FunctionArtifact<M>>, Plan, K), Error> {
     let Planned {
         key,
         spec,
         before,
         plan,
         kernel,
-    } = plan_one(r, p, m)?;
+    } = plan_keyed(keyed, p, m)?;
     plan.estimate.check(word_cap)?;
     let crate::lower::emit::Emitted {
         mut module,

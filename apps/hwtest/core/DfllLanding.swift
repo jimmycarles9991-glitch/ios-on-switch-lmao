@@ -11,16 +11,24 @@ import Foundation
 /// (SCALE + 1) / 256. A step is 15 mV of LUT at this console's 2.04 MHz/mV (clk-tegra124-dfll-fcpu.c's CPUB01 rows
 /// 1581 and 1683 MHz at speedo 1659: 834 and 884 mV), 30 MHz, as TegraDFLL's landing model takes it; boot 22 measured
 /// 20.6 to 23.4 MHz between outputs 17 and 18 at MULT 76, and held 1581 MHz at output 14 0.36 % over.
+/// Reported beside each row: probe_gap_pct, the probe's largest gap from the rate the DFLL's own monitor gives at the
+/// same reading (TegraDFLL dfll.c measured_hz: MONITOR_DATA's DVCO cycles in 4 reference cycles of 51 MHz, times
+/// (SCALE + 1) / 256), whose count resolves about 0.8 %: boot 22's probe read 0.4 to 0.8 % under it.
 public enum DfllLanding {
     public static let settledMs = 200
+    /// One run's landings, each its own write of the sysctl: the run judges them all, so a row that lands outside its
+    /// bounds in one of them is red
+    public static let landings = 5
 
     /// One reading's probe and where its loop stood (Tegra X1 TRM 6.1.6 DFLL_FREQ_REQ SCALE, 6.1.9 DFLL_OUTPUT_CFG MIN;
     /// clk-dfll.c's DFLL_I2C_STS last output).
     struct Reading {
         static let outputStepKhz = 30000.0
 
+        static let monitorKhzPerCount = 51000.0 / 4
+
         let khz: Double
-        let scale, outMin, lastOutput: UInt32
+        let scale, outMin, lastOutput, monitor: UInt32
 
         init?(_ value: String) {
             let parts = value.split(separator: ",")
@@ -30,8 +38,11 @@ public enum DfllLanding {
             self.khz = khz
             scale = (registers[0] >> 8) & 0xff
             outMin = (registers[2] >> 8) & 0x3f
+            monitor = registers[3] & 0xffff
             lastOutput = (registers[4] >> 1) & 0x3f
         }
+
+        var monitorKhz: Double { Double(monitor) * Self.monitorKhzPerCount * Double(scale + 1) / 256 }
 
         var pinned: Bool { lastOutput <= outMin }
 
@@ -80,6 +91,29 @@ public enum DfllLanding {
         return (checks, metrics)
     }
 
+    /// The verdict over a run's landings, the kernel's lines in turn: each judged as `judge` judges one, landing k's
+    /// (from 1) checks and metrics under "landing k: " and l<k>_, beside its SoC temperature (l<k>_soc_mc: SOC_THERM's
+    /// CPU group and PLLX in m C, as the kernel read them at the landing's start). The case names (c<i>, the same rates
+    /// in every landing) are logged with the first landing alone.
+    public static func judge(landings: [[String: String]]) -> (checks: [(String, Bool)], metrics: Metrics) {
+        var checks: [(String, Bool)] = []
+        var metrics = Metrics()
+        var failed = 0
+        for (k, fields) in landings.enumerated() {
+            let (landed, own) = judge(fields)
+            let prefix = "l\(k + 1)_"
+            metrics.set(prefix + "soc_mc", fields["soc_mc"] ?? "-")
+            metrics.merge(own, prefix: prefix)
+            for key in own.keys where k > 0 && key.hasPrefix("c") && key.dropFirst().allSatisfy(\.isNumber) {
+                metrics.keepInReportOnly(prefix + key)
+            }
+            failed += landed.allSatisfy(\.1) ? 0 : 1
+            checks += landed.map { ("landing \(k + 1): \($0.0)", $0.1) }
+        }
+        metrics.set("landings_failed", failed)
+        return (checks, metrics)
+    }
+
     typealias Landed = (khz: Double, reading: Reading?)
 
     static func judge(_ asked: Int, _ readings: [Landed], _ metrics: inout Metrics) -> [(String, Bool)] {
@@ -91,6 +125,11 @@ public enum DfllLanding {
         metrics.set("over_pct_\(asked)", overs.max() ?? 0, digits: 2)
         metrics.set("under_pct_\(asked)", under, digits: 2)
         metrics.set("spread_pct_\(asked)", spread, digits: 2)
+        let gaps = readings.compactMap { landed -> Double? in
+            guard let reading = landed.reading, reading.monitor > 0 else { return nil }
+            return abs(landed.khz - reading.monitorKhz) / reading.monitorKhz * 100
+        }
+        if let gap = gaps.max() { metrics.set("probe_gap_pct_\(asked)", gap, digits: 2) }
         let bounds = readings.map { $0.reading?.overBoundPct(asked: asked) ?? 0.25 }
         let worst = overs.indices.max { overs[$0] - bounds[$0] < overs[$1] - bounds[$1] } ?? 0
         let how = { (reading: Reading?) in

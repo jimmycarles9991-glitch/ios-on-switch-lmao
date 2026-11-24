@@ -227,6 +227,79 @@ class Rules(unittest.TestCase):
         got = {r.check.name: r for r in devicerun.run_checks(log[:2], [runs, lines])[0]}
         self.assertEqual(got[lines.name].verdict, PASS)
 
+    def test_the_file_indexer_failing_inside_a_hwtest_run_fails_and_outside_it_does_not(self):
+        runs = next(c for c in hwtest.HWTEST if c.name == hwtest.RUN_WINDOWS)
+        lines = next(c for c in checks.GROUPS['storage'] if c.name == 'storage.hwtest-indexed-mid-write')
+
+        def record(second: int, image: str, subsystem: str, message: str) -> dict:
+            return {
+                'timestamp': f'2026-11-22 23:{second // 60:02d}:{second % 60:02d}.000000-0800',
+                'bootUUID': 'B00T',
+                'processImagePath': image,
+                'subsystem': subsystem,
+                'category': 'daemon',
+                'messageType': 'Error',
+                'eventMessage': message,
+            }
+
+        indexer = (
+            '/System/Library/PrivateFrameworks/FileIndexer.framework/fileindexerd',
+            'com.apple.FileIndexer',
+            'failed to get metadata for (12, in: 3): NSError: POSIX 2 '
+            '"The operation couldn’t be completed. No such file or directory"',
+        )
+        suite = 'HWTEST suite FAIL pass=600 fail=40 skip=28 ios=27 ms=2045000.0'
+        app = '/Applications/SwitchHWTest.app/SwitchHWTest'
+        log = [
+            record(300, *indexer),
+            {**record(2200, app, hwtest.SUBSYSTEM, suite), 'category': 'results', 'messageType': 'Default'},
+            record(2300, *indexer),
+        ]
+        got = {r.check.name: r for r in devicerun.run_checks(log, [runs, lines])[0]}
+        self.assertEqual(got[lines.name].verdict, FAIL)
+        self.assertIn('1 runs, 1 off', got[lines.name].observed)
+        got = {r.check.name: r for r in devicerun.run_checks(log[1:], [runs, lines])[0]}
+        self.assertEqual(got[lines.name].verdict, PASS)
+
+    def test_a_title_scroll_repetition_past_the_first_takes_no_fresh_import(self):
+        reps, imports = (
+            next(c for c in checks.GROUPS['refusals'] if c.name == name)
+            for name in (checks.TITLE_SCROLL_REPS, 'compositor.title-scroll-imports')
+        )
+
+        def record(second: float, proc: str, subsystem: str, message: str) -> dict:
+            return {
+                'timestamp': f'2026-11-23 09:00:{second:06.3f}-0800',
+                'bootUUID': 'B00T',
+                'processImagePath': f'/usr/libexec/{proc}',
+                'subsystem': subsystem,
+                'category': 'marks',
+                'messageType': 'Default',
+                'eventMessage': message,
+            }
+
+        user = 'SwitchFrameUser: backboardd cb 9 commit 1 enc 1 1 replay 0 0 ret 0 owait 0 0 fence 2 done 2 back 0 '
+        log = [
+            record(
+                1.2, 'backboardd', checks.GPU_METAL_SUBSYSTEM, user + 'slot 0 0 prev 0 dropped 0 surf 1 imp 2 hit 0'
+            ),
+            record(
+                1.4, 'SwitchHWTest27', 'com.brunostjohn.switch.hwtest', 'SwitchMark: ui.title_scroll.paused.0 500 ms'
+            ),
+            record(
+                3.2, 'backboardd', checks.GPU_METAL_SUBSYSTEM, user + 'slot 0 0 prev 0 dropped 0 surf 0 imp 0 hit 3'
+            ),
+            record(
+                3.4, 'SwitchHWTest27', 'com.brunostjohn.switch.hwtest', 'SwitchMark: ui.title_scroll.paused.1 500 ms'
+            ),
+        ]
+        got = {r.check.name: r for r in devicerun.run_checks(log, [reps, imports])[0]}
+        self.assertEqual(got[imports.name].verdict, PASS)
+        self.assertIn('1 runs, 0 off', got[imports.name].observed)
+        log[0] = {**log[0], 'timestamp': '2026-11-23 09:00:03.100-0800'}
+        got = {r.check.name: r for r in devicerun.run_checks(log, [reps, imports])[0]}
+        self.assertEqual(got[imports.name].verdict, FAIL)
+
     def test_a_promise_given_up_after_its_makers_kill_fails(self):
         judged = [c for c in checks.GROUPS['gpu'] if c.name.startswith(('gpu.channel-killed', 'gpu.promise-given-up'))]
 
@@ -259,6 +332,92 @@ class Rules(unittest.TestCase):
         self.assertEqual(verdicts(given_up(9, 'Weather'), killed)['gpu.promise-given-up-after-kill'], PASS)
         self.assertEqual(verdicts(killed, given_up(11, 'Maps'))['gpu.promise-given-up'], INFO)
 
+    def test_compositor_foreign_waits_excuses_only_promises_in_promise_unkept_windows(self):
+        judged = [
+            c for c in checks.GROUPS['gpu'] if c.name in {checks.PROMISE_UNKEPT_WINDOWS, 'gpu.compositor-foreign-waits'}
+        ]
+
+        def record(second: int, message: str, path: str = '/kernel', subsystem: str = '', boot: str = 'B00T') -> dict:
+            return {
+                'timestamp': f'2026-11-23 09:00:{second:02d}.000000-0800',
+                'bootUUID': boot,
+                'processImagePath': path,
+                'subsystem': subsystem,
+                'category': '',
+                'messageType': 'Default',
+                'eventMessage': message,
+            }
+
+        def stats(
+            second: int,
+            jobs: int,
+            fences: int,
+            promises: int,
+            events: int,
+            host1x: int = 0,
+            boot: str = 'B00T',
+        ) -> dict:
+            return record(
+                second,
+                f'tegra-gm20b: {jobs} compositor jobs waited on foreign work ({fences} fences, '
+                f'{promises} promises, {events} events; {host1x} host1x waits), queue mean 100 us max 200 us ({jobs})',
+                boot=boot,
+            )
+
+        def verdict(*log: dict) -> str:
+            got = {r.check.name: r.verdict for r in devicerun.run_checks(list(log), judged)[0]}
+            return got['gpu.compositor-foreign-waits']
+
+        promise_unkept_test = record(
+            15,
+            'HWTEST gpu.path.promise_unkept PASS d_abandoned=1 waited_ms=5002 ms=5200.0',
+            path='/Applications/SwitchHWTest.app/SwitchHWTest',
+            subsystem=hwtest.SUBSYSTEM,
+        )
+        promise_unkept_bare = record(
+            15,
+            'HWTEST gpu.path.promise_unkept PASS ms=5200.0',
+            path='/Applications/SwitchHWTest.app/SwitchHWTest',
+            subsystem=hwtest.SUBSYSTEM,
+        )
+        present_promise_test = record(
+            15,
+            'HWTEST gpu.path.present_promise PASS flags=0x1 ms=500.0',
+            path='/Applications/SwitchHWTest.app/SwitchHWTest',
+            subsystem=hwtest.SUBSYSTEM,
+        )
+        promise_given_up = record(
+            15,
+            "tegra-gm20b: SwitchHWTest's writer promise at fence offset 256 (value 9) was not kept: "
+            'backboardd waited 5000 ms for it in a composite; it goes on without the promised writes',
+        )
+        production_given_up = record(
+            15,
+            "tegra-gm20b: MobileSafari's writer promise at fence offset 256 (value 9) was not kept: "
+            'backboardd waited 5000 ms for it in a composite; it goes on without the promised writes',
+        )
+
+        self.assertEqual(verdict(stats(10, 0, 0, 0, 0, host1x=0)), PASS)
+        self.assertEqual(verdict(stats(10, 0, 0, 0, 0, host1x=5)), PASS)
+        self.assertEqual(verdict(stats(10, 1, 1, 0, 0)), FAIL)
+        self.assertEqual(verdict(stats(10, 1, 0, 0, 1)), FAIL)
+        self.assertEqual(verdict(stats(12, 1, 1, 0, 0), promise_unkept_test), FAIL)
+        self.assertEqual(verdict(stats(12, 1, 0, 0, 1), promise_unkept_test), FAIL)
+        self.assertEqual(verdict(stats(12, 2, 1, 1, 0), promise_unkept_test), FAIL)
+        self.assertEqual(verdict(stats(12, 1, 0, 1, 0), promise_unkept_test), PASS)
+        self.assertEqual(verdict(stats(12, 1, 0, 1, 0), promise_unkept_bare), PASS)
+        self.assertEqual(verdict(stats(18, 1, 0, 1, 0), promise_unkept_test), PASS)
+        self.assertEqual(verdict(stats(15, 1, 0, 1, 0), present_promise_test), PASS)
+        self.assertEqual(verdict(stats(18, 1, 0, 1, 0), present_promise_test), PASS)
+        self.assertEqual(verdict(stats(15, 1, 1, 0, 0), present_promise_test), FAIL)
+        self.assertEqual(verdict(stats(12, 1, 0, 1, 0), promise_given_up), PASS)
+        self.assertEqual(verdict(stats(18, 1, 0, 1, 0), promise_given_up), PASS)
+        self.assertEqual(verdict(stats(12, 1, 0, 1, 0), production_given_up), FAIL)
+        self.assertEqual(verdict(stats(30, 1, 0, 1, 0), promise_unkept_test), FAIL)
+        self.assertEqual(verdict(stats(30, 1, 0, 1, 0), promise_given_up), FAIL)
+        self.assertEqual(verdict(stats(12, 1, 0, 1, 0)), FAIL)
+        self.assertEqual(verdict(stats(12, 1, 0, 1, 0, boot='B00T2'), promise_unkept_test), FAIL)
+
     def test_a_refused_vic_read_and_an_old_vblank_phase_line_fail(self):
         judged = [c for g in ('gpu', 'display') for c in checks.GROUPS[g] if c.owner == 'lost-work-3']
 
@@ -286,6 +445,46 @@ class Rules(unittest.TestCase):
         )
         self.assertEqual(refused['gpu.vic-read-refused'], FAIL)
         self.assertEqual(verdicts('SwitchDisplay: V_PULSE2 never reached the CPU')['display.vblank-phase-gone'], FAIL)
+
+    def test_a_probe_row_runs_kills_are_its_killed_rows_class_errors(self):
+        runs = {c.name: c for c in hwtest.HWTEST}
+        lines = {c.name: c for c in checks.GROUPS['gpu']}
+
+        def record(second: int, path: str, subsystem: str, message: str) -> dict:
+            return {
+                'timestamp': f'2026-11-23 09:00:{second:02d}.000000-0800',
+                'bootUUID': 'B00T',
+                'processImagePath': path,
+                'subsystem': subsystem,
+                'category': 'results',
+                'messageType': 'Default',
+                'eventMessage': message,
+            }
+
+        def kill(second: int, code: str, method: str, data: str) -> dict:
+            return record(
+                second,
+                '/System/Library/Kernels/kernel.development',
+                '',
+                f'tegra-gm20b: GPU error in SwitchHWTest (channel 18): channel killed, GPU running: gr: DATA_ERROR '
+                f'{code} [] ch 18 [00f11f4000 SwitchHWTest] subc 0 class b197 mthd {method} data {data} | fifo:0',
+            )
+
+        def run(second: int, killed: int) -> dict:
+            return record(
+                second,
+                '/Applications/SwitchHWTest.app/SwitchHWTest',
+                hwtest.SUBSYSTEM,
+                f'HWTEST gpu.gm20b.mixed_end_rows PASS row_end_mode=killed killed={killed} ms=4000.0',
+            )
+
+        log = [kill(1, '00000004', '0fb8', '00000000'), kill(2, '00000127', '0d78', '00000004'), run(3, 2)]
+        check = [runs[hwtest.TIR_ROWS_RUNS], lines['gpu.tir-rows-errors']]
+        got = {r.check.name: r for r in devicerun.run_checks(log, check)[0]}
+        self.assertEqual(got['gpu.tir-rows-errors'].verdict, PASS)
+        self.assertEqual([m['code'] for m in got['gpu.tir-rows-errors'].matches], ['00000004', '00000127'])
+        got = {r.check.name: r for r in devicerun.run_checks(log[1:], check)[0]}
+        self.assertEqual(got['gpu.tir-rows-errors'].verdict, FAIL)
 
     def test_decode_lines_are_counted_per_run_against_each_runs_want(self):
         runs = {c.name: c for c in hwtest.HWTEST}
@@ -367,6 +566,206 @@ class Rules(unittest.TestCase):
         got = {r.check.name: r for r in results}
         self.assertEqual(got['gm20b.failed'].verdict, FAIL)
         self.assertIn('SpringBoard/none/1', got['gm20b.failed'].observed)
+
+    def test_an_os_state_the_pack_lacks_fails_the_boot_by_its_label(self):
+        covers = [c for c in checks.GROUPS['boot'] if c.name == 'boot.pack-covers-os']
+
+        def record(process: str, message: str) -> dict:
+            return {
+                'timestamp': '2026-11-23 10:00:01.000000+0000',
+                'bootUUID': 'B00T',
+                'processImagePath': '/usr/libexec/' + process,
+                'subsystem': checks.GPU_METAL_SUBSYSTEM,
+                'category': '',
+                'messageType': 'Default',
+                'eventMessage': message,
+            }
+
+        key = 'c0=80 | v fixed_vert_lph_spc | f fixed_frag_lph_cph | l QuartzCore'
+        stored = [
+            record(
+                'backboardd',
+                "SwitchMetal: a state the pack lacks made in 3 ms (UI, from the shader compiler's store; queue -1 us) "
+                f'after 0 ms for a compile slot: 3ef3a99e4f382ce1 {key}',
+            ),
+            record(
+                'backboardd',
+                'SwitchMetal: harvest 3ef3a99e4f382ce1 1/1 '
+                f'label=com.apple.coreanimation.PBGRAXmw_TimgA3Xhf_IxrgN3Oc3mtc4nlnlnl {key}',
+            ),
+        ]
+        hwtest = record(
+            'SwitchHWTest', f'SwitchMetal: harvest 0123456789abcdef 1/1 label=com.apple.coreanimation.x {key}'
+        )
+        results, _ = devicerun.run_checks([hwtest], covers)
+        self.assertEqual(results[0].verdict, PASS)
+        results, _ = devicerun.run_checks([*stored, hwtest], covers)
+        self.assertEqual(results[0].verdict, FAIL)
+        self.assertEqual(len(results[0].matches), 1)
+        self.assertIn('backboardd/PBGRAXmw_TimgA3Xhf_IxrgN3Oc3mtc4nlnlnl', results[0].observed)
+        in_process = record(
+            'backboardd',
+            'SwitchMetal: in-process state the pack lacks 3ef3a99e4f382ce1 (record): '
+            'label=com.apple.coreanimation.PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr',
+        )
+        hwtest_in_process = record(
+            'SwitchHWTest',
+            'SwitchMetal: in-process state the pack lacks 0123456789abcdef (record): '
+            'label=com.apple.coreanimation.PBGRAXm_TimgA2Xhf_Isrc',
+        )
+        results, _ = devicerun.run_checks([hwtest_in_process], covers)
+        self.assertEqual(results[0].verdict, PASS)
+        results, _ = devicerun.run_checks([in_process, hwtest_in_process], covers)
+        self.assertEqual(results[0].verdict, FAIL)
+        self.assertIn('backboardd/PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr', results[0].observed)
+
+    def test_backboardd_must_draw_no_catch_all_across_the_boot(self):
+        rule = [c for c in checks.GROUPS['boot'] if c.name == 'boot.ca-no-catch-all']
+        self.assertEqual(len(rule), 1)
+
+        def rates(process: str, cag: int, second: int) -> dict:
+            return {
+                'timestamp': f'2026-11-23 10:00:{second:02d}.000000+0000',
+                'bootUUID': 'B00T',
+                'processImagePath': '/usr/libexec/' + process,
+                'subsystem': checks.GPU_METAL_SUBSYSTEM,
+                'category': 'plugin',
+                'messageType': 'Default',
+                'eventMessage': f'TegraGM20BMetal: {process} gm20b 5s c=120(24.0/s) pack=45/0 cag={cag} rtsync=12/345us',
+            }
+
+        hwtest = rates('SwitchHWTest', 7, 1)
+        results, _ = devicerun.run_checks([hwtest], rule)
+        self.assertEqual(results[0].verdict, NO_DATA)
+        clean = [rates('backboardd', 0, 5), rates('backboardd', 0, 10), hwtest]
+        results, _ = devicerun.run_checks(clean, rule)
+        self.assertEqual(results[0].verdict, PASS)
+        results, _ = devicerun.run_checks([*clean, rates('backboardd', 3, 15)], rule)
+        self.assertEqual(results[0].verdict, FAIL)
+        self.assertIn('max(cag) 3', results[0].observed)
+
+    def test_boot_pack_pieces_fails_on_refusal_slow_import_or_piece_import(self):
+        rule = [c for c in checks.GROUPS['boot'] if c.name == 'boot.pack-pieces']
+        self.assertEqual(len(rule), 1)
+
+        def rec(path: str, subsystem: str, message: str, second: int = 10) -> dict:
+            return {
+                'timestamp': f'2026-11-24 10:00:{second:02d}.000000+0000',
+                'bootUUID': 'B00T',
+                'processImagePath': path,
+                'subsystem': subsystem,
+                'category': 'gm20b',
+                'messageType': 'Default',
+                'eventMessage': message,
+            }
+
+        healthy = [
+            rec(
+                '/kernel.development',
+                '',
+                'tegra-gm20b: pack image: tier 0 124 MiB built in 900 ms for cameracaptured '
+                '(pagein requests 125, copy 14 ms, big-page bytes 130023424)',
+                1,
+            ),
+            rec(
+                '/usr/libexec/backboardd',
+                checks.GPU_METAL_SUBSYSTEM,
+                'SwitchMetal: backboardd: pack window mapped in 140 us (124 MiB tier 0)',
+                2,
+            ),
+            rec(
+                '/usr/libexec/backboardd',
+                checks.GPU_METAL_SUBSYSTEM,
+                'SwitchMetal: pack window: 5 MiB of CPU ranges wired in 42 ms (pageins 310)',
+                3,
+            ),
+            rec(
+                '/kernel.development',
+                '',
+                'tegra-gm20b: slow import backboardd 3840 KiB surface 42: 6500 us = wire 6000',
+                4,
+            ),
+            rec(
+                '/kernel.development',
+                '',
+                'tegra-gm20b: slow import SwitchHWTest 64 KiB read-only surface 0: 9500 us = wire 9000',
+                5,
+            ),
+        ]
+        results, _ = devicerun.run_checks(healthy, rule)
+        self.assertEqual(results[0].verdict, PASS, results[0].observed)
+
+        bad_cases = [
+            (
+                rec('/kernel.development', '', 'tegra-gm20b: pack image: refused (open failed, err 2)'),
+                'refused (open failed, err 2)',
+            ),
+            (
+                rec(
+                    '/kernel.development',
+                    '',
+                    'tegra-gm20b: slow import backboardd 64 KiB read-only surface 0: 21000 us = wire 20500',
+                ),
+                '64 KiB read-only surface 0',
+            ),
+            (
+                rec(
+                    '/usr/libexec/backboardd',
+                    checks.GPU_METAL_SUBSYSTEM,
+                    'SwitchMetal: backboardd: pack image refused (status 2): using per-piece placement',
+                ),
+                'image refused (status 2)',
+            ),
+            (
+                rec(
+                    '/usr/libexec/backboardd',
+                    checks.GPU_METAL_SUBSYSTEM,
+                    'SwitchMetal: backboardd: pack image map failed (0xe00002c2): using per-piece placement',
+                ),
+                'image map failed (0xe00002c2)',
+            ),
+            (
+                rec(
+                    '/usr/libexec/backboardd',
+                    checks.GPU_METAL_SUBSYSTEM,
+                    'SwitchMetal: backboardd: pack piece import: tier 0, 1 piece(s) at heap 0x0',
+                ),
+                'piece import: tier 0',
+            ),
+        ]
+        for bad, expected_detail in bad_cases:
+            results, _ = devicerun.run_checks([*healthy, bad], rule)
+            self.assertEqual(results[0].verdict, FAIL, expected_detail)
+            self.assertIn(expected_detail, results[0].observed)
+
+    def test_the_setup_before_launchd_is_timed_on_boots_that_sync_nothing(self):
+        rows = [c for c in checks.GROUPS['boot'] if c.name in {'boot.prefs-before-launchd', 'boot.prefs-synced'}]
+
+        def record(boot: str, tail: str) -> dict:
+            return {
+                'timestamp': '2026-11-23 10:00:05.000000+0000',
+                'bootUUID': boot,
+                'processImagePath': '/kernel',
+                'messageType': 'Default',
+                'eventMessage': f'Switch: persistent Data launchd preferences ready {tail}',
+            }
+
+        ordinary = record('B00T', '(1 written, 9 unchanged, 0 durable, 84 ms)')
+        panicked = record(
+            'B00T2', '(4 written, 8 unchanged, 3 durable, 1412 ms): synced from /private/var/Switch/panic-x.log'
+        )
+        results, _ = devicerun.run_checks([ordinary, panicked], rows)
+        got = {r.check.name: r for r in results}
+        self.assertEqual(got['boot.prefs-before-launchd'].verdict, PASS, got['boot.prefs-before-launchd'].observed)
+        self.assertEqual(got['boot.prefs-synced'].verdict, INFO)
+        self.assertIn('/private/var/Switch/panic-x.log/3/1412', got['boot.prefs-synced'].observed)
+        results, _ = devicerun.run_checks([panicked], rows)
+        got = {r.check.name: r for r in results}
+        self.assertEqual(got['boot.prefs-before-launchd'].verdict, NO_DATA)
+        results, _ = devicerun.run_checks([record('B00T', '(1 written, 9 unchanged, 0 durable, 1487 ms)')], rows)
+        got = {r.check.name: r for r in results}
+        self.assertEqual(got['boot.prefs-before-launchd'].verdict, FAIL)
+        self.assertEqual(got['boot.prefs-synced'].verdict, NO_DATA)
 
     def test_kills_in_a_kill_tests_window_are_that_tests(self):
         judged = [c for c in checks.GROUPS['refusals'] if c.name in {'gm20b.failed', 'gm20b.killed'}]
@@ -502,6 +901,76 @@ class Rules(unittest.TestCase):
         self.assertEqual(got['wifi.dhcp-bound'].verdict, NO_DATA)
 
 
+class Widgets(unittest.TestCase):
+    """The display-query, window-server and widget-watchdog checks over boot 2's (22 Nov) lines."""
+
+    @staticmethod
+    def judge(name: str, log: list[dict]) -> rules.Result:
+        results, _ = devicerun.run_checks(log, [c for c in checks.GROUPS['boot'] if c.name == name])
+        return results[0]
+
+    @staticmethod
+    def record(path: str, subsystem: str, message: str) -> dict:
+        return {
+            'timestamp': '2026-11-22 23:51:55.850000+0000',
+            'bootUUID': '3349B3E8',
+            'processImagePath': path,
+            'subsystem': subsystem,
+            'category': '',
+            'messageType': 'Error',
+            'eventMessage': message,
+        }
+
+    def test_a_refused_display_query_fails_the_boot_in_any_process(self):
+        refused = 'CoreAnimation: Unable to query displays from server (-81182718)'
+        chronod = self.record('/System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod', '', refused)
+        contextstored = self.record('/usr/libexec/contextstored', 'com.apple.coreanimation', refused)
+        self.assertEqual(self.judge('boot.display-query-refused', []).verdict, PASS)
+        result = self.judge('boot.display-query-refused', [chronod, contextstored])
+        self.assertEqual(result.verdict, FAIL)
+        self.assertIn('chronod x1', result.observed)
+        self.assertIn('contextstored x1', result.observed)
+
+    def test_the_window_server_is_ready_inside_a_display_querys_five_seconds(self):
+        def ready(seconds: str) -> dict:
+            return self.record(
+                '/usr/libexec/backboardd',
+                'com.apple.BackBoard',
+                f'      window server ready in {seconds}s. overall 35.0843s',
+            )
+
+        self.assertEqual(self.judge('boot.window-server-ready', []).verdict, NO_DATA)
+        self.assertEqual(self.judge('boot.window-server-ready', [ready('0.4127')]).verdict, PASS)
+        result = self.judge('boot.window-server-ready', [ready('0.4127'), ready('21.7462')])
+        self.assertEqual(result.verdict, FAIL)
+        self.assertIn('max(s) 21.75', result.observed)
+
+    def test_a_widget_session_the_watchdog_ends_fails_once_per_kill(self):
+        chronod = '/System/Library/PrivateFrameworks/ChronoCore.framework/Support/chronod'
+        error = (
+            'Error Domain=CHSErrorDomain Code=1001 "Watchdog provision violated for getTimelines(1)" '
+            'UserInfo={NSDebugDescription=Watchdog provision violated for getTimelines(1)}'
+        )
+        killed = [
+            self.record(
+                chronod,
+                'com.apple.chrono',
+                f'[Music.MusicWidgets-23375BEB9354] Session operation: `getTimelines(1)` error result: {error}',
+            ),
+            self.record(
+                chronod,
+                'com.apple.chrono',
+                '[com.apple.Music::com.apple.Music.MusicWidgets:Music.RecentlyPlayedWidget:systemMedium::305.50/'
+                f'141.00/23.97:(null)~(null)] on local reload: failed with error {error}',
+            ),
+        ]
+        self.assertEqual(self.judge('widgets.timeline-watchdog', []).verdict, PASS)
+        result = self.judge('widgets.timeline-watchdog', killed)
+        self.assertEqual(result.verdict, FAIL)
+        self.assertEqual(len(result.matches), 1)
+        self.assertIn('Music.MusicWidgets x1', result.observed)
+
+
 class UsbHost(unittest.TestCase):
     """The host-mode checks over boot-1109-2145's lines (a keyboard plugged twice) and a boot that enumerates."""
 
@@ -625,6 +1094,54 @@ class Reports(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(devicerun.main([str(NDJSON), '--ndjson']), 1)
         self.assertIn('launchd.lskdd', out.getvalue())
+
+    def test_boot_prefetch_lead_parses_line(self):
+        lead_check = next(c for c in checks.GROUPS['boot'] if c.name == 'boot.prefetch-lead')
+        summary_check = next(c for c in checks.GROUPS['boot'] if c.name == 'boot.prefetch')
+        lead_msg = (
+            'SwitchBootPrefetch: 120 MiB paged in ahead (110 used, 2 reclaimed unused, '
+            'lead 8 of bound 64), 45 MiB of demand reads by volume (15/20/10), '
+            'card ms 1400/900, requests > 64 KiB replay 200/240, demand 12/80'
+        )
+        saved_msg = (
+            'SwitchBootPrefetch: list saved: 42 runs, 12 MiB '
+            '(4/3/5 MiB cx/root/Data; 10 kept of the last list, 1 dropped unused, 0 evicted) in 35 ms'
+        )
+        records = [
+            {
+                'timestamp': '2026-11-23 10:00:10.000000-0800',
+                'bootUUID': '31AB01C1',
+                'processImagePath': '/kernel',
+                'subsystem': '',
+                'category': '',
+                'messageType': 'Default',
+                'eventMessage': msg,
+            }
+            for msg in (lead_msg, saved_msg)
+        ]
+        results, _ = devicerun.run_checks(records, [summary_check, lead_check])
+        by_name = {r.check.name: r for r in results}
+        self.assertEqual(by_name['boot.prefetch-lead'].verdict, INFO)
+        self.assertIn('120/110/2/8/64/45/15/20/10/1400/900/200/240/12/80', by_name['boot.prefetch-lead'].observed)
+        self.assertEqual(by_name['boot.prefetch'].verdict, INFO)
+        self.assertEqual(len(by_name['boot.prefetch'].matches), 1)
+        self.assertIn('list saved:', by_name['boot.prefetch'].matches[0]['message'])
+
+    def test_launchd_prngseedd_fails_on_boot_2_respawn_and_passes_when_absent(self):
+        check = next(c for c in checks.GROUPS['launchd'] if c.name == 'launchd.prngseedd')
+        spawned = {
+            'timestamp': '2026-11-22 23:56:53.760000+0000',
+            'bootUUID': 'B2',
+            'processImagePath': '/sbin/launchd',
+            'subsystem': 'user/501/com.apple.prngseedd [492]',
+            'category': '',
+            'messageType': 'Default',
+            'eventMessage': 'exited due to exit(0), ran for 1030ms',
+        }
+        failed, _ = devicerun.run_checks([spawned], [check])
+        self.assertEqual(failed[0].verdict, FAIL)
+        clean, _ = devicerun.run_checks([], [check])
+        self.assertEqual(clean[0].verdict, PASS)
 
 
 if __name__ == '__main__':

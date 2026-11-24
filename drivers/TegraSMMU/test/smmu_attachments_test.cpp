@@ -78,3 +78,19 @@ TEST(SmmuAttachments, RetainsBothAfiClientRegistersAndMergesTheirBits)
     tegra_smmu_attachments_forget(&t, read.asidReg);
     EXPECT_EQ(t.count, 0u);
 }
+
+TEST(SmmuAttachments, RetainsBothGpuTranslationRegistersForSameSwgroup)
+{
+    tegra_smmu_attachments t = {};
+    const tegra_smmu_attachment gpu0 = {117, 0x8000e000, 0xaac, 0x230, (1u << 24) | (1u << 25), false};
+    const tegra_smmu_attachment gpu1 = {117, 0x8000e000, 0xaac, 0xb98, (1u << 8) | (1u << 9), false};
+    ASSERT_TRUE(tegra_smmu_attachments_note(&t, &gpu0));
+    ASSERT_TRUE(tegra_smmu_attachments_note(&t, &gpu1));
+    ASSERT_EQ(t.count, 2u);
+    EXPECT_EQ(t.entry[0].translationReg, 0x230u);
+    EXPECT_EQ(t.entry[0].translationBits, (1u << 24) | (1u << 25));
+    EXPECT_EQ(t.entry[1].translationReg, 0xb98u);
+    EXPECT_EQ(t.entry[1].translationBits, (1u << 8) | (1u << 9));
+    tegra_smmu_attachments_forget(&t, 0xaac);
+    EXPECT_EQ(t.count, 0u);
+}

@@ -247,6 +247,10 @@ struct upl {
 #endif  /* UPL_DEBUG */
 
 	bitmap_t       *lite_list;
+	uint32_t        switch_prefetch_bytes;
+#if DEVELOPMENT || DEBUG
+	uint64_t        switch_start_abs;
+#endif
 	struct upl_page_info page_list[];
 };
 
@@ -275,6 +279,10 @@ struct upl {
 #define UPL_MAP_EXCLUSIVE_WAIT  0x00200000
 #define UPL_HAS_FS_VERIFY_INFO  0x00400000
 #define UPL_HAS_WIRED           0x00800000
+#define UPL_SWITCH_PREFETCH     0x10000000
+#if DEVELOPMENT || DEBUG
+#define UPL_SWITCH_DEMAND       0x20000000
+#endif
 
 /* flags for upl_create flags parameter */
 #define UPL_CREATE_EXTERNAL     0

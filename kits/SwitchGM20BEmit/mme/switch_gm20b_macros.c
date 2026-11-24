@@ -318,13 +318,15 @@ static void fetch_short(struct mme_builder *b, struct mme_value t, struct mme_va
     mme_merge_to(b, t, mme_zero(), t, 0, 1, 31);
 }
 
-/* The vertices of an instance's first BEGIN, and of each later one, of each SET_PRIMITIVE_TOPOLOGY (point list 1, line
- * list 2, line strip 3, triangle list 4, triangle strip 5): two bits a topology */
+/* The vertices of a primitive, and those from one primitive's first vertex to the next's, of each
+ * SET_PRIMITIVE_TOPOLOGY (point list 1, line list 2, line strip 3, triangle list 4, triangle strip 5): two bits a
+ * topology */
 #define FETCH_FIRST_TABLE (1u << 2 | 2u << 4 | 2u << 6 | 3u << 8 | 3u << 10)
 #define FETCH_STEP_TABLE  (1u << 2 | 2u << 4 | 1u << 6 | 3u << 8 | 1u << 10)
 
-/* `size`: the vertices of an instance's first BEGIN (`first`) or of each later one, from the call's scratch words or,
- * for an indirect command buffer's commands, whose topologies differ, from the topology the command set (`t` spare) */
+/* `size`: the vertices of a primitive (`first`) or those from one primitive's first vertex to the next's, from the
+ * call's scratch words or, for an indirect command buffer's commands, whose topologies differ, from the topology the
+ * command set (`t` spare) */
 static void fetch_size(struct mme_builder *b, struct mme_value size, struct mme_value t, bool first, bool topology)
 {
     if (!topology) {
@@ -339,13 +341,13 @@ static void fetch_size(struct mme_builder *b, struct mme_value size, struct mme_
 
 /* A draw of a state that fetches a colour it writes through the texture unit, whose primitives the fetch barrier must
  * order: after its count and instances, its words in Vulkan's indirect order (first, an indexed draw's vertex offset,
- * the first instance). The draw parameters once, then each instance as one split draw: its first BEGIN over the
- * vertices of its first primitive, each later BEGIN over the vertices that make one more with SPLIT_MODE open at both
- * ends and the primitive and instance IDs unchanged, and a last BEGIN over what is left that ends the split, each after
- * the fetch barrier. The hardware assembles the primitives across the BEGINs as one draw, its strips' winding and
- * primitive restart included, so every BEGIN completes at most one primitive. Fermi's seven registers: count, the
- * position, the BEGIN word, the instance loop's, what is left of the instance, the BEGIN's size and the test. Frees
- * every register it is given or takes. */
+ * the first instance). The draw parameters once, then each instance as one split draw: a BEGIN a primitive over that
+ * primitive's own vertices, after the fetch barrier, the later ones with SPLIT_MODE open at both ends and the primitive
+ * and instance IDs unchanged, and a last BEGIN of no vertices that ends the split. GM20B carried no vertex from one
+ * such BEGIN into the next on the device (a strip's later BEGINs of one vertex each drew nothing), so a strip's BEGIN
+ * repeats the vertices its primitive shares with the one before. Fermi's seven
+ * registers: count, the position, the BEGIN word, the instance loop's, what is left of the instance, the BEGIN's size
+ * and the test. Frees every register it is given or takes. */
 static void build_fetch_body(struct mme_builder *b, bool indexed, struct mme_value count, struct mme_value instances,
                              bool topology)
 {
@@ -389,20 +391,17 @@ static void build_fetch_body(struct mme_builder *b, bool indexed, struct mme_val
                     {
                         fetch_barrier(b);
                         fetch_begin(b, first_mthd, begin, at, size);
-                        mme_add_to(b, at, at, size);
-                        mme_sub_to(b, left, left, size);
                         mme_state_to(b, begin, FETCH_SCRATCH(CONTINUED));
                         fetch_size(b, size, t, false, topology);
+                        mme_add_to(b, at, at, size);
+                        mme_sub_to(b, left, left, size);
+                        fetch_size(b, size, t, true, topology);
                         fetch_short(b, t, left, size);
                     }
                 }
-                mme_if(b, ine, left, mme_zero())
-                {
-                    fetch_barrier(b);
-                }
                 mme_state_to(b, t, FETCH_SCRATCH(BEGIN));
                 mme_xor_to(b, begin, begin, t);
-                fetch_begin(b, first_mthd, begin, at, left);
+                fetch_begin(b, first_mthd, begin, at, mme_zero());
                 /* the next instance from the first vertex again: at - (count - left) */
                 mme_add_to(b, at, at, left);
                 mme_sub_to(b, at, at, count);
@@ -917,6 +916,80 @@ static void build_icb_bind(struct mme_builder *b, bool unused)
     }
 }
 
+static void build_band_draw(struct mme_builder *b, bool unused)
+{
+    (void)unused;
+    struct mme_value bands = mme_load(b);
+    struct mme_value horiz = mme_load(b);
+    mme_if(b, ine, bands, mme_zero())
+    {
+        mme_mthd(b, NVB197_SET_SCISSOR_ENABLE(0));
+        mme_emit(b, mme_imm(NVB197_SET_SCISSOR_ENABLE_V_TRUE));
+        mme_mthd(b, NVB197_SET_SCISSOR_HORIZONTAL(0));
+        mme_emit(b, horiz);
+    }
+    mme_free_reg(b, horiz);
+
+    struct mme_value first = mme_load(b);
+    struct mme_value count = mme_load(b);
+    struct mme_value y_cur = mme_load(b);
+    struct mme_value step = mme_load(b);
+
+    mme_if(b, ine, bands, mme_zero())
+    {
+        mme_sub_to(b, bands, bands, mme_imm(1));
+        mme_while(b, ine, bands, mme_zero())
+        {
+            struct mme_value next = mme_add(b, y_cur, step);
+            mme_merge_to(b, y_cur, y_cur, next, 16, 16, 0);
+            mme_mthd(b, NVB197_SET_SCISSOR_VERTICAL(0));
+            mme_emit(b, y_cur);
+            mme_mov_to(b, y_cur, next);
+            mme_free_reg(b, next);
+
+            mme_mthd(b, NVB197_BEGIN);
+            mme_emit(b, mme_zero());
+            mme_mthd(b, NVB197_SET_VERTEX_ARRAY_START);
+            mme_emit(b, first);
+            mme_emit(b, count);
+            mme_mthd(b, NVB197_END);
+            mme_emit(b, mme_zero());
+            mme_mthd(b, NVB197_WAIT_FOR_IDLE);
+            mme_emit(b, mme_zero());
+
+            mme_sub_to(b, bands, bands, mme_imm(1));
+        }
+        mme_mov_to(b, bands, mme_imm(1));
+    }
+    mme_free_reg(b, step);
+
+    struct mme_value y_end = mme_load(b);
+    struct mme_value orig_vert = mme_load(b);
+    mme_if(b, ine, bands, mme_zero())
+    {
+        mme_merge_to(b, y_cur, y_cur, y_end, 16, 16, 0);
+        mme_mthd(b, NVB197_SET_SCISSOR_VERTICAL(0));
+        mme_emit(b, y_cur);
+
+        mme_mthd(b, NVB197_BEGIN);
+        mme_emit(b, mme_zero());
+        mme_mthd(b, NVB197_SET_VERTEX_ARRAY_START);
+        mme_emit(b, first);
+        mme_emit(b, count);
+        mme_mthd(b, NVB197_END);
+        mme_emit(b, mme_zero());
+
+        mme_mthd(b, NVB197_SET_SCISSOR_VERTICAL(0));
+        mme_emit(b, orig_vert);
+    }
+    mme_free_reg(b, orig_vert);
+    mme_free_reg(b, y_end);
+    mme_free_reg(b, y_cur);
+    mme_free_reg(b, count);
+    mme_free_reg(b, first);
+    mme_free_reg(b, bands);
+}
+
 static void write_macro(FILE *out, const char *name, void (*build)(struct mme_builder *, bool), bool indexed,
                         const struct nv_device_info *dev)
 {
@@ -973,6 +1046,7 @@ int main(int argc, char **argv)
     write_macro(out, "clear_layers", build_clear_layers, false, &dev);
     write_macro(out, "fetch_draw", build_fetch_draw, false, &dev);
     write_macro(out, "fetch_draw_indexed", build_fetch_draw, true, &dev);
+    write_macro(out, "band_draw", build_band_draw, false, &dev);
     fprintf(out, "\n#endif\n");
     return fclose(out) ? 1 : 0;
 }

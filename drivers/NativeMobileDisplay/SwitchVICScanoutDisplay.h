@@ -129,6 +129,14 @@ bool offerVicCopy(const OriginalLegacySwapRequest *request, OSObject *surface, u
     const bool tiled = blockLog2 >= 0;
     if (tiled && blockLog2 != int(kScanBlockLog2))
         return false;
+    if (tiled) {
+        if (IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface)) {
+            IOByteCount length = 0;
+            const uint64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+            if (pa && tegra_gm20b_surface_compressed(pa & ~0xfffULL))
+                return false;
+        }
+    }
     if (!tiled && (!traits->blockLinearOut || stride % traits->sourcePitchAlign || allocation < stride * height)) {
         switch_refusal("display-scanout", "vic-stride",
                        "SwitchDisplay: VIC does not copy a %llu-byte-row frame into the scanout: it reads rows on "

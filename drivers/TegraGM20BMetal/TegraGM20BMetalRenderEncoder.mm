@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
+#import "TegraGM20BMetalStatesKey.h"
 
+#include "ca_catch_all.h"
 #include "sample_shading.h"
 #include "shader_test_push.h"
 
@@ -241,6 +243,7 @@ static void forwardCall(SwitchMetalEncoder *e, SEL selector, const void *argumen
     // ended, whose draws are refused
     if (!_pipe || _cb->_encFailed)
         return !gm20bDrawAfterParallelEnd(_cb);
+    SWITCH_METAL_DIAGNOSTIC(if (_pipe->_caCatchAll) gm20b::gCaCatchAllDraws.fetch_add(1, std::memory_order_relaxed));
     if (_checkedEligibility == _eligibility && _checkedEpoch == _cb->_plan.stateEpoch() &&
         _checkedPipeline == _pipe->_raw)
         return YES;
@@ -254,7 +257,7 @@ static void forwardCall(SwitchMetalEncoder *e, SEL selector, const void *argumen
         }
     }
     if (_turn && pl.turnRefused) {
-        gm20bTurnRefused(_cb, pl.rec->keyHash, _turn, _pipe->_key.c_str());
+        gm20bTurnRefused(_cb, pl.rec->keyHash, _turn, gm20bStateKey(_pipe).c_str());
         return NO;
     }
     uint32_t sampleMasks[4];
@@ -321,7 +324,7 @@ static void forwardCall(SwitchMetalEncoder *e, SEL selector, const void *argumen
     const uint32_t zeta = _zeta ? _zeta : _cb->_passes[_passAt].testsHiddenZeta ? gm20b::kZetaFormat : 0;
     if (const gm20b::Pipeline *pl = _pipe ? _pipe->_raw : nullptr;
         pl && _forms.fragmentTests != gm20b::drawnTests(pl->fetchBits && pl->depthFormat && !pl->storageBits,
-                                                        pl->rec->shaderTests, _ds, zeta))
+                                                        pl->rec->shaderTests, _ds, gm20b::testedZeta(zeta)))
         [self prepareDrawnRecord];
 }
 

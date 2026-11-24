@@ -58,7 +58,21 @@ extension NativeArgumentEncoderTest {
             Array(pixels.pixel(k, 0, width: 3)) == Array(Self.arrayTexels[k][4 ..< 8])
                 && Array(pixels.pixel(k, 1, width: 3)) == Array(Self.arrayTexels[k][0 ..< 4])
         }
-        return "\(drawn.path)/\(exact ? "exact" : "wrong")"
+        return "\(drawn.path)/\(exact ? "exact" : "wrong/" + Self.arrayPixels(pixels))"
+    }
+
+    /// Each pixel of the array draw, row 0 then row 1, as the texture and texel it holds ("1.0": texture 1's texel 0,
+    /// what row 1's repeat sampler reads of column 1) or its bytes where it holds none
+    static func arrayPixels(_ pixels: [UInt8]) -> String {
+        (0 ..< 2).flatMap { row -> [String] in
+            (0 ..< 3).map { column -> String in
+                let got = Array(pixels.pixel(column, row, width: 3))
+                for (j, texels) in arrayTexels.enumerated() {
+                    for i in 0 ..< 2 where Array(texels[4 * i ..< 4 * i + 4]) == got { return "\(j).\(i)" }
+                }
+                return got.map { String($0, radix: 16) }.joined(separator: ".")
+            }
+        }.joined(separator: "_")
     }
 
     /// Where a pass that reads a colour through one pointer that is a bound buffer at one pixel and an argument buffer's

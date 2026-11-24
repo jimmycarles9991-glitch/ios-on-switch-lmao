@@ -199,9 +199,9 @@ TEST(GM20BFacadeRangeForms, ASeparateDepthAndStencilFromTheirSlicesAreEncodedAhe
 }
 
 // What an extended-range texture bound in pass 9 of a paced CA frame takes off encode-ahead, printed per form: its
-// stand-in's bind vetoes the frame's encode ahead (VetoShadows, the stand-in drawn from the codes at the commit's encode);
-// one this harness's pack makes no stand-in for (no conversion state) vetoes nothing; a two-plane RGB10A8_2P_XR10 bind adds
-// no veto of its own (SwitchMetalPass::xrPlaneBinds).
+// stand-in's bind stops the encode ahead at pass 9 (VetoShadows, the stand-in drawn from the codes at the commit's encode
+// of passes 9 on), the passes before it encoded ahead; one this harness's pack makes no stand-in for (no conversion
+// state) stops nothing; a two-plane RGB10A8_2P_XR10 bind adds no reason of its own (SwitchMetalPass::xrPlaneBinds).
 TEST(GM20BFacadeRangeForms, ExtendedRangeSamplesAndTheEncodeAhead)
 {
     ASSERT_TRUE(opened().device != nil);
@@ -231,14 +231,19 @@ TEST(GM20BFacadeRangeForms, ExtendedRangeSamplesAndTheEncodeAhead)
         ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted) << format;
         NSDictionary *p = pipelined(cb);
         ASSERT_NE(p, nil);
-        printf("sampled format %u in pass 9: %d of %d encoders encoded ahead, veto %d, path %s\n", format,
-               [p[@"pipelined"] intValue], [p[@"encoders"] intValue], [p[@"veto"] intValue], path(cb).c_str());
-        if (!format)
+        printf("sampled format %u in pass 9: %d of %d encoders encoded ahead, veto %d, stopped %d, path %s\n", format,
+               [p[@"pipelined"] intValue], [p[@"encoders"] intValue], [p[@"veto"] intValue], [p[@"stopped"] intValue],
+               path(cb).c_str());
+        if (!format) {
             EXPECT_GE([p[@"pipelined"] intValue], 10);
-        else if (((SwitchMetalTexture *)sampled)->_raw.standIn)
-            EXPECT_NE([p[@"veto"] intValue] & int(VetoShadows), 0) << format;
-        else  // no conversion state in this harness's pack: no stand-in to draw at the commit
+        } else if (((SwitchMetalTexture *)sampled)->_raw.standIn) {
+            EXPECT_NE([p[@"stopped"] intValue] & int(VetoShadows), 0) << format;
             EXPECT_EQ([p[@"veto"] intValue] & int(VetoShadows), 0) << format;
+            EXPECT_GE([p[@"pipelined"] intValue], 6) << format;
+            EXPECT_LE([p[@"pipelined"] intValue], 9) << format;
+        } else {  // no conversion state in this harness's pack: no stand-in to draw at the commit
+            EXPECT_EQ(([p[@"veto"] intValue] | [p[@"stopped"] intValue]) & int(VetoShadows), 0) << format;
+        }
     }
 }
 

@@ -21,7 +21,7 @@ namespace gm20b {
 bool Device::waitFence(uint32_t seqno, uint64_t generation)
 {
     constexpr unsigned kRefusals = 3;
-    const uint32_t ch = channel_, opened = k_.opened();
+    const uint32_t ch = channel_.load(std::memory_order_acquire), opened = k_.opened();
     if (done(seqno) && semanticFence(seqno).status == SemanticFenceStatus::Superseded) {
         int result = KERN_SUCCESS;
         if (k_.wait(ch, seqno, ~0ull, &result))
@@ -87,13 +87,15 @@ std::vector<KillRange> Device::failedSeqnos() const
             if (kept.error)
                 failed.push_back(kept);
     }
+    const uint32_t ch = channel_.load(std::memory_order_acquire);
+    const volatile uint32_t *fence = fence_.load(std::memory_order_acquire);
     Killed live = {};
     if (!k_.killRecords())  // nothing tells the seqnos the channel finished from those it took with it
         failed.push_back({1, lastSubmitted(), kWaitRefused});
-    else if (k_.lost(channel_) && !liveKill(live))  // the kernel publishes the error before the record and the fence
-        failed.push_back({__atomic_load_n(fence_, __ATOMIC_ACQUIRE) + 1, lastSubmitted(),
+    else if (k_.lost(ch) && !liveKill(live))  // the kernel publishes the error before the record and the fence
+        failed.push_back({__atomic_load_n(fence, __ATOMIC_ACQUIRE) + 1, lastSubmitted(),
                           k_.lostError() ? k_.lostError() : kWaitRefused});
-    const auto *record = reinterpret_cast<const volatile TegraGM20BAbiFence *>(fence_);
+    const auto *record = reinterpret_cast<const volatile TegraGM20BAbiFence *>(fence);
     if (const uint32_t seqno =
             newestSemanticFailure(reinterpret_cast<const volatile TegraGM20BAbiFenceSemantic *>(record + 1)))
         failed.push_back({seqno, seqno, kDependencyFailed});
@@ -113,7 +115,7 @@ void Device::forgetKept()
 // writes the range, the error, then the fence word.
 bool Device::liveKill(Killed &k) const
 {
-    const volatile uint32_t *fence = fence_;
+    const volatile uint32_t *fence = fence_.load(std::memory_order_acquire);
     if (fence == &kNoFence)
         return false;
     if (k_.killRecords()) {
@@ -201,7 +203,7 @@ std::string Device::vaOwner(uint64_t va)
                     [&](const std::vector<Chunk> &z) {
                         return chunk(z, "a zeta chunk");
                     }) ||
-        chunk(wcChunks_, "a write-combined chunk"))
+        chunk(wcChunks_, "a write-combined chunk") || chunk(volatileWcChunks_, "a volatile write-combined chunk"))
         return line;
     for (const auto &[key, i] : surfaces_)
         if (in(i->bo, i->bo.bytes, i->kind == TGM_LAYOUT_KIND ? "a block-linear IOSurface" : "a pitch IOSurface"))
@@ -214,11 +216,12 @@ bool Device::reopen()
 #if SWITCH_METAL_DIAGNOSTICS
     const uint64_t began = mach_absolute_time();
 #endif
-    if (channel_) {  // none after a reopen the kernel refused: that channel was retired then
-        keptSlot_ = fence_;
+    if (const uint32_t oldChannel = channel_.load(std::memory_order_relaxed)) {
+        // none after a reopen the kernel refused: that channel was retired then
+        keptSlot_ = fence_.load(std::memory_order_relaxed);
         Killed live = {};
         if (liveKill(live)) {
-            k_.markLost(channel_, k_.opened());
+            k_.markLost(oldChannel, k_.opened());
             std::lock_guard<gm20b::Mutex> l(killedLock_);
             killedKept_[killedNext_++ % killedKept_.size()] = live;
             keptThrough_.store(live.last, std::memory_order_relaxed);
@@ -227,8 +230,10 @@ bool Device::reopen()
         contextless_ = true;
         const uint64_t retiring = generations_.retire(failedSeqnos());
         // Closed once: the connection is NVK's, whose next channel may take the slot number
-        k_.closeChannel(channel_);
+        k_.closeChannel(oldChannel);
         generations_.closed(retiring);
+        channel_.store(0, std::memory_order_release);
+        fence_.store(&kNoFence, std::memory_order_release);
     }
     if (!channelRefusal_.mayAsk(k_))
         return false;
@@ -244,7 +249,7 @@ bool Device::reopen()
         return false;
     }
     channelRefusal_.made();
-    if (fence_ != keptSlot_)
+    if (fence_.load(std::memory_order_relaxed) != keptSlot_)
         forgetKept();
     contextless_ = false;
     SWITCH_METAL_DIAGNOSTIC(stats.reopenTicks = mach_absolute_time() - began);

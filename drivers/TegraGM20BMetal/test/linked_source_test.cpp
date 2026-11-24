@@ -24,8 +24,12 @@ TEST(GM20BLinkedSource, TheRawRecordIsTheLinkedFunctionsToo)
 {
     const std::string states = SourceText("../TegraGM20BMetalStates.mm");
     EXPECT_THAT(Body(states, "SwitchMetalPipeline *gm20bPipelineShell("), HasSubstr("metal_linked_packable(d)"));
-    EXPECT_THAT(Body(SourceText("../TegraGM20BMetalLibrary.mm"), "NSString *metal_pipeline_key("),
-                HasSubstr("gm20b::pipelineKey(d, vf ? &vertex : nullptr, ff ? &fragment : nullptr, linkedKey(d),"));
+    const std::string library = SourceText("../TegraGM20BMetalLibrary.mm");
+    EXPECT_THAT(
+        Body(library, "NSString *metal_pipeline_key("),
+        HasSubstr("gm20bLinkedText(d.vertexLinkedFunctions.functions, d.vertexLinkedFunctions.privateFunctions,"));
+    EXPECT_THAT(Body(library, "NSString *metal_pipeline_key("),
+                HasSubstr("gm20b::pipelineKey(d, vf ? &vertex : nullptr, ff ? &fragment : nullptr, linked,"));
     EXPECT_THAT(Body(SourceText("../TegraGM20BMetalPipelineKey.h"), "inline std::string pipelineKey("),
                 HasSubstr("key += linked;"));
 
@@ -43,8 +47,11 @@ TEST(GM20BLinkedSource, TheRawRecordIsTheLinkedFunctionsToo)
 TEST(GM20BLinkedSource, ThePacksKeysAreTheRuntimes)
 {
     const std::string parse = Body(SourceText("../pack/probe_states.h"), "inline bool parseState(");
-    EXPECT_THAT(parse,
-                HasSubstr("s.key = gm20b::pipelineKey(d, &vertex, d.fragmentFunction ? &fragment : nullptr, linked,"));
+    EXPECT_THAT(
+        parse,
+        HasSubstr("s.key = gm20b::pipelineKey(fields, &vertex, d.fragmentFunction ? &fragment : nullptr, linked,"));
+    EXPECT_THAT(
+        parse, HasSubstr("s.fast = gm20b::fastKey(fields, &vertex, d.fragmentFunction ? &fragment : nullptr, linked,"));
     EXPECT_THAT(Body(SourceText("../pack/probe_states.h"), "inline id<MTLFunction> function("),
                 HasSubstr("key.constants = gm20b::constantsText(values);"));
     EXPECT_THAT(Body(SourceText("../TegraGM20BMetalLibrary.mm"), "- (SwitchMetalFunction *)function:"),

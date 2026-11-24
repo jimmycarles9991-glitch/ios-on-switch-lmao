@@ -16,9 +16,8 @@ struct InterlockSpinScene: GPUScene {
         let kind = GM20BFacade.kind(of: gpu.device)
         let format = TexelFormat.rgba16Float
         let scale = FetchBlendState.scale(format)
-        // Plain memory for both arms (a private target moves onto compressed memory once the facade has some): there the
-        // plain arm's ROP blends stay compressed and the interlocked arm's surface stores do not, and the 4x bound would
-        // weigh compression instead of the ticket wait
+        // Plain memory for both arms (a private target moves onto compressed memory once the facade has some), so the
+        // ROP arm's reported times compare across builds
         let target = try gpu.texture(
             format.metal, Self.width, Self.height, usage: [.renderTarget, .shaderRead, .pixelFormatView]
         )
@@ -30,10 +29,10 @@ struct InterlockSpinScene: GPUScene {
         let pipelines = try Self.arms.map {
             try FetchBlendPipeline.make(gpu, fragment: $0.1, format: format.metal)
         }
+        var lone: [Double] = []
         for layers in Self.layers {
             let texel = FetchBlendState.bytes([values[layers]], format)
             let expected = Array(repeating: texel, count: Self.width * Self.height).flatMap { $0 }
-            var baseline: [Double] = []
             for (arm, pipeline) in zip(Self.arms, pipelines) {
                 let label = "\(arm.0)_\(layers)"
                 let draw = { (commands: MTLCommandBuffer) in
@@ -88,12 +87,12 @@ struct InterlockSpinScene: GPUScene {
                         "\(label): unexpected interlock count \(interlocked)"
                     )
                 }
-                if arm.0 == "plain" {
-                    baseline = times
-                } else {
+                if arm.0 == "default", layers == 1 {
+                    lone = times
+                } else if arm.0 == "default" {
                     result.expect(
-                        InterlockSpinBound.accepts(times, baseline: baseline),
-                        "\(label): a draw exceeded 4x the non-interlocked GPU time or lacked a timestamp"
+                        InterlockSpinBound.accepts(times, layers: layers, lone: lone),
+                        "\(label): an overlapped interlocked layer cost more than a lone one, or lacked a timestamp"
                     )
                 }
             }

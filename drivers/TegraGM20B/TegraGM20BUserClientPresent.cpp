@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 // The display's present: scanout copies and fences on the GPU.
 #include "TegraGM20BUserClientInternal.h"
+#include "SwitchGpuSurfaceComp.h"
+#include "TegraGM20BComp.h"
 
 // GPU frame copy for the display (TegraScanoutCopy.h). The display offers each swapped surface; gpu_present.c's present channel
 // copies it, after the compositor's GPU work, into the block-linear target, and calls native_legacy_gpu_complete from the
@@ -31,7 +33,10 @@ struct PresentSurface {
 	uint64_t bytes, used;
 	uint32_t npages, kind;
 	uint64_t *pas;
+	tgm_vm *vm;
 	tgm_mem *mem;
+	switch_gpu_mapping *mapping;
+	bool ownsMemory;
 #if DEVELOPMENT || DEBUG
 	// the content generation its last accepted present showed, and that present
 	uint64_t shownContent, shownAt;
@@ -65,12 +70,16 @@ void presentDone(void *display, int status)
 	native_legacy_gpu_complete(display, status);
 }
 
-void dropSurface(PresentSurface &s, unsigned slot)
+void dropSurface(PresentSurface &s)
 {
 	if (!s.memory)
 		return;
-	tgm_present_unmap(kPresentSurface + slot * kPresentSurfaceSpan, s.bytes);
-	tgm_mem_del(&s.mem);
+	if (s.vm && s.mapping)
+		switch_gpu_vm_unmap(s.vm, &s.mapping);
+	if (s.ownsMemory)
+		tgm_mem_del(&s.mem);
+	else
+		s.mem = nullptr;
 	switch_gpu_backing_release(s.backing);
 	s.memory->complete();
 	s.memory->release();
@@ -116,72 +125,176 @@ uint64_t presentTarget(uint64_t pa, uint64_t bytes)
 	return kPresentTarget + slot * kPresentTargetSpan;
 }
 
+uint32_t presentCompressedKind(IOMemoryDescriptor *memory)
+{
+	IOByteCount len = 0;
+	const addr64_t first = memory->getPhysicalSegment(0, &len, kIOMemoryMapperNone);
+	if (!first)
+		return 0;
+	const uint32_t kind = tegra_gm20b_surface_kind(first & ~0xfffULL);
+	return switch_gpu_surface_kind_compressed(kind) ? kind : 0;
+}
+
 // The GPU address of the surface, imported on first use (or again after it fell out of the four, or became block-linear);
-// *pa its first page. A block-linear surface is mapped with TGM_LAYOUT_KIND, the kind its texels are written under.
+// *pa its first page. A block-linear surface is mapped with its decided kind (compressed kinds non-volatile at 64 KiB
+// via switch_gpu_vm_map so L2/CBC decompresses and unmap tears down LPT PTEs and flushes LTC).
 uint64_t presentSurface(IOMemoryDescriptor *memory, uint64_t bytes, bool blockLinear, uint64_t *pa,
 			switch_gpu_backing **backing)
 {
 	bytes = (bytes + 0xfff) & ~0xfffULL;
-	const uint32_t kind = blockLinear ? TGM_LAYOUT_KIND : 0;
+	const uint32_t compKind = blockLinear ? presentCompressedKind(memory) : 0u;
+	bool compressed = compKind != 0u;
+	uint32_t kind = compressed ? compKind : (blockLinear ? TGM_LAYOUT_KIND : 0);
 	unsigned slot = 0;
+	bool replaceSlot = false;
 	for (unsigned i = 0; i < 4; i++) {
-		if (gSurfaces[i].memory == memory && gSurfaces[i].bytes >= bytes &&
-		    gSurfaces[i].kind == kind) {
-			gSurfaces[i].used = ++gSurfaceUses;
-			*pa = gSurfaces[i].pas[0];
-			*backing = gSurfaces[i].backing;
-			return kPresentSurface + i * kPresentSurfaceSpan;
+		if (gSurfaces[i].memory == memory) {
+			bool staleAlias = false;
+			if (gSurfaces[i].ownsMemory && gSurfaces[i].backing) {
+				tgm_mem *canonical = nullptr;
+				const int found = switch_gpu_backing_tgm_mem_existing(
+					gSurfaces[i].backing, gSurfaces[i].npages, &canonical);
+				staleAlias = found == 0 && canonical != gSurfaces[i].mem;
+			}
+			if (gSurfaces[i].bytes >= bytes && gSurfaces[i].kind == kind &&
+			    !staleAlias) {
+				gSurfaces[i].used = ++gSurfaceUses;
+				*pa = gSurfaces[i].pas[0];
+				*backing = gSurfaces[i].backing;
+				return kPresentSurface + i * kPresentSurfaceSpan;
+			}
+			dropSurface(gSurfaces[i]);
+			slot = i;
+			replaceSlot = true;
+			continue;
 		}
-		if (gSurfaces[i].used < gSurfaces[slot].used)
+		if (!replaceSlot && gSurfaces[i].used < gSurfaces[slot].used)
 			slot = i;
 	}
-	if (bytes > kPresentSurfaceSpan || bytes > ((memory->getLength() + 0xfff) & ~0xfffULL))
+	const uint64_t fullBytes = (memory->getLength() + 0xfff) & ~0xfffULL;
+	if (bytes > kPresentSurfaceSpan || bytes > fullBytes)
 		return 0;
 	PresentSurface &s = gSurfaces[slot];
-	dropSurface(s, slot);
-	s.npages = static_cast<uint32_t>(bytes >> 12);
-	s.pas = IONew(uint64_t, s.npages);
-	if (!s.pas)
+	dropSurface(s);
+	if (memory->prepare(kIODirectionOut) != kIOReturnSuccess)
 		return 0;
 	memory->retain();
-	s.memory = memory;
-	s.bytes = bytes;
-	s.kind = kind;
-	tgm_vm *vm = nullptr;
-	if (memory->prepare(kIODirectionOut) != kIOReturnSuccess) {
-		memory->release();
-		IODelete(s.pas, uint64_t, s.npages);
-		s = {};
-		return 0;
+	if (blockLinear && !compressed) {
+		const uint32_t preparedKind = presentCompressedKind(memory);
+		if (preparedKind) {
+			compressed = true;
+			kind = preparedKind;
+		}
 	}
-	if (collectPages(memory, bytes, s.pas) || tgm_present_open(&vm) ||
-	    tgm_mem_new(vm, s.pas, s.npages, &s.mem) ||
-	    tgm_present_map(kPresentSurface + slot * kPresentSurfaceSpan, s.mem, bytes,
-			    static_cast<uint8_t>(kind))) {
-		tgm_mem_del(&s.mem);
+	uint64_t mapBytes = bytes;
+	uint32_t mapPages = static_cast<uint32_t>(bytes >> 12);
+	if (compressed) {
+		IOByteCount firstLen = 0;
+		const addr64_t firstPa =
+			memory->getPhysicalSegment(0, &firstLen, kIOMemoryMapperNone);
+		s.backing = firstPa ? switch_gpu_backing_find_pa(firstPa & ~0xfffULL) : nullptr;
+		switch_gpu_backing_info info = {};
+		if (s.backing)
+			switch_gpu_backing_describe(s.backing, &info);
+		mapPages = info.page_count;
+		mapBytes = static_cast<uint64_t>(mapPages) << 12;
+		if (!s.backing || !info.pages || !mapPages || mapBytes < bytes ||
+		    mapBytes > kPresentSurfaceSpan || mapBytes > fullBytes ||
+		    (mapPages % TGM_COMP_PAGES) != 0u) {
+			switch_gpu_backing_release(s.backing);
+			memory->complete();
+			memory->release();
+			s = {};
+			return 0;
+		}
+	}
+	s.pas = IONew(uint64_t, mapPages);
+	if (!s.pas) {
+		switch_gpu_backing_release(s.backing);
 		memory->complete();
 		memory->release();
-		IODelete(s.pas, uint64_t, s.npages);
 		s = {};
 		return 0;
 	}
-	memory->retain();
-	if (memory->prepare(kIODirectionOut) != kIOReturnSuccess) {
-		memory->release();
-		dropSurface(s, slot);
+	s.memory = memory;
+	s.bytes = mapBytes;
+	s.npages = mapPages;
+	s.kind = kind;
+	if (collectPages(memory, mapBytes, s.pas)) {
+		dropSurface(s);
 		return 0;
 	}
-	s.backing = switch_gpu_backing_register(s.pas, s.npages, 0, memory, releasePresentBacking);
-	if (!s.backing)
-		releasePresentBacking(memory);
-	if (!s.backing || switch_gpu_surface_adopt(memory, s.backing)) {
-		dropSurface(s, slot);
+	if (compressed) {
+		switch_gpu_backing_info info = {};
+		switch_gpu_backing_describe(s.backing, &info);
+		if (info.page_count != mapPages || !info.pages ||
+		    memcmp(s.pas, info.pages, static_cast<size_t>(mapPages) * sizeof(uint64_t)) !=
+			    0 ||
+		    switch_gpu_surface_adopt(memory, s.backing)) {
+			dropSurface(s);
+			return 0;
+		}
+	} else {
+		memory->retain();
+		if (memory->prepare(kIODirectionOut) != kIOReturnSuccess) {
+			memory->release();
+			dropSurface(s);
+			return 0;
+		}
+		s.backing = switch_gpu_backing_register(s.pas, s.npages, 0, memory,
+							releasePresentBacking);
+		if (!s.backing) {
+			releasePresentBacking(memory);
+			dropSurface(s);
+			return 0;
+		}
+		if (switch_gpu_surface_adopt(memory, s.backing)) {
+			dropSurface(s);
+			return 0;
+		}
+	}
+	tgm_vm *vm = nullptr;
+	if (tgm_present_open(&vm)) {
+		dropSurface(s);
+		return 0;
+	}
+	s.vm = vm;
+	const uint64_t va = kPresentSurface + slot * kPresentSurfaceSpan;
+	int mapped = 0;
+	if (compressed) {
+		s.ownsMemory = false;
+		int memRet = switch_gpu_backing_tgm_mem_existing(s.backing, s.npages, &s.mem);
+		if (memRet)
+			memRet = switch_gpu_backing_tgm_mem(s.backing, s.npages, &s.mem);
+		if (memRet || !tgm_mem_can_compress(s.mem)) {
+			s.mem = nullptr;
+			dropSurface(s);
+			return 0;
+		}
+		mapped = switch_gpu_vm_map(vm, va, mapBytes, s.mem, 0, static_cast<uint8_t>(kind),
+					   0, &s.mapping);
+	} else {
+		if (switch_gpu_backing_tgm_mem_existing_or_direct(s.backing, s.npages, &s.mem) ==
+		    0) {
+			s.ownsMemory = false;
+		} else {
+			s.ownsMemory = true;
+			if (tgm_mem_new(vm, s.pas, s.npages, &s.mem)) {
+				dropSurface(s);
+				return 0;
+			}
+		}
+		mapped = switch_gpu_vm_map_volatile(vm, va, mapBytes, s.mem, 0,
+						    static_cast<uint8_t>(kind), 0, 1, &s.mapping);
+	}
+	if (mapped) {
+		dropSurface(s);
 		return 0;
 	}
 	s.used = ++gSurfaceUses;
 	*pa = s.pas[0];
 	*backing = s.backing;
-	return kPresentSurface + slot * kPresentSurfaceSpan;
+	return va;
 }
 
 // The display's direct frame with its producer still running: the producer's interrupt pass completes it, no job.

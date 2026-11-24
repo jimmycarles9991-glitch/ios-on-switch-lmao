@@ -42,6 +42,28 @@ TEST(GM20BFetchRungs, EachFormatTheFormatArmsJudgeTakesTheRop)
     }
 }
 
+TEST(GM20BFetchRungs, FloatTargetTakesComputedLayersAtAnyDepthAndCountsNoEightBitLayers)
+{
+    gm20b::FixedBlendAsk a = screenLayer();
+    a.format = 115;
+    a.eightBitSources = false;
+    a.computedLayers = 8;
+    EXPECT_EQ(gm20b::fixedBlendAcceptable(a), gm20b::fixedBlendProven());
+    a.readable = true;
+    EXPECT_FALSE(gm20b::fixedBlendAcceptable(a));
+    a.readable = false;
+    a.accumulates = true;
+    EXPECT_FALSE(gm20b::fixedBlendAcceptable(a));
+    EXPECT_FALSE(gm20b::fixedBlendCountsLayer(115, false));
+    EXPECT_FALSE(gm20b::fixedBlendCountsLayer(115, true));
+    EXPECT_FALSE(gm20b::fixedBlendCountsLayer(80, true));
+    EXPECT_FALSE(gm20b::fixedBlendCountsLayer(70, true));
+    EXPECT_TRUE(gm20b::fixedBlendCountsLayer(80, false));
+    EXPECT_TRUE(gm20b::fixedBlendCountsLayer(70, false));
+    EXPECT_TRUE(gm20b::fixedBlendCountsLayer(81, true));
+    EXPECT_TRUE(gm20b::fixedBlendCountsLayer(71, true));
+}
+
 TEST(GM20BFetchRungs, AnSrgbTargetTakesEightBitSourcesTwoLayersDeepAsComputedColour)
 {
     for (uint16_t format : {uint16_t(81), uint16_t(71)}) {
@@ -90,6 +112,10 @@ TEST(GM20BFetchRungs, IteratedBlendTakesTheProgramsWhosePassesBeatTheInterlockOn
         a.program = gm20b::iteratedProgramName(slower);
         EXPECT_FALSE(gm20b::iteratedBlendUsable(a)) << slower << " costs more passes than the interlock";
     }
+    a.program = gm20b::iteratedProgramName("llt");
+    a.programWords = 9;
+    EXPECT_FALSE(gm20b::iteratedBlendUsable(a))
+        << "llt's 9 passes ran slower than its storage form (gpu.gm20b.fetch_rung3)";
     EXPECT_NE(gm20b::iteratedProgramName("dso"), gm20b::iteratedProgramName("pld"));
 }
 

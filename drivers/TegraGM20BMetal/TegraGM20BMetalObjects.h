@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "frame_cpu_counts.h"
 #include "lock.h"
 #include "word_wait.h"
 #import <Foundation/Foundation.h>
@@ -31,6 +32,7 @@
 #include "metallib_functions.h"
 #include "render_variant.h"
 #include "obtained.h"
+#include "pipeline_fields.h"
 
 namespace gm20b {
 template <typename T> class ComputeKernelJob;
@@ -95,6 +97,8 @@ inline uint64_t gm20bNewIdentity()
     uint32_t _type;                      // MTLFunctionType from the metallib; 0: none listed (a Core Image extern)
     MTLFunctionOptions _options;
     std::optional<gm20b::AirHash> _air;  // its library function's HASH tag; none where its library lists none
+    uint64_t _stageHash;                 // its part of a state's fast key (TegraGM20BMetalPipelineKey.h stageHash)
+    uint8_t _patchType;                  // its MTLPatchType, its TESS tag's
 }
 @property (nonatomic, copy) NSString *name;
 @end
@@ -200,6 +204,9 @@ enum class SwitchMetalShareable : uint8_t {
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     std::atomic<bool> _freshUnwritten;  // a fresh texture no command wrote yet (TegraGM20BMetalFresh.mm traceFreshUses)
 #endif
+#if SWITCH_METAL_DIAGNOSTICS
+    std::atomic<uint32_t> _replaceCount;
+#endif
 }
 @end
 
@@ -244,13 +251,24 @@ enum class SwitchMetalShareable : uint8_t {
     // its alpha to coverage and alpha to one (alpha_control.h), which its key does not hold
     uint32_t _alphaControl;
     std::string _failure;  // why its creation failed (Completion::makeNow), as Metal's would
-    std::string _key;      // its pack key (completable states')
-    uint64_t _packKey;     // the hash the pack finds its records and reflection by (its key's, or its key and AIR's)
-    MTLRenderPipelineDescriptor *_madeFrom;  // completable states': what its cubic variants are made of
+    // Completable states': what its key names (keyFieldsOf), its functions and their linked functions' segments, from which
+    // its pack key's text and a descriptor its variants are made of come at their first ask (gm20bStateKey,
+    // gm20bMadeFrom: TegraGM20BMetalStateKey.h)
+    gm20b::PipelineFields _fields;
+    SwitchMetalFunction *_vertexFunction, *_fragmentFunction;
+    NSArray *_linkedLists[4];  // vertex functions, vertex private functions, fragment's, fragment private
+    std::string _linked;
+    std::once_flag _keyed, _described;
+    std::string _key;
+    MTLRenderPipelineDescriptor *_madeFrom;
+    uint64_t _packKey;  // the hash the pack finds its records and reflection by (its key's, or its key and AIR's)
     gm20b::Mutex _variantLock;
     // every variant asked of it, by name, for its life: plans and encoders name each by address
     std::map<std::string, std::shared_ptr<gm20b::Variant<gm20b::Pipeline>>> _variants;
     gm20b::Obtained _obtained;  // debug builds: how its creation got its record
+#if SWITCH_METAL_DIAGNOSTICS
+    bool _caCatchAll;  // Core Animation's catch-all state (ca_catch_all.h), whose draws the rates line counts
+#endif
 }
 @end
 
@@ -269,6 +287,7 @@ enum class SwitchMetalShareable : uint8_t {
     std::atomic<void *> _last;   // the command buffer enqueued last, retained until its completed handlers ran
     // the submit worker's: the kernel's bound on the writer promises of a command buffer held behind its held head
     gm20b::EventDeadline::Time _heldBound;
+    uint32_t _unscheduled;
     uint32_t _gpuPriority, _backgroundGpuPriority;  // what it asked for (TegraGM20BMetalQueuePriority.mm)
 }
 @end
@@ -390,6 +409,33 @@ struct SwitchMetalSharedEventWait {
     std::shared_ptr<gm20b::SharedEventCompletion> completion = {};
 };
 
+struct SwitchMetalDeferredPresent {
+    enum class Kind : uint8_t {
+        Immediate,
+        AtTime,
+        AfterMinimumDuration
+    };
+
+    id<MTLDrawable> drawable;
+    Kind kind;
+    CFTimeInterval value;
+};
+
+static inline void gm20bRunDeferredPresent(const SwitchMetalDeferredPresent &p)
+{
+    switch (p.kind) {
+    case SwitchMetalDeferredPresent::Kind::Immediate:
+        [p.drawable present];
+        break;
+    case SwitchMetalDeferredPresent::Kind::AtTime:
+        [p.drawable presentAtTime:p.value];
+        break;
+    case SwitchMetalDeferredPresent::Kind::AfterMinimumDuration:
+        [p.drawable presentAfterMinimumDuration:p.value];
+        break;
+    }
+}
+
 @interface SwitchMetalCommandBuffer : SwitchMetalObject {
 @public
     uint64_t _protection;  // setProtectionOptions: (kept, no effect)
@@ -435,7 +481,8 @@ struct SwitchMetalSharedEventWait {
     // a drawable present was added (its completion is observed), cleared once it failed before all its work was
     // submitted (none is made, TegraGM20BMetalFinish.mm withholdPresents); the range being submitted ends quiet
     // (completion_source.h)
-    bool _presents, _rangeQuiet, _rangeHeld;
+    std::atomic<bool> _presents;
+    bool _rangeQuiet, _rangeHeld;
     // writer promises (Device::promise) made when it counted as scheduled before its work reached the kernel, under
     // _lock; taken once its last raw range carries them to the kernel or finish() cancels or withdraws them. _promised:
     // any were asked for, or its failure's unpromised writes were withdrawn (cancelPromises); read without the lock
@@ -461,8 +508,8 @@ struct SwitchMetalSharedEventWait {
     // each submitted range's written resources, for its completion (captureWrittenRange): the first _retired of them
     std::deque<gm20b::RetirementWrites> _retirements;
     size_t _retired;
-    // a pass's vertex setBytes before its first draw, again in cached memory (Cmd::x: offset + 1): the draw's geometry
-    // the encode reads (the first draw's cover test) is not read from the write-combined chunk
+    // vertex setBytes before a pass's first draw, and post-first vertex slots 0..2 (Core Animation's vertices and
+    // transform), again in cached memory (Cmd::shadow: offset + 1): encode geometry never reads write-combined chunks
     gm20b::GrowList<uint8_t> _shadow;
     gm20b::GrowList<uint64_t> _extra;
     std::vector<id> _owners;
@@ -476,13 +523,18 @@ struct SwitchMetalSharedEventWait {
         *_commandLog;           // a sub-encoder's command buffer's log of what it records (null: none)
     NSArray *_doneHandlers;     // its completed handlers, from finish() until they ran
     bool _doneBehindScheduled;  // they run behind its scheduled handlers on the queue's handler queue
-    gm20b::HandlerTurn _turn;
+    bool _emptyPendingCompletion;
+    std::vector<SwitchMetalDeferredPresent> _deferredPresents, _donePresents;
+    std::atomic<bool> _hasDeferredPresents;
+    bool _latePresent;
+    gm20b::HandlerTurn _scheduledTurn, _turn;
     std::atomic<MTLCommandBufferStatus> _status;
     NSError *_error;
     SwitchMetalQueue *_queue;
-    std::atomic<bool> _enqueued;
+    std::atomic<uint8_t> _enqueueState;  // 0: none, 1: commit claimed queue slot, 2: explicit enqueue pushed to worker
     gm20b::SubmitQueue<void *, SwitchMetalCommandBuffer *>::Reservation _reservation;
     bool _reserved;  // the submit worker's: its reservation made
+    bool _countedUnscheduled, _earlyPromised;
     std::vector<size_t> _eventWaits;
     gm20b::EventDeadline::Time _eventStart;
     std::unordered_set<void *> _variantObserved;
@@ -502,6 +554,10 @@ struct SwitchMetalSharedEventWait {
     // `_endedAt`: the last ended encoder's first command; `_handedCommands`: commands since the worker was last handed it.
     std::atomic<uint64_t> _published;
     std::atomic<uint32_t> _pipelineVeto;
+    // `_aheadStop`: the first command of the first encoder a reason of its own keeps from the encode ahead (0: none),
+    // stored as the reason is recorded; the encoders before it are encoded ahead and its commit splits the range there
+    // (gm20bPipelineSplit). `_aheadStopped`: the reasons that stopped it, the recording's and the worker's.
+    std::atomic<uint32_t> _aheadStop, _aheadStopped;
     size_t _endedAt;
     uint32_t _handedCommands;
     bool _handedOnce;  // the worker was handed it (its one SwitchMetalScheduleChange::Encoded)
@@ -510,20 +566,29 @@ struct SwitchMetalSharedEventWait {
     std::atomic<bool> _pipelineDeclined;
     uint32_t _pipelinedEncoders, _pipelineEncoders, _pipelineAbandons, _pipelineGivenBack;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-    std::atomic<size_t> _aheadAt;  // where the worker's encode ahead of it reached (switchMetalWaitAhead)
+    std::atomic<size_t> _aheadAt;    // where the worker's encode ahead of it reached (switchMetalWaitAhead)
+    std::atomic<size_t> _aheadHalt;  // where the worker found an encoder it cannot take ahead (0: none)
 #endif
 #if SWITCH_METAL_DIAGNOSTICS
     uint64_t _committedTicks;  // mach_absolute_time as its commit began
+    uint64_t _kickedTicks;     // and as its first raw range's job went to the kernel (0: none yet)
+    uint32_t _firstStamp;
+    uint8_t _enqueueTiming;
+    bool _lateWriteChecked, _lateWriteSampled;
 #endif
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     std::atomic<uint64_t> _heldReturnUs;  // when waitUntilScheduled returned for it held, until it was submitted
+    gm20b::ScheduleNotes _scheduleNotes;  // the submit worker's turns of it, for the frame rates line
 #endif
     // scheduled() and finish() ran (their handlers taken): a handler added after goes at once, and scheduled() runs once (a
     // command buffer held for a shared event is scheduled at its commit, eventHeld). A handler is added under _lock after its
     // list's flag is set, and the lists are taken under _lock only where the flag says one was added: taking exchanges the
     // sent flag first, so no handler is both missed and not run (gm20bTakeHandlers).
-    std::atomic<bool> _scheduledSent, _completedSent, _hasScheduledHandlers, _hasCompletedHandlers;
-    gm20b::ChangeWord _changes;  // a state change its waits read (gm20bChanged), with no lock (word_wait.h)
+    std::atomic<bool> _scheduledSent, _submittedAll, _completedSent, _hasScheduledHandlers, _hasCompletedHandlers;
+    gm20b::ChangeWord _changes;     // a state change its waits read (gm20bChanged), with no lock (word_wait.h)
+    gm20b::OwnedWord _submitOwner;  // submitLoop's thread port while committed and actively queued for submission
+    std::atomic<uint32_t> _compileWaitGen;
+    std::vector<std::function<bool()>> _compileWaits;  // under _lock: blocking compile waits while parked
     gm20b::Mutex _lock;
     uint32_t _seqno;
     uint32_t _stamp;  // its raw submission's GPU time stamps (gm20b::CommandBuffer::stamp), 0 for any other
@@ -629,6 +694,20 @@ static inline void gm20bPipelineVeto(SwitchMetalCommandBuffer *cb, uint32_t reas
 {
     if (!(cb->_pipelineVeto.load(std::memory_order_relaxed) & reason))
         cb->_pipelineVeto.fetch_or(reason, std::memory_order_release);
+}
+
+// The recording thread's: the encoder being recorded is not encoded ahead for `reason`, the encoders before it still are.
+// Stored before the publish of that encoder's end, which is the earliest the worker may encode the end before it.
+static inline void gm20bPipelineStop(SwitchMetalCommandBuffer *cb, uint32_t reason)
+{
+    if (!cb->_encAt) {
+        gm20bPipelineVeto(cb, reason);
+        return;
+    }
+    if (!cb->_aheadStop.load(std::memory_order_relaxed))
+        cb->_aheadStop.store(uint32_t(cb->_encAt), std::memory_order_release);
+    if (!(cb->_aheadStopped.load(std::memory_order_relaxed) & reason))
+        cb->_aheadStopped.fetch_or(reason, std::memory_order_relaxed);
 }
 
 // ---- encoders: they record ----

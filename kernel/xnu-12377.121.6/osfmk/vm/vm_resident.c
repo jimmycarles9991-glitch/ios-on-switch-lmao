@@ -5794,6 +5794,9 @@ vm_page_free_prepare_queues(
 		mem->vmp_realtime = false;
 		VM_COUNTER_DEC(&vm_page_realtime_count);
 	}
+	if (__improbable(mem->vmp_switch_prefetched)) {
+		mem->vmp_switch_prefetched = FALSE;
+	}
 
 	if (VM_PAGE_WIRED(mem)) {
 		assert(mem->vmp_wire_count > 0);
@@ -7656,6 +7659,8 @@ vm_page_relocate(
 
 		m2->vmp_realtime = m1->vmp_realtime;
 		m1->vmp_realtime = false;
+		m2->vmp_switch_prefetched = m1->vmp_switch_prefetched;
+		m1->vmp_switch_prefetched = FALSE;
 
 		/*
 		 * If m1 had really been reusable,
@@ -8595,6 +8600,9 @@ vm_page_do_delayed_work(
 					vm_page_activate(m);
 				}
 			} else if (dwp->dw_mask & DW_vm_page_speculate) {
+				if (__improbable(dwp->dw_mask & DW_vm_page_switch_prefetched)) {
+					m->vmp_switch_prefetched = TRUE;
+				}
 				vm_page_speculate(m, TRUE);
 			} else if (dwp->dw_mask & DW_enqueue_cleaned) {
 				/*

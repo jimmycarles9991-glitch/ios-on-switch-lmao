@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// r12-sdio: which queued reads ride in one card command with the read the SD worker picked (NativeSwitchBlock.cpp
+// r12-sdio: which queued requests ride in one card command with the request the SD worker picked (NativeSwitchBlock.cpp
 // pickLocked), wherever they sit in the queue.
 //
 // Until r12-sdio a chain only took the requests right behind its first one in the queue, so two reads that continue
 // each other on the card but were queued with another request between them took two commands (~0.58 ms each on r7p5,
-// most of it the card's access time; 4 KiB of data is ~40 us of it). Now a read chain grows at either end with any
-// queued read (among the first `scan`) that continues it, as long as:
-// - it is a read (writes keep FIFO order and their old rule: only the requests right behind, in queue order);
-// - it overlaps no older request still queued: a read never moves ahead of a write it would see, nor of an older read of
-//   the same blocks (the same rule the r6-lows priority pass applies to its pick);
+// most of it the card's access time; 4 KiB of data is ~40 us of it). A read chain grows at either end with any queued
+// read (among the first `scan`) that continues it, and a write chain grows at either end with any queued write (among
+// the first `scan`) that continues it strictly contiguously (no gaps), as long as:
+// - it matches the chain's direction;
+// - it overlaps no older request still queued (nor, for writes, any active in-flight range), preserving RAW/WAR/WAW
+//   ordering;
 // - the chain stays within one command (`limit` sectors, `maxCount` requests).
 // The chain comes back in card order (rising LBA), so the descriptor table and the bounce path walk it as before.
 //
@@ -17,6 +18,7 @@
 // card reads straight through the gaps between members, into a sink the driver never looks at, so two nearby reads cost
 // one command plus the gap's transfer instead of two commands. No single gap is longer than `maxGap` and all of one
 // chain's gaps add up to at most `gapBudget`. With both 0 (the default) nothing changes: members tile the range.
+// Writes never use gaps: payload always equals sectors.
 #pragma once
 
 #include <stdint.h>
@@ -24,6 +26,16 @@
 template <typename Request> inline bool switchOverlaps(const Request *a, const Request *b)
 {
     return a->lba < b->lba + b->sectors && b->lba < a->lba + a->sectors;
+}
+
+struct SwitchLbaRange {
+    uint64_t lba;
+    uint32_t sectors;
+};
+
+template <typename Request> inline bool switchOverlapsRange(const Request *a, const SwitchLbaRange &b)
+{
+    return a->sectors != 0 && b.sectors != 0 && a->lba < b.lba + b.sectors && b.lba < a->lba + a->sectors;
 }
 
 // Marks `first` and the reads that join it (`chained`), returns how many, and the chain's first LBA and length (gaps
@@ -83,15 +95,59 @@ inline uint32_t switchGatherReads(Request *head, Request *first, uint32_t limit,
     return count;
 }
 
-// Whether the `count` requests marked `chained` are reads that fit [start, start + sectors) as a chain may: inside it,
-// pairwise disjoint, one starting at `start` and one ending at its end, no gap between neighbours longer than `maxGap`
-// and the gaps together at most `gapBudget`. With both 0: they tile it exactly. The driver checks this before it unlinks
-// a chain (switchGatherReads is host-tested, but a chain that does not fit would put the card's bytes in the wrong
-// requests).
 template <typename Request>
-inline bool switchChainFits(const Request *head, uint64_t start, uint32_t sectors, uint32_t count, uint32_t maxGap,
-                            uint32_t gapBudget)
+inline uint32_t switchGatherWrites(Request *head, Request *first, uint32_t limit, uint32_t maxCount, unsigned scan,
+                                   uint64_t *start, uint32_t *sectors, const SwitchLbaRange *inFlight = nullptr,
+                                   unsigned inFlightCount = 0)
 {
+    first->chained = true;
+    uint64_t low = first->lba;
+    uint64_t high = first->lba + first->sectors;
+    uint32_t count = 1;
+    for (bool grew = true; grew && count < maxCount;) {
+        grew = false;
+        unsigned seen = 0;
+        for (Request *r = head; r && seen < scan && count < maxCount; r = r->next, ++seen) {
+            if (!r->write || r->chained)
+                continue;
+            const uint64_t from = r->lba;
+            const uint64_t to = r->lba + r->sectors;
+            uint64_t newLow = low;
+            uint64_t newHigh = high;
+            if (from == high) {
+                newHigh = to;
+            } else if (to == low) {
+                newLow = from;
+            } else {
+                continue;
+            }
+            if (newHigh - newLow > limit)
+                continue;
+            bool overlaps = false;
+            for (unsigned i = 0; i < inFlightCount && !overlaps; ++i)
+                overlaps = switchOverlapsRange(r, inFlight[i]);
+            for (const Request *older = head; older != r && !overlaps; older = older->next)
+                overlaps = !older->chained && switchOverlaps(older, r);
+            if (overlaps)
+                continue;
+            r->chained = true;
+            ++count;
+            low = newLow;
+            high = newHigh;
+            grew = true;
+        }
+    }
+    *start = low;
+    *sectors = static_cast<uint32_t>(high - low);
+    return count;
+}
+
+template <typename Request>
+inline bool switchChainFitsDirection(const Request *head, uint64_t start, uint32_t sectors, uint32_t count,
+                                     uint32_t maxGap, uint32_t gapBudget, bool write)
+{
+    if (write && (maxGap || gapBudget))
+        return false;
     uint64_t total = 0;
     uint32_t found = 0;
     bool atStart = false;
@@ -100,12 +156,12 @@ inline bool switchChainFits(const Request *head, uint64_t start, uint32_t sector
         if (!r->chained)
             continue;
         ++found;
-        if (r->write || !r->sectors || r->lba < start || r->lba + r->sectors > start + sectors)
+        if (r->write != write || !r->sectors || r->lba < start || r->sectors > sectors ||
+            r->lba - start > sectors - r->sectors)
             return false;
         total += r->sectors;
         atStart |= r->lba == start;
         atEnd |= r->lba + r->sectors == start + sectors;
-        // Disjoint from every other member, and the gap before it (to the nearest member ending at or before it).
         uint64_t before = start;
         for (const Request *other = head; other; other = other->next) {
             if (!other->chained || other == r)
@@ -124,6 +180,18 @@ inline bool switchChainFits(const Request *head, uint64_t start, uint32_t sector
     return found == count && atStart && atEnd && total <= sectors && sectors - total <= gapBudget;
 }
 
+// Whether the `count` requests marked `chained` are reads that fit [start, start + sectors) as a chain may: inside it,
+// pairwise disjoint, one starting at `start` and one ending at its end, no gap between neighbours longer than `maxGap`
+// and the gaps together at most `gapBudget`. With both 0: they tile it exactly. The driver checks this before it unlinks
+// a chain (switchGatherReads is host-tested, but a chain that does not fit would put the card's bytes in the wrong
+// requests).
+template <typename Request>
+inline bool switchChainFits(const Request *head, uint64_t start, uint32_t sectors, uint32_t count, uint32_t maxGap,
+                            uint32_t gapBudget)
+{
+    return switchChainFitsDirection(head, start, sectors, count, maxGap, gapBudget, false);
+}
+
 // The same with no gaps: the members tile [start, start + sectors) exactly.
 template <typename Request>
 inline bool switchChainTiles(const Request *head, uint64_t start, uint32_t sectors, uint32_t count)
@@ -131,23 +199,10 @@ inline bool switchChainTiles(const Request *head, uint64_t start, uint32_t secto
     return switchChainFits(head, start, sectors, count, 0, 0);
 }
 
-// r14-sdcq: the oldest queued read (among the first `scan`) of at most `maxSectors` that overlaps no older queued request,
-// so it may go now, ahead of what is queued before it (a write it would see, or an older read of the same blocks, keeps
-// it back: the rule the gather and the r6-lows priority pass apply). The SD worker starts a command-queue group's further
-// tasks with it. nullptr when there is none.
-template <typename Request> inline Request *switchNextIndependentRead(Request *head, uint32_t maxSectors, unsigned scan)
+template <typename Request>
+inline bool switchWriteChainTiles(const Request *head, uint64_t start, uint32_t sectors, uint32_t count)
 {
-    unsigned seen = 0;
-    for (Request *r = head; r && seen < scan; r = r->next, ++seen) {
-        if (r->write || r->sectors > maxSectors)
-            continue;
-        bool overlaps = false;
-        for (const Request *older = head; older != r && !overlaps; older = older->next)
-            overlaps = switchOverlaps(older, r);
-        if (!overlaps)
-            return r;
-    }
-    return nullptr;
+    return switchChainFitsDirection(head, start, sectors, count, 0, 0, true);
 }
 
 // Clears every `chained` mark (a chain that failed switchChainTiles stays queued as it was).

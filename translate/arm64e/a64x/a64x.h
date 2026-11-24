@@ -77,6 +77,13 @@ bool a64x_class_is_baseline(enum a64x_class c);
 bool a64x_rewrite1(uint32_t w, uint32_t *out);
 /* GPRs read/written by w (false if not decoded); and the X registers dead at a site given the words after it. */
 bool a64x_regs(uint32_t w, uint32_t *rd_mask, uint32_t *wr_mask);
+/*
+ * X registers an instruction that takes a stub reads or writes (SP excluded). A site naming x30 cannot be
+ * `BL shared_stub`: the BL overwrites x30 before the stub reads or writes it.
+ */
+uint32_t a64x_stub_gprs(uint32_t w);
+/* false for a site translated as BL whose original instruction names x30 */
+bool a64x_bl_site_ok(uint32_t orig, uint32_t site_word);
 uint32_t a64x_dead_regs(const uint32_t *next, int n);
 /* path-sensitive: window[0..n) is the page, site is the index of the instruction being replaced */
 uint32_t a64x_dead_regs_window(const uint32_t *window, int n, int site);

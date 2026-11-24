@@ -107,8 +107,8 @@ template <class Texture> HazardImage hazardImage(const Texture &t)
     i.width = t.width;
     i.height = t.height;
     i.layout = t.comptags ? HazardLayout::Compressed : t.blockLinear ? HazardLayout::BlockLinear : HazardLayout::Pitch;
-    i.plain =
-        t.va && !t.memoryless && t.samples == 1 && t.layers == 1 && t.depth == 1 && !t.chain && !t.zeta && !t.planar;
+    i.plain = t.va && !t.memoryless && !t.storage.gpuVolatile && t.samples == 1 && t.layers == 1 && t.depth == 1 &&
+              !t.chain && !t.zeta && !t.planar;
     return i;
 }
 
@@ -171,6 +171,7 @@ enum class DrainCause : uint8_t {
 // wait, storage write or an image past the lists); `vertexSamples`: its vertex stage binds a texture
 struct PassUses {
     bool known = false, vertexSamples = false;
+    bool shaderWrites = false, bufferWrites = false;
     uint32_t areaWidth = 0, areaHeight = 0;
     HazardImage written[8];  // its colour targets
     uint8_t writtenCount = 0;
@@ -274,6 +275,33 @@ constexpr DrainCause drainCause(const PassChain &chain, const PassUses &next)
 constexpr bool pixelBarrierHolds(const PassChain &chain, const PassUses &next)
 {
     return drainCause(chain, next) == DrainCause::None;
+}
+
+constexpr bool passesIndependent(const PassChain &chain, const PassUses &next)
+{
+    if (!next.known || !chain.valid || next.depthStencil || chain.depth)
+        return false;
+    for (uint8_t w = 0; w < next.writtenCount; w++) {
+        const HazardImage &target = next.written[w];
+        if (overlapsAny(target, chain.written, chain.writtenCount) ||
+            overlapsAny(target, chain.sampled, chain.sampledCount) ||
+            overlapsAny(target, chain.scratch, chain.scratchCount))
+            return false;
+    }
+    for (uint8_t k = 0; k < next.scratchCount; k++) {
+        const HazardImage &scratch = next.scratch[k];
+        if (overlapsAny(scratch, chain.written, chain.writtenCount) ||
+            overlapsAny(scratch, chain.sampled, chain.sampledCount) ||
+            overlapsAny(scratch, chain.scratch, chain.scratchCount))
+            return false;
+    }
+    for (uint8_t s = 0; s < next.sampledCount; s++) {
+        const HazardImage &read = next.sampled[s];
+        if (overlapsAny(read, chain.written, chain.writtenCount) ||
+            overlapsAny(read, chain.scratch, chain.scratchCount))
+            return false;
+    }
+    return true;
 }
 
 namespace pass_hazard_detail {

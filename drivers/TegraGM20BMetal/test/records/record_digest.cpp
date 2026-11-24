@@ -215,8 +215,11 @@ Record pipeline(const Pack &pack, const Context &c, const PackPipeline &pp)
     if (tessellates(pp))
         for (const uint32_t index : pp.tessPrograms)
             program(tail, pack, index);
-    if (pp.strideTwin || pp.amplificationLayerWord || pp.amplificationViewportWord)
+    if (pp.strideTwin || pp.amplificationLayerWord || pp.amplificationViewportWord) {
+        if (pp.strideTwin && pp.strideTwin <= pack.bytes(PackPipelines) / sizeof(PackPipeline))
+            flat.strideTwin = pack.section<PackPipeline>(PackPipelines)[pp.strideTwin - 1].keyHash;
         put(tail, &flat.strideTwin, offsetof(PackPipeline, restoreDwords) - offsetof(PackPipeline, strideTwin));
+    }
     if (pp.restoreDwords && uint64_t(pp.restoreAt + pp.restoreDwords) * 4 <= pack.bytes(PackBlob))
         put(tail, pack.section<uint32_t>(PackBlob) + pp.restoreAt, size_t(pp.restoreDwords) * 4);
     if (!tail.empty())

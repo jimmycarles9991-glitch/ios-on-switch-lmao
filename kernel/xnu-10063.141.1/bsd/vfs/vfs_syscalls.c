@@ -9755,6 +9755,14 @@ renameatx_np(__unused proc_t p, struct renameatx_np_args *uap, __unused int32_t 
 	           uap->tofd, uap->to, UIO_USERSPACE, uap->flags);
 }
 
+int switch_vfs_rename(const char *from, const char *to);
+int
+switch_vfs_rename(const char *from, const char *to)
+{
+	return renameat_internal(vfs_context_kernel(), AT_FDCWD, CAST_USER_ADDR_T(from),
+	           AT_FDCWD, CAST_USER_ADDR_T(to), UIO_SYSSPACE, RENAME_NOFOLLOW_ANY);
+}
+
 int
 renameat(__unused proc_t p, struct renameat_args *uap, __unused int32_t *retval)
 {

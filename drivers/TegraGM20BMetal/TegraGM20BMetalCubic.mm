@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
+#import "TegraGM20BMetalStatesKey.h"
 #include "fragment_tests.h"
 #include "render_variant.h"
 #include "shader_test_push.h"
@@ -44,10 +45,10 @@ static void cubicBinds(__unsafe_unretained SwitchMetalRenderEncoder *encoder, co
     });
 }
 
-void packedVariants(SwitchMetalPipeline *p, uint64_t keyHash)
+void packedVariants(SwitchMetalPipeline *p, const gm20b::PackRun &run)
 {
     std::lock_guard<gm20b::Mutex> lock(p->_variantLock);
-    for (const auto &[name, pl] : gRM->raw->variantPipelines(keyHash, p->_caTransform)) {
+    for (const auto &[name, pl] : gRM->raw->variantPipelines(run, p->_caTransform)) {
         auto variant = std::make_shared<gm20b::Variant<gm20b::Pipeline>>();
         variant->publish(pl);
         p->_variants.emplace(name, std::move(variant));
@@ -86,20 +87,23 @@ static gm20b::Variant<gm20b::Pipeline> *renderVariant(SwitchMetalPipeline *p, co
             return at->second.get();
         variant = at->second;
     }
-    const std::string key = p->_key + name;
+    const std::string key = gm20bStateKey(p) + name;
     gm20b::Completion *completion = gRM->completion.get();
     if (!completion) {
         variant->failUnserved();
         return variant.get();
     }
     gm20b::Completion::Ask request;
-    request.descriptor = p->_madeFrom;
-    request.facade = p->_madeFrom;
+    request.descriptor = gm20bMadeFrom(p);
+    request.facade = request.descriptor;
     request.key = key;
     request.caTransform = p->_caTransform;
     request.own = !p->_packable;
     request.variant = forms;
     request.resolveDescriptor = true;
+    request.bindWait = [variant](std::function<bool()> wait) {
+        variant->setWait(std::move(wait));
+    };
     completion->askVariant(std::move(request), [variant, key](gm20b::Pipeline *made, const std::string &failure) {
         if (made)
             variant->publish(made);
@@ -115,17 +119,48 @@ static void awaitSettled(const std::vector<gm20b::Variant<gm20b::Pipeline> *> &v
 {
     if (variants.empty())
         return;
-    dispatch_semaphore_t settled = dispatch_semaphore_create(0);
-    size_t pending = 0;
+
+    struct State {
+        gm20b::ChangeWord changed;
+        std::atomic<uint32_t> waitGen{1};
+    };
+
+    auto shared = std::make_shared<State>();
     for (gm20b::Variant<gm20b::Pipeline> *variant : variants) {
-        const auto state = variant->observe([settled] {
-            dispatch_semaphore_signal(settled);
-        });
-        if (state == gm20b::Variant<gm20b::Pipeline>::State::Pending)
-            pending++;
+        if (variant->observe([shared] {
+                shared->changed.changed();
+            }) == gm20b::Variant<gm20b::Pipeline>::State::Pending) {
+            variant->observeWait([shared] {
+                shared->waitGen.fetch_add(1, std::memory_order_acq_rel);
+                shared->changed.changed();
+            });
+        }
     }
-    for (; pending; pending--)
-        dispatch_semaphore_wait(settled, DISPATCH_TIME_FOREVER);
+    const auto allSettled = [&] {
+        for (gm20b::Variant<gm20b::Pipeline> *variant : variants)
+            if (variant->state() == gm20b::Variant<gm20b::Pipeline>::State::Pending)
+                return false;
+        return true;
+    };
+    uint32_t triedGen = 0;
+    while (!allSettled()) {
+        const uint32_t gen = shared->waitGen.load(std::memory_order_acquire);
+        if (gen != triedGen) {
+            bool retry = false;
+            for (gm20b::Variant<gm20b::Pipeline> *variant : variants) {
+                if (variant->state() == gm20b::Variant<gm20b::Pipeline>::State::Pending && variant->waitPending()) {
+                    retry = true;
+                    break;
+                }
+            }
+            if (!retry)
+                triedGen = gen;
+            continue;
+        }
+        shared->changed.waitOnce([&] {
+            return allSettled() || shared->waitGen.load(std::memory_order_acquire) != triedGen;
+        });
+    }
 }
 
 // The test classes drawnTests (shader_test_push.h) can give a draw of `pl` in a pass of the creation's depth and
@@ -134,7 +169,7 @@ static std::vector<uint8_t> testClasses(const gm20b::Pipeline &pl, uint32_t dept
 {
     using gm20b::FragmentTests;
     const bool hasDepth = gm20b::zetaHasDepth(depth) || gm20b::zetaHasDepth(stencil);
-    const bool hasStencil = gm20b::zetaHasStencil(depth) || gm20b::zetaHasStencil(stencil);
+    const bool hasStencil = gm20b::zetaHasStencil(gm20b::testedZeta(depth)) || gm20b::zetaHasStencil(stencil);
     if (pl.fetchBits && pl.depthFormat && !pl.storageBits) {
         std::vector<uint8_t> classes = {uint8_t(FragmentTests::Pass), uint8_t(FragmentTests::ReadOnly)};
         if (hasDepth)
@@ -253,7 +288,7 @@ static gm20b::Variant<gm20b::Pipeline> *preparedVariant(__unsafe_unretained Swit
     // where a state set in it tests depth or stencil (depth_stencil_state.h testsHiddenZeta)
     const uint32_t zeta = _zeta ? _zeta : _cb->_passes[_passAt].testsHiddenZeta ? gm20b::kZetaFormat : 0;
     _forms.fragmentTests = gm20b::drawnTests(base->fetchBits && base->depthFormat && !base->storageBits,
-                                             base->rec->shaderTests, _ds, zeta);
+                                             base->rec->shaderTests, _ds, gm20b::testedZeta(zeta));
     // a Depth16Unorm a draw tests in its shader renders converted (TegraGM20BMetalRangeForms.mm depth16Tested)
     if ((_forms.fragmentTests && gm20b::zetaHasDepth(zeta)) || (base->rec->shaderTests.flags & gm20b::kShaderTestDepth))
         _cb->_passes[_passAt].shaderTestsDepth = true;
@@ -287,7 +322,7 @@ static gm20b::Variant<gm20b::Pipeline> *preparedVariant(__unsafe_unretained Swit
         }
     }
     if (gm20b::anySlot(standIns[0]) || gm20b::anySlot(standIns[1]))
-        gm20bPipelineVeto(_cb, VetoShadows);
+        gm20bPipelineStop(_cb, VetoShadows);
     for (uint32_t stage = 0; stage < 2; stage++)
         gm20b::forEachSlot(standIns[stage], [&](uint32_t slot) {
             _cb->_xrStandIns.insert(_tex[stage][slot]);

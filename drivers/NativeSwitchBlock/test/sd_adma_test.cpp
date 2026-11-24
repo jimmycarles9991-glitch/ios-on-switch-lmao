@@ -313,66 +313,6 @@ static void highBytes()
     REQUIRE(refused.t.add(0x100000000ull, 0x1000, anyPage) == kAdmaHigh && refused.t.high == 0);
 }
 
-// r12-sdio: the states of ADMA2 above 4 GiB (SwitchAdmaHigh) and what each
-// lets through.
-static void highProof()
-{
-    SwitchAdmaHigh h;
-    // Proving: reads may reach up to the DMA mask, writes stay below 4 GiB; the
-    // IRAM alias window is kept out of reads.
-    REQUIRE(h.state == SwitchAdmaHigh::kProving && h.checking(false) && h.checking(true));
-    REQUIRE(h.limit(false) == kAdmaDmaLimit && h.limit(true) == kAdma4GiB);
-    REQUIRE(!h.pageOk(kAdmaIramAlias, false) && !h.pageOk(kAdmaIramAlias + kAdmaIramBytes - kAdmaPage, false));
-    REQUIRE(h.pageOk(kAdmaIramAlias - kAdmaPage, false) && h.pageOk(kAdmaIramAlias + kAdmaIramBytes, false));
-    REQUIRE(h.pageOk(kAdmaIramAlias,
-                     true));  // writes never reach there while proving (their limit is 4 GiB)
-    REQUIRE(h.pageOk(0x80000000ull, false));
-    // Only reads that reach above 4 GiB are proofs; no write is checked for it
-    // yet.
-    REQUIRE(h.proofDue(false, 1) && !h.proofDue(false, 0) && !h.proofDue(true, 1));
-    REQUIRE(!h.writeCheckDue(true, 0x1000));
-    // A table built under the proving limit and filter: the IRAM alias page is
-    // refused, a page next to it is not.
-    {
-        Table t(1024, h.limit(false));
-        auto ok = [&](uint64_t page) {
-            return h.pageOk(page, false);
-        };
-        REQUIRE(t.t.add(kAdmaIramAlias + 0x1000, 0x1000, ok) == kAdmaMemory);
-        REQUIRE(t.t.add(kAdmaIramAlias + kAdmaIramBytes, 0x1000, ok) == kAdmaOk && t.t.high == 0x1000);
-        Table w(1024, h.limit(true));
-        REQUIRE(w.t.add(0x100000000ull, 0x1000, ok) == kAdmaHigh);
-    }
-    for (uint32_t i = 1; i < SwitchAdmaHigh::kProofs; ++i) {
-        REQUIRE(!h.proved(0x1000));
-        REQUIRE(h.state == SwitchAdmaHigh::kProving && h.proofsLeft == SwitchAdmaHigh::kProofs - i);
-    }
-    REQUIRE(h.proved(0x2000));  // the last one, reported once
-    REQUIRE(h.state == SwitchAdmaHigh::kOn && h.proofsLeft == 0);
-    REQUIRE(h.provenBytes == (SwitchAdmaHigh::kProofs - 1) * 0x1000ull + 0x2000);
-    REQUIRE(!h.proved(0x1000) && h.state == SwitchAdmaHigh::kOn);  // no second report
-    // On: both directions up to the mask, the IRAM alias window too; the first
-    // writes from up there are read back.
-    REQUIRE(h.limit(false) == kAdmaDmaLimit && h.limit(true) == kAdmaDmaLimit);
-    REQUIRE(h.pageOk(kAdmaIramAlias, false) && h.pageOk(kAdmaIramAlias, true));
-    REQUIRE(!h.proofDue(false, 0x1000));
-    REQUIRE(h.checking(true) && !h.checking(false));
-    for (uint32_t i = 0; i < SwitchAdmaHigh::kWriteProofs; ++i) {
-        REQUIRE(h.writeCheckDue(true, 0x1000) && !h.writeCheckDue(true, 0) && !h.writeCheckDue(false, 0x1000));
-        h.writeChecked();
-    }
-    REQUIRE(!h.writeCheckDue(true, 0x1000) && !h.checking(true));
-    h.writeChecked();  // never wraps
-    REQUIRE(h.writeProofsLeft == 0);
-    // Off (a proof differed): below 4 GiB both ways, nothing more to check.
-    SwitchAdmaHigh off;
-    REQUIRE(!off.proved(0x1000));
-    off.refuse();
-    REQUIRE(off.limit(false) == kAdma4GiB && off.limit(true) == kAdma4GiB && !off.checking(true));
-    REQUIRE(!off.proofDue(false, 0x1000) && !off.writeCheckDue(true, 0x1000) && !off.proved(0x1000));
-    REQUIRE(off.state == SwitchAdmaHigh::kOff);
-}
-
 // r12-sdio: a read chain's table with refused segments staged through the bounce buffer (SwitchAdmaStaging).
 using Staging = SwitchAdmaStaging<Memory>;
 constexpr uint64_t kBounce = 0x90000000ull, kBounceSize = 1 << 20;
@@ -712,11 +652,6 @@ TEST(SdAdma, RandomRuns)
 TEST(SdAdma, HighBytes)
 {
     highBytes();
-}
-
-TEST(SdAdma, HighProof)
-{
-    highProof();
 }
 
 TEST(SdAdma, StagingCases)

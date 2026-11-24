@@ -9,6 +9,21 @@ enum DecodeJudge {
     struct Tally {
         var off = 0
         var maxDiff: Float = 0
+        /// Of an sRGB read's colour channels off Apple's code (channelsOff): those read as the code / 255, no sRGB
+        /// decode where the texel is read (undecoded), and those read as the decode of the code's own decode stored in
+        /// 8 bits, one decode too many (twice)
+        var channelsOff = 0, undecoded = 0, twice = 0
+
+        /// "undecoded/twice/channels off", for a report
+        var forms: String { "\(undecoded)/\(twice)/\(channelsOff)" }
+
+        mutating func add(_ other: Tally) {
+            off += other.off
+            maxDiff = max(maxDiff, other.maxDiff)
+            channelsOff += other.channelsOff
+            undecoded += other.undecoded
+            twice += other.twice
+        }
     }
 
     /// 8-bit codes, red in the low byte of `want`; an sRGB read's colour channels by the nearest code of Apple's table
@@ -20,8 +35,15 @@ enum DecodeJudge {
             for c in 0 ..< 4 {
                 let code = Int((word >> (8 * UInt32(c))) & 255)
                 if srgb && c < 3 {
-                    off = off || DecodeVectors.nearestSrgbCode(texel[c]) != code
+                    let channelOff = DecodeVectors.nearestSrgbCode(texel[c]) != code
+                    off = off || channelOff
                     tally.maxDiff = max(tally.maxDiff, abs(texel[c] - DecodeVectors.srgb[code]))
+                    if channelOff {
+                        let twice = DecodeVectors.srgb[Self.code(DecodeVectors.srgb[code], 255)]
+                        tally.channelsOff += 1
+                        tally.undecoded += abs(texel[c] - Float(code) / 255) < 0.5 / 255 ? 1 : 0
+                        tally.twice += abs(texel[c] - twice) < 0.5 / 255 ? 1 : 0
+                    }
                 } else {
                     off = off || Self.code(texel[c], 255) != code
                     tally.maxDiff = max(tally.maxDiff, abs(texel[c] - Float(code) / 255))

@@ -160,8 +160,14 @@ void RenderEncoder::end()
         p_.m(GLOBAL_BASE_VERTEX_INDEX, 0);
         p_.m(VERTEX_ID_BASE, 0);
     }
-    if (rasterSamples_ > samples_)
-        tirOff(p_);
+    if (rasterSamples_ > samples_) {
+#if SWITCH_METAL_DIAGNOSTICS
+        if (tirProbe_)
+            tirOffProbed(p_, tirProbe_);
+        else
+#endif
+            tirOff(p_);
+    }
     if (std::max(samples_, rasterSamples_) > 1)
         sampleWords(p_, 1, d.root_.va);
     // the 3D engine's work outside the pass (the blit encoder's draws) meets no iterated blend and the pass's
@@ -186,7 +192,7 @@ void RenderEncoder::end()
         tiledCacheDrain(p_, d.k_.info());
     if (measured)
         emitDrawStamp(p_, d.stamps_.va, candidate_.slot, true, candidate_.payload);
-    if (attachmentWrites_.storage)
+    if (attachmentWrites_.storage || cb_->passBufferWrites_ || passShaderWrites_ || planned_.shaderWrites)
         p_.m(INVALIDATE_SHADER_CACHES, kFlushData | kInvalidateData);
     checkRoom(p_, "a pass body");
     if (p_.at > bodyStart_)
@@ -206,23 +212,34 @@ void RenderEncoder::end()
     probeEdges();
 #endif
     const std::vector<uint32_t> &restore = extrasAtBegin_ ? extrasAtBegin_->restore : std::vector<uint32_t>();
-    const uint32_t room = 160 + 8 * 32 * layers + uint32_t(cl.size()) * 48 + kZetaTargetWords + kZcullRegionWords +
-                          kZetaClearWords + 16 + kSampleWords + kTurnWordsMethods + uint32_t(restore.size()) +
-                          kSpanMarkWords + startStampCount_ * counters::kTimestampWords + kDrawStampWords +
+    const uint32_t room = 160 + SWITCH_GM20B_KIND_SWITCH_WORDS + 8 * 32 * layers + uint32_t(cl.size()) * 48 +
+                          kZetaTargetWords + kZcullRegionWords + kZetaClearWords + 16 + kSampleWords +
+                          kTurnWordsMethods + uint32_t(restore.size()) + kSpanMarkWords +
+                          startStampCount_ * counters::kTimestampWords + kDrawStampWords +
                           (separate_.stencil ? 64 + 128 * layers : 0) + (zetaShadowOf_ ? zetaShadowWords(layers) : 0) +
                           (rasterSamples_ > samples_ ? kSampleWords + kTirWords + 16 : 0) + kTimedPassWords;
+    const uint32_t totalRoom = room + (uint32_t(cl.size()) + 1) * kTiledCacheSizeWords;
     uint64_t va;
-    uint32_t *start = reinterpret_cast<uint32_t *>(d.alloc(d.push_, room * 4, 256, va));
-    Push p{start, start + room};
+    uint32_t *start = reinterpret_cast<uint32_t *>(d.alloc(d.push_, totalRoom * 4, 256, va));
+    Push p{start, start + totalRoom};
     SWITCH_METAL_DIAGNOSTIC(if (cb_->drawTimes_) d.emitDrawTime(p, betweenTime_));
     p.raw(restore.data(), uint32_t(restore.size()));
     const BarrierEngine before = cb_->lastEngine_;
     const BarrierForms forms = cb_->barrierForms();
     const PassUses uses = passUses();
+    const bool hadBufferWrites =
+        cb_->passBufferWrites_ || planned_.bufferWrites || passWritesMemory_ || (!uses.known && !rot_.turned());
+    cb_->passBufferWrites_ = false;
+    cb_->inRender_ = false;
     const PassForm pass = forms.pass != PassForm::Rule ? forms.pass : passRule(before, uses);
     const Opened opened = passOpening(p, pass, switchFormFor(forms.switchForm, before, BarrierEngine::ThreeD),
-                                      entryFormFor(forms.entry), before);
+                                      entryFormFor(forms.entry), before, cb_->prevBufferWrites_);
+    if (cb_->takeKindSwitch())
+        kit(p, switch_gm20b_kind_switch);
     advanceChain(cb_->chain_, uses, opened != Opened::Pass);
+    if (opened != Opened::Pass)
+        cb_->prevBufferWrites_ = false;
+    cb_->prevBufferWrites_ |= hadBufferWrites;
     cb_->lastEngine_ = BarrierEngine::ThreeD;
     SWITCH_METAL_DIAGNOSTIC(cb_->taken_.count(opened));
     SWITCH_METAL_DIAGNOSTIC(cb_->pixelOpenings_ += opened == Opened::Pass && pass == PassForm::PixelOrdered);
@@ -274,15 +291,18 @@ void RenderEncoder::end()
         colorTarget(p, 0, *t, layers);
         kit(p, switch_gm20b_render_area, 1u, r.x1, r.y1);
         p.m(ZT_SELECT, 0);
+        tiledCacheSetSize(p, d.k_.info(), tiledCacheTileSize(t->bpp * std::max<uint32_t>(t->samples, 1u)),
+                          cb_->tiledCacheSize_);
         uint32_t v[4] = {};
         clearWords(pass_.color[c.target].texture->format, c.value, v,
                    !called_ && pass_.color[c.target].texture->compressed);
         d.clearZbc(*t, !r.x0 && !r.y0 && r.x1 >= t->width && r.y1 >= t->height, v);
         clearRect(p, r.x0, r.y0, r.x1, r.y1, v, 0, 0, layers);
+        cb_->tiledCacheDirty_ = true;
         own = true;
     }
     if (own) {
-        kit(p, switch_gm20b_pass_barrier, false);
+        kit(p, switch_gm20b_pass_drain, false);
     }
     uint32_t count = 0;
     for (uint32_t j = 0; j < pass_.count && j < 8; j++)
@@ -299,9 +319,20 @@ void RenderEncoder::end()
     kit(p, switch_gm20b_render_area, count, planeArea().x1, planeArea().y1);
     const DepthStencilAttachment &zs = pass_.depthStencil;
     zetaTargetWords(p, zs.texture, layers);
+    uint32_t totalBpp = 0;
+    for (uint32_t j = 0; j < count; j++)
+        if (const Texture *t = pass_.color[j].texture)
+            totalBpp += t->bpp * std::max<uint32_t>(t->samples, 1u);
+    if (const Texture *z = zs.texture)
+        totalBpp += z->bpp * std::max<uint32_t>(z->samples, 1u);
+    tiledCacheSetSize(p, d.k_.info(), tiledCacheTileSize(totalBpp), cb_->tiledCacheSize_);
     // ahead of the depth clear, which sets the region, or the load of a stored one; over the plane the pass renders (a
     // turned drawable's own axes, zcullBegin)
-    if (zcull_.candidate) {
+    bool zcullAfterTir = false;
+#if SWITCH_METAL_DIAGNOSTICS
+    zcullAfterTir = zcull_.candidate && (tirProbe_ & kTirProbeZcullAfter);
+#endif
+    const auto zcullWords = [&] {
         uint32_t criterion = 0;
 #if SWITCH_METAL_DIAGNOSTICS
         if (const uint32_t c = d.probeZcullCriterion.load(std::memory_order_relaxed))
@@ -312,9 +343,11 @@ void RenderEncoder::end()
         if (zcull_.load)
             p.m(kLoadZcull, 0);
         SWITCH_METAL_DIAGNOSTIC(d.stats.zcullPasses++; d.stats.zcullLoads += zcull_.load);
-    } else if (d.zcullOn_) {
+    };
+    if (zcull_.candidate && !zcullAfterTir)
+        zcullWords();
+    else if (!zcull_.candidate && d.zcullOn_)
         zcullOffWords(p);
-    }
     // the backing's layers past a shorter zeta's own, which no copy fills, hold what an M4 Max tests there
     // (m2v-pass-forms/probe/layerprobe.mm): a loaded depth above 1.0 (a float zeta's 2.0) or Depth16Unorm's 1.0, a loaded
     // stencil 0xff; a DontCare aspect its clear value, as Apple's DontCare depth and stencil test against
@@ -328,8 +361,10 @@ void RenderEncoder::end()
                         : zs.texture->format == kDepth16Unorm ? 1.0f
                                                               : 2.0f,
                         stencil, zs.loaded ? 0xffu : zs.stencil);
-        if (depth || stencil)
+        if (depth || stencil) {
             clearZeta(p, planeArea(), zetaClearBits(depth, stencil), own, layers - own);
+            cb_->tiledCacheDirty_ = true;
+        }
     }
     // NVK clears depth and stencil with the first color the pass clears over its render area, else on their own
     uint32_t zsBits = zs.texture ? zetaClearBits(zs.clearDepth && zetaHasDepth(zs.texture->format),
@@ -354,18 +389,31 @@ void RenderEncoder::end()
         d.clearZbc(*t, !r.x0 && !r.y0 && r.x1 >= t->width && r.y1 >= t->height, v);
         const bool area = !mixed && !c.x0 && !c.y0 && c.x1 == areaW_ && c.y1 == areaH_;
         clearRect(p, r.x0, r.y0, r.x1, r.y1, v, c.target, area ? zsBits : 0, layers);
+        cb_->tiledCacheDirty_ = true;
         zsBits = area ? 0 : zsBits;
     }
     if (mixed) {
         p.m(ZT_SELECT, 1);
         sampleWords(p, rasterSamples_, d.root_.va, pass_.positions, rot_);
-        if (zsBits)
+        if (zsBits) {
             clearZeta(p, planeArea(), zsBits, 0, layers);
+            cb_->tiledCacheDirty_ = true;
+        }
         zsBits = 0;
         tirOn(p, rasterSamples_);
+#if SWITCH_METAL_DIAGNOSTICS
+        if (tirProbe_ & kTirProbeModeOff)
+            p.m(NVB197_SET_TIR, NVB197_SET_TIR_MODE_DISABLED);
+#endif
+        if (zcullAfterTir)
+            zcullWords();
     }
-    if (zsBits)
+    if (zsBits) {
         clearZeta(p, planeArea(), zsBits, 0, layers);
+        cb_->tiledCacheDirty_ = true;
+    }
+    if (drew_)
+        cb_->tiledCacheDirty_ = !flush;
     if (measured)
         emitDrawStamp(p, d.stamps_.va, candidate_.slot, false, candidate_.payload);
     SWITCH_METAL_DIAGNOSTIC(markSpan(p, prologueMark_, SpanKind::Prologue));
@@ -424,6 +472,7 @@ void RenderEncoder::end()
         copySeparateZeta(q, aspects, false);
         checkRoom(q, "a pass's separate depth and stencil stores");
         cb_->segment(at, q.at);
+        cb_->lastEngine_ = BarrierEngine::Copy;
         d.push_.head = uint64_t(reinterpret_cast<uint8_t *>(q.at) - d.push_.bo.cpu);
         SWITCH_METAL_DIAGNOSTIC(d.stats.pushBytes += uint64_t(q.at - at) * 4);
     }

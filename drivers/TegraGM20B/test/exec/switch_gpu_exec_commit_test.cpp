@@ -577,3 +577,231 @@ TEST_F(ExecCommit, PlainAndHostOnlyJobsTakeNoLiveLock)
 		kicks.clear();
 	}
 }
+
+TEST_F(ExecCommit, LaterCompositorKicksCountFramesPerFrameMaxAndQueueMax)
+{
+	switch_exec_chan_high(consumer, 1);
+	switch_exec_chan_critical(consumer, 1);
+
+	const auto submit = [&](switch_exec_chan *chan, switch_exec_kick_kind kick, int later,
+				uint64_t sub_pt, uint64_t queue_pt) {
+		switch_exec_set_kick(kick, later);
+		switch_exec_set_ptimer(sub_pt);
+		uint32_t out = 0;
+		EXPECT_EQ(switch_gpu_chan_exec_events(switch_exec_chan_tgm(chan), &kPush, 1,
+						      nullptr, 0, nullptr, 0, nullptr, 0, &out,
+						      nullptr, kJob, nullptr, 0, nullptr),
+			  0);
+		switch_exec_chan_complete_stamp(chan, out, sub_pt + queue_pt,
+						sub_pt + queue_pt + 100);
+		kicks.clear();
+		return out;
+	};
+
+	submit(consumer, SWITCH_EXEC_KICK_PREEMPTED, 0, 1000, 8000);
+	submit(consumer, SWITCH_EXEC_KICK_CLEAR, 1, 10000, 7000);
+	const uint32_t marked_seqno = submit(consumer, SWITCH_EXEC_KICK_PREEMPTED, 1, 20000, 2500);
+	submit(consumer, SWITCH_EXEC_KICK_SWITCHING, 1, 30000, 1200);
+
+	submit(consumer, SWITCH_EXEC_KICK_CLEAR, 0, 35000, 500);
+	submit(consumer, SWITCH_EXEC_KICK_DEFERRED, 1, 40000, 4000);
+
+	switch_exec_chan *other = switch_exec_chan_new(0x130, 3);
+	switch_exec_chan_high(other, 1);
+	submit(other, SWITCH_EXEC_KICK_PREEMPTED, 1, 50000, 49000);
+
+	uint64_t pt = 100000;
+	uint32_t last = 0;
+	for (uint32_t tries = 0; tries < 80 && last != marked_seqno + 64; ++tries) {
+		pt += 1000;
+		last = submit(consumer, SWITCH_EXEC_KICK_PREEMPTED, 0, pt, 50000);
+	}
+	EXPECT_EQ(last, marked_seqno + 64);
+
+	switch_exec_later_stats got = {};
+	switch_exec_take_later_stats(&got);
+	EXPECT_EQ(got.kicks, 3u);
+	EXPECT_EQ(got.frames, 2u);
+	EXPECT_EQ(got.frame_max, 2u);
+	EXPECT_EQ(got.queue_max, 4000u);
+
+	switch_exec_take_later_stats(&got);
+	EXPECT_EQ(got.kicks, 0u);
+	EXPECT_EQ(got.frames, 0u);
+	EXPECT_EQ(got.frame_max, 0u);
+	EXPECT_EQ(got.queue_max, 0u);
+}
+
+TEST_F(ExecCommit, CompositorForeignWaitsCountFencesPromisesEventsHost1xAndQueueImpact)
+{
+	switch_exec_chan_high(consumer, 1);
+	switch_exec_chan_critical(consumer, 1);
+
+	switch_exec_chan *same_vm = switch_exec_chan_new(0x131, 2);
+	switch_exec_chan_share_vm(same_vm, consumer);
+	switch_exec_chan_live(same_vm, 1);
+
+	switch_exec_chan *foreign_a = switch_exec_chan_new(0x132, 3);
+	switch_exec_chan *foreign_b = switch_exec_chan_new(0x133, 4);
+	switch_exec_chan_live(foreign_a, 1);
+	switch_exec_chan_live(foreign_b, 1);
+
+	switch_exec_chan *non_comp = switch_exec_chan_new(0x134, 5);
+	switch_exec_chan_high(non_comp, 1);
+
+	const auto run_one = [&](switch_exec_chan *chan,
+				 const std::vector<switch_gpu_backing_token> &deps,
+				 const std::vector<switch_gpu_word_wait> &word_list,
+				 uint64_t sub_pt, uint64_t queue_pt) {
+		switch_exec_set_ptimer(sub_pt);
+		uint32_t out = 0;
+		const int ret = switch_gpu_chan_exec_events(
+			switch_exec_chan_tgm(chan), &kPush, 1, deps.empty() ? nullptr : deps.data(),
+			uint32_t(deps.size()), nullptr, 0,
+			word_list.empty() ? nullptr : word_list.data(), uint32_t(word_list.size()),
+			&out, nullptr, kJob, nullptr, 0, nullptr);
+		if (!ret)
+			switch_exec_chan_complete_stamp(chan, out, sub_pt + queue_pt,
+							sub_pt + queue_pt + 100);
+		kicks.clear();
+		return std::pair<int, uint32_t>{ret, out};
+	};
+
+	const switch_gpu_backing_token own_fence = switch_exec_backing::token(0x131, 1);
+	const switch_gpu_backing_token settled_foreign = switch_exec_backing::token(0x132, 1);
+	switch_exec_backing::complete(settled_foreign);
+	const switch_gpu_backing_token foreign_fence = switch_exec_backing::token(0x132, 2);
+	const switch_gpu_backing_token foreign_fence_b = switch_exec_backing::token(0x133, 2);
+	const switch_gpu_backing_token own_promise = {1, 1, SWITCH_GPU_ENGINE_PROMISE,
+						      2u * 16384u + 0x100u};
+	const switch_gpu_backing_token foreign_promise = {1, 1, SWITCH_GPU_ENGINE_PROMISE,
+							  3u * 16384u + 0x100u};
+	const switch_gpu_backing_token vic_wait = {3, 1, SWITCH_GPU_ENGINE_VIC, 7};
+	const switch_gpu_word_wait own_event = {2u * 16384u + 0x200u, 1, 0x131};
+	const switch_gpu_word_wait own_event_no_queue = {2u * 16384u + 0x204u, 1, 0};
+	const switch_gpu_word_wait foreign_event = {3u * 16384u + 0x200u, 2, 0x132};
+	const switch_gpu_word_wait foreign_event_no_queue = {4u * 16384u + 0x200u, 2, 0};
+
+	EXPECT_EQ(run_one(consumer, {own_fence, settled_foreign, own_promise},
+			  {own_event, own_event_no_queue}, 1000, 9000)
+			  .first,
+		  0);
+
+	const auto [r1, marked_seqno] = run_one(consumer, {foreign_fence}, {}, 20000, 3500);
+	EXPECT_EQ(r1, 0);
+
+	EXPECT_EQ(run_one(consumer, {foreign_promise}, {}, 40000, 7000).first, 0);
+
+	EXPECT_EQ(run_one(consumer, {}, {foreign_event, foreign_event_no_queue}, 60000, 2500).first,
+		  0);
+
+	EXPECT_EQ(run_one(consumer, {foreign_fence, foreign_fence_b, foreign_promise, vic_wait},
+			  {foreign_event}, 80000, 5000)
+			  .first,
+		  0);
+
+	EXPECT_EQ(run_one(consumer, {vic_wait}, {}, 100000, 12000).first, 0);
+
+	EXPECT_EQ(run_one(non_comp, {foreign_fence, foreign_promise, vic_wait}, {foreign_event},
+			  120000, 99000)
+			  .first,
+		  0);
+
+	const switch_gpu_backing_token missing_source = switch_exec_backing::token(0x999, 1);
+	EXPECT_EQ(run_one(consumer, {foreign_fence, missing_source}, {}, 140000, 88000).first,
+		  kNoDevice);
+
+	uint64_t pt = 200000;
+	uint32_t last = 0;
+	for (uint32_t tries = 0; tries < 80 && last != marked_seqno + 64; ++tries) {
+		pt += 1000;
+		const auto [r, s] = run_one(consumer, {}, {}, pt, 50000);
+		EXPECT_EQ(r, 0);
+		last = s;
+	}
+	EXPECT_EQ(last, marked_seqno + 64);
+
+	switch_exec_foreign_stats got = {};
+	switch_exec_take_foreign_stats(&got);
+	EXPECT_EQ(got.jobs, 4u);
+	EXPECT_EQ(got.fences, 3u);
+	EXPECT_EQ(got.promises, 2u);
+	EXPECT_EQ(got.events, 3u);
+	EXPECT_EQ(got.host1x, 2u);
+	EXPECT_EQ(got.timed, 4u);
+	EXPECT_EQ(got.queue_sum, 3500u + 7000u + 2500u + 5000u);
+	EXPECT_EQ(got.queue_max, 7000u);
+
+	switch_exec_take_foreign_stats(&got);
+	EXPECT_EQ(got.jobs, 0u);
+	EXPECT_EQ(got.fences, 0u);
+	EXPECT_EQ(got.promises, 0u);
+	EXPECT_EQ(got.events, 0u);
+	EXPECT_EQ(got.host1x, 0u);
+	EXPECT_EQ(got.timed, 0u);
+	EXPECT_EQ(got.queue_sum, 0u);
+	EXPECT_EQ(got.queue_max, 0u);
+
+	struct tgm_foreign_waits totals = {};
+	tgm_foreign_waits_totals(&totals);
+	EXPECT_EQ(totals.jobs, 4u);
+	EXPECT_EQ(totals.fences, 3u);
+	EXPECT_EQ(totals.promises, 2u);
+	EXPECT_EQ(totals.events, 3u);
+	EXPECT_EQ(totals.host1x, 2u);
+
+	EXPECT_EQ(run_one(consumer, {foreign_fence}, {}, pt + 1000, 1500).first, 0);
+	tgm_foreign_waits_totals(&totals);
+	EXPECT_EQ(totals.jobs, 5u);
+	EXPECT_EQ(totals.fences, 4u);
+	EXPECT_EQ(totals.promises, 2u);
+	EXPECT_EQ(totals.events, 3u);
+	EXPECT_EQ(totals.host1x, 2u);
+}
+
+TEST_F(ExecCommit, L2InvalidateStatsSplitHostWrittenTlbAndKernelPush)
+{
+	const auto submit = [&](switch_exec_chan *chan, uint32_t visibility) {
+		uint32_t out = 0;
+		ASSERT_EQ(switch_gpu_chan_exec_events(switch_exec_chan_tgm(chan), &kPush, 1,
+						      nullptr, 0, nullptr, 0, nullptr, 0, &out,
+						      nullptr, visibility, nullptr, 0, nullptr),
+			  0);
+		kicks.clear();
+	};
+
+	switch_exec_chan *compositor = switch_exec_chan_new(0x140, 3);
+	switch_exec_chan_critical(compositor, 1);
+	switch_exec_chan *kernel = switch_exec_chan_new(0x141, 4);
+	switch_exec_chan_kernel(kernel, 1);
+
+	// Plain explicit job: no L2 invalidate.
+	submit(consumer, kJob);
+	// App host-written job.
+	submit(consumer, kJob | SWITCH_GPU_SUBMIT_HOST_WRITTEN);
+	// Compositor host-written job.
+	submit(compositor, kJob | SWITCH_GPU_SUBMIT_HOST_WRITTEN);
+	// TLB-only job (not host-written).
+	switch_exec_chan_dirty_tlb(consumer);
+	submit(consumer, kJob);
+	// Both host-written and TLB-dirty on one user submission.
+	switch_exec_chan_dirty_tlb(consumer);
+	submit(consumer, kJob | SWITCH_GPU_SUBMIT_HOST_WRITTEN);
+	// Kernel channel host-written push.
+	submit(kernel, kJob | SWITCH_GPU_SUBMIT_HOST_WRITTEN);
+
+	switch_exec_l2_inval_stats got = {};
+	switch_exec_take_l2_inval_stats(&got);
+	EXPECT_EQ(got.total, 5u);
+	EXPECT_EQ(got.host_written, 3u);
+	EXPECT_EQ(got.compositor, 1u);
+	EXPECT_EQ(got.tlb, 2u);
+	EXPECT_EQ(got.kernel_push, 1u);
+
+	switch_exec_take_l2_inval_stats(&got);
+	EXPECT_EQ(got.total, 0u);
+	EXPECT_EQ(got.host_written, 0u);
+	EXPECT_EQ(got.compositor, 0u);
+	EXPECT_EQ(got.tlb, 0u);
+	EXPECT_EQ(got.kernel_push, 0u);
+}

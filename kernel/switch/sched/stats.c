@@ -13,6 +13,8 @@
  */
 
 #include <kern/misc_protos.h>
+#include <switch/diag.h>
+#include <switch/recorder.h>
 #include <switch/sched.h>
 #include <switch/stall.h>
 #include <switch/xnu.h>
@@ -165,14 +167,32 @@ static void watch(enum slot_id id, uint64_t tid, int pid, const char *label, boo
         }
     }
     simple_lock(&slots_lock, LCK_GRP_NULL);
-    if (os_atomic_load(&watched[id], relaxed) != tid &&
-        (replace_same_pid || slots[id].pid != pid || os_atomic_load(&watched[id], relaxed) == 0)) {
+    const bool stored = os_atomic_load(&watched[id], relaxed) != tid &&
+                        (replace_same_pid || slots[id].pid != pid || os_atomic_load(&watched[id], relaxed) == 0);
+    if (stored) {
         slots[id].pid = pid;
         strlcpy(slots[id].label, label, sizeof(slots[id].label));
         os_atomic_store(&watched[id], tid, relaxed);
     }
     simple_unlock(&slots_lock);
     os_atomic_store(&switch_sched_watching, 1, relaxed);
+    if (stored && id == CA_RENDER) {
+        switch_sched_watch_render_server(tid);
+    }
+}
+
+/* The task's first thread, its main thread, with a reference (THREAD_NULL when it has none). */
+static thread_t main_thread(task_t task)
+{
+    thread_t thread = THREAD_NULL;
+
+    task_lock(task);
+    if (!queue_empty(&task->threads)) {
+        thread = (thread_t)queue_first(&task->threads);
+        thread_reference(thread);
+    }
+    task_unlock(task);
+    return thread;
 }
 
 static uint64_t main_thread_id(task_t task)
@@ -192,16 +212,22 @@ void switch_sched_role(task_t task, int role)
 {
     char name[32];
     char label[LABEL];
+    thread_t main = THREAD_NULL;
     uint64_t tid = 0;
 
     switch_stall_frame_role(task, role);
-    if (role != TASK_FOREGROUND_APPLICATION) {
+    if (role == TASK_FOREGROUND_APPLICATION) {
+        main = main_thread(task);
+    }
+    switch_sched_busy_focal(task, role, main);
+#if SWITCH_RECORDER
+    switch_recorder_role(task, role, main);
+#endif
+    if (main == THREAD_NULL) {
         return;
     }
-    tid = main_thread_id(task);
-    if (tid == 0) {
-        return;
-    }
+    tid = thread_tid(main);
+    thread_deallocate(main);
     switch_task_name(task, name, sizeof(name));
     if (strcmp(name, "SpringBoard") == 0) {
         watch(SB_MAIN, tid, task_pid(task), "SpringBoard.main", true);
@@ -209,6 +235,7 @@ void switch_sched_role(task_t task, int role)
     }
     snprintf(label, sizeof(label), "%s.main", name);
     watch(APP_MAIN, tid, task_pid(task), label, true);
+    switch_sched_watch_focal(task, tid);
 }
 
 /* bsd_setthreadname (proc_info.c): backboardd's threads as they name themselves, and its main thread with them. */
@@ -468,12 +495,14 @@ static void switch_sched_report(__unused thread_call_param_t p0, __unused thread
     static uint64_t last_ns;
     static char line[LINE];
     uint64_t now_ns = 0;
+    uint64_t window_ns = 0;
     uint64_t window_ms = 0;
     uint64_t boot_ns = os_atomic_load(&boot_complete_ns, relaxed);
     size_t at = 0;
 
     absolutetime_to_nanoseconds(mach_absolute_time(), &now_ns);
-    window_ms = (now_ns - last_ns) / NSEC_PER_MSEC;
+    window_ns = now_ns - last_ns;
+    window_ms = window_ns / NSEC_PER_MSEC;
     last_ns = now_ns;
     if (boot_ns != 0) {
         at = (size_t)snprintf(line, LINE,
@@ -493,6 +522,9 @@ static void switch_sched_report(__unused thread_call_param_t p0, __unused thread
     at = (size_t)snprintf(line, LINE, "SwitchSched 2/2 (the render server's GPU threads)");
     append_slots(line, MIN(at, LINE - 1), FIRST_GPU, SLOTS);
     os_log(OS_LOG_DEFAULT, "%s", line);
+    switch_sched_cpu_report(line, window_ns);
+    switch_sched_watch_report(line, LINE, window_ns);
+    switch_diag_pagein_report(line, LINE, window_ns);
     report_asked(line);
 }
 

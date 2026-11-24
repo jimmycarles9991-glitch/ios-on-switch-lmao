@@ -1,5 +1,6 @@
 # drivers/NativeMobileDisplay on the host:
 #   switch_interaction_test             SwitchInteraction.h: the presents of a touch interaction window, its line
+#   switch_slow_present_test            SwitchSlowPresent.h: the cause a present two or more periods late is charged to
 #   switch_frame_stall_test             SwitchFrameStall.h: the frame ends at which the screen stopped mid-animation
 #   switch_sbim_test                    SwitchSBIM.h: libEDR's enableSBIM dictionaries (iOS 27), as
 #                                       AppleMobileDispH12P answers them for a display without SBIM statistics
@@ -93,6 +94,15 @@ host_test(
     srcs = [
         "switch_interaction_test.cpp",
         "//drivers/NativeMobileDisplay:SwitchInteraction.h",
+        "//drivers/NativeMobileDisplay:SwitchSlowPresent.h",
+    ],
+)
+
+host_test(
+    name = "switch_slow_present_test",
+    srcs = [
+        "switch_slow_present_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchSlowPresent.h",
     ],
 )
 
@@ -1414,4 +1424,45 @@ host_test(
     copts = ["-fsanitize=thread"],
     linkopts = ["-fsanitize=thread"],
     sanitize = False,
+)
+
+host_test(
+    name = "switch_display_promise_test",
+    srcs = [
+        "switch_display_promise_harness.h",
+        "switch_display_promise_kernel.h",
+        "switch_display_promise_test.cpp",
+        "//drivers/NativeMobileDisplay:SwitchCompletionFlip.h",
+        "//drivers/NativeMobileDisplay:SwitchCompletionFlipDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchCompletionFlipFilter.h",
+        "//drivers/NativeMobileDisplay:SwitchDirectVisibleDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchFlipDeadlineDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchGpuDoneDisplay.h",
+        "//drivers/NativeMobileDisplay:SwitchScanoutAddress.h",
+        "//drivers/NativeMobileDisplay:SwitchScanoutStart.h",
+        "//drivers/NativeMobileDisplay:SwitchUnshownSource.h",
+        "//drivers/TegraDisplayFlip:TegraScanoutCopy.h",
+        "//drivers/TegraDisplayFlip:TegraScanoutRing.h",
+        "//drivers/TegraGM20B:SwitchGpuBacking.h",
+        "//drivers/TegraGM20B:SwitchGpuPresentWatch.h",
+        "//drivers/TegraGM20B:SwitchGpuPromiseGiveUp.h",
+        "//drivers/TegraGM20B:SwitchGpuWriterPromise.h",
+        "//drivers/TegraGM20B:TegraGM20BABI.h",
+        "//drivers/TegraGM20B:TegraGM20BFencePageABI.h",
+        "//drivers/TegraGM20B:TegraGM20BJobABI.h",
+        "//drivers/TegraHost1x:SwitchHost1xFence.h",
+        "//drivers/TegraVIC:SwitchNativeScanout.h",
+        "//drivers/TegraVIC:SwitchNativeSurface.h",
+        "//drivers/TegraVIC:SwitchSurfaceColor.h",
+        "//drivers/TegraVIC:SwitchVICPicture.h",
+        "//drivers/TegraVIC:TegraVICColor.h",
+        "//drivers/TegraVIC:TegraVICConfig.h",
+        "//drivers/TegraVIC:TegraVICFormats.h",
+        "//drivers/TegraVIC:TegraVICRequest.h",
+        "//drivers/TegraVIC:TegraVICSurface.h",
+    ],
+    data = [
+        "//drivers/NativeMobileDisplay:NativeLegacyDisplay.cpp",
+    ],
+    deps = [":native_scanout_kernel"],
 )

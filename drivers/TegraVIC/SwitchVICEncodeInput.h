@@ -8,6 +8,7 @@
 
 struct switch_gpu_backing;
 struct switch_gpu_backing_token;
+class IOMemoryDescriptor;
 
 struct SwitchVICEncodeInput {
     switch_gpu_backing *destination;  // the picture buffer, registered by its engine
@@ -28,3 +29,14 @@ bool switch_vic_encode_input_ready(bool blockLinear);
 // `why` a literal for the caller's one line.
 int switch_vic_encode_input(uint32_t surfaceID, task_t task, const SwitchVICEncodeInput *input, uint32_t *fence,
                             switch_gpu_backing_token *written, bool *bounced, const char **why);
+
+struct SwitchVICEncodeBuffer {
+    switch_gpu_backing *source;
+    IOMemoryDescriptor *sourceMemory;
+    uint64_t srcLumaOffset, srcChromaOffset;
+    uint32_t srcPitch, width, height, fourcc;
+    SwitchVICEncodeInput output;
+};
+
+int switch_vic_encode_buffer(const SwitchVICEncodeBuffer *request, uint32_t *fence, switch_gpu_backing_token *written,
+                             bool *bounced, const char **why);

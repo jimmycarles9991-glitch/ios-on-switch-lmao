@@ -32,6 +32,7 @@ struct PipelineFields {
     uint64_t amplification = 1;         // maxVertexAmplificationCount
     uint64_t textureWriteRounding = 0;  // textureWriteRoundingMode (Apple SPI): 2 rounds to nearest even
     uint64_t patchType = 0;             // the vertex function's MTLPatchType
+    uint64_t alphaToCoverage = 0;       // MTLRenderPipelineDescriptor alphaToCoverageEnabled: 1 on, 0 off
     TessellationFields tessellation;
     ColorFields color[8];
     AttributeFields attributes[31];

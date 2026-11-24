@@ -9,7 +9,8 @@ import Metal
 /// slices of an array as a cube, levels 1 and 2 of a mipmapped 3D texture, slice 2 and slices 1-2 of a depth array, and
 /// a depth/stencil texture's stencil (X32_Stencil8), a buffer's texture and a multisampled one as one-layer arrays.
 /// Every command buffer that reads a view must stay raw; the fills' path is reported (passes into levels, slices and
-/// depth layers are pass.level's and pass.ds's).
+/// depth layers are pass.level's and pass.ds's), and so are the cube view's texture header and its array's (cube_tic,
+/// cubes_tic: the eight words switchMetalProbeHeader: answers).
 struct TextureViewsTest: HWTest {
     let id = "gpu.gm20b.texture_views"
     let name = "Views of levels, slices, faces, 3D levels, depth layers and stencil read their part, on the driver"
@@ -152,6 +153,8 @@ struct TextureViewsTest: HWTest {
                 pixelFormat: .rgba8Unorm, textureType: .type2DMultisampleArray, levels: 0 ..< 1, slices: 0 ..< 1
             )
         else { return .fail("a view returned nil", metrics) }
+        metrics.set("cube_tic", Self.header(gpu.device, cube))
+        metrics.set("cubes_tic", Self.header(gpu.device, cubes))
 
         struct Arm {
             let name: String
@@ -237,5 +240,13 @@ struct TextureViewsTest: HWTest {
         }
         if paths.contains(where: { $0 != "gm20b" }) { wrong.append("paths") }
         return wrong.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(wrong.joined(separator: ","), metrics)
+    }
+
+    static let headerSelector = NSSelectorFromString("switchMetalProbeHeader:")
+
+    /// `texture`'s header words, as switchMetalProbeHeader: answers them; "-" where the device has no answer
+    static func header(_ device: MTLDevice, _ texture: MTLTexture) -> String {
+        guard let facade = device as? NSObject, facade.responds(to: headerSelector) else { return "-" }
+        return facade.perform(headerSelector, with: texture)?.takeUnretainedValue() as? String ?? "-"
     }
 }

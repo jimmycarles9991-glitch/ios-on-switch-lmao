@@ -63,7 +63,7 @@ struct switch_us_cache {
 };
 
 #define SWITCH_US_PAGE_SIZE       0x4000ULL
-#define SWITCH_US_MAX_SITES       16u
+#define SWITCH_US_MAX_SITES       24u
 
 #include <vm/switch_ui_scale_sites_21H461.h>
 #include <vm/switch_ui_scale_sites_24B119.h>

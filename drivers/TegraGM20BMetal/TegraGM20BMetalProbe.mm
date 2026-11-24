@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
+#include "TegraGM20BGrPreemptABI.h"
 #include "push.h"
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -132,9 +133,10 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
     return nil;
 }
 
-- (NSString *)switchMetalProbeZcullMixed:(NSNumber *)on
+// `row`: a mixed pass's probe row (mixed_samples.h kTirProbeZcull .. TirEnd), 0 off
+- (NSString *)switchMetalProbeTir:(NSNumber *)row
 {
-    gRM->raw->probeZcullMixed.store(on.boolValue, std::memory_order_release);
+    gRM->raw->probeTir.store(row.unsignedIntValue, std::memory_order_release);
     return nil;
 }
 
@@ -159,6 +161,29 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
 {
     return [NSString
         stringWithFormat:@"%llu", (unsigned long long)gRM->raw->bandBudgetNs_.exchange(ns.unsignedLongLongValue)];
+}
+
+- (NSString *)switchMetalProbeComputeCta:(NSNumber *)on
+{
+    int kr = kIOReturnNotReady;
+    TegraGM20BAbiGrPreemptReply reply = {};
+    gm20bRunOnSubmitWorker([&] {
+        const uint32_t channel = gRM->raw->probeChannel();
+        if (!channel)
+            return;
+        const TegraGM20BAbiGrPreempt in = {
+            channel, on.boolValue ? uint32_t(TegraGM20BGrPreemptCta) : uint32_t(TegraGM20BGrPreemptWfi), {0, 0}};
+        kr = gRM->raw->kernelDebugCall(TegraGM20BMethodGrPreempt, &in, sizeof in, &reply, sizeof reply);
+    });
+    if (kr != KERN_SUCCESS)
+        return [NSString stringWithFormat:@"error=0x%x", unsigned(kr)];
+    return [NSString stringWithFormat:@"old=%u readback=%u", reply.old_mode, reply.readback];
+}
+
+- (NSString *)switchMetalProbeMacroBands:(NSNumber *)on
+{
+    gRM->raw->probeMacroBands.store(on.boolValue, std::memory_order_release);
+    return nil;
 }
 
 // Storage forms view compressed attachments while set, for gpu.gm20b.storage_compressed
@@ -218,6 +243,19 @@ static gm20b::ProbeSurface probeSurface(const gm20b::Texture &t, uint32_t fmt2d)
         [NSString stringWithFormat:@"raw=%d comptags=%d block_linear=%d pitch=%u tiled_cache=%d compression=%d",
                                    t != nil, t && now.comptags, t && now.blockLinear, t ? now.pitch : 0,
                                    (flags & TegraGM20BInfoTiledCache) != 0, (flags & TegraGM20BInfoCompression) != 0];
+}
+
+// A texture's header as the texture unit reads it, its eight words dot-separated; nil where the driver holds no header
+// for it
+- (NSString *)switchMetalProbeHeader:(id<MTLTexture>)texture
+{
+    SwitchMetalTexture *t = gm20bTexture(texture);
+    const gm20b::Texture now = t ? gRM->raw->lockedCopy(t->_raw) : gm20b::Texture();
+    if (!now.tic)
+        return nil;
+    const uint32_t *w = gRM->raw->headerWords(now.tic);
+    return [NSString
+        stringWithFormat:@"%08x.%08x.%08x.%08x.%08x.%08x.%08x.%08x", w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]];
 }
 
 @end

@@ -131,7 +131,15 @@ void Device::compStart()
                 compMake(l);
                 zbcMake(l);
                 SWITCH_METAL_DIAGNOSTIC(compSettledRun(l));
-                trimBackings();
+                if (stopping_)
+                    return;
+                DeferredFrees deferred(*this);
+                trimBackings(deferred);
+                if (!deferred.empty()) {
+                    l.unlock();
+                    deferred.flush();
+                    l.lock();
+                }
             }
         });
     compWake_.notify_one();
@@ -205,6 +213,46 @@ Device::Backing *Device::compBacking(const Texture &m, uint32_t tag, uint32_t ki
     return b;
 }
 
+uint64_t Device::compEvictIdleReady(const CompWant &w, bool comptagExhausted, std::vector<Bo> &evict)
+{
+    std::vector<bool> claimed(comp_.ready.size(), false);
+    for (const auto &[texture, pw] : privateWants_) {
+        if (!pw.views.empty())
+            continue;
+        const uint64_t need = compBytes(pw.bytes);
+        size_t best = comp_.ready.size();
+        for (size_t i = 0; i < comp_.ready.size(); ++i) {
+            if (claimed[i])
+                continue;
+            const CompBo &r = comp_.ready[i];
+            if (r.kind == pw.kind && r.bo.bytes >= need &&
+                (best == comp_.ready.size() || r.bo.bytes < comp_.ready[best].bo.bytes))
+                best = i;
+        }
+        if (best < comp_.ready.size())
+            claimed[best] = true;
+    }
+    uint64_t freedBytes = 0;
+    std::vector<CompBo> kept;
+    kept.reserve(comp_.ready.size());
+    for (size_t i = 0; i < comp_.ready.size(); ++i) {
+        const CompBo &r = comp_.ready[i];
+        const bool fitsW = r.kind == w.kind && r.bo.bytes >= w.bytes;
+        const bool needMore = comptagExhausted || freedBytes < w.bytes;
+        if (!claimed[i] && !fitsW && needMore) {
+            SWITCH_METAL_DIAGNOSTIC(stats.compHeld--);
+            SWITCH_METAL_DIAGNOSTIC(stats.compHeldBytes -= r.bo.bytes);
+            SWITCH_METAL_DIAGNOSTIC(glassMemEvent("compressed memory evicted", r.bo.bytes));
+            evict.push_back(r.bo);
+            freedBytes += r.bo.bytes;
+        } else {
+            kept.push_back(r);
+        }
+    }
+    comp_.ready.swap(kept);
+    return freedBytes;
+}
+
 void Device::compMake(std::unique_lock<gm20b::Mutex> &l)
 {
     while (!comp_.wanted.empty() && !stopping_) {
@@ -215,16 +263,73 @@ void Device::compMake(std::unique_lock<gm20b::Mutex> &l)
         const auto start = std::chrono::steady_clock::now();
 #endif
         int kr = k_.allocCompressible(w.bytes, bo);
-        const bool made = kr == KERN_SUCCESS;
+        bool made = kr == KERN_SUCCESS;
 #if SWITCH_METAL_DIAGNOSTICS
-        const auto us =
+        auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
 #endif
         l.lock();
-        comp_.wanted.erase(std::find(comp_.wanted.begin(), comp_.wanted.end(), w));
-        if (made && (kr = k_.bindCompressed(bo, w.kind)) == KERN_SUCCESS) {
+        if (stopping_) {
+            if (made) {
+                l.unlock();
+                k_.free(bo);
+                l.lock();
+            }
+            break;
+        }
+        if (made)
+            kr = k_.bindCompressed(bo, w.kind);
+        uint64_t evictedBytes = 0;
+        if (kr != KERN_SUCCESS && compShortage(kr) && !comp_.ready.empty()) {
+            if (made) {
+                l.unlock();
+                k_.free(bo);
+                l.lock();
+                bo = {};
+                made = false;
+                if (stopping_)
+                    break;
+            }
+            if (comp_.fit(w.bytes, w.kind) != comp_.ready.end()) {
+                if (auto it = std::find(comp_.wanted.begin(), comp_.wanted.end(), w); it != comp_.wanted.end())
+                    comp_.wanted.erase(it);
+                continue;
+            }
+            std::vector<Bo> evict;
+            evictedBytes = compEvictIdleReady(w, kr == kIOReturnNoResources, evict);
+            if (!evict.empty()) {
+                l.unlock();
+                for (Bo &e : evict)
+                    k_.free(e);
+#if SWITCH_METAL_DIAGNOSTICS
+                const auto retryStart = std::chrono::steady_clock::now();
+#endif
+                kr = k_.allocCompressible(w.bytes, bo);
+                made = kr == KERN_SUCCESS;
+#if SWITCH_METAL_DIAGNOSTICS
+                const auto retryElapsed = std::chrono::steady_clock::now() - retryStart;
+                us = std::chrono::duration_cast<std::chrono::microseconds>(retryElapsed).count();
+#endif
+                l.lock();
+                if (stopping_) {
+                    if (made) {
+                        l.unlock();
+                        k_.free(bo);
+                        l.lock();
+                    }
+                    break;
+                }
+                if (made)
+                    kr = k_.bindCompressed(bo, w.kind);
+            }
+        }
+        if (auto it = std::find(comp_.wanted.begin(), comp_.wanted.end(), w); it != comp_.wanted.end())
+            comp_.wanted.erase(it);
+        if (made && kr == KERN_SUCCESS) {
             set_.add(k_, bo, TegraGM20BSurfaceWrite);
             compReadyPush(bo, w.kind);
+            if (evictedBytes)
+                compGaveBack();
             backingsChanged();
             SWITCH_METAL_DIAGNOSTIC(stats.compMade++);
             SWITCH_METAL_DIAGNOSTIC(stats.compHeld++);
@@ -235,11 +340,16 @@ void Device::compMake(std::unique_lock<gm20b::Mutex> &l)
                                                  (unsigned long long)(w.bytes >> 10), w.kind, (long long)us));
             continue;
         }
-        if (made)
+        if (made) {
+            l.unlock();
             k_.free(bo);
+            l.lock();
+            if (stopping_)
+                break;
+        }
         SWITCH_METAL_DIAGNOSTIC(stats.compFailed++);
         const bool shortage = compShortage(kr);
-        if (comp_.refuse(w, shortage))
+        if (comp_.refuse(w, shortage)) {
             os_log_error(compLog(),
                          "SwitchMetal: compressed memory %llu KiB kind 0x%x not made (%{public}s, 0x%x): %{public}s",
                          (unsigned long long)(w.bytes >> 10), w.kind,
@@ -250,6 +360,20 @@ void Device::compMake(std::unique_lock<gm20b::Mutex> &l)
                          unsigned(kr),
                          shortage ? "those backings stay uncompressed until this process gives compressed memory back"
                                   : "that backing stays uncompressed");
+#if SWITCH_METAL_DIAGNOSTICS
+            uint64_t ready = 0;
+            for (const CompBo &r : comp_.ready)
+                ready += r.bo.bytes;
+            os_log(
+                compLog(),
+                "SwitchMetal: at that refusal this process holds %llu KiB of compressed memory, %llu KiB of it in %zu "
+                "made buffers no backing took",
+                (unsigned long long)(stats.compHeldBytes.load() >> 10), (unsigned long long)(ready >> 10),
+                comp_.ready.size());
+#endif
+        }
+        if (evictedBytes)
+            compGaveBack(shortage ? &w : nullptr);
     }
 }
 
@@ -297,7 +421,7 @@ void Device::compSettledRun(std::unique_lock<gm20b::Mutex> &l)
 }
 #endif
 
-void Device::compFree(Backing &b)
+void Device::compFree(Backing &b, DeferredFrees &deferred)
 {
     if (b.texture.tic)
         freeTic(b.texture.tic);
@@ -309,11 +433,11 @@ void Device::compFree(Backing &b)
     SWITCH_METAL_DIAGNOSTIC(stats.compHeld--);
     SWITCH_METAL_DIAGNOSTIC(stats.compHeldBytes -= mem->bo.bytes);
     SWITCH_METAL_DIAGNOSTIC(glassMemEvent("compressed memory freed", mem->bo.bytes));
-    k_.free(mem->bo);
+    deferred.add({mem->bo});
+    deferred.noteCompFreed();
     comp_.mems.erase(std::find_if(comp_.mems.begin(), comp_.mems.end(), [&](const std::unique_ptr<CompMem> &m) {
         return m.get() == mem;
     }));
-    compGaveBack();
 }
 
 uint64_t Device::compDeadline() const
@@ -332,16 +456,16 @@ uint64_t Device::compDeadline() const
     return at ? std::max(at, compClock() + kCompRecheckNs) : 0;
 }
 
-void Device::compTrim(uint64_t now)
+void Device::compTrim(uint64_t now, DeferredFrees &deferred)
 {
     for (auto it = comp_.ready.begin(); it != comp_.ready.end();) {
         if (readyStale(commits(), it->madeAt, now, it->readyNs)) {
             SWITCH_METAL_DIAGNOSTIC(stats.compHeld--);
             SWITCH_METAL_DIAGNOSTIC(stats.compHeldBytes -= it->bo.bytes);
             SWITCH_METAL_DIAGNOSTIC(glassMemEvent("compressed memory freed unused", it->bo.bytes));
-            k_.free(it->bo);
+            deferred.add({it->bo});
+            deferred.noteCompFreed();
             it = comp_.ready.erase(it);
-            compGaveBack();
             continue;
         }
         ++it;

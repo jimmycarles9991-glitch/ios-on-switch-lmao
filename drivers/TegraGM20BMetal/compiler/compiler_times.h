@@ -14,6 +14,18 @@ namespace switch_compiler {
 #if SWITCH_DEBUG
 inline thread_local TegraGM20BAbiCompileTimes tJobTimes;
 
+// Where a job's compile went, for its line (compiler_service.mm): the worker's own, cleared as the job starts. Stages
+// are NIR and NAK's compiles (compiler_stages.h); translationsKept is how many more of m2v's the process keeps after
+// the job than before it (nmb_kept_translations), which another worker's job may move too.
+struct JobSplit {
+    uint64_t libraryNs = 0, makeNs = 0, codegenNs = 0, storeNs = 0;
+    uint64_t stagesAsked = 0, stagesMade = 0;
+    int64_t translationsKept = 0;
+};
+
+inline thread_local JobSplit tJobSplit;
+#define SWITCH_JOB_COUNT(field) (::switch_compiler::tJobSplit.field++)
+
 inline uint64_t uptimeNs()
 {
     return clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -47,6 +59,8 @@ inline TegraGM20BAbiCompileTimes answering()
     return times;
 }
 #else
+#define SWITCH_JOB_COUNT(field) ((void)0)
+
 inline void compileStarted()
 {}
 

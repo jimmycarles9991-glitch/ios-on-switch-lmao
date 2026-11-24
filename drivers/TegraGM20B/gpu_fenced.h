@@ -3,6 +3,7 @@
 // statistics on every fence.
 #pragma once
 #include "gpu_inline.h"
+#include "SwitchGpuJobRing.h"
 
 /* push profile (stats):
  * What each push of a submission costs the GPU, sampled: one submission in 64 of each connection (the user client's
@@ -130,6 +131,10 @@ static inline void stats_fences(struct tgm_chan *chan)
 	u64 now = nvxnu_nanotime();
 	u64 start = 0;
 	u64 end = 0;
+#if SWITCH_RECORDER
+	bool started = false;
+	bool ended = false;
+#endif
 	volatile struct tgm_stamps *st = NULL;
 
 	if ((s32)(done - s) > CHAN_NSTAMPS) {
@@ -153,10 +158,21 @@ static inline void stats_fences(struct tgm_chan *chan)
 				prof_collect(chan, first, fs->start.ns, st->end.ns);
 			WRITE_ONCE(chan->prof_seqno, 0);
 		}
+#if SWITCH_RECORDER
+		started = st->start.payload == s + 1;
+		ended = st->end.payload == s + 1;
+		start = started ? st->start.ns : 0;
+		end = ended ? st->end.ns : 0;
+		if (!chan->kernel)
+			switch_gpu_job_ring(chan, s + 1, start, end);
+		if (!started || !ended)
+			continue; /* overwritten by a later submission, or not stamped */
+#else
 		if (st->start.payload != s + 1 || st->end.payload != s + 1)
 			continue; /* overwritten by a later submission, or not stamped */
 		start = st->start.ns;
 		end = st->end.ns;
+#endif
 		if (chan->kernel) {
 			__atomic_fetch_add(&tgm_stats.copies, 1, __ATOMIC_RELAXED);
 			stats_add(&tgm_stats.copy_sum, &tgm_stats.copy_max, end - start);
@@ -166,14 +182,28 @@ static inline void stats_fences(struct tgm_chan *chan)
 		stats_add(&tgm_stats.queue_sum, &tgm_stats.queue_max,
 			  start - READ_ONCE(chan->stat_sub_ptimer[i]));
 		if (chan->high) {
+			const u64 queue = start - READ_ONCE(chan->stat_sub_ptimer[i]);
+
 			__atomic_fetch_add(&tgm_stats.comp, 1, __ATOMIC_RELAXED);
-			stats_add(&tgm_stats.comp_sum, &tgm_stats.comp_max,
-				  start - READ_ONCE(chan->stat_sub_ptimer[i]));
+			stats_add(&tgm_stats.comp_sum, &tgm_stats.comp_max, queue);
 			if (READ_ONCE(chan->stat_kick[i]) != TGM_KICK_CLEAR) {
 				__atomic_fetch_add(&tgm_stats.behind, 1, __ATOMIC_RELAXED);
-				stats_add(&tgm_stats.behind_sum, &tgm_stats.behind_max,
-					  start - READ_ONCE(chan->stat_sub_ptimer[i]));
+				stats_add(&tgm_stats.behind_sum, &tgm_stats.behind_max, queue);
 			}
+#if TGM_STATS
+			{
+				const u8 foreign = READ_ONCE(chan->stat_foreign[i]);
+
+				if (foreign & TGM_STAT_LATER)
+					stats_max(&tgm_stats.later_queue_max, queue);
+				if (foreign & TGM_STAT_FOREIGN_MASK) {
+					__atomic_fetch_add(&tgm_stats.foreign_timed, 1,
+							   __ATOMIC_RELAXED);
+					stats_add(&tgm_stats.foreign_queue_sum,
+						  &tgm_stats.foreign_queue_max, queue);
+				}
+			}
+#endif
 		}
 	}
 	chan->stat_done = done;
@@ -270,9 +300,10 @@ static inline void present_fenced(struct tgm_chan *chan)
  * watch to the work item. */
 static inline void present_watch_fenced(struct tgm_chan *chan, int killed)
 {
-	if (switch_gpu_present_watch_fenced(&tgm_present.watch, chan->id,
-					    tgm_chan_completed(chan)) &&
-	    killed)
+	int matched = 0;
+	const int due = switch_gpu_present_watch_fenced_any(&tgm_present.watch, chan->id,
+							    tgm_chan_completed(chan), &matched);
+	if (killed && (due || matched))
 		nvxnu_work_schedule(tgm_present.watch_work);
 }
 

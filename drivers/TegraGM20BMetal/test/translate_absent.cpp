@@ -18,6 +18,21 @@ NmbOfflineLibrary *nmb_offline_library_new(const void *, size_t)
 void nmb_offline_library_release(NmbOfflineLibrary *)
 {}
 
+NmbOfflineLibrary *nmb_offline_library_new_held(const void *, size_t, bool, const void *owner,
+                                                void (*release)(const void *owner))
+{
+    release(owner);
+    return nullptr;
+}
+
+void nmb_keep_translations(uint64_t)
+{}
+
+void nmb_kept_translations(uint64_t out[2])
+{
+    out[0] = out[1] = 0;
+}
+
 NmbOfflineFunction *nmb_offline_function_new(const NmbOfflineLibrary *, const char *)
 {
     return nullptr;

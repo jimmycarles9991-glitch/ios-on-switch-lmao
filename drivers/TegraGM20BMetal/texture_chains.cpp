@@ -97,19 +97,21 @@ bool Device::createBlockTextureOver(void *bytes, uint64_t length, uint32_t width
     if (!blockCompressed(f) || !bytes || length < layout.bytes || layout.bpp != f->bpp ||
         !shape(width, height, format, t))
         return false;
+    {
+        std::lock_guard<gm20b::Mutex> l(lock_);
+        if (ownChunkMemory(bytes, length, "newTextureWithBytesNoCopy"))
+            return false;
+    }
     const bool inPlace = blockImageInPlace(uintptr_t(bytes), layout);
     const uint32_t kind = inPlace ? TGM_LAYOUT_KIND : kPteKindPitch;
     cleanToMemory(bytes, layout.bytes);
     Import *i = new Import;
-    if (!k_.importPages(bytes, length, i->bo, 0, true)) {
+    if (!k_.importPages(bytes, length, i->bo, 0, true) || !k_.bindImport(bytes, i->bo, kind)) {
         delete i;
         return false;
     }
-    std::lock_guard<gm20b::Mutex> l(lock_);
-    if (!k_.bindImport(bytes, i->bo, kind)) {
-        delete i;
-        return false;
-    }
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     i->kind = kind;
     i->refs = 1;
     i->base = uintptr_t(bytes);
@@ -117,14 +119,14 @@ bool Device::createBlockTextureOver(void *bytes, uint64_t length, uint32_t width
     SWITCH_METAL_DIAGNOSTIC(stats.imports++);
     SWITCH_METAL_DIAGNOSTIC(stats.importsMade++);
     SWITCH_METAL_DIAGNOSTIC(stats.importBytes += i->bo.bytes);
-    if (!inPlace && !blAlloc(layout.bytes, layout.align, t.span)) {
-        release(i);
+    if (!inPlace && !blAlloc(l, layout.bytes, layout.align, t.span)) {
+        release(i, deferred);
         return false;
     }
     if ((!inPlace && !(t.imagePitchVa = blPitchVa(t.span))) || !(t.tic = allocTic())) {
         Lease *none = nullptr;
-        freeSpan(t.span, Memory::Bl, none);
-        release(i);
+        freeSpan(l, t.span, Memory::Bl, none, deferred);
+        release(i, deferred);
         return false;
     }
     if (inPlace) {

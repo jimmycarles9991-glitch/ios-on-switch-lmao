@@ -3,6 +3,8 @@
 // debug.switch_gpu_ramfc (TegraGM20BRamfcProbe.cpp) and HW Tests gpu.ramfc_timeslice and gpu.ramfc_creation: debug
 // kernels only.
 #include "gpu_internal.h"
+#include <engine/fifo/chan.h>
+#include "TegraGM20BGrPreempt.h"
 
 #if TGM_STATS
 static void ramfc_owner(struct tgm_ramfc_look *look, const struct tgm_chan *chan, size_t *at)
@@ -124,5 +126,89 @@ int tgm_ramfc_probe(struct tgm_ramfc_look *look)
 	if (!look->flip_ret)
 		look->flip_ret = ramfc_flip(from.chid, from.value, &look->back_read);
 	return 0;
+}
+
+static struct nvkm_gpuobj *chan_gr_ctx(u32 chid)
+{
+	struct nvkm_runl *runl = NULL;
+	struct nvkm_chan *nchan = NULL;
+	struct nvkm_vctx *vctx = NULL;
+	struct nvkm_gpuobj *inst = NULL;
+	unsigned long flags = 0;
+
+	nvkm_runl_foreach(runl, tgm_gpu.device->fifo)
+	{
+		nchan = nvkm_runl_chan_get_chid(runl, chid, &flags);
+		if (nchan) {
+			if (nchan->cgrp) {
+				list_for_each_entry(vctx, &nchan->cgrp->vctxs, head)
+				{
+					if (vctx->ectx && vctx->ectx->engn &&
+					    vctx->ectx->engn->engine &&
+					    vctx->ectx->engn->engine->subdev.type ==
+						    NVKM_ENGINE_GR) {
+						inst = vctx->inst;
+						break;
+					}
+				}
+			}
+			nvkm_chan_put(&nchan, flags);
+			break;
+		}
+	}
+	return inst;
+}
+
+static uint32_t gr_ctx_read(void *arg, uint32_t offset)
+{
+	return nvkm_ro32((struct nvkm_gpuobj *)arg, offset);
+}
+
+static void gr_ctx_write(void *arg, uint32_t offset, uint32_t value)
+{
+	nvkm_wo32((struct nvkm_gpuobj *)arg, offset, value);
+}
+
+struct gr_preempt_write {
+	struct nvkm_gpuobj *ctx;
+	struct tgm_gr_preempt_ctx op;
+};
+
+static void gr_preempt_write(void *arg)
+{
+	struct gr_preempt_write *w = arg;
+
+	nvkm_kmap(w->ctx);
+	tgm_gr_preempt_write_cb(&w->op);
+	nvkm_done(w->ctx);
+}
+
+int tgm_chan_gr_preempt(struct tgm_chan *chan, uint32_t mode, uint32_t *old_mode,
+			uint32_t *readback)
+{
+	struct tgm_gr_preempt_io io = {NULL, gr_ctx_read, gr_ctx_write};
+	struct gr_preempt_write w = {NULL, {NULL, &io, mode, 0, 0}};
+	int ret = 0;
+
+	if (!chan || chan->kernel || mode > TGM_GR_CTX_PREEMPT_CTA)
+		return -EINVAL;
+	if (READ_ONCE(chan->error))
+		return -EIO;
+	tgm_gpu_lock();
+	w.ctx = chan_gr_ctx(chan->chid);
+	if (!w.ctx || w.ctx->size < TGM_GR_CTX_PREEMPT_MIN_SIZE) {
+		ret = -ENOENT;
+	} else {
+		io.arg = w.ctx;
+		ret = tgm_sched_ramfc(tgm_gpu.device, chan->chid, gr_preempt_write, &w, 1);
+	}
+	mutex_unlock(&tgm_gpu.lock);
+	if (!ret) {
+		if (old_mode)
+			*old_mode = w.op.old_mode;
+		if (readback)
+			*readback = w.op.readback;
+	}
+	return ret;
 }
 #endif

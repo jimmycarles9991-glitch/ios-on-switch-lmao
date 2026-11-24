@@ -153,8 +153,10 @@ void planSegments(SwitchMetalCommandBuffer *cb)
             return;
         }
     }
+    // with room for the split at the encode ahead's end (gm20bPipelineSplit), which the worker makes without allocating
+    cb->_segs.reserve(plan.ranges().size() + 2);
+    // the ranges are prepared by the submit worker at their turn (submitLoop), which owns the plan from the commit on
     for (const auto &range : plan.ranges()) {
-        cb->_plan.prepareRange(range.from, range.to);
         const bool native = range.kind == gm20b::ExecutionKind::native;
         cb->_segs.push_back({uint32_t(range.from), uint32_t(range.to), !native, false, range.gpuWait});
         if (native && cb->_predicates.loops()) {
@@ -224,6 +226,7 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
         return true;
     }
     if (cb->_segNext == cb->_segs.size()) {
+        cb->_submittedAll.store(true, std::memory_order_release);
         finish(cb, nil);
         return true;
     }
@@ -257,6 +260,7 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
         if (range.from == range.to) {
             ++cb->_segNext;
             if (last) {
+                cb->_submittedAll.store(true, std::memory_order_release);
                 scheduled(cb);
                 finish(cb, nil);
             }
@@ -295,12 +299,16 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
         const gm20b::RangeEnd end = rangeEnd(cb, last, followed, handlers);
         cb->_rangeQuiet = gm20b::quietEnd(end);
         cb->_rangeHeld = gm20b::frameHeld(end);
-        gm20bMoveWanting();
-        const SwitchMetalEncoded encoded = encodeRaw(cb, range.from, range.to, &why);
+        SwitchMetalEncoded encoded = SwitchMetalEncoded::stopped;
+        @autoreleasepool {
+            gm20bMoveWanting();
+            encoded = encodeRaw(cb, range.from, range.to, &why);
+        }
 #if SWITCH_FRAME_TIMELINE
         const uint64_t wallTicks = gm20b::encodeTicks() - profileTicks;
         cb->_frame.mark(switch_frame::EncodeEnd);
         SWITCH_METAL_DIAGNOSTIC(r.stats.encodeUs += nowUs() - began);
+        SWITCH_METAL_DIAGNOSTIC(cb->_scheduleNotes.encodeUs.fetch_add(nowUs() - began, std::memory_order_relaxed));
         const auto folded = [&, wallTicks] {
             gm20b::tEncodeProfile = nullptr;
             mallocs.reset();
@@ -326,12 +334,18 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
             return failSubmission(cb, stoppedWithoutError(why));
         }
         SWITCH_METAL_DIAGNOSTIC(r.stats.raw++);
+#if SWITCH_METAL_DIAGNOSTICS
+        if (!cb->_kickedTicks)
+            cb->_kickedTicks = mach_absolute_time();
+#endif
         {
             SWITCH_METAL_ENCODE_SPAN(Retire);
             // Core Animation's waitUntilScheduled returns before the retirement's bookkeeping: a waitUntilCompleted that
             // follows finds its range in flight or wakes the completion thread for it (retireRawRange)
-            if (last)
+            if (last) {
+                cb->_submittedAll.store(true, std::memory_order_release);
                 scheduled(cb);
+            }
             retireRawRange(cb, range.from, range.to);
         }
 #if SWITCH_FRAME_TIMELINE
@@ -339,8 +353,10 @@ bool submitRange(SwitchMetalCommandBuffer *cb, bool followed)
 #endif
     }
     ++cb->_segNext;
-    if (last && range.event)
+    if (last && range.event) {
+        cb->_submittedAll.store(true, std::memory_order_release);
         scheduled(cb);
+    }
     if (last)
         finish(cb, nil);  // joins every submitted range before handlers/resources are released
     return last;

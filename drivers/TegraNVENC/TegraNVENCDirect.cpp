@@ -150,10 +150,34 @@ int tegra_nvenc_direct_prepare(const TegraNVENCSubmit *s, task_t task, TegraNVEN
                                const char **why)
 {
     *d = {};
-    if (tegra_vic_surface_lookup(s->source.surface_id, task, &d->surface))
+    if (why)
+        *why = nullptr;
+    if (tegra_vic_surface_lookup(s->source.surface_id, task, &d->surface)) {
+        if (why)
+            *why = "source IOSurface lookup failed";
         return -95;
-    if (switch_native_surface_acquire(&d->surface, &d->view, true) || !d->view.owner)
+    }
+    const int acquired = switch_native_surface_acquire(&d->surface, &d->view, true);
+    if (acquired) {
+        if (why) {
+            if (acquired == -2)
+                *why = "source IOSurface has no native picture";
+            else if (acquired == -16)
+                *why = "source IOSurface native publication is in progress";
+            else if (acquired == SWITCH_GPU_BACKING_STALE)
+                *why = "source IOSurface native picture is stale";
+            else if (acquired == -95)
+                *why = "source IOSurface native picture is not directly readable";
+            else
+                *why = "source IOSurface native view could not be acquired";
+        }
         return -95;
+    }
+    if (!d->view.owner) {
+        if (why)
+            *why = "source IOSurface native picture has no owner";
+        return -95;
+    }
     nvenc_h264_surface_cfg_s cfg;
     memcpy(&cfg, s->setup + offsetof(nvenc_h264_drv_pic_setup_s, input_cfg), sizeof(cfg));
     TegraNVENCDirectPlan plan = {};

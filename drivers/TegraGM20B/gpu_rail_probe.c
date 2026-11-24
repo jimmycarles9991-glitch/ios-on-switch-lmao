@@ -2,6 +2,7 @@
 // What a rail-up left, for debug.switch_gpu_rail_cycle (TegraGM20BRailCycle.cpp) and HW Test gpu.rail_cycle, and the
 // kernel channel job the debug probes run: debug kernels only.
 #include "gpu_internal.h"
+#include "TegraGM20BNapll.h"
 
 #if TGM_STATS
 static u32 wake_coeff, wake_off_rate;
@@ -70,6 +71,7 @@ static void gpcpll_look(struct nvkm_device *device, void *arg)
 
 	look->coeff = nvkm_rd32(device, GPCPLL_COEFF_R);
 	look->cfg = nvkm_rd32(device, GPCPLL_CFG_R);
+	look->dvfs1 = nvkm_rd32(device, TGM_GPCPLL_DVFS1_R);
 	look->khz = nvkm_clk_read(device->clk, nv_clk_src_gpc);
 	look->pl = (look->coeff >> 16) & 0x3f;
 	look->expect_pl = (look->coeff >> 16) & 0x3f;
@@ -95,7 +97,7 @@ int tgm_rail_probe(struct tgm_rail_look *look)
 	ret = tgm_gpu_held(gpcpll_look, look);
 	if (ret)
 		return ret;
-	return !look->fence && (look->cfg & 0x20001) == 0x20001 && look->vco_ok &&
+	return !look->fence && tgm_napll_cfg_running(look->cfg, look->dvfs1) && look->vco_ok &&
 			       look->pl == look->expect_pl
 		       ? 0
 		       : -EIO;

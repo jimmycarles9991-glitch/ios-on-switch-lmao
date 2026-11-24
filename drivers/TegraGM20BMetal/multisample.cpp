@@ -44,18 +44,19 @@ bool Device::createOwnedZeta(uint32_t width, uint32_t height, uint32_t format, u
     if (!zetaImageLayout(width, height, format, samples, layers, levels, type, sampled, t, chain, bytes, align))
         return false;
     const uint32_t z = zetaFormatIndex(format);
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     if (const uint32_t kind = levels == 1 ? storedZetaKind((k_.info().flags & TegraGM20BInfoCompression) != 0, format,
                                                            samples, kindLayers(*this, format, type, layers))
                                           : 0;
         kind && createCompressedZeta(bytes, kind, t))
         return true;
     Span span;
-    if (!tiledAlloc(zChunks_[z], kZetaFormatInfo[z].kind, bytes, std::max(align, kBlAlign), span))
+    if (!tiledAlloc(l, zChunks_[z], kZetaFormatInfo[z].kind, bytes, std::max(align, kBlAlign), span))
         return false;
     // made here whatever `sampled` says: recording threads read t.tic unlocked, so nothing may set it later
     if (!(t.tic = allocTic())) {
-        tiledFree(zChunks_[z], span);
+        tiledFree(zChunks_[z], span, deferred);
         return false;
     }
     t.va = span.va;

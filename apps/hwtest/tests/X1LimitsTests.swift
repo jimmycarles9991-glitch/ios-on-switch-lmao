@@ -116,7 +116,8 @@ struct X1ThreadsPerThreadgroupTest: HWTest {
 /// 40(f + 1), layer l l >> 3, so a layer index that lost a high bit reads another code), read by a kernel at the last
 /// face's (16383, 16383) and the last layer's (3, 3): cube_last_face and array_last_layer 1 (an M4 Max: 240 and 255).
 /// The cube holds 1.6 GB: where os_proc_available_memory leaves under it and cubeMargin, it is not made
-/// (cube_skipped_mb, the memory there was), reported and not judged; a nil texture is reported as the device's answer.
+/// (cube_skipped_mb, the memory there was), reported and not judged. Where it is there, a nil texture fails (its code
+/// -1): the device claims the size.
 struct X1TextureExtentsTest: HWTest {
     let id = "gpu.x1.texture_extents"
     let name = "A 16384 cube and a 2048-layer array hold their last face and layer"
@@ -141,7 +142,7 @@ struct X1TextureExtentsTest: HWTest {
         let layerCode = try await Self.cleared(gpu, array, slices: Self.layers, at: lastLayer) { $0 >> 3 }
         metrics.set("array_code", layerCode ?? -1)
         metrics.set("array_last_layer", layerCode == (Self.layers - 1) >> 3)
-        checks.append(("the 2048-layer array made and its last layer read back (\(layerCode ?? -1))", layerCode == 255))
+        checks.append((Self.read("the 2048-layer array", "its last layer", layerCode), layerCode == 255))
         let cubeBytes = Self.cubeSide * Self.cubeSide * 6
         let available = Int(os_proc_available_memory())
         if available < cubeBytes + Self.cubeMargin {
@@ -156,9 +157,13 @@ struct X1TextureExtentsTest: HWTest {
             let faceCode = try await Self.cleared(gpu, cube, slices: 6, at: at) { 40 * ($0 + 1) }
             metrics.set("cube_code", faceCode ?? -1)
             metrics.set("cube_last_face", faceCode == 240)
-            checks.append(("the 16384 cube made and its last face read back (\(faceCode ?? -1))", faceCode == 240))
+            checks.append((Self.read("the 16384 cube", "its last face", faceCode), faceCode == 240))
         }
         return Outcome.judged(checks, metrics, proof: gpu.proof).onRawPath(gpu)
+    }
+
+    static func read(_ texture: String, _ slice: String, _ code: Int?) -> String {
+        code.map { "\(texture) made and \(slice) read back (\($0))" } ?? "\(texture) not made (a nil texture)"
     }
 
     /// The code read at `at` after each slice was cleared to `code(slice)`; nil where the texture was not made

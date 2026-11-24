@@ -21,6 +21,7 @@
  */
 
 #include <sys/kdebug_common.h>
+#include <switch/recorder.h>
 #include <vm/vm_kern_xnu.h>
 
 LCK_GRP_DECLARE(kdebug_lck_grp, "kdebug");
@@ -64,8 +65,8 @@ kdebug_startup(void)
 {
 	lck_spin_init(&kd_control_trace.kdc_storage_lock, &kdebug_lck_grp, LCK_ATTR_NULL);
 	lck_spin_init(&kd_control_triage.kdc_storage_lock, &kdebug_lck_grp, LCK_ATTR_NULL);
-	kdebug_init(new_nkdbufs, trace_typefilter,
-	    (trace_wrap ? KDOPT_WRAPPING : 0) | KDOPT_ATBOOT);
+	kdebug_init(SWITCH_RECORDER_EVENTS(new_nkdbufs), SWITCH_RECORDER_FILTER(new_nkdbufs, trace_typefilter),
+	    SWITCH_RECORDER_OPTS(new_nkdbufs, (trace_wrap ? KDOPT_WRAPPING : 0) | KDOPT_ATBOOT));
 	create_buffers_triage();
 }
 

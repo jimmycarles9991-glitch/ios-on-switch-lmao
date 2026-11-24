@@ -6,8 +6,9 @@
 // returns once it has ended: each request and each reading is one step on the work loop and the waits between them
 // sleep on the writer's thread, so ALERT, SOC_THERM and the thermal timer run meanwhile; the governor's requests wait
 // until it has asked the rate it found again. A reading lands up to one work-loop hand-off after its time. Reading
-// gives the line: "dfll=ran" and, per case i, "i=<from MHz>><to MHz>" and "i.<ms>=<probe kHz>,<FREQ_REQ>,<TUNE1>,
-// <OUTPUT_CFG>,<MONITOR_DATA>,<I2C_STS>" (registers in hex).
+// gives the line: "dfll=ran", "soc_mc=<CPU group>,<PLLX>" (SOC_THERM's temperatures at the start, m C) and, per case
+// i, "i=<from MHz>><to MHz>" and "i.<ms>=<probe kHz>,<FREQ_REQ>,<TUNE1>,<OUTPUT_CFG>,<MONITOR_DATA>,<I2C_STS>"
+// (registers in hex).
 
 #include "../../kits/SwitchSysctl/SwitchSysctl.h"
 
@@ -158,6 +159,11 @@ void SwitchThermal::dfllLanding()
         return;
     }
     dfllLandingAppend(n, "dfll=ran");
+    int cpuMillic = 0;
+    int pllxMillic = 0;
+    if (!switch_soctherm_read(SWITCH_SOCTHERM_CPU, &cpuMillic) &&
+        !switch_soctherm_read(SWITCH_SOCTHERM_PLLX, &pllxMillic))
+        dfllLandingAppend(n, " soc_mc=%d,%d", cpuMillic, pllxMillic);
     for (unsigned c = 0; c < sizeof(kDfllLandingCases) / sizeof(kDfllLandingCases[0]) && run.on; ++c) {
         const DfllLandingCase &k = kDfllLandingCases[c];
         dfllLandingAppend(n, " %u=%lu>%lu", c, k.from / 1000000, k.to / 1000000);

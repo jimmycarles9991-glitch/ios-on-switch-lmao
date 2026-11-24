@@ -74,12 +74,12 @@ switch_gpu_backing *surface(uint64_t first)
 	return switch_gpu_backing_register(pages, 4, 0, nullptr, nullptr);
 }
 
-void count_job(uint32_t shared)
+void count_job(uint32_t shared, int critical)
 {
-	const uint64_t ns[TGM_SUBMIT_PHASES] = {1000, 1000, 1000, 1000};
+	const uint64_t ns[TGM_SUBMIT_PHASES] = {1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000};
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SUBMIT_JOB, 1);
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SHARED_USE, shared);
-	switch_gpu_job_submitted(ns, 0, shared, shared, 0);
+	switch_gpu_job_submitted(ns, 0, shared, shared, 0, critical);
 }
 }  // namespace
 
@@ -116,7 +116,7 @@ TEST(SubmitRace, CompositorJobsReadProducersWithoutLocksWhileAppsDrawFailAndClos
 				  0);
 			switch_gpu_backing_commit(&transaction);
 			compositor.complete(frame - 1);
-			count_job(kTextures);
+			count_job(kTextures, 1);
 		}
 	});
 	std::vector<std::thread> drawing;
@@ -143,7 +143,7 @@ TEST(SubmitRace, CompositorJobsReadProducersWithoutLocksWhileAppsDrawFailAndClos
 				const int result = value % 7 ? 1 : -5;
 				authority.result.store(result);
 				switch_gpu_timeline_semantic_finish(&wait, result);
-				count_job(kTextures / 2);
+				count_job(kTextures / 2, 0);
 			}
 		});
 	std::thread reader([&] {

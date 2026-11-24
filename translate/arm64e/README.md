@@ -40,7 +40,7 @@ called `a64x` (AArch64 translate), the name every symbol, sysctl and file alread
 | arm64 (ALL/V8) Mach-Os | At load, only if a scan finds something the A57 lacks | As above but PAC words left alone | Unchanged; a clean image keeps its own mapping |
 | Binaries built for this core (`__TEXT,__a64x_target`) | Never | Mapped as is | Unchanged |
 | JIT code of an arm64e process | Never: MAP_JIT is refused for arm64e processes | JavaScriptCore falls back to its interpreter | |
-| Anything left (unplaced sites, code generated at run time) | Trapped | EL0 undefined-instruction fallback emulates LSE with exclusive loops on the user address, counted in `kern.a64x.traps`; anything else is logged and faults | |
+| Anything left (unplaced sites, code generated at run time) | Trapped | EL0 undefined-instruction fallback emulates LSE with exclusive loops and a trailing DMB ISH on the storing path, counted in `kern.a64x.traps`; anything else is logged and faults | |
 
 The split follows who owns the bytes. Where we own the layout (the kernelcache we prelink), translation is static and
 free at run time. Where Apple's code signature, the system volume's seal and the trust caches must stay valid (the
@@ -59,8 +59,11 @@ stub region), so switching is a packaging decision, not a code change.
   PACGA to `MOV Xd, XZR`; LDRAA/LDRAB to LDR, LDUR or pre-index LDR, else a 3-word stub. The hint-space forms
   (PACIBSP, AUTIBSP, XPACLRI) are NOPs on ARMv8.0 already and stay.
 - LDAPR to LDAR (RCpc acquire to RCsc acquire: stronger), LDLAR/STLLR to LDAR/STLR, DC CVAP to DC CVAC.
-- LSE (CAS, CASP, LD<op>, ST<op>, SWP): the site becomes `B stub` (or `BL shared_stub` where x30 is dead); the stub is
-  what a compiler emits for ARMv8.0, an exclusive loop with the same acquire/release bits, ending in a branch back.
+- LSE (CAS, CASP, LD<op>, ST<op>, SWP): the site becomes `B stub` (or `BL shared_stub` where x30 is dead and the
+  instruction does not use it). The stub is an exclusive loop with the instruction's acquire/release bits, ending in a
+  branch back. Forms with both acquire and release (`*AL`) add a `DMB ISH` after the store-exclusive succeeds, because
+  an LSE `*AL` instruction is a full barrier while `LDAXR`/`STLXR` are two half-barriers that let a later plain load
+  pass the store; a failed `CASAL`/`CASPAL` compare stores nothing and carries no barrier.
   Scratch registers come from a path-sensitive liveness pass (over the whole function when LC_FUNCTION_STARTS gives its
   bounds); otherwise they are spilled below Darwin's 128-byte red zone.
 - FJCVTZS, FCMLA/FCADD, FP16 arithmetic, SQRDMLAH/SQRDMLSH: stubs. FP16 widens to single, operates and narrows once
@@ -82,8 +85,10 @@ stub region), so switching is a packaging decision, not a code change.
   kernel's pager produce the same bytes (`macho_test` regenerates every page through the pager's window form and
   compares).
 - **Every stub path returns.** `a64x_verify_image` (and the planner's simulation for the cache) follows every path of
-  every stub, both ways of each conditional branch: each stays in stub words until it branches to site + 4. Over the
-  whole 26.5.2 cache plan: 897,714 sites, 0 broken.
+  every stub, both ways of each conditional branch: each stays in stub words until it branches to site + 4. The
+  verifiers (`a64plan2`, `dsc-verify`, `a64x_pt_verify`, `a64x_verify_image`) also refuse any acquire+release LSE stub
+  without a full barrier after its store-exclusive on the success path. Over the whole 26.5.2 cache plan: 897,714 sites,
+  0 broken.
 - **Semantics against the hardware.** Apple silicon has every instruction being replaced, so the tests run the
   original and its stub from the same random state and compare X0-X30, SP, NZCV, Q0-Q31, the target memory and the
   red zone: systematic and random LSE encodings in spill and dead-register modes, 4 threads hammering one counter

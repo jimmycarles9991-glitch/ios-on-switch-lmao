@@ -1,11 +1,12 @@
-"""The corpus's Core Animation states this IPSW makes.
+"""The corpus's and device-demanded Core Animation states this IPSW makes.
 
 ca_states.py <corpus.log> <QuartzCore default.metallib> <qc-<build>.json> <out>. A state is this IPSW's where its line
 names the IPSW's build (os=), its QuartzCore declares both functions and every constant the line sets on them, and the
 constants' values are those its QuartzCore makes of the state's name (pack/ca/caspec.py with this IPSW's tables).
 iOS 17's path_stroke_* states fail the second on iOS 27, whose QuartzCore has no such functions; most of iOS 17's other
 lines fail the third there (a memoryless index past the pass's attachments, another build's blend function codes),
-states iOS 27 never makes.
+states iOS 27 never makes. States a build's devices made (pack/ca/demand-<build>.json) are appended from their names
+when not already in the corpus.
 """
 
 import importlib.util
@@ -17,7 +18,9 @@ from tools.gpu.shaders import metallib
 
 # caspec imports its iOS 27 half (caspec27) by its bare name, so ca/ goes on the path and caspec is imported as caspec
 sys.path.insert(0, str(Path(importlib.util.find_spec('drivers.TegraGM20BMetal.pack.ca.caspec').origin).parent))
+import caset
 import caspec
+import closure
 
 PREFIX = 'R ok=1 label=com.apple.coreanimation.'
 OS_BUILDS = re.compile(r' os=(\S+)')
@@ -51,19 +54,30 @@ def tagged(line: str, build: str) -> bool:
 
 
 def states(corpus: str, library: bytes, tables: caspec.Tables) -> list[str]:
-    """Return the corpus's Core Animation lines that `library` (a QuartzCore default.metallib) with `tables` makes."""
+    """Return the corpus's and device-demanded Core Animation lines that `library` with `tables` makes."""
     functions = metallib.functions(library)
     if functions is None:
         raise ValueError('not a Metal library')
     declared = {f.name: {c.name for c in f.constants} | {f'#{c.index}' for c in f.constants} for f in functions}
-    return [
+    build = tables.t['build']
+    kept = [
         line
         for line in corpus.splitlines()
         if line.startswith(PREFIX)
-        and tagged(line, tables.t['build'])
+        and tagged(line, build)
         and made_here(line, declared)
         and caspec.made_of_name(tables, line)
     ]
+    seen = {line.split()[2] for line in kept}
+    for name in closure.demand(build):
+        label = f'label=com.apple.coreanimation.{name}'
+        if label in seen or not caset.makes(tables, name):
+            continue
+        line = caspec.state_line(tables, name)
+        if made_here(line, declared):
+            seen.add(label)
+            kept.append(line)
+    return kept
 
 
 def main() -> None:

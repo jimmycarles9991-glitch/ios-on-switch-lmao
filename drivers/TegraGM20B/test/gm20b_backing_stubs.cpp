@@ -4,6 +4,8 @@
 #include "drivers/TegraGM20B/SwitchGpuBacking.h"
 #include "gm20b_record_model.h"
 uint64_t gBackingContent;
+int gBackingScanned;
+int gSmmuReady = 1;
 bool gSurfaceUnwritten = true;
 
 extern "C" void tgm_record_park(tgm_record *record, tgm_coh *c)
@@ -45,6 +47,16 @@ extern "C" void switch_gpu_backing_release(switch_gpu_backing *)
 
 extern "C" void switch_gpu_backing_retain(switch_gpu_backing *)
 {
+}
+
+extern "C" int switch_gpu_backing_scanned(const switch_gpu_backing *)
+{
+	return gBackingScanned;
+}
+
+extern "C" int switch_gpu_smmu_ready(void)
+{
+	return gSmmuReady;
 }
 
 #if SWITCH_GPU_PATH_STATS

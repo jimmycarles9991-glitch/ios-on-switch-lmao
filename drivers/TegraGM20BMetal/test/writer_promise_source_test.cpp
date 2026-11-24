@@ -39,8 +39,21 @@ TEST(GM20BWriterPromiseSource, AHeldCommandBufferPromisesItsWritesBeforeItsWaitR
     expectBefore(promise, "gRM->raw->promise(part, id)", "late = cb->_promisesTaken;");
     EXPECT_THAT(promise, HasSubstr("gRM->raw->cancelPromise(id);"));  // its last range went meanwhile: given back
     EXPECT_THAT(promise, HasSubstr("at += TegraGM20BMaxPromiseUses"));
+    const std::string append = Between(schedule, "static void appendSurfaceHandles(", "\n}\n");
+    EXPECT_THAT(append, HasSubstr("texture = texture->_parent;"));
+    EXPECT_THAT(append, HasSubstr("texture->_buffer"));
+    EXPECT_THAT(append, HasSubstr("texture->_raw.texelRows"));
+    EXPECT_THAT(append, HasSubstr("texture->_raw.luma"));
+    EXPECT_THAT(append, HasSubstr("texture->_raw.chroma"));
     const std::string written = Between(schedule, "static std::vector<uint64_t> writtenSurfaces(", "\n}\n");
-    EXPECT_THAT(written, HasSubstr("texture = texture->_parent;"));
+    EXPECT_THAT(written, HasSubstr("appendSurfaceHandles("));
+    const std::string early = Between(schedule, "static bool tryEarlySchedule(", "\n}\n");
+    EXPECT_THAT(early, HasSubstr("gm20b::Device::Role::RenderServer"));
+    EXPECT_THAT(early, HasSubstr("VetoVariant"));
+    expectBefore(early, "promiseWritesEarly(cb, handles)", "scheduled(cb);");
+    const std::string cancel = Between(schedule, "void cancelPromises(", "\n}\n");
+    EXPECT_THAT(cancel, HasSubstr("_submittedAll"));
+    EXPECT_THAT(cancel, HasSubstr("cancelPromise(id, hasError)"));
 }
 
 TEST(GM20BWriterPromiseSource, TheLastRangeCarriesThemAndFinishGivesBackTheRest)

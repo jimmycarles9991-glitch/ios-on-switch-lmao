@@ -14,6 +14,7 @@
 #include "../../kits/SwitchDMA/SwitchDMAPages.h"
 
 struct switch_dma_buffer;
+struct TegraNVENCPitchPlan;
 
 // One buffer NVENC reads or writes: any RAM pages, mapped at `iova` in NVENC's address space, 64 KiB granular, zeroed
 // and clean in the caches when allocated. Its backing is what another engine writing it (VIC, an input picture) is
@@ -106,5 +107,8 @@ bool tegra_nvenc_source_ready(void);
 uint32_t tegra_nvenc_source_row_align(void);
 int tegra_nvenc_source(const TegraNVENCSubmit *submit, TegraNVENCResolve resolve, void *context, task_t task,
                        const uint32_t *last, TegraNVENCAfter *after, uint32_t *route, const char **why);
+int tegra_nvenc_pitch_convert(const TegraNVENCPitchPlan *plan, const TegraNVENCBlock *source,
+                              const TegraNVENCBlock *destination, const uint32_t *last, TegraNVENCAfter *after,
+                              uint32_t *route, const char **why);
 
 #endif

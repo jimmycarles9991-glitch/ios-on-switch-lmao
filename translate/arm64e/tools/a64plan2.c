@@ -1454,6 +1454,14 @@ static uint32_t patch_at(uint64_t va, bool *found)
     return *found ? patches[lo].w : 0;
 }
 
+static bool plan_word(const void *ctx, uint64_t va, uint32_t *w)
+{
+    (void)ctx;
+    bool found;
+    *w = patch_at(va, &found);
+    return found;
+}
+
 /* follow a translated site through planned words: B chains end with a B to site+4, BL chains with RET */
 static int follow(uint64_t site, uint32_t w)
 {
@@ -1981,7 +1989,7 @@ int a64x_cmd_plan2(int argc, char **argv)
                                                 lr & ~(1u << 30),
                                                 vd,
                                                 (uint8_t)c,
-                                                (uint8_t)((lr >> 30) & 1),
+                                                (uint8_t)(((lr >> 30) & 1) && !(a64x_stub_gprs(w) & (1u << 30))),
                                                 (uint8_t)((hotbits[f][(fo / 4) >> 3] >> ((fo / 4) & 7)) & 1)};
             }
         }
@@ -2250,7 +2258,8 @@ int a64x_cmd_plan2(int argc, char **argv)
                      c == A64X_JSCVT || c == A64X_FCMA || c == A64X_FP16 || c == A64X_RDM) &&
                     out[x] != in[x]) {
                     vcls[c]++;
-                    if (follow(va + 4 * x, out[x]))
+                    if (a64x_bl_site_ok(in[x], out[x]) && follow(va + 4 * x, out[x]) &&
+                        a64x_stub_ordered(in[x], va + 4 * x, out[x], plan_word, NULL))
                         ok++;
                     else {
                         bad++;

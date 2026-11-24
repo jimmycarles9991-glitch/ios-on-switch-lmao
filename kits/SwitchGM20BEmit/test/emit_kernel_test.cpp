@@ -97,10 +97,10 @@ TEST(EmitKernel, TheKitWritesTheHandEncodedWords)
     uint32_t w[TGM_RELAYOUT_DWORDS];
     EXPECT_EQ(words(tgm_relayout_acquire(w, &wait), w),
               (std::vector<uint32_t>{0x20040004, 0x00000012, 0x345678c0, 0x0000004d, 0x00001004}));
-    EXPECT_EQ(
-        words(tgm_relayout_checkpoint(w, 0x1000040), w),
-        (std::vector<uint32_t>{0x2001001e, 0x00000000, 0x20010009, 0x00000000, 0x2002000c, 0x00000000, 0x80000000,
-                               0x20010009, 0x00000000, 0x20040004, 0x00000000, 0x01000040, 0x00000001, 0x01000002}));
+    EXPECT_EQ(words(tgm_relayout_checkpoint(w, 0x1000040), w),
+              (std::vector<uint32_t>{0x2001001e, 0x00000000, 0x20010009, 0x00000000, 0x2002000c, 0x00000000, 0x80000000,
+                                     0x20010009, 0x00000000, 0x2002000c, 0x00000000, 0x70000000, 0x20040004, 0x00000000,
+                                     0x01000040, 0x00000001, 0x01000002}));
     const std::vector<uint32_t> clear = {0x200381c0, 0x00000000, 0x00000000, 0x00030004, 0x20068102,
                                          0x00000044, 0x00001000, 0x00001000, 0x00001000, 0x00000400,
                                          0x00000030, 0x200180c0, 0x00000786};

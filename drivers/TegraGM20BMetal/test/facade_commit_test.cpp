@@ -5,14 +5,18 @@
 // the commit to its return, to waitUntilScheduled's and to the first job's submission (commit_latency.txt).
 #include "scale_frames.h"
 #include "timed_gpu.h"
+#include "bazel/testing/fresh_process.h"
 #include "../TegraGM20BMetalPassCache.h"
 
+#import <IOSurface/IOSurface.h>
 #include <gtest/gtest.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <future>
+#include <memory>
 #include <optional>
 #include <thread>
 
@@ -25,6 +29,47 @@
 - (NSUInteger)length
 {
     return 64;
+}
+
+@end
+
+@interface EmptyFastPathDrawable : NSObject <MTLDrawable>
+@property (nonatomic) std::atomic<int> *presents;
+@end
+
+@implementation EmptyFastPathDrawable
+
+- (void)present
+{
+    if (_presents)
+        _presents->fetch_add(1, std::memory_order_acq_rel);
+}
+
+- (void)presentAtTime:(CFTimeInterval)t
+{
+    (void)t;
+    [self present];
+}
+
+- (void)presentAfterMinimumDuration:(CFTimeInterval)d
+{
+    (void)d;
+    [self present];
+}
+
+- (void)addPresentedHandler:(MTLDrawablePresentedHandler)block
+{
+    (void)block;
+}
+
+- (CFTimeInterval)presentedTime
+{
+    return 0;
+}
+
+- (NSUInteger)drawableID
+{
+    return 0;
 }
 
 @end
@@ -81,6 +126,119 @@ NSDictionary *pipelined(id<MTLCommandBuffer> cb)
 std::string path(id<MTLCommandBuffer> cb)
 {
     return [[(id)cb performSelector:@selector(switchMetalPath)] UTF8String];
+}
+
+void compositorWaitUntilScheduledReturnsBeforeLongRangeSubmits()
+{
+    const std::string pack = harness::writePack(harness::packKey(MTLPixelFormatBGRA8Unorm));
+    const std::string metallib = harness::writeMetallib();
+    metal_prepare(pack.c_str(), 0);
+    id<MTLDevice> device = harness::open(pack);
+    ASSERT_NE(device, nil);
+    NSError *error = nil;
+    id<MTLLibrary> library = [device newLibraryWithURL:[NSURL fileURLWithPath:@(metallib.c_str())] error:&error];
+    ASSERT_NE(library, nil);
+    id<MTLRenderPipelineState> state =
+        [device newRenderPipelineStateWithDescriptor:harness::descriptor(library, MTLPixelFormatBGRA8Unorm)
+                                               error:&error];
+    ASSERT_NE(state, nil);
+
+    IOSurfaceRef surface = IOSurfaceCreate((__bridge CFDictionaryRef) @{
+        (id)kIOSurfaceWidth : @64,
+        (id)kIOSurfaceHeight : @64,
+        (id)kIOSurfaceBytesPerElement : @4,
+        (id)kIOSurfaceBytesPerRow : @256,
+        (id)kIOSurfaceAllocSize : @(64 * 256),
+        (id)kIOSurfacePixelFormat : @(uint32_t('BGRA'))
+    });
+    ASSERT_NE(surface, nullptr);
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                  width:64
+                                                                                 height:64
+                                                                              mipmapped:NO];
+    td.storageMode = MTLStorageModeShared;
+    td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    id<MTLTexture> frame = [device newTextureWithDescriptor:td iosurface:surface plane:0];
+    CFRelease(surface);
+    ASSERT_NE(frame, nil);
+
+    id<MTLCommandQueue> queue = [device newCommandQueue];
+    const scale_frames::Shape warmShape{1, 4, 1, 64, 64};
+    id<MTLCommandBuffer> warm = scale_frames::record(queue, state, {frame}, warmShape, 0);
+    [warm commit];
+    [warm waitUntilCompleted];
+    ASSERT_EQ(warm.status, MTLCommandBufferStatusCompleted);
+
+    kernel_model::Model &m = kernel_model::model;
+    dispatch_semaphore_t inJob = dispatch_semaphore_create(0);
+    dispatch_semaphore_t releaseJob = dispatch_semaphore_create(0);
+    std::atomic<bool> held{false};
+    const size_t jobsBefore = jobCount();
+    const kernel_model::HooksCleared cleared;
+    std::atomic<size_t> makeCalls{0};
+
+    struct ReleaseGuard {
+        dispatch_semaphore_t sem;
+        bool released = false;
+
+        ~ReleaseGuard()
+        {
+            if (!released)
+                dispatch_semaphore_signal(sem);
+        }
+    } guard{releaseJob};
+
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        m.promiseCalled = [&m, &makeCalls] {
+            if (m.promiseCalls.back().op == TegraGM20BPromiseMake)
+                makeCalls.fetch_add(1, std::memory_order_release);
+        };
+        m.jobAdded = [&m, &held, inJob, releaseJob] {
+            const auto &j = m.jobs.back();
+            __atomic_store_n(&m.fence(j.channel - 1).completed, j.seqno, __ATOMIC_RELEASE);
+            if (!held.exchange(true, std::memory_order_acq_rel)) {
+                dispatch_semaphore_signal(inJob);
+                dispatch_semaphore_wait(releaseJob, DISPATCH_TIME_FOREVER);
+            }
+        };
+    }
+
+    const scale_frames::Shape shape{15, 90, 1, 64, 64};
+    id<MTLCommandBuffer> cb = scale_frames::record(queue, state, {frame}, shape, 1);
+    [cb commit];
+    ASSERT_FALSE(dispatch_semaphore_wait(inJob, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))))
+        << "first range never entered SubmitJob";
+
+    auto done = std::make_shared<std::promise<void>>();
+    std::future<void> waited = done->get_future();
+    std::thread waiter([cb, done] {
+        [cb waitUntilScheduled];
+        done->set_value();
+    });
+    const bool early = waited.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    EXPECT_TRUE(early) << "waitUntilScheduled blocked until the submit worker finished the long range";
+    EXPECT_GE(makeCalls.load(std::memory_order_acquire), 1u);
+    if (early)
+        EXPECT_EQ(cb.status, MTLCommandBufferStatusScheduled);
+
+    guard.released = true;
+    dispatch_semaphore_signal(releaseJob);
+    waiter.join();
+    [cb waitUntilCompleted];
+    EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+
+    std::lock_guard<std::mutex> l(kernel_model::callLock);
+    ASSERT_GE(m.jobs.size(), jobsBefore + 1);
+    for (size_t i = jobsBefore; i + 1 < m.jobs.size(); ++i)
+        EXPECT_EQ(m.jobs[i].flags & TegraGM20BJobFulfills, 0u);
+    EXPECT_NE(m.jobs.back().flags & TegraGM20BJobFulfills, 0u);
+    EXPECT_EQ(m.promiseCalls.size(), 1u);
+}
+
+TEST(GM20BFacadeCommit, CompositorWaitUntilScheduledReturnsBeforeLongRangeSubmits)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(compositorWaitUntilScheduledReturnsBeforeLongRangeSubmits);
 }
 
 TEST(GM20BFacadeCommit, ParallelRecordingsSurviveTrimAndReturnTheirBanksAfterSplice)
@@ -158,6 +316,42 @@ TEST(GM20BFacadeCommit, EncodersEndedBeforeTheCommitAreEncodedAhead)
     };
     printf("hand-offs over 4 frames: %lld, %lld of them woke the worker\n", delta(@"pipeline_handoffs"),
            delta(@"pipeline_handoff_wakes"));
+}
+
+// Nine passes of eight commands hand the command buffer over at the ninth (kHandOff); with the worker asleep after it
+// encoded them, a tenth publishes too little to hand it over again and wakes no one. Waiting for the encode ahead of it
+// must still return: it hung on iOS 17 now and then in AnotherQueuesSubmissionTakesTheDeviceBack, whose worker slept
+// before the tenth pass's publish.
+TEST(GM20BFacadeCommit, AWaitForTheEncodeAheadWakesASleepingWorker)
+{
+    ASSERT_TRUE(opened().device != nil);
+    // Let any pending 1 s idle release (which calls schedule.wake()) finish before recording so nothing else wakes it.
+    for (int i = 0; i < 400 && gRM->idle.due(0); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    const scale_frames::Shape shape{15, 90, 4};
+    const auto into = scale_frames::targets(opened().device, shape);
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    for (int p = 0; p < 9; p++)
+        scale_frames::pass(cb, opened().state, into, shape, p, 0);
+    EXPECT_EQ(scale_frames::waitAhead(cb), 0u);
+    for (int i = 0; i < 200 && !gRM->submitAsleep.load(std::memory_order_acquire); i++)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    scale_frames::pass(cb, opened().state, into, shape, 9, 0);
+    const auto waited = std::make_shared<std::promise<uint32_t>>();
+    std::future<uint32_t> answer = waited->get_future();
+    std::thread([cb, waited] {
+        waited->set_value(scale_frames::waitAhead(cb));
+    }).detach();
+    const bool returned = answer.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    EXPECT_TRUE(returned) << "the wait for the encode ahead slept through a publish that woke no worker";
+    if (returned)
+        EXPECT_EQ(answer.get(), 0u);
+    [cb commit];
+    [cb waitUntilCompleted];
+    EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted);
 }
 
 TEST(GM20BFacadeCommit, PassesBesideAMemorylessColourAreEncodedAhead)
@@ -371,7 +565,9 @@ TEST(GM20BFacadeCommit, AnotherQueuesSubmissionTakesTheDeviceBack)
     EXPECT_EQ([p[@"pipelined"] intValue], 0);
 }
 
-TEST(GM20BFacadeCommit, ACommandBufferWithAComputeEncoderIsEncodedAtTheCommit)
+// A compute encoder after pass 12 of 15, which an encode ahead does not take: the encoders before it are encoded ahead
+// (they go to the GPU at the commit's turn as a range of their own), the compute encoder and the rest at the commit
+TEST(GM20BFacadeCommit, EncodersBeforeAComputeEncoderAreEncodedAhead)
 {
     ASSERT_TRUE(opened().device != nil);
     id<MTLCommandQueue> queue = [opened().device newCommandQueue];
@@ -384,12 +580,204 @@ TEST(GM20BFacadeCommit, ACommandBufferWithAComputeEncoderIsEncodedAtTheCommit)
             [[cb computeCommandEncoder] endEncoding];
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    EXPECT_EQ(scale_frames::waitAhead(cb), 0u);
     [cb commit];
     [cb waitUntilCompleted];
     ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted);
     NSDictionary *p = pipelined(cb);
     ASSERT_NE(p, nil);
-    EXPECT_EQ([p[@"pipelined"] intValue], 0) << [[p description] UTF8String];
+    EXPECT_EQ([p[@"encoders"] intValue], 16);
+    EXPECT_GE([p[@"pipelined"] intValue], 9) << [[p description] UTF8String];
+    EXPECT_LE([p[@"pipelined"] intValue], 12) << [[p description] UTF8String];
+    EXPECT_NE([p[@"stopped"] unsignedIntValue] & VetoOps, 0u) << [[p description] UTF8String];
+    EXPECT_EQ([p[@"veto"] intValue], 0);
+    EXPECT_EQ([p[@"abandons"] intValue], 0);
+}
+
+TEST(GM20BFacadeCommit, EmptyAndNearEmptyCommandBuffersBypassTheSubmitWorker)
+{
+    ASSERT_TRUE(opened().device != nil);
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    id<MTLTexture> target = newTarget();
+    id<MTLBuffer> buf = [opened().device newBufferWithLength:64 options:MTLResourceStorageModeShared];
+    ASSERT_TRUE(target != nil && buf != nil);
+    const size_t jobsBefore = jobCount();
+#if SWITCH_METAL_DIAGNOSTICS
+    const uint64_t deferredBefore = gRM->stats.deferred.load();
+#endif
+    {
+        scale_frames::WorkerHold hold;
+        auto runBounded = [&](id<MTLCommandBuffer> cb) {
+            auto done = std::make_shared<std::promise<void>>();
+            std::future<void> waited = done->get_future();
+            std::thread worker([cb, done] {
+                [cb commit];
+                [cb waitUntilCompleted];
+                done->set_value();
+            });
+            const bool ok = waited.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+            if (!ok)
+                hold.release();
+            worker.join();
+            return ok;
+        };
+        id<MTLCommandBuffer> empty = [queue commandBuffer];
+        ASSERT_TRUE(runBounded(empty)) << "empty command buffer waited on the held submit worker";
+        EXPECT_EQ(empty.status, MTLCommandBufferStatusCompleted);
+        EXPECT_EQ(path(empty), "gm20b");
+
+        id<MTLCommandBuffer> emptyBlit = [queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [emptyBlit blitCommandEncoder];
+        [blit synchronizeResource:buf];
+        [blit optimizeContentsForGPUAccess:target];
+        [blit endEncoding];
+        ASSERT_TRUE(runBounded(emptyBlit)) << "no-op blit command buffer waited on the held submit worker";
+        EXPECT_EQ(emptyBlit.status, MTLCommandBufferStatusCompleted);
+
+        id<MTLCommandBuffer> emptyCompute = [queue commandBuffer];
+        [[emptyCompute computeCommandEncoder] endEncoding];
+        ASSERT_TRUE(runBounded(emptyCompute)) << "empty compute command buffer waited on the held submit worker";
+        EXPECT_EQ(emptyCompute.status, MTLCommandBufferStatusCompleted);
+
+        for (MTLLoadAction load : {MTLLoadActionDontCare, MTLLoadActionLoad}) {
+            id<MTLCommandBuffer> noOpRender = [queue commandBuffer];
+            MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+            d.colorAttachments[0].texture = target;
+            d.colorAttachments[0].loadAction = load;
+            d.colorAttachments[0].storeAction = MTLStoreActionDontCare;
+            [[noOpRender renderCommandEncoderWithDescriptor:d] endEncoding];
+            ASSERT_TRUE(runBounded(noOpRender)) << "no-op render command buffer waited on the held submit worker";
+            EXPECT_EQ(noOpRender.status, MTLCommandBufferStatusCompleted);
+        }
+
+        std::mutex lock;
+        std::vector<int> events;
+        std::atomic<int> presents{0};
+        EmptyFastPathDrawable *drawable = [EmptyFastPathDrawable new];
+        drawable.presents = &presents;
+        id<MTLCommandBuffer> withHandlers = [queue commandBuffer];
+        std::mutex *const lockPtr = &lock;
+        std::vector<int> *const eventsPtr = &events;
+        [withHandlers addScheduledHandler:^(id<MTLCommandBuffer>) {
+            std::lock_guard<std::mutex> l(*lockPtr);
+            eventsPtr->push_back(1);
+        }];
+        [withHandlers presentDrawable:drawable];
+        [withHandlers addCompletedHandler:^(id<MTLCommandBuffer>) {
+            std::lock_guard<std::mutex> l(*lockPtr);
+            eventsPtr->push_back(2);
+        }];
+        ASSERT_TRUE(runBounded(withHandlers)) << "empty command buffer with handlers waited on the held submit worker";
+        EXPECT_EQ(withHandlers.status, MTLCommandBufferStatusCompleted);
+        EXPECT_EQ(presents.load(std::memory_order_acquire), 1);
+        std::lock_guard<std::mutex> l(lock);
+        EXPECT_EQ(events, (std::vector<int>{1, 2}));
+    }
+    EXPECT_EQ(jobCount(), jobsBefore);
+#if SWITCH_METAL_DIAGNOSTICS
+    EXPECT_EQ(gRM->stats.deferred.load(), deferredBefore);
+#endif
+
+    id<MTLCommandBuffer> clearOnly = [queue commandBuffer];
+    MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+    d.colorAttachments[0].texture = target;
+    d.colorAttachments[0].loadAction = MTLLoadActionClear;
+    d.colorAttachments[0].storeAction = MTLStoreActionStore;
+    [[clearOnly renderCommandEncoderWithDescriptor:d] endEncoding];
+    [clearOnly commit];
+    [clearOnly waitUntilCompleted];
+    EXPECT_EQ(clearOnly.status, MTLCommandBufferStatusCompleted);
+    EXPECT_GT(jobCount(), jobsBefore);
+}
+
+TEST(GM20BFacadeCommit, AnEmptyCommandBufferOnAnotherQueueDoesNotAbandonAnEncodeAhead)
+{
+    ASSERT_TRUE(opened().device != nil);
+    id<MTLCommandQueue> recorded = [opened().device newCommandQueue], other = [opened().device newCommandQueue];
+    const scale_frames::Shape shape{15, 90, 4};
+    const auto into = scale_frames::targets(opened().device, shape);
+    id<MTLCommandBuffer> cb = [recorded commandBuffer];
+    for (int p = 0; p < shape.passes; p++) {
+        scale_frames::pass(cb, opened().state, into, shape, p, 0);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (p == 9) {
+            EXPECT_EQ(scale_frames::waitAhead(cb), 0u);
+            id<MTLCommandBuffer> empty = [other commandBuffer];
+            [empty commit];
+            [empty waitUntilCompleted];
+            EXPECT_EQ(empty.status, MTLCommandBufferStatusCompleted);
+            id<MTLCommandBuffer> emptyBlit = [other commandBuffer];
+            [[emptyBlit blitCommandEncoder] endEncoding];
+            [emptyBlit commit];
+            [emptyBlit waitUntilCompleted];
+            EXPECT_EQ(emptyBlit.status, MTLCommandBufferStatusCompleted);
+        }
+    }
+    EXPECT_EQ(scale_frames::waitAhead(cb), 0u);
+    [cb commit];
+    [cb waitUntilCompleted];
+    ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+    NSDictionary *p = pipelined(cb);
+    ASSERT_NE(p, nil);
+    EXPECT_EQ([p[@"abandons"] intValue], 0) << [[p description] UTF8String];
+    EXPECT_GE([p[@"pipelined"] intValue], 10) << [[p description] UTF8String];
+}
+
+TEST(GM20BFacadeCommit, ALongUnsplitCommandBufferKicksInTwoToThreeRanges)
+{
+    ASSERT_TRUE(opened().device != nil);
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    const scale_frames::Shape medium{15, 90, 4}, large{24, 144, 4}, small{3, 12, 2};
+    const auto into = scale_frames::targets(opened().device, medium);
+    const auto rawCount = [&] {
+        return [counters(opened().device)[@"gm20b"] unsignedLongLongValue];
+    };
+    {
+        id<MTLCommandBuffer> warm = scale_frames::record(queue, opened().state, into, small, 0);
+        [warm commit];
+        [warm waitUntilCompleted];
+        ASSERT_EQ(warm.status, MTLCommandBufferStatusCompleted);
+    }
+    const auto runUnsplit = [&](const scale_frames::Shape &shape, uint32_t frame) {
+        const uint64_t before = rawCount();
+        id<MTLCommandBuffer> cb;
+        {
+            scale_frames::WorkerHold hold;
+            cb = scale_frames::record(queue, opened().state, into, shape, frame);
+            [cb commit];
+        }
+        [cb waitUntilCompleted];
+        EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+        EXPECT_EQ(path(cb), "gm20b");
+        return rawCount() - before;
+    };
+    EXPECT_EQ(runUnsplit(small, 1), 1u);
+    const uint64_t mediumRanges = runUnsplit(medium, 2);
+    EXPECT_GE(mediumRanges, 2u);
+    EXPECT_LE(mediumRanges, 3u);
+    const uint64_t largeRanges = runUnsplit(large, 3);
+    EXPECT_GE(largeRanges, 2u);
+    EXPECT_LE(largeRanges, 3u);
+
+    id<MTLCommandBuffer> earlyStop = [queue commandBuffer];
+    for (int p = 0; p < medium.passes; p++) {
+        scale_frames::pass(earlyStop, opened().state, into, medium, p, 4);
+        if (p == 2)
+            [[earlyStop computeCommandEncoder] endEncoding];
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_EQ(scale_frames::waitAhead(earlyStop), 0u);
+    const uint64_t beforeEarly = rawCount();
+    [earlyStop commit];
+    [earlyStop waitUntilCompleted];
+    ASSERT_EQ(earlyStop.status, MTLCommandBufferStatusCompleted);
+    EXPECT_EQ(path(earlyStop), "gm20b");
+    const uint64_t earlyRanges = rawCount() - beforeEarly;
+    EXPECT_EQ(earlyRanges, 3u);
+    NSDictionary *p = pipelined(earlyStop);
+    ASSERT_NE(p, nil);
+    EXPECT_EQ([p[@"abandons"] intValue], 0);
+    EXPECT_NE([p[@"stopped"] unsignedIntValue] & VetoOps, 0u) << [[p description] UTF8String];
 }
 
 struct Latency {
@@ -475,6 +863,135 @@ TEST(GM20BFacadeCommit, RecordingCost)
              percentileOf(recordUs, 0.5), percentileOf(recordUs, 0.9), percentileOf(commitUs, 0.5));
     std::ofstream(outputs() + "/recording_cost.txt") << line;
     printf("%s", line);
+}
+
+TEST(GM20BFacadeCommit, GiveBackDropsUncommittedEncodeAheadAndPurgesVolatileHeap)
+{
+    ASSERT_TRUE(opened().device != nil && opened().state != nil);
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    const scale_frames::Shape shape{5, 30, 2};
+    const auto into = scale_frames::targets(opened().device, shape);
+
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+    hd.size = 256 << 10;
+    hd.storageMode = MTLStorageModeShared;
+    hd.type = MTLHeapTypeAutomatic;
+    id<MTLHeap> heap = [opened().device newHeapWithDescriptor:hd];
+    ASSERT_NE(heap, nil);
+    const uint32_t arena = ((SwitchMetalHeap *)heap)->_arena - 1;
+    ASSERT_EQ([heap setPurgeableState:MTLPurgeableStateVolatile], MTLPurgeableStateNonVolatile);
+
+    @autoreleasepool {
+        id<MTLCommandBuffer> orphan = [queue commandBuffer];
+        for (int p = 0; p < shape.passes; p++)
+            scale_frames::pass(orphan, opened().state, into, shape, p, 0);
+        EXPECT_EQ(scale_frames::waitAhead(orphan), 0u);
+        ASSERT_EQ(gRM->committed.load(), 1u);
+    }
+    gRawRelease.release();
+    EXPECT_EQ(gRM->committed.load(), 0u);
+    EXPECT_TRUE(gRM->raw->arenaPurged(arena));
+
+    EXPECT_EQ([heap setPurgeableState:MTLPurgeableStateNonVolatile], MTLPurgeableStateEmpty);
+    ASSERT_FALSE(gRM->raw->arenaPurged(arena));
+    EXPECT_EQ([heap setPurgeableState:MTLPurgeableStateVolatile], MTLPurgeableStateNonVolatile);
+
+    id<MTLCommandBuffer> live = [queue commandBuffer];
+    for (int p = 0; p < shape.passes; p++)
+        scale_frames::pass(live, opened().state, into, shape, p, 1);
+    EXPECT_EQ(scale_frames::waitAhead(live), 0u);
+    ASSERT_EQ(gRM->committed.load(), 1u);
+    gRawRelease.release();
+    EXPECT_EQ(gRM->committed.load(), 0u);
+    EXPECT_TRUE(gRM->raw->arenaPurged(arena));
+    [live commit];
+    [live waitUntilCompleted];
+    ASSERT_EQ(live.status, MTLCommandBufferStatusCompleted);
+    heap = nil;
+
+    id<MTLCommandBuffer> kept = [queue commandBuffer];
+    for (int p = 0; p < shape.passes; p++)
+        scale_frames::pass(kept, opened().state, into, shape, p, 2);
+    EXPECT_EQ(scale_frames::waitAhead(kept), 0u);
+    ASSERT_EQ(gRM->committed.load(), 1u);
+    gRawRelease.release();
+    EXPECT_EQ(gRM->committed.load(), 1u);
+    [kept commit];
+    [kept waitUntilCompleted];
+    ASSERT_EQ(kept.status, MTLCommandBufferStatusCompleted);
+    NSDictionary *p = pipelined(kept);
+    ASSERT_NE(p, nil);
+    EXPECT_EQ([p[@"abandons"] intValue], 0) << [[p description] UTF8String];
+    EXPECT_GE([p[@"pipelined"] intValue], 1) << [[p description] UTF8String];
+}
+
+TEST(GM20BFacadeCommit, PostFirstDrawVertexBytesShadowInCachedMemory)
+{
+    ASSERT_TRUE(opened().device != nil && opened().state != nil);
+    id<MTLCommandQueue> queue = [opened().device newCommandQueue];
+    const auto into = scale_frames::targets(opened().device, {1, 1, 1});
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    MTLRenderPassDescriptor *d = [MTLRenderPassDescriptor renderPassDescriptor];
+    d.colorAttachments[0].texture = into[0];
+    d.colorAttachments[0].loadAction = MTLLoadActionClear;
+    d.colorAttachments[0].storeAction = MTLStoreActionStore;
+    id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:d];
+    [e setRenderPipelineState:opened().state];
+
+    const float v0a[16] = {-1, -1, 0, 1, 1, -1, 0, 1, -1, 1, 0, 1, 1, 1, 0, 1};
+    const float m2a[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float frag[4] = {1, 0, 0, 1};
+    [e setVertexBytes:v0a length:sizeof v0a atIndex:0];
+    [e setVertexBytes:m2a length:sizeof m2a atIndex:2];
+    [e setFragmentBytes:frag length:sizeof frag atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+
+    const float v0b[16] = {0, 0, 0, 1, 0.5f, 0, 0, 1, 0, 0.5f, 0, 1, 0.5f, 0.5f, 0, 1};
+    uint8_t v1b[288];
+    for (size_t i = 0; i < sizeof v1b; ++i)
+        v1b[i] = uint8_t(i ^ 0x5a);
+    const float m2b[16] = {2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float v3b[16] = {3, 3, 3, 3};
+    [e setVertexBytes:v0b length:sizeof v0b atIndex:0];
+    [e setVertexBytes:v1b length:sizeof v1b atIndex:1];
+    [e setVertexBytes:m2b length:sizeof m2b atIndex:2];
+    [e setVertexBytes:v3b length:sizeof v3b atIndex:3];
+    [e setFragmentBytes:frag length:sizeof frag atIndex:0];
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+
+    std::vector<uint8_t> big(1028, 0x3c);
+    [e setVertexBytes:big.data() length:big.size() atIndex:1];
+    [e drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+
+    SwitchMetalCommandBuffer *raw = (SwitchMetalCommandBuffer *)cb;
+    std::vector<size_t> drawOps;
+    for (size_t i = 0; i < raw->_plan.size(); ++i)
+        if (raw->_plan.operation(i).op == OpDraw)
+            drawOps.push_back(i);
+    ASSERT_EQ(drawOps.size(), 3u);
+
+    const auto &state1 = raw->_plan.renderStates[raw->_plan.draw(drawOps[1]).state];
+    const gm20b::BufferBinding &b0 = raw->_plan.buffers[0][state1.buffers[0]][0];
+    const gm20b::BufferBinding &b1 = raw->_plan.buffers[0][state1.buffers[0]][1];
+    const gm20b::BufferBinding &b2 = raw->_plan.buffers[0][state1.buffers[0]][2];
+    const gm20b::BufferBinding &b3 = raw->_plan.buffers[0][state1.buffers[0]][3];
+    const gm20b::BufferBinding &bf = raw->_plan.buffers[1][state1.buffers[1]][0];
+    ASSERT_NE(b0.shadow, 0u);
+    ASSERT_NE(b1.shadow, 0u);
+    ASSERT_NE(b2.shadow, 0u);
+    EXPECT_EQ(b3.shadow, 0u);
+    EXPECT_EQ(bf.shadow, 0u);
+    EXPECT_EQ(memcmp(raw->_shadow.ownData() + b0.shadow - 1, v0b, sizeof v0b), 0);
+    EXPECT_EQ(memcmp(raw->_shadow.ownData() + b1.shadow - 1, v1b, sizeof v1b), 0);
+    EXPECT_EQ(memcmp(raw->_shadow.ownData() + b2.shadow - 1, m2b, sizeof m2b), 0);
+
+    const auto &state2 = raw->_plan.renderStates[raw->_plan.draw(drawOps[2]).state];
+    EXPECT_EQ(raw->_plan.buffers[0][state2.buffers[0]][1].shadow, 0u);
+
+    [e endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
 }
 
 TEST(GM20BFacadeCommit, CommitLatency)

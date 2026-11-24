@@ -1,8 +1,7 @@
 # drivers/NativeSwitchBlock on the host: the SD driver's header-only engines against models (ADMA2 descriptor tables
-# and their staging, the SD card's register decoders and command encodings, the client copy through copypv, the
-# command-queue engine against a model card, read-chain merging, the cryptex direct read map and prefetch runs), and
-# guards on what NativeSwitchBlock.cpp and SwitchCryptex.cpp do with them (*_source_test: the drivers themselves
-# are not built for the host).
+# and their staging, the SD card's register decoders and command encodings, the client copy through copypv, read-chain
+# merging, the cryptex direct read map and prefetch runs), and guards on what NativeSwitchBlock.cpp and
+# SwitchCryptex.cpp do with them (*_source_test: the drivers themselves are not built for the host).
 #
 #   bazel test //drivers/NativeSwitchBlock/test:all
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
@@ -35,6 +34,15 @@ host_test(
     srcs = [
         "sd_bus_test.cpp",
         "//drivers/NativeSwitchBlock:SwitchSdBus.h",
+    ],
+)
+
+# The request accounting's histograms, line and totals (debug kernels' SwitchSD io line and kern.switch_sd).
+host_test(
+    name = "sd_io_test",
+    srcs = [
+        "sd_io_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdIo.h",
     ],
 )
 
@@ -81,19 +89,19 @@ host_test(
 )
 
 host_test(
-    name = "sd_cq_test",
+    name = "sd_queue_test",
     srcs = [
-        "sd_cq_test.cpp",
-        "//drivers/NativeSwitchBlock:SwitchCq.h",
-        "//drivers/NativeSwitchBlock:SwitchSdCard.h",
+        "sd_queue_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchQueue.h",
     ],
     copts = ["-O1"],
 )
 
 host_test(
-    name = "sd_queue_test",
+    name = "sd_pool_test",
     srcs = [
-        "sd_queue_test.cpp",
+        "sd_pool_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdPool.h",
         "//drivers/NativeSwitchBlock:SwitchQueue.h",
     ],
     copts = ["-O1"],
@@ -164,21 +172,21 @@ host_test(
 )
 
 host_test(
-    name = "sd_cq_source_test",
-    srcs = ["sd_cq_source_test.cpp"],
-    copts = ["-O1"],
-    data = [
-        "//drivers/NativeSwitchBlock:SwitchCq.h",
-        "//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp",
-    ],
-    deps = [":source_checks"],
-)
-
-host_test(
     name = "sd_queue_source_test",
     srcs = ["sd_queue_source_test.cpp"],
     copts = ["-O1"],
     data = ["//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp"],
+    deps = [":source_checks"],
+)
+
+host_test(
+    name = "sd_pool_source_test",
+    srcs = ["sd_pool_source_test.cpp"],
+    copts = ["-O1"],
+    data = [
+        "//drivers/NativeSwitchBlock:SwitchSdPool.h",
+        "//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp",
+    ],
     deps = [":source_checks"],
 )
 
@@ -191,18 +199,4 @@ host_test(
         "//diagnostics/switch:SwitchRawMount.h",
     ],
     deps = [":source_checks"],
-)
-
-host_test(
-    name = "sd_release_dma_test",
-    srcs = [
-        "sd_release_dma_test.cpp",
-        "//drivers/NativeSwitchBlock:SwitchAdma.h",
-    ],
-    copts = [
-        "-UDEVELOPMENT",
-        "-DDEVELOPMENT=0",
-        "-UDEBUG",
-        "-DDEBUG=0",
-    ],
 )

@@ -88,12 +88,21 @@ struct SolidRects {
     }
 };
 
-inline void runEngines(size_t first, EngineRun &out)
+// kinds: each bind of kind 0 or 0xfe mapped cacheable with its kind (gm20b_gpu_memory.h: a GOB the L2 holds keeps the
+// kind of its first access), and the host's MEM_OP methods run, so work that moves between kinds of the same pages
+// with no kind switch between reads and writes them in the other kind's GOB order. The L2 starts empty at `first` and
+// is dropped ahead of each host-written job, as the kernel drops it.
+inline void runEngines(size_t first, EngineRun &out, bool kinds = false)
 {
     Memory memory;
     for (const auto &[va, bind] : kernel_model::model.binds)
-        if (auto *bytes = kernel_model::model.host(va, bind.second))
-            memory.map(va, bytes, bind.second, false);
+        if (auto *bytes = kernel_model::model.host(va, bind.second)) {
+            const uint32_t kind = kernel_model::model.bindKinds[va];
+            if (kinds && (kind == 0 || kind == TGM_LAYOUT_KIND))
+                memory.map(va, bytes, bind.second, false, true, int(kind));
+            else
+                memory.map(va, bytes, bind.second, false);
+        }
     CopyEngine engine(memory);
     engine.requireNonPipelined = false;
     SolidRects solids;
@@ -106,6 +115,8 @@ inline void runEngines(size_t first, EngineRun &out)
     gm20b::fx::emitTwodInit(push);
     ASSERT_TRUE(twod.run(init.data(), size_t(push.at - init.data()))) << twod.error();
     for (size_t j = first; j < kernel_model::model.jobs.size(); ++j) {
+        if (kinds && kernel_model::model.jobs[j].hostWritten)
+            memory.invalidateL2();  // the kernel's invalidate ahead of a host-written job (gpu_exec.c chan_exec_body)
         const auto &words = kernel_model::model.jobs[j].words;
         std::vector<switch_gm20b_method> methods(words.size());
         const long count = switch_gm20b_push_decode(words.data(), words.size(), methods.data(), methods.size());
@@ -113,6 +124,8 @@ inline void runEngines(size_t first, EngineRun &out)
         for (long k = 0; k < count; ++k) {
             if (methods[k].subchannel == gm20b::SUBC_COPY && methods[k].method >= 0x100)
                 engine.method(gm20b::SUBC_COPY, methods[k].method, methods[k].value);
+            if (kinds && (methods[k].method == 0x0030 || methods[k].method == 0x0034))  // MEM_OP_C, MEM_OP_D
+                engine.method(methods[k].subchannel, methods[k].method, methods[k].value);
             if (methods[k].subchannel == gm20b::SUBC_2D)
                 solids.method(methods[k].method, methods[k].value);
             ASSERT_TRUE(solids.error.empty()) << solids.error;
@@ -126,7 +139,7 @@ inline void runEngines(size_t first, EngineRun &out)
 }
 
 // `cb` committed and completed on the driver, its engines' work run (runEngines)
-inline void commitOnRaw(id<MTLCommandBuffer> cb, EngineRun &out)
+inline void commitOnRaw(id<MTLCommandBuffer> cb, EngineRun &out, bool kinds = false)
 {
     const size_t first = kernel_model::model.jobs.size();
     [cb commit];
@@ -134,7 +147,7 @@ inline void commitOnRaw(id<MTLCommandBuffer> cb, EngineRun &out)
     ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
     auto *path = ((NSString * (*)(id, SEL)) objc_msgSend)(cb, sel_registerName("switchMetalPath"));
     ASSERT_TRUE([path isEqualToString:@"gm20b"]) << path.UTF8String;
-    runEngines(first, out);
+    runEngines(first, out, kinds);
 }
 
 }  // namespace harness

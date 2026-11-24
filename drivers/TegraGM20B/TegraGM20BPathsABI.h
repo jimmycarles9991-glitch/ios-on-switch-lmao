@@ -26,6 +26,9 @@ enum {
 	TegraGM20BPathsOpPool = 4,
 	/* "lines=N": the refusal lines this connection's GPU job calls wrote (SwitchGpuRefusalSites.h) */
 	TegraGM20BPathsOpRefusals = 5,
+	/* "foreign_jobs=N foreign_fences=N foreign_promises=N foreign_events=N foreign_host1x=N": monotonic compositor
+	 * foreign-wait totals since boot (TGM_STATS) */
+	TegraGM20BPathsOpForeignWaits = 6,
 };
 
 struct TegraGM20BAbiPaths {

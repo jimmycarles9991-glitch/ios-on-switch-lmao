@@ -2,6 +2,7 @@
 // See gpu.h (Device::pipeline, the argument tables, the runtime's own states).
 #include "lock.h"
 #include "blend_kill.h"
+#include "creation_cost.h"
 #include "dynamic_push.h"
 #include "blend_reads.h"
 #include "gpu.h"
@@ -15,7 +16,6 @@
 #include "shader_test_push.h"
 #include "slm.h"
 #include "stage_switches.h"
-#include "program_stores.h"
 #include "storage.h"
 #include "xr_pass.h"
 #include "written_textures.h"
@@ -208,24 +208,38 @@ bool Device::rebindArguments(Pipeline &pl)
     return bound;
 }
 
+// A search of the pack for keyHash's records (Pack::run), counted for the creation's line (creation_cost.h)
+static PackRun searched(const Pack &pack, uint64_t keyHash)
+{
+    SWITCH_METAL_CREATION_SPAN(lookupTicks);
+    SWITCH_METAL_CREATION_COUNT(lookups, 1);
+    return pack.run(keyHash);
+}
+
+Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)
+{
+    return pipeline(searched(pack_, keyHash), keyHash, form, caTransform);
+}
+
 // A state of the pack, made the first time it is looked up (most of the pack's states never are in a process): its registers
-// as push words with its programs placed in the heap. Else one the runtime made (addRecord). A storage form that computes
+// as push words with its programs placed in the heap, the record drawn as the pack holds it (the generator's tests scan
+// every record of the pack: pack_scan.h). Else one the runtime made (addRecord). A storage form that computes
 // the pipeline's blend has no barrier twin to fall back on: its barrier form leaves the blend to the ROP after a fetch
 // outside the interlock, which keeps Metal's result only drawn a triangle at a time. A pass it cannot view as its storage
 // images refuses its draws (RenderEncoder::prepare), as Metal fails a state drawn into attachments it was not made for.
 // That form is its blendTwin, which a draw takes a triangle at a time where rule fetch.twin holds (twin_rule.h).
-Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)
+Pipeline *Device::pipeline(const PackRun &run, uint64_t keyHash, PackForm form, bool caTransform)
 {
-    Pipeline *pl = placePipeline(keyHash, form, caTransform);
-    if (form == PackForm::Default && pl && pl->fetchBits && fetchFreeReachable(keyHash)) {
-        Pipeline *free = placePipeline(keyHash, PackForm::FetchFree, caTransform);
+    Pipeline *pl = placePipeline(run, keyHash, form, caTransform);
+    if (form == PackForm::Default && pl && pl->fetchBits && fetchFreeReachable(run)) {
+        Pipeline *free = placePipeline(run, keyHash, PackForm::FetchFree, caTransform);
         std::lock_guard<gm20b::Mutex> l(lock_);
         if (free && free != pl && free->freeForm.rung != FetchNone)
             pl->fetchFree = free;
     }
     if (form != PackForm::Default || !pl || !pl->storageBits)
         return pl;
-    Pipeline *twin = placePipeline(keyHash, PackForm::Barrier, caTransform);
+    Pipeline *twin = placePipeline(run, keyHash, PackForm::Barrier, caTransform);
     std::lock_guard<gm20b::Mutex> l(lock_);
     if (twin && twin != pl && !twin->storageBits)
         (pl->storageBlendBits ? pl->blendTwin : pl->barrierTwin) = twin;
@@ -233,9 +247,9 @@ Pipeline *Device::pipeline(uint64_t keyHash, PackForm form, bool caTransform)
 }
 
 // Whether the state's fetch-free form, where the pack holds one, is placed (fetch_free.h fetchFreePlaced)
-bool Device::fetchFreeReachable(uint64_t keyHash) const
+bool Device::fetchFreeReachable(const PackRun &run) const
 {
-    const PackPipeline *rec = pack_.find(keyHash, PackForm::FetchFree);
+    const PackPipeline *rec = pack_.find(run, PackForm::FetchFree);
     if (!rec)
         return false;
     uint8_t probe = 0;
@@ -245,29 +259,28 @@ bool Device::fetchFreeReachable(uint64_t keyHash) const
     return fetchFreePlaced(fetchFreeForm(*rec, pack_.iterated(*rec), pack_.far(*rec)), probe);
 }
 
-bool Device::usableRecord(const PackPipeline *rec) const
-{
-    return rec && usableDynamicPush(*rec, pack_.string(rec->keyString)) &&
-           usableStorageMetadata(*rec, pack_.section<uint32_t>(PackBlob) + rec->blob, rec->blobDwords, pack_.far(*rec));
-}
-
 std::vector<std::pair<std::string, Pipeline *>> Device::variantPipelines(uint64_t keyHash, bool caTransform)
 {
+    return variantPipelines(searched(pack_, keyHash), caTransform);
+}
+
+std::vector<std::pair<std::string, Pipeline *>> Device::variantPipelines(const PackRun &run, bool caTransform)
+{
     std::vector<std::pair<std::string, Pipeline *>> out;
-    for (const PackPipeline *rec : pack_.variantRecords(keyHash)) {
+    for (const PackPipeline *rec : pack_.variantRecords(run)) {
         const std::string name = pack_.string(rec->variantName);
         // a barrier record is a storage form's twin unless it is the variant's one record (its storage form refused)
-        if ((rec->flags & PipelineBarrierForm) && pack_.variantRecord(keyHash, name, PackForm::Default))
+        if ((rec->flags & PipelineBarrierForm) && pack_.variantRecord(run, name, PackForm::Default))
             continue;
         Pipeline *pl = nullptr;
-        if (usableRecord(rec)) {
+        {
             std::lock_guard<gm20b::Mutex> l(lock_);
             pl = placeRecord(*rec, caTransform);
         }
         // a storage form's barrier twin, as Device::pipeline gives a state's own
         const PackPipeline *barrier =
-            pl && pl->storageBits ? pack_.variantRecord(keyHash, name, PackForm::Barrier) : nullptr;
-        if (usableRecord(barrier)) {
+            pl && pl->storageBits ? pack_.variantRecord(run, name, PackForm::Barrier) : nullptr;
+        if (barrier) {
             std::lock_guard<gm20b::Mutex> l(lock_);
             Pipeline *twin = placeRecord(*barrier, caTransform);
             if (twin && twin != pl && !twin->storageBits)
@@ -278,27 +291,9 @@ std::vector<std::pair<std::string, Pipeline *>> Device::variantPipelines(uint64_
     return out;
 }
 
-Pipeline *Device::placePipeline(uint64_t keyHash, PackForm form, bool caTransform)
+Pipeline *Device::placePipeline(const PackRun &run, uint64_t keyHash, PackForm form, bool caTransform)
 {
-    const PackPipeline *rec = pack_.find(keyHash, form);
-    if (rec && !usableRecord(rec)) {
-        const bool blends = rec->storageBlendMask;
-        const PackPipeline *barrier = form == PackForm::Default && (rec->flags & PipelineStorageMetadata) && !blends
-                                          ? pack_.find(keyHash, PackForm::Barrier)
-                                          : nullptr;
-        rec = usableRecord(barrier) ? barrier : nullptr;
-        if (blends)
-            os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
-                         "SwitchMetal: pack state %016llx computes its blend in a storage form this runtime cannot "
-                         "read: refused",
-                         (unsigned long long)keyHash);
-#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
-        if (rec) {
-            stats.fetch.storageFallback[size_t(StorageFallback::Metadata)]++;
-            stats.fetch.fallbackKeys.note(keyHash);
-        }
-#endif
-    }
+    const PackPipeline *rec = pack_.find(run, form);
     std::lock_guard<gm20b::Mutex> l(lock_);
     if (!rec) {
         const auto made = completed_.find(keyHash);
@@ -321,14 +316,8 @@ std::vector<uint32_t> restoreWords(const uint32_t *pairs, uint32_t dwords)
 Pipeline *Device::placeRecord(const PackPipeline &pp, bool caTransform)
 {
     Pipeline &pl = pipelines_[&pp - pack_.section<PackPipeline>(PackPipelines)];
-    if (pl.rec || pl.malformed)
-        return pl.rec ? &pl : nullptr;
-    if (const char *why = entriesRefusal(pp, pack_.far(pp), pack_.header()->samplers)) {
-        pl.malformed = true;
-        os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
-                     "SwitchMetal: pack state %016llx refused: %{public}s", (unsigned long long)pp.keyHash, why);
-        return nullptr;
-    }
+    if (pl.rec)
+        return &pl;
     const bool tess = tessellates(pp);
     PlacedProgram vs, fs = noPixelProgram(), tessPlaced[2];
     if (!placePackProgram(pp.vs, vs) || (pixelStage(pp) && !placePackProgram(pp.fs, fs)) ||
@@ -345,12 +334,9 @@ Pipeline *Device::placeRecord(const PackPipeline &pp, bool caTransform)
         return nullptr;
     }
     Pipeline *twin = nullptr;
-    if (pp.strideTwin) {
-        const PackPipeline *twinRecord = pack_.find(pp.strideTwin, recordForm(pp));
-        if (twinRecord && twinRecord != &pp && usableRecord(twinRecord) &&
-            !(twin = placeRecord(*twinRecord, caTransform)))
-            return nullptr;
-    }
+    if (pp.strideTwin &&
+        !(twin = placeRecord(pack_.section<PackPipeline>(PackPipelines)[pp.strideTwin - 1], caTransform)))
+        return nullptr;
     build(pl, pp, vs, fs, pack_.section<uint32_t>(PackBlob) + pp.blob, pack_.string(pp.keyString), caTransform,
           pack_.spills(pp), pack_.far(pp), tess ? tessPlaced : nullptr);
     if (pp.restoreDwords && uint64_t(pp.restoreAt) + pp.restoreDwords <= pack_.bytes(PackBlob) / 4) {
@@ -381,19 +367,20 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
                    const uint32_t *blob, const char *keyString, bool caTransform, const uint32_t *spills,
                    const uint32_t *far, const PlacedProgram *tess)
 {
+    SWITCH_METAL_CREATION_SPAN(buildTicks);
+    SWITCH_METAL_CREATION_COUNT(builds, 1);
     pl.entries = SetEntries(pp, far);
     auto instructions = [](const PackProgram &program) {
         const uint32_t bytes = program.dataBytes ? program.dataOffset : program.bytes;
         return std::max(1u, (bytes > 128 ? bytes - 128 : 0) / 8);
     };
-    pl.vertexInstructions = instructions(*vs.record);
+    pl.vertexInstructions =
+        instructions(*vs.record) + (tess ? instructions(*tess[0].record) + instructions(*tess[1].record) : 0);
     pl.fragmentInstructions = instructions(*fs.record);
-    // the code as the heap holds it (a runtime record's CPU copy is its header alone)
-    const auto writesMemory = [&](const PlacedProgram &p) {
-        const uint8_t *header = heapCpu(p.program);
-        return !header || placedWritesMemory(header, *p.record);
+    const auto writesMemory = [](const PlacedProgram &p) {
+        return (p.record->facts & kProgramWritesMemory) != 0;
     };
-    pl.writesMemory[0] = writesMemory(vs);
+    pl.writesMemory[0] = writesMemory(vs) || (tess && (writesMemory(tess[0]) || writesMemory(tess[1])));
     pl.writesMemory[1] = writesMemory(fs);
     pl.memoryEntries = pp.memoryEntries;
     std::vector<uint32_t> words(64 + 16 + kStageSwitchWords + (tess ? 64 : 0) + pp.blobDwords * 2);
@@ -452,6 +439,11 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
     pl.setSlot[1] = bindProgramCbufs(w, *fs.record, kSetGroups[1], fs.data, root_.va, exactCbufs);
     const PackProgram *programs[4] = {vs.record, fs.record};
     const uint16_t *farUbos[4] = {vs.farUbos, fs.farUbos};
+    if (tess) {
+        // SET_PATCH is in kOwnedMethods so the blob loop drops it; m2v's tessellation states always draw 1-point
+        // patches.
+        w.m(NVB197_SET_PATCH, 1);
+    }
     for (uint32_t k = 0; tess && k < 2; k++) {
         w.m(PIPELINE_PROGRAM_TESS + kPipelineStageStride * k, tess[k].program);
         w.m(PIPELINE_REGISTER_COUNT_TESS + kPipelineStageStride * k, tess[k].record->gprs);
@@ -526,11 +518,15 @@ void Device::build(Pipeline &pl, const PackPipeline &pp, const PlacedProgram &vs
     uint32_t sph[20];
     memcpy(sph, fs.header, sizeof sph);
     pl.primitiveId = (sph[5] >> 24) & 1;  // NVA097_SPHV3T2_IMAP_PRIMITIVE_ID, bit 184
-    uint32_t vsph0;
-    memcpy(&vsph0, vs.header, sizeof vsph0);
-    pl.vertexStores = (vsph0 >> 16) & 1;    // NVA097_SPHV3T1_DOES_GLOBAL_STORE
+    const auto doesGlobalStore = [](const uint8_t *header) {
+        uint32_t sph0;
+        memcpy(&sph0, header, sizeof sph0);
+        return ((sph0 >> 16) & 1) != 0;  // NVA097_SPHV3T1_DOES_GLOBAL_STORE
+    };
+    pl.vertexStores =
+        doesGlobalStore(vs.header) || (tess && (doesGlobalStore(tess[0].header) || doesGlobalStore(tess[1].header)));
     pl.fragmentDepth = (sph[19] >> 1) & 1;  // OMAP_DEPTH, bit 609
-    pl.viewportIndex = headerWritesViewportIndex(vs.header);
+    pl.viewportIndex = headerWritesViewportIndex((tess ? tess[1] : vs).header);
     pl.writesLayer = headerWritesLayer((tess ? tess[1] : vs).header);
     bool tests = false;
     for (uint32_t k = 0; k < pp.blobDwords; k += 2) {

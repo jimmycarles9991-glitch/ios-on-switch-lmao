@@ -2,7 +2,7 @@
 // A model of MAXWELL_DMA_COPY_A and the host methods the kernel's copy pushes use (TegraGM20BRelayout.h, TegraGM20BCopyPush.h)
 // over modelled GPU memory: remapped component copies and plain byte copies, pitch and block-linear sides (a block-linear side
 // addressed by TegraGM20BLayout.h's offsets), constant fills, NON_PIPELINED launches, semaphore acquires and host1x syncpoint
-// waits and increments as the host reads them.
+// waits and increments as the host reads them, and the host's L2 invalidate.
 #pragma once
 #include <algorithm>
 #include <cstdint>
@@ -162,6 +162,8 @@ struct CopyEngine {
 			m[mthd] = data;
 			if (mthd == 0x0034 && data == 0x10u << 27)  // MEM_OP_D L2_FLUSH_DIRTY
 				flushed = true;
+			if (mthd == 0x0034 && data == 0x0eu << 27)  // MEM_OP_D L2_SYSMEM_INVALIDATE
+				memory.invalidateL2();
 			if (mthd ==
 			    0x0074) {  // SYNCPOINTB: INDEX 15:8, WAIT_SWITCH 4, OPERATION 0 (wait) or 1 (incr)
 				const uint32_t id = (data >> 8) & 0xff;

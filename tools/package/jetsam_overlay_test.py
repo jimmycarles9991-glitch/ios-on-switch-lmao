@@ -1,7 +1,8 @@
 """The Supplemental cryptex's jetsam overlay as this build's profile makes it (overlay/BUILD.bazel jetsam_properties).
 
-It holds the shader compiler's Override in both profiles and the texture peer's (HW Test's second process, which the
-manifest stages in debug alone) in debug alone; its merge refuses a label named twice.
+It holds the shader compiler's and the bootstrap helper's Overrides in both profiles (the manifest stages both daemons'
+jobs in release too) and the texture peer's (HW Test's second process, which the manifest stages in debug alone) in
+debug alone; its merge refuses a label named twice.
 """
 
 import json
@@ -18,6 +19,7 @@ COMPILER = Path('overlay/supplemental/com.brunostjohn.switch.shadercompiler.jets
 PEER = Path('apps/hwtest/peer/com.brunostjohn.switch.texpeer.jetsam.plist')
 MANIFEST = Path('overlay/manifest.json')
 COMPILER_LABEL = 'com.brunostjohn.switch.shadercompiler'
+BOOTSTRAP_LABEL = 'com.brunostjohn.switch.bootstrap'
 PEER_LABEL = 'com.brunostjohn.switch.texpeer'
 
 
@@ -33,7 +35,7 @@ class ProfileTest(unittest.TestCase):
         self.assertEqual(self.override[COMPILER_LABEL], override(COMPILER)[COMPILER_LABEL])
 
     def test_the_texture_peer_has_its_override_in_debug_alone(self):
-        labels = {COMPILER_LABEL} | ({PEER_LABEL} if PROFILE == 'debug' else set())
+        labels = {COMPILER_LABEL, BOOTSTRAP_LABEL} | ({PEER_LABEL} if PROFILE == 'debug' else set())
         self.assertEqual(set(self.override), labels)
         if PROFILE == 'debug':
             self.assertEqual(self.override[PEER_LABEL], {'ActiveSoftMemoryLimit': 40, 'InactiveHardMemoryLimit': 40})

@@ -61,6 +61,7 @@ extern "C" void tegra_gm20b_surface_engine_rows(OSObject *surface) __attribute__
 extern "C" void *tegra_gm20b_surface_hold(uint64_t pa, int *tiled) __attribute__((weak));
 extern "C" void tegra_gm20b_surface_unhold(void *hold) __attribute__((weak));
 extern "C" int tegra_gm20b_surface_layout(uint64_t pa, struct tgm_layout *out) __attribute__((weak));
+extern "C" int tegra_gm20b_surface_compressed(uint64_t pa) __attribute__((weak));
 
 extern "C" {
 vm_offset_t phystokv(uint64_t pa);
@@ -220,6 +221,8 @@ const char *takeLayout(Job *job, uint64_t firstPage, void **hold)
     tgm_layout layout = {};
     if (!tiled || tegra_gm20b_surface_layout(firstPage, &layout) != 1)
         return nullptr;
+    if (tegra_gm20b_surface_compressed && tegra_gm20b_surface_compressed(firstPage))
+        return "compressed";
     return tegra_nvjpg_plan_block_linear(&job->request.base, job->dst.desc.length, kSinkBytes, layout.row_bytes,
                                          layout.y_log2, &job->plan, &job->engine.setup);
 }

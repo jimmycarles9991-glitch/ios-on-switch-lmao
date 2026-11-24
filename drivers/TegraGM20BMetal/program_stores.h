@@ -44,12 +44,4 @@ inline bool programWritesMemory(const uint8_t *code, size_t bytes)
     return false;
 }
 
-// The same of a program of the heap: `header` its shader program header, at its slot's 0x30 (PackProgram)
-inline bool placedWritesMemory(const uint8_t *header, const PackProgram &program)
-{
-    constexpr uint32_t kCodeInSlot = 0x80, kHeaderBytes = 0x50;
-    const uint32_t end = program.dataBytes ? program.dataOffset : program.bytes;
-    return !header || programWritesMemory(header + kHeaderBytes, end > kCodeInSlot ? end - kCodeInSlot : 0);
-}
-
 }  // namespace gm20b

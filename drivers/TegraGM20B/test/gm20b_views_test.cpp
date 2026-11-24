@@ -10,6 +10,7 @@
 #include "drivers/TegraDisplayFlip/TegraScanoutCopy.h"
 #include "drivers/TegraGM20B/TegraGM20BGpu.h"
 #include "drivers/TegraGM20B/TegraGM20BLayout.h"
+#include "drivers/TegraGM20B/TegraGM20BLayoutAsk.h"
 #include "drivers/TegraGM20B/TegraGM20BRelayout.h"
 #include "drivers/TegraGM20B/TegraGM20BViews.h"
 #include "gm20b_tiled_model.h"
@@ -97,6 +98,8 @@ protected:
 		gScratchFails = false;
 		gScratchPurged = false;
 		gRefusals.clear();
+		gBackingScanned = 0;
+		gSmmuReady = 1;
 		gViews = ViewModel{};
 		gGpu = FakeGpu{};
 	}
@@ -521,6 +524,38 @@ TEST_F(Views, NothingForAPitchSurface)
 	EXPECT_EQ(tegra_gm20b_iosurface_view(client(1), kUnlock, 88, 0), 0);
 	EXPECT_TRUE(gMoves.empty());
 	EXPECT_EQ(gViews.remaps, 0);
+	tgm_coherency_put(c);
+}
+
+TEST_F(Views, CompressedUnlockWritebackFailurePropagatesErrorAndLogsRefusal)
+{
+	std::vector<uint64_t> pas;
+	for (uint32_t i = 0; i < 16; i++)
+		pas.push_back(0xb0000000 + i * 0x2000);
+	int covered = 0;
+	tgm_coh *c = tgm_coherency_add(pas[0], 91, pas.data(), 16, 1, 1, &covered);
+	ASSERT_EQ(tgm_coherency_pin(c, reinterpret_cast<switch_gpu_backing *>(1), nullptr, nullptr),
+		  0);
+	tgm_coherency_set_compressible(c, 1);
+	ASSERT_EQ(tgm_coherency_layout_fitted(c, 128, 128, 4, 512,
+					      TGM_LAYOUT_ASK_WRITES | TGM_LAYOUT_ASK_COMPRESS),
+		  1);
+	ASSERT_EQ(tegra_gm20b_surface_kind(pas[0]), 0xdbu);
+	gViews.mappings[{client(1), 91}] = {client(1), task(1), 0x300000, 16 * 4096, 0, 0};
+
+	ASSERT_EQ(tegra_gm20b_iosurface_view(client(1), kLock, 91, 0), 0);
+	tgm_views_gpu_writes(c);
+	gRefusals.clear();
+	gMoveFails = true;
+	gCpuMoves = 0;
+	EXPECT_NE(tegra_gm20b_iosurface_view(client(1), kUnlock, 91, 0), 0);
+	EXPECT_EQ(gCpuMoves, 0);
+	bool sawWritebackFailed = false;
+	for (const auto &r : gRefusals)
+		if (r.first == "iosurface-layout" && r.second == "unlock-writeback-failed")
+			sawWritebackFailed = true;
+	EXPECT_TRUE(sawWritebackFailed);
+	gMoveFails = false;
 	tgm_coherency_put(c);
 }
 

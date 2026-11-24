@@ -69,6 +69,37 @@ unsigned xnu_stall_wait_names(void)
     return SWITCH_STALL_WAIT_NAMES;
 }
 
+bool xnu_stall_owner_is_thread(int pid, uint64_t tid)
+{
+    const struct switch_stall_owner owner = {.pid = pid, .tid = tid};
+
+    return switch_stall_owner_is_thread(&owner);
+}
+
+bool xnu_stall_owner_known(int pid, uint64_t tid)
+{
+    const struct switch_stall_owner owner = {.pid = pid, .tid = tid};
+
+    return switch_stall_owner_known(&owner);
+}
+
+bool xnu_stall_hop_present(int pid, uint64_t tid, bool locked)
+{
+    const struct switch_stall_owner owner = {.pid = pid, .tid = tid};
+
+    return switch_stall_hop_present(&owner, locked);
+}
+
+bool xnu_stall_rwlock_wait(unsigned hint)
+{
+    return switch_stall_rwlock_wait(hint);
+}
+
+uint64_t xnu_stall_rwlock_of(uint64_t event, unsigned hint, bool allow_typed)
+{
+    return (uint64_t)switch_stall_rwlock_of(event, hint, allow_typed);
+}
+
 unsigned xnu_stall_most(const uint64_t *tids, const uint64_t *cpus, unsigned n, bool complete, const uint64_t *now_tids,
                         const uint64_t *now_cpus, unsigned now_n, unsigned k, uint64_t *top_tids, uint64_t *top_gains)
 {

@@ -407,7 +407,7 @@ TEST_F(PromisedPresentFilter, TheKeepingJobsEndFlipsFromTheFilter)
 TEST_F(PromisedPresentFilter, ACancelShowsTheFrameFromTheWorkItem)
 {
 	promiseWord = kPromiseValue;
-	EXPECT_EQ(workItem(), SWITCH_GPU_PRESENT_WATCH_VISIBLE);
+	EXPECT_EQ(workItem(), SWITCH_GPU_PRESENT_WATCH_HIDDEN);
 	filter();
 	EXPECT_TRUE(callouts.empty());
 	EXPECT_FALSE(handOver()) << "claimed: a job submitted after the cancel watches nothing";
@@ -454,8 +454,11 @@ TEST(PresentFilterSource, TheWatchAttachesBeforeItsArmAndEachClaimDetachesFirst)
 	using switch_ios::test::SourceText;
 	const std::string present = SourceText("../gpu_present.c");
 	const std::string watch = Between(present, "int tgm_present_watch_dependencies(", "\n}\n");
-	EXPECT_LT(watch.find("tgm_present_filter_attach(&tgm_present.tokens.tokens[0]);"),
-		  watch.find("switch_gpu_present_watch_arm("));
+	EXPECT_NE(watch.find("switch_gpu_present_watch_arm_many("), std::string::npos);
+	EXPECT_LT(watch.find("if (watch_count == 1)"),
+		  watch.find("tgm_present_filter_attach(&watch_tokens[0]);"));
+	EXPECT_LT(watch.find("tgm_present_filter_attach(&watch_tokens[0]);"),
+		  watch.find("switch_gpu_present_watch_arm_many("));
 	const std::string pass = Between(present, "void tgm_present_pass(void)\n{", "\n}\n");
 	EXPECT_LT(pass.find("switch_gpu_present_watch_take_visible("),
 		  pass.find("tgm_present_filter_detach();"));

@@ -9,6 +9,7 @@ using present_model::Channel;
 using present_model::Deadline;
 using present_model::Display;
 using present_model::kA;
+using present_model::kB;
 using present_model::kWakeGraceNs;
 using present_model::Producer;
 
@@ -137,4 +138,20 @@ TEST(PresentDeadline, ATeardownDeliversWhatItsPassWouldHave)
 	EXPECT_EQ(d.presented, 1u);
 	EXPECT_EQ(d.workItems, 1u);
 	EXPECT_EQ(d.deadline(0), Deadline::Idle);
+}
+
+TEST(PresentDeadline, TwoProducersWaitForTheRunningOneThenDetectALostInterrupt)
+{
+	Producer a{kA, Channel(40)}, b{kB, Channel(7)};
+	Display d({&a, &b});
+	const switch_gpu_backing_token tokens[2] = {a.token(a.channel.submit(1, false)),
+						    b.token(b.channel.submit(1, false))};
+	ASSERT_EQ(d.offer(tokens, 2), 0);
+	a.channel.run();
+	EXPECT_EQ(d.presented, 0u);
+	EXPECT_EQ(d.deadline(100), Deadline::Producer);
+	b.channel.run(~size_t(0), false);
+	EXPECT_EQ(d.deadline(1000), Deadline::Grace);
+	EXPECT_EQ(d.deadline(1000 + kWakeGraceNs), Deadline::Panic);
+	EXPECT_EQ(d.presented, 0u);
 }

@@ -17,6 +17,7 @@ protected:
 		onUnmap = {};
 		onCallEnter = {};
 		installError = 0;
+		unmapFlushes = 0;
 		logs.clear();
 		client.chans_[0] = &chan;
 	}
@@ -274,6 +275,55 @@ TEST_F(ClientRetirement, CloseJoinsAnUnmapOutsideTheConnectionLock)
 	EXPECT_EQ(unmapped, (std::vector<unsigned>{31}));
 	EXPECT_EQ(client.unmapping_, nullptr);
 	EXPECT_TRUE(client.call.cancelled);
+}
+
+TEST_F(ClientRetirement, ExternallyVisibleBindingsRetireWithZeroLtcFlushes)
+{
+	for (unsigned i = 0; i < 3; ++i) {
+		client.add(400 + i, 0x10000 + i * 4096);
+		free(400 + i);
+	}
+	chan.completed = chan.visible = chan.submitted;
+	client.retireBatch();
+	EXPECT_EQ(unmapped.size(), 3u);
+	EXPECT_EQ(unmapFlushes, 0u);
+}
+
+TEST_F(ClientRetirement, InternalWritableBatchCoalescesToOneLtcFlush)
+{
+	for (unsigned i = 0; i < 3; ++i) {
+		client.add(410 + i, 0x10000 + i * 4096);
+		free(410 + i);
+	}
+	chan.completed = chan.submitted;
+	chan.visible = 0;
+	client.retireBatch();
+	EXPECT_EQ(unmapped.size(), 3u);
+	EXPECT_EQ(unmapFlushes, 1u);
+}
+
+TEST_F(ClientRetirement, CompressedBindingFlushesOnceEvenWhenExternalAndCoalescesBatch)
+{
+	for (unsigned i = 0; i < 2; ++i) {
+		client.add(420 + i, 0x10000 + i * 4096);
+		client.binds_[client.nbinds_ - 1].retirement->mapping->compressed = true;
+		free(420 + i);
+	}
+	chan.completed = chan.visible = chan.submitted;
+	client.retireBatch();
+	EXPECT_EQ(unmapped.size(), 2u);
+	EXPECT_EQ(unmapFlushes, 1u);
+}
+
+TEST_F(ClientRetirement, ReapCoalescesDirtyBindingsToOneLtcFlush)
+{
+	for (unsigned i = 0; i < 3; ++i) {
+		client.add(430 + i, 0x10000 + i * 4096);
+		free(430 + i);
+	}
+	client.reap(true);
+	EXPECT_EQ(unmapped.size(), 3u);
+	EXPECT_EQ(unmapFlushes, 1u);
 }
 
 TEST(ClientControlRetirement, ControlQuotaRetiresWithActualPoolOwnership)

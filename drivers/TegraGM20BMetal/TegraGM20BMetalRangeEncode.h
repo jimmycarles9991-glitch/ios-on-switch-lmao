@@ -8,6 +8,7 @@
 #import "TegraGM20BMetalCounters.h"
 #import "TegraGM20BMetalFresh.h"
 #import "TegraGM20BMetalStandIns.h"
+#include <algorithm>
 #include <array>
 #include <deque>
 #include <optional>
@@ -29,8 +30,31 @@ public:
     // as it is stepped into, nothing reads what the CPU may write until the commit (buffer contents, a surface's seed),
     // and an encoder whose encode would read such a thing stops it (vetoed()). False: *why; nothing of it was submitted.
     bool open(SwitchMetalCommandBuffer *cb, size_t from, size_t to, bool whole, const char **why);
-    // The range's commands up to `until`; false: failed (*why) or, encoded ahead, stopped (vetoed())
+    // The range's commands up to `until`; false: failed (*why) or, encoded ahead, stopped (vetoed()). Encoded ahead, it
+    // looks one encoder past `until` (within the ended tape) and halts before the first encoder it cannot take, the end
+    // before that encoder encoded as the range's end (halted()).
     bool step(size_t until);
+
+    // Encoded ahead: the range ends at `stop` at the latest (the recording's stop, SIZE_MAX: none), and the tape before
+    // `ended` holds only ended encoders
+    void limit(size_t stop, size_t ended)
+    {
+        to_ = std::min(to_, stop);
+        ended_ = ended;
+    }
+
+    // Encoded ahead: the first command of the encoder it halted before (0: none)
+    size_t halted() const
+    {
+        return halt_;
+    }
+
+    // Encoded ahead: its last encoder ended with nothing left open, so the range may end at position()
+    bool betweenEncoders() const
+    {
+        return at_ > from_ && !re_ && !be_ && !ce_ && !continuing_;
+    }
+
     // An encode opened ahead goes on after its command buffer's commit, up to `to` where its range ends; false: as open()
     bool resume(size_t to, const char **why);
     // False: *why
@@ -94,7 +118,7 @@ private:
     bool passRefused(uint64_t a);
     bool refused();
     bool stop(uint32_t veto);
-    uint32_t ineligible(size_t from, size_t until);
+    uint32_t ineligible(size_t from, size_t until, size_t &stopAt);
     bool loadsAStoredDepth(size_t x);
     bool enter(size_t begin);
     bool resources(size_t from, size_t to);
@@ -153,6 +177,7 @@ private:
     gm20b::CommandBuffer *rc_ = nullptr;
     const char **why_ = nullptr;
     size_t from_ = 0, to_ = 0, at_ = 0;
+    size_t ended_ = 0, halt_ = 0;  // encoded ahead: limit()'s ended tape, and where it halted
     bool whole_ = true;
     bool ahead_ = false;  // before its commit: the recording goes on
     bool abandoned_ = false, sealed_ = false, producerPending_ = false;

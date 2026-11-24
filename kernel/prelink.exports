@@ -9,3 +9,7 @@ _native_prelink_security_init_version
 # kits/SwitchIdle (kernel/switch/idle/idle.c) for the EMC governor (drivers/SwitchPower/SwitchEMC.cpp).
 _switch_idle_last_frame
 _switch_idle_set_frames_started
+# drivers/TegraGM20B/SwitchGpuPackImage.cpp: UPL page-in and throttled warm-read worker.
+_vnode_pagein
+_upl_phys_page
+_kernel_thread_start_priority

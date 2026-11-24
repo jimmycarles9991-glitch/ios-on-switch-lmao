@@ -341,7 +341,7 @@ struct vm_page {
 #else
 		uint8_t                 __vmp_reserved2:1;
 #endif
-		uint8_t                 __vmp_reserved3:1;
+		uint8_t                 vmp_switch_prefetched:1; /* page brought in by boot prefetch (O&P) */
 	};
 
 	/*

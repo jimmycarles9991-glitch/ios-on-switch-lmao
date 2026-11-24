@@ -14,7 +14,7 @@ load("@rules_python//python:py_binary.bzl", "py_binary")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//boot:overlay.bzl", "OVERLAY_BINARIES")
 load(":defs.bzl", "fake_boot_package", "image_inputs", "install_artifacts", "install_spec", "ipsw_pins", "prelink_options", "release_prelink", "release_tree", "test_member")
-load(":translated.bzl", "pretranslated_delta", "translated_cryptex")
+load(":translated.bzl", "delta_metadata", "packed_image", "pretranslated_delta", "translated_cryptex")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -255,42 +255,68 @@ image_inputs(
     ("system_cryptex", ":system_cryptex"),
 ]]
 
+[delta_metadata(
+    name = "delta_" + role + "_meta",
+    delta = ":delta_" + role,
+    tags = ["manual"],
+) for role in [
+    "app_cryptex",
+    "system_cryptex",
+]]
+
 # The IPSW's large members, and the shader seed made from them: building these fetches the 5.2 GB OS image and
 # inflates the 3.3 GB system cryptex (and for iOS 27 translates them).
+_IMAGE_IPSW_INPUTS = {
+    "os_dmg": "@ipsw//:os",
+    "pretranslated_pins": ":pretranslated_pins",
+    "shader_seed": ":shader_seed",
+    "shader_seed_size": ":shader_seed_size",
+} | select({
+    "//ipsw:ios27": {
+        "delta_app_cryptex": ":delta_app_cryptex_meta",
+        "delta_os": ":delta_os",
+        "delta_system_cryptex": ":delta_system_cryptex_meta",
+        "translated_app_cryptex": ":translated_app_cryptex",
+        "translated_system_cryptex": ":translated_system_cryptex",
+    },
+    "//conditions:default": {
+        "app_cryptex": "@ipsw//:app_cryptex",
+        "system_cryptex": ":system_cryptex",
+    },
+})
+
 image_inputs(
     name = "image_ipsw",
-    inputs = {
-        "app_cryptex": "@ipsw//:app_cryptex",
-        "os_dmg": "@ipsw//:os",
-        "pretranslated_pins": ":pretranslated_pins",
-        "shader_seed": ":shader_seed",
-        "shader_seed_size": ":shader_seed_size",
-        "system_cryptex": ":system_cryptex",
-    } | select({
-        "//ipsw:ios27": {
-            "delta_app_cryptex": ":delta_app_cryptex",
-            "delta_os": ":delta_os",
-            "delta_system_cryptex": ":delta_system_cryptex",
-            "translated_app_cryptex": ":translated_app_cryptex",
-            "translated_system_cryptex": ":translated_system_cryptex",
-        },
-        "//conditions:default": {},
+    inputs = _IMAGE_IPSW_INPUTS,
+    tags = ["manual"],
+)
+
+packed_image(
+    name = "packed_image",
+    apfs_tool = ":image_apfs_tool",
+    extra_inputs = select({
+        ":from_release": ["@switch_release//:inputs"],
+        "//conditions:default": [],
     }),
+    inputs = {
+        "boot_package": "//deploy:boot_package",
+        "gpu_base": ":image_gpu_base",
+        "gpu_stager": "//drivers/TegraGM20BMetal:stage-tegra-gm20b-metal.py",
+        "install_payload": ":image_install_payload",
+        "ipsw": ":ipsw_pins",
+        "spec": ":spec",
+    } | _IMAGE_IPSW_INPUTS,
     tags = ["manual"],
 )
 
 py_binary(
     name = "image",
-    srcs = ["//tools/install:image.py"],
+    srcs = ["//tools/install:stage_image.py"],
     args = [
-        "--inputs=$(rlocationpath :image_inputs)",
-        "--inputs=$(rlocationpath :image_ipsw)",
+        "--packed=$(rlocationpath :packed_image)",
     ],
-    data = [
-        ":image_inputs",
-        ":image_ipsw",
-    ],
-    main = "//tools/install:image.py",
+    data = [":packed_image"],
+    main = "//tools/install:stage_image.py",
     tags = ["manual"],
     deps = [
         "//tools/install:lib",

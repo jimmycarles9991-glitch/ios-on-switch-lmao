@@ -17,6 +17,31 @@
 
 namespace gm20b {
 
+void RenderEncoder::remake()
+{
+    auto *const bytes = reinterpret_cast<unsigned char *>(this);
+    const size_t keptFrom = size_t(reinterpret_cast<unsigned char *>(&bufs_) - bytes),
+                 keptTo = size_t(reinterpret_cast<unsigned char *>(&touched_ + 1) - bytes);
+    const Touched touched = touched_[0];
+    this->~RenderEncoder();
+    // what value-initialisation does before the members' own initialisers: zero, here around the kept tables
+    memset(bytes, 0, keptFrom);
+    memset(bytes + keptTo, 0, sizeof(RenderEncoder) - keptTo);
+    new (this) RenderEncoder(Again{});
+    for (uint32_t stage = 0; stage < 3; stage++)
+        for (uint32_t slots = touched.buffers[stage]; slots; slots &= slots - 1)
+            bufs_[stage][__builtin_ctz(slots)] = Bound{};
+    using Words = SlotMaskWords<StageTextureMask>;
+    for (uint32_t at = 0; at < 2; at++) {
+        for (size_t w = 0; w < Words::kWords; w++)
+            for (uint32_t slots = Words::word(touched.textures[at], w); slots; slots &= slots - 1)
+                textures_[at][32 * w + __builtin_ctz(slots)] = nullptr;
+        for (uint32_t slots = touched.samplers[at]; slots; slots &= slots - 1)
+            samplers_[at][__builtin_ctz(slots)] = nullptr;
+    }
+    touched_[0] = Touched{};
+}
+
 RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
 {
     const auto refused = [why](const char *rule) -> RenderEncoder * {
@@ -39,9 +64,7 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
     rects.clear();
     splitPlan.clear();
     clears.clear();
-    // made again where it is, not built aside and moved in (the encoder is 7 KB)
-    e.~RenderEncoder();
-    new (&e) RenderEncoder();
+    e.remake();
     e.bodies_ = std::move(bodies);
     e.rects_ = std::move(rects);
     e.splitPlan_ = std::move(splitPlan);
@@ -114,6 +137,7 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
     blockLinear |= !pitchTarget;
     // the device's backings: those the last passes asked the same of with no lock, else under the device's lock once a
     // pass however many attachments need one (the compression thread trims them under it)
+    Device::DeferredFrees deferred(*dev_);
     std::unique_lock<gm20b::Mutex> backingLock(dev_->lock_, std::defer_lock);
     const auto backing = [&](const Texture &shape, uint32_t tag, bool linear, bool compression, bool copied = false) {
         if (Texture *b = backingLock.owns_lock() ? nullptr : dev_->lastBacking(shape, tag, linear, compression, copied))
@@ -122,7 +146,7 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
             backingLock.lock();
             SWITCH_METAL_ENCODE_COUNT(Locks);
         }
-        return dev_->backing(shape, tag, linear, compression, copied);
+        return dev_->backing(backingLock, deferred, shape, tag, linear, compression, copied);
     };
     // a colour texture as the depth attachment: a Depth32Float backing (zeta_colour.h)
     const Texture zetaShape = zeta && !zeta->zeta ? colourAsDepthShape(*zeta) : zeta ? *zeta : Texture();
@@ -230,13 +254,20 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
     }
     if (backingLock.owns_lock())
         backingLock.unlock();
+    deferred.flush();
+    encodersOpened_++;
     // the depth's stored region (zcull_planes.h), taken before this pass's own write leaves it stale
     const ZcullStored zcullHeld = zeta ? zcullPlanes_.held(zeta->va) : ZcullStored();
-    for (uint32_t j = 0; j < e.pass_.count && j < 8; ++j)
+    for (uint32_t j = 0; j < e.pass_.count && j < 8; ++j) {
         if (const Texture *texture = e.pass_.color[j].texture)
             use(*texture, true);
+        if (const Texture *shadow = e.shadowOf_[j])
+            noteArenaKind(shadow->storageRange().arena);
+    }
     if (const Texture *texture = e.pass_.depthStencil.texture)
         use(*texture, true);
+    if (e.zetaShadowOf_)
+        noteArenaKind(e.zetaShadowOf_->storageRange().arena);
     // the render area: from the origin, the smallest attachment's extent, each axis within the pass's target size where it
     // names one (m2v render_pass.rs `area`); Metal's default viewport and scissor cover it (render_state.rs `metal_defaults`)
     // (a separate pair's stencil is an attachment of its own extent, as an M4 Max counts it)
@@ -260,15 +291,19 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
     ZcullAsk zask;
     zask.on = dev_->zcullOn_ && e.rasterSamples_ <= e.samples_;
 #if SWITCH_METAL_DIAGNOSTICS
-    zask.on |= dev_->zcullOn_ && e.samples_ == 1 && e.rasterSamples_ == 4 &&
-               dev_->probeZcullMixed.load(std::memory_order_relaxed);
+    e.tirProbe_ = e.samples_ == 1 && e.rasterSamples_ == 4 ? dev_->probeTir.load(std::memory_order_relaxed) : 0;
+    zask.on |= dev_->zcullOn_ && (e.tirProbe_ & kTirProbeZcull);
 #endif
     zask.depth = zeta && !pass.separate.stencil && zetaHasDepth(zeta->format);
     zask.cleared = pass.depthStencil.clearDepth && !std::isnan(pass.depthStencil.depth);
     zask.layers = layers;
     zask.zetaLayers = zeta ? std::max(zeta->layers, 1u) : 1;
     zask.atStorageBase = zeta && (!zeta->storage.va || zeta->va == zeta->storage.va);
-    const Rect zcullArea = e.planeArea();
+    Rect zcullArea = e.planeArea();
+#if SWITCH_METAL_DIAGNOSTICS
+    if (e.tirProbe_ & kTirProbeSampleGrid)
+        zcullArea = {zcullArea.x0 * 2, zcullArea.y0 * 2, zcullArea.x1 * 2, zcullArea.y1 * 2};
+#endif
     const bool zcullKeep =
         zeta && e.pass_.depthStencil.texture == zeta && pass.depthStencil.stored && pass.depthStencil.loadedLater;
     zcullBegin(e.zcull_, zask, dev_->zcullInfo_, zcullArea.x0, zcullArea.y0, zcullArea.x1 - zcullArea.x0,
@@ -305,6 +340,7 @@ RenderEncoder *CommandBuffer::render(const PassDesc &pass, const char **why)
                 if (t)
                     __atomic_store_n(&t->ropBlendSerial, uint64_t(0), __ATOMIC_RELAXED);
     passes++;
+    inRender_ = true;
     return &e;
 }
 

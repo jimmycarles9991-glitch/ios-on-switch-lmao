@@ -7,3 +7,9 @@ fragment float4 a2c_ramp_fragment(float4 position [[position]], constant float &
 {
     return float4(1.0, 1.0, 1.0, position.x / width);
 }
+
+fragment float4 a2c_fetch_ramp_fragment(float4 position [[position]], constant float &width [[buffer(0)]],
+                                        float4 dst [[color(0)]])
+{
+    return float4(dst.rgb + float3(1.0), position.x / width);
+}

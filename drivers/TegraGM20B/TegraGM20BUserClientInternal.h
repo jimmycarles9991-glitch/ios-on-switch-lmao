@@ -13,8 +13,10 @@
 #include <kern/thread_call.h>
 #include <mach/vm_region.h>
 #include "SwitchGpuSpares.h"
+#include "SwitchGpuParked.h"
 #include "SwitchGpuCachedBuffer.h"
 #include "SwitchGpuMethodGate.h"
+#include <switch/park_mapping.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/systm.h>
@@ -38,6 +40,7 @@
 #include "SwitchGpuBindings.h"
 #include "SwitchGpuWriterPromise.h"
 #include "SwitchGpuBoIndex.h"
+#include "SwitchGpuBoLimits.h"
 #include "SwitchGpuBindingTable.h"
 #include "SwitchGpuGatedMethods.h"
 #include "SwitchGpuClaims.h"
@@ -62,6 +65,7 @@
 #include "SwitchGpuResourceSet.h"
 #include "SwitchGpuFenceRecord.h"
 #include "SwitchGpuJobStats.h"
+#include "SwitchGpuPackImage.h"
 
 #include "SwitchGpuSurfaceGeometry.h"
 #include "shim/include/switch_tiled_cache.h"
@@ -84,7 +88,7 @@ constexpr uint32_t kJobBytes =
 	TegraGM20BMaxJobEvents *
 		(sizeof(TegraGM20BAbiEventUse) + sizeof(TegraGM20BAbiSignalRelease)) +
 	sizeof(TegraGM20BAbiSubmitAdmission) + sizeof(TegraGM20BAbiJobPromises);
-constexpr uint64_t kMaxBoBytes = 256ULL << 20;
+constexpr uint64_t kMaxBoBytes = SWITCH_GPU_MAX_BUFFER_BYTES;
 // IOKit's inline structure limit (4096 bytes) less the tunnel's header
 constexpr uint32_t kMaxRecordBytes = 4096 - 8;
 constexpr uint32_t kFenceToken = 0xfe000001u;
@@ -121,6 +125,7 @@ extern PoolOrphan *gPoolOrphans;
 extern volatile uint64_t gSystemCoherent, gSystemCoherentBytes;
 extern volatile uint64_t gClientPoolBytes, gOrphanBytes, gOrphans;
 extern volatile uint64_t gCompressibleBytes, gCompressibles;
+extern volatile uint64_t gSmmuCompressibleBytes, gSmmuCompressibles;
 void pushOrphan(PoolOrphan *orphan);
 
 bool poolZeroLater(void *va, uint64_t pa, uint64_t bytes);
@@ -168,6 +173,17 @@ struct Spare {
 	switch_gpu_cached_mapping *mapping;
 };
 
+struct ReclaimedBacking {
+	ReclaimedBacking *next;
+	SwitchGpuCachedBuffer buffer;
+	uint64_t *pas;
+	uint32_t backingPages;
+	uint64_t bytes;
+	switch_gpu_cached_mapping *cachedMapping;
+	switch_gpu_backing *backing;
+	bool system;
+};
+
 struct PoolZero {
 	PoolZero *next;
 	void *va;
@@ -191,6 +207,8 @@ struct SparePool {
 	uint16_t count[kClasses], target[kClasses], zeroing[kClasses];
 	uint64_t clean, dirtyBytes, cleaningBytes,
 		poolZeroing;  // bytes ready, freed and waiting, pool bytes waiting
+	// a copy-engine fill failed: no spare is made until the next BoAlloc asks
+	bool fillFailed;
 #if TGM_STATS
 	OwnerStat owners[kOwners];
 	uint32_t misses[SWITCH_GPU_SPARE_MISSES], zeroBusy, zeroFailed, refillRefused, notUnits;
@@ -203,6 +221,20 @@ Spare *spareTake(uint64_t bytes);
 void spareIneligible();
 bool spareKeep(const SwitchGpuCachedBuffer &buffer, uint64_t *pas, uint64_t bytes,
 	       switch_gpu_cached_mapping *mapping = nullptr);
+bool sparesPressure();
+bool sparesHasRoom();
+void kickSpareWork();
+bool reclaimParkedStep(bool pressure, bool room);
+bool parkedPoolEnsure();
+bool parkedPoolPush(SwitchGpuParkedNode *node, bool countStat);
+bool parkedNotifyDemand(uint64_t bytes);
+bool parkedHasAny();
+IOOptionBits boMapOptions(bool coherent, bool system, bool fullView, bool readOnly, uint64_t bytes);
+#if TGM_STATS
+void parkedStatUnpark(bool reclaimed);
+void parkedStatsTake(uint64_t *parked, uint64_t *unparkResident, uint64_t *unparkReclaimed,
+		     uint64_t *reclaimedCached, uint64_t *reclaimedSystem);
+#endif
 
 // With the stats (also gpu_stats_tick.c's stats lines): the method stream of every kScanEvery-th submission of each
 // connection is read back and what it asks of the GPU is counted, one line per process every 5 s ("tegra-gm20b: push
@@ -302,6 +334,7 @@ class AGXDeviceUserClient : public IOUserClient
 		void *pool_va;  // Coherent BOs: pool memory (write-combined, contiguous)
 		uint64_t pool_pa;
 		bool chunked;  // Compressible BOs: pas are pool chunks (tgm_pool_alloc_chunks); no view, never CPU-mapped
+		bool smmuCompressible;
 		switch_gpu_cached_mapping *cachedMapping;
 		SwitchGpuCachedBuffer buffer;  // cached and system BOs
 		IOMemoryDescriptor *wired;     // imports
@@ -314,6 +347,7 @@ class AGXDeviceUserClient : public IOUserClient
 		bool compositorPool;  // a pool BO counted as the compositor's (critical_ when it was made)
 		tgm_mem *mem;
 		bool backingMemory;
+		bool ownsMem;
 		tgm_coh *coh;  // imports: the surface's coherency entry, held (TegraGM20BCoherency)
 		bool layoutAsked;  // imports: this BO asked the surface's layout before (TGM_LAYOUT_ASK_FIRST)
 		switch_gpu_backing *backing;
@@ -323,6 +357,19 @@ class AGXDeviceUserClient : public IOUserClient
 		uint32_t bindings;
 		Bo **zombieLink;
 		SwitchGpuOwnerKind ownerKind;
+		bool bufferKernelMap;
+		uint32_t mappingRefs;
+		bool freeing;
+		bool parkReclaimed;
+		bool parkedGuard;
+		bool parkedReadOnly;
+		bool reclaimDeferred;
+		SwitchGpuParkState parkState;
+		uint64_t parkedVa;
+		uint64_t reclaimSeq;
+		switch_gpu_backing *parkedBacking;
+		ReclaimedBacking *reclaimPayload;
+		SwitchGpuParkedNode parkedNode;
 	};
 
 	struct RetiredBinding {
@@ -351,6 +398,9 @@ class AGXDeviceUserClient : public IOUserClient
 		IOMemoryMap *map;
 		uint32_t token;
 		uint64_t address;
+		uint64_t bytes;
+		bool overwrite;
+		bool readOnly;
 	};
 
 	struct CpuLease {
@@ -455,6 +505,9 @@ class AGXDeviceUserClient : public IOUserClient
 	};
 
 	Left left_ = {};  // lock_: for releaseCall_
+	uint32_t reclaimDeferredCount_ = 0;
+	uint64_t reclaimSeq_ = 0;
+	uint32_t parkWait_ = 0;
 	thread_call_t releaseCall_ = nullptr;
 	RetiredBinding *retired_ = nullptr, **retiredTail_ = &retired_, *unmapping_ = nullptr;
 	// a retired binding's PTEs go under it (retireBatch, takeRetiredOverlaps)
@@ -516,6 +569,7 @@ class AGXDeviceUserClient : public IOUserClient
 		false;  // a coherent BoAlloc served from system memory (tgm_pool::FromSystem), logged once
 	uint64_t pool_bytes_ = 0;  // pool BOs held
 	uint64_t control_bytes_ = 0;
+	uint64_t smmu_compressible_bytes_ = 0;
 	// the thread about to take a hang's line while it holds lock_ (tgm_chan_hung, tgm_chan_del), so hungInterlocks
 	// reads the binds without taking it again
 	thread_t hangHolder_ = nullptr;
@@ -523,6 +577,7 @@ class AGXDeviceUserClient : public IOUserClient
 	// atomic: each site's refusals, for its line's rate bound, and the lines written
 	uint32_t refusals_[size_t(SwitchGpuRefusal::Count)] = {};
 	uint32_t refusalLines_ = 0;
+	SwitchGpuPackClient packClient_ = {};
 
 	Bo *findBo(uint64_t handle);
 	Bo *findAddress(uint64_t address, uint64_t bytes = 1);
@@ -576,7 +631,8 @@ class AGXDeviceUserClient : public IOUserClient
 
 	struct BoCharge {
 		const char *refused;  // the pool tiers' refusal, or null
-		uint64_t readyReserve, pool, control;
+		const char *smmuRefused;
+		uint64_t readyReserve, pool, control, smmuComp;
 		bool critical;
 	};
 
@@ -591,6 +647,20 @@ class AGXDeviceUserClient : public IOUserClient
 	static void adoptWiring(Bo *bo, SharedWiring *w);
 	void publishWiring(Bo *bo, const TegraGM20BAbiBoImport *in);
 	IOReturn boFree(const TegraGM20BAbiBoFree *in);
+	IOReturn boFreeMethod(const TegraGM20BAbiBoFree *in);
+	IOReturn boPark(const TegraGM20BAbiBoPark *in);
+	IOReturn boUnpark(const TegraGM20BAbiBoUnpark *in, TegraGM20BAbiBoUnparkReply *out);
+	IOReturn vmBindParkedRefusal(const TegraGM20BAbiVmBind *in, uint32_t count);
+	bool cpuAcquireParkedRefusal(const TegraGM20BAbiCpuAccess *in);
+	bool boGpuBusyLocked(const Bo *bo) const;
+	void parkUnlinkLocked(Bo *bo, bool consumeDemand);
+	bool parkWaitStableLocked(uint64_t handle);
+	ReclaimedBacking *detachReclaimedLocked(Bo *bo);
+	void parkFinishReclaimLocked(Bo *bo);
+	void drainDeferredReclaims(uint64_t upToSeq);
+	void releaseReclaimedList(ReclaimedBacking *list);
+	void parkUnlinkAllLocked();
+	void drainParkedRanges();
 	Bo **findLink(uint64_t handle);
 	IOReturn freeBo(Bo **p);
 	IOReturn cpuComplete(const TegraGM20BAbiCpuComplete *, TegraGM20BAbiCpuCompleteReply *);
@@ -654,10 +724,13 @@ class AGXDeviceUserClient : public IOUserClient
 			    SwitchGpuRefusalNote &why);
 	void destroySets();
 	IOReturn unmapToken(const TegraGM20BAbiUnmap *in);
+	IOReturn packImageMap(const TegraGM20BAbiPackImageMap *in,
+			      TegraGM20BAbiPackImageMapReply *out);
 	void releaseMappings();
 
 public:
 	bool setUp(task_t task);
+	bool reclaimParkedBo(uint64_t handle);
 	int hungInterlocks(const uint64_t *va, const uint32_t *dwords, uint32_t n,
 			   uint64_t *interlocks, uint32_t *lastEngine);
 

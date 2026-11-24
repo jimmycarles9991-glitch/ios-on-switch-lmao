@@ -10,6 +10,7 @@ pack holds kernels for at some dispatch shape (compute_key.h computeStateKey: a 
 import re
 import struct
 from collections import Counter
+from collections.abc import Collection
 
 import packfile
 from make_pack import state_key
@@ -33,15 +34,25 @@ def compute_key(line: str) -> str:
     return f'k {found[1]}{constants} | max={fields.get("max", "0")} tgm={fields.get("tgm", "0")}'
 
 
-def declared(inventory: str) -> tuple[dict[str, set[int]], Counter[str]]:
+def refused_keys(states: Collection[dict], refused: Collection[dict]) -> set[int]:
+    """Give key hashes of render states refused by directpack whose default record was not made."""
+    made = {packfile.fnv(rec['key'].encode()) for rec in states}
+    return {packfile.fnv(rec['key'].encode()) for rec in refused} - made
+
+
+def declared(inventory: str, refused: Collection[int] = ()) -> tuple[dict[str, set[int]], Counter[str]]:
     """Give each archive's declared states' key hashes, by its path on the device, and the rows taken by kind."""
     out: dict[str, set[int]] = {}
     kinds: Counter[str] = Counter()
+    skipped = set(refused)
     for row in inventory.splitlines():
         kind, _owner, path, family, line = row.split('\t')
         key = state_key(line) if kind == 'render' else compute_key(line) if kind == 'compute' else ''
         if family == 'device' and key:
-            out.setdefault(path, set()).add(packfile.fnv(key.encode()))
+            key_hash = packfile.fnv(key.encode())
+            if kind == 'render' and key_hash in skipped:
+                continue
+            out.setdefault(path, set()).add(key_hash)
             kinds[kind] += 1
     return out, kinds
 

@@ -39,8 +39,9 @@ bool Device::createOnePlaneYcbcr(uint64_t surfaceId, void *base, uint64_t allocB
             destroyTexture(*x);
             delete x;
         }
+        DeferredFrees deferred(*this);
         std::lock_guard<gm20b::Mutex> l(lock_);
-        release(planes);
+        release(planes, deferred);
         return false;
     }
     t.import = planes;

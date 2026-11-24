@@ -2,6 +2,7 @@
 #import "TegraGM20BMetalFunctionTags.h"
 #import "TegraGM20BMetalInternal.h"
 #import "TegraGM20BMetalPipelineKey.h"
+#import "TegraGM20BMetalStatesKey.h"
 #include "metallib.h"
 
 // The function list entry's TESS tag in the AIR slice the facade read (MetallibEntries.h); false where the facade read none
@@ -41,8 +42,7 @@ static bool ownTess(SwitchMetalFunction *f, switch_metal::FunctionTess &tess)
 
 - (MTLPatchType)patchType
 {
-    switch_metal::FunctionTess tess;
-    return ownTess(self, tess) ? MTLPatchType(tess.patchType) : MTLPatchTypeNone;
+    return MTLPatchType(_patchType);
 }
 
 - (NSInteger)patchControlPointCount
@@ -98,9 +98,12 @@ static id functionNotFound(NSString *name, NSError **error)
     f->_values = [values copy];
     f->_libraryName = libraryName.UTF8String ?: "";
     f->_type = _functions.type(f->_libraryName);
+    if (const auto tess = _functions.tess.find(f->_libraryName); tess != _functions.tess.end())
+        f->_patchType = switch_metal::decodeTess(tess->second).patchType;
     if (const auto air = _airHashes.find(f->_libraryName); air != _airHashes.end())
         f->_air = air->second;
     f.name = specializedName.length ? specializedName : libraryName;
+    f->_stageHash = gm20b::stageHash({::libraryName(f), f->_constants});
     return f;
 }
 
@@ -258,15 +261,14 @@ std::string libraryName(SwitchMetalFunction *f)
 
 // The descriptor's linked functions as the journal's R line names them without their libraries (NativeBridgeMetalFrontend.mm
 // linkedText): " | <vl|vp|fl|fp> <library function>[ as=<specialized name>] <constants>", "-" for one not this facade's
-static std::string linkedKey(MTLRenderPipelineDescriptor *d)
+std::string gm20bLinkedText(NSArray *vertex, NSArray *vertexPrivate, NSArray *fragment, NSArray *fragmentPrivate)
 {
     std::string key;
-    const std::pair<const char *, NSArray *> lists[] = {{"vl", d.vertexLinkedFunctions.functions},
-                                                        {"vp", d.vertexLinkedFunctions.privateFunctions},
-                                                        {"fl", d.fragmentLinkedFunctions.functions},
-                                                        {"fp", d.fragmentLinkedFunctions.privateFunctions}};
-    for (const auto &[tag, functions] : lists)
-        for (id f in functions) {
+    static const char *const tags[4] = {"vl", "vp", "fl", "fp"};
+    NSArray *lists[4] = {vertex, vertexPrivate, fragment, fragmentPrivate};
+    for (int k = 0; k < 4; k++)
+        for (id f in lists[k]) {
+            const char *tag = tags[k];
             if (![f isKindOfClass:[SwitchMetalFunction class]]) {
                 key += std::string(" | ") + tag + " - ";
                 continue;
@@ -297,7 +299,10 @@ NSString *metal_pipeline_key(MTLRenderPipelineDescriptor *d)
                                   : nil;
     const gm20b::StageKey vertex{vf ? libraryName(vf) : "", vf ? vf->_constants : ""};
     const gm20b::StageKey fragment{ff ? libraryName(ff) : "", ff ? ff->_constants : ""};
+    const std::string linked =
+        gm20bLinkedText(d.vertexLinkedFunctions.functions, d.vertexLinkedFunctions.privateFunctions,
+                        d.fragmentLinkedFunctions.functions, d.fragmentLinkedFunctions.privateFunctions);
     const std::string key =
-        gm20b::pipelineKey(d, vf ? &vertex : nullptr, ff ? &fragment : nullptr, linkedKey(d), vf ? vf->_framework : "");
+        gm20b::pipelineKey(d, vf ? &vertex : nullptr, ff ? &fragment : nullptr, linked, vf ? vf->_framework : "");
     return [NSString stringWithUTF8String:key.c_str()];
 }

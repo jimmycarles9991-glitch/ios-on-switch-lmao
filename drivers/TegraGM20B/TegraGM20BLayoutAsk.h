@@ -9,6 +9,7 @@
 #define TGM_LAYOUT_ASK_WRITES 1
 #define TGM_LAYOUT_ASK_FIRST 2 /* the BO's first ask (a failed tiling move is decided again then) */
 #define TGM_LAYOUT_ASK_UNWRITTEN 4
+#define TGM_LAYOUT_ASK_COMPRESS 8
 
 static inline int tgm_layout_ask_flags(int exclusive, int packed, int client_memory, int shape_ok,
 				       int asks_writes, int unwritten, int first)

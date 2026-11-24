@@ -179,15 +179,15 @@ gm20b::CompileRequest layout03Request()
     return r;
 }
 
-TEST(CompileRequest, ItsLayoutIsSWCREQ06)
+TEST(CompileRequest, ItsLayoutIsSWCREQ07)
 {
-    EXPECT_EQ(gm20b::encodeRequest(layout03Request()).substr(0, 8), "SWCREQ06");
+    EXPECT_EQ(gm20b::encodeRequest(layout03Request()).substr(0, 8), "SWCREQ07");
 }
 
-// Layouts 04 and 05 carried the shadowed colours' and the two-plane colours' bytes, which a request no longer has
-TEST(CompileRequest, ARequestOfLayout04Or05IsRefused)
+// Layouts 04, 05 and 06 do not carry PipelineFields::alphaToCoverage (added in SWCREQ07)
+TEST(CompileRequest, ARequestOfAnOlderLayoutIsRefused)
 {
-    for (const char *magic : {"SWCREQ04", "SWCREQ05"}) {
+    for (const char *magic : {"SWCREQ04", "SWCREQ05", "SWCREQ06"}) {
         std::string bytes = layout03::encode(layout03Request(), true);
         bytes.replace(0, 8, magic);
         gm20b::CompileRequest back;
@@ -198,6 +198,28 @@ TEST(CompileRequest, ARequestOfLayout04Or05IsRefused)
         EXPECT_FALSE(switch_compiler::prepare(bytes, kStack, system, prepared, why)) << magic;
         EXPECT_EQ(why, "an unreadable request") << magic;
     }
+}
+
+TEST(CompileRequest, AlphaToCoverageRoundTripsAndKeysSeparately)
+{
+    MTLRenderPipelineDescriptor *d = descriptor();
+    d.alphaToCoverageEnabled = YES;
+    gm20b::CompileRequest r = renderRequest();
+    r.key = "a key";
+    r.fields = gm20b::fieldsOf(d);
+    EXPECT_EQ(r.fields.alphaToCoverage, 1u);
+    gm20b::CompileRequest back;
+    ASSERT_TRUE(gm20b::decodeRequest(gm20b::encodeRequest(r), back));
+    EXPECT_EQ(back.fields.alphaToCoverage, 1u);
+    MTLRenderPipelineDescriptor *made = [MTLRenderPipelineDescriptor new];
+    gm20b::applyFields(back.fields, made);
+    EXPECT_TRUE(made.alphaToCoverageEnabled);
+    bool own = false;
+    const std::string flaggedKey = gm20b::requestPackKey(back, own);
+    const std::string plainKey = gm20b::requestPackKey(renderRequest(), own);
+    EXPECT_NE(flaggedKey.find(" alphacov=1 "), std::string::npos) << flaggedKey;
+    EXPECT_EQ(plainKey.find("alphacov="), std::string::npos) << plainKey;
+    EXPECT_NE(flaggedKey, plainKey);
 }
 
 // A request of layout 03, which a client of an older build sends or the compiler's request log (compiler_log.h) kept,
@@ -846,6 +868,16 @@ TEST(CompileRequest, ARefusalsLineNamesItsFunctionsAndReason)
     EXPECT_STREQ(switch_compiler::refusalLine(library, 1, "error").reason, "library");
     EXPECT_EQ(switch_compiler::refusalLine(library, 1, "error").text,
               "pid 1's library of front end request type 13 refused: error");
+}
+
+// Boot 2: a kernel whose translation fails at every try (its dispatches' command buffers fail) logged only the
+// compiler's own "not made" line, and no refusal line
+TEST(CompileRequest, ATranslationThatFailsAtEveryTryIsRefusedForGood)
+{
+    EXPECT_TRUE(switch_compiler::failsForGood(
+        "m2v refused its translation: fails: kernel sampler slot 0 samples texture slots 0 and 1"));
+    EXPECT_FALSE(switch_compiler::failsForGood("m2v refused its translation: retry: compile: Budget(Time)"));
+    EXPECT_FALSE(switch_compiler::failsForGood("the store took no entry"));
 }
 
 TEST(CompileRequest, ConstantsReadBackAsTheirText)

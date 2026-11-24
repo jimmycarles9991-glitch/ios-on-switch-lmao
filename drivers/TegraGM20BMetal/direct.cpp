@@ -21,7 +21,6 @@
 #include "direct_abi.h"
 #include "emit.h"
 #include "record_parts.h"
-#include "selector_variants.h"
 
 namespace gm20b {
 namespace {
@@ -101,10 +100,9 @@ public:
     // `turned`: the fragment stage alone, as a turned plane's (NVK's nvk_switch_turn.h). A state of one stage has no
     // fragment function: its pixel stage is off (stage_switches.h)
     CompileOutcome compile(const NmbDirectState &state, uint32_t halfTargets, bool split, std::string &why,
-                           uint32_t zeroPush = 0, bool texsF16 = false, bool turned = false,
-                           const UboFold *fold = nullptr)
+                           uint32_t zeroPush = 0, bool texsF16 = false, bool turned = false)
     {
-        const bool fragmentOnly = turned || fold;
+        const bool fragmentOnly = turned;
         if (state.stageCount != 2 && !(state.stageCount == 1 && !fragmentOnly) &&
             !(state.stageCount == 4 && state.tess.parameters && state.tess.controlWord)) {
             why = std::to_string(state.stageCount) + " stages";
@@ -147,12 +145,7 @@ public:
             for (uint32_t i = 0; i < 32; i++)
                 if (zeroPush >> i & 1)
                     info.constPushWords[i] = 0;
-            if (fold) {
-                info.uboFoldDesc = fold->desc;
-                info.uboFoldMask = fold->mask;
-                memcpy(info.uboFoldBytes, fold->bytes, sizeof info.uboFoldBytes);
-            }
-            const int32_t result = compileStage(compile_, info, layout_.layout, made_[k]);
+            const int32_t result = compileStage(compile_, info, layout_.layout, made_[k], &held_[k]);
             if (result != 0) {
                 why = "the stage compile refused stage " + std::to_string(k) + " (VkResult " + std::to_string(result) +
                       ")";
@@ -170,7 +163,7 @@ public:
 
     bool tessellates() const
     {
-        return made_[3].owner != nullptr;
+        return made_[3].owner != nullptr || held_[3];
     }
 
     bool pixel() const
@@ -197,6 +190,7 @@ private:
     XrPlaneBindings xrPlaneBindings_;
     bool pixel_ = true;
     NvkStage made_[4] = {};
+    std::shared_ptr<const void> held_[4];  // a memo's stages (StageCompile::memo), which own their code
     CapturedProgram programs_[4];
 };
 
@@ -587,7 +581,7 @@ bool splitsFragment(const NmbDirectState &state)
 CompileOutcome directRecord(const NmbDirectState &state, const StageCompile &compile, const PackRules &rules,
                             const std::string &key, const std::vector<uint32_t> &attributes, RuntimeRecord &out,
                             std::string &why, std::map<uint32_t, uint32_t> *registers, bool split, bool variants,
-                            uint16_t xrSlots, const SelectorConfigs *selectors)
+                            uint16_t xrSlots)
 {
     out = {};
     const NmbDirectDraw &draw = state.draws[0];
@@ -721,24 +715,6 @@ CompileOutcome directRecord(const NmbDirectState &state, const StageCompile &com
         splitInto(stages.split(1), out);
     if (variants && state.stageCount == 2)
         programVariants(state, compile, nakLayout, halfFloatTargets(key), xrPlanes, stages, out);
-    if (selectors && state.stageCount != 2) {
-        why = "selector configs require a vertex and fragment stage";
-        return CompileOutcome::Failed;
-    }
-    if (selectors && !selectorVariants(
-                         *selectors, stages.emit(1),
-                         [&](const UboFold &fold, uint32_t zeroPush, CapturedProgram &program, EmitProgram &emit) {
-                             Stages folded(compile, nakLayout, xrPlanes);
-                             std::string unmade;
-                             if (folded.compile(state, halfFloatTargets(key), false, unmade, zeroPush, kTexsF16Proven,
-                                                false, &fold) != CompileOutcome::Made)
-                                 return false;
-                             program = folded.program(1);
-                             emit = folded.emit(1);
-                             return true;
-                         },
-                         out, why))
-        return CompileOutcome::Failed;
     turnedVariant(state, compile, nakLayout, halfFloatTargets(key), xrPlanes, stages, out);
     return CompileOutcome::Made;
 }

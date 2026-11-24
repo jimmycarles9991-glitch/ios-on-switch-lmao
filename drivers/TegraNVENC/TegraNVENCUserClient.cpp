@@ -22,6 +22,7 @@
 #include "TegraNVENC.h"
 #include "TegraNVENCABI.h"
 #include "TegraNVENCDirect.h"
+#include "TegraNVENCPitchPlan.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 
@@ -64,17 +65,21 @@ class AppleAVE2UserClient : public IOUserClient {
     alignas(8) uint8_t input_[sizeof(TegraNVENCSubmit)] = {};  // under lock_: the record of a locked call
     TegraNVENCSubmit direct_ = {};                             // under lock_: a submit reading a native picture
     Buffer buffers_[kMaxBuffers] = {};
+    TegraNVENCBlock pitchScratch_ = {};
     uint32_t nextHandle_ = 1, lastFence_ = 0;
     bool submitted_ = false, counted_ = false;
 
     Buffer *find(uint32_t handle);
     bool quiesce() const;
     static void drop(Buffer *b, bool returnMemory);
+    int ensurePitchScratch(uint64_t bytes);
     // Wait takes lock_ itself; every other method runs with the caller holding it.
     IOReturn run(uint32_t method, const void *in, uint32_t inSize, void *out, uint32_t *outSize);
     static bool resolve(void *context, uint32_t handle, TegraNVENCBlock *block);
     static bool resolveDirect(void *context, uint32_t handle, TegraNVENCBlock *block);
+    static bool resolvePitch(void *context, uint32_t handle, TegraNVENCBlock *block);
     int submitDirect(const TegraNVENCSubmit *submit, uint32_t *fence, const char **why);
+    int preparePitch(const TegraNVENCSubmit *submit, TegraNVENCAfter *after, uint32_t *route, const char **why);
 
 public:
     bool setUp()
@@ -126,12 +131,80 @@ bool AppleAVE2UserClient::resolveDirect(void *context, uint32_t handle, TegraNVE
     return true;
 }
 
+bool AppleAVE2UserClient::resolvePitch(void *context, uint32_t handle, TegraNVENCBlock *block)
+{
+    auto *client = static_cast<AppleAVE2UserClient *>(context);
+    if (handle != TEGRA_NVENC_PITCH_HANDLE)
+        return resolve(client, handle, block);
+    *block = client->pitchScratch_;
+    return client->pitchScratch_.iova != 0;
+}
+
+int AppleAVE2UserClient::ensurePitchScratch(uint64_t bytes)
+{
+    if (pitchScratch_.iova && pitchScratch_.size >= bytes)
+        return 0;
+    if (pitchScratch_.iova) {
+        if (!quiesce())
+            return -16;
+        tegra_nvenc_buffer_free(&pitchScratch_);
+    }
+    return tegra_nvenc_buffer_alloc(bytes, &pitchScratch_);
+}
+
+int AppleAVE2UserClient::preparePitch(const TegraNVENCSubmit *submit, TegraNVENCAfter *after, uint32_t *route,
+                                      const char **why)
+{
+    if (!tegra_nvenc_ready() || tegra_nvenc_wedged()) {
+        *why = "NVENC is not ready";
+        return -19;
+    }
+    if (const int err = tegra_nvenc_check_submit(submit, resolve, this, why))
+        return err;
+    TegraNVENCPitchPlan plan = {};
+    if ((*why = tegra_nvenc_pitch_plan(submit, &plan)) != nullptr)
+        return -95;
+    Buffer *src = find(plan.inputHandle);
+    if (!src || !src->block.backing) {
+        *why = "pitch input buffer";
+        return -22;
+    }
+    const uint64_t lumaBytes = uint64_t(plan.srcPitch) * plan.height;
+    const uint64_t chromaBytes = uint64_t(plan.srcPitch) * (plan.height / 2);
+    int err = switch_gpu_backing_cpu_acquire(src->block.backing, 0, src->block.size,
+                                             SWITCH_GPU_BACKING_WRITE | SWITCH_GPU_BACKING_CPU_NO_CACHE);
+    if (!err) {
+        err = switch_gpu_backing_cpu_publish(src->block.backing, plan.srcLumaOffset, lumaBytes);
+        if (!err)
+            err = switch_gpu_backing_cpu_publish(src->block.backing, plan.srcChromaOffset, chromaBytes);
+        (void)switch_gpu_backing_cpu_release(src->block.backing, 0, src->block.size,
+                                             SWITCH_GPU_BACKING_WRITE | SWITCH_GPU_BACKING_CPU_NO_CACHE);
+    }
+    if (err) {
+        *why = "pitch input cache publish";
+        return err;
+    }
+    err = ensurePitchScratch(plan.scratchBytes);
+    if (err) {
+        *why = "pitch conversion scratch";
+        return err;
+    }
+    err = tegra_nvenc_pitch_convert(&plan, &src->block, &pitchScratch_, submitted_ ? &lastFence_ : nullptr, after,
+                                    route, why);
+    if (!err)
+        tegra_nvenc_pitch_patch(submit, &plan, TEGRA_NVENC_PITCH_HANDLE, &direct_);
+    return err;
+}
+
 // The source as its native picture, read in place: 0, or -95 when NVENC cannot (VIC takes it), -11 when the picture's
 // producers are not ones NVENC's stream can wait for, else the job's error.
 int AppleAVE2UserClient::submitDirect(const TegraNVENCSubmit *submit, uint32_t *fence, const char **why)
 {
-    if (!tegra_nvenc_engine_ready())
+    if (!tegra_nvenc_engine_ready()) {
+        if (why)
+            *why = "NVENC is not ready for a direct native read";
         return -95;
+    }
     TegraNVENCDirect direct;
     int err = tegra_nvenc_direct_prepare(submit, current_task(), &direct, &direct_, why);
     if (!err) {
@@ -175,6 +248,8 @@ IOReturn AppleAVE2UserClient::clientClose()
         if (b.handle)
             drop(&b, idle);
     }
+    if (idle && pitchScratch_.iova)
+        tegra_nvenc_buffer_free(&pitchScratch_);
     IOLockUnlock(lock_);
     terminate();
     return kIOReturnSuccess;
@@ -183,10 +258,13 @@ IOReturn AppleAVE2UserClient::clientClose()
 void AppleAVE2UserClient::free()
 {
     if (lock_) {
+        const bool idle = quiesce();
         for (Buffer &b : buffers_) {
             if (b.handle)
-                drop(&b, quiesce());
+                drop(&b, idle);
         }
+        if (idle && pitchScratch_.iova)
+            tegra_nvenc_buffer_free(&pitchScratch_);
         IOLockFree(lock_);
         lock_ = nullptr;
     }
@@ -280,7 +358,7 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
             break;
         }
         slot->handle = nextHandle_++;
-        if (!nextHandle_)
+        if (!nextHandle_ || nextHandle_ >= TEGRA_NVENC_DIRECT_HANDLE)
             nextHandle_ = 1;
         TegraNVENCBufferReply *reply = static_cast<TegraNVENCBufferReply *>(out);
         reply->handle = slot->handle;
@@ -306,7 +384,14 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
         TegraNVENCAfter after = {};
         uint32_t route = TEGRA_NVENC_INPUT_CPU;
         const bool sourced = submit->source.surface_id != 0;
+        const TegraNVENCSubmit *runSubmit = submit;
+        TegraNVENCResolve runResolve = resolve;
+        bool hasAfter = false;
         if (sourced) {
+            if (!tegra_nvenc_ready() || tegra_nvenc_wedged()) {
+                ret = kIOReturnNotReady;
+                break;
+            }
             if (const int err = tegra_nvenc_check_submit(submit, resolve, this, &why)) {
                 ret = ioreturn(err);
                 break;
@@ -341,8 +426,25 @@ IOReturn AppleAVE2UserClient::run(uint32_t method, const void *in, uint32_t inSi
                 ret = err == -95 ? kIOReturnUnsupported : kIOReturnNotReady;
                 break;
             }
+            hasAfter = true;
+            if (tegra_nvenc_is_pitch_input(submit)) {
+                tegra_nvenc_source_bl2_patch(submit, &direct_);
+                runSubmit = &direct_;
+            }
+        } else if (tegra_nvenc_is_pitch_input(submit)) {
+            const int err = preparePitch(submit, &after, &route, &why);
+            if (err) {
+                switch_refusal("TegraNVENC", why ? why : "pitch input", "pitch input conversion refused: %s",
+                               why ? why : "refused");
+                ret = err == -95 ? kIOReturnUnsupported : ioreturn(err);
+                break;
+            }
+            runSubmit = &direct_;
+            runResolve = resolvePitch;
+            hasAfter = true;
         }
-        const int err = tegra_nvenc_run(submit, resolve, this, sourced ? &after : nullptr, nullptr, &fence, &why);
+        const int err =
+            tegra_nvenc_run(runSubmit, runResolve, this, hasAfter ? &after : nullptr, nullptr, &fence, &why);
         if (err) {
             static volatile int logged;
             if (why &&

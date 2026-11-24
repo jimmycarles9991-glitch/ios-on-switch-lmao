@@ -43,7 +43,6 @@ filegroup(
         "pack/xr_srgb_decode.h",  # BGR10_XR_sRGB's tables, which xr_srgb.h's model reads
         "pack/xr_srgb_encode.h",
         "//drivers/TegraGM20BMetal/abi:MetalABI.h",
-        "//drivers/TegraGM20BMetal/precompile/ca-selectors:ca_selector_layout.h",
     ],
 )
 
@@ -90,7 +89,6 @@ filegroup(
         "metallib.cpp",
         "metallib.h",
         "pack.h",
-        "pack_selectors.h",
         "set_entries.h",
         "TegraGM20BMetalPipelineKey.h",  # the runtime's key of a state, which probe_states.h files records under
         "pipeline_fields.h",  # the descriptor fields that key reads
@@ -147,17 +145,16 @@ filegroup(
         "nak_target.h",
         "owned.h",
         "program_pages.h",
+        "program_stores.h",
         "sample_shading.h",
         "pack.cpp",
         "pack.h",
-        "pack_selectors.h",
         "push.h",
         "record.h",
         "record_parts.cpp",
         "record_parts.h",
         "residual.h",
         "rotation.h",
-        "selector_variants.h",
         "set_entries.h",
         "set_layout.h",
         "slot_mask.h",
@@ -322,6 +319,8 @@ ios_binary(
         "draw_inputs.cpp",
         "draw_shader_tests.cpp",
         "memory.cpp",
+        "parked_arena.cpp",
+        "parked_chunks.cpp",
         "pass_backings.cpp",
         "pass_begin.cpp",
         "pass_clears.cpp",
@@ -367,6 +366,7 @@ ios_binary(
         "//drivers/TegraGM20B:TegraGM20BJobABI.h",
         "//drivers/TegraGM20B:TegraGM20BLayout.h",
         "//drivers/TegraGM20B:TegraGM20BSchedPolicy.h",
+        "//drivers/TegraGM20B:TegraGM20BVolatileABI.h",
         "//drivers/TegraGM20B:TegraGM20BZcullABI.h",
         "//kits/SwitchGM20B:class_headers",
         "//kits/SwitchGM20BEmit:emit_headers",
@@ -419,6 +419,8 @@ py_library(
         ],
     ),
     data = [
+        "pack/ca/context-24B119.json",
+        "pack/ca/demand-24B119.json",
         "pack/ca/qc-21H461.json",
         "pack/ca/qc-24B119.json",
         "pack/rb/rb-21H461.json",
@@ -451,6 +453,36 @@ py_test(
         "pack/ca/qc-24B119.json",
     ],
     main = "pack/ca/caspec27_test.py",
+    deps = [":pack"],
+)
+
+# pack/ca/closure.py and caname.py: QuartzCore's names written back as it writes them, and every known content in every
+# context the build's table gives (context-24B119.json, demand-24B119.json) among the pack's corpus lines.
+py_test(
+    name = "closure_test",
+    size = "medium",
+    srcs = ["pack/ca/closure_test.py"],
+    data = [
+        "precompile/ca-names/24B119.txt",
+        "precompile/corpus.log",
+        "pack/ca/qc-21H461.json",
+        "pack/ca/qc-24B119.json",
+    ],
+    main = "pack/ca/closure_test.py",
+    deps = [":pack"],
+)
+
+# pack/make_pack.py's tiers: every Core Animation state a device or QuartzCore names is in the pack's launch set (tier 0)
+py_test(
+    name = "tiers_test",
+    size = "medium",
+    srcs = ["pack/ca/tiers_test.py"],
+    data = [
+        "precompile/ca-names/24B119.txt",
+        "precompile/corpus.log",
+        "pack/ca/qc-24B119.json",
+    ],
+    main = "pack/ca/tiers_test.py",
     deps = [":pack"],
 )
 
@@ -491,6 +523,17 @@ py_test(
         "pack/rb/rb-24B119.json",
     ],
     main = "pack/rb/rbfree_test.py",
+    deps = [":pack"],
+)
+
+py_test(
+    name = "rbclosure_test",
+    srcs = ["pack/rb/rbclosure_test.py"],
+    data = [
+        "pack/rb/demand-24B119.json",
+        "precompile/corpus.log",
+    ],
+    main = "pack/rb/rbclosure_test.py",
     deps = [":pack"],
 )
 

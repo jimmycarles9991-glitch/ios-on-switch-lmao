@@ -147,11 +147,33 @@ TEST(ObjectPool, WarmFramesMakeNoBlocks)
     EXPECT_EQ(gm20bPoolMade([PoolProbe class]), warm);
 }
 
-// A pool keeps 32 blocks: 40 let go at once free 8, and the next 40 take the 32 and allocate 8 (a miss never waits)
-TEST(ObjectPool, PastItsKeepAPoolFreesAndAMissAllocates)
+// A frame of 64 render passes (Core Animation's busiest, backboardd's 128-encoder command buffers) held until its end:
+// once one such frame went, the next allocates and frees nothing
+TEST(ObjectPool, AFrameOfAsManyAsTheBusiestBeforeMakesAndFreesNoBlock)
 {
     pooled();
-    constexpr int kAtOnce = 40, kKept = 32;
+    constexpr int kAtOnce = 64;
+    auto hold = [] {
+        std::vector<PoolProbe *> live;
+        for (int i = 0; i < kAtOnce; i++)
+            live.push_back([PoolProbe new]);
+    };
+    hold();
+    const uint64_t made = gm20bPoolMade([PoolProbe class]), freed = gm20bPoolFreed([PoolProbe class]);
+    for (int frame = 0; frame < 8; frame++)
+        hold();
+    EXPECT_EQ(gm20bPoolMade([PoolProbe class]) - made, 0u);
+    EXPECT_EQ(gm20bPoolFreed([PoolProbe class]) - freed, 0u);
+    EXPECT_GE(gm20bPoolMost([PoolProbe class]), uint32_t(kAtOnce));
+    EXPECT_GE(gm20bPoolKept([PoolProbe class]), uint32_t(kAtOnce));
+}
+
+// Past 256 alive at once a pool keeps 256: 300 let go at once free 44, and the next 300 take the 256 and allocate 44
+// (a miss never waits)
+TEST(ObjectPool, PastItsMostAPoolFreesAndAMissAllocates)
+{
+    pooled();
+    constexpr int kAtOnce = 300, kKeptMost = 256;
     auto hold = [] {
         std::vector<PoolProbe *> live;
         for (int i = 0; i < kAtOnce; i++)
@@ -160,8 +182,8 @@ TEST(ObjectPool, PastItsKeepAPoolFreesAndAMissAllocates)
     hold();
     const uint64_t made = gm20bPoolMade([PoolProbe class]), freed = gm20bPoolFreed([PoolProbe class]);
     hold();
-    EXPECT_EQ(gm20bPoolMade([PoolProbe class]) - made, uint64_t(kAtOnce - kKept));
-    EXPECT_EQ(gm20bPoolFreed([PoolProbe class]) - freed, uint64_t(kAtOnce - kKept));
+    EXPECT_EQ(gm20bPoolMade([PoolProbe class]) - made, uint64_t(kAtOnce - kKeptMost));
+    EXPECT_EQ(gm20bPoolFreed([PoolProbe class]) - freed, uint64_t(kAtOnce - kKeptMost));
 }
 
 TEST(ObjectPool, DeallocRunsDroppedAndDestroysTheInstanceInPlace)

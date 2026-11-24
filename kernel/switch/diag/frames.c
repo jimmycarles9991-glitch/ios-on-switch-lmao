@@ -8,6 +8,7 @@
 
 #include <kern/misc_protos.h>
 #include <switch/frames.h>
+#include <switch/sched.h>
 #include <switch/xnu.h>
 
 #include "frames.h"
@@ -41,6 +42,7 @@ static struct {
 static struct switch_latency latency;
 static uint64_t touch_began, touch_last_down;
 static uint32_t report_pending;
+static uint64_t report_stamp;       /* mach: the oldest report no delivery followed yet */
 static uint64_t co_receivers_until; /* mach */
 
 static uint64_t abs_to_us(uint64_t abs)
@@ -61,7 +63,11 @@ void switch_frames_render_message(task_t sender, mach_msg_id_t id, bool own)
     if (own || sender == kernel_task) {
         return;
     }
-    const uint64_t now = abs_to_us(mach_absolute_time());
+    const uint64_t abs = mach_absolute_time();
+    if (id == SWITCH_LATENCY_COMMIT_ID) {
+        switch_sched_watch_commit(abs);
+    }
+    const uint64_t now = abs_to_us(abs);
     switch_task_name(sender, name, sizeof(name));
     lck_spin_lock(&frames_lock);
     for (int w = 0; w < WINDOWS; w++) {
@@ -99,8 +105,10 @@ void switch_frames_render_server_sent(ipc_port_t port)
     switch_task_name(receiver, name, sizeof(name));
     const uint64_t now = abs_to_us(abs);
     uint64_t window;
+    uint64_t stamp;
     nanoseconds_to_absolutetime((uint64_t)CO_RECEIVERS_US * NSEC_PER_USEC, &window);
     lck_spin_lock(&frames_lock);
+    stamp = report_stamp;
     os_atomic_store(&co_receivers_until, abs + window, relaxed);
     switch_latency_delivered(&latency, acc.delivery[STATS_WINDOW].pending_us, task_pid(receiver), now);
     for (int w = 0; w < WINDOWS; w++) {
@@ -108,6 +116,7 @@ void switch_frames_render_server_sent(ipc_port_t port)
     }
     os_atomic_store(&report_pending, 0, relaxed);
     lck_spin_unlock(&frames_lock);
+    switch_sched_watch_delivered(stamp, task_pid(receiver), abs);
 }
 
 void switch_frames_touch(uint64_t stamp, bool down, unsigned int changes)
@@ -127,6 +136,9 @@ void switch_frames_touch(uint64_t stamp, bool down, unsigned int changes)
         switch_frames_note_report(&acc.delivery[w], abs_to_us(stamp));
     }
     switch_latency_report(&latency, changes);
+    if (os_atomic_load(&report_pending, relaxed) == 0) {
+        report_stamp = stamp;
+    }
     os_atomic_store(&report_pending, 1, relaxed);
     lck_spin_unlock(&frames_lock);
 }

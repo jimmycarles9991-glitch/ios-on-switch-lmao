@@ -75,4 +75,22 @@ TEST(GpuChanNew, AnOrdinaryChannelKeepsTheDefaultTimeslice)
 	EXPECT_EQ(made.recorded, kDefault);
 	EXPECT_EQ(made.memory.timeslice, kDefault);
 }
+
+TEST(GpuChanNew, ClosingChannelFlushesLtcOnlyWhenWorkWasNotExternallyVisible)
+{
+	ASSERT_EQ(switch_chan_new_make(7, 0), 0);
+	switch_chan_new_set_visibility(5, 5, 5);
+	switch_chan_new_delete();
+	EXPECT_EQ(switch_chan_new_ltc_flushes(), 0u);
+
+	ASSERT_EQ(switch_chan_new_make(7, 0), 0);
+	switch_chan_new_set_visibility(5, 5, 3);
+	switch_chan_new_delete();
+	EXPECT_EQ(switch_chan_new_ltc_flushes(), 1u);
+
+	ASSERT_EQ(switch_chan_new_make(7, 0), 0);
+	switch_chan_new_leave_running();
+	switch_chan_new_delete();
+	EXPECT_EQ(switch_chan_new_ltc_flushes(), 1u);
+}
 }  // namespace

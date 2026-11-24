@@ -17,6 +17,11 @@
 @protocol HarnessDeviceSPI
 - (id<MTLBuffer>)newBufferWithIOSurface:(IOSurfaceRef)surface;
 - (NSUInteger)requiredLinearTextureBytesPerRowForDescriptor:(MTLTextureDescriptor *)descriptor;
+- (NSDictionary<NSString *, NSNumber *> *)switchMetalLastCreation;
+@end
+
+@protocol HarnessStateSPI
+- (NSNumber *)switchPackHit;
 @end
 
 namespace {
@@ -104,6 +109,52 @@ void packedDraw()
         (long long)(int64_t(atDraw) - int64_t(atOpen)) / 1024, (unsigned long long)(device.currentAllocatedSize >> 10),
         [[held.description stringByReplacingOccurrencesOfString:@"\n" withString:@" "] UTF8String]);
     note("packed_draw", line);
+}
+
+// A packed state's creation answers its own work on its thread (TegraGM20BMetalStatesCost.mm): the first in the process
+// imports the pack's pages its programs run from (kernel calls) and builds the state, finding its records by its fast
+// key with no search of the pack; the second, of the same key, finds it placed and does neither
+void creationCost()
+{
+    const Opened opened = openWithLibrary(writePack(packKey(kPacked)));
+    id<MTLDevice> device = opened.device;
+    ASSERT_TRUE(device != nil && opened.library != nil);
+    MTLRenderPipelineDescriptor *d = descriptor(opened.library, kPacked);
+    const auto made = [device, d] {
+        NSError *error = nil;
+        EXPECT_TRUE([device newRenderPipelineStateWithDescriptor:d error:&error] != nil) << text(error);
+        return [(id<HarnessDeviceSPI>)device switchMetalLastCreation];
+    };
+    NSDictionary<NSString *, NSNumber *> *first = made(), *again = made();
+    ASSERT_TRUE(first != nil && again != nil);
+    EXPECT_EQ(first[@"lookups"].intValue, 0) << text(first);
+    EXPECT_EQ(first[@"builds"].intValue, 1) << text(first);
+    EXPECT_GT(first[@"pieces"].intValue, 0) << text(first);
+    EXPECT_GE(first[@"kernel_calls"].intValue, 2 * first[@"pieces"].intValue) << text(first);
+    EXPECT_GT(first[@"locks"].intValue, 0) << text(first);
+    EXPECT_GE(first[@"wall_us"].intValue, first[@"place_us"].intValue) << text(first);
+    EXPECT_EQ(again[@"builds"].intValue, 0) << text(again);
+    EXPECT_EQ(again[@"pieces"].intValue, 0) << text(again);
+    EXPECT_EQ(again[@"copied_bytes"].intValue, 0) << text(again);
+    EXPECT_EQ(again[@"kernel_calls"].intValue, 0) << text(again);
+}
+
+// A state the pack holds is found by its fast key, a field its key leaves out changed or not: its creation makes no text
+// of its key
+void fastKeyHit()
+{
+    const auto [device, library] = openWithLibrary(writePack(packKey(kPacked)));
+    ASSERT_TRUE(device != nil && library != nil);
+    MTLRenderPipelineDescriptor *d = descriptor(library, kPacked);
+    d.colorAttachments[2].sourceRGBBlendFactor = MTLBlendFactorDestinationColor;
+    d.maxTessellationFactor = 32;
+    NSError *error = nil;
+    id<MTLRenderPipelineState> state = [device newRenderPipelineStateWithDescriptor:d error:&error];
+    ASSERT_TRUE(state != nil) << text(error);
+    EXPECT_TRUE([(id<HarnessStateSPI>)state switchPackHit].boolValue);
+    NSDictionary<NSString *, NSNumber *> *made = [(id<HarnessDeviceSPI>)device switchMetalLastCreation];
+    ASSERT_NE(made[@"text_keys"], nil) << text(made);
+    EXPECT_EQ(made[@"text_keys"].intValue, 0) << text(made);
 }
 
 // A state of this device's functions that no record draws (the pack lacks it and no shader compiler serves the process)
@@ -450,6 +501,123 @@ TEST(GM20BFacadeLazy, PackedDrawOpensNoM2V)
 {
     switch_ios::test::ExpectPassesInFreshProcess(packedDraw);
     show("packed_draw");
+}
+
+TEST(GM20BFacadeLazy, APackedStatesCreationAnswersItsOwnWork)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(creationCost);
+}
+
+TEST(GM20BFacadeLazy, APackedStateIsFoundByItsFastKey)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(fastKeyHit);
+}
+
+// The fast key names what the key's text names (TegraGM20BMetalPipelineKey.h fastKey): field lists, stages, linked
+// functions and frameworks key alike exactly where their texts are one
+TEST(GM20BFacadeLazy, AFastKeyNamesWhatItsTextNames)
+{
+    std::vector<gm20b::PipelineFields> fields(1);
+    fields[0].color[0] = {80, 15, 0, 1, 0, 0, 1, 0, 0};
+    fields[0].attributes[0] = {31, 0, 1, 48, 1, 1};
+    const auto with = [&fields](auto change) {
+        gm20b::PipelineFields f = fields[0];
+        change(f);
+        fields.push_back(f);
+    };
+    using F = gm20b::PipelineFields;
+    with([](F &f) {
+        f.color[0].format = 81;
+    });
+    with([](F &f) {
+        f.color[0].destinationRGB = 5;
+    });
+    with([](F &f) {
+        f.color[1] = {80, 15, 0, 1, 0, 0, 1, 0, 0};
+    });
+    with([](F &f) {
+        f.attributes[0].stride = 64;
+    });
+    with([](F &f) {
+        f.attributes[2] = {29, 16, 1, 48, 1, 1};
+    });
+    with([](F &f) {
+        f.samples = 4;
+    });
+    with([](F &f) {
+        f.depthFormat = 252;
+    });
+    with([](F &f) {
+        f.rasterization = 0;
+    });
+    with([](F &f) {
+        f.amplification = 2;
+    });
+    with([](F &f) {
+        f.textureWriteRounding = 2;
+    });
+    with([](F &f) {
+        f.alphaToCoverage = 1;
+    });
+    with([](F &f) {
+        f.patchType = 1;
+    });
+    with([](F &f) {
+        f.patchType = 2;
+    });
+    with([](F &f) {
+        f.patchType = 1, f.tessellation.maxFactor = 64;
+    });
+    with([](F &f) {
+        f.color[3].sourceRGB = 4;
+    });
+    with([](F &f) {
+        f.attributes[5].offset = 8;
+    });
+    with([](F &f) {
+        f.tessellation.maxFactor = 64;
+    });
+    with([](F &f) {
+        f.amplification = 0;
+    });
+    with([](F &f) {
+        f.textureWriteRounding = 1;
+    });
+    with([](F &f) {
+        f.attributes[0].stride = UINT64_MAX;
+    });
+    with([](F &f) {
+        f.attributes[0].stride = UINT32_MAX;
+    });
+    const gm20b::StageKey v{"v", ""}, w{"w", ""}, plain{"f", ""}, constant{"f", "#0:3:01000000"};
+
+    struct Parts {
+        const gm20b::StageKey *vertex, *fragment;
+        std::string linked, framework;
+    };
+
+    const std::vector<Parts> parts = {{&v, &plain, "", "QuartzCore"},
+                                      {&v, &plain, "", ""},
+                                      {&v, &plain, "", "RenderBox"},
+                                      {&v, nullptr, "", "QuartzCore"},
+                                      {&v, &constant, "", "QuartzCore"},
+                                      {&w, &plain, "", "QuartzCore"},
+                                      {&v, &plain, " | fl g as=h ", "QuartzCore"}};
+    std::vector<std::pair<std::string, uint64_t>> keys;
+    for (const F &f : fields)
+        for (const Parts &p : parts)
+            keys.push_back({gm20b::pipelineKey(f, p.vertex, p.fragment, p.linked, p.framework),
+                            gm20b::fastKey(f, p.vertex, p.fragment, p.linked, p.framework)});
+    size_t alike = 0;
+    for (size_t i = 0; i < keys.size(); i++)
+        for (size_t j = i + 1; j < keys.size(); j++) {
+            alike += keys[i].first == keys[j].first;
+            EXPECT_EQ(keys[i].first == keys[j].first, keys[i].second == keys[j].second) << keys[i].first << "\n"
+                                                                                        << keys[j].first;
+        }
+    EXPECT_GT(alike, 0u);
+    for (const auto &[text, fast] : keys)
+        EXPECT_EQ(harness::fastKeyOfText(text), fast) << text;
 }
 
 TEST(GM20BFacadeLazy, AnUnpackedStateIsMetalsCreationFailure)

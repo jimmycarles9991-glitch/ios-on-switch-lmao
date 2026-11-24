@@ -10,9 +10,12 @@
 #include "TegraGM20BMetalDirect.h"
 #include "translate/NativeMetalTranslate.h"
 
-// The device calls the line parsers make of a library: newLibraryWithURL:error: and newLibraryWithData:error:
+// The device calls the line parsers make of a library: newLibraryWithURL:error: and newLibraryWithData:error:; and the
+// shader compiler's newSealedLibraryWithURL:error: of a sealed system volume's library (nmb_offline_library_new_held).
+// Each library reads its file or data in place.
 @interface GM20BOfflineDevice : NSObject
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error;
+- (id<MTLLibrary>)newSealedLibraryWithURL:(NSURL *)url error:(NSError **)error;
 - (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error;
 @end
 
@@ -20,6 +23,9 @@ namespace offline {
 
 // The direct compile's translation of descriptors of GM20BOfflineDevice's functions
 gm20b::DirectTranslator translator();
+
+// A GM20BOfflineDevice library's translator library, which the translator's own calls take (null for another's)
+NmbOfflineLibrary *libraryHandle(id<MTLLibrary> library);
 
 // Whether the m2v runtime makes a compute state of `descriptor` (of GM20BOfflineDevice's functions): its own compile
 // device compiles the kernel. False with `why`.

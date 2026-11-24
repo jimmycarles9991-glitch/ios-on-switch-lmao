@@ -11,10 +11,12 @@ import Metal
 /// cleared once more and read back. Judged: every texel of each colour's third and fourth clear its codes
 /// (`pixels_wrong` 0); where drained, the table answered every colour this process had not asked before (`zbc_added` +
 /// `zbc_full` = `asked_want`: 16 on the process's first run, 0 after) and refused at least one of them (`zbc_full` >=
-/// 1: the table holds 15, its boot entries among them). Reported: zbc_hits, full_lines (this process's "table is full"
-/// lines since the test began, as logd had them; the pulled log lists them by process: raw.zbc-full-lines). The table
-/// stays full for the rest of the boot, so every process's clears to values it lacks write their texels from then on:
-/// it runs last.
+/// 1: the table holds 15, its boot entries among them, so 16 new colours overflow it however full it already was).
+/// Reported: zbc_hits, full_lines (this process's "table is full" lines since the test began, as logd had them; the
+/// pulled log lists them by process: raw.zbc-full-lines), and where drained zbc_dropped, the colours neither added nor
+/// refused, with zbc_inexact and zbc_misses over the test: a colour is dropped before any ask where its clear is not
+/// exact (zbc_inexact) or where this process's list of values (zbc.h ZbcTable, 64, evicting seen and refused entries
+/// while keeping held, wanted, and asking) has no room left by the tests before it.
 struct ZbcFullTest: HWTest {
     let id = "gpu.gm20b.zbc_full"
     let name = "The GPU's ZBC colour table fills: every clear exact, the refusals counted, one line a process"
@@ -83,6 +85,9 @@ struct ZbcFullTest: HWTest {
         metrics.set("zbc_full", full)
         metrics.set("asked_want", want)
         metrics.set("zbc_hits", delta(before, after, "zbc_hits"))
+        if drained { metrics.set("zbc_dropped", want - added - full) }
+        metrics.set("zbc_inexact", delta(before, after, "zbc_inexact"))
+        metrics.set("zbc_misses", delta(before, after, "zbc_misses"))
         metrics.set("pixels_wrong", pixelsWrong)
         let fullLines = ProcessLog.lines(ProcessLog.metal, "gm20b", containing: Self.fullLine, since: start)
         metrics.set("full_lines", fullLines?.count ?? -1)

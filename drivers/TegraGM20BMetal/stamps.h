@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
-// A raw command buffer's GPU time, Metal's GPUStartTime and GPUEndTime: two 16-byte host semaphore releases in its own push
-// (NV906F SEMAPHORED, RELEASE_WFI EN, as the kernel's stats stamps), the first ahead of its prologue and the last after its final
-// work, each writing the payload and PTIMER. The last one's wait for idle is the one the kernel's fence release makes right after
-// it (drivers/TegraGM20B/gpu_exec.c tgm_chan_exec: WFI, the L2 flush, then the fence with RELEASE_WFI), so it holds the GPU no longer.
+// A raw command buffer's GPU time, Metal's GPUStartTime and GPUEndTime: two 16-byte 3D report semaphore releases
+// (NVB197_SET_REPORT_SEMAPHORE_A..D, kDrawStampRelease), the first ahead of its prologue and the last after its final
+// work, each writing the payload and PTIMER at the bottom of the 3D pipe without a host WFI. The host-WFI helper
+// (emitStamp) stays for diagnostic probes that need a host semaphore release.
 //
 // PTIMER does not count nanoseconds here: its source is the 19.2 MHz oscillator and each tick adds 32, a step that assumes
 // 31.25 MHz, so one unit is 31.25 / 19.2 = 625/384 ns. GK20A-family PTIMERs have no rate registers to set it right (nouveau's
@@ -53,16 +53,25 @@ inline void emitStamp(Push &p, uint64_t va, uint32_t stamp)
     p.inc(HOST_SEMAPHORE_A, {uint32_t(va >> 32) & 0xff, uint32_t(va), stamp, HOST_SEMAPHORE_RELEASE_16_WFI});
 }
 
-// A command buffer's two releases into its slot of the stamp page at `slots`: the first ahead of its prologue, the last
-// after its final work
+constexpr uint32_t kDrawStampWords = 5;
+constexpr uint32_t kDrawStampRelease =
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, OPERATION, RELEASE) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, RELEASE, AFTER_ALL_PRECEEDING_WRITES_COMPLETE) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, PIPELINE_LOCATION, ALL) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, STRUCTURE_SIZE, FOUR_WORDS) |
+    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, FLUSH_DISABLE, TRUE);
+
+// Both start and end release at the bottom of the 3D pipe (ordered behind prior work without stalling HOST/PBDMA).
 inline void emitStartStamp(Push &p, uint64_t slots, uint32_t stamp)
 {
-    emitStamp(p, slots + stampOffset(stamp) + offsetof(StampSlot, start), stamp);
+    const uint64_t va = slots + stampOffset(stamp) + offsetof(StampSlot, start);
+    p.inc(NVB197_SET_REPORT_SEMAPHORE_A, {uint32_t(va >> 32) & 0xff, uint32_t(va), stamp, kDrawStampRelease});
 }
 
 inline void emitEndStamp(Push &p, uint64_t slots, uint32_t stamp)
 {
-    emitStamp(p, slots + stampOffset(stamp) + offsetof(StampSlot, end), stamp);
+    const uint64_t va = slots + stampOffset(stamp) + offsetof(StampSlot, end);
+    p.inc(NVB197_SET_REPORT_SEMAPHORE_A, {uint32_t(va >> 32) & 0xff, uint32_t(va), stamp, kDrawStampRelease});
 }
 
 // A measured draw's stamps (band_rates.h), after the command buffers' slots in the same page set: 3D report semaphore
@@ -74,13 +83,6 @@ constexpr uint64_t kDrawStampBase = kStampSlots * sizeof(StampSlot);
 // predicated loops would run past its copies, and that loop's tag (predication.h endLoop)
 constexpr uint64_t kLoopWordsBase = kDrawStampBase + kDrawStampSlots * sizeof(StampSlot);
 constexpr uint64_t kStampBytes = kLoopWordsBase + kStampSlots * 8;
-constexpr uint32_t kDrawStampWords = 5;
-constexpr uint32_t kDrawStampRelease =
-    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, OPERATION, RELEASE) |
-    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, RELEASE, AFTER_ALL_PRECEEDING_WRITES_COMPLETE) |
-    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, PIPELINE_LOCATION, ALL) |
-    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, STRUCTURE_SIZE, FOUR_WORDS) |
-    NVDEF(NVB197, SET_REPORT_SEMAPHORE_D, FLUSH_DISABLE, TRUE);
 
 inline uint64_t drawStampOffset(uint32_t slot, bool end)
 {

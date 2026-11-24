@@ -77,5 +77,34 @@ final class SignatureTests: XCTestCase {
         XCTAssertEqual(goldens.header, "QuartzCore 24B119 on Apple M4 Max")
         XCTAssertEqual(goldens.states.count, 1)
         XCTAssertEqual(try XCTUnwrap(goldens.states["c00c"]?[1]).hash, signature.hash)
+        XCTAssertEqual(goldens.malformed, ["bad": "bad line"])
+    }
+
+    /// A golden line whose label and signature lost the space between them (boot 2's gpu.gm20b.cubic_sampler) is its
+    /// own outcome naming the line, not a picture without a golden
+    func testALineNamingNoSignatureIsMalformedNotMissing() throws {
+        let signature = Signature(bytes: bgra(), metalFormat: 80, width: 16, height: 8)
+        let line = SceneGoldens.line(scene: "gpu.x", picture: "p", metalFormat: 80, signature)
+        let joined = line.replacingOccurrences(of: "f80 c0=", with: "f80c0=")
+        let goldens = SceneGoldens(joined + "\n")
+        XCTAssertNil(goldens.golden(scene: "gpu.x", picture: "p"))
+        XCTAssertEqual(goldens.malformed(scene: "gpu.x", picture: "p"), joined)
+        XCTAssertNotNil(SceneGoldens(line + "\n").golden(scene: "gpu.x", picture: "p"))
+        XCTAssertNil(SceneGoldens(line + "\n").malformed(scene: "gpu.x", picture: "p"))
+    }
+
+    func testOneCodeVerdictDistinguishesCloseFromCoarse() {
+        let base = Signature(hash: 1, means: [0.5, 0.25])
+        let fine8 = Signature(hash: 2, means: [0.5 + 0.5 / 255, 0.25])
+        let coarse8 = Signature(hash: 3, means: [0.5 + 2.0 / 255, 0.25])
+        XCTAssertEqual(GoldenVerdict.of(fine8, against: base, metalFormat: 80), .close)
+        XCTAssertEqual(GoldenVerdict.of(coarse8, against: base, metalFormat: 80), .close)
+        XCTAssertTrue(CAGoldens.withinOneCode(fine8, against: base, metalFormat: 80))
+        XCTAssertFalse(CAGoldens.withinOneCode(coarse8, against: base, metalFormat: 80))
+        let fineXR = Signature(hash: 4, means: [0.5 + 0.5 / 510, 0.25])
+        let coarseXR = Signature(hash: 5, means: [0.5 + 2.0 / 510, 0.25])
+        XCTAssertTrue(CAGoldens.withinOneCode(fineXR, against: base, metalFormat: 554))
+        XCTAssertFalse(CAGoldens.withinOneCode(coarseXR, against: base, metalFormat: 554))
+        XCTAssertTrue(CAGoldens.withinOneCode(base, against: base, metalFormat: 80))
     }
 }

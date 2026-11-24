@@ -122,13 +122,22 @@ OS_BUILD = re.compile(r' os=\S+')
 
 # The Core Animation states the pack holds (ca/caset.py's tiers): every one. The runtime makes a state and places its
 # programs in the shader heap at its first lookup (gpu.cpp Device::pipeline), so the pack's size is file size only.
-CA_TIERS = ('corpus', 'manifest', 'variants', 'blend', 'fetch')
+CA_TIERS = ('corpus', 'demand', 'manifest', 'variants', 'blend', 'fetch', 'closure')
+# The tiers the generator derives and no device or manifest named: their states are laid after the launch set
+# (runtime/pack.h PackHeader::tier0), their lines marked by cold_line
+COLD_TIERS = ('variants', 'blend', 'fetch', 'closure')
+
+
+def cold_line(line: str) -> str:
+    """Give a corpus line marked as a state of tier 1 (probe_states.h State::tier); its key is the line's as it was."""
+    return line.replace(' samples=', ' tier=1 samples=', 1)
 
 
 def ca_corpus(qc: Path, corpus: Path, work: Path, names: list[str] = (), preferences: Path = STAGER) -> Path:
     """Give the corpus with its Core Animation lines as harvested and those made from their names (ca/ tables).
 
-    Without this QuartzCore's tables in ca/, the corpus as it is.
+    RenderBox's states follow the corpus's own, with the tier-1 closure rb/rbclosure.py makes of them. Without this
+    QuartzCore's tables in ca/, the corpus as it is.
     """
     digest = hashlib.sha256(qc.read_bytes()).hexdigest()
     for path in sorted((HERE / 'ca').glob('qc-*.json')):
@@ -150,6 +159,7 @@ def ca_corpus(qc: Path, corpus: Path, work: Path, names: list[str] = (), prefere
     renderbox, why = renderbox_tagger(digest)
     with open(out, 'w') as dst:
         dst.writelines(renderbox(line) for line in lines if not caspec.corpus_fields(line)[0])
+        dst.writelines(cold_line(renderbox(line)) + '\n' for line in renderbox_closure(digest, lines))
         for tier, made in ca_states(path, corpus, names, cif10):
             dst.writelines(line + '\n' for line in made)
             print(f'make_pack: Core Animation states, {tier}: {len(made)}')
@@ -170,6 +180,19 @@ def renderbox_tagger(digest: str) -> tuple[Callable[[str], str], dict[str, int]]
     if made is None:
         print(f'make_pack: no RenderBox tables for QuartzCore {digest[:16]}: its states as they are')
         return (lambda line: line), {}
+    return made
+
+
+def renderbox_closure(digest: str, lines: list[str]) -> list[str]:
+    """Give the RenderBox states rb/rbclosure.py makes of the corpus's that the corpus lacks.
+
+    For the IPSW whose QuartzCore library has SHA-256 `digest`; none where its rb/ table has no closure.
+    """
+    sys.path.insert(0, str(HERE / 'rb'))
+    import rbclosure  # noqa: PLC0415 (rb/ is only on the path here)
+
+    made = rbclosure.made(HERE / 'rb', digest, lines, state_key)
+    print(f'make_pack: RenderBox states, closure: {len(made)}')
     return made
 
 
@@ -205,7 +228,10 @@ def ca_states(
     for tier, labels in caset.labels(tables, named, CA_TIERS, cif10).items():
         out.append((tier, [line for line in (caspec.state_line(tables, n) for n in labels) if fresh(line)]))
     why: dict[str, int] = {}
-    tagged = [(tier, [caset.with_fetch_rung(tables, line, why) for line in lines]) for tier, lines in out]
+    tagged = [
+        (tier, [(cold_line if tier in COLD_TIERS else str)(caset.with_fetch_rung(tables, line, why)) for line in lines])
+        for tier, lines in out
+    ]
     for reason, count in sorted(why.items()):
         print(f'make_pack: fetching states, {reason}: {count}')
     return tagged
@@ -459,7 +485,7 @@ def state_key(line: str) -> str:
     fields = [
         h
         for h in line[:bar1].split()
-        if h.startswith(('samples=', 'topo=', 'ds=')) or (len(h) > 1 and h[0] in 'ca' and h[1].isdigit())
+        if h.startswith(('samples=', 'topo=', 'ds=', 'alphacov=')) or (len(h) > 1 and h[0] in 'ca' and h[1].isdigit())
     ] + [h for h in line[:bar1].split() if h == 'rast=0']
     key = ' '.join(fields) + ' ' + STAGE_NAMES.sub(r'\1', line[bar1 : bar3 if bar3 >= 0 else len(line)])
     cubic = sampled = written = ''
@@ -488,17 +514,14 @@ def stamp(pack_bin: Path, stack: int) -> None:
     pack_bin.write_bytes(pack)
 
 
-def link(
-    out: Path, buckets: list[Path], stack: int, inventory: Path | None = None, selectors: str | None = None
-) -> None:
+def link(out: Path, buckets: list[Path], stack: int, inventory: Path | None = None) -> None:
     """directlink.py over the buckets' records: out/pack.bin, stamped with the stack key.
 
     `inventory`: the IPSW's archive inventory, whose archives' declared states the pack lists (archives.py).
     """
     out.mkdir(parents=True, exist_ok=True)
     archives = ['--archives', inventory] if inventory else []
-    table = ['--ca-selectors', selectors] if selectors else []
-    report = run([sys.executable, HERE / 'directlink.py', out, *archives, *table, *buckets])
+    report = run([sys.executable, HERE / 'directlink.py', out, *archives, *buckets])
     if stack:
         stamp(out / 'pack.bin', stack)
     print(report.rstrip())
@@ -514,7 +537,7 @@ def stamp_or_link(stack: int) -> bool:
         buckets = [Path(a).resolve() for a in sys.argv[sys.argv.index('--link') + 1 :] if Path(a).is_dir()]
         buckets = [b for b in buckets if b != out]
         inventory = option('--archives', False)
-        link(out, buckets, stack, Path(inventory).resolve() if inventory else None, option('--ca-selectors', False))
+        link(out, buckets, stack, Path(inventory).resolve() if inventory else None)
         return True
     return False
 
@@ -571,9 +594,9 @@ def main() -> None:
     env = probe_env()
     buckets = split_buckets(corpus, work, BUCKETS)
     with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
-        for line in pool.map(lambda b: bucket(work, b, qc, env, option('--ca-selectors', False)), buckets):
+        for line in pool.map(lambda b: bucket(work, b, qc, env), buckets):
             print(line)
-    link(out, buckets, stack, selectors=option('--ca-selectors', False))
+    link(out, buckets, stack)
     if '--clean' in sys.argv[1:]:
         shutil.rmtree(work)
 

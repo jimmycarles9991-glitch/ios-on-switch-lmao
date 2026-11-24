@@ -76,4 +76,37 @@ TEST(GM20BTiledCache, TailIsOneFlush)
     EXPECT_EQ(decode(&word, &word + 1), (Methods{{0x0f80, 0}}));
 }
 
+TEST(GM20BTiledCache, TileSizeTargetsSixtyFourKiBPerTile)
+{
+    EXPECT_EQ(gm20b::tiledCacheTileSize(0), 128u | (128u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(4), 128u | (128u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(8), 64u | (128u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(12), 64u | (64u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(16), 64u | (64u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(24), 64u | (32u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(32), 64u | (32u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(48), 32u | (32u << 16));
+    EXPECT_EQ(gm20b::tiledCacheTileSize(64), 32u | (32u << 16));
+}
+
+TEST(GM20BTiledCache, SetSizeShadowCachesAndSkipsWithoutTiledCache)
+{
+    const TegraGM20BAbiInfo on = info(TegraGM20BInfoHostImport | TegraGM20BInfoTiledCache);
+    const TegraGM20BAbiInfo off = info(TegraGM20BInfoHostImport);
+    uint32_t shadow = gm20b::kTiledCacheDefaultSize;
+    uint32_t words[16];
+    gm20b::Push p{words, words + 16};
+    gm20b::tiledCacheSetSize(p, on, gm20b::tiledCacheTileSize(4), shadow);
+    EXPECT_EQ(p.at, words);
+    gm20b::tiledCacheSetSize(p, on, gm20b::tiledCacheTileSize(8), shadow);
+    EXPECT_EQ(decode(words, p.at), (Methods{{0x0f64, 0x00800040}}));
+    EXPECT_EQ(shadow, 0x00800040u);
+    uint32_t *afterFirst = p.at;
+    gm20b::tiledCacheSetSize(p, on, gm20b::tiledCacheTileSize(8), shadow);
+    EXPECT_EQ(p.at, afterFirst);
+    gm20b::tiledCacheSetSize(p, off, gm20b::tiledCacheTileSize(16), shadow);
+    EXPECT_EQ(p.at, afterFirst);
+    EXPECT_EQ(shadow, 0x00800040u);
+}
+
 }  // namespace

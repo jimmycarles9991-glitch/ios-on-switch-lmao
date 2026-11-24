@@ -546,7 +546,8 @@ TEST(XnuUiScaleSites24B119, OnlyHardwareAndCompatibilitySitesApplyAtScaleOne)
                                  name == "SampleAnalysis mach timebase of a 19.2 MHz counter" ||
                                  name == "SpringBoard iPad native canvas selection" ||
                                  name == "SpringBoard iPad native canvas eligibility" ||
-                                 name == "UIKitCore table reload focus request only when effective focus is allowed";
+                                 name == "UIKitCore table reload focus request only when effective focus is allowed" ||
+                                 name == "CoreMotion motion capabilities of J181 without its motion coprocessor";
         EXPECT_EQ(kCache.sites[i].every_scale, every_scale) << name;
     }
 }

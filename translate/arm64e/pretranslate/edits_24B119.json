@@ -1,0 +1,19 @@
+{
+  "build": "24B119",
+  "files": {
+    "/usr/libexec/locationd": [
+      {
+        "fileoff": "0x7f0a3c",
+        "stock": "130080d2557e91d2358ca2f27502c0f234010014",
+        "at": 0,
+        "patched": "152080d21504a2f206000014"
+      },
+      {
+        "fileoff": "0x7f0a5c",
+        "stock": "3500c0f22f010014",
+        "at": 0,
+        "patched": ""
+      }
+    ]
+  }
+}

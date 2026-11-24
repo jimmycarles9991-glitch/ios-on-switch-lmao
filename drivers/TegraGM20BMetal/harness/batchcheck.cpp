@@ -62,9 +62,9 @@ int main()
     close(fd);
     gm20b::Device device;
     std::string error;
-    const bool opened = written && device.open(path, 0, error);
-    unlink(path);
+    const bool opened = written && device.open(path, 0, error, gm20b::Device::Role::Client);
     if (!opened) {
+        unlink(path);
         fprintf(stderr, "device: %s\n", error.c_str());
         return 1;
     }
@@ -75,8 +75,10 @@ int main()
         printf("%s: %s\n", ok ? "PASS" : "FAIL", label);
     };
     gm20b::Texture image;
-    if (!device.createTexture(16, 16, 80, image, true))
+    if (!device.createTexture(16, 16, 80, image, true)) {
+        unlink(path);
         return 2;
+    }
     gm20b::PackPipeline record{};
     record.vertexSlot = 0xff;
     gm20b::Pipeline pipeline;
@@ -134,11 +136,56 @@ int main()
     expect(repeated(1, 1), "one small draw stays one submission");
     expect(repeated(1000, 8), "1000 draws survive eight bounded submissions");
     expect(repeated(256, 2), "exact boundary includes final stores without an extra submission");
-    pipeline.fragmentInstructions = gm20b::BatchWork::kLimit;
-    expect(repeated(3, 1), "the render server keeps a client's preemption-sized draws in one batch");
-    pipeline.fragmentInstructions = gm20b::BatchWork::kRenderServerLimit;
-    expect(repeated(3, 3), "expensive draws each expose a legal preemption boundary");
+    pipeline.fragmentInstructions = uint32_t(gm20b::BatchWork::kLimit);
+    expect(repeated(3, 3), "expensive client draws each expose a legal preemption boundary");
     pipeline.fragmentInstructions = 1;
+    {
+        gm20b::Device server;
+        std::string serverErr;
+        gm20b::Texture serverImage;
+        const bool serverOpened = server.open(path, 0, serverErr, gm20b::Device::Role::RenderServer) &&
+                                  server.createTexture(16, 16, 80, serverImage, true);
+        unlink(path);
+        if (!serverOpened) {
+            fprintf(stderr, "server device: %s\n", serverErr.c_str());
+            return 2;
+        }
+        gm20b::PassDesc serverPass = pass;
+        serverPass.color[0].texture = &serverImage;
+        auto serverRepeated = [&](unsigned count, unsigned batches, uint32_t scissorSide) {
+            auto *cb = server.begin();
+            auto *encoder = cb ? cb->render(serverPass) : nullptr;
+            if (!encoder)
+                return false;
+            encoder->setPipeline(&pipeline);
+            const uint64_t before = cap_draws();
+            const unsigned long submits = mock_iokit_calls(TegraGM20BMethodSubmitJob);
+            for (unsigned i = 0; i < count; ++i) {
+                encoder->setScissor(scissorSide < 16 ? (i & 1) : 0, 0, scissorSide, scissorSide);
+                if (!encoder->draw(3, 0, 3, 1, 0, &why)) {
+                    cb->abandon();
+                    return false;
+                }
+            }
+            encoder->end();
+            uint32_t sequence = 0;
+            if (!cb->commit(sequence)) {
+                cb->abandon();
+                return false;
+            }
+            return server.wait(sequence) && cap_draws() - before == count &&
+                   mock_iokit_calls(TegraGM20BMethodSubmitJob) - submits == batches;
+        };
+        expect(serverRepeated(1000, 1, 1), "the render server keeps 1000 small draws in one submission");
+        expect(serverRepeated(gm20b::BatchWork::kRenderServerOps + 1, 2, 1),
+               "the render server cuts past its operation safety ceiling");
+        pipeline.fragmentInstructions = uint32_t(gm20b::BatchWork::kLimit);
+        expect(serverRepeated(3, 1, 1), "the render server keeps a client's preemption-sized draws in one batch");
+        pipeline.fragmentInstructions = uint32_t(gm20b::BatchWork::kRenderServerLimit / 256);
+        expect(serverRepeated(3, 3, 16), "expensive render server draws still expose a safety boundary");
+        pipeline.fragmentInstructions = 1;
+        server.destroyTexture(serverImage);
+    }
 
     {
         auto [cb, encoder] = begin();

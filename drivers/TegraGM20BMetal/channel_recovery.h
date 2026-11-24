@@ -161,15 +161,39 @@ bool makeChannel(Kernel &k, uint32_t engines, uint32_t &channel, const volatile 
 {
     channel = 0;
     fence = none;
-    if (!k.channel(engines, channel, fence))
+    uint32_t made = 0;
+    const volatile uint32_t *madeFence = none;
+    if (!k.channel(engines, made, madeFence))
         return false;
     uint32_t seqno = 0;
-    if (!context(channel, seqno)) {
-        k.closeChannel(channel);
-        channel = 0;
-        fence = none;
+    if (!context(made, seqno)) {
+        k.closeChannel(made);
         return false;
     }
+    channel = made;
+    fence = madeFence;
+    last.store(seqno, std::memory_order_release);
+    return true;
+}
+
+template <class Context>
+bool makeChannel(Kernel &k, uint32_t engines, std::atomic<uint32_t> &channel,
+                 std::atomic<const volatile uint32_t *> &fence, std::atomic<uint32_t> &last,
+                 const volatile uint32_t *none, Context &&context)
+{
+    channel.store(0, std::memory_order_release);
+    fence.store(none, std::memory_order_release);
+    uint32_t made = 0;
+    const volatile uint32_t *madeFence = none;
+    if (!k.channel(engines, made, madeFence))
+        return false;
+    uint32_t seqno = 0;
+    if (!context(made, seqno)) {
+        k.closeChannel(made);
+        return false;
+    }
+    channel.store(made, std::memory_order_release);
+    fence.store(madeFence, std::memory_order_release);
     last.store(seqno, std::memory_order_release);
     return true;
 }

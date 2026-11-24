@@ -111,6 +111,7 @@ bool ComputeEncoder::dispatchIndirect(const Buffer *arguments, uint64_t offset, 
     memcpy(dev_.alloc(dev_.upload_, sizeof qmd, 256, qmdVa), qmd, sizeof qmd);
     SWITCH_METAL_DIAGNOSTIC(dev_.stats.uploadBytes += kRootBytes + sizeof qmd);
     cb_.use(*arguments, false);
+    emitKindSwitch();
     if (arguments->hostVisible && !arguments->wc && arguments->cpu)
         cb_.clean(arguments->cpu + offset, kArgumentBytes);
     const bool looping = cb_.loops_.open();

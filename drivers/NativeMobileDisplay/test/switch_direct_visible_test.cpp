@@ -260,6 +260,21 @@ TEST_F(DirectVisible, ASlotsFirstFrameKeepsThePresentJobAndLaterOnesAreWatched)
     EXPECT_EQ(display.producerWatch(entry), 0u);
 }
 
+TEST_F(DirectVisible, FirstFrameWithVisibleWindowAAndWindowBChangeIsWatched)
+{
+    const int entry = NativeLegacyDisplay::kSlot0 + 1;
+    display.planeNextSet = true;
+    EXPECT_EQ(display.producerWatch(entry), TEGRA_SCANOUT_COPY_PRODUCER_WATCH);
+    visible = 0;
+    EXPECT_EQ(display.producerWatch(entry), 0u);
+    visible = 1;
+    display.alsoWritten = 0x1000;
+    EXPECT_EQ(display.producerWatch(entry), 0u);
+    display.alsoWritten = 0;
+    backing.promises = 1;
+    EXPECT_EQ(display.producerWatch(entry), 0u);
+}
+
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
 size_t linesWith(const std::string &text)
 {

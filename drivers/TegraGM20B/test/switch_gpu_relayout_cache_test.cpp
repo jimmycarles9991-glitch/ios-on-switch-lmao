@@ -26,7 +26,47 @@ struct switch_gpu_backing {
 namespace
 {
 std::map<uint64_t, switch_gpu_backing *> backings;
-int creates, maps, unmaps, deletes, failMap;
+std::map<uint64_t, uint32_t> surfaceKinds;
+std::map<switch_gpu_backing *, tgm_mem *> canonicalMemories;
+int creates, maps, unmaps, deletes, failMap, directPaLatches;
+uint8_t lastMappedKind;
+}
+
+extern "C" uint32_t tegra_gm20b_surface_kind(uint64_t page)
+{
+	const auto found = surfaceKinds.find(page);
+	return found == surfaceKinds.end() ? 0u : found->second;
+}
+
+extern "C" int switch_gpu_backing_tgm_mem(switch_gpu_backing *backing, uint32_t, tgm_mem **out)
+{
+	const auto found = canonicalMemories.find(backing);
+	if (found == canonicalMemories.end())
+		return -95;
+	*out = found->second;
+	return 0;
+}
+
+extern "C" int switch_gpu_backing_tgm_mem_existing(switch_gpu_backing *backing, uint32_t,
+						   tgm_mem **out)
+{
+	const auto found = canonicalMemories.find(backing);
+	if (found == canonicalMemories.end())
+		return -2;
+	*out = found->second;
+	return 0;
+}
+
+extern "C" int switch_gpu_backing_tgm_mem_existing_or_direct(switch_gpu_backing *backing, uint32_t,
+							     tgm_mem **out)
+{
+	const auto found = canonicalMemories.find(backing);
+	if (found == canonicalMemories.end()) {
+		++directPaLatches;
+		return -2;
+	}
+	*out = found->second;
+	return 0;
 }
 
 extern "C" switch_gpu_backing *switch_gpu_backing_find_pa(uint64_t page)
@@ -76,11 +116,12 @@ extern "C" void tgm_mem_del(tgm_mem **memory)
 	}
 }
 
-extern "C" int switch_gpu_vm_map(tgm_vm *, uint64_t address, uint64_t, tgm_mem *, uint64_t, uint8_t,
-				 int, switch_gpu_mapping **mapping)
+extern "C" int switch_gpu_vm_map(tgm_vm *, uint64_t address, uint64_t, tgm_mem *, uint64_t,
+				 uint8_t kind, int, switch_gpu_mapping **mapping)
 {
 	if (++maps == failMap)
 		return -12;
+	lastMappedKind = kind;
 	*mapping = new switch_gpu_mapping{address};
 	return 0;
 }
@@ -106,7 +147,10 @@ protected:
 	void SetUp() override
 	{
 		backings.clear();
-		creates = maps = unmaps = deletes = failMap = 0;
+		surfaceKinds.clear();
+		canonicalMemories.clear();
+		creates = maps = unmaps = deletes = failMap = directPaLatches = 0;
+		lastMappedKind = 0;
 	}
 
 	void TearDown() override
@@ -245,4 +289,63 @@ TEST_F(RelayoutCache, ExplicitBackingIdentityDoesNotNeedFirstPageRegistryLookup)
 	EXPECT_EQ(creates, 1);
 	switch_gpu_relayout_mapping_put(first);
 	switch_gpu_relayout_mapping_put(second);
+}
+
+TEST_F(RelayoutCache, CompressedSurfaceUsesCanonicalBackingMemoryAndCompressedKind)
+{
+	auto *backing = allocation(16);
+	tgm_mem canonical{backing->pages.data()};
+	surfaceKinds[backing->pages[0]] = 0xdbu;
+	canonicalMemories[backing] = &canonical;
+	auto *entry = get(backing, true);
+	ASSERT_NE(entry, nullptr);
+	EXPECT_EQ(entry->memory, &canonical);
+	EXPECT_FALSE(entry->ownsMemory);
+	EXPECT_EQ(entry->tiledKind, 0xdbu);
+	EXPECT_EQ(lastMappedKind, 0xdbu);
+	EXPECT_EQ(creates, 0);
+	EXPECT_EQ(maps, 2);
+	auto *again = get(backing, true);
+	EXPECT_EQ(again, entry);
+	EXPECT_EQ(maps, 2);
+	switch_gpu_relayout_mapping_put(entry);
+	switch_gpu_relayout_mapping_put(again);
+	switch_gpu_relayout_cache_clear(&vm, &cache);
+	EXPECT_EQ(deletes, 0);
+	EXPECT_EQ(unmaps, 2);
+}
+
+TEST_F(RelayoutCache, UncompressedMappingReusesCanonicalMemoryAndKindTransitionEvictsIdleSlot)
+{
+	auto *backing = allocation(16);
+	tgm_mem canonical{backing->pages.data()};
+	canonicalMemories[backing] = &canonical;
+	auto *uncompressed = get(backing, true);
+	ASSERT_NE(uncompressed, nullptr);
+	EXPECT_EQ(uncompressed->memory, &canonical);
+	EXPECT_FALSE(uncompressed->ownsMemory);
+	EXPECT_EQ(uncompressed->tiledKind, 0xfeu);
+	EXPECT_EQ(creates, 0);
+	switch_gpu_relayout_mapping_put(uncompressed);
+
+	surfaceKinds[backing->pages[0]] = 0xdbu;
+	auto *compressed = get(backing, true);
+	ASSERT_NE(compressed, nullptr);
+	EXPECT_EQ(compressed->memory, &canonical);
+	EXPECT_EQ(compressed->tiledKind, 0xdbu);
+	EXPECT_EQ(unmaps, 2);
+	EXPECT_EQ(cache.bytes, 16u * 4096u);
+	EXPECT_EQ(directPaLatches, 0);
+	switch_gpu_relayout_mapping_put(compressed);
+}
+
+TEST_F(RelayoutCache, DirectFallbackLatchesDirectPaBeforeAllocatingMem)
+{
+	auto *backing = allocation(16);
+	auto *entry = get(backing, false);
+	ASSERT_NE(entry, nullptr);
+	EXPECT_TRUE(entry->ownsMemory);
+	EXPECT_EQ(creates, 1);
+	EXPECT_EQ(directPaLatches, 1);
+	switch_gpu_relayout_mapping_put(entry);
 }

@@ -18,6 +18,20 @@ enum PresentMode: Sendable {
     case warm
     /// CAMetalDisplayLink owns the drawable's target time; the command buffer presents it without an explicit time.
     case metalLink
+    /// Plain presents and linkTarget's timed ones in turn on one layer: the plain ones' presented reports keep the
+    /// layer's last report recent, which QuartzCore's present path checks (a layer with none for a second has every
+    /// drawable it holds finished at once, with no presented time).
+    case alternate
+    /// presentDrawable:atTime: with targets that cycle through `sweepTargets`, each a kind of time QuartzCore may treat
+    /// apart.
+    case sweep
+
+    /// The sweep's targets, in turn: under QuartzCore's half-millisecond floor (a plain present), just over it, one
+    /// second after boot, ten seconds and a tenth of a second before the commit, and four periods after it.
+    static let sweepTargets: [(name: String, target: (Double) -> Double)] = [
+        ("floor", { _ in 0.0004 }), ("over", { _ in 0.001 }), ("boot", { _ in 1 }), ("past10", { $0 - 10 }),
+        ("past01", { $0 - 0.1 }), ("ahead", { $0 + 4 * PresentTimeVerdict.period }),
+    ]
 }
 
 /// One phase on a fresh CAMetalLayer: what each drawable asked for and what Metal told it back.
@@ -79,6 +93,9 @@ final class PresentAtTimeRun: NSObject, CAMetalDisplayLinkDelegate {
             case .plain: target = 0
             case .past: target = committed - 0.1
             case .mediaTarget: target = committed + 4 * period
+            case .alternate: target = tick % 8 == 0 ? 0 : link.targetTimestamp + 3 * period
+            case .sweep: target = PresentMode.sweepTargets[(tick / 4) % PresentMode.sweepTargets.count]
+                .target(committed)
             }
             present(drawable, target: target, recorded: !warming)
         }

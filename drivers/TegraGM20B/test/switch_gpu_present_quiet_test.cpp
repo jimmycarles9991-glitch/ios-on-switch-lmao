@@ -107,22 +107,60 @@ TEST(PresentQuiet, AProducerThatEndsBetweenTheAskAndTheLookIsPresentedOnce)
 	EXPECT_EQ(d.presented, 1u);
 }
 
-// Two producers on two channels, the second ending quiet: the watch takes one producer only, so the fence-only present
-// job waits for both on the GPU, and its own fence interrupts. Neither producer is asked or interrupts for it.
-TEST(PresentQuiet, TwoProducersOnTwoChannelsTheSecondQuietGoToThePresentJob)
+TEST(PresentQuiet, TwoProducersOnTwoChannelsTheSecondQuietAreWatched)
 {
 	Producer a{kA, Channel(40)}, b{kB, Channel(7)};
 	Display d({&a, &b});
 	const switch_gpu_backing_token tokens[2] = {a.token(a.channel.submit(1, false)),
 						    b.token(b.channel.submit(2, true))};
-	EXPECT_EQ(d.offer(tokens, 2), 1);
+	ASSERT_EQ(d.offer(tokens, 2), 0);
+	EXPECT_TRUE(switch_gpu_present_watch_armed(&d.watch));
+	EXPECT_FALSE(a.channel.asked);
+	EXPECT_TRUE(b.channel.asked);
+	d.ownerWakes();
+	a.channel.run();
+	EXPECT_EQ(d.presented, 0u);
+	b.channel.run();
+	EXPECT_EQ(b.channel.interrupts, 1u);
+	EXPECT_EQ(d.presented, 1u);
+	EXPECT_EQ(d.jobInterrupts, 0u);
+	EXPECT_EQ(d.workItems, 0u);
+}
+
+TEST(PresentQuiet, TwoProducersWithOneAlreadyDoneDeliverOnTheSecond)
+{
+	Producer a{kA, Channel(40)}, b{kB, Channel(7)};
+	Display d({&a, &b});
+	const switch_gpu_backing_token tokens[2] = {a.token(a.channel.submit(1, true)),
+						    b.token(b.channel.submit(2, true))};
+	a.channel.run();
+	ASSERT_EQ(d.offer(tokens, 2), 0);
+	EXPECT_FALSE(a.channel.asked);
+	EXPECT_TRUE(b.channel.asked);
+	EXPECT_EQ(d.presented, 0u);
+	d.ownerWakes();
+	b.channel.run();
+	EXPECT_EQ(d.presented, 1u);
+	EXPECT_EQ(d.workItems, 0u);
+	EXPECT_EQ(d.jobInterrupts, 0u);
+}
+
+TEST(PresentQuiet, FiveProducersGoToThePresentJob)
+{
+	Producer a{kA, Channel(40)}, b{kB, Channel(7)};
+	Display d({&a, &b});
+	const switch_gpu_backing_token tokens[5] = {
+		a.token(a.channel.submit(1, false)), b.token(b.channel.submit(1, true)),
+		a.token(a.channel.submit(1, true)),  b.token(b.channel.submit(1, true)),
+		a.token(a.channel.submit(1, true)),
+	};
+	EXPECT_EQ(d.offer(tokens, 5), 1);
 	EXPECT_FALSE(switch_gpu_present_watch_armed(&d.watch));
 	EXPECT_FALSE(a.channel.asked);
 	EXPECT_FALSE(b.channel.asked);
 	a.channel.run();
-	EXPECT_FALSE(d.runJob()) << "its acquire on the second producer still waits";
+	EXPECT_FALSE(d.runJob());
 	b.channel.run();
-	EXPECT_EQ(b.channel.interrupts, 0u);
 	EXPECT_TRUE(d.runJob());
 	EXPECT_EQ(d.presented, 1u);
 	EXPECT_EQ(d.jobInterrupts, 1u);

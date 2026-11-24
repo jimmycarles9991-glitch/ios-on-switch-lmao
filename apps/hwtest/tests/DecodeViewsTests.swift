@@ -39,7 +39,7 @@ struct DecodeViewsTest: HWTest {
         let hdr = context.ios >= 27
         var forms = Forms()
         var viewLinesWant = 0, formLinesWant = 0
-        let srgbOff = try await Self.pvrtcView(gpu, &forms)
+        let srgb = try await Self.pvrtcView(gpu, &forms), srgbOff = srgb.off
         for (base, own) in [(203, [185, 221]), (209, [191, 227])] {
             try await Self.family(gpu, base, own.filter { hdr || $0 < 221 }, native: [], &forms)
         }
@@ -66,6 +66,7 @@ struct DecodeViewsTest: HWTest {
         }
         var metrics = Metrics()
         metrics.set("decode_view_srgb_off", srgbOff)
+        metrics.set("decode_view_srgb_forms", srgb.forms)
         metrics.set("decode_form_view_off", forms.off)
         metrics.set("decode_form_view_texels", forms.texels)
         metrics.set("decode_form_view_stale", forms.stale)
@@ -98,14 +99,15 @@ struct DecodeViewsTest: HWTest {
         ).onRawPath(gpu)
     }
 
-    /// The 167 view of a 166 texture of the driver's 16x16 vector: texels off the sRGB decode of its codes
-    static func pvrtcView(_ gpu: GPU, _ forms: inout Forms) async throws -> Int {
+    /// The 167 view of a 166 texture of the driver's 16x16 vector: texels off the sRGB decode of its codes, and how
+    /// their channels missed (decode_view_srgb_forms: DecodeJudge.Tally.forms)
+    static func pvrtcView(_ gpu: GPU, _ forms: inout Forms) async throws -> DecodeJudge.Tally {
         guard let v = DecodeVectors.level(166, side: 16),
               let texture = DecodeScene.texture(gpu, v.pixelFormat, 16, 16, storage: .shared),
               let view = texture.makeTextureView(pixelFormat: MTLPixelFormat(rawValue: 167)!)
         else {
             forms.unmade.append("166_or_167")
-            return 0
+            return DecodeJudge.Tally()
         }
         v.bytes.withUnsafeBytes {
             texture.replace(
@@ -113,7 +115,7 @@ struct DecodeViewsTest: HWTest {
             )
         }
         let read = try await DecodeScene.read(gpu, view, DecodeScene.everyTexel(16, 16))
-        return DecodeJudge.rgba8(read, v.want, srgb: true).off
+        return DecodeJudge.rgba8(read, v.want, srgb: true)
     }
 
     /// A texture of `base`'s vectors with views of the formats `own` (decoded forms) and `native` (forms GM20B

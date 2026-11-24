@@ -367,6 +367,24 @@ TEST(Image, VerificationCatchesABrokenStub)
     EXPECT_NE(nullptr, strstr(err, "register branch")) << err;
 }
 
+TEST(Image, VerificationCatchesAnAcquireReleaseStubWithoutItsBarrier)
+{
+    Translated t;
+    translate(plainFunction(A64X_CPU_SUBTYPE_ARM64E), t);
+    ASSERT_EQ(1, t.sites) << t.err;
+    int barriers = 0;
+    for (uint32_t i = 0; i < t.x.nstubs; i++) {
+        if (t.x.stubs[i] == 0xD5033BBFu) {
+            t.x.stubs[i] = kNop;
+            barriers++;
+        }
+    }
+    ASSERT_EQ(1, barriers);
+    char err[256];
+    EXPECT_EQ(-1, a64x_verify_image(t.m.get(), t.out.data(), &t.x, err, sizeof(err)));
+    EXPECT_NE(nullptr, strstr(err, "DMB ISH")) << err;
+}
+
 TEST(Image, FatSlices)
 {
     std::vector<uint8_t> a = build(plainFunction(A64X_CPU_SUBTYPE_ARM64E));

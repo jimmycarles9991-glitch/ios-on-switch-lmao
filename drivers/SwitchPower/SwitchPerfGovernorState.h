@@ -39,11 +39,13 @@ extern void *gCtx;
 
 extern switch_cpu_load gLoad[kCpus];
 
-// A boost's deadline, one writer each: the touch filter, the display gate, exec in the slot of the CPU it ran on.
+// A boost's deadline, one writer each: the touch filter, the display gate, exec and a foreground role in the slot of the
+// CPU they ran on.
 struct Boost {
     uint64_t until;
 #if DEVELOPMENT || DEBUG
     uint32_t hints, wakes;  // since boot, by the same writer
+    uint32_t foreground;    // a launch slot's hints from a foreground role
 #endif
 };
 

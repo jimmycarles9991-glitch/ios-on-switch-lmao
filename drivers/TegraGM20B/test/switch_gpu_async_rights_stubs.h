@@ -3,11 +3,13 @@
 // a port is a number, its send rights a count. A release with none left is the kernel's "send right count overflow"
 // panic, counted in `underflows`; a reply on a port with no right is counted in `orphanSends`.
 #pragma once
+#include <condition_variable>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <mach/port.h>
 #include <map>
 #include <mutex>
@@ -20,6 +22,13 @@ using UInt32 = uint32_t;
 using io_user_reference_t = uint64_t;
 using mach_vm_address_t = uint64_t;
 using task_t = struct host_task *;
+using thread_t = struct host_thread *;
+
+struct host_thread {
+	const char *name;
+};
+
+constexpr thread_t THREAD_NULL = nullptr;
 
 constexpr IOReturn kIOReturnSuccess = 0, kIOReturnError = 0x2bc, kIOReturnNoMemory = 0x2bd,
 		   kIOReturnNoResources = 0x2be, kIOReturnBadArgument = 0x2c2,
@@ -238,6 +247,12 @@ protected:
 };
 
 using IOLock = std::mutex;
+using lck_mtx_t = std::mutex;
+
+inline lck_mtx_t *IOLockGetMachLock(IOLock *lock)
+{
+	return lock;
+}
 
 inline IOLock *IOLockAlloc()
 {
@@ -261,7 +276,177 @@ inline void __attribute__((no_thread_safety_analysis)) IOLockUnlock(IOLock *lock
 
 constexpr int THREAD_ABORTSAFE = 1, THREAD_AWAKENED = 0, THREAD_INTERRUPTED = 2;
 
-// No thread of these tests waits: a sleep is an abort
+struct turnstile;
+
+struct switch_user_turnstile {
+	struct turnstile *turnstile;
+};
+
+inline host_thread gDefaultThread = {"default"};
+inline thread_local thread_t gCurrentThread = &gDefaultThread;
+
+inline thread_t current_thread(void)
+{
+	return gCurrentThread;
+}
+
+struct HostTurnstiles {
+	struct Slot {
+		thread_t inheritor = THREAD_NULL;
+		uint32_t waiters = 0;
+		uint64_t wakes = 0;
+		bool active = false;
+	};
+
+	struct Event {
+		enum Kind {
+			Sleep,
+			Retarget,
+			WakeAll
+		};
+
+		Kind kind;
+		const switch_user_turnstile *ut;
+		thread_t inheritor;
+	};
+
+	std::mutex lock;
+	std::condition_variable cv;
+	std::map<thread_t, int> refs;
+	std::map<const switch_user_turnstile *, Slot> slots;
+	std::vector<Event> events;
+	unsigned underflows = 0;
+	bool abortSleep = false;
+	std::function<void(const switch_user_turnstile *, thread_t)> onSleep;
+
+	void retain(thread_t t)
+	{
+		if (!t)
+			return;
+		std::lock_guard<std::mutex> l(lock);
+		refs[t]++;
+	}
+
+	void drop(thread_t t)
+	{
+		if (!t)
+			return;
+		std::lock_guard<std::mutex> l(lock);
+		if (refs[t] <= 0)
+			underflows++;
+		else
+			refs[t]--;
+	}
+
+	int held()
+	{
+		std::lock_guard<std::mutex> l(lock);
+		int sum = 0;
+		for (const auto &[t, count] : refs)
+			sum += count;
+		return sum;
+	}
+
+	int refCount(thread_t t)
+	{
+		std::lock_guard<std::mutex> l(lock);
+		auto it = refs.find(t);
+		return it == refs.end() ? 0 : it->second;
+	}
+
+	void reset()
+	{
+		std::lock_guard<std::mutex> l(lock);
+		refs.clear();
+		slots.clear();
+		events.clear();
+		underflows = 0;
+		abortSleep = false;
+		onSleep = nullptr;
+	}
+};
+
+inline HostTurnstiles gTurnstiles;
+
+inline int __attribute__((no_thread_safety_analysis))
+switch_user_turnstile_sleep(lck_mtx_t *mtx, struct switch_user_turnstile *ut, thread_t inheritor,
+			    int)
+{
+	std::function<void(const switch_user_turnstile *, thread_t)> hook;
+	uint64_t seenWakes = 0;
+	{
+		std::unique_lock<std::mutex> tl(gTurnstiles.lock);
+		mtx->unlock();
+		auto &slot = gTurnstiles.slots[ut];
+		slot.waiters++;
+		slot.active = true;
+		slot.inheritor = inheritor;
+		ut->turnstile = reinterpret_cast<struct turnstile *>(uintptr_t(1));
+		seenWakes = slot.wakes;
+		gTurnstiles.events.push_back({HostTurnstiles::Event::Sleep, ut, inheritor});
+		hook = gTurnstiles.onSleep;
+		gTurnstiles.cv.notify_all();
+	}
+	if (hook)
+		hook(ut, inheritor);
+	int wr = THREAD_AWAKENED;
+	{
+		std::unique_lock<std::mutex> tl(gTurnstiles.lock);
+		auto &slot = gTurnstiles.slots[ut];
+		if (gTurnstiles.abortSleep) {
+			wr = THREAD_INTERRUPTED;
+		} else {
+			gTurnstiles.cv.wait(tl, [&] {
+				return slot.wakes != seenWakes || gTurnstiles.abortSleep;
+			});
+			if (slot.wakes == seenWakes && gTurnstiles.abortSleep)
+				wr = THREAD_INTERRUPTED;
+		}
+		if (--slot.waiters == 0) {
+			slot.active = false;
+			slot.inheritor = THREAD_NULL;
+			ut->turnstile = nullptr;
+		}
+		gTurnstiles.cv.notify_all();
+	}
+	mtx->lock();
+	return wr;
+}
+
+inline void switch_user_turnstile_retarget(struct switch_user_turnstile *ut, thread_t inheritor)
+{
+	std::lock_guard<std::mutex> tl(gTurnstiles.lock);
+	auto it = gTurnstiles.slots.find(ut);
+	if (it == gTurnstiles.slots.end() || !it->second.active)
+		return;
+	it->second.inheritor = inheritor;
+	gTurnstiles.events.push_back({HostTurnstiles::Event::Retarget, ut, inheritor});
+	gTurnstiles.cv.notify_all();
+}
+
+inline void switch_user_turnstile_wakeup_all(struct switch_user_turnstile *ut, int)
+{
+	std::lock_guard<std::mutex> tl(gTurnstiles.lock);
+	auto it = gTurnstiles.slots.find(ut);
+	if (it == gTurnstiles.slots.end() || !it->second.active)
+		return;
+	it->second.inheritor = THREAD_NULL;
+	it->second.wakes++;
+	gTurnstiles.events.push_back({HostTurnstiles::Event::WakeAll, ut, THREAD_NULL});
+	gTurnstiles.cv.notify_all();
+}
+
+inline void switch_user_turnstile_thread_retain(thread_t thread)
+{
+	gTurnstiles.retain(thread);
+}
+
+inline void switch_user_turnstile_thread_drop(thread_t thread)
+{
+	gTurnstiles.drop(thread);
+}
+
+// No thread of these tests waits on the request-list condition: a sleep is an abort
 inline int IOLockSleep(IOLock *, void *, int)
 {
 	return THREAD_INTERRUPTED;

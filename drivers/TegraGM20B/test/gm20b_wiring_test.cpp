@@ -129,4 +129,148 @@ TEST(SharedWiring, ARacingPublishTakesTheFirstAndFreesItsOwn)
 	sharedWiringPut(b);
 	EXPECT_EQ(first.completed, 1);
 }
+
+struct ImportBoModel {
+	SharedWiring *wiring = nullptr;
+	IOMemoryDescriptor *wired = nullptr;
+	uint64_t *pas = nullptr;
+	uint32_t npages = 4;
+	tgm_mem *mem = nullptr;
+	bool backingMemory = false;
+	bool ownsMem = false;
+	bool readOnly = false;
+};
+
+void adoptModel(ImportBoModel *bo, SharedWiring *w)
+{
+	bo->wiring = w;
+	bo->wired = w->wired;
+	bo->pas = w->pas;
+	bo->mem = w->mem;
+	bo->readOnly = w->readOnly;
+	bo->ownsMem = false;
+}
+
+void publishModel(ImportBoModel *bo, uint32_t surfaceId)
+{
+	auto *made = IONew(SharedWiring, 1);
+	tgm_mem *const backingMem = bo->backingMemory ? bo->mem : nullptr;
+	tgm_mem *const sharedMem = bo->ownsMem ? bo->mem : nullptr;
+	if (sharedMem)
+		bo->ownsMem = false;
+	*made = {};
+	made->task = kTask;
+	made->address = kAddress;
+	made->bytes = kBytes;
+	made->surfaceId = surfaceId;
+	made->wired = bo->wired;
+	made->pas = bo->pas;
+	made->npages = bo->npages;
+	made->mem = sharedMem;
+	made->readOnly = bo->readOnly;
+	adoptModel(bo, sharedWiringPublish(made));
+	if (backingMem) {
+		bo->mem = backingMem;
+		bo->backingMemory = true;
+		bo->ownsMem = false;
+	}
+}
+
+void releaseModel(ImportBoModel *bo)
+{
+	if (!bo->ownsMem)
+		bo->mem = nullptr;
+	tgm_mem_del(&bo->mem);
+	if (bo->wiring) {
+		sharedWiringPut(bo->wiring);
+		bo->wiring = nullptr;
+		bo->pas = nullptr;
+	}
+}
+
+TEST(SharedWiring, SharedWiringHitWithFallbackMemFreesFallbackOnRelease)
+{
+	deletedMems().clear();
+	IOMemoryDescriptor first;
+	auto *canonical = reinterpret_cast<tgm_mem *>(0x8100);
+	auto *fallback = reinterpret_cast<tgm_mem *>(0x8200);
+	mapTask(0xd0000000);
+	SharedWiring *w = sharedWiringPublish(make(&first, 0xd0000000, 21, nullptr));
+	ImportBoModel bo1{};
+	adoptModel(&bo1, w);
+	bo1.mem = canonical;
+	bo1.backingMemory = true;
+
+	ImportBoModel bo2{};
+	SharedWiring *hit = sharedWiringFind(kTask, kAddress, kBytes, 21);
+	ASSERT_EQ(hit, w);
+	adoptModel(&bo2, hit);
+	EXPECT_EQ(bo2.mem, nullptr);
+	bo2.mem = fallback;
+	bo2.ownsMem = true;
+
+	releaseModel(&bo2);
+	EXPECT_TRUE(deletedMems().count(fallback));
+	EXPECT_FALSE(deletedMems().count(canonical));
+	EXPECT_EQ(first.completed, 0);
+
+	releaseModel(&bo1);
+	EXPECT_FALSE(deletedMems().count(canonical));
+	EXPECT_EQ(first.completed, 1);
+}
+
+TEST(SharedWiring, RacingPublishKeepsCanonicalBackingMemAndRecoversOnNullWinner)
+{
+	deletedMems().clear();
+	IOMemoryDescriptor w1, w2;
+	auto *memA = reinterpret_cast<tgm_mem *>(0x9100);
+	auto *canonical = reinterpret_cast<tgm_mem *>(0x9200);
+	mapTask(0xe0000000);
+	SharedWiring *existing = sharedWiringPublish(make(&w1, 0xe0000000, 22, memA));
+
+	ImportBoModel boB{};
+	boB.wired = &w2;
+	boB.pas = IONew(uint64_t, 4);
+	for (uint32_t i = 0; i < 4; i++)
+		boB.pas[i] = 0xe0000000 + i * 0x10000;
+	boB.mem = canonical;
+	boB.backingMemory = true;
+	publishModel(&boB, 22);
+	EXPECT_EQ(boB.wiring, existing);
+	EXPECT_EQ(boB.mem, canonical);
+	EXPECT_TRUE(boB.backingMemory);
+	EXPECT_FALSE(boB.ownsMem);
+	EXPECT_EQ(w2.completed, 1);
+	EXPECT_FALSE(deletedMems().count(memA));
+	releaseModel(&boB);
+	EXPECT_FALSE(deletedMems().count(memA));
+	sharedWiringPut(existing);
+	EXPECT_TRUE(deletedMems().count(memA));
+	EXPECT_FALSE(deletedMems().count(canonical));
+
+	deletedMems().clear();
+	IOMemoryDescriptor w3, w4;
+	auto *fallbackB = reinterpret_cast<tgm_mem *>(0x9300);
+	auto *recovered = reinterpret_cast<tgm_mem *>(0x9400);
+	mapTask(0xf0000000);
+	SharedWiring *nullWinner = sharedWiringPublish(make(&w3, 0xf0000000, 23, nullptr));
+	ImportBoModel boC{};
+	boC.wired = &w4;
+	boC.pas = IONew(uint64_t, 4);
+	for (uint32_t i = 0; i < 4; i++)
+		boC.pas[i] = 0xf0000000 + i * 0x10000;
+	boC.mem = fallbackB;
+	boC.ownsMem = true;
+	publishModel(&boC, 23);
+	EXPECT_EQ(boC.wiring, nullWinner);
+	EXPECT_EQ(boC.mem, nullptr);
+	EXPECT_FALSE(boC.ownsMem);
+	EXPECT_TRUE(deletedMems().count(fallbackB));
+	boC.mem = recovered;
+	boC.ownsMem = true;
+	releaseModel(&boC);
+	EXPECT_TRUE(deletedMems().count(recovered));
+	sharedWiringPut(nullWinner);
+	EXPECT_EQ(w3.completed, 1);
+}
 }  // namespace

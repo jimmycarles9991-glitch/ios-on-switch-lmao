@@ -2,6 +2,8 @@
 
 import hashlib
 import importlib.util
+import json
+import struct
 import subprocess
 import sys
 import tempfile
@@ -9,6 +11,7 @@ import unittest
 from pathlib import Path
 
 DRIVER = Path(__file__).with_name('translate_tree.py')
+EDITS_24B119 = Path(__file__).with_name('edits_24B119.json')
 SPEC = importlib.util.spec_from_file_location('translate_tree', DRIVER)
 translate_tree = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(translate_tree)
@@ -18,12 +21,33 @@ FAKE_TOOL = """#!{python}
 import hashlib, json, sys
 from pathlib import Path
 with open(sys.argv[0] + '.calls', 'a') as calls:
-    calls.write(' '.join(sys.argv[1:2]) + '\\n')
+    calls.write(' '.join(sys.argv[1:]) + '\\n')
 if sys.argv[1] == 'pretranslate':
-    report, src, out = sys.argv[3], Path(sys.argv[4]), Path(sys.argv[5])
-    data = src.read_bytes()
-    out.write_bytes(b'translated {salt} ' + data)
-    slice = dict(status='translated', cdhash_in=hashlib.sha1(data).hexdigest(),
+    args = sys.argv[2:]
+    report, edits = None, []
+    i = 0
+    while i < len(args) and args[i].startswith('-'):
+        if args[i] == '-r':
+            report = args[i + 1]
+            i += 2
+        elif args[i] == '-e':
+            edits.append(args[i + 1])
+            i += 2
+        else:
+            sys.exit(2)
+    src, out = Path(args[i]), Path(args[i + 1])
+    raw = src.read_bytes()
+    buf = bytearray(raw)
+    for spec in edits:
+        off_s, stock_h, at_s, patched_h = spec.split(':')
+        off, at = int(off_s, 0), int(at_s, 0)
+        stock, patched = bytes.fromhex(stock_h), bytes.fromhex(patched_h)
+        if bytes(buf[off : off + len(stock)]) != stock:
+            sys.exit(1)
+        if patched:
+            buf[off + at : off + at + len(patched)] = patched
+    out.write_bytes(b'translated {salt} ' + bytes(buf))
+    slice = dict(status='translated', cdhash_in=hashlib.sha1(raw).hexdigest(),
                  cdhash_out=hashlib.sha1(out.read_bytes()).hexdigest())
     Path(report).write_text(json.dumps(dict(slices=[slice])))
 """
@@ -104,7 +128,7 @@ class WarmThenColdTest(unittest.TestCase):
 
     def calls(self, tool: Path) -> list[str]:
         path = Path(str(tool) + '.calls')
-        return path.read_text().split() if path.exists() else []
+        return path.read_text().splitlines() if path.exists() else []
 
     def test_a_warm_memo_gives_the_cold_tree_without_translating(self):
         warm = self.run_driver('warm', self.tool)
@@ -136,6 +160,145 @@ class WarmThenColdTest(unittest.TestCase):
         other = self.tool_with_salt('two')
         self.run_driver('cold', other)
         self.assertEqual(len(self.calls(other)), 2)
+
+    def test_edits_patch_synthetic_file_preserve_original_cdhash_and_bust_memo(self):
+        stock = b'\x13\x00\x80\xd2\x55\x7e\x91\xd2'
+        patched = b'\x15\x20\x80\xd2\x15\x04\xa2\xf2'
+        (self.volume / 'usr/bin/a').write_bytes(MACHO + stock)
+        edits_file = self.dir / 'edits.json'
+        edits_file.write_text(
+            json.dumps(
+                {'files': {'/usr/bin/a': [{'fileoff': '0x4', 'stock': stock.hex(), 'at': 0, 'patched': patched.hex()}]}}
+            )
+        )
+        raw_cdhash = hashlib.sha1(MACHO + stock).hexdigest()
+
+        base_out = self.run_driver('plain', self.tool)
+        self.assertEqual(len(self.calls(self.tool)), 2)
+
+        edited_out = self.dir / 'edited'
+        cmd = [
+            sys.executable,
+            str(DRIVER),
+            '--role',
+            'os',
+            '--tool',
+            str(self.tool),
+            '--volume',
+            str(self.volume),
+            '--out',
+            str(edited_out),
+            '--memo',
+            str(self.memo),
+            '--edits',
+            str(edits_file),
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        self.assertEqual(len(self.calls(self.tool)), 3)
+        self.assertIn(patched, (edited_out / 'files/usr/bin/a').read_bytes())
+        self.assertNotEqual((base_out / 'files/usr/bin/a').read_bytes(), (edited_out / 'files/usr/bin/a').read_bytes())
+        pairs = dict(line.split() for line in (edited_out / 'os.cdhash-pairs').read_text().splitlines())
+        self.assertIn(raw_cdhash, pairs)
+
+        rerun_out = self.dir / 'edited-rerun'
+        subprocess.run(
+            [*cmd[:-4], '--out', str(rerun_out), '--memo', str(self.memo), '--edits', str(edits_file)],
+            check=True,
+            capture_output=True,
+        )
+        self.assertEqual(len(self.calls(self.tool)), 3)
+
+        bad_edits = self.dir / 'missing.json'
+        bad_edits.write_text(
+            json.dumps(
+                {'files': {'/usr/bin/missing': [{'fileoff': '0x4', 'stock': stock.hex(), 'at': 0, 'patched': ''}]}}
+            )
+        )
+        bad = subprocess.run([*cmd[:-2], '--edits', str(bad_edits)], capture_output=True, text=True)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn('/usr/bin/missing', bad.stderr)
+
+    def test_load_edits_rejects_whitespace_hex_negative_offset_and_canonicalizes_fileoff(self):
+        canon = self.dir / 'canon.json'
+        canon.write_text(
+            json.dumps({'files': {'/usr/bin/a': [{'fileoff': 4, 'stock': '130080D2', 'at': 0, 'patched': ''}]}})
+        )
+        hex_form = self.dir / 'hex.json'
+        hex_form.write_text(
+            json.dumps({'files': {'/usr/bin/a': [{'fileoff': '0x04', 'stock': '130080d2', 'at': 0, 'patched': ''}]}})
+        )
+        e1 = translate_tree.load_edits(canon)
+        e2 = translate_tree.load_edits(hex_form)
+        self.assertEqual(e1, e2)
+        self.assertEqual(e1['/usr/bin/a'][0]['fileoff'], '0x4')
+
+        for bad_entry in (
+            {'fileoff': '0x4', 'stock': '13 00 80 d2', 'at': 0, 'patched': ''},
+            {'fileoff': '0x4', 'stock': '130080d2', 'at': 0, 'patched': '1f 20 03 d5'},
+            {'fileoff': '-4', 'stock': '130080d2', 'at': 0, 'patched': ''},
+        ):
+            p = self.dir / 'bad.json'
+            p.write_text(json.dumps({'files': {'/usr/bin/a': [bad_entry]}}))
+            with self.assertRaises(ValueError):
+                translate_tree.load_edits(p)
+
+
+class Locationd24B119EditTest(unittest.TestCase):
+    @staticmethod
+    def _run_case(entries: list[dict], patched: bool) -> tuple[int, int, int]:
+        text: dict[int, int] = {}
+        for entry in entries:
+            base = int(entry['fileoff'], 0)
+            buf = bytearray(bytes.fromhex(entry['stock']))
+            if patched and entry['patched']:
+                at = int(entry['at'])
+                rep = bytes.fromhex(entry['patched'])
+                buf[at : at + len(rep)] = rep
+            for off in range(0, len(buf), 4):
+                text[base + off] = struct.unpack_from('<I', buf, off)[0]
+        pc, tail = 0x7F0A3C, 0x7F0F1C
+        x19, x21 = 0, 0
+        for _ in range(16):
+            if pc == tail:
+                break
+            insn = text[pc]
+            rd, hw, imm16 = insn & 0x1F, (insn >> 21) & 3, (insn >> 5) & 0xFFFF
+            if (insn & 0x7F800000) == 0x52800000 and rd in (19, 21):
+                if rd == 19:
+                    x19 = imm16 << (16 * hw)
+                else:
+                    x21 = imm16 << (16 * hw)
+            elif (insn & 0x7F800000) == 0x72800000 and rd in (19, 21):
+                if rd == 19:
+                    x19 = (x19 & ~(0xFFFF << (16 * hw))) | (imm16 << (16 * hw))
+                else:
+                    x21 = (x21 & ~(0xFFFF << (16 * hw))) | (imm16 << (16 * hw))
+            elif (insn & 0xFC000000) == 0x14000000:
+                imm26 = insn & 0x3FFFFFF
+                if imm26 & 0x2000000:
+                    imm26 -= 0x4000000
+                pc += imm26 * 4
+                continue
+            else:
+                raise AssertionError(f'unexpected instruction {insn:#x} at {pc:#x}')
+            pc += 4
+        return pc, x19, x21
+
+    def test_24b119_locationd_edit_clears_exact_coprocessor_bits(self):
+        edits = translate_tree.load_edits(EDITS_24B119)
+        self.assertIn('/usr/libexec/locationd', edits)
+        entries = edits['/usr/libexec/locationd']
+        end_stock, x19_stock, x21_stock = self._run_case(entries, patched=False)
+        self.assertEqual((end_stock, x19_stock, x21_stock), (0x7F0F1C, 0, 0x0000001314618BF2))
+
+        end_patched, x19_patched, x21_patched = self._run_case(entries, patched=True)
+        self.assertEqual((end_patched, x19_patched), (0x7F0F1C, 0))
+        self.assertEqual(x21_patched & ~0x0000001314618BF2, 0)
+        cleared = 0
+        for bit in (1, 4, 5, 6, 7, 9, 11, 15, 16, 22, 26, 33, 36):
+            cleared |= 1 << bit
+        self.assertEqual(0x0000001314618BF2 & ~x21_patched, cleared)
+        self.assertEqual(x21_patched, (1 << 8) | (1 << 21) | (1 << 28) | (1 << 32))
 
 
 if __name__ == '__main__':

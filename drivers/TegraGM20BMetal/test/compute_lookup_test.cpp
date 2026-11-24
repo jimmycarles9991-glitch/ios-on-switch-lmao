@@ -593,3 +593,76 @@ TEST(GM20BComputeLookup, AFailedJobFailsItsDispatchAndTheNextDispatchStartsAnoth
     EXPECT_EQ(cache.request(key, start), made);
     EXPECT_EQ(starts, 2u);
 }
+
+TEST(GM20BComputeLookup, LateRunOwnerWakesWaitObserverForOwnedWait)
+{
+    using Job = gm20b::ComputeKernelJob<int>;
+    auto job = std::make_shared<Job>();
+    int value = 11;
+
+    struct State {
+        gm20b::ChangeWord changed;
+        std::atomic<uint32_t> waitGen{1};
+    };
+
+    auto shared = std::make_shared<State>();
+    ASSERT_EQ(job->observe([shared] {
+        shared->changed.changed();
+    }),
+              Job::State::Pending);
+    job->observeWait([shared] {
+        shared->waitGen.fetch_add(1, std::memory_order_acq_rel);
+        shared->changed.changed();
+    });
+
+    gm20b::ChangeWord gate;
+    std::atomic<bool> waiterParked{false}, wokeForOwner{false}, releaseRun{false}, ownedWaitReturnedTrue{false};
+    std::thread waiter([&] {
+        uint32_t triedGen = 0;
+        while (job->state() == Job::State::Pending) {
+            const uint32_t gen = shared->waitGen.load(std::memory_order_acquire);
+            if (gen != triedGen) {
+                if (gen > 1) {
+                    wokeForOwner.store(true, std::memory_order_release);
+                    gate.changed();
+                }
+                if (job->waitPending())
+                    ownedWaitReturnedTrue.store(true, std::memory_order_release);
+                else
+                    triedGen = gen;
+                continue;
+            }
+            waiterParked.store(true, std::memory_order_release);
+            gate.changed();
+            shared->changed.waitOnce([&] {
+                return job->state() != Job::State::Pending ||
+                       shared->waitGen.load(std::memory_order_acquire) != triedGen;
+            });
+        }
+    });
+
+    gate.waitFor([&] {
+        return waiterParked.load(std::memory_order_acquire);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    std::thread worker([&] {
+        Job::Run run{job};
+        gate.waitFor([&] {
+            return releaseRun.load(std::memory_order_acquire);
+        });
+        run.result = {&value, false};
+    });
+
+    gate.waitFor([&] {
+        return wokeForOwner.load(std::memory_order_acquire);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    releaseRun.store(true, std::memory_order_release);
+    gate.changed();
+
+    worker.join();
+    waiter.join();
+    EXPECT_TRUE(ownedWaitReturnedTrue.load(std::memory_order_acquire));
+    EXPECT_EQ(job->value(), &value);
+}

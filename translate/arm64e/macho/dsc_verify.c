@@ -1,4 +1,5 @@
 #include "dsc.h"
+#include "stub_split.h"
 
 #include "../a64x/a64x.h"
 
@@ -99,6 +100,11 @@ static bool freed_at(const struct cache *c, uint64_t va, uint32_t *w)
     uint64_t k = (va - m->addr) / 4;
     *w = rd32(m->out + 4 * k);
     return m->freed[k >> 3] & (1u << (k & 7));
+}
+
+static bool stub_word(const void *ctx, uint64_t va, uint32_t *w)
+{
+    return freed_at(ctx, va, w);
 }
 
 static bool code_of_plan(void *ctx, uint64_t va)
@@ -266,7 +272,7 @@ static int check_code(const struct cache *c, const struct xmap *m, struct a64x_d
             v->stub_words++;
             v->entered_stub_words += (m->entered[k >> 3] >> (k & 7)) & 1;
         } else if (is_stub_class(cw, was)) {
-            if (follow(c, va, now)) {
+            if (a64x_bl_site_ok(was, now) && follow(c, va, now) && a64x_stub_ordered(was, va, now, stub_word, c)) {
                 v->sites_ok++;
                 v->sites[cw]++;
             } else {

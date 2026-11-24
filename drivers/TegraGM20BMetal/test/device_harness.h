@@ -73,6 +73,12 @@ struct DeviceHarness {
         return v.holds(va, bytes);
     }
 
+    static bool lockFree(Device &d)
+    {
+        std::unique_lock<gm20b::Mutex> l(d.lock_, std::try_to_lock);
+        return l.owns_lock();
+    }
+
     // A lease's hold on an arena (alias.cpp: a CPU access, or a placement made aliasable)
     static void holdArena(Device &d, uint32_t arena, bool hold)
     {

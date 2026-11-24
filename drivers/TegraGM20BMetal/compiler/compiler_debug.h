@@ -4,11 +4,16 @@
 #pragma once
 #include <os/log.h>
 #include <cstdint>
+#include <string>
 
 namespace switch_compiler {
 
 #if SWITCH_DEBUG
 const char *resultName(int32_t result);
+// A job's line: its result, where its wait went (the kernel's hand-over at `takenNs`, its prepare to `preparedNs`, then
+// the pool) and where its compile went (compiler_times.h, this worker's), for pid `pid`'s request of `key`
+void logJob(os_log_t log, int32_t result, uint64_t takenNs, uint64_t preparedNs, unsigned workerClass, int32_t pid,
+            const std::string &key);
 // What jetsam holds against the plist's JetsamProperties: the footprint now and its peak this process, and the heap's part
 void logFootprint(os_log_t log, const char *when);
 // HW Test gpu.compile.first_draw: the compiler dies as the memory limit kills one, holding the next request of the pid

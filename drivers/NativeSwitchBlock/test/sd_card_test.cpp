@@ -1,6 +1,5 @@
-// Host test of drivers/NativeSwitchBlock/SwitchSdCard.h: the SD card register decoders and command encodings the SD
-// driver uses for its identification lines, CMD23 framing and the command queue, bit for bit. What the driver does with
-// them is guarded by sd_card_source_test.cpp.
+// Host test of drivers/NativeSwitchBlock/SwitchSdCard.h: the SD card register decoders, CMD23 framing, and cache-off
+// sequence used by NativeSwitchBlock.cpp. What the driver does with them is guarded by sd_card_source_test.cpp.
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -215,29 +214,28 @@ static void extension()
     SwitchSdGeneralInfo g = switchSdParseGeneralInfo(info.data(), 512);
     REQUIRE(!g.why && g.extensions == 2 && g.power.found && g.power.fno == 1 && g.power.address == 0 && g.perf.found &&
             g.perf.fno == 2 && g.perf.address == 3 * 512);
-    REQUIRE(switchSdCqControlAddress(g.perf) == 3 * 512 + 262);
-    // A performance set not at the top of its page: byte 262 would be on the next page, so no CQ address.
+    REQUIRE(switchSdPerfFits(g.perf));
+    // A performance set not at the top of its page: byte 262 would be on the next page, so it does not fit.
     SwitchSdExtFunction shifted = g.perf;
     shifted.address = 3 * 512 + 250;
-    REQUIRE(!switchSdCqControlAddress(shifted));
+    REQUIRE(!switchSdPerfFits(shifted));
+    REQUIRE(!switchSdPerfWriteAddress(shifted, kSdPerfCacheControl, 0));
     shifted.address = 3 * 512 + 249;
-    REQUIRE(switchSdCqControlAddress(shifted) == 3 * 512 + 511);
-    REQUIRE(!switchSdCqControlAddress(SwitchSdExtFunction{}));
-    // r16-sdcq: the host bytes the driver may write, and only these values: Cache Enable 00h/01h, Flush Cache 01h, the
-    // CQ control byte 00h/03h; the CMD48/CMD49 argument of each (MIO 0, FNO 2, page 3, LEN 0: one byte).
+    REQUIRE(switchSdPerfFits(shifted));
+    REQUIRE(switchSdPerfWriteAddress(shifted, kSdPerfCacheControl, 0) == 3 * 512 + 509);
+    REQUIRE(!switchSdPerfFits(SwitchSdExtFunction{}));
+    // Only flushing a cache found enabled (byte 261 = 01h) and disabling it (byte 260 = 00h) are permitted.
     REQUIRE(switchSdPerfWriteAddress(g.perf, kSdPerfCacheControl, 0) == 3 * 512 + 260);
-    REQUIRE(switchSdPerfWriteAddress(g.perf, kSdPerfCacheControl, kSdCacheEnable) == 3 * 512 + 260);
     REQUIRE(switchSdPerfWriteAddress(g.perf, kSdPerfFlushControl, kSdFlushCache) == 3 * 512 + 261);
-    REQUIRE(switchSdPerfWriteAddress(g.perf, kSdPerfCqControl, 0) == 3 * 512 + 262);
-    REQUIRE(switchSdPerfWriteAddress(g.perf, kSdPerfCqControl, kSdCqEnable | kSdCqSequential) == 3 * 512 + 262);
-    REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfFlushControl, 0));         // the card clears it, never the host
-    REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfCqControl, kSdCqEnable));  // voluntary mode: never
+    REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfCacheControl, kSdCacheEnable));  // never enables cache
+    REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfFlushControl, 0));               // the card clears it, never host
+    REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfCqControl, 0));                  // command queue is absent
+    REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfCqControl, 3));
     REQUIRE(!switchSdPerfWriteAddress(g.perf, kSdPerfCacheControl, 2));
     REQUIRE(!switchSdPerfWriteAddress(g.perf, 257, 1) && !switchSdPerfWriteAddress(g.perf, 258, 0));
-    REQUIRE(!switchSdPerfWriteAddress(shifted, kSdPerfCacheControl, 0) || switchSdCqControlAddress(shifted));
-    REQUIRE(!switchSdPerfWriteAddress(SwitchSdExtFunction{}, kSdPerfCqControl, 0));
+    REQUIRE(!switchSdPerfWriteAddress(SwitchSdExtFunction{}, kSdPerfCacheControl, 0));
     REQUIRE(switchSdExtArgument(2, 3 * 512 + 261, 1) == (2u << 27 | (3u * 512 + 261) << 9));
-    REQUIRE(!(switchSdExtArgument(2, 3 * 512 + 262, 1) & (1u << 31 | 1u << 26)));  // MIO 0 (memory), MW 0
+    REQUIRE(!(switchSdExtArgument(2, 3 * 512 + 260, 2) & (1u << 31 | 1u << 26)));  // MIO 0 (memory), MW 0
     // Layouts it does not trust.
     REQUIRE(switchSdParseGeneralInfo(generalInfo(1).data(), 512).why);
     info = generalInfo();
@@ -260,10 +258,26 @@ static void extension()
     g = switchSdParseGeneralInfo(info.data(), 512);
     REQUIRE(!g.why && !g.power.found && !g.perf.found);
 
-    // Power: off notification at byte 1 bit 4.
+    // Power: off notification at byte 1 bit 4; only Power Off Notification (byte 2 = 01h) may be written.
     uint8_t power[2] = {0x10, 0x30};
     const SwitchSdPower p = switchSdParsePower(power);
     REQUIRE(p.revision == 0 && p.offNotification && p.sustenance && !p.powerDown);
+    const SwitchSdExtFunction powerFunc{true, 1, 0};
+    REQUIRE(switchSdPowerFits(powerFunc));
+    REQUIRE(switchSdPowerWriteAddress(powerFunc, kSdPowerSetting, kSdPowerOffNotify) == kSdPowerSetting);
+    REQUIRE(!switchSdPowerWriteAddress(powerFunc, kSdPowerSetting, 0));
+    REQUIRE(!switchSdPowerWriteAddress(powerFunc, kSdPowerSetting, 2));
+    REQUIRE(!switchSdPowerWriteAddress(powerFunc, kSdPowerSetting, 4));
+    REQUIRE(!switchSdPowerWriteAddress(powerFunc, kSdPowerStatus, kSdPowerOffNotify));
+    REQUIRE(!switchSdPowerWriteAddress(powerFunc, kSdPowerRevision, kSdPowerOffNotify));
+    SwitchSdExtFunction powerShifted = powerFunc;
+    powerShifted.address = 510;
+    REQUIRE(!switchSdPowerFits(powerShifted));
+    REQUIRE(!switchSdPowerWriteAddress(powerShifted, kSdPowerSetting, kSdPowerOffNotify));
+    powerShifted.address = 509;
+    REQUIRE(switchSdPowerFits(powerShifted));
+    REQUIRE(switchSdPowerWriteAddress(powerShifted, kSdPowerSetting, kSdPowerOffNotify) == 511);
+    REQUIRE(!switchSdPowerFits(SwitchSdExtFunction{}));
 
     // Performance register set (Table 5-30).
     std::vector<uint8_t> perf(512, 0);
@@ -272,7 +286,7 @@ static void extension()
     perf[4] = 1;
     perf[6] = 0x1f;
     perf[260] = 1;
-    perf[262] = kSdCqEnable | kSdCqSequential;
+    perf[262] = 0x03;
     SwitchSdPerf f = switchSdParsePerf(perf.data());
     REQUIRE(f.fxEvent && f.cardMaintenance && f.hostMaintenance && f.cache && f.cqDepth == 32 && f.cacheEnable == 1 &&
             f.cqControl == 3 && !f.taskErrors);
@@ -317,14 +331,6 @@ static void framing()
     REQUIRE(f.transfer == 0x2b && f.command == 0x193a && f.argument2 == 2048);
     f = switchSdBlockFrame(1, true, true);
     REQUIRE(f.transfer == 0x01 && f.command == 0x183a && f.argument2 == 0);
-    // r14-sdcq: a command-queue task's CMD46: a read, DMA, the block count, no auto command, never a write.
-    for (uint32_t sectors = 1; sectors <= 512; ++sectors) {
-        const SwitchSdFrame t = switchSdTaskFrame(sectors);
-        REQUIRE(t.command == 0x2e3a && t.argument2 == 0 && !t.autoStop);
-        REQUIRE(!(t.transfer & (kSdTransferAutoCmd12 | kSdTransferAutoCmd23)) && (t.transfer & kSdTransferRead) &&
-                (t.transfer & kSdTransferDma));
-        REQUIRE(t.transfer == (sectors > 1 ? 0x33 : 0x11));
-    }
 }
 
 TEST(SdCard, RegisterFields)
@@ -345,4 +351,436 @@ TEST(SdCard, ExtensionRegisters)
 TEST(SdCard, BlockFraming)
 {
     framing();
+}
+
+// The data path from the registers boot 2 of image d13 logged: caps 0x376cd08c, HOST_CONTROL2 after the switch to SDR104
+// (v4 64-bit addressing, tuned, 1.8 V, SDR104), SCR 0245848700000000 (CMD20, CMD23, CMD48). The emulator lists the same
+// capabilities and has no SCR.
+TEST(SdCard, DataPathFromRegisters)
+{
+    const uint8_t scrBytes[8] = {0x02, 0x45, 0x84, 0x87, 0, 0, 0, 0};
+    const SwitchSdScr scr = switchSdParseScr(scrBytes);
+    const SwitchSdPath device = switchSdPath(0x376cd08cu, 0x308b, &scr);
+    EXPECT_TRUE(device.adma);
+    EXPECT_TRUE(device.autoCmd23);
+    const SwitchSdPath emulator = switchSdPath(0x376cd08cu, 0x3000, nullptr);
+    EXPECT_TRUE(emulator.adma);
+    EXPECT_FALSE(emulator.autoCmd23);
+    // No ADMA2 listed, or v4 64-bit addressing not kept: SDMA through the bounce buffer, and no CMD23 framing either.
+    EXPECT_FALSE(switchSdPath(0x376cd08cu & ~(1u << 19), 0x308b, &scr).adma);
+    const SwitchSdPath noV4 = switchSdPath(0x376cd08cu, 0x008b, &scr);
+    EXPECT_FALSE(noV4.adma);
+    EXPECT_FALSE(noV4.autoCmd23);
+    EXPECT_FALSE(switchSdPath(0x376cd08cu, 0x108b, &scr).adma);
+    // A card whose SCR lists no CMD23.
+    const uint8_t plain[8] = {0x02, 0x45, 0x84, 0x80, 0, 0, 0, 0};
+    const SwitchSdScr old = switchSdParseScr(plain);
+    EXPECT_FALSE(switchSdPath(0x376cd08cu, 0x308b, &old).autoCmd23);
+}
+
+TEST(SdCard, DisableFoundCache)
+{
+    struct Op {
+        bool write;
+        uint8_t fno;
+        uint32_t address;
+        uint32_t length;
+        uint8_t value;
+    };
+
+    struct FakeBus {
+        uint32_t base = 3 * 512;
+        uint8_t cacheByte = kSdCacheEnable;
+        uint8_t flushByte = 0;
+        bool flushedWhileEnabled = false;
+        bool stickyCache = false;
+        bool stickyFlush = false;
+        int failAt = 0;
+        int failError = 0;
+        uint32_t failR1 = 0;
+        std::vector<Op> ops;
+
+        int writeByte(uint8_t fno, uint32_t address, uint8_t value, uint32_t *r1)
+        {
+            ops.push_back({true, fno, address, 1, value});
+            *r1 = 0;
+            if (static_cast<int>(ops.size()) == failAt) {
+                *r1 = failR1;
+                return failError;
+            }
+            if (address == base + kSdPerfFlushControl) {
+                if ((value & kSdFlushCache) && (cacheByte & kSdCacheEnable))
+                    flushedWhileEnabled = true;
+                flushByte = stickyFlush ? kSdFlushCache : 0;
+            } else if (address == base + kSdPerfCacheControl) {
+                cacheByte = stickyCache ? kSdCacheEnable : value;
+            }
+            return 0;
+        }
+
+        int readBytes(uint8_t fno, uint32_t address, uint32_t length, uint8_t *out, uint32_t *r1)
+        {
+            ops.push_back({false, fno, address, length, 0});
+            *r1 = 0;
+            if (static_cast<int>(ops.size()) == failAt) {
+                *r1 = failR1;
+                return failError;
+            }
+            if (address == base + kSdPerfCacheControl && length == 2) {
+                out[0] = cacheByte;
+                out[1] = flushByte;
+            }
+            return 0;
+        }
+    };
+
+    const SwitchSdExtFunction perfFunc{true, 2, 3 * 512};
+    SwitchSdPerf perf = {};
+
+    // Zero commands when the performance set was not read or Cache Enable already reads 0.
+    {
+        FakeBus bus;
+        perf.cacheEnable = kSdCacheEnable;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(false, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kSkipped);
+        EXPECT_TRUE(bus.ops.empty());
+    }
+    {
+        FakeBus bus;
+        perf.cacheEnable = 0;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kSkipped);
+        EXPECT_TRUE(bus.ops.empty());
+    }
+    {
+        FakeBus bus;
+        perf.cacheEnable = 0x02;  // bit 0 is clear
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kSkipped);
+        EXPECT_TRUE(bus.ops.empty());
+    }
+
+    // Cache found on: flush (261 = 01h) while cache is still enabled, disable (260 = 00h), single read-back of 260-261.
+    perf.cacheEnable = kSdCacheEnable;
+    {
+        FakeBus bus;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kDone);
+        EXPECT_TRUE(bus.flushedWhileEnabled);
+        ASSERT_EQ(bus.ops.size(), 3u);
+        EXPECT_TRUE(bus.ops[0].write);
+        EXPECT_EQ(bus.ops[0].fno, 2u);
+        EXPECT_EQ(bus.ops[0].address, 3u * 512 + kSdPerfFlushControl);
+        EXPECT_EQ(bus.ops[0].value, kSdFlushCache);
+        EXPECT_TRUE(bus.ops[1].write);
+        EXPECT_EQ(bus.ops[1].fno, 2u);
+        EXPECT_EQ(bus.ops[1].address, 3u * 512 + kSdPerfCacheControl);
+        EXPECT_EQ(bus.ops[1].value, 0u);
+        EXPECT_FALSE(bus.ops[2].write);
+        EXPECT_EQ(bus.ops[2].fno, 2u);
+        EXPECT_EQ(bus.ops[2].address, 3u * 512 + kSdPerfCacheControl);
+        EXPECT_EQ(bus.ops[2].length, 2u);
+    }
+
+    // Invalid or page-crossing performance register set: zero commands, fails.
+    {
+        FakeBus bus;
+        SwitchSdExtFunction crosses = perfFunc;
+        crosses.address = 3 * 512 + 250;
+        EXPECT_EQ(switchSdDisableFoundCache(true, crosses, perf, bus).step, SwitchSdCacheOffStep::kBadAddress);
+        EXPECT_TRUE(bus.ops.empty());
+        EXPECT_EQ(switchSdDisableFoundCache(true, SwitchSdExtFunction{}, perf, bus).step,
+                  SwitchSdCacheOffStep::kBadAddress);
+        EXPECT_TRUE(bus.ops.empty());
+    }
+
+    // Flush failure stops immediately (bus error or R1 error bit); no disable and no retry.
+    {
+        FakeBus bus;
+        bus.failAt = 1;
+        bus.failError = 6;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kFlushFailed);
+        EXPECT_EQ(r.error, 6);
+        EXPECT_EQ(bus.ops.size(), 1u);
+    }
+    {
+        FakeBus bus;
+        bus.failAt = 1;
+        bus.failR1 = 1u << 22;  // ILLEGAL_COMMAND
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kFlushFailed);
+        EXPECT_EQ(r.r1, 1u << 22);
+        EXPECT_EQ(bus.ops.size(), 1u);
+    }
+
+    // Disable failure stops after two commands; no read-back and no retry.
+    {
+        FakeBus bus;
+        bus.failAt = 2;
+        bus.failError = 3;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kDisableFailed);
+        EXPECT_EQ(r.error, 3);
+        EXPECT_EQ(bus.ops.size(), 2u);
+    }
+    {
+        FakeBus bus;
+        bus.failAt = 2;
+        bus.failR1 = 1u << 19;  // ERROR
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kDisableFailed);
+        EXPECT_EQ(r.r1, 1u << 19);
+        EXPECT_EQ(bus.ops.size(), 2u);
+    }
+
+    // Read-back failure stops after one CMD48 (bus error or R1 error bit).
+    {
+        FakeBus bus;
+        bus.failAt = 3;
+        bus.failError = 2;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kReadBackFailed);
+        EXPECT_EQ(r.error, 2);
+        EXPECT_EQ(bus.ops.size(), 3u);
+    }
+    {
+        FakeBus bus;
+        bus.failAt = 3;
+        bus.failR1 = 1u << 19;  // ERROR
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kReadBackFailed);
+        EXPECT_EQ(r.r1, 1u << 19);
+        EXPECT_EQ(bus.ops.size(), 3u);
+    }
+
+    // Read-back still shows Cache Enable bit 0 or Flush Cache bit 0 set: fails after one read-back, no retry loop.
+    {
+        FakeBus bus;
+        bus.stickyCache = true;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kStillOn);
+        EXPECT_EQ(r.cacheEnable, kSdCacheEnable);
+        EXPECT_EQ(r.flushCache, 0u);
+        EXPECT_EQ(bus.ops.size(), 3u);
+    }
+    {
+        FakeBus bus;
+        bus.stickyFlush = true;
+        const SwitchSdCacheOff r = switchSdDisableFoundCache(true, perfFunc, perf, bus);
+        EXPECT_EQ(r.step, SwitchSdCacheOffStep::kStillOn);
+        EXPECT_EQ(r.cacheEnable, 0u);
+        EXPECT_EQ(r.flushCache, kSdFlushCache);
+        EXPECT_EQ(bus.ops.size(), 3u);
+    }
+}
+
+TEST(SdCard, PowerOffNotification)
+{
+    struct Op {
+        bool write;
+        uint8_t fno;
+        uint32_t address;
+        uint32_t length;
+        uint8_t value;
+    };
+
+    struct FakePowerBus {
+        uint32_t base = 0;
+        uint8_t statusByte = kSdPowerOffSupport;
+        uint32_t readyAfterSleeps = 0;
+        uint32_t sleeps = 0;
+        uint64_t clockNs = 1000000000ULL;
+        int failAt = 0;
+        int failError = 0;
+        uint32_t failR1 = 0;
+        std::vector<Op> ops;
+
+        int writeByte(uint8_t fno, uint32_t address, uint8_t value, uint32_t *r1)
+        {
+            ops.push_back({true, fno, address, 1, value});
+            *r1 = 0;
+            if (static_cast<int>(ops.size()) == failAt) {
+                *r1 = failR1;
+                return failError;
+            }
+            if (address == base + kSdPowerSetting && (value & kSdPowerOffNotify) && readyAfterSleeps == 0)
+                statusByte |= kSdPowerOffReady;
+            return 0;
+        }
+
+        int readBytes(uint8_t fno, uint32_t address, uint32_t length, uint8_t *out, uint32_t *r1)
+        {
+            ops.push_back({false, fno, address, length, 0});
+            *r1 = 0;
+            if (static_cast<int>(ops.size()) == failAt) {
+                *r1 = failR1;
+                return failError;
+            }
+            if (address == base + kSdPowerStatus && length == 1)
+                out[0] = statusByte;
+            return 0;
+        }
+
+        uint64_t nowNs() const
+        {
+            return clockNs;
+        }
+
+        void sleepMs(uint32_t ms)
+        {
+            ++sleeps;
+            clockNs += static_cast<uint64_t>(ms) * 1000000ULL;
+            if (sleeps >= readyAfterSleeps)
+                statusByte |= kSdPowerOffReady;
+        }
+    };
+
+    const SwitchSdExtFunction powerFunc{true, 1, 0};
+    SwitchSdPower power = {};
+
+    // Zero commands when the Power Management extension was not read or POFS=0.
+    {
+        FakePowerBus bus;
+        power.offNotification = true;
+        EXPECT_EQ(switchSdPowerOffNotify(false, powerFunc, power, bus).step, SwitchSdPowerOffStep::kSkipped);
+        EXPECT_TRUE(bus.ops.empty());
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+    {
+        FakePowerBus bus;
+        power.offNotification = false;
+        EXPECT_EQ(switchSdPowerOffNotify(true, powerFunc, power, bus).step, SwitchSdPowerOffStep::kSkipped);
+        EXPECT_TRUE(bus.ops.empty());
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+
+    // Invalid or page-crossing Power Management register set: zero commands.
+    power.offNotification = true;
+    {
+        FakePowerBus bus;
+        SwitchSdExtFunction crosses = powerFunc;
+        crosses.address = 510;
+        EXPECT_EQ(switchSdPowerOffNotify(true, crosses, power, bus).step, SwitchSdPowerOffStep::kBadAddress);
+        EXPECT_TRUE(bus.ops.empty());
+        EXPECT_EQ(switchSdPowerOffNotify(true, SwitchSdExtFunction{}, power, bus).step,
+                  SwitchSdPowerOffStep::kBadAddress);
+        EXPECT_TRUE(bus.ops.empty());
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+
+    // Fast path at @0x00000 (SanDisk SR01T layout) and at a non-zero page/offset: POFR=1 on 1st CMD48 with 0 sleeps.
+    {
+        FakePowerBus bus;
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kDone);
+        EXPECT_EQ(r.status, kSdPowerOffSupport | kSdPowerOffReady);
+        EXPECT_EQ(bus.sleeps, 0u);
+        ASSERT_EQ(bus.ops.size(), 2u);
+        EXPECT_TRUE(bus.ops[0].write);
+        EXPECT_EQ(bus.ops[0].fno, 1u);
+        EXPECT_EQ(bus.ops[0].address, kSdPowerSetting);
+        EXPECT_EQ(bus.ops[0].value, kSdPowerOffNotify);
+        EXPECT_FALSE(bus.ops[1].write);
+        EXPECT_EQ(bus.ops[1].fno, 1u);
+        EXPECT_EQ(bus.ops[1].address, kSdPowerStatus);
+        EXPECT_EQ(bus.ops[1].length, 1u);
+    }
+    {
+        const SwitchSdExtFunction shifted{true, 1, 2 * 512 + 509};
+        FakePowerBus bus;
+        bus.base = shifted.address;
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, shifted, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kDone);
+        EXPECT_EQ(bus.sleeps, 0u);
+        ASSERT_EQ(bus.ops.size(), 2u);
+        EXPECT_EQ(bus.ops[0].address, 2u * 512 + 511);
+        EXPECT_EQ(bus.ops[1].address, 2u * 512 + 510);
+    }
+
+    // Delayed POFR (SD 6.00 5.8.1.3 post-busy window): sleeps and re-reads byte 1 until POFR=1.
+    {
+        FakePowerBus bus;
+        bus.readyAfterSleeps = 3;
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kDone);
+        EXPECT_EQ(r.status, kSdPowerOffSupport | kSdPowerOffReady);
+        EXPECT_EQ(bus.sleeps, 3u);
+        ASSERT_EQ(bus.ops.size(), 5u);
+        EXPECT_TRUE(bus.ops[0].write);
+        for (size_t i = 1; i < bus.ops.size(); ++i) {
+            EXPECT_FALSE(bus.ops[i].write);
+            EXPECT_EQ(bus.ops[i].fno, 1u);
+            EXPECT_EQ(bus.ops[i].address, kSdPowerStatus);
+            EXPECT_EQ(bus.ops[i].length, 1u);
+        }
+    }
+
+    // POFR stays 0 until the post-busy deadline expires: sleeps up to the limit, performs one final read, returns kNotReady.
+    {
+        FakePowerBus bus;
+        bus.readyAfterSleeps = UINT32_MAX;
+        const uint64_t expectedSleeps =
+            kSdPowerOffReadyLimitNs / (static_cast<uint64_t>(kSdPowerOffSleepMs) * 1000000ULL);
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kNotReady);
+        EXPECT_EQ(r.status, kSdPowerOffSupport);
+        EXPECT_EQ(bus.sleeps, expectedSleeps);
+        EXPECT_EQ(bus.ops.size(), 2u + expectedSleeps);
+    }
+
+    // CMD49 failure (bus or R1 error) stops after one command; no CMD48 and no sleep.
+    {
+        FakePowerBus bus;
+        bus.failAt = 1;
+        bus.failError = 6;
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kNotifyFailed);
+        EXPECT_EQ(r.error, 6);
+        EXPECT_EQ(bus.ops.size(), 1u);
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+    {
+        FakePowerBus bus;
+        bus.failAt = 1;
+        bus.failR1 = 1u << 22;  // ILLEGAL_COMMAND
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kNotifyFailed);
+        EXPECT_EQ(r.r1, 1u << 22);
+        EXPECT_EQ(bus.ops.size(), 1u);
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+
+    // CMD48 failure (1st read or retry read, bus or R1 error) stops immediately without further retries.
+    {
+        FakePowerBus bus;
+        bus.failAt = 2;
+        bus.failError = 3;
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kReadBackFailed);
+        EXPECT_EQ(r.error, 3);
+        EXPECT_EQ(bus.ops.size(), 2u);
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+    {
+        FakePowerBus bus;
+        bus.failAt = 2;
+        bus.failR1 = 1u << 19;  // ERROR
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kReadBackFailed);
+        EXPECT_EQ(r.r1, 1u << 19);
+        EXPECT_EQ(bus.ops.size(), 2u);
+        EXPECT_EQ(bus.sleeps, 0u);
+    }
+    {
+        FakePowerBus bus;
+        bus.readyAfterSleeps = UINT32_MAX;
+        bus.failAt = 3;
+        bus.failError = 3;
+        const SwitchSdPowerOff r = switchSdPowerOffNotify(true, powerFunc, power, bus);
+        EXPECT_EQ(r.step, SwitchSdPowerOffStep::kReadBackFailed);
+        EXPECT_EQ(r.error, 3);
+        EXPECT_EQ(bus.ops.size(), 3u);
+        EXPECT_EQ(bus.sleeps, 1u);
+    }
 }

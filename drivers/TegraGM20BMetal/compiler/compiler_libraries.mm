@@ -30,13 +30,11 @@ void LibraryCache::ended()
 
 void LibraryCache::release(uint64_t generation)
 {
-    std::map<std::string, id<MTLLibrary>> system;
-    std::map<gm20b::Digest, id<MTLLibrary>> data;
+    std::map<gm20b::Digest, std::shared_ptr<Slot>> data;
     {
         std::lock_guard<std::mutex> l(lock_);
         if (running_ || generation != generation_)
             return;
-        system.swap(system_);
         data.swap(data_);
         dataOrder_.clear();
     }
@@ -48,41 +46,38 @@ id<MTLLibrary> LibraryCache::library(const gm20b::RequestLibrary &l, std::string
     if (l.system && !SystemLibraries::resolve(root_, l.path, real, why))
         return nil;
     const gm20b::Digest digest = l.system ? gm20b::Digest{} : gm20b::sha256(l.bytes.data(), l.bytes.size());
+    std::shared_ptr<Slot> slot;
     {
         std::lock_guard<std::mutex> g(lock_);
-        if (l.system) {
-            if (const auto found = system_.find(real); found != system_.end())
-                return found->second;
-        } else if (const auto found = data_.find(digest); found != data_.end()) {
-            return found->second;
+        std::shared_ptr<Slot> &kept = l.system ? system_[real] : data_[digest];
+        if (!kept) {
+            kept = std::make_shared<Slot>();
+            if (!l.system) {
+                dataOrder_.push_back(digest);
+                if (dataOrder_.size() > kDataLibraries) {
+                    data_.erase(dataOrder_.front());
+                    dataOrder_.pop_front();
+                }
+            }
         }
+        slot = kept;
     }
+    std::lock_guard<std::mutex> making(slot->making);
+    if (slot->made)
+        return slot->made;
     NSError *error = nil;
-    id<MTLLibrary> made = nil;
     GM20BOfflineDevice *device = [GM20BOfflineDevice new];
     if (l.system) {
-        made = [device newLibraryWithURL:[NSURL fileURLWithPath:@(real.c_str())] error:&error];
+        slot->made = [device newSealedLibraryWithURL:[NSURL fileURLWithPath:@(real.c_str())] error:&error];
     } else {
         dispatch_data_t bytes =
             dispatch_data_create(l.bytes.data(), l.bytes.size(), nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        made = [device newLibraryWithData:bytes error:&error];
+        slot->made = [device newLibraryWithData:bytes error:&error];
     }
-    if (!made) {
+    if (!slot->made)
         why = std::string("the translator refused the library ") + (l.path.empty() ? "of its data" : l.path) +
               (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
-        return nil;
-    }
-    std::lock_guard<std::mutex> g(lock_);
-    if (l.system) {
-        system_[real] = made;
-    } else if (data_.emplace(digest, made).second) {
-        dataOrder_.push_back(digest);
-        if (dataOrder_.size() > kDataLibraries) {
-            data_.erase(dataOrder_.front());
-            dataOrder_.pop_front();
-        }
-    }
-    return made;
+    return slot->made;
 }
 
 }  // namespace switch_compiler

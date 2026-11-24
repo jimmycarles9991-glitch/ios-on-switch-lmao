@@ -304,4 +304,67 @@ TEST(Zcull, NothingWithoutARegion)
     EXPECT_FALSE(gm20b::zcullInvalidates(z, depth(kAlways, true), true, false, true, true, true));
 }
 
+TEST(Zcull, EarlyFragmentTestsWithStoresKeepTheRegion)
+{
+    gm20b::ZcullPass z;
+    z.candidate = true;
+    EXPECT_FALSE(gm20b::zcullInvalidates(z, depth(kLess, true), true, false, false, false, true, true));
+    EXPECT_FALSE(z.invalidated);
+    EXPECT_EQ(z.dir, gm20b::kZcullLess);
+    EXPECT_TRUE(gm20b::zcullInvalidates(z, depth(kLess, true), true, false, true, false, true, true));
+    z = {};
+    z.candidate = true;
+    EXPECT_TRUE(gm20b::zcullInvalidates(z, depth(kLess, true), true, false, false, true, true, true));
+    z = {};
+    z.candidate = true;
+    EXPECT_TRUE(gm20b::zcullInvalidates(z, depth(kLess, true), true, false, false, false, true, false));
+}
+
+TEST(Zcull, EarlyFragmentTestsReadFromPipelineMethods)
+{
+    std::vector<uint32_t> words(64);
+    gm20b::Push p{words.data(), words.data() + words.size()};
+    p.m(0x1a00, 0x1111);
+    EXPECT_FALSE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    p.m(gm20b::kEarlyFragmentTestsMethod, 1);
+    EXPECT_TRUE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    p.m(gm20b::kEarlyFragmentTestsMethod, 2);
+    EXPECT_FALSE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    p.m(gm20b::kEarlyFragmentTestsMethod, 3);
+    EXPECT_TRUE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    p.m(gm20b::kEarlyFragmentTestsMethod, 0);
+    EXPECT_FALSE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    p.inc(0x020c, {0u, 1u});
+    EXPECT_TRUE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    const uint32_t nonInc[2] = {1u, 0u};
+    p.nonInc(gm20b::kEarlyFragmentTestsMethod, nonInc, 2);
+    EXPECT_FALSE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    *p.at++ = gm20b::Push::hdr(5, gm20b::SUBC_3D, gm20b::kEarlyFragmentTestsMethod, 2);
+    *p.at++ = 1u;
+    *p.at++ = 0u;
+    EXPECT_TRUE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    *p.at++ = gm20b::Push::hdr(5, gm20b::SUBC_3D, gm20b::kEarlyFragmentTestsMethod - 4, 3);
+    *p.at++ = 1u;
+    *p.at++ = 1u;
+    *p.at++ = 2u;
+    EXPECT_FALSE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    *p.at++ = gm20b::Push::hdr(5, gm20b::SUBC_3D, gm20b::kEarlyFragmentTestsMethod - 4, 2);
+    *p.at++ = 0u;
+    *p.at++ = 1u;
+    EXPECT_TRUE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+
+    p.m(gm20b::kEarlyFragmentTestsMethod, 0);
+    p.m(gm20b::kEarlyFragmentTestsMethod, 1, gm20b::SUBC_COMPUTE);
+    EXPECT_FALSE(gm20b::zcullEarlyFragmentTests(words.data(), size_t(p.at - words.data())));
+}
+
 }  // namespace

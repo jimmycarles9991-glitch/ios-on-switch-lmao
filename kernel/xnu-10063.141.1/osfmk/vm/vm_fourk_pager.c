@@ -59,6 +59,7 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_protos.h>
 #include <vm/vm_kern.h>
+#include <switch/prefetch_vm.h>
 
 
 /*
@@ -948,6 +949,7 @@ retry_src_fault:
 			fault_info.io_sync = FALSE;
 			fault_info.mark_zf_absent = FALSE;
 			fault_info.batch_pmap_op = FALSE;
+			fault_info.switch_wake = FALSE;
 			interruptible = fault_info.interruptible;
 			prot = VM_PROT_READ;
 			error_code = 0;
@@ -984,6 +986,7 @@ retry_src_fault:
 				/* success but no VM page: fail */
 				vm_object_paging_end(src_object);
 				vm_object_unlock(src_object);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 				OS_FALLTHROUGH;
 			case VM_FAULT_MEMORY_ERROR:
 				/* the page is not there! */
@@ -1113,6 +1116,7 @@ src_fault_done:
 				src_page = VM_PAGE_NULL;
 				vm_object_paging_end(src_page_object);
 				vm_object_unlock(src_page_object);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 				if (top_page) {
 					vm_object_t     top_object;
 

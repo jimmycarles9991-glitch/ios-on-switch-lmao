@@ -108,6 +108,7 @@ bool Remote::declined()
 Remote::~Remote()
 {
     std::map<uint64_t, Done> pending;
+    std::vector<Held> held;
     {
         std::lock_guard<gm20b::Mutex> l(asyncLock_);
         for (Port &p : ports_) {
@@ -116,9 +117,13 @@ Remote::~Remote()
             p.port = nullptr;
         }
         pending.swap(pending_);
+        held.swap(held_);
     }
+    heldChanged_.changed();
     for (auto &[cookie, done] : pending)
         done(Answer::Unavailable, Answered{});
+    for (auto &h : held)
+        h.done(Answer::Unavailable, Answered{});
     for (Port &p : ports_)
         if (p.queue)
             dispatch_release(static_cast<dispatch_queue_t>(p.queue));
@@ -294,17 +299,80 @@ Remote::Answer Remote::compile(const std::string &request, Answered *answered)
     return answerOf(reply.result);
 }
 
-bool Remote::compileAsync(const std::string &request, bool waited, uint32_t qos, Done done)
+bool Remote::compileAsync(const std::string &request, bool waited, uint32_t qos, Done done, uint64_t *cookieOut)
 {
     if (!serving() || !taking())
         return false;
     std::lock_guard<gm20b::Mutex> l(asyncLock_);
-    return ask({request, waited, qos, std::move(done)});
+    const uint64_t cookie = nextCookie_++;
+    if (!ask({request, waited, qos, std::move(done), cookie}))
+        return false;
+    if (cookieOut)
+        *cookieOut = cookie;
+    return true;
+}
+
+bool Remote::waitAsync(uint64_t cookie)
+{
+    if (!cookie || !waitSupported_.load(std::memory_order_acquire))
+        return false;
+    uint64_t skipThrough = 0;
+    for (;;) {
+        uint64_t active = 0;
+        bool isHeld = false;
+        uint64_t snapshotHead = 0;
+        {
+            std::lock_guard<gm20b::Mutex> l(asyncLock_);
+            if (pending_.count(cookie)) {
+                active = cookie;
+            } else {
+                isHeld = std::any_of(held_.begin(), held_.end(), [cookie](const Held &h) {
+                    return h.cookie == cookie;
+                });
+                if (isHeld) {
+                    const auto it = pending_.upper_bound(skipThrough);
+                    if (it != pending_.end())
+                        active = it->first;
+                    else if (!pending_.empty())
+                        snapshotHead = pending_.begin()->first;
+                }
+            }
+        }
+        if (active) {
+            const TegraGM20BAbiCompileWait in = {active, 0, 0};
+            const int r = call(TegraGM20BMethodCompileWait, &in, sizeof in, nullptr, 0);
+            if (r == kIOReturnUnsupported) {
+                waitSupported_.store(false, std::memory_order_release);
+                return false;
+            }
+            if (active == cookie)
+                return r == kIOReturnAborted;
+            if (r == kIOReturnNotFound) {
+                skipThrough = active;
+                continue;
+            }
+            return r == kIOReturnAborted || r == kIOReturnSuccess;
+        }
+        if (!isHeld || !snapshotHead)
+            return false;
+        heldChanged_.waitOnce([&] {
+            std::lock_guard<gm20b::Mutex> l(asyncLock_);
+            if (pending_.count(cookie))
+                return true;
+            const bool stillHeld = std::any_of(held_.begin(), held_.end(), [cookie](const Held &h) {
+                return h.cookie == cookie;
+            });
+            if (!stillHeld || pending_.empty())
+                return true;
+            return pending_.upper_bound(skipThrough) != pending_.end() || pending_.begin()->first != snapshotHead;
+        });
+    }
 }
 
 bool Remote::ask(Held &&held)
 {
-    const uint64_t cookie = nextCookie_++;
+    const uint64_t cookie = held.cookie ? held.cookie : nextCookie_++;
+    held.cookie = cookie;
     const TegraGM20BAbiCompile in = {uint64_t(uintptr_t(held.request.data())),
                                      held.request.size(),
                                      cookie,
@@ -349,14 +417,16 @@ void Remote::delivered(void *refcon, int result, void **words, uint32_t count)
             return;
         done = std::move(found->second);
         remote->pending_.erase(found);
-        if (!remote->held_.empty()) {
+        while (!remote->held_.empty()) {
             Held next = std::move(remote->held_.front());
             remote->held_.erase(remote->held_.begin());
             Done nextDone = next.done;
-            if (!remote->ask(std::move(next)))
-                refused.push_back(std::move(nextDone));
+            if (remote->ask(std::move(next)))
+                break;
+            refused.push_back(std::move(nextDone));
         }
     }
+    remote->heldChanged_.changed();
     for (const auto &r : refused)
         r(Answer::Unavailable, Answered{});
     if (result != kIOReturnSuccess)

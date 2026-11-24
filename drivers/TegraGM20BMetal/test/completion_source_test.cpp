@@ -23,6 +23,9 @@ TEST(QuietEnd, OnlyWorkInHandBehindItAndNobodyWaitingMakesARangeQuiet)
     EXPECT_TRUE(gm20b::quietEnd(end));
     end.observed = true;
     EXPECT_FALSE(gm20b::quietEnd(end)) << "completed handlers, a present or waitUntilCompleted";
+    end.compositor = false;
+    end.handlersOnly = false;
+    EXPECT_FALSE(gm20b::quietEnd(end)) << "non-compositor presenting command buffer stays interrupt-driven";
     end = {};
     end.lastOfBuffer = false;
     EXPECT_FALSE(gm20b::quietEnd(end)) << "its next range is an event's or m2v's";
@@ -30,6 +33,15 @@ TEST(QuietEnd, OnlyWorkInHandBehindItAndNobodyWaitingMakesARangeQuiet)
     EXPECT_TRUE(gm20b::quietEnd(end));
     end.signals = true;
     EXPECT_FALSE(gm20b::quietEnd(end)) << "the CPU publishes its signals when it completes";
+}
+
+TEST(InlineCompletion, DeferredPresentsNeverRunInlineOnTheCompletionThread)
+{
+    EXPECT_TRUE(gm20b::inlineCompletion(false, false, false, false));
+    EXPECT_FALSE(gm20b::inlineCompletion(false, false, false, true));
+    EXPECT_FALSE(gm20b::inlineCompletion(true, false, false, false));
+    EXPECT_FALSE(gm20b::inlineCompletion(false, true, false, false));
+    EXPECT_FALSE(gm20b::inlineCompletion(false, false, true, false));
 }
 
 TEST(CompletionTarget, TheFirstRangeThatInterruptsCoversThoseBeforeIt)

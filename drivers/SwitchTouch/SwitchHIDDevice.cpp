@@ -479,7 +479,6 @@ public:
         setProperty("Built-In", true);
         if (profile == &kProfiles[kSwitchHIDOrientation])
             addAopPlugIn();
-        timed = timestamps();
         return IOHIDDevice::start(provider);
     }
 
@@ -537,42 +536,26 @@ public:
         return handleReport(buffer, 0 /* kIOHIDReportTypeInput */, 0);
     }
 
-    // IOHIDDevice::handleReport (slot 181, not overridden here) is clock_get_uptime, the _readyForInputReports test,
-    // WORKLOOP_LOCK (its event source's lock: the gate of getWorkLoop(), our `loop`), the virtual handleReportWithTime
-    // (slot 197) and WORKLOOP_UNLOCK (IOHIDFamily-2031 IOHIDDevice.cpp:1291-1311). postAt is the same with the caller's
-    // time; handleReportWithTime makes the same readiness test itself (IOHIDDevice.cpp:2111). Used only after
-    // timestamps() found 21H461's code there (from our kernel's prelinked IOHIDFamily): +0x34 ldrb w8, [x19, #0xb0]
-    // (_readyForInputReports), +0x48 ldr x1, [sp, #8] (the time), +0x50 ldr x8, [x8, #0x628] (slot 197).
-    static constexpr unsigned kHandleReport = 181, kHandleReportWithTime = 197;
-
-    bool timestamps() const
-    {
-        const uintptr_t *table = *reinterpret_cast<const uintptr_t *const *>(this);
-        const uint32_t *code = reinterpret_cast<const uint32_t *>(table[kHandleReport]);
-        return (code != nullptr) && code[0x34 / 4] == 0x3942c268 && code[0x48 / 4] == 0xf94007e1 &&
-               code[0x50 / 4] == 0xf9431508;
-    }
-
+    // IOHIDDevice::handleReport (not overridden here) is clock_get_uptime, the _readyForInputReports test, WORKLOOP_LOCK
+    // (its event source's lock: the gate of getWorkLoop(), our `loop`), handleReportWithTime and WORKLOOP_UNLOCK
+    // (IOHIDFamily-2031 IOHIDDevice.cpp:1291-1311). postAt is the same with the caller's time; handleReportWithTime makes
+    // the readiness test itself (IOHIDDevice.cpp:2111). Its slot is each kind's table's (kits/SwitchABI/kinds/<kind>/
+    // IOHIDDevice.json, read from that kernelcache), so both iOS builds take it.
     IOReturn postAt(const void *report, size_t length, uint64_t timestamp)
     {
         if (length != profile->reportSize)
             return kIOReturnBadArgument;
-        if (!timed)
-            return kIOReturnUnsupported;
         installEdge();
         memcpy(buffer->getBytesNoCopy(), report, length);
         // Under the work loop's gate, as handleReport's WORKLOOP_LOCK takes it (runAction closes and opens it).
         return loop->runAction(
             [](OSObject *owner, void *time, void *, void *, void *) -> IOReturn {
                 auto *self = static_cast<SwitchHIDDevice *>(owner);
-                return edge::call<IOReturn, uint64_t, IOMemoryDescriptor *, uint32_t, IOOptionBits>(
-                    self, kHandleReportWithTime, *static_cast<const uint64_t *>(time), self->buffer,
-                    0 /* kIOHIDReportTypeInput */, 0);
+                return self->handleReportWithTime(*static_cast<const uint64_t *>(time), self->buffer,
+                                                  0 /* kIOHIDReportTypeInput */, 0);
             },
             this, &timestamp);
     }
-
-    bool timed = false;  // timestamps(), at start
 
     IOReturn deliver(OSObject *event)
     {
@@ -947,8 +930,7 @@ IOReturn switch_hid_post_at(IOService *device, const void *report, size_t length
 
 bool switch_hid_supports_timestamps(IOService *device)
 {
-    auto *hid = OSDynamicCast(SwitchHIDDevice, device);
-    return (hid != nullptr) && hid->timed;
+    return OSDynamicCast(SwitchHIDDevice, device) != nullptr;
 }
 
 IOReturn switch_hid_dispatch_event(IOService *device, OSObject *event)

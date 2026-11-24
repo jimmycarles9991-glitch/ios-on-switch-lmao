@@ -6,6 +6,9 @@
 
 from tools.devicerun.apps import APPS
 from tools.devicerun.audio import AUDIO
+from tools.devicerun.battery import BATTERY
+from tools.devicerun.commit import COMMIT
+from tools.devicerun.cpu import CPU
 from tools.devicerun.cut import CUT
 from tools.devicerun.dispatch import DISPATCH
 from tools.devicerun.hwtest import (
@@ -14,13 +17,19 @@ from tools.devicerun.hwtest import (
     HWTEST,
     KILL_WINDOWS,
     READBACK_RUNS,
+    RUN_WINDOWS,
+    TIR_ROWS_RUNS,
     TRANSFER_FAILED_RUNS,
 )
 from tools.devicerun.joycon import JOYCON
+from tools.devicerun.launch import LAUNCHES
 from tools.devicerun.lockscreen import LOCKSCREEN
+from tools.devicerun.memory import MEMORY
 from tools.devicerun.morning import MORNING
+from tools.devicerun.motion import MOTION
 from tools.devicerun.protection import PROTECTION
 from tools.devicerun.rules import REPORT, TIMELINE, Check
+from tools.devicerun.springboard import OBSERVATIONS, SPRINGBOARD
 from tools.devicerun.stutter import STUTTER
 from tools.devicerun.textures import TEXTURES
 
@@ -43,15 +52,27 @@ KILLED_FAILURE = (
     r'|(?P<code>[12])\): The operation couldn.t be completed\. \(MTLCommandBufferErrorDomain error (?P=code)\.\))'
 )
 GPU_METAL_SUBSYSTEM = 'com.brunostjohn.switch.TegraGM20BMetal'
+# ui.title_scroll's repetitions past the first, each a window from its SwitchMark line's time less its ms: backboardd's
+# work in them is judged against "every repetition after the first draws from what the first made"
+TITLE_SCROLL_REPS = 'hwtest.title-scroll-reps'
 # The kernel's one line for a writer promise given up: its maker (the channel owner holding its fence word) and reader
 PROMISE_GIVEN_UP = (
     r"tegra-gm20b: (?P<owner>.+?)'s writer promise at fence offset \d+ \(value \d+\) was not kept: "
     r'(?P<waiter>.+?) waited (?P<waited_ms>\d+) ms for it'
 )
+PROMISE_UNKEPT_WINDOWS = 'gpu.promise-unkept-windows'
 
 GROUPS: dict[str, list[Check]] = {
     'launchd': [
         Check('launchd.lskdd', 'r32-cpuhog', 'Successfully spawned lskdd[', process=LAUNCHD, note='was 158 in 158 s'),
+        Check(
+            'launchd.prngseedd',
+            'perf1-daemons',
+            ('Successfully spawned seputil[', 'exited due to exit('),
+            process=LAUNCHD,
+            subsystem='com.apple.prngseedd',
+            note='was 203 respawns in 34 min on boot 2',
+        ),
         Check('launchd.sepupdatetimer', 'r32-cpuhog', SPAWNED, process=LAUNCHD, subsystem='com.apple.SepUpdateTimer'),
         Check(
             'launchd.sepupdatetimer-throttle',
@@ -325,6 +346,22 @@ GROUPS: dict[str, list[Check]] = {
             note='client channels the kernel killed: a fault, the hang rule, or destroyed with its work still running',
         ),
         Check(
+            'gpu.tir-rows-errors',
+            'boot2-correctness',
+            'channel killed, GPU running: gr: DATA_ERROR ',
+            process=KERNEL,
+            regex=(
+                r'tegra-gm20b: GPU error in SwitchHWTest\w* \(channel \d+\): channel killed, GPU running: gr: '
+                r'DATA_ERROR (?P<code>[0-9a-f]{8}) .*? mthd (?P<method>[0-9a-f]+) data (?P<data>[0-9a-f]+)'
+            ),
+            show=('code', 'method', 'data'),
+            per=TIR_ROWS_RUNS,
+            per_count='killed',
+            source='drivers/TegraGM20B/gpu_hang.c tgm_chan_killed',
+            note="the class error of each mixed-pass probe row the class killed, in the rows' order (a run's "
+            'row_<name>=killed fields; tools/benchloop/gr_class_errors.txt names the code): one kill a killed row',
+        ),
+        Check(
             'gpu.promise-given-up',
             'ds3',
             'was not kept: ',
@@ -349,6 +386,42 @@ GROUPS: dict[str, list[Check]] = {
             source='drivers/TegraGM20B/gpu_promise_giveup.c giveup_report',
             note="a promise given up whose maker's channel a kill named in the 2 s before it: that kill's retirement "
             'releases it (abandon and raise), never the give-up',
+        ),
+        Check(
+            PROMISE_UNKEPT_WINDOWS,
+            'kernel-sched',
+            ('HWTEST gpu.path.promise_unkept ', 'HWTEST gpu.path.present_promise ', 'was not kept: '),
+            REPORT,
+            regex=(
+                r'(?:^HWTEST (?P<id>gpu\.path\.(?:promise_unkept|present_promise)) (?:PASS|FAIL|SKIP)(?: .*)? ms='
+                r"|tegra-gm20b: (?P<owner>SwitchHWTest\w*)'s writer promise at fence offset \d+ \(value \d+\) was not kept: "
+                r'(?P<waiter>.+?) waited )(?P<ms>[\d.]+)(?: ms for it| why=|$)'
+            ),
+            show=('id', 'owner', 'waiter'),
+            source='apps/hwtest/tests/PromiseUnkeptPathTest.swift, apps/hwtest/tests/PresentPromisePathTest.swift, '
+            'drivers/TegraGM20B/gpu_promise_giveup.c',
+            note='windows containing gpu.path.promise_unkept, gpu.path.present_promise, or SwitchHWTest '
+            'gpu.promise-given-up lines that excuse promise-only waits in gpu.compositor-foreign-waits',
+        ),
+        Check(
+            'gpu.compositor-foreign-waits',
+            'kernel-sched',
+            ' compositor jobs waited on foreign work (',
+            process=KERNEL,
+            regex=(
+                r'tegra-gm20b: (?P<jobs>\d+) compositor jobs waited on foreign work '
+                r'\((?P<fences>\d+) fences, (?P<promises>\d+) promises, (?P<events>\d+) events; '
+                r'(?P<host1x>\d+) host1x waits\), queue mean (?P<mean>\d+) us max (?P<max>\d+) us \((?P<timed>\d+)\)'
+            ),
+            where='jobs > 0',
+            show=('jobs', 'fences', 'promises', 'events', 'max'),
+            during=PROMISE_UNKEPT_WINDOWS,
+            within=5.5,
+            excusable=r'\(0 fences, [1-9]\d* promises, 0 events;',
+            source='drivers/TegraGM20B/gpu_stats_tick.c',
+            note='debug kernels: compositor foreign GM20B fences and shared events always fail; foreign writer '
+            'promises are excused only inside a gpu.path.promise_unkept, gpu.path.present_promise, or SwitchHWTest '
+            'gpu.promise-given-up window',
         ),
         Check(
             'gm20b.zbc-full-lines',
@@ -790,24 +863,144 @@ GROUPS: dict[str, list[Check]] = {
             'SwitchBootPrefetch: ',
             REPORT,
             process=KERNEL,
-            source='drivers/NativeSwitchBlock/SwitchCryptex.cpp',
-            note='silence means the page-ins failed',
+            regex=r'^SwitchBootPrefetch: (?!\d+ MiB paged in ahead)',
+            source='kernel/switch/vm/prefetch.c',
+            note='debug kernels log list save and errors; release kernels log errors and no-list boots only '
+            '(silent on a healthy replay boot)',
+        ),
+        Check(
+            'boot.prefetch-lead',
+            'paging',
+            'SwitchBootPrefetch: ',
+            REPORT,
+            process=KERNEL,
+            regex=r'SwitchBootPrefetch: (?P<replayed>\d+) MiB paged in ahead \((?P<used>\d+) used, '
+            r'(?P<reclaimed>\d+) reclaimed unused, lead (?P<lead>\d+) of bound (?P<bound>\d+)\), '
+            r'(?P<demand>\d+) MiB of demand reads by volume \((?P<cx>\d+)/(?P<root>\d+)/(?P<data>\d+)\), '
+            r'card ms (?P<replay_ms>\d+)/(?P<demand_ms>\d+), requests > 64 KiB replay '
+            r'(?P<replay_gt64k>\d+)/(?P<replay_reqs>\d+), demand (?P<demand_gt64k>\d+)/(?P<demand_reqs>\d+)',
+            show=(
+                'replayed',
+                'used',
+                'reclaimed',
+                'lead',
+                'bound',
+                'demand',
+                'cx',
+                'root',
+                'data',
+                'replay_ms',
+                'demand_ms',
+                'replay_gt64k',
+                'replay_reqs',
+                'demand_gt64k',
+                'demand_reqs',
+            ),
+            source='kernel/switch/vm/prefetch.c (debug kernels)',
+            note='10 s boot prefetch pacing and request-size split: used/replayed should stay near 1 and '
+            'reclaimed unused small',
+        ),
+        Check(
+            'boot.prefs-before-launchd',
+            'paging',
+            'launchd preferences ready',
+            'max(ms) < 150',
+            process=KERNEL,
+            regex=r'preferences ready \((?P<written>\d+) written, (?P<unchanged>\d+) unchanged, (?P<durable>\d+) '
+            r'durable, (?P<ms>\d+) ms\)',
+            where='durable == 0',
+            show=('written', 'unchanged', 'ms'),
+            source='kernel/xnu-*/bsd/kern/kern_exec.c (debug kernels)',
+            note="the kernel's Data setup before launchd on boots with no durable change, which sync nothing (boot 2, "
+            '22 Nov, synced every boot: 1487 ms); the bound is inferred; NO-DATA when every boot synced: '
+            'boot.prefs-synced says why',
+        ),
+        Check(
+            'boot.prefs-synced',
+            'paging',
+            'launchd preferences ready',
+            REPORT,
+            process=KERNEL,
+            regex=r'(?P<durable>\d+) durable, (?P<ms>\d+) ms\): synced from (?P<first>.+)$',
+            show=('first', 'durable', 'ms'),
+            source='kernel/xnu-*/bsd/kern/kern_exec.c (debug kernels)',
+            note='boots that synced, by their first durable change: a changed override or managed preference, a fresh '
+            'Data volume, a panic record, a mode change; the same change on every boot is a write that should be '
+            'REDONE, or the OS changing one of our keys',
         ),
         Check(
             'boot.pack-covers-os',
             'cold-boot',
-            ('a state the pack lacks made in', 'a compute state the pack lacks answered by the shader compiler'),
+            (
+                'SwitchMetal: harvest ',
+                'SwitchMetal: in-process state the pack lacks ',
+                'a compute state the pack lacks answered by the shader compiler',
+            ),
             process='!SwitchHWTest',
             subsystem=GPU_METAL_SUBSYSTEM,
             regex=(
-                r'^SwitchMetal: a (?P<kind>compute state|state) the pack lacks (?:made|answered) '
-                r'.*?by the shader compiler'
+                r'^SwitchMetal: (?:(?:harvest [0-9a-f]{16} 1/\d+ '
+                r'|in-process state the pack lacks [0-9a-f]{16} \((?:record|refusal)\): )label='
+                r'(?:com\.apple\.coreanimation\.(?P<ca>\S+)|(?P<label>\S+))'
+                r'|a (?P<kind>compute state) the pack lacks answered by the shader compiler)'
             ),
-            show=('process', 'kind'),
-            source='drivers/TegraGM20BMetal/TegraGM20BMetalCompleteRemote.mm (debug builds)',
-            note='an OS process waited for a compile of a state the pack lacks; `logharvest --check` on the pull names '
-            'them and `logharvest` adds them to the corpus; boot 1 (22 Nov), before its boot logo: 3 states (shadowed '
-            'variants, 30 to 61 s each; the last held the logo) and 45 compute states',
+            show=('process', 'ca', 'label', 'kind'),
+            source='drivers/TegraGM20BMetal/TegraGM20BMetalComplete{,Remote}.mm (debug builds)',
+            note='an OS process made a state the pack lacks: each render state by its harvest line (compiled, from '
+            "the shader compiler's store or refused) or in-process CA line (table, disk cache or seed), named by its "
+            'Core Animation spec (ca) or other label, and each compute state the shader compiler answered; '
+            '`logharvest --check` on the pull names them and `logharvest` adds them to the corpus; boot 1 (22 Nov), '
+            'before its boot logo: 3 states (shadowed variants, 30 to 61 s each; the last held the logo) and 45 '
+            'compute states',
+        ),
+        Check(
+            'boot.ca-no-catch-all',
+            'ca-closure',
+            ' cag=',
+            'max(cag) == 0',
+            process='backboardd',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            regex=r'\bgm20b \d+s c=\d+\(.*?\bcag=(?P<cag>\d+)',
+            show=('cag',),
+            source='drivers/TegraGM20BMetal/TegraGM20BMetalRates.mm (debug builds)',
+            note='backboardd draws zero Core Animation catch-all shaders across the boot on iOS 27 '
+            '(CA_DISABLE_GENERIC_SHADERS=1 in xnu-12377 kern_exec.c; 21H461 keeps the generic)',
+        ),
+        Check(
+            'boot.pack-pieces',
+            'pack-hit',
+            (
+                'tegra-gm20b: pack image: refused',
+                'tegra-gm20b: slow import backboardd ',
+                'SwitchMetal: backboardd: pack image ',
+                'SwitchMetal: backboardd: pack piece import:',
+            ),
+            regex=(
+                r'^(?:tegra-gm20b: pack image: (?=refused \()'
+                r'|tegra-gm20b: slow import backboardd (?=(?:16|32|48|64) KiB read-only surface 0:)'
+                r'|SwitchMetal: backboardd: pack (?=image (?:refused|map failed|mismatch)|piece import: tier \d+))'
+                r'(?P<detail>refused \([^)]+\)|(?:16|32|48|64) KiB read-only surface 0'
+                r'|image (?:refused|map failed|mismatch)[^:]*|piece import: tier \d+)'
+            ),
+            show=('process', 'detail'),
+            source='drivers/TegraGM20B/SwitchGpuPackImage.cpp, drivers/TegraGM20B/gpu_stats.c, '
+            'drivers/TegraGM20BMetal/gpu.cpp',
+            note='backboardd runs tier-0 states from the shared pack window with zero slow read-only pack-piece '
+            'imports and no pack-image refusal or per-piece placement',
+        ),
+        Check(
+            'compiler.library-time',
+            'compiler-speed',
+            'SwitchShaderCompiler: made in',
+            'max(ms) < 100',
+            process='SwitchShaderCompiler',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            regex=r' libraries (?P<ms>\d+) ms',
+            show=('ms',),
+            source='drivers/TegraGM20BMetal/compiler/compiler_debug.mm (debug builds)',
+            note='a job read its libraries for over 100 ms (an inferred bound): a system library is mapped and parsed '
+            'by its function list once per compiler process; boot 1 spent 2.2 s per MPS facts request copying and '
+            'hashing an 84 MB metallib',
         ),
         Check(
             'compiler.ui-waiter-served-below-ui',
@@ -823,8 +1016,52 @@ GROUPS: dict[str, list[Check]] = {
             'user-initiated at most, and only a synchronous waiter pushing the worker (a turnstile, as a sync XPC '
             "message pushes Apple's MTLCompilerService) lifts it; boot 1: 36",
         ),
+        Check(
+            'boot.display-query-refused',
+            'widgets',
+            'CoreAnimation: Unable to query displays from server',
+            show=('process',),
+            source='QuartzCore 24B119 query_displays (0x1843d6e84): its line before abort(), kept in every build',
+            note="backboardd answers another process's display query 0xfb294002 until its window server is set up, "
+            'and QuartzCore aborts a client still refused after 5 s; boot 2 (22 Nov): chronod; saved reports 8-18 '
+            'Nov: chronod, contextstored, replicatord, callservicesd. A crash-report count misses an abort with none',
+        ),
+        Check(
+            'boot.window-server-ready',
+            'widgets',
+            'window server ready in ',
+            'max(s) < 5',
+            process='backboardd',
+            regex=r'window server ready in (?P<s>[\d.]+)s',
+            source="backboardd's own startup line (com.apple.BackBoard:Common)",
+            note="QuartzCore's client budget for a display query (query_displays: 5 s); necessary, not sufficient, "
+            'since a client can ask before the window server starts; boot 2: 21.7462 s',
+        ),
+        Check(
+            'widgets.timeline-watchdog',
+            'widgets',
+            'Watchdog provision violated for getTimelines',
+            process='chronod',
+            regex=r'\[(?P<session>[\w.]+)-[0-9A-F]{12}\] Session operation: `getTimelines\(\d+\)` error result',
+            show=('session',),
+            source="chronod's session log (com.apple.chrono:session), boot 2",
+            note='a widget extension that did not return its timeline within its session budget (measured: 30 s an '
+            'entry at Default QoS, 45 s at Utility) is killed; boot 2: 6 (Music, Stocks, News, Maps, Weather x2)',
+        ),
     ],
     'refusals': [
+        Check(
+            'refusal.compiler-reason',
+            'compiler-speed',
+            ' refused:',
+            process='SwitchShaderCompiler',
+            subsystem=REFUSAL_SUBSYSTEM,
+            regex=r' refused:\s*$',
+            show=('process',),
+            source='drivers/TegraGM20BMetal/compiler/compiler_request.mm (refusalLine)',
+            note='a shader compiler refusal line that names no reason; boot 2: two libraries of front end request type '
+            "13 (the front end's log was the library entry's, never the line's)",
+        ),
         Check(
             'refusal.bytesnocopy',
             'r119-rawgaps',
@@ -975,6 +1212,45 @@ GROUPS: dict[str, list[Check]] = {
             'texture: one line a process (one key for both), on its first run; none on 24B119',
         ),
         Check(
+            TITLE_SCROLL_REPS,
+            'probes-frame',
+            'SwitchMark: ui.title_scroll.',
+            REPORT,
+            subsystem='com.brunostjohn.switch.hwtest',
+            regex=r'^SwitchMark: ui\.title_scroll\.(?P<rep>back\.\d+|paused\.[1-9]\d*) (?P<ms>\d+) ms',
+            show=('rep',),
+            source='apps/hwtest/tests/TitleScrollTest.swift',
+            note='the repetitions past the first of ui.title_scroll, both arms (paused 1.5 s before each, back to '
+            "back); the app's own numbers are on each line",
+        ),
+        Check(
+            'compositor.title-scroll-creations',
+            'probes-frame',
+            'a state the pack lacks',
+            process='backboardd',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            regex=r'^SwitchMetal: a (?:compute )?state the pack lacks',
+            per=TITLE_SCROLL_REPS,
+            per_count='0',
+            source='drivers/TegraGM20BMetal/TegraGM20BMetalCompleteRemote.mm (debug builds)',
+            note='no state made for the title scroll once the first repetition has made them',
+        ),
+        Check(
+            'compositor.title-scroll-imports',
+            'probes-frame',
+            'SwitchFrameUser: backboardd ',
+            process='backboardd',
+            subsystem=GPU_METAL_SUBSYSTEM,
+            regex=r'^SwitchFrameUser: backboardd cb \d+ .* imp [1-9]\d* ',
+            per=TITLE_SCROLL_REPS,
+            per_count='0',
+            source='drivers/TegraGM20BMetal/plugin/SwitchFrameTimeline.h (debug builds)',
+            note="no command buffer of the render server's with a fresh kernel import (imp) in a repetition past the "
+            'first: its memory is what the first made. Catch-all draws under 5 ms, zeroed bytes and object-call time '
+            'reach no line; the catch-all spans of 5 ms or more are in the HWTEST line (p<n>_generic, b<n>_generic). '
+            'SwitchFrameUser is capped at 60 lines a second a process, so a window can miss an import',
+        ),
+        Check(
             'gm20b.failed-hwtest',
             'failed-counts',
             'a command buffer failed',
@@ -1117,8 +1393,22 @@ GROUPS: dict[str, list[Check]] = {
             r'copied (?P<kib>\d+) KiB in (?P<copy_us>\d+) us',
             source='drivers/NativeSwitchBlock/SwitchCryptexStats.h',
         ),
+        Check(
+            'storage.hwtest-indexed-mid-write',
+            'hwtest-harness',
+            'failed to get metadata',
+            process='fileindexerd',
+            level='error',
+            regex=r'failed to get metadata for',
+            per=RUN_WINDOWS,
+            per_count='0',
+            source='fileindexerd (24B119), com.apple.FileIndexer:daemon',
+            note="Spotlight's file indexer finding a file gone before it read it, in a HW Test run: the app writes "
+            'what changes while a run goes outside Documents (apps/hwtest/core/AppFiles.swift); boot 2 read 1,861',
+        ),
     ],
     'memory': [
+        *MEMORY,
         Check(
             'memory.gpu-live',
             'r116-sched',
@@ -1248,6 +1538,8 @@ GROUPS: dict[str, list[Check]] = {
         ),
     ],
     'audio': AUDIO,
+    'battery': BATTERY,
+    'motion': MOTION,
     'm2v-cut': CUT,
     'textures': TEXTURES,
     'dispatch': DISPATCH,
@@ -1256,6 +1548,11 @@ GROUPS: dict[str, list[Check]] = {
     'lockscreen': LOCKSCREEN,
     'protection': PROTECTION,
     'stutter': STUTTER,
+    'cpu': CPU,
+    'commit': COMMIT,
+    'launch': LAUNCHES,
+    'springboard': SPRINGBOARD,
+    'boot-observations': OBSERVATIONS,
 }
 
 # The tools/frames lines, pulled with the checks' own query.

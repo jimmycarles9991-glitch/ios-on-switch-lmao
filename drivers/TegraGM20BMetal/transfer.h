@@ -55,7 +55,8 @@ public:
               void *bytes, uint64_t row, uint64_t image, bool write, std::shared_ptr<void> owner);
     // `bytes` bytes from GPU address `source`, CPU-written memory whose lines are cleaned, to `destination`, with no CPU
     // wait; `owner` held until the copy completed. Later work on either range waits for it: by the set where it lies in a
-    // member, else by the kernel's write record.
+    // member, else by the kernel's write record. `destination` is a pool image's kind-0 view (Device::copyCallerPages),
+    // whose texels are read through 0xfe next: the copy ends with a kind switch.
     bool copyBytes(Kernel &kernel, ResourceSet &set, gm20b::Mutex &allocationLock, uint64_t source,
                    uint64_t destination, uint64_t bytes, std::shared_ptr<void> owner);
     void close(Kernel &kernel, gm20b::Mutex &allocationLock);

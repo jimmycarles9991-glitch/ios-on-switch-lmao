@@ -5,6 +5,7 @@
 class IOMemoryDescriptor;
 class OSObject;
 struct SwitchNativeScanout;
+struct switch_gpu_backing;
 
 namespace switch_display {
 // One of window B's slots, its mapping placed in the plane IOVA space at iova (0: nothing mapped). A GPU surface's
@@ -22,6 +23,7 @@ struct PlaneSlot {
     SwitchNativeScanout *native = nullptr;
     uint64_t mappedAllocation = 0, mappedGeneration = 0;
     uint32_t iova = 0;
+    switch_gpu_backing *scanoutBacking = nullptr;
 };
 
 // The last kKeys engine allocations (ID and page-list generation) whose mappings were dropped for room: a later mapping

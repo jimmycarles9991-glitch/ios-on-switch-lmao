@@ -20,10 +20,11 @@ struct SwitchVICMapping {
 
 namespace {
 OSObject surfaceObject;
-IOMemoryDescriptor surfaceMemory;
-switch_gpu_backing sourcePitch, buffer;
+IOMemoryDescriptor surfaceMemory, pitchBufferMemory;
+switch_gpu_backing sourcePitch, buffer, pitchBuffer;
 volatile uint64_t sourceGeneration = 1;
 bool found = true, vicUp = true, sourcePitchLayout = true;
+uint32_t expectedGuards = 1;
 int mappings = 0, accesses = 0, lookups = 0;
 void (*pending)(void *, int);
 void *pendingContext;
@@ -77,7 +78,7 @@ extern "C" int tegra_gm20b_ce_copy_plane_checked(const tegra_gm20b_ce_plane *src
                                                  const switch_gpu_copy_ownership *ownership,
                                                  const switch_gpu_event_submission *)
 {
-    EXPECT_EQ(ownership->guard_count, 1u);
+    EXPECT_EQ(ownership->guard_count, expectedGuards);
     engineCopies.push_back({*src, *dst, rowBytes, rows, from, to, fromOffset, toOffset, *done});
     return 0;
 }
@@ -112,7 +113,7 @@ extern "C" void switch_gpu_backing_describe(switch_gpu_backing *backing, switch_
     static uint64_t pages[1] = {0x100000};
     *info = {};
     info->pages = pages;
-    info->page_count = backing == &buffer ? (6u << 20) >> 12 : 1024;
+    info->page_count = backing == &buffer ? (6u << 20) >> 12 : backing == &pitchBuffer ? (4u << 20) >> 12 : 1024;
 }
 
 extern "C" IOReturn tegra_vic_surface_lookup(uint32_t id, task_t, TegraVICSurface *out)
@@ -211,7 +212,7 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
     if (after)
         submittedAfter = *after;
     declaredUses.assign(ownership.uses, ownership.uses + ownership.useCount);
-    EXPECT_EQ(ownership.guardCount, 1u);
+    EXPECT_EQ(ownership.guardCount, expectedGuards);
     pending = completion;
     pendingContext = context;
     *fence = 4321;
@@ -231,6 +232,8 @@ protected:
     void SetUp() override
     {
         found = vicUp = sourcePitchLayout = true;
+        expectedGuards = 1;
+        pitchBufferMemory.refs = 1;
         mappings = accesses = lookups = 0;
         pending = nullptr;
         hadAfter = false;
@@ -438,5 +441,166 @@ TEST_F(SwitchVICEncodeInputTest, RefusesWithoutQueueingAndReleasesEverything)
     vicUp = false;
     EXPECT_EQ(switch_vic_encode_input(77, nullptr, &input, &fence, &written, &bounced, &why), -19);
     EXPECT_EQ(pending, nullptr);
+}
+
+TEST_F(SwitchVICEncodeInputTest, BufferPitchOnGridConvertsToBL2DirectlyThroughVIC)
+{
+    expectedGuards = 0;
+    SwitchVICEncodeBuffer req = {};
+    req.source = &pitchBuffer;
+    req.sourceMemory = &pitchBufferMemory;
+    req.srcLumaOffset = 0;
+    req.srcChromaOffset = 1280u * 768u;
+    req.srcPitch = 1280;
+    req.width = 1280;
+    req.height = 720;
+    req.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.output.destination = &buffer;
+    req.output.lumaOffset = 0;
+    req.output.chromaOffset = 1280u * 768u;
+    req.output.pitch = 1280;
+    req.output.lumaRows = 768;
+    req.output.chromaRows = 384;
+    req.output.blockLinear = 1;
+    req.output.blockHeightLog2 = 1;
+    req.output.width = 1280;
+    req.output.height = 720;
+    req.output.w = 1280;
+    req.output.h = 720;
+    req.output.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.output.after = &last;
+
+    uint32_t fence = 0;
+    switch_gpu_backing_token written = {};
+    bool bounced = false;
+    const char *why = nullptr;
+    ASSERT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), 0) << why;
+    EXPECT_FALSE(bounced);
+    EXPECT_TRUE(engineCopies.empty());
+    EXPECT_EQ(fence, 4321u);
+    EXPECT_EQ(written.value, kWritten.value);
+    ASSERT_TRUE(hadAfter);
+    EXPECT_EQ(submittedAfter.syncpt, 9u);
+    EXPECT_EQ(submittedAfter.threshold, 1234u);
+    ASSERT_EQ(declaredUses.size(), 2u);
+    EXPECT_EQ(declaredUses[0].backing, &buffer);
+    EXPECT_EQ(declaredUses[0].access, uint32_t(SWITCH_GPU_BACKING_WRITE));
+    EXPECT_EQ(declaredUses[1].backing, &pitchBuffer);
+    EXPECT_EQ(declaredUses[1].access, uint32_t(SWITCH_GPU_BACKING_READ));
+    EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_BLK_KIND),
+              uint64_t(TEGRA_VIC_BLK_16Bx2));
+    EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT_SURFACE, SURF_BLK_HEIGHT), 1u);
+    EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT, OUT_TARGET_RIGHT), 1279u);
+    EXPECT_EQ(TEGRA_VIC_GET(submittedJob.config, TEGRA_VIC_OUTPUT, OUT_TARGET_BOTTOM), 719u);
+    EXPECT_EQ(mappings, 2);
+}
+
+TEST_F(SwitchVICEncodeInputTest, BufferPitchOffGridBouncesThroughCopyEngineThenVICToBL2)
+{
+    expectedGuards = 0;
+    SwitchVICEncodeBuffer req = {};
+    req.source = &pitchBuffer;
+    req.sourceMemory = &pitchBufferMemory;
+    req.srcLumaOffset = 0;
+    req.srcChromaOffset = 320u * 256u;
+    req.srcPitch = 320;
+    req.width = 320;
+    req.height = 240;
+    req.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.output.destination = &buffer;
+    req.output.lumaOffset = 0;
+    req.output.chromaOffset = 320u * 256u;
+    req.output.pitch = 320;
+    req.output.lumaRows = 256;
+    req.output.chromaRows = 128;
+    req.output.blockLinear = 1;
+    req.output.blockHeightLog2 = 1;
+    req.output.width = 320;
+    req.output.height = 240;
+    req.output.w = 320;
+    req.output.h = 240;
+    req.output.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+
+    uint32_t fence = 0;
+    switch_gpu_backing_token written = {};
+    bool bounced = false;
+    const char *why = nullptr;
+    ASSERT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), 0) << why;
+    EXPECT_TRUE(bounced);
+    ASSERT_EQ(engineCopies.size(), 2u);
+    EXPECT_EQ(engineCopies[0].rows, 240u);
+    EXPECT_EQ(engineCopies[0].rowBytes, 320u);
+    EXPECT_EQ(engineCopies[0].src.pitch, 320u);
+    EXPECT_EQ(engineCopies[0].dst.pitch, 512u);
+    EXPECT_EQ(engineCopies[0].from, &pitchBuffer);
+    EXPECT_EQ(engineCopies[0].to, &scratchBacking);
+    EXPECT_EQ(engineCopies[1].rows, 120u);
+    EXPECT_EQ(engineCopies[1].src.offset, 320u * 256u);
+    ASSERT_EQ(declaredUses.size(), 2u);
+    EXPECT_EQ(declaredUses[1].backing, &scratchBacking);
+    EXPECT_EQ(method(TEGRA_VIC_M_SURFACE0_SLOT0_LUMA), 0x60000000u >> 8);
+    EXPECT_EQ(mappings, 1);
+    EXPECT_EQ(pitchBufferMemory.refs.load(), 2u);
+    for (const auto &copy : engineCopies)
+        copy.done.fn(copy.done.arg, 0);
+    engineCopies.clear();
+    pending(pendingContext, 0);
+    pending = nullptr;
+    EXPECT_EQ(pitchBufferMemory.refs.load(), 1u);
+}
+
+TEST_F(SwitchVICEncodeInputTest, BufferPitchRefusesNonBL2UnsupportedFormatOutOfBoundsAndVICDown)
+{
+    expectedGuards = 0;
+    SwitchVICEncodeBuffer req = {};
+    req.source = &pitchBuffer;
+    req.sourceMemory = &pitchBufferMemory;
+    req.srcLumaOffset = 0;
+    req.srcChromaOffset = 1280u * 768u;
+    req.srcPitch = 1280;
+    req.width = 1280;
+    req.height = 720;
+    req.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.output.destination = &buffer;
+    req.output.chromaOffset = 1280u * 768u;
+    req.output.pitch = 1280;
+    req.output.lumaRows = 768;
+    req.output.chromaRows = 384;
+    req.output.blockLinear = 0;
+    req.output.width = 1280;
+    req.output.height = 720;
+    req.output.w = 1280;
+    req.output.h = 720;
+    req.output.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+
+    uint32_t fence = 0;
+    switch_gpu_backing_token written = {};
+    bool bounced = false;
+    const char *why = nullptr;
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), -95);
+    req.output.blockLinear = 1;
+    req.output.blockHeightLog2 = 1;
+    req.fourcc = TEGRA_VIC_FOURCC('B', 'G', 'R', 'A');
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), -95);
+    req.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.srcChromaOffset = 256;
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), -22);
+    req.srcChromaOffset = 5u << 20;
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), -22);
+    req.srcChromaOffset = 1280u * 768u;
+    req.output.chromaOffset = 1280u * 720u;
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), -95);
+    req.output.lumaRows = 720;
+    req.output.chromaRows = 368;
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), 0) << why;
+    pending(pendingContext, 0);
+    pending = nullptr;
+    req.output.lumaRows = 768;
+    req.output.chromaRows = 384;
+    req.output.chromaOffset = 1280u * 768u;
+    vicUp = false;
+    EXPECT_EQ(switch_vic_encode_buffer(&req, &fence, &written, &bounced, &why), -19);
+    EXPECT_EQ(pending, nullptr);
+    EXPECT_EQ(pitchBufferMemory.refs.load(), 1u);
 }
 }  // namespace

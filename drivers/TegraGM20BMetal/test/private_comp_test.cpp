@@ -153,8 +153,8 @@ TEST(GM20BPrivateComp, AStoredZetaTakesCompressedMemoryInEveryBuild)
     EXPECT_THAT(Body(SourceText("../private_comp.cpp"), "bool Device::takeCompressed("),
                 HasSubstr("comp_.fit(need, kind)"));
     EXPECT_THAT(made, Not(HasSubstr("allocCompressible")));
-    EXPECT_THAT(Body(SourceText("../gpu.h"), "    void freeOwnedZeta(uint64_t va)"),
-                HasSubstr("freeCompressedZeta(va);"));
+    EXPECT_THAT(Body(SourceText("../gpu.h"), "    void freeOwnedZeta(uint64_t va, DeferredFrees &deferred)"),
+                HasSubstr("freeCompressedZeta(va, deferred);"));
 }
 
 }  // namespace

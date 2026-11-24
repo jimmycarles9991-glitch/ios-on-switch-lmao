@@ -52,6 +52,12 @@ def rebuilds_launchservices(ios_version: str | None) -> bool:
     return app_journal.ios_major(ios_version) >= REBUILDS_LAUNCHSERVICES_FROM
 
 
+def interrupted_migration(data_root: Path) -> bool:
+    """Return whether an earlier boot left both the kernel marker and the migration sentinel behind."""
+    data_root = Path(data_root)
+    return all(not (data_root / name).is_symlink() and (data_root / name).is_file() for name in (MARKER, SENTINEL))
+
+
 def request_migration(data_root: Path, log: host.Log, rebuild: bool = False) -> None:
     """Write the migration sentinel; `rebuild` (rebuilds_launchservices) also removes LaunchServices' store."""
     sentinel = Path(data_root) / SENTINEL
@@ -70,11 +76,15 @@ def request_migration(data_root: Path, log: host.Log, rebuild: bool = False) -> 
 def register(data_root: Path, before: dict, log: host.Log, boot: app_journal.NextBoot, force: bool = False) -> bool:
     """Register the overlay's apps that differ from `before` at the next boot; True when that takes a migration.
 
-    `force` (--rerun-migration, a restage) asks for the migration regardless; so do changed or still pending apps on
-    a boot that cannot register them itself (app_journal.NextBoot.registers_apps).
+    `force` (--rerun-migration, a restage) asks for the migration regardless; so do an interrupted migration
+    (both MARKER and SENTINEL left on Data) and changed or still pending apps on a boot that cannot register
+    them itself (app_journal.NextBoot.registers_apps).
     """
     after = apps(data_root)
     waiting = after != before or any(app_journal.pending(data_root).values())
+    if not force and interrupted_migration(data_root):
+        log(f'last boot did not finish data migration (<Data>/{MARKER} and <Data>/{SENTINEL} both present); rearming')
+        force = True
     if not force and waiting and not boot.registers_apps():
         log(f'system apps to register, and {app_journal.NO_BLUETOOTH} keeps iOS {boot.ios_version} from it at boot')
         force = True

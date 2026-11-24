@@ -9,9 +9,8 @@
 //   kAdmaMaxLength (below 64 KiB, a whole number of 4 KiB pages so splits stay page- and line-aligned).
 // - SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC: End goes on the last transfer descriptor, never on a separate NOP.
 // Mainline Linux gives Tegra210's SDMMC a 34-bit DMA mask (sdhci-tegra.c soc_data_tegra210.dma_mask) with no SMMU in
-// front of it, which covers this board's DRAM (0x80000000-0x17fffffff); the driver still checks addresses above 4 GiB on
-// the hardware before it lets the data path use them (limit): setup()'s check when its test pages land there, else the
-// first read chains that reach them (r12-sdio: `high` counts their bytes).
+// front of it, which covers this board's DRAM (0x80000000-0x17fffffff); the driver's tables reach up to it (`limit`).
+// `high` counts a table's bytes above 4 GiB.
 //
 // What may go straight to the card (anything else takes the bounce buffer; the builder says why):
 // - every segment starts and ends on a 64-byte cache line: the driver cleans or invalidates whole lines of the client's
@@ -92,8 +91,8 @@ struct SwitchAdmaTable {
         if (pa + length > kAdma4GiB)
             high += pa >= kAdma4GiB ? length : pa + length - kAdma4GiB;
         while (length) {
-            // No descriptor crosses a 4 GiB boundary (r12-sdio: the engine's address word pair is only proven per
-            // descriptor; Linux's default DMA segment boundary is 0xffffffff too): what fits up to the next one.
+            // No descriptor crosses a 4 GiB boundary (Linux's default DMA segment boundary is 0xffffffff too): what fits up
+            // to the next one.
             const uint64_t boundary = (pa | (kAdma4GiB - 1)) + 1;
             SwitchAdmaDescriptor *last = count ? &entries[count - 1] : nullptr;
             uint64_t room = 0;
@@ -122,7 +121,7 @@ struct SwitchAdmaTable {
 
     // r14-sdcq: [pa, pa + length) in descriptors of their own: they continue no earlier descriptor and no later bytes
     // continue them, whatever lies next to them in physical memory. For the driver's own buffers in a request's table
-    // (a gap's sink, a run staged in the bounce buffer): the cache maintenance and the proofs pass over those descriptors
+    // (a gap's sink, a run staged in the bounce buffer): the cache maintenance passes over those descriptors
     // by their start address, which must never take a request's page along (or a request's descriptor theirs).
     SwitchAdmaRefusal addSealed(uint64_t pa, uint64_t length)
     {
@@ -278,87 +277,7 @@ template <typename Memory> struct SwitchAdmaStaging {
     }
 };
 
-// r12-sdio: whether ADMA2 may reach the requests' pages above 4 GiB (this board's RAM is 0x80000000-0x17fffffff, so half
-// of it). setup()'s check decides it when some of its test pages land up there; at boot the VM hands out pages in rising
-// physical order, so they usually all sit below 4 GiB (r7p5: "0 of 0 test pages above 4 GiB"), and from ~20 s of uptime
-// 60% of requests then went through the bounce buffer for that alone. So the proof moves to the data path:
-// - Proving: a read chain may use pages above 4 GiB, except those whose 4 GiB-lower alias is IRAM (0x40000000, 256 KiB):
-//   if the engine dropped the high address word, the card's bytes would land 4 GiB lower, which is below DRAM and
-//   outside the memory controller's EMEM aperture, everywhere but there. The driver poisons those pages, reads, reads
-//   the same blocks again by SDMA and compares; `kProofs` such chains that match turn it on. Writes stay below 4 GiB.
-// - On: tables reach up to `kAdmaDmaLimit` in both directions; the first `kWriteProofs` writes with pages above 4 GiB are
-//   read back (a dropped address bit on the engine's memory reads would put the wrong bytes on the card).
-// - Off (a proof differed, or the engine stopped on an ADMA error): everything above 4 GiB through the bounce buffer
-//   until reboot, as before r12-sdio. setup()'s own check can start in On (its high test pages matched) or Off (they kept
-//   their fill: the engine drops the high word).
+// ADMA2 reaches every page below kAdmaDmaLimit in both directions (this board's RAM is 0x80000000-0x17fffffff, half of
+// it above 4 GiB); every boot from r12-sdio to 23 Nov compared its first reads and writes up there with SDMA and found
+// them equal.
 constexpr uint64_t kAdmaDmaLimit = 1ULL << 34;  // mainline Linux's DMA mask for this controller
-constexpr uint64_t kAdmaIramAlias = 0x140000000ULL, kAdmaIramBytes = 0x40000;
-
-struct SwitchAdmaHigh {
-    enum State : uint8_t {
-        kProving,
-        kOn,
-        kOff
-    };
-
-#if DEVELOPMENT || DEBUG
-    static constexpr bool kLiveProofs = true;
-#else
-    static constexpr bool kLiveProofs = false;
-#endif
-    static constexpr uint32_t kProofs = 16, kWriteProofs = 16;
-    State state = kLiveProofs ? kProving : kOn;
-    uint32_t proofsLeft = kLiveProofs ? kProofs : 0, writeProofsLeft = kLiveProofs ? kWriteProofs : 0;
-    uint64_t provenBytes = 0;  // above 4 GiB, in the proofs that matched
-
-    // The table's address limit for a command in this direction.
-    uint64_t limit(bool write) const
-    {
-        return state == kOn || (state == kProving && !write) ? kAdmaDmaLimit : kAdma4GiB;
-    }
-
-    // Whether a page may go straight to the card in this direction (on top of the driver's own RAM check).
-    bool pageOk(uint64_t page, bool write) const
-    {
-        return state != kProving || write || page - kAdmaIramAlias >= kAdmaIramBytes;
-    }
-
-    // A direct read whose table reaches above 4 GiB, while proving: compare it with SDMA before it completes.
-    bool proofDue(bool write, uint64_t high) const
-    {
-        return state == kProving && !write && (high != 0u);
-    }
-
-    // A matching proof; true when it was the last one needed (the caller logs that once).
-    bool proved(uint64_t high)
-    {
-        provenBytes += high;
-        if (state != kProving || --proofsLeft)
-            return false;
-        state = kOn;
-        return true;
-    }
-
-    void refuse()
-    {
-        state = kOff;
-    }
-
-    // A direct write whose table reaches above 4 GiB, while its read-backs last.
-    bool writeCheckDue(bool write, uint64_t high) const
-    {
-        return state == kOn && write && (high != 0u) && (writeProofsLeft != 0u);
-    }
-
-    void writeChecked()
-    {
-        if (writeProofsLeft)
-            --writeProofsLeft;
-    }
-
-    // Whether proofs are still to come (reads; with `writes`, ADMA2 writes being on, the writes' read-backs too).
-    bool checking(bool writes) const
-    {
-        return state == kProving || (writes && state == kOn && (writeProofsLeft != 0u));
-    }
-};

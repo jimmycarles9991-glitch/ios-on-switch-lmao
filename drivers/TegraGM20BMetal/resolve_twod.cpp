@@ -33,9 +33,9 @@ switch_gm20b_2d_surface gridSurface(const Texture &t, uint32_t fmt2d, uint32_t w
     return s;
 }
 
-// fx::twodFormat's formats, RGB10A2Unorm, whose resolve the pack has no state for, RG11B10Float, and the formats whose
-// resolve is the mean of their codes (attachment_target.h codesResolvedByTwod): the signed normalized ones as the 2D
-// engine's signed formats
+// fx::twodFormat's formats, RGB10A2Unorm, whose resolve the pack has no state for, RG11B10Float, and the signed normalized
+// formats as the 2D engine's signed formats: the 16-bit ones resolved as the mean of their codes (attachment_target.h
+// codesResolvedByTwod), the 8-bit ones spread alone (spreadSamples)
 uint32_t resolveFormat(uint32_t mtl)
 {
     switch (mtl) {

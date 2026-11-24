@@ -25,7 +25,7 @@ load("@xcode//:defs.bzl", "DEVELOPER_DIR", "XCODE_TOOLCHAIN")
 load("//bazel/platforms:transitions.bzl", "kernel_transition", "outer_transition")
 load("//ipsw:ipsw.bzl", "kernel_virt_base")
 load("//kernel/rules:layout.bzl", "MOVED_ROOTS", "OLD_TREE", "PATH_ROOT", "tree_path")
-load("//kernel/switch:objects.bzl", "SWITCH_ROOT", "switch_copts", "switch_objects", "with_kprof")
+load("//kernel/switch:objects.bzl", "SWITCH_ROOT", "switch_copts", "switch_objects", "with_kprof", "with_recorder")
 load(":recipes_development.bzl", "DEVELOPMENT_RECIPES")
 load(":recipes_release.bzl", "RELEASE_RECIPES")
 load(":selected.bzl", "selected_only")
@@ -413,7 +413,9 @@ def xnu_objects(name, component, table, release, srcs = None, **kwargs):
         config = by_profile("DEVELOPMENT", "RELEASE"),
         objects = by_profile(switch_objects(ours, table.objects), switch_objects(ours, release.objects)),
         copts = select({
+            "//kernel:kprof_recorder_debug": with_recorder(component, with_kprof(component, switch_copts(ours, own_copts))),
             "//kernel:kprof_debug": with_kprof(component, switch_copts(ours, own_copts)),
+            "//kernel:recorder_debug": with_recorder(component, switch_copts(ours, own_copts)),
             "//bazel:release": switch_copts(ours, release_copts),
             "//conditions:default": switch_copts(ours, own_copts),
         }),

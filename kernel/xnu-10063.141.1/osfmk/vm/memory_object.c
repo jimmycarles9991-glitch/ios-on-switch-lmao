@@ -102,6 +102,7 @@
 #include <vm/vm_external.h>
 
 #include <vm/vm_protos.h>
+#include <switch/prefetch_vm.h>
 
 memory_object_default_t memory_manager_default = MEMORY_OBJECT_DEFAULT_NULL;
 LCK_MTX_DECLARE(memory_manager_default_lock, &vm_object_lck_grp);
@@ -744,6 +745,7 @@ vm_object_update(
 			vm_object_lock(object);
 		}
 	}
+	bool switch_wake = false;
 	if ((copy_object != VM_OBJECT_NULL && update_cow) || (flags & MEMORY_OBJECT_DATA_SYNC)) {
 		vm_object_offset_t      i;
 		vm_object_size_t        copy_size;
@@ -824,6 +826,7 @@ RETRY_COW_OF_LOCK_REQUEST:
 				if (top_page) {
 					vm_fault_cleanup(
 						VM_PAGE_OBJECT(page), top_page);
+					SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 					vm_object_lock(copy_object);
 					vm_object_paging_begin(copy_object);
 				}
@@ -859,6 +862,7 @@ RETRY_COW_OF_LOCK_REQUEST:
 				vm_object_unlock(copy_object);
 				OS_FALLTHROUGH;
 			case VM_FAULT_MEMORY_ERROR:
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 				if (object != copy_object) {
 					vm_object_deallocate(copy_object);
 				}
@@ -870,11 +874,20 @@ RETRY_COW_OF_LOCK_REQUEST:
 			}
 		}
 		vm_object_paging_end(copy_object);
+		if (fault_info.switch_wake) {
+			fault_info.switch_wake = FALSE;
+			switch_wake = true;
+		}
 	}
 	if ((flags & (MEMORY_OBJECT_DATA_SYNC | MEMORY_OBJECT_COPY_SYNC))) {
 		if (copy_object != VM_OBJECT_NULL && copy_object != object) {
 			vm_object_unlock(copy_object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 			vm_object_deallocate(copy_object);
+			vm_object_lock(object);
+		} else if (__improbable(switch_wake)) {
+			vm_object_unlock(object);
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 			vm_object_lock(object);
 		}
 		return KERN_SUCCESS;
@@ -891,7 +904,12 @@ RETRY_COW_OF_LOCK_REQUEST:
 			vm_object_deallocate(object);
 		}
 		vm_object_unlock(copy_object);
+		SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 		vm_object_deallocate(copy_object);
+		vm_object_lock(object);
+	} else if (__improbable(switch_wake)) {
+		vm_object_unlock(object);
+		SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 		vm_object_lock(object);
 	}
 BYPASS_COW_COPYIN:

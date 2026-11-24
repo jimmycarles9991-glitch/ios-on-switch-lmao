@@ -47,7 +47,7 @@ TEST(SdBusSource, ClaimNeverWaits)
 // Every path that writes COMMAND claims the bus first and records the end it took; resets clear the tracker.
 TEST(SdBusSource, EveryCommandClaimsAndEnds)
 {
-    for (const char *signature : {"int NativeSwitchBlock::issue(", "int NativeSwitchBlock::cqCommand(",
+    for (const char *signature : {"int NativeSwitchBlock::issue(", "int NativeSwitchBlock::controlCommand(",
                                   "int NativeSwitchBlock::cardCommand(", "void NativeSwitchBlock::recover("}) {
         const std::string text = body(signature);
         EXPECT_LT(Index(text, "claimBus("), Index(text, "w16(COMMAND")) << signature;
@@ -56,7 +56,7 @@ TEST(SdBusSource, EveryCommandClaimsAndEnds)
     const std::string release = body("int NativeSwitchBlock::awaitRelease()");
     EXPECT_LT(Index(release, "bus.claim(r32(PRESENT), SwitchSdUse::kBusy)"), Index(release, "w16(COMMAND"));
     EXPECT_THAT(release, Not(HasSubstr("claimBus(")));
-    for (const char *signature : {"int NativeSwitchBlock::complete(", "int NativeSwitchBlock::cqCommand(",
+    for (const char *signature : {"int NativeSwitchBlock::complete(", "int NativeSwitchBlock::controlCommand(",
                                   "int NativeSwitchBlock::cardCommand(", "void NativeSwitchBlock::recover(",
                                   "int NativeSwitchBlock::awaitRelease()"}) {
         EXPECT_THAT(body(signature), HasSubstr("ended(s);")) << signature;
@@ -75,10 +75,9 @@ TEST(SdBusSource, TuningWaitStaysInTuning)
     EXPECT_EQ(Count(driver(), "awaitTuningIdle("), 4u);  // declaration, definition, tuneStep, tune
     EXPECT_THAT(body("void NativeSwitchBlock::tuneStep()"), HasSubstr("awaitTuningIdle("));
     EXPECT_THAT(body("bool NativeSwitchBlock::tune()"), HasSubstr("awaitTuningIdle("));
-    for (const char *signature :
-         {"int NativeSwitchBlock::issue(", "int NativeSwitchBlock::complete(", "void NativeSwitchBlock::beginBatch(",
-          "void NativeSwitchBlock::endBatch(", "void NativeSwitchBlock::beginTask(", "int NativeSwitchBlock::endTask(",
-          "int NativeSwitchBlock::cqCommand(", "void NativeSwitchBlock::worker("}) {
+    for (const char *signature : {"int NativeSwitchBlock::issue(", "int NativeSwitchBlock::complete(",
+                                  "void NativeSwitchBlock::beginBatch(", "void NativeSwitchBlock::endBatch(",
+                                  "int NativeSwitchBlock::controlCommand(", "void NativeSwitchBlock::worker("}) {
         EXPECT_FALSE(Search(body(signature), R"(\b(IOSleep|IODelay|awaitTuningIdle)\b)")) << signature;
     }
 }

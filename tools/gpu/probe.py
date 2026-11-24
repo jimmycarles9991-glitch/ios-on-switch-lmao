@@ -66,7 +66,6 @@ def probe(args: argparse.Namespace, work: Path) -> None:
     arguments = ['--probe-bucket', out, '--prebuilt', Path(args.raw).resolve(), '--data-libs', data]
     arguments += ['--root', Path(args.root).resolve()] if args.root else []
     arguments += ['--qc', Path(args.qc).resolve()]
-    arguments += ['--ca-selectors', Path(args.ca_selectors).resolve()] if args.ca_selectors else []
     env = {
         'PATH': '/usr/bin:/bin',
         'ZERO_AR_DATE': '1',
@@ -88,7 +87,6 @@ def main() -> None:
     for name in ('generator', 'raw', 'qc', 'lines', 'out'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--root')
-    parser.add_argument('--ca-selectors')
     parser.add_argument('--data-dir')
     parser.add_argument('--data', action='append', default=[])
     args = parser.parse_args()

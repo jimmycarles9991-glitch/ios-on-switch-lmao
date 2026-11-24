@@ -4,7 +4,7 @@ Each sampled state's record from the runtime's direct compile must be the pack's
 aside must be refused. The sample is fixed by the pack's bucket corpora: of their lines, the PLAIN and the EXTENDED
 (those naming an extended-range colour, 550 to 555, which render through their RGBA16Float stand-ins) of lowest SHA-256,
 so a line added to the corpus moves at most one line out of it. The first of SHARDS processes makes the driver's own states
-as well.
+as well, and scans the whole pack as the runtime trusts it (pack_scan.h): any finding fails.
 
 usage: directcheck_test.py <directcheck inputs.json>
 """
@@ -47,12 +47,11 @@ class Directcheck(unittest.TestCase):
             any(EXTENDED_COLOUR.search(line) for line in lines), 'the corpora name no extended-range colour'
         )
         env = dict(os.environ, PROBE_LIB_ROOT=str(Path(INPUTS['lib_root']).resolve()))
-        env['DIRECTCHECK_SELECTORS'] = str(Path(INPUTS['selectors']).resolve())
         runs = []
         for shard in range(SHARDS):
             corpus = work / f'corpus{shard}.log'
             corpus.write_text('\n'.join(lines[shard::SHARDS]) + '\n')
-            own = {'PROBE_OWN_LIB': str(work / 'own.metallib')} if shard == 0 else {}
+            own = {'PROBE_OWN_LIB': str(work / 'own.metallib'), 'DIRECTCHECK_SCAN': '1'} if shard == 0 else {}
             command = [work / 'directcheck', INPUTS['qc'], corpus]
             runs.append(
                 subprocess.Popen(
@@ -72,7 +71,8 @@ class Directcheck(unittest.TestCase):
             self.assertIsNotNone(summary, f'shard {shard} exited {run.returncode}: {stdout[-2000:]}{stderr[-2000:]}')
             states += int(summary.group(1))
             if run.returncode:
-                print('\n'.join(line for line in stdout.splitlines() if line.startswith('DIFFERS')))
+                print('\n'.join(line for line in stdout.splitlines() if line.startswith(('DIFFERS', 'SCAN '))))
+                report += [line for line in stdout.splitlines() if line.startswith('SCAN ')][:40]
                 report.append(f'shard {shard}: {summary.group(0)}')
                 report += [line for line in stdout.splitlines() if line.startswith('  ') and ' x ' in line]
         print(f'directcheck: {len(lines)} lines, {states} records made')

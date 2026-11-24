@@ -8,3 +8,4 @@ int switch_gpu_cached_zero(const uint64_t *pages, uint32_t count, void *cpu,
 			   switch_gpu_cached_mapping **mapping, void (*completed)(void *, int),
 			   void *context);
 void switch_gpu_cached_mapping_drop(switch_gpu_cached_mapping **mapping);
+int switch_gpu_cached_copy(const uint64_t *srcPages, const uint64_t *dstPages, uint32_t count);

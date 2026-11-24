@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include "direct.h"
 
 namespace gm20b {
@@ -36,11 +37,6 @@ struct NvkStageInfo {
     bool texsF16 = false;
     bool turned = false;
     XrPlaneBindings xrPlaneBindings = {};  // nvk_switch_xr_planes.h: set-0 bindings read through a header pair
-    // nvk_switch_ubo_fold.h: the set-0 uniform buffer at descriptor byte uboFoldDesc, its bytes in uboFoldMask held as
-    // uboFoldBytes
-    uint32_t uboFoldDesc = 0;
-    uint64_t uboFoldMask = 0;
-    uint8_t uboFoldBytes[64] = {};
 };
 
 struct NvkStage {
@@ -160,8 +156,28 @@ namespace gm20b {
 
 // The stage compiled with no device, from the frozen table and the layout as data (the native seed's rank mode: the
 // cheaper of its native and portable programs)
-inline int32_t compileStage(const StageCompile &c, const NvkStageInfo &info, const NakLayout &layout, NvkStage &out)
+inline int32_t compileStageNow(const StageCompile &c, const NvkStageInfo &info, const NakLayout &layout, NvkStage &out)
 {
     return (c.ranked ? switch_compile_ranked_stage : switch_compile_stage)(c.target, &info, &layout, &out);
+}
+
+// Stages compiled once for every compile of the same inputs (compiler/compiler_stages.h). A stage it answers is its
+// own: `held` keeps it, and `out` owns nothing.
+class StageMemo {
+public:
+    virtual int32_t compile(const StageCompile &c, const NvkStageInfo &info, const NakLayout &layout, NvkStage &out,
+                            std::shared_ptr<const void> &held) = 0;
+
+protected:
+    ~StageMemo() = default;
+};
+
+// `held`: where a memo's stage is kept for `out`'s use (none: compiled now, owned by `out`)
+inline int32_t compileStage(const StageCompile &c, const NvkStageInfo &info, const NakLayout &layout, NvkStage &out,
+                            std::shared_ptr<const void> *held = nullptr)
+{
+    if (c.memo && held)
+        return c.memo->compile(c, info, layout, out, *held);
+    return compileStageNow(c, info, layout, out);
 }
 }  // namespace gm20b

@@ -9,6 +9,8 @@
 //  - an RG11B10Float channel: that half mean rounded to the channel's float, ties to even.
 //  - a wider or narrower unorm channel (8 to 16 bits, 10-bit colour and 2-bit alpha): its codes summed with half the count, over
 //    the count, as 8-bit unorm (measured on an M4 Max, macOS 27.2.1);
+//  - an 8-bit signed normalized channel: its codes summed with half the count, over the count rounded down: the mean rounded
+//    half up, a negative one's too (an M4 Max at 2x and 4x, harness/resolvecodesoracle.mm; HW Test gpu.gm20b.resolve_codes);
 //  - a 32-bit float channel: the samples summed in order and scaled by one over the count, every operand and result flushed
 //    to a zero of its sign where it is subnormal (the M4 Max's, NaNs and infinities included);
 //  - a 5- or 6-bit channel (B5G6R5Unorm, BGR5A1Unorm): two samples the floor of their mean, raised a code for the odd sums
@@ -73,6 +75,16 @@ template <uint N> static float4 unorm8Of(Samples s, uint2 at)
     for (uint k = 0; k < N; k++)
         sum += rint(s.read(at, k) * 255.0);
     return floor(sum * (1.0 / N)) * as_type<float>(0x3b808081u);  // 1 / 255
+}
+
+// An 8-bit snorm sample reads as the float nearest code / 127, so rint(x * 127) is its code; the codes and half the count
+// sum exactly, and the count is a power of two
+static float4 snorm8(Samples s, uint n, uint2 at)
+{
+    float4 sum = float4(n / 2);
+    for (uint k = 0; k < n; k++)
+        sum += rint(s.read(at, k) * 127.0);
+    return floor(sum / float(n)) * as_type<float>(0x3c010204u);  // 1 / 127
 }
 
 static float4 srgb8(Samples s, uint n, uint2 at)
@@ -234,6 +246,17 @@ UNORM_RESOLVE(rg16, 65535.0, 65535.0, 65535.0, 65535.0)
 UNORM_RESOLVE(rgba16, 65535.0, 65535.0, 65535.0, 65535.0)
 UNORM_RESOLVE(rgb10a2, 1023.0, 1023.0, 1023.0, 3.0)
 UNORM_RESOLVE(bgr10a2, 1023.0, 1023.0, 1023.0, 3.0)
+
+#define SNORM8_RESOLVE(name)                                                             \
+    fragment float4 resolve_##name##_frag(Out in [[stage_in]], Samples s [[texture(0)]], \
+                                          constant uint &n [[buffer(0)]])                \
+    {                                                                                    \
+        return snorm8(s, n, uint2(in.position.xy));                                      \
+    }
+
+SNORM8_RESOLVE(r8snorm)
+SNORM8_RESOLVE(rg8snorm)
+SNORM8_RESOLVE(rgba8snorm)
 
 fragment float4 resolve_r16f_frag(Out in [[stage_in]], Samples s [[texture(0)]], constant uint &n [[buffer(0)]])
 {

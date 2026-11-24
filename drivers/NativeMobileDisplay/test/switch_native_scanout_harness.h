@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 #include <array>
 #include <cstdarg>
+#include <functional>
 #include <map>
 #include <vector>
 #define IONewZero(type, count) new (std::nothrow) type[count]()
@@ -98,6 +99,13 @@ public:
         (object) = nullptr;       \
     } while (0)
 inline unsigned unholds;
+inline void *nextSurfaceHoldPtr;
+inline int nextSurfaceHoldTiled;
+inline bool surfaceCompressedFlag;
+inline std::function<void(uint64_t)> onSurfaceCompressedCheck;
+inline std::map<uint64_t, struct switch_gpu_backing *> findPaBackings;
+inline std::map<struct switch_gpu_backing *, int> backingRefs;
+inline std::map<struct switch_gpu_backing *, int> backingScanoutHolds;
 
 extern "C" void tegra_gm20b_surface_unhold(void *)
 {
@@ -106,8 +114,50 @@ extern "C" void tegra_gm20b_surface_unhold(void *)
 
 extern "C" void *tegra_gm20b_surface_hold(uint64_t, int *held)
 {
-    *held = 0;
-    return nullptr;
+    *held = nextSurfaceHoldTiled;
+    return nextSurfaceHoldPtr;
+}
+
+extern "C" int tegra_gm20b_surface_compressed(uint64_t pa)
+{
+    if (onSurfaceCompressedCheck)
+        onSurfaceCompressedCheck(pa);
+    return surfaceCompressedFlag ? 1 : 0;
+}
+
+extern "C" struct switch_gpu_backing *switch_gpu_backing_find_pa(uint64_t pa)
+{
+    const auto found = findPaBackings.find(pa);
+    if (found == findPaBackings.end() || !found->second)
+        return nullptr;
+    ++backingRefs[found->second];
+    return found->second;
+}
+
+extern "C" void switch_gpu_backing_retain(struct switch_gpu_backing *backing)
+{
+    if (backing)
+        ++backingRefs[backing];
+}
+
+extern "C" void switch_gpu_backing_release(struct switch_gpu_backing *backing)
+{
+    if (!backing)
+        return;
+    EXPECT_GT(backingRefs[backing], 0);
+    --backingRefs[backing];
+}
+
+extern "C" void switch_gpu_backing_scanout(struct switch_gpu_backing *backing, int add)
+{
+    if (!backing)
+        return;
+    if (add) {
+        ++backingScanoutHolds[backing];
+    } else {
+        EXPECT_GT(backingScanoutHolds[backing], 0);
+        --backingScanoutHolds[backing];
+    }
 }
 
 inline void switch_dcache_clean_invalidate(const void *, uint64_t)
@@ -332,6 +382,14 @@ protected:
     void SetUp() override
     {
         leases = acquisitions = pitchAcquisitions = deliveries = 0;
+        unholds = 0;
+        nextSurfaceHoldPtr = nullptr;
+        nextSurfaceHoldTiled = 0;
+        surfaceCompressedFlag = false;
+        onSurfaceCompressedCheck = {};
+        findPaBackings.clear();
+        backingRefs.clear();
+        backingScanoutHolds.clear();
         completedThrough = 0;
         noted.clear();
         nativeError = pitchError = 0;

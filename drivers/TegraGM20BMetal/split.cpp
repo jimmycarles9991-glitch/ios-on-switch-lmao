@@ -31,7 +31,9 @@ enum : uint32_t {
 constexpr uint32_t kRootBytes = 0x800, kMaxCbufBytes = 0x10000, kPixelGroup = 4;
 constexpr uint32_t kFlushData = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE),
                    kInvalidateData = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, DATA, TRUE),
-                   kInvalidateConstant = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, CONSTANT, TRUE);
+                   kInvalidateConstant = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES, CONSTANT, TRUE),
+                   kNoWfiData = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES_NO_WFI, GLOBAL_DATA, TRUE),
+                   kNoWfiConstant = NVDEF(NVB1C0, INVALIDATE_SHADER_CACHES_NO_WFI, CONSTANT, TRUE);
 constexpr uint32_t kPcasInvalidateSchedule =
     NVDEF(NVB1C0, SEND_SIGNALING_PCAS_B, INVALIDATE, TRUE) | NVDEF(NVB1C0, SEND_SIGNALING_PCAS_B, SCHEDULE, TRUE);
 // QMDV01_07 (cla1c0qmd.h): PROGRAM_OFFSET, and constant buffer i's ADDR_LOWER, then ADDR_UPPER (bits 0-7) and SIZE (15-31)
@@ -318,8 +320,12 @@ void CommandBuffer::launchPrologues()
     uint64_t va = 0;
     uint32_t *start = reinterpret_cast<uint32_t *>(d.alloc(d.push_, words * 4, 4, va));
     Push p{start, start + words};
-    p.m(WAIT_FOR_IDLE, 0);
-    p.m(INVALIDATE_SHADER_CACHES, kInvalidateData | kFlushData | kInvalidateConstant, SUBC_COMPUTE);
+    if (relaxed(entryFormFor(barrierForms().entry))) {
+        p.m(NVB1C0_INVALIDATE_SHADER_CACHES_NO_WFI, kNoWfiData | kNoWfiConstant, SUBC_COMPUTE);
+    } else {
+        p.m(WAIT_FOR_IDLE, 0);
+        p.m(INVALIDATE_SHADER_CACHES, kInvalidateData | kFlushData | kInvalidateConstant, SUBC_COMPUTE);
+    }
     p.m(INVALIDATE_SKED_CACHES, 0, SUBC_COMPUTE);
     auto launch = [&](const SplitState &split, const uint64_t *cbuf, const uint32_t *bytes, uint32_t groups) {
         uint64_t qmdVa = 0;

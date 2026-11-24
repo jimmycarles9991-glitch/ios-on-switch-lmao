@@ -7,6 +7,7 @@
 // the error the GPU's fp32 transform and subpixel snap may add, and the boxes grow by it.
 #pragma once
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -63,14 +64,16 @@ public:
         for (int r = 0; r < 4; r++) {
             clip[r] = magnitude[r] = 0;
             for (int c = 0; c < 4; c++) {
-                clip[r] += double(m_[c * 4 + r]) * p[c];
-                magnitude[r] += std::fabs(double(m_[c * 4 + r]) * p[c]);
+                const double term = double(m_[c * 4 + r]) * p[c];
+                clip[r] += term;
+                magnitude[r] += std::fabs(term);
             }
+            if (!std::isfinite(clip[r]) || !std::isfinite(magnitude[r]) || magnitude[r] >= FLT_MAX)
+                return false;
         }
         // the GPU's fp32 component: within kRelative of the sum of its terms' magnitudes, whatever its order or fusing
         const double wError = kRelative * magnitude[3];
-        if (!std::isfinite(clip[0]) || !std::isfinite(clip[1]) || !std::isfinite(clip[2]) || !std::isfinite(clip[3]) ||
-            clip[3] <= wError)
+        if (clip[3] <= wError || clip[3] - wError <= FLT_MIN)
             return false;
         const double zError = kRelative * magnitude[2];
         out.unclipped = clip[2] - zError >= 0 && clip[2] + zError <= clip[3] - wError;

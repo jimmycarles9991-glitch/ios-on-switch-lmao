@@ -179,6 +179,13 @@ extension FetchShape {
         side: 8, cull: .back, draws: [stripRestartDraw], codes: reds(coverage(stripRestartDraw, side: 8, cull: .back))
     )
 
+    /// The strip's first run drawn from its vertices, back faces culled: its three triangles face front, so a draw that
+    /// gave its second triangle the first's winding culls it
+    static let stripRun: FetchShape = {
+        let draw = FetchDraw(primitive: .triangleStrip, points: Array(stripRestartDraw.points[0 ..< 5]), count: 5)
+        return FetchShape(side: 8, cull: .back, draws: [draw], codes: reds(coverage(draw, side: 8, cull: .back)))
+    }()
+
     /// fetch_points: 16 points on pixel (3, 5): red 16 there, 0 elsewhere
     static let points = FetchShape(
         side: 8, vertex: "fetch_count_point_vertex",

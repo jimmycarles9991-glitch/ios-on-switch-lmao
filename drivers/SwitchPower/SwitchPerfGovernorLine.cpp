@@ -15,8 +15,9 @@ uint32_t gLineSeq;
 uint32_t gLineTakenSeq;  // the owner's: the last line it took
 #if DEVELOPMENT || DEBUG
 switchperf::LineTaken gLine;
-// The owner's: touch, frame and launch boosts, then the owner wakes they made, at its last line.
-uint32_t gBoostsSeen[6];
+// The owner's: touch, frame and launch boosts, then the owner wakes they made, then the launches from a foreground role,
+// at its last line.
+uint32_t gBoostsSeen[7];
 
 template <class T> void put(T *to, T value)
 {
@@ -155,9 +156,11 @@ void switchperf::lineFormat(const LineTaken &taken, unsigned index, char *line, 
     }
     uint32_t launches = 0;
     uint32_t launchWakes = 0;
+    uint32_t foreground = 0;
     for (const Boost &slot : gLaunch) {
         launches += __atomic_load_n(&slot.hints, __ATOMIC_RELAXED);
         launchWakes += __atomic_load_n(&slot.wakes, __ATOMIC_RELAXED);
+        foreground += __atomic_load_n(&slot.foreground, __ATOMIC_RELAXED);
     }
     const uint32_t touches = boostsSince(0, __atomic_load_n(&gTouch.hints, __ATOMIC_RELAXED));
     const uint32_t frames = boostsSince(1, __atomic_load_n(&gFrame.hints, __ATOMIC_RELAXED));
@@ -165,6 +168,7 @@ void switchperf::lineFormat(const LineTaken &taken, unsigned index, char *line, 
     const uint32_t touchWakes = boostsSince(3, __atomic_load_n(&gTouch.wakes, __ATOMIC_RELAXED));
     const uint32_t frameWakes = boostsSince(4, __atomic_load_n(&gFrame.wakes, __ATOMIC_RELAXED));
     launchWakes = boostsSince(5, launchWakes);
+    foreground = boostsSince(6, foreground);
     unsigned long target = 0;
     unsigned long measured = 0;
     unsigned vdd = 0;
@@ -173,11 +177,11 @@ void switchperf::lineFormat(const LineTaken &taken, unsigned index, char *line, 
         n += static_cast<size_t>(snprintf(
             line + n, len - n,
             "; %u up %u down (%u jumps, %u boosted, %u clamped); busy mean %llu%% peak %u%% over %u windows; boosts "
-            "touch %u frame %u launch %u%s; range %u-%u MHz; now %u MHz (DFLL target %lu, measured %lu MHz, VDD_CPU %u "
-            "mV)",
+            "touch %u frame %u launch %u (%u foreground)%s; range %u-%u MHz; now %u MHz (DFLL target %lu, measured %lu "
+            "MHz, VDD_CPU %u mV)",
             taken.ups, taken.downs, taken.jumps, taken.boosted, taken.clamped,
             taken.windows ? taken.busySum / taken.windows / 10 : 0, taken.busyPeak / 10, taken.windows, touches, frames,
-            launches, taken.boot ? ", boot floor" : "", in.khz[taken.lo] / 1000, in.khz[taken.hi] / 1000,
+            launches, foreground, taken.boot ? ", boot floor" : "", in.khz[taken.lo] / 1000, in.khz[taken.hi] / 1000,
             in.khz[index] / 1000, target / 1000000, measured / 1000000, vdd));
     }
     if (n < len) {

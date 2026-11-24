@@ -60,6 +60,15 @@ inline bool zetaHasStencil(uint32_t metal)
     return i < kZetaFormats && kZetaFormatInfo[i].stencil;
 }
 
+// The depth/stencil format a fetching draw's in-shader tests run against in a pass of attachment format `zeta`: a
+// Depth16Unorm renders through a Depth32Float_Stencil8 whose stencil starts at 0 (TegraGM20BMetalRangeForms.mm
+// depth16Tested), as Apple's tile tests and writes a stencil the pass has no attachment for (an M4 Max, a Depth16Unorm
+// pass: a draw under stencil NotEqual 0 is dropped, and a Replace of 1 makes a later Equal 0 draw drop)
+inline uint32_t testedZeta(uint32_t zeta)
+{
+    return zeta == 250 ? kZetaFormat : zeta;
+}
+
 // width x height of zeta `format` at `samples`: its layout in t (block-linear, pitch the row stride, blockHeight, layerBytes NIL's
 // array stride); `bytes` and `align` what its memory takes. False: no such image (another format, a size of 0 or past 16384).
 bool zetaShape(uint32_t width, uint32_t height, uint32_t format, uint32_t samples, Texture &t, uint64_t &bytes,

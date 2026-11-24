@@ -57,6 +57,7 @@ exports_files(glob(
         hdrs = [
             "app_registration.h",
             "app_registration.mm",
+            "package_records.h",
         ],
         copts = [
             "-std=c++20",

@@ -46,8 +46,8 @@ struct switch_linked_group_name {
  * vertex descriptor. The linked arrays are vertexLinkedFunctions' and fragmentLinkedFunctions' functions and
  * privateFunctions, as NmbComputePipelineDescriptor's linked functions are. tessellation through
  * factor_scale_enabled are the descriptor's tessellator state, as MTLRenderPipelineDescriptor's (0: Metal's defaults),
- * max_amplification its maxVertexAmplificationCount and texture_write_rounding its textureWriteRoundingMode (Apple SPI,
- * 0 where Metal has none). */
+ * max_amplification its maxVertexAmplificationCount, texture_write_rounding its textureWriteRoundingMode (Apple SPI,
+ * 0 where Metal has none) and alpha_to_coverage its alphaToCoverageEnabled (1 on, 0 off). */
 #define NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS(Function)                                                           \
     Function *vertex, *fragment;                                                                                  \
     struct NmbColorAttachment colors[8];                                                                          \
@@ -66,7 +66,8 @@ struct switch_linked_group_name {
     uint64_t tessellation, max_tessellation_factor, partition_mode, factor_format, factor_step_function, winding, \
         control_point_index_type, factor_scale_enabled;                                                           \
     uint64_t max_amplification;                                                                                   \
-    uint64_t texture_write_rounding;
+    uint64_t texture_write_rounding;                                                                              \
+    uint64_t alpha_to_coverage;
 
 /* As NMB_RENDER_PIPELINE_DESCRIPTOR_FIELDS, a compute pipeline descriptor's. The linked arrays are MTLLinkedFunctions'
  * functions and privateFunctions, the external functions the kernel calls by name (counted arrays of live handles for
@@ -100,6 +101,15 @@ typedef struct NmbOfflineFunction NmbOfflineFunction;
 // As nmb_library_new's metallib, nmb_function_new's and nmb_function_new_specialized's functions
 NmbOfflineLibrary *nmb_offline_library_new(const void *bytes, size_t length);
 void nmb_offline_library_release(NmbOfflineLibrary *);
+// nmb_offline_library_new's library over `bytes`, which the caller holds unchanged until `release(owner)` (called once,
+// on any thread, also when no library is made), with no copy. `sealed`: read from a sealed system volume, its
+// functions' HASH tags taken as stated, so only its function list is read until a function of it is compiled.
+NmbOfflineLibrary *nmb_offline_library_new_held(const void *bytes, size_t length, bool sealed, const void *owner,
+                                                void (*release)(const void *owner));
+// The system shader compiler keeps up to `bytes` of each kind of compiled stage (0: none), so a stage another state
+// compiles under the same inputs is translated once; and what it keeps: entries and bytes
+void nmb_keep_translations(uint64_t bytes);
+void nmb_kept_translations(uint64_t out[2]);
 NmbOfflineFunction *nmb_offline_function_new(const NmbOfflineLibrary *, const char *name);
 NmbOfflineFunction *nmb_offline_function_new_specialized(const NmbOfflineLibrary *, const char *name,
                                                          const char *specialized_name,

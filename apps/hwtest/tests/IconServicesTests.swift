@@ -17,6 +17,9 @@ import UniformTypeIdentifiers
 ///  - `_side`, only off its points times scale; `_placeholder`, only when the uncached image is the placeholder
 ///    IconServices makes when the agent refuses a request (`true`: a missing app's or type's icon at the same size, by
 ///    the request's kind) or there is none to compare with (`unknown`).
+/// And once an icon of an app, reported: `<icon>_record`, what LaunchServices answers this process for the app
+/// (LSApplicationProxy): `installed`, `absent` (a proxy of no installed app) or `none` (no proxy). A placeholder with
+/// `installed` puts the failing lookup in iconservicesagent; with `absent` or `none`, in this process's own.
 /// A failure names the field.
 enum IconArm {
     static func placeholder(
@@ -79,7 +82,13 @@ enum IconArm {
                 )
             }
         }
+        if case .bundle(let bundle) = source { metrics.set("\(name)_record", record(bundle)) }
         return failures.isEmpty ? .pass(metrics) : .fail(failures.joined(separator: ","), metrics)
+    }
+
+    static func record(_ bundle: String) -> String {
+        guard OverlayAppsTest.proxy(bundle) != nil else { return "none" }
+        return OverlayAppsTest.registered(bundle) ? "installed" : "absent"
     }
 }
 

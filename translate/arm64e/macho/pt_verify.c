@@ -1,4 +1,6 @@
 #include "pretranslate.h"
+#include "pt_edits.h"
+#include "stub_split.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -34,6 +36,8 @@ struct vctx {
     uint8_t *freed; /* 1 bit per word of the executable segment */
     uint64_t lo, hi;
     uint64_t mac_lo, mac_hi; /* the FIPS integrity MAC, checked against the translated text */
+    const struct a64x_pt_edit *edits;
+    size_t nedits;
 };
 
 int a64x_pt_fips(const struct a64x_macho *m, const uint8_t *bytes, struct a64x_fips *fips)
@@ -143,6 +147,15 @@ static bool follow(const struct vctx *c, uint64_t site, uint32_t w)
     return true;
 }
 
+static bool stub_word(const void *ctx, uint64_t off, uint32_t *w)
+{
+    const struct vctx *c = ctx;
+    if (!freed_at(c, off))
+        return false;
+    *w = rd32(c->out + off);
+    return true;
+}
+
 static bool stub_site(enum a64x_class c, uint32_t w)
 {
     uint32_t one;
@@ -154,7 +167,7 @@ static bool stub_site(enum a64x_class c, uint32_t w)
 static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, char *err, size_t errlen)
 {
     for (uint64_t off = c->lo; off + 4 <= c->hi; off += 4) {
-        uint32_t was = rd32(c->m->base + off), now = rd32(c->out + off), one;
+        uint32_t was = rd32(c->m->base + off), now = rd32(c->out + off), one, edited;
         bool code = code_at(c, off), freed = freed_at(c, off);
         enum a64x_class cn = a64x_classify(now), cw = a64x_classify(was);
         bool counts = !(no_pac && a64x_class_is_pac(cn));
@@ -167,6 +180,11 @@ static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, cha
             continue;
         if (!code && !freed)
             return fail(err, errlen, "data word at 0x%llx changed", (unsigned long long)off);
+        if (code && !freed && a64x_pt_edited_word(c->edits, c->nedits, off, &edited) && now == edited &&
+            cn == A64X_OK && !a64x_unallocated(now) && (now >> 16)) {
+            v->rewritten++;
+            continue;
+        }
         if (freed && a64x_class_is_baseline(cn))
             return fail(err, errlen, "stub word at 0x%llx is %s", (unsigned long long)off, a64x_class_name(cn));
         if ((now == 0x14000004u || now == 0x14000006u) && !freed && freed_at(c, off + 4)) {
@@ -176,7 +194,13 @@ static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, cha
         } else if (freed) {
             v->stub_words++;
             v->entered_stub_words += a64x_pt_entered(c->m, c->entries, off);
+        } else if (stub_site(cw, was) && !a64x_bl_site_ok(was, now)) {
+            return fail(err, errlen, "site at 0x%llx: its BL overwrites the x30 that %08x uses",
+                        (unsigned long long)off, was);
         } else if (stub_site(cw, was) && follow(c, off, now)) {
+            if (!a64x_stub_ordered(was, off, now, stub_word, c))
+                return fail(err, errlen, "site at 0x%llx: the stub of %08x has no DMB ISH after its store-exclusive",
+                            (unsigned long long)off, was);
             v->sites++;
         } else {
             return fail(err, errlen, "word at 0x%llx: %08x became %08x", (unsigned long long)off, was, now);
@@ -185,7 +209,8 @@ static int check_words(struct vctx *c, bool no_pac, struct a64x_pt_check *v, cha
     return 0;
 }
 
-long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_pt_check *v, char *err, size_t errlen)
+long a64x_pt_verify_edits(const struct a64x_macho *m, const uint8_t *out, const struct a64x_pt_edit *edits,
+                          size_t nedits, struct a64x_pt_check *v, char *err, size_t errlen)
 {
     memset(v, 0, sizeof(*v));
     uint64_t sig_off, sig_size, tlo, thi;
@@ -223,7 +248,9 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
                      m->exec_fileoff,
                      m->exec_fileoff + m->exec_filesize,
                      mac_lo,
-                     mac_hi};
+                     mac_hi,
+                     edits,
+                     nedits};
     int rc = c.freed && c.entries ? 0 : fail(err, errlen, "out of memory or unreadable fixups");
     struct a64x_code_map cm = {&c, code_at, flags, NULL};
     for (uint64_t off = c.lo; off < c.hi && !rc && !(flags & A64X_MAP_NO_PAC); off += PAGE) {
@@ -235,6 +262,8 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
     a64x_pt_tail(m, &tlo, &thi);
     for (uint64_t off = tlo; off < thi && !rc; off += 4)
         set_freed(&c, off);
+    if (!rc && nedits)
+        rc = a64x_pt_check_edits(m, islands.data, c.freed, tlo, thi, out, edits, nedits, err, errlen);
     if (!rc)
         rc = check_words(&c, flags & A64X_MAP_NO_PAC, v, err, errlen);
     if (!rc && v->entered_stub_words)
@@ -247,4 +276,9 @@ long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_
     free((void *)c.entries);
     free(islands.data);
     return rc ? -1 : (long)v->sites;
+}
+
+long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_pt_check *v, char *err, size_t errlen)
+{
+    return a64x_pt_verify_edits(m, out, NULL, 0, v, err, errlen);
 }

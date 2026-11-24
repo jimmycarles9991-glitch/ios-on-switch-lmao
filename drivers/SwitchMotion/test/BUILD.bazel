@@ -4,7 +4,8 @@
 # frame and scale; the off-with-one-line and lost-interrupt-panic paths; FIFO batching (watermark from the batch
 # interval, one status/count burst and whole-record data bursts per drain, per-sample times) and its fall-backs; the
 # orientation detector and its reports through 21H461's IOHIDEventDriver and CoreMotion (orientation_pipeline_model.h).
-# Plus guards on what the models cannot see (switch_motion_source_test).
+# Plus guards on what the models cannot see (switch_motion_source_test), and the 10 s line's window
+# (switch_motion_stats_test).
 #
 #   bazel test //drivers/SwitchMotion/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -33,6 +34,7 @@ host_library(
         "//drivers/ArmGIC:SwitchInterrupts.h",
         "//drivers/NativeMobileDisplay:SwitchPortrait.h",
         "//drivers/SwitchMotion:SwitchMotion.h",
+        "//drivers/SwitchMotion:SwitchMotionStats.h",
         "//drivers/SwitchTouch:SwitchHID.h",
         "//drivers/TegraGPIO:TegraGPIO.h",
         "//drivers/TegraSPI:TegraSPI.h",
@@ -51,6 +53,14 @@ host_test(
     deps = [
         ":headers",
         ":kernel",
+    ],
+)
+
+host_test(
+    name = "switch_motion_stats_test",
+    srcs = [
+        "switch_motion_stats_test.cpp",
+        "//drivers/SwitchMotion:SwitchMotionStats.h",
     ],
 )
 

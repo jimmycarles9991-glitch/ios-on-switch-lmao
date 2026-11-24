@@ -95,7 +95,9 @@ final class BenchWorker: @unchecked Sendable {
             "formats": BenchProtocol.formats.keys.sorted(), "root": root.path,
         ]
         if let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]) {
-            try? DurableFile.write(data + Data("\n".utf8), to: root.appendingPathComponent("status.json"))
+            try? DurableFile.write(
+                data + Data("\n".utf8), to: root.appendingPathComponent("status.json"), stagingIn: AppFiles.staging
+            )
         }
     }
 
@@ -144,7 +146,7 @@ final class BenchWorker: @unchecked Sendable {
             }
             try? DurableFile.write(
                 BenchResult.encode(batch: batch.name, entry: entry, outcome: outcome),
-                to: outbox.appendingPathComponent(entry.id + ".json")
+                to: outbox.appendingPathComponent(entry.id + ".json"), stagingIn: AppFiles.staging
             )
             try? DurableFile.append(BenchJournal.done(entry.id, outcome.status), to: journal)
             counts[outcome.status, default: 0] += 1
@@ -174,7 +176,9 @@ final class BenchWorker: @unchecked Sendable {
             a, _ in a
         }
         if let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]) {
-            try? DurableFile.write(data + Data("\n".utf8), to: outbox.appendingPathComponent("done.json"))
+            try? DurableFile.write(
+                data + Data("\n".utf8), to: outbox.appendingPathComponent("done.json"), stagingIn: AppFiles.staging
+            )
         }
         let kept = outbox.appendingPathComponent("batch.json")
         try? FileManager.default.removeItem(at: kept)

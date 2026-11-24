@@ -345,6 +345,8 @@ protected:
 		gGpu = FakeGpu{};
 		gMoves.clear();
 		gMoveFails = false;
+		gBackingScanned = 0;
+		gSmmuReady = 1;
 		gViews = ViewModel{};
 	}
 };
@@ -853,4 +855,73 @@ TEST_F(Coherency, WritersPerChannelAndTooManyChannels)
 	EXPECT_EQ(tegra_gm20b_iosurface_lock_will(75, 0), 0);
 	EXPECT_EQ(gGpu.waitAll, 1);
 	tgm_coherency_put(c);
+}
+
+TEST_F(Coherency, CompressedNonScanoutSurfaceKeepsKindAndRefusesCpuFallback)
+{
+	const auto p = pages(0x9f000000, 16);
+	tgm_coh *c = add(p[0], 76, p.data(), 16, 1);
+	tgm_coherency_set_compressible(c, 1);
+	EXPECT_EQ(tgm_coherency_layout_fitted(c, 128, 128, 4, 512,
+					      TGM_LAYOUT_ASK_WRITES | TGM_LAYOUT_ASK_COMPRESS),
+		  1);
+	EXPECT_TRUE(tegra_gm20b_surface_tiled(p[0]));
+	EXPECT_EQ(tegra_gm20b_surface_kind(p[0]), 0xdbu);
+	EXPECT_EQ(tegra_gm20b_surface_compressed(p[0]), 1);
+	tgm_layout layout = {};
+	EXPECT_EQ(tegra_gm20b_surface_layout(p[0], &layout), 1);
+
+	gMoveFails = true;
+	gCpuMoves = 0;
+	void *client = reinterpret_cast<void *>(0x1008);
+	void *task = reinterpret_cast<void *>(0x2000);
+	gViews.mappings[{client, 76}] = {client, task, 0x100000, 16 * 4096, 0, 0};
+	EXPECT_NE(tegra_gm20b_iosurface_view(client, kLock, 76, kReadOnly), 0);
+	EXPECT_EQ(gCpuMoves, 0);
+	void *rows = nullptr, *memory = nullptr;
+	uint64_t offset = 0;
+	EXPECT_EQ(tegra_gm20b_surface_rows(p[0], &rows, &memory, &offset), -5);
+	EXPECT_EQ(gCpuMoves, 0);
+	gMoveFails = false;
+	EXPECT_EQ(tegra_gm20b_iosurface_view(client, kLock, 76, kReadOnly), 0);
+	EXPECT_EQ(gCpuMoves, 0);
+	EXPECT_EQ(tegra_gm20b_iosurface_view(client, kUnlock, 76, kReadOnly), 0);
+	tgm_coherency_put(c);
+
+	const auto s = pages(0x9f400000, 928);
+	tgm_coh *scanout = add(s[0], 77, s.data(), 928, 1);
+	tgm_coherency_set_compressible(scanout, 1);
+	EXPECT_EQ(tgm_coherency_layout_fitted(scanout, 720, 1280, 4, 720 * 4,
+					      TGM_LAYOUT_ASK_WRITES | TGM_LAYOUT_ASK_COMPRESS),
+		  1);
+	EXPECT_EQ(tegra_gm20b_surface_kind(s[0]), TGM_LAYOUT_KIND);
+	EXPECT_EQ(tegra_gm20b_surface_compressed(s[0]), 0);
+	tgm_coherency_put(scanout);
+}
+
+TEST_F(Coherency, ScannedOrNoSmmuSurfaceRefusesCompression)
+{
+	const auto a = pages(0x9f800000, 16);
+	tgm_coh *scanned = add(a[0], 78, a.data(), 16, 1);
+	tgm_coherency_set_compressible(scanned, 1);
+	gBackingScanned = 1;
+	EXPECT_EQ(tgm_coherency_layout_fitted(scanned, 128, 128, 4, 512,
+					      TGM_LAYOUT_ASK_WRITES | TGM_LAYOUT_ASK_COMPRESS),
+		  1);
+	EXPECT_EQ(tegra_gm20b_surface_kind(a[0]), TGM_LAYOUT_KIND);
+	EXPECT_EQ(tegra_gm20b_surface_compressed(a[0]), 0);
+	gBackingScanned = 0;
+	tgm_coherency_put(scanned);
+
+	const auto b = pages(0x9fa00000, 16);
+	tgm_coh *noSmmu = add(b[0], 79, b.data(), 16, 1);
+	tgm_coherency_set_compressible(noSmmu, 1);
+	gSmmuReady = 0;
+	EXPECT_EQ(tgm_coherency_layout_fitted(noSmmu, 128, 128, 4, 512,
+					      TGM_LAYOUT_ASK_WRITES | TGM_LAYOUT_ASK_COMPRESS),
+		  1);
+	EXPECT_EQ(tegra_gm20b_surface_kind(b[0]), TGM_LAYOUT_KIND);
+	EXPECT_EQ(tegra_gm20b_surface_compressed(b[0]), 0);
+	gSmmuReady = 1;
+	tgm_coherency_put(noSmmu);
 }

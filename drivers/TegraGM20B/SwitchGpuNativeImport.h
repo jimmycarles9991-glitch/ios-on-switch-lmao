@@ -77,8 +77,17 @@ IOReturn AGXDeviceUserClient::nativeSurfaceView(const TegraGM20BAbiNativeSurface
 	Bo *bo = !result ? IONewZero(Bo, 1) : nullptr;
 	if (!result && !bo)
 		result = -12;
-	if (!result)
-		result = tgm_mem_new(vm_, allocation.pages, allocation.page_count, &bo->mem);
+	if (!result) {
+		if (switch_gpu_backing_tgm_mem_existing_or_direct(
+			    view->native, allocation.page_count, &bo->mem) == 0) {
+			bo->backingMemory = true;
+		} else {
+			result =
+				tgm_mem_new(vm_, allocation.pages, allocation.page_count, &bo->mem);
+			if (!result)
+				bo->ownsMem = true;
+		}
+	}
 	if (result) {
 		if (bo)
 			IODelete(bo, Bo, 1);

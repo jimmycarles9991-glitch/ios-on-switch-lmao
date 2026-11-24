@@ -26,6 +26,10 @@
 #include <IOKit/IOUserClient.h>
 #include <pexpert/pexpert.h>
 #include "AKSKeyWrap.h"
+#if DEVELOPMENT || DEBUG
+#include <kern/clock.h>
+#include <sys/proc.h>
+#endif
 extern "C" void native_keyevents_open_refused(void);
 extern "C" bool native_aks_state_enabled(void);
 extern "C" uint32_t native_aks_lock_state(void);
@@ -44,6 +48,11 @@ constexpr uint32_t kSelLockState = 7, kSelWrapKey = 10, kSelUnwrapKey = 11, kSel
                    kSelGetBagUUID = 23, kSelGetConfiguration = 31, kSelExtendedDeviceState = 35,
                    kSelSeSupportInRecovery = 107, kSelMementoState = 139;
 constexpr uint64_t kUnlockedSinceBoot = 4;
+#if DEVELOPMENT || DEBUG
+constexpr uint64_t kSlowCallNs = 20000000;
+constexpr uint32_t kSlowCallLogCap = 64;
+uint32_t gSlowCallLogged = 0;
+#endif
 constexpr uint32_t kStateFlags = 4;
 constexpr uint64_t kSystemHandle = 0;
 constexpr uint32_t kMessageFirstUnlock = 0xe3ffd00f;
@@ -239,6 +248,9 @@ OSDeclareDefaultStructors(AppleKeyStoreUserClient) public : IOReturn clientClose
     IOReturn externalMethod(uint32_t selector, IOExternalMethodArguments *args, IOExternalMethodDispatch *, OSObject *,
                             void *) override
     {
+#if DEVELOPMENT || DEBUG
+        const uint64_t began = mach_absolute_time();
+#endif
         IOReturn rc = kAksUnsupported;
         if (!args) {
             rc = kAksError;
@@ -326,6 +338,18 @@ OSDeclareDefaultStructors(AppleKeyStoreUserClient) public : IOReturn clientClose
             }
         }
         native_aks_call(selector, static_cast<int32_t>(rc));
+#if DEVELOPMENT || DEBUG
+        uint64_t ns = 0;
+        absolutetime_to_nanoseconds(mach_absolute_time() - began, &ns);
+        if (ns >= kSlowCallNs && __atomic_load_n(&gSlowCallLogged, __ATOMIC_RELAXED) < kSlowCallLogCap) {
+            if (__atomic_fetch_add(&gSlowCallLogged, 1, __ATOMIC_RELAXED) < kSlowCallLogCap) {
+                char caller[32] = {};
+                proc_selfname(caller, sizeof caller);
+                IOLog("AppleKeyStore: selector %u from %s[%d] took %llu ms (0x%x)\n", selector,
+                      caller[0] ? caller : "kernel", proc_selfpid(), ns / 1000000, rc);
+            }
+        }
+#endif
         return rc;
     }
 };

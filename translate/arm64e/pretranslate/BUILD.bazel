@@ -30,7 +30,10 @@ py_binary(
 py_test(
     name = "translate_tree_test",
     srcs = ["translate_tree_test.py"],
-    data = ["translate_tree.py"],
+    data = [
+        "edits_24B119.json",
+        "translate_tree.py",
+    ],
     deps = [
         "//tools/common:files",
         "//tools/common:hashing",
@@ -45,6 +48,10 @@ py_test(
         "//conditions:default": [],
     }),
     driver = ":translate_tree",
+    edits = select({
+        "//ipsw:ios27": "edits_24B119.json",
+        "//conditions:default": None,
+    }) if role == "os" else None,
     role = role,
     tool = "//translate/arm64e",
 ) for role, trustcaches in {

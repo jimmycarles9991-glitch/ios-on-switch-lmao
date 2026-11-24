@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <tuple>
 #include <vector>
@@ -29,6 +31,7 @@ struct TexelRows;  // texel_rows.h
 enum class Memory : uint8_t {
     Pool,
     Wc,
+    VolatileWc,
     Import,
     Bl,
     Arena
@@ -100,7 +103,7 @@ struct Import {
     // createSurfaceImage), whose textures address their memory as their images say
     bool kernelTiled() const
     {
-        return kind == TGM_LAYOUT_KIND && layout.bytes;
+        return kind != 0 && layout.bytes;
     }
 };
 
@@ -116,9 +119,13 @@ struct StoragePiece {
 
 // While its allocation is live, later trim/restoration cannot split these cuts.
 struct ArenaStorage {
-    uint32_t arena;
-    uint64_t offset;
-    uint8_t *cpu;
+    uint32_t arena = 0;
+    uint64_t offset = 0;
+    uint8_t *cpu = nullptr;
+    uint64_t arenaId = 0;
+    uint32_t kind = 0;
+    // Bumped under Device::lock_ when overlapping placements in this arena cross PTE kinds; read lock-free at use.
+    std::shared_ptr<std::atomic<uint64_t>> multiKindGen;
     StoragePiece first = {};
     std::vector<StoragePiece> rest{};
 
@@ -188,6 +195,7 @@ struct Texture {
         uint64_t va = 0, bytes = 0;
         bool hostVisible = false;
         const ArenaStorage *arena = nullptr;
+        bool gpuVolatile = false;
     } storage;
 
     StorageRange storageRange() const;
@@ -413,6 +421,7 @@ struct Buffer {
     // in memory once a DSB drains it (CommandBuffer::commit's, the replay's) and nothing is cleaned for the GPU, nor invalidated
     // after its writes; the CPU reading it is slow (uncached), which Core Animation's buffers (written, then drawn) never do.
     bool wc = false;
+    bool gpuVolatile = false;
     Import *import = nullptr;  // a caller's no-copy pages, else
     Span span;                 // pool memory
     Lease *lease = nullptr;    // as Texture::lease

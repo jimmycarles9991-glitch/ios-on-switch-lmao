@@ -14,9 +14,15 @@ from collections.abc import Iterable, Iterator
 
 from tools.devicerun import renamed
 from tools.devicerun.checks import FRAME_PREFIX, GROUPS
+from tools.devicerun.commit import commit_rows
+from tools.devicerun.cpu import cpu_rows
+from tools.devicerun.hwtest import joined
+from tools.devicerun.launch import launch_rows
+from tools.devicerun.memory import memory_rows
 from tools.devicerun.morning import CHECKLIST
 from tools.devicerun.reports import crash_rows, frame_rows, headline, rolled_up
 from tools.devicerun.rules import FAIL, Check, Event, Result, evaluate, match
+from tools.devicerun.springboard import springboard_rows
 
 OBSERVED_WIDTH = 110
 
@@ -77,9 +83,9 @@ def run_checks(records: Iterable[dict], checks: list[Check]) -> tuple[list[Resul
     regexes = {c.name: re.compile(c.regex) if c.regex else None for c in checks}
     by_name: dict[str, list[dict]] = {c.name: [] for c in checks}
     frame_lines, first, last = [], None, None
-    for record in records:
+    for record in joined(records):
         event = Event.from_ndjson(record)
-        first, last = first or event.time, event.time
+        first, last = min(first or event.time, event.time), max(last or event.time, event.time)
         if event.message.startswith(FRAME_PREFIX):
             frame_lines.append(f'{record["timestamp"]} {event.message}')
         for check in checks:
@@ -140,6 +146,11 @@ def evaluate_all(
     results, frame_lines = run_checks(records, all_checks(label))
     by_check = {r.check.name: r for r in results}
     groups = [(name, rolled_up([by_check[c.name] for c in group])) for name, group in groups_in.items()]
+    groups.append(('cpu-summary', cpu_rows(by_check)))
+    groups.append(('commit-summary', commit_rows(by_check)))
+    groups.append(('launch-summary', launch_rows(by_check)))
+    groups.append(('springboard-life', springboard_rows(by_check)))
+    groups.append(('memory-watch', memory_rows(by_check)))
     groups.append(('frames', frame_rows(frame_lines)))
     groups.append(('crashes', crash_rows(crashes)))
     return groups

@@ -77,6 +77,41 @@ class ArchivesTest(unittest.TestCase):
             self.assertEqual(list(values[first : first + n]), sorted(values[first : first + n]))
         self.assertEqual(len(data), 8 + 16 * 3 + 8 * 4)
 
+    def test_refused_render_rows_are_excluded_from_declared_and_section(self):
+        kept = RENDER.replace('c0=80:', 'c0=70:')
+        refused_key = (
+            'samples=1 topo=0 ds=260/260 c0=80:15:0:1:0:0:1:0:0  | v uber_vertex  | f uber_fragment'
+            ' #0:36:000000000000000050f8010071000000 | l RenderBox'
+        )
+        kept_key = refused_key.replace('c0=80:', 'c0=70:')
+        refused_hash = packfile.fnv(refused_key.encode())
+        kept_hash = packfile.fnv(kept_key.encode())
+        inventory = '\n'.join(
+            [
+                row('render', RENDERBOX, 'device', RENDER),
+                row('render', RENDERBOX, 'device', kept),
+                row('compute', NRF, 'device', KERNEL),
+            ]
+        )
+        declared, kinds = archives.declared(inventory, {refused_hash})
+        self.assertEqual(declared[RENDERBOX], {kept_hash})
+        self.assertEqual(dict(kinds), {'render': 1, 'compute': 1})
+        data = archives.section(declared, set())
+        count, key_count = struct.unpack_from('<II', data)
+        values = set(struct.unpack_from(f'<{key_count}Q', data, 8 + 16 * count))
+        self.assertNotIn(refused_hash, values)
+        self.assertIn(kept_hash, values)
+
+        only_refused, only_kinds = archives.declared(row('render', RENDERBOX, 'device', RENDER), {refused_hash})
+        self.assertEqual(only_refused, {})
+        self.assertEqual(dict(only_kinds), {})
+
+    def test_refused_keys_drops_states_whose_default_record_was_made(self):
+        made_key = 'samples=1 topo=0 ds=0/0 c0=80:15:0:1:0:0:1:0:0  | v a  | f b  | l RenderBox'
+        refused_only = 'samples=1 topo=0 ds=0/0 c0=70:15:0:1:0:0:1:0:0  | v a  | f b  | l RenderBox'
+        keys = archives.refused_keys([{'key': made_key}], [{'key': made_key}, {'key': refused_only}])
+        self.assertEqual(keys, {packfile.fnv(refused_only.encode())})
+
 
 if __name__ == '__main__':
     unittest.main()

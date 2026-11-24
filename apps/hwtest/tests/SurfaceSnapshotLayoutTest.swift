@@ -24,24 +24,7 @@ struct SurfaceSnapshotLayoutTest: HWTest {
         let gpu = try GPU.make()
         guard GM20BFacade.kind(of: gpu.device) == "gm20b" else { return .skip("the default device is not the facade") }
         guard let kernel = GPUConnection() else { return .skip("no TegraGM20B connection") }
-        let acceptor = TexturePeerAcceptor()
-        let listener = NSXPCListener.anonymous()
-        listener.delegate = acceptor
-        listener.resume()
-        defer {
-            acceptor.connection?.invalidate()
-            listener.invalidate()
-        }
-        let endpoint = listener.endpoint
-        if let why = await NativeSharedTexturePeerTest.offThread({ NativeSharedTexturePeerTest.startPeer(endpoint) }) {
-            throw TestFailure("no texture peer: \(why)")
-        }
-        let connected = await NativeSharedTexturePeerTest.offThread {
-            acceptor.accepted.wait(timeout: .now() + 20) == .success
-        }
-        guard connected, let connection = acceptor.connection else {
-            throw TestFailure("the texture peer never connected")
-        }
+        let connection = try await TexturePeerLink.connection()
         var blockLinear = 0, pitch = 0, cpuWrong = 0, gob = 0, readMax = 0, rendered = 0
         var layouts: [String] = []
         var held: [IOSurface] = []
@@ -79,6 +62,7 @@ struct SurfaceSnapshotLayoutTest: HWTest {
         metrics.set("gob", gob)
         metrics.set("read_us_max", readMax)
         let checks = [
+            await TexturePeerLink.startedOnce(&metrics),
             ("the peer rendered all \(Self.surfaces) surfaces", rendered == Self.surfaces),
             ("all \(Self.surfaces) block-linear (\(blockLinear), pitch \(pitch))", blockLinear == Self.surfaces),
             ("every lock read is the peer's rows (\(cpuWrong) bytes differ)", rendered > 0 && cpuWrong == 0),

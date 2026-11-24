@@ -94,7 +94,10 @@ def plan_lines(args: argparse.Namespace, first: str | None, name: str) -> list[s
 def check_inputs(args: argparse.Namespace) -> None:
     names = ['spec', 'ipsw', 'boot_package', 'gpu_base', 'gpu_stager', 'install_payload', 'apfs_tool']
     if not args.dry_run and not args.boot_only:
-        names += ['os_dmg', 'system_cryptex', 'app_cryptex']
+        names.append('os_dmg')
+        for member in ('system_cryptex', 'app_cryptex'):
+            translated = f'translated_{member}'
+            names.append(translated if getattr(args, translated, None) else member)
     missing = [n for n in names if not getattr(args, n) or not os.path.exists(getattr(args, n))]
     if missing:
         raise host.HostError('inputs missing: {}'.format(', '.join(missing)))

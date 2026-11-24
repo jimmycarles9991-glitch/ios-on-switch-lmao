@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include "TegraNVENC.h"
 #include "TegraNVENCCheck.h"
+#include "TegraNVENCPitchPlan.h"
 #include "../TegraVIC/SwitchVICEncodeInput.h"
 
 static_assert(offsetof(nvenc_h264_drv_pic_setup_s, input_cfg) == offsetof(nvenc_h265_drv_pic_setup_s, input_cfg) &&
@@ -67,17 +68,18 @@ int tegra_nvenc_source(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, voi
         *why = "a source region larger than the picture";
         return -22;
     }
-    const uint32_t blockRows = tegra_nvenc_block_rows(false, cfg.block_height);
+    const uint32_t gobs = cfg.block_height ? cfg.block_height : 2;
+    const uint32_t blockRows = tegra_nvenc_block_rows(false, gobs);
     const TegraVICAcquire previous = {tegra_nvenc_syncpt(), last ? *last : 0};
     SwitchVICEncodeInput input = {};
     input.destination = block.backing;
     input.lumaOffset = luma->offset + uint64_t(cfg.luma_top_frm_offset) * 256;
     input.chromaOffset = chroma->offset + uint64_t(cfg.chroma_top_frm_offset) * 256;
     input.pitch = cfg.sfc_pitch;
-    input.lumaRows = tegra_nvenc_luma_rows(height, blockRows);
-    input.chromaRows = tegra_nvenc_chroma_rows(height, blockRows);
-    input.blockLinear = cfg.block_height != 0;
-    input.blockHeightLog2 = cfg.block_height ? log2Of(cfg.block_height) : 0;
+    input.lumaRows = tegra_nvenc_read_rows(height, blockRows);
+    input.chromaRows = tegra_nvenc_read_rows((height + 1) / 2, blockRows);
+    input.blockLinear = 1;
+    input.blockHeightLog2 = log2Of(gobs);
     input.width = width;
     input.height = height;
     input.x = source.x;
@@ -91,6 +93,49 @@ int tegra_nvenc_source(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, voi
     switch_gpu_backing_token written = {};
     bool bounced = false;
     const int error = switch_vic_encode_input(source.surface_id, task, &input, &fence, &written, &bounced, why);
+    if (!error) {
+        *after = {tegra_vic_syncpt(), fence, written};
+        *route = bounced ? TEGRA_NVENC_INPUT_BOUNCED : TEGRA_NVENC_INPUT_VIC;
+    }
+    return error;
+}
+
+int tegra_nvenc_pitch_convert(const TegraNVENCPitchPlan *plan, const TegraNVENCBlock *source,
+                              const TegraNVENCBlock *destination, const uint32_t *last, TegraNVENCAfter *after,
+                              uint32_t *route, const char **why)
+{
+    if (!plan || !source || !destination || !source->backing || !destination->backing) {
+        *why = "pitch conversion buffers";
+        return -22;
+    }
+    const TegraVICAcquire previous = {tegra_nvenc_syncpt(), last ? *last : 0};
+    SwitchVICEncodeBuffer req = {};
+    req.source = source->backing;
+    req.sourceMemory = source->pages.memory;
+    req.srcLumaOffset = plan->srcLumaOffset;
+    req.srcChromaOffset = plan->srcChromaOffset;
+    req.srcPitch = plan->srcPitch;
+    req.width = plan->width;
+    req.height = plan->height;
+    req.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.output.destination = destination->backing;
+    req.output.lumaOffset = 0;
+    req.output.chromaOffset = plan->bl2ChromaOffset;
+    req.output.pitch = plan->bl2Pitch;
+    req.output.lumaRows = plan->bl2LumaRows;
+    req.output.chromaRows = plan->bl2ChromaRows;
+    req.output.blockLinear = 1;
+    req.output.blockHeightLog2 = log2Of(2);
+    req.output.width = plan->width;
+    req.output.height = plan->height;
+    req.output.w = plan->width;
+    req.output.h = plan->height;
+    req.output.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
+    req.output.after = last ? &previous : nullptr;
+    uint32_t fence = 0;
+    switch_gpu_backing_token written = {};
+    bool bounced = false;
+    const int error = switch_vic_encode_buffer(&req, &fence, &written, &bounced, why);
     if (!error) {
         *after = {tegra_vic_syncpt(), fence, written};
         *route = bounced ? TEGRA_NVENC_INPUT_BOUNCED : TEGRA_NVENC_INPUT_VIC;

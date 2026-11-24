@@ -38,6 +38,7 @@
 #include <vm/vm_purgeable_internal.h>
 #include <vm/vm_object_internal.h>
 #include <vm/vm_ubc.h>
+#include <switch/prefetch_vm.h>
 #include <sys/kdebug.h>
 #include <sys/kdebug_kernel.h>
 
@@ -619,6 +620,7 @@ upl_commit_range(
 	int                     dw_limit;
 	int                     isVectorUPL = 0;
 	upl_t                   vector_upl = NULL;
+	uint32_t                switch_committed = 0;
 	boolean_t               should_be_throttled = FALSE;
 
 	vm_page_t               nxt_page = VM_PAGE_NULL;
@@ -1184,6 +1186,10 @@ process_upl_to_commit:
 				clear_refmod |= VM_MEM_REFERENCED;
 			} else if (!VM_PAGE_PAGEABLE(m)) {
 				if (m->vmp_clustered || (flags & UPL_COMMIT_SPECULATE)) {
+					if (__improbable((upl->flags & UPL_SWITCH_PREFETCH) && m->vmp_clustered)) {
+						switch_committed++;
+						dwp->dw_mask |= DW_vm_page_switch_prefetched;
+					}
 					dwp->dw_mask |= DW_vm_page_speculate;
 				} else if (m->vmp_reference) {
 					dwp->dw_mask |= DW_vm_page_activate;
@@ -1220,6 +1226,10 @@ commit_next_page:
 				VM_PAGE_ADD_DELAYED_WORK(dwp, m, dw_count);
 
 				if (dw_count >= dw_limit) {
+					if (__improbable(switch_committed != 0 && switch_vm_prefetch_committed != NULL)) {
+						switch_vm_prefetch_committed(switch_committed);
+						switch_committed = 0;
+					}
 					vm_page_do_delayed_work(shadow_object, VM_KERN_MEMORY_NONE, dwp_start, dw_count);
 
 					dwp = dwp_start;
@@ -1235,6 +1245,10 @@ commit_next_page:
 				}
 			}
 		}
+	}
+	if (__improbable(switch_committed != 0 && switch_vm_prefetch_committed != NULL)) {
+		switch_vm_prefetch_committed(switch_committed);
+		switch_committed = 0;
 	}
 	if (dw_count) {
 		vm_page_do_delayed_work(shadow_object, VM_KERN_MEMORY_NONE, dwp_start, dw_count);

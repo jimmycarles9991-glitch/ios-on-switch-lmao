@@ -137,6 +137,7 @@
 #if DEVELOPMENT || DEBUG
 #include <vm/vm_compressor_info.h>
 #endif /* DEVELOPMENT || DEBUG */
+#include <switch/prefetch_vm.h>
 #include <ptrcheck.h>
 #include <san/kasan.h>
 
@@ -11049,6 +11050,7 @@ vm_map_copyout_internal(
 				    &page_sleep_needed);
 
 				vm_object_unlock(object);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 				assert(!page_sleep_needed);
 
 				offset += PAGE_SIZE_64;

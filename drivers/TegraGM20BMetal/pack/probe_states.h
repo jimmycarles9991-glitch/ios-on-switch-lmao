@@ -109,6 +109,7 @@ inline bool linkedFunction(MTLRenderPipelineDescriptor *d, id<MTLLibrary> own, c
 
 struct State {
     std::string key, label;
+    uint64_t fast = 0;  // its fast key (TegraGM20BMetalPipelineKey.h fastKey), of its key less any variant name
     MTLRenderPipelineDescriptor *d;
     id<MTLLibrary> library = nil;  // the library its functions are made from
     std::string framework;         // that library's framework (parseState), "" for QuartzCore's and a bundle's
@@ -120,6 +121,9 @@ struct State {
     // a line naming the state's written variant (" | wtex=<slot>:<format>,...", written_textures.h): the formats bound at
     // the slots it writes, which its key leaves out as it does xrSlots
     std::vector<gm20b::WrittenTexture> written;
+    // its line's " tier=1": a state the generator derived and no device named, laid after the launch set (pack.h
+    // PackHeader::tier0); 0: one of the launch set
+    uint64_t tier = 0;
 };
 
 // A line's " | cubic s<slot>:<s><t><r><border><n|p>... t<slot>:<MTLPixelFormat>..." segment (cubic.h key) as binds,
@@ -214,8 +218,12 @@ inline bool parseState(id<MTLLibrary> qc, const std::string &line, State &s, con
             d.tessellationFactorScaleEnabled = scale != 0;
         } else if (h.rfind("amp=", 0) == 0) {
             d.maxVertexAmplificationCount = strtoul(h.c_str() + 4, nullptr, 10);
+        } else if (h == "tier=1") {
+            s.tier = 1;
         } else if (h == "twr=2") {
             [d setValue:@2 forKey:@"textureWriteRoundingMode"];
+        } else if (h == "alphacov=1") {
+            d.alphaToCoverageEnabled = YES;
         } else if (h[0] == 'a' && isdigit(h[1])) {
             unsigned i, x[6] = {};
             unsigned long long stride = 0;
@@ -258,8 +266,10 @@ inline bool parseState(id<MTLLibrary> qc, const std::string &line, State &s, con
             return refuse("its segment \"" + segment.substr(0, 80) + "\" makes nothing");
         at = next;
     }
-    s.key = gm20b::pipelineKey(d, &vertex, d.fragmentFunction ? &fragment : nullptr, linked, framework) +
+    const gm20b::PipelineFields fields = gm20b::fieldsOf(d);
+    s.key = gm20b::pipelineKey(fields, &vertex, d.fragmentFunction ? &fragment : nullptr, linked, framework) +
             (s.cubic.empty() ? std::string() : s.cubic.key());
+    s.fast = gm20b::fastKey(fields, &vertex, d.fragmentFunction ? &fragment : nullptr, linked, framework);
     s.d = d;
     return true;
 }
@@ -450,6 +460,9 @@ inline std::vector<std::string> corpusLines(NSString *text, bool own)
                             "110 | v resolve_vert | f resolve_rgba16_frag",
                             "90 | v resolve_vert | f resolve_rgb10a2_frag",
                             "94 | v resolve_vert | f resolve_bgr10a2_frag",
+                            "12 | v resolve_vert | f resolve_r8snorm_frag",
+                            "32 | v resolve_vert | f resolve_rg8snorm_frag",
+                            "72 | v resolve_vert | f resolve_rgba8snorm_frag",
                             "25 | v resolve_vert | f resolve_r16f_frag",
                             "65 | v resolve_vert | f resolve_rg16f_frag",
                             "55 | v resolve_vert | f resolve_r32f_frag",

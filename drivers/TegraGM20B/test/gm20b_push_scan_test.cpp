@@ -92,9 +92,9 @@ struct CoreAnimation {
 		      immd(0, 0x1288, 0)};                               // WFI, SHINV+flush, texinv
 		p3 = {inc(4, 0x0418, 2), 0, 0, immd(4, 0x0300, 0x186)};  // NVK's copy-engine WFI
 		p4 = {inc(0, 0x1b00, 4), 0x3e, 0x1000};  // a report: two of four words here
-		p5 = {0, 0x10000002, immd(0, 0x0050, 0), immd(0, 0x0034, 0x0e),
-		      immd(0, 0x0da4, 0x10)};  // the rest, SET_REFERENCE,
-					       // L2 sysmem invalidate, shinv
+		p5 = {0,           0x10000002,           immd(0, 0x0050, 0), inc(0, 0x0034, 1),
+		      0x0eu << 27, immd(0, 0x0da4, 0x10)};  // the rest, SET_REFERENCE,
+							    // L2 sysmem invalidate, shinv
 	}
 };
 
@@ -468,4 +468,23 @@ TEST(GM20BPushScan, EachRawDrawAndClearCountsOnceAndLatchesItsTarget)
 			EXPECT_EQ(drawn.samples, 1u) << k.name;
 		}
 	}
+}
+
+TEST(GM20BPushScan, MemOpDL2InvalidateUsesOperationBits31To27)
+{
+	const Push inval = {inc(0, 0x0034, 1), 0x0eu << 27};
+	const Push lowBitsOnly = {immd(0, 0x0034, 0x0e)};
+	const Push flushDirty = {inc(0, 0x0034, 1), 0x10u << 27};
+	const Push tlbInval = {inc(0, 0x0034, 1), 0x09u << 27};
+
+	const Result good = scan({&inval});
+	EXPECT_EQ(good.c.l2Inval, 1u);
+	EXPECT_EQ(good.cls[0], TGM_PC_SYNC);
+
+	const Result low = scan({&lowBitsOnly});
+	EXPECT_EQ(low.c.l2Inval, 0u) << "MEM_OP_D operation lives in bits 31:27, not 4:0";
+	EXPECT_EQ(low.cls[0], TGM_PC_STATE);
+
+	const Result other = scan({&flushDirty, &tlbInval});
+	EXPECT_EQ(other.c.l2Inval, 0u);
 }

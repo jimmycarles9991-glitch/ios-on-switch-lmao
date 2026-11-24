@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define SWITCH_GPU_SMALL_SHIFT 12u
-#define SWITCH_GPU_BIG_SHIFT 17u
+#define SWITCH_GPU_BIG_SHIFT 16u
 #define SWITCH_GPU_BIG_BYTES (1ULL << SWITCH_GPU_BIG_SHIFT)
 #define SWITCH_GPU_BIG_PAGES (1u << (SWITCH_GPU_BIG_SHIFT - SWITCH_GPU_SMALL_SHIFT))
 
@@ -54,7 +54,7 @@ static inline int switch_gpu_mapping_next(const uint64_t *pages, uint32_t count,
 	return 1;
 }
 
-/* A sparse range has no pages behind it: 128 KiB PTEs wherever its VA holds a whole aligned big page, 4 KiB ones
+/* A sparse range has no pages behind it: 64 KiB PTEs wherever its VA holds a whole aligned big page, 4 KiB ones
  * elsewhere */
 static inline void switch_gpu_mapping_sparse_next(uint64_t va, uint64_t bytes,
 						  struct switch_gpu_mapping_run *run)
@@ -69,7 +69,7 @@ static inline void switch_gpu_mapping_sparse_next(uint64_t va, uint64_t bytes,
 	}
 }
 
-/* The bytes of a range 128 KiB PTEs could map (VA and physical pages aligned and contiguous), whatever it is mapped with */
+/* The bytes of a range 64 KiB PTEs could map (VA and physical pages aligned and contiguous), whatever it is mapped with */
 static inline uint64_t switch_gpu_mapping_big_bytes(const uint64_t *pages, uint32_t count,
 						    uint64_t va, uint64_t offset, uint64_t bytes)
 {

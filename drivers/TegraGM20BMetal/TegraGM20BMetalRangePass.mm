@@ -244,11 +244,22 @@ bool SwitchMetalRangeEncode::beginPass(size_t at)
         p.depthStencil.loaded = pass.depthLoad == MTLLoadActionLoad || pass.stencilLoad == MTLLoadActionLoad;
         p.depthStencil.stored =
             pass.zeta[0].store != MTLStoreActionDontCare || pass.zeta[1].store != MTLStoreActionDontCare;
-        // an encode ahead has no later pass that loads it (ineligible())
-        p.depthStencil.loadedLater =
-            whole_ && std::any_of(cb->_passes.begin() + c.x + 1, cb->_passes.end(), [&](const SwitchMetalPass &later) {
-                return later.depth == pass.depth && later.depthLoad == MTLLoadActionLoad;
-            });
+        bool loadedLater = false;
+        if (whole_) {
+            for (size_t k = cb->_plan.encoderEnd(at); k < to_;) {
+                const Op nextOp = cb->_plan.operation(k).op;
+                if (nextOp == OpRender) {
+                    const SwitchMetalPass &later = cb->_passes[cb->_plan.legacy(k).x];
+                    if (later.depth == pass.depth && later.depthLoad == MTLLoadActionLoad) {
+                        loadedLater = true;
+                        break;
+                    }
+                }
+                const size_t nextEnd = SwitchMetalCommandPlan::isEncoderBegin(nextOp) ? cb->_plan.encoderEnd(k) : k + 1;
+                k = std::max(nextEnd, k + 1);
+            }
+        }
+        p.depthStencil.loadedLater = loadedLater;
         p.depthStencil.depth = gm20b::metalClearDepth(pass.clearDepth, z->_raw.format);
         p.depthStencil.stencil = pass.clearStencil;
         if (separate) {

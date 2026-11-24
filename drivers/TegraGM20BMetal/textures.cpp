@@ -93,32 +93,33 @@ bool Device::createTexture(uint32_t width, uint32_t height, uint32_t format, Tex
         return false;
     const bool blocks = t.blockW > 1 || t.blockH > 1;
     t.pitch = (t.width * t.bpp + 255) & ~255u;
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     const uint64_t bytes = uint64_t(t.pitch) * t.height;
     tgm_layout bl;
     const bool laid = plainTiled(t, tiled, bl);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (probeCompressNext.exchange(false) && laid && !wc && !blocks && compressedKind(t.bpp, 0))
-        return probeCompressible(bl, t);
+        return probeCompressible(bl, t, deferred);
 #endif
-    if (laid && blAlloc(bl.bytes, bl.align, t.span)) {
+    if (laid && blAlloc(l, bl.bytes, bl.align, t.span)) {
         tiledRows(t, bl);
     } else if (blocks) {
         return false;
-    } else if (wc && wcAlloc(bytes, t.span)) {
+    } else if (wc && wcAlloc(l, bytes, t.span)) {
         t.wc = true;
         SWITCH_METAL_DIAGNOSTIC(stats.wcBytes += t.span.bytes);
     } else {
         if (wc)
             SWITCH_METAL_DIAGNOSTIC(stats.wcFallbacks++);
-        if (!poolAlloc(bytes, t.span))
+        if (!poolAlloc(l, bytes, t.span))
             return false;
     }
     t.va = t.span.va;
     t.cpu = t.span.cpu;
     if (!(t.tic = allocTic())) {
         Lease *none = nullptr;
-        freeSpan(t.span, memoryOf(t), none);
+        freeSpan(l, t.span, memoryOf(t), none, deferred);
         return false;
     }
     writeTic(t);
@@ -295,13 +296,14 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
         arenaRounded(kind, bytes, align);
     const bool zeta = ask.kind == TextureAsk::Zeta;
     const uint32_t z = zetaFormatIndex(ask.format);
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     Span owned;
     Bo comp;
     const bool compressed = ask.compressKind && !at && !zeta && takeCompressed(bytes, ask.compressKind, comp);
-    const bool placed = compressed || (at     ? arenaSpan(*at, bytes, align, kind, t)
-                                       : zeta ? tiledAlloc(zChunks_[z], kind, bytes, align, owned)
-                                              : blAlloc(bytes, align, t.span));
+    const bool placed = compressed || (at     ? arenaSpan(l, *at, bytes, align, kind, t)
+                                       : zeta ? tiledAlloc(l, zChunks_[z], kind, bytes, align, owned)
+                                              : blAlloc(l, bytes, align, t.span));
     if (!placed) {
         delete chain;
         return false;
@@ -313,9 +315,9 @@ bool Device::createLaidOut(const TextureAsk &ask, Texture &t, const ArenaAt *at)
         if (compressed)
             compReadyPush(comp, ask.compressKind);
         else if (zeta && !at)
-            tiledFree(zChunks_[z], owned);
+            tiledFree(zChunks_[z], owned, deferred);
         else
-            freeSpan(t.span, memoryOf(t), none);
+            freeSpan(l, t.span, memoryOf(t), none, deferred);
         delete chain;
         return false;
     }
@@ -412,14 +414,15 @@ void Device::destroyTexture(Texture &t)
         t.sampled = nullptr;
         t.tic = 0;
     }
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     if (t.tic && t.xrPlanes) {
         freeTicPair(t.tic);
     } else if (t.tic) {
         freeTic(t.tic);
     }
     if (t.zeta)
-        freeOwnedZeta(t.va);
+        freeOwnedZeta(t.va, deferred);
     if (t.chain) {
         for (const uint32_t *tics : {t.chain->levelTic, t.chain->levelCodesTic})
             for (uint32_t level = 0; level < fx::kMaxLevels; level++)
@@ -429,21 +432,21 @@ void Device::destroyTexture(Texture &t)
         t.chain = nullptr;
     }
     if (t.import)
-        release(t.import);
+        release(t.import, deferred);
     if (t.texelRows) {
-        release(t.texelRows->import);
+        release(t.texelRows->import, deferred);
         delete t.texelRows;
     }
     if (t.callerPages)
-        release(t.callerPages);
+        release(t.callerPages, deferred);
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     if (auto it = probeCompressed.find(t.va); t.comptags && !t.span.valid() && it != probeCompressed.end()) {
-        k_.free(it->second);
+        deferred.add({it->second});
         probeCompressed.erase(it);
     }
 #endif
-    releasePrivateCompressed(t);
-    freeSpan(t.span, memoryOf(t), t.lease);
+    releasePrivateCompressed(t, deferred);
+    freeSpan(l, t.span, memoryOf(t), t.lease, deferred);
     SWITCH_METAL_DIAGNOSTIC(stats.textureBytes -= t.heldBytes);
     t = {};
 }
@@ -493,14 +496,14 @@ bool Device::probeRetarget(const Texture &a, const Texture *to)
     return true;
 }
 
-bool Device::probeCompressible(const tgm_layout &bl, Texture &t)
+bool Device::probeCompressible(const tgm_layout &bl, Texture &t, DeferredFrees &deferred)
 {
     const uint32_t kind = compressedKind(t.bpp, 0);
     Bo bo;
     if (k_.allocCompressible(compBytes(bl.bytes), bo) != KERN_SUCCESS)
         return false;
     if (k_.bindCompressed(bo, kind) != KERN_SUCCESS) {
-        k_.free(bo);
+        deferred.add({bo});
         return false;
     }
     t.va = bo.va;
@@ -510,7 +513,7 @@ bool Device::probeCompressible(const tgm_layout &bl, Texture &t)
     t.layerBytes = bl.bytes;
     t.comptags = true;
     if (!(t.tic = allocTic())) {
-        k_.free(bo);
+        deferred.add({bo});
         return false;
     }
     probeCompressed[bo.va] = bo;

@@ -65,6 +65,7 @@
 #include <kperf/kptimer.h>
 #include <kperf/pet.h>
 #include <kperf/sample.h>
+#include <switch/recorder.h>
 
 #define KPTIMER_PET_INACTIVE (999)
 #define KPTIMER_MAX (8)
@@ -224,6 +225,7 @@ kptimer_sample_curcpu(unsigned int actionid, unsigned int timerid,
 
 	(void)kperf_sample(intbuf, &ctx, actionid,
 	    SAMPLE_FLAG_PEND_USER | flags);
+	SWITCH_RECORDER_SAMPLED();
 
 	BUF_INFO(PERF_TM_HNDLR | DBG_FUNC_END);
 }

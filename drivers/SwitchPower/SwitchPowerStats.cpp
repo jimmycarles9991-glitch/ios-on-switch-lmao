@@ -2,7 +2,8 @@
 // The power stats line (debug kernels only, os_log): every 10 s, each core's time in C7, in WFI and busy over the
 // window, with its C7 entries, the requests the firmware returned from at once and the frame lines that found it in C7;
 // the C7 exits wake timers ended (mean, largest since boot, and those back after their deadline); the interrupts each
-// core took by class (timer PPI, IPI, SPI); the EMC's rate changes and time at each rate, then the battery's draw.
+// core took by class (timer PPI, IPI, SPI); the EMC's rate changes and time at each rate, then the battery's draw. A
+// second line names the INTIDs that took the most SPIs in the same window.
 #include "SwitchPowerStats.h"
 
 #if DEVELOPMENT || DEBUG
@@ -10,8 +11,10 @@
 #include <kern/clock.h>
 #include <os/log.h>
 #include "../../kits/SwitchIdle/switch_idle.h"
+#include "../ArmGIC/SwitchInterrupts.h"
 #include "../SwitchBattery/SwitchBattery.h"
 #include "SwitchEMC.h"
+#include "SwitchIrqSources.h"
 
 // ArmCpu's per-core interrupt counts, each written only by its own core (ArmCpu.cpp).
 extern "C" volatile uint32_t armcpu_core_timer[8], armcpu_core_sgi[8], armcpu_core_spi[8];
@@ -86,6 +89,22 @@ size_t appendInterrupts(char *line, size_t size, size_t n)
     return n;
 }
 
+switch_power::IrqSources gSources;
+
+void logSources(uint64_t ms, bool log)
+{
+    switch_power::startIrqWindow(gSources);
+    for (uint32_t intid = switch_power::kFirstSpi; intid < switch_power::kIntidLimit; ++intid)
+        switch_power::noteIrq(gSources, intid, switch_interrupt_count(intid));
+    if (!log)
+        return;
+    char line[400];
+    const int n = snprintf(line, sizeof(line), "SwitchPower interrupts: %llu ms: ", ms);
+    if (n > 0 && static_cast<size_t>(n) < sizeof(line))
+        switch_power::formatIrqSources(gSources, ms, line + n, sizeof(line) - static_cast<size_t>(n));
+    os_log(OS_LOG_DEFAULT, "%s", line);
+}
+
 size_t appendBattery(char *line, size_t size, size_t n)
 {
     switch_battery_gauge gauge = {};
@@ -114,6 +133,7 @@ void switch_power_stats_tick()
     appendBattery(line, sizeof(line), n);
     if (gLast)
         os_log(OS_LOG_DEFAULT, "%s", line);
+    logSources(window / 19200, gLast != 0);
     gLast = now;
 }
 #endif

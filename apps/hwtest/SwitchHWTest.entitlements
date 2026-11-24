@@ -26,6 +26,7 @@
 	</array>
 	<key>com.apple.security.exception.files.absolute-path.read-only</key>
 	<array>
+		<string>/private/var/mobile/Library/Logs/CrashReporter/</string>
 		<string>/private/var/Switch/icon-cache-gpu</string>
 		<string>/private/var/Switch/icon-cache-reset</string>
 	</array>
@@ -52,8 +53,16 @@
 		<string>kern.switch_frame_info_unsent</string>
 		<string>kern.switch_frame_info_ordinary</string>
 		<string>kern.switch_frame_info_early</string>
+		<string>kern.switch_frame_info_unphased</string>
+		<string>kern.switch_display_refresh_min</string>
+		<string>kern.switch_display_refresh_min_mach</string>
+		<string>kern.switch_display_refresh_max</string>
+		<string>kern.switch_display_refresh_max_mach</string>
+		<string>kern.switch_display_refresh_step</string>
+		<string>kern.switch_display_refresh_step_mach</string>
 		<string>kern.switch_joycon</string>
 		<string>kern.switch_soctherm</string>
+		<string>kern.switch_sd</string>
 		<string>kern.switch_gpu_paths</string>
 		<string>kern.switch_gpu_promises</string>
 		<string>kern.a64x.images</string>
@@ -93,6 +102,9 @@
 		<string>debug.switch_gpu_ramfc</string>
 		<string>debug.switch_perf_dfll_landing</string>
 		<string>debug.switch_joycon_probe</string>
+		<string>debug.switch_recorder</string>
+		<string>debug.switch_recorder_expect</string>
+		<string>debug.switch_recorder_wait</string>
 		<string>kern.switch_scanout_cpu</string>
 		<string>kern.switch_scanout_unshown</string>
 		<string>kern.switch_scanout_vic</string>
@@ -103,6 +115,7 @@
 	</array>
 	<key>com.apple.security.exception.sysctl.read-write</key>
 	<array>
+		<string>debug.switch_recorder_expect</string>
 		<string>debug.switch_display_dc_host1x_class</string>
 		<string>debug.switch_display_host1x_flip</string>
 		<string>debug.switch_gpu_rail_cycle</string>

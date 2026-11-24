@@ -10,8 +10,9 @@ import Metal
 /// texture goes (the runtime keeps its import, memory.cpp keepImport, so the kernel's untile at the last release does not
 /// run), and a read-only lock must read the pattern as rows. A surface the CPU wrote first must still be tiled by a move:
 /// the GPU blits over its top half only, and its lock must read the GPU's rows above the CPU's (written_wrong_blitted and
-/// written_wrong_moved split its wrong bytes by half). A pattern that is not uniform shows a skipped tiling move (the
-/// CPU's rows read back scrambled) and a skipped untile (texels read as rows).
+/// written_wrong_moved split its wrong bytes by half; written_moved_rows_all_wrong counts the moved half's rows wrong
+/// in all 512 bytes: 32 for GOB lines in the other kind's order, 0 for a copy short of each row). A pattern that is not
+/// uniform shows a skipped tiling move (the CPU's rows read back scrambled) and a skipped untile (texels read as rows).
 struct RelayoutPathTest: GPUPathTest {
     let id = "gpu.path.relayout_history"
     let name = "A fresh render target is tiled without a move and untiled at its first CPU lock; a written one moves"
@@ -44,6 +45,12 @@ struct RelayoutPathTest: GPUPathTest {
         metrics.set("written_wrong_bytes", writtenWrong)
         metrics.set("written_wrong_blitted", Self.wrong(Array(got[..<half]), Array(want[..<half])))
         metrics.set("written_wrong_moved", Self.wrong(Array(got[half...]), Array(want[half...])))
+        metrics.set(
+            "written_moved_rows_all_wrong",
+            stride(from: half, to: got.count, by: Self.rowBytes).filter { row in
+                (row ..< row + Self.rowBytes).allSatisfy { got[$0] != want[$0] }
+            }.count
+        )
         if writtenWrong != 0 { failures.append("\(writtenWrong) bytes of the CPU-written target read back wrong") }
         if case .counts(let start) = before, case .counts(let end) = GPUPaths.read(connection) {
             let skipped = end.taken("relayout_fresh", since: start)

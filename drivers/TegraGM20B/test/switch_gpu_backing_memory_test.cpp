@@ -334,3 +334,85 @@ TEST_F(BackingMemory, InstalledEngineMappingFixesThePinnedExtent)
 	EXPECT_EQ(switch_gpu_backing_mapping_context(b, SWITCH_GPU_ENGINE_NVJPG), memory);
 	switch_gpu_backing_release(b);
 }
+
+TEST_F(BackingMemory, ExistingLookupReturnsCanonicalObjectWithoutCreating)
+{
+	auto *b = backing(4);
+	void *existing = nullptr;
+	EXPECT_EQ(switch_gpu_backing_memory_existing(b, 4, destroyMemory, &existing), -2);
+	EXPECT_EQ(existing, nullptr);
+	EXPECT_EQ(created, 0u);
+
+	void *canonical = nullptr;
+	ASSERT_EQ(acquire(b, 4, &canonical), 0);
+	ASSERT_EQ(switch_gpu_backing_memory_existing(b, 2, destroyMemory, &existing), 0);
+	EXPECT_EQ(existing, canonical);
+	EXPECT_EQ(created, 1u);
+
+	EXPECT_EQ(switch_gpu_backing_memory_existing(b, 5, destroyMemory, &existing), -95);
+	EXPECT_EQ(existing, nullptr);
+	EXPECT_EQ(switch_gpu_backing_memory_existing(b, 4, destroyOther, &existing), -95);
+	EXPECT_EQ(existing, nullptr);
+
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(BackingMemory, DirectPaLatchRefusesSmmuAndFallsBackToDirect)
+{
+	auto *b = backing(16);
+	void *existing = nullptr;
+	EXPECT_EQ(switch_gpu_backing_memory_existing_or_direct(b, 16, destroyMemory, &existing),
+		  -2);
+	EXPECT_EQ(existing, nullptr);
+
+	static std::atomic<unsigned> smmuCalls{0};
+	smmuCalls = 0;
+	auto createSmmu = [](const uint64_t *pages, uint32_t count, void **out, uint32_t *flags) {
+		++smmuCalls;
+		++created;
+		*flags = SWITCH_GPU_BACKING_MEMORY_FIXED | SWITCH_GPU_BACKING_MEMORY_SMMU;
+		*out = new Memory{pages, count, pages[0]};
+		return 0;
+	};
+	void *object = nullptr;
+	ASSERT_EQ(switch_gpu_backing_memory_acquire_smmu(b, 16, createSmmu, createMemory,
+							 destroyMemory, &object),
+		  0);
+	EXPECT_NE(object, nullptr);
+	EXPECT_EQ(smmuCalls.load(), 0u);
+	EXPECT_EQ(created.load(), 1u);
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(BackingMemory, ConcurrentDirectPaLatchDiscardsUnpublishedSmmuCandidate)
+{
+	auto *b = backing(16);
+	static std::atomic<unsigned> smmuCalls{0};
+	smmuCalls = 0;
+	creationHook = [&] {
+		void *existing = nullptr;
+		EXPECT_EQ(switch_gpu_backing_memory_existing_or_direct(b, 16, destroyMemory,
+								       &existing),
+			  -2);
+		EXPECT_EQ(existing, nullptr);
+		creationHook = {};
+	};
+	auto createSmmu = [](const uint64_t *pages, uint32_t count, void **out, uint32_t *flags) {
+		++smmuCalls;
+		++created;
+		*flags = SWITCH_GPU_BACKING_MEMORY_FIXED | SWITCH_GPU_BACKING_MEMORY_SMMU;
+		*out = new Memory{pages, count, pages[0]};
+		if (creationHook)
+			creationHook();
+		return 0;
+	};
+	void *object = nullptr;
+	ASSERT_EQ(switch_gpu_backing_memory_acquire_smmu(b, 16, createSmmu, createMemory,
+							 destroyMemory, &object),
+		  0);
+	EXPECT_NE(object, nullptr);
+	EXPECT_EQ(smmuCalls.load(), 1u);
+	EXPECT_EQ(created.load(), 2u);
+	EXPECT_EQ(destroyed.load(), 1u);
+	switch_gpu_backing_release(b);
+}

@@ -282,6 +282,101 @@ TEST(SwitchPrefs, NotAPlist)
     EXPECT_EQ(Drop(bytes), SWITCH_PREFS_UNREADABLE);
 }
 
+// The setup's com.apple.purplebuddy as kern_exec.c writes it, and the domain as cfprefsd saves it once the OS has set
+// keys of its own there: ours hold, so the boot leaves the file alone.
+const char kPurpleBuddy[] = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                            "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+                            "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>"
+                            "<key>SetupDone</key><true/><key>SetupFinishedAllSteps</key><true/>"
+                            "<key>SetupVersion</key><integer>11</integer><key>daemonizeNeedsToRun</key><false/>"
+                            "</dict></plist>\n";
+
+bool Holds(const Bytes &plist)
+{
+    return switch_prefs_holds(plist.data(), plist.size(), kPurpleBuddy, sizeof(kPurpleBuddy) - 1);
+}
+
+CFMutableDictionaryRef PurpleBuddy(int version, bool daemonize)
+{
+    CFMutableDictionaryRef dict = NewDict();
+    Set(dict, "SetupDone", kCFBooleanTrue);
+    Set(dict, "SetupFinishedAllSteps", kCFBooleanTrue);
+    Owned<CFNumberRef> number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &version));
+    Set(dict, "SetupVersion", number.ref);
+    Set(dict, "daemonizeNeedsToRun", daemonize ? kCFBooleanTrue : kCFBooleanFalse);
+    return dict;
+}
+
+Bytes AsXml(CFPropertyListRef plist)
+{
+    Owned<CFDataRef> data(
+        CFPropertyListCreateData(kCFAllocatorDefault, plist, kCFPropertyListXMLFormat_v1_0, 0, nullptr));
+    const uint8_t *bytes = CFDataGetBytePtr(data.ref);
+    return Bytes(bytes, bytes + CFDataGetLength(data.ref));
+}
+
+TEST(SwitchPrefsHolds, OurOwnFileHolds)
+{
+    EXPECT_TRUE(Holds(Bytes(kPurpleBuddy, kPurpleBuddy + sizeof(kPurpleBuddy) - 1)));
+}
+
+TEST(SwitchPrefsHolds, BinaryWithTheOsKeysBesideOursHolds)
+{
+    Owned<CFMutableDictionaryRef> dict(PurpleBuddy(11, false));
+    Owned<CFStringRef> country(Str("GB"));
+    Set(dict.ref, "GuessedCountry", country.ref);
+    Owned<CFDateRef> date(CFDateCreate(kCFAllocatorDefault, 800000000.0));
+    Set(dict.ref, "SetupLastExit", date.ref);
+    const int big = 70000;
+    Owned<CFNumberRef> number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &big));
+    Set(dict.ref, "PBAppActivity", number.ref);
+    EXPECT_TRUE(Holds(Binary(dict.ref)));
+    EXPECT_TRUE(Holds(AsXml(dict.ref)));
+}
+
+TEST(SwitchPrefsHolds, AChangedOrMissingKeyDoesNot)
+{
+    Owned<CFMutableDictionaryRef> older(PurpleBuddy(10, false));
+    EXPECT_FALSE(Holds(Binary(older.ref)));
+    EXPECT_FALSE(Holds(AsXml(older.ref)));
+    Owned<CFMutableDictionaryRef> flipped(PurpleBuddy(11, true));
+    EXPECT_FALSE(Holds(Binary(flipped.ref)));
+    Owned<CFMutableDictionaryRef> missing(PurpleBuddy(11, false));
+    Owned<CFStringRef> key(Str("SetupDone"));
+    CFDictionaryRemoveValue(missing.ref, key.ref);
+    EXPECT_FALSE(Holds(Binary(missing.ref)));
+    EXPECT_FALSE(Holds(AsXml(missing.ref)));
+}
+
+TEST(SwitchPrefsHolds, AValueOfAnotherKindDoesNot)
+{
+    Owned<CFMutableDictionaryRef> dict(PurpleBuddy(11, false));
+    Set(dict.ref, "SetupDone", kCFBooleanFalse);
+    Owned<CFStringRef> text(Str("11"));
+    Set(dict.ref, "SetupVersion", text.ref);
+    EXPECT_FALSE(Holds(Binary(dict.ref)));
+    Owned<CFMutableDictionaryRef> real(PurpleBuddy(11, false));
+    const double eleven = 11;
+    Owned<CFNumberRef> number(CFNumberCreate(kCFAllocatorDefault, kCFNumberDoubleType, &eleven));
+    Set(real.ref, "SetupVersion", number.ref);
+    EXPECT_FALSE(Holds(Binary(real.ref)));
+}
+
+TEST(SwitchPrefsHolds, NothingToHoldOrNotAPlist)
+{
+    const Bytes ours(kPurpleBuddy, kPurpleBuddy + sizeof(kPurpleBuddy) - 1);
+    const std::string nothing = std::string(kXmlHead) + kXmlTail;
+    EXPECT_FALSE(switch_prefs_holds(ours.data(), ours.size(), nothing.data(), nothing.size()));
+    const std::string string_value = std::string(kXmlHead) + "<key>SetupDone</key><string>yes</string>" + kXmlTail;
+    EXPECT_FALSE(switch_prefs_holds(ours.data(), ours.size(), string_value.data(), string_value.size()));
+    const Bytes hello = {'h', 'e', 'l', 'l', 'o'};
+    EXPECT_FALSE(Holds(hello));
+    Owned<CFMutableDictionaryRef> dict(PurpleBuddy(11, false));
+    Bytes truncated = Binary(dict.ref);
+    truncated.resize(truncated.size() / 2);
+    EXPECT_FALSE(Holds(truncated));
+}
+
 // The guard: SpringBoard's Auto-Lock is the user's (11-07). No boot-time setup writes SBDisableAutoDim or
 // SBDontDimOrLockOnAC, in either kernel or in the 12377 port record; the names appear only in the one function that
 // takes them out of a user plist earlier builds wrote, the same in both kernels and called from the setup.
@@ -338,6 +433,81 @@ TEST(SwitchPrefsGuard, NoSetupTurnsBackBoardsWatchdogsOff)
     }
 }
 
+// SetupVersion is the selected IPSW's (<switch/setup_state.h>, one header per build), in both kernels: a number written
+// into the setup's purplebuddy body would apply to every build.
+TEST(SwitchPrefsGuard, SetupVersionComesFromTheIpswTable)
+{
+    using switch_ios::test::Body;
+    using switch_ios::test::SourceText;
+    const std::string key = "<key>SetupVersion</key><integer>", table = "\" SWITCH_SETUP_VERSION \"";
+    for (const char *path : kKernels) {
+        const std::string setup =
+            Body(SourceText(path), "native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)");
+        const size_t at = setup.find(key);
+        ASSERT_NE(at, std::string::npos) << path;
+        EXPECT_EQ(setup.compare(at + key.size(), table.size(), table), 0) << path << ": " << setup.substr(at, 60);
+        EXPECT_EQ(setup.find(key, at + 1), std::string::npos) << path;
+    }
+}
+
+// The setup's sync decisions (<switch/boot_sync.h>, kernel/tests/switch_boot_sync_test.cpp) as both kernels apply them:
+// REDONE at the changes the next boot remakes (IconServices' drop — top-level unlink on 10063, trash mkdir and
+// rename-aside on 12377 — and its marker, timed's drop and its marker), every other write DURABLE, the class deciding
+// the write's IO_SYNC, and the step's end syncing through switch_boot_sync_finish. A change classed wrongly would ship
+// unsynced with every host test green.
+TEST(SwitchPrefsGuard, OnlyTheRemadeChangesGoOutUnsynced)
+{
+    using switch_ios::test::Body;
+    using switch_ios::test::Count;
+    using switch_ios::test::SourceText;
+    const char *const functions[] = {
+        "\nnative_switch_watchdog_directory(", "\nnative_switch_replace_file(", "\nnative_switch_data_file(",
+        "\nnative_switch_watchdog_file(",      "\nnative_switch_unlink(",       "\nnative_switch_mkdir(",
+        "\nnative_switch_icon_cache_write(",   "\nnative_switch_timed_cache(",  "\nnative_switch_sync_volume(",
+    };
+    std::vector<std::string> first;
+    for (const char *path : kKernels) {
+        const std::string source = SourceText(path);
+        const bool salted = std::string(path).find("12377") != std::string::npos;
+        EXPECT_EQ(Count(source, "SWITCH_BOOT_REDONE"), salted ? 5u : 4u) << path;
+        EXPECT_EQ(Count(Body(source, "\nnative_switch_icon_cache_write("), "SWITCH_BOOT_REDONE"), 1u) << path;
+        if (salted) {
+            EXPECT_EQ(Count(Body(source, "\nnative_switch_icon_cache_mkdir("), "SWITCH_BOOT_REDONE"), 1u) << path;
+            EXPECT_EQ(Count(Body(source, "\nnative_switch_icon_cache_rename("), "SWITCH_BOOT_REDONE"), 1u) << path;
+        } else {
+            EXPECT_EQ(Count(Body(source, "\nnative_switch_icon_cache_unlink("), "SWITCH_BOOT_REDONE"), 1u) << path;
+        }
+        EXPECT_EQ(Count(Body(source, "\nnative_switch_timed_cache("), "SWITCH_BOOT_REDONE"), 2u) << path;
+        EXPECT_EQ(Count(Body(source, "\nnative_switch_watchdog_file("), "mode, SWITCH_BOOT_DURABLE);"), 1u) << path;
+        const std::string replace = Body(source, "\nnative_switch_replace_file(");
+        EXPECT_EQ(
+            Count(replace, "const int io = switch_boot_sync_change(&native_switch_sync, change, path) ? IO_SYNC : 0;"),
+            1u)
+            << path;
+        EXPECT_EQ(Count(replace, "UIO_SYSSPACE, io, vfs_context_ucred(context)"), 1u) << path;
+        EXPECT_EQ(Count(Body(source, "\nnative_switch_unlink("),
+                        "switch_boot_sync_change(&native_switch_sync, change, path)"),
+                  1u)
+            << path;
+        EXPECT_EQ(Count(Body(source, "\nnative_switch_mkdir("), "SWITCH_BOOT_DURABLE, path);"), 1u) << path;
+        const std::string directory = Body(source, "\nnative_switch_watchdog_directory(");
+        EXPECT_EQ(Count(directory, "SWITCH_BOOT_DURABLE, path);"), 1u) << path;
+        EXPECT_EQ(Count(directory, "if (!error && switch_boot_sync_due(&native_switch_sync)) error = VNOP_FSYNC("), 1u)
+            << path;
+        EXPECT_EQ(Count(Body(source, "\nnative_switch_sync_volume("), "return VNOP_FSYNC("), 1u) << path;
+        const std::string policy = Body(source, "\nnative_switch_watchdog_policy(");
+        EXPECT_EQ(Count(policy, ".sync_volume = native_switch_sync_volume"), 1u) << path;
+        EXPECT_EQ(Count(policy, "error = switch_boot_sync_finish(&native_switch_sync, error, &finish);"), 1u) << path;
+        EXPECT_EQ(Count(policy, "VNOP_FSYNC("), 0u) << path << ": the volume sync is switch_boot_sync_finish's";
+        std::vector<std::string> bodies;
+        for (const char *function : functions)
+            bodies.push_back(Body(source, function));
+        if (first.empty())
+            first = bodies;
+        EXPECT_EQ(bodies, first) << path << ": the two kernels' sync decisions differ";
+    }
+}
+
 // timed's cache is kept only when it holds the boot session UUID of this clock's last boot, the same in both kernels
 // (drivers/SwitchPower/SwitchMonotonicBase.h): one an older kernel's boot saved would put the time decades ahead.
 TEST(SwitchPrefsGuard, TimedCacheKeptOnlyFromThisClock)
@@ -354,9 +524,10 @@ TEST(SwitchPrefsGuard, TimedCacheKeptOnlyFromThisClock)
         EXPECT_EQ(Count(body, "\"/private/var/db/timed/com.apple.timed.plist\""), 1u) << path;
         EXPECT_EQ(Count(body, "keep = native_switch_bytes_hold(cached, cached_length, last, last_length);"), 1u)
             << path;
-        EXPECT_LT(body.find("if (!keep) {"), body.find("native_switch_unlink(p, &request, &result)")) << path;
-        EXPECT_LT(body.find("native_switch_unlink(p, &request, &result)"),
-                  body.find("native_switch_watchdog_file(p, scratch, marker, bootsessionuuid_string"))
+        EXPECT_LT(body.find("if (!keep) {"), body.find("native_switch_unlink(p, scratch, cache, SWITCH_BOOT_REDONE)"))
+            << path;
+        EXPECT_LT(body.find("native_switch_unlink(p, scratch, cache, SWITCH_BOOT_REDONE)"),
+                  body.find("native_switch_data_file(p, scratch, marker, bootsessionuuid_string"))
             << path << ": the marker is this boot's, written after the drop";
         EXPECT_EQ(Count(Body(source, "native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)"),
                         "native_switch_timed_cache(p, scratch, data_mount);"),

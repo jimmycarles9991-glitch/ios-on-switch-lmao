@@ -84,6 +84,7 @@
 #include "SwitchGpuPresentTokens.h"
 #include "SwitchGpuPresentWatch.h"
 #include "SwitchGpuMapping.h"
+#include "SwitchGpuSmmu.h"
 #include "SwitchGpuPathStats.h"
 #include "SwitchGpuJobStats.h"
 #include "SwitchGpuEventStats.h"
@@ -155,6 +156,7 @@ extern struct mutex tgm_gate_lock;
 void tgm_gate_enter(void);
 int cpu_number(void);
 int tgm_clk_raise(char *line, unsigned int len);
+void tgm_clk_suspend(struct nvkm_device *device);
 int tgm_m2_device_init(struct nvkm_device *device, const char **at);
 extern u64 tgm_cpu_zeroes, tgm_cpu_zero_bytes;
 
@@ -189,6 +191,8 @@ struct tgm_mem {
 	u32 npages;
 	struct switch_gpu_memory_view *big_views;
 	bool big_views_ready;
+	u64 smmu_iova;
+	u64 *smmu_pages;
 };
 
 int tgm_vm_kmap_raw(struct tgm_vm *vm, struct tgm_mem *mem, uint64_t bytes, int read_only,
@@ -219,6 +223,12 @@ _Static_assert(TGM_PROF_MAX * 16 <= 0x1000,
 	       "the push profile's stamps fit the channel's semaphore page above CHAN_PROF");
 #define CHAN_NSTAMPS \
 	64 /* by seqno; one record = two 16-byte semaphore releases (payload, 0, PTIMER ns) */
+#define TGM_STAT_LATER (1u << 0)
+#define TGM_STAT_FOREIGN_FENCE (1u << 1)
+#define TGM_STAT_FOREIGN_PROMISE (1u << 2)
+#define TGM_STAT_FOREIGN_EVENT (1u << 3)
+#define TGM_STAT_FOREIGN_MASK \
+	(TGM_STAT_FOREIGN_FENCE | TGM_STAT_FOREIGN_PROMISE | TGM_STAT_FOREIGN_EVENT)
 
 /* What a 16-byte semaphore release writes (NV906F SEMAPHORED RELEASE_SIZE_16BYTE) */
 struct tgm_stamp {
@@ -310,6 +320,9 @@ struct tgm_chan {
 	u64 stat_sub_ns[CHAN_NSTAMPS];
 	u64 stat_sub_ptimer[CHAN_NSTAMPS];
 	u8 stat_kick[CHAN_NSTAMPS]; /* stats: what each high kick found (tgm_sched_kick) */
+#if TGM_STATS
+	u8 stat_foreign[CHAN_NSTAMPS]; /* TGM_STAT_* per-seqno marks */
+#endif
 	u64 stat_exec,
 		stat_exec_max; /* stats: this window's stamped exec time (PTIMER units), for its owner */
 	u32 stat_exec_n;
@@ -486,6 +499,16 @@ struct stats_state {
 	 * app on the GPU (tgm_sched_kicked: preempted, mid-switch or deferred), PTIMER units */
 	u32 comp, behind;
 	u64 comp_sum, comp_max, behind_sum, behind_max;
+#if TGM_STATS
+	u32 later_kicks, later_frames, later_in_frame, later_frame_max;
+	u64 later_queue_max;
+	u32 foreign_jobs, foreign_fences, foreign_promises, foreign_events, foreign_host1x,
+		foreign_timed;
+	u64 foreign_queue_sum, foreign_queue_max;
+	u32 l2_inval, l2_inval_host, l2_inval_host_comp, l2_inval_tlb, l2_inval_kernel;
+	u64 foreign_total_jobs, foreign_total_fences, foreign_total_promises, foreign_total_events,
+		foreign_total_host1x;
+#endif
 	/* tgm_gpu.lock held by a channel's setup (chan_new) and teardown (chan_free): every VmBind, BoAlloc, BoImport and BoFree
 	 * of every process, the compositor's too, waits for it; nanoseconds, the sum counts them */
 	u64 lock_new_sum, lock_new_max, lock_free_sum, lock_free_max;
@@ -505,6 +528,7 @@ struct frame_gpu_state {
 extern struct frame_gpu_state tgm_frame_gpu;
 void tgm_stats_waits(u64 ms);
 void tgm_stats_mem(u64 ms);
+void tgm_stats_l2_inval_window(void);
 
 /* Submit-to-fence latency (CPU clock), seen from the fence's nonstall interrupt (every channel's handler runs on each
  * one), and from the GPU's stamps (PTIMER): queue = the GPU started the submission - the kernel kicked it, exec = the
@@ -630,6 +654,9 @@ int tgm_fences_map(struct tgm_vm *vm);
 #define NVB06F_MEM_OP_C 0x0030
 #define NVB06F_MEM_OP_D 0x0034
 #define NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY (0x10u << 27)
+#define NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE (0x0eu << 27)
+#define NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE (0x09u << 27)
+#define NVB06F_MEM_OP_C_TLB_INVALIDATE_PDB_ALL 0x1u /* GPC 1:1 0: the GPCs' TLBs too */
 #define NVB06F_WFI 0x0078
 
 /* Push dwords chan_fence() may write, at most */

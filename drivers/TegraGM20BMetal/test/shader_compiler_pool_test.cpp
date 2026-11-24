@@ -50,6 +50,9 @@ public:
     std::vector<uint8_t> started;
     std::vector<Band> raises;
     std::vector<size_t> idles;  // how many waiters were answered at each idle
+    std::vector<uint32_t> registeredWorkers;
+    std::vector<std::pair<uint64_t, uint32_t>> served;
+    std::map<uint64_t, uint32_t> servedBeforeRun;
     unsigned lowered = 0, running = 0, mostRunning = 0, mostForeground = 0, foreground = 0;
     std::unique_ptr<Pool> pool;
     thread_local static Band band, before;
@@ -71,6 +74,18 @@ public:
             std::lock_guard<std::mutex> l(lock);
             lowered++;
             liveRaises.erase(uintptr_t(token));
+        };
+        hooks.registerWorker = [this](uint32_t slot) {
+            std::lock_guard<std::mutex> l(lock);
+            registeredWorkers.push_back(slot);
+            changed.notify_all();
+        };
+        hooks.serve = [this](uint64_t id, uint32_t slot) {
+            std::lock_guard<std::mutex> l(lock);
+            served.emplace_back(id, slot);
+            if (!running)
+                servedBeforeRun[id] = slot;
+            changed.notify_all();
         };
         hooks.complete = [this](const Waiter &w, int32_t result) {
             std::lock_guard<std::mutex> l(lock);
@@ -362,6 +377,52 @@ TEST(ShaderCompilerPool, AForegroundRequestToAllParkedWorkersIsPickedAtTheIntera
     EXPECT_EQ(h.pickedAt[4], Band::Interactive) << "a parked worker picked an urgent job below the interactive class";
     EXPECT_EQ(h.startBand[4], Band::Interactive);
     EXPECT_EQ(h.answeredAt[14], Band::Interactive);
+}
+
+TEST(ShaderCompilerPool, WorkersRegisterSlotsAndServeWaitersBeforeCompileStarts)
+{
+    Harness h;
+    h.submit(1, 101, Band::Interactive);
+    h.waitRunning(1);
+    h.release(1);
+    h.pool->drain();
+    std::lock_guard<std::mutex> l(h.lock);
+    std::vector<uint32_t> slots = h.registeredWorkers;
+    std::sort(slots.begin(), slots.end());
+    ASSERT_EQ(slots.size(), size_t(Pool::kWorkers));
+    for (uint32_t i = 0; i < Pool::kWorkers; ++i)
+        EXPECT_EQ(slots[i], i + 1);
+    ASSERT_EQ(h.servedBeforeRun.count(101), 1u);
+    EXPECT_GE(h.servedBeforeRun[101], 1u);
+    EXPECT_LE(h.servedBeforeRun[101], Pool::kWorkers);
+}
+
+TEST(ShaderCompilerPool, JoiningARunningWarmOrSameBandJobCallsServeWithItsWorkerSlot)
+{
+    Harness h;
+    // Warm/replay job has waiter.id == 0: no serve at start, yet a joining real waiter must bind to its worker slot.
+    EXPECT_TRUE(h.submit(2, 0, Band::Background));
+    h.waitRunning(1);
+    EXPECT_FALSE(h.submit(2, 201, Band::Default));
+    // A second waiter at the same band (no QoS raise needed) must still bind its id to the running worker slot.
+    EXPECT_FALSE(h.submit(2, 202, Band::Default));
+    {
+        std::lock_guard<std::mutex> l(h.lock);
+        uint32_t slot201 = 0, slot202 = 0;
+        for (const auto &[id, slot] : h.served) {
+            if (id == 201)
+                slot201 = slot;
+            if (id == 202)
+                slot202 = slot;
+        }
+        ASSERT_NE(slot201, 0u);
+        EXPECT_EQ(slot201, slot202);
+        EXPECT_EQ(h.raises.size(), 1u) << "only the Background->Default jump needed a QoS raise";
+    }
+    h.release(2);
+    h.pool->drain();
+    EXPECT_EQ(h.completed[201], 2);
+    EXPECT_EQ(h.completed[202], 2);
 }
 
 }  // namespace

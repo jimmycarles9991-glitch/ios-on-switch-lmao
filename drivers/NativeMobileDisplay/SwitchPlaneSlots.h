@@ -109,6 +109,25 @@ void planeNoteMapped(uint64_t, uint64_t)
 {}
 #endif
 
+void planeReleaseScanoutBacking(unsigned k)
+{
+    if (!planeSlots[k].scanoutBacking)
+        return;
+    switch_gpu_backing_scanout(planeSlots[k].scanoutBacking, 0);
+    switch_gpu_backing_release(planeSlots[k].scanoutBacking);
+    planeSlots[k].scanoutBacking = nullptr;
+}
+
+void planeHoldScanoutBacking(unsigned k, switch_gpu_backing *backing)
+{
+    planeReleaseScanoutBacking(k);
+    if (!backing)
+        return;
+    switch_gpu_backing_retain(backing);
+    switch_gpu_backing_scanout(backing, 1);
+    planeSlots[k].scanoutBacking = backing;
+}
+
 // The slot holding [low, high) of the surface's memory (mapped now, if not yet, where planeSlotPlace puts it): -1 when
 // no slot or room can be had, the pages cannot be had, or the layout the GPU holds the surface in is not the one the
 // window's registers were made for (`tiled`: block-linear). A surface the CPU may have written (RGB: an image decoded
@@ -125,6 +144,29 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
     for (unsigned k = 0; k < kPlaneSlots; ++k) {
         if (planeSlots[k].memory == memory && planeSlots[k].low == low && planeSlots[k].high == end &&
             planeSlots[k].tiled == tiled) {
+            IOByteCount length = 0;
+            const addr64_t first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+            if (first && !planeSlots[k].scanoutBacking) {
+                if (auto *backing = switch_gpu_backing_find_pa(first & ~0xfffULL)) {
+                    planeHoldScanoutBacking(k, backing);
+                    switch_gpu_backing_release(backing);
+                }
+            }
+            if (first && !planeSlots[k].layout) {
+                int held = 0;
+                planeSlots[k].layout = tegra_gm20b_surface_hold(first & ~0xfffULL, &held);
+                if (planeSlots[k].layout && (held != 0) != tiled) {
+                    if (!planeSlotBusy(int(k)))
+                        planeDropSlot(k);
+                    return -1;
+                }
+            }
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            if (first && tegra_gm20b_surface_compressed(first & ~0xfffULL) != 0) {
+                if (!planeSlotBusy(int(k)))
+                    planeDropSlot(k);
+                return -1;
+            }
             planeSlots[k].used = ++planeSlotUses;
             return static_cast<int>(k);
         }
@@ -179,8 +221,16 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
     int held = 0;
     IOByteCount length = 0;
     const addr64_t first = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+    if (first) {
+        if (auto *backing = switch_gpu_backing_find_pa(first & ~0xfffULL)) {
+            planeHoldScanoutBacking(static_cast<unsigned>(k), backing);
+            switch_gpu_backing_release(backing);
+        }
+    }
     slot.layout = first ? tegra_gm20b_surface_hold(first & ~0xfffULL, &held) : nullptr;
-    if (slot.layout && (held != 0) != tiled) {
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    const bool compressed = first && tegra_gm20b_surface_compressed(first & ~0xfffULL) != 0;
+    if ((slot.layout && (held != 0) != tiled) || compressed) {
         planeDropSlot(static_cast<unsigned>(k));
         return -1;
     }
@@ -192,6 +242,7 @@ int planeSlotFor(IOMemoryDescriptor *memory, uint64_t low, uint64_t high, bool c
 void planeDropSlot(unsigned k)
 {
     planeUseRelease(k);
+    planeReleaseScanoutBacking(k);
     PlaneSlot &slot = planeSlots[k];
     if (slot.mappedAllocation)
         planeForgets.publish(k, 0);
@@ -219,6 +270,7 @@ void planeDropSlot(unsigned k)
 void planeReleaseLease(unsigned k)
 {
     planeUseRelease(k);
+    planeReleaseScanoutBacking(k);
     auto *native = planeSlots[k].native;
     if (native && native->lease) {
         switch_native_scanout_deliver(native);

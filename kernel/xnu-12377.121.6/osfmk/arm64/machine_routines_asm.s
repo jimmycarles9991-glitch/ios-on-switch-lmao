@@ -814,8 +814,9 @@ LEXT(dtrace_nofault_copy64)
 #if CONFIG_A64X
 /*
  * a64x: atomic read-modify-write on user memory, for the undefined-instruction fallback of the arm64e translator
- * (kernel/switch/translate/a64x_xnu.c a64x_emulate_user). Exclusive loops with acquire+release, under a copyio recovery range: a
- * fault on the user address goes through vm_fault first, as for any copyio, and returns EFAULT if unresolved.
+ * (kernel/switch/translate/a64x_xnu.c a64x_emulate_user). Exclusive loops with acquire+release and a trailing
+ * dmb ish on the storing path, under a copyio recovery range: a fault on the user address goes through vm_fault
+ * first, as for any copyio, and returns EFAULT if unresolved.
  */
 
 /*
@@ -920,6 +921,7 @@ Lrmw8:
 	cbnz	w10, 1b
 Lrmw8_done:
 Lrmw_out:
+	dmb	ish
 	str	x8, [x2]
 	mov	x0, #0
 	mov	x8, #0
@@ -953,6 +955,7 @@ LEXT(_a64x_user_cas)
 	b.ne	2f
 	stlxr	w10, x2, [x0]
 	cbnz	w10, 1b
+	dmb	ish
 	b	Lcas64_done
 2:	clrex
 Lcas64_done:
@@ -964,6 +967,7 @@ Lcas32:
 	b.ne	2f
 	stlxr	w10, w2, [x0]
 	cbnz	w10, 1b
+	dmb	ish
 	b	Lcas32_done
 2:	clrex
 Lcas32_done:
@@ -975,6 +979,7 @@ Lcas16:
 	b.ne	2f
 	stlxrh	w10, w2, [x0]
 	cbnz	w10, 1b
+	dmb	ish
 	b	Lcas16_done
 2:	clrex
 Lcas16_done:
@@ -986,6 +991,7 @@ Lcas8:
 	b.ne	2f
 	stlxrb	w10, w2, [x0]
 	cbnz	w10, 1b
+	dmb	ish
 	b	Lcas8_done
 2:	clrex
 Lcas8_done:
@@ -1015,6 +1021,7 @@ LEXT(_a64x_user_casp)
 	b.ne	2f
 	stlxp	w10, x6, x7, [x0]
 	cbnz	w10, 1b
+	dmb	ish
 	b	Lcasp_done
 2:	stlxp	w10, x8, x9, [x0]
 	cbnz	w10, 1b

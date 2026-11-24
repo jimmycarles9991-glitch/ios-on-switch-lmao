@@ -89,13 +89,13 @@ inline void learn(BandRate &r, uint64_t ns, uint64_t units)
 }
 
 // A measured draw's record, kept by its command buffer until completion: the rate it teaches, its stamp slot and payload,
-// and for a debug build's long draw line its state's key and program instructions
+// and for a debug build's long draw line its state's key, program instructions and bands
 struct DrawTiming {
     BandRate *rate = nullptr;
     uint64_t units = 0;
     uint32_t slot = 0, payload = 0;
     uint64_t key = 0;
-    uint32_t instructions = 0;
+    uint32_t instructions = 0, bands = 1;
 };
 
 constexpr uint64_t kLongDrawNs = 5'000'000;

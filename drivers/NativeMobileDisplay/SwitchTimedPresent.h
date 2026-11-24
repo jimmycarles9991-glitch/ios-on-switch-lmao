@@ -5,9 +5,12 @@
 // waits while that frame end is more than half a period before its target.
 //
 // A swap stamped no more than a period and a half after it was accepted is the render server's ordinary frame, for
-// its next vsync: it goes at once. iOS 27's render server keeps a timer of its own, at a phase unrelated to DC A's
-// frame end (no vsync client registers), so its next vsync can sit up to a period after the frame end that would
-// show the frame; holding those would add a frame of latency to every frame for half of the phases.
+// its next vsync: it goes at once. The clause was written for a render-server timer at any phase to DC A's frame end.
+// The device shows otherwise: no vsync client registers, the render server's timer is phased from frame info's
+// Presentation_time (the frame end), and its render thread woke within 250 us of a frame end for 659 of 873 late
+// swaps (one boot, 22 Nov). A swap it stamps for the second frame end ahead is then shown a frame early (Ordinary)
+// when it comes in the second half of the period, and on time when it comes in the first. The debug counters
+// (kern.switch_frame_info_ordinary, _unphased, _early and the "SwitchDisplay requested" line) say how often.
 #pragma once
 #include <stdint.h>
 
@@ -23,14 +26,15 @@ struct Clock {
 
 enum class Decision {
     Due,
-    Early,       // the next frame end is too early for it
-    NeedsPhase,  // the frame ends were masked: the next one says which frame end is the target's
-    Ordinary,    // too early for the next frame end, and goes at once as the render server's ordinary frame
+    Early,             // the next frame end is too early for it
+    NeedsPhase,        // the frame ends were masked: the next one says which frame end is the target's
+    Ordinary,          // too early for the next frame end, and goes at once as the render server's ordinary frame
+    OrdinaryUnphased,  // the frame ends were masked, and it goes at once as the render server's ordinary frame
 };
 
 inline bool due(Decision d)
 {
-    return d == Decision::Due || d == Decision::Ordinary;
+    return d == Decision::Due || d == Decision::Ordinary || d == Decision::OrdinaryUnphased;
 }
 
 inline Decision decide(uint64_t requestedContinuous, const Clock &c)
@@ -45,7 +49,7 @@ inline Decision decide(uint64_t requestedContinuous, const Clock &c)
         return Decision::Due;
     const bool ordinary = c.accepted && requested <= c.accepted + c.period + c.period / 2;
     if (!c.lastFrameEnd || c.lastFrameEnd > c.nowAbsolute || c.nowAbsolute - c.lastFrameEnd >= 2 * c.period)
-        return ordinary ? Decision::Due : Decision::NeedsPhase;
+        return ordinary ? Decision::OrdinaryUnphased : Decision::NeedsPhase;
     const uint64_t nextFrameEnd = c.lastFrameEnd + ((c.nowAbsolute - c.lastFrameEnd) / c.period + 1) * c.period;
     if (requested <= nextFrameEnd + c.period / 2)
         return Decision::Due;

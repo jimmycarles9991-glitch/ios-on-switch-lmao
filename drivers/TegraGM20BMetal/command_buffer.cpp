@@ -41,17 +41,24 @@ void Device::reapAtBegin()
 {
     if (!trimmedPending_.load(std::memory_order_acquire) && !nativeStale_.load(std::memory_order_acquire))
         return;
-    SWITCH_METAL_ENCODE_LOCK(l, lock_);
-    reapNativeSurfaces();
-    nativeStale_.store(std::any_of(nativeSurfaces_.begin(), nativeSurfaces_.end(),
-                                   [](const std::unique_ptr<NativeSurface> &s) {
-                                       return !s->cached;
-                                   }),
-                       std::memory_order_relaxed);
-    for (Backing *b : trimmedBackings_)
+    DeferredFrees deferred(*this);
+    std::vector<Backing *> trimmed;
+    {
+        SWITCH_METAL_ENCODE_LOCK(l, lock_);
+        std::vector<Bo> nativeBos;
+        reapNativeSurfaces(nativeBos);
+        for (const Bo &bo : nativeBos)
+            deferred.add({bo});
+        nativeStale_.store(std::any_of(nativeSurfaces_.begin(), nativeSurfaces_.end(),
+                                       [](const std::unique_ptr<NativeSurface> &s) {
+                                           return !s->cached;
+                                       }),
+                           std::memory_order_relaxed);
+        trimmed.swap(trimmedBackings_);
+        trimmedPending_.store(false, std::memory_order_relaxed);
+    }
+    for (Backing *b : trimmed)
         delete b;
-    trimmedBackings_.clear();
-    trimmedPending_.store(false, std::memory_order_relaxed);
 }
 
 CommandBuffer *Device::begin()
@@ -93,6 +100,17 @@ CommandBuffer *Device::begin()
     cb.memberUses_.clear();
     cb.memberRemovals_ = setView_.removals;
     cb.memberHostWritten_ = false;
+    cb.arenaKindInvalidate_ = false;
+    cb.pendingKindSwitch_ = false;
+    cb.kindSwitchGen_ = 0;
+    cb.encodersOpened_ = 0;
+    cb.activeBlit_ = nullptr;
+    cb.inRender_ = false;
+    cb.passBufferWrites_ = false;
+    cb.prevBufferWrites_ = false;
+    cb.tiledCacheDirty_ = false;
+    cb.cbArenaKinds_.clear();
+    cb.cbCrossSeen_.clear();
     cb.named_.clear();
     cb.sharedWaits_.clear();
     cb.sharedSignals_.clear();
@@ -101,6 +119,7 @@ CommandBuffer *Device::begin()
     cb.loops_ = {};
     cb.visibility_ = JobVisibility::Legacy;
     cb.externalWrites_ = false;
+    cb.volatileWrites_ = false;
     cb.publication_ = {};
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     cb.forceWholePrograms_ = cb.inlineStates_ = false;
@@ -135,6 +154,7 @@ CommandBuffer *Device::begin()
     cb.rtLayer_ = rtLayer_;
     cb.alphaHeld_ = alphaHeld_;
     cb.sampleMaskHeld_ = sampleMaskHeld_;
+    cb.tiledCacheSize_ = tiledCacheSize_;
     cb.ds_ = ds_;
     cb.extrasLive_ = extrasLive_;
     cb.heldSegment_ = heldSegment_;
@@ -143,10 +163,11 @@ CommandBuffer *Device::begin()
     reapAtBegin();
     // a trim's lock once in 64 command buffers, never waited for: the compressed-memory thread holding it trims too
     if (commits() % 64 == 0) {
+        DeferredFrees deferred(*this);
         std::unique_lock<gm20b::Mutex> l(lock_, std::try_to_lock);
         if (l.owns_lock()) {
             SWITCH_METAL_ENCODE_COUNT(Locks);
-            trimBackings();
+            trimBackings(deferred);
         }
     }
     cb.stamp = stampOf(commits());
@@ -376,7 +397,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
         uint64_t va;
         auto *tail = reinterpret_cast<uint32_t *>(d.alloc(d.push_, (kTiledCacheFlushWords + kStampWords) * 4, 4, va));
         Push p{tail, tail + kTiledCacheFlushWords + kStampWords};
-        if (tiledCache(d.k_.info()))
+        if (tiledCache(d.k_.info()) && tiledCacheDirty_)
             p.at = tiledCacheFlush(p.at);
         emitEndStamp(p, d.stamps_.va, stamp);
         segment(tail, p.at);
@@ -414,8 +435,9 @@ bool CommandBuffer::commit(uint32_t &seqno)
             d.tablesInvalidated_ = written;
         }
         if (!heaps_.empty()) {
-            SWITCH_METAL_ENCODE_LOCK(lock, d.lock_);
-            nameHeaps();
+            std::unique_lock<gm20b::Mutex> lock(d.lock_);
+            SWITCH_METAL_ENCODE_COUNT(Locks);
+            nameHeaps(lock);
         }
     }
     if (!batchWork_.operations)
@@ -444,8 +466,8 @@ bool CommandBuffer::commit(uint32_t &seqno)
         SWITCH_METAL_ENCODE_BEGIN(execSpan, Exec);
         const bool executed =
             d.job(d.setView_, d.channel_, pushes, count, uses, visibility, seq, &result, events, &memberUses_,
-                  memberRemovals_, invalidates || memberHostWritten_ || tablesInvalidate, admission, admissionFlags,
-                  !last || quietEnd, last && !promises.empty() ? &promises : nullptr);
+                  memberRemovals_, invalidates || memberHostWritten_ || tablesInvalidate || arenaKindInvalidate_,
+                  admission, admissionFlags, !last || quietEnd, last && !promises.empty() ? &promises : nullptr);
         SWITCH_METAL_ENCODE_END(execSpan);
         if (executed && last && quietEnd && gm20b::jobKeptLoud())
             quietEnd = false;
@@ -492,8 +514,10 @@ bool CommandBuffer::commit(uint32_t &seqno)
     }
     const bool pushed = segments_.submit(maxPushes, maxFences, [&](size_t at, size_t n) {
         const bool closing = at + n == segments_.size();
+        const JobVisibility volatileVis = d.k_.volatileWrites() ? JobVisibility::Volatile : JobVisibility::External;
         const JobVisibility visibility = visibility_ == JobVisibility::Legacy ? JobVisibility::Legacy
                                          : externalWrites_ && closing         ? JobVisibility::External
+                                         : volatileWrites_ && closing         ? volatileVis
                                                                               : JobVisibility::Internal;
         const uint32_t waitCount = uint32_t(sharedWaits_.size() - waited);
         const uint32_t signalCount =
@@ -546,6 +570,7 @@ bool CommandBuffer::commit(uint32_t &seqno)
     d.rtLayer_ = rtLayer_;
     d.alphaHeld_ = alphaHeld_;
     d.sampleMaskHeld_ = sampleMaskHeld_;
+    d.tiledCacheSize_ = tiledCacheSize_;
     d.ds_ = ds_;
     d.extrasLive_ = extrasLive_;
     d.heldSegment_ = heldSegment_;
@@ -558,6 +583,27 @@ bool CommandBuffer::commit(uint32_t &seqno)
     }
     d.commitCount_.store(d.commitCount_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
     d.closedCount_.store(d.closedCount_.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+    for (const auto &[id, gen] : cbCrossSeen_) {
+        uint64_t &seen = d.arenaCrossSeen_[id];
+        if (gen > seen)
+            seen = gen;
+    }
+    cbCrossSeen_.clear();
+    if (invalidates || memberHostWritten_ || tablesInvalidate || arenaKindInvalidate_ || kindSwitchGen_) {
+        d.l2InvalidatedBeforeCb_ = serial;
+        for (auto it = d.arenaKindUses_.begin(); it != d.arenaKindUses_.end();) {
+            it->second.pruneBefore(d.l2InvalidatedBeforeCb_);
+            it = it->second.empty() ? d.arenaKindUses_.erase(it) : std::next(it);
+        }
+    }
+    for (const auto &entry : cbArenaKinds_) {
+        const uint64_t id = entry.first;
+        entry.second.each([&](uint64_t offset, uint64_t bytes, uint32_t kind, uint64_t gen) {
+            if (gen == kindSwitchGen_)
+                d.arenaKindUses_[id].record(offset, bytes, kind, serial);
+        });
+    }
+    cbArenaKinds_.clear();
     d.noteCommittedTimings(timings);
     SWITCH_METAL_DIAGNOSTIC(if (drawTimes_) d.committedDrawTimes(*this, seq));
     releaseNativeReads();
@@ -590,6 +636,15 @@ void CommandBuffer::abandon()
     dirty_.clear();
     surfaces_.clear();
     named_.clear();
+    cbArenaKinds_.clear();
+    cbCrossSeen_.clear();
+    activeBlit_ = nullptr;
+    inRender_ = false;
+    passBufferWrites_ = false;
+    prevBufferWrites_ = false;
+    tiledCacheDirty_ = false;
+    pendingKindSwitch_ = false;
+    arenaKindInvalidate_ = false;
 }
 
 }  // namespace gm20b

@@ -54,4 +54,9 @@ struct RefusalLine {
 
 RefusalLine refusalLine(const gm20b::CompileRequest &r, int32_t pid, const std::string &why);
 
+// Whether a failed compile's `why` is a translation that fails at every try, which its client takes as for good (it
+// fails the command buffers that use the state: TegraGM20BMetalComplete.mm kTranslationFails), so it takes the refusal
+// line as a refusal does
+bool failsForGood(const std::string &why);
+
 }  // namespace switch_compiler

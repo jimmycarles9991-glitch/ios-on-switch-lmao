@@ -6,9 +6,9 @@
 #include <algorithm>
 #include <deque>
 #include <vector>
-#include "MetallibSlice.h"
 #include "TegraGM20BCompilerABI.h"
 #include "../TegraGM20BMetalCompileRequest.h"
+#include "../TegraGM20BMetalOffline.h"
 #include "../TegraGM20BMetalPipelineKey.h"
 #include "../buffer_encoders.h"
 #include "../compute_facts_entry.h"
@@ -18,30 +18,6 @@
 
 namespace switch_compiler {
 namespace {
-
-// The AIR slice of the library `l` names: a system library's file under `root` (`held` keeps its mapping), else its bytes
-bool airSliceOf(const gm20b::RequestLibrary &l, const std::string &root, NSData *__strong &held, const uint8_t *&slice,
-                size_t &size, std::string &why)
-{
-    const uint8_t *file = reinterpret_cast<const uint8_t *>(l.bytes.data());
-    size_t length = l.bytes.size();
-    if (l.system) {
-        std::string real;
-        if (!SystemLibraries::resolve(root, l.path, real, why))
-            return false;
-        held = [NSData dataWithContentsOfFile:@(real.c_str()) options:NSDataReadingMappedIfSafe error:nil];
-        if (!held)
-            return why = "an unreadable library: " + l.path, false;
-        file = static_cast<const uint8_t *>(held.bytes);
-        length = held.length;
-    }
-    size_t at = 0;
-    if (!switch_metal::airSlice(file, length, at, size))
-        return why = "no AIR slice Metal takes in " + (l.path.empty() ? std::string("its library's data") : l.path),
-               false;
-    slice = file + at;
-    return true;
-}
 
 // The constants as the translator takes them, indexed then named (TegraGM20BMetalOffline.mm)
 bool constantsOf(MTLFunctionConstantValues *values, std::vector<NmbConstant> &out, std::string &why)
@@ -127,7 +103,8 @@ void stageInputOf(const gm20b::StageInFields &in, NmbOfflineComputePipelineDescr
     d.stage_index_buffer = in.indexBuffer;
 }
 
-// A request's stages as the translator's functions, each library read once from its AIR slice; all released with it
+// A request's stages as the translator's functions, of the libraries `libraries` gives (the compiler's, each read once
+// per process); its functions released with it
 class OfflineStages {
 public:
     OfflineStages() = default;
@@ -138,25 +115,18 @@ public:
     {
         for (NmbOfflineFunction *f : functions_)
             nmb_offline_function_release(f);
-        for (NmbOfflineLibrary *l : libraries_)
-            if (l)
-                nmb_offline_library_release(l);
     }
 
-    bool make(const gm20b::CompileRequest &r, const std::string &root, std::string &why)
+    bool make(const gm20b::CompileRequest &r, const Libraries &libraries, std::string &why)
     {
-        libraries_.assign(r.libraries.size(), nullptr);
         held_.resize(r.libraries.size());
         for (const gm20b::RequestStage &s : r.stages) {
-            NmbOfflineLibrary *&library = libraries_[s.library];
-            if (!library) {
-                const uint8_t *slice = nullptr;
-                size_t size = 0;
-                if (!airSliceOf(r.libraries[s.library], root, held_[s.library], slice, size, why))
-                    return false;
-                if (!(library = nmb_offline_library_new(slice, size)))
-                    return why = std::string("a library the translator does not read: ") + nmb_last_error(), false;
-            }
+            __strong id<MTLLibrary> &held = held_[s.library];
+            if (!held && !(held = libraries(r.libraries[s.library], why)))
+                return false;
+            const NmbOfflineLibrary *library = offline::libraryHandle(held);
+            if (!library)
+                return why = "a library the translator does not hold", false;
             MTLFunctionConstantValues *values = nil;
             NmbOfflineFunction *f = functionOf(library, s, constants_.emplace_back(), values, why);
             if (values)
@@ -177,8 +147,7 @@ public:
     }
 
 private:
-    std::vector<NSData *> held_;
-    std::vector<NmbOfflineLibrary *> libraries_;
+    std::vector<id<MTLLibrary>> held_;
     std::deque<std::vector<NmbConstant>> constants_;  // what each function was made with, held as long as it is
     NSMutableArray *values_ = [NSMutableArray array];
     std::vector<NmbOfflineFunction *> functions_;
@@ -203,11 +172,11 @@ bool collectEncoder(uint32_t index, bool argumentBuffer, const NmbArgumentLayout
 
 }  // namespace
 
-int32_t makeBufferEncoders(const Prepared &p, const std::string &systemRoot, std::string &entry, std::string &why)
+int32_t makeBufferEncoders(const Prepared &p, const Libraries &libraries, std::string &entry, std::string &why)
 {
     @autoreleasepool {
         OfflineStages stages;
-        if (!stages.make(p.request, systemRoot, why))
+        if (!stages.make(p.request, libraries, why))
             return TegraGM20BCompileUnavailable;
         gm20b::BufferEncoders encoders;
         const bool made = nmb_offline_function_buffer_encoders(stages.function(0), collectEncoder, &encoders);
@@ -219,11 +188,11 @@ int32_t makeBufferEncoders(const Prepared &p, const std::string &systemRoot, std
     }
 }
 
-int32_t makeAttributes(const Prepared &p, const std::string &systemRoot, std::string &entry, std::string &why)
+int32_t makeAttributes(const Prepared &p, const Libraries &libraries, std::string &entry, std::string &why)
 {
     @autoreleasepool {
         OfflineStages stages;
-        if (!stages.make(p.request, systemRoot, why))
+        if (!stages.make(p.request, libraries, why))
             return TegraGM20BCompileUnavailable;
         const NmbOfflineFunction *function = stages.function(0);
         gm20b::AttributeList vertex, stageInput;
@@ -234,11 +203,11 @@ int32_t makeAttributes(const Prepared &p, const std::string &systemRoot, std::st
     }
 }
 
-int32_t makeFacts(const Prepared &p, const std::string &systemRoot, std::string &entry, std::string &why)
+int32_t makeFacts(const Prepared &p, const Libraries &libraries, std::string &entry, std::string &why)
 {
     @autoreleasepool {
         OfflineStages stages;
-        if (!stages.make(p.request, systemRoot, why))
+        if (!stages.make(p.request, libraries, why))
             return TegraGM20BCompileUnavailable;
         std::vector<NmbOfflineFunction *> linked;
         std::vector<switch_linked_group_name> groupNames;

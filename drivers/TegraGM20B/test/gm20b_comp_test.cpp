@@ -138,19 +138,43 @@ std::vector<uint64_t> runs(std::initializer_list<uint64_t> starts)
 
 TEST(PageShift, BigPagesOnlyOverAlignedRuns)
 {
-	auto pas = runs({0xe4020000, 0x180000000, 0xe4000000});
+	auto pas = runs({0xe4020000, 0x180010000, 0xe4000000});
 	EXPECT_EQ(tgm_comp_page_shift(pas.data(), (uint32_t)pas.size()), (uint32_t)TGM_COMP_SHIFT);
 
 	auto misaligned = runs({0xe4021000});
 	EXPECT_EQ(tgm_comp_page_shift(misaligned.data(), (uint32_t)misaligned.size()), 12u);
 
-	auto broken = runs({0xe4020000, 0xe4040000});
-	broken[40] += 0x1000;
+	auto broken = runs({0xe4020000, 0xe4030000});
+	broken[20] += 0x1000;
 	EXPECT_EQ(tgm_comp_page_shift(broken.data(), (uint32_t)broken.size()), 12u);
 
 	auto partial = runs({0xe4020000});
 	EXPECT_EQ(tgm_comp_page_shift(partial.data(), (uint32_t)partial.size() - 1), 12u);
 	EXPECT_EQ(tgm_comp_page_shift(partial.data(), 0), 12u);
+}
+
+TEST(PageShift, EnforcesAlternatingBit16ParityOn64KiBChunks)
+{
+	EXPECT_EQ((uint32_t)TGM_COMP_SHIFT, 16u);
+	EXPECT_EQ(TGM_COMP_BYTES, 65536ULL);
+
+	auto sameEven = runs({0xe4000000, 0xe4020000});
+	EXPECT_EQ(tgm_comp_page_shift(sameEven.data(), (uint32_t)sameEven.size()), 12u);
+
+	auto sameOdd = runs({0xe4010000, 0xe4030000});
+	EXPECT_EQ(tgm_comp_page_shift(sameOdd.data(), (uint32_t)sameOdd.size()), 12u);
+
+	auto evenOdd = runs({0xe4000000, 0xe4010000});
+	EXPECT_EQ(tgm_comp_page_shift(evenOdd.data(), (uint32_t)evenOdd.size()), 16u);
+
+	auto oddEven = runs({0xe4010000, 0xe4020000});
+	EXPECT_EQ(tgm_comp_page_shift(oddEven.data(), (uint32_t)oddEven.size()), 16u);
+
+	auto singleOdd = runs({0xe4010000});
+	EXPECT_EQ(tgm_comp_page_shift(singleOdd.data(), (uint32_t)singleOdd.size()), 16u);
+
+	auto smmu = runs({(1ULL << 34) | 0x10000000ULL, (1ULL << 34) | 0x10010000ULL});
+	EXPECT_EQ(tgm_comp_page_shift(smmu.data(), (uint32_t)smmu.size()), 16u);
 }
 
 // The GPU pool as shim/linux.c keeps it: 256 MiB of 4 KiB pages, a bit each in the map (taken) and in dirty (free, not
@@ -197,20 +221,20 @@ void expectFree(const Pool &p, const std::vector<uint64_t> &chunks, int dirty)
 TEST(PoolChunks, AFragmentedPoolServesWhatItHasFree)
 {
 	Pool p;
-	// every chunk but every 16th holds a taken page: 128 of 2048 chunks free, none next to another
+	// every chunk but every 16th holds a taken page: 256 of 4096 64 KiB chunks free, none next to another
 	for (uint64_t c = 0; c < Pool::kPages / TGM_COMP_PAGES; c++)
 		if (c % 16)
 			Pool::set(p.map, c * TGM_COMP_PAGES + (c % TGM_COMP_PAGES));
 	std::vector<uint64_t> chunks;
-	const int dirty = p.pick(57, chunks);  // a 720x1280 RGBA16F target: 7296 KiB
+	const int dirty = p.pick(114, chunks);  // a 720x1280 RGBA16F target: 7296 KiB
 	ASSERT_EQ(dirty, 0);
 	expectFree(p, chunks, dirty);
-	EXPECT_EQ(chunks.front(), 2032u);  // the top free chunk first
+	EXPECT_EQ(chunks.front(), 4080u);  // the top free chunk first
 	for (uint64_t c : chunks)
 		EXPECT_EQ(c % 16, 0u);
-	ASSERT_EQ(p.pick(128, chunks), 0);
+	ASSERT_EQ(p.pick(256, chunks), 0);
 	expectFree(p, chunks, 0);
-	EXPECT_EQ(p.pick(129, chunks), -1);
+	EXPECT_EQ(p.pick(257, chunks), -1);
 }
 
 TEST(PoolChunks, CleanChunksBeforeDirtyOnes)
@@ -235,10 +259,10 @@ TEST(PoolChunks, CleanChunksBeforeDirtyOnes)
 TEST(PoolChunks, ChunksStraddleNoWord)
 {
 	Pool p;
-	Pool::set(p.map, 31);      // chunk 0's last page
-	Pool::set(p.map, 32 * 5);  // chunk 5's first page
+	Pool::set(p.map, TGM_COMP_PAGES - 1);  // chunk 0's last page
+	Pool::set(p.map, TGM_COMP_PAGES * 5);  // chunk 5's first page
 	for (uint64_t c = 7; c < Pool::kPages / TGM_COMP_PAGES; c++)
-		Pool::set(p.map, c * TGM_COMP_PAGES + 16);
+		Pool::set(p.map, c * TGM_COMP_PAGES + 8);
 	std::vector<uint64_t> chunks;
 	ASSERT_EQ(p.pick(5, chunks), 0);
 	EXPECT_EQ(chunks.front(), 6u);
@@ -255,7 +279,7 @@ TEST(PoolChunks, CleanChunksAreWholeUnusedAndZeroedOnes)
 	const uint64_t total = Pool::kPages / TGM_COMP_PAGES;
 	EXPECT_EQ(tgm_comp_clean_chunks(p.map.data(), p.dirty.data(), Pool::kPages), total);
 	for (uint64_t c = 0; c < total; c += 4)
-		Pool::set(p.map, c * TGM_COMP_PAGES + 31);
+		Pool::set(p.map, c * TGM_COMP_PAGES + TGM_COMP_PAGES - 1);
 	for (uint64_t c = 1; c < total; c += 4)
 		Pool::set(p.dirty, c * TGM_COMP_PAGES);
 	EXPECT_EQ(tgm_comp_clean_chunks(p.map.data(), p.dirty.data(), Pool::kPages), total / 2);
@@ -264,12 +288,12 @@ TEST(PoolChunks, CleanChunksAreWholeUnusedAndZeroedOnes)
 		<< "every counted chunk is the pick's, clean";
 }
 
-// The kernel picks under the pool's spinlock: one pass over 2048 chunks, however fragmented the pool, in microseconds.
+// The kernel picks under the pool's spinlock: one pass over 4096 chunks, however fragmented the pool, in microseconds.
 TEST(PoolChunks, OnePassBoundsThePick)
 {
 	Pool p;
 	for (uint64_t c = 1; c < Pool::kPages / TGM_COMP_PAGES; c++)
-		Pool::set(p.map, c * TGM_COMP_PAGES + 31);
+		Pool::set(p.map, c * TGM_COMP_PAGES + TGM_COMP_PAGES - 1);
 	std::vector<uint64_t> chunks;
 	const auto start = std::chrono::steady_clock::now();
 	constexpr int kPicks = 100;
@@ -286,13 +310,37 @@ TEST(PoolChunks, OnePassBoundsThePick)
 	EXPECT_EQ(chunks.front(), 0u);
 }
 
+TEST(PoolChunks, AlternatingParityChunksPreferredOverSameParity)
+{
+	Pool p;
+	const uint64_t total = Pool::kPages / TGM_COMP_PAGES;
+	// Top half has only even chunks free; lower half has odd chunks free.
+	for (uint64_t c = total / 2; c < total; c++)
+		if (c & 1u)
+			Pool::set(p.map, c * TGM_COMP_PAGES);
+	for (uint64_t c = 0; c < total / 2; c++)
+		if (!(c & 1u))
+			Pool::set(p.map, c * TGM_COMP_PAGES);
+	std::vector<uint64_t> chunks;
+	ASSERT_EQ(p.pick(8, chunks), 0);
+	expectFree(p, chunks, 0);
+	EXPECT_EQ(chunks.front(), total - 2);
+	std::vector<uint64_t> pas;
+	for (uint64_t c : chunks)
+		for (uint64_t k = 0; k < TGM_COMP_PAGES; k++)
+			pas.push_back(0xe4000000ULL + (c * TGM_COMP_PAGES + k) * 4096ULL);
+	EXPECT_EQ(tgm_comp_page_shift(pas.data(), uint32_t(pas.size())),
+		  static_cast<uint32_t>(TGM_COMP_SHIFT));
+}
+
 TEST(BindOk, WholeBigPagesOfBigPageMemory)
 {
 	const uint64_t big = TGM_COMP_BYTES;
 	EXPECT_TRUE(tgm_comp_bind_ok(0x100000000ULL, big, 4 * big, TGM_COMP_SHIFT));
+	EXPECT_TRUE(tgm_comp_bind_ok(0x100010000ULL, 0x10000, big, TGM_COMP_SHIFT));
 	EXPECT_FALSE(tgm_comp_bind_ok(0x100000000ULL, big, 4 * big, 12));
-	EXPECT_FALSE(tgm_comp_bind_ok(0x100010000ULL, 0, big, TGM_COMP_SHIFT));
-	EXPECT_FALSE(tgm_comp_bind_ok(0x100000000ULL, 0x10000, big, TGM_COMP_SHIFT));
+	EXPECT_FALSE(tgm_comp_bind_ok(0x100008000ULL, 0, big, TGM_COMP_SHIFT));
+	EXPECT_FALSE(tgm_comp_bind_ok(0x100000000ULL, 0x8000, big, TGM_COMP_SHIFT));
 	EXPECT_FALSE(tgm_comp_bind_ok(0x100000000ULL, 0, big + 0x1000, TGM_COMP_SHIFT));
 	EXPECT_FALSE(tgm_comp_bind_ok(0x100000000ULL, 0, 0, TGM_COMP_SHIFT));
 }
@@ -322,23 +370,30 @@ TEST(Pte, FieldsAreNvgpus)
 // with each page of 128 KiB, and the full-comp-tag-line top bit set only for a page at an odd 64 KiB).
 TEST(Pte, BindLinesFollowNvgpu)
 {
-	const uint64_t first = 0x40, offset = 3 * TGM_COMP_BYTES, pa = 0xe4100000;
+	const uint64_t first = 0x40;
 	const uint32_t kind = 0xdb;
-	uint64_t type = tgm_pte_kind(kind) | tgm_pte_comptagline(tgm_comp_line(first, offset));
-	uint64_t ctag = (first + (offset >> 17)) << 17;
-	for (uint32_t i = 0; i < 8; i++) {
-		const uint64_t page_pa = pa + i * TGM_COMP_BYTES;
-		const uint64_t pte = (page_pa >> 8) | type;
-		type += tgm_pte_comptagline(1);
+	for (uint64_t basePa : {0xe4100000ULL, (1ULL << 34) | 0x10000000ULL}) {
+		for (uint64_t offset : {2 * TGM_COMP_BYTES, 3 * TGM_COMP_BYTES}) {
+			uint64_t half = tgm_comp_half_line(first, offset);
+			uint64_t ctag = (first << 17) + offset;
+			for (uint32_t i = 0; i < 8; i++) {
+				const uint64_t page_pa = basePa + offset + i * TGM_COMP_BYTES;
+				const uint64_t pte = (page_pa >> 8) | tgm_pte_kind(kind) |
+						     tgm_pte_comptagline_64k(half++ >> 1, page_pa);
 
-		uint32_t word1 = nvgpuKindF(kind) | nvgpuComptaglineF((uint32_t)(ctag >> 17));
-		if (page_pa & 0x10000)
-			word1 |= nvgpuComptaglineF(1u << 16);
-		ctag += TGM_COMP_BYTES;
+				uint32_t word1 = nvgpuKindF(kind) |
+						 nvgpuComptaglineF((uint32_t)(ctag >> 17));
+				if (page_pa & 0x10000)
+					word1 |= nvgpuComptaglineF(1u << 16);
+				ctag += TGM_COMP_BYTES;
 
-		EXPECT_EQ((uint32_t)(pte >> 32), word1) << i;
-		EXPECT_EQ((uint32_t)pte, (uint32_t)(page_pa >> 12) << 4) << i;
-		EXPECT_EQ(pte & (1ULL << 60), 0u) << i;
+				EXPECT_EQ((uint32_t)(pte >> 32), word1) << i;
+				EXPECT_EQ((uint32_t)pte, (uint32_t)(page_pa >> 12) << 4) << i;
+				EXPECT_EQ(pte & (1ULL << 60),
+					  (page_pa & 0x10000) ? (1ULL << 60) : 0ULL)
+					<< i;
+			}
+		}
 	}
 }
 }  // namespace

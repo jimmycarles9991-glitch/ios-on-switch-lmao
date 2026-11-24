@@ -131,6 +131,26 @@ TEST(Spares, ARefilledSpareIsWhole128KiBUnits)
 	EXPECT_EQ(small.tail, 320ULL << 10);
 }
 
+// 22 Nov, boot B: Photos' launch made a 1792x1472 RGBA16F attachment in backboardd, a block-linear chunk of its own (rows
+// pitch-wide, or rounded to a 128-row block), which found no ready spare and was zeroed and cleaned on the render thread
+// (17.3 ms). From boot, before any miss, a warm class serves it.
+TEST(Spares, ALaunchSizedTargetFindsAWarmSpareFromBoot)
+{
+	const auto warm = [](uint32_t asked) {
+		for (const switch_gpu_spare_warm &w : SWITCH_GPU_SPARE_WARM)
+			if (w.ready &&
+			    switch_gpu_spare_serves(asked, switch_gpu_spare_class_up(w.bytes)))
+				return true;
+		return false;
+	};
+	constexpr uint64_t kPitch = 1792 * 8, kRows = 1472;
+	for (const uint64_t bytes : {kPitch * kRows, kPitch * ((kRows + 127) / 128 * 128)}) {
+		const uint32_t asked = switch_gpu_spare_class_up(bytes);
+		EXPECT_TRUE(warm(asked))
+			<< bytes << " bytes, class of " << switch_gpu_spare_class_bytes(asked);
+	}
+}
+
 TEST(Spares, NoSpareIsGivenBackForAClassThatStillWouldNotFit)
 {
 	constexpr uint64_t kCap = 96ULL << 20;

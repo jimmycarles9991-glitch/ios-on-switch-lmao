@@ -4,15 +4,17 @@
 #include <string>
 #include "bazel/testing/source_text.h"
 #include "drivers/TegraGM20B/TegraGM20BCopyResetABI.h"
+#include "drivers/TegraGM20B/TegraGM20BGrPreemptABI.h"
 #include "drivers/TegraGM20B/TegraGM20BJobABI.h"
 #include "drivers/TegraGM20B/TegraGM20BReadbackABI.h"
 #include "drivers/TegraGM20B/TegraGM20BRegDumpABI.h"
+#include "drivers/TegraGM20B/TegraGM20BVolatileABI.h"
 
 TEST(JobAbi, MethodsFollowTheHashedHeadersOnes)
 {
-	const uint32_t hashed[] = {TegraGM20BMethodGetInfo, TegraGM20BMethodCpuComplete,
-				   TegraGM20BMethodReadback, TegraGM20BMethodRegdump,
-				   TegraGM20BMethodCopyReset};
+	const uint32_t hashed[] = {TegraGM20BMethodGetInfo,   TegraGM20BMethodCpuComplete,
+				   TegraGM20BMethodReadback,  TegraGM20BMethodRegdump,
+				   TegraGM20BMethodCopyReset, TegraGM20BMethodGrPreempt};
 	const uint32_t job[] = {TegraGM20BMethodResourceSetCreate,
 				TegraGM20BMethodResourceSetRelease, TegraGM20BMethodSubmitJob,
 				TegraGM20BMethodWriterPromise, TegraGM20BMethodEventWord};
@@ -21,6 +23,9 @@ TEST(JobAbi, MethodsFollowTheHashedHeadersOnes)
 		for (uint32_t other : hashed)
 			EXPECT_NE(method, other);
 	}
+	EXPECT_NE(uint32_t(TegraGM20BMethodGrPreempt), uint32_t(TegraGM20BMethodCopyReset));
+	EXPECT_NE(uint32_t(TegraGM20BMethodGrPreempt), uint32_t(TegraGM20BMethodReadback));
+	EXPECT_NE(uint32_t(TegraGM20BMethodGrPreempt), uint32_t(TegraGM20BMethodRegdump));
 }
 
 TEST(JobAbi, RecordsKeepTheirLayout)
@@ -38,8 +43,28 @@ TEST(JobAbi, RecordsKeepTheirLayout)
 TEST(JobAbi, TheHashedAbiHeaderNeverIncludesIt)
 {
 	const std::string abi = switch_ios::test::SourceText("../TegraGM20BABI.h");
+	const std::string jobAbi = switch_ios::test::SourceText("../TegraGM20BJobABI.h");
 	ASSERT_FALSE(abi.empty());
+	ASSERT_FALSE(jobAbi.empty());
 	EXPECT_EQ(abi.find("TegraGM20BJobABI.h"), std::string::npos);
+	EXPECT_EQ(abi.find("TegraGM20BGrPreemptABI.h"), std::string::npos);
+	EXPECT_EQ(abi.find("TegraGM20BVolatileABI.h"), std::string::npos);
+	EXPECT_EQ(jobAbi.find("TegraGM20BVolatileABI.h"), std::string::npos);
+
+	constexpr uint32_t kInfoBits =
+		uint32_t(TegraGM20BInfoSparse) | TegraGM20BInfoHostImport | TegraGM20BInfoZcull |
+		TegraGM20BInfoKernelMap | TegraGM20BInfoSurfaceWrites |
+		TegraGM20BInfoSurfaceLayout | TegraGM20BInfoPriority | TegraGM20BInfoCompression |
+		TegraGM20BInfoKillRecord | TegraGM20BInfoTiledCache | TegraGM20BInfoCpuAccess |
+		TegraGM20BInfoSubmitAddress | TegraGM20BInfoCpuPreserveDirty |
+		TegraGM20BInfoCanonicalSurfaceLayout | TegraGM20BInfoChannelEpoch |
+		TegraGM20BInfoPushFences | TegraGM20BInfoPackImage | TegraGM20BInfoBoPark;
+	constexpr uint32_t kJobBits = uint32_t(TegraGM20BJobExternal) | TegraGM20BJobHostWritten |
+				      TegraGM20BJobHasEvents | TegraGM20BJobQuiet |
+				      TegraGM20BJobAdmission | TegraGM20BJobFulfills |
+				      TegraGM20BJobEventReleases;
+	EXPECT_EQ(uint32_t(TegraGM20BInfoVolatileWrites) & kInfoBits, 0u);
+	EXPECT_EQ(uint32_t(TegraGM20BJobVolatileWrites) & kJobBits, 0u);
 }
 
 // What attachSet and the raw kernel model refuse a method 31 record for before its BO lookup

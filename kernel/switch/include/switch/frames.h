@@ -48,6 +48,10 @@ size_t switch_frames_line(bool interaction, char *out, size_t size);
 void switch_frames_present(uint64_t vsync, uint64_t submit, uint64_t latch);
 size_t switch_frames_latency_line(char *out, size_t size);
 
+/* The newest commit message any client sent the render server (mach; 0: none yet, and always in a release kernel).
+ * One relaxed load: any context, the display's frame-end filter included (sched/watch.c). */
+uint64_t switch_frames_last_commit(void);
+
 __END_DECLS
 
 #endif /* SWITCH_FRAMES_H */

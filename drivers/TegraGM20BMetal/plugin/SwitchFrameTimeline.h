@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // The user side of the frame timeline (debug builds only): a kdebug event at each step of a command buffer, for ktrace, and one
-// "SwitchFrameUser:" line per slow command buffer, for the pulled log archive. Times are mach ticks, the kernel's "SwitchFrame:"
-// clock; tools/frames joins the two by time.
+// "SwitchFrameUser:" line per slow command buffer (slow() says which), for the pulled log archive. Times are mach ticks, the
+// kernel's "SwitchFrame:" clock; tools/frames joins the two by time.
 #pragma once
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <atomic>
+#include <utility>
 
 extern "C" int kdebug_trace(uint32_t debugid, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4);
 
@@ -65,7 +66,9 @@ enum Field : unsigned {
     SlotEnd,
     Fence,
     Done,
-    Made,  // the command buffer was made
+    Made,       // the command buffer was made
+    WaitStart,  // a thread first blocked in its waitUntilScheduled
+    Scheduled,  // its scheduled handlers ran: what waitUntilScheduled waits for
     FieldCount
 };
 
@@ -175,11 +178,20 @@ private:
 
 #define SWITCH_API(kind) const switch_frame::ApiScope switchApiScope(switch_frame::kind)
 
-// A commit site's own per-thread state: its previous commit, where it was called from, and the process's churn totals then
+// This thread's time blocked in waitUntilScheduled since its last commit.
+inline uint64_t &blockedTicks()
+{
+    static thread_local uint64_t ticks = 0;
+    return ticks;
+}
+
+// A commit site's own per-thread state: its previous commit, where it was called from, the process's churn totals then, and
+// whether that commit belonged to a slow frame
 struct Since {
     uint64_t commit = 0;
     Site site;
     Churn totals;
+    bool slowFrame = false;
 };
 
 struct Stamps {
@@ -189,6 +201,8 @@ struct Stamps {
     ApiTotals apiAtMade,
         api;  // the making thread's totals then; from then to the commit, when made and committed there
     pthread_t madeOn = nullptr;
+    uint64_t blockedBefore = 0;  // the committing thread's time blocked in waitUntilScheduled since its previous commit
+    bool slowFrame = false;      // committed in a slow frame (frameSlow)
     std::atomic<uint64_t> at[FieldCount] = {};
 
     void set(Field f, uint64_t ticks)
@@ -227,6 +241,46 @@ inline uint64_t ticksPerMs()
     return perMs;
 }
 
+// A waitUntilScheduled that blocks: the command buffer's first wait start, and the thread's time blocked.
+class WaitScope {
+public:
+    explicit WaitScope(Stamps &s) : start(mach_absolute_time())
+    {
+        if (!s.get(WaitStart))
+            s.set(WaitStart, start);
+    }
+
+    ~WaitScope()
+    {
+        blockedTicks() += mach_absolute_time() - start;
+    }
+
+    WaitScope(const WaitScope &) = delete;
+    WaitScope &operator=(const WaitScope &) = delete;
+
+private:
+    uint64_t start;
+};
+
+// A commit opens a slow frame when it comes kSlowGapMs or more after the thread's previous one and the thread was not idle
+// for kIdleMs of that: a gap it spent blocked in waitUntilScheduled or recording this command buffer is a stall, a longer
+// one spent elsewhere a screen that went still. The thread's next commits under kSameFrameMs apart are the same frame's.
+constexpr uint64_t kSlowGapMs = 20, kIdleMs = 250, kSameFrameMs = 8, kSlowCallMs = 8, kSlowWaitMs = 8;
+
+inline bool frameSlow(const Stamps &s, bool previousSlow)
+{
+    const uint64_t ms = ticksPerMs();
+    const uint64_t commit = s.get(Commit), previous = s.get(Previous), made = s.get(Made);
+    if (!previous || commit <= previous)
+        return false;
+    const uint64_t gap = commit - previous;
+    if (previousSlow && gap < kSameFrameMs * ms)
+        return true;
+    const uint64_t recording = made > previous && commit > made ? commit - made : 0;
+    const uint64_t busy = s.blockedBefore + recording < gap ? s.blockedBefore + recording : gap;
+    return gap >= kSlowGapMs * ms && gap - busy < kIdleMs * ms;
+}
+
 // At the commit call's entry: the command buffer's sequence number and the stamps that start it. `since` is the caller's own
 // per-thread state: the facade's and the m2v frontend's commits interleave on one thread when a replay commits.
 // `frame` is the commit method's own frame (__builtin_frame_address(0)), for its callers; null leaves them out.
@@ -237,6 +291,8 @@ inline void committed(Stamps &s, Since &since, const Churn &totals, const void *
     const uint64_t t = s.mark(Commit);
     s.set(Previous, since.commit);
     since.commit = t;
+    s.blockedBefore = std::exchange(blockedTicks(), 0);
+    s.slowFrame = since.slowFrame = frameSlow(s, since.slowFrame);
     if (frame) {
         s.site = callers(frame);
         s.previousSite = since.site;
@@ -255,25 +311,59 @@ inline void committed(Stamps &s, Since &since, const Churn &totals, const void *
     trace(kCommit, kPoint, s.seq);
 }
 
-// Slow: a commit 20-250 ms after this thread's previous one (past 250 ms the thread was idle), a commit call over 8 ms, or a
-// replay on m2v
-inline bool slow(const Stamps &s)
+// Why a command buffer is slow, a bit each: committed in a slow frame (frameSlow: every command buffer of it), a commit call
+// over kSlowCallMs, a waitUntilScheduled blocked over kSlowWaitMs until its scheduled handlers ran, a replay on m2v
+enum Slow : unsigned {
+    kSlowFrame = 1,
+    kSlowCall = 2,
+    kSlowWait = 4,
+    kSlowReplay = 8
+};
+
+inline unsigned slowReasons(const Stamps &s)
 {
     const uint64_t ms = ticksPerMs();
-    const uint64_t commit = s.get(Commit);
-    const uint64_t previous = s.get(Previous);
-    const uint64_t back = s.get(Back);
-    const uint64_t gap = previous && commit > previous ? commit - previous : 0;
-    return (gap > 20 * ms && gap < 250 * ms) || (back > commit && back - commit > 8 * ms) || s.get(ReplayStart) != 0;
+    const uint64_t commit = s.get(Commit), back = s.get(Back);
+    const uint64_t waited = s.get(WaitStart), scheduled = s.get(Scheduled);
+    unsigned why = s.slowFrame ? kSlowFrame : 0;
+    if (back > commit && back - commit > kSlowCallMs * ms)
+        why |= kSlowCall;
+    if (waited && scheduled > waited && scheduled - waited > kSlowWaitMs * ms)
+        why |= kSlowWait;
+    if (s.get(ReplayStart))
+        why |= kSlowReplay;
+    return why;
 }
 
-// After the completed handlers ran: the kdebug event, and the line when the command buffer was slow (at most 20 a second,
-// the ones over that counted into the next line's "dropped")
+inline bool slow(const Stamps &s)
+{
+    return slowReasons(s) != 0;
+}
+
+// slowReasons' bits by name, comma-joined, for the line's "why"
+inline void describeSlow(unsigned why, char *out, size_t size)
+{
+    static const char *const names[] = {"frame", "call", "wait", "replay"};
+    size_t at = 0;
+    out[0] = '\0';
+    for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]) && at + 1 < size; i++) {
+        if (!(why & (1u << i)))
+            continue;
+        const int w = snprintf(out + at, size - at, "%s%s", at ? "," : "", names[i]);
+        at = w < 0 ? at : at + size_t(w) < size ? at + size_t(w) : size - 1;
+    }
+}
+
+// After the completed handlers ran: the kdebug event, and the line when the command buffer was slow (at most
+// kLinesPerSecond, the ones over that counted into the next line's "dropped"). The line is one string: each field is one
+// add() below, "name start end" in ticks for a span tools/frames places on the frame, durations comma-joined in api.
 inline void finished(Stamps &s)
 {
+    static constexpr uint32_t kLinesPerSecond = 60;  // every command buffer of a 20 Hz compositor's slow frames
     s.mark(Done);
     trace(kHandlersRun, kPoint, s.seq);
-    if (!slow(s))
+    const unsigned why = slowReasons(s);
+    if (!why)
         return;
     static std::atomic<uint64_t> windowStart{0};
     static std::atomic<uint32_t> inWindow{0}, dropped{0};
@@ -281,7 +371,7 @@ inline void finished(Stamps &s)
     uint64_t start = windowStart.load(std::memory_order_relaxed);
     if (now - start > 1000 * ticksPerMs() && windowStart.compare_exchange_strong(start, now, std::memory_order_relaxed))
         inWindow.store(0, std::memory_order_relaxed);
-    if (inWindow.fetch_add(1, std::memory_order_relaxed) >= 20) {
+    if (inWindow.fetch_add(1, std::memory_order_relaxed) >= kLinesPerSecond) {
         dropped.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -289,29 +379,39 @@ inline void finished(Stamps &s)
     const auto g = [&s](Field f) {
         return (unsigned long long)s.get(f);
     };
+    const uint64_t perUs = ticksPerMs() / 1000 ? ticksPerMs() / 1000 : 1;
+    char line[1024];  // about 590 bytes used with both sites: the rest is for the fields still to come
+    size_t at = 0;
+    auto add = [&](const char *format, auto... values) {
+        if (at + 1 >= sizeof(line))
+            return;
+        const int w = snprintf(line + at, sizeof(line) - at, format, values...);
+        at = w < 0 ? at : at + size_t(w) < sizeof(line) ? at + size_t(w) : sizeof(line) - 1;
+    };
+    add("cb %llu commit %llu enc %llu %llu replay %llu %llu ret %llu owait %llu %llu fence %llu done %llu back %llu",
+        (unsigned long long)s.seq, g(Commit), g(EncodeStart), g(EncodeEnd), g(ReplayStart), g(ReplayEnd), g(Returned),
+        g(OrderWaitStart), g(OrderWaitEnd), g(Fence), g(Done), g(Back));
+    add(" slot %llu %llu prev %llu ws %llu %llu dropped %u", g(SlotStart), g(SlotEnd), g(Previous), g(WaitStart),
+        g(Scheduled), dropped.exchange(0, std::memory_order_relaxed));
+    add(" surf %llu imp %llu hit %llu made %llu", (unsigned long long)s.churn.surfaces,
+        (unsigned long long)s.churn.imports, (unsigned long long)s.churn.hits, g(Made));
+    char reasons[32];
+    describeSlow(why, reasons, sizeof(reasons));
+    add(" why %s", reasons);
+    // Comma-joined, so tools/frames reads no time spans in it.
+    const ApiTotals &a = s.api;
+    add(" api "
+        "draw=%lluus/%llu,bind=%lluus/%llu,state=%lluus/%llu,encoder=%lluus/%llu,object=%lluus/%llu,blocked=%lluus",
+        a.ticks[ApiDraw] / perUs, a.calls[ApiDraw], a.ticks[ApiBind] / perUs, a.calls[ApiBind],
+        a.ticks[ApiState] / perUs, a.calls[ApiState], a.ticks[ApiEncoder] / perUs, a.calls[ApiEncoder],
+        a.ticks[ApiObject] / perUs, a.calls[ApiObject], (unsigned long long)(s.blockedBefore / perUs));
     char sites[2 * kSiteFrames * 48];
     describe(s.site, sites, sizeof(sites) / 2);
     const size_t own = strlen(sites);
     snprintf(sites + own, sizeof(sites) - own, " prevsite ");
     describe(s.previousSite, sites + strlen(sites), sizeof(sites) - strlen(sites));
-    // Comma-joined, so tools/frames reads no time spans in it.
-    char api[160];
-    const uint64_t perUs = ticksPerMs() / 1000 ? ticksPerMs() / 1000 : 1;
-    const ApiTotals &a = s.api;
-    snprintf(api, sizeof(api),
-             "draw=%lluus/%llu,bind=%lluus/%llu,state=%lluus/%llu,encoder=%lluus/%llu,object=%lluus/%llu",
-             a.ticks[ApiDraw] / perUs, a.calls[ApiDraw], a.ticks[ApiBind] / perUs, a.calls[ApiBind],
-             a.ticks[ApiState] / perUs, a.calls[ApiState], a.ticks[ApiEncoder] / perUs, a.calls[ApiEncoder],
-             a.ticks[ApiObject] / perUs, a.calls[ApiObject]);
-    os_log(
-        log,
-        "SwitchFrameUser: %{public}s cb %llu commit %llu enc %llu %llu replay %llu %llu ret %llu owait %llu %llu fence "
-        "%llu done %llu back %llu slot %llu %llu prev %llu dropped %u surf %llu imp %llu hit %llu made %llu api "
-        "%{public}s site %{public}s",
-        getprogname(), (unsigned long long)s.seq, g(Commit), g(EncodeStart), g(EncodeEnd), g(ReplayStart), g(ReplayEnd),
-        g(Returned), g(OrderWaitStart), g(OrderWaitEnd), g(Fence), g(Done), g(Back), g(SlotStart), g(SlotEnd),
-        g(Previous), dropped.exchange(0, std::memory_order_relaxed), (unsigned long long)s.churn.surfaces,
-        (unsigned long long)s.churn.imports, (unsigned long long)s.churn.hits, g(Made), api, sites);
+    add(" site %s", sites);
+    os_log(log, "SwitchFrameUser: %{public}s %{public}s", getprogname(), line);
 }
 
 }  // namespace switch_frame

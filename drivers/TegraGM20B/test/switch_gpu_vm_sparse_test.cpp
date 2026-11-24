@@ -11,10 +11,10 @@ struct Run {
 	u8 shift;
 };
 
-// [0x40011000, 0x40063000): 4 KiB pages up to the first 128 KiB boundary, the two whole big pages, the 4 KiB tail
+// [0x40011000, 0x40063000): 4 KiB pages up to the first 64 KiB boundary, the four whole big pages, the 4 KiB tail
 constexpr u64 kVa = 0x40011000, kRange = 0x52000;
 const std::vector<Run> kRuns = {
-	{0x40011000, 0xf000, 12}, {0x40020000, 0x40000, 17}, {0x40060000, 0x3000, 12}};
+	{0x40011000, 0xf000, 12}, {0x40020000, 0x40000, 16}, {0x40060000, 0x3000, 12}};
 
 void expectRun(const Call &call, const Run &run)
 {
@@ -112,16 +112,17 @@ TEST_F(VmSparse, APendingSparseRangeWritesNothingUntilInstalled)
 	switch_gpu_vm_unmap(&a, &mapping);
 }
 
-// An Unmap, or the cut of a Map over it, removes sparse PTEs as any: after an L2 flush, synchronously, each run's page
-// tables given back.
+// An Unmap, or the cut of a Map over it, removes sparse PTEs synchronously with no L2 flush
+// (sparse PTEs back no physical memory) and gives each run's page tables back.
 TEST_F(VmSparse, ItsRemovalIsAnyMappingsRemoval)
 {
 	switch_gpu_mapping *mapping = nullptr;
 	ASSERT_EQ(switch_gpu_vm_sparse(&a, kVa, kRange, 1, &mapping), 0);
 	calls.clear();
+	flushes = 0;
 	switch_gpu_vm_unmap(&a, &mapping);
 	EXPECT_EQ(mapping, nullptr);
-	EXPECT_EQ(flushes, 1u);
+	EXPECT_EQ(flushes, 0u);
 	ASSERT_EQ(calls.size(), 2 * kRuns.size());
 	for (size_t i = 0; i < kRuns.size(); ++i) {
 		EXPECT_EQ(calls[2 * i].operation, 'u');
@@ -147,7 +148,7 @@ TEST_F(VmSparse, ACutBigPageStaysSparseAndItsRestIsWrittenSparseAgain)
 		  0);
 	EXPECT_TRUE(calls.empty());
 	ASSERT_EQ(taken->count, 1u);
-	EXPECT_EQ(taken->entries[0].shift, 17);
+	EXPECT_EQ(taken->entries[0].shift, 16);
 	EXPECT_EQ(taken->entries[0].bytes, 0x40000u);
 	EXPECT_FALSE(taken->entries[0].pending);
 	EXPECT_TRUE(below->sparse && taken->sparse && above->sparse);

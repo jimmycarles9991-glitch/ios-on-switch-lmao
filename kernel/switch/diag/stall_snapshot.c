@@ -8,7 +8,8 @@
  * thread lock), so its own turnstile and the port it belongs to cannot be torn down; inheritors and a special reply
  * port's sync inheritor port carry references while their holder is locked. Ports further up a chain carry none and
  * are never dereferenced. A thread at the end of the chain is referenced under its turnstile's lock (the turnstile
- * holds one on its inheritor) and looked at only after the waiter's lock is dropped: two thread locks never nest.
+ * holds one on its inheritor) and looked at only after the waiter's lock is dropped: two thread locks never nest. Each
+ * owner past the first is taken the same way from the one before it, one thread lock at a time.
  */
 
 #include <switch/xnu.h>
@@ -157,7 +158,7 @@ static void owner_of(thread_t t, struct stall_snapshot *ss)
     }
     ts = thread_get_waiting_turnstile(t);
     inheritor(ts, ss);
-    if (ss->owner.pid != 0 && ss->owner.tid != 0) {
+    if (switch_stall_owner_is_thread(&ss->owner)) {
         return;
     }
     if (waitq_type(wq) == WQT_PORT) {
@@ -183,8 +184,17 @@ bool switch_stall_off_core_waiting(int state)
     return (state & (TH_WAIT | TH_RUN)) == TH_WAIT;
 }
 
+void switch_stall_take_rwlock(thread_t t, struct stall_wait *w)
+{
+    if (!switch_stall_on_core(t) && switch_stall_off_core_waiting(t->state) &&
+        switch_stall_rwlock_wait(t->block_hint)) {
+        w->rwlock = true;
+        w->rw_writer_ctid = switch_stall_rw_writer(t);
+    }
+}
+
 /* Under the thread's lock, off core: its wait and the kernel half of its stack (a running thread's saved state is stale). */
-static void take_wait(thread_t t, struct stall_wait *w)
+static void take_wait(thread_t t, struct stall_wait *w, bool read_rwlock)
 {
     w->state = t->state;
     w->sched_pri = t->sched_pri;
@@ -196,6 +206,9 @@ static void take_wait(thread_t t, struct stall_wait *w)
     }
     if (switch_stall_on_core(t)) {
         return;
+    }
+    if (read_rwlock) {
+        switch_stall_take_rwlock(t, w);
     }
     if (t->continuation != NULL) {
         w->continuation =
@@ -226,7 +239,7 @@ void switch_stall_take(thread_t t, struct stall_snapshot *ss)
 
     ss->taken = mach_absolute_time();
     ss->tid = thread_tid(t);
-    take_wait(t, &ss->wait);
+    take_wait(t, &ss->wait, false);
     if (user != NULL && !switch_stall_on_core(t)) {
         ss->pc = get_saved_state_pc(user);
         ss->lr = get_saved_state_lr(user);
@@ -239,23 +252,64 @@ void switch_stall_take(thread_t t, struct stall_snapshot *ss)
     task_reference(ss->task);
 }
 
+/* Under t's lock, t waiting off core: whom it waits for (the thread +1). */
+static void hop_of(thread_t t, struct stall_hop *hop)
+{
+    struct stall_snapshot found = {0};
+
+    owner_of(t, &found);
+    hop->owner = found.owner;
+    hop->thread = found.owner_thread;
+    hop->special_reply = found.special_reply;
+    hop->locked = found.locked;
+}
+
+bool switch_stall_take_thread(thread_t t, bool *on_core, struct stall_wait *w, struct stall_hop *next, bool read_rwlock)
+{
+    bool taken = false;
+    spl_t s = splsched();
+
+    thread_lock(t);
+    if (!(t->state & TH_TERMINATE)) {
+        *on_core = switch_stall_on_core(t);
+        take_wait(t, w, read_rwlock);
+        taken = true;
+        if (next != NULL && switch_stall_off_core_waiting(w->state)) {
+            hop_of(t, next);
+        }
+    }
+    thread_unlock(t);
+    splx(s);
+    return taken;
+}
+
 void switch_stall_take_owner(struct stall_snapshot *ss)
 {
-    thread_t owner = ss->owner_thread;
-    spl_t s;
+    if (ss->owner_thread != THREAD_NULL) {
+        ss->owner_taken = switch_stall_take_thread(ss->owner_thread, &ss->owner_on_core, &ss->owner_wait, NULL, false);
+    }
+}
 
-    if (owner == THREAD_NULL) {
-        return;
+void switch_stall_take_owner_chain(struct stall_snapshot *ss, unsigned int max_more)
+{
+    const unsigned int limit = max_more < STALL_MORE ? max_more : STALL_MORE;
+    thread_t t = ss->owner_thread;
+    bool *taken = &ss->owner_taken, *on_core = &ss->owner_on_core;
+    struct stall_wait *w = &ss->owner_wait;
+
+    for (unsigned int i = 0; t != THREAD_NULL; i++) {
+        struct stall_hop *next = i < limit ? &ss->more[i] : NULL;
+
+        *taken = switch_stall_take_thread(t, on_core, w, next, true);
+        if (next == NULL || !switch_stall_hop_present(&next->owner, next->locked)) {
+            break;
+        }
+        ss->nmore = i + 1;
+        t = next->thread;
+        taken = &next->taken;
+        on_core = &next->on_core;
+        w = &next->wait;
     }
-    s = splsched();
-    thread_lock(owner);
-    if (!(owner->state & TH_TERMINATE)) {
-        ss->owner_on_core = switch_stall_on_core(owner);
-        take_wait(owner, &ss->owner_wait);
-        ss->owner_taken = true;
-    }
-    thread_unlock(owner);
-    splx(s);
 }
 
 void switch_stall_release(struct stall_snapshot *ss)
@@ -263,6 +317,12 @@ void switch_stall_release(struct stall_snapshot *ss)
     if (ss->owner_thread != THREAD_NULL) {
         thread_deallocate(ss->owner_thread);
         ss->owner_thread = THREAD_NULL;
+    }
+    for (unsigned int i = 0; i < STALL_MORE; i++) {
+        if (ss->more[i].thread != THREAD_NULL) {
+            thread_deallocate(ss->more[i].thread);
+            ss->more[i].thread = THREAD_NULL;
+        }
     }
     if (ss->task != TASK_NULL) {
         task_deallocate(ss->task);
@@ -352,7 +412,7 @@ void switch_stall_put_kernel(struct stall_line *l, const char *label, const stru
     }
 }
 
-static void put_blocked(struct stall_line *l, const struct stall_wait *w, bool special)
+void switch_stall_put_blocked(struct stall_line *l, const struct stall_wait *w, bool special)
 {
     switch_stall_put(l, " %s%s on %s 0x%lx, event 0x%llx;", switch_stall_wait_name(w->hint),
                      special ? " (special reply port)" : "", wq_name(w->wq_type), w->wq_object, w->event);
@@ -366,8 +426,8 @@ void switch_stall_put_wait(struct stall_line *l, const struct stall_snapshot *ss
         switch_stall_put(l, " %s;", (ss->wait.state & TH_SUSP) ? "suspended" : "on a run queue");
         return;
     }
-    put_blocked(l, &ss->wait, ss->special_reply);
-    if (ss->owner.pid != 0 || ss->owner.tid != 0) {
+    switch_stall_put_blocked(l, &ss->wait, ss->special_reply);
+    if (switch_stall_owner_known(&ss->owner)) {
         proc_name(ss->owner.pid, owner, sizeof(owner));
         switch_stall_put(l, " waits for %s[%d]", owner, ss->owner.pid);
         if (ss->owner.tid != 0) {
@@ -378,7 +438,7 @@ void switch_stall_put_wait(struct stall_line *l, const struct stall_snapshot *ss
             switch_stall_put(l, " it is on core (pri %d);", ss->owner_wait.sched_pri);
         } else if (ss->owner_taken && switch_stall_off_core_waiting(ss->owner_wait.state)) {
             switch_stall_put(l, " it is blocked (pri %d):", ss->owner_wait.sched_pri);
-            put_blocked(l, &ss->owner_wait, false);
+            switch_stall_put_blocked(l, &ss->owner_wait, false);
             switch_stall_put_kernel(l, "its kernel", &ss->owner_wait);
         } else if (ss->owner_taken) {
             switch_stall_put(l, " it is on a run queue (pri %d);", ss->owner_wait.sched_pri);

@@ -18,7 +18,10 @@ import UIKit
 /// video (other processes' jobs are reported, not judged), no frame of either change showing anything but one route's
 /// CRC or the other's (the landscape route's CRC is the held landscape frame's), the copy's very CRC back afterwards,
 /// no underflow, no frame dropped while playing. The two routes filter differently (VIC scales the turn, window A's
-/// DDAs scale the scan), so their CRCs are reported (crc_same), not compared. Last, the forced-failure arm.
+/// DDAs scale the scan), so their CRCs are reported (crc_same), not compared. Last, the forced-failure arm. Reported
+/// for the change in: the video and UI latches of its last sample (enter_video_latches, enter_ui_latches: a paused
+/// video whose held frame reaches no overlay latch gives the route no swap to change on) and the playing sample's
+/// frames still portrait (playing_portrait_frames).
 struct LandscapeVideoTest: HWTest {
     let id = "display.x1.landscape_video"
     let name = "A landscape video column-scanned on window A under the UI on window B, against the VIC copy (CRC)"
@@ -109,24 +112,26 @@ struct LandscapeVideoTest: HWTest {
         guard case .success(let (leave, leaveSamples)) = await change(session, video, held, fresh: false) else {
             return .fail("no sample of the change back")
         }
-        _ = try session.call(
-            LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
-        ).get()
         samples.leave = leave
         let (forcedChecks, forcedMetrics) = try await forcedFailure(session, video, held)
         await MainActor.run { video.pause() }
 
         var (checks, metrics) = LandscapeJudge.judge(samples, dropped: dropped)
         metrics.set("enter_samples", enterSamples)
+        metrics.set("enter_video_latches", samples.enter.overlayLatches)
+        metrics.set("enter_ui_latches", samples.enter.uiLatches)
+        metrics.set("playing_portrait_frames", samples.playing.frames - samples.playing.landscapeFrames)
         metrics.set("leave_samples", leaveSamples)
         metrics.merge(forcedMetrics)
         checks += forcedChecks
         return .judged(checks, metrics)
     }
 
-    /// The forced-failure arm, last: FAIL makes the next change into landscape fail as a reservation would (one line,
-    /// that change dropped); nothing is held, so a following frame's change has to go landscape. forced_failures is the
-    /// kernel's count over the arm.
+    /// The forced-failure arm, last, entered on the copy route with PORTRAIT still holding changes into landscape back:
+    /// FAIL is armed under the hold and the hold then let go, so the first change into landscape is the one FAIL makes
+    /// fail as a reservation would (one line, that change dropped), and a following frame's change has to go landscape.
+    /// Armed after the hold's release, FAIL would find the held frame already landscape and no change left to fail.
+    /// forced_failures is the kernel's count over the arm.
     func forcedFailure(
         _ session: VICKernelTest.Session, _ video: AVPlayer, _ held: Held
     ) async throws
@@ -141,6 +146,9 @@ struct LandscapeVideoTest: HWTest {
         ).get()
         _ = try session.call(
             LandscapeSample.request(op: LandscapeSample.fail, value: 1), replyBytes: LandscapeSample.size
+        ).get()
+        _ = try session.call(
+            LandscapeSample.request(op: LandscapeSample.portrait, value: 0), replyBytes: LandscapeSample.size
         ).get()
         await MainActor.run { video.play() }
         var entered = false

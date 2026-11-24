@@ -10,108 +10,15 @@
 #include <stdbool.h>
 #include <string.h>
 
+#include "bplist.h"
+
 #define PREFS_MAX_KEYS 8u
-
-enum {
-    kMagic = 8,
-    kTrailer = 32
-};
-
-static uint64_t be(const uint8_t *p, size_t n)
-{
-    uint64_t v = 0;
-    for (size_t i = 0; i < n; ++i) {
-        v = v << 8 | p[i];
-    }
-    return v;
-}
 
 static void put_be(uint8_t *p, size_t n, uint64_t v)
 {
     for (size_t i = n; i-- > 0; v >>= 8) {
         p[i] = (uint8_t)v;
     }
-}
-
-struct bplist {
-    const uint8_t *bytes;
-    size_t objects_end; /* the offset table: every object lies before it */
-    const uint8_t *offsets;
-    size_t offset_size, ref_size;
-    uint64_t object_count;
-};
-
-/* Object `ref`'s offset; 0 when there is no such object. */
-static size_t object_at(const struct bplist *b, uint64_t ref)
-{
-    if (ref >= b->object_count) {
-        return 0;
-    }
-    const uint64_t offset = be(b->offsets + ref * b->offset_size, b->offset_size);
-    return offset >= kMagic && offset < b->objects_end ? (size_t)offset : 0;
-}
-
-/* The count of the object at `at`: returns the bytes its marker and count take, 0 when unreadable. */
-static size_t count_at(const struct bplist *b, size_t at, uint64_t *count)
-{
-    const uint8_t nibble = (uint8_t)(b->bytes[at] & 0xf);
-    if (nibble != 0xf) {
-        *count = nibble;
-        return 1;
-    }
-    if (at + 2 > b->objects_end || (b->bytes[at + 1] & 0xf0) != 0x10 || (b->bytes[at + 1] & 0xf) > 3) {
-        return 0;
-    }
-    const size_t width = (size_t)1 << (b->bytes[at + 1] & 0xf);
-    if (at + 2 + width > b->objects_end) {
-        return 0;
-    }
-    *count = be(b->bytes + at + 2, width);
-    return 2 + width;
-}
-
-static bool key_is(const struct bplist *b, uint64_t ref, const char *key)
-{
-    const size_t at = object_at(b, ref);
-    uint64_t length = 0;
-    size_t header = 0;
-    if (!at || (b->bytes[at] & 0xf0) != 0x50 || !(header = count_at(b, at, &length))) {
-        return false;
-    }
-    return length == strlen(key) && length <= b->objects_end - at - header &&
-           !memcmp(b->bytes + at + header, key, (size_t)length);
-}
-
-/* The trailer and the top-level dictionary of a binary plist: false when this is not one it can read. */
-struct top_dict {
-    uint64_t top, entries;
-    size_t at, header;
-};
-
-static bool read_binary(const uint8_t *plist, size_t length, struct bplist *b, struct top_dict *d)
-{
-    if (length < kMagic + 1 + kTrailer) {
-        return false;
-    }
-    const uint8_t *trailer = plist + length - kTrailer;
-    *b = (struct bplist){
-        .bytes = plist,
-        .offset_size = trailer[6],
-        .ref_size = trailer[7],
-        .object_count = be(trailer + 8, 8),
-    };
-    d->top = be(trailer + 16, 8);
-    const uint64_t table = be(trailer + 24, 8);
-    if (b->offset_size < 1 || b->offset_size > 8 || b->ref_size < 1 || b->ref_size > 8 || table < kMagic + 1 ||
-        table > length - kTrailer || !b->object_count ||
-        b->object_count > (length - kTrailer - table) / b->offset_size) {
-        return false;
-    }
-    b->objects_end = (size_t)table;
-    b->offsets = plist + table;
-    d->at = object_at(b, d->top);
-    return d->at && (plist[d->at] & 0xf0) == 0xd0 && (d->header = count_at(b, d->at, &d->entries)) &&
-           d->entries <= (b->objects_end - d->at - d->header) / (2 * b->ref_size);
 }
 
 static enum switch_prefs_result drop_binary(uint8_t *plist, size_t length, const char *const *keys, size_t count)
@@ -173,16 +80,6 @@ static enum switch_prefs_result drop_binary(uint8_t *plist, size_t length, const
         }
     }
     return SWITCH_PREFS_DROPPED;
-}
-
-static size_t find(const uint8_t *text, size_t length, size_t from, const char *needle, size_t size)
-{
-    for (size_t at = from; size <= length && at <= length - size; ++at) {
-        if (!memcmp(text + at, needle, size)) {
-            return at;
-        }
-    }
-    return length;
 }
 
 static enum switch_prefs_result drop_xml(uint8_t *plist, size_t *length, const char *const *keys, size_t count)
@@ -405,6 +302,131 @@ static enum switch_prefs_result add_xml(const uint8_t *plist, size_t length, con
     memcpy(p, plist + open + skip, length - open - skip);
     *out_length = (size_t)(p - out) + length - open - skip;
     return SWITCH_PREFS_ADDED;
+}
+
+/* A value the setup's XML sets: a boolean, or an integer. */
+struct prefs_value {
+    bool integer;
+    int64_t value;
+};
+
+static size_t skip_space(const uint8_t *text, size_t length, size_t at)
+{
+    while (at < length && (text[at] == ' ' || text[at] == '\t' || text[at] == '\n' || text[at] == '\r')) {
+        ++at;
+    }
+    return at;
+}
+
+static bool starts(const uint8_t *text, size_t length, size_t at, const char *with)
+{
+    const size_t size = strlen(with);
+    return at <= length && length - at >= size && !memcmp(text + at, with, size);
+}
+
+/* The XML value at `at` (after whitespace): <true/>, <false/> or <integer>n</integer>; false for any other. */
+static bool xml_value(const uint8_t *text, size_t length, size_t at, struct prefs_value *v)
+{
+    at = skip_space(text, length, at);
+    if (starts(text, length, at, "<true/>") || starts(text, length, at, "<false/>")) {
+        *v = (struct prefs_value){.integer = false, .value = text[at + 1] == 't'};
+        return true;
+    }
+    if (!starts(text, length, at, "<integer>")) {
+        return false;
+    }
+    size_t i = at + 9, digits = 0;
+    const bool negative = i < length && text[i] == '-';
+    uint64_t magnitude = 0;
+    for (i += negative; i < length && text[i] >= '0' && text[i] <= '9' && digits < 18; ++i, ++digits) {
+        magnitude = magnitude * 10 + (uint64_t)(text[i] - '0');
+    }
+    if (!digits || !starts(text, length, i, "</integer>")) {
+        return false;
+    }
+    *v = (struct prefs_value){.integer = true, .value = negative ? -(int64_t)magnitude : (int64_t)magnitude};
+    return true;
+}
+
+/* A binary plist's object `ref` as a value: a boolean, or an integer of 1, 2, 4 or 8 bytes. */
+static bool binary_value(const struct bplist *b, uint64_t ref, struct prefs_value *v)
+{
+    const size_t at = object_at(b, ref);
+    if (!at) {
+        return false;
+    }
+    const uint8_t marker = b->bytes[at];
+    if (marker == 0x08 || marker == 0x09) {
+        *v = (struct prefs_value){.integer = false, .value = marker == 0x09};
+        return true;
+    }
+    const size_t width = (size_t)1 << (marker & 0xf);
+    if ((marker & 0xf0) != 0x10 || (marker & 0xf) > 3 || at + 1 + width > b->objects_end) {
+        return false;
+    }
+    *v = (struct prefs_value){.integer = true, .value = (int64_t)be(b->bytes + at + 1, width)};
+    return true;
+}
+
+static bool holds_one(const uint8_t *plist, size_t length, const struct bplist *b, const struct top_dict *d,
+                      const char *key, struct prefs_value want)
+{
+    struct prefs_value got;
+    if (b) {
+        const size_t rs = b->ref_size;
+        const uint8_t *keys = plist + d->at + d->header, *values = keys + (size_t)d->entries * rs;
+        for (uint64_t i = 0; i < d->entries; ++i) {
+            if (key_is(b, be(keys + i * rs, rs), key)) {
+                return binary_value(b, be(values + i * rs, rs), &got) && got.integer == want.integer &&
+                       got.value == want.value;
+            }
+        }
+        return false;
+    }
+    char tag[96];
+    const size_t name = strlen(key), size = name + 11;
+    if (size > sizeof(tag)) {
+        return false;
+    }
+    memcpy(tag, "<key>", 5);
+    memcpy(tag + 5, key, name);
+    memcpy(tag + 5 + name, "</key>", 6);
+    const size_t at = find(plist, length, 0, tag, size);
+    return at < length && xml_value(plist, length, at + size, &got) && got.integer == want.integer &&
+           got.value == want.value;
+}
+
+bool switch_prefs_holds(const uint8_t *plist, size_t length, const char *ours, size_t ours_length)
+{
+    if (!plist || !ours) {
+        return false;
+    }
+    struct bplist binary = {0};
+    struct top_dict dict = {0};
+    const bool is_binary = length >= kMagic && !memcmp(plist, "bplist00", kMagic);
+    const size_t head = length < 256 ? length : 256;
+    if (is_binary ? !read_binary(plist, length, &binary, &dict) : find(plist, head, 0, "<plist", 6) >= head) {
+        return false;
+    }
+    const uint8_t *text = (const uint8_t *)ours;
+    size_t keys = 0;
+    for (size_t at = find(text, ours_length, 0, "<key>", 5); at < ours_length;
+         at = find(text, ours_length, at, "<key>", 5)) {
+        const size_t name = at + 5, close = find(text, ours_length, name, "</key>", 6);
+        char key[80];
+        struct prefs_value want;
+        if (close >= ours_length || close - name >= sizeof(key) || !xml_value(text, ours_length, close + 6, &want)) {
+            return false;
+        }
+        memcpy(key, text + name, close - name);
+        key[close - name] = '\0';
+        if (!holds_one(plist, length, is_binary ? &binary : NULL, &dict, key, want)) {
+            return false;
+        }
+        ++keys;
+        at = close + 6;
+    }
+    return keys != 0;
 }
 
 size_t switch_prefs_add_room(size_t length)

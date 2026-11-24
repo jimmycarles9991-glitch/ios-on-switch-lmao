@@ -17,7 +17,8 @@
 //     the window shows up in the sum). At or above kCpuUpPermille: the top point at once; else the lowest point whose
 //     kCpuTargetPermille share covers the work; down only after kCpuDownHoldUs of lower targets.
 //   * Boosts (switch_perf_hint, SwitchPower.h): a touch (SwitchTouch's interrupt), a frame that took two or more
-//     refresh periods (NativeLegacyDisplay's present stamps), an exec (XNU exec_activate_image), each holding the top
+//     refresh periods (NativeLegacyDisplay's present stamps), an exec (XNU exec_activate_image) or an app's task taking
+//     the foreground role (XNU task policy: RunningBoard's launch or resume, a prewarmed app's too), each holding the top
 //     point for a while, applied at once (the owner applies the top while any boost runs; the tick folds the boosts in
 //     at its next window); and the boot itself, held at the top from the governor's start (as soon as the DFLL is up)
 //     until SpringBoard's System Boot Complete (XNU IOPMrootDomain, SWITCH_PERF_HINT_BOOT_DONE) or kBootFallbackUs of
@@ -108,16 +109,18 @@ void csw(perfcontrol_event event, uint32_t cpu, uint64_t timestamp, uint32_t, st
         switch_cpu_load_switch(&switchperf::gLoad[cpu], timestamp, event != IDLE);
 }
 
-// One window's busy share, in permille.
-uint32_t windowBusy(const switchperf::Config &config, uint64_t now)
+// One window's busy share, in permille; `cpuTime` the CPUs' busy time in it, summed over them.
+uint32_t windowBusy(const switchperf::Config &config, uint64_t now, uint64_t *cpuTime)
 {
     const uint64_t span = now - gTick.prevNow;
     uint64_t sum = 0;
     uint64_t peak = 0;
+    *cpuTime = 0;
     for (unsigned c = 0; c < config.cpus; ++c) {
         const uint64_t total = switch_cpu_load_busy(&switchperf::gLoad[c], now);
         const uint64_t done = total > gTick.prevTotal[c] ? total - gTick.prevTotal[c] : 0;
         gTick.prevTotal[c] = total;
+        *cpuTime += done;
         uint64_t permille = span ? done * 1000 / span : 0;
         if (permille > 1000)
             permille = 1000;
@@ -132,10 +135,11 @@ uint32_t windowBusy(const switchperf::Config &config, uint64_t now)
 }
 
 // One window: the limits and boosts the other sides posted, folded in; the step; the decision published. Returns
-// whether the owner must be woken (the clock moves, or the periodic line is due); `boot` whether the boot window runs.
-bool step(const switchperf::Config &config, uint64_t now, bool *boot)
+// whether the owner must be woken (the clock moves, or the periodic line is due); `boot` whether the boot window runs,
+// `cpuTime` the window's busy time.
+bool step(const switchperf::Config &config, uint64_t now, bool *boot, uint64_t *cpuTime)
 {
-    uint32_t busy = windowBusy(config, now);
+    uint32_t busy = windowBusy(config, now, cpuTime);
     const uint32_t limits = __atomic_load_n(&switchperf::gLimits, __ATOMIC_RELAXED);
     if (limits != gTick.limits) {
         gTick.limits = limits;
@@ -171,7 +175,8 @@ void deadlinePassed(uint64_t)
     if (gTick.generation != generation)
         restartTick(config, generation, now);
     bool boot = false;
-    if (step(config, now, &boot)) {
+    uint64_t cpuTime = 0;
+    if (step(config, now, &boot, &cpuTime)) {
         switchperf::gSignal(switchperf::gCtx, static_cast<unsigned>(cpu_number()));
         switchperf::lineWake(&gTick.stats);
     }
@@ -179,7 +184,7 @@ void deadlinePassed(uint64_t)
     // until then the GPU never leaves its full clock.
     if (!boot)
         tegra_gm20b_idle_tick();
-    switch_emc_tick(now);
+    switch_emc_tick(now, cpuTime);
     __atomic_thread_fence(__ATOMIC_RELEASE);
     sched_perfcontrol_update_callback_deadline(now + config.window);
 }
@@ -371,14 +376,15 @@ void switchperf::applied(unsigned index)
 
 extern "C" void switch_perf_hint(unsigned int hint)
 {
-    tegra_gm20b_perf_hint(hint);  // the GPU back at its full clock if it idles low
+    // The GPU back at its full clock if it idles low; a foreground role is a launch to it.
+    tegra_gm20b_perf_hint(hint == SWITCH_PERF_HINT_FOREGROUND ? SWITCH_PERF_HINT_LAUNCH : hint);
     switch_emc_hint(hint);
     if (hint == SWITCH_PERF_HINT_BOOT_DONE) {
         switch_boot_io_complete();
         switchperf::bootDone();
         return;
     }
-    if (!switchperf::running() || hint >= 5 || !hint)
+    if (!switchperf::running() || hint > SWITCH_PERF_HINT_FOREGROUND || !hint)
         return;
     const switchperf::Config &in = switchperf::config();
     const boolean_t enabled = ml_set_interrupts_enabled(FALSE);
@@ -389,9 +395,20 @@ extern "C" void switch_perf_hint(unsigned int hint)
     } else if (hint == SWITCH_PERF_HINT_FRAME_MISS) {
         boost(&switchperf::gFrame, now + in.frameHold, now, cpu);
     } else if (cpu < switchperf::kCpus) {
-        boost(&switchperf::gLaunch[cpu], now + in.launchHold, now, cpu);
+        switchperf::Boost &slot = switchperf::gLaunch[cpu];
+        boost(&slot, now + in.launchHold, now, cpu);
+#if DEVELOPMENT || DEBUG
+        if (hint == SWITCH_PERF_HINT_FOREGROUND)
+            __atomic_store_n(&slot.foreground, slot.foreground + 1, __ATOMIC_RELAXED);
+#endif
     }
     ml_set_interrupts_enabled(enabled);
+}
+
+extern "C" void switch_perf_role(bool foreground)
+{
+    if (foreground)
+        switch_perf_hint(SWITCH_PERF_HINT_FOREGROUND);
 }
 
 extern "C" unsigned int switch_perf_cpu_khz(void)

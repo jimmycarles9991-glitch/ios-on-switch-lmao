@@ -480,4 +480,174 @@ TEST_F(DeviceFetch, ASlotWithNoResidualWordBoundOffItsAlignmentIsDrawn)
     EXPECT_TRUE(d.ok) << d.why;
 }
 
+TEST_F(DeviceFetch, ConvexTwoTriangleQuadElidesIntraDrawBarrierAndDisjointQuadsElideInterDrawBarrier)
+{
+    gm20b::RuntimeRecord r = fetchingRecord(0xca01, false);
+    r.keyString = "samples=1 c0=70:15:0 ds=0/0 a0=31:0:0:16:1:1 ";
+    r.pipeline.vertexSlot = 0;
+    r.pipeline.vertexStride = 16;
+    r.blob = {0x1a00, 0x1111, 0x1c00, (1u << 12) | 16};
+    std::string why;
+    gm20b::Pipeline *pl = dev.addRecord(r, true, why);
+    ASSERT_NE(pl, nullptr) << why;
+    ASSERT_TRUE(pl->caTransform && pl->positionComponents == 4);
+
+    const float identity[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    const float quadA[16] = {-1.0f, 1.0f, 0, 1, -0.5f, 1.0f, 0, 1, -1.0f, 0.5f, 0, 1, -0.5f, 0.5f, 0, 1};
+    const float quadB[16] = {0.0f, 0.0f, 0, 1, 0.5f, 0.0f, 0, 1, 0.0f, -0.5f, 0, 1, 0.5f, -0.5f, 0, 1};
+    const float quadOverlap[16] = {-0.75f, 0.75f, 0, 1, -0.25f, 0.75f, 0, 1, -0.75f, 0.25f, 0, 1, -0.25f, 0.25f, 0, 1};
+    const float quadList[24] = {-1.0f, 1.0f, 0, 1, -0.5f, 1.0f, 0, 1, -1.0f, 0.5f, 0, 1,
+                                -0.5f, 1.0f, 0, 1, -0.5f, 0.5f, 0, 1, -1.0f, 0.5f, 0, 1};
+    const float foldedStrip[16] = {-1.0f, 1.0f, 0, 1, -0.5f, 1.0f, 0, 1, -0.5f, 0.5f, 0, 1, -1.0f, 0.5f, 0, 1};
+    const float overlapList[24] = {-1.0f, 1.0f, 0, 1, 0.0f,  1.0f, 0, 1, -0.5f,  0.0f, 0, 1,
+                                   0.0f,  1.0f, 0, 1, -0.5f, 0.0f, 0, 1, -0.75f, 0.5f, 0, 1};
+
+    const Drawn convexStrip = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadA, sizeof quadA);
+        return e.draw(kStrip, 0, 4, 1, 0, w);
+    });
+    EXPECT_TRUE(convexStrip.ok) << convexStrip.why;
+    EXPECT_EQ(convexStrip.split, 0u);
+    EXPECT_TRUE(fetchCalls().empty());
+
+    const Drawn convexList = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadList, sizeof quadList);
+        return e.draw(kTriangle, 0, 6, 1, 0, w);
+    });
+    EXPECT_TRUE(convexList.ok) << convexList.why;
+    EXPECT_EQ(convexList.split, 0u);
+    EXPECT_TRUE(fetchCalls().empty());
+
+    const Drawn folded = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, foldedStrip, sizeof foldedStrip);
+        return e.draw(kStrip, 0, 4, 1, 0, w);
+    });
+    EXPECT_TRUE(folded.ok) << folded.why;
+    EXPECT_EQ(folded.split, 1u);
+    EXPECT_EQ(folded.triangles, 2u);
+
+    const Drawn overlapping = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, overlapList, sizeof overlapList);
+        return e.draw(kTriangle, 0, 6, 1, 0, w);
+    });
+    EXPECT_TRUE(overlapping.ok) << overlapping.why;
+    EXPECT_EQ(overlapping.split, 1u);
+    EXPECT_EQ(overlapping.triangles, 2u);
+
+    const Drawn wireframe = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setFillMode(1);
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadA, sizeof quadA);
+        return e.draw(kStrip, 0, 4, 1, 0, w);
+    });
+    EXPECT_TRUE(wireframe.ok) << wireframe.why;
+    EXPECT_EQ(wireframe.split, 1u);
+
+    const Drawn instancedQuad = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadA, sizeof quadA);
+        return e.draw(kStrip, 0, 4, 2, 0, w);
+    });
+    EXPECT_TRUE(instancedQuad.ok) << instancedQuad.why;
+    EXPECT_EQ(instancedQuad.split, 1u);
+
+    const Drawn disjoint = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadA, sizeof quadA);
+        if (!e.draw(kStrip, 0, 4, 1, 0, w))
+            return false;
+        e.setBytes(1, 0, quadB, sizeof quadB);
+        return e.draw(kStrip, 0, 4, 1, 0, w);
+    });
+    EXPECT_TRUE(disjoint.ok) << disjoint.why;
+    EXPECT_EQ(disjoint.split, 0u);
+    EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 0u);
+
+    const Drawn colliding = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadA, sizeof quadA);
+        if (!e.draw(kStrip, 0, 4, 1, 0, w))
+            return false;
+        e.setBytes(1, 0, quadOverlap, sizeof quadOverlap);
+        return e.draw(kStrip, 0, 4, 1, 0, w);
+    });
+    EXPECT_TRUE(colliding.ok) << colliding.why;
+    EXPECT_EQ(colliding.split, 0u);
+    EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 1u);
+
+    gm20b::Texture compressed = target;
+    compressed.comptags = true;
+    into = &compressed;
+    const Drawn compDisjoint = drawOnce(pl, [&](gm20b::RenderEncoder &e, const char **w) {
+        e.setBytes(1, 2, identity, sizeof identity);
+        e.setBytes(1, 0, quadA, sizeof quadA);
+        if (!e.draw(kStrip, 0, 4, 1, 0, w))
+            return false;
+        e.setBytes(1, 0, quadB, sizeof quadB);
+        return e.draw(kStrip, 0, 4, 1, 0, w);
+    });
+    into = &target;
+    EXPECT_TRUE(compDisjoint.ok) << compDisjoint.why;
+    EXPECT_EQ(compDisjoint.split, 2u);
+    EXPECT_EQ(jobMethods().count(NVB197_PIXEL_SHADER_BARRIER), 1u);
+}
+
+TEST_F(DeviceFetch, FetchBarrierUsesSysmemBarOnlyForDirectVolatilePitchTargets)
+{
+    gm20b::Pipeline *pl = pipeline(false);
+    ASSERT_NE(pl, nullptr);
+
+    const auto barrierValues = [&]() {
+        const std::vector<uint32_t> &words = kernel_model::model.jobs.back().words;
+        std::vector<switch_gm20b_method> methods(words.size());
+        const long count = switch_gm20b_push_decode(words.data(), words.size(), methods.data(), methods.size());
+        EXPECT_GE(count, 0);
+        std::vector<uint32_t> out;
+        for (long i = 0; i < count; i++)
+            if (!methods[i].subchannel && methods[i].method == NVB197_PIXEL_SHADER_BARRIER)
+                out.push_back(methods[i].value);
+        return out;
+    };
+
+    const auto drawTwo = [&](gm20b::Texture &dest) {
+        into = &dest;
+        const Drawn d = drawOnce(pl, [](gm20b::RenderEncoder &e, const char **w) {
+            return e.draw(kTriangle, 0, 3, 1, 0, w) && e.draw(kTriangle, 0, 3, 1, 0, w);
+        });
+        into = &target;
+        EXPECT_TRUE(d.ok) << d.why;
+        EXPECT_EQ(d.split, 0u);
+        return barrierValues();
+    };
+
+    constexpr uint32_t kPitch = 64 * 4;
+    gm20b::Buffer volBuf, cachedBuf;
+    gm20b::Texture volDirect, volShadowed, cachedDirect;
+    ASSERT_TRUE(dev.createBuffer(uint64_t(kPitch) * 64 + 128, volBuf, true, true, true));
+    ASSERT_TRUE(dev.createBuffer(uint64_t(kPitch) * 64, cachedBuf, true, true, false));
+    ASSERT_TRUE(dev.createBufferTexture(volBuf, 0, 64, 64, kPitch, kRGBA8, volDirect));
+    ASSERT_TRUE(dev.createBufferTexture(volBuf, 64, 64, 64, kPitch, kRGBA8, volShadowed));
+    ASSERT_TRUE(dev.createBufferTexture(cachedBuf, 0, 64, 64, kPitch, kRGBA8, cachedDirect));
+    ASSERT_TRUE(volDirect.renderable && !volDirect.shadowTarget && volDirect.storageRange().gpuVolatile);
+    ASSERT_TRUE(!volShadowed.renderable && volShadowed.shadowTarget && volShadowed.storageRange().gpuVolatile);
+    ASSERT_TRUE(cachedDirect.renderable && !cachedDirect.shadowTarget && !cachedDirect.storageRange().gpuVolatile);
+
+    EXPECT_EQ(drawTwo(volDirect), (std::vector<uint32_t>{uint32_t(NVB197_PIXEL_SHADER_BARRIER_SYSMEMBAR_ENABLE_TRUE)}));
+    EXPECT_EQ(drawTwo(cachedDirect),
+              (std::vector<uint32_t>{uint32_t(NVB197_PIXEL_SHADER_BARRIER_SYSMEMBAR_ENABLE_FALSE)}));
+    EXPECT_EQ(drawTwo(volShadowed),
+              (std::vector<uint32_t>{uint32_t(NVB197_PIXEL_SHADER_BARRIER_SYSMEMBAR_ENABLE_FALSE)}));
+    EXPECT_EQ(drawTwo(target), (std::vector<uint32_t>{uint32_t(NVB197_PIXEL_SHADER_BARRIER_SYSMEMBAR_ENABLE_FALSE)}));
+
+    dev.destroyTexture(cachedDirect);
+    dev.destroyTexture(volShadowed);
+    dev.destroyTexture(volDirect);
+    dev.destroyBuffer(cachedBuf);
+    dev.destroyBuffer(volBuf);
+}
+
 }  // namespace

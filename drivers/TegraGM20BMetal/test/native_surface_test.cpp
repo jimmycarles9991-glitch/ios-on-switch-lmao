@@ -135,7 +135,15 @@ struct Device {
     }
 
     const Texture *nativeRead(const Texture &, NativeSurface *&, int &);
-    void reapNativeSurfaces(bool = false);
+    void reapNativeSurfaces(std::vector<Bo> &, bool = false);
+
+    void reapNativeSurfaces(bool all = false)
+    {
+        std::vector<Bo> detached;
+        reapNativeSurfaces(detached, all);
+        for (Bo &bo : detached)
+            k_.free(bo);
+    }
 };
 
 struct CommandBuffer {

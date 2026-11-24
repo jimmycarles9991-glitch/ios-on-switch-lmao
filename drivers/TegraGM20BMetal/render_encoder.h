@@ -46,8 +46,57 @@ namespace gm20b {
 
 class CommandBuffer;
 
+// A binding table whose storage a pass's encoder made again over the last one keeps (RenderEncoder::remake): only the
+// slots the last pass set are cleared, not the whole table
+template <typename Row, size_t N> struct KeptRows {
+    union {
+        Row rows[N];
+    };
+
+    KeptRows() : rows{}
+    {}
+
+    explicit KeptRows(bool)
+    {}
+
+    Row &operator[](size_t i)
+    {
+        return rows[i];
+    }
+
+    const Row &operator[](size_t i) const
+    {
+        return rows[i];
+    }
+
+    Row *begin()
+    {
+        return rows;
+    }
+
+    Row *end()
+    {
+        return rows + N;
+    }
+
+    const Row *begin() const
+    {
+        return rows;
+    }
+
+    const Row *end() const
+    {
+        return rows + N;
+    }
+};
+
 class RenderEncoder {
 public:
+    RenderEncoder() = default;
+    // Made again where it is for a new pass, as a new encoder (value-initialised) but for its binding tables, whose
+    // slots the last pass set are cleared one by one: most of its bytes are the tables (CommandBuffer::render)
+    void remake();
+
     void setPipeline(Pipeline *p);
 
     // The bound Metal state's alpha to coverage and alpha to one (alpha_control.h alphaControl), after setPipeline
@@ -118,6 +167,7 @@ public:
             samplers_[at][slot] = s;
             ++bindingRevision_;
             moved_.samplers[at] |= uint16_t(1u << slot);
+            touched_[0].samplers[at] |= uint16_t(1u << slot);
         }
     }
 
@@ -401,7 +451,10 @@ private:
                   uint32_t baseInstance);
     uint64_t drawUnits(uint32_t instances) const;
     uint32_t drawBands(uint32_t vertices, uint32_t instances, uint64_t units) const;
-    void noteCandidate(uint64_t units);
+    void noteCandidate(uint64_t units, uint32_t bands);
+#if SWITCH_METAL_DIAGNOSTICS
+    void notePrice(uint64_t units, uint32_t bands) const;
+#endif
     bool measurePass(bool drained);
     uint32_t passDraws_ = 0;
     DrawTiming candidate_;  // the pass's first draw, measured at the pass's end when it stays the only one
@@ -450,20 +503,37 @@ private:
     {
         ++bindingRevision_;
         moved_.buffers[stage] |= 1u << slot;
+        touched_[0].buffers[stage] |= 1u << slot;
     }
 
     void textureMoved(uint32_t at, uint32_t slot)
     {
         ++bindingRevision_;
         addSlot(moved_.textures[at], slot);
+        addSlot(touched_[0].textures[at], slot);
         vertexSamples_ |= at == 0 && textures_[at][slot];
     }
 
     uint32_t movedEntries(const SetEntries &entries) const;
     DescriptorBinding descriptorBinding_;
-    Bound bufs_[3][31];
-    const Texture *textures_[2][kStageTextures] = {};  // vertex, fragment (handleStage)
-    const Sampler *samplers_[2][kStageSamplers] = {};
+    // remake() keeps these four, declared together, as they are: nothing may be declared between them
+    KeptRows<Bound[31], 3> bufs_;
+    KeptRows<const Texture *[kStageTextures], 2> textures_;  // vertex, fragment (handleStage)
+    KeptRows<const Sampler *[kStageSamplers], 2> samplers_;
+
+    // the slots set since the encoder was made new, which remake() clears
+    struct Touched {
+        uint32_t buffers[3];
+        StageTextureMask textures[2];
+        uint16_t samplers[2];
+    };
+
+    KeptRows<Touched, 1> touched_;
+
+    struct Again {};
+
+    explicit RenderEncoder(Again) : bufs_(true), textures_(true), samplers_(true), touched_(true)
+    {}
 
     const Texture *boundTexture(const PackEntry &e) const
     {
@@ -486,11 +556,9 @@ private:
                  const char **why);
     // `pl`'s split twin where the draw is large enough for it to save time and its prologue can read what the draw binds
     Pipeline *splitTwin(Pipeline *pl, WrittenRegion::Analysis &analysis) const;
-    // the facts of a draw of `pl` its bindings decide, and with them selectorId_: the Core Animation config bound at
-    // fragment slot kCaSelectorSlot as `pl`'s selector variants name it (0: none), read where the bindings moved since
-    // the last draw, never as one is bound
+    // the facts of a draw of `pl` its bindings decide, worked out where the bindings moved since the last draw, never as
+    // one is bound
     uint32_t bindingFacts(const Pipeline &pl);
-    uint16_t selectorId_ = 0;
     const Pipeline *factsPipeline_ = nullptr;
     uint64_t factsRevision_ = 0;
     uint32_t facts_ = 0;
@@ -570,6 +638,8 @@ private:
     uint32_t samplePasses_ = 1;
     uint32_t tirControlHeld_ = ~0u;  // SET_TIR_CONTROL since the pass began (mixed_samples.h), ~0: not written
     AttachmentWrites attachmentWrites_;
+    bool passShaderWrites_ = false;
+    bool passWritesMemory_ = false;
     bool memoryless_[8] = {};
     bool hiddenZeta_ = false;  // pass_.depthStencil.texture is PassDesc::hiddenZeta's backing: the pass declares none
     // The hidden zeta: over the plane the colors' backings cover (once they are taken), of the pass's samples
@@ -590,6 +660,7 @@ private:
     // a mixed pass's (mixed_samples.h): its zeta's samples, which it rasterises at; samples_ is its colour's
     uint8_t rasterSamples_ = 1;
 #if SWITCH_METAL_DIAGNOSTICS
+    uint32_t tirProbe_ = 0;                     // a mixed pass's probe row (Device::probeTir), taken at its begin
     uint32_t prologueMark_ = SpanMarks::kNone;  // span_marks.h: its prologue's mark, taken ahead of its draws'
     void markSpan(Push &p, uint32_t index, SpanKind kind);
     // draw_times.h: its prologue's two marks, taken ahead of its draws', and its pass in the capture

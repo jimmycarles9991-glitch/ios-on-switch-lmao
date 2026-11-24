@@ -411,6 +411,60 @@ impl Meter {
     pub fn ledger_peak(&self) -> u64 {
         self.peak_bytes
     }
+
+    /// Where the meter stands before an attempt whose charges [`Meter::charged_since`] reads
+    /// back: its peak restarts at the ledger, so the attempt's own excursion shows.
+    pub fn mark(&mut self) -> MeterMark {
+        let mark = MeterMark {
+            work: self.work,
+            bytes: self.bytes,
+            peak: self.peak_bytes,
+        };
+        self.peak_bytes = self.bytes;
+        mark
+    }
+
+    /// What the attempt since `mark` charged, the meter's peak restored to cover both.
+    pub fn charged_since(&mut self, mark: MeterMark) -> Charged {
+        let charged = Charged {
+            work: self.work.saturating_sub(mark.work),
+            excursion: self.peak_bytes.saturating_sub(mark.bytes),
+            kept: i128::from(self.bytes) - i128::from(mark.bytes),
+        };
+        self.peak_bytes = self.peak_bytes.max(mark.peak);
+        charged
+    }
+
+    /// Charge again what an attempt charged, for its result kept from an earlier attempt: the same
+    /// work cap and ledger cap refuse it as they refused the attempt.
+    pub fn replay(&mut self, c: &Charged) -> Result<(), Error> {
+        self.work = self.work.saturating_add(c.work);
+        if self.work > self.work_cap {
+            return Err(Error::LimitExceeded(Limit::WorkUnits));
+        }
+        self.charge(usize::try_from(c.excursion).unwrap_or(usize::MAX))?;
+        // the ledger ends at or below its peak, so what the attempt kept is at most its excursion
+        let released = i128::from(c.excursion) - c.kept;
+        self.release(usize::try_from(released.max(0)).unwrap_or(usize::MAX));
+        Ok(())
+    }
+}
+
+/// A [`Meter`]'s state before an attempt ([`Meter::mark`]).
+#[derive(Clone, Copy, Debug)]
+pub struct MeterMark {
+    work: u64,
+    bytes: u64,
+    peak: u64,
+}
+
+/// What one attempt charged a [`Meter`]: its work units, the most its ledger rose above where it
+/// started, and what it left charged (negative where it returned more than it charged).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Charged {
+    pub work: u64,
+    pub excursion: u64,
+    pub kept: i128,
 }
 
 #[cfg(test)]

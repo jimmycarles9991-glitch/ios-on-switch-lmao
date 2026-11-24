@@ -99,4 +99,129 @@ TEST(GM20BZbc, Depth16ClearsTakeTheFloatDepthEntry)
     EXPECT_FALSE(gm20b::zbcDepthEntry(253, depth, d16)) << "Stencil8";
 }
 
+TegraGM20BAbiZbc colorKey(uint32_t id)
+{
+    TegraGM20BAbiZbc e = {};
+    e.type = TegraGM20BZbcColor;
+    e.format = gm20b::kZbcA8R8G8B8;
+    e.ds[0] = id;
+    e.l2[0] = id;
+    return e;
+}
+
+TegraGM20BAbiZbc depthKey(uint32_t id)
+{
+    TegraGM20BAbiZbc e = {};
+    e.type = TegraGM20BZbcDepth;
+    e.format = gm20b::kZbcDepthFp32;
+    e.ds[0] = id;
+    e.l2[0] = id;
+    return e;
+}
+
+bool askAndAnswer(gm20b::ZbcTable &table, const TegraGM20BAbiZbc &e, bool held)
+{
+    bool wanted = false;
+    for (uint8_t i = 0; i < gm20b::ZbcTable::kZbcRepeats; i++) {
+        if (table.lookup(e, wanted))
+            return false;
+    }
+    if (!wanted)
+        return false;
+    TegraGM20BAbiZbc asked = {};
+    if (!table.next(asked) || memcmp(&asked, &e, sizeof e) != 0)
+        return false;
+    table.answer(asked, held);
+    return true;
+}
+
+// Refused entries hold no GPU table slot: once all slots fill, a new clear value reuses a refused slot rather than
+// dropping its ask, while held entries stay held.
+TEST(GM20BZbc, RefusedEntriesAreReusedOnceTheListFills)
+{
+    gm20b::ZbcTable table;
+    for (uint32_t i = 0; i < 15; i++) {
+        ASSERT_TRUE(askAndAnswer(table, colorKey(100 + i), true)) << i;
+        ASSERT_TRUE(askAndAnswer(table, depthKey(200 + i), true)) << i;
+    }
+    for (uint32_t i = 0; i < 40; i++)
+        ASSERT_TRUE(askAndAnswer(table, colorKey(1000 + i), false)) << i;
+    for (uint32_t i = 0; i < 16; i++)
+        ASSERT_TRUE(askAndAnswer(table, colorKey(2000 + i), false)) << "zbc_full colour " << i << " dropped";
+    ASSERT_TRUE(askAndAnswer(table, depthKey(3000), true)) << "depth ask starved by refused colours";
+    bool wanted = false;
+    EXPECT_TRUE(table.lookup(depthKey(3000), wanted));
+    EXPECT_FALSE(wanted);
+    for (uint32_t i = 0; i < 15; i++) {
+        EXPECT_TRUE(table.lookup(colorKey(100 + i), wanted)) << "held colour " << i << " evicted";
+        EXPECT_FALSE(wanted);
+        EXPECT_TRUE(table.lookup(depthKey(200 + i), wanted)) << "held depth " << i << " evicted";
+        EXPECT_FALSE(wanted);
+    }
+}
+
+// One-off clear values recycle Seen slots before touching Refused entries, so animated clears do not flush the
+// refused cache.
+TEST(GM20BZbc, OneOffValuesEvictSeenBeforeRefused)
+{
+    gm20b::ZbcTable table;
+    for (uint32_t i = 0; i < 15; i++) {
+        ASSERT_TRUE(askAndAnswer(table, colorKey(100 + i), true)) << i;
+        ASSERT_TRUE(askAndAnswer(table, depthKey(200 + i), true)) << i;
+    }
+    constexpr uint32_t kRefused = 34;
+    for (uint32_t i = 0; i < kRefused; i++)
+        ASSERT_TRUE(askAndAnswer(table, colorKey(1000 + i), false)) << i;
+    bool wanted = false;
+    for (uint32_t i = 0; i < 1000; i++) {
+        EXPECT_FALSE(table.lookup(colorKey(5000 + i), wanted));
+        EXPECT_FALSE(wanted);
+    }
+    uint32_t stillRefused = 0;
+    for (uint32_t i = 0; i < kRefused; i++) {
+        const TegraGM20BAbiZbc e = colorKey(1000 + i);
+        bool reasked = false;
+        for (uint8_t n = 0; n < gm20b::ZbcTable::kZbcRepeats; n++) {
+            EXPECT_FALSE(table.lookup(e, wanted));
+            reasked |= wanted;
+        }
+        if (!reasked)
+            stillRefused++;
+    }
+    EXPECT_GE(stillRefused, kRefused - 1);
+}
+
+// Entries waiting for or in flight to the kernel are never evicted while the list turns over.
+TEST(GM20BZbc, InFlightEntriesAreNeverEvicted)
+{
+    gm20b::ZbcTable table;
+    for (uint32_t i = 0; i < 15; i++) {
+        ASSERT_TRUE(askAndAnswer(table, colorKey(100 + i), true)) << i;
+        ASSERT_TRUE(askAndAnswer(table, depthKey(200 + i), true)) << i;
+    }
+    for (uint32_t i = 0; i < 18; i++)
+        ASSERT_TRUE(askAndAnswer(table, colorKey(1000 + i), false)) << i;
+    bool wanted = false;
+    for (uint32_t i = 0; i < 16; i++) {
+        for (uint8_t n = 0; n < gm20b::ZbcTable::kZbcRepeats; n++)
+            EXPECT_FALSE(table.lookup(colorKey(2000 + i), wanted));
+        ASSERT_TRUE(wanted) << i;
+    }
+    TegraGM20BAbiZbc inFlight = {};
+    ASSERT_TRUE(table.next(inFlight));
+    for (uint32_t i = 0; i < 20; i++) {
+        EXPECT_FALSE(table.lookup(colorKey(9000 + i), wanted));
+        EXPECT_FALSE(wanted);
+    }
+    uint32_t answered = 1;
+    table.answer(inFlight, false);
+    TegraGM20BAbiZbc next = {};
+    while (table.next(next)) {
+        table.answer(next, false);
+        answered++;
+    }
+    EXPECT_EQ(answered, 16u);
+    EXPECT_FALSE(table.unanswered());
+}
+
 }  // namespace

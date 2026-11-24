@@ -277,8 +277,9 @@ uint32_t standInTargetFormat(MTLRenderPipelineDescriptor *d)
 // pass's texels, the channels a mask keeps as loaded or cleared, and a format without alpha blends by a destination alpha of
 // 1 (standin_blend.h). An M4 Max blends YCbCr in halves of its own rounding, so a blended store is within one code of
 // Metal's (harness/ycbcrblendoracle.mm); a masked one is Metal's. A format ycbcrTargetRefusal names has no target texture
-// (planYcbcr refuses its render-target usage), so its state draws no pass, as Metal makes it all the same. The archives a
-// creation under FailOnBinaryArchiveMiss lists answer for the app's state, not its stand-in.
+// (planYcbcr refuses its render-target usage), so its state draws no pass, as Metal makes it all the same. A framework's
+// stand-in state the pack holds is the device's archive hit (TegraGM20BMetalStates.mm); any other creation under
+// FailOnBinaryArchiveMiss checks the listed archives under the app's descriptor, not its stand-in.
 - (id<MTLRenderPipelineState>)standInTargetState:(MTLRenderPipelineDescriptor *)d
                                          options:(MTLPipelineOption)o
                                       reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection
@@ -286,9 +287,7 @@ uint32_t standInTargetFormat(MTLRenderPipelineDescriptor *d)
 {
     if (const char *why = gm20bUnsupportedRenderState(d))
         return gm20bRefuseUnsupported(why, error);
-    if (gm20bRenderArchiveMissed(d, o, error))
-        return nil;
-    o &= ~MTLPipelineOptionFailOnBinaryArchiveMiss;
+    const MTLPipelineOption withoutMiss = o & ~MTLPipelineOptionFailOnBinaryArchiveMiss;
     MTLRenderPipelineDescriptor *made = [d copy];
     for (NSUInteger c = 0; c < 8; c++) {
         MTLRenderPipelineColorAttachmentDescriptor *a = d.colorAttachments[c];
@@ -305,8 +304,13 @@ uint32_t standInTargetFormat(MTLRenderPipelineDescriptor *d)
         standIn.pixelFormat = MTLPixelFormat(gm20b::ycbcrStandInFormat(format));
         gm20bAlphaOneBlend(standIn);
     }
-    SwitchMetalPipeline *p = gm20bPipelineFor(self, made, o, error);
+    SwitchMetalPipeline *p = gm20bPipelineShell(self, made, withoutMiss, error);
     if (!p)
+        return nil;
+    const bool deviceArchive = p->_packable && p->_raw;
+    if (p->_completable && !deviceArchive && gm20bRenderArchiveMissed(d, o, error))
+        return nil;
+    if (!gm20bMakeRecord(p, made, error))
         return nil;
     if (!p->_raw) {
         if (error)
@@ -317,7 +321,7 @@ uint32_t standInTargetFormat(MTLRenderPipelineDescriptor *d)
         return nil;
     }
     if (reflection)
-        *reflection = gm20bRenderReflection(p, made, o);
+        *reflection = gm20bRenderReflection(p, made, withoutMiss);
     if (error)
         *error = nil;
     return (id<MTLRenderPipelineState>)p;

@@ -10,6 +10,7 @@
 #include <set>
 #include "own_states.h"
 #include "owned.h"
+#include "program_stores.h"
 #include "set_reads.h"
 #include "spill_table.h"
 
@@ -636,7 +637,16 @@ std::vector<uint8_t> programSlot(const CapturedProgram &p, PackProgram &info)
     memcpy(info.cbufType, p.cbufTypes.data(), info.cbufs);
     info.gprs = p.gprs;
     info.boundTextures = p.boundTextures;
+    info.facts = programFacts(p);
     return slot;
+}
+
+uint32_t programFacts(const CapturedProgram &p)
+{
+    constexpr size_t kHeaderBytes = 0x50;
+    const bool writes = p.image.size() > kHeaderBytes &&
+                        programWritesMemory(p.image.data() + kHeaderBytes, p.image.size() - kHeaderBytes);
+    return writes ? kProgramWritesMemory : 0;
 }
 
 }  // namespace gm20b

@@ -39,8 +39,6 @@ def _directcheck_impl(ctx):
     )
     pack = ctx.files.pack
     corpora = [f for f in ctx.attr.pack[OutputGroupInfo].report.to_list() if f.extension == "log"]
-    kind = ctx.attr.ipsw[IpswInfo].build
-    selectors = [f for f in ctx.files.ca_selectors if f.basename == kind + ".txt"][0]
     inputs = ctx.actions.declare_file(ctx.attr.name + ".json")
     ctx.actions.write(inputs, json.encode({
         "tools": out.short_path,
@@ -48,9 +46,8 @@ def _directcheck_impl(ctx):
         "corpora": [f.short_path for f in corpora],
         "qc": crawl.qc.short_path,
         "lib_root": _crawl_root(crawl) + "/root",
-        "selectors": selectors.short_path,
     }))
-    runfiles = ctx.runfiles(files = [out, inputs, crawl.qc, selectors] + pack + corpora, transitive_files = crawl.files)
+    runfiles = ctx.runfiles(files = [out, inputs, crawl.qc] + pack + corpora, transitive_files = crawl.files)
     return [
         DefaultInfo(files = depset([inputs]), runfiles = runfiles),
         OutputGroupInfo(native_tools = depset([out])),
@@ -61,7 +58,6 @@ gm20b_directcheck = rule(
     doc = "directcheck and its inputs, as one JSON file whose runfiles hold them.",
     attrs = {
         "ipsw": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
-        "ca_selectors": attr.label(default = "//drivers/TegraGM20BMetal/precompile/ca-selectors:tables"),
         "srcs": attr.label_list(allow_files = True, doc = "directcheck.mm and every source it compiles"),
         "translate": attr.label(mandatory = True, allow_single_file = True),
         "compile": attr.label(

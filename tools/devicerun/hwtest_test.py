@@ -330,5 +330,62 @@ def arm_names(text: str) -> list[tuple[str, int]]:
     return names
 
 
+class Pieces(unittest.TestCase):
+    """A line os_log could not take whole, as apps/hwtest/core/LogPieces.swift cuts it."""
+
+    def test_a_line_in_pieces_is_judged_whole(self):
+        results = run(
+            'HWTEST gpu.clear.formats FAIL dev=gm20b wrong=3',
+            'HWTEST gpu.clear.formats +1  gm20b_paths=gm20b/230 ms=9.0 why=every_tex',
+            'HWTEST gpu.clear.formats +2 el_exact',
+            'HWTEST decode.h264_1080p PASS frames=60',
+            'HWTEST decode.h264_1080p +1  fps=212.4 ms=900.0',
+            'HWTEST suite FAIL pass=1 fail=1 skip=0 ms=60000.0',
+        )
+        self.assertEqual(results['hwtest.gpu.clear.formats'].verdict, FAIL)
+        self.assertIn('every_texel_exact', results['hwtest.gpu.clear.formats'].observed)
+        self.assertIn('gpu.clear.formats/gm20b/230 x1', results['hwtest.gpu-paths'].observed)
+        self.assertIn('212.4', results['hwtest.decode-fps'].observed)
+
+    def test_each_process_keeps_its_own_pieces(self):
+        def record(pid: int, message: str) -> dict:
+            return {**line(message), 'processID': pid}
+
+        got = [
+            r['eventMessage']
+            for r in hwtest.joined(
+                [
+                    record(1, 'HWTEST a.b PASS x=1'),
+                    record(2, 'HWTEST a.b FAIL y=2'),
+                    {**record(1, 'other process line'), 'subsystem': 'com.apple.other'},
+                    record(2, 'HWTEST a.b +1  z=3'),
+                    record(1, 'HWTEST a.b +1  w=4'),
+                    record(1, 'HWTEST c.d PASS v=5'),
+                ]
+            )
+        ]
+        self.assertEqual(
+            got, ['other process line', 'HWTEST a.b PASS x=1 w=4', 'HWTEST a.b FAIL y=2 z=3', 'HWTEST c.d PASS v=5']
+        )
+
+
+class Harness(unittest.TestCase):
+    LINE = (
+        'HWTEST suite.harness {} boundaries=665 boundary_ms_p50={} boundary_ms_max=455.0 flush_ms_p50=31.0 '
+        'flush_ms_max=420.0 main_wait_ms_p50=0.3 main_wait_ms_max=80.0 main_late=2 ms=30000.0'
+    )
+
+    def test_the_suite_between_tests_is_judged_by_its_line(self):
+        quick = run(self.LINE.format('PASS', '42.0'))
+        self.assertEqual(quick['hwtest.harness-ceiling'].verdict, PASS)
+        self.assertIn('42.0/31.0/0.3/30000.0', quick[hwtest.HARNESS].observed)
+        slow = run(self.LINE.format('FAIL', '565.0') + ' why=median_boundary_over_100_ms')
+        self.assertEqual(slow['hwtest.harness-ceiling'].verdict, FAIL)
+        self.assertIn('median_boundary_over_100_ms', slow['hwtest.harness-ceiling'].observed)
+        self.assertEqual(
+            run('HWTEST suite PASS pass=1 fail=0 skip=0 ms=1.0')['hwtest.harness-ceiling'].verdict, NO_DATA
+        )
+
+
 if __name__ == '__main__':
     unittest.main()

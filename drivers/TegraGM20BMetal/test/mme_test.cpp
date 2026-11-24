@@ -360,4 +360,40 @@ TEST(GM20BMme, AnIndirectDrawLeavesTheParametersUnknown)
     gm20b::mme::draw(push, held, false, 0, 4, 1, 0, 0);
     EXPECT_EQ(push.at - before, ptrdiff_t(gm20b::mme::kCallWords));
 }
+
+TEST(GM20BMme, BandDrawCallSyncsParamsAndEmitsClassWfiBetweenBands)
+{
+    std::array<uint32_t, gm20b::mme::kBandDrawMaxWords + gm20b::mme::kBandDrawCallWords> words{};
+    gm20b::Push push{words.data(), words.data() + words.size()};
+    gm20b::mme::DrawParams held;
+    held.unknown = true;
+    gm20b::mme::bandDraw(push, held, 4, 2, 3, 2, 5, 0, 1280, 0, 720);
+    EXPECT_FALSE(held.unknown);
+    EXPECT_EQ(held.root, 2u);
+    EXPECT_EQ(held.baseInstance, 5u);
+    EXPECT_EQ(held.baseVertex, 0u);
+    const uint32_t *second = push.at;
+    gm20b::mme::bandDraw(push, held, 4, 2, 3, 2, 5, 0, 1280, 0, 720);
+    EXPECT_EQ(push.at - second, ptrdiff_t(gm20b::mme::kBandDrawCallWords));
+    EXPECT_EQ(second[0], gm20b::Push::hdr(5, gm20b::SUBC_3D, 0x3800 + 8 * gm20b::mme::kBandDraw, 8));
+    EXPECT_EQ(second[1], 4u);
+    EXPECT_EQ(second[6], 180u);
+    EXPECT_EQ(second[7], 720u);
+    EXPECT_EQ(second[8], 720u << 16);
+
+    Simulation sim;
+    sim.runEncoded(gm20b::mme::kBandDrawProgram.words, gm20b::mme::kBandDrawProgram.size,
+                   std::vector<uint32_t>(second + 1, second + 9));
+    unsigned draws = 0, wfis = 0;
+    for (const Method &m : sim.methods) {
+        if (m.first == NVB197_END)
+            ++draws;
+        if (m.first == NVB197_WAIT_FOR_IDLE)
+            ++wfis;
+    }
+    EXPECT_EQ(draws, 4u);
+    EXPECT_EQ(wfis, 3u);
+    ASSERT_FALSE(sim.methods.empty());
+    EXPECT_EQ(sim.methods.back(), Method(NVB197_SET_SCISSOR_VERTICAL(0), 720u << 16));
+}
 }  // namespace

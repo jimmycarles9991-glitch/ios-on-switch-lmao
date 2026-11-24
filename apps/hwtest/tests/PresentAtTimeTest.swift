@@ -13,15 +13,23 @@ import UIKit
 /// driving a fresh layer for two seconds (warm_off_ms, mlink_off_ms: median presentedTime minus target). A failure so
 /// says whether timed presents, future times, a layer Core Animation has not shown yet, the kind of display link or
 /// this layer's route lose presentedTime. offsets_ms= is each timed drawable's presentedTime minus its target ("x":
-/// none); lead_min_ms its commit to target; hlag_* when its handler ran against its target. d_fi_* (debug kernels)
+/// none); lead_min_ms its commit to target; hlag_* when its handler ran against its target, hc_p50_ms (and each
+/// control's <key>_hc_ms) against its commit: a presented handler within a few ms of its commit, with no
+/// presentedTime, is a drawable QuartzCore released at presentAtTime: without queueing it. d_fi_* (debug kernels)
 /// count the display's swaps: held for their time and shown or replaced unsent, let go early by the ordinary-frame
-/// clause, and shown more than half a period before their requested presentation.
+/// clause, shown more than half a period before their requested presentation, and let go by that clause with the frame
+/// ends masked. Two phases settle why timed drawables come back with no time (QuartzCore 24B119 finishes every drawable
+/// of a layer that had no presented report for a second, the one presented now included): alt_plain= and alt_timed=,
+/// plain and timed presents in turn on one layer (timed ones shown here: the server shows and reports them, and what
+/// fails alone is the layer's report going stale; none: the server never takes or never reports a timed image); and
+/// sw_<kind>=, a sweep of targets (PresentMode.sweepTargets: none shown at any time, past ones included, says the time
+/// is not what is refused).
 struct PresentAtTimeTest: HWTest {
     let id = "display.present_at_time"
     let name = "presentDrawable:atTime: shows each drawable at its refresh, with its presentedTime"
     let subsystem = Subsystem.compositor
 
-    static let counters = ["shown", "unsent", "ordinary", "early"]
+    static let counters = ["shown", "unsent", "ordinary", "early", "unphased"]
 
     func run(_ context: TestContext) async throws -> Outcome {
         let kernelBefore = Self.frameInfoTotals()
@@ -32,12 +40,17 @@ struct PresentAtTimeTest: HWTest {
         let media = try await phase(context, .mediaTarget, seconds: 1, paths: paths)
         let warm = try await phase(context, .warm, seconds: 1.5, paths: paths)
         let metalLink = try await phase(context, .metalLink, seconds: 2, paths: paths)
+        let alternate = try await phase(context, .alternate, seconds: 2, paths: paths)
+        let sweep = try await phase(context, .sweep, seconds: 2.5, paths: paths)
         let kernelAfter = Self.frameInfoTotals()
 
         let frames = timed.frames
         let summary = PresentTimeVerdict.Summary(frames)
         let offsets = frames.compactMap(\.offsetMs)
         let handlerLag = frames.filter { $0.handled > 0 }.map { ($0.handled - $0.target) * 1000 }
+        let handlerAfterCommit = { (frames: [PresentTimeVerdict.Frame]) in
+            Stats.percentile(frames.filter { $0.handled > 0 }.map { ($0.handled - $0.committed) * 1000 }, 0.5)
+        }
         var metrics = Metrics()
         metrics.set("submitted", summary.submitted)
         metrics.set("timed", summary.timed)
@@ -48,6 +61,7 @@ struct PresentAtTimeTest: HWTest {
         metrics.set("offset_p50_ms", Stats.percentile(offsets, 0.5), digits: 1)
         metrics.set("hlag_min_ms", handlerLag.min() ?? 0, digits: 1)
         metrics.set("hlag_p50_ms", Stats.percentile(handlerLag, 0.5), digits: 1)
+        metrics.set("hc_p50_ms", handlerAfterCommit(frames), digits: 1)
         metrics.set("drawable", timed.drawable)
         metrics.set("d_flips", timed.flips)
         for name in Self.counters {
@@ -62,6 +76,13 @@ struct PresentAtTimeTest: HWTest {
             metrics.set(key + "_flips", control.flips)
             let latency = control.frames.compactMap(\.latencyMs)
             metrics.set(key + "_lat_ms", Stats.percentile(latency, 0.5), digits: 1)
+            metrics.set(key + "_hc_ms", handlerAfterCommit(control.frames), digits: 1)
+        }
+        metrics.set("alt_plain", PresentTimeVerdict.shown(alternate.frames.filter { $0.target == 0 }))
+        metrics.set("alt_timed", PresentTimeVerdict.shown(alternate.frames.filter { $0.target > 0 }))
+        metrics.set("alt_timed_hc_ms", handlerAfterCommit(alternate.frames.filter { $0.target > 0 }), digits: 1)
+        for kind in PresentMode.sweepTargets.map(\.name) {
+            metrics.set("sw_" + kind, PresentTimeVerdict.shown(sweep.frames.filter { Self.sweepKind($0) == kind }))
         }
         for (key, control) in [("warm", warm), ("mlink", metalLink)] {
             metrics.set(key + "_off_ms", Stats.percentile(control.frames.compactMap(\.offsetMs), 0.5), digits: 1)
@@ -110,6 +131,15 @@ struct PresentAtTimeTest: HWTest {
         return PhaseResult(frames: frames, drawable: "\(Int(size.width))x\(Int(size.height))", flips: flips)
     }
 
+    /// Which of PresentMode.sweepTargets a drawable of the sweep asked for.
+    static func sweepKind(_ frame: PresentTimeVerdict.Frame) -> String {
+        if frame.target < 0.0005 { return "floor" }
+        if frame.target < 0.01 { return "over" }
+        if frame.target < 2 { return "boot" }
+        if frame.target < frame.committed - 5 { return "past10" }
+        return frame.target < frame.committed ? "past01" : "ahead"
+    }
+
     /// kern.switch_frame_info_* (debug kernels) by name; a counter that cannot be read is left out.
     static func frameInfoTotals() -> [String: Int] {
         var values: [String: Int] = [:]
@@ -121,11 +151,14 @@ struct PresentAtTimeTest: HWTest {
         return values
     }
 
-    /// mach_continuous_time() ahead of mach_absolute_time(): the time asleep since boot, in milliseconds.
+    /// mach_continuous_time() ahead of mach_absolute_time(): the time asleep since boot, in milliseconds. The absolute
+    /// clock is read first: read second, it is ahead of a continuous clock that never slept.
     static func asleepMs() -> Double {
         var base = mach_timebase_info_data_t()
         mach_timebase_info(&base)
-        let ticks = Double(mach_continuous_time() &- mach_absolute_time())
+        let absolute = mach_absolute_time()
+        let continuous = mach_continuous_time()
+        let ticks = Double(continuous > absolute ? continuous - absolute : 0)
         return ticks * Double(base.numer) / Double(base.denom) / 1_000_000
     }
 }

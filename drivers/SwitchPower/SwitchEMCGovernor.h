@@ -8,10 +8,13 @@
  *   up:   one sample busier than 60 % of this rate. The EMC goes straight to the top rate (there are only three: a frame
  *         must never wait for a ramp);
  *   down: eight samples in a row (32 ms) that the next rate down would carry at 40 % or less. One step down.
- * Never slower: while frames are being made (a frame line in the last 100 ms) or within 500 ms of a touch, launch or
- * missed frame, the EMC stays at the top rate; a frame line after a quiet spell or any of those hints raises it at once,
- * ahead of the frame's own traffic. So the low rates only run while nothing is drawn: the Home Screen at rest, the
- * screen off, background work.
+ * Never slower: while frames are being made (a frame line in the last 100 ms), while the CPUs work (a window of the CPU
+ * governor's tick with SWITCH_EMC_BUSY_FLOOR_US of CPU time or more in the last 100 ms) or within 500 ms of a touch,
+ * launch or missed frame, the EMC stays at the top rate; a frame line after a quiet spell, a window of CPU work or any of
+ * those hints raises it at once. ACTMON counts memory traffic, not the latency a CPU waits on, so CPU work that misses
+ * the caches without filling the bus (an app's launch) never trips the up watermark: the CPUs' own idle accounting
+ * decides instead. So the low rates only run while nothing is drawn and the CPUs are idle: the Home Screen at rest, the
+ * screen off.
  */
 #ifndef SWITCH_EMC_GOVERNOR_H
 #define SWITCH_EMC_GOVERNOR_H
@@ -25,6 +28,10 @@
 #define SWITCH_EMC_DOWN_SAMPLES 8u
 #define SWITCH_EMC_HINT_HOLD_US 500000u
 #define SWITCH_EMC_MAX_RATES    8u
+/* The CPU time, summed over the CPUs, that makes one window of the CPU governor's tick (8 ms while anything runs) a
+ * window of work: one raise's latency, hint to the top rate (674-718 us mean on 23 Nov). The EMC's own work loop and
+ * the tick, which run when a hold ends, stay far below it, so they do not hold the top rate themselves. */
+#define SWITCH_EMC_BUSY_FLOOR_US 700u
 
 #define SWITCH_EMC_EVENT_UP   1u
 #define SWITCH_EMC_EVENT_DOWN 2u
@@ -36,6 +43,7 @@ enum switch_emc_reason {
     SWITCH_EMC_REASON_DISPLAY,
     SWITCH_EMC_REASON_DISPLAY_MEMORY,
     SWITCH_EMC_REASON_GOVERN,
+    SWITCH_EMC_REASON_UNTICKED,
 };
 
 struct switch_emc_wmarks {

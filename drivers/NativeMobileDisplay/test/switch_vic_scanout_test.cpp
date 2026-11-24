@@ -129,6 +129,11 @@ extern "C" void native_legacy_gpu_complete(void *, int status)
     completedStatus = status;
 }
 
+extern "C" int tegra_gm20b_surface_compressed(uint64_t)
+{
+    return 0;
+}
+
 extern "C" switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages, uint32_t count, uint32_t, void *,
                                                            void (*)(void *))
 {

@@ -1118,7 +1118,15 @@ extern lck_grp_t vm_page_lck_grp_local;
 #define VM_PAGE_SPECULATIVE_USED_ADD()
 #endif
 
-#define VM_PAGE_CONSUME_CLUSTERED(mem)                          \
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern bool switch_vm_prefetch_used_locked(void) __attribute__((weak));
+#ifdef __cplusplus
+}
+#endif
+
+#define VM_PAGE_CONSUME_CLUSTERED_WAKE(mem, wake_flag)          \
 	MACRO_BEGIN                                             \
 	ppnum_t	__phys_page;                                    \
 	__phys_page = VM_PAGE_GET_PHYS_PAGE(mem);               \
@@ -1129,9 +1137,22 @@ extern lck_grp_t vm_page_lck_grp_local;
 	        assert(o);                                      \
 	        o->pages_used++;                                \
 	        mem->vmp_clustered = FALSE;                     \
+	        if (__improbable(mem->vmp_switch_prefetched)) { \
+	                if (switch_vm_prefetch_used_locked != NULL && \
+	                    switch_vm_prefetch_used_locked()) { \
+	                        (wake_flag) = TRUE;             \
+	                }                                       \
+	        }                                               \
 	        VM_PAGE_SPECULATIVE_USED_ADD();                 \
 	}                                                       \
 	pmap_unlock_phys_page(__phys_page);                     \
+	MACRO_END
+
+#define VM_PAGE_CONSUME_CLUSTERED(mem)                          \
+	MACRO_BEGIN                                             \
+	bool __switch_unused_wake = false;                      \
+	VM_PAGE_CONSUME_CLUSTERED_WAKE(mem, __switch_unused_wake); \
+	(void)__switch_unused_wake;                             \
 	MACRO_END
 
 
@@ -1213,6 +1234,7 @@ extern kern_return_t pmap_enter_check(
 #endif /* HAS_MTE */
 #define DW_vm_page_iopl_wire            0x20000
 #define DW_vm_page_iopl_wire_write      0x40000
+#define DW_vm_page_switch_prefetched    0x100000
 
 struct vm_page_delayed_work {
 	vm_page_t       dw_m;

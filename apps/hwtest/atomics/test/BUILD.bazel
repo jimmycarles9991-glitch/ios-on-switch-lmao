@@ -1,0 +1,48 @@
+# cpu.atomics on this Mac: the forms assembled with LSE (as the iOS 27 app's are; here the core runs them) and as the
+# ARMv8.0 sequences of a64x's stubs (as the iOS 17 app's are, -mcpu=cortex-a57) each hold every invariant, Apple's
+# entry points too, and no row that must order sees store buffering.
+#
+#   bazel test --config=remote //apps/hwtest/atomics/test:all
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//bazel/testing:defs.bzl", "host_library", "host_test")
+
+lint_files()
+
+SRCS = [
+    "//apps/hwtest:atomics/switch_atomics.c",
+    "//apps/hwtest:atomics/switch_atomics_forms.S",
+    "//apps/hwtest:atomics/switch_atomics_hammer.c",
+    "//apps/hwtest:atomics/switch_atomics_harness.S",
+    "//apps/hwtest:atomics/switch_atomics_internal.h",
+    "//apps/hwtest:atomics/switch_atomics_library.c",
+    "//apps/hwtest:atomics/switch_atomics_list.h",
+    "//apps/hwtest:atomics/switch_atomics_litmus.c",
+]
+
+host_library(
+    name = "atomics_lse",
+    srcs = SRCS,
+    hdrs = ["//apps/hwtest:atomics/switch_atomics.h"],
+    copts = ["-O2"],
+)
+
+# The iOS 17 app's shape: no LSE, so the forms are the ARMv8.0 sequences.
+host_library(
+    name = "atomics_v80",
+    srcs = SRCS,
+    hdrs = ["//apps/hwtest:atomics/switch_atomics.h"],
+    copts = [
+        "-O2",
+        "-mcpu=cortex-a57",
+    ],
+)
+
+[host_test(
+    name = "switch_atomics_{}_test".format(build),
+    srcs = ["switch_atomics_test.cpp"],
+    defines = ["SWITCH_ATOMICS_EXPECT_LSE={}".format(lse)],
+    deps = [":atomics_" + build],
+) for build, lse in [
+    ("lse", 1),
+    ("v80", 0),
+]]

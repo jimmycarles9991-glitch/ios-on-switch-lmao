@@ -4273,6 +4273,9 @@ extern "C" void switch_bluetooth_data_mounted(void)
 {
     if (bluetoothDisabled())
         return;
+#if DEVELOPMENT || DEBUG
+    const uint64_t began = mach_absolute_time();
+#endif
     uint8_t staged[6];
     if (readStagedAddress(staged)) {
         memcpy(gStaged, staged, sizeof(gStaged));
@@ -4284,5 +4287,15 @@ extern "C" void switch_bluetooth_data_mounted(void)
     } else {
         __atomic_store_n(&gStagedState, kStagedNone, __ATOMIC_RELEASE);
     }
+#if DEVELOPMENT || DEBUG
+    const uint64_t read = mach_absolute_time();
+#endif
     announceAddressToRails();
+#if DEVELOPMENT || DEBUG
+    uint64_t readNs = 0, toldNs = 0;
+    absolutetime_to_nanoseconds(read - began, &readNs);
+    absolutetime_to_nanoseconds(mach_absolute_time() - read, &toldNs);
+    IOLog("SwitchBluetooth: before launchd: staged address read in %llu ms, the Joy-Con rails told it in %llu ms\n",
+          readNs / 1000000, toldNs / 1000000);
+#endif
 }

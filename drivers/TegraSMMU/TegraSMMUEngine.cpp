@@ -66,8 +66,18 @@ int TegraSMMUEngine::attach(const TegraSMMUSwgroup *engineGroups, uint32_t count
     groupCount = count;
     for (uint32_t i = 0; i < count; i++) {
         if (tegra_smmu_attach(asid, domain.ptb(), groups[i].asidReg, groups[i].translationReg,
-                              groups[i].translationBits, line, size))
+                              groups[i].translationBits, line, size)) {
+            for (uint32_t j = 0; j < i; j++) {
+                bool seen = false;
+                for (uint32_t k = 0; k < j; k++)
+                    seen = seen || groups[k].asidReg == groups[j].asidReg;
+                if (!seen)
+                    tegra_smmu_detach(asid, groups[j].asidReg);
+            }
+            groups = nullptr;
+            groupCount = 0;
             return -1;
+        }
     }
     return 0;
 }

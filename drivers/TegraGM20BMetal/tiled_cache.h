@@ -32,17 +32,40 @@ enum : uint32_t {
 };
 
 constexpr uint32_t kTiledCacheFlushWords = 1;
+constexpr uint32_t kTiledCacheSizeWords = 2;
+constexpr uint32_t kTiledCacheDefaultSize = 128u | (128u << 16);
 
 inline bool tiledCache(const TegraGM20BAbiInfo &info)
 {
     return (info.flags & TegraGM20BInfoTiledCache) != 0;
 }
 
+constexpr uint32_t tiledCacheTileSize(uint32_t totalBpp)
+{
+    if (totalBpp <= 4)
+        return 128u | (128u << 16);
+    if (totalBpp <= 8)
+        return 64u | (128u << 16);
+    if (totalBpp <= 16)
+        return 64u | (64u << 16);
+    if (totalBpp <= 32)
+        return 64u | (32u << 16);
+    return 32u | (32u << 16);
+}
+
+inline void tiledCacheSetSize(Push &p, const TegraGM20BAbiInfo &info, uint32_t size, uint32_t &shadow)
+{
+    if (!tiledCache(info) || shadow == size)
+        return;
+    p.m(SET_TILED_CACHE_TILE_SIZE, size);
+    shadow = size;
+}
+
 inline void tiledCacheInit(Push &p, const TegraGM20BAbiInfo &info)
 {
     if (!tiledCache(info))
         return;
-    p.m(SET_TILED_CACHE_TILE_SIZE, 128 | 128 << 16);
+    p.m(SET_TILED_CACHE_TILE_SIZE, kTiledCacheDefaultSize);
     p.m(SET_TILED_CACHE_CONFIG_0, 0x1109);
     p.m(SET_TILED_CACHE_CONFIG_1, 0x08080202);
     p.m(SET_TILED_CACHE_CONFIG_2, 0x1f);

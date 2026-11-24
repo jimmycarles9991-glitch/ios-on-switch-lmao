@@ -54,14 +54,17 @@ struct CAGenericStateScene: GPUScene {
         let zeros = [UInt8](repeating: 0, count: 256)
         // the facade's two arms past the Mac's cases, both held to its nothing case: into a target its usage keeps off
         // compressed memory for life, and with every buffer slot the state may read bound to 64 KiB of zeros (the
-        // transform at its first 64 bytes)
+        // vertices and transform at the start of their slots)
+        let quad = CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(1, 1, 1, 1))
         let plain = try gpu.texture(
             .bgra8Unorm, Self.size, Self.size, usage: [.renderTarget, .shaderRead, .pixelFormatView]
         )
-        let wide = try gpu.buffer(65536), wideTransform = try gpu.buffer(65536)
+        let wide = try gpu.buffer(65536), wideTransform = try gpu.buffer(65536), wideVertices = try gpu.buffer(65536)
+        ZeroPaddedBytes.fill(wide.contents(), length: 65536)
         withUnsafeBytes(of: matrix_identity_float4x4) {
-            wideTransform.contents().copyMemory(from: $0.baseAddress!, byteCount: $0.count)
+            ZeroPaddedBytes.fill(wideTransform.contents(), length: 65536, prefix: $0)
         }
+        quad.withUnsafeBytes { ZeroPaddedBytes.fill(wideVertices.contents(), length: 65536, prefix: $0) }
         var runs = cases.map { (label: $0.0, cubes: $0.1, into: target, padded: false) }
         if raw {
             runs.append((label: "nothing_plain", cubes: [nil, nil, nil], into: plain, padded: false))
@@ -78,15 +81,14 @@ struct CAGenericStateScene: GPUScene {
                 pass.colorAttachments[1].storeAction = .dontCare
                 let encoder = commands.makeRenderCommandEncoder(descriptor: pass)!
                 encoder.setRenderPipelineState(pipeline)
-                CAState.bind(
-                    encoder, vertices: CAState.rectangle(x0: -1, y0: -1, x1: 1, y1: 1, color: SIMD4(1, 1, 1, 1)),
-                    source: nil
-                )
+                CAState.bind(encoder, vertices: quad, source: nil)
                 for slot in 4 ..< 8 { encoder.setVertexBytes(zeros, length: zeros.count, index: slot) }
                 for slot in 4 ..< 16 { encoder.setFragmentBytes(zeros, length: zeros.count, index: slot) }
                 if padded {
-                    for slot in [0, 3, 4, 5, 6, 7] { encoder.setVertexBuffer(wide, offset: 0, index: slot) }
+                    encoder.setVertexBuffer(wide, offset: 0, index: 0)
+                    encoder.setVertexBuffer(wideVertices, offset: 0, index: 1)
                     encoder.setVertexBuffer(wideTransform, offset: 0, index: 2)
+                    for slot in 3 ..< 16 { encoder.setVertexBuffer(wide, offset: 0, index: slot) }
                     for slot in 0 ..< 16 { encoder.setFragmentBuffer(wide, offset: 0, index: slot) }
                 }
                 encoder.setFragmentTextures(cubes, range: 12 ..< 15)

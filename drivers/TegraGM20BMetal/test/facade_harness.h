@@ -64,6 +64,69 @@ inline std::string packKey(MTLPixelFormat format)
     return gm20b::pipelineKey(descriptor(nil, format), &vertex, &fragment, "", "QuartzCore");
 }
 
+// The fast key the facade finds the state of pack key `key` by (TegraGM20BMetalPipelineKey.h fastKey): its fields read
+// back as probe_states.h parseState reads a corpus line's, its stages, linked functions and framework as pipelineKey wrote
+// them. Text trimmed at the key's end leaves its last stage or linked function's empty constants without their space.
+inline uint64_t fastKeyOfText(const std::string &key)
+{
+    gm20b::PipelineFields f;
+    const size_t stages = key.find(" | v ");
+    char field[96];
+    for (const char *at = key.c_str(), *end = at + stages; at < end;) {
+        int used = 0;
+        if (sscanf(at, " %95s%n", field, &used) != 1 || at + used > end)
+            break;
+        at += used;
+        unsigned i = 0;
+        unsigned long long x[10] = {};
+        if (sscanf(field, "samples=%llu", x) == 1)
+            f.samples = x[0];
+        else if (sscanf(field, "topo=%llu", x) == 1)
+            f.topology = x[0];
+        else if (sscanf(field, "ds=%llu/%llu", x, x + 1) == 2)
+            f.depthFormat = x[0], f.stencilFormat = x[1];
+        else if (sscanf(field, "c%u=%llu:%llu:%llu:%llu:%llu:%llu:%llu:%llu:%llu", &i, x, x + 1, x + 2, x + 3, x + 4,
+                        x + 5, x + 6, x + 7, x + 8) == 10 &&
+                 i < 8)
+            f.color[i] = {x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8]};
+        else if (sscanf(field, "a%u=%llu:%llu:%llu:%llu:%llu:%llu", &i, x, x + 1, x + 2, x + 3, x + 4, x + 5) == 7 &&
+                 i < 31)
+            f.attributes[i] = {x[0], x[1], x[2], x[3], x[4], x[5]};
+        else if (sscanf(field, "t=%llu:%llu:%llu:%llu:%llu:%llu:%llu", x, x + 1, x + 2, x + 3, x + 4, x + 5, x + 6) ==
+                 7)
+            f.patchType = 1, f.tessellation = {x[0], x[1], x[2], x[3], x[4], x[5], x[6]};
+        else if (sscanf(field, "amp=%llu", x) == 1)
+            f.amplification = x[0];
+        else if (!strcmp(field, "twr=2"))
+            f.textureWriteRounding = 2;
+        else if (!strcmp(field, "alphacov=1"))
+            f.alphaToCoverage = 1;
+        else if (!strcmp(field, "rast=0"))
+            f.rasterization = 0;
+    }
+    const size_t fragmentAt = key.find(" | f ", stages);
+    const size_t framed = key.find(" | l ", fragmentAt);
+    const size_t end = framed == std::string::npos ? key.size() : framed;
+    const size_t linkedAt = std::min(key.find(" | ", fragmentAt + 5), end);
+    const auto stage = [](const std::string &text) {
+        const size_t space = text.find(' ');
+        return gm20b::StageKey{text.substr(0, space), space == std::string::npos ? "" : text.substr(space + 1)};
+    };
+    const gm20b::StageKey vertex = stage(key.substr(stages + 5, fragmentAt - stages - 5));
+    const gm20b::StageKey fragment = stage(key.substr(fragmentAt + 5, linkedAt - fragmentAt - 5));
+    std::string linked = key.substr(linkedAt, end - linkedAt);
+    if (!linked.empty() && framed == std::string::npos) {
+        const size_t last = linked.rfind(" | ");
+        int words = 0;
+        for (const char *at = linked.c_str() + last + 3; sscanf(at, " %95s", field) == 1; words++)
+            at = strstr(at, field) + strlen(field);
+        if (words == 2 || (words == 3 && strstr(linked.c_str() + last, " as=")))
+            linked += ' ';
+    }
+    return gm20b::fastKey(f, &vertex, fragment.function == "-" ? nullptr : &fragment, linked,
+                          framed == std::string::npos ? "QuartzCore" : key.substr(framed + 5));
+}
+
 // Program slot `k`'s bytes: its shader header (zeros: no local memory, no outputs) at 0x30, then code
 inline std::vector<uint8_t> slot(uint32_t k)
 {
@@ -83,9 +146,9 @@ inline std::string writePack(const std::string &key, std::vector<gm20b::PackKern
                              std::vector<gm20b::PackComputeFacts> facts = {}, bool pixelStage = true,
                              const std::string &reflections = "",
                              const std::vector<std::pair<std::string, MTLPixelFormat>> &named = {},
-                             const std::vector<gm20b::PackEntry> &entries = {})
+                             const std::vector<gm20b::PackEntry> &entries = {}, const std::string &archives = "")
 {
-    constexpr uint64_t kPrograms = 0x180, kComputeStates = 0xc00, kStrings = 0xe00, kKernels = 0x2000;
+    constexpr uint64_t kPrograms = 0x200, kComputeStates = 0xc00, kStrings = 0xe00, kKernels = 0x2000;
     // one state's record fits below the compute states; more go between the kernels and the heap
     const uint64_t kPipelines = named.empty() ? 0x800 : 0x8000;
     const uint32_t programs = 2 + uint32_t(kernels.size());
@@ -159,6 +222,16 @@ inline std::string writePack(const std::string &key, std::vector<gm20b::PackKern
     const uint64_t reflectionsAt = file.size();
     file.insert(file.end(), reflections.begin(), reflections.end());
     h.section[gm20b::PackReflections] = {reflectionsAt, reflections.size()};
+    const uint32_t first = uint32_t(std::distance(fieldsAt.begin(), fieldsAt.find(keyHash)));
+    const gm20b::PackFastKey fast = {fastKeyOfText(key), first, 1};
+    file.resize((file.size() + 7) & ~size_t(7));
+    h.section[gm20b::PackFastKeys] = {file.size(), sizeof fast};
+    file.insert(file.end(), reinterpret_cast<const uint8_t *>(&fast), reinterpret_cast<const uint8_t *>(&fast + 1));
+    if (!archives.empty()) {
+        file.resize((file.size() + 7) & ~size_t(7));
+        h.section[gm20b::PackArchives] = {file.size(), archives.size()};
+        file.insert(file.end(), archives.begin(), archives.end());
+    }
     memcpy(file.data(), &h, sizeof h);
     const std::string path = dir() + "/pack.bin";
     std::ofstream(path, std::ios::binary)

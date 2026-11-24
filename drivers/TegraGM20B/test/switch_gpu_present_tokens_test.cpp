@@ -393,3 +393,49 @@ TEST(PresentDeliver, TheClaimEndsBeforeTheCallback)
 	EXPECT_EQ(delivered, SWITCH_GPU_BACKING_WRITER_GONE);
 	EXPECT_EQ(completing, 0u);
 }
+
+TEST_F(PresentTokens, NeedL2FlushOnlyWhenGpuDependencyLacksExternalVisibility)
+{
+	auto extOf = [](const switch_gpu_backing_token *t) -> int {
+		return states[t->queue];
+	};
+	EXPECT_FALSE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+
+	const auto vicOnly = std::array{token(1, SWITCH_GPU_ENGINE_VIC)};
+	ASSERT_EQ(switch_gpu_present_tokens_prepare(&held, vicOnly.data(), vicOnly.size()), 0);
+	states[1] = 0;
+	EXPECT_FALSE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	switch_gpu_present_tokens_drop(&held);
+
+	const switch_gpu_backing_token multi[3] = {
+		token(1, SWITCH_GPU_ENGINE_GM20B),
+		token(2, SWITCH_GPU_ENGINE_GM20B),
+		token(3, SWITCH_GPU_ENGINE_VIC),
+	};
+	ASSERT_EQ(switch_gpu_present_tokens_prepare(&held, multi, 3), 0);
+	states[1] = 1;
+	states[2] = 1;
+	states[3] = 0;
+	EXPECT_FALSE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	states[2] = 0;
+	EXPECT_TRUE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	switch_gpu_present_tokens_drop(&held);
+
+	const auto ceToken = std::array{token(1, SWITCH_GPU_ENGINE_CE)};
+	ASSERT_EQ(switch_gpu_present_tokens_prepare(&held, ceToken.data(), ceToken.size()), 0);
+	states[1] = 0;
+	EXPECT_TRUE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	states[1] = 1;
+	EXPECT_TRUE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	switch_gpu_present_tokens_drop(&held);
+
+	const auto promiseToken = std::array{token(1, SWITCH_GPU_ENGINE_PROMISE)};
+	ASSERT_EQ(
+		switch_gpu_present_tokens_prepare(&held, promiseToken.data(), promiseToken.size()),
+		0);
+	states[1] = 0;
+	EXPECT_TRUE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	states[1] = 1;
+	EXPECT_TRUE(switch_gpu_present_tokens_need_l2_flush(&held, extOf));
+	switch_gpu_present_tokens_drop(&held);
+}

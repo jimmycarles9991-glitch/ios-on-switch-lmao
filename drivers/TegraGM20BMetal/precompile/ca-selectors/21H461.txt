@@ -1,4 +1,0 @@
-# QuartzCore's FragmentShaderConfig, read by the generic merge states (..Xghfc) from a fragment buffer: its slot, its
-# bytes, and those that are padding. Read from 21H461's code by a reviewer outside this tree and unchecked against a
-# device dump: the selector line's bytes of a boot check it
-layout slot=0 length=52 padding=3,13-15,19,29-31,49-51

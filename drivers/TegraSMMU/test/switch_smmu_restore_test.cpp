@@ -143,4 +143,25 @@ TEST_F(SmmuRestore, ConflictingRetainedClientsCannotProgramADirectory)
     EXPECT_LT(restore(), 0);
     EXPECT_TRUE(io.writes.empty());
 }
+
+TEST_F(SmmuRestore, BothGpuTranslationRegistersAreRequiredWithoutWritingSecureRegisters)
+{
+    const tegra_smmu_attachment gpu0{117, 0x8000900, 0xaac, 0x230, (1u << 24) | (1u << 25), false};
+    const tegra_smmu_attachment gpu1{117, 0x8000900, 0xaac, 0xb98, (1u << 8) | (1u << 9), false};
+    ASSERT_TRUE(tegra_smmu_attachments_note(&attachments, &gpu0));
+    ASSERT_TRUE(tegra_smmu_attachments_note(&attachments, &gpu1));
+    io.words[0x230 / 4] = gpu0.translationBits;
+    io.words[0xb98 / 4] = gpu1.translationBits;
+    ASSERT_EQ(restore(117, 0x8000900, 0xaac), 0);
+    EXPECT_EQ(io.words[0xaac / 4], (1u << 31) | 117u);
+    for (const auto &[offset, value] : io.writes) {
+        EXPECT_NE(offset, 0x230u);
+        EXPECT_NE(offset, 0xb98u);
+    }
+    io.writes.clear();
+    io.words[0xaac / 4] = 0;
+    io.words[0xb98 / 4] = 0;
+    EXPECT_LT(restore(117, 0x8000900, 0xaac), 0);
+    EXPECT_EQ(io.words[0xaac / 4], 0u);
+}
 }

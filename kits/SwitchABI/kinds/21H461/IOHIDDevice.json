@@ -28,7 +28,8 @@
     "175": "newProductIDNumber",
     "180": "newReportDescriptor",
     "181": "handleReport",
-    "191": "newSerialNumberString"
+    "191": "newSerialNumberString",
+    "197": "handleReportWithTime"
   },
   "fields": {},
   "addresses": {
@@ -72,7 +73,7 @@
     "opaque194": "0xfffffff005ade1a4",
     "opaque195": "0xfffffff005ade1c4",
     "opaque196": "0xfffffff005ade1cc",
-    "opaque197": "0xfffffff005ade1d4",
+    "handleReportWithTime": "0xfffffff005ade1d4",
     "opaque198": "0xfffffff005ade6d0",
     "opaque199": "0xfffffff005ade75c",
     "opaque201": "0xfffffff005ade890",

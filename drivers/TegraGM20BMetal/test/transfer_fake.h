@@ -35,12 +35,14 @@ struct FakeGpu {
     std::deque<Job> jobs;
     std::vector<TegraGM20BAbiSurfaceUse> uses;
     std::vector<uint32_t> launches;  // LAUNCH_DMA words, in the order they ran
+    uint32_t kindSwitches = 0;  // MEM_OP_D L2_SYSMEM_INVALIDATEs the jobs ran (the kit's kind switch ends with one)
     gm20b::JobVisibility visibility = gm20b::JobVisibility::Legacy;
 
     void execute(const Job &job)
     {
         std::array<uint32_t, 0x800 / 4> state{};
         auto method = [&](uint32_t method, uint32_t value) {
+            kindSwitches += method == 0x0034 && value == 0x0eu << 27;
             state.at(method / 4) = value;
             if (method != 0x0300)
                 return;
@@ -91,7 +93,8 @@ struct FakeGpu {
         for (uint32_t i = 0; i < job.words;) {
             const uint32_t header = words[i++], op = header >> 29, count = header >> 16 & 0x1fff;
             const uint32_t first = (header & 0xfff) * 4;
-            ASSERT_EQ((header >> 13) & 7, gm20b::SUBC_COPY);
+            if (first >= 0x100)  // host methods (below 0x100) go on any subchannel
+                ASSERT_EQ((header >> 13) & 7, gm20b::SUBC_COPY);
             if (op == 4) {
                 method(first, count);
             } else {
@@ -126,7 +129,8 @@ bool Kernel::open(std::string &)
     return true;
 }
 
-bool Kernel::alloc(uint64_t bytes, bool coherent, Bo &bo, uint32_t, uint64_t, bool gpuVolatile, bool control, bool)
+bool Kernel::alloc(uint64_t bytes, bool coherent, Bo &bo, uint32_t, uint64_t, bool gpuVolatile, bool control, bool,
+                   uint64_t, bool)
 {
     std::lock_guard<std::mutex> l(fake->lock);
     EXPECT_TRUE(coherent);

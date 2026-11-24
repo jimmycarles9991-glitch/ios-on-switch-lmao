@@ -1,35 +1,39 @@
 // SPDX-License-Identifier: MIT
 // GPCPLL programming and the idle and performance policy that sets the GPU clock.
 #include "gpu_internal.h"
+#include "TegraGM20BNapll.h"
 
-/* GPCPLL above 76.8 MHz: GPU_MHZ, one of L4T's B01 GPU rates (76.8 MHz x n). Runs
- * between M1 and M2, with the GPU as quiet as at the end of M1's own clk init (PRI ring, timer and GPCPLL up, no
- * falcon running yet), so the relock below happens under the conditions M1 has already proven; ACR, PMU, GR (M2) and
- * the channel test (M3) then run at the new rate, as nvgpu runs them at the rate its PLL holds (217.6 MHz on a
- * first power-on, gm20b_init_clk_setup_sw() clk_gm20b.c:1230-1242; the last DVFS rate after a railgate).
- *
- * PLL: nouveau's legacy fixed-frequency path (speedo ID 0, see m1), gk20a_clk_calc() + gk20a_clk_prog() as
- * gm20b_clk_init() runs them: NDIV slide to NDIV_LO, GPU on bypass (38.4 MHz with M1's 1:1 divider), relock with lock
- * detect, NDIV slide up. For every L4T rate it picks M=1 (38.4 MHz update rate) and the same N/PL that B01's C1 PLL
- * limits allow (VCO 1300-2600 MHz, u 19.2-38.4 MHz: nvgpu gpc_pll_params_c1, clk_gm20b.c:71-85), so this mode needs no
- * C1 parameters.
- *
- * Voltage: L4T has only noise-aware (NAPLL) tables for B01 and WARNs without NA mode (tegra210-dvfs.c:821-929,2089);
- * platform.c's tegra_gm20b_dvfs_na_uv() reproduces them. A fixed-frequency PLL cannot back off under supply droop and
- * needs more: on T210, where L4T has both, the fixed table asks 6-19% more than the NA table at equal speedo
- * (FIXED_FREQ_CVB_TABLE vs NA_FREQ_CVB_TABLE, :682-746, evaluated at speedo 1400-1900). So a rate is taken only if its
- * worst-case NA voltage plus FIXED_PLL_MARGIN_PCT fits the rail ceiling, 800 mV (switchroot's cap,
- * nx-common.dtsi:548). The rail is held at that ceiling for every rate: it is also L4T's floor at any rate below 20 C
- * (gpu_scaling_cdev trip0, nx-common.dtsi:1365), and nothing here reads the GPU temperature. Voltage goes up (with
- * readback) before the clock; this hook never lowers it.
- * For GPU speedo 1673 the 20% margin admits up to 768 MHz (worst NA 665 mV); HOS also stops retail units at 768 MHz
- * (nx-common.dtsi:521-523). 13% is T210's fixed/NA ratio at 921.6 MHz for speedo 1700 (+10..13% across 768-921.6), the
- * only measured basis for less, and would admit 844.8 MHz (685 mV + 13% = 774 mV) but not 921.6 (710 mV + 13% > 800 mV). */
 #define FIXED_PLL_MARGIN_PCT 20
-#define GPU_MHZ 768
-#define BOOT_KHZ 76800 /* gm20b_pstates[0], set by gm20b_clk_init() in M1 */
+#define GPU_NAPLL_TARGET_KHZ 921600u
+#define GPU_FIXED_TARGET_KHZ 768000u
+#define BOOT_KHZ 76800
 
-static int clk_prog_khz(struct nvkm_device *device, u32 khz)
+static struct tgm_napll_state tgm_napll;
+
+static uint32_t napll_rd32(void *arg, uint32_t reg)
+{
+	return nvkm_rd32((struct nvkm_device *)arg, reg);
+}
+
+static void napll_wr32(void *arg, uint32_t reg, uint32_t val)
+{
+	nvkm_wr32((struct nvkm_device *)arg, reg, val);
+}
+
+static void napll_udelay(void *arg, uint32_t us)
+{
+	(void)arg;
+	udelay(us);
+}
+
+static struct tgm_napll_io napll_io(struct nvkm_device *device)
+{
+	struct tgm_napll_io io = {device, napll_rd32, napll_wr32, napll_udelay};
+
+	return io;
+}
+
+static int clk_prog_fixed_khz(struct nvkm_device *device, u32 khz)
 {
 	struct nvkm_clk *clk = device->clk;
 	struct nvkm_cstate cstate = {.domain[nv_clk_src_gpc] = khz};
@@ -42,138 +46,162 @@ static int clk_prog_khz(struct nvkm_device *device, u32 khz)
 	return ret;
 }
 
+static int clk_prog_khz(struct nvkm_device *device, u32 khz)
+{
+	if (tgm_napll.active) {
+		struct tgm_napll_io io = napll_io(device);
+
+		if (tgm_idle.vco_coeff && tgm_idle.vco_khz && khz &&
+		    !(tgm_idle.vco_khz % (2u * khz))) {
+			u32 m = tgm_idle.vco_coeff & 0xffu;
+			u32 n = (tgm_idle.vco_coeff >> 8) & 0xffu;
+			u32 pl = tgm_idle.vco_khz / (2u * khz);
+
+			if (m == 1u && pl >= tgm_napll.params.min_pl &&
+			    pl <= tgm_napll.params.max_pl)
+				return tgm_napll_reprogram_mnp(&io, &tgm_napll, m, n, pl);
+		}
+		return tgm_napll_reprogram(&io, &tgm_napll, khz);
+	}
+	return clk_prog_fixed_khz(device, khz);
+}
+
+void tgm_clk_suspend(struct nvkm_device *device)
+{
+	struct tgm_napll_io io = napll_io(device);
+
+	tgm_napll_suspend(&io, &tgm_napll);
+}
+
 /* One CLK trace line after a PLL change: GPCPLL state and, over the PRI ring, whether the ring survived (as M1 reads
  * it). Returns 1 if the GPU runs from a locked GPCPLL at `khz` with the 1:1 bypass divider and a live ring. */
 static int clk_state(struct nvkm_device *device, const char *what, int ret, u32 khz)
 {
-	u32 cfg = nvkm_rd32(device, 0x137000);   /* GPCPLL_CFG: 0 enable, 17 lock */
-	u32 coeff = nvkm_rd32(device, 0x137004); /* GPCPLL_COEFF: M 7:0, N 15:8, PL 21:16 */
-	u32 vco = nvkm_rd32(device, 0x137100);   /* SEL_VCO: 0 = GPU on bypass */
-	u32 out =
-		nvkm_rd32(device, 0x137250); /* GPC2CLK_OUT: 5:0 bypass divider, 13:8 VCO divider */
-	u32 ring = nvkm_rd32(device,
-			     0x120050); /* PRI_RINGMASTER_START_RESULTS: 0 = connectivity pass */
-	u32 bus = nvkm_rd32(device, 0x001100); /* BUS_INTR_0: 3 = PRI timeout */
+	u32 cfg = nvkm_rd32(device, TGM_GPCPLL_CFG_R);
+	u32 coeff = nvkm_rd32(device, TGM_GPCPLL_COEFF_R);
+	u32 dvfs1 = nvkm_rd32(device, TGM_GPCPLL_DVFS1_R);
+	u32 vco = nvkm_rd32(device, TGM_SEL_VCO_R);
+	u32 out = nvkm_rd32(device, TGM_GPC2CLK_OUT_R);
+	u32 ring = nvkm_rd32(device, 0x120050);
+	u32 bus = nvkm_rd32(device, 0x001100);
 	int now = nvkm_clk_read(device->clk, nv_clk_src_gpc);
 
-	nvxnu_step("tegra-gm20b: CLK step: %s, ret %d: GPCPLL_CFG %08x COEFF %08x (M %u N %u PL "
-		   "%u) SEL_VCO %x "
-		   "GPC2CLK_OUT %08x = %d kHz; ring %08x BUS_INTR %08x\n",
-		   what, ret, cfg, coeff, coeff & 0xff, (coeff >> 8) & 0xff, (coeff >> 16) & 0x3f,
-		   vco, out, now, ring, bus);
-	return !ret && (cfg & 0x20001) == 0x20001 && (vco & 1) && !(out & 0x3f3f) &&
+	nvxnu_step("tegra-gm20b: CLK step: %s, ret %d: GPCPLL_CFG %08x COEFF %08x DVFS1 %08x "
+		   "(M %u N %u PL %u) SEL_VCO %x GPC2CLK_OUT %08x = %d kHz; ring %08x "
+		   "BUS_INTR %08x\n",
+		   what, ret, cfg, coeff, dvfs1, coeff & 0xff, (coeff >> 8) & 0xff,
+		   (coeff >> 16) & 0x3f, vco, out, now, ring, bus);
+	return !ret && tgm_napll_cfg_running(cfg, dvfs1) && (vco & 1) && !(out & 0x3f3f) &&
 	       now == (int)khz && !badf(ring) && (ring & 1) && !(bus & 0x8);
 }
 
 int tgm_clk_raise(char *line, unsigned int len)
 {
 	struct nvkm_device *device = tgm_gpu.device;
+	u32 chipset = (tgm_gpu.boot0 >> 20) & 0x1ffu;
 	int speedo = tegra_sku_info.gpu_speedo_value;
 	int ceil_uv = tegra_gm20b_rail_max_uv();
 	int uv = 0;
-	int na_uv = 0;
-	int need_uv = 0;
 	int ret = 0;
 	int back = 0;
-	int i = 0;
-	int fits = 1;
-	const int margin = FIXED_PLL_MARGIN_PCT;
-	u32 khz = 0;
-	u32 best = 0;
-	u32 k = 0;
-	const long long mhz = GPU_MHZ;
+	u32 na_khz = 0;
+	u32 na_best = 0;
+	u32 fixed_khz = 0;
+	u32 fixed_best = 0;
+	u32 target_khz = 0;
+	struct tgm_napll_params params = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+	int try_napll = 0;
 
-	for (i = 0; (k = tegra_gm20b_dvfs_khz(i)); i++) {
-		int v = tegra_gm20b_dvfs_na_uv(k, speedo);
-		if (mhz > 0 && mhz < 10000 && mhz * 1000 > (long long)k - 1000 &&
-		    mhz * 1000 < (long long)k + 1000)
-			khz = k;
-		fits = fits && v > 0 && DIV_ROUND_UP(v * (100 + margin), 100) <= ceil_uv;
-		if (fits)
-			best = k; /* L4T drops every rate above the first one that does not fit */
-	}
-	if (!khz) {
-		nvxnu_log("tegra-gm20b: %lld MHz is not an L4T B01 GPU rate (76.8 MHz x "
-			  "1..16, 1267.2): GPU stays at "
-			  "%d kHz\n",
-			  mhz, nvkm_clk_read(device->clk, nv_clk_src_gpc));
+	tgm_napll.active = 0;
+	na_khz = tgm_napll_select_rate_khz(GPU_NAPLL_TARGET_KHZ, ceil_uv, 0, tegra_gm20b_dvfs_khz,
+					   tegra_gm20b_dvfs_na_uv, speedo, &na_best);
+	fixed_khz = tgm_napll_select_rate_khz(GPU_FIXED_TARGET_KHZ, ceil_uv, FIXED_PLL_MARGIN_PCT,
+					      tegra_gm20b_dvfs_khz, tegra_gm20b_dvfs_na_uv, speedo,
+					      &fixed_best);
+	/* platform.c carries T210B01 16nm CVB and 800 mV ceiling; gate NAPLL to C1 until B1 has its own. */
+	try_napll = chipset == TGM_CHIPSET_GM20B_C1 && na_khz > (u32)BOOT_KHZ &&
+		    tgm_napll_params_for_chipset(chipset, &params) == 0;
+	target_khz = try_napll ? na_khz : fixed_khz;
+
+	if (target_khz <= (u32)BOOT_KHZ) {
+		nvxnu_log("tegra-gm20b: no GPU rate above %u kHz fits %d uV ceiling (speedo %d): "
+			  "GPU stays at %d kHz\n",
+			  (u32)BOOT_KHZ, ceil_uv, speedo,
+			  nvkm_clk_read(device->clk, nv_clk_src_gpc));
 		return 0;
 	}
-	if (nvkm_clk_read(device->clk, nv_clk_src_gpc) == (int)khz)
-		return 0; /* the boot rate, or a retried stage 2 */
-	na_uv = tegra_gm20b_dvfs_na_uv(khz, speedo);
-	if (na_uv < 0) {
-		nvxnu_log("tegra-gm20b: %lld MHz refused: no B01 table voltage for GPU "
-			  "speedo %d; GPU stays at %d kHz\n",
-			  mhz, speedo, nvkm_clk_read(device->clk, nv_clk_src_gpc));
+	if (!try_napll && nvkm_clk_read(device->clk, nv_clk_src_gpc) == (int)target_khz)
 		return 0;
-	}
-	need_uv = DIV_ROUND_UP(na_uv * (100 + margin), 100);
-	if (need_uv > ceil_uv) {
-		nvxnu_log("tegra-gm20b: %lld MHz refused: %u kHz needs %d uV in "
-			  "fixed-frequency mode (B01 NA table %d "
-			  "uV + %d%%) for GPU speedo %d, above the %d uV rail ceiling; GPU stays "
-			  "at %d kHz (highest rate that fits: "
-			  "%u kHz)\n",
-			  mhz, khz, need_uv, na_uv, margin, speedo, ceil_uv,
-			  nvkm_clk_read(device->clk, nv_clk_src_gpc), best);
-		return 0;
-	}
+
 	ret = tegra_gm20b_rail_get_uv(&uv);
-	nvxnu_step("tegra-gm20b: CLK step: %lld MHz -> %u kHz, GPU speedo %d: B01 NA "
-		   "table %d uV, +%d%% fixed PLL "
-		   "%d uV, ceiling %d uV (highest rate that fits %u kHz); VDD_GPU %d uV (ret %d)\n",
-		   mhz, khz, speedo, na_uv, margin, need_uv, ceil_uv, best, uv, ret);
+	nvxnu_step("tegra-gm20b: CLK step: chip %03x speedo %d ceil %d uV (NA %u/%u kHz, "
+		   "fixed +%d%% %u/%u kHz); VDD_GPU %d uV (ret %d)\n",
+		   chipset, speedo, ceil_uv, na_khz, na_best, FIXED_PLL_MARGIN_PCT, fixed_khz,
+		   fixed_best, uv, ret);
 
-	/* voltage first */
-	if (!ret && uv < ceil_uv) {
-		ret = tegra_gm20b_rail_set_uv(
-			ceil_uv); /* MAX77812 write + readback, then the ramp delay */
+	/* Converge rail to ceil_uv before raising the clock; rail_set_uv clamps to GPU_UV_CEIL. */
+	if (!ret && uv != ceil_uv) {
+		ret = tegra_gm20b_rail_set_uv(ceil_uv);
 		if (!ret)
 			ret = tegra_gm20b_rail_get_uv(&uv);
-		nvxnu_step("tegra-gm20b: CLK step: VDD_GPU raised to %d uV (ret %d) before the "
+		nvxnu_step("tegra-gm20b: CLK step: VDD_GPU set to %d uV (ret %d) before the "
 			   "clock\n",
 			   uv, ret);
 	}
-	if (ret || uv < ceil_uv) {
-		nvxnu_log("tegra-gm20b: %lld MHz: VDD_GPU %d uV (ret %d), %d uV needed "
-			  "first; GPU stays at %d kHz\n",
-			  mhz, uv, ret, ceil_uv, nvkm_clk_read(device->clk, nv_clk_src_gpc));
+	if (ret || uv != ceil_uv) {
+		nvxnu_log("tegra-gm20b: %u kHz: VDD_GPU %d uV (ret %d), %d uV required; GPU stays "
+			  "at %d kHz\n",
+			  target_khz, uv, ret, ceil_uv, nvkm_clk_read(device->clk, nv_clk_src_gpc));
 		return 0;
 	}
 
-	/* then the clock */
-	nvxnu_step("tegra-gm20b: CLK step: GPCPLL_CFG %08x COEFF %08x = %d kHz -> %u kHz (NDIV "
-		   "slide, bypass, relock, slide)\n",
-		   nvkm_rd32(device, 0x137000), nvkm_rd32(device, 0x137004),
-		   nvkm_clk_read(device->clk, nv_clk_src_gpc), khz);
-	ret = clk_prog_khz(device, khz);
-	if (clk_state(device, "raised", ret, khz)) {
-		/* the one result line (nvxnu_step prints only when traced): the rate the PLL now holds, from
-		 * its own registers; the stats line measures it every window (clk_measure) */
-		u32 coeff = nvkm_rd32(device, 0x137004);
-		nvxnu_log("tegra-gm20b: GPU clock %d kHz (GPCPLL M %u N %u PL %u, "
-			  "%lld MHz), "
-			  "VDD_GPU %d uV\n",
-			  nvkm_clk_read(device->clk, nv_clk_src_gpc), coeff & 0xff,
-			  (coeff >> 8) & 0xff, (coeff >> 16) & 0x3f, mhz, uv);
-		return 0;
+	if (try_napll) {
+		struct tgm_napll_io io = napll_io(device);
+		u32 calib0 = tegra_gm20b_fuse_read(TGM_FUSE_RESERVED_CALIB0_OFF);
+
+		ret = tgm_napll_start(&io, chipset, calib0, uv, TGM_NAPLL_REF_KHZ, na_khz,
+				      &tgm_napll);
+		if (clk_state(device, "raised NAPLL", ret, na_khz)) {
+			u32 coeff = nvkm_rd32(device, TGM_GPCPLL_COEFF_R);
+			nvxnu_log("tegra-gm20b: GPU clock %d kHz (NAPLL %s M %u N %u PL %u, "
+				  "coeff %u ext_cal %d), VDD_GPU %d uV\n",
+				  nvkm_clk_read(device->clk, nv_clk_src_gpc),
+				  tgm_napll.fused ? "fused" : "self-cal", coeff & 0xff,
+				  (coeff >> 8) & 0xff, (coeff >> 16) & 0x3f,
+				  tgm_napll.dvfs.dfs_coeff, tgm_napll.dvfs.dfs_ext_cal, uv);
+			return 0;
+		}
+		tgm_napll_clear_dvfs(&io);
+		tgm_napll.active = 0;
+		nvxnu_log("tegra-gm20b: NAPLL %u kHz failed (ret %d); switching to fixed PLL %u "
+			  "kHz\n",
+			  na_khz, ret, fixed_khz);
 	}
 
-	/* not at the target: one way back to the M1 rate, at the same voltage */
-	back = clk_prog_khz(device, BOOT_KHZ);
-	if (clk_state(device, "back to the boot rate", back, BOOT_KHZ)) {
-		nvxnu_log("tegra-gm20b: %lld MHz: GPCPLL did not settle at %u kHz (ret "
-			  "%d); back at %u kHz\n",
-			  mhz, khz, ret, BOOT_KHZ);
+	if (fixed_khz > (u32)BOOT_KHZ) {
+		ret = clk_prog_fixed_khz(device, fixed_khz);
+		if (clk_state(device, "raised fixed", ret, fixed_khz)) {
+			u32 coeff = nvkm_rd32(device, TGM_GPCPLL_COEFF_R);
+			nvxnu_log("tegra-gm20b: GPU clock %d kHz (GPCPLL M %u N %u PL %u), "
+				  "VDD_GPU %d uV\n",
+				  nvkm_clk_read(device->clk, nv_clk_src_gpc), coeff & 0xff,
+				  (coeff >> 8) & 0xff, (coeff >> 16) & 0x3f, uv);
+			return 0;
+		}
+	}
+
+	back = clk_prog_fixed_khz(device, (u32)BOOT_KHZ);
+	if (clk_state(device, "back to the boot rate", back, (u32)BOOT_KHZ)) {
+		nvxnu_log("tegra-gm20b: GPCPLL did not settle at %u kHz (ret %d); back at %u "
+			  "kHz\n",
+			  target_khz, ret, (u32)BOOT_KHZ);
 		return 0;
 	}
 	scnprintf(line, len,
 		  "M2 FAIL GPCPLL to %u kHz (ret %d) and back to %u kHz (ret %d): GPCPLL_CFG %08x "
-		  "COEFF %08x "
-		  "SEL_VCO %x",
-		  khz, ret, BOOT_KHZ, back, nvkm_rd32(device, 0x137000),
-		  nvkm_rd32(device, 0x137004), nvkm_rd32(device, 0x137100));
+		  "COEFF %08x SEL_VCO %x",
+		  target_khz, ret, (u32)BOOT_KHZ, back, nvkm_rd32(device, TGM_GPCPLL_CFG_R),
+		  nvkm_rd32(device, TGM_GPCPLL_COEFF_R), nvkm_rd32(device, TGM_SEL_VCO_R));
 	return -EIO;
 }
 
@@ -243,7 +271,8 @@ static int pl_switch(u32 pl)
 	}
 	back = nvkm_rd32(device, GPCPLL_COEFF_R);
 	return ((back >> 16) & 0x3f) == pl &&
-			       (nvkm_rd32(device, GPCPLL_CFG_R) & 0x20001) == 0x20001 &&
+			       tgm_napll_cfg_running(nvkm_rd32(device, GPCPLL_CFG_R),
+						     nvkm_rd32(device, TGM_GPCPLL_DVFS1_R)) &&
 			       (nvkm_rd32(device, SEL_VCO_R) & 1) &&
 			       !(nvkm_rd32(device, GPC2CLK_OUT_R) & 0x3f3f)
 		       ? 0

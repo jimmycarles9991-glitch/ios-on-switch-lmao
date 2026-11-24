@@ -20,8 +20,11 @@
 #include <sys/errno.h>
 #include <sys/reboot.h>
 #include <sys/sysctl.h>
+#include <switch/prefetch_vm.h>
 #include <switch/shutdown.h>
 #include "SwitchPowerTrail.h"
+
+extern void switch_gpu_pack_shutdown(void) __attribute__((weak));
 
 #if DEVELOPMENT || DEBUG
 #define DEADLINE_S 25u
@@ -75,6 +78,10 @@ static unsigned switch_shutdown_mark(const char *what)
 
 void switch_shutdown_begin(int howto)
 {
+    if (switch_prefetch_shutdown != NULL)
+        switch_prefetch_shutdown();
+    if (switch_gpu_pack_shutdown != NULL)
+        switch_gpu_pack_shutdown();
     shutdown_howto = howto;
     switch_power_trail("reboot(%#x) began", howto);
     switch_shutdown_mark_sync(SWITCH_MARK_HALT_BEGAN);
@@ -125,7 +132,12 @@ SYSCTL_PROC(_debug, OID_AUTO, switch_watchdog_bench, CTLTYPE_INT | CTLFLAG_WR | 
             0, switch_watchdog_bench, "I", "SoC watchdog bench: seconds to a reset, never petted");
 #else
 void switch_shutdown_begin(int howto __unused)
-{}
+{
+    if (switch_prefetch_shutdown != NULL)
+        switch_prefetch_shutdown();
+    if (switch_gpu_pack_shutdown != NULL)
+        switch_gpu_pack_shutdown();
+}
 
 void switch_shutdown_step(const char *what __unused, const void *pc __unused, uint64_t elapsed __unused)
 {}

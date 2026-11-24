@@ -268,6 +268,7 @@ int32_t CodeGen::make(const Prepared &p, std::string &entry, std::string &why)
     if (!a.called)
         return why = "the system's Metal compiler did not answer", TegraGM20BCompileFailed;
     if (a.refused) {
+        why = a.log;
         entry = gm20b::encodeLibraryEntry(p.key, nullptr, a.log);
         return TegraGM20BCompileRefused;
     }

@@ -38,10 +38,11 @@ MTLAutoreleasedRenderPipelineReflection gm20bRenderReflection(SwitchMetalPipelin
     return nil;
 }
 
-uint32_t gm20bComputeTexturesWritten(SwitchMetalComputeState *s)
+static void readTextureSlots(SwitchMetalComputeState *s)
 {
     std::call_once(s->_writtenOnce, [s] {
         s->_texturesWritten = ~0u;
+        s->_texturesFloat = 0;
         const std::string key = gm20b::computeStateKey(s->_air, s->_constants, s->_maxThreads, s->_multipleOfWidth);
         uint32_t length = 0;
         std::string blob, why;
@@ -51,10 +52,23 @@ uint32_t gm20bComputeTexturesWritten(SwitchMetalComputeState *s)
             length = uint32_t(blob.size());
         }
         gm20b::ReflectionView v;
-        if (bytes && gm20b::readReflection(bytes, length, gm20b::kReflectionComputeStages, v))
+        if (bytes && gm20b::readReflection(bytes, length, gm20b::kReflectionComputeStages, v)) {
             s->_texturesWritten = gm20b::kernelTexturesWritten(v);
+            s->_texturesFloat = gm20b::kernelTexturesFloat(v);
+        }
     });
+}
+
+uint32_t gm20bComputeTexturesWritten(SwitchMetalComputeState *s)
+{
+    readTextureSlots(s);
     return s->_texturesWritten;
+}
+
+uint32_t gm20bComputeTexturesFloat(SwitchMetalComputeState *s)
+{
+    readTextureSlots(s);
+    return s->_texturesFloat;
 }
 
 bool gm20bComputeReflection(SwitchMetalComputeState *s, MTLPipelineOption o,

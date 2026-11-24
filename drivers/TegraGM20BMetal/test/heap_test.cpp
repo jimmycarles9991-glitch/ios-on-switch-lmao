@@ -103,4 +103,54 @@ TEST(GM20BHeap, ExplicitPlacementChecksExactBoundsAlignmentAndOverflow)
     EXPECT_FALSE(automatic.placeAt(256, 256, 0));
 }
 
+TEST(GM20BHeap, KindRangesCrossOnlyOverlappingDifferentKinds)
+{
+    constexpr uint32_t kKindPitch = 0, kKindColor = 0xfe, kKindZeta = 0xdb;
+
+    gm20b::HeapPlacement placement(128 * kKiB, true);
+    bool crossed = true;
+    ASSERT_TRUE(placement.placeAt(16 * kKiB, 512, 0, kKindColor, &crossed));
+    EXPECT_FALSE(crossed);
+    EXPECT_FALSE(placement.multiKind());
+
+    ASSERT_TRUE(placement.placeAt(16 * kKiB, 512, 0, kKindColor, &crossed));
+    EXPECT_FALSE(crossed) << "aliasing under the same PTE kind does not cross";
+    EXPECT_FALSE(placement.multiKind());
+
+    ASSERT_TRUE(placement.placeAt(16 * kKiB, 512, 16 * kKiB, kKindPitch, &crossed));
+    EXPECT_FALSE(crossed) << "side-by-side GOB-aligned placements of different kinds do not overlap";
+    EXPECT_FALSE(placement.multiKind());
+
+    ASSERT_TRUE(placement.placeAt(16 * kKiB, 256, 0, kKindPitch, &crossed));
+    EXPECT_TRUE(crossed) << "overlapping a block-linear range with a pitch buffer crosses kinds";
+    EXPECT_TRUE(placement.multiKind());
+
+    ASSERT_TRUE(placement.placeAt(256, 256, 32 * kKiB, kKindColor, &crossed));
+    EXPECT_FALSE(crossed);
+    ASSERT_TRUE(placement.placeAt(256, 256, 32 * kKiB + 256, kKindPitch, &crossed));
+    EXPECT_TRUE(crossed) << "two halves of one 512-byte GOB share L2 GOB state";
+
+    gm20b::HeapPlacement automatic(64 * kKiB);
+    uint64_t a = 0, b = 0, c = 0;
+    ASSERT_TRUE(automatic.place(16 * kKiB, kBlock, a, kKindColor, &crossed));
+    EXPECT_FALSE(crossed);
+    ASSERT_TRUE(automatic.place(16 * kKiB, kBlock, b, kKindZeta, &crossed));
+    EXPECT_FALSE(crossed);
+    EXPECT_FALSE(automatic.multiKind());
+    automatic.release(a, 16 * kKiB);
+    ASSERT_TRUE(automatic.place(16 * kKiB, kBlock, c, kKindPitch, &crossed));
+    EXPECT_EQ(c, a);
+    EXPECT_TRUE(crossed) << "reusing released automatic-heap memory under a different kind crosses";
+    EXPECT_TRUE(automatic.multiKind());
+
+    gm20b::KindRanges uses;
+    uses.record(0, 4096, kKindColor, 1);
+    uses.record(4096, 4096, kKindZeta, 3);
+    EXPECT_TRUE(uses.overlapsOther(0, 4096, kKindPitch, 1));
+    EXPECT_FALSE(uses.overlapsOther(0, 4096, kKindPitch, 2));
+    uses.pruneBefore(2);
+    EXPECT_FALSE(uses.overlapsOther(0, 4096, kKindPitch, 0));
+    EXPECT_TRUE(uses.overlapsOther(4096, 4096, kKindPitch, 2));
+}
+
 }  // namespace

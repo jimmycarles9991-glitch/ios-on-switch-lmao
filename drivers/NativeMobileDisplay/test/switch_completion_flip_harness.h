@@ -269,12 +269,14 @@ inline void thread_wakeup(event_t)
     ++gThreadWakeups;
 }
 
+inline uint64_t gClock = 1000;
+inline uint64_t gPanelStepTicks = 0;  // how far the clock moves while TegraPanel's frame-end step runs
+
 inline void tegra_panel_frame_end_filter()
 {
     ++gPanelFrameEnds;
+    gClock += gPanelStepTicks;
 }
-
-inline uint64_t gClock = 1000;
 
 inline uint64_t mach_absolute_time()
 {
@@ -490,6 +492,18 @@ struct Display : OSObject {
     uint64_t tapeFrames = 0, feLast = 0, vsyncInterval = 0, fePeriodSum = 0, fePeriodMin = UINT64_MAX, fePeriodMax = 0;
     TegraDisplayColor *color = nullptr;
     IOFilterInterruptEventSource vblankSource;
+    std::vector<std::pair<uint64_t, uint64_t>> timelineVsyncs;  // noteTimelineVsync's (stamp, period)
+
+    uint64_t refreshTicks() const
+    {
+        return vsyncInterval ? vsyncInterval : 16667;
+    }
+
+    void noteTimelineVsync(uint64_t stamp, uint64_t interval)
+    {
+        timelineVsyncs.emplace_back(stamp, interval);
+    }
+
     // The GPU's completion (SwitchGpuDoneDisplay.h) and the deadlines (SwitchFlipDeadlineDisplay.h).
     static constexpr unsigned kFlipDeadlineMS = 100, kGpuCopyDeadlineMS = 1000;
     IOInterruptEventSource gpuDoneStore;

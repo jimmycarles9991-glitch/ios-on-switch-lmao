@@ -280,10 +280,14 @@ void AGXDeviceUserClient::noteBind(uint8_t op, uint64_t va, uint64_t range, cons
 	if (bo) {
 		n.handle = bo->handle;
 		n.bo_bytes = bo->bytes;
-		n.origin = bo->wired     ? TGM_BIND_IMPORT
-			   : bo->chunked ? TGM_BIND_COMPRESSIBLE
-			   : bo->pool_va ? TGM_BIND_POOL
-					 : TGM_BIND_ALLOC;
+		if (bo->wired)
+			n.origin = TGM_BIND_IMPORT;
+		else if (bo->chunked || bo->smmuCompressible)
+			n.origin = TGM_BIND_COMPRESSIBLE;
+		else if (bo->pool_va)
+			n.origin = TGM_BIND_POOL;
+		else
+			n.origin = TGM_BIND_ALLOC;
 		n.surface = bo->coh ? tgm_coh_surface_id(bo->coh) : 0;
 	}
 	for (uint32_t i = 0; i < kMaxChannels; i++)

@@ -150,7 +150,7 @@ static inline void switch_stall_rank(struct switch_stall_top *top, unsigned int 
     top[at] = entry;
 }
 
-/* block_hint.h's thread_snapshot_wait_flags, by value. */
+/* block_hint.h's thread_snapshot_wait_flags, by value (xnu-12377's list, which extends xnu-10063's). */
 static inline const char *switch_stall_wait_name(unsigned int hint)
 {
     static const char *const names[] = {
@@ -175,11 +175,71 @@ static inline const char *switch_stall_wait_name(unsigned int hint)
         "sleep with inheritor",
         "eventlink",
         "compressor",
+        "parked bound workqueue",
+        "page busy",
+        "page list request in progress",
+        "pager ready",
+        "paging activity",
+        "mapping in progress",
+        "memory blocked",
+        "paging in progress",
+        "page-in throttle",
+        "exclave core",
+        "exclave kit",
+        "VM entry exclusive",
+        "VM entry shared",
+        "VM entry unwire",
     };
     return hint < sizeof(names) / sizeof(names[0]) ? names[hint] : "unknown wait";
 }
 
-#define SWITCH_STALL_WAIT_NAMES 21u
+#define SWITCH_STALL_WAIT_NAMES 35u
+
+struct switch_stall_owner {
+    int pid;
+    uint64_t tid; /* 0: a process, not a thread */
+    const char *via;
+};
+
+/* A turnstile walk that reached any thread (including kernel_task, pid 0) must not fall through to port lookup. */
+static inline bool switch_stall_owner_is_thread(const struct switch_stall_owner *owner)
+{
+    return owner->tid != 0;
+}
+
+static inline bool switch_stall_owner_known(const struct switch_stall_owner *owner)
+{
+    return owner->pid != 0 || owner->tid != 0;
+}
+
+static inline bool switch_stall_hop_present(const struct switch_stall_owner *owner, bool locked)
+{
+    return switch_stall_owner_known(owner) || locked;
+}
+
+/* A kernel rwlock wait (read, write or upgrade): its wait event is the lock's address with low bits set. */
+static inline bool switch_stall_rwlock_wait(unsigned int hint)
+{
+    return hint >= 0x07 && hint <= 0x09;
+}
+
+/*
+ * The lock a kernel rwlock wait's event names (hint: the wait's block hint).
+ * lck_rw_old_t (all of xnu-10063, and default lck_rw_t including APFS/BSD/IOKit on xnu-12377 where
+ * XNU_LCK_RW_DEFAULT_TO_NEW is 0) waits on untyped lock + 2 (read) or lock + 1 (write/upgrade).
+ * Explicit lck_rw_new_t locks on xnu-12377 (`allow_typed`) wait on WAITQ_TYPED_EVENT64(hint, lock) + 1..3, which XORs
+ * `hint` into bits [48:55] where canonical kernel pointers hold 0xff (or 0x00 for bit 63 clear, waitq.h).
+ */
+static inline uintptr_t switch_stall_rwlock_of(uint64_t event, unsigned int hint, bool allow_typed)
+{
+    const uint64_t mask = 0xffull << 48;
+    const uint64_t sign_tag = (event >> 63) != 0 ? mask : 0;
+
+    if (allow_typed && (event & mask) != sign_tag) {
+        return (uintptr_t)(((event & ~mask) | sign_tag) - (hint + 1u - 0x07));
+    }
+    return (uintptr_t)(event - (hint == 0x07 ? 2u : 1u));
+}
 
 /* A user address as the host can name it: dyld shared cache (unslid) or main executable + offset. */
 enum switch_stall_where {

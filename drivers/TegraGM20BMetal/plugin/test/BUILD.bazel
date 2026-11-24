@@ -12,6 +12,7 @@
 #   core_image_probe_test   the selected IPSW's Core Image libraries: the kernels Core Image asks ci_stdlib for first are
 #                           ci_filters', so a real device misses there too
 #   switch_compile_reply_test  SwitchCompileReply.h: the Metal compiler's reply envelope
+#   switch_frame_timeline_test SwitchFrameTimeline.h: which command buffers get a SwitchFrameUser line
 #
 #   bazel test //drivers/TegraGM20BMetal/plugin/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -113,4 +114,14 @@ host_test(
         "-framework",
         "Foundation",
     ],
+)
+
+host_test(
+    name = "switch_frame_timeline_test",
+    srcs = [
+        "switch_frame_timeline_test.cpp",
+        "//drivers/TegraGM20BMetal:plugin/SwitchFrameTimeline.h",
+    ],
+    copts = ["-Idrivers/TegraGM20BMetal/plugin"],
+    cxx_std = "c++17",
 )

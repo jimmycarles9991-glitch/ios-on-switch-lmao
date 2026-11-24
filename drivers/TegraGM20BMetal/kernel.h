@@ -36,6 +36,8 @@ struct Bo {
     bool vaReserved =
         false;  // bound inside a reservation (bindImportAt): the VA is the reservation's, not freed with it
     bool allocated = false;  // a BoAlloc's (Kernel::allocatedBytes counts it), not an import
+    bool control = false;    // from the control reserve (Kernel::controlMappedBytes counts its mapping)
+    bool parked = false;
 };
 
 // The offset into `bo` of the CPU bytes [cpu, cpu + bytes): bo.cpu is the CPU address of bo.va, which lies bo.va - bo.vaBase
@@ -113,9 +115,11 @@ public:
     }
 
     // `control`: from the kernel's control reserve (TegraGM20BBoControl, coherent kind-0 memory only). `cpu`: mapped for the
-    // CPU at bo.cpu; an IOKit mapping counts whole in the task's phys_footprint (iokit_mapped), touched or not.
+    // CPU at bo.cpu; an IOKit mapping counts whole in the task's phys_footprint (iokit_mapped), touched or not. `at`: bound
+    // at that VA of a reservation (reserveVa), which freeing the BO leaves to the reservation; 0: a VA of its own.
     bool alloc(uint64_t bytes, bool coherent, Bo &bo, uint32_t kind = 0, uint64_t align = 0x10000,
-               bool gpuVolatile = false, bool control = false, bool cpu = true);
+               bool gpuVolatile = false, bool control = false, bool cpu = true, uint64_t at = 0,
+               bool systemOnly = false);
 
     // Memory only the GPU reads and writes (shader local memory): no CPU mapping
     bool allocGpu(uint64_t bytes, Bo &bo)
@@ -144,7 +148,7 @@ public:
     // texture renders into or stores to it. TegraGM20BLayoutTiled, TegraGM20BLayoutOtherShape, or 0 (pitch; also without
     // the method).
     uint32_t surfaceLayout(const Bo &bo, uint32_t width, uint32_t height, uint32_t bpp, uint32_t bytesPerRow,
-                           bool writes, tgm_layout *canonical = nullptr);
+                           bool writes, tgm_layout *canonical = nullptr, uint32_t *kind = nullptr);
     int nativeSurfaceView(const Bo &source, Bo &view, TegraGM20BAbiNativeSurfaceViewReply &layout);
     bool bindImport(void *addr, Bo &bo, uint32_t kind);
     // BoAlloc Compressible (comp.h), never CPU-mapped; safe beside the other calls (it may zero pages a free left
@@ -172,6 +176,24 @@ public:
     {
         return (info_.flags & TegraGM20BInfoSparse) != 0;
     }
+
+    bool supportsPackImage() const
+    {
+        return (info_.flags & TegraGM20BInfoPackImage) != 0;
+    }
+
+    bool supportsBoPark() const
+    {
+        return (info_.flags & TegraGM20BInfoBoPark) != 0;
+    }
+
+    int park(uint64_t handle, bool guardNone);
+    int unpark(uint64_t handle, uint64_t &address, uint64_t &bytes, uint32_t &status);
+    bool mapAt(uint32_t token, uint64_t bytes, uint64_t fixedVa, bool readOnly = false);
+    void unmap(uint32_t token, uint64_t address);
+
+    int packImageMap(const TegraGM20BAbiPackCpuRange *cpuRanges, uint32_t cpuRangeCount,
+                     TegraGM20BAbiPackImageMapReply &reply);
 
     // One VmBind: `bo` whole at `va`, a reservation's granule, and [va + bo.bytes, va + bytes) sparse (whole pages). BoFree
     // unbinds only the BO's own binding: unbind [va, va + bytes) before releasing the reservation
@@ -283,6 +305,11 @@ public:
         return (info_.flags & TegraGM20BInfoSubmitAddress) != 0;
     }
 
+    bool volatileWrites() const
+    {
+        return volatileWrites_;
+    }
+
     // Internal fences a job may carry (TegraGM20BPushFence); 0: each fence is a submission of its own.
     uint32_t maxFences() const
     {
@@ -326,6 +353,12 @@ public:
         return allocated_.load(std::memory_order_relaxed);
     }
 
+    // The CPU mappings of the connection's control memory (allocControl) it holds
+    uint64_t controlMappedBytes() const
+    {
+        return controlMapped_.load(std::memory_order_relaxed);
+    }
+
 private:
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     std::atomic<uint64_t> jobs_{0}, released_{0};
@@ -339,12 +372,12 @@ private:
     int call(uint32_t method, const void *in, size_t inSize, void *out, size_t outSize);
     void notResponding(uint32_t channel, uint32_t opened);
     bool map(uint32_t token, bool readOnly, uint64_t &address, uint64_t &bytes);
-    void unmap(uint32_t token, uint64_t address);
     bool bind(uint64_t va, uint64_t handle, uint64_t range, uint32_t kind, bool gpuVolatile = false);
     uint64_t allocVa(uint64_t bytes, uint64_t align);
     void freeVa(uint64_t va, uint64_t bytes);
     uint32_t conn_ = 0;
     bool tunnel_ = false;
+    bool volatileWrites_ = false;
     FreeObserver *freeObserver_ = nullptr;
     // A SurfaceWrites failed: imports stop saying the GPU only samples them.
     std::atomic<bool> importsWritten_{false};
@@ -362,6 +395,9 @@ private:
     std::shared_ptr<SharedEvents> events_;
     std::atomic<uint64_t> vaUsed_{0};
     std::atomic<uint64_t> allocated_{0};
+    // Kept by the threads that make and free control memory (the open, the submit worker's rings), read by the debug
+    // give-back line on another: a count of their own, as allocated_ is, not their BOs' fields
+    std::atomic<uint64_t> controlMapped_{0};
     std::string err_;
     mutable gm20b::Mutex errorLock_;
 };

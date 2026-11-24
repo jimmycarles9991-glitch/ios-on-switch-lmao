@@ -34,8 +34,19 @@ struct a64x_pt_result {
     uint8_t cdhash_in[A64X_CDHASH_SIZE], cdhash_out[A64X_CDHASH_SIZE];
 };
 
+struct a64x_pt_edit {
+    uint64_t fileoff;
+    const uint8_t *stock;
+    size_t stock_len;
+    size_t at;
+    const uint8_t *patched;
+    size_t patched_len;
+};
+
 /* out: m->size bytes, the slice translated (or copied unchanged). 0, or -1 with a message (unreadable slice). */
 int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_result *r, char *err, size_t errlen);
+int a64x_pretranslate_edits(const struct a64x_macho *m, uint8_t *out, const struct a64x_pt_edit *edits, size_t nedits,
+                            struct a64x_pt_result *r, char *err, size_t errlen);
 
 /*
  * A translated slice against its original, from the bytes: only the executable segment's code words, its tail,
@@ -51,6 +62,8 @@ struct a64x_pt_check {
 };
 
 long a64x_pt_verify(const struct a64x_macho *m, const uint8_t *out, struct a64x_pt_check *v, char *err, size_t errlen);
+long a64x_pt_verify_edits(const struct a64x_macho *m, const uint8_t *out, const struct a64x_pt_edit *edits,
+                          size_t nedits, struct a64x_pt_check *v, char *err, size_t errlen);
 
 /*
  * The code map of a slice translated offline (x->data, x->npages): the loader's data islands, plus the trailing words

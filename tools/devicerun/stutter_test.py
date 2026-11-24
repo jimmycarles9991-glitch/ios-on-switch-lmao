@@ -37,6 +37,11 @@ POWER = (
     'mean 88 us, boot max {max} us, {late} late; EMC 6 moves 204:61.0% 1600:39.0%, {raises} raises: hint to top '
     '400/{emc} us (BPMP max 300 us); battery -900 mA x 4100 mV = -3690 mW'
 )
+EMC_WORK = (
+    'SwitchPower: 10000 ms: cpu0 c7 0.0% (0, 0 skipped, 0 frame wakes) wfi 21.0% busy 79.0%; EMC 2 moves 204:3.1% '
+    '1331:0.4% 1600:96.5%, 1 raises: hint to top 700/700 us (BPMP max 650 us), cpu ms 204:4 1331:0 1600:27311, '
+    '{unheld} work windows unheld ({late} late), {refused} refused; battery -900 mA x 4100 mV = -3690 mW'
+)
 RENDER = (
     'SwitchFrameRender: vsync 1266197624: woke 140 us after it; first submit 6330 us (cpu 5200, blocked 300 us '
     'in 2); swap 9730 us (cpu 8000, blocked 900 us in 4, waiting for a core {wait} us); longest block 600 us, '
@@ -104,6 +109,17 @@ class Stutter(unittest.TestCase):
         self.assertEqual(got['stutter.emc-raise'], FAIL)
         self.assertEqual(got['stutter.c7-exit-max'], FAIL)
         self.assertEqual(got['stutter.c7-exit-late'], FAIL)
+
+    def test_cpu_work_on_a_slow_emc(self):
+        got = verdicts(EMC_WORK.format(unheld=2, late=0, refused=0))
+        self.assertEqual(got['stutter.emc-work-late'], PASS)
+        self.assertEqual(got['stutter.emc-refused'], PASS)
+        got = verdicts(EMC_WORK.format(unheld=9, late=4, refused=1))
+        self.assertEqual(got['stutter.emc-work-late'], FAIL)
+        self.assertEqual(got['stutter.emc-refused'], FAIL)
+        self.assertEqual(
+            verdicts(POWER.format(wakes=1, max=126, late=0, raises=3, emc=900))['stutter.emc-work-late'], NO_DATA
+        )
 
     def test_render_thread_and_clocks(self):
         got = verdicts(RENDER.format(wait=150), FRAME.format(mhz=1785))

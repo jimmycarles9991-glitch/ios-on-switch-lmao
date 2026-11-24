@@ -11,6 +11,7 @@
 #include <vector>
 #include "compute_key.h"
 #include "variant.h"
+#include "word_wait.h"
 #include "dispatch_regions.h"
 
 namespace gm20b {
@@ -206,27 +207,58 @@ public:
         return state();
     }
 
+    void observeWait(std::function<void()> observer)
+    {
+        ready_.observeWait(std::move(observer));
+    }
+
+    bool waitPending()
+    {
+        return ready_.waitPending();
+    }
+
+    void setOwner(uint32_t owner)
+    {
+        owner_.setOwner(owner);
+        if (owner) {
+            ready_.setWait([this] {
+                return owner_.waitOnce([this] {
+                    return state() != State::Pending;
+                });
+            });
+        }
+    }
+
     void publish(ComputeKernelResult<T> result)
     {
         if (claimed_.test_and_set(std::memory_order_relaxed))
             return;
         result_ = result;
         ready_.publish(&result_);
+        owner_.clear();
     }
 
     struct Run {
         std::shared_ptr<ComputeKernelJob> job;
         ComputeKernelResult<T> result{nullptr, true};
 
+        explicit Run(std::shared_ptr<ComputeKernelJob> pending) : job(std::move(pending))
+        {
+            if (job)
+                job->setOwner(OwnedWord::currentOwner());
+        }
+
         ~Run()
         {
-            job->publish(result);
+            if (job)
+                job->publish(result);
         }
     };
 
 private:
     ComputeKernelResult<T> result_;
     Variant<ComputeKernelResult<T>> ready_;
+    OwnedWord owner_;
     std::atomic_flag claimed_ = ATOMIC_FLAG_INIT;
 };
 
@@ -301,6 +333,21 @@ public:
             for (uint8_t i = 0; i < count; ++i)
                 jobs[i]->observe(observer);
         return state();
+    }
+
+    void observeWait(const std::function<void()> &observer)
+    {
+        if (observer)
+            for (uint8_t i = 0; i < count; ++i)
+                jobs[i]->observeWait(observer);
+    }
+
+    bool waitPending() const
+    {
+        for (uint8_t i = 0; i < count; ++i)
+            if (jobs[i]->state() == State::Pending && jobs[i]->waitPending())
+                return true;
+        return false;
     }
 };
 

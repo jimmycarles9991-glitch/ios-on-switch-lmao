@@ -353,9 +353,11 @@ refresh:
 			lastAdmissionCookies_[slot] = record.admission;
 		}
 	}
+	job.phases.end(TGM_SUBMIT_REFRESH);
 	ownershipBusy = error == -16;
 	ownershipFailed = error == -5;
 	switch_gpu_chan_submit_enter(chan);
+	job.phases.end(TGM_SUBMIT_ENTER);
 	for (; !error;) {
 		dependencies = 0;
 		const bool runs = count || (head.flags & TegraGM20BJobHasEvents);
@@ -367,6 +369,7 @@ refresh:
 							      leaseCount, job.guards, guardCount,
 							      &completion, &transaction);
 			backings = transaction.count;
+			job.phases.end(TGM_SUBMIT_BEGIN);
 			ownershipBusy = error == -16;
 			if (!error) {
 				stage = SwitchGpuRefusal::WriteRanges;
@@ -395,6 +398,7 @@ refresh:
 				ownershipFailed = error == -5;
 				if (error)
 					break;
+				job.phases.end(TGM_SUBMIT_LOCK);
 				continue;
 			}
 			error = captured;
@@ -445,6 +449,7 @@ refresh:
 		error = switch_gpu_chan_wait_submission_room(
 			chan, pushes, count, dependencies + siblingCount + events->wordCount(),
 			profile);
+		job.phases.end(TGM_SUBMIT_ROOM);
 		if (error)
 			break;
 	}
@@ -495,7 +500,7 @@ refresh:
 	job.phases.end(TGM_SUBMIT_COMMIT);
 #if TGM_STATS
 	switch_gpu_job_submitted(job.phases.ns, set != nullptr, head.shared_count, backings,
-				 siblingCount);
+				 siblingCount, critical_);
 #endif
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SUBMIT_JOB, 1);
 	switch_gpu_path_taken(SWITCH_GPU_PATH_SET_JOB, set ? 1 : 0);

@@ -110,6 +110,11 @@
 
 extern "C" OSReturn switch_kernel_classes(void (*initialize)());
 extern "C" void switch_joycon_hid_static_init(void) __asm__("__GLOBAL__sub_I_SwitchJoyConHID.cpp");
+#if SWITCH_RECORDER
+// XNU kernel/switch/recorder (--//kernel:recorder): the owner saw a hitch; freeze the ring into a dump.
+extern "C" __attribute__((weak)) void switch_recorder_mark(void)
+{}
+#endif
 
 namespace {
 constexpr uint32_t kNintendo = 0x057e;
@@ -454,6 +459,11 @@ public:
         // Home down with the panel off: a wake source (journal, wake guarantee); the Menu press below does the waking.
         if ((now & kMenu) && !(posted & kMenu))
             switch_wake_event(SWITCH_WAKE_RAIL_HOME);
+#if SWITCH_RECORDER
+        // Capture down: the screenshot it takes stays.
+        if ((now & kSnapshot) && !(posted & kSnapshot))
+            switch_recorder_mark();
+#endif
         posted = now;
         uint8_t *bytes = static_cast<uint8_t *>(report->getBytesNoCopy());
         bytes[0] = 1;

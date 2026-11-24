@@ -413,7 +413,7 @@ TEST_F(GM20BTransfer, ByteCopyMovesExactlyItsBytesWithoutWaitingAndNamesBothRang
         EXPECT_EQ(gpu.waits, waits);
         EXPECT_EQ(gpu.visibility, gm20b::JobVisibility::Internal);
         EXPECT_FALSE(held.expired());
-        EXPECT_LE(gpu.jobs.back().words, gm20b::kCopyBytesWords);
+        EXPECT_LE(gpu.jobs.back().words, gm20b::kCopyBytesWords + SWITCH_GM20B_KIND_SWITCH_WORDS);
         ASSERT_EQ(gpu.uses.size(), 3u);
         EXPECT_EQ(gpu.uses[1].handle, from);
         EXPECT_EQ(gpu.uses[1].access, uint32_t(TegraGM20BSurfaceGpuAddress | TegraGM20BSurfaceRead |
@@ -424,7 +424,9 @@ TEST_F(GM20BTransfer, ByteCopyMovesExactlyItsBytesWithoutWaitingAndNamesBothRang
                   uint32_t(TegraGM20BSurfaceGpuAddress | TegraGM20BSurfaceWrite | TegraGM20BSurfaceRange));
         EXPECT_EQ(gpu.uses[2].reserved, bytes);
         gpu.launches.clear();
+        const uint32_t switches = gpu.kindSwitches;
         gpu.complete(gpu.sequence);
+        EXPECT_EQ(gpu.kindSwitches, switches + 1) << "the pool image's kind-0 fill ends with a kind switch";
         ASSERT_EQ(gpu.launches.size(), size_t(bytes / line > 0) + size_t(bytes % line > 0));
         EXPECT_EQ(gpu.launches[0] & 3, uint32_t(NVB0B5_LAUNCH_DMA_DATA_TRANSFER_TYPE_NON_PIPELINED));
         if (gpu.launches.size() > 1)

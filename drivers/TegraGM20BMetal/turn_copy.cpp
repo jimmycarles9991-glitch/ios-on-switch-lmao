@@ -171,8 +171,9 @@ Texture *CommandBuffer::turnScratch(uint32_t format, uint32_t width, uint32_t he
     m.samples = uint8_t(samples);
     m.layers = std::max(layers, 1u);
     m.memoryless = true;
-    std::lock_guard<gm20b::Mutex> l(dev_->lock_);
-    Texture *b = dev_->backing(m, tag, true, false);
+    Device::DeferredFrees deferred(*dev_);
+    std::unique_lock<gm20b::Mutex> l(dev_->lock_);
+    Texture *b = dev_->backing(l, deferred, m, tag, true, false);
     if (b)
         backings_.push_back(b);
     return b;

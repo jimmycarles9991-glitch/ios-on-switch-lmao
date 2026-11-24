@@ -73,26 +73,29 @@ public:
 		}
 		late = 0;
 		deadlineAt = 0;
-		switch_gpu_backing_token watched = tokens[0];
-		for (const auto &k : keptJobs)
-			if (watched.engine == SWITCH_GPU_ENGINE_PROMISE &&
-			    k.first == promise(watched))
-				watched = k.second;
-		if (watched.engine == SWITCH_GPU_ENGINE_PROMISE) {
-			switch_gpu_present_watch_promise(&watch, &watched);
+		switch_gpu_backing_token watched[SWITCH_GPU_PRESENT_WATCH_MAX] = {};
+		for (uint32_t i = 0; i < count; ++i)
+			watched[i] = tokens[i];
+		if (count == 1 && watched[0].engine == SWITCH_GPU_ENGINE_PROMISE)
+			for (const auto &k : keptJobs)
+				if (k.first == promise(watched[0]))
+					watched[0] = k.second;
+		uint64_t gen = 0;
+		if (count == 1 && watched[0].engine == SWITCH_GPU_ENGINE_PROMISE) {
+			gen = switch_gpu_present_watch_promise(&watch, &watched[0]);
 			parked = true;
 		} else {
 			deadlineAt = clock + kPresentNs;
-			view = true;
-			switch_gpu_present_watch_arm(&watch, &watched);
+			view = count == 1;
+			gen = switch_gpu_present_watch_arm_many(&watch, watched, count);
 		}
 		if (afterArm)
 			afterArm();
 		if (asks)
-			needTokens(&watched, 1);
+			needTokens(watched, count);
 		if (afterAsk)
 			afterAsk();
-		if (physical(&watch.token))
+		if (switch_gpu_present_watch_check(&watch, gen, watched, count, physical))
 			work();
 		return 0;
 	}
@@ -136,8 +139,15 @@ public:
 	// writes window A once the watched producer is complete and visible, once per view
 	void filter()
 	{
-		if (!view || filterCalled || watch.token.engine != SWITCH_GPU_ENGINE_GM20B ||
-		    physical(&watch.token) != 1)
+		switch_gpu_backing_token tokens[SWITCH_GPU_PRESENT_WATCH_MAX] = {};
+		uint32_t count = 0;
+
+		if (!view || filterCalled)
+			return;
+		if (switch_gpu_present_watch_snapshot(&watch, tokens, &count, nullptr) ==
+			    SWITCH_GPU_PRESENT_WATCH_IDLE ||
+		    count != 1 || tokens[0].engine != SWITCH_GPU_ENGINE_GM20B ||
+		    physical(&tokens[0]) != 1)
 			return;
 		filterCalled = true;
 		++filterFlips;
@@ -167,7 +177,10 @@ public:
 	// tgm_chan_del: no pass of the channel comes after it
 	void teardown(const Producer &producer)
 	{
-		if (switch_gpu_present_watch_fenced(&watch, producer.id, producer.channel.fence))
+		int matched = 0;
+		const int due = switch_gpu_present_watch_fenced_any(
+			&watch, producer.id, producer.channel.fence, &matched);
+		if (due || matched)
 			work();
 	}
 
@@ -177,12 +190,18 @@ public:
 	// frame
 	void atBound()
 	{
-		if (!parked || watch.state != SWITCH_GPU_PRESENT_WATCH_PROMISED)
+		switch_gpu_backing_token tokens[SWITCH_GPU_PRESENT_WATCH_MAX] = {};
+		uint32_t count = 0;
+
+		if (!parked ||
+		    switch_gpu_present_watch_snapshot(&watch, tokens, &count, nullptr) !=
+			    SWITCH_GPU_PRESENT_WATCH_PROMISED ||
+		    count != 1)
 			return;
 		parked = false;
-		if (physical(&watch.token) != 1) {
-			abandoned.insert(promise(watch.token));
-			words[uint32_t(watch.token.queue)] = uint32_t(watch.token.value);
+		if (physical(&tokens[0]) != 1) {
+			abandoned.insert(promise(tokens[0]));
+			words[uint32_t(tokens[0].queue)] = uint32_t(tokens[0].value);
 			++reported;
 		}
 		work();
@@ -192,8 +211,13 @@ public:
 	// delivered
 	void giveUp()
 	{
-		if (!parked || watch.state != SWITCH_GPU_PRESENT_WATCH_PROMISED ||
-		    physical(&watch.token) != 1)
+		switch_gpu_backing_token tokens[SWITCH_GPU_PRESENT_WATCH_MAX] = {};
+		uint32_t count = 0;
+
+		if (!parked ||
+		    switch_gpu_present_watch_snapshot(&watch, tokens, &count, nullptr) !=
+			    SWITCH_GPU_PRESENT_WATCH_PROMISED ||
+		    count != 1 || physical(&tokens[0]) != 1)
 			return;
 		parked = false;
 		work();
@@ -202,26 +226,56 @@ public:
 	// gpu_present_deadline.c at or after TGM_PRESENT_NS: a PROMISED watch has none
 	Deadline deadline(uint64_t now)
 	{
-		if (watch.state != SWITCH_GPU_PRESENT_WATCH_ARMED)
+		switch_gpu_backing_token tokens[SWITCH_GPU_PRESENT_WATCH_MAX] = {};
+		switch_gpu_backing_token lateToken = {};
+		uint32_t count = 0;
+		uint32_t pending = 0;
+		int status = 0;
+		bool allDone = true;
+		uint32_t chosen = 0;
+
+		if (switch_gpu_present_watch_snapshot(&watch, tokens, &count, &pending) !=
+			    SWITCH_GPU_PRESENT_WATCH_ARMED ||
+		    !count)
 			return Deadline::Idle;
-		const int status = physical(&watch.token);
-		if (!status)
+		for (uint32_t i = 0; i < count; ++i) {
+			const int st = physical(&tokens[i]);
+			if (st < 0) {
+				lateToken = tokens[i];
+				status = st;
+				allDone = false;
+				break;
+			}
+			if (!st)
+				allDone = false;
+			else if ((pending & (1u << i)) && !chosen)
+				chosen = i + 1u;
+		}
+		if (!status && !allDone)
 			return Deadline::Producer;
-		const Producer *producer = named(&watch.token);
+		if (allDone) {
+			lateToken = tokens[chosen ? chosen - 1u : 0u];
+			status = 1;
+		}
+		const Producer *producer = named(&lateToken);
 		int where = SWITCH_GPU_QUIET_UNASKED;
-		followed = uint32_t(watch.token.value);
+		followed = uint32_t(lateToken.value);
 		if (status > 0 && producer) {
 			int recorded = 0;
 			followed = switch_gpu_jobs_announced_by(&producer->channel.jobs, followed,
 								&recorded);
 			where = switch_gpu_quiet_interrupt(
-				&producer->channel.quiet, uint32_t(watch.token.value),
+				&producer->channel.quiet, uint32_t(lateToken.value),
 				producer->channel.fence, &followed, recorded);
 		}
-		if (where == SWITCH_GPU_QUIET_QUEUED)
+		if (where == SWITCH_GPU_QUIET_QUEUED) {
+			late = 0;
 			return Deadline::Follows;
-		if (where == SWITCH_GPU_QUIET_OWED)
+		}
+		if (where == SWITCH_GPU_QUIET_OWED) {
+			late = 0;
 			return Deadline::Rearmed;
+		}
 		if (!late)
 			late = now;
 		return now - late < kWakeGraceNs ? Deadline::Grace : Deadline::Panic;
@@ -281,7 +335,7 @@ private:
 	void pass(const Producer &producer)
 	{
 		switch_gpu_present_watch_fenced(&watch, producer.id, producer.channel.fence);
-		if (watch.state != SWITCH_GPU_PRESENT_WATCH_DUE)
+		if (switch_gpu_present_watch_state(&watch) != SWITCH_GPU_PRESENT_WATCH_DUE)
 			return;
 		if (switch_gpu_present_watch_take_visible(&watch, physical, physical))
 			deliver(true);

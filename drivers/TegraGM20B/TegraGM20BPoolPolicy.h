@@ -59,6 +59,25 @@ inline const char *compressibleRefusal(uint64_t bytes, uint64_t avail, const Lim
 	return avail < bytes + l.floorBytes ? "the pool's last 16 MiB stay for nvkm" : nullptr;
 }
 
+struct SmmuCompLimits {
+	uint64_t globalBytes;
+	uint64_t clientBytes;
+	uint64_t smmuHeadroomBytes;
+};
+
+inline const char *smmuCompressibleRefusal(uint64_t bytes, uint64_t globalHeld, uint64_t clientHeld,
+					   uint64_t smmuFree, const SmmuCompLimits &l,
+					   bool compositor = false)
+{
+	if (bytes > l.globalBytes || globalHeld > l.globalBytes - bytes)
+		return "global SMMU compressible budget reached";
+	if (!compositor && (bytes > l.clientBytes || clientHeld > l.clientBytes - bytes))
+		return "client SMMU compressible share reached";
+	if (smmuFree < bytes || smmuFree - bytes < l.smmuHeadroomBytes)
+		return "SMMU window headroom reserved";
+	return nullptr;
+}
+
 constexpr uint64_t ControlClientBytes = 16ULL << 20;
 constexpr uint64_t ControlReadyBytes = SWITCH_GPU_POOL_CONTROL_READY_BYTES;
 constexpr uint64_t KernelReadyBytes = 4ULL << 20;

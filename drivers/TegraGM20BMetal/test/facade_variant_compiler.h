@@ -12,11 +12,15 @@
 #include "../../../kits/SwitchGM20BEmit/SwitchGM20BPushDecode.h"
 #include <IOKit/OSMessageNotification.h>
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <future>
 #include <mutex>
+#include <set>
+#include <thread>
+#include <vector>
 
 extern "C" {
 struct record_count {
@@ -27,7 +31,101 @@ void record_count_start(void);
 void record_count_stop(struct record_count *out);
 }
 
-// One test binary includes this once: the asynchronous compile answered at once, as the kernel's notification
+namespace harness {
+
+// Tracks in-flight async compiles for tests that set kernel_model::model.asyncCompile = true: runs each async compile
+// off the caller's thread without holding kernel_model::callLock, and services kMethodCompileWait (0x534b).
+struct AsyncCompileTracker {
+    std::mutex lock;
+    std::condition_variable cv;
+    std::set<uint64_t> active;
+    std::vector<uint64_t> waited;
+    std::vector<std::thread> threads;
+
+    AsyncCompileTracker()
+    {
+        instance() = this;
+        kernel_model::model.asyncCompile = true;
+        kernel_model::model.compileWait = [this](uint64_t cookie) -> int {
+            std::unique_lock<std::mutex> l(lock);
+            if (!active.count(cookie))
+                return kIOReturnNotFound;
+            waited.push_back(cookie);
+            cv.notify_all();
+            cv.wait(l, [&] {
+                return !active.count(cookie);
+            });
+            return KERN_SUCCESS;
+        };
+    }
+
+    ~AsyncCompileTracker()
+    {
+        std::vector<std::thread> join;
+        {
+            std::lock_guard<std::mutex> l(lock);
+            join.swap(threads);
+        }
+        for (std::thread &t : join)
+            if (t.joinable())
+                t.join();
+        {
+            std::lock_guard<std::mutex> l(kernel_model::callLock);
+            kernel_model::model.asyncCompile = false;
+            kernel_model::model.compileWait = nullptr;
+        }
+        instance() = nullptr;
+    }
+
+    bool waitForCompileWait(size_t count, std::chrono::milliseconds timeout)
+    {
+        std::unique_lock<std::mutex> l(lock);
+        return cv.wait_for(l, timeout, [&] {
+            return waited.size() >= count;
+        });
+    }
+
+    size_t waitCount()
+    {
+        std::lock_guard<std::mutex> l(lock);
+        return waited.size();
+    }
+
+    static AsyncCompileTracker *&instance()
+    {
+        static AsyncCompileTracker *current = nullptr;
+        return current;
+    }
+
+    static kern_return_t sendReply(mach_port_t port, const uint64_t *reference, uint64_t cookie, int32_t answer,
+                                   uint32_t generation)
+    {
+        const kern_return_t result = KERN_SUCCESS;
+        const uint64_t packed = uint64_t(uint32_t(answer)) | uint64_t(generation) << 32;
+        const uint64_t words[TegraGM20BCompileAnswerWords] = {cookie, packed};
+        constexpr size_t kBytes =
+            sizeof(mach_msg_header_t) + sizeof(OSNotificationHeader64) + sizeof result + sizeof words;
+        alignas(8) uint8_t bytes[kBytes] = {};
+        auto *header = reinterpret_cast<mach_msg_header_t *>(bytes);
+        auto *notification = reinterpret_cast<OSNotificationHeader64 *>(bytes + sizeof *header);
+        uint8_t *content = bytes + sizeof *header + sizeof *notification;
+        header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
+        header->msgh_size = sizeof bytes;
+        header->msgh_remote_port = port;
+        header->msgh_id = kOSNotificationMessageID;
+        notification->size = sizeof result + sizeof words;
+        notification->type = kIOAsyncCompletionNotificationType;
+        memcpy(notification->reference, reference, sizeof notification->reference);
+        memcpy(content, &result, sizeof result);
+        memcpy(content + sizeof result, words, sizeof words);
+        return mach_msg(header, MACH_SEND_MSG, sizeof bytes, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+};
+
+}  // namespace harness
+
+// One test binary includes this once: the asynchronous compile answered at once, as the kernel's notification (or on a
+// worker thread when kernel_model::model.asyncCompile is set)
 extern "C" kern_return_t IOConnectCallAsyncStructMethod(mach_port_t connection, uint32_t method, mach_port_t port,
                                                         uint64_t *reference, uint32_t referenceCount, const void *input,
                                                         size_t inputBytes, void *, size_t *)
@@ -35,29 +133,52 @@ extern "C" kern_return_t IOConnectCallAsyncStructMethod(mach_port_t connection, 
     if (method != TegraGM20BMethodCompile || inputBytes != sizeof(TegraGM20BAbiCompile) ||
         referenceCount != kOSAsyncRef64Count)
         return kIOReturnUnsupported;
+    const auto &request = *static_cast<const TegraGM20BAbiCompile *>(input);
+    if (harness::AsyncCompileTracker *tracker = harness::AsyncCompileTracker::instance()) {
+        std::string payload(reinterpret_cast<const char *>(uintptr_t(request.address)), size_t(request.bytes));
+        std::array<uint64_t, kOSAsyncRef64Count> ref{};
+        memcpy(ref.data(), reference, sizeof ref);
+        std::function<int32_t(const std::string &)> fn;
+        int32_t fallback = TegraGM20BCompileUnavailable;
+        uint32_t fallbackGen = 1;
+        {
+            std::lock_guard<std::mutex> l(kernel_model::callLock);
+            kernel_model::Model &m = kernel_model::connected(connection);
+            m.compileCalls.push_back({request.qos, request.flags});
+            m.compileRequests.push_back(payload);
+            const size_t at = std::min<size_t>(m.compiles++, m.compileResults.size() - 1);
+            fn = m.compiler;
+            fallback = m.compileResults[at];
+            fallbackGen = m.storeGeneration;
+        }
+        {
+            std::lock_guard<std::mutex> l(tracker->lock);
+            tracker->active.insert(request.cookie);
+            tracker->threads.emplace_back([tracker, connection, port, ref, cookie = request.cookie,
+                                           payload = std::move(payload), fn = std::move(fn), fallback, fallbackGen] {
+                int32_t answer = fallback;
+                uint32_t generation = fallbackGen;
+                if (fn) {
+                    answer = fn(payload);
+                    std::lock_guard<std::mutex> l(kernel_model::callLock);
+                    generation = ++kernel_model::connected(connection).storeGeneration;
+                }
+                {
+                    std::lock_guard<std::mutex> l(tracker->lock);
+                    tracker->active.erase(cookie);
+                }
+                tracker->cv.notify_all();
+                harness::AsyncCompileTracker::sendReply(port, ref.data(), cookie, answer, generation);
+            });
+        }
+        return KERN_SUCCESS;
+    }
     TegraGM20BAbiCompileReply reply = {};
     size_t replyBytes = sizeof reply;
     const kern_return_t result = IOConnectCallStructMethod(connection, method, input, inputBytes, &reply, &replyBytes);
     if (result != KERN_SUCCESS)
         return result;
-    const auto &request = *static_cast<const TegraGM20BAbiCompile *>(input);
-    const uint64_t words[TegraGM20BCompileAnswerWords] = {request.cookie, uint64_t(uint32_t(reply.result)) |
-                                                                              uint64_t(reply.generation) << 32};
-    alignas(8)
-        uint8_t bytes[sizeof(mach_msg_header_t) + sizeof(OSNotificationHeader64) + sizeof result + sizeof words] = {};
-    auto *header = reinterpret_cast<mach_msg_header_t *>(bytes);
-    auto *notification = reinterpret_cast<OSNotificationHeader64 *>(bytes + sizeof *header);
-    uint8_t *content = bytes + sizeof *header + sizeof *notification;
-    header->msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_MAKE_SEND, 0);
-    header->msgh_size = sizeof bytes;
-    header->msgh_remote_port = port;
-    header->msgh_id = kOSNotificationMessageID;
-    notification->size = sizeof result + sizeof words;
-    notification->type = kIOAsyncCompletionNotificationType;
-    memcpy(notification->reference, reference, sizeof notification->reference);
-    memcpy(content, &result, sizeof result);
-    memcpy(content + sizeof result, words, sizeof words);
-    return mach_msg(header, MACH_SEND_MSG, sizeof bytes, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    return harness::AsyncCompileTracker::sendReply(port, reference, request.cookie, reply.result, reply.generation);
 }
 
 namespace harness {

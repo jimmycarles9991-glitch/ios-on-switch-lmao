@@ -2414,6 +2414,33 @@ out:
 	return error;
 }
 
+/* A SwitchWL handoff line (kernel/switch/diag/workloop.c): owner and servicer are compared, never followed. */
+static inline void
+switch_wl_line(enum switch_wl_kind kind, struct kqworkloop *kqwl, uint64_t ident, const struct kevent_qos_s *kev,
+    thread_t waiter)
+{
+#if DEVELOPMENT || DEBUG
+	struct switch_wl_event event = {
+		.workloop = kqwl->kqwl_dynamicid,
+		.ident = ident,
+		.dq_state = kev->ext[EV_EXTIDX_WL_VALUE],
+		.fflags = kev->fflags,
+		.flags = kev->flags,
+		.owner = kqwl->kqwl_owner,
+		.servicer = kqr_thread(&kqwl->kqwl_request),
+		.waiter = waiter,
+	};
+
+	switch_diag_wl_event(kind, &event);
+#else
+	(void)kind;
+	(void)kqwl;
+	(void)ident;
+	(void)kev;
+	(void)waiter;
+#endif
+}
+
 static int
 filt_wlattach(struct knote *kn, struct kevent_qos_s *kev)
 {
@@ -2491,6 +2518,9 @@ filt_wlattach(struct knote *kn, struct kevent_qos_s *kev)
 	}
 out:
 	if (error) {
+		if (error == EOWNERDEAD) {
+			switch_wl_line(SWITCH_WL_OWNER_DEAD, kqwl, kn->kn_id, kev, THREAD_NULL);
+		}
 		/* If userland wants ESTALE to be hidden, fail the attach anyway */
 		if (error == ESTALE && (kn->kn_sfflags & NOTE_WL_IGNORE_ESTALE)) {
 			error = 0;
@@ -2518,8 +2548,14 @@ filt_wlwait_continue(void *parameter, wait_result_t wr)
 {
 	struct _kevent_register *cont_args = parameter;
 	struct kqworkloop *kqwl = cont_args->kqwl;
+	struct switch_wl_event switch_wl;
 
 	kqlock(kqwl);
+	bool switch_unheld = wr == THREAD_AWAKENED &&
+	    switch_diag_wl_unheld(current_thread(), kqwl->kqwl_owner, kqr_thread(&kqwl->kqwl_request));
+	if (switch_unheld) {
+		switch_diag_wl_hold(&switch_wl, kqwl->kqwl_owner, kqr_thread(&kqwl->kqwl_request));
+	}
 	if (filt_wlturnstile_interlock_is_workq(kqwl)) {
 		workq_kern_threadreq_lock(kqwl->kqwl_p);
 		turnstile_complete((uintptr_t)kqwl, &kqwl->kqwl_turnstile, NULL, TURNSTILE_WORKLOOPS);
@@ -2530,6 +2566,15 @@ filt_wlwait_continue(void *parameter, wait_result_t wr)
 	kqunlock(kqwl);
 
 	turnstile_cleanup();
+
+	if (switch_unheld) {
+		switch_wl.workloop = kqwl->kqwl_dynamicid;
+		switch_wl.ident = cont_args->kev.ident;
+		switch_wl.dq_state = cont_args->kev.ext[EV_EXTIDX_WL_VALUE];
+		switch_wl.fflags = cont_args->kev.fflags;
+		switch_wl.flags = cont_args->kev.flags;
+		switch_diag_wl_event(SWITCH_WL_WAIT_UNHELD, &switch_wl);
+	}
 
 	if (wr == THREAD_INTERRUPTED) {
 		cont_args->kev.flags |= EV_ERROR;
@@ -2734,6 +2779,9 @@ filt_wltouch(struct knote *kn, struct kevent_qos_s *kev)
 
 out:
 	if (error) {
+		if (error == EOWNERDEAD) {
+			switch_wl_line(SWITCH_WL_OWNER_DEAD, kqwl, kn->kn_id, kev, THREAD_NULL);
+		}
 		if (error == ESTALE && (kev->fflags & NOTE_WL_IGNORE_ESTALE)) {
 			/* If userland wants ESTALE to be hidden, do not activate */
 			return result;
@@ -2743,6 +2791,10 @@ out:
 		return result;
 	}
 	switch_diag_wl_touched(command, kn->kn_sfflags, kqwl->kqwl_dynamicid, kn->kn_id, kn->kn_thread);
+	if (command == NOTE_WL_SYNC_WAIT && (kn->kn_sfflags & NOTE_WL_SYNC_WAKE) && kn->kn_thread == THREAD_NULL &&
+	    switch_diag_wl_unheld(current_thread(), kqwl->kqwl_owner, kqr_thread(&kqwl->kqwl_request))) {
+		switch_wl_line(SWITCH_WL_STALE_WAKE, kqwl, kn->kn_id, kev, THREAD_NULL);
+	}
 	if (command == NOTE_WL_SYNC_WAIT && !(kn->kn_sfflags & NOTE_WL_SYNC_WAKE)) {
 		return kevent_register_wait_prepare(kn, kev, result);
 	}
@@ -2770,8 +2822,13 @@ filt_wlallow_drop(struct knote *kn, struct kevent_qos_s *kev)
 	if (command == NOTE_WL_SYNC_IPC) {
 		error = filt_wlupdate_sync_ipc(kqwl, kn, kev, FILT_WLDROP);
 	} else {
+		thread_t switch_woken = (thread_t)(uintptr_t)switch_diag_wl_waking(
+			(kn->kn_sfflags & (NOTE_WL_SYNC_WAIT | NOTE_WL_SYNC_WAKE)) == NOTE_WL_SYNC_WAIT, kn->kn_thread);
 		error = filt_wlupdate(kqwl, kn, kev, 0, FILT_WLDROP);
 		filt_wlremember_last_update(kn, kev, error);
+		if (switch_woken != THREAD_NULL && error == 0) {
+			switch_wl_line(SWITCH_WL_DROP_WAKE, kqwl, kn->kn_id, kev, switch_woken);
+		}
 	}
 	assert(error != EPREEMPTDISABLED);
 
@@ -4072,6 +4129,10 @@ restart:
 			 */
 		} else {
 			error = ENOENT;
+			if ((kq->kq_state & KQ_WORKLOOP) && kev->filter == EVFILT_WORKLOOP &&
+			    (kev->fflags & NOTE_WL_END_OWNERSHIP)) {
+				switch_wl_line(SWITCH_WL_END_ENOENT, (struct kqworkloop *)kq, kev->ident, kev, THREAD_NULL);
+			}
 		}
 		goto out;
 	} else if (kn == NULL) {

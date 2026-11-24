@@ -192,7 +192,16 @@ ComputeEncoder::ComputeEncoder(CommandBuffer &cb, Device &dev) : cb_(cb), dev_(d
         computeEncoderOpening(p_, switchFormFor(forms.switchForm, cb.lastEngine_, BarrierEngine::Compute),
                               entryFormFor(forms.entry), cb.lastEngine_);
     cb.lastEngine_ = BarrierEngine::Compute;
+    cb.encodersOpened_++;
     SWITCH_METAL_DIAGNOSTIC(cb.taken_.count(opened));
+}
+
+void ComputeEncoder::emitKindSwitch()
+{
+    if (!cb_.takeKindSwitch())
+        return;
+    room(SWITCH_GM20B_KIND_SWITCH_WORDS);
+    kit(p_, switch_gm20b_kind_switch);
 }
 
 void ComputeEncoder::room(uint32_t words)
@@ -729,13 +738,14 @@ bool ComputeEncoder::dispatchRegion(const ComputeRegion &part, const std::array<
             ? 1
             : pieceCount(estimatedNs(state_->rate, units, workNs(laneWork(units, state_->instructions))),
                          dev_.bandBudgetNs(), grid[axis], kBandsPerCommandBuffer - cb_.bands);
+    emitKindSwitch();
     if (serial_ && dispatched_ && first)
         barrier();
     dispatched_ = true;
     if (pieces > 1 && cb_.batchWork_.operations)
         cutBatch();
     if (first)
-        noteDispatch(units, looping);
+        noteDispatch(units, looping, pieces);
     slotTableVa_ = 0;
     for (uint32_t i = 0; i < pieces; i++) {
         const DispatchPiece piece = dispatchPiece(grid, axis, i, pieces);
@@ -820,11 +830,11 @@ void ComputeEncoder::cutBatch()
 // the encoder's opening wait for idle, which only the first dispatch follows, the end stamp ahead of the closing one. The
 // start stamp goes out before the encoder knows the dispatch stays alone, so it is taken in a slot of its own; a second
 // dispatch leaves it unread. The pick is counted at the end whether or not a start stamp went out.
-void ComputeEncoder::noteDispatch(uint64_t units, bool looping)
+void ComputeEncoder::noteDispatch(uint64_t units, bool looping, uint32_t pieces)
 {
     if (++dispatches_ != 1 || looping || dev_.compositorClass() || cb_.timings.size() >= kMeasuredPerCommandBuffer)
         return;
-    candidate_ = {&state_->rate, units, 0, 0, state_->rec->keyHash, state_->instructions};
+    candidate_ = {&state_->rate, units, 0, 0, state_->rec->keyHash, state_->instructions, pieces};
     if (!wouldMeasure(state_->rate, units))
         return;
     const uint32_t n = dev_.drawStamps_++;

@@ -6,10 +6,9 @@ import VideoToolbox
 
 /// Which input layouts NVENC 5.0 reads, decided on the unit: the AVE plug-in's SwitchEncoderLayoutProbe (debug builds)
 /// codes one 720p pattern picture again as an IDR from each layout (the CPU writing it in that layout, and VIC writing
-/// BL2, the route the encoder ships, and BL16), and each IDR is decoded back here against the pattern. The firmware turns
-/// block_height into a code (TegraNVENC/nvidia/SOURCE): 4, 8, 16 GOBs are codes 1-3, while 0 (pitch) and 2 GOBs share
-/// code 0, so exactly one of "pitch" and "bl2" can decode back. NVIDIA's driver sends its own 2-GOB surfaces as code 0,
-/// so "bl2" is expected; "pitch" reading would mean NVENC can take an IOSurface without VIC.
+/// BL2, the route the encoder ships, and BL16), and each IDR is decoded back here against the pattern. NVENC 5.0's
+/// hardware reads code 0 as 2-GOB block linear (`bl2`), while the kernel converts `pitch` submits to a BL2 scratch
+/// surface via VIC DMA before NVENC runs, so both `pitch` and `bl2` decode back.
 struct NVENCInputLayoutTest: HWTest {
     let id = "encode.nvenc_input_layouts"
     let name = "NVENC input layouts: one IDR from each, decoded back"
@@ -47,14 +46,16 @@ struct NVENCInputLayoutTest: HWTest {
             metrics.set(layout, decoded.matched == 1 ? "reads" : "wrong")
             metrics.set("\(layout)_luma_err", decoded.worstLumaError, digits: 1)
         }
-        let codeZero = reads["pitch"] == true ? "pitch" : reads["bl2"] == true ? "bl2" : "neither"
+        let pitchReads = reads["pitch"] == true
+        let bl2Reads = reads["bl2"] == true
+        let codeZero = pitchReads && bl2Reads ? "both" : pitchReads ? "pitch" : bl2Reads ? "bl2" : "neither"
         metrics.set("code0_reads", codeZero)
         return .judged(
             [
                 ("16x16 tiles, the layout E3 proved, decode back", reads["tiled16"] == true),
                 (
-                    "code 0 reads exactly one of pitch rows and 2-GOB blocks",
-                    (reads["pitch"] == true) != (reads["bl2"] == true)
+                    "2-GOB blocks (code 0) and kernel VIC-converted pitch rows both decode back",
+                    reads["pitch"] == true && reads["bl2"] == true
                 ),
                 (
                     "4, 8 and 16 GOBs a block (codes 1-3) decode back",

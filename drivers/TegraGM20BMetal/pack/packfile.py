@@ -5,8 +5,6 @@ import re
 import struct
 from dataclasses import dataclass, field
 
-import selector_section
-
 MAGIC = b'GM20BPK1'
 # 2: the header's stack key (make_pack.py --stack) after the section table; 3: barrier-form records; 4: programs' shader
 # data and constant buffer types; 6: compute kernels (runtime/pack.h PackKernel); 8: a texture3d entry's Metal
@@ -26,7 +24,9 @@ MAGIC = b'GM20BPK1'
 # entries past 32 (the count's high byte, the rest of the entries and their bound and memory bits in a far block in the
 # blob section, an argument table's entry past 254), programs' uniform buffers past set-0 byte 496 (a far table in the
 # blob section); 28: the selector section (PackSelectors), a state's shader-side stencil push word (shadow_stencil_word)
-VERSION = 30
+# 31: the selector section gone; 32: the fast keys section (PackFastKeys); 33: two tiers (the header's tier0 table, each
+# section's tier 0 first, a stride twin as its record's index + 1), programs' facts (PackProgram.facts)
+VERSION = 33
 SECTIONS = 16  # runtime/pack.h PackSectionCount
 ENTRY_COMPARES = 1  # runtime/pack.h kEntryCompares: a handle's sampler slot the state samples by comparison
 # PackIteratedBlend: count, enable, constants, uniformSlot, uniformOffset, uniformWords, reserved, alphaSource,
@@ -34,6 +34,7 @@ ENTRY_COMPARES = 1  # runtime/pack.h kEntryCompares: a handle's sampler slot the
 ITERATED = struct.Struct('<BBBBHBBIIQQ24H128I')
 KERNEL_ENTRIES = 64  # PackKernel.entry's length (pack.h kKernelEntries)
 PROGRAM_CBUFS = 18  # PackProgram.cbufType's length (runtime/pack.h)
+PROGRAM_BYTES = 48  # sizeof(PackProgram)
 # PackPipeline's record-v15 tail: variants, variantCount[2], storageBlendMask, storageBlendModel, boundEntries,
 # uniform[8], fetchRung[8], variantName
 PIPELINE_V15 = struct.Struct('<IBBBBI32s8sI')
@@ -394,11 +395,14 @@ def place_graphics(
         return
     pr = programs[pid]
     storage_id = pr.get('storage_id', pid)
-    shared = next((p for p in prog_recs if p.get('storage_id') == storage_id), None)
-    if shared:
+    # The first record of each storage id, under a key no program id takes (prog_index is only looked up by key):
+    # one probe where a scan of every record placed made the link quadratic in programs
+    shared = prog_index.get(('storage', storage_id))
+    if shared is not None:
         prog_index[pid] = len(prog_recs)
-        prog_recs.append(dict(shared, id=pid))
+        prog_recs.append(dict(prog_recs[shared], id=pid))
         return
+    prog_index['storage', storage_id] = len(prog_recs)
     off = len(heap)
     slot = bytearray(0x80 - 0x50) + pr['image'][:80]
     slot += pr['image'][80:]
@@ -422,6 +426,7 @@ def place_graphics(
             'gprs': pr.get('gprs', 0),
             'bound_textures': pr.get('bound_textures', 0),
             'far_ubos': pr.get('far_ubos', []),
+            'facts': pr.get('facts', 0),
         }
     )
 
@@ -488,10 +493,64 @@ class Pack:
     compute_facts: list[dict] = field(default_factory=list)  # the PackComputeStates section (kernels.py state_facts)
     # the PackReflections section's blobs (reflection_bytes): by (compute, the state's key hash)
     reflections: dict[tuple[bool, int], bytes] = field(default_factory=dict)
+    # the PackFastKeys section's (fast_key_bytes): each state's fast key, the key hash of its records
+    fast_keys: dict[int, int] = field(default_factory=dict)
+    # tier 0's programs and heap bytes (directlink.py lay_out_tiers); None: every program is tier 0's
+    tier0_programs: int | None = None
+    tier0_heap: int | None = None
 
 
-def pipeline_sections(pipes: list[dict]) -> tuple[bytearray, list[int], bytearray, bytearray]:
-    """Give the pipelines, the blob, the strings and the variants.
+# The heap section starts on this boundary (runtime/pack.h kPackTierAlign), so its tier 0 ends on one in the file too
+TIER_ALIGN = 128 << 10
+# The sections whose tier 0 is the whole section: read at a process's open, or as a whole (the blob's runs are shared)
+WHOLE_SECTIONS = (2, 3, 4, 5, 12)  # samplers, baseline, init, blob, iterated
+# The sections no state of the launch set reads at its creation: their tier 0 is empty
+UNTIERED_SECTIONS = (8, 11, 13, 14)  # kernels, archives, compute states, reflections
+SECTION_NAMES = (
+    'programs',
+    'pipelines',
+    'samplers',
+    'baseline',
+    'init',
+    'blob',
+    'strings',
+    'heap',
+    'kernels',
+    'splits',
+    'variants',
+    'archives',
+    'iterated',
+    'compute states',
+    'reflections',
+    'fast keys',
+)
+
+
+def twin_indices(pipes: list[dict]) -> list[int]:
+    """Give each record's stride twin as the pack names it: the index + 1 of its twin's record of its form, 0: none.
+
+    As Pack::find picks a state's record of a form: no variant record; the free form's or the barrier form's own; else
+    the storage form's record, else the first.
+    """
+    runs: dict[int, list[int]] = {}
+    for at, rec in enumerate(pipes):
+        if not variant_name(rec['key']):
+            runs.setdefault(key_hash(rec), []).append(at)
+
+    def find(key: int, form: str) -> int:
+        ats = runs.get(key, [])
+        if form in ('free', 'barrier'):
+            return next((at for at in ats if pipes[at].get('form') == form), -1)
+        plain = [at for at in ats if pipes[at].get('form') not in ('free', 'barrier')]
+        return next((at for at in plain if pipes[at].get('storage_mask')), plain[0] if plain else -1)
+
+    return [find(rec['stride_twin'], rec.get('form', '')) + 1 if rec.get('stride_twin') else 0 for rec in pipes]
+
+
+def pipeline_sections(
+    pipes: list[dict], tier0: list[int] | None = None
+) -> tuple[bytearray, list[int], bytearray, bytearray]:
+    """Give the pipelines, the blob, the strings and the variants; `tier0` gets tier 0's strings and variant bytes.
 
     The blob holds the registers' pairs, one copy of each distinct run, each record's argument tables' words, the
     vertex table's first (its spill_at), and the pairs its draws set back after it (its restore_at).
@@ -505,7 +564,9 @@ def pipeline_sections(pipes: list[dict]) -> tuple[bytearray, list[int], bytearra
 
     blob, blobs = [], {}
     pipe_bin, variant_bin = bytearray(), bytearray()
-    for rec in pipes:
+    for rec, twin in zip(pipes, twin_indices(pipes), strict=True):
+        if tier0 is not None and not tier0 and rec.get('tier', 0):
+            tier0 += [len(strings), len(variant_bin)]
         pairs = tuple(rec['blob'])
         if pairs not in blobs:
             blobs[pairs] = len(blob)
@@ -526,8 +587,10 @@ def pipeline_sections(pipes: list[dict]) -> tuple[bytearray, list[int], bytearra
             blob += [m, v]
         far_at = len(blob)
         blob += far_words(rec)
-        placed = dict(rec, spill_at=spill_at, restore_at=restore_at, far_at=far_at)
+        placed = dict(rec, spill_at=spill_at, restore_at=restore_at, far_at=far_at, stride_twin=twin)
         pipe_bin += pipeline_bytes(placed, key_off, blobs[pairs], variants_off, string(name) if name else 0)
+    if tier0 is not None and not tier0:
+        tier0 += [len(strings), len(variant_bin)]
     return pipe_bin, blob, strings, variant_bin
 
 
@@ -559,8 +622,52 @@ def reflection_bytes(reflections: dict[tuple[bool, int], bytes]) -> bytes:
     return head + bytes(entries) + bytes(blobs)
 
 
+def fast_key_bytes(fast_keys: dict[int, int], pipes: list[dict]) -> tuple[bytes, int]:
+    """Give the PackFastKeys section (runtime/pack.h PackFastKey) and its tier-0 rows: by tier, then fast key.
+
+    Each state's records are one run of the pipelines, which are in key hash order within each tier; a fast key whose
+    state has no record is left out.
+    """
+    runs: dict[int, tuple[int, int, int]] = {}
+    last = (-1, -1)
+    for at, rec in enumerate(pipes):
+        h = key_hash(rec)
+        if (rec.get('tier', 0), h) < last:
+            raise ValueError(f'pipeline {at} ({h:016x}) after {last[1]:016x}: not in tier and key hash order')
+        tier, first, count = runs.get(h, (rec.get('tier', 0), at, 0))
+        runs[h] = (tier, first, count + 1)
+        last = (rec.get('tier', 0), h)
+    rows = sorted((runs[h][0], fast, runs[h][1], runs[h][2]) for fast, h in fast_keys.items() if h in runs)
+    return b''.join(struct.pack('<QII', *row[1:]) for row in rows), sum(1 for row in rows if row[0] == 0)
+
+
+def tier0_prefixes(pack: Pack, strings: int, variants: int, fast_rows: int, sections: list[bytes]) -> list[int]:
+    """Give each section's tier-0 bytes (runtime/pack.h PackHeader::tier0)."""
+    records = sum(1 for rec in pack.pipes if rec.get('tier', 0) == 0)
+    programs = len(pack.programs) if pack.tier0_programs is None else pack.tier0_programs
+    heap = len(pack.heap) if pack.tier0_heap is None else pack.tier0_heap
+    tier0 = [len(s) if i in WHOLE_SECTIONS else 0 for i, s in enumerate(sections)]
+    tier0[0] = programs * PROGRAM_BYTES
+    tier0[1] = records * len(sections[1]) // max(len(pack.pipes), 1)
+    tier0[6], tier0[7], tier0[10] = strings, heap, variants
+    tier0[9] = sum(1 for split in pack.splits if split['whole'] < programs) * PACK_SPLIT.size
+    tier0[15] = fast_rows * 16
+    return tier0
+
+
+def sections_line(data: bytes) -> str:
+    """Give the report's line of each section's bytes and its tier 0's, from a pack's header."""
+    count = len(SECTION_NAMES)
+    offsets = struct.unpack_from(f'<{2 * count}Q', data, 24)
+    tier0 = struct.unpack_from(f'<{count}Q', data, 24 + 16 * count + 16)
+    return 'pack sections (KiB, tier 0 KiB): ' + ', '.join(
+        f'{name} {offsets[2 * i + 1] // 1024} ({tier0[i] // 1024})' for i, name in enumerate(SECTION_NAMES)
+    )
+
+
 def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
-    pipe_bin, blob, strings, variant_bin = pipeline_sections(pack.pipes)
+    tier0_strings_variants: list[int] = []
+    pipe_bin, blob, strings, variant_bin = pipeline_sections(pack.pipes, tier0_strings_variants)
     kernel_bin = bytearray()
     for k in sorted(pack.kernels, key=lambda k: fnv(k['key'].encode())):
         kernel_bin += kernel_bytes(k, len(strings), len(blob))
@@ -587,6 +694,7 @@ def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
             + types
             + struct.pack('<BB', pr.get('gprs', 0), pr.get('bound_textures', 0))
             + far
+            + struct.pack('<I', pr.get('facts', 0))
         )
     tsc_bin = b''.join(struct.pack('<8I', *w) for w in pack.constexpr_tsc)
     base_bin = b''.join(struct.pack('<II', m, v) for m, v in sorted(pack.baseline.items()))
@@ -608,20 +716,24 @@ def pack_bytes(pack: Pack) -> tuple[bytes, list[int]]:
         iterated_bytes(pack.iterated),
         compute_facts_bytes(pack.compute_facts),
         reflection_bytes(pack.reflections),
-        selector_section.section_bytes(pack.pipes),
     ]
+    fast_bin, fast_rows = fast_key_bytes(pack.fast_keys, pack.pipes)
+    sections.append(fast_bin)
     assert len(sections) == SECTIONS
-    header_size = 8 + 4 * 4 + 8 * 2 * len(sections) + 16  # the section table, then the stack key and chip facts
+    tier0 = tier0_prefixes(pack, *tier0_strings_variants, fast_rows, sections)
+    # the section table, then the stack key, chip facts and reserved, then the tier-0 table
+    header_size = 8 + 4 * 4 + 8 * 2 * len(sections) + 16 + 8 * len(sections)
     offs, at = [], (header_size + 255) // 256 * 256
     body = bytearray()
-    for s in sections:
-        pad = (-(at + len(body))) % 256
+    for i, s in enumerate(sections):
+        pad = (-(at + len(body))) % (TIER_ALIGN if i == 7 else 256)
         body += bytes(pad)
         offs.append((at + len(body), len(s)))
         body += s
     hdr = MAGIC + struct.pack('<IIII', VERSION, len(pack.programs), len(pack.pipes), len(pack.constexpr_tsc))
     hdr += struct.pack(f'<{2 * len(sections)}Q', *[x for o in offs for x in o])
     hdr += struct.pack('<QII', 0, chip_facts(), 0)  # the stack key (make_pack.py stamps it), chip facts, reserved
+    hdr += struct.pack(f'<{len(sections)}Q', *tier0)
     return hdr + bytes((header_size + 255) // 256 * 256 - len(hdr)) + body, blob
 
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "../shared_events.h"
 #include "../batch.h"
+#include "../follow.h"
 #include "../kernel.h"
 #include "TegraGM20BJobABI.h"
 #include <IOKit/IOKitLib.h>
@@ -48,6 +49,7 @@ struct Model {
     int cpuReturn = 0;
     TegraGM20BAbiCpuComplete cpuRequest{};
     std::vector<TegraGM20BAbiCpuRange> cpuRanges;
+    dispatch_queue_t notificationQueue = nullptr;
 } model;
 
 void fire(const Notification &notification, int result)
@@ -233,8 +235,10 @@ extern "C" mach_port_t IONotificationPortGetMachPort(IONotificationPortRef)
     return 55;
 }
 
-extern "C" void IONotificationPortSetDispatchQueue(IONotificationPortRef, dispatch_queue_t)
-{}
+extern "C" void IONotificationPortSetDispatchQueue(IONotificationPortRef, dispatch_queue_t queue)
+{
+    model.notificationQueue = queue;
+}
 
 extern "C" void IONotificationPortDestroy(IONotificationPortRef)
 {
@@ -692,8 +696,40 @@ static void cpuCompletion(bool tunnel)
           "GPU-only completion emits no kernel call");
 }
 
+// The queue the kernel's notifications arrive on wakes the submit worker a frame may wait for: once a fixed-priority
+// thread (Core Animation's render thread) committed, its work runs at that thread's policy and priority, not at a
+// QoS class XNU clamps below it
+static void notificationsFollowTheCommitter()
+{
+    model = {};
+    std::thread([] {
+        sched_param param{};
+        param.sched_priority = 40;
+        check(pthread_setschedparam(pthread_self(), SCHED_FIFO, &param) == 0, "a fixed-priority committer");
+        gm20b::followers().committing();
+    }).join();
+    auto transport = gm20b::SharedEvents::create(42, false, model.selector);
+    auto event = transport->import(101);
+    int result = -1;
+    auto watch = transport->observe(event, uint64_t(1) << 40, [](int) {}, result);
+    check(watch && !result && model.notificationQueue, "an observer arms the notification port's queue");
+    // async: a sync block may run on the calling thread
+    __block int policy = 0;
+    __block sched_param param{};
+    dispatch_semaphore_t ran = dispatch_semaphore_create(0);
+    dispatch_async(model.notificationQueue, ^{
+        pthread_getschedparam(pthread_self(), &policy, &param);
+        dispatch_semaphore_signal(ran);
+    });
+    dispatch_semaphore_wait(ran, DISPATCH_TIME_FOREVER);
+    check(policy == SCHED_FIFO && param.sched_priority == 40, "notifications run at the committer's fixed priority");
+    watch.reset();
+    transport->shutdown();
+}
+
 int main()
 {
+    notificationsFollowTheCommitter();
     run(false);
     run(true);
     terminal(false);

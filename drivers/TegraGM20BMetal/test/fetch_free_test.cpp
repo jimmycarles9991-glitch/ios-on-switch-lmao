@@ -202,6 +202,13 @@ TEST(GM20BFetchFree, EightBitSourcesTakeRung2AtAnyDepthUnlessTheTargetAccumulate
     EXPECT_FALSE(gm20b::fetchFreeTaken(f, draw));
     draw.ropLayers = 0;
     EXPECT_FALSE(gm20b::fetchFreeTaken(f, draw));
+    gm20b::FetchFreeDraw halfTarget = {115, false, 8};
+    EXPECT_EQ(gm20b::fetchFreeTaken(f, halfTarget), gm20b::fixedBlendProven());
+    halfTarget.readable = true;
+    EXPECT_FALSE(gm20b::fetchFreeTaken(f, halfTarget));
+    halfTarget.readable = false;
+    halfTarget.accumulates = true;
+    EXPECT_FALSE(gm20b::fetchFreeTaken(f, halfTarget));
 }
 
 TEST(GM20BFetchFree, Rung3WaitsForItsPassesToBeProvenUnlessAProbeForcesIt)

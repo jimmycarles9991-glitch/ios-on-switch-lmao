@@ -14,6 +14,7 @@ namespace gm20b {
 struct HeapMember {
     uint64_t va = 0, bytes = 0;
     bool hostVisible = false;  // the CPU writes it: a job names it host-written
+    bool gpuVolatile = false;  // VOL=1 in the GPU MMU: skips L2 so never marked host-written
 };
 
 class HeapMembers {

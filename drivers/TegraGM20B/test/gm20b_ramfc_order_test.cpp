@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 
+#include "drivers/TegraGM20B/TegraGM20BGrPreempt.h"
 #include "drivers/TegraGM20B/TegraGM20BRamfcOrder.h"
 
 namespace
@@ -121,6 +122,91 @@ TEST(Gm20bRamfcOrder, APreemptThatNeverCompletesWritesNothingAndReenables)
 	gHost.preemptHangs = true;
 	EXPECT_EQ(tgm_ramfc_write_quiesced(&kSteps), -ETIMEDOUT);
 	EXPECT_EQ(gHost.writes, 0);
+	EXPECT_TRUE(gHost.enabled);
+	EXPECT_FALSE(gHost.lockHeld);
+}
+
+struct GrCtxImage {
+	uint32_t memory = TGM_GR_CTX_PREEMPT_WFI;
+	uint32_t fecs = TGM_GR_CTX_PREEMPT_WFI;
+	uint32_t last_offset = 0;
+	int reads = 0;
+	int writes = 0;
+};
+
+GrCtxImage gGrCtx;
+
+uint32_t grRead(void *, uint32_t offset)
+{
+	gGrCtx.last_offset = offset;
+	++gGrCtx.reads;
+	return gGrCtx.memory;
+}
+
+void grWrite(void *, uint32_t offset, uint32_t value)
+{
+	gGrCtx.last_offset = offset;
+	++gGrCtx.writes;
+	gGrCtx.memory = value;
+}
+
+int grPreempt(void *arg)
+{
+	const int ret = preempt(arg);
+	if (!ret)
+		gGrCtx.memory = gGrCtx.fecs;
+	return ret;
+}
+
+const tgm_ramfc_steps kGrSteps = {nullptr, own, release, disable, enable, grPreempt, nullptr};
+const tgm_gr_preempt_io kGrIo = {nullptr, grRead, grWrite};
+
+TEST(Gm20bGrPreempt, QuiescedWriteUpdatesCtxswOption0x60AfterSaveAndTogglesBack)
+{
+	gHost = Host{};
+	gHost.saving = true;
+	gGrCtx = GrCtxImage{};
+	uint32_t old_mode = 99, readback = 99;
+
+	EXPECT_EQ(tgm_gr_preempt_write_quiesced(&kGrSteps, &kGrIo, TGM_GR_CTX_PREEMPT_CTA,
+						&old_mode, &readback),
+		  0);
+	EXPECT_EQ(gGrCtx.last_offset, TGM_GR_CTX_PREEMPT_OPTIONS);
+	EXPECT_EQ(old_mode, TGM_GR_CTX_PREEMPT_WFI);
+	EXPECT_EQ(readback, TGM_GR_CTX_PREEMPT_CTA);
+	EXPECT_EQ(gGrCtx.memory, TGM_GR_CTX_PREEMPT_CTA);
+	EXPECT_TRUE(gHost.enabled);
+	EXPECT_FALSE(gHost.lockHeld);
+
+	gGrCtx.fecs = gGrCtx.memory;
+	gHost.loaded = true;
+	EXPECT_EQ(tgm_gr_preempt_write_quiesced(&kGrSteps, &kGrIo, TGM_GR_CTX_PREEMPT_WFI,
+						&old_mode, &readback),
+		  0);
+	EXPECT_EQ(old_mode, TGM_GR_CTX_PREEMPT_CTA);
+	EXPECT_EQ(readback, TGM_GR_CTX_PREEMPT_WFI);
+	EXPECT_EQ(gGrCtx.memory, TGM_GR_CTX_PREEMPT_WFI);
+}
+
+TEST(Gm20bGrPreempt, InvalidModeAndPreemptFailureTouchNothing)
+{
+	gHost = Host{};
+	gGrCtx = GrCtxImage{};
+	uint32_t old_mode = 7, readback = 7;
+
+	EXPECT_EQ(tgm_gr_preempt_write_quiesced(&kGrSteps, &kGrIo, 2, &old_mode, &readback),
+		  -EINVAL);
+	EXPECT_EQ(gGrCtx.writes, 0);
+	EXPECT_EQ(gGrCtx.reads, 0);
+	EXPECT_TRUE(gHost.enabled);
+	EXPECT_FALSE(gHost.lockHeld);
+
+	gHost.preemptHangs = true;
+	EXPECT_EQ(tgm_gr_preempt_write_quiesced(&kGrSteps, &kGrIo, TGM_GR_CTX_PREEMPT_CTA,
+						&old_mode, &readback),
+		  -ETIMEDOUT);
+	EXPECT_EQ(gGrCtx.writes, 0);
+	EXPECT_EQ(gGrCtx.memory, TGM_GR_CTX_PREEMPT_WFI);
 	EXPECT_TRUE(gHost.enabled);
 	EXPECT_FALSE(gHost.lockHeld);
 }

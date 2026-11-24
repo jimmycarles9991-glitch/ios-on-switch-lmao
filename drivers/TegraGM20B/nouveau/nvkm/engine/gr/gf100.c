@@ -34,6 +34,7 @@
 #include <subdev/pmu.h>
 
 #include "TegraGM20BGrFault.h"
+#include "TegraGM20BGrPreemptContext.h"
 #include "TegraGM20BTexTrap.h"
 #include "TegraGM20BZcullContext.h"
 #include <subdev/therm.h>
@@ -349,6 +350,8 @@ gf100_gr_chan_bind(struct nvkm_object *object, struct nvkm_gpuobj *parent,
 		tgm_zcull_image_bind(*pgpuobj, chan->zcull_vma);
 		nvkm_wo32(*pgpuobj, 0x28, 0);
 		nvkm_wo32(*pgpuobj, 0x2c, 0);
+		tgm_gr_preempt_image_bind(*pgpuobj, gr->size,
+					  gr->func->grctx ? gr->func->grctx->preempt_options : 0);
 	}
 	nvkm_done(*pgpuobj);
 	return 0;

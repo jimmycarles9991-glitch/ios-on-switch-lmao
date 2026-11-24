@@ -393,6 +393,7 @@ pub struct NmbRenderPipelineDescriptorOf<F> {
     pub factor_scale_enabled: u64,
     pub max_amplification: u64,
     pub texture_write_rounding: u64,
+    pub alpha_to_coverage: u64,
 }
 
 pub fn optional_format(value: u64) -> Result<Option<PixelFormat>, String> {
@@ -535,6 +536,7 @@ pub fn render_descriptor<F: DescriptorFunction>(
             d.texture_write_rounding
         )
     })?;
+    out.alpha_to_coverage = d.alpha_to_coverage != 0;
     Ok(out)
 }
 

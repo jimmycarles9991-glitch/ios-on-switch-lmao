@@ -76,6 +76,12 @@ _DIAGNOSTICS_OFF_FLAGS = {
     "//conditions:default": [],
 }
 
+# --//kernel:recorder: the drivers' flight recorder hooks (kernel/switch/include/switch/recorder.h).
+_RECORDER_FLAGS = {
+    "//kernel:recorder_debug": ["-DSWITCH_RECORDER=1"],
+    "//conditions:default": [],
+}
+
 def _recipe_name(label, valid):
     name = label.rpartition(":")[2]
     if name not in valid:
@@ -275,8 +281,8 @@ def kernel_driver(
                 name = lib,
                 srcs = group,
                 hdrs = hdrs,
-                cxxopts = _expand(cxx_flags + extra) + select(_DIAGNOSTICS_OFF_FLAGS),
-                conlyopts = _expand(c_copts + extra) + select(_DIAGNOSTICS_OFF_FLAGS),
+                cxxopts = _expand(cxx_flags + extra) + select(_DIAGNOSTICS_OFF_FLAGS) + select(_RECORDER_FLAGS),
+                conlyopts = _expand(c_copts + extra) + select(_DIAGNOSTICS_OFF_FLAGS) + select(_RECORDER_FLAGS),
                 features = features,
                 deps = header_deps + _generated(flags),
                 toolchains = [KERNEL_SDK],

@@ -7,6 +7,7 @@
 #ifndef SWITCH_PREFS_H
 #define SWITCH_PREFS_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -35,5 +36,12 @@ enum switch_prefs_result switch_prefs_drop_keys(uint8_t *plist, size_t *length, 
 enum switch_prefs_result switch_prefs_add_integer(const uint8_t *plist, size_t length, const char *key, int64_t value,
                                                   uint8_t *out, size_t *out_length);
 size_t switch_prefs_add_room(size_t length);
+
+/*
+ * Whether a binary plist's top-level dictionary (an XML one: the key's first <key>) holds every key the setup's XML
+ * `ours` sets (<key>name</key> then <true/>, <false/> or <integer>n</integer>) with that value, whatever else it holds.
+ * False when `ours` sets nothing, or sets a value of another kind: the caller then writes its own file.
+ */
+bool switch_prefs_holds(const uint8_t *plist, size_t length, const char *ours, size_t ours_length);
 
 #endif /* SWITCH_PREFS_H */

@@ -527,6 +527,8 @@ void startRates()
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         if (metal_encode_rates(line, sizeof line))
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
+        if (metal_frame_rates(line, sizeof line))
+            os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
         if (metal_fetch_keys(line, sizeof line))
             os_log(logger(), "TegraGM20BMetal: %{public}s %{public}s", processWord(), line);
     });
@@ -582,11 +584,17 @@ id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
     if (renderServer)
         metal_prepare(pack, uint64_t(TEGRA_STACK_KEY));
     const char *records = recordCacheDir();
+#if SWITCH_DEBUG
+    const uint64_t searched = renderServer ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+#endif
     id device = metal_device_open(pack, uint64_t(TEGRA_STACK_KEY), registryID, &why);
     if (!device) {
         failure = metal_open_failure();
         return nil;
     }
+#if SWITCH_DEBUG
+    const uint64_t opened = renderServer ? clock_gettime_nsec_np(CLOCK_UPTIME_RAW) : 0;
+#endif
     os_log(logger(), "TegraGM20BMetal: raw GM20B path on in %{public}s (pack %{public}s, stack %016llx)", getprogname(),
            pack, (unsigned long long)TEGRA_STACK_KEY);
     char nativeSeed[1100];
@@ -595,6 +603,15 @@ id openOnce(unsigned port, gm20b::OpenFailure &failure, NSString *__strong &why)
     os_log(logger(), "TegraGM20BMetal: device %{public}s ready in %{public}s, open %llu ms",
            [[(id<MTLDevice>)device name] UTF8String], getprogname(), (unsigned long long)(openNs / 1000000));
 #if SWITCH_DEBUG
+    if (renderServer) {
+        uint64_t prepOpenNs = 0, prepWarmNs = 0, waitedNs = 0;
+        metal_prepare_split(&prepOpenNs, &prepWarmNs, &waitedNs);
+        os_log(logger(),
+               "SwitchMetal: open split in %{public}s (ms): cache directory %llu, device %llu (of it waiting for the "
+               "prepare thread %llu, which took open %llu and warm %llu), states %llu",
+               getprogname(), (searched - openBegan) / 1000000, (opened - searched) / 1000000, waitedNs / 1000000,
+               prepOpenNs / 1000000, prepWarmNs / 1000000, (openBegan + openNs - opened) / 1000000);
+    }
     startRates();
 #endif
     return device;

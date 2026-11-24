@@ -25,6 +25,8 @@ constexpr uint32_t kLdpFp = 0xA8C17BFD;    // ldp x29, x30, [sp], #16
 constexpr uint32_t kLdaddal = 0xF8E20003;  // ldaddal x2, x3, [x0]
 constexpr uint32_t kCasal = 0xC8E1FC02;    // casal x1, x2, [x0]
 constexpr uint32_t kAdd = 0x8B020020;      // add x0, x1, x2
+constexpr uint32_t kLdadd30 = 0xB83E0003;  // ldadd w30, w3, [x0]
+constexpr uint32_t kUcvtf30 = 0x1EE303C0;  // ucvtf h0, w30
 constexpr uint32_t kSeg = 0x4000;
 constexpr uint32_t kTextOff = 0x1000;
 constexpr uint64_t kBase = 0x100000000;
@@ -279,6 +281,61 @@ TEST(Pretranslate, TheVerifierCatchesAStubThatDoesNotReturn)
     EXPECT_LT(a64x_pt_verify(&x.m, x.out.data(), &v, x.err, sizeof(x.err)), 0);
 }
 
+// f0's site has x30 dead after it (the ldp reloads it), but these sites read w30: a BL would overwrite it first.
+TEST(Pretranslate, ASiteThatReadsX30GetsItsOwnStub)
+{
+    for (uint32_t site : {kLdadd30, kUcvtf30}) {
+        Spec s = typical();
+        s.code[2] = site;
+        Result x;
+        run(s, x);
+        ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+        EXPECT_EQ(x.verified, 2) << x.err;
+        EXPECT_EQ(text(x, 2) & 0xFC000000u, 0x14000000u) << std::hex << site;
+    }
+}
+
+TEST(Pretranslate, TheVerifierCatchesABlOverAnX30Operand)
+{
+    Result x;
+    run(typical(), x);
+    ASSERT_EQ(text(x, 2) & 0xFC000000u, 0x94000000u);
+    Spec s = typical();
+    s.code[2] = kLdadd30;
+    std::vector<uint8_t> in = build(s);
+    a64x_macho m;
+    ASSERT_EQ(a64x_macho_parse(in.data(), in.size(), &m, x.err, sizeof(x.err)), 0) << x.err;
+    a64x_pt_check v;
+    EXPECT_LT(a64x_pt_verify(&m, x.out.data(), &v, x.err, sizeof(x.err)), 0) << "the BL overwrites the w30 it adds";
+}
+
+// typical()'s LDADDAL (a shared stub) and CASAL (its own) are acquire+release: each stub holds one DMB ISH, and
+// removing either one is refused even though the slice is signed again.
+TEST(Pretranslate, TheVerifierRefusesAnAcquireReleaseStubWithoutItsBarrier)
+{
+    Result x;
+    run(typical(), x);
+    ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+    ASSERT_EQ(x.verified, 2) << x.err;
+    std::vector<uint64_t> barriers;
+    for (uint64_t at = kTextOff; at < kSeg; at += 4) {
+        if (get32(x.out.data() + at) == 0xD5033BBFu)
+            barriers.push_back(at);
+    }
+    ASSERT_EQ(barriers.size(), 2u);
+    uint64_t so, ss;
+    ASSERT_EQ(a64x_cs_find(x.out.data(), x.out.size(), &so, &ss), 0);
+    for (uint64_t at : barriers) {
+        put32(x.out, at, 0xD503201Fu);
+        uint8_t h[A64X_CDHASH_SIZE];
+        ASSERT_EQ(a64x_cs_rehash(x.out.data(), x.out.size(), so, ss, h, x.err, sizeof(x.err)), 0) << x.err;
+        a64x_pt_check v;
+        EXPECT_LT(a64x_pt_verify(&x.m, x.out.data(), &v, x.err, sizeof(x.err)), 0) << std::hex << at;
+        EXPECT_NE(strstr(x.err, "DMB ISH"), nullptr) << x.err;
+        put32(x.out, at, 0xD5033BBFu);
+    }
+}
+
 TEST(Pretranslate, TheSignatureNoLongerChecksAfterAByteChanges)
 {
     Result x;
@@ -307,7 +364,7 @@ TEST(Pretranslate, NoRoomLeavesTheSliceForTheLoader)
 }
 
 // No tail, only 3-word holes: a CASAL with x30 live needs its own stub, longer than any hole, so it is split.
-TEST(Pretranslate, AStubLongerThanEveryHoleIsSplitOverSeveral)
+Spec split_casal()
 {
     Spec s;
     s.code.assign((kSeg - kTextOff) / 4, kAdd);
@@ -318,8 +375,13 @@ TEST(Pretranslate, AStubLongerThanEveryHoleIsSplitOverSeveral)
     for (uint32_t f = 2; f + 5 <= s.code.size(); f += 5)
         memcpy(&s.code[f], lr_check, sizeof(lr_check));
     s.code.back() = kRet;
+    return s;
+}
+
+TEST(Pretranslate, AStubLongerThanEveryHoleIsSplitOverSeveral)
+{
     Result x;
-    run(s, x);
+    run(split_casal(), x);
     ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
     EXPECT_EQ(x.verified, 1) << x.err;
     EXPECT_EQ(x.r.tail_words, 0u);
@@ -336,6 +398,31 @@ TEST(Pretranslate, AStubLongerThanEveryHoleIsSplitOverSeveral)
         holes++;
     }
     EXPECT_GT(holes, 1u) << "the stub spans several holes";
+}
+
+TEST(Pretranslate, TheVerifierRefusesASplitAcquireReleaseStubWithoutItsBarrier)
+{
+    Result x;
+    run(split_casal(), x);
+    ASSERT_EQ(x.r.status, A64X_PT_TRANSLATED) << x.r.why;
+    ASSERT_EQ(x.verified, 1) << x.err;
+    uint64_t barrier = 0;
+    int barriers = 0;
+    for (uint64_t at = kTextOff; at < kSeg; at += 4) {
+        if (get32(x.out.data() + at) == 0xD5033BBFu) {
+            barrier = at;
+            barriers++;
+        }
+    }
+    ASSERT_EQ(barriers, 1);
+    put32(x.out, barrier, 0xD503201Fu);
+    uint8_t h[A64X_CDHASH_SIZE];
+    uint64_t so, ss;
+    ASSERT_EQ(a64x_cs_find(x.out.data(), x.out.size(), &so, &ss), 0);
+    ASSERT_EQ(a64x_cs_rehash(x.out.data(), x.out.size(), so, ss, h, x.err, sizeof(x.err)), 0) << x.err;
+    a64x_pt_check v;
+    EXPECT_LT(a64x_pt_verify(&x.m, x.out.data(), &v, x.err, sizeof(x.err)), 0);
+    EXPECT_NE(strstr(x.err, "DMB ISH"), nullptr) << x.err;
 }
 
 // A tail-call LR check shared with an unsigned early return (libsystem_trace's _logDestructor in iOS 27): the CBZ enters
@@ -495,6 +582,123 @@ TEST(Pretranslate, TheVerifierCatchesAFipsMacLeftAsItWas)
     a64x_pt_check v;
     EXPECT_LT(a64x_pt_verify(&x.m, x.out.data(), &v, x.err, sizeof(x.err)), 0);
     EXPECT_NE(std::string(x.err).find("FIPS"), std::string::npos) << x.err;
+}
+
+TEST(Pretranslate, CheckedEditsApplyVerifySignAndPreserveOriginalCdhash)
+{
+    Spec s = typical();
+    const uint32_t base = static_cast<uint32_t>(s.code.size());
+    s.starts.push_back(base);
+    // Case 225 sequence matching 24B119 /usr/libexec/locationd at 0x7f0a3c and check-only tail at +0x20.
+    const std::vector<uint32_t> case225 = {
+        0xD2800013u, 0xD2917E55u, 0xF2A28C35u, 0xF2C00275u, 0x14000134u,
+        0xD2800013u, 0xD2800255u, 0xD503201Fu, 0xF2C00035u, 0x1400012Fu,
+    };
+    s.code.insert(s.code.end(), case225.begin(), case225.end());
+
+    const uint8_t stock0[20] = {0x13, 0x00, 0x80, 0xd2, 0x55, 0x7e, 0x91, 0xd2, 0x35, 0x8c,
+                                0xa2, 0xf2, 0x75, 0x02, 0xc0, 0xf2, 0x34, 0x01, 0x00, 0x14};
+    const uint8_t patched0[12] = {0x15, 0x20, 0x80, 0xd2, 0x15, 0x04, 0xa2, 0xf2, 0x06, 0x00, 0x00, 0x14};
+    const uint8_t stock1[8] = {0x35, 0x00, 0xc0, 0xf2, 0x2f, 0x01, 0x00, 0x14};
+    const uint64_t off0 = kTextOff + 4ull * base;
+    const a64x_pt_edit edits[2] = {
+        {off0, stock0, sizeof(stock0), 0, patched0, sizeof(patched0)},
+        {off0 + 0x20, stock1, sizeof(stock1), 0, nullptr, 0},
+    };
+
+    Result plain;
+    run(s, plain);
+    ASSERT_EQ(plain.r.status, A64X_PT_TRANSLATED) << plain.r.why;
+
+    Result edited;
+    edited.in = plain.in;
+    edited.out.assign(edited.in.size(), 0);
+    ASSERT_EQ(a64x_macho_parse(edited.in.data(), edited.in.size(), &edited.m, edited.err, sizeof(edited.err)), 0);
+    ASSERT_EQ(
+        a64x_pretranslate_edits(&edited.m, edited.out.data(), edits, 2, &edited.r, edited.err, sizeof(edited.err)), 0)
+        << edited.err;
+    ASSERT_EQ(edited.r.status, A64X_PT_TRANSLATED) << edited.r.why;
+    EXPECT_EQ(memcmp(edited.r.cdhash_in, plain.r.cdhash_in, A64X_CDHASH_SIZE), 0);
+    EXPECT_NE(memcmp(edited.r.cdhash_out, plain.r.cdhash_out, A64X_CDHASH_SIZE), 0);
+
+    a64x_pt_check v;
+    EXPECT_EQ(a64x_pt_verify_edits(&edited.m, edited.out.data(), edits, 2, &v, edited.err, sizeof(edited.err)), 2)
+        << edited.err;
+    EXPECT_LT(a64x_pt_verify(&edited.m, edited.out.data(), &v, edited.err, sizeof(edited.err)), 0);
+    EXPECT_EQ(memcmp(edited.out.data() + off0, patched0, sizeof(patched0)), 0);
+    EXPECT_EQ(memcmp(edited.out.data() + off0 + 0x20, stock1, sizeof(stock1)), 0);
+}
+
+TEST(Pretranslate, CheckedEditsFailLoudOnStockMismatchOrBaselineInstruction)
+{
+    Spec s = typical();
+    const uint32_t base = static_cast<uint32_t>(s.code.size());
+    s.starts.push_back(base);
+    s.code.push_back(0xD2800013u);
+    s.code.push_back(kRet);
+    const std::vector<uint8_t> in = build(s);
+    std::vector<uint8_t> out(in.size(), 0);
+    a64x_macho m{};
+    a64x_pt_result r{};
+    char err[256] = {};
+    ASSERT_EQ(a64x_macho_parse(in.data(), in.size(), &m, err, sizeof(err)), 0);
+
+    const uint8_t wrong_stock[4] = {0x00, 0x00, 0x80, 0xd2};
+    const uint8_t nop[4] = {0x1f, 0x20, 0x03, 0xd5};
+    const a64x_pt_edit bad_stock = {kTextOff + 4ull * base, wrong_stock, sizeof(wrong_stock), 0, nop, sizeof(nop)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &bad_stock, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("stock bytes differ"), std::string::npos) << err;
+
+    const uint8_t right_stock[4] = {0x13, 0x00, 0x80, 0xd2};
+    uint8_t casal[4];
+    memcpy(casal, &kCasal, 4);
+    const a64x_pt_edit bad_insn = {kTextOff + 4ull * base, right_stock, sizeof(right_stock), 0, casal, sizeof(casal)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &bad_insn, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("patched word"), std::string::npos) << err;
+
+    const uint64_t site = kTextOff + 4ull * base;
+    const uint32_t sb_word = 0xD50330FFu;
+    uint8_t sb[4];
+    memcpy(sb, &sb_word, 4);
+    const a64x_pt_edit bad_sb = {site, right_stock, sizeof(right_stock), 0, sb, sizeof(sb)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &bad_sb, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("patched word"), std::string::npos) << err;
+
+    const uint8_t udf[4] = {0x00, 0x00, 0x00, 0x00};
+    const a64x_pt_edit bad_udf = {site, right_stock, sizeof(right_stock), 0, udf, sizeof(udf)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &bad_udf, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("unallocated"), std::string::npos) << err;
+
+    const uint8_t unalloc[4] = {0x00, 0x00, 0x00, 0x02};
+    const a64x_pt_edit bad_unalloc = {site, right_stock, sizeof(right_stock), 0, unalloc, sizeof(unalloc)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &bad_unalloc, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("unallocated"), std::string::npos) << err;
+
+    const a64x_pt_edit hdr_edit = {0, in.data(), 4, 0, nop, sizeof(nop)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &hdr_edit, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("outside executable code"), std::string::npos) << err;
+
+    uint64_t tlo = 0, thi = 0;
+    a64x_pt_tail(&m, &tlo, &thi);
+    ASSERT_LT(tlo, thi);
+    const a64x_pt_edit tail_edit = {tlo, in.data() + tlo, 4, 0, nop, sizeof(nop)};
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), &tail_edit, 1, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("outside executable code"), std::string::npos) << err;
+
+    const uint8_t pair_stock[8] = {0x13, 0x00, 0x80, 0xd2, 0xc0, 0x03, 0x5f, 0xd6};
+    const a64x_pt_edit overlap[2] = {
+        {kTextOff + 4ull * base, pair_stock, sizeof(pair_stock), 0, nop, sizeof(nop)},
+        {kTextOff + 4ull * (base + 1), pair_stock + 4, 4, 0, nop, sizeof(nop)},
+    };
+    EXPECT_LT(a64x_pretranslate_edits(&m, out.data(), overlap, 2, &r, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("overlaps"), std::string::npos) << err;
+
+    Result plain;
+    run(s, plain);
+    ASSERT_EQ(plain.r.status, A64X_PT_TRANSLATED);
+    a64x_pt_check v{};
+    EXPECT_LT(a64x_pt_verify_edits(&plain.m, plain.out.data(), &hdr_edit, 1, &v, err, sizeof(err)), 0);
+    EXPECT_NE(std::string(err).find("outside executable code"), std::string::npos) << err;
 }
 
 }  // namespace

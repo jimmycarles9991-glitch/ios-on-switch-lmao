@@ -49,13 +49,27 @@ constexpr bool srgbBlendFormat(uint16_t format)
     return format == 71 || format == 81;
 }
 
+constexpr bool floatBlendFormat(uint16_t format)
+{
+    return format == 115;
+}
+
+// Non-sRGB 8-bit unorm sources stay within one code at any depth, and RGBA16Float blends in half-float (no 8-bit
+// quantiser), so neither counts against the two-layer computed-colour cap.
+constexpr bool fixedBlendCountsLayer(uint16_t format, bool eightBitSources)
+{
+    return !floatBlendFormat(format) && (!eightBitSources || srgbBlendFormat(format));
+}
+
 // 8-bit sources are exact at any depth only where the target stores 8-bit codes as they are: into an sRGB target they are
 // linear light the blend encodes, as a computed colour is, and GM20B's encode drifts 3 codes off Metal's by eight layers
-// where Apple's GPU stays within 2 (gpu.gm20b.fixed_blend_formats rop_*_srgb_8)
+// where Apple's GPU stays within 2 (gpu.gm20b.fixed_blend_formats rop_*_srgb_8). RGBA16Float blends in half precision
+// without the 8-bit quantiser (8-bit sources measured within 2^-11 * (layers + 1) up to 8 layers in
+// gpu.gm20b.fixed_blend_formats; computed and HDR > 1.0 arms added there for on-chip check).
 constexpr bool fixedBlendAcceptable(const FixedBlendAsk &a)
 {
     return fixedBlendProven() && fixedBlendFormat(a.format) && !a.readable && !a.accumulates && a.standardFactors &&
-           ((a.eightBitSources && !srgbBlendFormat(a.format)) || a.computedLayers <= 2);
+           (floatBlendFormat(a.format) || (a.eightBitSources && !srgbBlendFormat(a.format)) || a.computedLayers <= 2);
 }
 
 // Rung 3, rule fetch.iterated: the ROP's iterated blend (kits/SwitchGM20BEmit/SwitchGM20BEmitIterated.h) for blends with

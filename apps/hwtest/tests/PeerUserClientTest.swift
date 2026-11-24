@@ -22,21 +22,9 @@ struct PeerUserClientTest: HWTest {
         let image = try? Data(contentsOf: URL(fileURLWithPath: Self.peer), options: .alwaysMapped)
         let classes = image.flatMap(EmbeddedEntitlements.of).map(EmbeddedEntitlements.userClientClasses)
         metrics.set("peer_classes", classes.map { $0.isEmpty ? "-" : $0.joined(separator: ",") } ?? "unreadable")
-        let acceptor = TexturePeerAcceptor()
-        let listener = NSXPCListener.anonymous()
-        listener.delegate = acceptor
-        listener.resume()
-        defer {
-            acceptor.connection?.invalidate()
-            listener.invalidate()
-        }
-        let endpoint = listener.endpoint
         var made = false
-        if let why = await NativeSharedTexturePeerTest.offThread({ NativeSharedTexturePeerTest.startPeer(endpoint) }) {
-            metrics.set("peer_make", "no_peer:\(why)")
-        } else if await NativeSharedTexturePeerTest.offThread({
-            acceptor.accepted.wait(timeout: .now() + 20) == .success
-        }), let connection = acceptor.connection {
+        do {
+            let connection = try await TexturePeerLink.connection()
             let surface = HandlerValue<IOSurface?>(nil)
             let answer = await SurfaceCrossProcessTest.ask(connection) { peer, reply in
                 peer.makeSurfaceWidth(16, height: 16, keep: false) {
@@ -47,11 +35,13 @@ struct PeerUserClientTest: HWTest {
             made = answer?.hasPrefix("ok ") == true && surface.value != nil
             let word = answer?.split(separator: " ").first.map { $0.replacingOccurrences(of: "=", with: ":") }
             metrics.set("peer_make", made ? "ok" : word ?? "no_answer")
-        } else {
-            metrics.set("peer_make", "never_connected")
+        } catch {
+            metrics.set("peer_make", "no_peer:\(error)")
         }
+        let once = await TexturePeerLink.startedOnce(&metrics)
         return .judged(
             [
+                once,
                 ("the peer is signed for \(Self.surfaceClass)", classes?.contains(Self.surfaceClass) ?? true),
                 ("the peer made an IOSurface", made),
             ], metrics, proof: ""

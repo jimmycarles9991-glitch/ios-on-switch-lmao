@@ -37,6 +37,7 @@ host_library(
     name = "headers",
     hdrs = [
         "//drivers/SwitchBattery:SwitchBattery.h",
+        "//drivers/SwitchBattery:SwitchBatteryPack.h",
         "//drivers/SwitchBattery:SwitchChargePolicy.h",
         "//drivers/SwitchPower:SwitchPower.h",
         "//drivers/SwitchPower:SwitchSensorModels.h",
@@ -56,8 +57,28 @@ host_library(
 
 host_library(
     name = "switch_battery",
-    srcs = ["//drivers/SwitchBattery:SwitchBattery.cpp"],
+    srcs = [
+        "//drivers/SwitchBattery:SwitchBattery.cpp",
+        "//drivers/SwitchBattery:SwitchBatteryPack.cpp",
+    ],
     copts = ["-Wno-unused-parameter"],
+    deps = [
+        ":headers",
+        ":kernel",
+    ],
+)
+
+# The same driver as a 24B119 kernel builds it (the kind header's SWITCH_IPSW_KIND_24B119): with the battery pack.
+host_library(
+    name = "switch_battery_24b119",
+    srcs = [
+        "//drivers/SwitchBattery:SwitchBattery.cpp",
+        "//drivers/SwitchBattery:SwitchBatteryPack.cpp",
+    ],
+    copts = [
+        "-DSWITCH_IPSW_KIND_24B119=1",
+        "-Wno-unused-parameter",
+    ],
     deps = [
         ":headers",
         ":kernel",
@@ -94,6 +115,22 @@ host_test(
         ":headers",
         ":kernel",
         ":switch_battery",
+        ":switch_pd",
+        ":switch_pd_alt_mode",
+    ],
+)
+
+host_test(
+    name = "switch_charging_24b119_test",
+    srcs = ["switch_charging_test.cpp"],
+    copts = [
+        "-DSWITCH_IPSW_KIND_24B119=1",
+        "-Wno-unused-parameter",
+    ],
+    deps = [
+        ":headers",
+        ":kernel",
+        ":switch_battery_24b119",
         ":switch_pd",
         ":switch_pd_alt_mode",
     ],

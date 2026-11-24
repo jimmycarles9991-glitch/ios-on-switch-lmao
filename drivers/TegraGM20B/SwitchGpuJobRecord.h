@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "TegraGM20BJobABI.h"
+#include "TegraGM20BVolatileABI.h"
 
 struct SwitchGpuJobRecord {
 	TegraGM20BAbiJob *job;
@@ -17,7 +18,7 @@ struct SwitchGpuJobRecord {
 	static constexpr uint32_t kFlags = TegraGM20BJobExternal | TegraGM20BJobHostWritten |
 					   TegraGM20BJobHasEvents | TegraGM20BJobQuiet |
 					   TegraGM20BJobAdmission | TegraGM20BJobFulfills |
-					   TegraGM20BJobEventReleases;
+					   TegraGM20BJobVolatileWrites | TegraGM20BJobEventReleases;
 	static constexpr size_t kMaxBytes =
 		sizeof(TegraGM20BAbiJob) + TegraGM20BMaxJobPushes * sizeof(TegraGM20BAbiPush) +
 		TegraGM20BMaxJobUses * sizeof(TegraGM20BAbiSurfaceUse) +

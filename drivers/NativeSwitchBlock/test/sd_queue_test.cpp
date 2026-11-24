@@ -409,56 +409,273 @@ static void randomGaps()
     }
 }
 
-// r14-sdcq: the command queue's further tasks start at the oldest read that overlaps no older queued request.
-static void independent()
+static Picked pickWrites(Queue &q, int first, uint32_t limit = 2048, uint32_t maxCount = 256, unsigned scan = 128,
+                         const std::vector<SwitchLbaRange> &inFlight = {})
 {
-    // The head read, when nothing is older.
-    {
-        Queue q({{100, 8, false}, {200, 8, false}});
-        REQUIRE(switchNextIndependentRead(q.head, 512, 128) == q.at(0));
+    Picked p{};
+    const uint32_t count =
+        switchGatherWrites(q.head, q.at(first), limit, maxCount, scan, &p.start, &p.sectors,
+                           inFlight.empty() ? nullptr : inFlight.data(), static_cast<unsigned>(inFlight.size()));
+    REQUIRE(switchWriteChainTiles(q.head, p.start, p.sectors, count));
+    Request *chain = switchUnlinkChain(q.head, q.tail, count);
+    uint64_t at = p.start;
+    for (Request *r = chain; r; r = r->next) {
+        REQUIRE(r->lba == at && r->write && !r->chained);
+        at = r->lba + r->sectors;
+        p.chain.push_back(r->id);
     }
-    // A write first: the read behind it goes unless it overlaps that write.
+    REQUIRE(chain->lba == p.start && p.chain.size() == count && at == p.start + p.sectors && p.sectors <= limit);
+    for (const Request *r = q.head; r; r = r->next)
+        REQUIRE(!r->chained);
+    q.checkTail();
+    return p;
+}
+
+static void writeTiling()
+{
+    Queue q({{100, 8, true}, {108, 8, true}, {104, 8, true}, {116, 8, false}, {124, 8, true}});
+    auto mark = [&](std::vector<int> ids) {
+        switchClearChain(q.head);
+        for (int id : ids)
+            q.at(id)->chained = true;
+    };
+    mark({0, 1});
+    REQUIRE(switchWriteChainTiles(q.head, 100, 16, 2));
+    REQUIRE(!switchWriteChainTiles(q.head, 100, 24, 2));
+    REQUIRE(!switchWriteChainTiles(q.head, 100, 16, 3));
+    REQUIRE(!switchWriteChainTiles(q.head, 104, 12, 2));
+    mark({0, 1, 2});
+    REQUIRE(!switchWriteChainTiles(q.head, 100, 24, 3));
+    mark({0, 1, 3});
+    REQUIRE(!switchWriteChainTiles(q.head, 100, 24, 3));
+    mark({0, 4});
+    REQUIRE(!switchWriteChainTiles(q.head, 100, 32, 2));
+    mark({});
+    REQUIRE(switchWriteChainTiles(q.head, 100, 0, 0));
+    REQUIRE(!switchWriteChainTiles(q.head, 100, 8, 0));
+    REQUIRE(!switchChainFitsDirection(q.head, 100, 0, 0, 8, 8, true));
+    switchClearChain(q.head);
+}
+
+static void writeBasics()
+{
     {
-        Queue q({{100, 8, true}, {104, 8, false}, {300, 8, false}});
-        REQUIRE(switchNextIndependentRead(q.head, 512, 128) == q.at(2));
+        Queue q({{100, 8, true}});
+        Picked p = pickWrites(q, 0);
+        REQUIRE(p.chain == std::vector<int>{0} && p.start == 100 && p.sectors == 8 && !q.head && !q.tail);
     }
-    // An older read of the same blocks keeps a newer one back; reads larger than a task are skipped.
     {
-        Queue q({{100, 1024, false}, {104, 8, false}, {2000, 8, false}});
-        REQUIRE(switchNextIndependentRead(q.head, 512, 128) == q.at(2));
+        Queue q({{100, 8, true}, {108, 8, true}, {116, 16, true}, {500, 8, true}});
+        Picked p = pickWrites(q, 0);
+        REQUIRE((p.chain == std::vector<int>{0, 1, 2}) && p.sectors == 32);
+        REQUIRE(q.ids() == std::vector<int>{3});
     }
-    // Within `scan` only; none at all.
     {
-        Queue q({{100, 8, true}, {200, 8, true}, {300, 8, false}});
-        REQUIRE(!switchNextIndependentRead(q.head, 512, 2) && switchNextIndependentRead(q.head, 512, 3) == q.at(2));
-        Queue w({{100, 8, true}});
-        REQUIRE(!switchNextIndependentRead(w.head, 512, 128));
-        Queue e({});
-        REQUIRE(!switchNextIndependentRead(e.head, 512, 128));
+        Queue q({{108, 8, true}, {900, 8, false}, {116, 8, true}, {100, 8, true}, {2000, 8, true}, {92, 8, true}});
+        Picked p = pickWrites(q, 0);
+        REQUIRE((p.chain == std::vector<int>{5, 3, 0, 2}) && p.start == 92 && p.sectors == 32);
+        REQUIRE((q.ids() == std::vector<int>{1, 4}));
     }
-    // Random queues: what it returns is a read within the bounds overlapping nothing older, and the first such.
-    std::mt19937_64 random(0x1d);
-    for (unsigned round = 0; round < 20000; ++round) {
-        const unsigned n = unsigned(random() % 30);
+    // Strict contiguity only: a 1-sector gap prevents merging.
+    {
+        Queue q({{100, 8, true}, {109, 8, true}, {116, 8, true}});
+        Picked p = pickWrites(q, 0);
+        REQUIRE(p.chain == std::vector<int>{0} && p.sectors == 8);
+        REQUIRE((q.ids() == std::vector<int>{1, 2}));
+    }
+    // Falling order merges into rising card order.
+    {
         std::vector<std::tuple<uint64_t, uint32_t, bool>> items;
-        for (unsigned i = 0; i < n; ++i)
-            items.push_back({(random() % 64) * 8, 8 * uint32_t(1 + random() % 8), random() % 4 == 0});
+        for (int i = 0; i < 40; ++i)
+            items.push_back({uint64_t(39 - i) * 8, 8, true});
         Queue q(items);
-        const uint32_t maxSectors = 8 * uint32_t(1 + random() % 8);
-        const Request *found = switchNextIndependentRead(q.head, maxSectors, 128);
+        Picked p = pickWrites(q, 0);
+        REQUIRE(p.chain.size() == 40 && p.start == 0 && p.sectors == 320 && p.chain.front() == 39 && !q.head);
+    }
+}
+
+static void writeOrdering()
+{
+    // WAR: a write must not pass an older overlapping read (full or partial).
+    {
+        Queue q({{100, 8, true}, {108, 8, false}, {108, 8, true}});
+        Picked p = pickWrites(q, 0);
+        REQUIRE(p.chain == std::vector<int>{0});
+        REQUIRE((q.ids() == std::vector<int>{1, 2}));
+    }
+    {
+        Queue q({{100, 8, true}, {110, 2, false}, {108, 8, true}});
+        REQUIRE(pickWrites(q, 0).chain == std::vector<int>{0});
+    }
+    // WAW: a newer write behind an over-limit or partially overlapping older write stays behind it.
+    {
+        Queue q({{100, 8, true}, {108, 12, true}, {108, 8, true}});
+        Picked p = pickWrites(q, 0, 16);
+        REQUIRE(p.chain == std::vector<int>{0});
+        REQUIRE((q.ids() == std::vector<int>{1, 2}));
+    }
+    {
+        Queue q({{100, 8, true}, {112, 8, true}, {108, 8, true}});
+        Picked p = pickWrites(q, 0);
+        REQUIRE(p.chain == std::vector<int>{0});
+        REQUIRE((q.ids() == std::vector<int>{1, 2}));
+    }
+    // Reads never join a write chain.
+    {
+        Queue q({{100, 8, true}, {108, 8, false}, {116, 8, true}});
+        REQUIRE(pickWrites(q, 0).chain == std::vector<int>{0});
+    }
+    // Non-overlapping older reads and writes do not block a contiguous write.
+    {
+        Queue q({{100, 8, true}, {5000, 8, false}, {6000, 8, true}, {108, 8, true}});
+        REQUIRE((pickWrites(q, 0).chain == std::vector<int>{0, 3}));
+        REQUIRE((q.ids() == std::vector<int>{1, 2}));
+    }
+    // An older write ahead of a newer overlapping read still joins before that read.
+    {
+        Queue q({{108, 8, true}, {108, 8, false}, {100, 8, true}});
+        Picked p = pickWrites(q, 2);
+        REQUIRE((p.chain == std::vector<int>{2, 0}) && p.start == 100);
+        REQUIRE(q.ids() == std::vector<int>{1});
+    }
+}
+
+static void writeInFlight()
+{
+    // Candidate overlapping an active in-flight range is skipped while the opposite end still joins.
+    {
+        Queue q({{100, 8, true}, {108, 8, true}, {92, 8, true}});
+        Picked p = pickWrites(q, 0, 2048, 256, 128, {{108, 8}});
+        REQUIRE((p.chain == std::vector<int>{2, 0}) && p.start == 92 && p.sectors == 16);
+        REQUIRE(q.ids() == std::vector<int>{1});
+    }
+    // Multiple in-flight ranges (active, prepared, stashed), partial overlap, empty range ignored, touching allowed.
+    {
+        Queue q({{100, 8, true}, {108, 8, true}, {92, 8, true}, {84, 8, true}, {116, 8, true}});
+        const std::vector<SwitchLbaRange> slots = {{0, 0}, {112, 4}, {76, 8}, {500, 16}};
+        Picked p = pickWrites(q, 0, 2048, 256, 128, slots);
+        REQUIRE((p.chain == std::vector<int>{3, 2, 0}) && p.start == 84 && p.sectors == 24);
+        REQUIRE((q.ids() == std::vector<int>{1, 4}));
+    }
+    // An older write blocked by inFlight also blocks a newer overlapping write outside inFlight.
+    {
+        Queue q({{100, 8, true}, {108, 8, true}, {108, 4, true}});
+        Picked p = pickWrites(q, 0, 2048, 256, 128, {{112, 8}});
+        REQUIRE(p.chain == std::vector<int>{0});
+        REQUIRE((q.ids() == std::vector<int>{1, 2}));
+    }
+}
+
+static void writeLimits()
+{
+    {
+        std::vector<std::tuple<uint64_t, uint32_t, bool>> items;
+        for (int i = 0; i < 300; ++i)
+            items.push_back({uint64_t(i) * 8, 8, true});
+        Queue q(items);
+        Picked p = pickWrites(q, 0, 2048, 256, 1000);
+        REQUIRE(p.chain.size() == 256 && p.sectors == 2048);
+        REQUIRE(q.ids().size() == 44 && q.ids().front() == 256);
+    }
+    {
+        Queue q({{0, 8, true}, {8, 8, true}, {16, 8, true}, {24, 8, true}});
+        REQUIRE(pickWrites(q, 0, 2048, 3).chain.size() == 3);
+    }
+    {
+        Queue q({{100, 8, true}, {500, 8, true}, {600, 8, true}, {108, 8, true}});
+        REQUIRE(pickWrites(q, 0, 2048, 256, 3).chain == std::vector<int>{0});
+        Queue r({{100, 8, true}, {500, 8, true}, {600, 8, true}, {108, 8, true}});
+        REQUIRE((pickWrites(r, 0, 2048, 256, 4).chain == std::vector<int>{0, 3}));
+    }
+}
+
+static void writeRandomQueues()
+{
+    std::mt19937_64 random(0x77726974ULL);
+    for (unsigned round = 0; round < 20000; ++round) {
+        const unsigned n = 1 + unsigned(random() % 40);
+        std::vector<std::tuple<uint64_t, uint32_t, bool>> items;
         for (unsigned i = 0; i < n; ++i) {
-            const Request &r = q.storage[i];
-            bool ok = !r.write && r.sectors <= maxSectors;
-            for (unsigned older = 0; older < i && ok; ++older)
-                ok = !switchOverlaps(&q.storage[older], &r);
-            if (ok) {
-                REQUIRE(found == &r);
-                break;
-            }
-            REQUIRE(found != &r);
+            const uint64_t lba = (random() % 64) * 8;
+            const uint32_t sectors = 8 * uint32_t(1 + random() % (random() % 4 ? 2 : 8));
+            items.push_back({lba, sectors, random() % 4 != 0});
         }
-        if (found)
-            REQUIRE(!found->write && found->sectors <= maxSectors);
+        Queue q(items);
+        std::vector<int> writes;
+        for (unsigned i = 0; i < n; ++i)
+            if (std::get<2>(items[i]))
+                writes.push_back(int(i));
+        if (writes.empty())
+            continue;
+        const int first = (round % 2 == 0 && std::get<2>(items[0])) ? 0 : writes[random() % writes.size()];
+        const uint32_t limit = random() % 2 ? 2048 : 8 * uint32_t(1 + random() % 16);
+        if (std::get<1>(items[size_t(first)]) > limit)
+            continue;
+        std::vector<SwitchLbaRange> inFlight;
+        const unsigned slots = unsigned(random() % 4);
+        for (unsigned s = 0; s < slots; ++s)
+            inFlight.push_back({(random() % 64) * 8, random() % 5 == 0 ? 0u : 8u * uint32_t(1 + random() % 4)});
+        const std::vector<int> before = q.ids();
+        Picked p = pickWrites(q, first, limit, 256, 128, inFlight);
+        std::vector<bool> taken(n);
+        for (int id : p.chain)
+            taken[size_t(id)] = true;
+        REQUIRE(taken[size_t(first)]);
+        for (int id : p.chain) {
+            if (id == first)
+                continue;
+            const Request &r = q.storage[size_t(id)];
+            for (const SwitchLbaRange &active : inFlight)
+                REQUIRE(!switchOverlapsRange(&r, active));
+            for (int older = 0; older < id; ++older)
+                if (!taken[size_t(older)])
+                    REQUIRE(!switchOverlaps(&q.storage[size_t(older)], &r));
+        }
+        std::vector<int> rest;
+        for (int id : before)
+            if (!taken[size_t(id)])
+                rest.push_back(id);
+        REQUIRE(q.ids() == rest);
+        // Maximal: every remaining contiguous write within limit overlaps inFlight or an older unchained request.
+        for (int id : rest) {
+            const Request &r = q.storage[size_t(id)];
+            if (!r.write)
+                continue;
+            if (r.lba != p.start + p.sectors && r.lba + r.sectors != p.start)
+                continue;
+            if (p.sectors + r.sectors > limit)
+                continue;
+            bool blocked = false;
+            for (const SwitchLbaRange &active : inFlight)
+                blocked |= switchOverlapsRange(&r, active);
+            for (int older = 0; older < id && !blocked; ++older)
+                blocked = !taken[size_t(older)] && switchOverlaps(&q.storage[size_t(older)], &r);
+            REQUIRE(blocked);
+        }
+        // When `first` is head (as in pickLocked), executing the gathered chain then `rest` must match strict FIFO.
+        if (first == 0) {
+            constexpr size_t kDiskSectors = 64 * 8 + 64;
+            std::vector<int> fifoDisk(kDiskSectors, -1), mergedDisk(kDiskSectors, -1);
+            std::vector<std::vector<int>> fifoReads(n), mergedReads(n);
+            auto runOp = [&](int id, std::vector<int> &disk, std::vector<std::vector<int>> &reads) {
+                const Request &r = q.storage[size_t(id)];
+                for (uint32_t s = 0; s < r.sectors; ++s) {
+                    const size_t idx = size_t(r.lba + s);
+                    if (r.write)
+                        disk[idx] = id;
+                    else
+                        reads[size_t(id)].push_back(disk[idx]);
+                }
+            };
+            for (int id : before)
+                runOp(id, fifoDisk, fifoReads);
+            for (int id : p.chain)
+                runOp(id, mergedDisk, mergedReads);
+            for (int id : rest)
+                runOp(id, mergedDisk, mergedReads);
+            REQUIRE(mergedDisk == fifoDisk);
+            REQUIRE(mergedReads == fifoReads);
+        }
     }
 }
 
@@ -497,7 +714,32 @@ TEST(SdQueue, RandomGaps)
     randomGaps();
 }
 
-TEST(SdQueue, IndependentReads)
+TEST(SdQueue, WriteTiling)
 {
-    independent();
+    writeTiling();
+}
+
+TEST(SdQueue, WriteBasics)
+{
+    writeBasics();
+}
+
+TEST(SdQueue, WriteOrdering)
+{
+    writeOrdering();
+}
+
+TEST(SdQueue, WriteInFlight)
+{
+    writeInFlight();
+}
+
+TEST(SdQueue, WriteLimits)
+{
+    writeLimits();
+}
+
+TEST(SdQueue, WriteRandomQueues)
+{
+    writeRandomQueues();
 }

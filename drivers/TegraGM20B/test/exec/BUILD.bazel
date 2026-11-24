@@ -12,13 +12,21 @@ lint_files()
 
 # -nostdlibinc as the kernel's freestanding C recipe: the shim's os.h is the whole C library, and the host's
 # <sys/cdefs.h> redefines its __cold.
-GPU_HOST_COPTS = [flag.replace("{tree}/", "") for flag in GPU_C_FLAGS] + [
+GPU_HOST_COPTS_BASE = [flag.replace("{tree}/", "") for flag in GPU_C_FLAGS] + [
     "-nostdlibinc",
     "-fno-builtin",
     "-fno-common",
-    "-DDEVELOPMENT=1",
     "-I",
     "drivers/TegraGM20B",
+]
+
+GPU_HOST_COPTS = GPU_HOST_COPTS_BASE + ["-DDEVELOPMENT=1"]
+
+GPU_HOST_RELEASE_COPTS = GPU_HOST_COPTS_BASE + [
+    "-UDEVELOPMENT",
+    "-DDEVELOPMENT=0",
+    "-UDEBUG",
+    "-DDEBUG=0",
 ]
 
 GPU_HEADERS = [
@@ -72,6 +80,25 @@ host_library(
     copts = GPU_HOST_COPTS + ["-DSWITCH_MMIO_HOST_MODEL"],
 )
 
+host_library(
+    name = "exec_driver_release",
+    srcs = [
+        ":owned_waits_source",
+        "switch_gpu_exec_channel.c",
+        "switch_gpu_exec_driver.c",
+        "switch_gpu_exec_fixture.h",
+    ] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_RELEASE_COPTS,
+)
+
+host_library(
+    name = "gpu_exec_release",
+    srcs = ["//drivers/TegraGM20B:gpu_exec.c"] + GPU_HEADERS,
+    c_std = "gnu11",
+    copts = GPU_HOST_RELEASE_COPTS + ["-DSWITCH_MMIO_HOST_MODEL"],
+)
+
 EXEC_TEST_SRCS = [
     "switch_gpu_exec_backing.cpp",
     "switch_gpu_exec_backing.h",
@@ -91,6 +118,38 @@ host_test(
     name = "switch_gpu_exec_commit_test",
     srcs = EXEC_TEST_SRCS,
     deps = [":gpu_exec"] + EXEC_TEST_DEPS,
+)
+
+host_test(
+    name = "switch_gpu_exec_wfi_debug_test",
+    srcs = [
+        "switch_gpu_exec_backing.cpp",
+        "switch_gpu_exec_backing.h",
+        "switch_gpu_exec_fixture.h",
+        "switch_gpu_exec_kernel.cpp",
+        "switch_gpu_exec_wfi_test.cpp",
+    ],
+    defines = ["SWITCH_EXEC_WFI_RELEASE=0"],
+    deps = [":gpu_exec"] + EXEC_TEST_DEPS,
+)
+
+host_test(
+    name = "switch_gpu_exec_wfi_release_test",
+    srcs = [
+        "switch_gpu_exec_backing.cpp",
+        "switch_gpu_exec_backing.h",
+        "switch_gpu_exec_fixture.h",
+        "switch_gpu_exec_kernel.cpp",
+        "switch_gpu_exec_wfi_test.cpp",
+    ],
+    defines = ["SWITCH_EXEC_WFI_RELEASE=1"],
+    deps = [
+        ":exec_driver_release",
+        ":gpu_exec_release",
+        ":nvif_chan",
+        "//drivers/TegraGM20B/test:backing",
+        "//drivers/TegraGM20B/test:coherency_kernel",
+    ],
 )
 
 # The same test against gpu_exec.c with its commit moved (switch_gpu_exec_mutant.py): each of these is expected to

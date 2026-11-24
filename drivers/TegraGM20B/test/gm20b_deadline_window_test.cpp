@@ -449,3 +449,21 @@ TEST_F(DeadlineWindow, AMissedFrameNamesItsCause)
 	const tgm_deadline_miss late = {1000, 16000000, 9000000, 9000000, 0, 0};
 	EXPECT_EQ(tgm_deadline_miss_cause(&late), TGM_MISS_PRESENT);
 }
+
+TEST_F(DeadlineWindow, LaterCompositorKicksReportNotFirstUntilPresent)
+{
+	tgm_deadline_presented(now, 1);
+	now += 1000;
+	EXPECT_EQ(tgm_deadline_kicked(1, 0), 0);
+	now += 1000;
+	EXPECT_EQ(tgm_deadline_kicked(0, 1), 0);
+	EXPECT_EQ(tgm_deadline_kicked(1, 0), 1);
+	now += 1000;
+	EXPECT_EQ(tgm_deadline_kicked(1, 1), 1);
+	now += 1000;
+	tgm_deadline_presented(now, 1);
+	now += 1000;
+	EXPECT_EQ(tgm_deadline_kicked(1, 0), 0);
+	now += 1000;
+	EXPECT_EQ(tgm_deadline_kicked(1, 1), 1);
+}

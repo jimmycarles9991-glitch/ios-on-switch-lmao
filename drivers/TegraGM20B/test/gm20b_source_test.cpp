@@ -27,10 +27,11 @@ const std::string &client()
 {
 	static const std::string source = [] {
 		std::string units;
-		for (const char *unit : {"", "Pool", "Spares", "Bo", "Import", "Channel", "Submit",
-					 "Dispatch", "Present", "Job", "JobSubmit"})
+		for (const char *unit : {"", "Pool", "Spares", "Bo", "Park", "Import", "Channel",
+					 "Submit", "Dispatch", "Present", "Job", "JobSubmit"})
 			units += SourceText(std::string("../TegraGM20BUserClient") + unit + ".cpp");
-		return units + SourceText("../TegraGM20BPushScanRun.cpp") +
+		return units + SourceText("../SwitchGpuParkedPool.cpp") +
+		       SourceText("../TegraGM20BPushScanRun.cpp") +
 		       SourceText("../TegraGM20BUserClientInternal.h") +
 		       SourceText("../SwitchGpuClientRetirement.h") +
 		       SourceText("../SwitchGpuClientBinds.h");
@@ -117,7 +118,8 @@ TEST(GM20BPoolPolicySource, SystemBosGoAsCachedBosDo)
 
 // A system BO neither takes a spare nor gives its pages to the spares, which are cacheable: it is made at its own size.
 // A cached BO's pages are in one state from every source: zero in DRAM, no line in the cacheable kernel alias
-// (cleanZeros publishes KMA_ZERO; recycled spares become ready only after CE completion).
+// (cleanZeros publishes a missed BoAlloc's KMA_ZERO; every spare, made or recycled, becomes ready only after CE
+// completion, so no CPU thread zeroes a spare).
 TEST(GM20BPoolPolicySource, SystemBosNeverUseSpares)
 {
 	const CodeText alloc = Block(client(), "IOReturn AGXDeviceUserClient::boAlloc(");
@@ -127,12 +129,15 @@ TEST(GM20BPoolPolicySource, SystemBosNeverUseSpares)
 	EXPECT_TRUE(alloc.has("(in->flags & TegraGM20BBoContiguous) || system ? kClasses : "
 			      "classUp(in->bytes);"));
 	EXPECT_TRUE(alloc.has("cleanZeros(va, backing);"));
-	EXPECT_TRUE(Block(client(), "Spare *spareMake(SparePool *p, uint64_t bytes)")
-			    .has("cleanZeros(buffer.cpu, bytes);"));
+	EXPECT_FALSE(Block(client(), "Spare *spareMake(SparePool *p, uint64_t bytes)")
+			     .has("cleanZeros"));
 	const CodeText work =
 		Block(client(), "void spareWork(thread_call_param_t param, thread_call_param_t)");
 	EXPECT_TRUE(work.has("switch_gpu_cached_zero(s->pas"));
 	EXPECT_FALSE(work.has("cleanZeros(s->buffer"));
+	EXPECT_FALSE(work.has("p->ready[c] = s;"));
+	EXPECT_EQ(work.count("p->dirty = s;"), 2u)
+		<< "a busy scrub's spare put back, and the refill's new one";
 	const CodeText completed = Block(client(), "void spareZeroed(void *context, int result)");
 	EXPECT_TRUE(
 		completed.before("const bool keep = !result && spareRoom();", "p->ready[c] = s;"));
@@ -209,6 +214,16 @@ TEST(GM20BPoolPolicySource, CompressibleBosArePoolChunksNoTaskMaps)
 			  "int nvxnu_pool_alloc_chunks(unsigned long count, unsigned "
 			  "long long *pas)")
 			    .has("tgm_comp_pick_chunks(pool_map, pool_dirty, pool_npages,"));
+	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::cpuAccess(")
+			    .has("bo->chunked || bo->smmuCompressible"));
+	EXPECT_TRUE(Block(SourceText("../SwitchGpuUserCpuComplete.h"),
+			  "IOReturn AGXDeviceUserClient::cpuComplete(")
+			    .has("bo->chunked || bo->smmuCompressible"));
+	EXPECT_TRUE(Block(client(), "void AGXDeviceUserClient::noteBind(")
+			    .has("else if (bo->chunked || bo->smmuCompressible) "
+				 "n.origin = TGM_BIND_COMPRESSIBLE;"));
+	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::boPark(")
+			    .has("bo->chunked || bo->smmuCompressible,"));
 }
 
 TEST(GM20BPoolScrubSource, NoCpuClearOfTheReservedPool)
@@ -411,8 +426,9 @@ TEST(GM20BPresentSource, OneL2FlushPerPresent)
 	EXPECT_TRUE(
 		Block(gpu(), "void tgm_present_push_copy(")
 			.before("NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY", "tgm_copy_texels("));
+	EXPECT_TRUE(copy.has("switch_gpu_present_tokens_need_l2_flush("));
 	EXPECT_TRUE(copy.has(
-		"switch_gpu_chan_fence_sealed(chan, dst_va ? TGM_FENCE_VOLATILE_WRITES : 1,"));
+		"switch_gpu_chan_fence_sealed(chan, need_flush ? 1 : TGM_FENCE_VOLATILE_WRITES,"));
 	const CodeText fence = Block(gpu(), "static u32 chan_fence_job(");
 	EXPECT_TRUE(
 		fence.before("NVB06F_FB_FLUSH, 0); if (external != TGM_FENCE_VOLATILE_WRITES) {",
@@ -515,8 +531,20 @@ TEST(GM20BPresentSource, TiledSourceIsCopiedBlockLinear)
 	EXPECT_FALSE(Block(SourceText("../TegraGM20BReadback.cpp"), "uint32_t tgm_readback_take(")
 			     .has("TEGRA_SCANOUT_TILED"));
 	const CodeText surface = Block(client(), "uint64_t presentSurface(");
-	EXPECT_TRUE(surface.has("const uint32_t kind = blockLinear ? TGM_LAYOUT_KIND : 0;"));
-	EXPECT_TRUE(surface.has("s.mem, bytes, static_cast<uint8_t>(kind))"));
+	EXPECT_TRUE(surface.has("uint32_t kind = compressed ? compKind : "
+				"(blockLinear ? TGM_LAYOUT_KIND : 0);"));
+	EXPECT_TRUE(surface.has("const uint32_t preparedKind = presentCompressedKind(memory);"));
+	EXPECT_TRUE(surface.has("switch_gpu_vm_map(vm, va, mapBytes, s.mem, 0, "
+				"static_cast<uint8_t>(kind), 0, &s.mapping)"));
+	EXPECT_TRUE(surface.has("switch_gpu_vm_map_volatile(vm, va, mapBytes, s.mem, 0, "
+				"static_cast<uint8_t>(kind), 0, 1, &s.mapping)"));
+	const CodeText drop = Block(client(), "void dropSurface(PresentSurface &s)");
+	EXPECT_TRUE(drop.has("switch_gpu_vm_unmap(s.vm, &s.mapping);"));
+	EXPECT_FALSE(drop.has("tgm_present_unmap("));
+	EXPECT_TRUE(Block(gpu(), "int tgm_present_open(struct tgm_vm **pvm)")
+			    .has("tgm_vm_claim(tgm_present.vm, &tgm_present);"));
+	EXPECT_TRUE(Block(gpu(), "static int present_copy(")
+			    .has("if (tgm_tlb_take(&chan->tlb, &chan->vm->tlb))"));
 	EXPECT_FALSE(Block(client(), "IOReturn AGXDeviceUserClient::vmBind(").has("tiled"));
 	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::surfaceLayoutInfo(")
 			    .has("tgm_coherency_layout(coh,"));
@@ -524,6 +552,9 @@ TEST(GM20BPresentSource, TiledSourceIsCopiedBlockLinear)
 	EXPECT_TRUE(info.has("? tgm_coherency_layout_fitted(coh, width, height, "
 			     "surface.bpp, pitch, writes)"));
 	EXPECT_TRUE(info.has("canonical || (same && tgm_layout_nil_height(&tiled))"));
+	EXPECT_TRUE(info.has("current && current->backingMemory && current->mem && "
+			     "tgm_mem_can_compress(current->mem)"));
+	EXPECT_TRUE(info.has("switch_refusal(\"iosurface-layout\", \"uncompressible-bo\","));
 }
 
 // System sleep (gpu_power.c "system sleep"): every path that touches the GPU outside tgm_gpu.lock goes through the gate
@@ -849,7 +880,7 @@ TEST(GM20BVisibilitySource, AJobWritingAScannedBackingIsExternal)
 	EXPECT_TRUE(
 		Block(SourceText("../SwitchGpuBacking.cpp"),
 		      "extern \"C\" int switch_gpu_backing_scanned(")
-			.has("__atomic_load_n(&backing->scanout_holds, __ATOMIC_ACQUIRE) != 0"));
+			.has("__atomic_load_n(&backing->scanout_holds, __ATOMIC_SEQ_CST) != 0"));
 }
 
 // Only a connection's maps skip the CPU's L2 and TLB maintenance; every removal keeps it (TegraGM20BTlb.h).
@@ -1322,8 +1353,8 @@ TEST(GM20BJobSource, AWriterPromiseIsTheConnectionsAndEndsWithIt)
 TEST(GM20BPresentSource, AWatchedPresentIsCompletedByItsProducersInterruptPass)
 {
 	const CodeText fenced = Block(gpu(), "static inline void present_watch_fenced(");
-	EXPECT_TRUE(fenced.has("switch_gpu_present_watch_fenced(&tgm_present.watch, chan->id, "
-			       "tgm_chan_completed(chan))"));
+	EXPECT_TRUE(fenced.has("switch_gpu_present_watch_fenced_any(&tgm_present.watch, chan->id, "
+			       "tgm_chan_completed(chan), &matched)"));
 	EXPECT_FALSE(fenced.has("mutex_lock"));
 	EXPECT_FALSE(fenced.has("finish_visible"));
 	const CodeText killed =
@@ -1349,14 +1380,13 @@ TEST(GM20BPresentSource, AWatchedPresentIsCompletedByItsProducersInterruptPass)
 	EXPECT_FALSE(deliver.has("mutex_lock"));
 	const CodeText arm = Block(
 		gpu(), "int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,");
-	EXPECT_TRUE(
-		arm.before("switch_gpu_present_watch_arm(", "mutex_unlock(&tgm_present.lock);"));
-	EXPECT_TRUE(arm.before("gate_leave();", "present_physical(&tgm_present.watch.token)"));
-	// every producer is asked, of the channel its token names, between the arm and the last look: the job that keeps a
-	// writer promise in the promise's place once it is submitted
-	const char *const ask = "tgm_chan_need_tokens(kept.engine ? &kept : dependencies, "
-				"kept.engine ? 1 : dependency_count);";
-	EXPECT_TRUE(arm.before("switch_gpu_present_watch_arm(", ask));
+	EXPECT_TRUE(arm.before("switch_gpu_present_watch_arm_many(",
+			       "mutex_unlock(&tgm_present.lock);"));
+	EXPECT_TRUE(arm.before("gate_leave();",
+			       "switch_gpu_present_watch_check(&tgm_present.watch, watch_gen, "
+			       "watch_tokens, watch_count, present_physical)"));
+	const char *const ask = "tgm_chan_need_tokens(watch_tokens, watch_count);";
+	EXPECT_TRUE(arm.before("switch_gpu_present_watch_arm_many(", ask));
 	EXPECT_TRUE(arm.before("gate_leave();", ask));
 	EXPECT_TRUE(arm.before("tgm_present_promise_watch(&kept);",
 			       "switch_gpu_present_watch_promise("));
@@ -1370,8 +1400,9 @@ TEST(GM20BPresentSource, AWatchedPresentIsCompletedByItsProducersInterruptPass)
 				"tgm_chan_need_tokens(producer, 1);"));
 	EXPECT_TRUE(kept.before("tgm_chan_need_tokens(producer, 1);",
 				"switch_gpu_backing_token_physical_status(producer, 0)"));
-	EXPECT_TRUE(
-		arm.before("tgm_chan_need_tokens(", "present_physical(&tgm_present.watch.token)"));
+	EXPECT_TRUE(arm.before("tgm_chan_need_tokens(",
+			       "switch_gpu_present_watch_check(&tgm_present.watch, watch_gen, "
+			       "watch_tokens, watch_count, present_physical)"));
 	EXPECT_FALSE(arm.has("tgm_chan_need_uid("));
 	EXPECT_TRUE(
 		arm.has("nvxnu_work_schedule_after(tgm_present.deadline_work, TGM_PRESENT_NS);"));
@@ -1380,10 +1411,10 @@ TEST(GM20BPresentSource, AWatchedPresentIsCompletedByItsProducersInterruptPass)
 	// the deadline never delivers a watch: it follows the work an asked interrupt is behind, or panics for a lost one
 	const CodeText deadline = Block(gpu(), "void tgm_present_deadline(void *arg)");
 	EXPECT_FALSE(deadline.has("present_watch_work("));
-	EXPECT_TRUE(deadline.before(
-		"watched = switch_gpu_backing_token_physical_status(&tgm_present.watch.token, 0);",
-		"mutex_lock(&tgm_live_lock);"));
-	EXPECT_TRUE(deadline.before("if (watch_late(watched, age, &waited, &seqno)) {",
+	EXPECT_TRUE(
+		deadline.before("switch_gpu_backing_token_physical_status(&watch_tokens[i], 0);",
+				"mutex_lock(&tgm_live_lock);"));
+	EXPECT_TRUE(deadline.before("if (watch_late(&late_token, watched, age, &waited, &seqno)) {",
 				    "tgm_hang_recover("));
 	const CodeText late = Block(gpu(), "static int watch_late(");
 	EXPECT_TRUE(late.before("switch_gpu_quiet_interrupt(", "nvxnu_panic("));
@@ -1596,7 +1627,7 @@ TEST(GM20BVisibilitySource, InternalFenceKeepsExecutionOrderAndExternalFencePubl
 	const CodeText fence = Block(gpu(), "static u32 chan_fence_job(");
 	EXPECT_TRUE(fence.has("if (external && (l2_on() || chan->kernel))"));
 	EXPECT_TRUE(fence.before("NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY",
-				 "if (external && chan->visible_cpu)"));
+				 "if (external == 1 && chan->visible_cpu)"));
 	EXPECT_TRUE(
 		fence.before("lower_32_bits(chan->visible_gpu)", "lower_32_bits(chan->fence_gpu)"));
 	EXPECT_TRUE(fence.has("RELEASE_WFI, EN"));
@@ -1606,7 +1637,7 @@ TEST(GM20BVisibilitySource, InternalFenceKeepsExecutionOrderAndExternalFencePubl
 				"NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE"));
 	EXPECT_TRUE(exec.has(
 		"*seqno = chan_fence_job(chan, external, chan->submitted + 1, last, quiet, "
-		"releases, release_count, owned);"));
+		"releases, release_count, owned, waits);"));
 	// A batch's internal fence orders execution only: no L2 flush, no visible release, no interrupt. Its kick is the
 	// GPFIFO entry that keeps it between the batches; the job's own kick writes GP_PUT.
 	const CodeText internal = Block(gpu(), "static void chan_job_fence(");
@@ -1620,7 +1651,8 @@ TEST(GM20BVisibilitySource, InternalFenceKeepsExecutionOrderAndExternalFencePubl
 	EXPECT_TRUE(fence.before("chan->chan.defer_kick = true;", "PUSH_KICK(push);"));
 	EXPECT_TRUE(fence.before("PUSH_KICK(push);", "chan_doorbell(chan);"));
 	EXPECT_TRUE(fence.before(
-		"job = switch_gpu_jobs_kick(&chan->jobs, first, next, chan->submit_ns, !announce);",
+		"job = switch_gpu_jobs_kick_waits(&chan->jobs, first, next, chan->submit_ns, "
+		"!announce, waits);",
 		"PUSH_KICK(push);"));
 	for (const char *signature : {"int tgm_vm_unmap_pages(", "void switch_gpu_vm_unmap("}) {
 		const CodeText unmap = Block(gpu(), signature);
@@ -1737,4 +1769,147 @@ TEST(GM20BRopSource, ZropAndCropCountTheL2SlicesAsNvgpuDoes)
 	EXPECT_TRUE(init.has("nvkm_wr32(device, 0x408850, ltc_count);"));
 	EXPECT_TRUE(init.has("nvkm_wr32(device, 0x408958, ltc_count);"));
 	EXPECT_TRUE(CodeText(gr).has(".init_rop_active_fbps = gm20b_gr_init_rop_active_ltcs,"));
+}
+
+TEST(GM20BParkedBoSource, LockOrderAndOffLockVmCalls)
+{
+	const CodeText run = Block(client(), "IOReturn AGXDeviceUserClient::run(");
+	EXPECT_TRUE(run.before("return boPark(", "switch_gpu_method_closes_gate(method)"));
+	EXPECT_TRUE(run.before("return boUnpark(", "switch_gpu_method_closes_gate(method)"));
+	EXPECT_TRUE(run.before("return boFreeMethod(", "switch_gpu_method_closes_gate(method)"));
+	EXPECT_TRUE(run.before("vmBindParkedRefusal(", "vmBind("));
+	EXPECT_TRUE(run.has("cpuAcquireParkedRefusal("));
+
+	const CodeText park = Block(client(), "IOReturn AGXDeviceUserClient::boPark(");
+	EXPECT_TRUE(park.before("IOLockUnlock(lock_);", "switch_iokit_park_replace("));
+	EXPECT_FALSE(park.between("IOLockLock(lock_);", "IOLockUnlock(lock_);")
+			     .has("switch_iokit_park_replace("));
+
+	const CodeText unpark = Block(client(), "IOReturn AGXDeviceUserClient::boUnpark(");
+	EXPECT_TRUE(unpark.before("IOLockUnlock(lock_);", "switch_iokit_unpark_range("));
+	EXPECT_FALSE(unpark.between("IOLockLock(lock_);", "IOLockUnlock(lock_);")
+			     .has("switch_iokit_unpark_range("));
+	EXPECT_TRUE(unpark.before("if (bo->parkState == SwitchGpuParkState::Reclaiming)",
+				  "parkWaitStableLocked(in->handle)"));
+	EXPECT_TRUE(unpark.before("parkWaitStableLocked(in->handle)",
+				  "switch_gpu_park_begin_unpark(bo->parkState)"));
+	const CodeText wait = unpark.between("parkWaitStableLocked(in->handle)",
+					     "switch_gpu_park_begin_unpark(bo->parkState)");
+	EXPECT_TRUE(wait.has("submitGate_.closed()"));
+	EXPECT_TRUE(wait.has("findBo(in->handle)"));
+	EXPECT_TRUE(wait.has("bo->freeing"));
+
+	const CodeText freeMethod = Block(client(), "IOReturn AGXDeviceUserClient::boFreeMethod(");
+	EXPECT_TRUE(freeMethod.before("IOLockUnlock(lock_);", "switch_iokit_drop_parked_range("));
+
+	const CodeText work =
+		Block(client(), "void spareWork(thread_call_param_t param, thread_call_param_t)");
+	EXPECT_TRUE(work.before("reclaimParkedStep(", "IOLockLock(p->lock);"));
+
+	const CodeText take = Block(client(), "Spare *spareTake(uint64_t bytes)");
+	EXPECT_TRUE(take.before("IOLockUnlock(p->lock);", "parkedNotifyDemand("));
+	EXPECT_TRUE(take.before("IOLockUnlock(p->lock);", "parkedHasAny()"));
+
+	const CodeText stats = Block(client(), "extern \"C\" unsigned long tgm_owner_stats(");
+	EXPECT_TRUE(stats.before("parkedStatsTake(", "IOLockLock(p->lock);"));
+}
+
+TEST(GM20BParkedBoSource, OverwriteMappingsAndXnuHelpersPreserveVmSafety)
+{
+	const CodeText map = Block(client(), "IOReturn AGXDeviceUserClient::mapToken(");
+	EXPECT_TRUE(map.has("switch_iokit_map_fixed("));
+	EXPECT_TRUE(map.has("switch_iokit_unmap_overwrite("));
+	EXPECT_TRUE(map.has("mappingRefs"));
+	EXPECT_TRUE(Block(client(), "IOReturn AGXDeviceUserClient::unmapToken(")
+			    .has("switch_iokit_unmap_overwrite("));
+	EXPECT_TRUE(Block(client(), "void AGXDeviceUserClient::releaseMappings()")
+			    .has("switch_iokit_unmap_overwrite("));
+	EXPECT_TRUE(Block(client(), "extern \"C\" uint32_t switch_gpu_info_flags(void)")
+			    .has("TegraGM20BInfoBoPark"));
+	const CodeText memType = Block(client(), "IOReturn AGXDeviceUserClient::memoryForType(");
+	EXPECT_TRUE(memType.has("bo->parkState == SwitchGpuParkState::Live"));
+	EXPECT_TRUE(memType.has("isBuffer ? kIOMapUnique : 0u"));
+
+	const CodeText parkFn = Block(client(), "IOReturn AGXDeviceUserClient::boPark(");
+	EXPECT_TRUE(parkFn.has("bo->mappingRefs != 0u"));
+	EXPECT_TRUE(parkFn.has("backingParkable(bo->backing)"));
+	EXPECT_FALSE(parkFn.has("switch_gpu_backing_member_freed("));
+	EXPECT_FALSE(parkFn.has("switch_iokit_unpark_range("));
+
+	const CodeText gpuBusy = Block(client(), "bool AGXDeviceUserClient::boGpuBusyLocked(");
+	EXPECT_TRUE(gpuBusy.has("switch_gpu_mapping_pending("));
+	EXPECT_TRUE(gpuBusy.has("liveBinds != bo->bindings"));
+
+	const CodeText bindRefuse =
+		Block(client(), "IOReturn AGXDeviceUserClient::vmBindParkedRefusal(");
+	EXPECT_TRUE(bindRefuse.has("binds_[j].bo"));
+
+	const CodeText reclaimFn = Block(client(), "bool AGXDeviceUserClient::reclaimParkedBo(");
+	EXPECT_TRUE(reclaimFn.has("retirementStopped_"));
+	EXPECT_TRUE(reclaimFn.has("switch_gpu_vm_unmap(vm_, &record->mapping)"));
+	EXPECT_FALSE(reclaimFn.has("switch_gpu_mapping_mark_l2_clean("));
+	EXPECT_TRUE(reclaimFn.before("passSubmitters(false)", "detachReclaimedLocked(still)"));
+
+	const CodeText drain = Block(client(), "void AGXDeviceUserClient::drainParkedRanges()");
+	EXPECT_FALSE(drain.has("IONew("));
+	EXPECT_TRUE(drain.has("switch_iokit_drop_parked_range("));
+
+	const std::string backingCpp = SourceText("../SwitchGpuBacking.cpp");
+	const CodeText parkable =
+		Block(backingCpp, "extern \"C\" int switch_gpu_backing_parkable(");
+	EXPECT_TRUE(parkable.before("IOLockLock(lock);", "switch_gpu_backing_enter(backing)"));
+	EXPECT_TRUE(parkable.has("switch_gpu_backing_access_status("));
+	EXPECT_TRUE(parkable.has("backing->refs != 1u"));
+	EXPECT_TRUE(parkable.has("backing->retiring"));
+	EXPECT_TRUE(parkable.has("__atomic_load_n(&backing->mapped_engines, __ATOMIC_ACQUIRE)"));
+	EXPECT_TRUE(parkable.has("__atomic_load_n(&backing->scanout_holds, __ATOMIC_ACQUIRE)"));
+
+	const std::string parkCpp = SourceText("../../../kernel/switch/iokit/park_mapping.cpp");
+	const CodeText replace = Block(parkCpp, "kern_return_t switch_iokit_park_replace(");
+	EXPECT_TRUE(replace.before("switch_iokit_map_check_or_neuter(", "switch_vm_park_range("));
+	EXPECT_TRUE(replace.before("buffer_mem->getRetainCount()", "switch_vm_park_range("));
+	EXPECT_TRUE(replace.before("old_view->getRetainCount()", "switch_vm_park_range("));
+	EXPECT_TRUE(replace.before("switch_vm_park_range(", "switch_vm_range_has_objects("));
+	EXPECT_TRUE(
+		replace.has("switch_iokit_map_neuter_after_park(old_map); old_map->release();"));
+
+	const CodeText unparkHelper = Block(parkCpp, "IOReturn switch_iokit_unpark_range(");
+	EXPECT_TRUE(unparkHelper.has("switch_vm_repark_matching("));
+	EXPECT_TRUE(unparkHelper.has("desc_is_physical(desc)"));
+	const CodeText fixedHelper = Block(parkCpp, "IOReturn switch_iokit_map_fixed(");
+	EXPECT_TRUE(fixedHelper.has("switch_vm_unmap_matching("));
+	EXPECT_TRUE(fixedHelper.has("desc_is_physical(desc)"));
+	EXPECT_TRUE(fixedHelper.has("switch_iokit_map_is_unique(map)"));
+
+	const std::string parkVm = SourceText("../../../kernel/switch/vm/park_vm.c");
+	const CodeText vmCode(parkVm);
+	EXPECT_FALSE(vmCode.has("entry_is_iokit_kernel"));
+	EXPECT_FALSE(vmCode.has("vm_map_ilk_lock_shared"));
+	EXPECT_TRUE(vmCode.has("VM_MAP_PAGE_MASK(map)"));
+	EXPECT_TRUE(vmCode.has("vm_map_range_ex_lock("));
+	EXPECT_TRUE(vmCode.has("vm_map_range_sh_lock("));
+	EXPECT_TRUE(vmCode.has("VME_IS_SENTINEL("));
+	EXPECT_TRUE(vmCode.has("vm_object_lock(obj)"));
+	EXPECT_TRUE(vmCode.has("obj->shadowed"));
+	EXPECT_TRUE(vmCode.has("obj->vo_copy == VM_OBJECT_NULL"));
+	EXPECT_TRUE(vmCode.has("e->zero_wired_pages = FALSE;"));
+	EXPECT_TRUE(vmCode.has("VME_OBJECT_SET(e, VM_OBJECT_NULL, false, 0)"));
+	EXPECT_TRUE(vmCode.has("vm_map_iokit_unmapped_region("));
+	EXPECT_TRUE(vmCode.has("VM_MAP_REMOVE_GAPS_FAIL"));
+	EXPECT_TRUE(vmCode.has("vm_map_remove_and_unlock("));
+	EXPECT_TRUE(vmCode.has("mach_memory_entry_from_port("));
+}
+
+TEST(GM20BParkedBoSource, ParkedDiagnosticsCompileOutOfRelease)
+{
+	for (const char *file : {"../TegraGM20BUserClientPark.cpp", "../SwitchGpuParkedPool.cpp"}) {
+		const std::string src = SourceText(file);
+		const CodeText release(Configured(src, "TGM_STATS", false));
+		EXPECT_EQ(release.count("parkedStatsTake"), 0u);
+		EXPECT_EQ(release.count("parkedStatUnpark"), 0u);
+		EXPECT_EQ(release.count("unparkResident"), 0u);
+		EXPECT_EQ(release.count("unparkReclaimed"), 0u);
+		EXPECT_EQ(release.count("reclaimedCached"), 0u);
+		EXPECT_EQ(release.count("reclaimedSystem"), 0u);
+	}
 }

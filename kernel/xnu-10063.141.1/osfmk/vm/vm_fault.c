@@ -1,4 +1,5 @@
 #include <switch/bootstrap.h>
+#include <switch/diag.h>
 /*
  * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
  *
@@ -101,6 +102,7 @@
 #include <vm/memory_object.h>
 #include <vm/vm_purgeable_internal.h>   /* Needed by some vm_page.h macros */
 #include <vm/vm_shared_region.h>
+#include <switch/prefetch_vm.h>
 
 #include <sys/codesign.h>
 #include <sys/code_signing.h>
@@ -1431,10 +1433,12 @@ vm_fault_page(
 				m = vm_page_lookup(object, vm_object_trunc_page(offset));
 
 				if (m != VM_PAGE_NULL && m->vmp_cleaning) {
+					const struct switch_page_wait switch_wait = switch_diag_page_wait(object->internal ? NULL : object->pager, m->vmp_absent);
 					PAGE_ASSERT_WAIT(m, interruptible);
 
 					vm_object_unlock(object);
 					wait_result = thread_block(THREAD_CONTINUE_NULL);
+					switch_diag_page_waited(&switch_wait);
 					vm_object_deallocate(object);
 
 					goto backoff;
@@ -2171,7 +2175,7 @@ dont_look_for_page:
 
 			if (m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-				VM_PAGE_CONSUME_CLUSTERED(m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 			}
 			assert(!m->vmp_cleaning);
 
@@ -2192,6 +2196,12 @@ dont_look_for_page:
 
 			vm_object_paging_end(object);
 			vm_object_unlock(object);
+			if (__improbable(fault_info->switch_wake)) {
+				fault_info->switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 
 			my_fault = DBG_COW_FAULT;
 			counter_inc(&vm_statistics_cow_faults);
@@ -2322,10 +2332,12 @@ dont_look_for_page:
 				copy_m = vm_page_lookup(copy_object, copy_offset);
 
 				if (copy_m != VM_PAGE_NULL && copy_m->vmp_busy) {
+					const struct switch_page_wait switch_wait = switch_diag_page_wait(copy_object->internal ? NULL : copy_object->pager, copy_m->vmp_absent);
 					PAGE_ASSERT_WAIT(copy_m, interruptible);
 
 					vm_object_unlock(copy_object);
 					wait_result = thread_block(THREAD_CONTINUE_NULL);
+					switch_diag_page_waited(&switch_wait);
 					vm_object_deallocate(copy_object);
 
 					goto backoff;
@@ -2333,6 +2345,7 @@ dont_look_for_page:
 					vm_object_unlock(copy_object);
 					vm_object_deallocate(copy_object);
 					thread_interrupt_level(interruptible_state);
+					SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info->switch_wake);
 
 					return VM_FAULT_RETRY;
 				}
@@ -2361,6 +2374,7 @@ dont_look_for_page:
 				vm_object_unlock(copy_object);
 				vm_fault_cleanup(object, first_m);
 				thread_interrupt_level(interruptible_state);
+				SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info->switch_wake);
 
 				return VM_FAULT_MEMORY_SHORTAGE;
 			}
@@ -2381,7 +2395,7 @@ dont_look_for_page:
 
 			if (m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-				VM_PAGE_CONSUME_CLUSTERED(m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 			}
 			/*
 			 * If there's a pager, then immediately
@@ -2506,7 +2520,7 @@ done:
 			 */
 			if (m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(m);
-				VM_PAGE_CONSUME_CLUSTERED(m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 			}
 			vm_fault_is_sequential(object, offset, fault_info->behavior);
 			vm_fault_deactivate_behind(object, offset, fault_info->behavior);
@@ -2532,6 +2546,12 @@ done:
 
 backoff:
 	thread_interrupt_level(interruptible_state);
+	if (__improbable(fault_info->switch_wake)) {
+		fault_info->switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 
 	if (wait_result == THREAD_INTERRUPTED) {
 		ktriage_record(thread_tid(current_thread()), KDBG_TRIAGE_EVENTID(KDBG_TRIAGE_SUBSYS_VM, KDBG_TRIAGE_RESERVED, KDBG_TRIAGE_VM_FAULT_INTERRUPTED), 0 /* arg */);
@@ -3815,7 +3835,7 @@ vm_fault_enter_prepare(
 
 				VM_PAGE_COUNT_AS_PAGEIN(m);
 			}
-			VM_PAGE_CONSUME_CLUSTERED(m);
+			VM_PAGE_CONSUME_CLUSTERED_WAKE(m, fault_info->switch_wake);
 		}
 	}
 
@@ -4159,6 +4179,12 @@ vm_fault_complete(
 	vm_map_unlock_read(map);
 	if (real_map != map) {
 		vm_map_unlock(real_map);
+	}
+	if (__improbable(fault_info->switch_wake)) {
+		fault_info->switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
 	}
 }
 
@@ -4683,6 +4709,7 @@ RetryFault:
 					vm_map_unlock(real_map);
 				}
 
+				const struct switch_page_wait switch_wait = switch_diag_page_wait(cur_object->internal ? NULL : cur_object->pager, m->vmp_absent);
 				result = PAGE_ASSERT_WAIT(m, interruptible);
 
 				vm_object_unlock(cur_object);
@@ -4690,6 +4717,7 @@ RetryFault:
 				if (result == THREAD_WAITING) {
 					result = thread_block(THREAD_CONTINUE_NULL);
 				}
+				switch_diag_page_waited(&switch_wait);
 				if (result == THREAD_AWAKENED || result == THREAD_RESTART) {
 					goto RetryFault;
 				}
@@ -5165,7 +5193,7 @@ FastPmapEnter:
 
 			if (cur_m->vmp_clustered) {
 				VM_PAGE_COUNT_AS_PAGEIN(cur_m);
-				VM_PAGE_CONSUME_CLUSTERED(cur_m);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(cur_m, fault_info.switch_wake);
 				vm_fault_is_sequential(cur_object, cur_offset, fault_info.behavior);
 			}
 			need_collapse = TRUE;
@@ -6064,6 +6092,12 @@ handle_copy_delay:
 		} else {
 			vm_object_unlock(object);
 		}
+		if (__improbable(fault_info.switch_wake)) {
+			fault_info.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 
 		object_locks_dropped = TRUE;
 
@@ -6362,6 +6396,12 @@ handle_copy_delay:
 			}
 			PAGE_WAKEUP_DONE(m);
 			vm_fault_cleanup(m_object, top_page);
+			if (__improbable(fault_info.switch_wake)) {
+				fault_info.switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 			vm_object_deallocate(object);
 			goto done;
 		}
@@ -6526,12 +6566,19 @@ cleanup:
 	} else {
 		vm_fault_cleanup(object, top_page);
 	}
+	if (__improbable(fault_info.switch_wake)) {
+		fault_info.switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 
 	vm_object_deallocate(object);
 
 #undef  RELEASE_PAGE
 
 done:
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 	thread_interrupt_level(interruptible_state);
 
 	if (resilient_media_object != VM_OBJECT_NULL) {
@@ -6880,6 +6927,12 @@ vm_fault_unwire(
 				PAGE_WAKEUP_DONE(result_page);
 			}
 			vm_fault_cleanup(result_object, top_page);
+			if (__improbable(fault_info.switch_wake)) {
+				fault_info.switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 		}
 	}
 
@@ -6987,6 +7040,7 @@ vm_fault_wire_fast(
 
 #define GIVE_UP {                                       \
 	UNLOCK_AND_DEALLOCATE;                          \
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake); \
 	return(KERN_FAILURE);                           \
 }
 
@@ -7138,6 +7192,12 @@ done:
 
 	PAGE_WAKEUP_DONE(m);
 	UNLOCK_AND_DEALLOCATE;
+	if (__improbable(fault_info.switch_wake)) {
+		fault_info.switch_wake = FALSE;
+		if (switch_vm_prefetch_wake != NULL) {
+			switch_vm_prefetch_wake();
+		}
+	}
 
 	return kr;
 }
@@ -7250,6 +7310,8 @@ vm_fault_copy(
 
 #define RETURN(x)                                       \
 	MACRO_BEGIN                                     \
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_dst.switch_wake); \
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_src.switch_wake); \
 	*copy_size -= amount_left;                      \
 	MACRO_RETURN(x);                                \
 	MACRO_END
@@ -7320,6 +7382,7 @@ RetryDestinationFault:;
 			vm_object_unlock(dst_object);
 			OS_FALLTHROUGH;
 		case VM_FAULT_MEMORY_ERROR:
+			SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_dst.switch_wake);
 			if (error) {
 				return error;
 			} else {
@@ -7352,6 +7415,12 @@ RetryDestinationFault:;
 		vm_page_unlock_queues();
 		PAGE_WAKEUP_DONE(dst_page);
 		vm_object_unlock(dst_object);
+		if (__improbable(fault_info_dst.switch_wake)) {
+			fault_info_dst.switch_wake = FALSE;
+			if (switch_vm_prefetch_wake != NULL) {
+				switch_vm_prefetch_wake();
+			}
+		}
 
 		if (dst_top_page != VM_PAGE_NULL) {
 			vm_object_lock(dst_object);
@@ -7416,6 +7485,7 @@ RetrySourceFault:;
 					vm_object_unlock(src_object);
 					OS_FALLTHROUGH;
 				case VM_FAULT_MEMORY_ERROR:
+					SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info_src.switch_wake);
 					vm_fault_copy_dst_cleanup(dst_page);
 					if (error) {
 						return error;
@@ -7434,6 +7504,12 @@ RetrySourceFault:;
 			}
 			assert((src_prot & VM_PROT_READ) != VM_PROT_NONE);
 			vm_object_unlock(result_page_object);
+			if (__improbable(fault_info_src.switch_wake)) {
+				fault_info_src.switch_wake = FALSE;
+				if (switch_vm_prefetch_wake != NULL) {
+					switch_vm_prefetch_wake();
+				}
+			}
 		}
 
 		vm_map_lock_read(dst_map);

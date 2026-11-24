@@ -328,13 +328,14 @@ TEST_F(DeviceSet, AViewAliasTheSetCouldNotTakeLeavesItsArenaAMemberAtEveryVa)
     EXPECT_EQ(goneMember(), 0u);
 }
 
-// The give-back trims no arena while a command buffer that used its heap is in flight; once it completed, the arena is
-// trimmed into parts and holes, its whole BO freed. The set lists no freed BO, and the command buffers that use the heap
-// next, one of them placing into a hole, run raw on the set naming none.
-TEST_F(DeviceSet, AHeapsArenaTrimmedOnceTheCommandBufferNamingItCompletedLeavesNoFreedBoInTheSetOrTheNextJobs)
+// The give-back purges no volatile heap's arena while a command buffer that used the heap is in flight; once it completed,
+// the arena's BO is freed. The set lists no freed BO, and the command buffers that use the heap once it is bound again,
+// one of them placing where a released buffer was, run raw on the set naming none.
+TEST_F(DeviceSet, AHeapsArenaPurgedOnceTheCommandBufferNamingItCompletedLeavesNoFreedBoInTheSetOrTheNextJobs)
 {
     uint32_t arena = 0;
     ASSERT_TRUE(dev.createArena(kArenaBytes, true, arena));
+    ASSERT_FALSE(dev.setArenaVolatile(arena, true));
     gm20b::Buffer a, b, c;
     ASSERT_TRUE(dev.arenaBuffer(arena, kQuarter, a));
     ASSERT_TRUE(dev.arenaBuffer(arena, kQuarter, b));
@@ -347,15 +348,17 @@ TEST_F(DeviceSet, AHeapsArenaTrimmedOnceTheCommandBufferNamingItCompletedLeavesN
     uint32_t seqno = copyInHeap(heap, a, c);
     ASSERT_NE(seqno, 0u) << refusal();
     giveBack();
-    EXPECT_FALSE(freed(whole)) << "the arena was trimmed under a command buffer in flight";
+    EXPECT_FALSE(freed(whole)) << "the arena was purged under a command buffer in flight";
     completeEverything();
     ASSERT_TRUE(dev.wait(seqno));
 
     giveBack();
-    ASSERT_TRUE(freed(whole)) << "the give-back kept the arena whole";
+    ASSERT_TRUE(freed(whole)) << "the give-back kept the volatile arena";
     EXPECT_EQ(listed(whole), 0u);
     EXPECT_EQ(goneMember(), 0u);
     EXPECT_EQ(model.setRefusals, 0u) << refusal();
+    dev.setArenaVolatile(arena, false);
+    ASSERT_TRUE(dev.restoreArena(arena));
 
     const unsigned jobs = model.setJobs;
     size_t first = model.jobs.size();
@@ -367,7 +370,7 @@ TEST_F(DeviceSet, AHeapsArenaTrimmedOnceTheCommandBufferNamingItCompletedLeavesN
 
     gm20b::Buffer d;
     ASSERT_TRUE(dev.arenaBuffer(arena, kQuarter, d));
-    ASSERT_EQ(d.span.offset, kQuarter) << "the placement is not in the hole";
+    ASSERT_EQ(d.span.offset, kQuarter) << "the placement is not where the released buffer was";
     first = model.jobs.size();
     seqno = copyInHeap(heap, d, a);
     ASSERT_NE(seqno, 0u) << refusal();

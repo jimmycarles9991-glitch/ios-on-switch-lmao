@@ -1,7 +1,8 @@
 """Copy HW Test's run reports off the card's Data volume into the Mac's history, each with its sidecar.
 
-The app keeps its reports in its data container (Documents/hwtest), which needs no change to the OS: the container is
-found by its metadata plist. The sidecar holds what the device cannot see: the commit deploy.py recorded on the card,
+The app keeps its reports in its data container (Library/Application Support/hwtest; builds before 23 Nov used
+Documents/hwtest, which Spotlight indexes), which needs no change to the OS: the container is found by its metadata
+plist. The sidecar holds what the device cannot see: the commit deploy.py recorded on the card,
 the boot's crash reports and saved panics, and how many hosts the device is paired with.
 """
 
@@ -12,11 +13,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tools.hwtest import bootlog, health, posters
-from tools.hwtest.reports import Report, is_report, sidecar_of
+from tools.hwtest.reports import JOURNAL, Report, from_journal, is_report, sidecar_of
 
 BUNDLES = ('com.brunostjohn.switch.hwtest', 'com.brunostjohn.switch.hwtest27e')
 CONTAINERS = 'mobile/Containers/Data/Application'
 METADATA = '.com.apple.mobile_container_manager.metadata.plist'
+# Oldest first: a run in both is the later folder's
+REPORT_FOLDERS = ('Documents/hwtest', 'Library/Application Support/hwtest')
 CRASH_REPORTS = 'mobile/Library/Logs/CrashReporter'
 DEPLOYED = 'deployed.json'
 
@@ -43,6 +46,19 @@ def copy_gpu_files(container: Path, out: Path, identifier: str) -> None:
         files = container / 'Documents' / folder
         if files.is_dir():
             shutil.copytree(files, out / kind / identifier, copy_function=shutil.copyfile, dirs_exist_ok=True)
+
+
+def card_reports(folder: Path) -> dict[str, bytes]:
+    """Return each run in one of an app's REPORT_FOLDERS as its json's name and bytes.
+
+    A run with a journal (one that runs, or a finished one a rerun reopened) is the journal's report.
+    """
+    reports = {path.name: path.read_bytes() for path in sorted(folder.glob('*.json')) if is_report(path)}
+    for path in sorted(folder.glob('*' + JOURNAL)):
+        report = from_journal(path.read_bytes())
+        if report is not None:
+            reports[path.stem + '.json'] = (json.dumps(report, indent=1, sort_keys=True) + '\n').encode()
+    return reports
 
 
 def sidecar(report: Report, data: Path, switch_folder: Path, archive: Path | None = None) -> dict:
@@ -81,16 +97,15 @@ def fetch(
     for identifier, container in containers(data).items():
         if out:
             copy_gpu_files(container, out, identifier)
-        for source in sorted((container / 'Documents/hwtest').glob('*.json')):
-            if not is_report(source):
-                continue
-            target = history / source.name
+        reports = {name: data for folder in REPORT_FOLDERS for name, data in card_reports(container / folder).items()}
+        for name, content in reports.items():
+            target = history / name
             if out:
                 out.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, out / source.name)
-            if target.is_file() and target.read_bytes() == source.read_bytes():
+                (out / name).write_bytes(content)
+            if target.is_file() and target.read_bytes() == content:
                 continue
-            shutil.copyfile(source, target)
+            target.write_bytes(content)
             try:
                 report = Report.load(target)
             except ValueError:

@@ -11,7 +11,6 @@
 // the BPMP has restored the rate (ACTMON lost its state with the SoC).
 #include <IOKit/IOInterruptEventSource.h>
 #include <IOKit/IOLib.h>
-#include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 #include <kern/clock.h>
 #include <kern/cpu_number.h>
@@ -25,6 +24,7 @@
 #include "../../kits/SwitchMMIO/SwitchMMIOWords.h"
 #include "SwitchClocks.h"
 #include "SwitchDisplayMemoryState.h"
+#include "SwitchGpuMcLa.h"
 #include "SwitchEMC.h"
 #include "SwitchEMCGovernor.h"
 #include "SwitchEMCHold.h"
@@ -56,7 +56,6 @@ class SwitchEMC : public OSObject {
     // Hints' wakes: one source per CPU, signalled only from that CPU with interrupts masked, so interruptOccurred's
     // producer count has one producer each.
     IOInterruptEventSource *signal[switchperf::kSignalCpus] = {};
-    IOTimerEventSource *hold = nullptr;
     volatile uint8_t *regs = nullptr;
     SwitchMMIOWords mcRegs;
     switch_display::MemoryState memoryState;
@@ -65,7 +64,7 @@ class SwitchEMC : public OSObject {
     volatile uint8_t *car = nullptr;
     uint32_t khz[SWITCH_EMC_MAX_RATES] = {};
     unsigned count = 0, cur = 0;
-    bool governing = false, refusalLogged = false;
+    bool governing = false, refusalLogged = false, planRefusalLogged = false;
 
     // A hint's deadline in the slot of the CPU it ran on, written only there with interrupts masked.
     struct HintSlot {
@@ -85,15 +84,26 @@ class SwitchEMC : public OSObject {
     // Hints that found the EMC below its top rate: from the first such hint to the BPMP's answer at the top rate.
     uint64_t raiseTicks = 0, raiseMax = 0, bpmpMax = 0;
     unsigned raises = 0;
+    // The tick's (one CPU at a time), only ever growing: the CPUs' busy time in its windows, and the windows of work that
+    // found the EMC not held at its top rate, the first of a run (it wakes the loop) and the ones after it (late: the
+    // loop had not raised it a window later).
+    uint64_t busyTotal = 0;
+    uint32_t unheld = 0, late = 0;
+    bool unheldBefore = false;
+    // The loop's: the busy time at each rate, attributed where `residency` is, and the counts at the last line.
+    uint64_t busyAt[SWITCH_EMC_MAX_RATES] = {}, busyMark = 0;
+    uint32_t unheldSeen = 0, lateSeen = 0;
+    unsigned refusals = 0;  // moves the BPMP or the display memory plan refused
 #endif
 
     static void actmonFired(OSObject *owner, IOInterruptEventSource *, int);
     static void signalFired(OSObject *owner, IOInterruptEventSource *, int);
-    static void holdFired(OSObject *owner, IOTimerEventSource *);
     bool held(uint64_t now);
     uint64_t hintUntil() const;
 #if DEVELOPMENT || DEBUG
     uint64_t takeAsked();
+    void noteWindow(uint64_t busy, bool topHeld);
+    void account(uint64_t now);
 #endif
     void program();
     bool moveTo(unsigned asked, switch_emc_reason reason);
@@ -110,6 +120,7 @@ class SwitchEMC : public OSObject {
     unsigned memoryFloor(unsigned first) const;
     void uncoveredDisplayMemory(uint32_t runningKhz, const char *why);
     bool programMemory(uint32_t before, uint32_t after, bool force = false);
+    void programGpuMc(uint32_t dramKhz, bool logDump = false);
     static IOReturn memoryAction(OSObject *owner, void *request, void *result, void *, void *);
     static IOReturn displayAction(OSObject *owner, void *bytes, void *result, void *, void *);
     bool setup(char *why, size_t size);
@@ -126,7 +137,7 @@ public:
     void govern(bool resume = false);
     void pause();
     void hint();
-    void tick(uint64_t now);
+    void tick(uint64_t now, uint64_t busy);
     void retick();
     int reserveDisplay(uint64_t bytes);
     int reserveMemory(const switch_display_memory_head &request);
@@ -195,7 +206,6 @@ void SwitchEMC::free()
     dropSource(loop, actmon);
     for (IOInterruptEventSource *source : signal)
         dropSource(loop, source);
-    dropSource(loop, hold);
     OSSafeReleaseNULL(loop);
     OSObject::free();
 }
@@ -231,6 +241,8 @@ bool SwitchEMC::setup(char *why, size_t size)
     if (!memoryQualified)
         IOLog("SwitchEMC: display memory admission off: HIDREV %#x FBIO_CFG5 %#x is not a T21x with LPDDR4\n", hidrev,
               fbio);
+    else
+        programGpuMc(khz[cur], true);
     if (fixed)
         IOLog("SwitchEMC: no BPMP firmware: the EMC stays at %u kHz (%s), where display memory admission plans\n", now,
               switchclk::emcSourceName(switchclk::readEmc(car).source));
@@ -238,9 +250,7 @@ bool SwitchEMC::setup(char *why, size_t size)
     loop = IOWorkLoop::workLoop();
     IOService *nub = switch_interrupt_nub(kActmonIntid, false);
     actmon = IOInterruptEventSource::interruptEventSource(this, &SwitchEMC::actmonFired, nub, 0);
-    hold = IOTimerEventSource::timerEventSource(this, &SwitchEMC::holdFired);
-    if (!regs || !loop || !actmon || !hold || loop->addEventSource(actmon) != kIOReturnSuccess ||
-        loop->addEventSource(hold) != kIOReturnSuccess) {
+    if (!regs || !loop || !actmon || loop->addEventSource(actmon) != kIOReturnSuccess) {
         snprintf(why, size, "no ACTMON mapping or work loop");
         return false;
     }
@@ -254,6 +264,7 @@ bool SwitchEMC::setup(char *why, size_t size)
     }
     nanoseconds_to_absolutetime(uint64_t{SWITCH_EMC_HINT_HOLD_US} * NSEC_PER_USEC, &holdTicks);
     nanoseconds_to_absolutetime(uint64_t{100} * NSEC_PER_MSEC, &holdState.frame_ticks);
+    nanoseconds_to_absolutetime(uint64_t{SWITCH_EMC_BUSY_FLOOR_US} * NSEC_PER_USEC, &holdState.busy_floor);
     return true;
 }
 
@@ -262,13 +273,35 @@ bool SwitchEMC::held(uint64_t now)
     return now < switch_emc_hold_end(&holdState, hintUntil(), switch_idle_last_frame());
 }
 
+void SwitchEMC::programGpuMc(uint32_t dramKhz, bool logDump)
+{
+    if (!__atomic_load_n(&memoryQualified, __ATOMIC_ACQUIRE))
+        return;
+#if DEVELOPMENT || DEBUG
+    const switch_mc::GpuMcSnapshot before = logDump ? switch_mc::captureGpuMc(mcRegs) : switch_mc::GpuMcSnapshot{};
+#else
+    (void)logDump;
+#endif
+    switch_mc::programGpuMc(mcRegs, dramKhz);
+#if DEVELOPMENT || DEBUG
+    if (logDump) {
+        const switch_mc::GpuMcSnapshot after = switch_mc::captureGpuMc(mcRegs);
+        os_log(OS_LOG_DEFAULT,
+               "SwitchEMC: GPU MC @ %u kHz: LA_GPU_0 %#x->%#x LA_GPU2_0 %#x GK_PTSA rate=%#x min=%#x->%#x "
+               "max=%#x->%#x GK2_PTSA rate=%#x min=%#x max=%#x OUT_REQ %#x RING3 %#x NISO %#x MISC0 %#x "
+               "THROT r3=%#x niso=%#x GRANT_DEC %#x",
+               dramKhz, before.gpu0, after.gpu0, after.gpu2, after.gkRate, before.gkMin, after.gkMin, before.gkMax,
+               after.gkMax, after.gk2Rate, after.gk2Min, after.gk2Max, after.outstandingReq, after.outstandingRing3,
+               after.outstandingNiso, after.arbMisc0, after.ring3Throttle, after.nisoThrottle, after.grantDec);
+    }
+#endif
+}
+
 // ACTMON's watermarks for the rate now; its sample count restarts there.
 void SwitchEMC::program()
 {
-    const uint64_t now = mach_absolute_time();
-    const switch_emc_hold_step step =
-        switch_emc_hold_program(&holdState, now, hintUntil(), switch_idle_last_frame(), switchperf::running());
-    const bool keep = step.keep;
+    const bool keep = switch_emc_hold_program(&holdState, mach_absolute_time(), hintUntil(), switch_idle_last_frame(),
+                                              switchperf::running());
     switch_emc_wmarks w = switch_emc_watermarks(khz, count, cur, keep);
     if (cur <= memoryFloor(0))
         w.down_on = false;
@@ -282,8 +315,6 @@ void SwitchEMC::program()
                             (SWITCH_EMC_DOWN_SAMPLES - 1) << kCtrlDownNumShift | 0u << kCtrlUpNumShift |
                             (w.up_on ? kCtrlUpWmark : 0) | (w.down_on ? kCtrlDownWmark : 0));
     __atomic_store_n(&gTopHeld, cur + 1 == count && !w.down_on, __ATOMIC_RELEASE);
-    if (step.arm_at)
-        hold->wakeAtTime(step.arm_at);
 }
 
 IOReturn SwitchEMC::displayAction(OSObject *owner, void *bytes, void *result, void *, void *)
@@ -349,13 +380,6 @@ void SwitchEMC::signalFired(OSObject *owner, IOInterruptEventSource *, int)
     self->program();
 }
 
-void SwitchEMC::holdFired(OSObject *owner, IOTimerEventSource *)
-{
-    auto *self = static_cast<SwitchEMC *>(owner);
-    if (self->governing)
-        self->program();
-}
-
 #include "SwitchEMCHints.h"
 
 void SwitchEMC::startActmon()
@@ -377,7 +401,6 @@ void SwitchEMC::stopActmon()
     actmon->disable();
     switch_mmio_write32(regs, kMcAll + kCtrl, 0);
     switch_mmio_write32(regs, kMcAll + kIntrStatus, ~0u);
-    hold->cancelTimeout();
 }
 
 IOReturn SwitchEMC::pauseAction(OSObject *owner, void *, void *, void *, void *)
@@ -387,9 +410,7 @@ IOReturn SwitchEMC::pauseAction(OSObject *owner, void *, void *, void *, void *)
         return kIOReturnSuccess;
     self->stopActmon();
 #if DEVELOPMENT || DEBUG
-    const uint64_t t = mach_absolute_time();
-    self->residency[self->cur] += t - self->since;
-    self->since = t;
+    self->account(mach_absolute_time());
 #endif
     self->governing = false;
     return kIOReturnSuccess;
@@ -409,40 +430,7 @@ void SwitchEMC::pause()
     loop->runAction(&SwitchEMC::pauseAction, this);
 }
 
-#if DEVELOPMENT || DEBUG
-IOReturn SwitchEMC::statsAction(OSObject *owner, void *line, void *size, void *written, void *)
-{
-    *static_cast<size_t *>(written) =
-        static_cast<SwitchEMC *>(owner)->stats(static_cast<char *>(line), *static_cast<size_t *>(size));
-    return kIOReturnSuccess;
-}
-
-size_t SwitchEMC::stats(char *line, size_t size)
-{
-    const uint64_t t = mach_absolute_time();
-    uint64_t total = 0;
-    uint64_t at[SWITCH_EMC_MAX_RATES];
-    for (unsigned i = 0; i < count; ++i) {
-        at[i] = residency[i] + (governing && i == cur ? t - since : 0);
-        total += at[i];
-    }
-    size_t n = static_cast<size_t>(snprintf(line, size, "EMC %u moves", moves));
-    for (unsigned i = 0; i < count && n < size; ++i) {
-        const unsigned pm = total ? static_cast<unsigned>(at[i] * 1000 / total) : 0;
-        n += static_cast<size_t>(snprintf(line + n, size - n, " %u:%u.%u%%", khz[i] / 1000, pm / 10, pm % 10));
-    }
-    if (n < size) {
-        n += static_cast<size_t>(
-            snprintf(line + n, size - n, ", %u raises: hint to top %llu/%llu us (BPMP max %llu us)", raises,
-                     raises ? raiseTicks / raises * 5 / 96 : 0, raiseMax * 5 / 96, bpmpMax * 5 / 96));
-    }
-    memset(residency, 0, sizeof(residency));
-    since = t;
-    moves = raises = 0;
-    raiseTicks = raiseMax = bpmpMax = 0;
-    return n;
-}
-#endif
+#include "SwitchEMCStats.h"
 
 extern "C" void switch_emc_start(void)
 {
@@ -453,15 +441,17 @@ extern "C" void switch_emc_start(void)
         IOLog("SwitchEMC: on-demand EMC off: %s\n", why);
         return;
     }
+    // The boot runs at the top rate and nothing lowers it before governing starts: hints and ticks need not wake the loop.
+    __atomic_store_n(&gTopHeld, true, __ATOMIC_RELEASE);
     __atomic_store_n(&gEMC, emc, __ATOMIC_RELEASE);
     switch_idle_set_frames_started(framesStarted);
     IOLog("SwitchEMC: on demand from System Boot Complete (ACTMON MC_ALL, INTID %u)\n", kActmonIntid);
 }
 
-extern "C" void switch_emc_tick(uint64_t now)
+extern "C" void switch_emc_tick(uint64_t now, uint64_t busy)
 {
     if (SwitchEMC *emc = __atomic_load_n(&gEMC, __ATOMIC_ACQUIRE))
-        emc->tick(now);
+        emc->tick(now, busy);
 }
 
 extern "C" void switch_emc_retick(void)

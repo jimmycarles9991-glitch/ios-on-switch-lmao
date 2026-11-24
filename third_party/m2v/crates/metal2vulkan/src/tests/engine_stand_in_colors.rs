@@ -3,7 +3,8 @@
 //! function's float output there carries Metal's clamp before its conversion, two `GLSL.std.450`
 //! `NClamp`s, its color lanes to the form's bounds (a blended output to Metal's blend source
 //! range, an unblended one to that range's low end and code 1023's value) and its alpha to
-//! `[0, 1]`. An attachment of one of those formats without a stand-in is refused.
+//! `[0, 1]`, and its half-float channels round to nearest even, as Metal's tile of those formats
+//! holds a float output. An attachment of one of those formats without a stand-in is refused.
 //!
 //! The owned fixture `engine/stage_io`'s render pipeline, its color 0 `RGBA16Float`, goes through
 //! `Device::compile_render_pipeline` on every committed profile. No GPU is used. `llvm-as`
@@ -155,10 +156,12 @@ fn a_stand_in_output_carries_metals_clamp() {
     let mut checked = 0;
     for (stem, dev) in devices() {
         let compile = |stand_in, blended| {
-            dev.compile_render_pipeline(
-                &descriptor(&bc, attachment(stand_in, blended)),
-                &Budget::standard(),
-            )
+            let mut d = descriptor(&bc, attachment(stand_in, blended));
+            // An unblended stand-in rounds its halves as a plain attachment does under mode 2.
+            if stand_in.is_none() && !blended {
+                d.texture_write_rounding_mode = crate::metal::TextureWriteRoundingMode::NearestEven;
+            }
+            dev.compile_render_pipeline(&d, &Budget::standard())
         };
         let plain = match (compile(None, false), compile(None, true)) {
             (Ok(unblended), Ok(blended)) => [clamps(&unblended), clamps(&blended)],
@@ -185,6 +188,68 @@ fn a_stand_in_output_carries_metals_clamp() {
         }
     }
     assert!(checked > 0, "no committed profile compiled the fixture");
+}
+
+/// An unblended stand-in's half-float channels round to nearest even ([`HALF_NEAREST`]) under
+/// either `textureWriteRoundingMode` on every committed profile, and a plain `RGBA16Float`
+/// attachment's under Metal's default do not: Metal's extended-range tile holds the half nearest a
+/// float output, where its `RGBA16Float` attachment stores the half toward zero. A blended
+/// stand-in keeps a blended plain attachment's writes.
+#[test]
+fn an_unblended_stand_ins_halves_round_to_nearest_even() {
+    use crate::metal::TextureWriteRoundingMode;
+    use crate::pipeline::color_writes::{exact_writes, HALF_NEAREST};
+    let mut checked = 0;
+    for (stem, dev) in devices() {
+        let p = dev.profile();
+        let writes = |stand_in, blended| {
+            exact_writes(
+                [0],
+                &[Some(attachment(stand_in, blended))],
+                (false, TextureWriteRoundingMode::TowardZero),
+                p,
+            )
+        };
+        let plain = writes(None, false);
+        assert!(
+            plain
+                .get(&0)
+                .is_none_or(|r| !r.contains(&Some(HALF_NEAREST))),
+            "{stem}: plain {plain:?}"
+        );
+        for form in [
+            ExtendedRange::Planes { srgb: false },
+            ExtendedRange::Planes { srgb: true },
+            ExtendedRange::Bgra10 { srgb: false },
+            ExtendedRange::Bgra10 { srgb: true },
+            ExtendedRange::Bgr10 { srgb: false },
+            ExtendedRange::Bgr10 { srgb: true },
+        ] {
+            assert_eq!(
+                writes(Some(form), true),
+                writes(None, true),
+                "{stem}: {form:?} blended"
+            );
+            for mode in [
+                TextureWriteRoundingMode::TowardZero,
+                TextureWriteRoundingMode::NearestEven,
+            ] {
+                let rules = exact_writes(
+                    [0],
+                    &[Some(attachment(Some(form), false))],
+                    (false, mode),
+                    p,
+                );
+                assert_eq!(
+                    rules.get(&0),
+                    Some(&[Some(HALF_NEAREST); 4]),
+                    "{stem}: {form:?} under {mode:?}"
+                );
+            }
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no committed profile");
 }
 
 /// A color attachment of one of Apple's 10-bit extended-range formats without a stand-in, blended

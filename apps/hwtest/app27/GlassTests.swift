@@ -6,18 +6,20 @@ import UIKit
 
 /// A Liquid Glass panel (UIGlassEffect, regular) across the middle of vertical stripes and of flat grey. Outside it the
 /// composited picture must match the CPU's. Inside, away from the lensing at its edges, each column over the stripes
-/// stays constant down its length (no streak or block) and the grey stays flat and not black. The stripes' remaining
-/// contrast is reported (contrast=) but not judged: how much glass blurs is UIKit's choice, not the GPU's. Apple's own
-/// render of this scene (the iOS 27 simulator, iPad Pro 11-inch: out/agent-scratch/x1-glass/ref) measures
-/// column_spread=8 contrast=29 (reference=). The run arms the render server's split capture (split-capture:
-/// `SwitchMetal: splitcap` lines of the glass shape's draws, tools/benchloop/capture.py). A failed run saves its picture
-/// (composited.png).
+/// stays constant down its length (no streak or block: column_spread at most Apple's) and the grey stays flat
+/// (grey_spread at most Apple's) and not black. The stripes' remaining contrast is reported (contrast=) but not judged:
+/// how much glass blurs is UIKit's choice, not the GPU's. Apple's own render of this scene (the iOS 27 simulator, iPad
+/// Pro 11-inch: out/agent-scratch/x1-glass/ref) measures column_spread=8 contrast=29 (reference=) with that folder's
+/// measure.py over the glass band (rows 902-1527 of ref.png, inset an eighth of the band), and grey_spread=8 over the
+/// grey half of the same crop (blue 203-211). The run arms the render server's split capture (split-capture:
+/// `SwitchMetal: splitcap` lines of the glass shape's draws, tools/benchloop/capture.py). A failed run saves its
+/// picture (composited.png).
 struct UIGlassTest: HWTest {
     let id = "ui.glass"
     let name = "UIGlassEffect over stripes and flat grey"
     let subsystem = Subsystem.compositor
 
-    static let reference = (columnSpread: 8, contrast: 29)
+    static let reference = (columnSpread: 8, contrast: 29, greySpread: 8)
 
     func run(_ context: TestContext) async throws -> Outcome {
         GlassProbe.post("split-capture")
@@ -28,20 +30,28 @@ struct UIGlassTest: HWTest {
         var reasons: [String] = []
         outside.judge(&metrics, &reasons, "outside")
         let (stripes, grey) = Self.measure(inside)
-        metrics.set("column_spread", Int((stripes.columnSpread * 255).rounded()))
+        let columnSpread = Int((stripes.columnSpread * 255).rounded())
+        metrics.set("column_spread", columnSpread)
         metrics.set("contrast", Int((stripes.contrast * 255).rounded()))
-        metrics.set("grey_spread", Int((grey.spread * 255).rounded()))
+        let greySpread = Int((grey.spread * 255).rounded())
+        metrics.set("grey_spread", greySpread)
         metrics.set("grey_mean", grey.mean.map { String(Int(($0 * 255).rounded())) }.joined(separator: ","))
         let checks: [(String, Bool)] = [
-            ("each column constant down the glass (spread <= 6)", stripes.columnSpread <= 6.0 / 255),
-            ("grey stays flat (spread <= 6)", grey.spread <= 6.0 / 255),
+            (
+                "each column constant down the glass (spread <= \(Self.reference.columnSpread), Apple's)",
+                columnSpread <= Self.reference.columnSpread
+            ),
+            (
+                "grey stays flat (spread <= \(Self.reference.greySpread), Apple's)",
+                greySpread <= Self.reference.greySpread
+            ),
             ("grey not black", grey.mean.prefix(3).reduce(0, +) > 0.12),
         ]
         reasons += checks.filter { !$0.1 }.map(\.0)
         if !reasons.isEmpty {
             let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            try? inside.png()?.write(to: directory.appendingPathComponent("composited.png"))
+            try? inside.png()?.place(at: directory.appendingPathComponent("composited.png"))
         }
         return reasons.isEmpty ? .pass(metrics) : .fail(LogLine.fitted(reasons), metrics)
     }
@@ -154,7 +164,7 @@ struct UIGlassMotionTest: HWTest {
     }
 
     static func save(_ picture: Raster, _ name: String, _ directory: URL) -> String {
-        try? picture.png()?.write(to: directory.appendingPathComponent(name))
+        try? picture.png()?.place(at: directory.appendingPathComponent(name))
         return name
     }
 }

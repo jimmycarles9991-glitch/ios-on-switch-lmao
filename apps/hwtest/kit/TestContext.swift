@@ -89,7 +89,9 @@ final class Stage: ObservableObject {
         visible = true
     }
 
+    /// Called between every two tests: a stage no test showed publishes nothing, so the list is not redrawn for it.
     func dismiss() {
+        guard visible else { return }
         visible = false
         fullScreen = false
         container.subviews.forEach { $0.removeFromSuperview() }

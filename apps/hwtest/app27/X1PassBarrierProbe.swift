@@ -19,7 +19,7 @@ enum X1PassBarrierProbe {
     static let probe = X1Probe(
         id: "gpu.x1.pass_pixel_barrier",
         name: "A pixel barrier between passes orders a pass's samples after the last's",
-        probe: "barrier.pass_pixel", timeout: 420, body: run
+        probe: "barrier.pass_pixel", timeout: 600, body: run
     )
 
     static let arms = [
@@ -63,6 +63,12 @@ enum X1PassBarrierProbe {
             }
             out.append(
                 Cell(
+                    format: format, layout: .blockLinear, shape: .same, width: 1280, height: 720,
+                    trials: 600, seconds: 12
+                )
+            )
+            out.append(
+                Cell(
                     format: format, layout: .blockLinear, shape: .stride, width: 1280, height: 720,
                     trials: 600, seconds: 36
                 )
@@ -71,6 +77,12 @@ enum X1PassBarrierProbe {
                 Cell(
                     format: format, layout: .blockLinear, shape: .pyramid, width: 1280, height: 720,
                     trials: 600, seconds: 9
+                )
+            )
+            out.append(
+                Cell(
+                    format: format, layout: .blockLinear, shape: .waw, width: 1280, height: 720,
+                    trials: 600, seconds: 12
                 )
             )
             for layout in [BarrierKit.Layout.pitch, .compressed] {
@@ -83,10 +95,26 @@ enum X1PassBarrierProbe {
                     )
                 }
             }
+            for shape in [Shape.same, .pyramid] {
+                out.append(
+                    Cell(
+                        format: format, layout: .compressed, shape: shape, width: 1280, height: 720,
+                        trials: 600, seconds: 12
+                    )
+                )
+            }
             out.append(
                 Cell(
                     format: format, layout: .blockLinear, shape: .waw, width: 320, height: 180, trials: 1504,
                     seconds: 4
+                )
+            )
+        }
+        for (width, height, trials, seconds) in [(64, 64, 1504, 6.0), (320, 180, 1504, 4.0), (1280, 720, 600, 12.0)] {
+            out.append(
+                Cell(
+                    format: .depth32Float, layout: .blockLinear, shape: .same, width: width, height: height,
+                    trials: trials, seconds: seconds
                 )
             )
         }
@@ -99,7 +127,7 @@ enum X1PassBarrierProbe {
         switch cell.size {
         case "s": return [0, 6, 34, 80]
         case "m": return [0, 12, 60, 240]
-        default: return [0, 3, 17, 120]
+        default: return [0, 12, 60, 240]
         }
     }
 

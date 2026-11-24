@@ -22,6 +22,7 @@
 #include "compile_request.h"
 #include "TegraGM20BCompilerABI.h"
 #include "kernel_transport.h"
+#include "word_wait.h"
 
 namespace gm20b {
 
@@ -95,7 +96,10 @@ public:
     // Asked with `done` called at the asker's class (answer_class.h): `waited`, at class `qos` (the waiting thread's),
     // else as background work. A request past the kernel's bound on this connection waits here for one of them to be
     // answered. False: not asked (`done` is not called)
-    bool compileAsync(const std::string &request, bool waited, uint32_t qos, Done done);
+    bool compileAsync(const std::string &request, bool waited, uint32_t qos, Done done, uint64_t *cookieOut = nullptr);
+    // Sleep on an in-flight async Compile (`cookie` from compileAsync) via TegraGM20BMethodCompileWait,
+    // donating the calling thread's priority to the compiler worker. Returns true if the caller should retry.
+    bool waitAsync(uint64_t cookie);
 
 private:
     struct Mapping {
@@ -111,6 +115,7 @@ private:
         bool waited;
         uint32_t qos;
         Done done;
+        uint64_t cookie = 0;
     };
 
     const Call call_;
@@ -118,6 +123,7 @@ private:
     std::atomic<CompilerMethods> methods_{CompilerMethods::Unknown};
     std::atomic<bool> expected_{false}, declined_{false};
     std::atomic<bool> absent_{false};
+    std::atomic<bool> waitSupported_{true};
     std::atomic<const Mapping *> mapping_{nullptr};
     std::atomic<uint32_t> latest_{0};  // the newest generation a completion named
     gm20b::Mutex mapLock_, asyncLock_;
@@ -134,6 +140,7 @@ private:
     std::array<Port, std::size(kAnswerClasses)> ports_;  // asyncLock_'s
     std::map<uint64_t, Done> pending_;
     std::vector<Held> held_;  // past the bound, asked once an earlier one is answered
+    gm20b::ChangeWord heldChanged_;
     uint64_t nextCookie_ = 1;
 
     // asyncLock_ held: the request asked, or held past the bound; false: neither

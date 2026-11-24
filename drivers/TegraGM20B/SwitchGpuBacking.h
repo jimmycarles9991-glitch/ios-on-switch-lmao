@@ -78,6 +78,29 @@ struct switch_gpu_backing *switch_gpu_backing_register(const uint64_t *pages, ui
 						       uint32_t surface_id, void *owner,
 						       void (*release_owner)(void *));
 struct switch_gpu_backing *switch_gpu_backing_find_pa(uint64_t first_page);
+
+/* Why switch_gpu_backing_register refuses pages whose first page a registered backing already starts at */
+enum switch_gpu_backing_collision {
+	SWITCH_GPU_BACKING_SHARES = 0,
+	SWITCH_GPU_BACKING_OTHER_PAGES, /* their page lists differ where both have pages */
+	SWITCH_GPU_BACKING_GROWS_FIXED, /* more pages than a backing whose GPU memory cannot grow */
+	SWITCH_GPU_BACKING_GROWS_MAPPED,  /* more pages than a backing an engine maps */
+	SWITCH_GPU_BACKING_GROWS_UNOWNED, /* more pages, with no owner, than an owned backing */
+	SWITCH_GPU_BACKING_GROWS_HELD,    /* more pages than a backing CPU or GPU admissions hold */
+	SWITCH_GPU_BACKING_OTHER_SURFACE, /* another IOSurface's */
+};
+
+/* The registered backing a registration of these pages would meet and why it would be refused: SHARES (and *found
+ * zeroed) when none starts at the first page or the registration would share it */
+struct switch_gpu_backing_found {
+	uint64_t id;
+	uint32_t surface_id, pages, gpu_memory_flags, mapping_engines;
+	uint32_t cpu_readers, cpu_writers, gpu_admission_readers, gpu_admission_writers;
+	int owned;
+};
+enum switch_gpu_backing_collision
+switch_gpu_backing_collision_at(const uint64_t *pages, uint32_t count, uint32_t surface_id,
+				const void *owner, struct switch_gpu_backing_found *found);
 struct switch_gpu_backing *switch_gpu_backing_find_surface(uint32_t surface_id);
 void switch_gpu_backing_retain(struct switch_gpu_backing *backing);
 void switch_gpu_backing_release(struct switch_gpu_backing *backing);
@@ -405,6 +428,8 @@ int switch_gpu_backing_wait(struct switch_gpu_backing *backing, uint32_t access)
  * would follow, and the CPU owners (readers and writers, an export's read lease among them) holding the backing now. */
 int switch_gpu_backing_pending(struct switch_gpu_backing *backing, uint32_t access,
 			       uint32_t *engines, uint32_t *cpu_owners);
+/* 0 when the backing is private, unpinned elsewhere and idle enough to park; -95 unsupported, -16 busy. */
+int switch_gpu_backing_parkable(struct switch_gpu_backing *backing);
 
 #ifdef __cplusplus
 }

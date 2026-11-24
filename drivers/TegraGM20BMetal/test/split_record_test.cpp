@@ -240,3 +240,120 @@ TEST_F(SplitRecords, TheGlassStateTakesItsTwinAfterDrawsReachingTheRingThroughTh
         EXPECT_EQ(frame(reader, f), 1u) << "frame " << f;
     EXPECT_EQ(frame(writer, 3), 0u) << "a program that stores may write the ring";
 }
+
+TEST_F(SplitRecords, RelaxedEntryPrologueLaunchAvoidsLeadingWfi)
+{
+    const auto decodeSubcMethods = [](const std::vector<uint32_t> &words) {
+        std::vector<std::pair<uint32_t, uint32_t>> out;
+        for (size_t at = 0; at < words.size();) {
+            const uint32_t h = words[at++], form = h >> 29, count = (h >> 16) & 0x1fff, subc = (h >> 13) & 7,
+                           method = (h & 0xfff) << 2;
+            if (!h)
+                continue;
+            if (form == 4) {
+                out.emplace_back(subc, method);
+                continue;
+            }
+            for (uint32_t i = 0; i < count && at < words.size(); i++, at++) {
+                const uint32_t m = form == 3 ? method : form == 5 && i ? method + 4 : method + 4 * (form == 1 ? i : 0);
+                out.emplace_back(subc, m);
+            }
+        }
+        return out;
+    };
+
+    std::string why;
+    gm20b::Pipeline *pl = dev.addRecord(shapeRecord(0x618b45175101cd29ull), false, why);
+    ASSERT_NE(pl, nullptr) << why;
+    const auto runOnce = [&](gm20b::EntryForm entry) {
+        dev.nextForms = {};
+        dev.nextForms.entry = entry;
+        gm20b::CommandBuffer *cb = dev.begin();
+        EXPECT_NE(cb, nullptr);
+        cb->forceSplit(true);
+        gm20b::PassDesc pass;
+        pass.color[0].texture = &target;
+        pass.color[0].load = gm20b::ColorAttachment::Clear;
+        pass.count = 1;
+        gm20b::RenderEncoder *e = cb->render(pass);
+        EXPECT_NE(e, nullptr);
+        e->setViewport(0, 0, 256, 256, 0, 1);
+        e->setScissor(0, 0, 256, 256);
+        e->setPipeline(pl);
+        e->setBuffer(2, 1, &uniforms, 0x1040);
+        const char *refused = nullptr;
+        EXPECT_TRUE(e->draw(kStrip, 0, 4, 1, 0, &refused)) << (refused ? refused : "?");
+        e->end();
+        uint32_t seqno = 0;
+        EXPECT_TRUE(cb->commit(seqno));
+        return decodeSubcMethods(kernel_model::model.jobs.back().words);
+    };
+
+    const auto relaxed = runOnce(gm20b::EntryForm::Rule);
+    const auto pcas = std::find(relaxed.begin(), relaxed.end(), std::make_pair(1u, uint32_t(NVB1C0_SEND_PCAS_A)));
+    ASSERT_NE(pcas, relaxed.end());
+    EXPECT_EQ(std::count(relaxed.begin(), pcas, std::make_pair(0u, uint32_t(NVB197_WAIT_FOR_IDLE))), 0);
+    EXPECT_EQ(std::count(relaxed.begin(), pcas, std::make_pair(1u, uint32_t(NVB1C0_INVALIDATE_SHADER_CACHES))), 0);
+    EXPECT_EQ(std::count(relaxed.begin(), pcas, std::make_pair(1u, uint32_t(NVB1C0_INVALIDATE_SHADER_CACHES_NO_WFI))),
+              1);
+
+    const auto strict = runOnce(gm20b::EntryForm::Today);
+    const auto strictPcas = std::find(strict.begin(), strict.end(), std::make_pair(1u, uint32_t(NVB1C0_SEND_PCAS_A)));
+    ASSERT_NE(strictPcas, strict.end());
+    EXPECT_EQ(std::count(strict.begin(), strictPcas, std::make_pair(0u, uint32_t(NVB197_WAIT_FOR_IDLE))), 1);
+    EXPECT_EQ(std::count(strict.begin(), strictPcas, std::make_pair(1u, uint32_t(NVB1C0_INVALIDATE_SHADER_CACHES))), 1);
+}
+
+TEST(SplitRecordsTiledCache, TailTiledCacheFlushSkippedAfterFlushedDrawPass)
+{
+    kernel_model::model = {};
+    kernel_model::model.infoFlags = TegraGM20BInfoTiledCache;
+    gm20b::Device tiledDev;
+    std::string err;
+    ASSERT_TRUE(tiledDev.open(harness::emptyPack().c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+    gm20b::Texture tiledTarget;
+    gm20b::Buffer tiledUniforms;
+    ASSERT_TRUE(tiledDev.createTexture(256, 256, kRGBA16Float, tiledTarget));
+    ASSERT_TRUE(tiledDev.createBuffer(0x4000, tiledUniforms));
+    std::string why;
+    gm20b::Pipeline *tiledPl = tiledDev.addRecord(shapeRecord(0x618b45175101cd2aull), false, why);
+    ASSERT_NE(tiledPl, nullptr) << why;
+    gm20b::CommandBuffer *cb = tiledDev.begin();
+    ASSERT_NE(cb, nullptr);
+    gm20b::PassDesc pass;
+    pass.color[0].texture = &tiledTarget;
+    pass.color[0].load = gm20b::ColorAttachment::Clear;
+    pass.count = 1;
+    gm20b::RenderEncoder *e = cb->render(pass);
+    ASSERT_NE(e, nullptr);
+    e->setViewport(0, 0, 256, 256, 0, 1);
+    e->setScissor(0, 0, 256, 256);
+    e->setPipeline(tiledPl);
+    e->setBuffer(2, 1, &tiledUniforms, 0x1040);
+    const char *refused = nullptr;
+    ASSERT_TRUE(e->draw(kStrip, 0, 4, 1, 0, &refused)) << (refused ? refused : "?");
+    e->end();
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    uint32_t flushes = 0;
+    const std::vector<uint32_t> &words = kernel_model::model.jobs.back().words;
+    for (size_t at = 0; at < words.size();) {
+        const uint32_t h = words[at++], form = h >> 29, count = (h >> 16) & 0x1fff, subc = (h >> 13) & 7,
+                       method = (h & 0xfff) << 2;
+        if (!h)
+            continue;
+        if (form == 4) {
+            if (subc == 0 && method == SWITCH_NVB197_TILED_CACHE_FLUSH)
+                ++flushes;
+            continue;
+        }
+        for (uint32_t i = 0; i < count && at < words.size(); i++, at++) {
+            const uint32_t m = form == 3 ? method : form == 5 && i ? method + 4 : method + 4 * (form == 1 ? i : 0);
+            if (subc == 0 && m == SWITCH_NVB197_TILED_CACHE_FLUSH)
+                ++flushes;
+        }
+    }
+    EXPECT_EQ(flushes, 1u);
+    tiledDev.destroyBuffer(tiledUniforms);
+    tiledDev.destroyTexture(tiledTarget);
+}

@@ -53,6 +53,20 @@ class States(unittest.TestCase):
         self.assertEqual(ios17 in kept, self.build == '21H461')
         self.assertEqual(ios27 in kept, self.build == '24B119')
 
+    def test_every_device_demanded_state_is_in_the_builds_sweep(self) -> None:
+        kept = ca_states.states(self.corpus, self.library, self.tables)
+        labels = [line.split()[2] for line in kept]
+        label_set = set(labels)
+        demanded = ca_states.closure.demand(self.build)
+        if self.build == '24B119':
+            self.assertGreater(len(demanded), 300)
+            for name in demanded:
+                self.assertIn(f'label=com.apple.coreanimation.{name}', label_set)
+            self.assertEqual(labels.count('label=com.apple.coreanimation.PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr'), 1)
+        else:
+            self.assertEqual(demanded, [])
+            self.assertNotIn('label=com.apple.coreanimation.PBGRABsovXmw_TlrpA3Xhfs_Iclr_Iclr', label_set)
+
 
 if __name__ == '__main__':
     unittest.main()

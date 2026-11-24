@@ -50,6 +50,12 @@ NSError *refusal(NSString *why)
                            userInfo:@{NSLocalizedDescriptionKey : why}];
 }
 
+// The translator's library holds its storage's bytes in place until it lets go of them here
+void releaseStorage(const void *owner)
+{
+    CFRelease(owner);
+}
+
 }  // namespace
 
 @implementation GM20BOfflineFunction
@@ -215,8 +221,13 @@ NSError *refusal(NSString *why)
 
 @implementation GM20BOfflineDevice
 
-// The library of a metallib's AIR slice, as the frontend's metallibLibrary makes it; `storage` keeps the bytes
-- (GM20BOfflineLibrary *)libraryOf:(id)storage bytes:(const uint8_t *)file length:(size_t)length error:(NSError **)error
+// The library of a metallib's AIR slice, as the frontend's metallibLibrary makes it; `storage` keeps the bytes, which the
+// translator reads in place. `sealed`: a sealed system volume's file (nmb_offline_library_new_held).
+- (GM20BOfflineLibrary *)libraryOf:(id)storage
+                             bytes:(const uint8_t *)file
+                            length:(size_t)length
+                            sealed:(bool)sealed
+                             error:(NSError **)error
 {
     size_t offset = 0, size = 0;
     if (!switch_metal::airSlice(file, length, offset, size)) {
@@ -224,7 +235,8 @@ NSError *refusal(NSString *why)
             *error = refusal(@"This library does not have a compatible AIR slice for this device");
         return nil;
     }
-    NmbOfflineLibrary *handle = nmb_offline_library_new(file + offset, size);
+    NmbOfflineLibrary *handle =
+        nmb_offline_library_new_held(file + offset, size, sealed, CFBridgingRetain(storage), releaseStorage);
     if (!handle) {
         if (error)
             *error = refusal(@(nmb_last_error()));
@@ -248,6 +260,20 @@ NSError *refusal(NSString *why)
     return (id<MTLLibrary>)[self libraryOf:bytes
                                      bytes:static_cast<const uint8_t *>(bytes.bytes)
                                     length:bytes.length
+                                    sealed:false
+                                     error:error];
+}
+
+- (id<MTLLibrary>)newSealedLibraryWithURL:(NSURL *)url error:(NSError **)error
+{
+    NSData *bytes =
+        url.isFileURL ? [NSData dataWithContentsOfFile:url.path options:NSDataReadingMappedAlways error:error] : nil;
+    if (!bytes)
+        return nil;
+    return (id<MTLLibrary>)[self libraryOf:bytes
+                                     bytes:static_cast<const uint8_t *>(bytes.bytes)
+                                    length:bytes.length
+                                    sealed:true
                                      error:error];
 }
 
@@ -256,7 +282,11 @@ NSError *refusal(NSString *why)
     const void *bytes = nullptr;
     size_t size = 0;
     dispatch_data_t mapped = dispatch_data_create_map(data, &bytes, &size);
-    return (id<MTLLibrary>)[self libraryOf:mapped bytes:static_cast<const uint8_t *>(bytes) length:size error:error];
+    return (id<MTLLibrary>)[self libraryOf:mapped
+                                     bytes:static_cast<const uint8_t *>(bytes)
+                                    length:size
+                                    sealed:false
+                                     error:error];
 }
 
 @end
@@ -345,6 +375,7 @@ bool renderDescriptor(MTLRenderPipelineDescriptor *d, NmbOfflineRenderPipelineDe
     }
     p.max_amplification = d.maxVertexAmplificationCount;
     p.texture_write_rounding = gm20b::textureWriteRoundingOf(d);
+    p.alpha_to_coverage = d.alphaToCoverageEnabled ? 1 : 0;
     if (MTLVertexDescriptor *v = d.vertexDescriptor)
         for (unsigned i = 0; i < 31; i++) {
             MTLVertexAttributeDescriptor *a = v.attributes[i];
@@ -496,6 +527,11 @@ bool descriptorOf(MTLComputePipelineDescriptor *d, NmbOfflineComputePipelineDesc
                   std::vector<NmbOfflineFunction *> &linked, std::vector<switch_linked_group_name> &groupNames)
 {
     return computeDescriptor(d, p, linked, groupNames);
+}
+
+NmbOfflineLibrary *libraryHandle(id<MTLLibrary> library)
+{
+    return [(id)library isKindOfClass:[GM20BOfflineLibrary class]] ? ((GM20BOfflineLibrary *)library).handle : nullptr;
 }
 
 gm20b::DirectTranslator translator()

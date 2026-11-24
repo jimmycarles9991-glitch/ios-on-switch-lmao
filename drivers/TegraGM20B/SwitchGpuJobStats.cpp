@@ -3,14 +3,15 @@
 #if SWITCH_GPU_JOB_STATS
 #include <kern/cpu_number.h>
 #include "SwitchGpuResourceSet.h"
+#include "TegraGM20BGpu.h"
 
 extern "C" void _disable_preemption(void);  // NOLINT(bugprone-reserved-identifier): XNU's own name
 extern "C" void _enable_preemption(void);   // NOLINT(bugprone-reserved-identifier): XNU's own name
 
 namespace
 {
-constexpr uint32_t kPhases = 4;  // TGM_SUBMIT_RESOLVE, _LOCK, _EXEC, _COMMIT
-constexpr uint32_t kCpus = 4;    // the X1's cores
+constexpr uint32_t kPhases = TGM_SUBMIT_PHASES;
+constexpr uint32_t kCpus = 4;  // the X1's cores
 
 enum : uint32_t {
 	kJobs,
@@ -20,6 +21,8 @@ enum : uint32_t {
 	kBackings,
 	kSiblings,
 	kTotal,
+	kCompJobs,
+	kCompTotal,
 	kNs,
 	kCauses = kNs + kPhases,
 	kCounts = kCauses + SWITCH_GPU_SET_CAUSES
@@ -29,7 +32,7 @@ enum : uint32_t {
 // and prints what moved since its last line. The maxima are for the window whose number they carry.
 struct Cpu {
 	uint64_t counts[kCounts];
-	uint64_t maxWindow, sharedMax, totalMax;
+	uint64_t maxWindow, sharedMax, totalMax, compBeginMax, compRoomMax;
 };
 
 Cpu cpus[kCpus];
@@ -58,23 +61,31 @@ void bump(Cpu &cpu, uint32_t counter, uint64_t value)
 	store(cpu.counts[counter], load(cpu.counts[counter]) + value);
 }
 
-void raise(Cpu &cpu, uint64_t shared, uint64_t total)
+void raise(Cpu &cpu, uint64_t shared, uint64_t total, int critical, uint64_t begin, uint64_t room)
 {
 	const uint64_t window = load(windowNumber);
 	if (load(cpu.maxWindow) != window) {
 		store(cpu.sharedMax, 0);
 		store(cpu.totalMax, 0);
+		store(cpu.compBeginMax, 0);
+		store(cpu.compRoomMax, 0);
 		store(cpu.maxWindow, window);
 	}
 	if (shared > load(cpu.sharedMax))
 		store(cpu.sharedMax, shared);
 	if (total > load(cpu.totalMax))
 		store(cpu.totalMax, total);
+	if (critical) {
+		if (begin > load(cpu.compBeginMax))
+			store(cpu.compBeginMax, begin);
+		if (room > load(cpu.compRoomMax))
+			store(cpu.compRoomMax, room);
+	}
 }
 }  // namespace
 
 extern "C" void switch_gpu_job_submitted(const uint64_t *ns, int named_set, uint32_t shared_uses,
-					 uint32_t backings, uint32_t siblings)
+					 uint32_t backings, uint32_t siblings, int critical)
 {
 	uint64_t total = 0;
 	for (uint32_t p = 0; p < kPhases; ++p)
@@ -88,7 +99,11 @@ extern "C" void switch_gpu_job_submitted(const uint64_t *ns, int named_set, uint
 		bump(cpu, kBackings, backings);
 		bump(cpu, kSiblings, siblings);
 		bump(cpu, kTotal, total);
-		raise(cpu, shared_uses, total);
+		if (critical) {
+			bump(cpu, kCompJobs, 1);
+			bump(cpu, kCompTotal, total);
+		}
+		raise(cpu, shared_uses, total, critical, ns[TGM_SUBMIT_BEGIN], ns[TGM_SUBMIT_ROOM]);
 	});
 }
 
@@ -118,40 +133,51 @@ extern "C" void switch_gpu_job_window(char *line, size_t size)
 		printed[i] = now;
 	}
 	const uint64_t window = load(windowNumber);
-	uint64_t sharedMax = 0, totalMax = 0;
+	uint64_t sharedMax = 0, totalMax = 0, compBeginMax = 0, compRoomMax = 0;
 	for (const Cpu &cpu : cpus) {
 		if (load(cpu.maxWindow) != window)
 			continue;
 		sharedMax = load(cpu.sharedMax) > sharedMax ? load(cpu.sharedMax) : sharedMax;
 		totalMax = load(cpu.totalMax) > totalMax ? load(cpu.totalMax) : totalMax;
+		compBeginMax = load(cpu.compBeginMax) > compBeginMax ? load(cpu.compBeginMax)
+								     : compBeginMax;
+		compRoomMax =
+			load(cpu.compRoomMax) > compRoomMax ? load(cpu.compRoomMax) : compRoomMax;
 	}
 	store(windowNumber, window + 1);
 	uint64_t changed = 0;
 	for (uint32_t c = 0; c < SWITCH_GPU_SET_CAUSES; ++c)
 		changed += moved[kCauses + c];
 	const uint64_t jobs = moved[kJobs], shared = moved[kShared], backings = moved[kBackings],
-		       total = moved[kTotal];
+		       total = moved[kTotal], compJobs = moved[kCompJobs],
+		       compTotal = moved[kCompTotal];
 	if (!size)
 		return;
 	line[0] = 0;
 	if (!jobs && !moved[kStale] && !changed)
 		return;
-	const uint64_t n = jobs ? jobs : 1;
+	const uint64_t n = jobs ? jobs : 1, compN = compJobs ? compJobs : 1;
 	const uint64_t *ns = moved + kNs, *causes = moved + kCauses;
+	const uint64_t lockNs = ns[TGM_SUBMIT_LOCK] + ns[TGM_SUBMIT_REFRESH] +
+				ns[TGM_SUBMIT_ENTER] + ns[TGM_SUBMIT_BEGIN] + ns[TGM_SUBMIT_ROOM];
 	// The kernel has no stdio.h: the builtin is the kernel's snprintf there and libc's on the host.
-	__builtin_snprintf(line, size,
-			   "SubmitJob %llu x mean %llu us (resolve %llu, lock %llu, exec %llu, "
-			   "commit %llu) max %llu us, "
-			   "set %llu hit %llu stale, shared %llu.%llu per job max %llu, siblings "
-			   "%llu, generations ended: "
-			   "free %llu layout %llu shared %llu kill %llu replace %llu cpu %llu, "
-			   "backings %llu.%llu per job",
-			   jobs, total / n / 1000, ns[0] / n / 1000, ns[1] / n / 1000,
-			   ns[2] / n / 1000, ns[3] / n / 1000, totalMax / 1000, moved[kSets],
-			   moved[kStale], shared / n, shared * 10 / n % 10, sharedMax,
-			   moved[kSiblings], causes[SWITCH_GPU_SET_CAUSE_FREE],
-			   causes[SWITCH_GPU_SET_CAUSE_LAYOUT], causes[SWITCH_GPU_SET_CAUSE_SHARED],
-			   causes[SWITCH_GPU_SET_CAUSE_KILL], causes[SWITCH_GPU_SET_CAUSE_REPLACE],
-			   causes[SWITCH_GPU_SET_CAUSE_CPU], backings / n, backings * 10 / n % 10);
+	__builtin_snprintf(
+		line, size,
+		"SubmitJob %llu x mean %llu us (resolve %llu, lock %llu, exec %llu, commit %llu) "
+		"max %llu us, lock (refresh %llu, enter %llu, begin %llu, room %llu), "
+		"compositor %llu x mean %llu us, begin max %llu us, room max %llu us, "
+		"set %llu hit %llu stale, shared %llu.%llu per job max %llu, siblings %llu, "
+		"generations ended: free %llu layout %llu shared %llu kill %llu replace %llu cpu "
+		"%llu, backings %llu.%llu per job",
+		jobs, total / n / 1000, ns[TGM_SUBMIT_RESOLVE] / n / 1000, lockNs / n / 1000,
+		ns[TGM_SUBMIT_EXEC] / n / 1000, ns[TGM_SUBMIT_COMMIT] / n / 1000, totalMax / 1000,
+		ns[TGM_SUBMIT_REFRESH] / n / 1000, ns[TGM_SUBMIT_ENTER] / n / 1000,
+		ns[TGM_SUBMIT_BEGIN] / n / 1000, ns[TGM_SUBMIT_ROOM] / n / 1000, compJobs,
+		compTotal / compN / 1000, compBeginMax / 1000, compRoomMax / 1000, moved[kSets],
+		moved[kStale], shared / n, shared * 10 / n % 10, sharedMax, moved[kSiblings],
+		causes[SWITCH_GPU_SET_CAUSE_FREE], causes[SWITCH_GPU_SET_CAUSE_LAYOUT],
+		causes[SWITCH_GPU_SET_CAUSE_SHARED], causes[SWITCH_GPU_SET_CAUSE_KILL],
+		causes[SWITCH_GPU_SET_CAUSE_REPLACE], causes[SWITCH_GPU_SET_CAUSE_CPU],
+		backings / n, backings * 10 / n % 10);
 }
 #endif

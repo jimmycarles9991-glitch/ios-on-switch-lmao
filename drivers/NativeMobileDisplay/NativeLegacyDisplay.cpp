@@ -55,6 +55,7 @@
 #include "SwitchFrameInfo.h"
 #include "SwitchFrameStall.h"
 #include "SwitchInteraction.h"
+#include "SwitchSlowPresent.h"
 #include "SwitchSBIM.h"
 #include "SwitchTimedPresent.h"
 #include "../SwitchSuspend/SwitchSleepSteps.h"
@@ -198,9 +199,19 @@ extern "C" __attribute__((weak)) int tegra_gm20b_surface_layout(uint64_t, struct
     return 0;
 }
 
+extern "C" __attribute__((weak)) int tegra_gm20b_surface_compressed(uint64_t)
+{
+    return 0;
+}
+
 extern "C" __attribute__((weak)) void tegra_gm20b_frame_take(struct SwitchFrameGpu *out)
 {
     *out = {};
+}
+
+extern "C" __attribute__((weak)) int tegra_gm20b_gpu_load(uint64_t *, uint64_t *)
+{
+    return -1;
 }
 
 extern "C" __attribute__((weak)) void switch_sched_render_vsync(uint64_t, uint64_t)
@@ -208,6 +219,15 @@ extern "C" __attribute__((weak)) void switch_sched_render_vsync(uint64_t, uint64
 
 extern "C" __attribute__((weak)) void switch_sched_render_swapped(void)
 {}
+
+#if SWITCH_RECORDER
+// XNU kernel/switch/recorder (--//kernel:recorder): a present six periods or more late freezes the ring into a dump.
+extern "C" __attribute__((weak)) void switch_recorder_late_frame(uint64_t)
+{}
+
+// A dump stops every CPU and writes 16 MiB or more: only a gross miss earns one.
+constexpr uint32_t kRecorderLatePeriods = 6;
+#endif
 
 // XNU osfmk/kern/switch_stall.c, debug kernels: base and current priority, mode and effective QoS of a thread.
 extern "C" __attribute__((weak)) void switch_thread_sched(thread_t, int *base, int *sched, int *mode, int *qos)
@@ -1148,7 +1168,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // fePeriodN only grow, the stats line takes the difference; fePeriodMin/Max reset by it). stFeFolded, frame ends that came
     // before the action took the previous one (the gate was busy for a whole frame). stFeLate is filter to action, the work
     // loop's delay at each frame end.
-    static constexpr uint64_t kGapUs = 250000;
+    static constexpr uint64_t kGapUs = switch_slow_present::kGapUs;
     // The histograms (and their quantiles in the stats line) are debug kernels' only, as the frame timeline is: a release
     // kernel never makes them.
     static constexpr bool frameHists = SWITCH_FRAME_TIMELINE;
@@ -1171,17 +1191,10 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // of the time between them the part spent waiting for a free surface, and its flip. At its present, swap-to-scan splits into
     // queue (submission to kick: behind the previous copy, or waiting for a surface), copy (kick to flip: the GPU work the copy is
     // ordered after, i.e. the compositor's own rendering of the frame, then the copy) and latch (flip to the boundary that took it).
-    // Every present more than 1.5 frames after the previous one (and under kGapUs) is charged to one cause, with the frames it cost:
-    //   idle   the compositor turned vsync off since the previous present: it had nothing to draw (no stall)
-    //   ca     its swap came at or after the boundary a one-frame interval would have used: the compositor was late (its CPU
-    //          render: m2v replay, encode, CPU contention)
-    //   gpu    the swap came in time, but kick to flip alone outlasted the time it had left: the compositor's GPU work (or GPU
-    //          contention) ended after that boundary
-    //   queue  in time, but waiting behind the previous copy or for a surface made it miss
-    //   latch  the flip was asked for in time but taken a boundary later
-    // Also: frames replaced before they were shown (latest frame wins), swaps retired unshown because a newer one was queued
-    // behind them (collapsed), V_BLANKs folded into one notification, notifications more than 1 ms after their V_BLANK, and how
-    // often the compositor turned vsync off.
+    // Every present more than 1.5 frames after the previous one (and under kGapUs, or inside a touch window) is charged to one
+    // cause, with the frames it cost (SwitchSlowPresent.h). Also: frames replaced before they were shown (latest frame wins), swaps retired unshown because a
+    // newer one was queued behind them (collapsed), V_BLANKs folded into one notification, notifications more than 1 ms after
+    // their V_BLANK, and how often the compositor turned vsync off.
     struct FrameMark {
         uint64_t submit, kick, waited, ready;
         FrameTimeline tl;
@@ -1189,19 +1202,7 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
 
     FrameMark taken = {}, marks[TegraScanoutRing::kMaxEntries] = {};
 
-    //   rate   its swap came promptly after the vsync it answered (under half a frame): the frames before it had nothing new
-    //          to show (a client drawing at 20 Hz: r8a's clock widget), not a late compositor (r17-touch)
-    enum {
-        kLongIdle,
-        kLongCa,
-        kLongGpu,
-        kLongQueue,
-        kLongLatch,
-        kLongRate,
-        kLongCauses
-    };
-
-    static_assert(SwitchInteraction::kCauses == kLongCauses, "the interaction line names the causes in this order");
+    static constexpr unsigned kLongCauses = switch_slow_present::kCauses;
 
     Span stPQueue = {}, stPWait = {}, stPCopy = {}, stPLatch = {};
     // r17-touch: for a present whose swap was submitted after a touch report the screen had not yet followed with one,
@@ -1209,7 +1210,9 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
     // touch input is when a frame that can answer it reaches the panel. A lower bound on touch-to-photon (the frame may
     // answer an older report if the app's pipeline is deeper); the slow-motion test measures the whole of it.
     Span stTouchSwap = {};
-    uint32_t stReplaced = 0, stCollapsed = 0, stLong[kLongCauses] = {}, stLongFrames[kLongCauses] = {};
+    uint32_t stReplaced = 0, stCollapsed = 0;
+    // Static: the instance is at the 16 KiB a kalloc_type class may have.
+    static inline uint32_t stLong[kLongCauses] = {}, stLongFrames[kLongCauses] = {};
     uint32_t stVsyncFolded = 0, stVsyncLateN = 0, stVsyncIdle = 0;
     uint32_t stFallbacks = 0;  // recoverFlip: DC A did not take a replaced flip as modelled
     bool idleSincePresent = false;
@@ -1262,34 +1265,67 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         uint64_t intervalUs = 0;
         uint32_t periods = 0;
         unsigned cause = kLongCauses;
+        const uint32_t gpuBusy = gpuBusySincePresent();
         frameStall.present(stamp, lastPresent && stamp > lastPresent ? stamp - lastPresent : 0, refreshTicks());
+        uint64_t began = 0;
+        uint64_t lastDown = 0;
+        if (frameHists)
+            switch_frames_touch_activity(&began, &lastDown);
+        // The run's first present answers the touch-down: its interval is the still screen before it.
+        const bool touching =
+            frameHists && began && lastPresent >= began &&
+            SwitchInteraction::active(Span::ticksToUs(stamp), Span::ticksToUs(began), Span::ticksToUs(lastDown));
         if (lastPresent && stamp > lastPresent) {
             const uint64_t us = Span::ticksToUs(stamp - lastPresent);
+            const uint64_t period = vsyncInterval ? Span::ticksToUs(vsyncInterval) : 16667;
+            const switch_slow_present::Interval judged = switch_slow_present::interval(us, period, touching);
             intervalUs = us;
+            periods = judged.periods;
             if (us >= kGapUs) {
                 ++stGaps[us < 1000000 ? 0 : 1];
+                if (judged.slow)
+                    cause = longCause(mark);
             } else {
                 if (frameHists)
                     hists->presentGap.add(us);
-                const uint64_t period = vsyncInterval ? Span::ticksToUs(vsyncInterval) : 16667;
-                const uint64_t frames = (us + period / 2) / period;
-                periods = static_cast<uint32_t>(frames);
-                uint64_t bin = 3;
-                if (frames <= 1) {
+                uint32_t bin = 3;
+                if (periods <= 1) {
                     bin = 0;
-                } else if (frames < 4) {
-                    bin = frames - 1;
+                } else if (periods < 4) {
+                    bin = periods - 1;
                 }
                 ++stVb[bin];
-                if (frames >= 2) {
-                    cause = noteLong(static_cast<uint32_t>(frames), mark);
-                    if (SWITCH_FRAME_TIMELINE)
-                        noteSlowFrame(stamp, us, static_cast<uint32_t>(frames), cause, mark);
-                }
+                if (judged.slow)
+                    cause = noteLong(periods, mark);
             }
+            if (SWITCH_FRAME_TIMELINE && judged.slow)
+                noteSlowFrame(stamp, us, periods, cause, mark, gpuBusy);
+#if SWITCH_RECORDER
+            if (judged.slow && periods >= kRecorderLatePeriods && cause >= switch_slow_present::kCa &&
+                cause <= switch_slow_present::kLatch)
+                switch_recorder_late_frame(us);
+#endif
         }
         if (frameHists)
-            noteInteraction(stamp, intervalUs, periods, cause);
+            noteInteraction(stamp, intervalUs, periods, cause, began, lastDown);
+    }
+
+    // Debug kernels: the GPU's busy share since the previous present from its PMU counters, in tenths of a percent
+    // (UINT32_MAX: not read). Static: the instance is at the 16 KiB a kalloc_type class may have.
+    static inline uint64_t gpuBusyLast = 0, gpuTotalLast = 0;
+
+    static uint32_t gpuBusySincePresent()
+    {
+        uint64_t busy = 0;
+        uint64_t total = 0;
+        if (tegra_gm20b_gpu_load(&busy, &total) != 0)
+            return UINT32_MAX;
+        const bool first = gpuTotalLast == 0;
+        const uint64_t busySince = busy - gpuBusyLast, totalSince = total - gpuTotalLast;
+        const bool counted = !first && total > gpuTotalLast && busy >= gpuBusyLast && busySince <= totalSince;
+        gpuBusyLast = busy;
+        gpuTotalLast = total;
+        return counted ? static_cast<uint32_t>(busySince * 1000 / totalSince) : UINT32_MAX;
     }
 
     SwitchFrameStall frameStall;
@@ -1302,12 +1338,11 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         return period;
     }
 
-    // Debug kernels: a present inside a touch interaction window (SwitchInteraction.h), after closing an ended one.
-    void noteInteraction(uint64_t stamp, uint64_t intervalUs, uint32_t periods, unsigned cause)
+    // Debug kernels: a present inside a touch interaction window (SwitchInteraction.h), after closing an ended one; began and
+    // lastDown, the touch run's (switch_frames_touch_activity).
+    void noteInteraction(uint64_t stamp, uint64_t intervalUs, uint32_t periods, unsigned cause, uint64_t began,
+                         uint64_t lastDown)
     {
-        uint64_t began = 0;
-        uint64_t lastDown = 0;
-        switch_frames_touch_activity(&began, &lastDown);
         const uint64_t now = Span::ticksToUs(stamp);
         const uint64_t beganUs = Span::ticksToUs(began);
         const uint64_t lastDownUs = Span::ticksToUs(lastDown);
@@ -1366,37 +1401,28 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
         return back < mark.submit ? mark.submit - back : 0;
     }
 
-    // A present frames DC A periods after the previous one (lastPresent, not yet moved on): its cause, see above.
+    // A slow present's cause (SwitchSlowPresent.h); lastPresent is the one before, not yet moved on.
+    unsigned longCause(const FrameMark &mark) const
+    {
+        return switch_slow_present::cause({mark.submit, mark.kick, mark.ready, vsyncOf(mark)}, lastPresent,
+                                          refreshTicks(), idleSincePresent);
+    }
+
+    // A present frames DC A periods after the previous one, under kGapUs: its cause, counted for the pacing line.
     unsigned noteLong(uint32_t frames, const FrameMark &mark)
     {
-        uint64_t period = vsyncInterval;
-        if (!period)
-            nanoseconds_to_absolutetime(16666667ULL, &period);
-        const uint64_t due = lastPresent + period;  // the boundary a one-frame interval would have used
-        unsigned cause = 0;
-        if (!mark.submit || mark.submit >= due) {
-            if (idleSincePresent) {
-                cause = kLongIdle;
-            } else if (const uint64_t vsync = vsyncOf(mark); vsync && mark.submit - vsync < period / 2) {
-                cause = kLongRate;
-            } else {
-                cause = kLongCa;
-            }
-        } else if (mark.ready > due) {
-            cause = mark.ready - mark.kick > due - mark.submit ? kLongGpu : kLongQueue;
-        } else {
-            cause = kLongLatch;
-        }
+        const unsigned cause = longCause(mark);
         ++stLong[cause];
         stLongFrames[cause] += frames - 1;
         return cause;
     }
 
-    // Debug kernels: one "SwitchFrame" line per present 1.5 periods or more after the one before (tools/frames reads them),
-    // its points in microseconds from the vsync its swap came after (from its submission when none is known).
-    static void noteSlowFrame(uint64_t stamp, uint64_t us, uint32_t frames, unsigned cause, const FrameMark &mark)
+    // Debug kernels: one "SwitchFrame" line per slow present (SwitchSlowPresent.h interval; tools/frames reads them), its
+    // points in microseconds from the vsync its swap came after (from its submission when none is known), and the GPU's
+    // busy share since the previous present (gpuBusy, tenths of a percent; UINT32_MAX: not read).
+    static void noteSlowFrame(uint64_t stamp, uint64_t us, uint32_t frames, unsigned cause, const FrameMark &mark,
+                              uint32_t gpuBusy)
     {
-        static const char *const kCause[kLongCauses] = {"idle", "ca", "gpu", "queue", "latch", "rate"};
         const FrameTimeline &tl = mark.tl;
         const bool fromVsync = (mark.submit != 0u) && tl.vsyncUs != kNotSeen;
         const uint64_t submitNs = mark.submit ? ticksNs(mark.submit) : 0;
@@ -1423,15 +1449,23 @@ class NativeLegacyDisplay : public IOMobileFramebufferLegacy {
             anchor = "swap";
         }
         char line[640];
-        snprintf(line, sizeof(line),
-                 "latch %llu after %u frames (%llu us), cause %s; origin %s %llu; first submit %lld, last "
-                 "submit %lld (%u, exec %u us), swap %lld, offer %lld, gpu done %lld, flip %lld, latch "
-                 "%lld us; other submits %u; swap thread base %d sched %d mode %d qos %d; cpu %u MHz at vsync %u at "
-                 "swap; imp %u %u us, bind %u %u us, alloc %u %u us, free %u, clean %u KiB %u us",
-                 stamp, frames, us, cause < kLongCauses ? kCause[cause] : "?", anchor, origin, rel(tl.firstUs),
-                 rel(tl.lastUs), tl.submits, tl.execUs, at(mark.submit), at(mark.kick), rel(tl.doneUs), at(mark.ready),
-                 at(stamp), tl.others, tl.basePri, tl.schedPri, tl.mode, tl.qos, tl.mhzVsync, tl.mhzSwap, tl.imports,
-                 tl.importUs, tl.binds, tl.bindUs, tl.allocs, tl.allocUs, tl.frees, tl.cleanKiB, tl.cleanUs);
+        const int written = snprintf(
+            line, sizeof(line),
+            "latch %llu after %u frames (%llu us), cause %s; origin %s %llu; first submit %lld, last "
+            "submit %lld (%u, exec %u us), swap %lld, offer %lld, gpu done %lld, flip %lld, latch "
+            "%lld us; other submits %u; swap thread base %d sched %d mode %d qos %d; cpu %u MHz at vsync %u at "
+            "swap; imp %u %u us, bind %u %u us, alloc %u %u us, free %u, clean %u KiB %u us",
+            stamp, frames, us, cause < kLongCauses ? switch_slow_present::kNames[cause] : "?", anchor, origin,
+            rel(tl.firstUs), rel(tl.lastUs), tl.submits, tl.execUs, at(mark.submit), at(mark.kick), rel(tl.doneUs),
+            at(mark.ready), at(stamp), tl.others, tl.basePri, tl.schedPri, tl.mode, tl.qos, tl.mhzVsync, tl.mhzSwap,
+            tl.imports, tl.importUs, tl.binds, tl.bindUs, tl.allocs, tl.allocUs, tl.frees, tl.cleanKiB, tl.cleanUs);
+        size_t used = written > 0 ? static_cast<size_t>(written) : 0;
+        if (used >= sizeof(line))
+            used = sizeof(line) - 1;
+        if (gpuBusy == UINT32_MAX)
+            snprintf(line + used, sizeof(line) - used, "; gpu busy -");
+        else
+            snprintf(line + used, sizeof(line) - used, "; gpu busy %u.%u%%", gpuBusy / 10, gpuBusy % 10);
         os_log(OS_LOG_DEFAULT, "SwitchFrame: %s", line);  // one string: os_log drops a record whose scalars outgrow it
     }
 
@@ -1585,11 +1619,11 @@ private:
         if (status & kVblankInt)
             vblankNotify();
         // Core Animation never registers for vsync on either kind (its frame clock is a CADisplayTimer): the frame end
-        // stands in for the compositor's vsync so the GPU deadline's window still opens.
+        // stands in for the compositor's vsync so the GPU deadline's window still opens (the frame timeline's, from
+        // the filter).
         if ((status & kFrameEndInt) && !vsyncArmed) {
             const uint64_t frameEnd = __atomic_load_n(&feStamp, __ATOMIC_ACQUIRE);
             tegra_gm20b_compositor_vsync(frameEnd, 0, refreshTicks());
-            noteTimelineVsync(frameEnd, refreshTicks());
         }
         watchVsync(status);
         if (status & kFrameEndInt)
@@ -1628,7 +1662,7 @@ private:
             colourBlankFrameEnd();
         }
         if ((status & kFrameEndInt) && stats) {
-            if (frameStall.frameEnd(mach_absolute_time(), refreshTicks(), vsyncWanted()))
+            if (frameStall.frameEnd(mach_absolute_time(), refreshTicks(), lastSubmit))
                 switch_stall_frame(frameStall.lastPresent());
             checkInteraction();
             noteStatsWindow();
@@ -1800,12 +1834,12 @@ private:
         stPlaneNative = 0;
         stPlaneFlips = stPlaneOnly = stPlaneLatched = stPlaneMaps = stPlaneRemaps = stPlaneDropped = stPlaneComposited =
             stPlaneUnderflows = stPlaneUnready = 0;
-        add("; long %u: idle %u/%u ca %u/%u gpu %u/%u queue %u/%u latch %u/%u rate %u/%u",
-            stLong[kLongIdle] + stLong[kLongCa] + stLong[kLongGpu] + stLong[kLongQueue] + stLong[kLongLatch] +
-                stLong[kLongRate],
-            stLong[kLongIdle], stLongFrames[kLongIdle], stLong[kLongCa], stLongFrames[kLongCa], stLong[kLongGpu],
-            stLongFrames[kLongGpu], stLong[kLongQueue], stLongFrames[kLongQueue], stLong[kLongLatch],
-            stLongFrames[kLongLatch], stLong[kLongRate], stLongFrames[kLongRate]);
+        uint32_t longs = 0;
+        for (const uint32_t n : stLong)
+            longs += n;
+        add("; long %u:", longs);
+        for (unsigned c = 0; c < kLongCauses; ++c)
+            add(" %s %u/%u", switch_slow_present::kNames[c], stLong[c], stLongFrames[c]);
         add("; vsync folded %u late>1ms %u idle %u", stVsyncFolded, stVsyncLateN, stVsyncIdle);
         if (stTouchSwap.count) {
             add("; touch->swap %llu/%llu us mean/max,", static_cast<unsigned long long>(stTouchSwap.meanUs()),
@@ -1818,6 +1852,7 @@ private:
             add("%s", "; quiet (the next quiet windows are not logged)");
         if (logged)
             os_log(OS_LOG_DEFAULT, "SwitchDisplay pacing: %s", line);  // log only, never the boot console
+        noteRequestedWindow(us, logged);
         // who drew in this window: Core Animation's clients send each commit to the render server as a mach message
         if (switch_render_senders_line(line, sizeof(line), us / 1000, 6) && logged) {
             os_log(OS_LOG_DEFAULT, "SwitchDisplay clients: %llu ms to the render server: %s",
@@ -1850,6 +1885,53 @@ private:
         stReadDue = true;
         stRead = 0;
         noteLocksWindow();
+    }
+
+    // Debug kernels: how far from Core Animation's requested presentation the frames this window were shown
+    // (SwitchFrameTickets.h lagged), in periods: 0 is on time, 1 a period late; and what the timed-present gate did with
+    // them (SwitchTimedPresentDisplay.h): held for an early frame end or for a phase, shown or replaced while held, let
+    // go as ordinary frames (with the frame ends masked: unphased), shown early.
+    static constexpr unsigned kTimedCounts = 7;
+    static inline uint32_t timedSeen[kTimedCounts] = {};
+
+    void noteRequestedWindow(uint64_t us, bool logged)
+    {
+#if SWITCH_FRAME_TIMELINE
+        const SwitchFrameTickets::Lag lag = frameInfo->tickets.takeLag();
+        const auto &pending = frameInfo->pending;
+        const uint32_t timed[kTimedCounts] = {pending.heldEarly,   pending.heldPhase,     pending.timedShown,
+                                              pending.timedUnsent, pending.timedOrdinary, pending.timedUnphased,
+                                              pending.shownEarly};
+        uint32_t window[kTimedCounts];
+        for (unsigned i = 0; i < kTimedCounts; ++i) {
+            window[i] = timed[i] - timedSeen[i];
+            timedSeen[i] = timed[i];
+        }
+        if (!logged)
+            return;
+        char line[320];
+        size_t at = 0;
+        for (unsigned i = 0; i < SwitchFrameTickets::kLagBins && at < sizeof(line); ++i) {
+            const int periods = static_cast<int>(i) + SwitchFrameTickets::kLagEarliest;
+            const char *edge = "";
+            if (i == 0) {
+                edge = "<=";
+            } else if (i + 1 == SwitchFrameTickets::kLagBins) {
+                edge = ">=";
+            }
+            at += static_cast<size_t>(
+                snprintf(line + at, sizeof(line) - at, "%s%s%d:%u", i ? " " : "", edge, periods, lag.bins[i]));
+        }
+        snprintf(line + at, at < sizeof(line) ? sizeof(line) - at : 0,
+                 ", unknown %u; timed gate held early %u phase %u, shown %u, replaced while held %u, ordinary %u "
+                 "unphased %u, shown early %u",
+                 lag.unknown, window[0], window[1], window[2], window[3], window[4], window[5], window[6]);
+        os_log(OS_LOG_DEFAULT, "SwitchDisplay requested: %llu ms: shown minus requested presentation, periods %s",
+               static_cast<unsigned long long>(us / 1000), line);
+#else
+        (void)us;
+        (void)logged;
+#endif
     }
 
     // Debug kernels: the frame path's locks per 100 frame ends this window, by lock (the colour unit's setters' lock,
@@ -1900,7 +1982,8 @@ private:
 
     // Debug kernels: the frame timeline's vsync, sent to the compositor or not. Core Animation's frame clock is its own
     // (it never arms the vsync on iOS 17 or 27), so the frame end stands in: without it no SwitchFrame line has a vsync
-    // origin and SwitchFrameRender (render.c) never sees a frame begin.
+    // origin and SwitchFrameRender (render.c) never sees a frame begin. The stand-in comes from DC A's primary filter:
+    // nothing here may lock or block.
     void noteTimelineVsync(uint64_t stamp, uint64_t interval)
     {
         if (!SWITCH_FRAME_TIMELINE)
@@ -3516,10 +3599,11 @@ public:
 #endif
         const int blockLog2 = surfaceBlockLog2(memory);
         const bool tiled = blockLog2 >= 0;
+        const bool compressed = tiled && surfaceCompressed(memory);
         // A block-linear frame in other blocks than window A's reaches the screen only through the GPU copy, which reads
         // its layout: window A cannot scan it, nor a CPU copy take its bytes as they are.
         const bool asScanned = !tiled || blockLog2 == static_cast<int>(kScanBlockLog2);
-        if (direct && asScanned &&
+        if (direct && asScanned && !compressed &&
             offerDirect(request, surface, memory, sourceStride, allocation, width, height, tiled, kickAt))
             return;
         if (direct && ring.target() == kNoBuffer) {  // no slot either: the frame end that frees a surface kicks again
@@ -3532,6 +3616,10 @@ public:
         if (offerVicCopy(request, surface, sourceStride, allocation, width, height, blockLog2, kickAt))
             return;
         if (!asScanned) {
+            native_legacy_transfer_observed(kIOReturnUnsupported, request, 0);
+            return;
+        }
+        if (compressed) {
             native_legacy_transfer_observed(kIOReturnUnsupported, request, 0);
             return;
         }
@@ -4397,8 +4485,10 @@ public:
 #if SWITCH_FRAME_TIMELINE
         bool first = false;
         const auto ticket = frameInfo->tickets.shown(seq, continuous, vsyncInterval / 2, &first);
-        if (first)
+        if (first) {
             KDBG(SWITCH_KDBG_CODE(SWITCH_KDBG_FRAME_TICKET), ticket.id, ticket.swapId, ticket.take, ticket.gpu);
+            frameInfo->tickets.lagged(ticket.requested, continuous, vsyncInterval);
+        }
 #endif
         switch_frame_info::Frame frame;
         if (frameInfo->pending.shown(seq, continuous, frame, vsyncInterval / 2) && frameInfo->clients.any())
@@ -4978,10 +5068,15 @@ public:
     {
         setInternalDisplay(true);
         IOWorkLoop *loop = getWorkLoop();
-        if (!loop || loop->runAction(&publishRefreshGated, this) != kIOReturnSuccess)
+        if (!loop || loop->runAction(&publishRefreshGated, this) != kIOReturnSuccess) {
             IOLog("SwitchDisplay: IOMobileFramebufferLegacy::setDisplayRefreshProperties failed: no "
                   "IOMFBDisplayRefresh\n");
+            return;
+        }
+        refreshValuesRegister();
     }
+
+#include "SwitchRefreshSysctlDisplay.h"
 
     // The compositor's framebuffer rows (QuartzCore CA::WindowServer::AppleDisplay::update_display_limits reads this IOMFB
     // property; iosurface_alignment() then rounds every framebuffer's bytesPerRow up to it, 64 by default), and VideoToolbox's

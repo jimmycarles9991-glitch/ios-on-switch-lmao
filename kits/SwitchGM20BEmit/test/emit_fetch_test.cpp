@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // The fetch macros (gen/SwitchGM20BMacros.h) on Mesa's Fermi MME simulator over the scratch words
-// SwitchGM20BMacroSlots.h gives them: each instance one split draw, a BEGIN a primitive with the fetch barrier before
-// it, its first BEGIN over a whole primitive's vertices, each later one over the vertices that complete one more, the
-// last over what is left, every argument consumed whatever the primitive count.
+// SwitchGM20BMacroSlots.h gives them: each instance one split draw, a BEGIN a primitive over that primitive's own
+// vertices with the fetch barrier before it, the last BEGIN of none, every argument consumed whatever the primitive
+// count.
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -154,7 +154,7 @@ std::vector<Begin> begins(const std::vector<Method> &methods)
     return out;
 }
 
-constexpr uint32_t kTriangles = 3, kStrip = 4, kLineStrip = 2, kPoints = 0;
+constexpr uint32_t kTriangles = 3, kStrip = 4, kLineStrip = 2, kLines = 1, kPoints = 0;
 
 TEST(EmitFetch, EachTriangleOfEachInstanceIsABeginBehindTheBarrier)
 {
@@ -166,23 +166,23 @@ TEST(EmitFetch, EachTriangleOfEachInstanceIsABeginBehindTheBarrier)
     EXPECT_EQ(drawn, expected);
 }
 
-TEST(EmitFetch, AStripsLaterBeginsSendOneVertexEach)
+TEST(EmitFetch, AStripsBeginsEachRepeatTheVerticesTheirTriangleShares)
 {
     const auto drawn = begins(run(switch_gm20b_macro_fetch_draw, kStrip, {6, 1, 0, 0}));
     const std::vector<Begin> expected = {{kFirst, 0, 3, 0, true},
-                                         {kContinued, 3, 1, 0, true},
-                                         {kContinued, 4, 1, 0, true},
-                                         {kContinued, 5, 1, 0, true},
-                                         {kLast, 6, 0, 0, false}};
+                                         {kContinued, 1, 3, 0, true},
+                                         {kContinued, 2, 3, 0, true},
+                                         {kContinued, 3, 3, 0, true},
+                                         {kLast, 4, 0, 0, false}};
     EXPECT_EQ(drawn, expected);
 }
 
-TEST(EmitFetch, WhatCompletesNoPrimitiveIsTheLastBegins)
+TEST(EmitFetch, WhatCompletesNoPrimitiveIsNotDrawn)
 {
     EXPECT_EQ(begins(run(switch_gm20b_macro_fetch_draw, kTriangles, {7, 1, 0, 0})),
-              (std::vector<Begin>{{kFirst, 0, 3, 0, true}, {kContinued, 3, 3, 0, true}, {kLast, 6, 1, 0, true}}));
+              (std::vector<Begin>{{kFirst, 0, 3, 0, true}, {kContinued, 3, 3, 0, true}, {kLast, 6, 0, 0, false}}));
     EXPECT_EQ(begins(run(switch_gm20b_macro_fetch_draw, kTriangles, {2, 1, 0, 0})),
-              (std::vector<Begin>{{kWhole, 0, 2, 0, true}}));
+              (std::vector<Begin>{{kWhole, 0, 0, 0, false}}));
 }
 
 TEST(EmitFetch, PointsAndLineStripsByTheirRuns)
@@ -190,7 +190,70 @@ TEST(EmitFetch, PointsAndLineStripsByTheirRuns)
     EXPECT_EQ(begins(run(switch_gm20b_macro_fetch_draw, kPoints, {2, 1, 4, 0})),
               (std::vector<Begin>{{kFirst, 4, 1, 0, true}, {kContinued, 5, 1, 0, true}, {kLast, 6, 0, 0, false}}));
     EXPECT_EQ(begins(run(switch_gm20b_macro_fetch_draw, kLineStrip, {3, 1, 0, 0})),
-              (std::vector<Begin>{{kFirst, 0, 2, 0, true}, {kContinued, 2, 1, 0, true}, {kLast, 3, 0, 0, false}}));
+              (std::vector<Begin>{{kFirst, 0, 2, 0, true}, {kContinued, 1, 2, 0, true}, {kLast, 2, 0, 0, false}}));
+}
+
+using Primitive = std::vector<uint32_t>;
+
+// The primitives `count` vertices from `first` of MTLPrimitiveType `primitive` make, each as its vertices in order
+std::vector<Primitive> primitivesOf(uint32_t primitive, uint32_t first, uint32_t count)
+{
+    std::vector<Primitive> out;
+    for (uint32_t k = 0; k + kRunFirst[primitive] <= count; k += kRunStep[primitive]) {
+        Primitive p;
+        for (uint32_t v = 0; v < kRunFirst[primitive]; v++)
+            p.push_back(first + k + v);
+        out.push_back(p);
+    }
+    return out;
+}
+
+// What GM20B draws of a fetch macro's BEGINs: each BEGIN's primitives from its own vertices alone (on the device a
+// strip's BEGINs of one new vertex each drew nothing, gpu.gm20b.fetch_icb), every one behind the fetch barrier and
+// alone in its BEGIN, so that the barrier orders each after the one before
+std::vector<Primitive> assembled(const std::vector<Begin> &drawn, uint32_t primitive)
+{
+    std::vector<Primitive> made;
+    for (const Begin &b : drawn) {
+        const auto own = primitivesOf(primitive, b.first, b.count);
+        EXPECT_LE(own.size(), 1u) << "a BEGIN of " << b.count << " vertices from " << b.first;
+        EXPECT_TRUE(own.empty() || b.barrier) << "a BEGIN from " << b.first << " drawn without the barrier";
+        made.insert(made.end(), own.begin(), own.end());
+    }
+    return made;
+}
+
+std::vector<Primitive> instancesOf(uint32_t primitive, uint32_t first, uint32_t count, uint32_t instances)
+{
+    std::vector<Primitive> out;
+    for (uint32_t i = 0; i < instances; i++) {
+        const auto one = primitivesOf(primitive, first, count);
+        out.insert(out.end(), one.begin(), one.end());
+    }
+    return out;
+}
+
+TEST(EmitFetch, EveryPrimitiveOfTheDrawIsOneBeginsOwnVertices)
+{
+    for (uint32_t primitive : {kPoints, kLines, kLineStrip, kTriangles, kStrip})
+        for (uint32_t count : {1u, 2u, 3u, 4u, 5u, 7u, 9u})
+            for (uint32_t instances : {1u, 3u}) {
+                const auto want = instancesOf(primitive, 4, count, instances);
+                const Execute execute = {true, primitive + 1};
+                EXPECT_EQ(assembled(begins(run(switch_gm20b_macro_fetch_draw, primitive, {count, instances, 4, 0})),
+                                    primitive),
+                          want)
+                    << "MTLPrimitiveType " << primitive << ", " << count << " vertices, " << instances << " instances";
+                EXPECT_EQ(assembled(begins(run(switch_gm20b_macro_fetch_draw_indexed, primitive,
+                                               {count, instances, 4, 0, 0})),
+                                    primitive),
+                          want)
+                    << "indexed MTLPrimitiveType " << primitive << ", " << count << " indices";
+                EXPECT_EQ(assembled(begins(run(switch_gm20b_macro_icb_draw, 0, {0, count, instances, 4, 0}, &execute)),
+                                    primitive),
+                          want)
+                    << "a command of SET_PRIMITIVE_TOPOLOGY " << primitive + 1 << ", " << count << " vertices";
+            }
 }
 
 TEST(EmitFetch, AnIndexedDrawsParametersOnceThenItsIndices)
@@ -209,7 +272,7 @@ TEST(EmitFetch, AnIndexedDrawsParametersOnceThenItsIndices)
     for (const Begin &b : drawn)
         EXPECT_EQ(b.firstMethod, uint32_t(NVB197_SET_INDEX_BUFFER_F));
     EXPECT_EQ(drawn,
-              (std::vector<Begin>{{kFirst, 8, 3, 0, true}, {kContinued, 11, 1, 0, true}, {kLast, 12, 0, 0, false}}));
+              (std::vector<Begin>{{kFirst, 8, 3, 0, true}, {kContinued, 9, 3, 0, true}, {kLast, 10, 0, 0, false}}));
 }
 
 TEST(EmitFetch, NothingIsDrawnOfNoVerticesOrNoInstances)
@@ -226,13 +289,13 @@ TEST(EmitFetch, AnOrderedExecutesCommandsTakeTheirSizesFromTheirTopology)
     const Execute strip = {true, 5}, list = {true, 4}, lines = {true, 3}, whole = {false, 5};
     EXPECT_EQ(begins(run(switch_gm20b_macro_icb_draw, 0, {0, 5, 1, 0, 0}, &strip)),
               (std::vector<Begin>{{kFirst, 0, 3, 0, true},
-                                  {kContinued, 3, 1, 0, true},
-                                  {kContinued, 4, 1, 0, true},
-                                  {kLast, 5, 0, 0, false}}));
+                                  {kContinued, 1, 3, 0, true},
+                                  {kContinued, 2, 3, 0, true},
+                                  {kLast, 3, 0, 0, false}}));
     EXPECT_EQ(begins(run(switch_gm20b_macro_icb_draw, 0, {1, 6, 1, 0, 0}, &list)),
               (std::vector<Begin>{{kFirst, 0, 3, 0, true}, {kContinued, 3, 3, 0, true}, {kLast, 6, 0, 0, false}}));
     EXPECT_EQ(begins(run(switch_gm20b_macro_icb_draw_indexed, 0, {2, 3, 1, 0, 0, 0}, &lines)),
-              (std::vector<Begin>{{kFirst, 0, 2, 0, true}, {kContinued, 2, 1, 0, true}, {kLast, 3, 0, 0, false}}));
+              (std::vector<Begin>{{kFirst, 0, 2, 0, true}, {kContinued, 1, 2, 0, true}, {kLast, 2, 0, 0, false}}));
     EXPECT_EQ(begins(run(switch_gm20b_macro_icb_draw, 0, {0, 5, 1, 0, 0}, &whole)),
               (std::vector<Begin>{{0, 0, 5, 0, false}}));
     EXPECT_TRUE(begins(run(switch_gm20b_macro_icb_draw, 0, {7, 5, 1, 0, 0}, &strip)).empty()) << "outside the range";

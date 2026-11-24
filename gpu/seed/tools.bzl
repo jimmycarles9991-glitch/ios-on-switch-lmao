@@ -15,7 +15,7 @@ _DARWIN = {"requires-darwin": ""}
 # The raw sources' Python that the raw build step reads: make_pack.py imports packfile.py at start. Python finds a module
 # beside a script through the script's real path, so an undeclared one still imported in the local sandbox (its inputs
 # are links into the source tree) and failed on a remote worker.
-_METAL_BUILD_MODULES = ["packfile.py", "selector_section.py"]
+_METAL_BUILD_MODULES = ["packfile.py"]
 
 # What make_pack.py build makes (its PACK_TOOLS), each its own output: a step's action reads only the tools it runs
 # (raw_tool_files), so a tool it does not run reruns none of it.

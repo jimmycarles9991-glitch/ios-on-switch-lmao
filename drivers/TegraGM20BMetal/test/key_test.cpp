@@ -107,7 +107,7 @@ TEST(GM20BKey, EveryResolveStateIsAnOwnState)
                                     ":15:0:1:0:0:1:0:0  | v resolve_vert  | f " + fragment;
             EXPECT_EQ(gm20b::packKeyHash(key), hash(name)) << format << " x" << samples;
         }
-    EXPECT_EQ(names.size(), 23u);
+    EXPECT_EQ(names.size(), 26u);
 }
 
 TEST(GM20BKey, FrameworkResolveSpecializationsHaveDistinctKeys)

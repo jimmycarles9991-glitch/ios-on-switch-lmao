@@ -117,9 +117,22 @@ static void present_watch_flush(void)
 	__atomic_fetch_sub(&tgm_present.completing, 1, __ATOMIC_SEQ_CST);
 }
 
+static int present_watch_failure(const struct switch_gpu_backing_token *tokens, uint32_t count)
+{
+	uint32_t i;
+
+	for (i = 0; i < count; ++i)
+		if (present_physical(&tokens[i]) < 0 || present_visible(&tokens[i]) < 0)
+			return switch_gpu_backing_token_failure(&tokens[i]);
+	return count ? switch_gpu_backing_token_failure(&tokens[0])
+		     : SWITCH_GPU_BACKING_WRITER_FAILED;
+}
+
 /* Thread context, may sleep: a kill, a semantic wait, a hidden producer, the offer's own late look. */
 static void present_watch_work(void *unused)
 {
+	struct switch_gpu_backing_token tokens[SWITCH_GPU_PRESENT_WATCH_MAX];
+	uint32_t count = 0;
 	int found;
 	int status;
 
@@ -128,8 +141,9 @@ static void present_watch_work(void *unused)
 					       present_visible);
 	if (found == SWITCH_GPU_PRESENT_WATCH_PENDING)
 		return;
-	tgm_present_promise_leave(tgm_present.watch.token.queue,
-				  (u32)tgm_present.watch.token.value);
+	switch_gpu_present_watch_snapshot(&tgm_present.watch, tokens, &count, NULL);
+	if (count)
+		tgm_present_promise_leave(tokens[0].queue, (u32)tokens[0].value);
 	tgm_present_filter_detach();
 	__atomic_fetch_add(&tgm_present.completing, 1, __ATOMIC_SEQ_CST);
 	if (found == SWITCH_GPU_PRESENT_WATCH_HIDDEN) {
@@ -138,9 +152,7 @@ static void present_watch_work(void *unused)
 	}
 	status = switch_gpu_present_tokens_finish_visible(
 		&tgm_present.tokens,
-		found == SWITCH_GPU_PRESENT_WATCH_FAILED
-			? switch_gpu_backing_token_failure(&tgm_present.watch.token)
-			: 0,
+		found == SWITCH_GPU_PRESENT_WATCH_FAILED ? present_watch_failure(tokens, count) : 0,
 		switch_gpu_timeline_promote);
 	present_watch_complete(status, 0);
 }
@@ -159,13 +171,12 @@ void tgm_present_pass(void)
 		tgm_deadline_presented(tgm_present.fenced_queued, 1);
 		nvxnu_work_schedule(tgm_present.completion_work);
 	}
-	if (__atomic_load_n(&tgm_present.watch.state, __ATOMIC_ACQUIRE) !=
-	    SWITCH_GPU_PRESENT_WATCH_DUE)
+	if (switch_gpu_present_watch_state(&tgm_present.watch) != SWITCH_GPU_PRESENT_WATCH_DUE)
 		return;
 	if (!switch_gpu_present_watch_take_visible(&tgm_present.watch,
 						   switch_gpu_backing_token_status,
 						   switch_gpu_backing_token_external_status)) {
-		if (__atomic_load_n(&tgm_present.watch.state, __ATOMIC_ACQUIRE) ==
+		if (switch_gpu_present_watch_state(&tgm_present.watch) ==
 		    SWITCH_GPU_PRESENT_WATCH_DUE)
 			nvxnu_work_schedule(tgm_present.watch_work);
 		return;
@@ -211,6 +222,7 @@ int tgm_present_open(struct tgm_vm **pvm)
 		      ? tgm_vm_new(&tgm_present.vm)
 		      : -ENOMEM;
 	if (!ret) {
+		tgm_vm_claim(tgm_present.vm, &tgm_present);
 		ret = tgm_pfence_get(
 			tgm_present
 				.vm); /* the channel's own fence: the page every address space may wait on */
@@ -230,10 +242,11 @@ int tgm_present_open(struct tgm_vm **pvm)
 				  &tgm_present.fences_gpu);
 	}
 	if (!ret) {
-		ret = tgm_chan_new_copy(tgm_present.vm, NULL, tgm_present.fence,
+		ret = tgm_chan_new_copy(tgm_present.vm, &tgm_present, tgm_present.fence,
 					tgm_present.fence_gpu, "present", 1, &tgm_present.chan);
 	}
 	if (!ret) {
+		tgm_present.chan->app = 0;
 		tgm_present.chan->kernel = CHAN_PRESENT;
 		tgm_gpu_lock();
 		chan_prioritize(tgm_present.chan);
@@ -260,7 +273,7 @@ int tgm_present_map(uint64_t va, struct tgm_mem *mem, uint64_t bytes, uint8_t ki
 
 int tgm_present_unmap(uint64_t va, uint64_t bytes)
 {
-	return tgm_present.vm ? tgm_vm_unmap(tgm_present.vm, va, bytes) : -ENODEV;
+	return tgm_present.vm ? tgm_vm_unmap_volatile(tgm_present.vm, va, bytes) : -ENODEV;
 }
 
 #if TGM_STATS
@@ -317,8 +330,8 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	cut = dst_va && tgm_copy_reset_armed();
 #endif
 	push = &chan->chan.push;
-	/* acquires, a start stamp, the copy, the read-backs, the fence */
-	words = dependency_count * 5 + 57 + nreads * TGM_COPY_RECT_DWORDS +
+	/* acquires, a start stamp, optional L2+TLB invalidate, the copy, the read-backs, the fence */
+	words = dependency_count * 5 + 57 + 18 + nreads * TGM_COPY_RECT_DWORDS +
 		cut * (TegraGM20BCopyResetCopies * TGM_PRESENT_COPY_DWORDS + 2) + CHAN_FENCE_DWORDS;
 #if TGM_STATS
 	if (push->cur + words > push->end && !tgm_chan_room(chan, 1, words))
@@ -360,6 +373,20 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 	tgm_present.copy.dst_va = dst_va;
 	tgm_present.copy.dst_pitch = dst_pitch;
 	tgm_present.copy.block_height_log2 = block_height_log2;
+	if (tgm_tlb_take(&chan->tlb, &chan->vm->tlb)) {
+		/* nouveau's NVDEF/NVVAL/PUSH_* macros compute in int and repeat their branches. */
+		/* NOLINTBEGIN(bugprone-signed-bitwise,bugprone-branch-clone) */
+		PUSH_NVSQ(push, NV906F, NVB06F_WFI, 0);
+		PUSH_NVSQ(push, NV906F, NVB06F_FB_FLUSH, 0);
+		PUSH_NVSQ(push, NV906F, NVB06F_MEM_OP_C, 0, NVB06F_MEM_OP_D,
+			  NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY);
+		PUSH_NVSQ(push, NV906F, NVB06F_FB_FLUSH, 0);
+		PUSH_NVSQ(push, NV906F, NVB06F_MEM_OP_C, 0, NVB06F_MEM_OP_D,
+			  NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE);
+		PUSH_NVSQ(push, NV906F, NVB06F_MEM_OP_C, NVB06F_MEM_OP_C_TLB_INVALIDATE_PDB_ALL,
+			  NVB06F_MEM_OP_D, NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE);
+		/* NOLINTEND(bugprone-signed-bitwise,bugprone-branch-clone) */
+	}
 	if (dst_va)
 		tgm_present_push_copy(push);
 #if TGM_STATS
@@ -391,11 +418,20 @@ static int present_copy(uint64_t src_va, uint64_t stride, int32_t src_block_log2
 		switch_gpu_chan_next_token(chan, &own);
 		tgm_present_filter_attach(&own);
 	}
-	/* A copy's flush above put the frame's source in DRAM, and the copy and its read-backs write through the present's
-	 * volatile PTEs (tgm_present_map); a fence-only present is direct scanout of a surface the GPU drew through the L2. */
-	switch_gpu_chan_fence_sealed(chan, dst_va ? TGM_FENCE_VOLATILE_WRITES : 1, NULL);
-	if (!dst_va && stats_on())
-		__atomic_fetch_add(&tgm_stats.present_flushes, 1, __ATOMIC_RELAXED);
+	/* A copy writes through volatile PTEs (tgm_present_map); a fence-only present skips
+	 * L2_FLUSH_DIRTY only when no promise/CE token is present and every GM20B dependency is
+	 * already externally visible. */
+	{
+		int need_flush = 0;
+
+		if (!dst_va)
+			need_flush = switch_gpu_present_tokens_need_l2_flush(
+				&tgm_present.tokens, switch_gpu_backing_token_external_status);
+		switch_gpu_chan_fence_sealed(chan, need_flush ? 1 : TGM_FENCE_VOLATILE_WRITES,
+					     NULL);
+		if (need_flush && stats_on())
+			__atomic_fetch_add(&tgm_stats.present_flushes, 1, __ATOMIC_RELAXED);
+	}
 	if (stats_on())
 		__atomic_fetch_add(dependency_count ? &tgm_stats.writer : &tgm_stats.idle, 1,
 				   __ATOMIC_RELAXED);
@@ -443,16 +479,55 @@ int tgm_present_copy_read_dependencies(uint64_t src_va, uint64_t stride, int32_t
 }
 #endif
 
-/* No present job: the producer's own interrupt pass completes it (SwitchGpuPresentWatch.h). 1: not exactly one GM20B
- * producer or writer promise, so the caller queues the fence-only job; otherwise as tgm_present_copy_dependencies. */
+static uint32_t present_watch_collect(const struct switch_gpu_backing_token *tokens, uint32_t count,
+				      struct switch_gpu_backing_token *out)
+{
+	uint32_t watched = 0;
+	uint32_t first_gm20b = count;
+	uint32_t i;
+
+	if (!tokens || !count)
+		return 0;
+	if (count == 1 && tokens[0].engine == SWITCH_GPU_ENGINE_PROMISE) {
+		out[0] = tokens[0];
+		return 1;
+	}
+	for (i = 0; i < count; ++i) {
+		if (tokens[i].engine == SWITCH_GPU_ENGINE_GM20B) {
+			if (first_gm20b == count)
+				first_gm20b = i;
+			if (switch_gpu_backing_token_status(&tokens[i]) == 1 &&
+			    switch_gpu_backing_token_external_status(&tokens[i]) == 1)
+				continue;
+			if (watched == SWITCH_GPU_PRESENT_WATCH_MAX)
+				return 0;
+			out[watched++] = tokens[i];
+		} else if (tokens[i].engine == SWITCH_GPU_ENGINE_PROMISE ||
+			   tokens[i].engine == SWITCH_GPU_ENGINE_CE ||
+			   switch_gpu_backing_token_status(&tokens[i]) != 1 ||
+			   switch_gpu_backing_token_external_status(&tokens[i]) != 1) {
+			return 0;
+		}
+	}
+	if (!watched && first_gm20b < count)
+		out[watched++] = tokens[first_gm20b];
+	return watched;
+}
+
+/* No present job: the producers' own interrupt passes complete it (SwitchGpuPresentWatch.h). 1:
+ * cannot be watched (empty, unsettled non-GM20B producer, or > SWITCH_GPU_PRESENT_WATCH_MAX
+ * active GM20B producers), so the caller queues the fence-only job. */
 int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 				   const struct switch_gpu_backing_token *dependencies,
 				   uint32_t dependency_count)
 {
+	struct switch_gpu_backing_token watch_tokens[SWITCH_GPU_PRESENT_WATCH_MAX];
 	struct switch_gpu_backing_token kept = {0};
+	uint32_t watch_count = 0;
+	uint64_t watch_gen = 0;
 	int ret = 0;
 
-	if (!switch_gpu_present_watchable(dependencies, dependency_count))
+	if (!dependencies || !dependency_count)
 		return 1;
 	if (!tgm_present.chan || tgm_present.chan->error || !tgm_present.watch_work)
 		return -ENODEV;
@@ -466,12 +541,19 @@ int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 		ret = switch_gpu_present_tokens_prepare(&tgm_present.tokens, dependencies,
 							dependency_count);
 	}
-	if (!ret && tgm_present.tokens.count != 1) {
-		switch_gpu_present_tokens_drop(&tgm_present.tokens);
-		ret = 1;
+	if (!ret) {
+		watch_count = present_watch_collect(tgm_present.tokens.tokens,
+						    tgm_present.tokens.count, watch_tokens);
+		if (!switch_gpu_present_watchable(watch_tokens, watch_count)) {
+			switch_gpu_present_tokens_drop(&tgm_present.tokens);
+			ret = 1;
+		}
 	}
-	if (!ret && tgm_present.tokens.tokens[0].engine == SWITCH_GPU_ENGINE_PROMISE)
+	if (!ret && watch_count == 1 && watch_tokens[0].engine == SWITCH_GPU_ENGINE_PROMISE) {
 		tgm_present_promise_watch(&kept);
+		if (kept.engine)
+			watch_tokens[0] = kept;
+	}
 	if (!ret) {
 		tgm_present.done = done;
 		tgm_present.arg = arg;
@@ -479,37 +561,32 @@ int tgm_present_watch_dependencies(void (*done)(void *, int), void *arg,
 		tgm_present.late = 0;
 		__atomic_store_n(&tgm_present.typed_pending, 1, __ATOMIC_RELEASE);
 		tgm_present.recheck = TGM_PRESENT_NS;
-		if (tgm_present.tokens.tokens[0].engine == SWITCH_GPU_ENGINE_PROMISE) {
-			/* no deadline until the job that keeps it is submitted (tgm_present_promise_kept): until then the promise is
-			 * its maker's to release, by that keep, its withdraw (a held command buffer fails at Metal's bound), a
-			 * cancel or its close */
+		if (watch_count == 1 && watch_tokens[0].engine == SWITCH_GPU_ENGINE_PROMISE) {
 			switch_gpu_path_promise_direct(SWITCH_GPU_PATH_DIRECT_PROMISED);
-			switch_gpu_present_watch_promise(&tgm_present.watch,
-							 &tgm_present.tokens.tokens[0]);
+			watch_gen = switch_gpu_present_watch_promise(&tgm_present.watch,
+								     &watch_tokens[0]);
 			__atomic_store_n(&tgm_present.promise_parked,
-					 tgm_promise_park(tgm_present.watch.token.queue,
-							  (u32)tgm_present.watch.token.value,
-							  "the display", "a direct present", NULL,
-							  1) == 1,
+					 tgm_promise_park(watch_tokens[0].queue,
+							  (u32)watch_tokens[0].value, "the display",
+							  "a direct present", NULL, 1) == 1,
 					 __ATOMIC_RELEASE);
 		} else {
 			nvxnu_work_schedule_after(tgm_present.deadline_work, TGM_PRESENT_NS);
-			/* before the arm: a pass claiming the watch detaches the view after this */
-			tgm_present_filter_attach(&tgm_present.tokens.tokens[0]);
-			switch_gpu_present_watch_arm(&tgm_present.watch,
-						     &tgm_present.tokens.tokens[0]);
+			/* Primary filter tracks one timeline view; multi-producer watches deliver
+			 * at the last producer's interrupt pass instead. */
+			if (watch_count == 1)
+				tgm_present_filter_attach(&watch_tokens[0]);
+			watch_gen = switch_gpu_present_watch_arm_many(&tgm_present.watch,
+								      watch_tokens, watch_count);
 		}
 	}
 	mutex_unlock(&tgm_present.lock);
 	if (ret)
 		gate_leave();
-	/* After the arm and before the last look: a producer's job may end quiet, and then only an interrupt asked for it
-	 * runs the pass that completes the watch (SwitchGpuQuiet.h). The caller's tokens, not the watch's, which the pass
-	 * may already have dropped. */
 	if (!ret)
-		tgm_chan_need_tokens(kept.engine ? &kept : dependencies,
-				     kept.engine ? 1 : dependency_count);
-	if (!ret && present_physical(&tgm_present.watch.token))
+		tgm_chan_need_tokens(watch_tokens, watch_count);
+	if (!ret && switch_gpu_present_watch_check(&tgm_present.watch, watch_gen, watch_tokens,
+						   watch_count, present_physical))
 		nvxnu_work_schedule(tgm_present.watch_work);
 	return ret;
 }

@@ -64,6 +64,29 @@ void dropBytes(Request *request)
 	gBroker.queuedBytes -= request->size;
 }
 
+void replaceThread(thread_t &slot, thread_t target)
+{
+	if (slot == target)
+		return;
+	thread_t old = slot;
+	switch_user_turnstile_thread_retain(target);
+	slot = target;
+	switch_user_turnstile_thread_drop(old);
+}
+
+void setInheritor(Request *request, thread_t target)
+{
+	if (request->inheritor == target)
+		return;
+	thread_t old = request->inheritor;
+	switch_user_turnstile_thread_retain(target);
+	request->inheritor = target;
+	// Retarget before dropping `old`: a sleeping waiter that unlocked gBroker.lock after
+	// grabbing the turnstile interlock still needs `old` alive until it releases that interlock.
+	switch_user_turnstile_retarget(&request->turnstile, target);
+	switch_user_turnstile_thread_drop(old);
+}
+
 void freeRequest(Request *request)
 {
 	if (request->async)
@@ -71,22 +94,25 @@ void freeRequest(Request *request)
 	IODelete(request, Request, 1);
 }
 
-// lock held: `request` finished with `result`. An asynchronous one is unlinked onto `sends` (its result goes out after the
-// lock is dropped); a synchronous one's waiter is woken.
+// lock held: `request` finished with `result`. Always unlinks `request`, wakes any sleeping
+// waiters, and releases its inheritor. An active async request stays alive until send() delivers
+// it and every CompileWait waiter has exited; any other request frees once waiters reaches 0.
 void finish(Request *request, int32_t result, Request **sends, uint32_t how)
 {
 	request->done = true;
 	request->result = result;
 	request->how = how;
 	dropBytes(request);
-	if (request->waiter) {
-		IOLockWakeup(gBroker.lock, request, false);
-	} else if (request->async && !request->abandoned) {
-		unlink(request);
+	thread_t old = request->inheritor;
+	request->inheritor = nullptr;
+	switch_user_turnstile_wakeup_all(&request->turnstile, THREAD_AWAKENED);
+	switch_user_turnstile_thread_drop(old);
+	unlink(request);
+	if (request->async && !request->abandoned) {
+		request->sendPending = true;
 		request->next = *sends;
 		*sends = request;
-	} else {
-		unlink(request);
+	} else if (request->waiters == 0) {
 		freeRequest(request);
 	}
 }
@@ -129,7 +155,15 @@ void send(Request *sends, uint32_t generation)
 			t.answered,
 			uint64_t(t.answer_priority) | uint64_t(t.reserved) << 32};
 		Sender::deliver(request->reference, payload, TegraGM20BCompileAnswerWords);
-		freeRequest(request);
+		bool drop = true;
+		if (request->waitedAsync) {
+			IOLockLock(gBroker.lock);
+			request->sendPending = false;
+			drop = request->waiters == 0;
+			IOLockUnlock(gBroker.lock);
+		}
+		if (drop)
+			freeRequest(request);
 	}
 }
 

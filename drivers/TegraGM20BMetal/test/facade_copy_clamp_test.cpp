@@ -4,6 +4,7 @@
 // clamp state draws it back. A copy of a texture Metal does not compress is the copy engine's one copy alone.
 #include "facade_pass_scene.h"
 #include "../push.h"
+#include "TegraGM20BVolatileABI.h"
 
 namespace {
 
@@ -39,6 +40,7 @@ id<MTLTexture> xrTexture(id<MTLDevice> device, bool optimized, uint32_t format =
 // launch of DATA_TRANSFER_TYPE (1:0) NONE or of an empty line (BlitEncoder::barrier's) moves none.
 struct Work {
     unsigned launches = 0, draws = 0;
+    size_t firstJob = 0, endJob = 0;
 };
 
 size_t jobCount()
@@ -52,6 +54,8 @@ Work workSince(size_t first)
     constexpr uint32_t kLaunchDma = 0x0300, kLineLengthIn = 0x0418;  // NVB0B5_LAUNCH_DMA, NVB0B5_LINE_LENGTH_IN
     std::lock_guard<std::mutex> l(kernel_model::callLock);
     Work out;
+    out.firstJob = first;
+    out.endJob = kernel_model::model.jobs.size();
     for (size_t j = first; j < kernel_model::model.jobs.size(); ++j) {
         const std::vector<uint32_t> &w = kernel_model::model.jobs[j].words;
         std::vector<switch_gm20b_method> methods(w.size());
@@ -188,6 +192,21 @@ void copiesOutOfACompressedTextureAreClamped()
     EXPECT_GE(out.draws, 1u) << "the clamp pass into the buffer's rows";
     EXPECT_EQ(plainOut.launches, 1u);
     EXPECT_EQ(plainOut.draws, 0u);
+    {
+        std::lock_guard<std::mutex> l(kernel_model::callLock);
+        ASSERT_LT(out.firstJob, out.endJob);
+        bool sawVolatile = false;
+        for (size_t j = out.firstJob; j < out.endJob; ++j) {
+            const kernel_model::Job &job = kernel_model::model.jobs[j];
+            EXPECT_EQ(job.flags & TegraGM20BJobExternal, 0u);
+            EXPECT_FALSE(job.hostWritten);
+            EXPECT_EQ(job.flags & TegraGM20BJobHostWritten, 0u);
+            sawVolatile |= (job.flags & TegraGM20BJobVolatileWrites) != 0u;
+            for (const TegraGM20BAbiSurfaceUse &u : job.uses)
+                EXPECT_EQ(u.access & TegraGM20BSurfaceHostWritten, 0u);
+        }
+        EXPECT_TRUE(sawVolatile);
+    }
 }
 
 }  // namespace

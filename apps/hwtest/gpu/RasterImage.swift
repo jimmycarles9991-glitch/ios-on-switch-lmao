@@ -66,7 +66,7 @@ extension SceneCheck {
     public func save(to directory: URL, stem: String) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for (suffix, data) in [("got", got.png()), ("want", want.png()), ("diff", diffPNG())] {
-            try data?.write(to: directory.appendingPathComponent("\(stem)-\(suffix).png"), options: .atomic)
+            try data?.place(at: directory.appendingPathComponent("\(stem)-\(suffix).png"))
         }
     }
 }

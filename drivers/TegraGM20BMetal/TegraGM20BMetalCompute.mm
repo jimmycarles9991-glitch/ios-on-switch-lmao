@@ -34,7 +34,8 @@ static bool heldInPlanes(SwitchMetalTexture *t)
     // addresses (0: setBytes:, which the driver uploads aligned)
     SwitchMetalTexture *_textures[31];
     SwitchMetalSampler *_samplers[16];
-    uint32_t _storableStandIns;  // slots of extended-range textures with a stand-in that a kernel may store
+    uint32_t _xrStandIns;         // slots of extended-range textures with a stand-in (xrStandIn)
+    uint16_t _unfetchedSamplers;  // slots of samplers whose filters the codes' fetches do not take (xrCodesSampler)
 }
 
 @end
@@ -56,8 +57,7 @@ static bool heldInPlanes(SwitchMetalTexture *t)
     if (_state != next) {
         _state = next;
         _kernelCurrent = false;
-        for (uint32_t m = _storableStandIns; m; m &= m - 1)
-            [self keyTexture:uint32_t(__builtin_ctz(m))];
+        [self keyStandIns];
     }
     setBinding(_cb, OpKernelState, 3, 0, state, 0);
 }
@@ -90,38 +90,53 @@ static bool heldInPlanes(SwitchMetalTexture *t)
         [self setBuffer:buffers[k] offset:offsets[k] atIndex:range.location + k];
 }
 
-static bool storableStandIn(SwitchMetalTexture *t)
+// An extended-range texture whose kernels read its codes or its stand-in by the state and the samplers (kernelFormat)
+static bool xrStandIn(SwitchMetalTexture *t)
 {
     const gm20b::XrForm form = gm20b::xrForm(uint32_t(t->_descriptor.pixelFormat));
-    return !heldInPlanes(t) && t->_raw.standIn && form != gm20b::XrForm::None && form != gm20b::XrForm::Planes &&
-           (t->_descriptor.usage & MTLTextureUsageShaderWrite);
+    return !heldInPlanes(t) && t->_raw.standIn && form != gm20b::XrForm::None && form != gm20b::XrForm::Planes;
 }
 
 // The format a kernel of `state` is compiled to read `t` at `slot` in: its own where the kernel reads and writes its
 // two planes apart (heldInPlanes, keyed :xr2p); else an RGB10A8_2P_XR10 texture with a stand-in, or an extended-range
-// one the kernel does not store (made without ShaderWrite, or at a slot the state's reflection writes nothing to), as
-// that stand-in, the RGBA16Float image of its values drawn from its codes as the encoder begins. With no state yet a
-// slot is taken as stored, and keyed again when one is set. The two are never keyed together.
-static MTLPixelFormat kernelFormat(SwitchMetalTexture *t, SwitchMetalComputeState *state, uint32_t slot)
+// one the kernel does not read by its codes (gm20b::kernelReadsCodes; `fetched`: every sampler bound is one the codes'
+// fetches take), as that stand-in, the RGBA16Float image of its values drawn from its codes as the encoder begins. With
+// no state yet a slot is taken as read by its codes, and keyed again when one is set. The two are never keyed together.
+static MTLPixelFormat kernelFormat(SwitchMetalTexture *t, SwitchMetalComputeState *state, uint32_t slot, bool fetched)
 {
     // a decoded format's texture is read as its stored image (decoded.h)
     if (const gm20b::DecodedFormat *f = gm20b::decodedFormat(uint32_t(t->_descriptor.pixelFormat)))
         return MTLPixelFormat(f->stored);
     if (heldInPlanes(t))
         return t->_descriptor.pixelFormat;
-    const bool storable = storableStandIn(t) ? !state || (gm20bComputeTexturesWritten(state) >> slot & 1)
-                                             : bool(t->_descriptor.usage & MTLTextureUsageShaderWrite);
-    return MTLPixelFormat(gm20b::kernelTextureFormat(t->_raw, uint32_t(t->_descriptor.pixelFormat), storable));
+    const bool storable = t->_descriptor.usage & MTLTextureUsageShaderWrite;
+    const bool codes = !xrStandIn(t) ? storable
+                       : !state      ? true
+                                     : gm20b::kernelReadsCodes(slot, storable, gm20bComputeTexturesWritten(state),
+                                                               gm20bComputeTexturesFloat(state), fetched);
+    return MTLPixelFormat(gm20b::kernelTextureFormat(t->_raw, uint32_t(t->_descriptor.pixelFormat), codes));
 }
 
-static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetalComputeState *state, uint32_t slot)
+// The swizzle a kernel reads `t` through (gm20b::kernelTextureSwizzle)
+static MTLTextureSwizzleChannels kernelSwizzle(SwitchMetalTexture *t)
+{
+    const MTLTextureSwizzleChannels w = t->_descriptor.swizzle;
+    uint8_t c[4] = {w.red, w.green, w.blue, w.alpha};
+    gm20b::kernelTextureSwizzle(t->_raw, uint32_t(t->_descriptor.pixelFormat), c);
+    return MTLTextureSwizzleChannelsMake(MTLTextureSwizzle(c[0]), MTLTextureSwizzle(c[1]), MTLTextureSwizzle(c[2]),
+                                         MTLTextureSwizzle(c[3]));
+}
+
+static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetalComputeState *state, uint32_t slot,
+                                              bool fetched)
 {
     MTLTextureDescriptor *d = t->_descriptor;
-    const MTLPixelFormat format = kernelFormat(t, state, slot);
+    const MTLPixelFormat format = kernelFormat(t, state, slot, fetched);
     if (format == d.pixelFormat)
         return d;
     d = [d copy];
     d.pixelFormat = format;
+    d.swizzle = kernelSwizzle(t);
     return d;
 }
 
@@ -132,14 +147,20 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
     gm20b::BoundTexture bound = {};
     if (t) {
         MTLTextureDescriptor *d = t->_descriptor;
-        const MTLTextureSwizzleChannels w = d.swizzle;
-        bound = {index,           kernelFormat(t, _state, index),
+        const MTLTextureSwizzleChannels w = kernelSwizzle(t);
+        bound = {index,           kernelFormat(t, _state, index, !_unfetchedSamplers),
                  d.textureType,   d.mipmapLevelCount,
                  d.arrayLength,   {w.red, w.green, w.blue, w.alpha},
                  heldInPlanes(t), t->_gm20bOk ? t->_raw.addressMap : uint8_t(0)};
     }
     if (_specialization.bindTexture(index, t ? &bound : nullptr))
         _kernelCurrent = false;
+}
+
+- (void)keyStandIns
+{
+    for (uint32_t m = _xrStandIns; m; m &= m - 1)
+        [self keyTexture:uint32_t(__builtin_ctz(m))];
 }
 
 - (void)setTexture:(id<MTLTexture>)texture atIndex:(NSUInteger)index
@@ -151,7 +172,7 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
                                  "a kernel's texture of another device");
     if (index < 31 && _textures[index] != t) {
         _textures[index] = t;
-        _storableStandIns = (_storableStandIns & ~(1u << index)) | uint32_t(t && storableStandIn(t)) << index;
+        _xrStandIns = (_xrStandIns & ~(1u << index)) | uint32_t(t && xrStandIn(t)) << index;
         [self keyTexture:uint32_t(index)];
     }
     if (t)
@@ -176,9 +197,13 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
         _cb->_borderSamplers = true;
     if (index < 16 && _samplers[index] != s) {
         _samplers[index] = s;
+        const bool fetched = !_unfetchedSamplers;
         gm20b::BoundSampler bound = {};
+        _unfetchedSamplers &= uint16_t(~(1u << index));
         if (s) {
             MTLSamplerDescriptor *d = s->_descriptor;
+            if (!gm20b::xrCodesSampler(d.minFilter, d.magFilter, d.mipFilter, d.maxAnisotropy))
+                _unfetchedSamplers |= uint16_t(1u << index);
             bound = {uint32_t(index),
                      d.minFilter,
                      d.magFilter,
@@ -196,6 +221,8 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
         }
         if (_specialization.bindSampler(uint32_t(index), s ? &bound : nullptr))
             _kernelCurrent = false;
+        if (fetched != !_unfetchedSamplers)
+            [self keyStandIns];
     }
     setBinding(_cb, OpKernelSampler, 3, index, sampler, 0);
 }
@@ -315,7 +342,7 @@ static MTLTextureDescriptor *kernelDescriptor(SwitchMetalTexture *t, SwitchMetal
                                                                        specialization.regionMode);
                     for (uint32_t slot = 0; slot < 31; ++slot)
                         if (_textures[slot])
-                            ask->texture(slot, kernelDescriptor(_textures[slot], _state, slot),
+                            ask->texture(slot, kernelDescriptor(_textures[slot], _state, slot, !_unfetchedSamplers),
                                          heldInPlanes(_textures[slot]));
                     for (uint32_t slot = 0; slot < 16; ++slot)
                         if (_samplers[slot])

@@ -79,13 +79,6 @@ struct switch_nvk_stage_info {
     * (nvk_switch_xr_planes.h)
     */
    uint64_t xr_plane_bindings[SWITCH_XR_PLANE_WORDS];
-   /* The set-0 uniform buffer whose descriptor is at byte ubo_fold_desc of
-    * the set and its bytes held constant: bit i of ubo_fold_mask says byte i
-    * of its bind is ubo_fold_bytes[i] (nvk_switch_ubo_fold.h); mask 0: none
-    */
-   uint32_t ubo_fold_desc;
-   uint64_t ubo_fold_mask;
-   uint8_t ubo_fold_bytes[64];
 };
 
 struct switch_nvk_stage {

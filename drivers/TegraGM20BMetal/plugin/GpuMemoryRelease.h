@@ -4,8 +4,8 @@
 // are kernel BOs mapped into the process and charged to its footprint as iokit_mapped until freed, so they go back on the
 // same events, and once the GPU has had nothing to do for a second: a widget or a snapshot service that stopped drawing
 // would otherwise carry them into its lower inactive limit, past which jetsam kills it at once, with no warning to answer.
-// The render server too: what it gives back after a still screen is made again on its render thread at the next frame
-// (HW Test pacing.* and gpu.gm20b.memoryless_burst judge that cost on the device).
+// The render server's go back on memory pressure alone (IdleDeadline::pressureOnly): what an idle second gave back, its
+// render thread made again at the next frame (22 Nov, boot B: an 8 MiB heap's 4.4 ms of zero-fill after every pause).
 #pragma once
 #include <dispatch/dispatch.h>
 #include <stdint.h>
@@ -117,9 +117,16 @@ private:
 // until the next drain stamps it again. Times are CLOCK_UPTIME_RAW nanoseconds.
 class IdleDeadline {
 public:
+    // The render server's: no drain sets a deadline, so memory pressure alone gives back
+    void pressureOnly()
+    {
+        pressureOnly_ = true;
+    }
+
     void drained(uint64_t now)
     {
-        drainedAt_.store(now, std::memory_order_release);
+        if (!pressureOnly_)
+            drainedAt_.store(now, std::memory_order_release);
     }
 
     // When the release is due with `inFlight` ranges in flight: 0 for none
@@ -139,4 +146,6 @@ public:
 private:
     // Atomic, not the waiting thread's own: the m2v fallback's completion handlers drain on their threads
     std::atomic<uint64_t> drainedAt_{0};
+    // Set at open, before the threads that drain are made
+    bool pressureOnly_ = false;
 };

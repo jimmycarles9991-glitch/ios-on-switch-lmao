@@ -39,12 +39,10 @@ gf100_vmm_pgt_pte(struct nvkm_vmm *vmm, struct nvkm_mmu_pt *pt,
 
 	if (map->ctag && !(map->next & (1ULL << 44))) {
 		while (ptes--) {
-			data = base | ((map->ctag >> 1) << 44);
-			if (!(map->ctag++ & 1))
-				data |= BIT_ULL(60);
-
+			data = base | tgm_pte_comptagline_64k(map->ctag++ >> 1, addr);
 			VMM_WO064(pt, vmm, ptei++ * 8, data);
 			base += map->next;
+			addr += TGM_COMP_BYTES;
 		}
 	} else {
 		map->type += ptes * map->ctag;
@@ -314,13 +312,13 @@ gf100_vmm_valid(struct nvkm_vmm *vmm, void *argv, u32 argc,
 		}
 
 		if (!map->no_comp && map->tags->mn) {
-			u64 tags = tgm_comp_line(map->tags->mn->offset, map->offset);
 			if (page->shift == 17 || !gm20x) {
+				u64 tags = tgm_comp_line(map->tags->mn->offset, map->offset);
 				map->type |= tgm_pte_comptagline(tags);
 				map->ctag |= tgm_pte_comptagline(1);
 				map->next |= tgm_pte_comptagline(1);
 			} else {
-				map->ctag |= tags << 1 | 1;
+				map->ctag = tgm_comp_half_line(map->tags->mn->offset, map->offset);
 			}
 		} else if (!map->no_comp) {
 			/* Out of comptags, for good for this memory: the caller asked for compression and gets an answer

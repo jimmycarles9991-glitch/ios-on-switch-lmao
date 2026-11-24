@@ -15,7 +15,10 @@ PassUses RenderEncoder::passUses() const
     uses.areaWidth = areaW_;
     uses.areaHeight = areaH_;
     uses.depthStencil = pass_.depthStencil.texture != nullptr;
-    if (rot_.turned() || pass_.storageMask)
+    if (pass_.depthStencil.texture)
+        uses.depth = hazardImage(*pass_.depthStencil.texture);
+    if (rot_.turned() || pass_.storageMask || cb_->passBufferWrites_ || passShaderWrites_ || planned_.shaderWrites ||
+        separate_.depth || separate_.stencil)
         uses.known = false;
     for (uint32_t j = 0; j < pass_.count && j < 8 && uses.known; j++) {
         const Texture *t = pass_.color[j].texture;
@@ -33,8 +36,11 @@ PassUses RenderEncoder::passUses() const
 
 PassForm RenderEncoder::passRule(BarrierEngine before, const PassUses &uses) const
 {
-    return before == BarrierEngine::ThreeD && pixelBarrierHolds(cb_->chain_, uses) ? PassForm::PixelOrdered
-                                                                                   : PassForm::Today;
+    if (before != BarrierEngine::ThreeD)
+        return PassForm::Today;
+    if (passesIndependent(cb_->chain_, uses))
+        return PassForm::None;
+    return pixelBarrierHolds(cb_->chain_, uses) ? PassForm::PixelOrdered : PassForm::Today;
 }
 
 }  // namespace gm20b

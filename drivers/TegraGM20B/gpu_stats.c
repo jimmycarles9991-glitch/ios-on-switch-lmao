@@ -530,4 +530,19 @@ const char *tgm_prof_name(unsigned int c, char *buf, unsigned int len)
 	}
 	return buf;
 }
+
+void tgm_stats_l2_inval_window(void)
+{
+	const u32 total = __atomic_exchange_n(&tgm_stats.l2_inval, 0, __ATOMIC_RELAXED);
+	const u32 host = __atomic_exchange_n(&tgm_stats.l2_inval_host, 0, __ATOMIC_RELAXED);
+	const u32 comp = __atomic_exchange_n(&tgm_stats.l2_inval_host_comp, 0, __ATOMIC_RELAXED);
+	const u32 tlb = __atomic_exchange_n(&tgm_stats.l2_inval_tlb, 0, __ATOMIC_RELAXED);
+	const u32 kernel = __atomic_exchange_n(&tgm_stats.l2_inval_kernel, 0, __ATOMIC_RELAXED);
+
+	if (!total)
+		return;
+	nvxnu_stats("tegra-gm20b: l2 invalidates %u (host_written %u, compositor %u, tlb %u, "
+		    "kernel_push %u)",
+		    total, host, comp, tlb, kernel);
+}
 #endif

@@ -197,12 +197,14 @@ bool TextureTransfers::copyBytes(Kernel &kernel, ResourceSet &set, gm20b::Mutex 
     if (!kernel.exactJobs() || !source || !destination || !bytes || bytes > UINT32_MAX)
         return false;
     std::unique_lock<gm20b::Mutex> serial(lock_);
-    const Claim slot = open(kernel, serial, allocationLock, kCopyBytesWords * sizeof(uint32_t));
+    constexpr uint32_t kWords = kCopyBytesWords + SWITCH_GM20B_KIND_SWITCH_WORDS;
+    const Claim slot = open(kernel, serial, allocationLock, kWords * sizeof(uint32_t));
     if (!slot)
         return false;
     auto *start = reinterpret_cast<uint32_t *>(slot->memory.cpu);
-    Push push{start, start + kCopyBytesWords};
+    Push push{start, start + kWords};
     emitCopyBytes(push, source, destination, bytes);
+    kit(push, switch_gm20b_kind_switch);
     SurfaceList uses;
     uses.add(slot->memory.handle, false);
     set.view(view_);

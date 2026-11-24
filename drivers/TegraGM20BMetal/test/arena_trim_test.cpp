@@ -640,7 +640,8 @@ TEST_P(ArenaTrimParts, MakingATextureAliasableGivesBackItsStandInsPlacementToo)
     dev.destroyArena(arena);
 }
 
-INSTANTIATE_TEST_SUITE_P(Storage, ArenaTrimParts, testing::Bool(), [](const testing::TestParamInfo<bool> &info) {
+// A private heap's arena is one BO from the kernel's spares, never trimmed (arena.cpp): only a shared heap's has parts
+INSTANTIATE_TEST_SUITE_P(Storage, ArenaTrimParts, testing::Values(false), [](const testing::TestParamInfo<bool> &info) {
     return info.param ? "Private" : "Shared";
 });
 

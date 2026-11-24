@@ -339,7 +339,7 @@ class RecordsTest(unittest.TestCase):
         )
         pipes, blob, _, _ = packfile.pipeline_sections([back])
         self.assertEqual(blob, [0x1C00, 0x1000, 0x0320, 0x202, 0x2080, 0x21, 0x2080, 0x20])
-        self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0xFEED, 7, 8, 2, 6))
+        self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0, 7, 8, 2, 6))
 
     def test_record_v24_tail_and_its_restore_pairs_in_the_blob(self):
         rec = {
@@ -359,8 +359,21 @@ class RecordsTest(unittest.TestCase):
             'restore': [(0x2080, 0x20), (0x20C0, 0x30)],
         }
         pipes, blob, _, _ = packfile.pipeline_sections([rec])
-        self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0x1234, 3, 4, 4, 2))
+        self.assertEqual(packfile.PIPELINE_V24.unpack_from(pipes, directlink.V24_AT), (2, 3, 0, 3, 4, 4, 2))
         self.assertEqual(blob, [0x1A00, 9, 0x2080, 0x20, 0x20C0, 0x30])
+
+    def test_a_stride_twin_is_its_records_index_of_the_same_form(self):
+        base = {'vs': 0, 'fs': 1, 'blob': [], 'entries': [], 'push': [], 'vbs': [], 'set_size': 0, 'fetch': False}
+        twin_key = 'samples=1 c0=80:15:0 a0=30:0:1:4096:1:1 | v t | f u'
+        twin = packfile.key_hash({'key': twin_key})
+        pipes = [
+            dict(base, key='samples=1 c0=80:15:0 | v a | f b', stride_twin=twin),
+            dict(base, key='samples=1 c0=80:15:0 | v a | f b', form='barrier', stride_twin=twin),
+            dict(base, key='samples=1 c0=80:15:0 | v c | f d', stride_twin=0x1234),
+            dict(base, key=twin_key),
+            dict(base, key=twin_key, form='barrier'),
+        ]
+        self.assertEqual(packfile.twin_indices(pipes), [4, 5, 0, 0, 0])
 
     def test_record_v22_written_formats_round_trip(self):
         rec = {

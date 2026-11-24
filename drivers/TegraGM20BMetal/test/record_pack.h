@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 // A pack of runtime records (record.h, compute_record.h) laid out as directlink.py lays out the generator's: each
 // render program a heap slot of its own (programSlot), a record's extras after its blob's pairs, its restore pairs after
-// its argument tables, its stride twin a record of its own under the twin's keyHash, and a kernel's code at its slot's
-// start (kernels.py lay_out). A host test opens gm20b::Device over it to draw a pack record of a state as the device draws
-// its runtime record of the same state.
+// its argument tables, its stride twin a record of its own under the twin's keyHash and named by its index + 1, and a
+// kernel's code at its slot's start (kernels.py lay_out), the records in keyHash order and the heap on its tier boundary
+// as packfile.py writes them, all of them tier 1's. A host test opens gm20b::Device over it to draw a pack record of a
+// state as the device draws its runtime record of the same state.
 #pragma once
 #include <algorithm>
 #include <cstdio>
@@ -93,6 +94,18 @@ inline std::string recordPack(const std::vector<gm20b::RuntimeRecord> &records, 
         laid.record(r);
     for (const auto &[keyHash, k] : kernels)
         laid.kernel(keyHash, *k);
+    std::stable_sort(laid.pipelines.begin(), laid.pipelines.end(),
+                     [](const gm20b::PackPipeline &a, const gm20b::PackPipeline &b) {
+                         return a.keyHash < b.keyHash;
+                     });
+    for (gm20b::PackPipeline &pp : laid.pipelines) {
+        if (!pp.strideTwin)
+            continue;
+        const auto twin = std::find_if(laid.pipelines.begin(), laid.pipelines.end(), [&](const gm20b::PackPipeline &t) {
+            return t.keyHash == pp.strideTwin && gm20b::recordForm(t) == gm20b::recordForm(pp);
+        });
+        pp.strideTwin = twin == laid.pipelines.end() ? 0 : uint64_t(twin - laid.pipelines.begin()) + 1;
+    }
     std::sort(laid.kernels.begin(), laid.kernels.end(), [](const gm20b::PackKernel &a, const gm20b::PackKernel &b) {
         return a.keyHash < b.keyHash;
     });
@@ -103,7 +116,8 @@ inline std::string recordPack(const std::vector<gm20b::RuntimeRecord> &records, 
     h.pipelines = uint32_t(laid.pipelines.size());
     std::vector<uint8_t> file((sizeof h + 255) & ~size_t(255));
     const auto put = [&](gm20b::PackSectionId id, const void *bytes, size_t n) {
-        file.resize((file.size() + 255) & ~size_t(255));
+        const size_t align = id == gm20b::PackHeap ? gm20b::kPackTierAlign : 256;
+        file.resize((file.size() + align - 1) & ~(align - 1));
         h.section[id] = {file.size(), n};
         file.insert(file.end(), static_cast<const uint8_t *>(bytes), static_cast<const uint8_t *>(bytes) + n);
     };

@@ -204,27 +204,6 @@ int32_t makeReflectionEntry(const Prepared &p, const Libraries &libraries, uint6
     }
 }
 
-id<MTLLibrary> offlineLibrary(const gm20b::RequestLibrary &l, const std::string &systemRoot, std::string &why)
-{
-    static GM20BOfflineDevice *const device = [GM20BOfflineDevice new];
-    NSError *error = nil;
-    id<MTLLibrary> made = nil;
-    if (l.system) {
-        std::string real;
-        if (!SystemLibraries::resolve(systemRoot, l.path, real, why))
-            return nil;
-        made = [device newLibraryWithURL:[NSURL fileURLWithPath:@(real.c_str())] error:&error];
-    } else {
-        dispatch_data_t bytes =
-            dispatch_data_create(l.bytes.data(), l.bytes.size(), nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        made = [device newLibraryWithData:bytes error:&error];
-    }
-    if (!made)
-        why = std::string("the translator refused the library ") + (l.path.empty() ? "of its data" : l.path) +
-              (error ? std::string(": ") + error.localizedDescription.UTF8String : "");
-    return made;
-}
-
 int32_t makeEntry(const Prepared &p, const Libraries &libraries, gm20b::Direct &direct, uint64_t stack,
                   std::string &entry, std::string &why)
 {

@@ -9,6 +9,7 @@
 // a recorded GPU write, so VIC's job waits for it on the hardware as TegraVIC's own bounced transfers do. A source the
 // GPU keeps block linear (tiled by default) is bounced the same way, whole planes.
 #include <IOKit/IOLib.h>
+#include <IOKit/IOMemoryDescriptor.h>
 #include "SwitchVICEncodeInput.h"
 #include "SwitchVICBouncePool.h"
 #include "SwitchVICJobs.h"
@@ -28,6 +29,7 @@ struct EncodeInput {
     SwitchNativeSurfaceView native = {};
     SwitchVICMapping *mappings[2] = {};
     SwitchVICBounceSlot *slot = nullptr;
+    IOMemoryDescriptor *retainedMemory = nullptr;
     TegraVICJob jobs[3] = {};
 };
 
@@ -40,6 +42,8 @@ void release(EncodeInput *work)
     switch_vic_surface_release_access(&work->access);
     switch_native_surface_release(&work->native);
     switch_vic_bounce_release(work->slot);
+    if (work->retainedMemory)
+        work->retainedMemory->release();
     tegra_vic_surface_release(&work->surface);
     IODelete(work, EncodeInput, 1);
 }
@@ -109,6 +113,12 @@ const char *destinationImage(const SwitchVICEncodeInput *in, uint64_t address, c
         return "encoder input format";
     if (in->lumaOffset >= bytes || in->chromaOffset >= bytes)
         return "encoder input outside its buffer";
+    const uint64_t lumaBytes = uint64_t(in->pitch) * in->lumaRows;
+    const uint64_t chromaBytes = uint64_t(in->pitch) * in->chromaRows;
+    if (lumaBytes > bytes - in->lumaOffset || chromaBytes > bytes - in->chromaOffset)
+        return "encoder input outside its buffer";
+    if (in->lumaOffset + lumaBytes > in->chromaOffset && in->chromaOffset + chromaBytes > in->lumaOffset)
+        return "encoder input planes overlap";
     image.width = in->width;
     image.height = in->height;
     const uint64_t offsets[2] = {in->lumaOffset, in->chromaOffset};
@@ -264,6 +274,136 @@ int place(EncodeInput *work, uint32_t surfaceID, task_t task, const SwitchVICEnc
     }
     return error;
 }
+
+int bounceBuffer(EncodeInput *work, const SwitchVICEncodeBuffer *req, const TegraVICSurfaceDesc &d,
+                 const SwitchVICBounceBuffer &scratch)
+{
+    const TegraVICFormat *f = tegra_vic_format(d.fourcc);
+    const switch_gpu_copy_ownership ownership = {nullptr, 0, nullptr, 0};
+    const switch_gpu_event_submission none = {};
+    for (uint32_t p = 0; p < f->planes; ++p) {
+        const uint64_t from = d.planeOffset[p];
+        const uint64_t to = scratch.desc.planeOffset[p];
+        if (from % TEGRA_VIC_BOUNCE_OFFSET_ALIGN)
+            return -95;
+        const tegra_gm20b_ce_plane src = {req->sourceMemory, from, static_cast<uint32_t>(d.planeBytesPerRow[p])};
+        const tegra_gm20b_ce_plane dst = {scratch.memory, to, static_cast<uint32_t>(scratch.desc.planeBytesPerRow[p])};
+        const tegra_gm20b_ce_done done = {TEGRA_GM20B_CE_NO_SYNCPT, copied, work};
+        __atomic_add_fetch(&work->refs, 1, __ATOMIC_RELAXED);
+        const uint32_t rowBytes = tegra_vic_bounce_row_bytes(f, d.width, p);
+        const auto rows = static_cast<uint32_t>(d.planeHeight[p]);
+        const int error = tegra_gm20b_ce_copy_plane_checked(&src, &dst, rowBytes, rows, nullptr, &done, req->source,
+                                                            from, scratch.backing, to, &ownership, &none);
+        if (error) {
+            release(work);
+            return error;
+        }
+    }
+    return 0;
+}
+
+int placeBuffer(EncodeInput *work, const SwitchVICEncodeBuffer *req, uint32_t *fence, switch_gpu_backing_token *written,
+                bool *bounced, const char **why)
+{
+    if (!req->output.blockLinear) {
+        *why = "pitch encode conversion requires a block-linear destination";
+        return -95;
+    }
+    const TegraVICFormat *f = tegra_vic_format(req->fourcc);
+    if (!f || f->planes != 2 || !f->subY || f->kind == TEGRA_VIC_KIND_RGB) {
+        *why = "pitch encode input format";
+        return -95;
+    }
+    if (!req->width || !req->height || (req->width & 1u) || (req->height & 1u) || req->srcPitch < req->width) {
+        *why = "pitch encode input dimensions";
+        return -22;
+    }
+    switch_gpu_backing_info info = {};
+    switch_gpu_backing_describe(req->source, &info);
+    const uint64_t bytes = uint64_t(info.page_count) << 12;
+    const uint64_t lumaBytes = uint64_t(req->srcPitch) * req->height;
+    const uint64_t chromaBytes = uint64_t(req->srcPitch) * (req->height / 2);
+    if (req->srcLumaOffset > bytes || lumaBytes > bytes - req->srcLumaOffset || req->srcChromaOffset > bytes ||
+        chromaBytes > bytes - req->srcChromaOffset) {
+        *why = "pitch source outside its buffer";
+        return -22;
+    }
+    if (req->srcLumaOffset + lumaBytes > req->srcChromaOffset &&
+        req->srcChromaOffset + chromaBytes > req->srcLumaOffset) {
+        *why = "pitch source planes overlap";
+        return -22;
+    }
+    TegraVICSurfaceDesc desc = {};
+    desc.fourcc = req->fourcc;
+    desc.width = req->width;
+    desc.height = req->height;
+    desc.planes = 2;
+    desc.planeOffset[0] = req->srcLumaOffset;
+    desc.planeOffset[1] = req->srcChromaOffset;
+    desc.planeWidth[0] = req->width;
+    desc.planeWidth[1] = req->width / 2;
+    desc.planeBytesPerRow[0] = desc.planeBytesPerRow[1] = req->srcPitch;
+    desc.planeHeight[0] = req->height;
+    desc.planeHeight[1] = req->height / 2;
+    desc.length = bytes;
+    desc.colorMatrix = SWITCH_VIC_MATRIX_709;
+    const int needed = tegra_vic_bounce_needed(&desc, tegra_vic_pitch_align(tegra_vic_traits(), true));
+    if (needed < 0) {
+        *why = "a source plane the copy engine cannot take either";
+        return -95;
+    }
+    *bounced = needed == 0;
+    int error = 0;
+    if (*bounced) {
+        if (!req->sourceMemory) {
+            *why = "bounced pitch source requires memory";
+            return -22;
+        }
+        if ((error = switch_vic_bounce_acquire(&desc, nullptr, &work->slot))) {
+            *why = "the bounce scratch";
+            return error;
+        }
+        work->retainedMemory = req->sourceMemory;
+        work->retainedMemory->retain();
+    }
+    const SwitchVICBounceBuffer *scratch = *bounced ? &work->slot->buffers[0] : nullptr;
+    if (!scratch)
+        work->mappings[0] = switch_vic_mapping_acquire(req->source, false);
+    work->mappings[1] = switch_vic_mapping_acquire(req->output.destination, true);
+    if ((!scratch && !work->mappings[0]) || !work->mappings[1]) {
+        *why = "VIC mappings";
+        return -12;
+    }
+    TegraVICImage src = {}, dst = {};
+    const uint64_t address = switch_vic_mapping_address(scratch ? scratch->mapping : work->mappings[0]);
+    *why = scratch ? tegra_vic_image_from(&scratch->desc, address, &src) : tegra_vic_image_from(&desc, address, &src);
+    if (!*why)
+        *why = destinationImage(&req->output, switch_vic_mapping_address(work->mappings[1]), src, &dst);
+    TegraVICOp ops[3] = {};
+    const uint32_t count = edgeOps(&req->output, ops);
+    for (uint32_t i = 0; !*why && i < count; ++i)
+        *why = tegra_vic_build(&src, &dst, &ops[i], tegra_vic_traits(), tegra_vic_config_address(),
+                               tegra_vic_filter_address(), &work->jobs[i]);
+    if (*why)
+        return -95;
+    if (scratch && (error = bounceBuffer(work, req, desc, *scratch))) {
+        *why = "the copy engine refused the bounce";
+        return error;
+    }
+    switch_gpu_backing_use uses[2] = {
+        {req->output.destination, SWITCH_GPU_BACKING_WRITE, 0},
+        {scratch ? scratch->backing : req->source, SWITCH_GPU_BACKING_READ, 0},
+    };
+    const SwitchVICOwnership ownership = {uses, 2u, nullptr, 0u, nullptr, 0u};
+    __atomic_add_fetch(&work->refs, 1, __ATOMIC_RELAXED);
+    error = switch_vic_submit_checked(work->jobs, count, req->output.after, ownership, completed, work, fence, nullptr,
+                                      written);
+    if (error) {
+        release(work);
+        *why = "VIC refused the job";
+    }
+    return error;
+}
 }  // namespace
 
 bool switch_vic_encode_input_ready(bool blockLinear)
@@ -292,6 +432,30 @@ int switch_vic_encode_input(uint32_t surfaceID, task_t task, const SwitchVICEnco
     }
     work->refs = 1;
     const int error = place(work, surfaceID, task, input, fence, written, bounced, why);
+    release(work);
+    return error;
+}
+
+int switch_vic_encode_buffer(const SwitchVICEncodeBuffer *request, uint32_t *fence, switch_gpu_backing_token *written,
+                             bool *bounced, const char **why)
+{
+    *why = nullptr;
+    *bounced = false;
+    if (!request || !request->source || !request->output.destination || !fence || !written) {
+        *why = "request";
+        return -22;
+    }
+    if (!switch_vic_encode_input_ready(true)) {
+        *why = "VIC is not up or has not proven block-linear output";
+        return -19;
+    }
+    auto *work = IONewZero(EncodeInput, 1);
+    if (!work) {
+        *why = "memory";
+        return -12;
+    }
+    work->refs = 1;
+    const int error = placeBuffer(work, request, fence, written, bounced, why);
     release(work);
     return error;
 }

@@ -48,6 +48,64 @@ uint32_t switch_exec_parked_promises(void);
 uint64_t switch_exec_mutex_takes(void);
 int switch_exec_mutex_held(void);
 void switch_exec_chan_high(struct switch_exec_chan *chan, int high);
+void switch_exec_chan_critical(struct switch_exec_chan *chan, int critical);
+void switch_exec_chan_share_vm(struct switch_exec_chan *chan, struct switch_exec_chan *with);
+void switch_exec_chan_kernel(struct switch_exec_chan *chan, int kernel);
+void switch_exec_chan_dirty_tlb(struct switch_exec_chan *chan);
+void switch_exec_chan_enable_visible(struct switch_exec_chan *chan);
+void switch_exec_set_low_busy(uint32_t chid, int busy);
+int switch_exec_chan_job_waits(struct switch_exec_chan *chan, uint32_t seqno);
+
+struct switch_exec_wfi_counts {
+	uint32_t method_wfis;
+	uint32_t fb_flushes;
+	uint32_t l2_flushes;
+	uint32_t release_wfi_en;
+	uint32_t release_wfi_dis;
+	uint32_t start_stamps_en;
+	uint32_t start_stamps_dis;
+	uint32_t end_stamps_en;
+	uint32_t end_stamps_dis;
+	uint32_t visible_wfi_en;
+	uint32_t visible_wfi_dis;
+	uint32_t fence_wfi_en;
+	uint32_t fence_wfi_dis;
+	uint32_t extra_wfi_en;
+	uint32_t extra_wfi_dis;
+};
+
+void switch_exec_chan_count_wfis(struct switch_exec_chan *chan, uint32_t from_dword,
+				 uint32_t to_dword, struct switch_exec_wfi_counts *out);
+
+enum switch_exec_kick_kind {
+	SWITCH_EXEC_KICK_CLEAR,
+	SWITCH_EXEC_KICK_PREEMPTED,
+	SWITCH_EXEC_KICK_SWITCHING,
+	SWITCH_EXEC_KICK_DEFERRED,
+};
+
+struct switch_exec_later_stats {
+	uint32_t kicks, frames, frame_max;
+	uint64_t queue_max;
+};
+
+struct switch_exec_foreign_stats {
+	uint32_t jobs, fences, promises, events, host1x, timed;
+	uint64_t queue_sum, queue_max;
+};
+
+struct switch_exec_l2_inval_stats {
+	uint32_t total, host_written, compositor, tlb, kernel_push;
+};
+
+void switch_exec_reset_driver(void);
+void switch_exec_set_kick(enum switch_exec_kick_kind sched_kick, int deadline_later);
+void switch_exec_set_ptimer(uint64_t pt);
+void switch_exec_chan_complete_stamp(struct switch_exec_chan *chan, uint32_t seqno,
+				     uint64_t start_pt, uint64_t end_pt);
+void switch_exec_take_later_stats(struct switch_exec_later_stats *out);
+void switch_exec_take_foreign_stats(struct switch_exec_foreign_stats *out);
+void switch_exec_take_l2_inval_stats(struct switch_exec_l2_inval_stats *out);
 /* The GPU clock on its idle divider until the next tgm_idle_raise, which calls `raised` first; NULL: the idle clock off */
 void switch_exec_idle_low(void (*raised)(void *context), void *context);
 

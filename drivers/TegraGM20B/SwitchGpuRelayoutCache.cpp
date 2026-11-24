@@ -6,6 +6,30 @@
 #include "TegraGM20BGpu.h"
 #include "TegraGM20BLayout.h"
 
+extern "C" __attribute__((weak)) uint32_t tegra_gm20b_surface_kind(uint64_t)
+{
+	return 0;
+}
+
+extern "C" __attribute__((weak)) int switch_gpu_backing_tgm_mem(struct switch_gpu_backing *,
+								uint32_t, struct tgm_mem **)
+{
+	return -95;
+}
+
+extern "C" __attribute__((weak)) int
+switch_gpu_backing_tgm_mem_existing(struct switch_gpu_backing *, uint32_t, struct tgm_mem **)
+{
+	return -2;
+}
+
+extern "C" __attribute__((weak)) int
+switch_gpu_backing_tgm_mem_existing_or_direct(struct switch_gpu_backing *, uint32_t,
+					      struct tgm_mem **)
+{
+	return -2;
+}
+
 namespace
 {
 constexpr uint64_t Base = 16ULL << 30;
@@ -16,7 +40,10 @@ void discard(tgm_vm *vm, SwitchGpuRelayoutCache *cache, SwitchGpuRelayoutMapping
 		return;
 	switch_gpu_vm_unmap(vm, &entry->tiledMapping);
 	switch_gpu_vm_unmap(vm, &entry->pitchMapping);
-	tgm_mem_del(&entry->memory);
+	if (entry->ownsMemory)
+		tgm_mem_del(&entry->memory);
+	else
+		entry->memory = nullptr;
 	cache->bytes -= entry->bytes;
 	IODelete(entry->pages, uint64_t, entry->pageCount);
 	switch_gpu_backing_release(entry->backing);
@@ -47,10 +74,18 @@ static int mapping(tgm_vm *vm, SwitchGpuRelayoutCache *cache, switch_gpu_backing
 
 	switch_gpu_backing_info info{};
 	switch_gpu_backing_describe(backing, &info);
+	const uint32_t surfaceKind = tiled ? tegra_gm20b_surface_kind(pages[0]) : 0u;
+	const uint32_t wantKind = tiled ? (surfaceKind ? surfaceKind : TGM_LAYOUT_KIND) : 0u;
+	const bool compressed = wantKind != 0u && wantKind != TGM_LAYOUT_KIND;
+	tgm_mem *canonical = nullptr;
+	const bool hasCanonical =
+		switch_gpu_backing_tgm_mem_existing(backing, count, &canonical) == 0;
 	for (auto &entry : cache->mappings) {
 		if (entry.backing == backing && entry.allocation == info.allocation_id &&
 		    entry.generation == info.allocation_generation && entry.pageCount == count &&
-		    entry.sourcePages == pages && (!tiled || entry.tiled)) {
+		    entry.sourcePages == pages &&
+		    (!tiled || (entry.tiled && entry.tiledKind == wantKind)) &&
+		    (!hasCanonical || entry.memory == canonical)) {
 			++entry.users;
 			entry.lastUse = ++cache->clock;
 			*out = &entry;
@@ -61,6 +96,12 @@ static int mapping(tgm_vm *vm, SwitchGpuRelayoutCache *cache, switch_gpu_backing
 	if (info.page_count < count || memcmp(info.pages, pages, size_t(count) * sizeof(*pages))) {
 		switch_gpu_backing_release(backing);
 		return -22;
+	}
+	for (auto &candidate : cache->mappings) {
+		if (!candidate.users && candidate.backing == backing &&
+		    candidate.allocation == info.allocation_id &&
+		    candidate.generation == info.allocation_generation)
+			discard(vm, cache, &candidate);
 	}
 	while (cache->bytes > SwitchGpuRelayoutCache::MaximumBytes - bytes) {
 		auto *entry = oldest(cache);
@@ -98,7 +139,20 @@ static int mapping(tgm_vm *vm, SwitchGpuRelayoutCache *cache, switch_gpu_backing
 	entry->bytes = bytes;
 	entry->pageCount = count;
 	cache->bytes += bytes;
-	int result = tgm_mem_new(vm, entry->pages, count, &entry->memory);
+	int result = 0;
+	if (hasCanonical) {
+		entry->memory = canonical;
+		entry->ownsMemory = false;
+	} else if (compressed) {
+		result = switch_gpu_backing_tgm_mem(backing, count, &entry->memory);
+		entry->ownsMemory = false;
+	} else if (switch_gpu_backing_tgm_mem_existing_or_direct(backing, count, &entry->memory) ==
+		   0) {
+		entry->ownsMemory = false;
+	} else {
+		result = tgm_mem_new(vm, entry->pages, count, &entry->memory);
+		entry->ownsMemory = result == 0;
+	}
 	const uint64_t pitch =
 		Base + uint64_t(entry - cache->mappings) * SwitchGpuRelayoutCache::WindowBytes * 2;
 	if (!result) {
@@ -109,10 +163,12 @@ static int mapping(tgm_vm *vm, SwitchGpuRelayoutCache *cache, switch_gpu_backing
 	}
 	if (!result && tiled) {
 		const uint64_t address = pitch + SwitchGpuRelayoutCache::WindowBytes;
-		result = switch_gpu_vm_map(vm, address, bytes, entry->memory, 0, TGM_LAYOUT_KIND, 0,
-					   &entry->tiledMapping);
-		if (!result)
+		result = switch_gpu_vm_map(vm, address, bytes, entry->memory, 0,
+					   static_cast<uint8_t>(wantKind), 0, &entry->tiledMapping);
+		if (!result) {
 			entry->tiled = address;
+			entry->tiledKind = wantKind;
+		}
 	}
 	if (result) {
 		discard(vm, cache, entry);

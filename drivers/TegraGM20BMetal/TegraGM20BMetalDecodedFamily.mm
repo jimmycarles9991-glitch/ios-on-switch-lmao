@@ -203,7 +203,7 @@ bool gm20bEncodeFamilyUpload(gm20b::CommandBuffer *rc, SwitchMetalCommandBuffer 
                 const uint64_t from = offset + p * image + r * row, to = k.offset + z * k.planeBytes +
                                                                          uint64_t(by + r) * k.rowBytes +
                                                                          uint64_t(bx) * f.blockBytes;
-                if (!source->_raw.wc)
+                if (source->_raw.hostVisible && !source->_raw.wc && source->_raw.cpu)
                     rc->clean(source->_raw.cpu + from, uint64_t(across) * f.blockBytes);
                 if (!kept.wc)
                     rc->clean(kept.cpu + to, uint64_t(across) * f.blockBytes, true);
@@ -272,7 +272,7 @@ bool gm20bEncodeFamilyReadback(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *be,
             const uint64_t from = k.offset + z * k.planeBytes + uint64_t(by + r) * k.rowBytes +
                                   uint64_t(bx) * f.blockBytes,
                            to = offset + p * image + r * row;
-            if (!into->_raw.wc)
+            if (into->_raw.hostVisible && !into->_raw.wc && into->_raw.cpu)
                 rc->clean(into->_raw.cpu + to, uint64_t(across) * f.blockBytes, true);
             be->copyBytes(kept.va + from, into->_raw.va + to, uint64_t(across) * f.blockBytes);
         }

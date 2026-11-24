@@ -101,7 +101,7 @@ struct PocketStripTest: HWTest {
             let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
             try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             for (name, picture) in saved {
-                try? picture.png()?.write(to: directory.appendingPathComponent("\(name).png"))
+                try? picture.png()?.place(at: directory.appendingPathComponent("\(name).png"))
             }
             return .fail(LogLine.fitted(reasons), metrics)
         }

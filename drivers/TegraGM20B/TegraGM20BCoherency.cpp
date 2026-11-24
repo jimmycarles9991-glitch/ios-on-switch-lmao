@@ -73,6 +73,8 @@ struct tgm_coh {
 		[TGM_COH_WRITERS];  // atomic: marking submissions, channel uid << 32 | seqno (0: free slot)
 	int writersLost;  // atomic: one found no slot: a lock waits for every channel's submitted work
 	uint32_t traced;  // atomic: CPU lock and unlock lines logged for it (debug kernels)
+	int compressible;
+	uint32_t pendingKind;
 };
 
 namespace
@@ -449,10 +451,32 @@ extern "C" int tgm_coh_pinned(const struct tgm_coh *c)
 	return c->backing != nullptr;
 }
 
+extern "C" struct switch_gpu_backing *tgm_coh_backing(const struct tgm_coh *c)
+{
+	return c ? c->backing : nullptr;
+}
+
 extern "C" void tgm_coherency_cleaned(struct tgm_coh *c)
 {
 	if (c)
 		__atomic_store_n(&c->cleaned, 1, __ATOMIC_RELEASE);
+}
+
+extern "C" void tgm_coherency_set_compressible(struct tgm_coh *c, int compressible)
+{
+	if (c)
+		__atomic_store_n(&c->compressible, compressible ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+extern "C" int tgm_coh_compressible(const struct tgm_coh *c)
+{
+	return c ? __atomic_load_n(&c->compressible, __ATOMIC_ACQUIRE) : 0;
+}
+
+extern "C" void tgm_coh_set_pending_kind(struct tgm_coh *c, uint32_t kind)
+{
+	if (c)
+		__atomic_store_n(&c->pendingKind, kind, __ATOMIC_SEQ_CST);
 }
 
 extern "C" void tgm_coherency_put(struct tgm_coh *c)
@@ -599,9 +623,9 @@ extern "C" int tegra_gm20b_surface_tiled(uint64_t pa)
 	IOLockLock(gRegistryLock);
 	const tgm_coh *c = *pageSlot(pa);
 	const tgm_tiled *t = c ? __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE) : nullptr;
-	const int tiled = static_cast<int>((t != nullptr) && t->tiled != 0);
+	const bool tiled = t != nullptr && __atomic_load_n(&t->tiled, __ATOMIC_ACQUIRE) != 0;
 	IOLockUnlock(gRegistryLock);
-	return tiled;
+	return static_cast<int>(tiled);
 }
 
 // The display's hold is one more reference on the entry: the last import's release no longer finds it alone, so nothing
@@ -616,7 +640,7 @@ extern "C" void *tegra_gm20b_surface_hold(uint64_t pa, int *tiled)
 	const tgm_tiled *t = c ? __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE) : nullptr;
 	if (t) {
 		c->refs++;
-		*tiled = t->tiled != 0 ? 1 : 0;
+		*tiled = __atomic_load_n(&t->tiled, __ATOMIC_ACQUIRE) != 0 ? 1 : 0;
 	}
 	IOLockUnlock(gRegistryLock);
 	return t ? c : nullptr;
@@ -634,11 +658,35 @@ extern "C" int tegra_gm20b_surface_layout(uint64_t pa, struct tgm_layout *out)
 	IOLockLock(gRegistryLock);
 	const tgm_coh *c = *pageSlot(pa);
 	const tgm_tiled *t = c ? __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE) : nullptr;
-	const int tiled = static_cast<int>((t != nullptr) && t->tiled != 0);
+	const bool tiled = t != nullptr && __atomic_load_n(&t->tiled, __ATOMIC_ACQUIRE) != 0;
 	if (tiled)
 		*out = t->layout;
 	IOLockUnlock(gRegistryLock);
-	return tiled;
+	return static_cast<int>(tiled);
+}
+
+extern "C" uint32_t tegra_gm20b_surface_kind(uint64_t pa)
+{
+	if (!gRegistryLock)
+		return 0;
+	IOLockLock(gRegistryLock);
+	const tgm_coh *c = *pageSlot(pa);
+	uint32_t kind = 0;
+	if (c) {
+		const tgm_tiled *t = __atomic_load_n(&c->tiled, __ATOMIC_ACQUIRE);
+		if (t && __atomic_load_n(&t->tiled, __ATOMIC_ACQUIRE))
+			kind = t->kind ? t->kind : TGM_LAYOUT_KIND;
+		else
+			kind = __atomic_load_n(&c->pendingKind, __ATOMIC_SEQ_CST);
+	}
+	IOLockUnlock(gRegistryLock);
+	return kind;
+}
+
+extern "C" int tegra_gm20b_surface_compressed(uint64_t pa)
+{
+	const uint32_t kind = tegra_gm20b_surface_kind(pa);
+	return static_cast<int>(kind != 0u && kind != TGM_LAYOUT_KIND);
 }
 
 // NOLINTNEXTLINE(misc-const-correctness): the host tests' stubs and the C callers share this signature

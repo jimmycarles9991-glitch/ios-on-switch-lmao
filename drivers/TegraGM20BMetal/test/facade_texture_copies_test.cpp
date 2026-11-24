@@ -6,6 +6,9 @@
 #include "../TegraGM20BMetalInternal.h"
 
 #include <gtest/gtest.h>
+#include <algorithm>
+#include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -247,6 +250,382 @@ TEST_F(FacadeTextureCopies, AWholeTextureCopyTakesTheLevelsOfOneSize)
     EXPECT_EQ(none.status, MTLCommandBufferStatusError);
     EXPECT_EQ(none.error.code, MTLCommandBufferErrorInvalidResource);
     EXPECT_EQ(gm20bPath(none), "error:call.blit");
+}
+
+// A no-copy block texture off its layout's alignment is a pool image (Texture::callerPages), and a blit into it goes on
+// to the caller's memory through the image's kind-0 view: that memory then holds the image's bytes as they are. Read
+// through lines the blit's 0xfe writes held, the copy took them in the other GOB order: gpu.astc.layouts blitin_back,
+// 21504 blocks wrong with the map g5=w5^w6^1, g6=w5^w7.
+TEST_F(FacadeTextureCopies, ABlitIntoAPoolImageReachesTheCallersMemoryAsTheImageHoldsIt)
+{
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatASTC_4x4_LDR
+                                                                                 width:64
+                                                                                height:64
+                                                                             mipmapped:NO];
+    d.storageMode = MTLStorageModeShared;
+    d.usage = MTLTextureUsageShaderRead;
+    id layout = ((id (*)(id, SEL, id, BOOL))objc_msgSend)(
+        gDevice, sel_registerName("newTextureLayoutWithDescriptor:isHeapOrBufferBacked:"), d, NO);
+    ASSERT_TRUE(layout != nil);
+    const NSUInteger length =
+        std::max<NSUInteger>(((NSUInteger (*)(id, SEL))objc_msgSend)(layout, sel_registerName("size")), 16384);
+    constexpr NSUInteger kOffAlignment = 512;
+    void *pages = nullptr;
+    ASSERT_EQ(posix_memalign(&pages, 16384, (kOffAlignment + length + 16383) / 16384 * 16384), 0);
+    auto *at = static_cast<uint8_t *>(pages) + kOffAlignment;
+    memset(at, 0, length);
+    id<MTLTexture> texture = ((id (*)(id, SEL, void *, NSUInteger, id, id))objc_msgSend)(
+        gDevice, sel_registerName("newTextureWithBytesNoCopy:length:descriptor:deallocator:"), at, length, d, nil);
+    ASSERT_TRUE(texture != nil);
+    const gm20b::Texture &image = ((SwitchMetalTexture *)texture)->_raw;
+    ASSERT_TRUE(image.callerPages != nullptr) << "a base off its alignment: a pool image";
+    constexpr NSUInteger kRowBytes = 16 * 16;
+    id<MTLBuffer> staging = [gDevice newBufferWithLength:kRowBytes * 16 options:MTLResourceStorageModeShared];
+    auto *blocks = static_cast<uint8_t *>(staging.contents);
+    for (NSUInteger i = 0; i < kRowBytes * 16; ++i)
+        blocks[i] = uint8_t(i * 7 + (i >> 8) * 61 + 1);
+    id<MTLCommandBuffer> cb = [[gDevice newCommandQueue] commandBuffer];
+    id<MTLBlitCommandEncoder> e = [cb blitCommandEncoder];
+    [e copyFromBuffer:staging
+               sourceOffset:0
+          sourceBytesPerRow:kRowBytes
+        sourceBytesPerImage:0
+                 sourceSize:MTLSizeMake(64, 64, 1)
+                  toTexture:texture
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e endEncoding];
+    harness::EngineRun run;
+    ASSERT_NO_FATAL_FAILURE(harness::commitOnRaw(cb, run, true));
+    const uint8_t *texels = kernel_model::model.host(image.imagePitchVa, image.storage.bytes);
+    ASSERT_NE(texels, nullptr);
+    size_t wrong = 0, written = 0;
+    for (uint64_t i = 0; i < image.storage.bytes; ++i) {
+        wrong += at[i] != texels[i];
+        written += texels[i] != 0;
+    }
+    EXPECT_GT(written, 0u) << "the blit wrote the image";
+    EXPECT_EQ(wrong, 0u) << "bytes of the caller's memory that are not the image's";
+}
+
+// A placement heap texture (kind 0xfe) and an aliased buffer (kind 0) at offset 0: writing the texture fills the L2
+// with 0xfe GOBs; a later non-host-written command buffer filling the aliased buffer must invalidate the L2 first, or
+// the pitch writes land in FermiColor order and read back scrambled.
+TEST_F(FacadeTextureCopies, APlacementHeapAliasedBufferAfterTextureInvalidatesL2AcrossCommandBuffers)
+{
+    constexpr NSUInteger kSide = 64, kBytes = kSide * kSide * 4, kStripe = 32;
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+    hd.type = MTLHeapTypePlacement;
+    hd.storageMode = MTLStorageModePrivate;
+    hd.size = 1 << 20;
+    id<MTLHeap> heap = [gDevice newHeapWithDescriptor:hd];
+    ASSERT_TRUE(heap != nil);
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:kSide
+                                                                                 height:kSide
+                                                                              mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [heap newTextureWithDescriptor:td offset:0];
+    id<MTLBuffer> aliased = [heap newBufferWithLength:kBytes options:MTLResourceStorageModePrivate offset:0];
+    ASSERT_TRUE(texture != nil && aliased != nil);
+
+    id<MTLBuffer> staging = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> readback = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    ASSERT_TRUE(staging != nil && readback != nil);
+    auto *src = static_cast<uint8_t *>(staging.contents);
+    for (NSUInteger i = 0; i < kBytes; ++i)
+        src[i] = uint8_t(i * 13 + (i >> 8) * 37 + 1);
+    memset(readback.contents, 0, kBytes);
+
+    id<MTLCommandQueue> queue = [gDevice newCommandQueue];
+    const size_t first = kernel_model::model.jobs.size();
+
+    id<MTLCommandBuffer> cb1 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e1 = [cb1 blitCommandEncoder];
+    [e1 copyFromBuffer:staging
+               sourceOffset:0
+          sourceBytesPerRow:kSide * 4
+        sourceBytesPerImage:kBytes
+                 sourceSize:MTLSizeMake(kSide, kSide, 1)
+                  toTexture:texture
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e1 endEncoding];
+    [cb1 commit];
+    [cb1 waitUntilCompleted];
+    ASSERT_EQ(cb1.status, MTLCommandBufferStatusCompleted);
+
+    std::vector<uint8_t> expected(kBytes);
+    id<MTLCommandBuffer> cb2 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e2 = [cb2 blitCommandEncoder];
+    for (NSUInteger off = 0; off < kBytes; off += kStripe) {
+        const uint8_t v = uint8_t(0x11 + ((off / kStripe) * 7 + (off / 256) * 29) % 223);
+        memset(expected.data() + off, v, kStripe);
+        [e2 fillBuffer:aliased range:NSMakeRange(off, kStripe) value:v];
+    }
+    [e2 endEncoding];
+    [cb2 commit];
+    [cb2 waitUntilCompleted];
+    ASSERT_EQ(cb2.status, MTLCommandBufferStatusCompleted);
+
+    id<MTLCommandBuffer> cb3 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e3 = [cb3 blitCommandEncoder];
+    [e3 copyFromBuffer:aliased sourceOffset:0 toBuffer:readback destinationOffset:0 size:kBytes];
+    [e3 endEncoding];
+    [cb3 commit];
+    [cb3 waitUntilCompleted];
+    ASSERT_EQ(cb3.status, MTLCommandBufferStatusCompleted);
+
+    harness::EngineRun run;
+    ASSERT_NO_FATAL_FAILURE(harness::runEngines(first, run, true));
+    const auto *got = static_cast<const uint8_t *>(readback.contents);
+    size_t wrong = 0;
+    for (NSUInteger i = 0; i < kBytes; ++i)
+        wrong += got[i] != expected[i];
+    EXPECT_EQ(wrong, 0u) << "aliased buffer bytes scrambled across PTE kinds";
+}
+
+// Same placement-heap aliasing within a single command buffer, ordered by an MTLFence between encoders: the driver
+// emits an in-stream kind switch before the aliased buffer's first command.
+TEST_F(FacadeTextureCopies, APlacementHeapAliasedBufferAfterTextureSwitchesKindsWithinOneCommandBuffer)
+{
+    constexpr NSUInteger kSide = 64, kBytes = kSide * kSide * 4, kStripe = 32;
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+    hd.type = MTLHeapTypePlacement;
+    hd.storageMode = MTLStorageModePrivate;
+    hd.size = 1 << 20;
+    id<MTLHeap> heap = [gDevice newHeapWithDescriptor:hd];
+    ASSERT_TRUE(heap != nil);
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:kSide
+                                                                                 height:kSide
+                                                                              mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [heap newTextureWithDescriptor:td offset:0];
+    id<MTLBuffer> aliased = [heap newBufferWithLength:kBytes options:MTLResourceStorageModePrivate offset:0];
+    id<MTLFence> fence = [gDevice newFence];
+    ASSERT_TRUE(texture != nil && aliased != nil && fence != nil);
+
+    id<MTLBuffer> staging = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> readback = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    ASSERT_TRUE(staging != nil && readback != nil);
+    auto *src = static_cast<uint8_t *>(staging.contents);
+    for (NSUInteger i = 0; i < kBytes; ++i)
+        src[i] = uint8_t(i * 11 + (i >> 8) * 41 + 3);
+    memset(readback.contents, 0, kBytes);
+
+    std::vector<uint8_t> expected(kBytes);
+    const size_t first = kernel_model::model.jobs.size();
+    id<MTLCommandQueue> queue = [gDevice newCommandQueue];
+    id<MTLCommandBuffer> cb1 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e1 = [cb1 blitCommandEncoder];
+    [e1 copyFromBuffer:staging
+               sourceOffset:0
+          sourceBytesPerRow:kSide * 4
+        sourceBytesPerImage:kBytes
+                 sourceSize:MTLSizeMake(kSide, kSide, 1)
+                  toTexture:texture
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e1 updateFence:fence];
+    [e1 endEncoding];
+
+    id<MTLBlitCommandEncoder> e2 = [cb1 blitCommandEncoder];
+    [e2 waitForFence:fence];
+    for (NSUInteger off = 0; off < kBytes; off += kStripe) {
+        const uint8_t v = uint8_t(0x21 + ((off / kStripe) * 5 + (off / 256) * 19) % 211);
+        memset(expected.data() + off, v, kStripe);
+        [e2 fillBuffer:aliased range:NSMakeRange(off, kStripe) value:v];
+    }
+    [e2 endEncoding];
+    [cb1 commit];
+    [cb1 waitUntilCompleted];
+    ASSERT_EQ(cb1.status, MTLCommandBufferStatusCompleted);
+    const size_t afterCb1 = kernel_model::model.jobs.size();
+
+    id<MTLCommandBuffer> cb2 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e3 = [cb2 blitCommandEncoder];
+    [e3 copyFromBuffer:aliased sourceOffset:0 toBuffer:readback destinationOffset:0 size:kBytes];
+    [e3 endEncoding];
+    [cb2 commit];
+    [cb2 waitUntilCompleted];
+    ASSERT_EQ(cb2.status, MTLCommandBufferStatusCompleted);
+
+    harness::EngineRun run;
+    ASSERT_NO_FATAL_FAILURE(harness::runEngines(first, run, true));
+    const auto *got = static_cast<const uint8_t *>(readback.contents);
+    size_t wrong = 0;
+    for (NSUInteger i = 0; i < kBytes; ++i)
+        wrong += got[i] != expected[i];
+    EXPECT_EQ(wrong, 0u) << "same-CB aliased buffer bytes scrambled across PTE kinds";
+
+    uint32_t kindSwitches = 0;
+    for (size_t j = first; j < afterCb1; ++j) {
+        const auto &words = kernel_model::model.jobs[j].words;
+        std::vector<switch_gm20b_method> methods(words.size());
+        const long count = switch_gm20b_push_decode(words.data(), words.size(), methods.data(), methods.size());
+        ASSERT_GE(count, 0);
+        for (long k = 0; k < count; ++k)
+            if (methods[k].method == 0x0034 && methods[k].value == (0x0eu << 27))
+                ++kindSwitches;
+    }
+    EXPECT_GE(kindSwitches, 1u) << "same-CB kind switch must emit L2_SYSMEM_INVALIDATE";
+}
+
+// Side-by-side non-overlapping texture (0xfe) and buffer (0) in the same placement heap never cross kinds: filling the
+// buffer in a separate command buffer stays non-host-written and emits no kind switch.
+TEST_F(FacadeTextureCopies, NonOverlappingPlacementHeapKindsIncurNoL2Invalidate)
+{
+    constexpr NSUInteger kSide = 64, kBytes = kSide * kSide * 4;
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+    hd.type = MTLHeapTypePlacement;
+    hd.storageMode = MTLStorageModePrivate;
+    hd.size = 1 << 20;
+    id<MTLHeap> heap = [gDevice newHeapWithDescriptor:hd];
+    ASSERT_TRUE(heap != nil);
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:kSide
+                                                                                 height:kSide
+                                                                              mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageShaderRead;
+    const MTLSizeAndAlign texNeed = [gDevice heapTextureSizeAndAlignWithDescriptor:td];
+    const NSUInteger bufOffset = (texNeed.size + 511) & ~NSUInteger(511);
+    id<MTLTexture> texture = [heap newTextureWithDescriptor:td offset:0];
+    id<MTLBuffer> sideBySide = [heap newBufferWithLength:kBytes options:MTLResourceStorageModePrivate offset:bufOffset];
+    ASSERT_TRUE(texture != nil && sideBySide != nil);
+
+    id<MTLBuffer> staging = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    ASSERT_TRUE(staging != nil);
+    id<MTLCommandQueue> queue = [gDevice newCommandQueue];
+
+    id<MTLCommandBuffer> cb1 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e1 = [cb1 blitCommandEncoder];
+    [e1 copyFromBuffer:staging
+               sourceOffset:0
+          sourceBytesPerRow:kSide * 4
+        sourceBytesPerImage:kBytes
+                 sourceSize:MTLSizeMake(kSide, kSide, 1)
+                  toTexture:texture
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e1 endEncoding];
+    [cb1 commit];
+    [cb1 waitUntilCompleted];
+    ASSERT_EQ(cb1.status, MTLCommandBufferStatusCompleted);
+
+    const size_t beforeCb2 = kernel_model::model.jobs.size();
+    id<MTLCommandBuffer> cb2 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e2 = [cb2 blitCommandEncoder];
+    [e2 fillBuffer:sideBySide range:NSMakeRange(0, kBytes) value:0x5a];
+    [e2 endEncoding];
+    [cb2 commit];
+    [cb2 waitUntilCompleted];
+    ASSERT_EQ(cb2.status, MTLCommandBufferStatusCompleted);
+
+    ASSERT_GT(kernel_model::model.jobs.size(), beforeCb2);
+    for (size_t j = beforeCb2; j < kernel_model::model.jobs.size(); ++j) {
+        EXPECT_EQ(kernel_model::model.jobs[j].flags & TegraGM20BJobHostWritten, 0u);
+        const auto &words = kernel_model::model.jobs[j].words;
+        std::vector<switch_gm20b_method> methods(words.size());
+        const long count = switch_gm20b_push_decode(words.data(), words.size(), methods.data(), methods.size());
+        ASSERT_GE(count, 0);
+        for (long k = 0; k < count; ++k)
+            EXPECT_FALSE(methods[k].method == 0x0034 && methods[k].value == (0x0eu << 27));
+    }
+}
+
+// First CB uses a texture while the arena is still single-kind; later two same-kind aliased buffers are placed on top
+// of it and the next CB uses only the second buffer (whose placement did not itself cross). L2 must still invalidate.
+TEST_F(FacadeTextureCopies, ASecondSameKindAliasAfterFirstCrossStillInvalidatesL2)
+{
+    constexpr NSUInteger kSide = 64, kBytes = kSide * kSide * 4, kStripe = 32;
+    MTLHeapDescriptor *hd = [MTLHeapDescriptor new];
+    hd.type = MTLHeapTypePlacement;
+    hd.storageMode = MTLStorageModePrivate;
+    hd.size = 1 << 20;
+    id<MTLHeap> heap = [gDevice newHeapWithDescriptor:hd];
+    ASSERT_TRUE(heap != nil);
+
+    MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                  width:kSide
+                                                                                 height:kSide
+                                                                              mipmapped:NO];
+    td.storageMode = MTLStorageModePrivate;
+    td.usage = MTLTextureUsageShaderRead;
+    id<MTLTexture> texture = [heap newTextureWithDescriptor:td offset:0];
+    ASSERT_TRUE(texture != nil);
+
+    id<MTLBuffer> staging = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    id<MTLBuffer> readback = [gDevice newBufferWithLength:kBytes options:MTLResourceStorageModeShared];
+    ASSERT_TRUE(staging != nil && readback != nil);
+    auto *src = static_cast<uint8_t *>(staging.contents);
+    for (NSUInteger i = 0; i < kBytes; ++i)
+        src[i] = uint8_t(i * 17 + (i >> 8) * 43 + 5);
+    memset(readback.contents, 0, kBytes);
+
+    id<MTLCommandQueue> queue = [gDevice newCommandQueue];
+    const size_t first = kernel_model::model.jobs.size();
+
+    id<MTLCommandBuffer> cb1 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e1 = [cb1 blitCommandEncoder];
+    [e1 copyFromBuffer:staging
+               sourceOffset:0
+          sourceBytesPerRow:kSide * 4
+        sourceBytesPerImage:kBytes
+                 sourceSize:MTLSizeMake(kSide, kSide, 1)
+                  toTexture:texture
+           destinationSlice:0
+           destinationLevel:0
+          destinationOrigin:MTLOriginMake(0, 0, 0)];
+    [e1 endEncoding];
+    [cb1 commit];
+    [cb1 waitUntilCompleted];
+    ASSERT_EQ(cb1.status, MTLCommandBufferStatusCompleted);
+
+    // unusedAlias crosses 0xfe -> 0; usedAlias then places kind 0 on top of kind 0.
+    id<MTLBuffer> unusedAlias = [heap newBufferWithLength:kBytes options:MTLResourceStorageModePrivate offset:0];
+    id<MTLBuffer> usedAlias = [heap newBufferWithLength:kBytes options:MTLResourceStorageModePrivate offset:0];
+    ASSERT_TRUE(unusedAlias != nil && usedAlias != nil);
+
+    std::vector<uint8_t> expected(kBytes);
+    id<MTLCommandBuffer> cb2 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e2 = [cb2 blitCommandEncoder];
+    for (NSUInteger off = 0; off < kBytes; off += kStripe) {
+        const uint8_t v = uint8_t(0x31 + ((off / kStripe) * 9 + (off / 256) * 23) % 217);
+        memset(expected.data() + off, v, kStripe);
+        [e2 fillBuffer:usedAlias range:NSMakeRange(off, kStripe) value:v];
+    }
+    [e2 endEncoding];
+    [cb2 commit];
+    [cb2 waitUntilCompleted];
+    ASSERT_EQ(cb2.status, MTLCommandBufferStatusCompleted);
+
+    id<MTLCommandBuffer> cb3 = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> e3 = [cb3 blitCommandEncoder];
+    [e3 copyFromBuffer:usedAlias sourceOffset:0 toBuffer:readback destinationOffset:0 size:kBytes];
+    [e3 endEncoding];
+    [cb3 commit];
+    [cb3 waitUntilCompleted];
+    ASSERT_EQ(cb3.status, MTLCommandBufferStatusCompleted);
+
+    harness::EngineRun run;
+    ASSERT_NO_FATAL_FAILURE(harness::runEngines(first, run, true));
+    const auto *got = static_cast<const uint8_t *>(readback.contents);
+    size_t wrong = 0;
+    for (NSUInteger i = 0; i < kBytes; ++i)
+        wrong += got[i] != expected[i];
+    EXPECT_EQ(wrong, 0u) << "second same-kind alias missed L2 invalidate after arena first crossed";
+    (void)unusedAlias;
 }
 
 }  // namespace

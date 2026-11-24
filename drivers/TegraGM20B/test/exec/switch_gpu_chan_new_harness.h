@@ -32,6 +32,8 @@ void switch_chan_new_delete(void);
  * critical at that kill, -1 before one */
 void switch_chan_new_leave_running(void);
 int switch_chan_new_isolated_critical(void);
+void switch_chan_new_set_visibility(uint32_t submitted, uint32_t completed, uint32_t visible);
+uint32_t switch_chan_new_ltc_flushes(void);
 /* tgm_chan_set_level at the high level or the foreground one, and what the channel then is */
 void switch_chan_new_set_level(int high, int critical);
 int switch_chan_new_high(void);

@@ -17,6 +17,8 @@
 
 #define SWITCH_BUSY_LONGEST 3
 #define SWITCH_BUSY_HINTS   32u /* block_hint.h's kThreadWait* values below this are counted by kind */
+#define SWITCH_BUSY_PCS     4   /* user code sampled at the stretch's preemptions, by 64-byte bucket */
+#define SWITCH_BUSY_MIN_MS  250 /* a UI main thread's stretch between two run-loop waits that is logged */
 
 /* One wait: block_hint.h's hint, the user PC and LR the thread trapped from (unslid, switch_stall_user_where), the
  * kernel continuation it parked in (unslid, 0 when it blocked on its stack) and the wait event. */
@@ -27,6 +29,13 @@ struct switch_busy_wait {
     uint8_t hint;
 };
 
+/* Where a running thread was when it was preempted: a sample of where its time went, no timer of its own. */
+struct switch_busy_pc {
+    uint64_t pc; /* unslid, 64-byte bucket */
+    uint32_t n;
+    uint8_t where;
+};
+
 struct switch_busy_episode {
     uint64_t woke, end; /* made runnable out of its run loop's wait; back in it */
     uint64_t cpu, blocked, runnable;
@@ -34,6 +43,8 @@ struct switch_busy_episode {
     uint64_t hint_ticks[SWITCH_BUSY_HINTS];
     uint32_t hint_waits[SWITCH_BUSY_HINTS];
     struct switch_busy_wait longest[SWITCH_BUSY_LONGEST];
+    struct switch_busy_pc pcs[SWITCH_BUSY_PCS];
+    uint32_t samples;
 };
 
 /* One thread's state, written only by its own departures and dispatches (never two at once: a thread is dispatched
@@ -63,7 +74,8 @@ static inline void switch_busy_keep_longest(struct switch_busy_episode *e, const
 
 /*
  * The thread leaves a core at `now` with CPU time `cpu`: into a wait (`waiting`), its run loop's in particular (`idle`),
- * or still runnable (preempted or yielding). A stretch of `min` or more ending here is copied to *done and true returned.
+ * or still runnable (preempted or yielding). A stretch of `min` or more ending here is copied to *done (when non-NULL)
+ * and true returned.
  */
 static inline bool switch_busy_departed(struct switch_busy *b, uint64_t now, uint64_t cpu, bool waiting, bool idle,
                                         const struct switch_busy_wait *wait, uint64_t min,
@@ -74,9 +86,11 @@ static inline bool switch_busy_departed(struct switch_busy *b, uint64_t now, uin
     if (b->open && waiting && idle) {
         b->open = false;
         if (now > b->e.woke && now - b->e.woke >= min) {
-            *done = b->e;
-            done->end = now;
-            done->cpu = cpu >= b->cpu0 ? cpu - b->cpu0 : 0;
+            if (done != NULL) {
+                *done = b->e;
+                done->end = now;
+                done->cpu = cpu >= b->cpu0 ? cpu - b->cpu0 : 0;
+            }
             ended = true;
         }
     }
@@ -124,6 +138,33 @@ static inline void switch_busy_dispatched(struct switch_busy *b, uint64_t now, u
     b->off_waiting = b->off_idle = false;
 }
 
+/* The thread leaves a core still runnable with its user code at `pc` (switch_stall_user_where's `where` and value):
+ * counted in the open stretch's buckets, a full table giving its least-counted bucket to a new one. */
+static inline void switch_busy_sampled(struct switch_busy *b, uint8_t where, uint64_t pc)
+{
+    struct switch_busy_pc *least = &b->e.pcs[0];
+
+    if (!b->open) {
+        return;
+    }
+    b->e.samples++;
+    pc &= ~63ull;
+    for (unsigned int i = 0; i < SWITCH_BUSY_PCS; i++) {
+        struct switch_busy_pc *p = &b->e.pcs[i];
+
+        if (p->n != 0 && p->pc == pc && p->where == where) {
+            p->n++;
+            return;
+        }
+        if (p->n < least->n) {
+            least = p;
+        }
+    }
+    least->pc = pc;
+    least->where = where;
+    least->n = 1;
+}
+
 static inline uint64_t switch_busy_us(uint64_t ticks, uint32_t numer, uint32_t denom)
 {
     return ticks * numer / denom / 1000u;
@@ -148,7 +189,7 @@ static inline void switch_busy_where(char *out, size_t size, uint8_t where, uint
     }
 }
 
-/* block_hint.h's name for a hint, or its number past the ones stall.h names (the page waits among them). */
+/* block_hint.h's name for a hint, or its number past the ones stall.h names. */
 static inline void switch_busy_kind(char *out, size_t size, unsigned int hint)
 {
     if (hint < SWITCH_STALL_WAIT_NAMES) {
@@ -212,6 +253,29 @@ static inline size_t switch_busy_format(char *out, size_t size, const struct swi
                             snprintf(out + at, size - at, " %llu us %s, user pc %s lr %s, kernel 0x%llx, event 0x%llx;",
                                      (unsigned long long)switch_busy_us(w->ticks, numer, denom), kind, pc, lr,
                                      (unsigned long long)w->kernel, (unsigned long long)w->event));
+    }
+    if (e->samples == 0) {
+        return at;
+    }
+    at = switch_busy_put(size, at,
+                         snprintf(out + at, size - at,
+                                  " user pc at its %u preemptions (the trap site when in the kernel):", e->samples));
+    bool shown[SWITCH_BUSY_PCS] = {false};
+    for (unsigned int k = 0; k < SWITCH_BUSY_PCS; k++) {
+        unsigned int top = SWITCH_BUSY_PCS;
+        char where[32];
+
+        for (unsigned int i = 0; i < SWITCH_BUSY_PCS; i++) {
+            if (!shown[i] && e->pcs[i].n != 0 && (top == SWITCH_BUSY_PCS || e->pcs[i].n > e->pcs[top].n)) {
+                top = i;
+            }
+        }
+        if (top == SWITCH_BUSY_PCS) {
+            break;
+        }
+        shown[top] = true;
+        switch_busy_where(where, sizeof(where), e->pcs[top].where, e->pcs[top].pc);
+        at = switch_busy_put(size, at, snprintf(out + at, size - at, " %s x%u;", where, e->pcs[top].n));
     }
     return at;
 }

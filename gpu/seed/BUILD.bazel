@@ -96,7 +96,6 @@ seed_pipeline_pack(
     app_states = [GM20B_METAL + ":app_state_lists"],
     archives = [GM20B_METAL + ":archive_inventories"],
     ca_names = [GM20B_METAL + ":ca_name_lists"],
-    ca_selectors = [GM20B_METAL + "/precompile/ca-selectors:tables"],
     corpus = GM20B_METAL + ":precompile/corpus.log",
     crawl = ":crawl",
     device_libraries = "@gpu_device_data//:libraries",

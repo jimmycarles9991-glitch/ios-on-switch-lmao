@@ -56,6 +56,7 @@ const Macro kMacros[] = {
     macro("clear_layers", switch_gm20b_macro_clear_layers),
     macro("fetch_draw", switch_gm20b_macro_fetch_draw),
     macro("fetch_draw_indexed", switch_gm20b_macro_fetch_draw_indexed),
+    macro("band_draw", switch_gm20b_macro_band_draw),
 };
 
 std::vector<mme_fermi_inst> decode(const Macro &m)

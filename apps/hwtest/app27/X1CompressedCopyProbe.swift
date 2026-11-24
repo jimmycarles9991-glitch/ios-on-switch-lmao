@@ -52,11 +52,9 @@ enum X1CompressedCopyProbe {
                     )
                     {
                         let key = "\(name)_\(kit.name)"
-                        let bad = zip(got, want).filter { $0 != $1 }.count + abs(got.count - want.count)
-                        wrong[key, default: 0] += bad > 0 ? 1 : 0
-                        if bad > 0 && firsts.count < 4,
-                           let at = (0 ..< min(got.count, want.count)).first(where: { got[$0] != want[$0] })
-                        {
+                        let differs = firstDifference(got, want)
+                        wrong[key, default: 0] += differs == nil ? 0 : 1
+                        if let at = differs, at < min(got.count, want.count), firsts.count < 4 {
                             let texel = at / kit.bytesPerTexel
                             firsts.append("\(key)@\(size):\(texel % w),\(texel / w):\(got[at])>\(want[at])")
                         }
@@ -81,7 +79,7 @@ enum X1CompressedCopyProbe {
         var bytes: Int { width * height * kit.bytesPerTexel }
 
         func pattern(_ seed: Int) -> [UInt8] {
-            (0 ..< width * height).flatMap { kit.texel($0 % width, $0 / width, seed: seed) }
+            kit.pattern.image(width: width, height: height, seed: seed)
         }
 
         func clearPass(_ commands: MTLCommandBuffer, _ t: MTLTexture, _ color: MTLClearColor) {

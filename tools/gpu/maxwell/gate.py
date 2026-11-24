@@ -6,10 +6,6 @@ usage: gate.py <before dump> <after dump> --corpus <R lines>... [--invocations N
        gate.py --rungs <dump> --corpus <R lines>... [--invocations N] [--seed S]
            each fetch-free form of the dump with the ROP unit that stands in for its fetch against its storage form,
            counted per rung (rungcheck.py)
-       gate.py --selectors <dump> [--invocations N] [--seed S] [--bound B]
-           each selector variant of the dump (directcheck DIRECTCHECK_SELECTORS, runtime/pack_selectors.h) against
-           its state's generic program with its config's compared bytes pinned and the uniform bind residuals 0, as
-           the variant reads them; with the instructions a quad issued on each (selectorgate.py)
 
 Every state of the corpora in both dumps runs N quads of each program (quad.py over interp.py's lanes) on the same
 seeded attributes, constant buffers, texture and storage-image results (specials included: NaNs with payloads,
@@ -173,12 +169,6 @@ def main() -> None:
     if '--rungs' in sys.argv:
         sys.argv.remove('--rungs')
         rungcheck.main()
-        return
-    if '--selectors' in sys.argv:
-        sys.argv.remove('--selectors')
-        from tools.gpu.maxwell import selectorgate  # noqa: PLC0415  only this mode's: the gate's other users lack it
-
-        selectorgate.main(compare)
         return
     ap = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     ap.add_argument('before', type=Path)

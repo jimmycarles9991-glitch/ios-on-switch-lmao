@@ -27,7 +27,7 @@ extern "C" {
 #define TGM_RELAYOUT_WAIT_FAILED UINT32_MAX
 #define TGM_RELAYOUT_ACQUIRE_DWORDS 5u
 #define TGM_RELAYOUT_CLEAR_DWORDS 12u
-#define TGM_RELAYOUT_CHECKPOINT_DWORDS 14u
+#define TGM_RELAYOUT_CHECKPOINT_DWORDS 17u
 #define TGM_RELAYOUT_DWORDS                                                                 \
 	(TGM_RELAYOUT_MAX_WAITS * TGM_RELAYOUT_ACQUIRE_DWORDS + 2u * TGM_COPY_RECT_DWORDS + \
 	 TGM_RELAYOUT_CHECKPOINT_DWORDS)
@@ -105,7 +105,9 @@ uint32_t tgm_relayout_waits(struct tgm_vm *vm, uint32_t self,
 			    const struct tgm_relayout_writer *writers, uint32_t nwriters,
 			    struct tgm_relayout_wait *waits, uint32_t nwaits);
 
-/* The checkpoint reaches DRAM before the original allocation can be overwritten. */
+/* The checkpoint reaches DRAM before the original allocation can be overwritten, and the L2 then drops its clean lines:
+ * a resident line keeps the GOB order of the PTE kind that brought it in, so the second copy's stores through the other
+ * kind would land in the first copy's order (FermiColor for kind 0, TegraColor for 0xfe). */
 uint32_t tgm_relayout_checkpoint(uint32_t *w, uint64_t address);
 
 // The whole push of one move, at most TGM_RELAYOUT_DWORDS words; `nwaits` at most TGM_RELAYOUT_MAX_WAITS

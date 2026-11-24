@@ -21,6 +21,7 @@
  */
 #include "ctxgf100.h"
 
+#include "TegraGM20BGrPreempt.h"
 #include <switch_tiled_cache.h>
 
 static void
@@ -91,4 +92,5 @@ gm20b_grctx = {
 	.alpha_nr = 0x800,
 	.sm_id = gm107_grctx_generate_sm_id,
 	.rop_mapping = gf117_grctx_generate_rop_mapping,
+	.preempt_options = TGM_GR_CTX_PREEMPT_CTA,
 };

@@ -8,6 +8,7 @@ sources.
 """
 
 import re
+from collections.abc import Iterable, Iterator
 
 from tools.devicerun.rules import REPORT, Check
 
@@ -16,6 +17,10 @@ SUBSYSTEM = 'com.brunostjohn.switch.hwtest'
 SOURCE = 'apps/hwtest/core/LogLine.swift'
 SUITE = 'hwtest.suite'
 LITERAL = 'HWTEST '
+# A line longer than one os_log message goes out in pieces (apps/hwtest/core/LogPieces.swift): its start, then
+# `HWTEST <id> +<n> <text>` lines whose texts follow it with nothing between them
+CONTINUED = re.compile(r'^HWTEST (?P<id>\S+) \+\d+ ')
+HARNESS = 'hwtest.harness'
 # A test's FAIL line naming the failed command buffers that reddened it, and any line naming calls skipped
 # (core/FailedAttribution.swift, core/FailedCounts.swift): reports.py rolls them up per predicate
 REDS = 'hwtest.reds'
@@ -32,6 +37,10 @@ READBACK_RUNS = 'hwtest.readback-routes-runs'
 TRANSFER_FAILED_RUNS = 'hwtest.texture-transfer-failed-runs'
 DECODE_READBACK_RUNS = 'hwtest.decode-readback-runs'
 DECODE_VIEWS_RUNS = 'hwtest.decode-views-runs'
+# Each full run, its suite line's time less its ms= (the run's span across relaunches) to the line
+RUN_WINDOWS = 'hwtest.run-windows'
+# The runs of the mixed-pass probe rows (apps/hwtest/tests/TirRowsTests.swift), each with how many rows the class killed
+TIR_ROWS_RUNS = 'hwtest.tir-rows-runs'
 
 CODECS = ('h264', 'hevc', 'hevc_main10', 'vp9')
 SIZES = ('720p', '1080p', '4k')
@@ -83,6 +92,7 @@ TESTS: dict[str, bool] = {
             'gpu.blur.mps',
             'gpu.blur.coreimage',
             'gpu.compute.half_alu',
+            'gpu.pack.hit_cost',
             'gpu.ca.sweep',
             'gpu.ca.asked_forms',
             'gpu.sm53_probe',
@@ -188,8 +198,12 @@ TESTS: dict[str, bool] = {
             'gpu.compile.first_draw',
             'gpu.compile.stage_library',
             'gpu.compile.answer_latency',
+            'gpu.compile.shared_stages',
             'gpu.sched.long_draw_bands',
             'gpu.sched.long_dispatch_pieces',
+            'gpu.sched.probe_cta',
+            'gpu.sched.probe_macro_wfi',
+            'gpu.sched.foreign_wait_isolation',
             'gpu.poster_targets',
             'gpu.push_scan_targets',
             'gpu.msaa.resolve_cost',
@@ -281,6 +295,7 @@ TESTS: dict[str, bool] = {
             'gpu.gm20b.depth16_ms_resolve',
             'gpu.gm20b.invalid_requests',
             'gpu.heap.aliasable_used',
+            'gpu.heap.aliased_kinds',
             'gpu.gm20b.compression_settled',
             'gpu.gm20b.texture_transfer_failed',
             'gpu.x1.viewports',
@@ -344,6 +359,7 @@ TESTS: dict[str, bool] = {
             'gpu.gm20b.zeta_resolve_parts',
             'gpu.gm20b.ycbcr_norender_usage',
             'gpu.gm20b.mixed_samples',
+            'gpu.gm20b.mixed_end_rows',
             'gpu.gm20b.same_bits',
             'gpu.gm20b.depth16_layered_tests',
             'gpu.gm20b.layers_past',
@@ -450,6 +466,12 @@ TESTS: dict[str, bool] = {
             'gpu.path.fresh_surface_import',
             'gpu.path.native_surface_republished',
             'gpu.path.holder_timeout',
+            'gpu.path.idle_redraw',
+            'gpu.path.launch_target',
+            'gpu.path.fresh_spare',
+            'gpu.path.teardown_free',
+            'gpu.path.parked_bo',
+            'gpu.frame.record_cost',
             'metal.native.depth_stencil',
             'metal.native.shared_event',
             'metal.native.fence',
@@ -576,6 +598,8 @@ TESTS: dict[str, bool] = {
     'pacing.blur_under': False,
     'pacing.list': False,
     'ui.scale_pacing': False,
+    'ui.title_scroll': False,
+    'anim.timing': False,
     'sensor.accelerometer': False,
     'sensor.gyroscope': False,
     'sensor.device_motion': False,
@@ -589,9 +613,11 @@ TESTS: dict[str, bool] = {
     'net.usb_storage': True,
     'storage.sequential': False,
     'storage.random': False,
+    'storage.io': False,
     'cpu.single': False,
     'cpu.multi': False,
     'a64x.self': False,
+    'cpu.atomics': False,
     'crypto.cryptokit': False,
     'crypto.commoncrypto': False,
     'crypto.keychain': False,
@@ -606,9 +632,11 @@ TESTS: dict[str, bool] = {
     'cpu.sustained': False,
     'cpu.sched': False,
     'cpu.ipi_pingpong': False,
+    'cpu.hog_pacing': False,
     'system.dispatch_sync': False,
     'system.dispatch_sync_workloops': False,
     'system.workloop_sync': False,
+    'dispatch.sync_handoff': False,
     'net.wifi_link': False,
     'gpu.latency': False,
     'gpu.present.copy_reset': False,
@@ -643,6 +671,7 @@ TESTS: dict[str, bool] = {
     'system.widgets_render': False,
     'ui.icon_render': False,
     'system.snapshot_purgeable': False,
+    'recorder.hang_dump': False,
     'ui.launch_hitch': False,
     'system.compiler_alive': False,
     'gpu.x1.texture_extents': False,
@@ -717,51 +746,17 @@ BY_IOS: dict[str, dict[str, bool]] = {
 # gap, not a regression. A row stays until a device run shows its test green: it names what the driver lacks, or,
 # once the driver builds it, what the driver now does that no device has judged yet ('built, unjudged: ...').
 OPEN: dict[str, str] = {
-    'gpu.gm20b.planes_copies_open': (
-        'built, unjudged: a source with no plane 1 leaves the destination plane 1 alone; a descriptor-made 550 and one '
-        'over a surface copy either way through the alpha at the word rows'
-    ),
-    'gpu.gm20b.xr_texel_buffer_tiled': (
-        'built, unjudged: a texel buffer over a surface the kernel laid out block-linear reads its bytes in order '
-        'through a pool the copy engine fills'
-    ),
-    'gpu.gm20b.packed_mips': (
-        'built, unjudged: R10Unorm_PACKED and RG10Unorm_PACKED over planes made with several levels'
-    ),
-    'gpu.gm20b.xr_turned_rows_under_16': (
-        'built, unjudged: a turned RGB10A8_2P_XR10 over planes of rows under 16 bytes stores through the turned pools'
-    ),
-    'gpu.gm20b.xr_into_alpha_tie': (
-        'built, unjudged: where a word byte and an alpha byte of one store meet, they are ORed'
-    ),
     'gpu.gm20b.ycbcr_texel_buffer_wide': (
-        'built, unjudged: a YCbCr or packed texture buffer wider than 16384 texels is read as rows of 16384 '
-        "(texel i at the plane's row i / 16384, texel i % 16384)"
-    ),
-    'gpu.gm20b.packed_levels_open': (
-        'built, unjudged: level views of R10/RG10Unorm_PACKED of several levels; a kernel sampler shared with a '
-        'one-level texture reads its level 0'
-    ),
-    'gpu.gm20b.ycbcr_planes_meet': (
-        "built, unjudged: where a YCbCr target's two planes' stored rows meet, the later 2x2 quad's byte is kept and "
-        "one quad's two planes are ORed"
-    ),
-    'gpu.gm20b.ycbcr_turned_overlap_order': (
-        'built, unjudged: a turned target over planes is made at any extent (rotations 1-3 were nil, rotation 0 the '
-        "control), stored by its frame's tiles"
-    ),
-    'gpu.gm20b.turned_overlap_tile_order': (
-        "built, unjudged: a turned target over planes is made at any extent and stored by its frame's tiles"
-    ),
-    'gpu.gm20b.xr_turned_clear_order': (
-        "built, unjudged: a turned target over planes is made at any extent and stored by its frame's tiles"
+        'compute.nokernel on boot 2: no pack kernel at the dispatch shape of a read of a YCbCr or packed texture '
+        'buffer wider than 16384 texels, so all five formats failed their command buffers before the read as rows '
+        'of 16384 ran'
     ),
     'gpu.gm20b.xr_descriptor_padding': (
         'a descriptor 550 has no row padding on raw: bytes a copy leaves in its padding or past its rows come back 0'
     ),
-    'gpu.gm20b.xr_stand_in_refill': (
-        'built, unjudged: a kernel reading an XR texel buffer through its stand-in after a write in the same compute '
-        'encoder reached it splits the encoder there, refills the pool and redraws the stand-in'
+    'gpu.frame.record_cost': (
+        "the frame CPU plan's targets (about 1.2 ms a home-screen frame across both threads) are met only once the "
+        'encode ahead per pass and the per-draw constant buffer slots are built'
     ),
     'gpu.gm20b.plain_rows_quarter_turns': (
         "an M4 Max stores a quarter-turned pass's frame tiles concurrently: no fixed order fits the rows it keeps "
@@ -769,6 +764,30 @@ OPEN: dict[str, str] = {
         'elements ten runs agree on change between runs), so raw keeps the order the larger shapes fit'
     ),
 }
+
+
+def joined(records: Iterable[dict]) -> Iterator[dict]:
+    """Return `records` with each HW Test line's continuations appended to its first piece.
+
+    A first piece waits for the next HW Test line of its process: the app logs a line's pieces before its next line.
+    """
+    held: dict[tuple, dict] = {}
+    for record in records:
+        message = record.get('eventMessage') or ''
+        if not message.startswith(LITERAL) or SUBSYSTEM not in (record.get('subsystem') or ''):
+            yield record
+            continue
+        key = (record.get('bootUUID'), record.get('processID'))
+        continued = CONTINUED.match(message)
+        if continued:
+            first = held.get(key)
+            if first and first['eventMessage'].split(' ', 2)[1] == continued['id']:
+                first['eventMessage'] += message[continued.end() :]
+            continue
+        if key in held:
+            yield held.pop(key)
+        held[key] = dict(record)
+    yield from held.values()
 
 
 def test_check(test_id: str, interactive: bool, ios: str) -> Check:
@@ -804,6 +823,16 @@ HWTEST = [
         show=('pass', 'fail', 'skip', 'ios'),
         source=SOURCE,
         note='the last full run (Run All, or the launch run)',
+    ),
+    Check(
+        RUN_WINDOWS,
+        OWNER,
+        LITERAL,
+        REPORT,
+        subsystem=SUBSYSTEM,
+        regex=r'^HWTEST suite (?:PASS|FAIL) .* ms=(?P<ms>[\d.]+)$',
+        source=SOURCE,
+        note='each full run, as a window from its start to its summary line',
     ),
     Check(
         KILL_WINDOWS,
@@ -868,6 +897,45 @@ HWTEST = [
         show=('view', 'form'),
         source=SOURCE,
         note='each run of gpu.decode.views and the gm20b:tex.view and gm20b:tex.decoded_form lines it must log',
+    ),
+    Check(
+        TIR_ROWS_RUNS,
+        OWNER,
+        LITERAL,
+        REPORT,
+        subsystem=SUBSYSTEM,
+        regex=(
+            r'^HWTEST gpu\.gm20b\.(?P<test>zc_mixed|mixed_end_rows) (?:PASS|FAIL) .*\bkilled=(?P<killed>\d+)\b'
+            r'.* ms=(?P<ms>[\d.]+)(?: why=|$)'
+        ),
+        show=('test', 'killed'),
+        source='apps/hwtest/tests/TirRowsTests.swift',
+        note="each run of a mixed pass's probe rows and how many of its rows the class killed (row_<name>=killed)",
+    ),
+    Check(
+        HARNESS,
+        OWNER,
+        LITERAL,
+        REPORT,
+        subsystem=SUBSYSTEM,
+        regex=(
+            r'^HWTEST suite\.harness (?:PASS|FAIL) .*\bboundary_ms_p50=(?P<boundary>[\d.]+)'
+            r' .*\bflush_ms_p50=(?P<flush>[\d.]+) .*\bmain_wait_ms_p50=(?P<main>[\d.]+) .*\bms=(?P<ms>[\d.]+)'
+        ),
+        show=('boundary', 'flush', 'main', 'ms'),
+        source='apps/hwtest/core/HarnessTally.swift',
+        note='the suite between its tests, per batch: median boundary, journal flush and main-thread answer, total ms',
+    ),
+    Check(
+        'hwtest.harness-ceiling',
+        OWNER,
+        LITERAL,
+        subsystem=SUBSYSTEM,
+        regex=r'^HWTEST suite\.harness FAIL(?:$| )(?:.*\bwhy=(?P<why>\S+))?',
+        show=('why',),
+        needs=HARNESS,
+        source='apps/hwtest/core/HarnessTally.swift',
+        note='median boundary <= 100 ms and median main-thread answer <= 16.7 ms: the suite stays out of tests',
     ),
     Check(
         'hwtest.suite-reds',

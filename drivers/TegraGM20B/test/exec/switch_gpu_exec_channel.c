@@ -111,6 +111,7 @@ void switch_exec_reset(const struct switch_exec_hooks *with)
 	if (!tgm_fence_pages.va)
 		tgm_fence_pages.va = switch_exec_host_alloc(TGM_FENCE_BYTES);
 	memset(tgm_fence_pages.va, 0, TGM_FENCE_BYTES);
+	switch_exec_reset_driver();
 	hooks = *with;
 }
 
@@ -155,6 +156,144 @@ struct tgm_chan *switch_exec_chan_tgm(struct switch_exec_chan *chan)
 void switch_exec_chan_high(struct switch_exec_chan *chan, int high)
 {
 	chan->tgm.high = high;
+}
+
+void switch_exec_chan_critical(struct switch_exec_chan *chan, int critical)
+{
+	chan->tgm.critical = critical;
+}
+
+void switch_exec_chan_share_vm(struct switch_exec_chan *chan, struct switch_exec_chan *with)
+{
+	chan->tgm.vm = with->tgm.vm;
+}
+
+void switch_exec_chan_kernel(struct switch_exec_chan *chan, int kernel)
+{
+	chan->tgm.kernel = kernel;
+}
+
+void switch_exec_chan_dirty_tlb(struct switch_exec_chan *chan)
+{
+	tgm_tlb_mapped(&chan->vm.tlb);
+}
+
+void switch_exec_chan_enable_visible(struct switch_exec_chan *chan)
+{
+	chan->tgm.visible_cpu = chan->tgm.fence_cpu + 1;
+	chan->tgm.visible_gpu = chan->tgm.fence_gpu + 4;
+}
+
+void switch_exec_set_low_busy(uint32_t chid, int busy)
+{
+	switch_gpu_busy_open(&tgm_busy, chid, 0);
+	switch_gpu_busy_level(&tgm_busy, chid, 1);
+	if (busy)
+		switch_gpu_busy_kick(&tgm_busy, chid, 1);
+	else
+		switch_gpu_busy_done(&tgm_busy, chid, 0);
+}
+
+int switch_exec_chan_job_waits(struct switch_exec_chan *chan, uint32_t seqno)
+{
+	struct switch_gpu_kicked_job job = {0};
+
+	if (!switch_gpu_jobs_find(&chan->tgm.jobs, seqno, &job))
+		return -1;
+	return job.waits;
+}
+
+void switch_exec_chan_count_wfis(struct switch_exec_chan *chan, uint32_t from_dword,
+				 uint32_t to_dword, struct switch_exec_wfi_counts *out)
+{
+	const u32 *words = chan->tgm.chan.push.mem.object.map.ptr;
+	const u64 sema_va = chan->tgm.ring_va + SWITCH_EXEC_SEMA_OFFSET;
+	const u64 stamps_base = chan->tgm.ring_va + CHAN_STAMPS;
+	const u64 stamps_end = stamps_base + (u64)CHAN_NSTAMPS * sizeof(struct tgm_stamps);
+	u32 sema_hi = 0;
+	u32 sema_lo = 0;
+	u32 i = from_dword;
+
+	memset(out, 0, sizeof(*out));
+	while (i < to_dword) {
+		const u32 hdr = words[i++];
+		const u32 sec = (hdr >> 29) & 7u;
+		const u32 count = (hdr >> 16) & 0x1fffu;
+		const u32 subc = (hdr >> 13) & 7u;
+		const u32 mthd = (hdr & 0xfffu) << 2;
+		u32 j;
+
+		if (sec == NV906F_DMA_SEC_OP_IMMD_DATA_METHOD)
+			continue;
+		if (sec != NV906F_DMA_SEC_OP_INC_METHOD &&
+		    sec != NV906F_DMA_SEC_OP_NON_INC_METHOD && sec != NV906F_DMA_SEC_OP_ONE_INC)
+			continue;
+		for (j = 0; j < count && i < to_dword; ++j) {
+			const u32 data = words[i++];
+			u32 cur = mthd;
+
+			if (sec == NV906F_DMA_SEC_OP_INC_METHOD)
+				cur += j * 4u;
+			else if (sec == NV906F_DMA_SEC_OP_ONE_INC && j)
+				cur += 4u;
+
+			if (subc != PUSH906F_SUBC_NV906F)
+				continue;
+			if (cur == NVB06F_WFI) {
+				out->method_wfis++;
+			} else if (cur == NVB06F_FB_FLUSH) {
+				out->fb_flushes++;
+			} else if (cur == NVB06F_MEM_OP_D &&
+				   data == NVB06F_MEM_OP_D_OPERATION_L2_FLUSH_DIRTY) {
+				out->l2_flushes++;
+			} else if (cur == NV906F_SEMAPHOREA) {
+				sema_hi = data & 0xffu;
+			} else if (cur == NV906F_SEMAPHOREB) {
+				sema_lo = data;
+			} else if (cur == NV906F_SEMAPHORED &&
+				   (data & 0xfu) == NV906F_SEMAPHORED_OPERATION_RELEASE) {
+				const u64 va = ((u64)sema_hi << 32) | sema_lo;
+				const int dis = (data >> 20) & 1u;
+
+				if (va == sema_va)
+					continue;
+				if (dis)
+					out->release_wfi_dis++;
+				else
+					out->release_wfi_en++;
+				if (va >= stamps_base && va < stamps_end) {
+					const u64 off =
+						(va - stamps_base) % sizeof(struct tgm_stamps);
+					if (off == offsetof(struct tgm_stamps, start))
+						dis ? out->start_stamps_dis++
+						    : out->start_stamps_en++;
+					else if (off == offsetof(struct tgm_stamps, end))
+						dis ? out->end_stamps_dis++ : out->end_stamps_en++;
+				} else if (chan->tgm.visible_cpu && va == chan->tgm.visible_gpu) {
+					dis ? out->visible_wfi_dis++ : out->visible_wfi_en++;
+				} else if (va == chan->tgm.fence_gpu) {
+					dis ? out->fence_wfi_dis++ : out->fence_wfi_en++;
+				} else {
+					dis ? out->extra_wfi_dis++ : out->extra_wfi_en++;
+				}
+			}
+		}
+	}
+}
+
+void switch_exec_chan_complete_stamp(struct switch_exec_chan *chan, uint32_t seqno,
+				     uint64_t start_pt, uint64_t end_pt)
+{
+	volatile struct tgm_stamps *st = chan_stamps(&chan->tgm, seqno);
+
+	st->start.payload = seqno;
+	st->start.ns = start_pt;
+	st->end.payload = seqno;
+	st->end.ns = end_pt;
+	WRITE_ONCE(*chan->tgm.fence_cpu, seqno);
+#if TGM_STATS
+	stats_fences(&chan->tgm);
+#endif
 }
 
 void switch_exec_chan_live(struct switch_exec_chan *chan, int live)

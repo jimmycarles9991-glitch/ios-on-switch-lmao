@@ -181,7 +181,7 @@ TEST_F(DeviceDrawTimes, ACompleterReadsBackEachMarksTimeAndInvocations)
     uint32_t mark = 0;
     for (size_t i = 0; i < m.size(); i++) {
         Report r;
-        if (report(m, i, NVB06F_SEMAPHOREA, r)) {
+        if (report(m, i, NVB06F_SEMAPHOREA, r) || (report(m, i, NVB197_SET_REPORT_SEMAPHORE_A, r) && !marks(r.va))) {
             ptimer += mark == 6 ? kUnit : 0;
             const gm20b::StampRelease release{r.payload, 0, ptimer};
             memcpy(kernel_model::model.host(r.va, sizeof release), &release, sizeof release);

@@ -433,6 +433,11 @@ extern "C" int tegra_gm20b_surface_layout(uint64_t, struct tgm_layout *)
     return 0;
 }
 
+extern "C" int tegra_gm20b_surface_compressed(uint64_t)
+{
+    return 0;
+}
+
 extern "C" void switch_refusal(const char *, const char *reason_key, const char *, ...)
 {
     gRefusals.emplace_back(reason_key);

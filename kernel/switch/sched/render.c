@@ -59,8 +59,10 @@ void switch_sched_render_on_core(thread_t thread, uint64_t now)
         nanoseconds_to_absolutetime(MIN_BLOCK_US * NSEC_PER_USEC, &min_block);
     }
     os_atomic_store(&render_thread, thread->thread_id, relaxed);
+    switch_sched_watch_display_woke(now);
     if (switch_render_dispatched(&window, count, os_atomic_load(&vsync_stamp, relaxed), now,
-                                 recount_thread_time_mach(thread), made == THREAD_NOT_RUNNABLE ? 0 : made, min_block)) {
+                                 recount_thread_time_mach(thread), made == THREAD_NOT_RUNNABLE ? 0 : made, min_block,
+                                 os_atomic_load(&half_period, relaxed))) {
         const arm_saved_state_t *user = get_user_regs(thread);
 
         longest_pc = user != NULL ? get_saved_state_pc(user) : 0;
@@ -148,15 +150,18 @@ void switch_sched_render_swapped(void)
 {
     const struct switch_render_window *w = &window;
     char first[96], pc[32], lr[32], line[640];
-    uint64_t now, cpu;
+    uint64_t now, cpu, count;
     uint32_t skipped = 0;
+    bool late = false;
 
-    if (!on_render_thread() || w->woke == 0 || w->swapped) {
+    if (!on_render_thread()) {
         return;
     }
-    window.swapped = true;
+    count = os_atomic_load(&vsync_count, acquire);
     now = mach_absolute_time();
-    if (now - w->vsync < os_atomic_load(&half_period, relaxed) || !line_allowed(now, &skipped)) {
+    if (!switch_render_swap(&window, count, os_atomic_load(&vsync_stamp, relaxed), now,
+                            os_atomic_load(&half_period, relaxed), &late) ||
+        !late || !line_allowed(now, &skipped)) {
         return;
     }
     cpu = own_cpu() - w->cpu0;

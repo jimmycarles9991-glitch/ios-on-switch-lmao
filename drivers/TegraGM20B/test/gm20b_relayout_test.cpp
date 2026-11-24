@@ -274,6 +274,79 @@ TEST(Relayout, FailureBeforeCheckpointLeavesOriginalLayoutUntouched)
 	EXPECT_EQ(s.surface, before);
 }
 
+// The surface's two mappings and the scratch cacheable, each with its kind, as the relayout mapping cache binds them, and
+// the checkpoint word mapped: gpu.path.relayout_history's 128x128 BGRA8 surface with rows 512 apart and its CPU pattern
+struct CachedMove {
+	static constexpr uint32_t kWidth = 128, kHeight = 128, kRowBytes = 512;
+	static constexpr uint64_t kCheckpointVa = 4ull << 32;
+	tgm_layout l{};
+	std::vector<uint8_t> surface, rows, checkpoint;
+	Memory memory;
+
+	CachedMove()
+	    : surface(kRowBytes * kHeight, 0), rows(kRowBytes * kHeight, 0), checkpoint(4, 0)
+	{
+		EXPECT_TRUE(tgm_layout_tiled(kWidth, kHeight, 4, &l));
+		EXPECT_EQ(l.bytes, surface.size());
+		memory.mapKind(kSurfaceVa, surface, TGM_LAYOUT_KIND);
+		memory.mapKind(kSurfaceRowsVa, surface, 0);
+		memory.mapKind(kRowsVa, rows, 0);
+		memory.map(kCheckpointVa, checkpoint);
+	}
+
+	static std::vector<uint8_t> cpuPattern(uint32_t seed)
+	{
+		std::vector<uint8_t> v(kRowBytes * kHeight);
+		for (uint32_t i = 0; i < v.size(); i++)
+			v[i] = uint8_t(((i * 7) ^ (i >> 9)) + seed * 61);
+		return v;
+	}
+
+	void move(tgm_relayout_op op)
+	{
+		const tgm_relayout_move m = {kSurfaceVa, kSurfaceRowsVa, kRowsVa,      kRowBytes,
+					     op,         rows.size(),    kCheckpointVa};
+		uint32_t w[TGM_RELAYOUT_DWORDS];
+		const uint32_t n = tgm_relayout_push(w, &l, &m, nullptr, 0);
+		CopyEngine ce(memory);
+		ce.run(w, n);
+		ASSERT_FALSE(ce.fault);
+		ASSERT_EQ(checkpoint[0], 1);
+	}
+
+	static size_t wrong(const std::vector<uint8_t> &got, const std::vector<uint8_t> &want)
+	{
+		size_t n = 0;
+		for (size_t i = 0; i < want.size(); i++)
+			n += got[i] != want[i];
+		return n;
+	}
+};
+
+TEST(Relayout, ATileInPlaceOverCachedPagesLandsEveryTexel)
+{
+	CachedMove s;
+	const std::vector<uint8_t> held = CachedMove::cpuPattern(2);
+	s.surface = held;
+	s.move(TGM_RELAYOUT_TILE_IN_PLACE);
+	std::vector<uint8_t> back(held.size(), 0);
+	tgm_layout_read(&s.l, s.surface.data(), 0, 0, CachedMove::kWidth, CachedMove::kHeight,
+			back.data(), CachedMove::kRowBytes);
+	EXPECT_EQ(CachedMove::wrong(back, held), 0u)
+		<< "bytes of the CPU's rows read back wrong through the texels the move wrote";
+}
+
+TEST(Relayout, AnUntileInPlaceOverCachedPagesLandsEveryRow)
+{
+	CachedMove s;
+	const std::vector<uint8_t> want = CachedMove::cpuPattern(1);
+	tgm_layout_write(&s.l, s.surface.data(), 0, 0, CachedMove::kWidth, CachedMove::kHeight,
+			 want.data(), CachedMove::kRowBytes);
+	s.move(TGM_RELAYOUT_UNTILE_IN_PLACE);
+	EXPECT_EQ(CachedMove::wrong(s.surface, want), 0u)
+		<< "bytes of the texels read back wrong as the rows the move wrote";
+}
+
 TEST(Relayout, WaitsForEveryWriterFirst)
 {
 	constexpr uint32_t kSemaphoreRun =

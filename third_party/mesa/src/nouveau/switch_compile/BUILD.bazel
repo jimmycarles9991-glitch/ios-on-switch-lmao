@@ -105,7 +105,6 @@ mesa_cc_library(
         "nvk_switch_split_prologue.c",
         "nvk_switch_split_proof.c",
         "nvk_switch_turn.c",
-        "nvk_switch_ubo_fold.c",
         "nvk_switch_xr_planes.c",
     ],
 )
@@ -316,48 +315,5 @@ py_test(
         "xr-planes",
     ],
     data = [":xr_planes_test_host"],
-    main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
-)
-
-mesa_cc_library(
-    name = "ubo_fold_test_objects",
-    testonly = True,
-    c_args = SWITCH_COMPILE_C_ARGS,
-    sources = [
-        "nvk_switch_ubo_fold.c",
-        "nvk_switch_ubo_fold_test.c",
-    ],
-)
-
-fs_depth_test_binary(
-    name = "ubo_fold_test_bin",
-    testonly = True,
-    archives = [
-        ":ubo_fold_test_objects",
-        "//third_party/mesa/src/compiler/nir:nir",
-        "//third_party/mesa/src/compiler:compiler",
-        "//third_party/mesa/src/util:mesa_util",
-        "//third_party/mesa/src/util:mesa_util_simd",
-        "//third_party/mesa/src/c11/impl:mesa_util_c11",
-        "//third_party/mesa/src/util/blake3",
-    ],
-)
-
-mesa_files(
-    name = "ubo_fold_test_host",
-    testonly = True,
-    srcs = [":ubo_fold_test_bin"],
-    platform = "macos",
-)
-
-py_test(
-    name = "ubo_fold_test",
-    size = "small",
-    srcs = ["//third_party/mesa/src/nouveau/compiler:run_host_test.py"],
-    args = [
-        "$(rootpath :ubo_fold_test_host)",
-        "ubo-fold",
-    ],
-    data = [":ubo_fold_test_host"],
     main = "//third_party/mesa/src/nouveau/compiler:run_host_test.py",
 )

@@ -78,15 +78,16 @@ public:
                         std::map<uint32_t, uint32_t> *registers = nullptr, bool split = false,
                         PackForm requested = PackForm::Default);
 
+    // The shader compiler's: a stage compiled from the same inputs as an earlier one is that one (StageCompile::memo)
+    void keepStages(StageMemo *memo)
+    {
+        compile_.memo = memo;
+    }
+
     // The pack generator's: records also hold the program variants directRecord makes (`variants`)
     void makeVariants(bool on)
     {
         variants_ = on;
-    }
-
-    void selectorConfigs(const std::map<uint64_t, SelectorConfigs> *configs)
-    {
-        selectors_ = configs;
     }
 
     // Why the last make's storage form was refused where it made the barrier form instead; empty where it made none
@@ -129,7 +130,6 @@ private:
     DirectTranslator translator_;
     StageCompile compile_;
     bool variants_ = false;
-    const std::map<uint64_t, SelectorConfigs> *selectors_ = nullptr;
     std::string storageRefusal_;
     bool splittable_ = false;
     bool keepBound_ = false;

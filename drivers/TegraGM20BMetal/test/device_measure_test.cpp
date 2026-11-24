@@ -35,7 +35,7 @@ struct Words {
     std::vector<long> stampAt, flushAt;  // their places among the methods
 };
 
-Words read(const std::vector<uint32_t> &words)
+Words read(const std::vector<uint32_t> &words, uint64_t cbStampPage)
 {
     Words w;
     std::vector<switch_gm20b_method> m(words.size());
@@ -47,7 +47,10 @@ Words read(const std::vector<uint32_t> &words)
             w.flushAt.push_back(i);
         }
         if (m[i].method == NVB197_SET_REPORT_SEMAPHORE_D && m[i].value == gm20b::kDrawStampRelease && i >= 3) {
-            w.stamps.push_back({uint64_t(m[i - 3].value) << 32 | m[i - 2].value, m[i - 1].value});
+            const uint64_t va = uint64_t(m[i - 3].value) << 32 | m[i - 2].value;
+            if (va >= cbStampPage && va < cbStampPage + gm20b::kDrawStampBase)
+                continue;
+            w.stamps.push_back({va, m[i - 1].value});
             w.stampAt.push_back(i);
         }
     }
@@ -97,7 +100,7 @@ protected:
         for (size_t j = before; j < kernel_model::model.jobs.size(); j++)
             words.insert(words.end(), kernel_model::model.jobs[j].words.begin(),
                          kernel_model::model.jobs[j].words.end());
-        return read(words);
+        return read(words, dev.loopRecordVa(1) - gm20b::kLoopWordsBase);
     }
 };
 
@@ -174,6 +177,26 @@ TEST_F(DeviceMeasure, TheNextCommandBufferTeachesWhatTheGpuStamped)
     EXPECT_EQ(pl->bandRate.samples.load(), 1u);
     EXPECT_EQ(pl->bandRate.psPerUnit.load(), 1'000'000'000ull / (uint64_t(kSide) * kSide));
     cb->abandon();
+}
+
+// A large draw counts where its price came from: the static estimate until a measured draw of its state completed,
+// then the learned rate, by which the next command buffer bands it (ten milliseconds in one-millisecond bands)
+TEST_F(DeviceMeasure, TheNextCommandBufferPricesALargeDrawByItsLearnedRate)
+{
+    const Words w = pass(1);
+    ASSERT_EQ(w.stamps.size(), 2u);
+    EXPECT_EQ(dev.stats.pricedStatic.load(), 1u);
+    EXPECT_EQ(dev.stats.pricedLearned.load(), 0u);
+    const uint64_t ticks[2] = {1000, 1000 + 10 * 614'400};
+    for (size_t i = 0; i < 2; i++) {
+        const gm20b::StampRelease r{w.stamps[i].second, 0, ticks[i]};
+        memcpy(kernel_model::model.host(w.stamps[i].first), &r, sizeof r);
+    }
+    const uint64_t bands = dev.stats.bands.load();
+    pass(1);
+    EXPECT_EQ(dev.stats.pricedStatic.load(), 1u);
+    EXPECT_EQ(dev.stats.pricedLearned.load(), 1u);
+    EXPECT_EQ(dev.stats.bands.load() - bands, 10u);
 }
 
 TEST_F(DeviceMeasure, AMeasuredDrawTheGpuHasNotRunWaits)

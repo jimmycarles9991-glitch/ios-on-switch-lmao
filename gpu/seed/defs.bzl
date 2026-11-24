@@ -261,17 +261,20 @@ _METAL_BUCKETS = 16
 # The generator's modules each step runs (make_pack.py imports or runs them by path, beside it). Python finds a module
 # beside a script through the script's real path, so a module missing here still imported in the local sandbox (its
 # inputs are links into the source tree) and failed on a remote worker.
-_METAL_STAMP = ["make_pack.py", "packfile.py", "selector_section.py"]
+_METAL_STAMP = ["make_pack.py", "packfile.py"]
 _METAL_SPLIT = _METAL_STAMP + [
+    "ca/caname.py",
     "ca/caset.py",
     "ca/caspec.py",
     "ca/caspec27.py",
+    "ca/closure.py",
     "ca/deepcolour.py",
     "ca/fetchfree.py",
     "iterated/programs.py",
     "iterated/programs_long.py",
     "iterated/table.py",
     "iterated/ucode.py",
+    "rb/rbclosure.py",
     "rb/rbfree.py",
     "rb/rbspec.py",
 ]
@@ -294,7 +297,6 @@ _METAL_LINK = [
     "layouts.py",
     "packfile.py",
     "probelog.py",
-    "selector_section.py",
     "splits.py",
     "archives.py",
     "draw_context.txt",
@@ -315,7 +317,7 @@ def _generator_files(ctx, names):
         fail("the pack generator's srcs lack some of " + ", ".join(names))
     return files
 
-def _pack_buckets(ctx, tools, corpora, views, selectors = []):
+def _pack_buckets(ctx, tools, corpora, views):
     """Probe each corpus over its view of the libraries (views[i]: a root and its files)."""
     generator = _generator_files(ctx, _METAL_PROBE)
     buckets = []
@@ -336,12 +338,11 @@ def _pack_buckets(ctx, tools, corpora, views, selectors = []):
         args.add("--root", view.root + "/root")
         args.add_all(ctx.files.device_libraries, before_each = "--data")
         args.add("--lines", bucket_corpus)
-        args.add_all(selectors, before_each = "--ca-selectors")
         args.add("--out", bucket.path)
         ctx.actions.run(
             executable = ctx.executable._probe,
             arguments = [args],
-            inputs = depset([bucket_corpus] + probe_tools + generator + selectors + ctx.files.device_libraries, transitive = [view.files]),
+            inputs = depset([bucket_corpus] + probe_tools + generator + ctx.files.device_libraries, transitive = [view.files]),
             outputs = [bucket],
             mnemonic = "MetalRawProbe",
             progress_message = "Making the pack's bucket {} of {} directly".format(i + 1, len(corpora)),
@@ -350,7 +351,7 @@ def _pack_buckets(ctx, tools, corpora, views, selectors = []):
         buckets.append(bucket)
     return buckets
 
-def _pack_link(ctx, buckets, corpus_report, archives, selectors = []):
+def _pack_link(ctx, buckets, corpus_report, archives):
     linked = ctx.actions.declare_directory(named(ctx, "_work/linked"))
     args = ctx.actions.args()
     args.add("link")
@@ -359,12 +360,11 @@ def _pack_link(ctx, buckets, corpus_report, archives, selectors = []):
     if corpus_report:
         args.add("--corpus-report", corpus_report)
     args.add_all(archives, before_each = "--archives")
-    args.add_all(selectors, before_each = "--ca-selectors")
     args.add_all(buckets, expand_directories = False)
     ctx.actions.run(
         executable = ctx.executable._tool,
         arguments = [args],
-        inputs = depset(([corpus_report] if corpus_report else []) + archives + selectors + buckets +
+        inputs = depset(([corpus_report] if corpus_report else []) + archives + buckets +
                         _generator_files(ctx, _METAL_LINK)),
         outputs = [linked],
         mnemonic = "MetalRawLink",
@@ -421,9 +421,8 @@ def _seed_pipeline_pack_impl(ctx):
     # The shared buckets read the crawl without this build's applications; the apps' bucket, the last, reads them too.
     base = struct(root = crawl.base_root, files = crawl.base_files, qc = crawl.qc)
     full = struct(root = crawl.root, files = crawl.files, qc = crawl.qc)
-    selectors = [f for f in ctx.files.ca_selectors if f.basename == kind + ".txt"]
-    buckets = _pack_buckets(ctx, tools, corpora, [base] * _METAL_BUCKETS + [full], selectors)
-    linked = _pack_link(ctx, buckets, corpus_report, archives, selectors)
+    buckets = _pack_buckets(ctx, tools, corpora, [base] * _METAL_BUCKETS + [full])
+    linked = _pack_link(ctx, buckets, corpus_report, archives)
 
     out = ctx.actions.declare_directory(named(ctx, ""))
     args = ctx.actions.args()
@@ -462,7 +461,6 @@ seed_pipeline_pack = rule(
             allow_files = [".txt"],
             doc = "Core Animation states devices named missing (precompile/ca-names/<build>.txt): the IPSW kind's",
         ),
-        "ca_selectors": attr.label_list(allow_files = [".txt"]),
         "app_states": attr.label_list(
             allow_files = [".log"],
             doc = "our own apps' states the pack holds (precompile/app-states/<build>.log): the IPSW kind's",
@@ -483,9 +481,7 @@ seed_pipeline_pack = rule(
 def _sample_pipeline_pack_impl(ctx):
     tools = seed_tool_files(ctx.attr.tools)
     crawl = ctx.attr.crawl[CrawlInfo]
-    kind = ctx.attr.ipsw[IpswInfo].build
-    selectors = [f for f in ctx.files.ca_selectors if f.basename == kind + ".txt"]
-    buckets = _pack_buckets(ctx, tools, [ctx.file.corpus], [struct(root = crawl.root, files = crawl.files, qc = crawl.qc)], selectors)
+    buckets = _pack_buckets(ctx, tools, [ctx.file.corpus], [struct(root = crawl.root, files = crawl.files, qc = crawl.qc)])
     return [DefaultInfo(files = depset([_pack_link(ctx, buckets, None, [])]))]
 
 sample_pipeline_pack = rule(
@@ -494,7 +490,6 @@ sample_pipeline_pack = rule(
     (the first bucket's warm-up line first), probed and linked as seed_pipeline_pack probes and links its buckets, with no
     archive inventory and no stamp. Its records are the full pack's records of those states.""",
     attrs = _IPSW | {
-        "ca_selectors": attr.label(default = "//drivers/TegraGM20BMetal/precompile/ca-selectors:tables"),
         "tools": attr.label(mandatory = True),
         "crawl": attr.label(mandatory = True, providers = [CrawlInfo]),
         "device_libraries": attr.label(allow_files = True, doc = "device-compiled libraries used by native corpus states"),

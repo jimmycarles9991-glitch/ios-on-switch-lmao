@@ -132,7 +132,8 @@ bool gm20bClampCopiedBuffer(gm20b::CommandBuffer *rc, gm20b::BlitEncoder *&be, S
         gm20b::shape(w, h, kRgba16Uint, target);
         target.va = va;
         target.pitch = uint32_t(row);
-        target.storage = {va, row * (h - 1) + uint64_t(w) * target.bpp, buffer.hostVisible, buffer.span.storage};
+        target.storage = {va, row * (h - 1) + uint64_t(w) * target.bpp, buffer.hostVisible, buffer.span.storage,
+                          buffer.gpuVolatile};
         // rows the render hardware takes as a pitch target are drawn in place, any other through a block-linear backing
         // the copy engine fills from them and drains back (Texture::shadowTarget)
         const bool linear = !((va | row) & 127);

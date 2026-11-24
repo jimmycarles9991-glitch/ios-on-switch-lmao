@@ -1,5 +1,5 @@
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_shims", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
@@ -101,4 +101,37 @@ host_test(
         "//drivers/TegraGM20B/test:backing",
         "//drivers/TegraGM20B/test:coherency_kernel",
     ],
+)
+
+host_library(
+    name = "pitch_nvenc",
+    srcs = [
+        "//drivers/SwitchVideoEncoders:AVE/H264NVENC.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.c",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.c",
+        "//drivers/TegraNVENC:nvidia/clc5b7.h",
+        "//drivers/TegraNVENC:nvidia/nvenc_drv.h",
+    ],
+    hdrs = [
+        "//drivers/SwitchVideoEncoders:AVE/H264NVENC.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCEncSyntax.h",
+        "//drivers/SwitchVideoEncoders:AVE/HEVCNVENC.h",
+        "//drivers/TegraNVENC:TegraNVENCABI.h",
+        "//drivers/TegraNVENC:TegraNVENCCheck.h",
+        "//drivers/TegraNVENC:TegraNVENCCheckCommon.h",
+        "//drivers/TegraNVENC:TegraNVENCCheckH265.h",
+        "//drivers/TegraNVENC:TegraNVENCPitchPlan.h",
+    ],
+    copts = ["-O1"],
+)
+
+host_test(
+    name = "tegra_nvenc_pitch_test",
+    srcs = ["tegra_nvenc_pitch_test.cpp"],
+    data = [
+        "//drivers/TegraNVENC:TegraNVENC.cpp",
+        "//drivers/TegraNVENC:TegraNVENCSource.cpp",
+        "//drivers/TegraNVENC:TegraNVENCUserClient.cpp",
+    ],
+    deps = [":pitch_nvenc"],
 )

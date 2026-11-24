@@ -36,6 +36,11 @@ inline bool quietEnd(const RangeEnd &end)
     return !end.observed && end.followed;
 }
 
+inline bool inlineCompletion(bool behindScheduled, bool hasCompletionQueue, bool hasHandlers, bool hasDeferredPresents)
+{
+    return !behindScheduled && !hasCompletionQueue && !hasHandlers && !hasDeferredPresents;
+}
+
 // A quiet range nothing in hand follows, left for its frame's loud end
 inline bool frameHeld(const RangeEnd &end)
 {

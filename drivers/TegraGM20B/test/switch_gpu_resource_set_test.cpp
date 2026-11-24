@@ -6,6 +6,7 @@
 #include "drivers/TegraGM20B/SwitchGpuBackingInternal.h"
 #include "drivers/TegraGM20B/SwitchGpuResourceSet.h"
 #include "drivers/TegraGM20B/SwitchGpuJobStats.h"
+#include "drivers/TegraGM20B/TegraGM20BGpu.h"
 #include <string>
 
 namespace
@@ -529,8 +530,8 @@ TEST_F(ResourceSet, TheJobsLineCountsEndedGenerationsByCause)
 					(const switch_gpu_backing_token[]){token(2, 1)});
 		switch_gpu_set_killed(set.set, 0);
 		switch_gpu_job_stale();
-		const uint64_t ns[4] = {1000, 2000, 30000, 4000};
-		switch_gpu_job_submitted(ns, 1, 3, 2, 1);
+		const uint64_t ns[TGM_SUBMIT_PHASES] = {1000, 2000, 30000, 4000};
+		switch_gpu_job_submitted(ns, 1, 3, 2, 1, 0);
 	}
 	switch_gpu_job_window(line, sizeof(line));
 	EXPECT_NE(std::string(line).find(
@@ -547,4 +548,66 @@ TEST_F(ResourceSet, TheJobsLineCountsEndedGenerationsByCause)
 	switch_gpu_job_window(line, sizeof(line));
 	EXPECT_EQ(line[0], 0);
 	switch_gpu_backing_release(member);
+}
+
+TEST_F(ResourceSet, TheJobsLineSplitsLockPhasesAndSeparatesCompositorJobs)
+{
+	char line[512];
+	switch_gpu_job_window(line, sizeof(line));
+
+	uint64_t app[TGM_SUBMIT_PHASES] = {};
+	app[TGM_SUBMIT_RESOLVE] = 10000;
+	app[TGM_SUBMIT_LOCK] = 2000;
+	app[TGM_SUBMIT_EXEC] = 30000;
+	app[TGM_SUBMIT_COMMIT] = 3000;
+	app[TGM_SUBMIT_REFRESH] = 6000;
+	app[TGM_SUBMIT_ENTER] = 8000;
+	app[TGM_SUBMIT_BEGIN] = 99000;
+	app[TGM_SUBMIT_ROOM] = 199000;
+	switch_gpu_job_submitted(app, 0, 2, 2, 0, 0);
+
+	uint64_t comp1[TGM_SUBMIT_PHASES] = {};
+	comp1[TGM_SUBMIT_RESOLVE] = 10000;
+	comp1[TGM_SUBMIT_LOCK] = 2000;
+	comp1[TGM_SUBMIT_EXEC] = 21000;
+	comp1[TGM_SUBMIT_COMMIT] = 3000;
+	comp1[TGM_SUBMIT_REFRESH] = 6000;
+	comp1[TGM_SUBMIT_ENTER] = 4000;
+	comp1[TGM_SUBMIT_BEGIN] = 12000;
+	comp1[TGM_SUBMIT_ROOM] = 0;
+	switch_gpu_job_submitted(comp1, 1, 4, 3, 0, 1);
+
+	uint64_t comp2[TGM_SUBMIT_PHASES] = {};
+	comp2[TGM_SUBMIT_RESOLVE] = 10000;
+	comp2[TGM_SUBMIT_LOCK] = 2000;
+	comp2[TGM_SUBMIT_EXEC] = 21000;
+	comp2[TGM_SUBMIT_COMMIT] = 3000;
+	comp2[TGM_SUBMIT_REFRESH] = 6000;
+	comp2[TGM_SUBMIT_ENTER] = 6000;
+	comp2[TGM_SUBMIT_BEGIN] = 30000;
+	comp2[TGM_SUBMIT_ROOM] = 14000;
+	switch_gpu_job_submitted(comp2, 1, 6, 4, 0, 1);
+
+	switch_gpu_job_window(line, sizeof(line));
+	EXPECT_NE(std::string(line).find(
+			  "SubmitJob 3 x mean 169 us (resolve 10, lock 132, exec 24, commit 3) "
+			  "max 357 us"),
+		  std::string::npos)
+		<< line;
+	EXPECT_NE(std::string(line).find("(refresh 6, enter 6, begin 47, room 71)"),
+		  std::string::npos)
+		<< line;
+	EXPECT_NE(std::string(line).find("compositor 2 x mean 75 us, begin max 30 us, room max 14 "
+					 "us"),
+		  std::string::npos)
+		<< line;
+
+	uint64_t next[TGM_SUBMIT_PHASES] = {};
+	next[TGM_SUBMIT_BEGIN] = 5000;
+	next[TGM_SUBMIT_ROOM] = 2000;
+	switch_gpu_job_submitted(next, 0, 1, 1, 0, 1);
+	switch_gpu_job_window(line, sizeof(line));
+	EXPECT_NE(std::string(line).find("compositor 1 x mean 7 us, begin max 5 us, room max 2 us"),
+		  std::string::npos)
+		<< line;
 }

@@ -17,6 +17,11 @@ extern "C" {
 // metal_device_open with the same pack and key takes its result. A device opened without it is another process's
 // (gpu.h Device::Role::Client): each of those made at its first use, in smaller steps.
 void metal_prepare(const char *packPath, uint64_t stack);
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+// Debug builds: the render server's prepare thread's Device::open and warm, and how long metal_device_open then waited
+// for that thread, in nanoseconds (all 0 in a process that did not prepare).
+void metal_prepare_split(uint64_t *open_ns, uint64_t *warm_ns, uint64_t *waited_ns);
+#endif
 // Turns on the runtime's completion of the Core Animation states the pack lacks (TegraGM20BMetalComplete.h): their records made off the render
 // thread and kept under `cacheDir`, the process's own shader cache directory (null: in memory only), the installed native records
 // under `nativeSeed` read first (RecordCache::attachSeed; null: none). After metal_device_open.
@@ -39,6 +44,11 @@ size_t metal_fetch_rates(char *out, size_t size);
 // a part includes those nested in it, a self time leaves them out), "/x" the calls per encode, pmax= the longest
 // prepare(), then the encode's events per command buffer (mallocs, locks, sends, slots per draw).
 size_t metal_encode_rates(char *out, size_t size);
+// Debug builds: "frame pass= hit= ... ahead= why= encoders= park= ws=" since the previous call (0 when nothing was
+// recorded or waited for): the recording thread's passes by how the pass cache gave them, command buffers encoded ahead
+// and why not, the pooled objects' blocks, queue heads parked by why, and waitUntilScheduled by where its time went
+// (TegraGM20BMetalEncoderRates.mm)
+size_t metal_frame_rates(char *out, size_t size);
 // "fetch keys rec=<key>:n,... enc=... sto=...": the pipeline keys behind the window's record-time and encode-time
 // refusals and storage-to-barrier fallbacks, eight of each at most, most first; 0 when none
 size_t metal_fetch_keys(char *out, size_t size);

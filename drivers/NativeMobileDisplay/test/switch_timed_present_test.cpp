@@ -40,9 +40,10 @@ TEST(TimedPresent, TheNextVblanksFrameFlipsAsBefore)
     }
 }
 
-// The render server's own timer sits at any phase to DC A's frame end: its frame for its next tick goes at once even when
-// that tick is most of a period after the frame end that will show it.
-TEST(TimedPresent, AnOrdinaryFrameGoesAtAnyTimerPhase)
+// A swap stamped within a period and a half of its acceptance goes at once even when the next frame end is more than
+// half a period before its stamp. The render server's timer does not sit at any phase to DC A's frame end, as the
+// clause assumed: on the device its render thread wakes at the frame end, and its swap comes 7-10 ms later.
+TEST(TimedPresent, AnOrdinaryFrameGoesAtOnceThoughTheNextFrameEndIsEarly)
 {
     const uint64_t tick = kFrameEnd + 10000, now = tick + 1500;
     EXPECT_EQ(decide(tick + kPeriod, at(now)), Decision::Early);
@@ -51,8 +52,8 @@ TEST(TimedPresent, AnOrdinaryFrameGoesAtAnyTimerPhase)
 }
 
 // The ordinary-frame clause latches a swap at a frame end more than half a period before its requested presentation:
-// it says so (Ordinary), for the debug count, and stays due. A swap the next frame end suits, or one decided without a
-// phase, is plainly Due.
+// it says so (Ordinary), for the debug count, and stays due. Decided without a phase (the frame ends were masked) it
+// says that (OrdinaryUnphased) and stays due. A swap the next frame end suits is plainly Due.
 TEST(TimedPresent, TheOrdinaryClauseIsNamedWhereItShowsAFrameEarly)
 {
     const uint64_t tick = kFrameEnd + 10000, now = tick + 1500, accepted = now - 200;
@@ -62,7 +63,8 @@ TEST(TimedPresent, TheOrdinaryClauseIsNamedWhereItShowsAFrameEarly)
     EXPECT_FALSE(switch_timed_present::due(Decision::NeedsPhase));
     EXPECT_EQ(decide(kFrameEnd + kPeriod, at(now, 0, kFrameEnd, accepted)), Decision::Due);
     const uint64_t stale = kFrameEnd + 10 * kPeriod + 1500;
-    EXPECT_EQ(decide(stale + kPeriod, at(stale, 0, kFrameEnd, stale - 200)), Decision::Due);
+    EXPECT_EQ(decide(stale + kPeriod, at(stale, 0, kFrameEnd, stale - 200)), Decision::OrdinaryUnphased);
+    EXPECT_TRUE(switch_timed_present::due(Decision::OrdinaryUnphased));
     EXPECT_EQ(decide(stale + kPeriod, at(stale)), Decision::NeedsPhase);
 }
 

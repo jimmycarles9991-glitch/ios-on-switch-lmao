@@ -169,8 +169,17 @@ struct DrawBandsTest: HWTest {
         }
         await MainActor.run { layer.removeFromSuperlayer() }
         await context.clearStage()
+        metrics.fitLog(within: 720, keeping: Self.judged)
         return failures.isEmpty ? .pass(metrics, proof: gpu.proof) : .fail(failures.joined(separator: "; "), metrics)
     }
+
+    /// The fields its verdict reads, kept on the line when the rest moves to the report so why= is never cut
+    static let judged: Set<String> = [
+        "identical_blend", "identical_fetch", "identical_msaa", "identical_memory", "bands_blend", "bands_fetch",
+        "bands_msaa", "us_per_band_blend", "interlock_draws_fetch", "learned_small", "learned_memory_first",
+        "bands_memory_learned", "priced_learned_memory", "us_measured", "us_unmeasured", "preempts", "preempt_max_us",
+        "preempt_mid_job", "sync_max_us", "windows",
+    ]
 
     func learned(_ gpu: GPU, metrics: inout Metrics) async throws -> [String] {
         let pipeline = try gpu.render(vertex: "bands_vertex", fragment: "bands_memory_fragment", format: .bgra8Unorm)
@@ -221,7 +230,7 @@ struct DrawBandsTest: HWTest {
         metrics.set("learned_small", smallLearned)
         if smallLearned != 0 { failures.append("memory: \(smallLearned) small passes took the state's picks") }
         var wholeMs = 0.0
-        var learnedBands = 0
+        var learnedBands = 0, pricedLearned = 0
         var measuredUs: [Double] = [], unmeasuredUs: [Double] = []
         for round in 0 ..< Self.learnRounds {
             let before = GM20BFacade.counters(of: gpu.device)
@@ -239,6 +248,7 @@ struct DrawBandsTest: HWTest {
                 if learned < 1 { failures.append("memory: the first draw's GPU time taught its state nothing") }
             } else {
                 learnedBands = bands
+                pricedLearned = (after["priced_learned"] ?? 0) - (before["priced_learned"] ?? 0)
                 metrics.set("us_memory_learned", timing.gpuMilliseconds * 1000, digits: 0)
                 if timing.gpuTimed {
                     if learned > 0 {
@@ -250,6 +260,7 @@ struct DrawBandsTest: HWTest {
             }
         }
         metrics.set("bands_memory_learned", learnedBands)
+        metrics.set("priced_learned_memory", pricedLearned)
         metrics.set("measured_draws", measuredUs.count)
         metrics.set("unmeasured_draws", unmeasuredUs.count)
         if let measured = Self.mean(measuredUs), let unmeasured = Self.mean(unmeasuredUs) {

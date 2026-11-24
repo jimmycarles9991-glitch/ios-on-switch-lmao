@@ -5,6 +5,7 @@
  * segment's file offset and address share their 4 KB phase, so the words are the same).
  */
 #include "macho.h"
+#include "stub_split.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -450,6 +451,20 @@ static int branch_target(uint32_t w, uint64_t pc, uint64_t *t)
     return 0;
 }
 
+struct region_ctx {
+    const uint32_t *stubs;
+    uint64_t lo, hi;
+};
+
+static bool region_word(const void *ctx, uint64_t at, uint32_t *w)
+{
+    const struct region_ctx *r = ctx;
+    if (at < r->lo || at >= r->hi || ((at - r->lo) & 3))
+        return false;
+    *w = r->stubs[(at - r->lo) / 4];
+    return true;
+}
+
 long a64x_verify_image(const struct a64x_macho *m, const uint8_t *out, const struct a64x_image_xlate *x, char *err,
                        size_t errlen)
 {
@@ -535,6 +550,10 @@ long a64x_verify_image(const struct a64x_macho *m, const uint8_t *out, const str
                 k = (uint32_t)((t - stub_lo) / 4);
             }
         }
+        struct region_ctx rc = {x->stubs, stub_lo, stub_hi};
+        if (!bad && !a64x_stub_ordered(was, off, now, region_word, &rc))
+            bad = fail(err, errlen, "site 0x%llx: the stub of %08x has no DMB ISH after its store-exclusive",
+                       (unsigned long long)off, was);
     }
     free(seen);
     free(stack);

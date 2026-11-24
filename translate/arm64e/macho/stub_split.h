@@ -30,6 +30,15 @@ struct a64x_placed {
 int a64x_stub_split(const uint32_t *st, int n, uint64_t laid, const uint64_t *addr, const uint64_t *links, int nlinks,
                     struct a64x_placed *out);
 
+/*
+ * For a site whose original word `was` is an LSE atomic with acquire and release (now `now`, a B or BL into its stub):
+ * whether the stub's success path (every conditional branch falls through: the compare matched, the store-exclusive
+ * succeeded) holds a full DMB or DSB between its store-exclusive and the return. True for every other word. word_at
+ * reads a stub word, false where there is none.
+ */
+bool a64x_stub_ordered(uint32_t was, uint64_t site, uint32_t now,
+                       bool (*word_at)(const void *ctx, uint64_t at, uint32_t *w), const void *ctx);
+
 #ifdef __cplusplus
 }
 #endif

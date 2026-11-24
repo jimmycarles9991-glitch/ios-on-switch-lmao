@@ -533,4 +533,48 @@ TEST_F(CachedZero, MappedByteBudgetIsBoundedAndReleasedMappingsRestoreCapacity)
 	finish();
 	switch_gpu_cached_mapping_drop(&a.mapping);
 }
+
+TEST_F(CachedZero, SynchronousCopyMovesPagesThroughCopyEngine)
+{
+	Allocation src(4), dst(4);
+	for (size_t i = 0; i < src.bytes.size(); ++i)
+		src.bytes[i] = uint8_t((i * 37u + 11u) & 0xffu);
+	std::fill(dst.bytes.begin(), dst.bytes.end(), 0u);
+	const unsigned unmapsBefore = unmaps;
+	auto worker = std::async(std::launch::async, [&] {
+		return switch_gpu_cached_copy(src.pages.data(), dst.pages.data(),
+					      uint32_t(src.pages.size()));
+	});
+	while (switch_zero_sleepers.load() == 0)
+		switch_zero_sleepers.wait(0);
+	finish();
+	ASSERT_EQ(worker.get(), 0);
+	EXPECT_EQ(dst.bytes, src.bytes);
+	EXPECT_EQ(destinationReadOnly, 0);
+	EXPECT_EQ(destinationVolatile, 0);
+	EXPECT_EQ(unmaps, unmapsBefore + 2u);
+}
+
+TEST_F(CachedZero, ZeroWaitsBehindCopyOnlyFaultedChannelInsteadOfReturningBusy)
+{
+	Allocation src(4), dst(4), spare(4);
+	auto copy = std::async(std::launch::async, [&] {
+		return switch_gpu_cached_copy(src.pages.data(), dst.pages.data(),
+					      uint32_t(src.pages.size()));
+	});
+	while (switch_zero_sleepers.load() < 1)
+		switch_zero_sleepers.wait(0);
+	gpu.failed = true;
+	auto zero = std::async(std::launch::async, [&] {
+		return spare.submit();
+	});
+	while (switch_zero_sleepers.load() < 2)
+		switch_zero_sleepers.wait(1);
+	finish(true, false);
+	EXPECT_EQ(copy.get(), -5);
+	ASSERT_EQ(zero.get(), 0);
+	finish();
+	EXPECT_EQ(spare.callbacks, 1u);
+	EXPECT_EQ(spare.result, 0);
+}
 }  // namespace

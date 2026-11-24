@@ -70,8 +70,11 @@ Prefault *prefault()
 		return nullptr;
 	bzero(fresh, sizeof(*fresh));
 	fresh->lock = IOLockAlloc();
+	// Above every thread that imports: an import racing the fault waits on the pages this call holds busy, and a VM
+	// busy-page wait lends no priority. At USER (31) a default-priority busy loop delayed it and the render thread
+	// (FIFO 55) waited behind it or zero-filled the pages itself (22 Nov: 46 of 50 slow imports).
 	fresh->call = fresh->lock ? thread_call_allocate_with_priority(prefaultWork, fresh,
-								       THREAD_CALL_PRIORITY_USER)
+								       THREAD_CALL_PRIORITY_KERNEL)
 				  : nullptr;
 	fresh->expiry = fresh->call ? thread_call_allocate_with_options(expiryWork, fresh,
 									THREAD_CALL_PRIORITY_USER,

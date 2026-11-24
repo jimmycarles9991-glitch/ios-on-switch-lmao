@@ -42,6 +42,7 @@
 #include <kperf/lazy.h>
 #include <kperf/pet.h>
 #include <kperf/sample.h>
+#include <switch/recorder.h>
 
 /* from libkern/libkern.h */
 extern uint64_t strtouq(const char *, char **, int);
@@ -85,8 +86,10 @@ kperf_init_early(void)
 	boolean_t found_kperf = FALSE;
 	char kperf_config_str[64];
 	found_kperf = PE_parse_boot_arg_str("kperf", kperf_config_str, sizeof(kperf_config_str));
+	SWITCH_RECORDER_KPERF(found_kperf, kperf_config_str, sizeof(kperf_config_str));
 	if (found_kperf && kperf_config_str[0] != '\0') {
 		kperf_kernel_configure(kperf_config_str);
+		SWITCH_RECORDER_KPERF_CONFIGURED();
 	}
 }
 

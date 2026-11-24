@@ -1,8 +1,8 @@
 import Foundation
 
-/// One run's JSON report, Documents/hwtest/<boot uuid>-<stamp>.json. It is written durably before each test
-/// (`run.current` names the test) and after it, so a run that the app or the OS did not survive still holds every
-/// finished result and the test that was running. tools/hwtest reads it on the Mac.
+/// One run's JSON report, Documents/hwtest/<boot uuid>-<stamp>.json once the run ends; while it runs, its journal
+/// (RunJournal) holds it, so a run that the app or the OS did not survive still holds every finished result and the
+/// test that was running (`run.current`). tools/hwtest reads both on the Mac.
 public struct Report: Codable, Equatable {
     public struct Entry: Codable, Equatable {
         public let id: String
@@ -156,7 +156,14 @@ public struct Report: Codable, Equatable {
 
     /// A test's record; a rerun replaces its earlier entry in place.
     public mutating func record(_ record: TestRecord) {
-        let entry = Entry(record, bootUUID: latestBootUUID)
+        self.record(entry(record))
+    }
+
+    public func entry(_ record: TestRecord) -> Entry {
+        Entry(record, bootUUID: latestBootUUID)
+    }
+
+    public mutating func record(_ entry: Entry) {
         if let index = results.firstIndex(where: { $0.id == entry.id }) {
             results[index] = entry
         } else {
@@ -167,10 +174,14 @@ public struct Report: Codable, Equatable {
     }
 
     public mutating func finish(at date: Date) {
+        finish(timestamp: Self.timestamp(date))
+    }
+
+    mutating func finish(timestamp: String) {
         run.status = .done
         run.current = nil
         run.interruption = nil
-        run.finished = Self.timestamp(date)
+        run.finished = timestamp
     }
 
     public mutating func cancel(at date: Date) {
@@ -224,10 +235,19 @@ public struct Report: Codable, Equatable {
         try JSONDecoder().decode(Report.self, from: data)
     }
 
+    /// Milliseconds from the run's start to `date`: the run's whole span, across every process and boot that ran it.
+    public func milliseconds(at date: Date) -> Double? {
+        Self.isoFormatter().date(from: run.started).map { date.timeIntervalSince($0) * 1000 }
+    }
+
     public static func timestamp(_ date: Date) -> String {
+        isoFormatter().string(from: date)
+    }
+
+    private static func isoFormatter() -> ISO8601DateFormatter {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: date)
+        return formatter
     }
 
     static func stamp(_ date: Date) -> String {

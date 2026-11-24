@@ -27,13 +27,36 @@ uint32_t RenderEncoder::drawBands(uint32_t vertices, uint32_t instances, uint64_
 
 // The pass's first draw, the one a pass of one draw measures at its end (measurePass): the render server is never banded,
 // so its draws teach nothing
-void RenderEncoder::noteCandidate(uint64_t units)
+void RenderEncoder::noteCandidate(uint64_t units, uint32_t bands)
 {
     if (passDraws_ != 1 || dev_->compositorClass())
         return;
-    candidate_ = {&emitted_->bandRate,           units, 0, 0, emitted_->rec ? emitted_->rec->keyHash : 0,
-                  emitted_->fragmentInstructions};
+    candidate_ = {&emitted_->bandRate,
+                  units,
+                  0,
+                  0,
+                  emitted_->rec ? emitted_->rec->keyHash : 0,
+                  emitted_->fragmentInstructions,
+                  bands};
 }
+
+#if SWITCH_METAL_DIAGNOSTICS
+// A draw large enough to measure, by where its price came from, and a line for one priced at a long draw's length
+void RenderEncoder::notePrice(uint64_t units, uint32_t bands) const
+{
+    const Pipeline &pl = *emitted_;
+    if (units < kMeasureUnits || dev_->compositorClass() || pl.vertexStores)
+        return;
+    const bool learned = pl.bandRate.psPerUnit.load(std::memory_order_relaxed) != 0;
+    (learned ? dev_->stats.pricedLearned : dev_->stats.pricedStatic)++;
+    const uint64_t ns = estimatedNs(pl.bandRate, units, workNs(laneWork(units, pl.fragmentInstructions)));
+    if (ns >= kLongDrawNs)
+        os_log(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
+               "SwitchMetal: banded draw k%016llx %llu kunits priced %llu us (%s) in %u bands",
+               (unsigned long long)(pl.rec ? pl.rec->keyHash : 0), (unsigned long long)(units / 1000),
+               (unsigned long long)(ns / 1000), learned ? "learned" : "static", bands);
+}
+#endif
 
 // At the pass's end, `drained` where its draws' writes are out of the tiled cache: whether its one draw is measured, its
 // stamps' slot taken. The start stamp goes at the end of the pass's prologue and the end stamp after the drain, so the
@@ -58,7 +81,8 @@ void RenderEncoder::emitDraw(bool indexed, uint32_t first, uint32_t count, uint3
     };
     const uint64_t units = drawUnits(instances);
     const uint32_t bands = drawBands(count, instances, units);
-    noteCandidate(units);
+    noteCandidate(units, bands);
+    SWITCH_METAL_DIAGNOSTIC(notePrice(units, bands));
     if (bands < 2) {
         if (p_.room() < kBandWords)
             reserve();
@@ -66,9 +90,22 @@ void RenderEncoder::emitDraw(bool indexed, uint32_t first, uint32_t count, uint3
         finishDraw(count, instances);
         return;
     }
+    const PixelBox area = {sc_[0], sc_[1], sc_[0] + sc_[2], sc_[1] + sc_[3]};
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (dev_->probeMacroBands.load(std::memory_order_relaxed) && !indexed && instances == 1 && rot_.turn == 0 &&
+        area.y1 > area.y0) {
+        if (p_.room() < mme::kBandDrawMaxWords)
+            reserve();
+        mme::bandDraw(p_, params_, bands, first, count, root, baseInstance, uint16_t(area.x0), uint16_t(area.x1),
+                      uint16_t(area.y0), uint16_t(area.y1));
+        cb_->bands += bands;
+        SWITCH_METAL_DIAGNOSTIC(if (cb_->drawTimes_) timeDraw(count, instances, false));
+        SWITCH_METAL_DIAGNOSTIC(dev_->stats.bandedDraws++; dev_->stats.bands += bands);
+        return;
+    }
+#endif
     if (cb_->batchWork_.operations)
         cutBatch();
-    const PixelBox area = {sc_[0], sc_[1], sc_[0] + sc_[2], sc_[1] + sc_[3]};
     emitBands(
         p_, rot_, area, drawBox_, bands,
         [&] {
@@ -111,9 +148,9 @@ void Device::learnCompleted()
 #if SWITCH_METAL_DIAGNOSTICS
             if (ns >= kLongDrawNs)
                 os_log(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
-                       "SwitchMetal: long draw %llu us k%016llx %llu kunits %u instr, learned %u ps a unit",
+                       "SwitchMetal: long draw %llu us k%016llx %llu kunits %u instr in %u bands, learned %u ps a unit",
                        (unsigned long long)(ns / 1000), (unsigned long long)t.key, (unsigned long long)(t.units / 1000),
-                       t.instructions, t.rate->psPerUnit.load(std::memory_order_relaxed));
+                       t.instructions, t.bands, t.rate->psPerUnit.load(std::memory_order_relaxed));
 #endif
             continue;
         }

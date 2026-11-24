@@ -81,6 +81,7 @@ bool RenderEncoder::drawnWhole(const Pipeline &pl) const
 void RenderEncoder::wholeDraw(const Pipeline &pl, bool indexed, uint32_t first, uint32_t count, uint32_t instances,
                               uint32_t baseVertex, uint32_t baseInstance)
 {
+    SWITCH_METAL_DIAGNOSTIC(if (drawUnits(instances) >= kMeasureUnits) dev_->stats.unpricedLarge++);
     if (amplifies()) {
         amplifyCall(pl, indexed, first, count, instances, baseVertex, baseInstance);
         return;
@@ -120,19 +121,23 @@ bool RenderEncoder::draw(uint32_t primitive, uint32_t first, uint32_t count, uin
     readBits_ |= pl->fetchBits;
     if (!count || !instances)
         return true;
-    if (orderedFetch(*pl, {primitive, count, instances, false, false})) {
-        if (primitive == icb::kPatchPrimitive) {
-            refuseFetch(*pl, FetchRefusal::Geometry, primitive, count, instances, why);
-            return false;
-        }
-        if (!prepare(pl, primitive, first, first, count, false, why))
-            return skippedDraw();
+    const bool ordered = orderedFetch(*pl, {primitive, count, instances, false, false});
+    if (ordered && primitive == icb::kPatchPrimitive) {
+        refuseFetch(*pl, FetchRefusal::Geometry, primitive, count, instances, why);
+        return false;
+    }
+    if (!prepare(pl, primitive, first, first, count, false, why))
+        return skippedDraw();
+    bool wholeQuad = instances == 1 && written_.lastNonOverlappingQuad();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (dev_->probeFetchRung.load(std::memory_order_relaxed) == kProbeBlendTwinTriangles)
+        wholeQuad = false;
+#endif
+    if (ordered && !wholeQuad) {
         fetchDraw(primitive, false, first, count, instances, first, baseInstance);
         cb_->draws++;
         return true;
     }
-    if (!prepare(pl, primitive, first, first, count, false, why))
-        return skippedDraw();
     cb_->draws += amplifies() ? amplifications_ : 1;
     const uint32_t drawnInstances = amplifies() ? instances * amplifications_ : instances;
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -187,6 +192,8 @@ void RenderEncoder::fetchDraw(uint32_t primitive, bool indexed, uint32_t first, 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
     dev_->stats.fetch.sequential++;
     dev_->stats.fetch.sequentialTriangles += uint64_t(primitives(primitive, count)) * instances;
+    if (drawUnits(instances) >= kMeasureUnits)
+        dev_->stats.unpricedLarge++;
 #endif
 }
 
@@ -230,7 +237,8 @@ Pipeline *RenderEncoder::fetchFreeFor(const Pipeline &pl)
 #endif
     if (!fetchFreeTaken(f, draw, forced))
         return nullptr;
-    if (f.rung == FetchBlend && ropLayers_[f.colour] < 255)
+    if (f.rung == FetchBlend && fixedBlendCountsLayer(uint16_t(t->format), draw.eightBitSources) &&
+        ropLayers_[f.colour] < 255)
         ropLayers_[f.colour]++;
     if (f.rung == FetchBlend)
         __atomic_store_n(&t->ropBlendSerial, cb_->serial, __ATOMIC_RELAXED);
@@ -368,7 +376,12 @@ bool RenderEncoder::drawIndexed(uint32_t primitive, uint32_t count, uint32_t ind
         ibEnd_ = last;
         ibSize_ = indexSize;
     }
-    if (ordered) {
+    bool wholeQuad = instances == 1 && written_.lastNonOverlappingQuad();
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+    if (dev_->probeFetchRung.load(std::memory_order_relaxed) == kProbeBlendTwinTriangles)
+        wholeQuad = false;
+#endif
+    if (ordered && !wholeQuad) {
         fetchDraw(primitive, true, 0, count, instances, uint32_t(baseVertex), baseInstance);
         cb_->draws++;
         return true;

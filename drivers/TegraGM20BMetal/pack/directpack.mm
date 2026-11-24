@@ -3,13 +3,14 @@
 // translation and the stage compile (third_party/mesa/src/nouveau/switch_compile, linked in), as the runtime makes a state
 // the pack lacks, with no device, pipeline, draw or capture: the translator's own libraries and functions
 // (runtime/TegraGM20BMetalOffline.h). directlink.py makes the pack of them.
-// usage: directpack <default.metallib> <corpus.log> <records.bin> [<selectors>]
+// usage: directpack <default.metallib> <corpus.log> <records.bin>
 // (PROBE_OWN_LIB, PROBE_LIB_ROOT and PROBE_LABEL as probe.mm reads them)
 //
 // records.bin, little-endian, per state: "DREC", the outcome (0 made, 1 refused, 2 failed), the key and the reason (u32 length,
 // bytes), then for a made state its PackPipeline (pack.h; vs 0, fs 1, no blob), its key string, its registers (u32 count,
 // method and value pairs: emit's), its vertex and fragment programs (header + code, shader data, constant buffer types:
-// each a u32 length and bytes), its constexpr sampler headers (u32 count, eight words each), which its entries number from 0,
+// each a u32 length and bytes, then a u32 of its register count, its bound-texture slot << 8 and its PackProgram::facts <<
+// 16), its constexpr sampler headers (u32 count, eight words each), which its entries number from 0,
 // and its fragment program's split: u32 0, or 1 and its PackSplit (no program indices), its per-pixel program and its prologue
 // (as the programs above; the prologue's header 80 bytes of zeros), its program variants, and the iterated blend program a
 // fetch-free form names (u32 length and bytes: ca/fetchfree.py, iterated/table.py; empty for any other record), then its
@@ -28,6 +29,9 @@
 // (runtime/pack.h PackComputeFacts: three u32).
 // And per state the corpus names, once: "DRFL", u32 0 for a render state (under its key less any variant name) or 1 for a
 // compute state (under a kernel key of it), the key, and its reflection (runtime/reflection_blob.h: u32 length, bytes).
+// And per corpus line that makes a render state: "DFKY", u32 24, its fast key (TegraGM20BMetalPipelineKey.h fastKey), the
+// keyHash its records are under (record.h packKeyHash of its key less any variant name) and its line's tier (probe_states.h
+// State::tier), each a u64.
 // A corpus line that makes no state is a refused DREC, and a D line that makes no kernel a refused DKRN, keyed by the line.
 // PROBE_DATA_LIBS names the directory of the corpus's data: libraries.
 #import <Foundation/Foundation.h>
@@ -43,7 +47,6 @@
 #include "direct_states.h"
 #include "fetch_free_make.h"
 #include "../TegraGM20BMetalOffline.h"
-#include "selector_configs.h"
 
 namespace {
 
@@ -107,7 +110,7 @@ void record(Writer &w, const std::string &key, gm20b::CompileOutcome outcome, co
         w.list(p.data);
         w.list(p.cbufTypes);
         w.list(p.farUbos);
-        w.u32(p.gprs | uint32_t(p.boundTextures) << 8);
+        w.u32(p.gprs | uint32_t(p.boundTextures) << 8 | gm20b::programFacts(p) << 16);
     };
     for (const gm20b::CapturedProgram &p : rec.programs)
         program(p);
@@ -140,14 +143,6 @@ void record(Writer &w, const std::string &key, gm20b::CompileOutcome outcome, co
         w.list(words);
     }
     w.list(rec.far);
-    w.u32(uint32_t(rec.selectors.size()));
-    if (!rec.selectors.empty())
-        w.u32(rec.selectorAssume);
-    for (const gm20b::RuntimeRecord::Selector &selector : rec.selectors) {
-        w.u32(selector.id);
-        program(selector.program);
-    }
-    w.list(rec.selectorGeneric);
     if (!rec.strideTwin)
         return;
     gm20b::RuntimeRecord twin = *rec.strideTwin;
@@ -184,7 +179,7 @@ void markCandidates(const std::string &line, gm20b::PackPipeline &p)
 // The depth and stencil test classes a state's draws ask its variant for (TegraGM20BMetalCubic.mm drawnRecord): a state that fetches
 // beside a depth or stencil attachment without the storage form, each class fragment_tests.h FragmentTests names above Any
 // (Pass, ReadOnly, DepthWrite, StencilWrite: 1-4) that its attachments' formats can reach (fragmentTests answers DepthWrite
-// only of a zeta with depth, StencilWrite only of one with stencil)
+// only of a zeta with depth, StencilWrite only of one with stencil, a Depth16Unorm's being testedZeta's)
 std::vector<uint8_t> testClasses(const gm20b::PackPipeline &p, const std::string &key)
 {
     unsigned depth = 0, stencil = 0;
@@ -195,7 +190,7 @@ std::vector<uint8_t> testClasses(const gm20b::PackPipeline &p, const std::string
     std::vector<uint8_t> classes = {1, 2};
     if (gm20b::zetaHasDepth(depth) || gm20b::zetaHasDepth(stencil))
         classes.push_back(3);
-    if (gm20b::zetaHasStencil(depth) || gm20b::zetaHasStencil(stencil))
+    if (gm20b::zetaHasStencil(gm20b::testedZeta(depth)) || gm20b::zetaHasStencil(stencil))
         classes.push_back(4);
     return classes;
 }
@@ -322,8 +317,8 @@ void kernel(Writer &w, const std::string &key, gm20b::CompileOutcome outcome, co
 int main(int argc, char **argv)
 {
     @autoreleasepool {
-        if (argc != 4 && argc != 5) {
-            fprintf(stderr, "usage: directpack <default.metallib> <corpus.log> <records.bin> [<selectors>]\n");
+        if (argc != 4) {
+            fprintf(stderr, "usage: directpack <default.metallib> <corpus.log> <records.bin>\n");
             return 2;
         }
         id<MTLDevice> libraries = (id<MTLDevice>)[GM20BOfflineDevice new];
@@ -351,16 +346,6 @@ int main(int argc, char **argv)
         rules.varying = gm20b::emittableMethods();
         gm20b::Direct direct(std::move(rules), false, offline::translator());
         direct.makeVariants(true);
-        std::map<uint64_t, gm20b::SelectorConfigs> selectors;
-        if (argc == 5) {
-            NSString *table = [NSString stringWithContentsOfFile:@(argv[4]) encoding:NSUTF8StringEncoding error:nil];
-            std::string why;
-            if (!table || !pack::readSelectorConfigs(table.UTF8String, selectors, why)) {
-                fprintf(stderr, "directpack: selectors: %s\n", table ? why.c_str() : "unread table");
-                return 1;
-            }
-            direct.selectorConfigs(&selectors);
-        }
         direct.keepBoundDraws(true);
         Counts counts;
         std::set<std::string> reflected;
@@ -371,6 +356,9 @@ int main(int argc, char **argv)
                 textures.cubic = s.cubic;
                 makeState(direct, w, qc, line, textures, s, counts);
                 const std::string state = s.key.substr(0, gm20b::variantNameAt(s.key));
+                const uint64_t keys[3] = {s.fast, gm20b::packKeyHash(state), s.tier};
+                fwrite("DFKY", 1, 4, w.f);
+                w.bytes(keys, sizeof keys);
                 if (reflected.insert(state).second) {
                     std::string blob, why;
                     const bool made = offline::renderReflection(s.d, blob, why);

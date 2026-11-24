@@ -12,8 +12,13 @@ __attribute__((objc_externally_retained)) inline void planPassUses(SwitchMetalCo
     const size_t end = cb->_plan.encoderEnd(begin);
     for (size_t i = begin + 1; i + 1 < end; ++i) {
         const Op op = cb->_plan.operation(i).op;
-        if (op == OpWaitFence || (isPlanDraw(op) && !cb->_plan.renderStates[cb->_plan.draw(i).state].usesFinal))
+        if (op == OpWaitFence)
             uses.known = false;
+        if (isPlanDraw(op) && !cb->_plan.renderStates[cb->_plan.draw(i).state].usesFinal) {
+            uses.known = false;
+            uses.shaderWrites = true;
+            uses.bufferWrites = true;
+        }
     }
     const SwitchMetalPass &pass = cb->_passes[cb->_plan.legacy(begin).x];
     const auto attachment = [&](void *object) {
@@ -29,18 +34,25 @@ __attribute__((objc_externally_retained)) inline void planPassUses(SwitchMetalCo
         case SwitchMetalResourceKind::Sampler:
             return;
         case SwitchMetalResourceKind::Buffer:
-            if (use.access & gm20b::ResourceUse::Write)
+            if (use.access & gm20b::ResourceUse::Write) {
                 uses.known = false;
+                uses.shaderWrites = true;
+                uses.bufferWrites = true;
+            }
             return;
         case SwitchMetalResourceKind::Texture:
             break;
         default:
             uses.known = false;
+            uses.shaderWrites = true;
+            uses.bufferWrites = true;
             return;
         }
         const bool target = attachment(use.object);
-        if ((use.access & gm20b::ResourceUse::Write) && !target)
+        if ((use.access & gm20b::ResourceUse::Write) && !target) {
             uses.known = false;
+            uses.shaderWrites = true;
+        }
         if (target && !(use.access & (gm20b::ResourceUse::Sample | gm20b::ResourceUse::Explicit)))
             return;
         if (use.access & reads) {
@@ -48,6 +60,9 @@ __attribute__((objc_externally_retained)) inline void planPassUses(SwitchMetalCo
             uses.sample(gm20b::hazardImage(texture->_raw), use.access & gm20b::ResourceUse::Explicit);
         }
     });
-    if (!cached)
+    if (!cached) {
         uses.known = false;
+        uses.shaderWrites = true;
+        uses.bufferWrites = true;
+    }
 }

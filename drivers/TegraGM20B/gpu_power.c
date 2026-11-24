@@ -165,6 +165,7 @@ static void sleep_nvkm(void)
 		nvxnu_panic("tegra-gm20b: sleep: L2 flush still busy after 2 s (%08x)",
 			    nvkm_rd32(device, 0x070010));
 	}
+	tgm_clk_suspend(device);
 	ret = nvkm_device_fini(device, NVKM_SUSPEND);
 	if (ret)
 		nvxnu_panic("tegra-gm20b: sleep: nvkm device suspend failed: %d", ret);

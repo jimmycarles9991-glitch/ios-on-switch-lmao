@@ -131,8 +131,9 @@ inline uint32_t *entryOpening(Push &p, EntryForm f)
     return word;
 }
 
-// A pass's opening (today switch_gm20b_pass_barrier without the tiled flush, which the pass before ends with)
-inline Opened passOpening(Push &p, PassForm pass, SwitchForm switchForm, EntryForm entry, BarrierEngine before)
+// A pass's opening (today switch_gm20b_pass_drain without the tiled flush, which the pass before ends with)
+inline Opened passOpening(Push &p, PassForm pass, SwitchForm switchForm, EntryForm entry, BarrierEngine before,
+                          bool invalidateConstants = false)
 {
     if (before == BarrierEngine::None && relaxed(entry))
         return Opened::First;
@@ -149,7 +150,7 @@ inline Opened passOpening(Push &p, PassForm pass, SwitchForm switchForm, EntryFo
         }
         return Opened::Switch;
     }
-    barrier_forms_detail::barrier(p, switch_gm20b_pass_barrier, false);
+    barrier_forms_detail::barrier(p, switch_gm20b_pass_drain, invalidateConstants || before != BarrierEngine::ThreeD);
     return Opened::Today;
 }
 

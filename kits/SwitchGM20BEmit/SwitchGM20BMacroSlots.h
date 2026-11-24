@@ -48,6 +48,7 @@ enum {
     // barrier, of vertices and of indices: its words in Vulkan's indirect order, the call's data or a GPFIFO continuation
     SWITCH_GM20B_MACRO_FETCH_DRAW,
     SWITCH_GM20B_MACRO_FETCH_DRAW_INDEXED,
+    SWITCH_GM20B_MACRO_BAND_DRAW,
     SWITCH_GM20B_MACRO_METAL_END,  // one past the driver's last slot
 };
 
@@ -55,11 +56,11 @@ enum {
     SWITCH_GM20B_SCRATCH_WORDS = 128,   // SET_MME_SHADOW_SCRATCH(i): MME_FERMI_SCRATCH_COUNT
     SWITCH_GM20B_SCRATCH_FECS_END = 3,  // NVK_MME_SCRATCH_FALCON_2 + 1
     SWITCH_GM20B_SCRATCH_ROOT_HI = 26,  // NVK_MME_SCRATCH_CB0_ADDR_HI: the root table's address, high then low
-    // the fetch macros' (the driver's RenderEncoder writes them before each call): the vertices or indices of an
-    // instance's first BEGIN and of each one after it, then the BEGIN words of an instance's first BEGIN, of a later
-    // instance's and of every one after the first in an instance (FETCH_BEGIN is also the bit an instance's last BEGIN
-    // flips to end its split draw); and whether an indirect command buffer's execute draws its commands so (1) or whole
-    // (0), each command's sizes then from the topology it sets
+    // the fetch macros' (the driver's RenderEncoder writes them before each call): the vertices or indices of a
+    // primitive and those from one primitive's first to the next's, then the BEGIN words of an instance's first BEGIN,
+    // of a later instance's and of every one after the first in an instance (FETCH_BEGIN is also the bit an instance's
+    // last BEGIN flips to end its split draw); and whether an indirect command buffer's execute draws its commands so
+    // (1) or whole (0), each command's sizes then from the topology it sets
     SWITCH_GM20B_SCRATCH_FETCH_FIRST = SWITCH_GM20B_SCRATCH_ROOT_HI + 2,
     SWITCH_GM20B_SCRATCH_FETCH_STEP,
     SWITCH_GM20B_SCRATCH_FETCH_BEGIN,

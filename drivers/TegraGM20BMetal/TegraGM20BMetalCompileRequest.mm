@@ -46,6 +46,7 @@ void applyFields(const PipelineFields &f, MTLRenderPipelineDescriptor *d)
     d.maxVertexAmplificationCount = f.amplification;
     if (f.textureWriteRounding)
         [d setValue:@(f.textureWriteRounding) forKey:@"textureWriteRoundingMode"];
+    d.alphaToCoverageEnabled = f.alphaToCoverage != 0;
     const TessellationFields &t = f.tessellation;
     d.tessellationPartitionMode = MTLTessellationPartitionMode(t.partition);
     d.tessellationFactorFormat = MTLTessellationFactorFormat(t.factorFormat);

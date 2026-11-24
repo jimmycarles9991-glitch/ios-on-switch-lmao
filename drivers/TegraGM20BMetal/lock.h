@@ -6,6 +6,10 @@
 #include <cstdint>
 #include <mutex>
 
+#if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
+#include <mach/mach_time.h>
+#endif
+
 namespace gm20b {
 
 #if !defined(SWITCH_DEBUG) || SWITCH_DEBUG
@@ -30,6 +34,23 @@ public:
         return sum;
     }
 
+    // A lock this thread found held, and the mach_absolute_time ticks it waited for it
+    static void waited(uint64_t ticks)
+    {
+        Thread &t = mine();
+        t.waits++;
+        t.waitTicks += ticks;
+    }
+
+    // This thread's: the locks it took, and those it waited for and how long
+    static void here(uint64_t &taken, uint64_t &waits, uint64_t &waitTicks)
+    {
+        const Thread &t = mine();
+        taken = t.taken.load(std::memory_order_relaxed);
+        waits = t.waits;
+        waitTicks = t.waitTicks;
+    }
+
 private:
     struct Thread;
 
@@ -41,6 +62,7 @@ private:
 
     struct Thread {
         std::atomic<uint64_t> taken{0};
+        uint64_t waits = 0, waitTicks = 0;
         Thread *next = nullptr, *prev = nullptr;
 
         Thread()
@@ -82,9 +104,23 @@ inline void countLock()
 {
     LockCount::taken();
 }
+
+template <typename Native> void lockTimed(Native &m) __attribute__((no_thread_safety_analysis))
+{
+    if (m.try_lock())
+        return;
+    const uint64_t began = mach_absolute_time();
+    m.lock();
+    LockCount::waited(mach_absolute_time() - began);
+}
 #else
 inline void countLock()
 {}
+
+template <typename Native> void lockTimed(Native &m) __attribute__((no_thread_safety_analysis))
+{
+    m.lock();
+}
 #endif
 
 // A capability to -Wthread-safety as the std mutex it wraps is; its own body is not analysed (it holds the std one)
@@ -92,7 +128,7 @@ template <typename Native> class __attribute__((capability("mutex"))) CountedMut
 public:
     void lock() __attribute__((acquire_capability(), no_thread_safety_analysis))
     {
-        m_.lock();
+        lockTimed(m_);
         countLock();
     }
 

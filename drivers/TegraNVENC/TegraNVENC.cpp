@@ -504,7 +504,17 @@ int check(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, T
         avail[i] = blocks[i].size - e->offset;
     }
     *why = tegra_nvenc_check(s, avail);
-    return *why ? -22 : 0;
+    if (*why)
+        return -22;
+    for (uint32_t i = 0; i < s->clean_count; i++) {
+        const TegraNVENCRange *r = &s->clean[i];
+        TegraNVENCBlock b;
+        if (!resolve(context, r->handle, &b) || static_cast<uint64_t>(r->offset) + r->length > b.size) {
+            *why = "clean range";
+            return -22;
+        }
+    }
+    return 0;
 }
 
 int run(const TegraNVENCSubmit *s, TegraNVENCResolve resolve, void *context, const TegraNVENCAfter *after,

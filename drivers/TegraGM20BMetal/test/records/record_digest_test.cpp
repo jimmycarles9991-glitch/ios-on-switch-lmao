@@ -326,4 +326,27 @@ TEST(RecordDigest, RowsRoundTripThroughTheirFile)
     }
 }
 
+TEST(RecordDigest, AStrideTwinDigestsByItsKeyWhereverTheTwinSits)
+{
+    const auto withTwin = [](const char *name, const std::vector<uint64_t> &keys, size_t twinIndex) {
+        Built b;
+        for (uint64_t key : keys) {
+            PackPipeline pp = {};
+            pp.fs = addProgram(b, 0x11, uint8_t(key));
+            pp.vs = addProgram(b, 0x22, uint8_t(key));
+            pp.keyHash = key;
+            pp.keyString = b.string("state " + std::to_string(key));
+            if (key == 5)
+                pp.strideTwin = twinIndex + 1;
+            b.pipelines.push_back(pp);
+        }
+        return state(load(write(name, b)), 5);
+    };
+    const records::Record a = withTwin("tw1.bin", {5, 9}, 1);
+    const records::Record b = withTwin("tw2.bin", {1, 5, 9}, 2);
+    const records::Record c = withTwin("tw3.bin", {5, 11}, 1);
+    EXPECT_EQ(records::digest(a.sections), records::digest(b.sections));
+    EXPECT_NE(records::sectionHashes(a).at("tail"), records::sectionHashes(c).at("tail"));
+}
+
 }  // namespace

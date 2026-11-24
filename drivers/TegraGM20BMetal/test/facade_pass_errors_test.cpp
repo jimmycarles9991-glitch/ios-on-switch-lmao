@@ -291,15 +291,15 @@ void codesResolvesOfAnyShapeAreRaws()
 {
     id<MTLDevice> device = openPacked();
     ASSERT_TRUE(device != nil);
-    id<MTLTexture> four = texture(device, MTLPixelFormatRGBA8Snorm, 4);
-    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Snorm
+    id<MTLTexture> four = texture(device, MTLPixelFormatRGBA16Snorm, 4);
+    MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Snorm
                                                                                  width:128
                                                                                 height:128
                                                                              mipmapped:YES];
     d.storageMode = MTLStorageModePrivate;
     d.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     id<MTLTexture> chain = [device newTextureWithDescriptor:d];
-    id<MTLTexture> into = texture(device, MTLPixelFormatRGBA8Snorm);
+    id<MTLTexture> into = texture(device, MTLPixelFormatRGBA16Snorm);
     ASSERT_TRUE(four != nil && chain != nil && into != nil);
     MTLRenderPassDescriptor *level = colourPass(four);
     level.colorAttachments[0].resolveTexture = chain;
@@ -312,6 +312,34 @@ void codesResolvesOfAnyShapeAreRaws()
     area.renderTargetWidth = 40;
     area.renderTargetHeight = 24;
     expectRaw(device, area);
+}
+
+// The 2D engine's box of 8-bit signed codes rounds a tie toward zero where an M4 Max rounds it up (gpu.gm20b.resolve_codes,
+// boot 2): an 8-bit signed normalized resolve is a pass of the pack's state of its codes and leaves the engine alone; a
+// 16-bit one stays the engine's
+void eightBitSignedResolvesTakeTheirStates()
+{
+    const MTLPixelFormat eightBit[] = {MTLPixelFormatR8Snorm, MTLPixelFormatRG8Snorm, MTLPixelFormatRGBA8Snorm};
+    std::vector<std::pair<std::string, MTLPixelFormat>> states;
+    for (const MTLPixelFormat format : eightBit)
+        if (const char *state = gm20b::resolveState(uint32_t(format), 4))
+            states.push_back({state, format});
+    id<MTLDevice> device = open(writePack(packKey(MTLPixelFormatBGRA8Unorm), {}, {}, true, "", states));
+    ASSERT_TRUE(device != nil);
+    for (const MTLPixelFormat format :
+         {MTLPixelFormatR8Snorm, MTLPixelFormatRG8Snorm, MTLPixelFormatRGBA8Snorm, MTLPixelFormatRGBA16Snorm}) {
+        id<MTLTexture> four = texture(device, format, 4);
+        id<MTLTexture> into = texture(device, format);
+        ASSERT_TRUE(four != nil && into != nil);
+        MTLRenderPassDescriptor *p = colourPass(four);
+        p.colorAttachments[0].resolveTexture = into;
+        p.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+        const long long engine = [counters(device)[@"resolve_twod"] longLongValue];
+        expectRaw(device, p);
+        EXPECT_EQ([counters(device)[@"resolve_twod"] longLongValue] - engine,
+                  format == MTLPixelFormatRGBA16Snorm ? 1 : 0)
+            << "format " << format;
+    }
 }
 
 // A view of some layers of a mipmapped 2D array is no target as a whole: its slice is, its layers its parent's whole
@@ -470,6 +498,11 @@ TEST(GM20BFacadePassErrors, ASliceOfAViewOfAMipmappedArrayIsRaws)
 TEST(GM20BFacadePassErrors, CodesResolvesOfAnyShapeAreRaws)
 {
     switch_ios::test::ExpectPassesInFreshProcess(codesResolvesOfAnyShapeAreRaws);
+}
+
+TEST(GM20BFacadePassErrors, EightBitSignedResolvesTakeTheirStatesAndSixteenBitOnesTheEngine)
+{
+    switch_ios::test::ExpectPassesInFreshProcess(eightBitSignedResolvesTakeTheirStates);
 }
 
 TEST(GM20BFacadePassErrors, AMultisampledStandInTargetAndItsResolveAreRaws)

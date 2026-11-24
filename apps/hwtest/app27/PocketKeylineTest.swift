@@ -99,7 +99,7 @@ struct PocketKeylineTest: HWTest {
         let directory = context.documents.appendingPathComponent("ui").appendingPathComponent(id)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         for (name, image) in [("render", picture)] + images {
-            try? image.png()?.write(to: directory.appendingPathComponent("\(name).png"))
+            try? image.png()?.place(at: directory.appendingPathComponent("\(name).png"))
         }
         return .fail(LogLine.fitted(reasons), all)
     }

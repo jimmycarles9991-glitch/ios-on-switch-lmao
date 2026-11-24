@@ -3,8 +3,9 @@ import Foundation
 /// How a picture compares with the same picture drawn on a Mac's GPU. exact: the same bytes. close: every 8x8 block's
 /// mean within three steps of the format (at least 0.004) plus 1% of its magnitude, which is what another GPU's
 /// filtering and half-precision rounding move it by; a wrong blend factor, format, swizzle or texture moves it further.
+/// malformed: the golden file has a line for the picture that names no signature (CAGoldens.malformed).
 public enum GoldenVerdict: String, Sendable {
-    case exact, close, wrong, missing
+    case exact, close, wrong, missing, malformed
 
     public var holds: Bool { self == .exact || self == .close }
 
@@ -28,6 +29,11 @@ public struct SceneGoldens: Sendable {
 
     public func golden(scene: String, picture: String) -> Signature? {
         goldens.states[Self.key(scene: scene, picture: picture)]?[0]
+    }
+
+    /// The picture's golden line where it names no signature
+    public func malformed(scene: String, picture: String) -> String? {
+        goldens.malformed[Self.key(scene: scene, picture: picture)]
     }
 
     public static func key(scene: String, picture: String) -> String { scene + "/" + picture }

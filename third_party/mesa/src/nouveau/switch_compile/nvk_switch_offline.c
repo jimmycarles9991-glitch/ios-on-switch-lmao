@@ -19,7 +19,6 @@
 #include "nvk_switch_round.h"
 #include "nvk_switch_split.h"
 #include "nvk_switch_turn.h"
-#include "nvk_switch_ubo_fold.h"
 #include "nvk_switch_xr_planes.h"
 
 #include "vk_graphics_state.h"
@@ -290,10 +289,6 @@ switch_compile_stage(const struct switch_nak_frozen *frozen,
    struct switch_nvk_const_push push = {.mask = info->const_push_mask};
    memcpy(push.words, info->const_push_words, sizeof(push.words));
    switch_nvk_const_push_current = push.mask ? &push : NULL;
-   struct switch_nvk_ubo_fold ubo = {.desc = info->ubo_fold_desc,
-                                     .mask = info->ubo_fold_mask};
-   memcpy(ubo.bytes, info->ubo_fold_bytes, sizeof(ubo.bytes));
-   switch_nvk_ubo_fold_current = ubo.mask ? &ubo : NULL;
    switch_nvk_half_targets_current = info->half_targets;
    switch_nvk_split_current = info->split;
    switch_nvk_center_frag_depth_current = info->center_frag_depth != 0;
@@ -304,7 +299,6 @@ switch_compile_stage(const struct switch_nak_frozen *frozen,
    bool native_used = false;
    VkResult result = compile(frozen, info, &l, shader, &native_used);
    switch_nvk_const_push_current = NULL;
-   switch_nvk_ubo_fold_current = NULL;
    switch_nvk_half_targets_current = 0;
    switch_nvk_split_current = false;
    switch_nvk_center_frag_depth_current = false;

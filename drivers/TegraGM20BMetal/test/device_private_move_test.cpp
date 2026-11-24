@@ -339,4 +339,245 @@ TEST_F(DevicePrivateComp, AWantRefusedForAShortageAsksAgainWhenMemoryIsGivenBack
     dev.destroyTexture(t);
 }
 
+TEST_F(DevicePrivateComp, StoredDepth32FloatAndDepth32Stencil8EvictIdleReadyMemoryOnShortageAndMove)
+{
+    static std::atomic<int> failCompressible{0};
+    auto failOnce = [](uint32_t method, const void *input) -> int {
+        if (method == TegraGM20BMethodBoAlloc &&
+            (static_cast<const TegraGM20BAbiBoAlloc *>(input)->flags & TegraGM20BBoCompressible)) {
+            int expected = failCompressible.load(std::memory_order_relaxed);
+            while (expected > 0 && !failCompressible.compare_exchange_weak(expected, expected - 1))
+                continue;
+            if (expected > 0)
+                return kIOReturnNoMemory;
+        }
+        return KERN_SUCCESS;
+    };
+    commitEmpty();
+    const std::pair<uint32_t, uint32_t> cases[] = {
+        {252u, gm20b::kCompKindZF32},
+        {260u, gm20b::kCompKindZeta},
+    };
+    for (const auto &[format, kind] : cases) {
+        gm20b::Texture holderA, holderB;
+        compressedSecond(holderA, holderB, [&](gm20b::Texture &x) {
+            return dev.createCompressedTexture(1280, 720, kBGRA8, gm20b::kCompKindC32, x) ||
+                   dev.createTexture(1280, 720, kBGRA8, x, false, true);
+        });
+        dev.destroyTexture(holderB);
+        dev.destroyTexture(holderA);
+        ASSERT_GE(gm20b::DeviceHarness::compReady(dev), 1u);
+
+        const size_t freedBefore = kernel_model::model.freed.size();
+        failCompressible.store(1, std::memory_order_release);
+        kernel_model::arriving.store(failOnce, std::memory_order_release);
+
+        gm20b::Texture z;
+        ASSERT_TRUE(dev.createOwnedZeta(1280, 720, format, 1, true, z)) << format;
+        ASSERT_FALSE(z.comptags);
+        ASSERT_TRUE(dev.wantCompressed(z, kind, &z)) << format;
+        settle();
+        kernel_model::arriving.store(nullptr, std::memory_order_release);
+
+        EXPECT_EQ(failCompressible.load(std::memory_order_acquire), 0) << format;
+        EXPECT_GT(kernel_model::model.freed.size(), freedBefore) << format;
+        EXPECT_TRUE(dev.privateMoveDue()) << format;
+        EXPECT_EQ(look(dev), std::vector<void *>{&z}) << format;
+        commitEmpty();
+        ASSERT_TRUE(dev.compressedFromPlain(z)) << format;
+        EXPECT_TRUE(z.comptags) << format;
+        EXPECT_TRUE(bound(kind)) << format;
+        commitEmpty();
+        dev.destroyTexture(z);
+    }
+}
+
+TEST_F(DevicePrivateComp, ActivePrivateWantReadyBoIsNotEvictedOrStrandedOnShortage)
+{
+    gm20b::Texture active;
+    zoomTarget(active);
+    awaitMade();
+    ASSERT_EQ(gm20b::DeviceHarness::compReady(dev), 1u);
+    ASSERT_TRUE(dev.privateMoveDue());
+
+    auto failAll = [](uint32_t method, const void *input) -> int {
+        if (method == TegraGM20BMethodBoAlloc &&
+            (static_cast<const TegraGM20BAbiBoAlloc *>(input)->flags & TegraGM20BBoCompressible))
+            return kIOReturnNoMemory;
+        return KERN_SUCCESS;
+    };
+    const size_t freedBefore = kernel_model::model.freed.size();
+    kernel_model::arriving.store(failAll, std::memory_order_release);
+
+    gm20b::Texture z;
+    ASSERT_TRUE(dev.createOwnedZeta(1280, 720, 252, 1, true, z));
+    ASSERT_TRUE(dev.wantCompressed(z, gm20b::kCompKindZF32, &z));
+    settle();
+    kernel_model::arriving.store(nullptr, std::memory_order_release);
+
+    EXPECT_EQ(kernel_model::model.freed.size(), freedBefore);
+    EXPECT_EQ(gm20b::DeviceHarness::compReady(dev), 1u);
+    EXPECT_TRUE(dev.privateMoveDue());
+    EXPECT_EQ(look(dev), std::vector<void *>{&active});
+    commitEmpty();
+    EXPECT_TRUE(dev.compressedFromPlain(active));
+    EXPECT_TRUE(active.comptags);
+    commitEmpty();
+    dev.destroyTexture(z);
+    dev.destroyTexture(active);
+}
+
+TEST_F(DevicePrivateComp, UnsatisfiableLargeWantPreservesActiveReadyBoAndDoesNotLoop)
+{
+    gm20b::Texture idleA, idleB, active;
+    compressedSecond(idleA, idleB, [&](gm20b::Texture &x) {
+        return dev.createCompressedTexture(256, 256, kBGRA8, gm20b::kCompKindC32, x) ||
+               dev.createTexture(256, 256, kBGRA8, x, false, true);
+    });
+    dev.destroyTexture(idleB);
+    dev.destroyTexture(idleA);
+    ASSERT_EQ(gm20b::DeviceHarness::compReady(dev), 1u);
+
+    ASSERT_FALSE(dev.createCompressedTexture(512, 512, kBGRA8, gm20b::kCompKindC32, active));
+    ASSERT_TRUE(dev.createTexture(512, 512, kBGRA8, active, false, true));
+    ASSERT_TRUE(dev.wantCompressed(active, gm20b::kCompKindC32, &active));
+    settle();
+    ASSERT_EQ(gm20b::DeviceHarness::compReady(dev), 2u);
+
+    static std::atomic<int> largeAttempts{0};
+    largeAttempts.store(0, std::memory_order_relaxed);
+    auto refuseLarge = [](uint32_t method, const void *input) -> int {
+        const auto *a = static_cast<const TegraGM20BAbiBoAlloc *>(input);
+        if (method == TegraGM20BMethodBoAlloc && (a->flags & TegraGM20BBoCompressible) && a->bytes >= (4ull << 20)) {
+            largeAttempts.fetch_add(1, std::memory_order_relaxed);
+            return kIOReturnNoMemory;
+        }
+        return KERN_SUCCESS;
+    };
+    kernel_model::arriving.store(refuseLarge, std::memory_order_release);
+
+    gm20b::Texture large;
+    ASSERT_TRUE(dev.createOwnedZeta(2048, 2048, 260, 1, true, large));
+    ASSERT_TRUE(dev.wantCompressed(large, gm20b::kCompKindZeta, &large));
+    settle();
+    kernel_model::arriving.store(nullptr, std::memory_order_release);
+
+    EXPECT_EQ(largeAttempts.load(std::memory_order_acquire), 2);
+    EXPECT_EQ(gm20b::DeviceHarness::compReady(dev), 1u);
+    EXPECT_EQ(look(dev), std::vector<void *>{&active});
+    commitEmpty();
+    EXPECT_TRUE(dev.compressedFromPlain(active));
+    EXPECT_TRUE(active.comptags);
+    commitEmpty();
+    dev.destroyTexture(large);
+    dev.destroyTexture(active);
+}
+
+TEST_F(DevicePrivateComp, EvictingIdleReadyMemoryOnFailureWakesSmallerRefusedWants)
+{
+    gm20b::Texture holder, smallZ, largeZ;
+    ASSERT_FALSE(dev.createCompressedTexture(1280, 720, kBGRA8, gm20b::kCompKindC32, holder));
+    ASSERT_TRUE(dev.createTexture(1280, 720, kBGRA8, holder, false, true));
+    ASSERT_TRUE(dev.wantCompressed(holder, gm20b::kCompKindC32, &holder));
+    awaitMade();
+    ASSERT_EQ(gm20b::DeviceHarness::compReady(dev), 1u);
+
+    auto refuseAll = [](uint32_t method, const void *input) -> int {
+        if (method == TegraGM20BMethodBoAlloc &&
+            (static_cast<const TegraGM20BAbiBoAlloc *>(input)->flags & TegraGM20BBoCompressible))
+            return kIOReturnNoMemory;
+        return KERN_SUCCESS;
+    };
+    kernel_model::arriving.store(refuseAll, std::memory_order_release);
+    ASSERT_TRUE(dev.createOwnedZeta(256, 256, 252, 1, true, smallZ));
+    ASSERT_TRUE(dev.wantCompressed(smallZ, gm20b::kCompKindZF32, &smallZ));
+    settle();
+    kernel_model::arriving.store(nullptr, std::memory_order_release);
+
+    // Dropping the unmoved plain holder makes its C32 ready BO truly idle without calling compGaveBack.
+    dev.destroyTexture(holder);
+    ASSERT_EQ(gm20b::DeviceHarness::compReady(dev), 1u);
+    EXPECT_TRUE(look(dev).empty());
+
+    auto refuseLargeOnly = [](uint32_t method, const void *input) -> int {
+        const auto *a = static_cast<const TegraGM20BAbiBoAlloc *>(input);
+        if (method == TegraGM20BMethodBoAlloc && (a->flags & TegraGM20BBoCompressible) && a->bytes >= (8ull << 20))
+            return kIOReturnNoMemory;
+        return KERN_SUCCESS;
+    };
+    kernel_model::arriving.store(refuseLargeOnly, std::memory_order_release);
+    ASSERT_TRUE(dev.createOwnedZeta(2048, 2048, 260, 1, true, largeZ));
+    ASSERT_TRUE(dev.wantCompressed(largeZ, gm20b::kCompKindZeta, &largeZ));
+    settle();
+    kernel_model::arriving.store(nullptr, std::memory_order_release);
+
+    EXPECT_TRUE(dev.privateMoveDue());
+    EXPECT_EQ(look(dev), std::vector<void *>{&smallZ});
+    commitEmpty();
+    EXPECT_TRUE(dev.compressedFromPlain(smallZ));
+    EXPECT_TRUE(smallZ.comptags);
+    commitEmpty();
+    dev.destroyTexture(largeZ);
+    dev.destroyTexture(smallZ);
+}
+
+TEST(DeviceContext, ChannelContextDisablesZcullStats)
+{
+    kernel_model::model = {};
+    const auto zcullStatsValues = [](const std::vector<uint32_t> &words) {
+        std::vector<uint32_t> out;
+        for (size_t at = 0; at < words.size();) {
+            const uint32_t h = words[at++], form = h >> 29, count = (h >> 16) & 0x1fff, subc = (h >> 13) & 7,
+                           method = (h & 0xfff) << 2;
+            if (!h)
+                continue;
+            if (form == 4) {
+                if (subc == 0 && method == NVB197_SET_ZCULL_STATS)
+                    out.push_back(count);
+                continue;
+            }
+            for (uint32_t i = 0; i < count && at < words.size(); i++, at++) {
+                const uint32_t m = form == 3 ? method : form == 5 && i ? method + 4 : method + 4 * (form == 1 ? i : 0);
+                if (subc == 0 && m == NVB197_SET_ZCULL_STATS)
+                    out.push_back(words[at]);
+            }
+        }
+        return out;
+    };
+
+    const char *dir = getenv("TEST_TMPDIR");
+    const std::string path = std::string(dir ? dir : "/tmp") + "/zcull-stats-pack.bin";
+    gm20b::PackHeader header{};
+    memcpy(header.magic, "GM20BPK1", 8);
+    header.version = gm20b::kPackVersion;
+    const gm20b::PackInitMethod init[] = {{0, NVB197_SET_ZCULL_STATS, NVB197_SET_ZCULL_STATS_ENABLE_TRUE, 0}};
+    const uint32_t baseline[] = {NVB197_SET_ZCULL_STATS, NVB197_SET_ZCULL_STATS_ENABLE_TRUE};
+    const uint64_t initOff = sizeof(header);
+    const uint64_t baseOff = initOff + sizeof(init);
+    for (auto &s : header.section)
+        s.offset = initOff;
+    header.section[gm20b::PackInit] = {initOff, sizeof(init)};
+    header.section[gm20b::PackBaseline] = {baseOff, sizeof(baseline)};
+    {
+        FILE *f = fopen(path.c_str(), "wb");
+        ASSERT_NE(f, nullptr);
+        fwrite(&header, 1, sizeof(header), f);
+        fwrite(init, 1, sizeof(init), f);
+        fwrite(baseline, 1, sizeof(baseline), f);
+        fclose(f);
+    }
+
+    gm20b::Device packDev;
+    std::string err;
+    ASSERT_TRUE(packDev.open(path.c_str(), 0, err, gm20b::Device::Role::Client)) << err;
+    gm20b::CommandBuffer *cb = packDev.begin();
+    ASSERT_NE(cb, nullptr);
+    uint32_t seqno = 0;
+    ASSERT_TRUE(cb->commit(seqno));
+    ASSERT_FALSE(kernel_model::model.jobs.empty());
+    EXPECT_EQ(zcullStatsValues(kernel_model::model.jobs.front().words),
+              (std::vector<uint32_t>{NVB197_SET_ZCULL_STATS_ENABLE_FALSE}));
+    remove(path.c_str());
+}
+
 }  // namespace

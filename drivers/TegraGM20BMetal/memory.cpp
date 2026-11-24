@@ -7,11 +7,12 @@
 #include "TegraGM20BLayout.h"
 
 #include <CoreFoundation/CoreFoundation.h>
-#include <mach/mach.h>
 #include <os/log.h>
 #include <pthread.h>
+#include <stdlib.h>
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 
 #include "gm20b_gpu_internal.h"
 
@@ -36,7 +37,7 @@ uint64_t Device::chunkSize(const std::vector<Chunk> &chunks, uint64_t cap, uint6
     if (role_ == Role::Client) {
         uint64_t held = 0;
         for (const Chunk &ch : chunks)
-            if (!ch.dedicated)
+            if (ch.park == ChunkPark::Live && ch.memory && !ch.dedicated)
                 held += ch.bytes;
         size = std::clamp(held, cap / kClientFirstShare, cap);
     }
@@ -44,45 +45,38 @@ uint64_t Device::chunkSize(const std::vector<Chunk> &chunks, uint64_t cap, uint6
     return (size + align - 1) & ~(align - 1);
 }
 
-// The render server's chunks are cached BoAllocs, which the kernel serves from its spares: pages wired, zeroed by the
-// copy engine and cleaned ahead of time, so a chunk costs a BO and a bind, not a wiring of fresh anonymous pages that the
-// CPU zero-fills (r7l, boot 21: ~9 ms for 16 MiB, on the render thread when a burst outran the grower). A chunk given back
-// returns to those spares. A client's stay imports of its own anonymous pages: m2v twins a client's raw memory by importing
-// its CPU range, and a kernel BO's view must not be freed under another import of its mapping (TegraGM20BUserClientPool.cpp).
-bool Device::chunkMemory(uint64_t size, uint32_t kind, std::unique_lock<gm20b::Mutex> *unlocked, Chunk &ch)
+// lock_ held through `l` (released across the kernel's call); the chunk's index in chunks_
+bool Device::newChunk(uint64_t size, bool dedicated, std::unique_lock<gm20b::Mutex> &l, uint32_t &index)
 {
-    vm_address_t host = 0;
-    const bool kernelMemory = role_ == Role::RenderServer;
-    if (!kernelMemory && vm_allocate(mach_task_self(), &host, size, VM_FLAGS_ANYWHERE) != KERN_SUCCESS)
+    if (closing_)
         return false;
-    if (unlocked)
-        unlocked->unlock();
-    const bool made = kernelMemory ? k_.alloc(size, false, ch.bo, kind, kChunkVaAlign)
-                                   : k_.importPages(reinterpret_cast<void *>(host), size, ch.bo);
-    if (unlocked)
-        unlocked->lock();
-    if (!made || (!kernelMemory && !k_.bindImport(reinterpret_cast<void *>(host), ch.bo, kind))) {
-        if (ch.bo.handle)
-            k_.free(ch.bo);
-        if (host)
-            vm_deallocate(mach_task_self(), host, size);
-        return false;
-    }
-    ch.memory = kernelMemory ? ch.bo.cpu : reinterpret_cast<void *>(host);
-    ch.bytes = size;
-    ch.hostPages = !kernelMemory;
-    return true;
-}
-
-// lock_ held (`unlocked`: the caller's lock, let go for the kernel's call and taken again); the chunk's index in chunks_
-bool Device::newChunk(uint64_t size, bool dedicated, std::unique_lock<gm20b::Mutex> *unlocked, uint32_t &index)
-{
     Chunk ch;
     ch.dedicated = dedicated;
-    if (!chunkMemory(size, kPteKindPitch, unlocked, ch))
+    ++offLockChunkOps_;
+    l.unlock();
+    const bool made = k_.alloc(size, false, ch.bo, kPteKindPitch, kChunkVaAlign);
+    if (made)
+        set_.add(k_, ch.bo, TegraGM20BSurfaceRead);
+    l.lock();
+    if (!made) {
+        if (--offLockChunkOps_ == 0)
+            chunkReady_.notify_all();
         return false;
+    }
+    if (closing_) {
+        l.unlock();
+        k_.free(ch.bo);
+        l.lock();
+        if (--offLockChunkOps_ == 0)
+            chunkReady_.notify_all();
+        return false;
+    }
+    if (--offLockChunkOps_ == 0)
+        chunkReady_.notify_all();
+    ch.memory = ch.bo.cpu;
+    ch.bytes = size;
     uint32_t c = 0;
-    while (c < chunks_.size() && chunks_[c].memory)
+    while (c < chunks_.size() && chunkSlotOccupied(chunks_[c]))
         c++;
     if (c == chunks_.size())
         chunks_.emplace_back();
@@ -90,7 +84,6 @@ bool Device::newChunk(uint64_t size, bool dedicated, std::unique_lock<gm20b::Mut
         ch.free[0] = size;
         poolFree_ += size;
     }
-    set_.add(k_, ch.bo, TegraGM20BSurfaceRead);
     chunks_[c] = std::move(ch);
     SWITCH_METAL_DIAGNOSTIC(stats.poolBytes += size);
     SWITCH_METAL_DIAGNOSTIC(stats.poolChunks++);
@@ -106,46 +99,82 @@ void Device::growLoop()
         grow_.wait(l, [&] {
             return stopping_ || growing_ || !tiledWanted_.empty();
         });
-        if (stopping_)
+        if (stopping_) {
+            grown_.notify_all();
             return;
+        }
         uint32_t c;
         if (growing_) {
-            newChunk(sizes_.chunk, false, &l, c);  // failing, the render thread's next allocation tries itself
+            bool resident = false;
+            while (!stopping_ && !closing_ &&
+                   tryUnparkChunk(l, ChunkVec::Pool, 0, sizes_.chunk, false, 0, TegraGM20BSurfaceRead, c, resident) &&
+                   !resident) {
+            }
+            if (!resident && !stopping_ && !closing_)
+                newChunk(sizes_.chunk, false, l, c);  // failing, the render thread's next allocation tries itself
             growing_ = false;
         } else {
             // the want stays listed while it is made, so an allocation that finds no room waits for it
             const TiledWant w = tiledWanted_.front();
-            newTiledChunk(*w.chunks, w.kind, chunkSize(*w.chunks, sizes_.blChunk, 0, kBlAlign), false, &l, c);
+            const ChunkVec vec = w.chunks == &blChunks_ ? ChunkVec::Bl : ChunkVec::Zeta;
+            const uint32_t zetaIndex = vec == ChunkVec::Zeta ? uint32_t(w.chunks - zChunks_) : 0;
+            const uint64_t want = chunkSize(*w.chunks, sizes_.blChunk, 0, kBlAlign);
+            bool resident = false;
+            while (!stopping_ && !closing_ &&
+                   tryUnparkChunk(l, vec, zetaIndex, want, false, kBlAlign, TegraGM20BSurfaceWrite, c, resident) &&
+                   !resident) {
+            }
+            if (!resident && !stopping_ && !closing_)
+                newTiledChunk(*w.chunks, w.kind, want, false, l, c);
             tiledWanted_.erase(tiledWanted_.begin());
         }
         grown_.notify_all();
     }
 }
 
-bool Device::poolAlloc(uint64_t bytes, Span &s)
+bool Device::poolAlloc(std::unique_lock<gm20b::Mutex> &l, uint64_t bytes, Span &s)
 {
     bytes = (bytes + pageSize() - 1) & ~uint64_t(pageSize() - 1);
     s = {};
     // over half a chunk: its own chunk, made now (in the render server rare: no Core Animation texture of the 720p screen is
     // that large)
     if (bytes > sizes_.chunk / 2) {
-        uint32_t c = ~0u;
-        for (auto it = spares_.begin(); it != spares_.end(); ++it)
-            if (chunks_[it->chunk].bytes == bytes) {
-                c = it->chunk;
-                spares_.erase(it);
-                break;
+        for (;;) {
+            if (closing_)
+                return false;
+            uint32_t c = ~0u;
+            for (auto it = spares_.begin(); it != spares_.end(); ++it)
+                if (chunks_[it->chunk].park == ChunkPark::Live && chunks_[it->chunk].bytes == bytes) {
+                    c = it->chunk;
+                    spares_.erase(it);
+                    break;
+                }
+            if (c != ~0u) {
+                chunks_[c].used = bytes;
+                s = {c, 0, bytes, chunks_[c].bo.va, static_cast<uint8_t *>(chunks_[c].memory)};
+                return true;
             }
-        if (c == ~0u && !newChunk(bytes, true, nullptr, c))
-            return false;
-        chunks_[c].used = bytes;
-        s = {c, 0, bytes, chunks_[c].bo.va, static_cast<uint8_t *>(chunks_[c].memory)};
-        return true;
+            bool resident = false;
+            if (tryUnparkChunk(l, ChunkVec::Pool, 0, bytes, true, 0, TegraGM20BSurfaceRead, c, resident)) {
+                if (!resident)
+                    continue;
+                chunks_[c].used = bytes;
+                s = {c, 0, bytes, chunks_[c].bo.va, static_cast<uint8_t *>(chunks_[c].memory)};
+                return true;
+            }
+            if (closing_ || !newChunk(bytes, true, l, c))
+                return false;
+            chunks_[c].used = bytes;
+            s = {c, 0, bytes, chunks_[c].bo.va, static_cast<uint8_t *>(chunks_[c].memory)};
+            return true;
+        }
     }
-    for (int pass = 0; pass < 3; pass++) {
+    for (int pass = 0; pass < 3;) {
+        if (closing_)
+            return false;
         for (uint32_t c = 0; c < chunks_.size(); c++) {
             Chunk &ch = chunks_[c];
-            if (ch.dedicated || !ch.memory)
+            if (ch.dedicated || ch.park != ChunkPark::Live || !ch.memory)
                 continue;
             for (auto it = ch.free.begin(); it != ch.free.end(); ++it) {
                 if (it->second < bytes)
@@ -164,26 +193,32 @@ bool Device::poolAlloc(uint64_t bytes, Span &s)
                 return true;
             }
         }
-        if (pass == 2)
+        uint32_t unparked = ~0u;
+        bool resident = false;
+        if (tryUnparkChunk(l, ChunkVec::Pool, 0, bytes, false, 0, TegraGM20BSurfaceRead, unparked, resident))
+            continue;
+        if (closing_ || ++pass == 3)
             break;
         SWITCH_METAL_DIAGNOSTIC(stats.poolStalls++);
         if (growing_) {  // the grower is making one: wait for it rather than wire a second
-            std::unique_lock<gm20b::Mutex> l(lock_, std::adopt_lock);
             // bounded, as every wait of the plugin's: a chunk not wired in 20 s is a stuck kernel import, said once and
             // stopped for the stack (a wait with no bound froze r7p8's compositor with nothing in the log)
-            if (!grown_.wait_for(l, std::chrono::seconds(20), [&] {
-                    return !growing_;
-                })) {
+            ++offLockChunkOps_;
+            const bool ready = grown_.wait_for(l, std::chrono::seconds(20), [&] {
+                return !growing_ || closing_;
+            });
+            if (--offLockChunkOps_ == 0)
+                chunkReady_.notify_all();
+            if (!ready) {
                 os_log_fault(
                     os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
                     "SwitchMetal: pool chunk not wired after 20 s (the grower's import): abort() for the stack");
                 abort();
             }
-            l.release();
             continue;
         }
         uint32_t c;
-        if (!newChunk(chunkSize(chunks_, sizes_.chunk, bytes, pageSize()), false, nullptr, c))
+        if (!newChunk(chunkSize(chunks_, sizes_.chunk, bytes, pageSize()), false, l, c))
             return false;
     }
     return false;
@@ -192,12 +227,12 @@ bool Device::poolAlloc(uint64_t bytes, Span &s)
 void Device::warm()
 {
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
+        std::unique_lock<gm20b::Mutex> l(lock_);
         uint32_t c;
-        while (poolFree_ <= sizes_.chunk && newChunk(sizes_.chunk, false, nullptr, c)) {
+        while (poolFree_ <= sizes_.chunk && newChunk(sizes_.chunk, false, l, c)) {
         }  // the first and the one ahead of it
         while (tiledFreeBytes(blChunks_) <= sizes_.blChunk &&
-               newTiledChunk(blChunks_, fx::kBlockLinearKind, sizes_.blChunk, false, nullptr, c)) {
+               newTiledChunk(blChunks_, fx::kBlockLinearKind, sizes_.blChunk, false, l, c)) {
         }  // and of block-linear images: the first frames' memoryless backings find room before the grower runs
     }
     if (!grower_.joinable())
@@ -209,7 +244,7 @@ void Device::warm()
         });
 }
 
-void Device::poolFree(Span &s)
+void Device::poolFree(Span &s, DeferredFrees &deferred)
 {
     if (!s.valid() || s.chunk >= chunks_.size())
         return;
@@ -221,7 +256,7 @@ void Device::poolFree(Span &s)
             s = {};
             return;
         }
-        freeChunk(ch);
+        freeChunk(ch, deferred);
         s = {};
         return;
     }
@@ -247,51 +282,66 @@ void Device::poolFree(Span &s)
     // shrinks after a burst instead of holding its peak for good (r8a: 320 MB in 20 chunks from 15:18 on, the screen idle)
     if (!ch.used && poolFree_ >= ch.bytes + sizes_.chunk) {
         poolFree_ -= ch.bytes;
-        freeChunk(ch);
+        freeChunk(ch, deferred);
     }
 }
 
-// lock_ held: an imported chunk's BO and pages go back (the kernel keeps the pages until the work submitted before has completed)
-void Device::freeChunk(Chunk &ch)
+// lock_ held: a chunk's BO is detached for off-lock free (the kernel keeps the pages until the work submitted before has
+// completed)
+void Device::freeChunk(Chunk &ch, DeferredFrees &deferred)
 {
     SWITCH_METAL_DIAGNOSTIC(stats.poolBytes -= ch.bytes);
     SWITCH_METAL_DIAGNOSTIC(stats.poolChunks--);
     SWITCH_METAL_DIAGNOSTIC(glassMemEvent("chunk freed", ch.bytes));
-    const bool host = ch.hostPages;
-    k_.free(ch.bo);
-    if (ch.pitchVa)
-        k_.releaseVa(ch.pitchVa, ch.bytes);
-    if (host)
-        vm_deallocate(mach_task_self(), vm_address_t(ch.memory), ch.bytes);
+    deferred.add({ch.bo, ch.pitchVa, ch.pitchVa ? ch.bytes : 0, nullptr, 0, nullptr, ch.bytes, 0, RetireKind::Chunk});
     ch = Chunk();
 }
 
 Device::Trimmed Device::trim()
 {
-    std::lock_guard<gm20b::Mutex> l(lock_);
-    const Trimmed trimmed = dropKeptImports();
-    reapNativeSurfaces();
-    for (const Spare &sp : spares_)
-        freeChunk(chunks_[sp.chunk]);
-    spares_.clear();
-    for (Chunk &ch : chunks_)
-        if (ch.memory && !ch.dedicated && !ch.used) {
-            poolFree_ -= ch.bytes;
-            freeChunk(ch);
+    std::vector<ParkCandidate> toPark;
+    Trimmed trimmed = {};
+    {
+        DeferredFrees deferred(*this);
+        std::lock_guard<gm20b::Mutex> l(lock_);
+        trimmed = dropKeptImports(deferred);
+        std::vector<Bo> nativeBos;
+        reapNativeSurfaces(nativeBos);
+        for (const Bo &bo : nativeBos)
+            deferred.add({bo});
+        auto freeUnusedWc = [&](std::vector<Chunk> &pool) {
+            for (Chunk &ch : pool)
+                if (ch.park == ChunkPark::Live && ch.bo.handle && !ch.used) {
+                    deferred.add({ch.bo, 0, 0, nullptr, 0, nullptr, ch.bytes, ch.bo.mapped,
+                                  ch.dedicated ? RetireKind::WcDedicated : RetireKind::WcShared});
+                    ch = Chunk();
+                }
+        };
+        if (k_.supportsBoPark() && !closing_) {
+            collectParkableChunksLocked(toPark);
+        } else {
+            for (const Spare &sp : spares_)
+                freeChunk(chunks_[sp.chunk], deferred);
+            spares_.clear();
+            for (Chunk &ch : chunks_)
+                if (ch.park == ChunkPark::Live && ch.memory && !ch.dedicated && !ch.used) {
+                    poolFree_ -= ch.bytes;
+                    freeChunk(ch, deferred);
+                }
+            auto freeUnused = [&](std::vector<Chunk> &tiled) {
+                for (Chunk &ch : tiled)
+                    if (ch.park == ChunkPark::Live && ch.memory && !ch.used)
+                        freeChunk(ch, deferred);
+            };
+            freeUnused(blChunks_);
+            for (std::vector<Chunk> &z : zChunks_)
+                freeUnused(z);
+            freeUnusedWc(wcChunks_);
         }
-    auto freeUnused = [&](std::vector<Chunk> &tiled) {
-        for (Chunk &ch : tiled)
-            if (ch.memory && !ch.used)
-                freeChunk(ch);
-    };
-    freeUnused(blChunks_);
-    for (std::vector<Chunk> &z : zChunks_)
-        freeUnused(z);
-    for (Chunk &ch : wcChunks_)
-        if (ch.bo.handle && !ch.used) {
-            k_.free(ch.bo);
-            ch = Chunk();
-        }
+        // Volatile WC chunks stay unparked to return carveout RAM immediately and avoid VOL=1/VOL=0 unpark aliasing.
+        freeUnusedWc(volatileWcChunks_);
+    }
+    finishParkChunks(toPark);
     return trimmed;
 }
 
@@ -352,14 +402,16 @@ Import *Device::makeImport(uint64_t id, void *base, uint64_t bytes, const void *
     const LayoutAsk none = {};
     const LayoutAsk &a = ask ? *ask : none;
     if (id) {
-        const uint32_t layout = k_.surfaceLayout(i->bo, a.width, a.height, a.bpp, a.bytesPerRow, a.writes, &i->layout);
+        uint32_t kind = 0;
+        const uint32_t layout =
+            k_.surfaceLayout(i->bo, a.width, a.height, a.bpp, a.bytesPerRow, a.writes, &i->layout, &kind);
         if (layout == TegraGM20BLayoutOtherShape) {
             k_.free(i->bo);
             delete i;
             return nullptr;
         }
         if (layout == TegraGM20BLayoutTiled)
-            i->kind = TGM_LAYOUT_KIND;
+            i->kind = kind ? kind : TGM_LAYOUT_KIND;
     }
     if (!k_.bindImport(base, i->bo, i->kind)) {
         delete i;
@@ -374,17 +426,17 @@ Import *Device::makeImport(uint64_t id, void *base, uint64_t bytes, const void *
     return i;
 }
 
-void Device::release(Import *i)
+void Device::release(Import *i, DeferredFrees &deferred)
 {
     if (!i || --i->refs)
         return;
     if (i->id && i->owner)
-        keepImport(i);
+        keepImport(i, deferred);
     else
-        dropImport(i);
+        dropImport(i, deferred);
 }
 
-void Device::keepImport(Import *i)
+void Device::keepImport(Import *i, DeferredFrees &deferred)
 {
     keptImports_.push_back(i);
     keptImportBytes_ += i->bo.bytes;
@@ -392,7 +444,7 @@ void Device::keepImport(Import *i)
         Import *oldest = keptImports_.front();
         keptImports_.erase(keptImports_.begin());
         keptImportBytes_ -= oldest->bo.bytes;
-        dropImport(oldest);
+        dropImport(oldest, deferred, true);
     }
 }
 
@@ -402,17 +454,17 @@ Device::Trimmed Device::keptImports()
     return {keptImports_.size(), keptImportBytes_};
 }
 
-Device::Trimmed Device::dropKeptImports()
+Device::Trimmed Device::dropKeptImports(DeferredFrees &deferred)
 {
     const Trimmed trimmed = {keptImports_.size(), keptImportBytes_};
     for (Import *i : keptImports_)
-        dropImport(i);
+        dropImport(i, deferred, true);
     keptImports_.clear();
     keptImportBytes_ = 0;
     return trimmed;
 }
 
-void Device::dropImport(Import *i)
+void Device::dropImport(Import *i, DeferredFrees &deferred, bool wasKept)
 {
     if (i->id)
         if (auto it = surfaces_.find(std::make_tuple(i->id, i->base, i->bytes));
@@ -424,9 +476,8 @@ void Device::dropImport(Import *i)
         i->native->cached = false;
         nativeStale_.store(true, std::memory_order_release);
     }
-    k_.free(i->bo);
-    if (i->owner)
-        CFRelease(i->owner);
+    deferred.add({i->bo, 0, 0, nullptr, 0, i->owner, wasKept ? i->bo.bytes : 0, 0,
+                  wasKept ? RetireKind::KeptImport : RetireKind::None});
     delete i;
 }
 
@@ -436,7 +487,7 @@ uint64_t Device::tiledFreeBytes(const std::vector<Chunk> &chunks)
 {
     uint64_t free = 0;
     for (const Chunk &ch : chunks)
-        if (ch.memory && !ch.dedicated)
+        if (ch.park == ChunkPark::Live && ch.memory && !ch.dedicated)
             free += ch.bytes - ch.used;
     return free;
 }
@@ -449,26 +500,46 @@ bool Device::tiledWanted(const std::vector<Chunk> &chunks) const
 }
 
 bool Device::newTiledChunk(std::vector<Chunk> &chunks, uint32_t kind, uint64_t size, bool dedicated,
-                           std::unique_lock<gm20b::Mutex> *unlocked, uint32_t &index)
+                           std::unique_lock<gm20b::Mutex> &l, uint32_t &index)
 {
+    if (closing_)
+        return false;
     Chunk ch;
     ch.dedicated = dedicated;
-    if (!chunkMemory(size, kind, unlocked, ch))
-        return false;
-    if (ch.bo.va & (kBlAlign - 1)) {
+    ++offLockChunkOps_;
+    l.unlock();
+    bool made = k_.alloc(size, false, ch.bo, kind, kChunkVaAlign);
+    if (made && (ch.bo.va & (kBlAlign - 1))) {
         k_.free(ch.bo);
-        if (ch.hostPages)
-            vm_deallocate(mach_task_self(), vm_address_t(ch.memory), ch.bytes);
+        made = false;
+    }
+    if (made)
+        set_.add(k_, ch.bo, TegraGM20BSurfaceWrite);
+    l.lock();
+    if (!made) {
+        if (--offLockChunkOps_ == 0)
+            chunkReady_.notify_all();
         return false;
     }
+    if (closing_) {
+        l.unlock();
+        k_.free(ch.bo);
+        l.lock();
+        if (--offLockChunkOps_ == 0)
+            chunkReady_.notify_all();
+        return false;
+    }
+    if (--offLockChunkOps_ == 0)
+        chunkReady_.notify_all();
+    ch.memory = ch.bo.cpu;
+    ch.bytes = size;
     uint32_t c = 0;
-    while (c < chunks.size() && chunks[c].memory)
+    while (c < chunks.size() && chunkSlotOccupied(chunks[c]))
         c++;
     if (c == chunks.size())
         chunks.emplace_back();
     if (!dedicated)
         ch.free[0] = size;
-    set_.add(k_, ch.bo, TegraGM20BSurfaceWrite);
     chunks[c] = std::move(ch);
     SWITCH_METAL_DIAGNOSTIC(stats.poolBytes += size);
     SWITCH_METAL_DIAGNOSTIC(stats.poolChunks++);
@@ -482,16 +553,41 @@ bool Device::newTiledChunk(std::vector<Chunk> &chunks, uint32_t kind, uint64_t s
 // thread runs (the render server, warm()), the shared chunks grow ahead of need as the pool's do, so a pass's memoryless
 // backings, made at commit, find room rather than wiring a chunk on the commit path (r115: boot 15's keyboard took 64 such
 // imports of 16 MiB at ~8.5 ms each as ~10 ms encodes).
-bool Device::tiledAlloc(std::vector<Chunk> &chunks, uint32_t kind, uint64_t bytes, uint64_t align, Span &s)
+bool Device::tiledAlloc(std::unique_lock<gm20b::Mutex> &l, std::vector<Chunk> &chunks, uint32_t kind, uint64_t bytes,
+                        uint64_t align, Span &s)
 {
     align = std::max(align, kBlAlign);
     bytes = (bytes + kBlAlign - 1) & ~(kBlAlign - 1);
     s = {};
     const bool dedicated = bytes > sizes_.blChunk / 2;
-    for (int pass = 0; pass < 3; pass++) {
+    const ChunkVec vec = &chunks == &blChunks_ ? ChunkVec::Bl : ChunkVec::Zeta;
+    const uint32_t zetaIndex = vec == ChunkVec::Zeta ? uint32_t(&chunks - zChunks_) : 0;
+    if (dedicated) {
+        for (;;) {
+            if (closing_)
+                return false;
+            uint32_t c = ~0u;
+            bool resident = false;
+            if (tryUnparkChunk(l, vec, zetaIndex, bytes, true, align, TegraGM20BSurfaceWrite, c, resident)) {
+                if (!resident)
+                    continue;
+                chunks[c].used = bytes;
+                s = {c, 0, bytes, chunks[c].bo.va, static_cast<uint8_t *>(chunks[c].memory)};
+                return true;
+            }
+            if (closing_ || !newTiledChunk(chunks, kind, bytes, true, l, c))
+                return false;
+            chunks[c].used = bytes;
+            s = {c, 0, bytes, chunks[c].bo.va, static_cast<uint8_t *>(chunks[c].memory)};
+            return true;
+        }
+    }
+    for (int pass = 0; pass < 3;) {
+        if (closing_)
+            return false;
         for (uint32_t c = 0; c < chunks.size(); c++) {
             Chunk &ch = chunks[c];
-            if (!ch.memory || ch.dedicated)
+            if (ch.park != ChunkPark::Live || !ch.memory || ch.dedicated)
                 continue;
             for (auto it = ch.free.begin(); it != ch.free.end(); ++it) {
                 const uint64_t start = it->first, len = it->second, at = (start + align - 1) & ~(align - 1);
@@ -511,46 +607,44 @@ bool Device::tiledAlloc(std::vector<Chunk> &chunks, uint32_t kind, uint64_t byte
                 return true;
             }
         }
-        if (pass == 2)
+        uint32_t unparked = ~0u;
+        bool resident = false;
+        if (tryUnparkChunk(l, vec, zetaIndex, bytes, false, align, TegraGM20BSurfaceWrite, unparked, resident))
+            continue;
+        if (closing_ || ++pass == 3)
             break;
-        if (dedicated) {
-            uint32_t c;
-            if (!newTiledChunk(chunks, kind, bytes, true, nullptr, c))
-                return false;
-            chunks[c].used = bytes;
-            s = {c, 0, bytes, chunks[c].bo.va, static_cast<uint8_t *>(chunks[c].memory)};
-            return true;
-        }
         SWITCH_METAL_DIAGNOSTIC(stats.poolStalls++);
         if (tiledWanted(chunks)) {  // the grower is making one: wait for it rather than wire a second
-            std::unique_lock<gm20b::Mutex> l(lock_, std::adopt_lock);
             // bounded, as the pool's wait (a chunk not wired in 20 s is a stuck kernel import)
-            if (!grown_.wait_for(l, std::chrono::seconds(20), [&] {
-                    return !tiledWanted(chunks);
-                })) {
+            ++offLockChunkOps_;
+            const bool ready = grown_.wait_for(l, std::chrono::seconds(20), [&] {
+                return !tiledWanted(chunks) || closing_;
+            });
+            if (--offLockChunkOps_ == 0)
+                chunkReady_.notify_all();
+            if (!ready) {
                 os_log_fault(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
                              "SwitchMetal: block-linear chunk not wired after 20 s (the grower's import): abort() for "
                              "the stack");
                 abort();
             }
-            l.release();
             continue;
         }
         uint32_t c;
-        if (!newTiledChunk(chunks, kind, chunkSize(chunks, sizes_.blChunk, bytes, kBlAlign), false, nullptr, c))
+        if (!newTiledChunk(chunks, kind, chunkSize(chunks, sizes_.blChunk, bytes, kBlAlign), false, l, c))
             return false;
     }
     return false;
 }
 
-void Device::tiledFree(std::vector<Chunk> &chunks, Span &s)
+void Device::tiledFree(std::vector<Chunk> &chunks, Span &s, DeferredFrees &deferred)
 {
     if (!s.valid() || s.chunk >= chunks.size())
         return;
     Chunk &ch = chunks[s.chunk];
     ch.used -= s.bytes;
     if (ch.dedicated) {
-        freeChunk(ch);
+        freeChunk(ch, deferred);
         s = {};
         return;
     }
@@ -574,7 +668,7 @@ void Device::tiledFree(std::vector<Chunk> &chunks, Span &s)
     // an empty chunk goes back while the others keep a chunk's worth free, as the pool's do: a burst's peak is not held for
     // good (boot 15: backboardd's chunks stayed at 912 MB after its keyboard's burst)
     if (!ch.used && tiledFreeBytes(chunks) >= ch.bytes + sizes_.blChunk)
-        freeChunk(ch);
+        freeChunk(ch, deferred);
 }
 
 uint64_t Device::blPitchVa(const Span &s)
@@ -599,27 +693,44 @@ uint64_t Device::blPitchVa(const Span &s)
     return ch.pitchVa + s.offset;
 }
 
-bool Device::createBuffer(uint64_t length, Buffer &b, bool wc)
+bool Device::createBuffer(uint64_t length, Buffer &b, bool wc, bool hostVisible, bool gpuVolatile)
 {
     b = {};
     if (!length)
         length = 16;
+    bool cleaned = hostVisible;
     {
-        std::lock_guard<gm20b::Mutex> l(lock_);
-        if (wc && wcAlloc(length, b.span)) {
+        std::unique_lock<gm20b::Mutex> l(lock_);
+        if (wc && gpuVolatile && volatileWcAlloc(l, length, b.span)) {
+            b.wc = true;
+            b.gpuVolatile = true;
+            // VOL=1 WC chunks carry no dirty GPU L2 lines and no CPU D-cache lines; skipping hostAccess keeps the chunk
+            // BO in ResourceSet and avoids host1x-bridge flushes and host_epoch whole-L2 invalidates.
+            cleaned = false;
+            SWITCH_METAL_DIAGNOSTIC(stats.wcBytes += b.span.bytes);
+        } else if (wc && wcAlloc(l, length, b.span)) {
             b.wc = true;
             SWITCH_METAL_DIAGNOSTIC(stats.wcBytes += b.span.bytes);
         } else {
             if (wc)
                 SWITCH_METAL_DIAGNOSTIC(stats.wcFallbacks++);
-            if (!poolAlloc(length, b.span))
+            if (!poolAlloc(l, length, b.span))
                 return false;
+            Chunk &chunk = chunks_[b.span.chunk];
+            cleaned = hostVisible || chunk.hostTouched;
+            chunk.hostTouched |= hostVisible;
         }
     }
     b.va = b.span.va;
     b.cpu = b.span.cpu;
     b.length = length;
-    // A reused span may still have dirty GPU lines from its previous owner. Acquire before exposing CPU bytes.
+    b.hostVisible = hostVisible;
+    // A reused span may still have dirty GPU lines from its previous owner. Acquire before exposing CPU bytes. A buffer no
+    // CPU reads or writes exposes none: it takes the lease (whose release cleans the CPU's lines) only where a host-visible
+    // buffer was in its chunk before it. A lease takes the whole chunk out of the resource set for good
+    // (SwitchGpuResourceSet.cpp cpu_reached), every resource in it a job use of its own from then on
+    if (!cleaned)
+        return true;
     HostAccess access;
     if (!hostAccess(b, true, access) || !access.finish()) {
         destroyBuffer(b);
@@ -641,84 +752,115 @@ bool Device::createControlBuffer(uint64_t length, Buffer &buffer)
     chunk.memory = chunk.bo.cpu;
     chunk.bytes = chunk.used = chunk.bo.bytes;
     chunk.dedicated = true;
+    std::vector<Chunk> &pool = chunk.bo.gpuVolatile ? volatileWcChunks_ : wcChunks_;
     uint32_t index = 0;
-    while (index < wcChunks_.size() && wcChunks_[index].bo.handle)
+    while (index < pool.size() && chunkSlotOccupied(pool[index]))
         ++index;
-    if (index == wcChunks_.size())
-        wcChunks_.emplace_back();
+    if (index == pool.size())
+        pool.emplace_back();
     buffer.span = {index, 0, chunk.bytes, chunk.bo.va, chunk.bo.cpu};
     buffer.va = chunk.bo.va;
     buffer.cpu = chunk.bo.cpu;
     buffer.length = length;
     buffer.wc = true;
+    buffer.gpuVolatile = chunk.bo.gpuVolatile;
     buffer.hostVisible = false;
     SWITCH_METAL_DIAGNOSTIC(stats.wcBytes += chunk.bytes);
-    wcChunks_[index] = std::move(chunk);
+    pool[index] = std::move(chunk);
     return true;
 }
 
 // ---- write-combined buffers: the GPU pool (BoAlloc coherent), mapped write-combined for the CPU ----
 
-// lock_ held. First fit by page; a new chunk when none has room (a BoAlloc: tens of microseconds, the GPU pool's own)
-bool Device::wcAlloc(uint64_t bytes, Span &s)
+// lock_ held through `l`. First fit by page; a new chunk when none has room (a BoAlloc: tens of microseconds, the GPU pool's own)
+bool Device::wcPoolAlloc(std::unique_lock<gm20b::Mutex> &l, std::vector<Chunk> &pool, uint64_t bytes, bool gpuVolatile,
+                         Span &s)
 {
     bytes = (bytes + pageSize() - 1) & ~uint64_t(pageSize() - 1);
     s = {};
-    for (int pass = 0; pass < 2; pass++) {
-        for (uint32_t c = 0; c < wcChunks_.size(); c++) {
-            Chunk &ch = wcChunks_[c];
-            if (!ch.bo.handle || ch.dedicated)
-                continue;
-            for (auto it = ch.free.begin(); it != ch.free.end(); ++it) {
-                if (it->second < bytes)
+    const bool dedicated = bytes > sizes_.wcChunk / 2;
+    for (int pass = 0; pass < 2;) {
+        if (closing_)
+            return false;
+        if (!dedicated) {
+            for (uint32_t c = 0; c < pool.size(); c++) {
+                Chunk &ch = pool[c];
+                if (ch.park != ChunkPark::Live || !ch.bo.handle || ch.dedicated)
                     continue;
-                const uint64_t at = it->first, left = it->second - bytes;
-                ch.free.erase(it);
-                if (left)
-                    ch.free[at + bytes] = left;
-                ch.used += bytes;
-                s = {c, at, bytes, ch.bo.va + at, ch.bo.cpu + at};
-                return true;
+                for (auto it = ch.free.begin(); it != ch.free.end(); ++it) {
+                    if (it->second < bytes)
+                        continue;
+                    const uint64_t at = it->first, left = it->second - bytes;
+                    ch.free.erase(it);
+                    if (left)
+                        ch.free[at + bytes] = left;
+                    ch.used += bytes;
+                    s = {c, at, bytes, ch.bo.va + at, ch.bo.cpu + at};
+                    return true;
+                }
+            }
+            if (!gpuVolatile) {
+                uint32_t unparked = ~0u;
+                bool resident = false;
+                if (tryUnparkChunk(l, ChunkVec::Wc, 0, bytes, false, 0, TegraGM20BSurfaceRead, unparked, resident))
+                    continue;
             }
         }
-        if (pass)
+        if (closing_ || pass++)
             break;
-        const bool dedicated = bytes > sizes_.wcChunk / 2;
-        const uint64_t size = dedicated ? bytes : chunkSize(wcChunks_, sizes_.wcChunk, bytes, pageSize());
+        const uint64_t size = dedicated ? bytes : chunkSize(pool, sizes_.wcChunk, bytes, pageSize());
         Chunk ch;
-        if (!k_.alloc(size, true, ch.bo))
+        ++offLockChunkOps_;
+        l.unlock();
+        const bool made = k_.alloc(size, true, ch.bo, 0, 0x10000, gpuVolatile);
+        if (made)
+            set_.add(k_, ch.bo, TegraGM20BSurfaceRead);
+        l.lock();
+        if (!made) {
+            if (--offLockChunkOps_ == 0)
+                chunkReady_.notify_all();
             return false;  // the GPU pool is full: pool memory instead (createBuffer)
-        set_.add(k_, ch.bo, TegraGM20BSurfaceRead);
+        }
+        if (closing_) {
+            l.unlock();
+            k_.free(ch.bo);
+            l.lock();
+            if (--offLockChunkOps_ == 0)
+                chunkReady_.notify_all();
+            return false;
+        }
+        if (--offLockChunkOps_ == 0)
+            chunkReady_.notify_all();
         ch.memory = ch.bo.cpu;
         ch.bytes = size;
         ch.dedicated = dedicated;
         uint32_t c = 0;
-        while (c < wcChunks_.size() && wcChunks_[c].bo.handle)
+        while (c < pool.size() && chunkSlotOccupied(pool[c]))
             c++;
-        if (c == wcChunks_.size())
-            wcChunks_.emplace_back();
+        if (c == pool.size())
+            pool.emplace_back();
         if (dedicated) {
             ch.used = bytes;
             s = {c, 0, bytes, ch.bo.va, ch.bo.cpu};
-            wcChunks_[c] = std::move(ch);
+            pool[c] = std::move(ch);
             return true;
         }
         ch.free[0] = size;
-        wcChunks_[c] = std::move(ch);
+        pool[c] = std::move(ch);
     }
     return false;
 }
 
 // lock_ held
-void Device::wcFree(Span &s)
+void Device::wcPoolFree(std::vector<Chunk> &pool, Span &s, DeferredFrees &deferred)
 {
-    if (!s.valid() || s.chunk >= wcChunks_.size())
+    if (!s.valid() || s.chunk >= pool.size())
         return;
-    Chunk &ch = wcChunks_[s.chunk];
+    Chunk &ch = pool[s.chunk];
     ch.used -= s.bytes;
     SWITCH_METAL_DIAGNOSTIC(stats.wcBytes -= s.bytes);
     if (ch.dedicated) {
-        k_.free(ch.bo);
+        deferred.add({ch.bo, 0, 0, nullptr, 0, nullptr, ch.bytes, ch.bo.mapped, RetireKind::WcDedicated});
         ch = Chunk();
         s = {};
         return;
@@ -744,13 +886,35 @@ void Device::wcFree(Span &s)
     // share follows what Core Animation holds, not its peak (r8a: the compositor 107 MiB of the pool at 15:16, 63 after,
     // and Maps refused a 4 MiB BO with 33 MiB free)
     if (!ch.used) {
-        for (const Chunk &other : wcChunks_)
-            if (&other != &ch && other.bo.handle && !other.dedicated && !other.used) {
-                k_.free(ch.bo);  // (the kernel keeps the pages until the work submitted before has completed)
+        for (const Chunk &other : pool)
+            if (&other != &ch && other.park == ChunkPark::Live && other.bo.handle && !other.dedicated && !other.used) {
+                deferred.add({ch.bo, 0, 0, nullptr, 0, nullptr, ch.bytes, ch.bo.mapped, RetireKind::WcShared});
                 ch = Chunk();
                 break;
             }
     }
+}
+
+bool Device::wcAlloc(std::unique_lock<gm20b::Mutex> &l, uint64_t bytes, Span &s)
+{
+    return wcPoolAlloc(l, wcChunks_, bytes, false, s);
+}
+
+void Device::wcFree(Span &s, DeferredFrees &deferred)
+{
+    wcPoolFree(wcChunks_, s, deferred);
+}
+
+bool Device::volatileWcAlloc(std::unique_lock<gm20b::Mutex> &l, uint64_t bytes, Span &s)
+{
+    if (!k_.volatileWrites() || !k_.exactJobs())
+        return false;
+    return wcPoolAlloc(l, volatileWcChunks_, bytes, true, s);
+}
+
+void Device::volatileWcFree(Span &s, DeferredFrees &deferred)
+{
+    wcPoolFree(volatileWcChunks_, s, deferred);
 }
 
 uint32_t Device::wcChunksHeld()
@@ -758,7 +922,9 @@ uint32_t Device::wcChunksHeld()
     std::lock_guard<gm20b::Mutex> l(lock_);
     uint32_t n = 0;
     for (const Chunk &ch : wcChunks_)
-        n += ch.bo.handle && !ch.dedicated;
+        n += ch.park == ChunkPark::Live && ch.bo.handle && !ch.dedicated;
+    for (const Chunk &ch : volatileWcChunks_)
+        n += ch.park == ChunkPark::Live && ch.bo.handle && !ch.dedicated;
     return n;
 }
 
@@ -771,24 +937,105 @@ uint64_t Device::heapInPlaceBytes()
     return bytes;
 }
 
+// The kernel's count of the control memory mapped, which the threads that make it keep (the submit worker grows the rings
+// under the channel's lock, not lock_), less the write-combined chunks, which are control memory named apart
 uint64_t Device::controlMappedBytes()
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
-    uint64_t bytes = 0;
-    for (const Bo *bo : {&tic_, &tsc_, &root_, &zero_, &tickets_, &colorTable_, &srgbEncode_, &stamps_, &handleTables_,
-                         &argumentRoots_, &push_.bo, &upload_.bo})
-        bytes += bo->mapped;
-    for (const Bo &bo : heapSets_)
-        bytes += bo.mapped;
-    return bytes;
+    uint64_t wc = retiring_.wcMapped.load(std::memory_order_acquire);
+    for (const Chunk &ch : wcChunks_)
+        if (ch.park == ChunkPark::Live)
+            wc += ch.bo.mapped;
+    for (const Chunk &ch : volatileWcChunks_)
+        if (ch.park == ChunkPark::Live)
+            wc += ch.bo.mapped;
+    const uint64_t control = k_.controlMappedBytes();
+    return control > wc ? control - wc : 0;
+}
+
+bool Device::held(Held &h, bool wait)
+{
+    std::unique_lock<gm20b::Mutex> l(lock_, std::defer_lock);
+    if (wait)
+        l.lock();
+    else if (!l.try_lock())
+        return false;
+    h = {};
+    const auto count = [&](const Chunk &ch) {
+#if SWITCH_METAL_DIAGNOSTICS
+        if (ch.park == ChunkPark::Parked) {
+            h.parkedChunks += ch.bytes;
+            h.parkedChunkCount++;
+            return;
+        }
+#endif
+        if (ch.park != ChunkPark::Live || !ch.memory)
+            return;
+        h.chunks += ch.bytes;
+        h.chunkCount++;
+        if (!ch.dedicated && ch.used && ch.used * 4 <= ch.bytes) {
+            h.pinned += ch.bytes;
+            h.pinnedCount++;
+        }
+    };
+    for (const Chunk &ch : chunks_)
+        count(ch);
+    for (const Chunk &ch : blChunks_)
+        count(ch);
+    for (const std::vector<Chunk> &z : zChunks_)
+        for (const Chunk &ch : z)
+            count(ch);
+    h.chunks += retiring_.chunkBytes.load(std::memory_order_relaxed);
+    h.chunkCount += retiring_.chunkCount.load(std::memory_order_relaxed);
+    for (const Spare &sp : spares_)
+        h.reuse += chunks_[sp.chunk].bytes;
+    uint64_t wcMapped = retiring_.wcMapped.load(std::memory_order_relaxed);
+    h.writeCombined = retiring_.wcBytes.load(std::memory_order_relaxed);
+    const auto countWc = [&](const Chunk &ch) {
+#if SWITCH_METAL_DIAGNOSTICS
+        if (ch.park == ChunkPark::Parked) {
+            h.parkedChunks += ch.bytes;
+            h.parkedChunkCount++;
+            return;
+        }
+#endif
+        if (ch.park != ChunkPark::Live)
+            return;
+        h.writeCombined += ch.bo.handle ? ch.bytes : 0;
+        wcMapped += ch.bo.mapped;
+    };
+    for (const Chunk &ch : wcChunks_)
+        countWc(ch);
+    for (const Chunk &ch : volatileWcChunks_)
+        countWc(ch);
+    for (const Arena &a : arenas_) {
+        if (a.used && !a.purged) {
+            (a.wc ? h.heaps : h.gpuHeaps) += a.bytes;
+            h.volatileHeaps += a.isVolatile ? a.bytes : 0;
+        }
+#if SWITCH_METAL_DIAGNOSTICS
+        else if (a.used && a.purged && a.boParked) {
+            h.parkedHeaps += a.bytes;
+            h.parkedHeapCount++;
+        }
+#endif
+    }
+    h.heaps += retiring_.heapBytes.load(std::memory_order_relaxed);
+    h.gpuHeaps += retiring_.gpuHeapBytes.load(std::memory_order_relaxed);
+    h.kept = keptImportBytes_ + retiring_.keptBytes.load(std::memory_order_relaxed);
+    const uint64_t control = k_.controlMappedBytes();
+    h.tables = control > wcMapped ? control - wcMapped : 0;
+    return true;
 }
 
 uint64_t Device::wcChunkBytesHeld()
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
-    uint64_t n = 0;
+    uint64_t n = retiring_.wcSharedBytes.load(std::memory_order_relaxed);
     for (const Chunk &ch : wcChunks_)
-        n += ch.bo.handle && !ch.dedicated ? ch.bytes : 0;
+        n += ch.park == ChunkPark::Live && ch.bo.handle && !ch.dedicated ? ch.bytes : 0;
+    for (const Chunk &ch : volatileWcChunks_)
+        n += ch.park == ChunkPark::Live && ch.bo.handle && !ch.dedicated ? ch.bytes : 0;
     return n;
 }
 
@@ -796,6 +1043,37 @@ uint64_t Device::blChunkFreeBytes()
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
     return tiledFreeBytes(blChunks_);
+}
+
+// lock_ held. A chunk is a cached BO, whose pages the kernel hands to any process's next BoAlloc once it is freed, though
+// an import of them that begins past its first page still holds them: a backing is found by its first page
+// (SwitchGpuBacking.cpp). So no import may take a range that reaches into one; `what` names the call refused.
+bool Device::ownChunkMemory(const void *bytes, uint64_t length, const char *what) const
+{
+    const auto overlapsRange = [&](uint64_t base, uint64_t size) {
+        return base && size && uintptr_t(bytes) < base + size && base < uintptr_t(bytes) + length;
+    };
+    const auto overlaps = [&](const std::vector<Chunk> &chunks) {
+        return std::any_of(chunks.begin(), chunks.end(), [&](const Chunk &ch) {
+            uint64_t base = ch.parkedVa;
+            if (ch.memory)
+                base = uint64_t(uintptr_t(ch.memory));
+            else if (ch.bo.cpu)
+                base = uint64_t(uintptr_t(ch.bo.cpu));
+            return overlapsRange(base, ch.bytes);
+        });
+    };
+    const bool inArena = std::any_of(arenas_.begin(), arenas_.end(), [&](const Arena &a) {
+        return a.used && a.kernelBo && (!a.purged || a.boParked) && overlapsRange(uint64_t(uintptr_t(a.cpu)), a.bytes);
+    });
+    if (!overlaps(chunks_) && !overlaps(blChunks_) && !overlaps(wcChunks_) && !overlaps(volatileWcChunks_) &&
+        std::none_of(std::begin(zChunks_), std::end(zChunks_), overlaps) && !inArena)
+        return false;
+    os_log_error(os_log_create("com.brunostjohn.switch.TegraGM20BMetal", "gm20b"),
+                 "SwitchMetal: %{public}s: %{public}s over %llu bytes at %p: they lie in this process's own GPU memory "
+                 "(a Metal buffer's contents), which no import may take",
+                 getprogname(), what, (unsigned long long)length, bytes);
+    return true;
 }
 
 // The caller's pages around [bytes, bytes + length): the frontend answers minBufferNoCopyAlignmentBytes with the kernel's 4 KiB
@@ -823,6 +1101,8 @@ bool Device::createBufferNoCopy(void *bytes, uint64_t length, Buffer &b, bool &t
             tiled = true;
             return false;
         }
+    if (ownChunkMemory(bytes, length, "newBufferWithBytesNoCopy"))
+        return false;
     if (!(b.import = importSurface(l, 0, bytes, length, nullptr)))
         return false;
     b.va = b.import->bo.va;
@@ -835,13 +1115,14 @@ bool Device::createSurfaceBuffer(uint64_t id, void *base, uint64_t length, const
 {
     b = {};
     tiled = false;
+    DeferredFrees deferred(*this);
     std::unique_lock<gm20b::Mutex> l(lock_);
     Import *i = importSurface(l, id, base, length, owner);
     if (!i)
         return false;
-    if (i->kind == TGM_LAYOUT_KIND) {
+    if (i->kernelTiled()) {
         tiled = true;
-        release(i);
+        release(i, deferred);
         return false;
     }
     b.import = i;
@@ -853,10 +1134,11 @@ bool Device::createSurfaceBuffer(uint64_t id, void *base, uint64_t length, const
 
 void Device::destroyBuffer(Buffer &b)
 {
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     if (b.import)
-        release(b.import);
-    freeSpan(b.span, b.arena ? Memory::Arena : b.wc ? Memory::Wc : Memory::Pool, b.lease);
+        release(b.import, deferred);
+    freeSpan(l, b.span, memoryOf(b), b.lease, deferred);
     SWITCH_METAL_DIAGNOSTIC(stats.textureBytes -= b.keptBytes);
     b = {};
 }

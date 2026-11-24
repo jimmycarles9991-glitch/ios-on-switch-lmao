@@ -97,7 +97,7 @@ const Texture *Device::nativeRead(const Texture &source, NativeSurface *&owner, 
     return &found->second;
 }
 
-void Device::reapNativeSurfaces(bool all)
+void Device::reapNativeSurfaces(std::vector<Bo> &detached, bool all)
 {
     for (auto it = nativeSurfaces_.begin(); it != nativeSurfaces_.end();) {
         NativeSurface &surface = **it;
@@ -105,7 +105,7 @@ void Device::reapNativeSurfaces(bool all)
         if (all || (unused && (surface.channelGeneration != channelGeneration() || done(surface.lastUse)))) {
             for (const auto &[key, texture] : surface.textures)
                 freeTic(texture.tic);
-            k_.free(surface.bo);
+            detached.push_back(surface.bo);
             it = nativeSurfaces_.erase(it);
         } else {
             ++it;

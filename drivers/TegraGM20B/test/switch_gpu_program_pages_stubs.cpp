@@ -39,3 +39,8 @@ uint64_t tgm_scratch_handout(const struct tgm_scratch *)
 {
 	return 0;
 }
+
+extern "C" int switch_gpu_smmu_ready(void)
+{
+	return 0;
+}

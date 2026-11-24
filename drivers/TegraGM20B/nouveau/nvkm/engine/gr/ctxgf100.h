@@ -40,6 +40,7 @@ struct gf100_grctx_func {
 	u32 alpha_nr_max;
 	u32 alpha_nr;
 	u32 gfxp_nr;
+	u32 preempt_options;
 	/* some other context buffer */
 	void (*unknown)(struct gf100_gr_chan *, u64 addr, u32 size);
 	u32 unknown_size;

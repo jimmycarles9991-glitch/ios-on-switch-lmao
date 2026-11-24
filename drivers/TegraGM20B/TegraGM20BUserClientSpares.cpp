@@ -4,15 +4,8 @@
 
 namespace
 {
-constexpr uint64_t kSpareCapBytes = 96ULL << 20, kLearnMaxBytes = 32ULL << 20;
-
-struct WarmClass {
-	uint64_t bytes;
-	uint16_t ready;
-};
-
-constexpr WarmClass kWarm[] = {
-	{64ULL << 10, 8}, {4ULL << 20, 2}, {8ULL << 20, 1}, {16ULL << 20, 2}};
+constexpr uint64_t kSpareCapBytes = SWITCH_GPU_SPARE_CAP_BYTES, kLearnMaxBytes = 32ULL << 20;
+static_assert(kClasses == SWITCH_GPU_SPARE_CLASSES, "the pool's classes are the policy's");
 }  // namespace
 
 namespace tgm_uc
@@ -20,16 +13,12 @@ namespace tgm_uc
 
 uint64_t classBytes(uint32_t c)
 {
-	return c < 5 ? 4096ULL << c : ((64ULL << 10) << ((c - 5) / 4)) * (5 + (c - 5) % 4) / 4;
+	return switch_gpu_spare_class_bytes(c);
 }
 
-// The smallest class of at least `bytes`; kClasses past the largest.
 uint32_t classUp(uint64_t bytes)
 {
-	uint32_t c = 0;
-	while (c < kClasses && classBytes(c) < bytes)
-		c++;
-	return c;
+	return switch_gpu_spare_class_up(bytes);
 }
 }  // namespace tgm_uc
 
@@ -111,8 +100,9 @@ bool kernelPages(const void *va, uint64_t bytes, uint64_t *pas)
 	return true;
 }
 
-// A wired, zeroed, clean cached BO of `bytes`, of 128 KiB units where its layout has them (each one GMMU big page), or
-// nullptr. The refill thread alone makes these: BoAlloc's own path on the allocating thread never searches for units.
+// A wired cached BO of `bytes`, of 128 KiB units where its layout has them (each one GMMU big page), or nullptr. Its pages
+// hold what their last owner left: it is a dirty spare until the copy engine has zeroed it (spareWork). The refill
+// thread alone makes these: BoAlloc's own path on the allocating thread never searches for units.
 Spare *spareMake(SparePool *p, uint64_t bytes)
 {
 	Spare *s = IONew(Spare, 1);
@@ -129,13 +119,9 @@ Spare *spareMake(SparePool *p, uint64_t bytes)
 #endif
 	}
 	made = made || switch_gpu_cached_buffer_pages(bytes, &buffer);
-	if (s && pas && made) {
-		// KMA_ZERO zero-filled it through the cacheable aperture: clean the zeros out
-		cleanZeros(buffer.cpu, bytes);
-		if (kernelPages(buffer.cpu, bytes, pas)) {
-			*s = {nullptr, buffer, pas, bytes, nullptr};
-			return s;
-		}
+	if (s && pas && made && kernelPages(buffer.cpu, bytes, pas)) {
+		*s = {nullptr, buffer, pas, bytes, nullptr};
+		return s;
 	}
 	switch_gpu_cached_buffer_free(&buffer);
 	if (pas)
@@ -161,7 +147,13 @@ void spareZeroed(void *context, int result)
 	} else {
 		p->clean -= s->bytes;
 	}
+	const bool firstFailure = result && !p->fillFailed;
+	p->fillFailed = p->fillFailed || result;
 	IOLockUnlock(p->lock);
+	if (firstFailure)
+		IOLog("tegra-gm20b: the copy engine's zero-fill of a %llu KiB spare "
+		      "failed (%d): no spare is made until the next BoAlloc\n",
+		      s->bytes >> 10, result);
 	if (!keep)
 		spareFree(s);
 	thread_call_enter(p->call);
@@ -171,6 +163,8 @@ void spareWork(thread_call_param_t param, thread_call_param_t)
 {
 	SparePool *p = static_cast<SparePool *>(param);
 	for (;;) {
+		if (reclaimParkedStep(memoryPressure(), spareRoom()))
+			continue;
 		IOLockLock(p->lock);
 		if (PoolZero *z = p->poolDirty) {  // first: pool pages are the scarcer
 			p->poolDirty = z->next;
@@ -245,7 +239,9 @@ void spareWork(thread_call_param_t param, thread_call_param_t)
 			return;
 		}
 		Spare *evicted = nullptr;
-		uint32_t c = 0;
+		// a spare made goes through the dirty list, which keeps none without room or with the copy engine's fills
+		// failing: the refill would make and free one without end
+		uint32_t c = p->fillFailed || !spareRoom() ? kClasses : 0;
 		for (; c < kClasses; c++) {
 			if (p->count[c] + p->zeroing[c] >= p->target[c])
 				continue;
@@ -284,17 +280,18 @@ void spareWork(thread_call_param_t param, thread_call_param_t)
 			return;
 		Spare *s = spareMake(p, classBytes(c));
 		IOLockLock(p->lock);
+		p->clean -= classBytes(c);
 		if (!s) {  // the VM could not give it: try again at the next event, not now
-			p->clean -= classBytes(c);
 #if TGM_STATS
 			++p->refillRefused;
 #endif
 			IOLockUnlock(p->lock);
 			return;
 		}
-		s->next = p->ready[c];
-		p->ready[c] = s;
-		p->count[c]++;
+		// to the copy engine as a freed spare goes; this loop takes the dirty list before it makes another
+		s->next = p->dirty;
+		p->dirty = s;
+		p->dirtyBytes += s->bytes;
 		IOLockUnlock(p->lock);
 	}
 }
@@ -312,7 +309,7 @@ SparePool *spares()
 	if (!n)
 		return nullptr;
 	bzero(n, sizeof(*n));
-	for (const WarmClass &w : kWarm)
+	for (const switch_gpu_spare_warm &w : SWITCH_GPU_SPARE_WARM)
 		n->target[classUp(w.bytes)] = w.ready;
 	n->lock = IOLockAlloc();
 	n->call =
@@ -344,10 +341,9 @@ Spare *spareTake(uint64_t bytes)
 	const uint32_t c = classUp(bytes);
 	if (!p || c >= kClasses)
 		return nullptr;
-	const uint32_t last = c + (c < 5 ? 1 : 4);
 	IOLockLock(p->lock);
 	Spare *s = nullptr;
-	for (uint32_t d = c; d < kClasses && d <= last && !s; d++) {
+	for (uint32_t d = c; d < kClasses && switch_gpu_spare_serves(c, d) && !s; d++) {
 		s = p->ready[d];
 		if (s) {
 			p->ready[d] = s->next;
@@ -366,12 +362,36 @@ Spare *spareTake(uint64_t bytes)
 		++p->misses[why];
 #endif
 	}
-	const bool kick =
-		memoryPressure() ? p->clean != 0 : spareRoom() && p->count[c] < p->target[c];
-	IOLockUnlock(p->lock);
+	const bool pressure = memoryPressure();
+	const bool room = spareRoom();
+	const bool kick = pressure ? p->clean != 0 : room && p->count[c] < p->target[c];
 	if (kick)
+		p->fillFailed = false;
+	IOLockUnlock(p->lock);
+	bool wake = kick;
+	if (!s && !pressure && room && parkedNotifyDemand(classBytes(c)))
+		wake = true;
+	else if (pressure && !wake && parkedHasAny())
+		wake = true;
+	if (wake)
 		thread_call_enter(p->call);
 	return s;
+}
+
+bool sparesPressure()
+{
+	return memoryPressure();
+}
+
+bool sparesHasRoom()
+{
+	return spareRoom();
+}
+
+void kickSpareWork()
+{
+	if (SparePool *p = spares())
+		thread_call_enter(p->call);
 }
 
 // Debug kernels: a cached BoAlloc that no spare can serve by its flags (contiguous, write-combined).
@@ -391,6 +411,10 @@ void spareIneligible()
 bool spareKeep(const SwitchGpuCachedBuffer &buffer, uint64_t *pas, uint64_t bytes,
 	       switch_gpu_cached_mapping *mapping)
 {
+	if (memoryPressure() || !spareRoom())
+		return false;
+	if (bytes > kSpareCapBytes || classUp(bytes) >= kClasses)
+		return false;
 	SparePool *p = spares();
 	Spare *s = p && switch_gpu_cached_buffer_alone(buffer) ? IONew(Spare, 1) : nullptr;
 	if (!s)
@@ -443,6 +467,10 @@ extern "C" unsigned long tgm_owner_stats(char *out, unsigned long size)
 	if (!TGM_STATS || !p || !size)
 		return 0;
 	out[0] = 0;
+	uint64_t parked = 0, unparkResident = 0, unparkReclaimed = 0, reclaimedCached = 0,
+		 reclaimedSystem = 0;
+	parkedStatsTake(&parked, &unparkResident, &unparkReclaimed, &reclaimedCached,
+			&reclaimedSystem);
 	IOLockLock(p->lock);
 	for (uint32_t i = 0; i < kOwners && p->owners[i].n; i++) {
 		const OwnerStat &o = p->owners[i];
@@ -470,6 +498,14 @@ extern "C" unsigned long tgm_owner_stats(char *out, unsigned long size)
 		       : 0;
 	if (n > 0)
 		at = at + size_t(n) < size ? at + size_t(n) : size - 1;
+	if (parked || unparkResident || unparkReclaimed || reclaimedCached || reclaimedSystem) {
+		const int pn = snprintf(out + at, size - at,
+					"%sparked %llu (res %llu, rec %llu, cached %llu, sys %llu)",
+					at ? "; " : "", parked, unparkResident, unparkReclaimed,
+					reclaimedCached, reclaimedSystem);
+		if (pn > 0)
+			at = at + size_t(pn) < size ? at + size_t(pn) : size - 1;
+	}
 	bzero(p->owners, sizeof(p->owners));
 	bzero(p->misses, sizeof(p->misses));
 	p->zeroBusy = p->zeroFailed = p->refillRefused = p->notUnits = 0;

@@ -330,6 +330,15 @@ static void chan_abandon(struct tgm_chan *chan)
 	}
 }
 
+int tgm_chan_visible_at(struct tgm_chan *chan, uint32_t seqno)
+{
+	if (!chan || READ_ONCE(chan->error))
+		return 0;
+	if (!chan->visible_cpu)
+		return (s32)(tgm_chan_completed(chan) - seqno) >= 0;
+	return (s32)(__atomic_load_n(chan->visible_cpu, __ATOMIC_ACQUIRE) - seqno) >= 0;
+}
+
 void tgm_chan_del(struct tgm_chan **pchan)
 {
 	struct tgm_chan *chan = *pchan;
@@ -373,6 +382,11 @@ void tgm_chan_del(struct tgm_chan **pchan)
 	nvxnu_pass_barrier();
 	tgm_gpu_lock();
 	held = stats_on() ? nvxnu_nanotime() : 0;
+	/* A closing user channel leaves binding retirement unable to check its visibility word
+	 * later, so flush L2 once here if its last work did not end externally visible. */
+	if (tgm_gpu.stage >= 3 && !chan->kernel && tgm_gpu.device && tgm_gpu.device->ltc &&
+	    !tgm_chan_visible_at(chan, chan->submitted))
+		nvkm_ltc_flush(tgm_gpu.device->ltc);
 	chan_free(chan);
 	if (stats_on()) {
 		__atomic_fetch_add(&tgm_stats.lock_free, 1, __ATOMIC_RELAXED);

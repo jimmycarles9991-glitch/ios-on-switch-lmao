@@ -62,6 +62,10 @@ public:
         // A running job's worker raised to `band` until lower(token)
         std::function<void *(pthread_t worker, Band band)> raise;
         std::function<void(void *token)> lower;
+        // Called once on each worker thread with its 1-based slot (1..kWorkers) before taking jobs
+        std::function<void(uint32_t worker)> registerWorker;
+        // Bind kernel request `id` to the worker registered in `worker` (1..kWorkers)
+        std::function<void(uint64_t id, uint32_t worker)> serve;
         // On the worker whose job was the last one queued or running, after its waiters were answered, at the background
         // class
         std::function<void()> idle;
@@ -94,6 +98,7 @@ private:
         bool running = false, primaryDone = false, foreground = false;
         int32_t primaryResult = 0;
         pthread_t worker = nullptr;
+        uint32_t workerSlot = 0;
         std::vector<void *> raises;
     };
 
@@ -107,7 +112,7 @@ private:
     bool stopping_ = false;
     Stats stats_;
 
-    void workerLoop();
+    void workerLoop(unsigned slot);
     std::shared_ptr<Job> next();
     void primary(const std::shared_ptr<Job> &job, int32_t result);
     void finish(const std::shared_ptr<Job> &job, int32_t splitResult);

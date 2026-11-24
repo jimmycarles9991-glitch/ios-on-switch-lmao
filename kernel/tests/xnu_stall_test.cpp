@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <regex>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "bazel/testing/source_text.h"
 #include "xnu_stall_harness.h"
@@ -117,25 +119,89 @@ TEST(XnuStall, StarvationIsReportedFromWhenItWasMadeRunnable)
     EXPECT_EQ(xnu_stall_episode_kind(), 2);
 }
 
-// The names follow block_hint.h's thread_snapshot_wait_flags by value.
+// block_hint.h's thread_snapshot_wait_flags as (name, value) pairs, in the order the header lists them.
+std::vector<std::pair<std::string, unsigned>> BlockHints(const char *tree)
+{
+    const std::string hints = switch_ios::test::SourceText(std::string("../") + tree + "/osfmk/kern/block_hint.h");
+    const std::regex entry("(kThreadWait[A-Za-z]+) += 0x([0-9a-f]+),");
+    std::vector<std::pair<std::string, unsigned>> out;
+    for (std::sregex_iterator it(hints.begin(), hints.end(), entry), end; it != end; ++it)
+        out.emplace_back((*it)[1].str(), (unsigned)std::stoul((*it)[2].str(), nullptr, 16));
+    return out;
+}
+
+// The names follow xnu-12377's thread_snapshot_wait_flags by value; xnu-10063's are the same values, a prefix of them.
 TEST(XnuStall, WaitNamesFollowBlockHint)
 {
-    const std::string hints = switch_ios::test::SourceText("../xnu-10063.141.1/osfmk/kern/block_hint.h");
-    const std::regex entry("(kThreadWait[A-Za-z]+) += 0x([0-9a-f]+),");
-    unsigned count = 0;
-    for (std::sregex_iterator it(hints.begin(), hints.end(), entry), end; it != end; ++it) {
-        const unsigned value = (unsigned)std::stoul((*it)[2].str(), nullptr, 16);
-        EXPECT_EQ(value, count) << (*it)[1].str() << ": the table is indexed by value";
-        ++count;
-    }
-    EXPECT_EQ(count, xnu_stall_wait_names());
+    const auto newer = BlockHints("xnu-12377.121.6"), older = BlockHints("xnu-10063.141.1");
+    for (unsigned i = 0; i < newer.size(); ++i)
+        EXPECT_EQ(newer[i].second, i) << newer[i].first << ": the table is indexed by value";
+    EXPECT_EQ(newer.size(), xnu_stall_wait_names());
+    ASSERT_LE(older.size(), newer.size());
+    for (unsigned i = 0; i < older.size(); ++i)
+        EXPECT_EQ(older[i], newer[i]);
     EXPECT_STREQ(xnu_stall_wait_name(0x02), "mach_msg receive");
     EXPECT_STREQ(xnu_stall_wait_name(0x03), "mach_msg receive on a port set");
     EXPECT_STREQ(xnu_stall_wait_name(0x04), "mach_msg send");
     EXPECT_STREQ(xnu_stall_wait_name(0x0a), "ulock");
     EXPECT_STREQ(xnu_stall_wait_name(0x10), "workloop sync wait");
     EXPECT_STREQ(xnu_stall_wait_name(0x14), "compressor");
-    EXPECT_STREQ(xnu_stall_wait_name(0x15), "unknown wait");
+    EXPECT_STREQ(xnu_stall_wait_name(0x16), "page busy");
+    EXPECT_STREQ(xnu_stall_wait_name(0x1d), "page-in throttle");
+    EXPECT_STREQ(xnu_stall_wait_name(0x22), "VM entry unwire");
+    EXPECT_STREQ(xnu_stall_wait_name(0x23), "unknown wait");
+}
+
+// Exactly block_hint.h's kernel rwlock waits are read as one.
+TEST(XnuStall, KernelRWLockWaitsByBlockHint)
+{
+    for (const auto &[name, value] : BlockHints("xnu-12377.121.6"))
+        EXPECT_EQ(xnu_stall_rwlock_wait(value), name.find("KernelRWLock") != std::string::npos) << name;
+}
+
+// Both lck_rw_old_t (all of xnu-10063 and default lck_rw_t such as APFS on xnu-12377) and explicit lck_rw_new_t on
+// xnu-12377 must decode to the exact lock address when allow_typed is true.
+TEST(XnuStall, KernelRWLockFromItsWaitEvent)
+{
+    const uint64_t old = 0xfffffff012345674ull;
+    // xnu-10063: always untyped.
+    EXPECT_EQ(xnu_stall_rwlock_of(old + 2, 0x07, false), old);
+    EXPECT_EQ(xnu_stall_rwlock_of(old + 1, 0x08, false), old);
+    EXPECT_EQ(xnu_stall_rwlock_of(old + 1, 0x09, false), old);
+    // xnu-12377: lck_rw_old_t (APFS/BSD/IOKit) uses untyped events even though allow_typed is true.
+    EXPECT_EQ(xnu_stall_rwlock_of(old + 2, 0x07, true), old);
+    EXPECT_EQ(xnu_stall_rwlock_of(old + 1, 0x08, true), old);
+    EXPECT_EQ(xnu_stall_rwlock_of(old + 1, 0x09, true), old);
+    // xnu-12377: explicit lck_rw_new_t uses WAITQ_TYPED_EVENT64(hint, lock) + (hint + 1 - 0x07).
+    const uint64_t lock = 0xfffffff012345670ull;
+    for (const unsigned hint : {0x07u, 0x08u, 0x09u}) {
+        const uint64_t typed = (lock ^ ((uint64_t)hint << 48)) + (hint + 1 - 0x07);
+        EXPECT_EQ(xnu_stall_rwlock_of(typed, hint, true), lock) << hint;
+    }
+}
+
+// A turnstile inheritor belonging to kernel_task (pid 0, tid != 0) is a thread owner and must be kept and followed on
+// hops 1-2 rather than falling through to port lookup.
+TEST(XnuStall, KernelTaskOwnerHopIsFollowed)
+{
+    EXPECT_TRUE(xnu_stall_owner_is_thread(0, 0x1c6));
+    EXPECT_TRUE(xnu_stall_owner_known(0, 0x1c6));
+    EXPECT_TRUE(xnu_stall_hop_present(0, 0x1c6, false));
+
+    EXPECT_TRUE(xnu_stall_owner_is_thread(69, 0x508));
+    EXPECT_TRUE(xnu_stall_owner_known(69, 0x508));
+    EXPECT_TRUE(xnu_stall_hop_present(69, 0x508, false));
+
+    // A workqueue inheritor has a pid without a tid: known, but not yet resolved to a thread.
+    EXPECT_FALSE(xnu_stall_owner_is_thread(69, 0));
+    EXPECT_TRUE(xnu_stall_owner_known(69, 0));
+    EXPECT_TRUE(xnu_stall_hop_present(69, 0, false));
+
+    // Empty owner stops unless a lock on the way was held.
+    EXPECT_FALSE(xnu_stall_owner_is_thread(0, 0));
+    EXPECT_FALSE(xnu_stall_owner_known(0, 0));
+    EXPECT_FALSE(xnu_stall_hop_present(0, 0, false));
+    EXPECT_TRUE(xnu_stall_hop_present(0, 0, true));
 }
 
 TEST(XnuStall, UserAddresses)

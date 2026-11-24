@@ -6,8 +6,10 @@
 // is not placed, and the entry of a buffer slot bound to nothing names the zero page.
 #include "device_harness.h"
 #include "record_pack.h"
+#include "../pack_scan.h"
 #include "../record.h"
 #include "../../../kits/SwitchGM20B/SwitchGM20B3D.h"
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -234,9 +236,9 @@ TEST_F(DeviceWideSet, AnEntryOfASlotBoundToNothingNamesTheZeroPage)
     EXPECT_EQ(words[6], 0u);
 }
 
-// A pack is read where its records' draws index by their entries: a record of an entry no draw can write is refused
-// where it is placed, and its state is no state of the device's
-TEST(DevicePackEntries, ARecordOfAnEntryNoDrawCanWriteIsNotPlaced)
+// A pack's records are drawn as it holds them, their draws indexing by their entries unchecked: a record of an entry no
+// draw can write is the generator's scan's to name (pack_scan.h), each one
+TEST(DevicePackEntries, ARecordOfAnEntryNoDrawCanWriteIsNamedByThePackScan)
 {
     gm20b::RuntimeRecord slot = narrowRecord(0x3c1), kind = narrowRecord(0x3c2), stage = narrowRecord(0x3c3),
                          offset = narrowRecord(0x3c4);
@@ -250,9 +252,17 @@ TEST(DevicePackEntries, ARecordOfAnEntryNoDrawCanWriteIsNotPlaced)
     std::string err;
     ASSERT_TRUE(dev.open(harness::recordPack(records, "pack-entries.bin").c_str(), 0, err, gm20b::Device::Role::Client))
         << err;
-    EXPECT_NE(dev.pipeline(0x3c0), nullptr);
+    const std::vector<std::string> found = gm20b::packScan(dev.pack());
+    const auto named = [&found](uint64_t keyHash) {
+        char head[32];
+        snprintf(head, sizeof head, "pipeline %016llx: ", (unsigned long long)keyHash);
+        return std::count_if(found.begin(), found.end(), [&head](const std::string &line) {
+            return line.rfind(head, 0) == 0;
+        });
+    };
+    EXPECT_EQ(named(0x3c0), 0);
     for (const gm20b::RuntimeRecord *bad : {&slot, &kind, &stage, &offset})
-        EXPECT_EQ(dev.pipeline(bad->pipeline.keyHash), nullptr) << std::hex << bad->pipeline.keyHash;
+        EXPECT_EQ(named(bad->pipeline.keyHash), 1) << std::hex << bad->pipeline.keyHash;
 }
 
 }  // namespace

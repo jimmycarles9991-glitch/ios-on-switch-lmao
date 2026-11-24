@@ -2,6 +2,7 @@
 // The periodic statistics lines (TGM_STATS): job stamps, fences, clocks, submissions and owners.
 #include "gpu_internal.h"
 #include "deadline_stats.h"
+#include "TegraGM20BLoad.h"
 
 #if TGM_STATS
 /* TegraVIC (drivers/TegraVIC/SwitchVICMapping.cpp, debug kernels) */
@@ -226,6 +227,15 @@ void tgm_stats_tick(void)
 	u32 copies = 0;
 	u32 comp = 0;
 	u32 behind = 0;
+	u32 later_kicks = 0;
+	u32 later_frames = 0;
+	u32 later_frame_max = 0;
+	u32 foreign_jobs = 0;
+	u32 foreign_fences = 0;
+	u32 foreign_promises = 0;
+	u32 foreign_events = 0;
+	u32 foreign_host1x = 0;
+	u32 foreign_timed = 0;
 	u32 lnew = 0;
 	u32 lfree = 0;
 	u64 abytes = 0;
@@ -240,6 +250,9 @@ void tgm_stats_tick(void)
 	u64 com = 0;
 	u64 bs = 0;
 	u64 bm = 0;
+	u64 later_queue_max = 0;
+	u64 foreign_qs = 0;
+	u64 foreign_qm = 0;
 	u64 lns = 0;
 	u64 lnm = 0;
 	u64 lfs = 0;
@@ -249,8 +262,10 @@ void tgm_stats_tick(void)
 	char scrubbed[200];
 	char sched[120];
 	char recov[128];
+	char load[160];
 
 	__atomic_fetch_add(&tgm_stats.submits, 1, __ATOMIC_RELAXED);
+	tgm_load_sample(now);
 	if (!since) {
 		if (__atomic_compare_exchange_n(&tgm_stats.since, &since, now, false,
 						__ATOMIC_RELAXED, __ATOMIC_RELAXED))
@@ -294,6 +309,19 @@ void tgm_stats_tick(void)
 	behind = __atomic_exchange_n(&tgm_stats.behind, 0, __ATOMIC_RELAXED);
 	bs = __atomic_exchange_n(&tgm_stats.behind_sum, 0, __ATOMIC_RELAXED);
 	bm = __atomic_exchange_n(&tgm_stats.behind_max, 0, __ATOMIC_RELAXED);
+	later_kicks = __atomic_exchange_n(&tgm_stats.later_kicks, 0, __ATOMIC_RELAXED);
+	later_frames = __atomic_exchange_n(&tgm_stats.later_frames, 0, __ATOMIC_RELAXED);
+	later_frame_max = __atomic_exchange_n(&tgm_stats.later_frame_max, 0, __ATOMIC_RELAXED);
+	later_queue_max = __atomic_exchange_n(&tgm_stats.later_queue_max, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&tgm_stats.later_in_frame, 0, __ATOMIC_RELAXED);
+	foreign_jobs = __atomic_exchange_n(&tgm_stats.foreign_jobs, 0, __ATOMIC_RELAXED);
+	foreign_fences = __atomic_exchange_n(&tgm_stats.foreign_fences, 0, __ATOMIC_RELAXED);
+	foreign_promises = __atomic_exchange_n(&tgm_stats.foreign_promises, 0, __ATOMIC_RELAXED);
+	foreign_events = __atomic_exchange_n(&tgm_stats.foreign_events, 0, __ATOMIC_RELAXED);
+	foreign_host1x = __atomic_exchange_n(&tgm_stats.foreign_host1x, 0, __ATOMIC_RELAXED);
+	foreign_timed = __atomic_exchange_n(&tgm_stats.foreign_timed, 0, __ATOMIC_RELAXED);
+	foreign_qs = __atomic_exchange_n(&tgm_stats.foreign_queue_sum, 0, __ATOMIC_RELAXED);
+	foreign_qm = __atomic_exchange_n(&tgm_stats.foreign_queue_max, 0, __ATOMIC_RELAXED);
 	tgm_sched_stats(sched, sizeof(sched));
 	tgm_recover_stats(recov, sizeof(recov));
 	lnew = __atomic_exchange_n(&tgm_stats.lock_new, 0, __ATOMIC_RELAXED);
@@ -310,6 +338,7 @@ void tgm_stats_tick(void)
 	}
 	/* the GPU's share of the window spent on stamped user submissions and copies */
 	busy = PT_NS(es + cs) * 100 / (now - since);
+	tgm_load_stats(load, sizeof(load), now - since);
 	tgm_clk_measure(clk, sizeof(clk));
 	tgm_scrub_stats(scrubbed, sizeof(scrubbed), ms);
 	/* formatted here and logged as one string: os_log drops a message whose scalar arguments outgrow its 256-byte buffer
@@ -318,7 +347,7 @@ void tgm_stats_tick(void)
 		  "%llu ms: %u submits (%llu/s), fence latency mean %llu us max %llu us (%u), GPU "
 		  "queue "
 		  "mean %llu us max %llu us, exec mean %llu us max %llu us (%u stamped), busy "
-		  "%llu%% (PTIMER x%llu.%03llu), "
+		  "%llu%% (PTIMER x%llu.%03llu), %s, "
 		  "L2 %s, %u presents (%u writer-only, %u L2 flushes), "
 		  "offer to done mean %llu us max "
 		  "%llu us, %s; compositor GPU queue mean %llu us max %llu us (%u), with an app on "
@@ -326,11 +355,24 @@ void tgm_stats_tick(void)
 		  ms, submits, submits * 1000ULL / (ms ? ms : 1), fences ? sum / fences / 1000 : 0,
 		  max / 1000, fences, timed ? PT_NS(qs) / timed / 1000 : 0, PT_NS(qm) / 1000,
 		  timed ? PT_NS(es) / timed / 1000 : 0, PT_NS(em) / 1000, timed, busy, rate >> 16,
-		  ((rate & 0xffff) * 1000) >> 16, l2_on() ? "cached" : "volatile", presents, writer,
-		  present_flushes, presents ? ps / presents / 1000 : 0, pm / 1000, clk,
+		  ((rate & 0xffff) * 1000) >> 16, load, l2_on() ? "cached" : "volatile", presents,
+		  writer, present_flushes, presents ? ps / presents / 1000 : 0, pm / 1000, clk,
 		  comp ? PT_NS(cos) / comp / 1000 : 0, PT_NS(com) / 1000, comp,
 		  behind ? PT_NS(bs) / behind / 1000 : 0, PT_NS(bm) / 1000, behind, sched, recov);
 	nvxnu_stats("tegra-gm20b: stats %s", line);
+	if (comp || later_kicks || later_queue_max)
+		nvxnu_stats("tegra-gm20b: %u later kicks met an app in %u frames, per frame max "
+			    "%u, queue max %llu us",
+			    later_kicks, later_frames, later_frame_max,
+			    PT_NS(later_queue_max) / 1000);
+	if (comp || foreign_jobs || foreign_host1x || foreign_timed)
+		nvxnu_stats("tegra-gm20b: %u compositor jobs waited on foreign work (%u fences, "
+			    "%u promises, %u events; %u host1x waits), queue mean %llu us max "
+			    "%llu us (%u)",
+			    foreign_jobs, foreign_fences, foreign_promises, foreign_events,
+			    foreign_host1x,
+			    foreign_timed ? PT_NS(foreign_qs) / foreign_timed / 1000 : 0,
+			    PT_NS(foreign_qm) / 1000, foreign_timed);
 	stats_deadline(line, sizeof(line));
 	tgm_acquire_probe_window(line, sizeof(line), now);
 	if (line[0])
@@ -443,7 +485,16 @@ void tgm_stats_tick(void)
 				  "never: the memory went), %llu moves made\n",
 				  r[0], r[1], r[2], r[3], r[4]);
 		}
+		uint64_t in_place[3];
+		tgm_relayout_in_place_stats(in_place);
+		if (in_place[0]) {
+			nvxnu_log("tegra-gm20b: in-place moves %llu (an L2 invalidate each), "
+				  "submission to completion mean %llu us, max %llu us\n",
+				  in_place[0], in_place[1] / in_place[0] / 1000,
+				  in_place[2] / 1000);
+		}
 	}
+	tgm_stats_l2_inval_window();
 #undef PT_NS
 }
 #endif

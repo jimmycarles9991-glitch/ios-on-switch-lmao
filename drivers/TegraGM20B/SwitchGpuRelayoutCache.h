@@ -14,7 +14,8 @@ struct SwitchGpuRelayoutMapping {
 	uint64_t *pages;
 	const uint64_t *sourcePages;
 	uint64_t allocation, generation, bytes, pitch, tiled, lastUse;
-	uint32_t pageCount, users;
+	uint32_t pageCount, users, tiledKind;
+	bool ownsMemory;
 };
 
 struct SwitchGpuRelayoutCache {

@@ -104,7 +104,19 @@ int tgm_mem_new_waited(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages,
 /* The same for pages no other memory object will ever name (a BO's own): such memory may take compressible kinds. */
 int tgm_mem_new_exclusive(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages,
 			  struct tgm_mem **pmem);
+int tgm_mem_new_exclusive_smmu(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages,
+			       struct tgm_mem **pmem);
 int tgm_mem_can_compress(const struct tgm_mem *mem);
+int tgm_mem_is_smmu(const struct tgm_mem *mem);
+struct switch_gpu_backing;
+int switch_gpu_backing_tgm_mem_direct(struct switch_gpu_backing *backing, uint32_t count,
+				      struct tgm_mem **out);
+int switch_gpu_backing_tgm_mem(struct switch_gpu_backing *backing, uint32_t count,
+			       struct tgm_mem **out);
+int switch_gpu_backing_tgm_mem_existing(struct switch_gpu_backing *backing, uint32_t count,
+					struct tgm_mem **out);
+int switch_gpu_backing_tgm_mem_existing_or_direct(struct switch_gpu_backing *backing,
+						  uint32_t count, struct tgm_mem **out);
 void tgm_mem_del(struct tgm_mem **pmem);
 /* User range [TGM_USER_VA_START, TGM_KERNEL_VA): raw binds. read_only: the GPU may only read the range (a write is an
  * MMU fault). tgm_vm_map and tgm_vm_unmap invalidate the L2 and the TLB before they return; tgm_vm_map_ordered (a
@@ -117,6 +129,7 @@ int tgm_vm_map_ordered(struct tgm_vm *vm, uint64_t va, uint64_t range, struct tg
 		       uint64_t offset, uint8_t kind, int read_only, uint8_t *page_shift);
 int tgm_vm_unmap(struct tgm_vm *vm, uint64_t va, uint64_t range);
 int tgm_vm_unmap_pages(struct tgm_vm *vm, uint64_t va, uint64_t range, uint8_t page_shift);
+int tgm_vm_unmap_volatile(struct tgm_vm *vm, uint64_t va, uint64_t range);
 struct switch_gpu_mapping;
 int switch_gpu_vm_map(struct tgm_vm *vm, uint64_t va, uint64_t range, struct tgm_mem *mem,
 		      uint64_t offset, uint8_t kind, int read_only,
@@ -126,6 +139,9 @@ int switch_gpu_vm_map_volatile(struct tgm_vm *vm, uint64_t va, uint64_t range, s
 			       struct switch_gpu_mapping **mapping);
 /* Whether a map of `kind` may be volatile: every map path (now, prepared, installed) refuses a compressed one. */
 int switch_gpu_vm_volatile_kind_ok(uint8_t kind, int vol);
+int switch_gpu_mapping_needs_ltc_flush(const struct switch_gpu_mapping *mapping);
+void switch_gpu_mapping_mark_l2_clean(struct switch_gpu_mapping *mapping);
+void switch_gpu_mapping_mark_l2_flushed(struct switch_gpu_mapping *mapping);
 void switch_gpu_vm_unmap(struct tgm_vm *vm, struct switch_gpu_mapping **mapping);
 /* Cuts [va, va + range) out of *mapping, made by switch_gpu_vm_map_volatile or _prepare of mem with kind, and consumes
  * it, changing no PTE. What stays below and above the range comes back as *below and *above, the range's own entries as
@@ -244,6 +260,8 @@ enum {
 	/* the job's end raises no interrupt unless a waiter asked for one (SwitchGpuQuiet.h); only on a channel with an owner
 	 * that pushes wake entries (tgm_chan_on_wake) */
 	SWITCH_GPU_SUBMIT_QUIET = 1u << 4,
+	/* volatile-mapped GPU writes: WFI + FB_FLUSH, no L2_FLUSH_DIRTY, does not advance visible_cpu */
+	SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY = 1u << 5,
 };
 
 int switch_gpu_chan_exec_visibility(struct tgm_chan *chan, const struct tgm_push *push,
@@ -375,6 +393,7 @@ struct tgm_prof {
 
 uint32_t tgm_chan_submitted(struct tgm_chan *chan);
 uint32_t tgm_chan_completed(struct tgm_chan *chan);
+int tgm_chan_visible_at(struct tgm_chan *chan, uint32_t seqno);
 /* `fenced(arg)` from the interrupt pass whenever the channel's fence may have moved, and once when it is killed (its
  * fence then released): under nvkm's event lock, so it must not block (a thread call does the work). */
 void tgm_chan_on_fence(struct tgm_chan *chan, void (*fenced)(void *arg), void *arg);
@@ -507,6 +526,7 @@ struct tgm_coh *tgm_coherency_add(uint64_t pa, uint32_t surface_id, const uint64
 /* SurfaceWrites (method 15): every entry of the surface counts submissions as GPU writes from now on. */
 void tgm_coherency_gpu_writes(uint32_t surface_id);
 void tgm_coherency_cleaned(struct tgm_coh *c);
+void tgm_coherency_set_compressible(struct tgm_coh *c, int compressible);
 struct switch_gpu_backing;
 /* Success consumes the supplied surface reference; it keeps a parked tiled identity from being recycled. */
 int tgm_coherency_pin(struct tgm_coh *c, struct switch_gpu_backing *backing, void *surface,
@@ -591,6 +611,9 @@ void tgm_relayout_by_cpu(const struct tgm_relayout_pages *surface,
 /* With the stats: the moves the CPU made for the copy engine since the last call (tgm_relayout_by_cpu, and a relayout
  * the CPU finished after a fault), and the surface bytes they covered. */
 void tgm_relayout_cpu_stats(uint64_t *moves, uint64_t *bytes);
+/* With the stats: the in-place moves the copy engine made since the last call (each one L2 invalidate at its
+ * checkpoint), and their time from submission to completion, summed and the longest, in ns. */
+void tgm_relayout_in_place_stats(uint64_t out[3]);
 /* tgm_writer_wait for a kernel copy's submission that starts with semaphore acquires on `acquired` (in push order):
  * while one of them has not completed, the wait is late on that writer, which a long wait recovers, not on the copy. */
 void tgm_copy_wait(uint32_t uid, uint32_t seqno, const struct tgm_relayout_writer *acquired,
@@ -651,7 +674,7 @@ int tgm_gpu_held(void (*fn)(struct nvkm_device *device, void *arg), void *arg);
  * at the PL it last set; -EIO otherwise, -EBUSY before M3. */
 struct tgm_rail_look {
 	int fence; /* 0, -ETIMEDOUT or -ENODEV */
-	uint32_t fence_us, coeff, cfg, pl, expect_pl, wake_coeff;
+	uint32_t fence_us, coeff, cfg, dvfs1, pl, expect_pl, wake_coeff;
 	int khz, vco_ok;
 };
 
@@ -681,6 +704,8 @@ struct tgm_ramfc_look {
 
 int tgm_ramfc_probe(struct tgm_ramfc_look *look);
 void tgm_ramfc_probe_register(void);
+int tgm_chan_gr_preempt(struct tgm_chan *chan, uint32_t mode, uint32_t *old_mode,
+			uint32_t *readback);
 
 /* Debug kernels: the GM20B registers L4T's capture reads (TegraGM20BRegDump.h, regdump.c), as text into buf; *len its
  * length. 0, -EBUSY before M3, -ENOMEM, -ENOSPC when cap is short of tgm_regdump_bytes(). */
@@ -768,6 +793,12 @@ int tgm_promise_was_cpu_raised(uint32_t offset, uint32_t value);
 uint64_t tgm_stats_cpu_ns(void);
 uint64_t tgm_stats_zero_fills(void);
 void tgm_stats_import_cost(const struct tgm_import_cost *cost);
+
+struct tgm_foreign_waits {
+	uint64_t jobs, fences, promises, events, host1x;
+};
+
+void tgm_foreign_waits_totals(struct tgm_foreign_waits *out);
 #else
 static inline uint64_t tgm_stats_cpu_ns(void)
 {
@@ -799,6 +830,10 @@ enum {
 	TGM_SUBMIT_LOCK,
 	TGM_SUBMIT_EXEC,
 	TGM_SUBMIT_COMMIT,
+	TGM_SUBMIT_REFRESH,
+	TGM_SUBMIT_ENTER,
+	TGM_SUBMIT_BEGIN,
+	TGM_SUBMIT_ROOM,
 	TGM_SUBMIT_PHASES
 };
 

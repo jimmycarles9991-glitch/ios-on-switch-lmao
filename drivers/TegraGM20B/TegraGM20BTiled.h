@@ -26,6 +26,7 @@ struct tgm_cpu_view {
 struct tgm_tiled {
 	int tiled; /* else pitch, for good unless retry */
 	int retry; /* pitch because the tiling move failed: decided again (TGM_LAYOUT_ASK_FIRST) */
+	uint32_t kind;
 	struct tgm_layout layout;
 	uint32_t bytes_per_row;
 	/* CPU locks (TegraGM20BViews.cpp; entry lock): the scratch holding the texels as rows while any is held, the locks,
@@ -65,6 +66,9 @@ struct tgm_tiled **tgm_coh_tiled(struct tgm_coh *c);
 int tgm_coh_alone(struct tgm_coh *c, uint32_t refs);
 int tgm_coh_unshared(const struct tgm_coh *c);
 int tgm_coh_pinned(const struct tgm_coh *c);
+struct switch_gpu_backing *tgm_coh_backing(const struct tgm_coh *c);
+int tgm_coh_compressible(const struct tgm_coh *c);
+void tgm_coh_set_pending_kind(struct tgm_coh *c, uint32_t kind);
 struct tgm_relayout_pages tgm_coh_pages(const struct tgm_coh *c);
 uint32_t tgm_coh_writers(struct tgm_coh *c, struct tgm_relayout_writer *out, uint32_t max);
 /* Until the GPU's writes to the pinned surface are in DRAM, which a CPU move reads and writes behind the L2 */

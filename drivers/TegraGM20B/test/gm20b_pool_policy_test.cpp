@@ -286,3 +286,23 @@ TEST(GM20BPoolPolicy, PastItsShareAnAppsCoherentBosComeFromSystemMemory)
 	alloc(p, app, 4 * MiB, false, r);
 	check(r.fromSystem == 1 && r.failed == 0, "its 4 MiB coherent BO from system memory");
 }
+
+TEST(GM20BPoolPolicy, SmmuCompressibleBudgetEnforcesGlobalClientAndHeadroomCaps)
+{
+	constexpr tgm_pool::SmmuCompLimits limits = {256 * MiB, 96 * MiB, 64 * MiB};
+	EXPECT_EQ(tgm_pool::smmuCompressibleRefusal(16 * MiB, 0, 0, 512 * MiB, limits, false),
+		  nullptr);
+	EXPECT_NE(
+		tgm_pool::smmuCompressibleRefusal(16 * MiB, 248 * MiB, 0, 512 * MiB, limits, true),
+		nullptr);
+	EXPECT_NE(tgm_pool::smmuCompressibleRefusal(16 * MiB, 88 * MiB, 88 * MiB, 512 * MiB, limits,
+						    false),
+		  nullptr);
+	EXPECT_EQ(tgm_pool::smmuCompressibleRefusal(16 * MiB, 88 * MiB, 88 * MiB, 512 * MiB, limits,
+						    true),
+		  nullptr);
+	EXPECT_NE(tgm_pool::smmuCompressibleRefusal(16 * MiB, 0, 0, 72 * MiB, limits, true),
+		  nullptr);
+	EXPECT_EQ(tgm_pool::smmuCompressibleRefusal(16 * MiB, 0, 0, 80 * MiB, limits, true),
+		  nullptr);
+}

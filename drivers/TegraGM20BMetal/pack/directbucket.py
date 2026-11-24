@@ -38,7 +38,7 @@ def library_root(qc: Path) -> str:
     return str(qc)[: -len(QC_PATH) - 1] if str(qc).endswith(QC_PATH) else ''
 
 
-def bucket(tools: Path, d: Path, qc: Path, env: dict[str, str], selectors: str | None = None) -> str:
+def bucket(tools: Path, d: Path, qc: Path, env: dict[str, str]) -> str:
     """Make one bucket's records directly (directpack.mm: records.bin, its states' and its dispatch shapes' kernels).
 
     Bucket 0 holds the tools' context.log: the context init and the registers every record is laid over (directlink.py).
@@ -69,8 +69,7 @@ def bucket(tools: Path, d: Path, qc: Path, env: dict[str, str], selectors: str |
         bridge_said.extend(line for line in r.stderr.splitlines() if line.startswith(DIRECT_COMPILE_SAYS))
 
     own = {'PROBE_OWN_LIB': str(tools / 'own.metallib')} if d.name == 'bucket0' else {}
-    tables = [selectors] if selectors else []
-    step('directpack', [tools / 'directpack', qc, corpus, d / 'records.bin', *tables], own, d / 'directpack.out')
+    step('directpack', [tools / 'directpack', qc, corpus, d / 'records.bin'], own, d / 'directpack.out')
     if d.name == 'bucket0':
         shutil.copyfile(tools / 'context.log', d / 'context.log')
     shutil.rmtree(cache, ignore_errors=True)
@@ -103,8 +102,7 @@ def probe_env() -> dict[str, str]:
 
 def main() -> None:
     tools, bucket_dir = Path(option('--prebuilt')).resolve(), Path(option('--probe-bucket')).resolve()
-    selectors = option('--ca-selectors', False)
-    print(bucket(tools, bucket_dir, Path(option('--qc')).resolve(), probe_env(), selectors))
+    print(bucket(tools, bucket_dir, Path(option('--qc')).resolve(), probe_env()))
 
 
 if __name__ == '__main__':

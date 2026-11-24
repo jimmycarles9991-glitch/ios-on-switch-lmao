@@ -141,6 +141,7 @@ inline PipelineFields fieldsOf(MTLRenderPipelineDescriptor *d)
     f.amplification = d.maxVertexAmplificationCount;
     f.textureWriteRounding = textureWriteRoundingOf(d);
     f.patchType = d.vertexFunction.patchType;
+    f.alphaToCoverage = d.alphaToCoverageEnabled ? 1 : 0;
     f.tessellation = {d.tessellationPartitionMode,
                       d.tessellationFactorFormat,
                       d.tessellationFactorStepFunction,
@@ -180,6 +181,8 @@ inline std::string pipelineKey(const PipelineFields &f, const StageKey *vertex, 
     snprintf(head, sizeof head, "samples=%llu topo=%llu ds=%llu/%llu ", (unsigned long long)f.samples,
              (unsigned long long)f.topology, (unsigned long long)f.depthFormat, (unsigned long long)f.stencilFormat);
     std::string key = head;
+    if (f.alphaToCoverage)
+        key += "alphacov=1 ";
     for (unsigned i = 0; i < 8; i++) {
         const ColorFields &c = f.color[i];
         if (!c.format)
@@ -233,6 +236,164 @@ inline std::string pipelineKey(MTLRenderPipelineDescriptor *d, const StageKey *v
                                const std::string &linked, const std::string &framework)
 {
     return pipelineKey(fieldsOf(d), vertex, fragment, linked, framework);
+}
+
+// The fast key, which the pack finds a state's records by (pack.h PackFastKey): what pipelineKey's text names, hashed as
+// words with no text made. The descriptor's fields go in as pipelineKey prints them (a colour or attribute of no format,
+// the tessellator without a patch, an amplification of 1 or less, a rounding other than 2, alpha-to-coverage off and
+// rasterization on all left out, the dynamic stride as UINT32_MAX), each tagged so no two field lists hash alike; then
+// each stage's stageHash, the linked functions' text's and the framework's. A hit is taken on the fast key alone without
+// comparing the full key text: packed states cannot collide because the link refuses duplicates, and a state outside the
+// pack collides with odds at most (fast-key rows) / 2^64 per creation.
+inline uint64_t keyTextHash(const char *bytes, size_t length)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < length; i++)
+        h = (h ^ uint8_t(bytes[i])) * 0x100000001b3ull;
+    return h;
+}
+
+// A stage's part of the fast key (its function's: TegraGM20BMetalLibrary.mm makes it with the function)
+inline uint64_t stageHash(const StageKey &k)
+{
+    const std::string named = k.function + '\0' + k.constants;
+    return keyTextHash(named.data(), named.size());
+}
+
+constexpr uint64_t kKeyNoStage = 0x2d2d2d2d2d2d2d2dull;  // the fragment stage of a state with no fragment function
+
+// The linked functions' text (linkedSegment's) and the framework, as the fast key takes them: 0 for none, QuartzCore's none
+inline uint64_t linkedHash(const std::string &linked)
+{
+    return linked.empty() ? 0 : keyTextHash(linked.data(), linked.size());
+}
+
+inline uint64_t frameworkHash(const std::string &framework)
+{
+    return framework.empty() || framework == "QuartzCore" ? 0 : keyTextHash(framework.data(), framework.size());
+}
+
+class KeyWords {
+public:
+    void add(uint64_t w)
+    {
+        h_ = (h_ ^ w) * 0x9e3779b97f4a7c15ull;
+        h_ ^= h_ >> 29;
+    }
+
+    uint64_t done() const
+    {
+        uint64_t h = h_ ^ (h_ >> 33);
+        h *= 0xff51afd7ed558ccdull;
+        h ^= h >> 33;
+        h *= 0xc4ceb9fe1a85ec53ull;
+        return h ^ (h >> 33);
+    }
+
+private:
+    uint64_t h_ = 0x243f6a8885a308d3ull;
+};
+
+inline uint64_t fastKey(const PipelineFields &f, uint64_t vertex, uint64_t fragment, uint64_t linked,
+                        uint64_t framework)
+{
+    KeyWords k;
+    for (const uint64_t w : {f.samples, f.topology, f.depthFormat, f.stencilFormat})
+        k.add(w);
+    for (unsigned i = 0; i < 8; i++) {
+        const ColorFields &c = f.color[i];
+        if (!c.format)
+            continue;
+        for (const uint64_t w : {uint64_t(0x100 + i), c.format, c.writeMask, c.blending, c.sourceRGB, c.destinationRGB,
+                                 c.operationRGB, c.sourceAlpha, c.destinationAlpha, c.operationAlpha})
+            k.add(w);
+    }
+    for (unsigned i = 0; i < 31; i++) {
+        const AttributeFields &a = f.attributes[i];
+        if (!a.format)
+            continue;
+        const uint64_t stride = a.stride == UINT64_MAX ? UINT32_MAX : a.stride;
+        for (const uint64_t w : {uint64_t(0x200 + i), a.format, a.offset, a.buffer, stride, a.step, a.rate})
+            k.add(w);
+    }
+    if (f.patchType) {
+        const TessellationFields &t = f.tessellation;
+        for (const uint64_t w : {uint64_t(0x300), t.partition, t.factorFormat, t.factorStep, t.winding,
+                                 t.controlPointIndex, t.maxFactor, t.factorScale})
+            k.add(w);
+    }
+    if (f.amplification > 1) {
+        k.add(0x400);
+        k.add(f.amplification);
+    }
+    if (f.textureWriteRounding == 2)
+        k.add(0x500);
+    if (!f.rasterization)
+        k.add(0x600);
+    if (f.alphaToCoverage)
+        k.add(0x680);
+    for (const uint64_t w : {uint64_t(0x700), vertex, fragment, linked, framework})
+        k.add(w);
+    return k.done();
+}
+
+inline uint64_t fastKey(const PipelineFields &f, const StageKey *vertex, const StageKey *fragment,
+                        const std::string &linked, const std::string &framework)
+{
+    return fastKey(f, vertex ? stageHash(*vertex) : kKeyNoStage, fragment ? stageHash(*fragment) : kKeyNoStage,
+                   linkedHash(linked), frameworkHash(framework));
+}
+
+// The fields the key names, read alone (fieldsOf reads every one, for a compile request), with the vertex function's
+// MTLPatchType `patchType`
+inline PipelineFields keyFieldsOf(MTLRenderPipelineDescriptor *d, uint64_t patchType)
+{
+    PipelineFields f;
+    f.samples = d.rasterSampleCount;
+    f.topology = d.inputPrimitiveTopology;
+    f.depthFormat = d.depthAttachmentPixelFormat;
+    f.stencilFormat = d.stencilAttachmentPixelFormat;
+    f.rasterization = d.rasterizationEnabled ? 1 : 0;
+    f.amplification = d.maxVertexAmplificationCount;
+    f.textureWriteRounding = textureWriteRoundingOf(d);
+    f.patchType = patchType;
+    f.alphaToCoverage = d.alphaToCoverageEnabled ? 1 : 0;
+    if (patchType)
+        f.tessellation = {d.tessellationPartitionMode,
+                          d.tessellationFactorFormat,
+                          d.tessellationFactorStepFunction,
+                          d.tessellationOutputWindingOrder,
+                          d.tessellationControlPointIndexType,
+                          d.maxTessellationFactor,
+                          d.tessellationFactorScaleEnabled ? 1u : 0u};
+    MTLRenderPipelineColorAttachmentDescriptorArray *colors = d.colorAttachments;
+    for (unsigned i = 0; i < 8; i++) {
+        MTLRenderPipelineColorAttachmentDescriptor *a = colors[i];
+        if (const MTLPixelFormat format = a.pixelFormat)
+            f.color[i] = {format,
+                          a.writeMask,
+                          a.blendingEnabled ? 1u : 0u,
+                          a.sourceRGBBlendFactor,
+                          a.destinationRGBBlendFactor,
+                          a.rgbBlendOperation,
+                          a.sourceAlphaBlendFactor,
+                          a.destinationAlphaBlendFactor,
+                          a.alphaBlendOperation};
+    }
+    if (MTLVertexDescriptor *v = d.vertexDescriptor) {
+        MTLVertexAttributeDescriptorArray *attributes = v.attributes;
+        MTLVertexBufferLayoutDescriptorArray *layouts = v.layouts;
+        for (unsigned i = 0; i < 31; i++) {
+            MTLVertexAttributeDescriptor *a = attributes[i];
+            const MTLVertexFormat format = a.format;
+            if (format == MTLVertexFormatInvalid)
+                continue;
+            const NSUInteger buffer = a.bufferIndex;
+            MTLVertexBufferLayoutDescriptor *l = layouts[buffer < 31 ? buffer : 0];
+            f.attributes[i] = {format, a.offset, buffer, l.stride, l.stepFunction, l.stepRate};
+        }
+    }
+    return f;
 }
 
 }  // namespace gm20b

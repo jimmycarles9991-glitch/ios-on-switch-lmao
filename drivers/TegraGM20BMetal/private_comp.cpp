@@ -106,14 +106,14 @@ bool Device::createCompressedZeta(uint64_t bytes, uint32_t kind, Texture &t)
     return true;
 }
 
-void Device::freeCompressedZeta(uint64_t va)
+void Device::freeCompressedZeta(uint64_t va, DeferredFrees &deferred)
 {
     const auto it = compZeta_.find(va);
     if (it == compZeta_.end())
         return;
     const PrivateComp comp = it->second;
     compZeta_.erase(it);
-    compRelease(comp);
+    compRelease(comp, deferred);
 }
 
 bool Device::privateCompressed(const Texture &t)
@@ -140,7 +140,7 @@ void Device::forgetView(const Texture &view)
         w.views.erase(std::remove(w.views.begin(), w.views.end(), &view), w.views.end());
 }
 
-void Device::releasePrivateCompressed(const Texture &t)
+void Device::releasePrivateCompressed(const Texture &t, DeferredFrees &deferred)
 {
     privateWants_.erase(&t);
     for (MovedPlain &m : movedPlain_)
@@ -151,10 +151,10 @@ void Device::releasePrivateCompressed(const Texture &t)
         return;
     const PrivateComp comp = it->second;
     privateComp_.erase(it);
-    compRelease(comp);
+    compRelease(comp, deferred);
 }
 
-void Device::compRelease(PrivateComp comp)
+void Device::compRelease(PrivateComp comp, DeferredFrees &deferred)
 {
     // Core Animation makes its large targets again at each app open and close (boot 21: its 1792x1472 BGRA8 zoom window
     // target), an app its depth texture at each resize: the memory stays made for the next texture of its kind until
@@ -168,19 +168,34 @@ void Device::compRelease(PrivateComp comp)
     }
     SWITCH_METAL_DIAGNOSTIC(stats.compHeld--);
     SWITCH_METAL_DIAGNOSTIC(stats.compHeldBytes -= comp.bo.bytes);
-    k_.free(comp.bo);
-    compGaveBack();
+    deferred.add({comp.bo});
+    deferred.noteCompFreed();
 }
 
-void Device::compGaveBack()
+void Device::compGaveBack(const CompWant *keepRefused)
 {
+    const bool hadRefused = !comp_.refused.empty();
     std::vector<CompWant> again;
-    for (const auto &[texture, w] : privateWants_) {
-        const CompWant ask{compBytes(w.bytes), w.kind};
-        if (w.views.empty() && std::find(comp_.refused.begin(), comp_.refused.end(), ask) != comp_.refused.end())
-            again.push_back(ask);
+    if (hadRefused) {
+        for (const auto &[texture, w] : privateWants_) {
+            if (!w.views.empty())
+                continue;
+            const CompWant ask{compBytes(w.bytes), w.kind};
+            if (keepRefused && (ask == *keepRefused || ask.bytes >= keepRefused->bytes))
+                continue;
+            if (comp_.fit(ask.bytes, ask.kind) == comp_.ready.end())
+                again.push_back(ask);
+        }
     }
-    comp_.freed();
+    if (keepRefused) {
+        comp_.refused.erase(std::remove_if(comp_.refused.begin(), comp_.refused.end(),
+                                           [&](const CompWant &r) {
+                                               return !(r == *keepRefused) && r.bytes < keepRefused->bytes;
+                                           }),
+                            comp_.refused.end());
+    } else {
+        comp_.freed();
+    }
     if (stopping_)
         return;
     for (const CompWant &w : again)
@@ -290,7 +305,7 @@ bool Device::compressedFromPlain(Texture &t)
         headersOf(t.tic, tics);
     }
     Buffer headers;
-    const bool named = createBuffer(32 * tics.size(), headers, true);
+    const bool named = createBuffer(32 * tics.size(), headers, true, true, true);
     for (size_t i = 0; named && i < tics.size(); i++) {
         uint32_t w[8];
         memcpy(w, tic_.cpu + 32 * tics[i], 32);
@@ -318,7 +333,8 @@ bool Device::compressedFromPlain(Texture &t)
         if (!copied)
             rc->abandon();
     }
-    std::lock_guard<gm20b::Mutex> l(lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
     std::vector<Texture *> views;
     if (const auto want = privateWants_.find(&t); want != privateWants_.end()) {
         views = std::move(want->second.views);
@@ -327,7 +343,7 @@ bool Device::compressedFromPlain(Texture &t)
     if (!copied) {
         compReadyPush(bo, kind);
         if (named)
-            freeSpan(headers.span, headers.wc ? Memory::Wc : Memory::Pool, headers.lease);
+            freeSpan(l, headers.span, memoryOf(headers), headers.lease, deferred);
         os_log_error(OS_LOG_DEFAULT,
                      "SwitchMetal: a plain %ux%u texture of format %u could not move to compressed memory", t.width,
                      t.height, t.format);
@@ -371,7 +387,9 @@ bool Device::compressedFromPlain(Texture &t)
 
 void Device::freeMovedPlain()
 {
-    SWITCH_METAL_ENCODE_LOCK(l, lock_);
+    DeferredFrees deferred(*this);
+    std::unique_lock<gm20b::Mutex> l(lock_);
+    SWITCH_METAL_ENCODE_COUNT(Locks);
     for (auto it = movedPlain_.begin(); it != movedPlain_.end();) {
         const bool lost = it->generation != channelGeneration();
         if (!lost && !done(it->seqno)) {
@@ -384,10 +402,10 @@ void Device::freeMovedPlain()
                 memcpy(tic_.cpu + 32 * it->tics[i], it->headers.cpu + 32 * i, 32);
         Lease *none = nullptr;
         if (it->zeta < kZetaFormats)
-            tiledFree(zChunks_[it->zeta], it->span);
+            tiledFree(zChunks_[it->zeta], it->span, deferred);
         else
-            freeSpan(it->span, Memory::Bl, none);
-        freeSpan(it->headers.span, it->headers.wc ? Memory::Wc : Memory::Pool, it->headers.lease);
+            freeSpan(l, it->span, Memory::Bl, none, deferred);
+        freeSpan(l, it->headers.span, memoryOf(it->headers), it->headers.lease, deferred);
 #if SWITCH_METAL_DIAGNOSTICS
         if (glassMem)
             for (const uint32_t tic : it->tics)

@@ -5,6 +5,8 @@ nvkm/subdev/ltc/gm20b.c is not upstream: GM20B's compbit backing store after nvg
 nvkm/engine/gr/gf100.c and gf100.h give every channel's context a zcull image of its own (ctxsw mode separate buffer, as
 nvgpu's gr_gk20a_ctx_zcull_setup binds one; ../../TegraGM20BZcullContext.h), so the raw path's zcull regions hold across
 context switches.
+nvkm/engine/gr/ctxgm20b.c, ctxgf100.h and gf100.c set ctxsw main image preemption_options (offset 0x60) to CTA (1, as
+nvgpu's gr_gm20b_update_ctxsw_preemption_mode does; ../../TegraGM20BGrPreemptContext.h) when binding a GM20B GR context.
 nvkm/engine/gr/gk20a.c enables TEX exceptions next to SM ones in TPC_EXCEPTION_EN (0x419d0c = 0x3, nvgpu's value);
 nvkm/engine/gr/gf100.c takes a trap with TEX exceptions alone as nvgpu does (gf100_gr_trap_tex, ../../TegraGM20BTexTrap.h):
 reported with dev_warn, the ESR written back, no TRAP error and so no channel kill.

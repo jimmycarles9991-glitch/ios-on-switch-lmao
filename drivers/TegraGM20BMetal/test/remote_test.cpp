@@ -20,9 +20,14 @@
 #include <IOKit/OSMessageNotification.h>
 #include <mach/mach.h>
 #include <pthread/qos.h>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <functional>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -33,11 +38,14 @@ class Kernel {
 public:
     uint32_t flags = TegraGM20BCompilerCapable | TegraGM20BCompilerRegistered | TegraGM20BCompilerStore;
     int called = kIOReturnSuccess, asyncCalled = kIOReturnSuccess, infoCalled = kIOReturnSuccess;
+    int waitCalled = kIOReturnSuccess;
     unsigned infos = 0;
     int32_t answer = TegraGM20BCompileMade;
     uint32_t generation = 1, how = TegraGM20BCompileCompiled | 4u << 8;
     TegraGM20BAbiCompileTimes times = {};  // the compiler's, as its Complete gave them
     unsigned maps = 0, compiles = 0, asyncAsked = 0;
+    std::vector<uint64_t> compileWaits;
+    std::function<int(uint64_t)> onCompileWait;
     std::function<void()> compiling;  // what the compiler does before it answers
     switch_seed_pack::StoreWriter store;
 
@@ -47,6 +55,7 @@ public:
         uint64_t cookie;
         uint64_t reference[kOSAsyncRef64Count];
         uint32_t port = 0;
+        uint32_t qos = 0, flags = 0;
     };
 
     std::vector<Waiting> waiting;
@@ -110,7 +119,8 @@ public:
                 if (asyncCalled != kIOReturnSuccess)
                     return asyncCalled;
                 compiles++;
-                Waiting w = {static_cast<const TegraGM20BAbiCompile *>(in)->cookie, {}, port};
+                const auto &req = *static_cast<const TegraGM20BAbiCompile *>(in);
+                Waiting w = {req.cookie, {}, port, req.qos, req.flags};
                 memcpy(w.reference, reference, sizeof w.reference);
                 waiting.push_back(w);
                 return kIOReturnSuccess;
@@ -134,6 +144,13 @@ public:
                     compiling();
                 *static_cast<TegraGM20BAbiCompileReply *>(out) = {answer, generation, how, 0, times};
                 return called;
+            case TegraGM20BMethodCompileWait: {
+                const auto &req = *static_cast<const TegraGM20BAbiCompileWait *>(in);
+                if (onCompileWait)
+                    return onCompileWait(req.cookie);
+                compileWaits.push_back(req.cookie);
+                return waitCalled;
+            }
             default:
                 return kIOReturnUnsupported;
             }
@@ -547,6 +564,138 @@ TEST_F(RemoteCompile, AnAsynchronousAnswerIsTakenAtItsAskersClass)
             << "answer " << i << " never taken";
         EXPECT_EQ(taken[i].at, gm20b::answerClass(asked[i])) << "answer " << i;
     }
+}
+
+TEST_F(RemoteCompile, AnUnwaitedAsynchronousRequestRunsAtTheBackgroundClass)
+{
+    publish();
+    gm20b::Remote remote(kernel.call(), kStack);
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    qos_class_t unwaitedAt = QOS_CLASS_UNSPECIFIED;
+    ASSERT_TRUE(remote.compileAsync("unwaited", false, QOS_CLASS_USER_INTERACTIVE,
+                                    [&](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {
+                                        unwaitedAt = qos_class_self();
+                                        dispatch_semaphore_signal(done);
+                                    }));
+    ASSERT_TRUE(remote.compileAsync("waited", true, QOS_CLASS_USER_INTERACTIVE,
+                                    [](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {}));
+    ASSERT_EQ(kernel.waiting.size(), 2u);
+    EXPECT_EQ(kernel.waiting[0].flags & TegraGM20BCompileWaited, 0u);
+    EXPECT_EQ(kernel.waiting[0].qos, uint32_t(QOS_CLASS_BACKGROUND));
+    EXPECT_NE(kernel.waiting[1].flags & TegraGM20BCompileWaited, 0u);
+    EXPECT_EQ(kernel.waiting[1].qos, uint32_t(QOS_CLASS_USER_INTERACTIVE));
+    EXPECT_NE(kernel.waiting[0].port, kernel.waiting[1].port);
+    kernel.send(TegraGM20BCompileMade);
+    ASSERT_EQ(dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 10 * int64_t(NSEC_PER_SEC))), 0);
+    EXPECT_EQ(unwaitedAt, QOS_CLASS_BACKGROUND);
+}
+
+TEST_F(RemoteCompile, WaitAsyncCallsCompileWaitForActiveAndHeldCookies)
+{
+    publish();
+    kernel.bound = 1;
+    gm20b::Remote remote(kernel.call(), kStack);
+    uint64_t first = 0, held = 0;
+    ASSERT_TRUE(remote.compileAsync(
+        "first", true, QOS_CLASS_USER_INTERACTIVE, [](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {},
+        &first));
+    ASSERT_TRUE(remote.compileAsync(
+        "held", true, QOS_CLASS_USER_INTERACTIVE, [](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {},
+        &held));
+    ASSERT_NE(first, 0u);
+    ASSERT_NE(held, 0u);
+    ASSERT_NE(first, held);
+
+    // Waiting on an active cookie returns false on kIOReturnSuccess (no redundant retry needed).
+    EXPECT_FALSE(remote.waitAsync(first));
+    ASSERT_EQ(kernel.compileWaits.size(), 1u);
+    EXPECT_EQ(kernel.compileWaits[0], first);
+
+    // Waiting on an aborted active cookie returns true so the caller retries.
+    kernel.waitCalled = kIOReturnAborted;
+    EXPECT_TRUE(remote.waitAsync(first));
+    ASSERT_EQ(kernel.compileWaits.size(), 2u);
+    EXPECT_EQ(kernel.compileWaits[1], first);
+
+    // Waiting on a held cookie pushes the oldest active pending cookie and returns true on success.
+    kernel.waitCalled = kIOReturnSuccess;
+    EXPECT_TRUE(remote.waitAsync(held));
+    ASSERT_EQ(kernel.compileWaits.size(), 3u);
+    EXPECT_EQ(kernel.compileWaits[2], first);
+
+    // Once the first request completes and promotes `held`, waiting on `held` passes `held` directly.
+    kernel.deliver(kIOReturnSuccess, TegraGM20BCompileMade);
+    EXPECT_FALSE(remote.waitAsync(held));
+    ASSERT_EQ(kernel.compileWaits.size(), 4u);
+    EXPECT_EQ(kernel.compileWaits[3], held);
+
+    // An older kernel returning kIOReturnUnsupported disables further CompileWait syscalls.
+    kernel.waitCalled = kIOReturnUnsupported;
+    EXPECT_FALSE(remote.waitAsync(held));
+    EXPECT_FALSE(remote.waitAsync(held));
+    EXPECT_EQ(kernel.compileWaits.size(), 5u);
+}
+
+TEST_F(RemoteCompile, WaitAsyncHeldCookieSurvivesNotFoundRaceAndFollowsPromotion)
+{
+    publish();
+    kernel.bound = 2;
+    gm20b::Remote remote(kernel.call(), kStack);
+    uint64_t c1 = 0, c2 = 0, held = 0;
+    ASSERT_TRUE(remote.compileAsync(
+        "first", true, QOS_CLASS_USER_INTERACTIVE, [](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {}, &c1));
+    ASSERT_TRUE(remote.compileAsync(
+        "second", true, QOS_CLASS_USER_INTERACTIVE, [](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {},
+        &c2));
+    ASSERT_TRUE(remote.compileAsync(
+        "held", true, QOS_CLASS_USER_INTERACTIVE, [](gm20b::Remote::Answer, const gm20b::Remote::Answered &) {},
+        &held));
+
+    std::mutex waitLock;
+    std::condition_variable waitCv;
+    std::vector<uint64_t> seen;
+    bool sawHeld = false;
+    kernel.onCompileWait = [&](uint64_t cookie) -> int {
+        std::lock_guard<std::mutex> l(waitLock);
+        seen.push_back(cookie);
+        if (cookie == held) {
+            sawHeld = true;
+            waitCv.notify_all();
+            return kIOReturnSuccess;
+        }
+        waitCv.notify_all();
+        // Kernel already unlinked active pending_ requests before Remote::delivered ran.
+        return kIOReturnNotFound;
+    };
+
+    std::atomic<bool> waiterDone{false};
+    bool retry = true;
+    std::thread waiter([&] {
+        retry = remote.waitAsync(held);
+        waiterDone.store(true, std::memory_order_release);
+    });
+
+    {
+        std::unique_lock<std::mutex> l(waitLock);
+        ASSERT_TRUE(waitCv.wait_for(l, std::chrono::seconds(2), [&] {
+            return seen.size() >= 2;
+        }));
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    EXPECT_FALSE(waiterDone.load(std::memory_order_acquire))
+        << "waitAsync(held) returned early instead of waiting for Remote::delivered to promote held";
+
+    // Delivering c1 promotes `held` into pending_ and wakes heldChanged_.
+    kernel.deliver(kIOReturnSuccess, TegraGM20BCompileMade);
+    {
+        std::unique_lock<std::mutex> l(waitLock);
+        ASSERT_TRUE(waitCv.wait_for(l, std::chrono::seconds(2), [&] {
+            return sawHeld;
+        }));
+    }
+    waiter.join();
+    EXPECT_FALSE(retry);
+    EXPECT_EQ(seen, (std::vector<uint64_t>{c1, c2, held}));
 }
 
 // Completion's queue (TegraGM20BMetalComplete.mm) runs each block at its asker's class, below its own default as well as above it,

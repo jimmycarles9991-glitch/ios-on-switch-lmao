@@ -13,8 +13,14 @@
 // write through a read-only PTE are faults, as the GMMU raises them.
 // The host's pushbuffer fetch goes through the GPU's L2 for a page mapped cacheable (not volatile): a line keeps what
 // its first fetch read, whatever the CPU writes behind it, until invalidateL2() (MEM_OP L2_SYSMEM_INVALIDATE).
+// A cacheable page mapped with its PTE kind (mapKind) also gives each 512-byte GOB the L2 holds of it the kind of the
+// access that brought it in: an access through the other kind, until invalidateL2(), lands in the 16-byte lines the
+// held kind places the bytes in (relaid). The device's counts fit it: gpu.path.relayout_history's 24576 wrong bytes are
+// a tiling move's texels in NIL's FermiColor order read in TegraColor order, and gpu.astc.layouts' blitin_back bit map
+// is that permutation.
 struct Memory {
-	static constexpr uint64_t kPage = 4096, kLine = 128;
+	static constexpr uint64_t kPage = 4096, kLine = 128, kGob = 512;
+	static constexpr int kNoKind = -1, kBlockLinearKind = 0xfe;
 
 	// A page of a test's buffer (followed through the vector, which may reallocate) or of host memory.
 	struct Pte {
@@ -22,6 +28,7 @@ struct Memory {
 		uint8_t *bytes;
 		uint64_t offset, size;
 		bool readOnly, cached, sparse;
+		int kind;
 
 		uint8_t *base() const
 		{
@@ -40,6 +47,7 @@ struct Memory {
 	std::map<uint64_t, Pte> ptes;                              // by GPU page number
 	std::map<const uint8_t *, std::array<uint8_t, kLine>> l2;  // by the line's first byte
 	std::map<const uint8_t *, uint64_t> dirty;  // l2's written lines: their valid bytes
+	std::map<const uint8_t *, bool> gobKinds;   // by the GOB's first byte: in the L2 as texels
 	// What a sparse page reads, and where its writes go
 	std::array<uint8_t, kPage> zeros{}, dropped{};
 	// One translation per direction: a copy alternates its reads and writes between two surfaces
@@ -47,24 +55,31 @@ struct Memory {
 	const Pte *lastPte[2] = {};
 	const Pte *last = nullptr;
 
-	void map(uint64_t va, uint8_t *bytes, uint64_t size, bool readOnly, bool cached = false)
+	void map(uint64_t va, uint8_t *bytes, uint64_t size, bool readOnly, bool cached = false,
+		 int kind = kNoKind)
 	{
 		EXPECT_EQ(va % kPage, 0u) << "a GPU mapping starts on a page";
 		last = lastPte[0] = lastPte[1] = nullptr;
 		for (uint64_t at = 0; at < size; at += kPage)
 			ptes[(va + at) / kPage] = {
-				nullptr,  bytes + at, 0,    std::min(kPage, size - at),
-				readOnly, cached,     false};
+				nullptr,  bytes + at, 0,     std::min(kPage, size - at),
+				readOnly, cached,     false, kind};
 	}
 
 	void map(uint64_t va, std::vector<uint8_t> &buffer, bool readOnly = false,
-		 bool cached = false)
+		 bool cached = false, int kind = kNoKind)
 	{
 		EXPECT_EQ(va % kPage, 0u) << "a GPU mapping starts on a page";
 		last = lastPte[0] = lastPte[1] = nullptr;
 		for (uint64_t at = 0; at < buffer.size(); at += kPage)
-			ptes[(va + at) / kPage] = {&buffer,  nullptr, at,   0,
-						   readOnly, cached,  false};
+			ptes[(va + at) / kPage] = {&buffer,  nullptr, at,    0,
+						   readOnly, cached,  false, kind};
+	}
+
+	// Cacheable, with its PTE kind: TGM_LAYOUT_KIND (block-linear texels) or 0 (rows)
+	void mapKind(uint64_t va, std::vector<uint8_t> &buffer, int kind)
+	{
+		map(va, buffer, false, true, kind);
 	}
 
 	// A sparse PTE (VALID false, VOL): every read of its page is 0 and every write is dropped, with no fault.
@@ -73,13 +88,15 @@ struct Memory {
 		EXPECT_EQ(va % kPage, 0u) << "a GPU mapping starts on a page";
 		last = lastPte[0] = lastPte[1] = nullptr;
 		for (uint64_t at = 0; at < size; at += kPage)
-			ptes[(va + at) / kPage] = {nullptr, nullptr, 0, kPage, false, false, true};
+			ptes[(va + at) / kPage] = {nullptr, nullptr, 0,    kPage,
+						   false,   false,   true, kNoKind};
 	}
 
 	void invalidateL2()
 	{
 		for (auto line = l2.begin(); line != l2.end();)
 			line = dirty.count(line->first) ? std::next(line) : l2.erase(line);
+		gobKinds.clear();
 	}
 
 	// An engine's store through its GPU address. A cacheable page's line takes it and stays dirty, out of the CPU's sight,
@@ -145,6 +162,8 @@ struct Memory {
 			return nullptr;
 		if (last->sparse)
 			return (write ? dropped.data() : zeros.data()) + offset;
+		if (last->cached && last->kind != kNoKind)
+			return held(last->base(), offset, last->kind == kBlockLinearKind);
 		return last->base() + offset;
 	}
 
@@ -165,6 +184,37 @@ struct Memory {
 	}
 
 private:
+	// NIL copy.rs: the 16-byte line of a 256-byte half GOB that holds bytes 16 x .. 16 x + 15 of row y, in
+	// GOBType::FermiColor order and in TegraColor order (TegraGM20BLayout.h tgm_layout_gob_offset)
+	static constexpr uint8_t kFermiLines[2][8] = {{2, 3, 0, 1, 14, 15, 12, 13},
+						      {4, 5, 6, 7, 8, 9, 10, 11}};
+	static constexpr uint8_t kTegraLines[2][8] = {{0, 1, 4, 5, 8, 9, 12, 13},
+						      {2, 3, 6, 7, 10, 11, 14, 15}};
+
+	// The page offset of the line that holds, in `to` order, what `offset`'s line holds in `from` order
+	static uint64_t relaid(uint64_t offset, const uint8_t (&from)[2][8],
+			       const uint8_t (&to)[2][8])
+	{
+		const uint64_t line = offset / 16 % 16;
+		for (uint32_t x = 0; x < 2; ++x)
+			for (uint32_t y = 0; y < 8; ++y)
+				if (from[x][y] == line)
+					return offset - line * 16 + uint64_t(to[x][y]) * 16;
+		return offset;
+	}
+
+	// The model's block-linear offsets are TegraColor's, where kind 0xfe puts the engines' bytes; a GOB the L2 holds
+	// as rows takes them in FermiColor order
+	uint8_t *held(uint8_t *page, uint64_t offset, bool blockLinear)
+	{
+		const bool gob = gobKinds.try_emplace(page + (offset & ~(kGob - 1)), blockLinear)
+					 .first->second;
+		if (gob == blockLinear)
+			return page + offset;
+		return page + (blockLinear ? relaid(offset, kTegraLines, kFermiLines)
+					   : relaid(offset, kFermiLines, kTegraLines));
+	}
+
 	const uint8_t *throughL2(const uint8_t *byte, uint64_t pageOffset)
 	{
 		const uint64_t lineOffset = pageOffset % kLine;

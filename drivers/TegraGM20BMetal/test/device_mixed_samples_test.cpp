@@ -178,6 +178,53 @@ TEST_F(DeviceZcullPasses, APassOfOneSampleCountTakesARegionAndAMixedOneNone)
     EXPECT_NE(std::find(mixed.begin(), mixed.end(), 0x3fu), mixed.end());
 }
 
+// The pass-end orders a mixed pass's probe rows write (mixed_samples.h TirEnd, Device::probeTir; HW Test
+// gpu.gm20b.mixed_end_rows): the mode's, raster count's, zeta select's and raster enable's methods after the mode's last
+// enable
+TEST_F(DevicePassForms, AMixedPassEndsInEachProbeRowsOrder)
+{
+    if (!SWITCH_METAL_DIAGNOSTICS)
+        GTEST_SKIP() << "the probe rows are debug builds'";
+    using Tail = std::vector<std::pair<uint32_t, uint32_t>>;
+    constexpr uint32_t kTir = NVB197_SET_TIR, kRaster = NVB197_SET_ANTI_ALIAS_RASTER, kZt = NVB197_SET_ZT_SELECT,
+                       kEnable = NVB197_SET_RASTER_ENABLE;
+    const auto row = [](gm20b::TirEnd end, uint32_t raster = 0) {
+        return 1u | uint32_t(end) << 8 | raster << 12;
+    };
+    const std::vector<std::pair<uint32_t, Tail>> rows = {
+        {row(gm20b::TirEnd::Mode), {{kTir, 0}, {kRaster, 0}}},
+        {row(gm20b::TirEnd::RasterFirst), {{kRaster, 0}, {kTir, 0}}},
+        {row(gm20b::TirEnd::ZetaOff), {{kZt, 0}, {kTir, 0}, {kRaster, 0}}},
+        {row(gm20b::TirEnd::ModeOnly), {{kTir, 0}}},
+        {row(gm20b::TirEnd::RasterDisabled), {{kEnable, 0}, {kTir, 0}, {kRaster, 0}, {kEnable, 1}}},
+        {row(gm20b::TirEnd::Value, 6), {{kTir, 0}, {kRaster, 6}, {kZt, 0}, {kRaster, 0}}},
+    };
+    for (const auto &[probe, want] : rows) {
+        dev.probeTir.store(probe);
+        gm20b::Texture colour, zeta;
+        ASSERT_TRUE(dev.createTexture(32, 32, kRGBA8, colour, false, true));
+        ASSERT_TRUE(dev.createOwnedZeta(32, 32, kDepth32Float, 4, true, zeta));
+        gm20b::PassDesc p;
+        p.color[0] = kept(colour, gm20b::ColorAttachment::Clear);
+        p.count = 1;
+        p.depthStencil = {&zeta, true, false, 1.0f, 0};
+        std::string why;
+        const auto ms = pass(p, &why);
+        ASSERT_FALSE(ms.empty()) << why;
+        Tail got;
+        for (const Method &x : ms) {
+            if (x.subc != gm20b::SUBC_3D)
+                continue;
+            if (x.method == kTir && x.value == NVB197_SET_TIR_MODE_RASTER_N_TARGET_M)
+                got.clear();
+            else if (x.method == kTir || x.method == kRaster || x.method == kZt || x.method == kEnable)
+                got.emplace_back(x.method, x.value);
+        }
+        EXPECT_EQ(got, want) << std::hex << probe;
+    }
+    dev.probeTir.store(0);
+}
+
 TEST_F(DevicePassForms, OtherMixedSampleCountsAreRefused)
 {
     gm20b::Texture colour, zeta;
@@ -195,6 +242,68 @@ TEST_F(DevicePassForms, OtherMixedSampleCountsAreRefused)
 // A multisampled colour cleared over a render area smaller than it, neither stored nor memory of its own: the clear reaches
 // the area rounded up to whole 32-pixel tiles, which its resolve reads (an M4 Max resolves a 64x64 Clear of a 40x24 area
 // over [0, 64) x [0, 32), the clear's past the area: hwtests-r4 gpu.gm20b.resolve_codes_parts)
+// A mixed pass's zcull probe rows (mixed_samples.h, Device::probeTir; HW Test gpu.gm20b.zc_mixed): a row asking for
+// zcull takes a region, over the zeta's 2x2 sample grid where it asks, its words before the clears or after the mode's
+// enable, and a row may leave the mode disabled after it
+TEST_F(DeviceZcullPasses, AMixedPassTakesTheZcullItsProbeRowAsks)
+{
+    if (!SWITCH_METAL_DIAGNOSTICS)
+        GTEST_SKIP() << "the probe rows are debug builds'";
+    constexpr uint32_t kRegionSizeA = 0x07c0;
+    const auto run = [&](uint32_t probe) {
+        dev.probeTir.store(probe);
+        gm20b::Texture colour, zeta;
+        EXPECT_TRUE(dev.createMemoryless(32, 32, kRGBA8, colour, 1));
+        EXPECT_TRUE(dev.createOwnedZeta(32, 32, kDepth32Float, 4, true, zeta));
+        gm20b::PassDesc p;
+        p.color[0] = kept(colour, gm20b::ColorAttachment::Clear);
+        p.color[0].store = false;
+        p.count = 1;
+        p.depthStencil = {&zeta, true, false, 1.0f, 0};
+        std::string why;
+        const auto ms = pass(p, &why);
+        EXPECT_FALSE(ms.empty()) << why;
+        dev.probeTir.store(0);
+        return ms;
+    };
+
+    // where the region (SET_ACTIVE_ZCULL_REGION 0) and the mode's enable fall, the region's width, and how often the
+    // mode is disabled after its enable
+    struct Seen {
+        long region = -1, enable = -1;
+        uint32_t width = 0, disables = 0;
+    };
+
+    const auto seen = [](const std::vector<Method> &ms) {
+        Seen s;
+        for (size_t i = 0; i < ms.size(); i++) {
+            const Method &x = ms[i];
+            if (x.subc != gm20b::SUBC_3D)
+                continue;
+            if (x.method == kSetActiveZcullRegion && x.value == 0 && s.region < 0)
+                s.region = long(i);
+            else if (x.method == kRegionSizeA && !s.width)
+                s.width = x.value;
+            else if (x.method == NVB197_SET_TIR && x.value == NVB197_SET_TIR_MODE_RASTER_N_TARGET_M && s.enable < 0)
+                s.enable = long(i);
+            s.disables += x.method == NVB197_SET_TIR && x.value == NVB197_SET_TIR_MODE_DISABLED && s.enable >= 0;
+        }
+        return s;
+    };
+    const Seen armed = seen(run(1));
+    EXPECT_LT(armed.region, 0) << "an armed row without kTirProbeZcull takes none";
+    EXPECT_EQ(armed.disables, 1u) << "the pass end's";
+    const Seen before = seen(run(1 | gm20b::kTirProbeZcull));
+    ASSERT_GE(before.region, 0);
+    EXPECT_LT(before.region, before.enable);
+    const Seen grid = seen(run(1 | gm20b::kTirProbeZcull | gm20b::kTirProbeSampleGrid));
+    EXPECT_EQ(grid.width, 2 * before.width);
+    const Seen after = seen(run(1 | gm20b::kTirProbeZcull | gm20b::kTirProbeZcullAfter));
+    ASSERT_GE(after.region, 0);
+    EXPECT_GT(after.region, after.enable);
+    EXPECT_EQ(seen(run(1 | gm20b::kTirProbeModeOff)).disables, 2u) << "after its enable, and the pass end's";
+}
+
 TEST_F(DevicePassForms, AMultisampledClearReachesTheAreasWholeTiles)
 {
     gm20b::Texture t;

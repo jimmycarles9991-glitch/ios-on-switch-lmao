@@ -158,7 +158,7 @@ struct SidebarRun {
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try? encoder.encode(record).write(to: directory.appendingPathComponent("frames.json"))
+        try? encoder.encode(record).place(at: directory.appendingPathComponent("frames.json"))
     }
 }
 

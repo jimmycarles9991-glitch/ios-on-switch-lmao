@@ -133,7 +133,7 @@ final class SidebarReader {
     private func write(_ bgra: Data, _ frame: ScanoutSession.Frame, _ stem: String) {
         let name = "\(phase)-\(stem).png"
         guard let png = LiveImage.png(bgra, width: frame.width, height: frame.height) else { return }
-        try? png.write(to: directory.appendingPathComponent(name))
+        try? png.place(at: directory.appendingPathComponent(name))
         saved.append(name)
     }
 }

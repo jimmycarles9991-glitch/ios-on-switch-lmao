@@ -46,21 +46,27 @@ IOReturn info(TegraGM20BAbiCompilerInfoReply *out)
 
 IOReturn waitFor(Request *request, TegraGM20BAbiCompileReply *out)
 {
+	lck_mtx_t *mtx = IOLockGetMachLock(gBroker.lock);
 	while (!request->done)
-		if (IOLockSleep(gBroker.lock, request, THREAD_ABORTSAFE) == THREAD_INTERRUPTED)
+		if (switch_user_turnstile_sleep(mtx, &request->turnstile, request->inheritor,
+						THREAD_ABORTSAFE) == THREAD_INTERRUPTED)
 			break;
+	request->waiters--;
 	if (request->done) {
 		*out = {request->result, gBroker.generation, request->how, 0, request->times};
-		unlink(request);
+		const bool drop = request->waiters == 0;
 		IOLockUnlock(gBroker.lock);
-		freeRequest(request);
+		if (drop)
+			freeRequest(request);
 		return kIOReturnSuccess;
 	}
-	request->waiter = false;
-	if (!request->taken) {
+	if (!request->taken && request->waiters == 0) {
 		dropBytes(request);
 		unlink(request);
+		setInheritor(request, nullptr);
+		IOLockUnlock(gBroker.lock);
 		freeRequest(request);
+		return kIOReturnAborted;
 	}
 	IOLockUnlock(gBroker.lock);
 	return kIOReturnAborted;
@@ -114,10 +120,14 @@ IOReturn compile(const void *owner, task_t task, const TegraGM20BAbiCompile *in,
 	request->flags = in->flags;
 	request->pid = proc_selfpid();
 	request->async = async;
-	request->waiter = !async;
+	request->waiters = async ? 0u : 1u;
 	IOLockLock(gBroker.lock);
 	request->id = ++gBroker.nextId;
 	request->client = clientId(owner);
+	if (gBroker.taker) {
+		switch_user_turnstile_thread_retain(gBroker.taker);
+		request->inheritor = gBroker.taker;
+	}
 	Request **tail = &gBroker.requests;
 	while (*tail)
 		tail = &(*tail)->next;
@@ -178,6 +188,15 @@ IOReturn take(const void *owner, task_t task, const TegraGM20BAbiCompilerTake *i
 	      TegraGM20BAbiCompilerTakeReply *out)
 {
 	IOLockLock(gBroker.lock);
+	if (gBroker.compiler == owner) {
+		thread_t self = current_thread();
+		if (gBroker.taker != self) {
+			replaceThread(gBroker.taker, self);
+			for (Request *r = gBroker.requests; r; r = r->next)
+				if (!r->taken && !r->done)
+					setInheritor(r, self);
+		}
+	}
 	Request *request = nullptr;
 	while (gBroker.compiler == owner) {
 		for (request = gBroker.requests; request && request->taken;
@@ -206,6 +225,7 @@ IOReturn take(const void *owner, task_t task, const TegraGM20BAbiCompilerTake *i
 		return kIOReturnSuccess;
 	}
 	request->taken = request->copying = true;
+	setInheritor(request, current_thread());
 	IOBufferMemoryDescriptor *bytes = request->bytes;
 	bytes->retain();
 	IOLockUnlock(gBroker.lock);
@@ -218,8 +238,10 @@ IOReturn take(const void *owner, task_t task, const TegraGM20BAbiCompilerTake *i
 	if (gBroker.compiler != owner) {
 		if (gBroker.declined)
 			finish(request, TegraGM20BCompileUnavailable, &sends);
-		else
+		else {
 			request->taken = false;
+			setInheritor(request, gBroker.taker);
+		}
 		ret = kIOReturnNotPermitted;
 	} else if (!copied) {
 		finish(request, TegraGM20BCompileFailed, &sends);
@@ -229,6 +251,63 @@ IOReturn take(const void *owner, task_t task, const TegraGM20BAbiCompilerTake *i
 	IOLockUnlock(gBroker.lock);
 	send(sends, generation);
 	return ret;
+}
+
+IOReturn serveRequest(const void *owner, const TegraGM20BAbiCompilerServe *in)
+{
+	if (in->flags || in->worker > TegraGM20BCompilerMaxWorkers || (!in->id && !in->worker))
+		return kIOReturnBadArgument;
+	IOLockLock(gBroker.lock);
+	if (gBroker.compiler != owner) {
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnNotPermitted;
+	}
+	if (!in->id) {
+		replaceThread(gBroker.workers[in->worker - 1], current_thread());
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnSuccess;
+	}
+	thread_t target = in->worker ? gBroker.workers[in->worker - 1] : current_thread();
+	if (!target) {
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnNotReady;
+	}
+	Request *request = gBroker.requests;
+	while (request && (request->id != in->id || !request->taken || request->done))
+		request = request->next;
+	if (request)
+		setInheritor(request, target);
+	IOLockUnlock(gBroker.lock);
+	return request ? kIOReturnSuccess : kIOReturnNotFound;
+}
+
+IOReturn compileWait(const void *owner, const TegraGM20BAbiCompileWait *in)
+{
+	if (!in->cookie || in->flags || in->reserved)
+		return kIOReturnBadArgument;
+	IOLockLock(gBroker.lock);
+	Request *request = gBroker.requests;
+	while (request && (request->owner != owner || !request->async ||
+			   request->cookie != in->cookie || request->done))
+		request = request->next;
+	if (!request) {
+		IOLockUnlock(gBroker.lock);
+		return kIOReturnNotFound;
+	}
+	request->waiters++;
+	request->waitedAsync = true;
+	lck_mtx_t *mtx = IOLockGetMachLock(gBroker.lock);
+	while (!request->done)
+		if (switch_user_turnstile_sleep(mtx, &request->turnstile, request->inheritor,
+						THREAD_ABORTSAFE) == THREAD_INTERRUPTED)
+			break;
+	const bool finished = request->done;
+	request->waiters--;
+	const bool drop = finished && request->waiters == 0 && !request->sendPending;
+	IOLockUnlock(gBroker.lock);
+	if (drop)
+		freeRequest(request);
+	return finished ? kIOReturnSuccess : kIOReturnAborted;
 }
 
 IOReturn completeRequest(const void *owner, const TegraGM20BAbiCompilerComplete *in)
@@ -294,7 +373,7 @@ IOReturn decline(task_t task)
 
 bool switch_gpu_compiler_method(uint32_t method)
 {
-	return method >= TegraGM20BMethodCompilerInfo && method <= TegraGM20BMethodCompilerAnnounce;
+	return method >= TegraGM20BMethodCompilerInfo && method <= TegraGM20BMethodCompileWait;
 }
 
 IOReturn switch_gpu_compiler_call(const void *owner, task_t task, uint32_t method, const void *in,
@@ -344,6 +423,14 @@ IOReturn switch_gpu_compiler_call(const void *owner, task_t task, uint32_t metho
 			return kIOReturnBadArgument;
 		return announce(owner, task,
 				static_cast<const TegraGM20BAbiCompilerAnnounce *>(in));
+	case TegraGM20BMethodCompilerServe:
+		if (inSize != sizeof(TegraGM20BAbiCompilerServe) || outSize)
+			return kIOReturnBadArgument;
+		return serveRequest(owner, static_cast<const TegraGM20BAbiCompilerServe *>(in));
+	case TegraGM20BMethodCompileWait:
+		if (inSize != sizeof(TegraGM20BAbiCompileWait) || outSize)
+			return kIOReturnBadArgument;
+		return compileWait(owner, static_cast<const TegraGM20BAbiCompileWait *>(in));
 	default:
 		return kIOReturnUnsupported;
 	}
@@ -394,6 +481,9 @@ void switch_gpu_compiler_close(const void *owner)
 	const bool announced = !compiler && gBroker.announced == owner;
 	if (compiler) {
 		gBroker.compiler = nullptr;
+		replaceThread(gBroker.taker, nullptr);
+		for (thread_t &worker : gBroker.workers)
+			replaceThread(worker, nullptr);
 #if SWITCH_GPU_COMPILER_LINE
 		gBroker.compilerPid = 0;
 #endif
@@ -411,21 +501,23 @@ void switch_gpu_compiler_close(const void *owner)
 		ended = finishAll(TegraGM20BCompileUnavailable, &sends);
 	for (Request *request = gBroker.requests, *next; request; request = next) {
 		next = request->next;
-		if (compiler && request->taken && !request->copying && !request->done) {
-			if (++request->attempts >= kAttempts) {
-				finish(request, TegraGM20BCompileFailed, &sends);
-				ended++;
+		if (compiler && !request->done) {
+			if (request->taken && !request->copying) {
+				if (++request->attempts >= kAttempts) {
+					finish(request, TegraGM20BCompileFailed, &sends);
+					ended++;
+				} else {
+					request->taken = false;
+					setInheritor(request, nullptr);
+					requeued++;
+				}
 			} else {
-				request->taken = false;
-				requeued++;
+				setInheritor(request, nullptr);
 			}
 		} else if (request->owner == owner && request->async) {
 			request->abandoned = true;
-			if (!request->taken) {
-				dropBytes(request);
-				unlink(request);
-				freeRequest(request);
-			}
+			if (!request->taken)
+				finish(request, TegraGM20BCompileUnavailable, &sends);
 		}
 	}
 	for (Client &c : gBroker.clients)

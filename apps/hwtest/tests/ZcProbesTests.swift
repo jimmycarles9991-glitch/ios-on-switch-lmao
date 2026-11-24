@@ -184,69 +184,38 @@ struct ZcZetaShadowTest: HWTest {
     }
 }
 
-/// LIST #27: a pass of a one-sample BGRA8 colour beside a four-sample memoryless Depth32Float, given a zcull region
-/// under switchMetalProbeZcullMixed:: a near quad (z 0.25, white) and a far one (z 0.75, black) under Less with writes,
-/// front to back and back to front, 64 times each; `mixed_wrong` texels not white in either order, `mixed_regions`
-/// passes that took a region (switchMetalCounters zcull_passes), `mixed_gpu_ms` against `mixed_off_gpu_ms` the same
-/// without the switch.
+/// LIST #27: which zcull a mixed pass takes (TirRows): boot 2's region over the render area's pixels, written before
+/// the clears, died at the first draw with INVALID_TIR_COMBINATION05. Rows z_<region>_<order>_<mode>: the region over
+/// the pixels (px) or the zeta's 2x2 sample grid (grid), its words before the clears (before) or after the mode's
+/// enable (after), the mode on (on) or left disabled (off); z_none and z_none_off take no region. An accepted row with
+/// _wrong 0 is a zcull a mixed pass can take; mixed passes keep zcull off until one is.
 struct ZcMixedTest: HWTest {
     let id = "gpu.gm20b.zc_mixed"
-    let name = "Mixed-sample zcull probe: a 1x colour beside a 4x depth given a zcull region"
+    let name = "Mixed-sample zcull probe: which region, order and mode a 1x colour beside a 4x depth takes"
     let subsystem = Subsystem.metal
 
-    static let side = 512, draws = 64
+    static let rows: [TirRows.Row] = [
+        TirRows.Row(name: "z_none", word: 1), TirRows.Row(name: "z_none_off", word: 1 | 16),
+    ] + [false, true].flatMap { off in
+        [false, true].flatMap { after in
+            [false, true].map { grid in
+                TirRows.Row(
+                    name: "z_\(grid ? "grid" : "px")_\(after ? "after" : "before")_\(off ? "off" : "on")",
+                    word: 1 | 2 | (grid ? 4 : 0) | (after ? 8 : 0) | (off ? 16 : 0)
+                )
+            }
+        }
+    }
 
     func run(_ context: TestContext) async throws -> Outcome {
         let gpu = try GPU.make()
         let kind = GM20BFacade.kind(of: gpu.device)
         guard kind == "gm20b" else { return .skip("the default device is not the facade (\(kind))") }
         var metrics = Metrics()
-        let before = GM20BFacade.counters(of: gpu.device)["zcull_passes"] ?? 0
-        let probed = try await ZcProbes.switched(gpu, "switchMetalProbeZcullMixed:", NSNumber(value: true)) {
-            try await Self.scene(gpu)
+        guard try await TirRows.run(gpu, Self.rows, &metrics) != nil else {
+            return .skip(GM20BFacade.missing("switchMetalProbeTir:", on: gpu.device))
         }
-        guard let probed else { return .skip(GM20BFacade.missing("switchMetalProbeZcullMixed:", on: gpu.device)) }
-        metrics.set("mixed_regions", (GM20BFacade.counters(of: gpu.device)["zcull_passes"] ?? 0) - before)
-        let control = try await Self.scene(gpu)
-        metrics.set("mixed_wrong", probed.wrong)
-        metrics.set("mixed_gpu_ms", probed.ms, digits: 3)
-        metrics.set("control_mixed_wrong", control.wrong)
-        metrics.set("mixed_off_gpu_ms", control.ms, digits: 3)
-        return Outcome.pass(metrics, proof: gpu.proof).onRawPath(gpu)
-    }
-
-    static func scene(_ gpu: GPU) async throws -> (wrong: Int, ms: Double) {
-        let colour = try gpu.texture(.bgra8Unorm, side, side)
-        let depth = try gpu.texture(.depth32Float, side, side, usage: [.renderTarget], samples: 4, storage: .memoryless)
-        let pipeline = try gpu.render(fragment: "exact_fragment", format: .bgra8Unorm, samples: 4, depth: .depth32Float)
-        let less = try ZcProbes.depthState(gpu, .less, write: true)
-        var wrong = 0, ms = 0.0
-        for nearFirst in [true, false] {
-            ms += try await gpu.run { commands in
-                let pass = MTLRenderPassDescriptor()
-                pass.colorAttachments[0].texture = colour
-                pass.colorAttachments[0].loadAction = .clear
-                pass.colorAttachments[0].storeAction = .store
-                pass.depthAttachment.texture = depth
-                pass.depthAttachment.loadAction = .clear
-                pass.depthAttachment.clearDepth = 1
-                pass.depthAttachment.storeAction = .dontCare
-                let e = commands.makeRenderCommandEncoder(descriptor: pass)!
-                e.setRenderPipelineState(pipeline)
-                e.setDepthStencilState(less)
-                for k in 0 ..< draws * 2 {
-                    let near = (k % 2 == 0) == nearFirst
-                    GPU.draw(
-                        e, corners: GPU.pixelQuad(0, 0, side, side, width: side, height: side, z: near ? 0.25 : 0.75),
-                        color: near ? SIMD4(1, 1, 1, 1) : SIMD4(0, 0, 0, 1)
-                    )
-                }
-                e.endEncoding()
-            }.gpuMilliseconds
-            let bytes = try await gpu.read(colour, bytesPerPixel: 4)
-            wrong += ZcProbes.texelsOff(bytes, [255, 255, 255, 255])
-        }
-        return (wrong, ms)
+        return Outcome.pass(metrics, proof: gpu.proof)
     }
 }
 

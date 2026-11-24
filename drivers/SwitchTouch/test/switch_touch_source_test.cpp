@@ -54,3 +54,26 @@ TEST(SwitchTouchSource, TouchAxesCarryThePanelsMillimetres)
     EXPECT_THAT(finger, HasSubstr("0x45, 0x00, 0x65, 0x00, 0x55, 0x00"));
     EXPECT_THAT(SourceText("../SwitchHIDDevice.cpp"), HasSubstr("TOUCH_X_SIZE 0x66, 0x03 /* 870: 87.0 mm */"));
 }
+
+// A report's own time on both iOS builds: postAt calls handleReportWithTime, whose slot each kind's table names
+// (kits/SwitchABI/kinds/<kind>/IOHIDDevice.json, read from that kernelcache), not code words read from iOS 17's
+// handleReport, which made every iOS 27 report carry the post's time instead (touch "stamps post") and turned motion
+// batching off.
+TEST(SwitchTouchSource, TimedPostsTakeTheTablesCallOnEveryBuild)
+{
+    const std::string source = SourceText("../SwitchHIDDevice.cpp");
+    for (const char *word : {"0x3942c268", "0xf94007e1", "0xf9431508", "timestamps()", "kHandleReportWithTime"})
+        EXPECT_THAT(source, Not(HasSubstr(word))) << word;
+    // The method alone: it ends at the class body's indentation.
+    const std::string post =
+        Between(source, "    IOReturn postAt(const void *report, size_t length, uint64_t timestamp)", "\n    }\n");
+    ASSERT_FALSE(post.empty());
+    EXPECT_THAT(post, HasSubstr("self->handleReportWithTime("));
+    EXPECT_THAT(post, Not(HasSubstr("kIOReturnUnsupported")));
+    for (const char *kind : {"21H461", "24B119"}) {
+        const std::string table =
+            SourceText(std::string("../../../kits/SwitchABI/kinds/") + kind + "/IOHIDDevice.json");
+        EXPECT_THAT(table, HasSubstr("\"handleReportWithTime\"")) << kind;
+        EXPECT_THAT(table, Not(HasSubstr("\"handleReportWithTime\": \"0x0\""))) << kind;
+    }
+}

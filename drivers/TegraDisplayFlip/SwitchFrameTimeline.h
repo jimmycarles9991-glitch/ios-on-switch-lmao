@@ -44,6 +44,9 @@ extern "C" {
 #endif
 // Provided by the GPU driver, weak in NativeLegacyDisplay: what it saw since the last call, then reset. Any thread.
 void tegra_gm20b_frame_take(struct SwitchFrameGpu *out);
+// Provided by the GPU driver (TegraGM20BLoad.h, debug kernels), weak in NativeLegacyDisplay: the PMU's busy and total
+// cycles so far; not 0 when not read. The display reads it at every present, under its gate, for the SwitchFrame line.
+int tegra_gm20b_gpu_load(uint64_t *busy, uint64_t *total);
 // Provided by XNU (kernel/switch/sched/render.c), weak and empty in the drivers that call them: Core Animation's display
 // thread from each vsync to its swap. The display reports each vsync (its stamp and refresh period, mach) and, on the
 // swapping thread, each swap; the GPU driver each compositor submission, on the submitting thread.

@@ -321,14 +321,16 @@ static void timer_work(void *arg)
 	nvxnu_pass_run(period_timed, NULL);
 }
 
-void tgm_deadline_kicked(int compositor, int app)
+int tgm_deadline_kicked(int compositor, int app)
 {
 	const u64 now = nvxnu_nanotime();
+	int later = 0;
 
 	if (!READ_ONCE(dl.device))
-		return;
+		return 0;
 	if (compositor) {
-		if (READ_ONCE(dl.kick_last) <= READ_ONCE(dl.presented_at)) {
+		later = READ_ONCE(dl.kick_last) > READ_ONCE(dl.presented_at);
+		if (!later) {
 			WRITE_ONCE(dl.frame_target, READ_ONCE(dl.next_target));
 			WRITE_ONCE(dl.kick_first, now);
 		}
@@ -336,6 +338,7 @@ void tgm_deadline_kicked(int compositor, int app)
 	}
 	if (app)
 		WRITE_ONCE(dl.kick_app_last, now);
+	return later;
 }
 
 struct kept_open {

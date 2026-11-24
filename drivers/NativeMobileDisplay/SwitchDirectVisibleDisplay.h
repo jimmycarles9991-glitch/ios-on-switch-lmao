@@ -40,12 +40,24 @@ void holdScanoutBacking(unsigned k)
     scanoutHeldUse[k] = slots[k].used;
 }
 
+bool directSlotVisible(int entry) const
+{
+    const auto *read = slots[entry - kSlot0].read;
+    if (!read || !read->lease)
+        return false;
+    const auto &producer = read->view.producer;
+    return !switch_gpu_backing_promised(read->view.native) &&
+           (!producer.engine || switch_gpu_backing_token_external_status(&producer) == 1);
+}
+
 // The slot's first frame was written before its backing was held scanned, by a job that may have ended Internal: only
-// the present job's flush puts it in DRAM.
+// the present job's flush puts it in DRAM, unless window A is already externally visible and only window B waits.
 uint32_t producerWatch(int entry) const
 {
     const auto k = static_cast<unsigned>(entry - kSlot0);
-    return scanoutHeld[k] && slots[k].used != scanoutHeldUse[k] ? TEGRA_SCANOUT_COPY_PRODUCER_WATCH : 0u;
+    if (scanoutHeld[k] && slots[k].used != scanoutHeldUse[k])
+        return TEGRA_SCANOUT_COPY_PRODUCER_WATCH;
+    return planeNextSet && !planeNextAlsoWritten() && directSlotVisible(entry) ? TEGRA_SCANOUT_COPY_PRODUCER_WATCH : 0u;
 }
 
 void releaseScanoutBacking(unsigned k)
@@ -59,12 +71,9 @@ void releaseScanoutBacking(unsigned k)
 
 bool directFrameVisible(int entry) const
 {
-    const auto *read = slots[entry - kSlot0].read;
-    if (!read || !read->lease || planeNextAlsoWritten() || (planeNextSet && planeFenced(planeNext)))
+    if (planeNextAlsoWritten() || (planeNextSet && planeFenced(planeNext)))
         return false;
-    const auto &producer = read->view.producer;
-    return !switch_gpu_backing_promised(read->view.native) &&
-           (!producer.engine || switch_gpu_backing_token_external_status(&producer) == 1);
+    return directSlotVisible(entry);
 }
 
 // offerDirect's first step once the slot is mapped: true when the frame went to window A from here.

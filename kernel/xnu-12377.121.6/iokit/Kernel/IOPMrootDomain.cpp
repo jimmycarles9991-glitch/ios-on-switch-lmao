@@ -1389,6 +1389,8 @@ static SYSCTL_PROC(_kern, OID_AUTO, consoleoptions,
 extern "C" void switch_boot_band_lift(const char *why);
 /* drivers/SwitchPower/SwitchPerfGovernor.cpp (SwitchPower.h SWITCH_PERF_HINT_BOOT_DONE = 4): the boot's clock window ends */
 extern "C" void switch_perf_hint(unsigned int hint);
+extern "C" void switch_icon_cache_boot_complete(void);
+extern "C" void switch_gpu_boot_complete(void) __attribute__((weak));
 
 static int
 sysctl_progressoptions SYSCTL_HANDLER_ARGS
@@ -8511,6 +8513,10 @@ IOPMrootDomain::dispatchPowerEvent(
 			switch_boot_band_lift("System Boot Complete");
 			switch_perf_hint(4); /* SWITCH_PERF_HINT_BOOT_DONE */
 			switch_sched_boot_complete();
+			switch_icon_cache_boot_complete();
+			if (switch_gpu_boot_complete) {
+				switch_gpu_boot_complete();
+			}
 
 			if (PE_get_default("sleep-disabled", &gSleepDisabledFlag, sizeof(gSleepDisabledFlag))) {
 				DLOG("Setting gSleepDisabledFlag to %u from device tree\n", gSleepDisabledFlag);

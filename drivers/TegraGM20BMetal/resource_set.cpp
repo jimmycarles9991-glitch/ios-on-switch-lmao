@@ -269,6 +269,33 @@ void ResourceSet::promote(Kernel &k, uint64_t handle)
         registerLocked(k, "for a written member");
 }
 
+void ResourceSet::remove(Kernel &k, const std::vector<uint64_t> &handles)
+{
+    if (handles.empty())
+        return;
+    std::lock_guard<gm20b::Mutex> l(lock_);
+    bool changed = false;
+    for (uint64_t handle : handles) {
+        if (eraseLocked(handle)) {
+            ++removals_;
+            changed = true;
+        }
+    }
+    if (!changed)
+        return;
+    version_.fetch_add(1, std::memory_order_release);
+    if (members_.empty()) {
+        if (set_) {
+            k.releaseSet(set_);
+            set_ = 0;
+            generation_ = 0;
+            mirror_ = nullptr;
+        }
+        return;
+    }
+    registerLocked(k, "before parking");
+}
+
 bool ResourceSet::leaving(uint64_t handle)
 {
     std::lock_guard<gm20b::Mutex> l(lock_);
@@ -290,7 +317,7 @@ ResourceSet::Renewal ResourceSet::renew(Kernel &k, uint32_t generation)
     std::lock_guard<gm20b::Mutex> l(lock_);
     if (generation != generation_)
         return Renewal::renewed;
-    if (!mirror_ || *mirror_ == generation_)
+    if (!mirror_ || __atomic_load_n(mirror_, __ATOMIC_ACQUIRE) == generation_)
         return Renewal::current;
     return registerLocked(k, "for an ended generation") ? Renewal::renewed : Renewal::refused;
 }

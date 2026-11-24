@@ -16,12 +16,13 @@
 //  - a stencil test whose fail or depth-fail operation writes: a fragment zcull rejects would skip it;
 //  - a program that writes depth (its output is not the depth zcull tested), or the shader's emulated tests;
 //  - a program that can write memory (program_stores.h): Metal runs it for every fragment unless it asks for early
-//    tests, and a tile zcull rejects is never shaded, so its stores would be lost. One with early tests loses only the
-//    region: the state keeps no early-test fact.
+//    tests (SET_API_MANDATED_EARLY_Z, 0x0210), and a tile zcull rejects is never shaded, so its stores would be lost
+//    when early tests are not mandated.
 // Discard needs nothing: zcull rejects only fragments the depth test would fail, and the region follows the depth the ROP
 // writes. NVK's sources gate none of these per draw; they are the hardware's documented zcull conditions mapped to the
 // states raw draws, kept conservative where the GM20B's behaviour is unmeasured.
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include "TegraGM20BZcullABI.h"
 #include "kernel.h"
@@ -139,6 +140,47 @@ inline void zcullOffWords(Push &p)
 }
 
 constexpr uint32_t kInvalidateZcull = 0x1958;
+constexpr uint32_t kEarlyFragmentTestsMethod = 0x0210;  // NVB197_SET_API_MANDATED_EARLY_Z
+
+// Decode a pipeline's push words for SET_API_MANDATED_EARLY_Z (0x0210) bit 0: last write wins, false if absent.
+inline bool zcullEarlyFragmentTests(const uint32_t *words, size_t count)
+{
+    bool early = false;
+    for (size_t i = 0; i < count;) {
+        const uint32_t hdr = words[i];
+        const uint32_t op = hdr >> 29;
+        const uint32_t arg = (hdr >> 16) & 0x1fffu;
+        const uint32_t subc = (hdr >> 13) & 7u;
+        const uint32_t mthd = (hdr & 0xfffu) << 2;
+        if (op == 4) {  // IMMD
+            if (subc == SUBC_3D && mthd == kEarlyFragmentTestsMethod)
+                early = (arg & 1u) != 0;
+            i += 1;
+        } else if (op == 1) {  // INC
+            if (subc == SUBC_3D && mthd <= kEarlyFragmentTestsMethod) {
+                const uint32_t step = (kEarlyFragmentTestsMethod - mthd) >> 2;
+                if (step < arg && i + 1 + step < count)
+                    early = (words[i + 1 + step] & 1u) != 0;
+            }
+            i += 1 + arg;
+        } else if (op == 3) {  // NON_INC
+            if (subc == SUBC_3D && mthd == kEarlyFragmentTestsMethod && arg > 0 && i + arg < count)
+                early = (words[i + arg] & 1u) != 0;
+            i += 1 + arg;
+        } else if (op == 5) {  // ONE_INC
+            if (subc == SUBC_3D && arg > 0) {
+                if (mthd == kEarlyFragmentTestsMethod && i + 1 < count)
+                    early = (words[i + 1] & 1u) != 0;
+                else if (mthd + 4 == kEarlyFragmentTestsMethod && arg > 1 && i + arg < count)
+                    early = (words[i + arg] & 1u) != 0;
+            }
+            i += 1 + arg;
+        } else {
+            i += 1;
+        }
+    }
+    return early;
+}
 
 // What zcull's region rule reads of a pass and its depth target
 struct ZcullAsk {
@@ -193,14 +235,14 @@ inline bool zcullStencilWrites(const StencilFace &s)
 }
 
 // Whether INVALIDATE_ZCULL goes before a draw under depth/stencil state `ds` (the pass's targets have depth `depth` and
-// stencil `stencil`) of a program that writes depth (`fragmentDepth`) or memory (`fragmentStores`), or under the
-// shader's tests; once per pass
+// stencil `stencil`) of a program that writes depth (`fragmentDepth`) or memory (`fragmentStores`, unless
+// `earlyFragmentTests` mandates early depth/stencil tests), or under the shader's tests; once per pass
 inline bool zcullInvalidates(ZcullPass &z, const DepthStencilDesc &ds, bool depth, bool stencil, bool fragmentDepth,
-                             bool shaderTests, bool fragmentStores)
+                             bool shaderTests, bool fragmentStores, bool earlyFragmentTests = false)
 {
     if (!z.candidate || z.invalidated)
         return false;
-    bool unsafe = fragmentDepth || shaderTests || fragmentStores;
+    bool unsafe = fragmentDepth || shaderTests || (fragmentStores && !earlyFragmentTests);
     if (stencil)
         unsafe |= zcullStencilWrites(ds.front) || zcullStencilWrites(ds.back);
     if (depth) {

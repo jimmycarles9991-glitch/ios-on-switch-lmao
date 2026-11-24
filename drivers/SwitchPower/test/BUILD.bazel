@@ -8,6 +8,8 @@
 #                                    measurements, unit conversions, SOC_THERM fuse calibration against L4T's, CLTM
 #   switch_thermal_tcal_test         the PMU tcal answer against thermalmonitord's correction and J181's skin model
 #   switch_sensors_hid_source_test   the HID descriptor and IOHIDFamily vtable slots the sensors are published through
+#   switch_irq_sources_test          SwitchIrqSources.h: the power stats' interrupt sources, each INTID's SPIs in the
+#                                    window, the busiest first, and their line
 #   switch_emc_governor_test         SwitchEMCGovernor.h: the EMC rates used, ACTMON's watermarks and the governor's moves
 #   switch_soctherm_window_test      SwitchSocThermWindow.h: SOC_THERM's one-degree LVL0 window and the groups' registers
 #   switch_soctherm_throttle_test    SwitchSocThermThrottle.h: L4T's T210B01 hardware throttle on a model of SOC_THERM,
@@ -21,10 +23,11 @@
 #                                    lock detection, enable, lock)
 #   switch_tegra_rtc_test            SwitchTegraRTC.h: the RTC's latched seconds and milliseconds, its one reader and
 #                                    that reader's two callers
-#   switch_emc_hold_test             SwitchEMCHold.h played out over a frame burst: the EMC loop's hold-timer arms and
-#                                    wake-ups per burst, the hold's end within a tick of the frames' or the hint's
+#   switch_emc_hold_test             SwitchEMCHold.h played out over frame bursts and CPU work: the EMC loop's wake-ups,
+#                                    the hold's end within a tick of the frames', the hint's or the CPUs' work
 #   switch_perf_hint_source_test     the touch filter's GPU and EMC hints as their sources stand: no lock, no
-#                                    read-modify-write, no sequentially consistent access
+#                                    read-modify-write, no sequentially consistent access; both kernels' task policy
+#                                    hands every role change to switch_perf_role
 #   switch_cpu_load_test             SwitchCpuLoad.h: a CPU's busy time from its context-switch callout, exact read
 #                                    alone, off by one interval per racing switch at most (also under TSAN)
 #   switch_perf_governor_callouts_test SwitchPerfGovernor.cpp itself over stand-ins for XNU: the locks, read-modify-
@@ -161,6 +164,14 @@ host_test(
 )
 
 host_test(
+    name = "switch_irq_sources_test",
+    srcs = [
+        "switch_irq_sources_test.cpp",
+        "//drivers/SwitchPower:SwitchIrqSources.h",
+    ],
+)
+
+host_test(
     name = "switch_display_bandwidth_test",
     srcs = [
         "switch_display_bandwidth_test.cpp",
@@ -190,11 +201,30 @@ host_test(
         "//drivers/SwitchPower:SwitchDisplayMemoryRegisters.h",
         "//drivers/SwitchPower:SwitchDisplayMemoryState.h",
         "//drivers/SwitchPower:SwitchDisplayMemoryEMC.h",
+        "//drivers/SwitchPower:SwitchGpuMcLa.h",
         "//drivers/SwitchPower:SwitchEMCGovernor.h",
         "//drivers/SwitchPower:SwitchEMCClock.h",
         "//drivers/SwitchPower:SwitchEMCFixed.h",
     ],
     defines = ["DEVELOPMENT=1"],
+)
+
+host_test(
+    name = "switch_gpu_mc_la_test",
+    srcs = [
+        "switch_gpu_mc_la_test.cpp",
+        "//drivers/SwitchPower:SwitchGpuMcLa.h",
+    ],
+    data = [
+        "//drivers/SwitchPower:SwitchEMC.cpp",
+        "//drivers/SwitchPower:SwitchEMCClock.h",
+        "//drivers/SwitchPower:SwitchEMCFixed.h",
+    ],
+    defines = [
+        'SWITCH_EMC_CPP=\\"$(rootpath //drivers/SwitchPower:SwitchEMC.cpp)\\"',
+        'SWITCH_EMC_CLOCK_H=\\"$(rootpath //drivers/SwitchPower:SwitchEMCClock.h)\\"',
+        'SWITCH_EMC_FIXED_H=\\"$(rootpath //drivers/SwitchPower:SwitchEMCFixed.h)\\"',
+    ],
 )
 
 host_test(
@@ -340,5 +370,7 @@ host_test(
         "//drivers/SwitchPower:SwitchEMC.cpp",
         "//drivers/SwitchPower:SwitchEMCHints.h",
         "//drivers/TegraGM20B:gpu_clock.c",
+        "//kernel/xnu-10063.141.1/osfmk:kern/task_policy.c",
+        "//kernel/xnu-12377.121.6/osfmk:kern/task_policy.c",
     ],
 )

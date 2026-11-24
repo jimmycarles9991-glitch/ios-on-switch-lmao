@@ -195,8 +195,9 @@ TEST_F(DeviceShapes, SignedNormalizedFormats)
 // renders and blends it (its row's target is NIL's: tic_words_test; the blend kill takes its texels as finite); a
 // private one binds the compressed kind of its texel size as the unorm formats of that size do (NIL's
 // nvc0_choose_pte_kind picks colour kinds by element size alone), and only an all-zero clear writes ZBC tags; a turn
-// copy moves its texels as unsigned integers of their size; a resolve is the 2D engine's of its codes
-// (attachment_target.h codesResolvedByTwod), never averaged as unorm.
+// copy moves its texels as unsigned integers of their size; a resolve is of its codes, never averaged as unorm: a 16-bit
+// one's the 2D engine's (attachment_target.h codesResolvedByTwod), an 8-bit one's the pack's state of its codes, as the
+// engine's box rounds an 8-bit tie toward zero where Metal rounds it up (gpu.gm20b.resolve_codes).
 TEST_F(DeviceShapes, SignedNormalizedTargetsReachTheirConsumers)
 {
     const std::pair<uint32_t, uint32_t> snormAndUnorm[] = {{12, 10}, {22, 20}, {32, 30},
@@ -207,7 +208,8 @@ TEST_F(DeviceShapes, SignedNormalizedTargetsReachTheirConsumers)
         EXPECT_NE(f->rt, 0u) << snorm;
         EXPECT_EQ(f->bpp, u->bpp) << snorm;
         EXPECT_TRUE(gm20b::normalizedFormat(snorm)) << snorm;
-        EXPECT_TRUE(gm20b::codesResolvedByTwod(snorm)) << snorm;
+        const bool eightBit = snorm == 12 || snorm == 32 || snorm == 72;
+        EXPECT_EQ(gm20b::codesResolvedByTwod(snorm), !eightBit) << snorm;
         gm20b::PrivateTextureFacts facts;
         facts.privateStorage = facts.compressibleUsage = true;
         facts.shape = gm20b::PrivateShape2D::Plain;
@@ -225,7 +227,7 @@ TEST_F(DeviceShapes, SignedNormalizedTargetsReachTheirConsumers)
         EXPECT_FALSE(gm20b::zbcColorEntry(snorm, half, entry)) << snorm;
         EXPECT_NE(gm20b::turnCopyState(f->bpp), nullptr) << snorm;
         for (uint32_t samples : {2u, 4u})
-            EXPECT_EQ(gm20b::resolveState(snorm, samples), nullptr) << snorm << " " << samples;
+            EXPECT_EQ(gm20b::resolveState(snorm, samples) != nullptr, eightBit) << snorm << " " << samples;
         gm20b::ResolveAsk ask;
         ask.format = uint16_t(snorm);
         ask.samples = 4;

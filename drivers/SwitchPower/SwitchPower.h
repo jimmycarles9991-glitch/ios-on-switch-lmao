@@ -29,16 +29,23 @@ void switch_thermal_cpu_quiesce(void);
 // clock (TegraGM20B gpu_clock.c, entered only after 500 ms with no submission and no swap). Any context: thread, work loop,
 // primary interrupt, the scheduler's; a few stores under a spin lock, nothing when the governor is off (BOOT_DONE:
 // thread context, it logs). Callers: SwitchTouch (each touch interrupt), NativeLegacyDisplay (a present two or more
-// refresh periods after the last one, while frames keep coming), XNU exec_activate_image (LAUNCH) and IOPMrootDomain at
-// SpringBoard's System Boot Complete (BOOT_DONE, whether or not the boot band's 60 s bound closed the band first).
+// refresh periods after the last one, while frames keep coming), XNU exec_activate_image (LAUNCH), switch_perf_role
+// (FOREGROUND, a launch counted apart) and IOPMrootDomain at SpringBoard's System Boot Complete (BOOT_DONE, whether or
+// not the boot band's 60 s bound closed the band first).
 enum {
     SWITCH_PERF_HINT_TOUCH = 1,
     SWITCH_PERF_HINT_FRAME_MISS = 2,
     SWITCH_PERF_HINT_LAUNCH = 3,
     SWITCH_PERF_HINT_BOOT_DONE = 4,
+    SWITCH_PERF_HINT_FOREGROUND = 5,
 };
 
 void switch_perf_hint(unsigned int hint);
+
+// XNU's task policy (task_policy_update_internal_locked, both trees, the task locked): a task's effective role changed,
+// `foreground` to TASK_FOREGROUND_APPLICATION: an app launched or resumed to the front, a prewarmed one included, which
+// no exec marks. That is a FOREGROUND hint.
+void switch_perf_role(bool foreground);
 
 // The CPU clock the governor last applied, in kHz; 0 when the CPU is not governed (PLL or fixed DFLL mode). Any
 // context (one atomic load): kprof prints it next to its measured per-core clock.

@@ -199,8 +199,8 @@ TEST_F(FacadeHeapUse, ABlitReadsAHeapBufferAcrossRestoredMappings)
 {
     kernel_model::model.unknownUsesRefused = true;
     constexpr uint64_t quarter = 0x40000;
-    for (MTLStorageMode mode : {MTLStorageModeShared, MTLStorageModePrivate}) {
-        SCOPED_TRACE(int(mode));
+    {  // a shared heap's arena: a private one is a single BO, never trimmed (arena.cpp)
+        const MTLStorageMode mode = MTLStorageModeShared;
         @autoreleasepool {
             id<MTLHeap> h = facade::heap(mode, 4 * quarter);
             ASSERT_NE(h, nil);
@@ -261,8 +261,8 @@ TEST_F(FacadeHeapUse, ARecordedHeapUseOutlivesMakeAliasableAndIdleTrim)
 {
     kernel_model::model.unknownUsesRefused = true;
     constexpr uint64_t quarter = 0x40000;
-    for (MTLStorageMode mode : {MTLStorageModeShared, MTLStorageModePrivate}) {
-        SCOPED_TRACE(int(mode));
+    {  // a shared heap's arena: a private one is a single BO, never trimmed (arena.cpp)
+        const MTLStorageMode mode = MTLStorageModeShared;
         @autoreleasepool {
             id<MTLHeap> h = facade::heap(mode, 4 * quarter);
             ASSERT_NE(h, nil);
@@ -347,6 +347,34 @@ TEST_F(FacadeHeapUse, ARecordedHeapViewKeepsItsAliasableOwnersMappings)
     }
 }
 
+// A private heap's memory has no CPU mapping (arena.cpp). A CPU copy of a texture over one of its buffers, which Metal's
+// validation stops, asks the host access that refuses it and raises, and loads nothing through the arena's reserved range
+TEST_F(FacadeHeapUse, ACpuCopyOfAPrivateHeapsMemoryIsRefusedNeverLoaded)
+{
+    @autoreleasepool {
+        id<MTLHeap> h = facade::heap(MTLStorageModePrivate, 0x40000);
+        ASSERT_NE(h, nil);
+        id<MTLBuffer> b = [h newBufferWithLength:0x10000 options:MTLResourceStorageModePrivate];
+        ASSERT_NE(b, nil);
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                     width:16
+                                                                                    height:16
+                                                                                 mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> t = [b newTextureWithDescriptor:d offset:0 bytesPerRow:256];
+        ASSERT_NE(t, nil);
+        std::vector<uint8_t> bytes(16 * 16 * 4);
+        bool raised = false;
+        @try {
+            [t getBytes:bytes.data() bytesPerRow:64 fromRegion:MTLRegionMake2D(0, 0, 16, 16) mipmapLevel:0];
+        } @catch (NSException *) {
+            raised = true;
+        }
+        EXPECT_TRUE(raised);
+    }
+}
+
 // A command buffer that uses a purged heap's texture through a view of a view, or over a heap buffer, names neither the
 // heap nor its root: its commit brings the arena back all the same
 TEST_F(FacadeHeapUse, ACommitBringsBackAPurgedHeapItReachesThroughViewsAndBufferTextures)
@@ -385,6 +413,152 @@ TEST_F(FacadeHeapUse, ACommitBringsBackAPurgedHeapItReachesThroughViewsAndBuffer
             commit(cb);
             EXPECT_FALSE(gRM->raw->arenaPurged(index));
         }
+    }
+}
+
+// A private heap's arena reserves a VM_PROT_NONE host range (arena.cpp). Blit fill and buffer copies over a private
+// heap buffer must not queue CPU cache cleans on that reserved range, which fault on arm64 dc cvac/civac.
+TEST_F(FacadeHeapUse, ABlitFillAndCopyOfAPrivateHeapsBufferDoesNotCleanReservedPages)
+{
+    @autoreleasepool {
+        id<MTLHeap> h = facade::heap(MTLStorageModePrivate, 0x40000);
+        ASSERT_NE(h, nil);
+        id<MTLBuffer> priv = [h newBufferWithLength:0x4000 options:MTLResourceStorageModePrivate];
+        id<MTLBuffer> shared = [facade::device() newBufferWithLength:0x4000 options:MTLResourceStorageModeShared];
+        ASSERT_NE(priv, nil);
+        ASSERT_NE(shared, nil);
+        MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                     width:16
+                                                                                    height:16
+                                                                                 mipmapped:NO];
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead;
+        id<MTLTexture> tex = [h newTextureWithDescriptor:d];
+        ASSERT_NE(tex, nil);
+
+        id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit fillBuffer:priv range:NSMakeRange(0, 0x4000) value:0x5a];
+        [blit copyFromBuffer:priv sourceOffset:0 toBuffer:shared destinationOffset:0 size:0x4000];
+        [blit copyFromBuffer:priv
+                   sourceOffset:0
+              sourceBytesPerRow:64
+            sourceBytesPerImage:1024
+                     sourceSize:MTLSizeMake(16, 16, 1)
+                      toTexture:tex
+               destinationSlice:0
+               destinationLevel:0
+              destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        commit(cb);
+    }
+}
+
+TEST_F(FacadeHeapUse, VolatileHeapWithAliasableResourcesPurgesOnGiveBackAndRestoresOnCommit)
+{
+    kernel_model::model.unknownUsesRefused = true;
+    constexpr uint64_t quarter = 0x40000;
+    for (MTLStorageMode mode : {MTLStorageModeShared, MTLStorageModePrivate}) {
+        SCOPED_TRACE(int(mode));
+        @autoreleasepool {
+            id<MTLHeap> h = facade::heap(mode, 4 * quarter);
+            ASSERT_NE(h, nil);
+            const uint32_t index = ((SwitchMetalHeap *)h)->_arena - 1;
+            MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                         width:256
+                                                                                        height:256
+                                                                                     mipmapped:NO];
+            d.storageMode = mode;
+            d.usage = MTLTextureUsageRenderTarget | MTLTextureUsagePixelFormatView;
+            id<MTLTexture> t = [h newTextureWithDescriptor:d];
+            ASSERT_NE(t, nil);
+            id<MTLTexture> view = [t newTextureViewWithPixelFormat:MTLPixelFormatRGBA8Unorm];
+            ASSERT_NE(view, nil);
+            id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = view;
+            rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+            [t makeAliasable];
+            EXPECT_EQ(h.usedSize, 0u);
+            EXPECT_EQ([h setPurgeableState:MTLPurgeableStateVolatile], MTLPurgeableStateNonVolatile);
+            gRawRelease.release();
+            EXPECT_TRUE(gRM->raw->arenaPurged(index));
+            EXPECT_EQ([h setPurgeableState:MTLPurgeableStateKeepCurrent], MTLPurgeableStateEmpty);
+            [cb commit];
+            [cb waitUntilCompleted];
+            EXPECT_EQ(cb.status, MTLCommandBufferStatusCompleted) << cb.error.description.UTF8String;
+            EXPECT_FALSE(gRM->raw->arenaPurged(index));
+            EXPECT_EQ(t.width, 256u);
+        }
+    }
+}
+
+TEST_F(FacadeHeapUse, UseResourceWriteAndUseHeapFlushDataAndInvalidateNextPassConstants)
+{
+    const auto methodValues = [](const std::vector<uint32_t> &words, uint32_t targetMethod) {
+        std::vector<uint32_t> values;
+        for (size_t at = 0; at < words.size();) {
+            const uint32_t h = words[at++], form = h >> 29, count = (h >> 16) & 0x1fff, subc = (h >> 13) & 7,
+                           method = (h & 0xfff) << 2;
+            if (!h)
+                continue;
+            if (form == 4) {
+                if (subc == 0 && method == targetMethod)
+                    values.push_back(count);
+                continue;
+            }
+            for (uint32_t i = 0; i < count && at < words.size(); i++, at++) {
+                const uint32_t m = form == 3 ? method : form == 5 && i ? method + 4 : method + 4 * (form == 1 ? i : 0);
+                if (subc == 0 && m == targetMethod)
+                    values.push_back(words[at]);
+            }
+        }
+        return values;
+    };
+    const uint32_t flushAndData = uint32_t(NVDEF(NVB197, INVALIDATE_SHADER_CACHES, FLUSH_DATA, TRUE) |
+                                           NVDEF(NVB197, INVALIDATE_SHADER_CACHES, DATA, TRUE));
+    const uint32_t dataAndConst = uint32_t(NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, GLOBAL_DATA, TRUE) |
+                                           NVDEF(NVB197, INVALIDATE_SHADER_CACHES_NO_WFI, CONSTANT, TRUE));
+
+    MTLTextureDescriptor *t2d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                                                                   width:64
+                                                                                  height:64
+                                                                               mipmapped:NO];
+    t2d.storageMode = MTLStorageModePrivate;
+    t2d.usage = MTLTextureUsageRenderTarget;
+    id<MTLTexture> secondTarget = [facade::device() newTextureWithDescriptor:t2d];
+    ASSERT_NE(secondTarget, nil);
+    id<MTLBuffer> buf = [facade::device() newBufferWithLength:4096 options:MTLResourceStorageModeShared];
+    ASSERT_NE(buf, nil);
+
+    for (bool useHeapCase : {false, true}) {
+        SCOPED_TRACE(useHeapCase ? "useHeap" : "useResourceWrite");
+        const size_t before = kernel_model::model.jobs.size();
+        id<MTLCommandBuffer> cb = [[facade::device() newCommandQueue] commandBuffer];
+        id<MTLRenderCommandEncoder> a = pass(cb);
+        if (useHeapCase)
+            [a useHeap:heap];
+        else
+            [a useResource:buf usage:MTLResourceUsageWrite];
+        [a endEncoding];
+        MTLRenderPassDescriptor *d2 = [MTLRenderPassDescriptor renderPassDescriptor];
+        d2.colorAttachments[0].texture = secondTarget;
+        d2.colorAttachments[0].loadAction = MTLLoadActionClear;
+        d2.colorAttachments[0].storeAction = MTLStoreActionStore;
+        [[cb renderCommandEncoderWithDescriptor:d2] endEncoding];
+        [cb commit];
+        [cb waitUntilCompleted];
+        ASSERT_EQ(cb.status, MTLCommandBufferStatusCompleted);
+        ASSERT_GT(kernel_model::model.jobs.size(), before);
+        const std::vector<uint32_t> &words = kernel_model::model.jobs.back().words;
+        const auto flushes = methodValues(words, NVB197_INVALIDATE_SHADER_CACHES);
+        ASSERT_GE(flushes.size(), 1u);
+        EXPECT_EQ(flushes.front(), flushAndData);
+        const auto noWfi = methodValues(words, NVB197_INVALIDATE_SHADER_CACHES_NO_WFI);
+        ASSERT_GE(noWfi.size(), 2u);
+        EXPECT_EQ(noWfi.back(), dataAndConst);
     }
 }
 

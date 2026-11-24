@@ -5,7 +5,8 @@
 
 // A cached BO's buffer: a prepared descriptor and the kernel's cacheable address of its first byte. One the spare refill
 // made of 128 KiB units (SwitchGpuSpares.h switch_gpu_spare_layout) is their IOMultiMemoryDescriptor, which `map` puts
-// at one kernel address; a buffer of one IOBufferMemoryDescriptor has no `map`.
+// at one kernel address; a buffer of one descriptor has no `map`. The spare refill's (units, pages) are not zeroed: the
+// copy engine zeroes them before any is handed out.
 struct SwitchGpuCachedBuffer {
 	IOMemoryDescriptor *memory;
 	IOMemoryMap *map;

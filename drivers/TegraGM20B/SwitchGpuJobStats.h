@@ -14,7 +14,7 @@ extern "C" {
 #define SWITCH_GPU_JOB_STATS 1
 /* ns: TegraGM20BGpu.h's TGM_SUBMIT_* phases */
 void switch_gpu_job_submitted(const uint64_t *ns, int named_set, uint32_t shared_uses,
-			      uint32_t backings, uint32_t siblings);
+			      uint32_t backings, uint32_t siblings, int critical);
 void switch_gpu_job_stale(void);
 void switch_gpu_job_invalidated(uint32_t cause);
 /* The window's counts as "SubmitJob N x mean ...", zeroed for the next window; empty when nothing happened */
@@ -23,13 +23,14 @@ void switch_gpu_job_window(char *line, size_t size);
 #define SWITCH_GPU_JOB_STATS 0
 
 static inline void switch_gpu_job_submitted(const uint64_t *ns, int named_set, uint32_t shared_uses,
-					    uint32_t backings, uint32_t siblings)
+					    uint32_t backings, uint32_t siblings, int critical)
 {
 	(void)ns;
 	(void)named_set;
 	(void)shared_uses;
 	(void)backings;
 	(void)siblings;
+	(void)critical;
 }
 
 static inline void switch_gpu_job_stale(void)

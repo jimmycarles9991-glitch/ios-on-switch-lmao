@@ -3,10 +3,6 @@
 #include "gpu_internal.h"
 #include "SwitchGpuWordWait.h"
 
-#define NVB06F_MEM_OP_D_OPERATION_L2_SYSMEM_INVALIDATE (0x0eu << 27)
-#define NVB06F_MEM_OP_D_OPERATION_MMU_TLB_INVALIDATE (0x09u << 27)
-#define NVB06F_MEM_OP_C_TLB_INVALIDATE_PDB_ALL 0x1u /* GPC 1:1 0: the GPCs' TLBs too */
-
 /* Whether nvif_chan_gpfifo_wait(gpfifo_nr, push_nr) would find its room now, counted as nvif counts it (the GET reports
  * on the semaphore page, its post size, a wrap of the push buffer that kicks one more entry). */
 static int chan_room(struct tgm_chan *chan, u32 gpfifo_nr, u32 push_nr)
@@ -80,6 +76,118 @@ static void chan_doorbell(struct tgm_chan *chan)
 	writel_relaxed(chan->chan.gpfifo.cur, (u8 __iomem *)chan->chan.userd.map.ptr + 0x8c);
 }
 
+#if TGM_STATS
+static u8 chan_note_foreign(struct tgm_chan *chan,
+			    const struct switch_gpu_backing_token *dependencies,
+			    u32 dependency_count, const u32 *unsettled,
+			    const struct switch_gpu_word_wait *word_waits, u32 word_wait_count)
+{
+	const uintptr_t base = (uintptr_t)tgm_fence_pages.va;
+	const uintptr_t own = (uintptr_t)chan->fence_cpu;
+	const uintptr_t own_slot = base && own >= base && own - base < TGM_FENCE_BYTES
+					   ? (own - base) / TGM_FENCE_SLOT
+					   : ~(uintptr_t)0;
+	u8 flags = 0;
+	u32 fences = 0;
+	u32 promises = 0;
+	u32 events = 0;
+	u32 host1x = 0;
+	u32 i = 0;
+
+	if (!chan->critical || !chan->high || chan->kernel)
+		return 0;
+	for (i = 0; i < dependency_count; ++i) {
+		if (!(unsettled[i / 32] & (1u << (i % 32))))
+			continue;
+		if (dependencies[i].engine == SWITCH_GPU_ENGINE_GM20B) {
+			struct tgm_chan *source = live_by_uid(dependencies[i].queue);
+			if (source && source->vm != chan->vm) {
+				flags |= TGM_STAT_FOREIGN_FENCE;
+				fences++;
+			}
+		} else if (dependencies[i].engine == SWITCH_GPU_ENGINE_PROMISE) {
+			if (dependencies[i].queue / TGM_FENCE_SLOT != own_slot) {
+				flags |= TGM_STAT_FOREIGN_PROMISE;
+				promises++;
+			}
+		} else if (dependencies[i].engine == SWITCH_GPU_ENGINE_VIC ||
+			   dependencies[i].engine == SWITCH_GPU_ENGINE_NVDEC ||
+			   dependencies[i].engine == SWITCH_GPU_ENGINE_DISPLAY ||
+			   dependencies[i].engine == SWITCH_GPU_ENGINE_NVENC) {
+			host1x++;
+		}
+	}
+	for (i = 0; i < word_wait_count; ++i) {
+		struct tgm_chan *source =
+			word_waits[i].queue ? live_by_uid(word_waits[i].queue) : NULL;
+		if (source ? source->vm != chan->vm
+			   : (word_waits[i].pool / TGM_FENCE_SLOT) != own_slot) {
+			flags |= TGM_STAT_FOREIGN_EVENT;
+			events++;
+		}
+	}
+	if (flags) {
+		__atomic_fetch_add(&tgm_stats.foreign_jobs, 1, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&tgm_stats.foreign_total_jobs, 1, __ATOMIC_RELAXED);
+	}
+	if (fences) {
+		__atomic_fetch_add(&tgm_stats.foreign_fences, fences, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&tgm_stats.foreign_total_fences, fences, __ATOMIC_RELAXED);
+	}
+	if (promises) {
+		__atomic_fetch_add(&tgm_stats.foreign_promises, promises, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&tgm_stats.foreign_total_promises, promises, __ATOMIC_RELAXED);
+	}
+	if (events) {
+		__atomic_fetch_add(&tgm_stats.foreign_events, events, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&tgm_stats.foreign_total_events, events, __ATOMIC_RELAXED);
+	}
+	if (host1x) {
+		__atomic_fetch_add(&tgm_stats.foreign_host1x, host1x, __ATOMIC_RELAXED);
+		__atomic_fetch_add(&tgm_stats.foreign_total_host1x, host1x, __ATOMIC_RELAXED);
+	}
+	return flags;
+}
+
+void tgm_foreign_waits_totals(struct tgm_foreign_waits *out)
+{
+	out->jobs = __atomic_load_n(&tgm_stats.foreign_total_jobs, __ATOMIC_RELAXED);
+	out->fences = __atomic_load_n(&tgm_stats.foreign_total_fences, __ATOMIC_RELAXED);
+	out->promises = __atomic_load_n(&tgm_stats.foreign_total_promises, __ATOMIC_RELAXED);
+	out->events = __atomic_load_n(&tgm_stats.foreign_total_events, __ATOMIC_RELAXED);
+	out->host1x = __atomic_load_n(&tgm_stats.foreign_total_host1x, __ATOMIC_RELAXED);
+}
+
+static void chan_set_foreign(struct tgm_chan *chan, u32 first, u32 next, u8 foreign)
+{
+	u32 s = 0;
+
+	for (s = first; (s32)(next - s) >= 0; s++)
+		WRITE_ONCE(chan->stat_foreign[s % CHAN_NSTAMPS], foreign);
+}
+
+static void chan_note_later_kick(struct tgm_chan *chan, u32 first, u32 next, int later, int app)
+{
+	u32 s = 0;
+	u32 in_frame = 0;
+
+	if (!later) {
+		__atomic_store_n(&tgm_stats.later_in_frame, 0, __ATOMIC_RELAXED);
+		return;
+	}
+	if (!app)
+		return;
+	__atomic_fetch_add(&tgm_stats.later_kicks, 1, __ATOMIC_RELAXED);
+	in_frame = __atomic_add_fetch(&tgm_stats.later_in_frame, 1, __ATOMIC_RELAXED);
+	if (in_frame == 1)
+		__atomic_fetch_add(&tgm_stats.later_frames, 1, __ATOMIC_RELAXED);
+	stats_max32(&tgm_stats.later_frame_max, in_frame);
+	for (s = next; (s32)(s - first) >= 0; s--)
+		WRITE_ONCE(chan->stat_foreign[s % CHAN_NSTAMPS],
+			   READ_ONCE(chan->stat_foreign[s % CHAN_NSTAMPS]) | TGM_STAT_LATER);
+}
+#endif
+
 /* Fence push: semaphore release of the next 32-bit seqno after wait-for-idle, then nvif's GET report, then a nonstall
  * interrupt (nouveau nvc0_fence_emit32) unless the job is quiet and nobody asked for it (SwitchGpuQuiet.h), then kick. The L2's dirty lines go to DRAM first, and the end of the submission
  * is stamped for the stats. The GET report comes before the interrupt so that a wait for room (chan_room) finds the room
@@ -89,11 +197,12 @@ static void chan_doorbell(struct tgm_chan *chan)
  * them all (the job's record says which). */
 static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 next, int quiet,
 			  const struct switch_gpu_release *releases, u32 release_count,
-			  struct switch_gpu_backing_transaction *owned)
+			  struct switch_gpu_backing_transaction *owned, int waits)
 {
 	struct nvif_push *push = &chan->chan.push;
 	struct switch_gpu_kicked_job *job = NULL;
 	const int announce = switch_gpu_quiet_announces(&chan->quiet, quiet);
+	int drained = 0;
 	u32 s = 0;
 	if (external && (l2_on() || chan->kernel)) {
 		/* engines idle, their writes committed to the L2 (FB flush: nvgpu gk20a_mm_fb_flush), the L2's dirty lines
@@ -109,30 +218,43 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 			PUSH_NVSQ(push, NV906F, NVB06F_FB_FLUSH, 0);
 		}
 		/* NOLINTEND(bugprone-signed-bitwise,bugprone-branch-clone) */
-	}
-	if (stats_on()) {
-		push_stamp(push, chan_stamps_va(chan, next) + offsetof(struct tgm_stamps, end),
-			   next);
+		drained = 1;
 	}
 	/* nouveau's NVDEF/NVVAL/PUSH_* macros compute in int and repeat their branches. */
 	/* NOLINTBEGIN(bugprone-signed-bitwise,bugprone-branch-clone) */
-	if (external && chan->visible_cpu) {
+	if (stats_on()) {
+		const u64 end_va = chan_stamps_va(chan, next) + offsetof(struct tgm_stamps, end);
+		PUSH_MTHD(push, NV906F, SEMAPHOREA,
+			  NVVAL(NV906F, SEMAPHOREA, OFFSET_UPPER, upper_32_bits(end_va)),
+			  SEMAPHOREB, lower_32_bits(end_va), SEMAPHOREC, next, SEMAPHORED,
+			  NVDEF(NV906F, SEMAPHORED, OPERATION, RELEASE) |
+				  (drained ? NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, DIS)
+					   : NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, EN)) |
+				  NVDEF(NV906F, SEMAPHORED, RELEASE_SIZE, 16BYTE));
+		drained = 1;
+	}
+	/* TGM_FENCE_VOLATILE_WRITES skips L2_FLUSH_DIRTY, so it must not advance visible_cpu past earlier L2-cached jobs. */
+	if (external == 1 && chan->visible_cpu) {
 		PUSH_MTHD(push, NV906F, SEMAPHOREA, upper_32_bits(chan->visible_gpu), SEMAPHOREB,
 			  lower_32_bits(chan->visible_gpu), SEMAPHOREC, next, SEMAPHORED,
 			  NVDEF(NV906F, SEMAPHORED, OPERATION, RELEASE) |
-				  NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, EN) |
+				  (drained ? NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, DIS)
+					   : NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, EN)) |
 				  NVDEF(NV906F, SEMAPHORED, RELEASE_SIZE, 4BYTE));
+		drained = 1;
 	}
 	PUSH_MTHD(push, NV906F, SEMAPHOREA,
 		  NVVAL(NV906F, SEMAPHOREA, OFFSET_UPPER, upper_32_bits(chan->fence_gpu)),
 		  SEMAPHOREB, lower_32_bits(chan->fence_gpu), SEMAPHOREC, next, SEMAPHORED,
 		  NVDEF(NV906F, SEMAPHORED, OPERATION, RELEASE) |
-			  NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, EN) |
+			  (drained ? NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, DIS)
+				   : NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, EN)) |
 			  NVDEF(NV906F, SEMAPHORED, RELEASE_SIZE, 4BYTE));
 	for (s = 0; s < release_count; s++) {
 		PUSH_MTHD(push, NV906F, SEMAPHOREA, upper_32_bits(releases[s].va), SEMAPHOREB,
 			  lower_32_bits(releases[s].va), SEMAPHOREC, releases[s].value, SEMAPHORED,
 			  NVDEF(NV906F, SEMAPHORED, OPERATION, RELEASE) |
+				  NVDEF(NV906F, SEMAPHORED, RELEASE_WFI, DIS) |
 				  NVDEF(NV906F, SEMAPHORED, RELEASE_SIZE, 4BYTE));
 	}
 	/* NOLINTEND(bugprone-signed-bitwise,bugprone-branch-clone) */
@@ -145,11 +267,17 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 	if (stats_on())
 		for (s = first; (s32)(next - s) >= 0; s++)
 			WRITE_ONCE(chan->stat_sub_ns[s % CHAN_NSTAMPS], chan->submit_ns);
+#if TGM_STATS
+	for (s = first; (s32)(next - s) >= 0; s++)
+		WRITE_ONCE(chan->stat_foreign[s % CHAN_NSTAMPS],
+			   READ_ONCE(chan->stat_foreign[s % CHAN_NSTAMPS]) & (u8)~TGM_STAT_LATER);
+#endif
 	if ((s32)(tgm_chan_completed(chan) - chan->submitted) >= 0) {
 		WRITE_ONCE(chan->progress_held, tgm_hold_held_ns(chan->chid, chan->submit_ns));
 		WRITE_ONCE(chan->busy_ns, chan->submit_ns);
 	}
-	job = switch_gpu_jobs_kick(&chan->jobs, first, next, chan->submit_ns, !announce);
+	job = switch_gpu_jobs_kick_waits(&chan->jobs, first, next, chan->submit_ns, !announce,
+					 waits);
 	if (announce)
 		switch_gpu_quiet_announce(&chan->quiet, next);
 	if (stats_on()) {
@@ -173,6 +301,7 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 	if (chan->high) {
 		struct tgm_sched_queued queued;
 		enum tgm_sched_kick kick = tgm_sched_kicked(tgm_gpu.device, chan->chid, &queued);
+		int later = 0;
 
 		WRITE_ONCE(job->app, kick != TGM_KICK_CLEAR);
 		if (stats_on() && queued.unread)
@@ -182,7 +311,13 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 				WRITE_ONCE(chan->stat_kick[s % CHAN_NSTAMPS], kick);
 		WRITE_ONCE(job->asked_pt, queued.asked_pt);
 		WRITE_ONCE(job->behind, queued.behind);
-		tgm_deadline_kicked(!chan->kernel, kick != TGM_KICK_CLEAR);
+		later = tgm_deadline_kicked(!chan->kernel, kick != TGM_KICK_CLEAR);
+#if TGM_STATS
+		if (chan->critical && !chan->kernel)
+			chan_note_later_kick(chan, first, next, later, kick != TGM_KICK_CLEAR);
+#else
+		(void)later;
+#endif
 	}
 	if (stats_on())
 		idle_stats();
@@ -191,14 +326,20 @@ static u32 chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 ne
 
 u32 tgm_chan_fence_job(struct tgm_chan *chan, int external, u32 first, u32 next)
 {
-	return chan_fence_job(chan, external, first, next, 0, NULL, 0, NULL);
+#if TGM_STATS
+	chan_set_foreign(chan, first, next, 0);
+#endif
+	return chan_fence_job(chan, external, first, next, 0, NULL, 0, NULL, 1);
 }
 
 u32 switch_gpu_chan_fence_sealed(struct tgm_chan *chan, int external,
 				 struct switch_gpu_backing_transaction *owned)
 {
+#if TGM_STATS
+	chan_set_foreign(chan, chan->submitted + 1, chan->submitted + 1, 0);
+#endif
 	return chan_fence_job(chan, external, chan->submitted + 1, chan->submitted + 1, 0, NULL, 0,
-			      owned);
+			      owned, 1);
 }
 
 void switch_gpu_chan_semantic_visibility(struct tgm_chan *chan,
@@ -522,10 +663,19 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	u32 bind_target = 0;
 	u64 bind_va = 0;
 	int bind = 0;
+	int waits = 0;
+#if TGM_STATS
+	u8 foreign = 0;
+#endif
 	int host_written = !(visibility & SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT) ||
 			   (visibility & SWITCH_GPU_SUBMIT_HOST_WRITTEN);
 	int external = !(visibility & SWITCH_GPU_SUBMIT_VISIBILITY_EXPLICIT) ||
-		       (visibility & SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY) || !chan->visible_cpu;
+				       (visibility & SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY) ||
+				       !chan->visible_cpu
+			       ? 1
+		       : (visibility & SWITCH_GPU_SUBMIT_VOLATILE_VISIBILITY)
+			       ? TGM_FENCE_VOLATILE_WRITES
+			       : 0;
 	int quiet = (visibility & SWITCH_GPU_SUBMIT_QUIET) &&
 		    __atomic_load_n(&chan->wake, __ATOMIC_ACQUIRE);
 
@@ -613,22 +763,33 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 				  NVDEF(NV906F, SEMAPHORED, ACQUIRE_SWITCH, ENABLED));
 	PUSH_KICK(&chan->chan.push);
 	switch_gpu_chan_park_promises_locked(chan, dependencies, dependency_count, unsettled);
+#if TGM_STATS
+	foreign = chan_note_foreign(chan, dependencies, dependency_count, unsettled, word_waits,
+				    word_wait_count);
+#endif
 	if (channels)
 		mutex_unlock(&tgm_live_lock);
 	if (owned)
 		switch_gpu_backing_publish(owned);
-	/* a high channel's start stamp, in every kernel: the end of the preemption latency of an app it was queued behind */
-	if (stats_on() || chan->high) {
+	/* Release kernels stamp a high user channel with WFI only when a low channel is busy, so
+	 * hold.c measures true GR preemption latency while idle compositor and kernel kicks skip
+	 * the start stamp altogether. */
+	if (stats_on()) {
 		u32 next = chan->submitted + 1;
-		if (stats_on()) {
-			WRITE_ONCE(chan->stat_sub_ptimer[next % CHAN_NSTAMPS],
-				   nvkm_timer_read(tgm_gpu.device->timer));
-		}
-		if (chan->high)
-			WRITE_ONCE(switch_gpu_jobs_next(&chan->jobs)->waits, 0);
+
+		WRITE_ONCE(chan->stat_sub_ptimer[next % CHAN_NSTAMPS],
+			   nvkm_timer_read(tgm_gpu.device->timer));
 		push_stamp(&chan->chan.push,
 			   chan_stamps_va(chan, next) + offsetof(struct tgm_stamps, start), next);
 		PUSH_KICK(&chan->chan.push);
+	} else if (chan->high && !chan->kernel && switch_gpu_busy_low(&tgm_busy)) {
+		const u32 next = chan->submitted + 1;
+
+		push_stamp(&chan->chan.push,
+			   chan_stamps_va(chan, next) + offsetof(struct tgm_stamps, start), next);
+		PUSH_KICK(&chan->chan.push);
+	} else if (chan->high) {
+		waits = 1;
 	}
 	if (prof) {
 		u32 stamps = 0;
@@ -655,6 +816,7 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	/* The L2 first: page-table lines a GPU-ordered map wrote around (TegraGM20BTlb.h) go before the TLB refetches. */
 	tlb = tgm_tlb_take(&chan->tlb, &chan->vm->tlb) || bind;
 	if ((l2_on() && host_written) || tlb) {
+		tgm_stats_l2_inval(chan, l2_on() && host_written, tlb);
 		/* nouveau's NVDEF/NVVAL/PUSH_* macros compute in int and repeat their branches. */
 		/* NOLINTBEGIN(bugprone-signed-bitwise,bugprone-branch-clone) */
 		PUSH_NVSQ(&chan->chan.push, NV906F, NVB06F_WFI, 0);
@@ -686,8 +848,11 @@ chan_exec_body(struct tgm_chan *chan, const struct tgm_push *pushes, uint32_t co
 	last = switch_gpu_job_emit(pushes, count, chan->submitted, &emitter);
 	tgm_hang_log_submit(&chan->hang, last, job.first, chan->chan.gpfifo.cur);
 
+#if TGM_STATS
+	chan_set_foreign(chan, chan->submitted + 1, last, foreign);
+#endif
 	*seqno = chan_fence_job(chan, external, chan->submitted + 1, last, quiet, releases,
-				release_count, owned);
+				release_count, owned, waits);
 	if (SWITCH_FRAME_TIMELINE && !chan->kernel)
 		frame_submitted(chan, *seqno, start);
 	if (stats_on())

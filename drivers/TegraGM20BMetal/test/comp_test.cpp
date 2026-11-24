@@ -110,9 +110,10 @@ TEST(GM20BComp, BootTableValuesAgreeAcrossMetalAndNvFormats)
 
 TEST(GM20BComp, MemoryIsWholeComptagLines)
 {
-    EXPECT_EQ(gm20b::compBytes(1), 0x20000u);
+    EXPECT_EQ(gm20b::compBytes(1), 0x10000u);
+    EXPECT_EQ(gm20b::compBytes(0x10000), 0x10000u);
     EXPECT_EQ(gm20b::compBytes(0x20000), 0x20000u);
-    EXPECT_EQ(gm20b::compBytes(1280u * 720u * 8u), 0x720000u);
+    EXPECT_EQ(gm20b::compBytes(1280u * 720u * 8u), 0x710000u);
 }
 
 // What the copy engine fills or drains compresses only at the kinds gpu.x1.ce_compressed proved (one-sample C32 and C64)

@@ -146,8 +146,8 @@ TEST(ProbeForms, TodayIsWhatTheRuntimeEmittedBefore)
     for (BarrierEngine before : kEngines) {
         Opened opened[3];
         EXPECT_EQ(passWords(PassForm::Today, SwitchForm::Today, EntryForm::Today, before, &opened[0]),
-                  words([](gm20b::Push &p) {
-                      gm20b::barrier_forms_detail::barrier(p, switch_gm20b_pass_barrier, false);
+                  words([before](gm20b::Push &p) {
+                      gm20b::barrier_forms_detail::barrier(p, switch_gm20b_pass_drain, before != BarrierEngine::ThreeD);
                   }));
         EXPECT_EQ(blitWords(SwitchForm::Today, EntryForm::Today, before, &opened[1]),
                   (std::vector<Method>{{0, kWfi, 0}}));

@@ -29,7 +29,8 @@
     "175": "newProductIDNumber",
     "180": "newReportDescriptor",
     "181": "handleReport",
-    "191": "newSerialNumberString"
+    "191": "newSerialNumberString",
+    "197": "handleReportWithTime"
   },
   "fields": {},
   "addresses": {
@@ -76,7 +77,7 @@
     "opaque194": "0xfffffff0098da3d8",
     "opaque195": "0xfffffff0098da3fc",
     "opaque196": "0xfffffff0098da408",
-    "opaque197": "0xfffffff0098da414",
+    "handleReportWithTime": "0xfffffff0098da414",
     "opaque198": "0xfffffff0098dac2c",
     "opaque199": "0xfffffff0098dad00",
     "opaque201": "0xfffffff0098dae2c",
@@ -104,6 +105,7 @@
     "handleIsOpen": "slot 93 by PAC of _ZNK9IOService12handleIsOpenEPKS_",
     "handleOpen": "slot 91 by PAC of _ZN9IOService10handleOpenEPS_jPv",
     "handleReport": "slot 181 by PAC of _ZN11IOHIDDevice12handleReportEP18IOMemoryDescriptor15IOHIDReportTypej",
+    "handleReportWithTime": "slot 197 by PAC of _ZN11IOHIDDevice20handleReportWithTimeEyP18IOMemoryDescriptor15IOHIDReportTypej",
     "init": "slot 21 by PAC of _ZN15IORegistryEntry4initEP12OSDictionary",
     "matchPropertyTable": "slot 101 by PAC of _ZN9IOService18matchPropertyTableEP12OSDictionaryPi",
     "message": "slot 132 by PAC of _ZN9IOService7messageEjPS_Pv",

@@ -25,7 +25,6 @@ struct Asked {
     bool variants;
     BoundDraw *bound;
     uint16_t xrSlots;
-    const SelectorConfigs *selectors;
     std::string why;
     CompileOutcome outcome = CompileOutcome::Failed;
     bool splittable = false;
@@ -36,7 +35,7 @@ bool made(const NmbDirectState *state, void *ctx)
     Asked &a = *static_cast<Asked *>(ctx);
     a.splittable = splitsFragment(*state);
     a.outcome = directRecord(*state, a.compile, a.rules, a.key, a.attributes, a.out, a.why, a.registers, a.split,
-                             a.variants, a.xrSlots, a.selectors);
+                             a.variants, a.xrSlots);
     if (a.bound) {
         const NmbDirectDraw &d = state->draws[3];
         a.bound->pushMask = d.pushMask;
@@ -72,15 +71,9 @@ CompileOutcome Direct::form(MTLRenderPipelineDescriptor *descriptor, bool barrie
                             const std::string &key, const std::vector<uint32_t> &attributes, RuntimeRecord &out,
                             std::string &why, std::map<uint32_t, uint32_t> *registers, bool split)
 {
-    const SelectorConfigs *selectors = nullptr;
-    if (selectors_) {
-        const auto found = selectors_->find(packKeyHash(key.substr(0, variantNameAt(key))));
-        if (found != selectors_->end())
-            selectors = &found->second;
-    }
     Asked a = {
-        compile_,         rules_,    key, attributes, out, registers, split, variants_, keepBound_ ? &bound_ : nullptr,
-        textures.xrSlots, selectors, {}};
+        compile_,         rules_, key, attributes, out, registers, split, variants_, keepBound_ ? &bound_ : nullptr,
+        textures.xrSlots, {}};
     if (keepBound_)
         bound_ = {};
     std::vector<NmbDirectCubicSampler> cubic;

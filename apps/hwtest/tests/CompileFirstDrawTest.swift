@@ -131,7 +131,6 @@ struct CompileFirstDrawTest: HWTest {
 /// so a Run All resumed after the app's process ended still counts the deaths its earlier process caused.
 enum DeliberateCompilerDeaths {
     static var tally: BootTally {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return BootTally(url: documents.appendingPathComponent("hwtest/compiler-deaths"), boot: DeviceInfo.bootUUID)
+        BootTally(url: AppFiles.working.appendingPathComponent("compiler-deaths"), boot: DeviceInfo.bootUUID)
     }
 }

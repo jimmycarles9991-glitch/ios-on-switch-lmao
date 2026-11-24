@@ -1,4 +1,5 @@
 #include "pretranslate.h"
+#include "pt_edits.h"
 
 #include "stub_split.h"
 
@@ -367,7 +368,7 @@ static bool place_site(struct pt *p, uint64_t site, uint32_t w, enum a64x_class 
     uint32_t dead, vdead, branch = 0;
     bool vt = a64x_class_uses_vtemps(c);
     liveness(p, site, vt, &dead, &vdead);
-    if ((dead >> 30) & 1 && c != A64X_PAC_LDRA) {
+    if ((dead >> 30) & 1 && c != A64X_PAC_LDRA && !(a64x_stub_gprs(w) & (1u << 30))) {
         uint32_t need = vt ? vtemps_of(w) : 0;
         bool two = (dead & ((1u << 16) | (1u << 17))) == ((1u << 16) | (1u << 17)),
              vfree = need && (vdead & need) == need;
@@ -462,7 +463,8 @@ static int fallback(struct a64x_pt_result *r, const char *fmt, ...)
     return 0;
 }
 
-int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_result *r, char *err, size_t errlen)
+int a64x_pretranslate_edits(const struct a64x_macho *m, uint8_t *out, const struct a64x_pt_edit *edits, size_t nedits,
+                            struct a64x_pt_result *r, char *err, size_t errlen)
 {
     memset(r, 0, sizeof(*r));
     memcpy(out, m->base, m->size);
@@ -471,13 +473,21 @@ int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_r
                      !a64x_cs_check(m->base, m->size, sig_off, sig_size, r->cdhash_in, NULL, 0);
     enum a64x_kind kind = a64x_kind_of(m->cputype, m->cpusubtype, m->marked);
     if (kind == A64X_KIND_NATIVE || kind == A64X_KIND_MARKED) {
+        if (nedits)
+            return fail(err, errlen, "edits requested for an already native or marked slice");
         r->status = A64X_PT_UNCHANGED;
         return 0;
     }
-    if (!signed_ok)
+    if (!signed_ok) {
+        if (nedits)
+            return fail(err, errlen, "no valid ad hoc SHA-256 signature");
         return fallback(r, "no valid ad hoc SHA-256 signature");
-    if (m->nexec != 1)
+    }
+    if (m->nexec != 1) {
+        if (nedits)
+            return fail(err, errlen, "%u executable segments", m->nexec);
         return fallback(r, "%u executable segments", m->nexec);
+    }
     uint32_t map_flags = kind == A64X_KIND_ARM64 ? A64X_MAP_NO_PAC : 0;
     struct a64x_image_xlate islands;
     if (a64x_pt_code_map(m, map_flags, &islands))
@@ -485,6 +495,7 @@ int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_r
     struct pt p = {.m = m, .out = out, .data = islands.data, .r = r};
     r->island_words = islands.island_words;
     a64x_pt_tail(m, &p.tail, &p.tail_end);
+    uint64_t tlo = p.tail, thi = p.tail_end;
     r->tail_words = (p.tail_end - p.tail) / 4;
     load_function_starts(&p);
     p.walk_buf = malloc(A64X_WALK_BYTES(FN_MAX_WORDS));
@@ -493,12 +504,20 @@ int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_r
     int rc = !p.walk_buf ? fail(r->why, sizeof(r->why), "out of memory")
              : p.entries ? translate(&p, map_flags, r->why, sizeof(r->why))
                          : fail(r->why, sizeof(r->why), "no entry map (out of memory or unreadable fixups)");
-    free_pt(&p);
     if (rc) {
+        free_pt(&p);
         memcpy(out, m->base, m->size);
+        if (nedits)
+            return fail(err, errlen, "%s", r->why);
         r->status = A64X_PT_FALLBACK;
         return 0;
     }
+    if (nedits && a64x_pt_apply_edits(m, p.data, tlo, thi, out, edits, nedits, err, errlen)) {
+        free_pt(&p);
+        memcpy(out, m->base, m->size);
+        return -1;
+    }
+    free_pt(&p);
     for (uint64_t off = m->exec_fileoff; off + 4 <= m->exec_fileoff + m->exec_filesize; off += 4)
         r->changed += rd32(out + off) != rd32(m->base + off);
     struct a64x_fips fips;
@@ -508,10 +527,17 @@ int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_r
     wr32(out + 28, A64X_PRETRANSLATED);
     if (a64x_cs_rehash(out, m->size, sig_off, sig_size, r->cdhash_out, r->why, sizeof(r->why))) {
         memcpy(out, m->base, m->size);
+        if (nedits)
+            return fail(err, errlen, "%s", r->why);
         r->status = A64X_PT_FALLBACK;
         return 0;
     }
     r->status = A64X_PT_TRANSLATED;
     r->why[0] = 0;
     return 0;
+}
+
+int a64x_pretranslate(const struct a64x_macho *m, uint8_t *out, struct a64x_pt_result *r, char *err, size_t errlen)
+{
+    return a64x_pretranslate_edits(m, out, NULL, 0, r, err, errlen);
 }

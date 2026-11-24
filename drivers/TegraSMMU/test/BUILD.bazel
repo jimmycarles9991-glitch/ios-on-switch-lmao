@@ -233,3 +233,55 @@ host_test(
         ":mc_errors_kernel",
     ],
 )
+
+host_shims(
+    name = "smmu_engine_kernel",
+    headers = [
+        "IOKit/IOBufferMemoryDescriptor.h",
+        "IOKit/IOLib.h",
+        "IOKit/IOLocks.h",
+        "kern/clock.h",
+        "libkern/libkern.h",
+    ],
+    stubs = "smmu_engine_stubs.h",
+)
+
+host_library(
+    name = "smmu_engine_mc",
+    srcs = [
+        "//drivers/TegraSMMU:SwitchSmmuRegisters.h",
+        "//drivers/TegraSMMU:TegraMCNames.h",
+        "//drivers/TegraSMMU:TegraSMMU.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUAttachments.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+        "//drivers/TegraSMMU:TegraSMMUEngine.cpp",
+        "//drivers/TegraSMMU:TegraSMMUEngine.h",
+        "//drivers/TegraSMMU:TegraSMMUPublish.h",
+        "//drivers/TegraSMMU:TegraSMMUSpace.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+        "//kits/SwitchDMA:SwitchHwPage.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":smmu_engine_kernel"],
+)
+
+host_test(
+    name = "smmu_engine_test",
+    srcs = [
+        "smmu_engine_test.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+        "//drivers/TegraSMMU:TegraSMMUEngine.h",
+        "//drivers/TegraSMMU:TegraSMMUSpace.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchHwPage.h",
+    ],
+    deps = [
+        ":smmu_engine_kernel",
+        ":smmu_engine_mc",
+    ],
+)

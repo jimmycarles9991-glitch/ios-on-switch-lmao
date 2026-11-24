@@ -1,0 +1,33 @@
+# dispatch.sync_handoff's queues, threads and judge (tests/DispatchSyncHandoffTest.swift); dispatch/test runs it on the
+# Mac, against Apple's own libdispatch and kernel.
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_swift//swift:swift_interop_hint.bzl", "swift_interop_hint")
+load("//bazel/lint:defs.bzl", "lint_files")
+
+package(default_visibility = ["//apps/hwtest:__subpackages__"])
+
+lint_files()
+
+SRCS = [
+    "switch_sync_handoff.c",
+    "switch_sync_internal.h",
+    "switch_sync_shapes.c",
+    "switch_sync_watch.c",
+    "switch_v80_atomics.h",
+]
+
+exports_files(SRCS + ["switch_sync_handoff.h"])
+
+swift_interop_hint(
+    name = "sync_handoff_module",
+    module_name = "SwitchSyncHandoff",
+)
+
+cc_library(
+    name = "sync_handoff",
+    srcs = SRCS,
+    hdrs = ["switch_sync_handoff.h"],
+    aspect_hints = [":sync_handoff_module"],
+    copts = ["-O2"],
+    target_compatible_with = ["@platforms//os:ios"],
+)

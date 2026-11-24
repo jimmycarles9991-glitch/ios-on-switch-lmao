@@ -98,7 +98,7 @@ struct FixedBlendRuleTest: HWTest {
     }
 
     static func layers(
-        _ state: MTLRenderPipelineState, _ target: MTLTexture, count: Int, computed: Bool
+        _ state: MTLRenderPipelineState, _ target: MTLTexture, count: Int, computed: Bool, clear: [Double] = Self.clear
     )
         -> (MTLCommandBuffer) -> Void
     {

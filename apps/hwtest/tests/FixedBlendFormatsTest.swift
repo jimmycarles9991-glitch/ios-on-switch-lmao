@@ -5,8 +5,8 @@ import Metal
 
 /// Rule fetch.blend's further formats (drivers/TegraGM20BMetal/fetch_rungs.h fixedBlendFormat): 8-bit
 /// sources (gpu.gm20b.fixed_blend_rule's shader) blended through the ROP 1, 2 and 8 layers deep into RGBA16Float,
-/// BGRA8Unorm_sRGB and RGBA8Unorm_sRGB, against Metal's blend computed here (each layer stored as the format stores it,
-/// sRGB channels blended in linear light).
+/// BGRA8Unorm_sRGB and RGBA8Unorm_sRGB, plus computed and HDR (> 1.0) arms into RGBA16Float, against Metal's blend
+/// computed here (each layer stored as the format stores it, sRGB channels blended in linear light).
 /// RGBA16Float is judged by value: the ROP takes the source in half precision, so where the source alpha is near 1 its
 /// 1 - alpha moves a tiny result by several half steps (8 at the worst texel) while the value moves by under 2^-11.
 /// Apple's GPU (M4 Max, the same shader and reference) is 1, 3 and 7 half steps and 2^-11, 2^-10 and 5 x 2^-11 off at
@@ -22,8 +22,13 @@ struct FixedBlendFormatsTest: HWTest {
     var timeout: TimeInterval { 60 }
 
     static let size = FixedBlendRuleTest.size
-    static let arms: [(label: String, format: MTLPixelFormat)] = [
-        ("rgba16f", .rgba16Float), ("bgra8_srgb", .bgra8Unorm_srgb), ("rgba8_srgb", .rgba8Unorm_srgb),
+    static let hdrClear: [Double] = [1.5, 1.75, 1.25, 1.0]
+    static let arms: [(label: String, format: MTLPixelFormat, computed: Bool, clear: [Double])] = [
+        ("rgba16f", .rgba16Float, false, FixedBlendRuleTest.clear),
+        ("rgba16f_computed", .rgba16Float, true, FixedBlendRuleTest.clear),
+        ("rgba16f_hdr", .rgba16Float, true, hdrClear),
+        ("bgra8_srgb", .bgra8Unorm_srgb, false, FixedBlendRuleTest.clear),
+        ("rgba8_srgb", .rgba8Unorm_srgb, false, FixedBlendRuleTest.clear),
     ]
 
     struct Worst {
@@ -49,17 +54,20 @@ struct FixedBlendFormatsTest: HWTest {
             var paths: Set<String> = []
             for layers in [1, 2, 8] {
                 let target = try gpu.texture(arm.format, Self.size, Self.size)
-                let run = FixedBlendRuleTest.layers(state, target, count: layers, computed: false)
+                let run = FixedBlendRuleTest.layers(
+                    state, target, count: layers, computed: arm.computed, clear: arm.clear
+                )
                 paths.insert(try await gpu.run(run).path)
                 let bytes = try await gpu.read(target, bytesPerPixel: arm.format == .rgba16Float ? 8 : 4)
-                let worst = Self.worst(bytes, arm.format, layers: layers)
+                let worst = Self.worst(bytes, arm.format, layers: layers, computed: arm.computed, clear: arm.clear)
                 let label = "\(arm.label)_\(layers)"
                 metrics.set(label + "_at", worst.at)
                 if arm.format == .rgba16Float {
                     metrics.set(label + "_steps", worst.codes)
                     metrics.set(label + "_model", worst.model)
                     metrics.set(label + "_value", worst.value, digits: 6)
-                    if worst.value > Double(layers + 1) / 2048 { wrong.append(label) }
+                    let limit = Double(layers + 1) / (arm.clear[0] > 1 ? 1024 : 2048)
+                    if worst.value > limit { wrong.append(label) }
                 } else {
                     metrics.set(label + "_worst", worst.codes)
                     if layers <= 2 && worst.codes > 2 { wrong.append(label) }
@@ -71,19 +79,22 @@ struct FixedBlendFormatsTest: HWTest {
         return wrong.isEmpty ? .pass(metrics) : .fail(wrong.joined(separator: ","), metrics)
     }
 
-    /// The texel farthest from Metal's blend of `layers` 8-bit source-overs into `format`: in codes (RGBA16F: half steps,
+    /// The texel farthest from Metal's blend of `layers` source-overs into `format`: in codes (RGBA16F: half steps,
     /// negative zero read as zero) and, for RGBA16F, the largest value difference, which picks the texel
-    static func worst(_ bytes: [UInt8], _ format: MTLPixelFormat, layers: Int) -> Worst {
+    static func worst(
+        _ bytes: [UInt8], _ format: MTLPixelFormat, layers: Int, computed: Bool = false,
+        clear: [Double] = FixedBlendRuleTest.clear
+    ) -> Worst {
         typealias Rule = FixedBlendRuleTest
         let half = format == .rgba16Float
         var out = Worst()
         var farthest = -1.0
         for y in 0 ..< size {
             for x in 0 ..< size {
-                var d = (0 ..< 4).map { c in Rule.store(Rule.clear[c], format, colour: c < 3) }
+                var d = (0 ..< 4).map { c in Rule.store(clear[c], format, colour: c < 3) }
                 var m = d
                 for layer in 0 ..< layers {
-                    let s = Rule.source(x, y, layer: layer, computed: false)
+                    let s = Rule.source(x, y, layer: layer, computed: computed)
                     d = (0 ..< 4).map { c in
                         Rule.store(s[c] + Rule.load(d[c], format, colour: c < 3) * (1 - s[3]), format, colour: c < 3)
                     }

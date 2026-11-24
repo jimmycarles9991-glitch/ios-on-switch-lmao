@@ -12,7 +12,8 @@
 #                            __cache_info__ alone goes, once per GPU build the deploy names
 #   xnu_icon_cache_source_test  both trees' boot setup runs it once before launchd, with one error line
 #   xnu_stall_test           kernel/switch/diag/stall.h's decisions: which samples of a UI main thread are a stall,
-#                            one report and one end per episode, wait names by block_hint.h value, user addresses
+#                            one report and one end per episode, wait names by block_hint.h value (both trees), the
+#                            kernel rwlock behind a wait's event, kernel_task owner hops, user addresses
 #   xnu_render_senders_test  osfmk/ipc/switch_render_senders.h's table and line: the render server's senders by
 #                            process, largest first, with their rates and top ids, the rest as others
 #   xnu_render_senders_source_test  ipc_kmsg_send counts a message under its destination port's lock, only for the
@@ -26,6 +27,22 @@
 #                            a release kernel compiles every hook to nothing
 #   xnu_sched_render_test    kernel/switch/sched/render.h: the display thread's dispatches split its time from a vsync
 #                            to its swap into running, blocked and waiting for a core
+#   xnu_sched_cpu_test       kernel/switch/sched/cpu.h: each process's CPU in a window, counted once across its exit and
+#                            an exec, a full table's misses counted; the cores and tasks lines
+#   xnu_sched_watch_test     kernel/switch/sched/watch.h and commit.h: a committing or touch-sending thread's stretch to
+#                            each event, one per burst, its cause and line; a commit through the render server to the
+#                            display thread's wake; nothing under the thread lock that locks or logs
+#   xnu_diag_pagein_test     kernel/switch/diag/pagein.h: a window's file pager reads and busy-page waits by process
+#                            and file, a file named by a read, full tables counted, the line; both trees' file pager
+#                            and page sleep reporting to it
+#   xnu_sched_slots_test     kernel/switch/sched/slots.h: watched threads' slots taken without a lock, freed only from
+#                            the report's snapshot, filter bits cleared only when no taken id needs them
+#   xnu_recorder_test        kernel/switch/recorder/recorder.h: a UI main thread's busy stretch as one hang, latched
+#                            only when taken; a hang taking a queued tail; the gap, the slots, the status line's cost
+#   xnu_recorder_hooks_source_test  every source in kernel/switch and both trees' bsd and osfmk that names
+#                            SWITCH_RECORDER is in objects.bzl's _RECORDER_OBJECTS, and every listed one names it
+#   xnu_kprof_role_test      kernel/switch/include/switch/kprof_role.h: main-thread vs worker user-sample bucketing,
+#                            per-CPU merge, per-role top-K selection and user/images line formatting
 #   xnu_sched_busy_test      kernel/switch/sched/busy.h: a UI main thread's stretch between two run-loop waits split into
 #                            running, blocked by kind and waiting for a core, its longest waits and its line; both trees'
 #                            thread_dispatch feed it under the thread's lock, with nothing there that locks or logs
@@ -49,6 +66,9 @@
 #                            scale keeping the shipped calls and exit; both copies of WidgetKit's placeholder deadline;
 #                            WidgetKit's archived image limit at 2x; the scroll edge keyline's two ladders sending every
 #                            scale but 3 to the 2x row; only the grid and WidgetKit's two applied at scale 1
+#   xnu_motion_caps_24B119_test  the CoreMotion site of switch_ui_scale_sites_24B119.h: the hardware type 225 case run
+#                            from its shipped bytes loads J181's capability word and from its patched bytes that word
+#                            without the motion coprocessor's bits; 21H461's table has no such site
 #   xnu_ui_scale_page_test   both trees' switch_ui_scale_page over 24B119's table focus site: the shipped bytes take
 #                            both edits and nothing else; a difference anywhere in either checked window leaves the
 #                            chunk as read and logs one line; a chunk without the edits is copied as read
@@ -89,6 +109,12 @@
 #   switch_prefs_add_test    kernel/switch/boot/prefs.c adds a missing integer key to plists CoreFoundation wrote and
 #                            reads back (binary, offsets widening, XML, <dict/>), never replaces one; only 27's setup
 #                            adds True Tone's default
+#   switch_boot_sync_test    <switch/boot_sync.h>: the setup before launchd syncs from a boot's first durable change on
+#                            (a changed override, a fresh Data volume, a panic record) and never on an ordinary or
+#                            deploy boot's REDONE changes
+#   xnu_workloop_handoff_test  <switch/workloop_handoff.h>'s SwitchWL handoff lines (which a process logs, as devicerun
+#                            reads them); 12377's workloop filter hooks each event where its state is held, 10063's has
+#                            no hook, and a release kernel compiles them to nothing
 #
 #   bazel test //kernel/tests:all
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
@@ -174,6 +200,19 @@ host_test(
     ],
 )
 
+host_test(
+    name = "xnu_recorder_hooks_source_test",
+    srcs = ["xnu_recorder_hooks_source_test.cpp"],
+    data = [
+        "//kernel/switch:objects.bzl",
+        "//kernel/switch:srcs",
+        "//kernel/xnu-10063.141.1/bsd:all",
+        "//kernel/xnu-10063.141.1/osfmk:all",
+        "//kernel/xnu-12377.121.6/bsd:all",
+        "//kernel/xnu-12377.121.6/osfmk:all",
+    ],
+)
+
 # iOS 27's kernel events may take one mbuf cluster (SwitchWLAN's 24B119 join report); iOS 17's are as Apple ships them.
 host_test(
     name = "xnu_kev_cluster_source_test",
@@ -182,6 +221,35 @@ host_test(
         "//kernel/xnu-10063.141.1/bsd:kern/kern_event.c",
         "//kernel/xnu-12377.121.6/bsd:kern/kern_event.c",
     ],
+)
+
+# --- <switch/workloop_handoff.h> and kernel/switch/diag/workloop_line.h ----------------------------------------------
+copy_file(
+    name = "switch_workloop_handoff",
+    src = "//kernel/switch:include/switch/workloop_handoff.h",
+    out = "switch/workloop_handoff.h",
+)
+
+copy_file(
+    name = "switch_workloop_line",
+    src = "//kernel/switch:diag/workloop_line.h",
+    out = "switch_workloop_line.h",
+)
+
+host_test(
+    name = "xnu_workloop_handoff_test",
+    srcs = [
+        "switch/workloop_handoff.h",
+        "switch_workloop_line.h",
+        "xnu_workloop_handoff_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:diag/workloop.c",
+        "//kernel/switch:include/switch/diag.h",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_event.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_event.c",
+    ],
+    includes = ["."],
 )
 
 host_test(
@@ -245,7 +313,10 @@ host_library(
 host_test(
     name = "xnu_stall_test",
     srcs = ["xnu_stall_test.cpp"],
-    data = ["//kernel/xnu-10063.141.1/osfmk:kern/block_hint.h"],
+    data = [
+        "//kernel/xnu-10063.141.1/osfmk:kern/block_hint.h",
+        "//kernel/xnu-12377.121.6/osfmk:kern/block_hint.h",
+    ],
     deps = [":stall"],
 )
 
@@ -298,6 +369,54 @@ host_test(
     includes = ["."],
 )
 
+# --- kernel/switch/sched/cpu.h --------------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_cpu",
+    src = "//kernel/switch:sched/cpu.h",
+    out = "sched/cpu.h",
+)
+
+host_test(
+    name = "xnu_sched_cpu_test",
+    srcs = [
+        "sched/cpu.h",
+        "xnu_sched_cpu_test.cpp",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/recorder/recorder.h ------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_recorder",
+    src = "//kernel/switch:recorder/recorder.h",
+    out = "recorder/recorder.h",
+)
+
+host_test(
+    name = "xnu_recorder_test",
+    srcs = [
+        "recorder/recorder.h",
+        "xnu_recorder_test.cpp",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/include/switch/kprof_role.h ----------------------------------------------------------------------------
+copy_file(
+    name = "switch_kprof_role",
+    src = "//kernel/switch:include/switch/kprof_role.h",
+    out = "switch/kprof_role.h",
+)
+
+host_test(
+    name = "xnu_kprof_role_test",
+    srcs = [
+        "switch/kprof_role.h",
+        "xnu_kprof_role_test.cpp",
+    ],
+    includes = ["."],
+)
+
 # --- kernel/switch/sched/busy.h -------------------------------------------------------------------------------------------
 copy_file(
     name = "switch_sched_busy",
@@ -324,6 +443,82 @@ host_test(
         "//kernel/switch:sched/busy.h",
         "//kernel/xnu-10063.141.1/osfmk:kern/sched_prim.c",
         "//kernel/xnu-12377.121.6/osfmk:kern/sched_prim.c",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/sched/watch.h, commit.h ----------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_watch",
+    src = "//kernel/switch:sched/watch.h",
+    out = "sched/watch.h",
+)
+
+copy_file(
+    name = "switch_sched_commit",
+    src = "//kernel/switch:sched/commit.h",
+    out = "sched/commit.h",
+)
+
+host_test(
+    name = "xnu_sched_watch_test",
+    srcs = [
+        "diag/stall.h",
+        "sched/busy.h",
+        "sched/commit.h",
+        "sched/stats.h",
+        "sched/watch.h",
+        "xnu_sched_watch_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:include/switch/sched.h",
+        "//kernel/switch:sched/commit.c",
+        "//kernel/switch:sched/slots.h",
+        "//kernel/switch:sched/watch.c",
+    ],
+    defines = select({
+        "//kernel:xnu_12377_121_6": ["XNU_12377_121_6=1"],
+        "//conditions:default": [],
+    }),
+    includes = ["."],
+)
+
+# --- kernel/switch/sched/slots.h ------------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_sched_slots",
+    src = "//kernel/switch:sched/slots.h",
+    out = "sched/slots.h",
+)
+
+host_test(
+    name = "xnu_sched_slots_test",
+    srcs = [
+        "sched/slots.h",
+        "xnu_sched_slots_test.cpp",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/diag/pagein.h -------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_diag_pagein",
+    src = "//kernel/switch:diag/pagein.h",
+    out = "diag/pagein.h",
+)
+
+host_test(
+    name = "xnu_diag_pagein_test",
+    srcs = [
+        "diag/pagein.h",
+        "xnu_diag_pagein_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:include/switch/diag.h",
+        "//kernel/xnu-10063.141.1/osfmk:vm/bsd_vm.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_object.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/bsd_vm.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_object.c",
     ],
     includes = ["."],
 )
@@ -456,6 +651,12 @@ host_test(
     name = "xnu_ui_scale_sites_24B119_test",
     srcs = _UI_SCALE_SITES_HDRS + ["xnu_ui_scale_sites_24B119_test.cpp"],
     data = _UI_SCALE_SITES_DATA,
+    includes = ["."],
+)
+
+host_test(
+    name = "xnu_motion_caps_24B119_test",
+    srcs = _UI_SCALE_SITES_HDRS + ["xnu_motion_caps_24B119_test.cpp"],
     includes = ["."],
 )
 
@@ -826,8 +1027,11 @@ host_test(
     srcs = ["xnu_icon_cache_source_test.cpp"],
     data = [
         "//kernel/switch:boot/icon_cache.c",
+        "//kernel/switch:boot/icon_cache_sweep.c",
         "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-10063.141.1/iokit:Kernel/IOPMrootDomain.cpp",
         "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/iokit:Kernel/IOPMrootDomain.cpp",
         "//tools/deploy:icon_cache.py",
     ],
 )
@@ -841,7 +1045,11 @@ copy_file(
 
 host_library(
     name = "prefs",
-    srcs = ["//kernel/switch:boot/prefs.c"],
+    # The headers: prefs.c's private ones beside it.
+    srcs = [
+        "//kernel/switch:boot/prefs.c",
+        "//kernel/switch:headers",
+    ],
     hdrs = ["switch/prefs.h"],
     includes = ["."],
 )
@@ -873,6 +1081,76 @@ host_test(
         "CoreFoundation",
     ],
     deps = [":prefs"],
+)
+
+# --- kernel/switch/include/switch/boot_sync.h -------------------------------------------------------------------------
+copy_file(
+    name = "switch_boot_sync",
+    src = "//kernel/switch:include/switch/boot_sync.h",
+    out = "switch/boot_sync.h",
+)
+
+host_test(
+    name = "switch_boot_sync_test",
+    srcs = [
+        "switch/boot_sync.h",
+        "switch_boot_sync_test.cpp",
+    ],
+    includes = ["."],
+)
+
+# --- kernel/switch/vm/prefetch_*.h ------------------------------------------------------------------------------------
+copy_file(
+    name = "switch_prefetch_list_hdr",
+    src = "//kernel/switch:vm/prefetch_list.h",
+    out = "switch/prefetch_list.h",
+)
+
+copy_file(
+    name = "switch_prefetch_pace_hdr",
+    src = "//kernel/switch:vm/prefetch_pace.h",
+    out = "switch/prefetch_pace.h",
+)
+
+copy_file(
+    name = "switch_prefetch_quiesce_hdr",
+    src = "//kernel/switch:include/switch/prefetch_quiesce.h",
+    out = "switch/prefetch_quiesce.h",
+)
+
+host_test(
+    name = "switch_prefetch_test",
+    srcs = [
+        "switch/prefetch_list.h",
+        "switch/prefetch_pace.h",
+        "switch/prefetch_quiesce.h",
+        "switch_prefetch_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:shutdown/shutdown.c",
+        "//kernel/switch:vm/prefetch.c",
+        "//kernel/switch:vm/prefetch_save.c",
+        "//kernel/switch:vm/prefetch_vm.c",
+        "//kernel/xnu-10063.141.1/bsd:kern/kern_exec.c",
+        "//kernel/xnu-10063.141.1/bsd:vfs/vfs_cluster.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/memory_object.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_object.h",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_page.h",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_pageout.c",
+        "//kernel/xnu-10063.141.1/osfmk:vm/vm_resident.c",
+        "//kernel/xnu-12377.121.6/bsd:kern/kern_exec.c",
+        "//kernel/xnu-12377.121.6/bsd:vfs/vfs_cluster.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/memory_object.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_fault.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_object_xnu.h",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_page.h",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_page_internal.h",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_pageout.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_resident.c",
+        "//kernel/xnu-12377.121.6/osfmk:vm/vm_upl.c",
+    ],
+    includes = ["."],
 )
 
 copy_file(
@@ -1498,6 +1776,55 @@ host_test(
         ":bootstrap_apps_exec_mac_27",
         ":bootstrap_apps_mmap_mac_17",
         ":bootstrap_apps_mmap_mac_27",
+    ],
+    includes = ["."],
+)
+
+[genrule(
+    name = "backboardd_environment_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/bsd:kern/kern_exec.c"],
+    outs = ["backboardd_environment_" + version + ".h"],
+    cmd = """awk '
+        /^static const char \\*const native_switch_bluetoothd_environment\\[/ { on = 1 }
+        /^native_switch_exec_environment\\(/ { fn = 1 }
+        on { print }
+        fn && /^}/ { exit }
+    ' $< > $@""",
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_backboardd_environment_test",
+    srcs = [
+        "switch_backboardd_environment_test.cpp",
+        ":backboardd_environment_17",
+        ":backboardd_environment_27",
+    ],
+    includes = ["."],
+)
+
+[genrule(
+    name = "launchd_policy_tail_" + version,
+    srcs = ["//kernel/xnu-" + xnu + "/bsd:kern/kern_exec.c"],
+    outs = ["launchd_policy_tail_" + version + ".h"],
+    cmd = """awk '
+        /^#define NATIVE_SWITCH_POLICY_TAIL / { on = 1 }
+        on { print }
+        on && /<\\/dict><\\/plist>/ { exit }
+    ' $< > $@""",
+) for version, xnu in [
+    ("17", "10063.141.1"),
+    ("27", "12377.121.6"),
+]]
+
+host_test(
+    name = "switch_prngseedd_policy_test",
+    srcs = [
+        "switch_prngseedd_policy_test.cpp",
+        ":launchd_policy_tail_17",
+        ":launchd_policy_tail_27",
     ],
     includes = ["."],
 )

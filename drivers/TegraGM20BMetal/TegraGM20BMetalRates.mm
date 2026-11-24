@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
 #import "TegraGM20BMetalPassCache.h"
+#import "TegraGM20BMetalStatesCost.h"
+#include "ca_catch_all.h"
 #include "object_pool.h"
 #include "resolve_rule.h"
 
@@ -77,6 +79,33 @@ size_t metal_rates(char *out, size_t size)
         (unsigned long long)k.resolveRoute[gm20b::ResolveByPass][0].exchange(0),
         (unsigned long long)k.resolveRoute[gm20b::ResolveByPass][1].exchange(0),
         (unsigned long long)k.resolveRoute[gm20b::ResolveByPass][2].exchange(0));
+    {
+        // render state creations the pack held and every other, since the device opened (TegraGM20BMetalStatesCost.mm)
+        uint64_t packHits = 0, packMisses = 0;
+        gm20bPackCreations(packHits, packMisses);
+        const size_t used = strlen(diag);
+        snprintf(diag + used, sizeof diag - used, " pack=%llu/%llu", (unsigned long long)packHits,
+                 (unsigned long long)packMisses);
+    }
+    {
+        const size_t used = strlen(diag);
+        snprintf(diag + used, sizeof diag - used, " cag=%llu rtsync=%llu/%lluus",
+                 (unsigned long long)gm20b::gCaCatchAllDraws.load(std::memory_order_relaxed),
+                 (unsigned long long)gm20b::gRenderSyncCreations.load(std::memory_order_relaxed),
+                 (unsigned long long)gm20b::gRenderSyncMaxUs.load(std::memory_order_relaxed));
+    }
+    {  // since open: heaps' arenas made and restored, untouched host pages imported (zero-filled on the importer)
+        const size_t used = strlen(diag);
+        snprintf(diag + used, sizeof diag - used,
+                 " heaps=%llu/%llu hz=%lluKB park=c%llu/%lluKB(%llu/%llu/%llu),h%llu/%lluKB(%llu/%llu/%llu)",
+                 (unsigned long long)k.arenasMade.load(), (unsigned long long)k.arenaRestores.load(),
+                 (unsigned long long)(k.hostZeroedBytes.load() >> 10), (unsigned long long)k.parkedChunks.load(),
+                 (unsigned long long)(k.parkedChunkBytes.load() >> 10), (unsigned long long)k.chunkParks.load(),
+                 (unsigned long long)k.chunkUnparksResident.load(), (unsigned long long)k.chunkUnparksReclaimed.load(),
+                 (unsigned long long)k.parkedHeaps.load(), (unsigned long long)(k.parkedHeapBytes.load() >> 10),
+                 (unsigned long long)k.heapParks.load(), (unsigned long long)k.heapUnparksResident.load(),
+                 (unsigned long long)k.heapUnparksReclaimed.load());
+    }
 #if SWITCH_FRAME_TIMELINE
     {
         const size_t used = strlen(diag);
@@ -386,6 +415,7 @@ static void gm20bEventWaitTick()
 void gm20bStallTick()
 {
     gm20bEventWaitTick();
+    gm20bMemoryTick();
     static uint64_t lastCommits = ~0ull, lastDone = ~0ull;
     static int still = 0;
     static bool said = false;

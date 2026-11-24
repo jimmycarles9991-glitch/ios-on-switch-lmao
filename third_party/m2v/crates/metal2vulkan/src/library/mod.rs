@@ -41,5 +41,5 @@ pub(crate) use compiled::KernelFacts;
 pub use dynamic::DynamicLibrary;
 pub use function::{
     Function, FunctionConstant, FunctionConstantValue, FunctionConstantValues, FunctionInfo,
-    FunctionStage, Library, LibraryType,
+    FunctionStage, HeldBytes, Library, LibraryType,
 };

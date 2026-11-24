@@ -88,6 +88,11 @@ public struct GPUSceneTest: HWTest {
         guard let goldens = Self.goldens else { return ["scene_goldens.txt is not in the app's bundle"] }
         var reasons: [String] = []
         for picture in pictures {
+            if let line = goldens.malformed(scene: scene.id, picture: picture.golden) {
+                metrics.set("golden_" + picture.label, GoldenVerdict.malformed.rawValue)
+                reasons.append("\(picture.label): its golden line names no signature: \(line.prefix(80))")
+                continue
+            }
             let golden = goldens.golden(scene: scene.id, picture: picture.golden)
             if let golden, let blank = picture.blank,
                GoldenVerdict.of(blank, against: golden, metalFormat: picture.metalFormat).holds
@@ -118,7 +123,7 @@ public struct GPUSceneTest: HWTest {
         }
         if written > 0 {
             let listing = result.failed.map(\.line).joined(separator: "\n") + "\n"
-            try? listing.write(to: directory.appendingPathComponent("\(prefix).txt"), atomically: true, encoding: .utf8)
+            try? Data(listing.utf8).place(at: directory.appendingPathComponent("\(prefix).txt"))
         }
         return written
     }
@@ -132,6 +137,6 @@ public struct GPUSceneTest: HWTest {
               let png = format.raster(bytes, width: picture.width, height: picture.height).png()
         else { return false }
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return (try? png.write(to: directory.appendingPathComponent("\(prefix)-\(picture.label).png"))) != nil
+        return (try? png.place(at: directory.appendingPathComponent("\(prefix)-\(picture.label).png"))) != nil
     }
 }

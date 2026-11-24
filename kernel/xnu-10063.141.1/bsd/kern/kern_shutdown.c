@@ -71,6 +71,7 @@
 
 #include <sys/kdebug.h>
 #include <switch/shutdown.h>
+#include <switch/recorder.h>
 
 uint32_t system_inshutdown = 0;
 uint32_t final_shutdown_stage = 0;
@@ -250,7 +251,7 @@ reboot_kernel(int howto, char *message)
 		startTime = mach_absolute_time();
 		sync((proc_t)NULL, (void *)NULL, (int *)NULL);
 
-		if (kdebug_enable) {
+		if (SWITCH_RECORDER_SHUTDOWN_TRACE(kdebug_enable)) {
 			startTime = mach_absolute_time();
 			kdbg_dump_trace_to_file("/var/log/shutdown/shutdown.trace", true);
 			halt_log_enter("shutdown.trace", 0, mach_absolute_time() - startTime);

@@ -84,6 +84,7 @@ public:
     // A read member a job is about to write becomes a written one (the set made again). Members start as read where the CPU
     // may lease them, so a CPU read lease of a member the GPU never wrote does not wait for the set's jobs.
     void promote(Kernel &k, uint64_t handle);
+    void remove(Kernel &k, const std::vector<uint64_t> &handles);
 
     // Kernel::free of a BO (the kernel this set registers with observes frees through it): a member leaves the list and
     // every view, then, once the BO is gone, the set is made again without it.

@@ -454,6 +454,26 @@ public:
     size_t storageBytes() const;
     void clear();
 
+    template <typename F> void forEachOperationUse(size_t from, size_t to, F visit) const
+    {
+        if (const Range *found = findRange(from, to)) {
+            const UseSpan span = useSpan(found->uses);
+            for (uint32_t i = 0; i < span.count; ++i) {
+                const auto &use = uses_[span.begin + i];
+                visit(use.object, use.access);
+            }
+            return;
+        }
+        for (size_t at = from; at < std::min(to, size()); ++at) {
+            const UseSpan span = useSpan(operations_[at].uses);
+            for (uint32_t i = 0; i < span.count; ++i) {
+                const auto &use = uses_[span.begin + i];
+                if (use.object)
+                    visit(use.object, use.access);
+            }
+        }
+    }
+
     template <typename F> void forEachUse(size_t from, size_t to, F visit) const
     {
         if (const Range *found = findRange(from, to)) {

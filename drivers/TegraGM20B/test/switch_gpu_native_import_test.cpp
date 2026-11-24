@@ -39,10 +39,11 @@ struct tgm_mem {
 namespace
 {
 int lockDepth = 1, acquireError, memError;
-unsigned acquired, released, constructed;
+unsigned acquired, released, constructed, directPaLatches;
 uint64_t pages[] = {0x100000, 0x101000, 0x102000};
 volatile uint64_t representation = 3, payload = 1;
 switch_gpu_backing logical, physical;
+tgm_mem *existingBackingMem;
 switch_gpu_native_surface_view answer;
 switch_gpu_backing_info allocation;
 
@@ -109,6 +110,17 @@ extern "C" void switch_gpu_backing_retain(switch_gpu_backing *value)
 	++value->refs;
 }
 
+extern "C" int switch_gpu_backing_tgm_mem_existing_or_direct(switch_gpu_backing *, uint32_t,
+							     tgm_mem **out)
+{
+	if (!existingBackingMem) {
+		++directPaLatches;
+		return -2;
+	}
+	*out = existingBackingMem;
+	return 0;
+}
+
 class AGXDeviceUserClient
 {
 public:
@@ -121,6 +133,8 @@ public:
 		uint64_t *pas;
 		uint32_t npages, backing_pages;
 		bool readOnly;
+		bool backingMemory;
+		bool ownsMem;
 		tgm_mem *mem;
 	};
 
@@ -194,9 +208,10 @@ protected:
 	{
 		lockDepth = 1;
 		acquireError = memError = 0;
-		acquired = released = constructed = 0;
+		acquired = released = constructed = directPaLatches = 0;
 		logical = {};
 		physical = {};
+		existingBackingMem = nullptr;
 		representation = 3;
 		payload = 1;
 		acquireFn = acquire;
@@ -229,7 +244,9 @@ protected:
 		while (client.bos_ != &source) {
 			auto *bo = client.bos_;
 			client.bos_ = bo->next;
-			delete bo->mem;
+			EXPECT_EQ(bo->ownsMem, !bo->backingMemory);
+			if (bo->ownsMem)
+				delete bo->mem;
 			release(bo->nativeView);
 			free(bo->nativeView);
 			--bo->backing->refs;
@@ -354,4 +371,24 @@ TEST_F(NativeImport, ProducerFailureIsAbortedContentRatherThanDeadChannel)
 	acquireError = -5;
 	EXPECT_EQ(client.nativeSurfaceView(&request, &reply), kIOReturnAborted);
 	EXPECT_EQ(constructed, 0u);
+}
+
+TEST_F(NativeImport, ExistingCanonicalBackingMemoryIsBorrowedWithoutAliasing)
+{
+	tgm_mem canonical{pages, 3};
+	existingBackingMem = &canonical;
+	ASSERT_EQ(client.nativeSurfaceView(&request, &reply), 0);
+	const auto *bo = client.findBo(reply.handle);
+	ASSERT_NE(bo, nullptr);
+	EXPECT_TRUE(bo->backingMemory);
+	EXPECT_EQ(bo->mem, &canonical);
+	EXPECT_EQ(constructed, 0u);
+	EXPECT_EQ(directPaLatches, 0u);
+}
+
+TEST_F(NativeImport, DirectFallbackLatchesDirectPaBeforeAllocatingMem)
+{
+	ASSERT_EQ(client.nativeSurfaceView(&request, &reply), 0);
+	EXPECT_EQ(directPaLatches, 1u);
+	EXPECT_EQ(constructed, 1u);
 }

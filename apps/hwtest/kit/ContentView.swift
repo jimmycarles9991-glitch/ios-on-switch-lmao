@@ -21,10 +21,10 @@ public struct ContentView: View {
                     StageView(stage: stage).frame(height: 240)
                 }
                 List {
-                    RunHeader(suite: suite)
+                    RunHeader(suite: suite, list: suite.list)
                     GlassWatchRow()
                     if suite.running {
-                        RunSections(suite: suite)
+                        RunSections(list: suite.list)
                     } else {
                         bySubsystem
                     }
@@ -95,14 +95,11 @@ public struct ContentView: View {
 
     /// Every test by subsystem, between runs; tapping one reruns it.
     @ViewBuilder var bySubsystem: some View {
-        ForEach(Subsystem.allCases, id: \.self) { subsystem in
-            let rows = suite.rows.filter { $0.test.subsystem == subsystem }
-            if !rows.isEmpty {
-                Section(subsystem.rawValue) {
-                    ForEach(rows) { row in
-                        TestRow(row: row).contentShape(Rectangle()).onTapGesture {
-                            if !suite.running && suite.pendingRun == nil { suite.rerun(row.id) }
-                        }
+        ForEach(suite.list.bySubsystem) { group in
+            Section(group.subsystem.rawValue) {
+                ForEach(group.rows) { row in
+                    TestRowView(row: row).contentShape(Rectangle()).onTapGesture {
+                        if !suite.running && suite.pendingRun == nil { suite.rerun(row.id) }
                     }
                 }
             }
@@ -110,8 +107,8 @@ public struct ContentView: View {
     }
 }
 
-struct TestRow: View {
-    let row: Suite.Row
+struct TestRowView: View {
+    @ObservedObject var row: RowState
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {

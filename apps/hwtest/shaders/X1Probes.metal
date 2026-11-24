@@ -53,11 +53,13 @@ kernel void x1_sample_points(texture2d<float> texture [[texture(0)]], device con
     out[i] = texture.sample(linear, uv[i], level(0)).r;
 }
 
-/// gpu.x1.rop_unorm10_rounding: pixel (x, y) returns value y * width + x as it is
+/// gpu.x1.rop_unorm10_rounding: pixel (x, y) returns value y * width + x clamped to size for odd-height quad helpers
 fragment float4 x1_value_fragment(float4 position [[position]], device const float4 *values [[buffer(0)]],
-                                  constant uint &width [[buffer(1)]])
+                                  constant uint2 &size [[buffer(1)]])
 {
-    return values[uint(position.y) * width + uint(position.x)];
+    const uint x = min(uint(position.x), size.x - 1u);
+    const uint y = min(uint(position.y), size.y - 1u);
+    return values[y * size.x + x];
 }
 
 /// metal.float32_filtering: linear samples of a 32-bit float texture at (u, v, lod) triples, mip levels blended linearly
@@ -146,6 +148,17 @@ fragment float4 x1_seeded_float(float4 position [[position]], constant X1Seeded 
     return as_type<float4>(uint4(0x3f800000u) | (uint4(v, v >> 3, v >> 6, v >> 9) & 0x7fffffu)) + x1_spin(p, s);
 }
 
+struct X1DepthOut {
+    float depth [[depth(any)]];
+};
+
+fragment X1DepthOut x1_seeded_depth(float4 position [[position]], constant X1Seeded &s [[buffer(0)]])
+{
+    const uint2 p = uint2(position.xy);
+    const uint v = x1_hash(p.x, p.y, s.seed);
+    return {float(v & 0xfffffu) * (1.0f / 1048576.0f) + x1_spin(p, s)};
+}
+
 struct X1Tap {
     int2 base, step, tile, size;
 };
@@ -163,6 +176,13 @@ fragment half4 x1_tap_half(float4 position [[position]], texture2d<half, access:
 {
     const int2 at = clamp(t.base + (int2(position.xy) - t.tile) * t.step, int2(0), t.size - 1);
     return src.read(uint2(at));
+}
+
+fragment float4 x1_tap_depth(float4 position [[position]], depth2d<float, access::read> src [[texture(0)]],
+                             constant X1Tap &t [[buffer(0)]])
+{
+    const int2 at = clamp(t.base + (int2(position.xy) - t.tile) * t.step, int2(0), t.size - 1);
+    return float4(src.read(uint2(at)), 0, 0, 1);
 }
 
 /// A pyramid level: the 2 x 2 box of the level above

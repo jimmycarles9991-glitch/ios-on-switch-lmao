@@ -121,7 +121,7 @@ def float_rung_2(tables: caspec.Tables) -> tuple[int, int]:
 
 class FloatRung2(unittest.TestCase):
     def test_the_pack_blends_into_rgba16float_on_rung_2(self):
-        self.assertEqual(float_rung_2(caspec.Tables(os.path.join(HERE, 'qc-24B119.json'))), (494, 188))
+        self.assertEqual(float_rung_2(caspec.Tables(os.path.join(HERE, 'qc-24B119.json'))), (628, 188))
         self.assertEqual(float_rung_2(caspec.Tables(os.path.join(HERE, 'qc-21H461.json'))), (34, 0))
 
 

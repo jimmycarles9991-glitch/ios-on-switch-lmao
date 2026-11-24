@@ -64,7 +64,8 @@ inline bool sampleLayout(uint32_t samples, SampleLayout &out)
 // The pack's resolve state into a target of MTLPixelFormat `format` from `samples` samples (pack/resolve.metal), keyed
 // "raw.resolve.<fragment function>"; null for a format it has none for. 8-bit unorm at 2 and 4 samples has entries of its
 // own with the count built in; every other takes the count from buffer 0. An 8-bit sRGB target's state writes codes, into
-// its UNORM twin (resolveTargetFormat).
+// its UNORM twin (resolveTargetFormat). The 8-bit signed normalized formats resolve here, not on the 2D engine
+// (attachment_target.h codesResolvedByTwod).
 inline const char *resolveState(uint32_t format, uint32_t samples)
 {
     const bool two = samples == 2, four = samples == 4;
@@ -97,6 +98,12 @@ inline const char *resolveState(uint32_t format, uint32_t samples)
         return "raw.resolve.resolve_a8_frag";
     case 10:
         return "raw.resolve.resolve_r8_frag";
+    case 12:
+        return "raw.resolve.resolve_r8snorm_frag";
+    case 32:
+        return "raw.resolve.resolve_rg8snorm_frag";
+    case 72:
+        return "raw.resolve.resolve_rgba8snorm_frag";
     case 20:
         return "raw.resolve.resolve_r16_frag";
     case 25:

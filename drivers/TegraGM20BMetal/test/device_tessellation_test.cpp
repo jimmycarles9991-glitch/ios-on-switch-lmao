@@ -17,8 +17,9 @@
 namespace {
 
 constexpr uint32_t kRGBA8 = 70, kTriangle = 3, kControlWord = 5;
-constexpr uint32_t kTessParameters = 0x0320, kShaderControl = 0x2080, kShaderEvaluation = 0x20c0;
+constexpr uint32_t kTessParameters = 0x0320, kPatch = 0x0dcc, kShaderControl = 0x2080, kShaderEvaluation = 0x20c0;
 constexpr uint32_t kProgramControl = 0x2084, kProgramEvaluation = 0x20c4, kRegistersControl = 0x208c;
+constexpr uint32_t kRegistersEvaluation = 0x20cc, kBindingControl = 0x2090, kBindingEvaluation = 0x20d0;
 
 // (method, value) of every method a pushed word stream writes (push.h's encodings), in order
 std::vector<std::pair<uint32_t, uint32_t>> written(const std::vector<uint32_t> &words)
@@ -42,7 +43,7 @@ std::multimap<uint32_t, uint32_t> methods(const std::vector<uint32_t> &words)
     return {in.begin(), in.end()};
 }
 
-gm20b::RuntimeRecord record(bool tessellates, uint64_t key, uint8_t indexBytes = 0)
+gm20b::RuntimeRecord record(bool tessellates, uint64_t key, uint8_t indexBytes = 0, bool evaluationWrites = false)
 {
     gm20b::RuntimeRecord r;
     r.keyString = "samples=1 c0=70:15:0 ds=0/0 ";
@@ -57,8 +58,15 @@ gm20b::RuntimeRecord record(bool tessellates, uint64_t key, uint8_t indexBytes =
     for (gm20b::CapturedProgram &p : r.tessPrograms) {
         p.image.assign(80 + 64, 0);
         p.image[80] = uint8_t(1 + (&p - r.tessPrograms));
-        p.id = "tess" + std::to_string(&p - r.tessPrograms);
+        p.id = std::string(evaluationWrites ? "tess-write-" : "tess") + std::to_string(&p - r.tessPrograms);
         p.gprs = 12;
+    }
+    if (evaluationWrites) {
+        gm20b::CapturedProgram &eval = r.tessPrograms[1];
+        eval.image[2] |= 1;   // SPHV3T1_DOES_GLOBAL_STORE
+        eval.image[53] |= 4;  // OMAP_SYSTEM_VALUES_A ViewportIndex (0x068)
+        const uint64_t stg = uint64_t(0xeed8) << 48;
+        memcpy(eval.image.data() + 80 + 8, &stg, sizeof stg);
     }
     r.pipeline.controlWord = kControlWord;
     r.pipeline.controlPoints = 4;
@@ -84,13 +92,13 @@ class DeviceTessellation : public harness::DeviceTest, public testing::WithParam
 protected:
     gm20b::Texture target;
     gm20b::Buffer factors, indices;
-    gm20b::Pipeline *patches = nullptr, *plain = nullptr, *indexed = nullptr;
+    gm20b::Pipeline *patches = nullptr, *plain = nullptr, *indexed = nullptr, *storing = nullptr;
     gm20b::Refusal refused;  // the last refused draw's
 
     void SetUp() override
     {
         const std::vector<gm20b::RuntimeRecord> records = {record(true, 0x7e55), record(false, 0x7e56),
-                                                           record(true, 0x7e57, 2)};
+                                                           record(true, 0x7e57, 2), record(true, 0x7e5a, 0, true)};
         if (GetParam()) {
             kernel_model::model = {};
             std::string err;
@@ -103,7 +111,7 @@ protected:
         ASSERT_TRUE(dev.createTexture(64, 64, kRGBA8, target));
         ASSERT_TRUE(dev.createBuffer(4096, factors));
         ASSERT_TRUE(dev.createBuffer(4096, indices));
-        gm20b::Pipeline **made[] = {&patches, &plain, &indexed};
+        gm20b::Pipeline **made[] = {&patches, &plain, &indexed, &storing};
         for (size_t k = 0; k < records.size(); k++) {
             std::string why;
             *made[k] = GetParam() ? dev.pipeline(records[k].pipeline.keyHash) : dev.addRecord(records[k], false, why);
@@ -144,15 +152,33 @@ TEST_P(DeviceTessellation, AStateBindsItsControlAndEvaluationProgramsAndSwitches
     const auto bound = methods(patches->methods);
     ASSERT_EQ(bound.count(kProgramControl), 1u);
     ASSERT_EQ(bound.count(kProgramEvaluation), 1u);
+    ASSERT_EQ(bound.count(kPatch), 1u);
+    EXPECT_EQ(bound.find(kPatch)->second, 1u);
     EXPECT_EQ(bound.find(kRegistersControl)->second, 12u);
+    EXPECT_EQ(bound.find(kRegistersEvaluation)->second, 12u);
     EXPECT_NE(bound.find(kProgramControl)->second, bound.find(kProgramEvaluation)->second);
     EXPECT_EQ(bound.find(kShaderControl)->second, 0x21u);
     EXPECT_EQ(bound.find(kShaderEvaluation)->second, 0x31u);
+    EXPECT_EQ(bound.find(kBindingControl)->second, 1u);
+    EXPECT_EQ(bound.find(kBindingEvaluation)->second, 2u);
     EXPECT_EQ(bound.find(kTessParameters)->second, 0x202u);
     const auto after = methods(patches->restore);
     EXPECT_EQ(after.find(kShaderControl)->second, 0x20u);
     EXPECT_EQ(after.find(kShaderEvaluation)->second, 0x30u);
-    EXPECT_EQ(methods(plain->methods).count(kProgramControl), 0u);
+    const auto plainBound = methods(plain->methods);
+    EXPECT_EQ(plainBound.count(kProgramControl), 0u);
+    EXPECT_EQ(plainBound.count(kPatch), 0u);
+}
+
+TEST_P(DeviceTessellation, EvaluationProgramStoresAndViewportReachThePipeline)
+{
+    EXPECT_FALSE(patches->vertexStores);
+    EXPECT_FALSE(patches->writesMemory[0]);
+    EXPECT_FALSE(patches->viewportIndex);
+    EXPECT_TRUE(storing->vertexStores);
+    EXPECT_TRUE(storing->writesMemory[0]);
+    EXPECT_TRUE(storing->viewportIndex);
+    EXPECT_GT(storing->vertexInstructions, plain->vertexInstructions);
 }
 
 // Either way round is Metal's validation error, which fails the command buffer (TegraGM20BMetalDrawErrors.mm)

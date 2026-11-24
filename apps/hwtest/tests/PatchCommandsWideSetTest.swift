@@ -7,7 +7,9 @@ import Metal
 /// buffers of its own besides its control points, so set 0 holds over 16 descriptors and the control stage's buffers
 /// sit in its second block. The patch macro selects the set at the state's own size. One quad patch at level 4 over the
 /// left half of the target, every buffer holding 0 so the position is the patch's own: the left half green, the right
-/// half black.
+/// half black. Reported, not judged: the same state and patch drawn by the encoder itself rather than through the
+/// indirect command buffer (direct_wrong_pixels): 0 there puts the miss in the patch command, the whole left half
+/// in every patch draw of this state.
 struct PatchCommandsWideSetTest: HWTest {
     let id = "gpu.gm20b.patch_commands_wide_set"
     let name = "Patch commands of a state whose set 0 is past 256 bytes draw on the driver"
@@ -76,34 +78,44 @@ struct PatchCommandsWideSetTest: HWTest {
             tessellationFactorBufferInstanceStride: 0
         )
         let target = try gpu.texture(.rgba8Unorm, Self.size, Self.size)
-        let timing = try await gpu.run(tolerateError: true) { buffer in
-            let pass = MTLRenderPassDescriptor()
-            pass.colorAttachments[0].texture = target
-            pass.colorAttachments[0].loadAction = .clear
-            pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-            pass.colorAttachments[0].storeAction = .store
-            let encoder = buffer.makeRenderCommandEncoder(descriptor: pass)!
-            encoder.setRenderPipelineState(pipeline)
-            encoder.setVertexBuffer(points, offset: 0, index: 0)
-            for index in Self.buffers { encoder.setVertexBuffer(zeros, offset: 0, index: index) }
-            encoder.setTessellationFactorBuffer(factors, offset: 0, instanceStride: 0)
-            encoder.useResource(factors, usage: .read, stages: .vertex)
-            encoder.executeCommandsInBuffer(commands, range: 0 ..< 1)
-            encoder.endEncoding()
-        }
-        var metrics = Metrics()
-        metrics.set("path", String(timing.path.prefix(160)))
-        var wrong = -1
-        if !timing.path.hasPrefix("error:") {
+        func drawn(_ draw: @escaping (MTLRenderCommandEncoder) -> Void) async throws -> (String, Int) {
+            let timing = try await gpu.run(tolerateError: true) { buffer in
+                let pass = MTLRenderPassDescriptor()
+                pass.colorAttachments[0].texture = target
+                pass.colorAttachments[0].loadAction = .clear
+                pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+                pass.colorAttachments[0].storeAction = .store
+                let encoder = buffer.makeRenderCommandEncoder(descriptor: pass)!
+                encoder.setRenderPipelineState(pipeline)
+                encoder.setVertexBuffer(points, offset: 0, index: 0)
+                for index in Self.buffers { encoder.setVertexBuffer(zeros, offset: 0, index: index) }
+                encoder.setTessellationFactorBuffer(factors, offset: 0, instanceStride: 0)
+                encoder.useResource(factors, usage: .read, stages: .vertex)
+                draw(encoder)
+                encoder.endEncoding()
+            }
+            guard !timing.path.hasPrefix("error:") else { return (timing.path, -1) }
             let pixels = try await gpu.read(target, bytesPerPixel: 4)
-            wrong =
+            let wrong =
                 (0 ..< Self.size * Self.size).filter { i in
                     let want: [UInt8] = i % Self.size < Self.size / 2 ? [0, 255, 0, 255] : [0, 0, 0, 255]
                     return Array(pixels.pixel(i % Self.size, i / Self.size, width: Self.size)) != want
                 }.count
+            return (timing.path, wrong)
         }
+        let (path, wrong) = try await drawn { $0.executeCommandsInBuffer(commands, range: 0 ..< 1) }
+        var metrics = Metrics()
+        metrics.set("path", String(path.prefix(160)))
         metrics.set("wrong_pixels", wrong)
-        return timing.path == "gm20b" && wrong == 0
-            ? .pass(metrics, proof: gpu.proof) : .fail("path \(timing.path.prefix(80)), \(wrong) pixels wrong", metrics)
+        let (directPath, directWrong) = (try? await drawn {
+            $0.drawPatches(
+                numberOfPatchControlPoints: 4, patchStart: 0, patchCount: 1, patchIndexBuffer: nil,
+                patchIndexBufferOffset: 0, instanceCount: 1, baseInstance: 0
+            )
+        }) ?? ("error", -1)
+        metrics.set("direct_path", String(directPath.prefix(80)))
+        metrics.set("direct_wrong_pixels", directWrong)
+        return path == "gm20b" && wrong == 0
+            ? .pass(metrics, proof: gpu.proof) : .fail("path \(path.prefix(80)), \(wrong) pixels wrong", metrics)
     }
 }

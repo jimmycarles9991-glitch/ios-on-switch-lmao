@@ -6,7 +6,8 @@ import Metal
 /// generateMipmaps of arrays and cubes whose steps are the 3D engine's (formats with a pack mip state and no 2D-engine
 /// filter: drivers/TegraGM20BMetal/mip_passes.cpp, one pass a layer and level), which went to m2v
 /// (mipmaps) before. Each layer's level 0 is cleared to its own colour, so every level of it must read that colour back.
-/// The generateMipmaps command buffer must stay raw; the clears' path is reported.
+/// The generateMipmaps command buffer must stay raw; the clears' path is reported, and so are the cube's and each view
+/// arm's texture header (<name>_tic, and the cube view's parent's: TextureViewsTest.header).
 struct MipmapLayersTest: HWTest {
     let id = "gpu.gm20b.mipmap_layers"
     let name = "Mipmaps of arrays, cubes and texture views"
@@ -34,6 +35,7 @@ struct MipmapLayersTest: HWTest {
             d.usage = [.renderTarget, .shaderRead]
             d.storageMode = .private
             guard let texture = gpu.device.makeTexture(descriptor: d) else { throw TestFailure("no \(label)") }
+            if type == .typeCube { metrics.set("\(label)_tic", TextureViewsTest.header(gpu.device, texture)) }
             let fill = try await gpu.run { commands in
                 for layer in 0 ..< layers {
                     let p = MTLRenderPassDescriptor()
@@ -152,6 +154,8 @@ struct MipmapLayersTest: HWTest {
             }
             metrics.set("\(arm.name)_path", generated)
             metrics.set("\(arm.name)_wrong", off)
+            metrics.set("\(arm.name)_tic", TextureViewsTest.header(gpu.device, view))
+            if arm.cube { metrics.set("\(arm.name)_parent_tic", TextureViewsTest.header(gpu.device, texture)) }
             if off > 0 { wrong.append(arm.name) }
             if generated != "gm20b" { wrong.append("\(arm.name)_path") }
         }

@@ -155,6 +155,8 @@ private:
                 f.topology = strtoul(h.c_str() + 5, nullptr, 10);
             else if (h.rfind("amp=", 0) == 0)
                 f.amplification = strtoul(h.c_str() + 4, nullptr, 10);
+            else if (h == "alphacov=1")
+                f.alphaToCoverage = 1;
             else if (h.rfind("ds=", 0) == 0 && sscanf(h.c_str() + 3, "%u/%u", x, x + 1) == 2) {
                 f.depthFormat = x[0];
                 f.stencilFormat = x[1];

@@ -89,6 +89,11 @@ CHECKLIST = {
         '4 Spotlight typing, 20 s   5 App switcher, 20 s   6 Control Center x5, then Notification Center x5',
         '7 Home folder open/close x5   8 App Library scroll again, 15 s',
         (
+            'W Widget page, 5 min or more after boot: from a page without widgets swipe to the page with them, hold '
+            '10 s, swipe back; five times. Note the wall-clock start and end, and read stutter.long-ca, -gpu, -queue '
+            'and -latch over that window alone (--start/--end): each sum must be 0'
+        ),
+        (
             'Then the same steps on the iOS 27 image, pulled separately: its stutter.* rows hold too '
             "(stutter.vsync-delivered reads NO-DATA on both: Core Animation's frame clock follows frame info)"
         ),

@@ -487,12 +487,12 @@ TEST(FrameEndSource, ValidateSwapTouchesNoGateState)
 
 // Core Animation never arms the vsync (its frame clock is its own), so the frame end stands in for the frame timeline as it
 // does for the GPU deadline: each swap's timeline then carries the vsync before it, the slow-frame line its phase, and
-// render.c a frame begin for SwitchFrameRender (boot 21 had none, and every SwitchFrame line read "origin swap").
+// render.c a frame begin for SwitchFrameRender (boot 21 had none, and every SwitchFrame line read "origin swap"). The
+// timeline's comes from the DC A filter (switch_display_period_test TheFilterPublishesTheTimelineVsync).
 TEST(FrameTimelineSource, TheFrameEndStandsInForAnUnarmedVsync)
 {
     const CodeText tick = method("void vblankTick()");
-    EXPECT_TRUE(tick.before("tegra_gm20b_compositor_vsync(frameEnd, 0, refreshTicks());",
-                            "noteTimelineVsync(frameEnd, refreshTicks());"));
+    EXPECT_TRUE(tick.has("tegra_gm20b_compositor_vsync(frameEnd, 0, refreshTicks());"));
     EXPECT_TRUE(method("void deliverVsync(").has("noteTimelineVsync(stamp, interval);"));
     const CodeText note = method("void noteTimelineVsync(");
     EXPECT_TRUE(note.has("if (!SWITCH_FRAME_TIMELINE) return;"));

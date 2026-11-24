@@ -4,18 +4,19 @@ import HWTestCore
 /// The bench's stale cells in its own shape: a 64x64 BGRA8 target the GPU writes and the bench frees, then one of the
 /// same size on the same span, filled by the CPU and blended into by a program the bench has placed before.
 /// tools/benchloop/batches/fvt1.json's program and additive blend, its every column's colour 16/255: the first
-/// experiment's texels are the GPU's write (its clear, 0, plus 16), the second's the CPU's fill plus 16.
+/// experiment's texels are the GPU's write (its clear, 0, plus 16), the second's the CPU's fill plus 16. The blend is
+/// colour 0's per-target block under the per-target switch the driver owns and keeps on (owned.h, fetch_free.h).
 enum CoherenceBench {
     static let sph =
         "YlQCAAAAAAAAAAAAAAAAAAAAAAAAAACQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAA="
     static let code =
         "Agfg4QG8PwAE//cPh/8D4AQKRwCAAbBcBARHAAAASDgBB0DgALT/BwAEBwAQAJXvAgSHABAAle8PAAcAAAAA4+IHIPwAhB8AAA8HAAAAsFAADwcAAACwUAAPBwAAALBQ"
-    // SET_BLEND_STATE_PER_TARGET, colour 0's ADD of ONE and ONE for colour and alpha, SET_BLEND(0)
+    // colour 0's ADD of ONE and ONE for colour and alpha, SET_BLEND(0)
     static let methods: [[Int]] = [
-        [0x12e4, 1], [0x1e00, 1], [0x1e04, 0x8006], [0x1e08, 0x4001], [0x1e0c, 0x4001], [0x1e10, 0x8006],
-        [0x1e14, 0x4001], [0x1e18, 0x4001], [0x1360, 1],
+        [0x1e00, 1], [0x1e04, 0x8006], [0x1e08, 0x4001], [0x1e0c, 0x4001], [0x1e10, 0x8006], [0x1e14, 0x4001],
+        [0x1e18, 0x4001], [0x1360, 1],
     ]
-    static let restore: [[Int]] = [[0x1360, 0], [0x12e4, 1]]
+    static let restore: [[Int]] = [[0x1360, 0]]
 
     static func run(rounds: Int) throws -> CoherenceTally {
         var tally = CoherenceTally(arm: "bench")

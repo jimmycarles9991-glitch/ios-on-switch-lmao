@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // GM20B bring-up (M1, M2, M3), the platform device, the GPU lock and the sleep gate's entry points.
 #include "gpu_internal.h"
+#include "SwitchGpuSmmu.h"
 
 /* mainline tegra210.dtsi gpu@57000000: BAR0, BAR1, SPI 157 ("stall") / 158 ("nonstall") */
 static struct resource gpu_res[] = {
@@ -392,6 +393,8 @@ static int m2(char *line, unsigned int len)
 			tgm_gpu.mem_type = nvif_mmu_type(&tgm_gpu.mmu, NVIF_MEM_HOST);
 		ret = tgm_gpu.mem_type < 0 ? tgm_gpu.mem_type : 0;
 	}
+	if (!ret)
+		(void)switch_gpu_smmu_init();
 	if (ret) {
 		scnprintf(line, len, "M2 FAIL %s %d (GR came up: see the M2 ok line above)", at,
 			  ret);

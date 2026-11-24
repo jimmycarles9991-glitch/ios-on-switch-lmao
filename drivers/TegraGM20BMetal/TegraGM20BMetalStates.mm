@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 #import "TegraGM20BMetalInternal.h"
-#include "ca_route.h"
 #import "TegraGM20BMetalRenderKey.h"
 #import "TegraGM20BMetalBinaryArchive.h"
 #import "TegraGM20BMetalReflection.h"
+#import "TegraGM20BMetalStatesCost.h"
+#import "TegraGM20BMetalStatesKey.h"
+#include "ca_catch_all.h"
 
 @implementation SwitchMetalSampler
 
@@ -89,22 +91,6 @@
     return (id<MTLSamplerState>)r;
 }
 
-// What Core Animation's name for a state says its draws are (ca_route.h), for the draw shortcuts' rules: the state and
-// its barrier form alike
-static void markRoute(gm20b::Pipeline *pl, NSString *label)
-{
-    static NSString *const prefix = @"com.apple.coreanimation.";
-    if (!pl || pl->caRoute || ![label hasPrefix:prefix])
-        return;
-    const char *name = [label substringFromIndex:prefix.length].UTF8String;
-    const uint8_t route = uint8_t(gm20b::caRouteOf(name));
-    for (gm20b::Pipeline *p : {pl, pl->barrierTwin}) {
-        if (!p)
-            continue;
-        p->caRoute = route;
-    }
-}
-
 #if SWITCH_METAL_DIAGNOSTICS
 // Core Animation's glass background (Tgs*, Tgb*) and generic merge (..Xghfc) states: the draw path checks their uniforms for
 // NaN and infinity (gpu.cpp probeUniforms), its barrier form's too
@@ -156,7 +142,7 @@ gm20b::Completion::Ask gm20bRecordAsk(SwitchMetalPipeline *p, MTLRenderPipelineD
     a.descriptor = d;
     a.resolveDescriptor = true;
     a.facade = d;
-    a.key = p->_key;
+    a.key = gm20bStateKey(p);
     a.caTransform = p->_caTransform;
     a.own = !p->_packable;
     return a;
@@ -172,7 +158,6 @@ static void makeRecord(SwitchMetalPipeline *p, MTLRenderPipelineDescriptor *d)
     const gm20b::Completion::Ask a = gm20bRecordAsk(p, d);
     p->_raw = gRM->completion->makeNow(a, p->_failure);
     SWITCH_METAL_DIAGNOSTIC(p->_obtained = gm20b::Completion::lastObtained());
-    markRoute(p->_raw, d.label);
 #if SWITCH_METAL_DIAGNOSTICS
     markProbes(p->_raw, d.label);
 #endif
@@ -212,6 +197,7 @@ SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipe
     SwitchMetalPipeline *p = [SwitchMetalPipeline new];
     p->_device = device;
     p.label = d.label;
+    SWITCH_METAL_DIAGNOSTIC(p->_caCatchAll = gm20b::caCatchAll(d.label.UTF8String));
     p->_alphaControl = gm20b::alphaControl(d.alphaToCoverageEnabled, d.alphaToOneEnabled);
     SwitchMetalFunction *vf = [(id)d.vertexFunction isKindOfClass:[SwitchMetalFunction class]]
                                   ? (SwitchMetalFunction *)d.vertexFunction
@@ -220,34 +206,49 @@ SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipe
                                   ? (SwitchMetalFunction *)d.fragmentFunction
                                   : nil;
     // a state linking functions is packed under them too (its key names each), where they are framework libraries' as well
+    SWITCH_METAL_CREATION_STAMP(keyBegan);
     p->_completable = ownFunctions(d);
     p->_packable = p->_completable && !vf->_framework.empty() && (!ff || vf->_framework == ff->_framework) &&
                    metal_linked_packable(d);
-    if (p->_completable) {
-        p->_key = metal_pipeline_key(d).UTF8String;
-        p->_madeFrom = [d copy];
+    // A state the pack holds is found by its fast key; the text of its key is made only for a state the pack lacks
+    const uint64_t fast = p->_completable ? gm20bKeepKey(p, d, vf, ff) : 0;
+    const gm20b::PackRun held = p->_packable ? gRM->raw->pack().fastRun(fast) : gm20b::PackRun();
+    uint64_t keyHash = held.records ? held.first->keyHash : 0;
+    if (!keyHash) {
+        const std::string &key = gm20bStateKey(p);
+        keyHash = gm20b::Pack::fnv(key.data(), key.size());
     }
-    const uint64_t keyHash = gm20b::Pack::fnv(p->_key.data(), p->_key.size());
     uint64_t packKey = keyHash;
     gm20b::CacheKey own;
     bool lookedUp = p->_packable;
     if (p->_packable) {
         p->_caTransform =
             vf->_framework == "QuartzCore" && [vf.name hasPrefix:@"fixed_vert_"] && [vf.name hasSuffix:@"_spc"];
-    } else if (p->_completable && gm20b::renderCacheKey(d, p->_key, true, 0, own, gm20bFunctionSource)) {
+    } else if (p->_completable && gm20b::renderCacheKey(d, gm20bStateKey(p), true, 0, own, gm20bFunctionSource)) {
         packKey = gm20b::Pack::fnv(own.key.data(), own.key.size());  // another library's: under its functions' AIR too
         lookedUp = true;
     }
     p->_packKey = packKey;
+    SWITCH_METAL_CREATION_SINCE(keyBegan, keyTicks);
     if (lookedUp) {
-        p->_raw = gRM->raw->pipeline(packKey, gm20b::PackForm::Default, p->_caTransform);
-        markRoute(p->_raw, d.label);
+        {
+            SWITCH_METAL_CREATION_SPAN(placeTicks);
+            p->_raw = held.records ? gRM->raw->pipeline(held, keyHash, gm20b::PackForm::Default, p->_caTransform)
+                                   : gRM->raw->pipeline(packKey, gm20b::PackForm::Default, p->_caTransform);
+        }
 #if SWITCH_METAL_DIAGNOSTICS
         markProbes(p->_raw, d.label);
 #endif
         p->_packed = p->_raw && gRM->raw->packHolds(*p->_raw);
-        if (p->_packed)
-            packedVariants(p, packKey);
+        if (p->_packed && !held.records)
+            os_log_error(gm20bLog(),
+                         "SwitchMetal: pack state %016llx found by its key's text and not by its fast key %016llx: "
+                         "the pack's fast keys are not the runtime's",
+                         (unsigned long long)keyHash, (unsigned long long)fast);
+        if (p->_packed) {
+            SWITCH_METAL_CREATION_SPAN(variantTicks);
+            packedVariants(p, held.records ? held : gRM->raw->pack().run(packKey));
+        }
     }
     // A framework's state the pack holds is the device's archive hit, as Apple's own archives hold its states for Apple's
     // GPUs; any other state is answered by the archives the creation lists alone, as Metal answers it
@@ -259,18 +260,24 @@ SwitchMetalPipeline *gm20bPipelineShell(SwitchMetalDevice *device, MTLRenderPipe
     return p;
 }
 
+bool gm20bMakeRecord(SwitchMetalPipeline *p, MTLRenderPipelineDescriptor *d, NSError **error)
+{
+    {
+        SWITCH_METAL_CREATION_SPAN(recordTicks);
+        makeRecord(p, d);
+    }
+    if (p->_failure.empty())
+        return true;
+    if (error)
+        *error = gm20bCreationError(p->_failure);
+    return false;
+}
+
 SwitchMetalPipeline *gm20bPipelineFor(SwitchMetalDevice *device, MTLRenderPipelineDescriptor *d, MTLPipelineOption o,
                                       NSError **error)
 {
     SwitchMetalPipeline *p = gm20bPipelineShell(device, d, o, error);
-    if (!p)
-        return nil;
-    makeRecord(p, d);
-    if (p->_failure.empty())
-        return p;
-    if (error)
-        *error = gm20bCreationError(p->_failure);
-    return nil;
+    return p && gm20bMakeRecord(p, d, error) ? p : nil;
 }
 
 NSError *gm20bCreationError(const std::string &failure)
@@ -313,8 +320,15 @@ static id<MTLRenderPipelineState> makeState(SwitchMetalDevice *device, MTLRender
                                             MTLPipelineOption o, MTLAutoreleasedRenderPipelineReflection *reflection,
                                             NSError **error)
 {
+#if SWITCH_METAL_DIAGNOSTICS
+    SwitchMetalCreationMeter meter;
+#endif
     SwitchMetalPipeline *p = gm20bPipelineFor(device, d, o, error);
-    return p ? gm20bFinishState(p, d, o, reflection, error) : nil;
+    id<MTLRenderPipelineState> state = p ? gm20bFinishState(p, d, o, reflection, error) : nil;
+#if SWITCH_METAL_DIAGNOSTICS
+    meter.finish(p, d);
+#endif
+    return state;
 }
 
 - (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d

@@ -73,6 +73,9 @@
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../TegraSPI/TegraSPI.h"
 #include "SwitchMotion.h"
+#if DEVELOPMENT || DEBUG
+#include "SwitchMotionStats.h"
+#endif
 
 extern "C" bool switch_display_is_on(void);  // ../SwitchBrightness/SwitchBacklight.cpp
 
@@ -497,6 +500,29 @@ class SwitchMotion : public IOService {
     bool timedOrientation = false;
     unsigned orientationSet = 0;
     uint64_t orientationStamp = 0;
+#if DEVELOPMENT || DEBUG
+    SwitchMotionStats stats;  // the 10 s line's window (SwitchMotionStats.h)
+    void statsInterrupt();
+
+    void statsEmpty()
+    {
+        ++stats.empty;
+    }
+
+    void statsPosted(Sensor sensor)
+    {
+        ++stats.posted[sensor];
+    }
+#else
+    void statsInterrupt()
+    {}
+
+    void statsEmpty()
+    {}
+
+    void statsPosted(Sensor)
+    {}
+#endif
 
     static void featureReceived(void *context, const uint8_t *report, size_t length);
     static void interruptOccurred(OSObject *owner, IOInterruptEventSource *sender, int count);
@@ -951,6 +977,7 @@ void SwitchMotion::post(Sensor sensor, const int16_t raw[3], uint64_t now)
     if (!__atomic_load_n(&intervalUS[sensor], __ATOMIC_RELAXED) || ++count[sensor] < every[sensor])
         return;
     count[sensor] = 0;
+    statsPosted(sensor);
     // Dropped until the event driver has opened it. A batched sample carries its own time, later than the last.
     if (fifoOn) {
         if (now <= lastPosted[sensor])
@@ -1098,6 +1125,7 @@ void SwitchMotion::sample()
     fresh[Accel] = fresh[Accel] && on[Accel];
     fresh[Gyro] = fresh[Gyro] && on[Gyro];
     if (!fresh[Accel] && !fresh[Gyro]) {
+        statsEmpty();
         if (++empty > kStuckLimit) {
             char state[256];
             tegra_gpio_describe(TEGRA_GPIO_IMU_INT, state, sizeof(state));
@@ -1147,6 +1175,7 @@ void SwitchMotion::drainFifo(uint64_t now)
         }
     }
     if (!n) {
+        statsEmpty();
         if (++empty > kStuckLimit) {
             char state[256];
             tegra_gpio_describe(TEGRA_GPIO_IMU_INT, state, sizeof(state));
@@ -1211,10 +1240,38 @@ void SwitchMotion::interruptOccurred(OSObject *owner, IOInterruptEventSource *, 
     auto *self = OSDynamicCast(SwitchMotion, owner);
     if (self && self->converting) {
         self->sample();
+        self->statsInterrupt();
         if (self->busError)
             self->giveUp();
     }
 }
+
+#if DEVELOPMENT || DEBUG
+// The 10 s line, from the interrupt action that just ran: a window restarts after 2 s without one (converting stopped).
+void SwitchMotion::statsInterrupt()
+{
+    const SwitchMotionState state = {
+        info->rates[rate].milliHz,
+        {on[Accel], on[Gyro]},
+        {__atomic_load_n(&intervalUS[Accel], __ATOMIC_RELAXED), __atomic_load_n(&intervalUS[Gyro], __ATOMIC_RELAXED)},
+        {__atomic_load_n(&batchUS[Accel], __ATOMIC_RELAXED), __atomic_load_n(&batchUS[Gyro], __ATOMIC_RELAXED)},
+        detecting,
+        __atomic_load_n(&displayLit, __ATOMIC_RELAXED),
+        fifoOn,
+        watermark,
+        drains,
+        records,
+        overflows,
+    };
+    const uint64_t now = mach_absolute_time();
+    if (!switchMotionInterrupt(stats, now, msToAbs(10000), msToAbs(2000), state))
+        return;
+    char line[400];
+    switchMotionLine(line, sizeof(line), stats, state, (now - stats.start) / msToAbs(1));
+    os_log(OS_LOG_DEFAULT, "SwitchMotion stats: %s", line);
+    switchMotionRestart(stats, now, state);
+}
+#endif
 
 void SwitchMotion::kicked(OSObject *owner, IOInterruptEventSource *, int)
 {

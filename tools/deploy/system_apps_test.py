@@ -238,6 +238,46 @@ class SystemAppsTest(unittest.TestCase):
         self.assertFalse(self.journal.exists())
         self.assertTrue(self.sentinel.is_file())
 
+    def test_an_interrupted_migration_is_rearmed_on_redeploy(self):
+        marker = self.data / system_apps.MARKER
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        self.sentinel.parent.mkdir(parents=True, exist_ok=True)
+        self.sentinel.touch()
+        store = self.data / 'mobile/Containers/Data/InternalDaemon/1/Library/Caches/com.apple.LaunchServices-1.csstore'
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b'store')
+        self.assertTrue(system_apps.interrupted_migration(self.data))
+        self.assertTrue(self.deploy(None, ios='27.2'))
+        self.assertFalse(marker.exists())
+        self.assertTrue(self.sentinel.is_file())
+        self.assertFalse(store.exists())
+        self.assertFalse(system_apps.interrupted_migration(self.data))
+        store.write_bytes(b'rebuilt')
+        self.assertFalse(self.deploy(None, ios='27.2'))
+        self.assertTrue(self.sentinel.is_file())
+        self.assertTrue(store.is_file())
+        self.sentinel.unlink()
+        marker.touch()
+        self.assertFalse(self.deploy(None, ios='27.2'))
+        self.assertTrue(marker.is_file())
+        self.assertFalse(self.sentinel.exists())
+        self.assertTrue(store.is_file())
+
+    def test_an_interrupted_migration_on_ios_17_keeps_launchservices_store(self):
+        marker = self.data / system_apps.MARKER
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.touch()
+        self.sentinel.parent.mkdir(parents=True, exist_ok=True)
+        self.sentinel.touch()
+        store = self.data / 'mobile/Containers/Data/InternalDaemon/1/Library/Caches/com.apple.LaunchServices-1.csstore'
+        store.parent.mkdir(parents=True, exist_ok=True)
+        store.write_bytes(b'store')
+        self.assertTrue(self.deploy(None, ios='17.7.11'))
+        self.assertFalse(marker.exists())
+        self.assertTrue(self.sentinel.is_file())
+        self.assertTrue(store.is_file())
+
 
 class LaunchServicesRebuildTest(unittest.TestCase):
     def setUp(self):

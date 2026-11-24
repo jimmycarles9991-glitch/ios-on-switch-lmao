@@ -10,6 +10,9 @@ namespace {
 constexpr uint32_t kSyncpt = 170, kBridgeSyncpt = 190;
 std::vector<switch_host1x_fence *> gRetirements;
 int gBridgesLive, gBridgesSubmitted;
+IOReturn gLookupResult = -1;
+int gAcquireResult = -95;
+OSObject *gAcquireOwner = nullptr;
 
 int nvencStatus(const switch_gpu_backing_token *token)
 {
@@ -73,6 +76,9 @@ protected:
             registered = true;
         }
         gRetirements.clear();
+        gLookupResult = -1;
+        gAcquireResult = -95;
+        gAcquireOwner = nullptr;
     }
 
     void TearDown() override
@@ -101,7 +107,7 @@ void *tegra_nvenc_native_map(switch_gpu_backing *, uint64_t *, uint64_t *)
 
 IOReturn tegra_vic_surface_lookup(uint32_t, task_t, TegraVICSurface *)
 {
-    return -1;
+    return gLookupResult;
 }
 
 void tegra_vic_surface_release(TegraVICSurface *)
@@ -172,9 +178,13 @@ switch_gpu_backing_token tegra_nvenc_token(uint32_t fence)
     return {fence, 1, SWITCH_GPU_ENGINE_NVENC, kSyncpt};
 }
 
-int switch_native_surface_acquire(const TegraVICSurface *, SwitchNativeSurfaceView *, bool, bool)
+int switch_native_surface_acquire(const TegraVICSurface *, SwitchNativeSurfaceView *view, bool, bool)
 {
-    return -95;
+    if (gAcquireResult)
+        return gAcquireResult;
+    *view = {};
+    view->owner = gAcquireOwner;
+    return 0;
 }
 
 void switch_native_surface_release(SwitchNativeSurfaceView *)
@@ -283,4 +293,33 @@ TEST_F(NVENCDirect, AGpuWriterTheBridgeDoesNotCoverSendsThePictureThroughVIC)
     EXPECT_EQ(begin(&d, 45, waits, &count), -11);
     EXPECT_TRUE(writerWaits(picture.logical).empty()) << "the transaction was given up";
     complete(render);
+}
+
+TEST_F(NVENCDirect, DirectPrepareRefusalsNameTheirReason)
+{
+    TegraNVENCSubmit submit = {}, patched = {};
+    submit.source.surface_id = 42;
+    TegraNVENCDirect direct = {};
+    const char *why = nullptr;
+
+    gLookupResult = -1;
+    EXPECT_EQ(tegra_nvenc_direct_prepare(&submit, nullptr, &direct, &patched, &why), -95);
+    ASSERT_NE(why, nullptr);
+    EXPECT_NE(std::string(why).find("lookup"), std::string::npos) << why;
+
+    gLookupResult = 0;
+    for (int err : {-2, -16, static_cast<int>(SWITCH_GPU_BACKING_STALE), -95, -5}) {
+        gAcquireResult = err;
+        why = nullptr;
+        EXPECT_EQ(tegra_nvenc_direct_prepare(&submit, nullptr, &direct, &patched, &why), -95) << err;
+        ASSERT_NE(why, nullptr) << err;
+        EXPECT_NE(why[0], '\0') << err;
+    }
+
+    gAcquireResult = 0;
+    gAcquireOwner = nullptr;
+    why = nullptr;
+    EXPECT_EQ(tegra_nvenc_direct_prepare(&submit, nullptr, &direct, &patched, &why), -95);
+    ASSERT_NE(why, nullptr);
+    EXPECT_NE(std::string(why).find("owner"), std::string::npos) << why;
 }

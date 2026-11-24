@@ -102,6 +102,9 @@ struct switch_gpu_mapping_entry {
 struct switch_gpu_mapping {
 	u32 count;
 	u8 sparse; /* switch_gpu_vm_sparse's: no memory behind any entry */
+	u8 l2_writable;
+	u8 compressed;
+	u8 l2_clean;
 	struct switch_gpu_mapping_entry entries[];
 };
 
@@ -133,7 +136,7 @@ int tgm_vm_new(struct tgm_vm **pvm)
 {
 	/* bigpage selects the big-page size, 16 (64 KiB) or 17 (128 KiB, nouveau's default); anything else is -EINVAL
 	 * (vmmgm200.c gm200_vmm_new_; 0 fails M3). 4 KiB pages stay available for fragmented ranges and tails. */
-	struct gm200_vmm_v0 args = {.version = 0, .bigpage = 17};
+	struct gm200_vmm_v0 args = {.version = 0, .bigpage = 16};
 	struct tgm_vm *vm = NULL;
 	int ret = 0;
 
@@ -226,11 +229,14 @@ void tgm_vm_claim_connection(struct tgm_vm *vm, const void *connection)
 
 static void mem_prepare_big_views(struct tgm_mem *mem);
 
-static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, struct tgm_mem **pmem,
-		   uint64_t *lock_wait_ns)
+static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, int compute_comp, int allow_smmu,
+		   struct tgm_mem **pmem, uint64_t *lock_wait_ns)
 {
-	struct nvif_mem_ram_v0 args = {.version = 0, .dma = (dma_addr_t *)pas, .sgl = NULL};
+	struct nvif_mem_ram_v0 args = {.version = 0, .dma = NULL, .sgl = NULL};
 	struct tgm_mem *mem = NULL;
+	const uint64_t *effective = pas;
+	u64 smmu_iova = 0;
+	u64 *smmu_pages = NULL;
 	u64 asked = 0;
 	int ret = 0;
 	if (tgm_gpu.stage < 2)
@@ -238,10 +244,34 @@ static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, struct tgm_mem
 	mem = kzalloc(sizeof(*mem), GFP_KERNEL);
 	if (!mem)
 		return -ENOMEM;
+	/* GM20B's L2 sits upstream of Tegra SMMU and tags lines by pre-SMMU address (BIT(34)|iova
+	 * vs direct PA). Only canonical exclusive compressible memory may acquire an SMMU IOVA. */
+	if (allow_smmu && compute_comp && switch_gpu_smmu_should_map(pas, npages)) {
+		smmu_iova = switch_gpu_smmu_map(pas, npages);
+		if (smmu_iova) {
+			smmu_pages = kmalloc_array(npages, sizeof(*smmu_pages), GFP_KERNEL);
+			if (smmu_pages) {
+				uint32_t i = 0;
+				for (i = 0; i < npages; ++i) {
+					const u64 page_iova = smmu_iova + ((u64)i << PAGE_SHIFT);
+					smmu_pages[i] = switch_gpu_smmu_pa(page_iova);
+				}
+				effective = smmu_pages;
+			} else {
+				switch_gpu_smmu_unmap(smmu_iova, npages);
+				smmu_iova = 0;
+			}
+		}
+	}
+	if (compute_comp)
+		page = (u8)tgm_comp_page_shift(effective, npages);
+	args.dma = (dma_addr_t *)effective;
 	mem->bytes = (u64)npages << PAGE_SHIFT;
 	mem->page = page;
-	mem->pages = pas;
+	mem->pages = effective;
 	mem->npages = npages;
+	mem->smmu_iova = smmu_iova;
+	mem->smmu_pages = smmu_pages;
 	asked = stats_on() && lock_wait_ns ? nvxnu_nanotime() : 0;
 	tgm_gpu_lock();
 	if (asked)
@@ -252,6 +282,9 @@ static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, struct tgm_mem
 		mem_prepare_big_views(mem);
 	mutex_unlock(&tgm_gpu.lock);
 	if (ret) {
+		if (smmu_iova)
+			switch_gpu_smmu_unmap(smmu_iova, npages);
+		kfree(smmu_pages);
 		kfree(mem);
 		return ret;
 	}
@@ -262,14 +295,14 @@ static int mem_new(const uint64_t *pas, uint32_t npages, u8 page, struct tgm_mem
 int tgm_mem_new(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages, struct tgm_mem **pmem)
 {
 	(void)vm;
-	return mem_new(pas, npages, PAGE_SHIFT, pmem, NULL);
+	return mem_new(pas, npages, PAGE_SHIFT, 0, 0, pmem, NULL);
 }
 
 int tgm_mem_new_waited(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages,
 		       struct tgm_mem **pmem, uint64_t *lock_wait_ns)
 {
 	(void)vm;
-	return mem_new(pas, npages, PAGE_SHIFT, pmem, lock_wait_ns);
+	return mem_new(pas, npages, PAGE_SHIFT, 0, 0, pmem, lock_wait_ns);
 }
 
 /* The common backing retains this memory object and its tag reference through final physical retirement.
@@ -279,8 +312,15 @@ int tgm_mem_new_exclusive(struct tgm_vm *vm, const uint64_t *pas, uint32_t npage
 {
 	const int comp = tgm_gpu.stage >= 2 && tgm_gpu.device->ltc->num_tags;
 	(void)vm;
-	return mem_new(pas, npages, comp ? tgm_comp_page_shift(pas, npages) : PAGE_SHIFT, pmem,
-		       NULL);
+	return mem_new(pas, npages, PAGE_SHIFT, comp, 0, pmem, NULL);
+}
+
+int tgm_mem_new_exclusive_smmu(struct tgm_vm *vm, const uint64_t *pas, uint32_t npages,
+			       struct tgm_mem **pmem)
+{
+	const int comp = tgm_gpu.stage >= 2 && tgm_gpu.device->ltc->num_tags;
+	(void)vm;
+	return mem_new(pas, npages, PAGE_SHIFT, comp, comp, pmem, NULL);
 }
 
 int tgm_mem_can_compress(const struct tgm_mem *mem)
@@ -288,15 +328,24 @@ int tgm_mem_can_compress(const struct tgm_mem *mem)
 	return mem && mem->page >= TGM_COMP_SHIFT;
 }
 
+int tgm_mem_is_smmu(const struct tgm_mem *mem)
+{
+	return mem && mem->smmu_iova != 0;
+}
+
 void tgm_mem_del(struct tgm_mem **pmem)
 {
-	if (!*pmem)
+	struct tgm_mem *mem = *pmem;
+	if (!mem)
 		return;
 	tgm_gpu_lock();
-	mem_big_views_drop(*pmem);
-	nvif_mem_dtor(&(*pmem)->mem);
+	mem_big_views_drop(mem);
+	nvif_mem_dtor(&mem->mem);
 	mutex_unlock(&tgm_gpu.lock);
-	kfree(*pmem);
+	if (mem->smmu_iova)
+		switch_gpu_smmu_unmap(mem->smmu_iova, mem->npages);
+	kfree(mem->smmu_pages);
+	kfree(mem);
 	*pmem = NULL;
 }
 

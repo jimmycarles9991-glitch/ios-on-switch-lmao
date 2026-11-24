@@ -114,6 +114,7 @@
 #if CONFIG_PHANTOM_CACHE
 #include <vm/vm_phantom_cache.h>
 #endif
+#include <switch/prefetch_vm.h>
 
 #if UPL_DEBUG
 #include <libkern/OSDebug.h>
@@ -1570,7 +1571,7 @@ uint64_t vm_pageout_skipped_bq_external = 0;
 #if 0
 static void vm_pageout_delayed_unlock(int *, int *, vm_page_t *);
 #endif
-static void vm_pageout_prepare_to_block(vm_object_t *, int *, vm_page_t *, int *, int);
+static void vm_pageout_prepare_to_block(vm_object_t *, int *, vm_page_t *, int *, int, bool *);
 
 #define VM_PAGEOUT_PB_NO_ACTION                         0
 #define VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER 1
@@ -1607,7 +1608,7 @@ vm_pageout_delayed_unlock(int *delayed_unlock, int *local_freed, vm_page_t *loca
 
 static void
 vm_pageout_prepare_to_block(vm_object_t *object, int *delayed_unlock,
-    vm_page_t *local_freeq, int *local_freed, int action)
+    vm_page_t *local_freeq, int *local_freed, int action, bool *switch_wake)
 {
 	vm_page_unlock_queues();
 
@@ -1621,6 +1622,7 @@ vm_pageout_prepare_to_block(vm_object_t *object, int *delayed_unlock,
 		*local_freeq = NULL;
 		*local_freed = 0;
 	}
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(*switch_wake);
 	*delayed_unlock = 1;
 
 	switch (action) {
@@ -2226,7 +2228,8 @@ vps_flow_control_reset_deadlock_timer(struct flow_control *flow_control)
  */
 static int
 vps_flow_control(struct flow_control *flow_control, int *anons_grabbed, vm_object_t *object, int *delayed_unlock,
-    vm_page_t *local_freeq, int *local_freed, int *vm_pageout_deadlock_target, unsigned int inactive_burst_count)
+    vm_page_t *local_freeq, int *local_freed, int *vm_pageout_deadlock_target, unsigned int inactive_burst_count,
+    bool *switch_wake)
 {
 	boolean_t       exceeded_burst_throttle = FALSE;
 	unsigned int    msecs = 0;
@@ -2349,7 +2352,7 @@ vps_flow_control(struct flow_control *flow_control, int *anons_grabbed, vm_objec
 	vm_pageout_scan_wants_object = VM_OBJECT_NULL;
 
 	vm_pageout_prepare_to_block(object, delayed_unlock, local_freeq, local_freed,
-	    VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER);
+	    VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER, switch_wake);
 
 	if (vm_page_free_count >= vm_page_free_target) {
 		/*
@@ -2997,6 +3000,7 @@ vm_pageout_scan(void)
 	boolean_t       page_from_bg_q = FALSE;
 	uint32_t        vm_pageout_inactive_external_forced_reactivate_limit = 0;
 	vm_object_t     m_object = VM_OBJECT_NULL;
+	bool            switch_wake = false;
 	int             retval = 0;
 	boolean_t       lock_yield_check = FALSE;
 
@@ -3055,7 +3059,7 @@ vm_pageout_scan(void)
 
 			if (delayed_unlock++ > delayed_unlock_limit) {
 				vm_pageout_prepare_to_block(&object, &delayed_unlock, &local_freeq, &local_freed,
-				    VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER);
+				    VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER, &switch_wake);
 			} else if (vm_pageout_scan_wants_object) {
 				vm_page_unlock_queues();
 				mutex_pause(0);
@@ -3095,7 +3099,7 @@ vm_pageout_scan(void)
 			vm_pageout_scan_wants_object = VM_OBJECT_NULL;
 
 			vm_pageout_prepare_to_block(&object, &delayed_unlock, &local_freeq, &local_freed,
-			    VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER);
+			    VM_PAGEOUT_PB_CONSIDER_WAKING_COMPACTOR_SWAPPER, &switch_wake);
 			/*
 			 * make sure the pageout I/O threads are running
 			 * throttled in case there are still requests
@@ -3203,7 +3207,7 @@ return_from_scan:
 		 */
 		retval = vps_flow_control(&flow_control, &anons_grabbed, &object,
 		    &delayed_unlock, &local_freeq, &local_freed,
-		    &vm_pageout_deadlock_target, inactive_burst_count);
+		    &vm_pageout_deadlock_target, inactive_burst_count, &switch_wake);
 
 		if (retval == VM_PAGEOUT_SCAN_NEXT_ITERATION) {
 			if (loop_count >= vm_page_inactive_count) {
@@ -3411,6 +3415,15 @@ reclaim_page:
 			    object->pager != NULL &&
 			    object->pager->mo_pager_ops == &shared_region_pager_ops) {
 				shared_region_pager_reclaimed++;
+			}
+
+			if (__improbable(m->vmp_switch_prefetched)) {
+				m->vmp_switch_prefetched = FALSE;
+				if (m->vmp_clustered && !m->vmp_absent && !VMP_ERROR_GET(m) &&
+				    switch_vm_prefetch_reclaimed_locked != NULL &&
+				    switch_vm_prefetch_reclaimed_locked()) {
+					switch_wake = true;
+				}
 			}
 
 			m->vmp_busy = TRUE;
@@ -4755,6 +4768,10 @@ vm_pressure_response(void)
 
 			if (old_level != memorystatus_vm_pressure_level) {
 				thread_wakeup(&vm_pageout_state.vm_pressure_changed);
+				if (switch_vm_pressure_changed != NULL) {
+					switch_vm_pressure_changed((unsigned int)old_level,
+					    (unsigned int)memorystatus_vm_pressure_level);
+				}
 			}
 			vm_pressure_last_level_transition_abs = curr_ts; /* renew the window of observation for a stuck pressure level */
 		}
@@ -5620,6 +5637,24 @@ upl_deallocate(upl_t upl)
 		}
 		upl_unlock(upl);
 
+		if (__improbable(upl->flags & UPL_SWITCH_PREFETCH)) {
+			if (switch_vm_prefetch_inflight_done != NULL) {
+#if DEVELOPMENT || DEBUG
+				uint64_t elapsed = mach_absolute_time() - upl->switch_start_abs;
+#else
+				uint64_t elapsed = 0;
+#endif
+				switch_vm_prefetch_inflight_done(upl->switch_prefetch_bytes, elapsed);
+			}
+		}
+#if DEVELOPMENT || DEBUG
+		else if (__improbable(upl->flags & UPL_SWITCH_DEMAND)) {
+			if (switch_vm_prefetch_demand_done != NULL) {
+				switch_vm_prefetch_demand_done(mach_absolute_time() - upl->switch_start_abs);
+			}
+		}
+#endif
+
 		if (upl->upl_iodone) {
 			upl_callout_iodone(upl);
 		}
@@ -5777,6 +5812,11 @@ vm_object_upl_request(
 	upl_t                   upl = NULL;
 	unsigned int            entry;
 	vm_page_t               alias_page = NULL;
+	bool                    switch_wake = false;
+	uint32_t                switch_absent_pages = 0;
+	const bool              switch_replay = (cntrl_flags & UPL_RET_ONLY_ABSENT) != 0 &&
+	    switch_vm_prefetch_is_replay_thread != NULL &&
+	    switch_vm_prefetch_is_replay_thread(current_thread());
 	int                     refmod_state = 0;
 	vm_object_t             last_copy_object;
 	uint32_t                last_copy_version;
@@ -6341,6 +6381,9 @@ check_busy:
 					 * speculative list
 					 */
 					dst_page->vmp_clustered = TRUE;
+					if (__improbable(switch_replay)) {
+						switch_absent_pages++;
+					}
 
 					if (!(cntrl_flags & UPL_FILE_IO)) {
 						counter_inc(&vm_statistics_pageins);
@@ -6508,7 +6551,7 @@ check_busy:
 			 *
 			 */
 			if (dst_page->vmp_clustered) {
-				VM_PAGE_CONSUME_CLUSTERED(dst_page);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(dst_page, switch_wake);
 			}
 		}
 try_next_page:
@@ -6553,7 +6596,18 @@ try_next_page:
 #if UPL_DEBUG
 	upl->upl_state = 1;
 #endif
+	if (__improbable(switch_replay && switch_absent_pages != 0)) {
+		upl->flags |= UPL_SWITCH_PREFETCH;
+		upl->switch_prefetch_bytes = switch_absent_pages * PAGE_SIZE;
+#if DEVELOPMENT || DEBUG
+		upl->switch_start_abs = mach_absolute_time();
+#endif
+		if (switch_vm_prefetch_inflight_add != NULL) {
+			switch_vm_prefetch_inflight_add(upl->switch_prefetch_bytes);
+		}
+	}
 	vm_object_unlock(object);
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 
 	VM_DEBUG_CONSTANT_EVENT(vm_object_upl_request, VM_UPL_REQUEST, DBG_FUNC_END, page_grab_count, 0, 0, 0);
 #if DEVELOPMENT || DEBUG
@@ -7585,6 +7639,7 @@ upl_commit_range(
 	int                     dw_limit;
 	int                     isVectorUPL = 0;
 	upl_t                   vector_upl = NULL;
+	uint32_t                switch_committed = 0;
 	boolean_t               should_be_throttled = FALSE;
 
 	vm_page_t               nxt_page = VM_PAGE_NULL;
@@ -8115,6 +8170,10 @@ process_upl_to_commit:
 				clear_refmod |= VM_MEM_REFERENCED;
 			} else if (!VM_PAGE_PAGEABLE(m)) {
 				if (m->vmp_clustered || (flags & UPL_COMMIT_SPECULATE)) {
+					if (__improbable((upl->flags & UPL_SWITCH_PREFETCH) && m->vmp_clustered)) {
+						switch_committed++;
+						dwp->dw_mask |= DW_vm_page_switch_prefetched;
+					}
 					dwp->dw_mask |= DW_vm_page_speculate;
 				} else if (m->vmp_reference) {
 					dwp->dw_mask |= DW_vm_page_activate;
@@ -8151,6 +8210,10 @@ commit_next_page:
 				VM_PAGE_ADD_DELAYED_WORK(dwp, m, dw_count);
 
 				if (dw_count >= dw_limit) {
+					if (__improbable(switch_committed != 0 && switch_vm_prefetch_committed != NULL)) {
+						switch_vm_prefetch_committed(switch_committed);
+						switch_committed = 0;
+					}
 					vm_page_do_delayed_work(shadow_object, VM_KERN_MEMORY_NONE, dwp_start, dw_count);
 
 					dwp = dwp_start;
@@ -8166,6 +8229,10 @@ commit_next_page:
 				}
 			}
 		}
+	}
+	if (__improbable(switch_committed != 0 && switch_vm_prefetch_committed != NULL)) {
+		switch_vm_prefetch_committed(switch_committed);
+		switch_committed = 0;
 	}
 	if (dw_count) {
 		vm_page_do_delayed_work(shadow_object, VM_KERN_MEMORY_NONE, dwp_start, dw_count);
@@ -9813,7 +9880,7 @@ record_phys_addr:
 			 *
 			 */
 			if (dst_page->vmp_clustered) {
-				VM_PAGE_CONSUME_CLUSTERED(dst_page);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(dst_page, fault_info.switch_wake);
 			}
 		}
 skip_page:
@@ -9852,6 +9919,7 @@ finish:
 		}
 	}
 	vm_object_unlock(object);
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 
 	if (cntrl_flags & UPL_BLOCK_ACCESS) {
 		/*
@@ -9946,6 +10014,7 @@ return_err:
 		vm_object_collapse(object, 0, TRUE);
 	}
 	vm_object_unlock(object);
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(fault_info.switch_wake);
 	upl_destroy(upl);
 
 	VM_DEBUG_CONSTANT_EVENT(vm_object_iopl_request, VM_IOPL_REQUEST, DBG_FUNC_END, page_grab_count, ret, 0, 0);
@@ -11136,6 +11205,40 @@ VM_PRESSURE_NORMAL_TO_WARNING(void)
 		return (AVAILABLE_NON_COMPRESSED_MEMORY < VM_PAGE_COMPRESSOR_COMPACT_THRESHOLD) ? 1 : 0;
 	}
 }
+
+uint64_t
+switch_vm_pressure_headroom_pages(void)
+{
+	if (memorystatus_vm_pressure_level != kVMPressureNormal) {
+		return 0;
+	}
+	uint64_t avail, thresh;
+	if (!VM_CONFIG_COMPRESSOR_IS_ACTIVE) {
+		avail = (uint64_t)memorystatus_available_pages;
+		thresh = (uint64_t)memorystatus_available_pages_pressure;
+	} else {
+		avail = (uint64_t)AVAILABLE_NON_COMPRESSED_MEMORY;
+		thresh = (uint64_t)VM_PAGE_COMPRESSOR_COMPACT_THRESHOLD;
+	}
+	return avail > thresh ? avail - thresh : 0;
+}
+
+#if DEVELOPMENT || DEBUG
+void
+switch_vm_prefetch_mark_demand_upl(void *upl_arg)
+{
+	upl_t upl = (upl_t)upl_arg;
+	if (upl == UPL_NULL) {
+		return;
+	}
+	upl_lock(upl);
+	if (!(upl->flags & (UPL_SWITCH_PREFETCH | UPL_SWITCH_DEMAND))) {
+		upl->flags |= UPL_SWITCH_DEMAND;
+		upl->switch_start_abs = mach_absolute_time();
+	}
+	upl_unlock(upl);
+}
+#endif
 
 boolean_t
 VM_PRESSURE_WARNING_TO_CRITICAL(void)

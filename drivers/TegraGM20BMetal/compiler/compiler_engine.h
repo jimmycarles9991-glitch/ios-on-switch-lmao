@@ -38,8 +38,12 @@ public:
     int32_t compile(const Prepared &p, std::string &entry, std::string &why);
 
 private:
-    // What compiles, made at the first compile that needs it, so a compiler that serves its store alone has none
-    gm20b::Direct &compiler();
+    // What compiles, made at the first compile that needs it, so a compiler that serves its store alone has none. A
+    // compile holds its own from take to give back: Direct::make keeps the state it makes in the object (its storage
+    // refusal, which make reads back to choose the barrier form, its split, its stride twin), so the pool's workers
+    // never share one; an idle one is taken before another is made
+    std::unique_ptr<gm20b::Direct> takeCompiler();
+    void giveBack(std::unique_ptr<gm20b::Direct> compiler);
 
     struct State;
     std::unique_ptr<State> state_;

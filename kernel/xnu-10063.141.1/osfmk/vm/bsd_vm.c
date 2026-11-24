@@ -57,6 +57,8 @@
 #include <vm/vm_purgeable_internal.h>
 
 #include <sys/kdebug_triage.h>
+#include <switch/diag.h>
+#include <switch/prefetch_vm.h>
 
 /* BSD VM COMPONENT INTERFACES */
 int
@@ -179,6 +181,7 @@ memory_object_control_uiomove(
 	int                     orig_offset;
 	vm_page_t               page_run[MAX_RUN];
 	int                     dirty_count;    /* keeps track of number of pages dirtied as part of this uiomove */
+	bool                    switch_wake = false;
 
 	object = memory_object_control_to_vm_object(control);
 	if (object == VM_OBJECT_NULL) {
@@ -267,6 +270,7 @@ memory_object_control_uiomove(
 			break;
 		}
 		vm_object_unlock(object);
+		SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 
 		for (i = 0; i < cur_run; i++) {
 			dst_page = page_run[i];
@@ -314,7 +318,7 @@ memory_object_control_uiomove(
 			 *
 			 */
 			if (dst_page->vmp_clustered) {
-				VM_PAGE_CONSUME_CLUSTERED(dst_page);
+				VM_PAGE_CONSUME_CLUSTERED_WAKE(dst_page, switch_wake);
 			}
 
 			PAGE_WAKEUP_DONE(dst_page);
@@ -322,6 +326,7 @@ memory_object_control_uiomove(
 		orig_offset = 0;
 	}
 	vm_object_unlock(object);
+	SWITCH_VM_PREFETCH_FLUSH_WAKE(switch_wake);
 	return retval;
 }
 
@@ -642,6 +647,7 @@ vnode_pager_data_request(
 	const kern_return_t kr = vnode_pager_cluster_read(vnode_object, base_offset, offset, io_streaming, size);
 	switch_kprof_wait(vnode_pager_virtualdev(vnode_object->vnode_handle) ? 3 : 0, mach_absolute_time() - began,
 	    (uint64_t)size);
+	switch_diag_pagein(vnode_object->vnode_handle, (uint64_t)size, mach_absolute_time() - began);
 	return kr;
 #else
 	return vnode_pager_cluster_read(vnode_object, base_offset, offset, io_streaming, size);

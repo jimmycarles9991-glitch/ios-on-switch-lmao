@@ -139,6 +139,11 @@ TEST(GM20BBounds, AVertexAtOrBehindWZeroLeavesNoBox)
     EXPECT_FALSE(bounds(at, {10, 30, 0.5f, 0}));
     gm20b::DrawBounds nan(kPixels, kViewport);
     EXPECT_FALSE(bounds(nan, {NAN, 30, 0.5f, 1}));
+    gm20b::DrawBounds subnormalW(kPixels, kViewport);
+    EXPECT_FALSE(bounds(subnormalW, {10, 30, 0.5f, FLT_MIN * 0.5f}));
+    const float bigScale[16] = {1e20f, 0, 0, 0, 0, 1e20f, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    gm20b::DrawBounds overflow(bigScale, kViewport);
+    EXPECT_FALSE(bounds(overflow, {1e20f, 0, 0.5f, 1}));
 }
 
 TEST(GM20BBounds, DepthClippedIsABoxButNoRectangle)
@@ -204,14 +209,15 @@ TEST(GM20BRegion, AFetchMeetsOnlyTheWritesItsPixelLimitReaches)
     EXPECT_FALSE(written.meets(scissored(d, 90, 0, 150, 100)));
 }
 
-TEST(GM20BRegion, TheRegionTestReadsNoVertex)
+TEST(GM20BRegion, BoundedDrawsResolveTheirProjectedBoxLazilyOnMeets)
 {
-    std::vector<float> a, b;
+    std::vector<float> a, b, c;
     gm20b::WrittenRegion written;
     gm20b::WrittenRegion::Analysis analysis(quad(a, 0, 0, 100, 100));
     written.add(analysis);
-    EXPECT_TRUE(written.meets(quad(b, 200, 200, 300, 300)));
     EXPECT_FALSE(analysis.evaluated());
+    EXPECT_FALSE(written.meets(quad(b, 200, 200, 300, 300)));
+    EXPECT_TRUE(written.meets(quad(c, 50, 50, 150, 150)));
 }
 
 TEST(GM20BRegion, ABoundedWriteKeepsAGuardPixelBetweenTouchingRectangles)
@@ -246,13 +252,139 @@ TEST(GM20BRegion, VerticesPastTheBoundBytesLeaveNoBox)
     EXPECT_TRUE(written.meets(scissored(b, 600, 0, 700, 100)));
 }
 
-TEST(GM20BRegion, MoreWritesThanItHoldsMeetEverything)
+TEST(GM20BRegion, TileMaskElidesDisjointWritesPastExactBoxCapacity)
 {
-    std::vector<std::vector<float>> memory(gm20b::WrittenRegion::kMaxDraws + 2);
+    const uint32_t count = gm20b::WrittenRegion::kMaxDraws + 20;
+    std::vector<std::vector<float>> memory(count + 2);
     gm20b::WrittenRegion written;
-    for (uint32_t i = 0; i <= gm20b::WrittenRegion::kMaxDraws; i++)
-        written.add(quad(memory[i], float(i), 0, float(i) + 1, 1));
-    EXPECT_TRUE(written.meets(quad(memory.back(), 1000, 600, 1100, 700)));
+    for (uint32_t i = 0; i < count; i++)
+        written.add(quad(memory[i], float((i % 16) * 4), float((i / 16) * 4), float((i % 16) * 4 + 2),
+                         float((i / 16) * 4 + 2)));
+    EXPECT_FALSE(written.meets(quad(memory[count], 1000, 600, 1100, 700)));
+    EXPECT_TRUE(written.meets(quad(memory[count + 1], 10, 10, 20, 20)));
+}
+
+TEST(GM20BRegion, SubTileDisjointWritesElideWithinExactBoxCapacity)
+{
+    std::vector<float> a, b, c;
+    gm20b::WrittenRegion written;
+    written.add(quad(a, 2, 2, 10, 10));
+    EXPECT_FALSE(written.meets(quad(b, 14, 14, 24, 24)));
+    EXPECT_TRUE(written.meets(quad(c, 8, 8, 20, 20)));
+}
+
+TEST(GM20BRegion, OutOfGridWritesStillTrackConservatively)
+{
+    std::vector<float> a, b, c;
+    gm20b::WrittenRegion written;
+    gm20b::DrawGeometry big = quad(a, 0, 0, 10, 10);
+    big.bounded = false;
+    big.limit = {2100, 100, 2300, 200};
+    written.add(big);
+    gm20b::DrawGeometry far = quad(b, 0, 0, 10, 10);
+    far.bounded = false;
+    far.limit = {100, 100, 200, 200};
+    EXPECT_FALSE(written.meets(far));
+    gm20b::DrawGeometry hit = quad(c, 0, 0, 10, 10);
+    hit.bounded = false;
+    hit.limit = {2200, 150, 2400, 250};
+    EXPECT_TRUE(written.meets(hit));
+}
+
+TEST(GM20BRegion, PendingOverflowNeverEvaluatesWithoutMeetsAndFoldsLimitConservatively)
+{
+    const uint32_t count = gm20b::WrittenRegion::kMaxPending + 10;
+    std::vector<std::vector<float>> memory(count + 2);
+    gm20b::GeometryBudget budget{4096, 4096};
+    gm20b::GeometryCache cache;
+    gm20b::WrittenRegion written;
+    std::vector<gm20b::WrittenRegion::Analysis> analyses;
+    analyses.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        gm20b::DrawGeometry g = quad(memory[i], 0, 0, 10, 10);
+        g.limit = i < gm20b::WrittenRegion::kMaxPending ? gm20b::PixelBox{0, 0, 100, 100}
+                                                        : gm20b::PixelBox{600, 100, 700, 200};
+        analyses.push_back(cache.analysis(g, i + 1, budget));
+        written.add(analyses.back());
+    }
+    EXPECT_EQ(budget.vertices, 4096u);
+    EXPECT_EQ(budget.pairs, 4096u);
+    for (auto &a : analyses)
+        EXPECT_FALSE(a.snapshot().evaluated);
+
+    EXPECT_TRUE(written.meets(scissored(memory[count], 620, 120, 660, 160)));
+    EXPECT_FALSE(written.meets(scissored(memory[count + 1], 1000, 500, 1100, 600)));
+}
+
+TEST(GM20BRegion, NonOverlappingQuadAcceptsConvexQuadsAndRejectsFoldedOrDegenerate)
+{
+    std::vector<float> stripMem, rotMem, listMem, foldedMem, concaveMem, dupMem, badWMem, hugeMem, guardMem;
+    gm20b::WrittenRegion::Analysis axisStrip(quad(stripMem, 10, 20, 210, 140));
+    EXPECT_TRUE(gm20b::WrittenRegion::nonOverlappingQuad(axisStrip, false));
+
+    rotMem = positions({{100, 20}, {180, 70}, {40, 110}, {120, 160}});
+    gm20b::DrawGeometry rot = quad(stripMem, 0, 0, 10, 10);
+    rot.positions.base = reinterpret_cast<const uint8_t *>(rotMem.data());
+    rot.positionBytes = rotMem.size() * sizeof(float);
+    gm20b::WrittenRegion::Analysis rotAnalysis(rot);
+    EXPECT_TRUE(gm20b::WrittenRegion::nonOverlappingQuad(rotAnalysis, false));
+
+    gm20b::DrawGeometry list = quad(listMem, 10, 20, 210, 140);
+    const uint16_t pair[6] = {0, 1, 2, 1, 3, 2};
+    list.indices = reinterpret_cast<const uint8_t *>(pair);
+    list.indexSize = 2;
+    list.count = 6;
+    list.strip = false;
+    gm20b::WrittenRegion::Analysis listAnalysis(list);
+    EXPECT_TRUE(gm20b::WrittenRegion::nonOverlappingQuad(listAnalysis, true));
+
+    gm20b::DrawGeometry folded = quad(foldedMem, 10, 20, 210, 140);
+    std::swap(foldedMem[8], foldedMem[12]);
+    std::swap(foldedMem[9], foldedMem[13]);
+    gm20b::WrittenRegion::Analysis foldedAnalysis(folded);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(foldedAnalysis, false));
+
+    concaveMem = positions({{0, 0}, {100, 0}, {50, 100}, {100, 0}, {50, 100}, {20, 40}});
+    gm20b::DrawGeometry overlap = quad(stripMem, 0, 0, 10, 10);
+    overlap.positions.base = reinterpret_cast<const uint8_t *>(concaveMem.data());
+    overlap.positionBytes = concaveMem.size() * sizeof(float);
+    overlap.count = 6;
+    overlap.strip = false;
+    gm20b::WrittenRegion::Analysis overlapAnalysis(overlap);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(overlapAnalysis, true));
+
+    gm20b::DrawGeometry dup = quad(dupMem, 10, 20, 210, 140);
+    const uint16_t same[6] = {0, 1, 2, 0, 1, 2};
+    dup.indices = reinterpret_cast<const uint8_t *>(same);
+    dup.indexSize = 2;
+    dup.count = 6;
+    dup.strip = false;
+    gm20b::WrittenRegion::Analysis dupAnalysis(dup);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(dupAnalysis, true));
+
+    gm20b::DrawGeometry badW = quad(badWMem, 10, 20, 210, 140);
+    badWMem[3] = 0.0f;
+    gm20b::WrittenRegion::Analysis badWAnalysis(badW);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(badWAnalysis, false));
+
+    gm20b::DrawGeometry huge = quad(hugeMem, -20000, 0, 20000, 100);
+    gm20b::WrittenRegion::Analysis hugeAnalysis(huge);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(hugeAnalysis, false));
+
+    const float smallPixels[16] = {2.0f / 16.0f, 0, 0, 0, 0, -2.0f / 16.0f, 0, 0, 0, 0, 1, 0, -1, 1, 0, 1};
+    guardMem = positions({{0, 0}, {2500, 0}, {0, 10}, {2500, 10}});
+    gm20b::DrawGeometry outsideGuard = quad(stripMem, 0, 0, 10, 10);
+    outsideGuard.matrix = reinterpret_cast<const uint8_t *>(smallPixels);
+    outsideGuard.positions.base = reinterpret_cast<const uint8_t *>(guardMem.data());
+    outsideGuard.positionBytes = guardMem.size() * sizeof(float);
+    outsideGuard.viewport = {0, 0, 16, 16};
+    gm20b::WrittenRegion::Analysis outsideGuardAnalysis(outsideGuard);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(outsideGuardAnalysis, false));
+
+    gm20b::DrawGeometry unbounded = quad(stripMem, 10, 20, 210, 140);
+    unbounded.bounded = false;
+    gm20b::WrittenRegion::Analysis unboundedAnalysis(unbounded);
+    EXPECT_FALSE(gm20b::WrittenRegion::nonOverlappingQuad(unboundedAnalysis, false));
 }
 
 TEST(GM20BRegion, IndexedDrawsReadTheirIndices)

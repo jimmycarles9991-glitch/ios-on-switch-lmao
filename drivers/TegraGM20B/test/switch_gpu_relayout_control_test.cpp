@@ -68,6 +68,13 @@ extern "C" void tgm_stats_unlocked(enum tgm_unlocked, uint64_t)
 {
 }
 
+// Each read 1.5 ms after the one before
+extern "C" uint64_t tgm_timestamp_ns(void)
+{
+	static uint64_t now;
+	return now += 1500000;
+}
+
 extern "C" void tgm_vm_del(tgm_vm **out)
 {
 	*out = nullptr;
@@ -480,5 +487,80 @@ TEST_F(RelayoutControl, ASecondMoveIsKickedWhileTheFirstWaitsForTheGpu)
 	EXPECT_EQ(gRelayout.users, 0u);
 	copyWait = nullptr;
 	channelsOpen = pipelined = false;
+}
+}  // namespace
+
+namespace
+{
+// The stats count the copy engine's in-place moves, each one L2 invalidate, with their time; moves into or out of a
+// scratch have no checkpoint and are not counted
+TEST_F(RelayoutControl, InPlaceMovesAreCountedAndTimedWithTheStats)
+{
+	channelsOpen = pipelined = true;
+	uint64_t before[3];
+	tgm_relayout_in_place_stats(before);
+	tgm_layout l = {};
+	ASSERT_TRUE(tgm_layout_tiled(64, 64, 4, &l));
+	std::vector<uint64_t> surfacePas, rowsPas;
+	for (uint64_t at = 0; at < surfaceBytes.size(); at += 4096) {
+		surfacePas.push_back(kSurfacePa + at);
+		rowsPas.push_back(kRowsPa + at);
+	}
+	const tgm_relayout_pages surface = {surfacePas.data(), uint32_t(surfacePas.size())};
+	const tgm_relayout_pages rows = {rowsPas.data(), uint32_t(rowsPas.size())};
+	for (const int op : {TGM_RELAYOUT_TILE_IN_PLACE, TGM_RELAYOUT_TO_ROWS,
+			     TGM_RELAYOUT_UNTILE_IN_PLACE, TGM_RELAYOUT_TO_TILED})
+		EXPECT_EQ(tgm_relayout(&surface, &rows, &l, 256, op, nullptr, 0), 0) << op;
+	uint64_t taken[3];
+	tgm_relayout_in_place_stats(taken);
+	EXPECT_EQ(taken[0], TGM_STATS ? 2u : 0u);
+	EXPECT_EQ(taken[1], TGM_STATS ? 2u * 1500000u : 0u);
+	EXPECT_EQ(taken[2], TGM_STATS ? 1500000u : 0u);
+	tgm_relayout_in_place_stats(taken);
+	EXPECT_EQ(taken[0], 0u);
+	channelsOpen = pipelined = false;
+}
+
+TEST_F(RelayoutControl, FaultedCompressedTileInPlaceAfterCheckpointRestoresPitchAndFails)
+{
+	channelsOpen = faultMoves = true;
+	beforeCheckpoint = false;
+	flushJobs = cpuReads = cpuReadsBehindL2 = 0;
+	surfaceMap.tiledKind = 0xdbu;
+	memory.map(kSurfaceGpuVa, surfaceBytes, false, true);
+	tgm_layout l = {};
+	ASSERT_TRUE(tgm_layout_tiled(64, 64, 4, &l));
+	std::vector<uint64_t> surfacePas, rowsPas;
+	for (uint64_t at = 0; at < surfaceBytes.size(); at += 4096) {
+		surfacePas.push_back(kSurfacePa + at);
+		rowsPas.push_back(kRowsPa + at);
+	}
+	for (size_t i = 0; i < rowsBytes.size(); ++i)
+		rowsBytes[i] = uint8_t((i * 17 + 5) & 0xff);
+	std::fill(surfaceBytes.begin(), surfaceBytes.end(), 0xee);
+	const tgm_relayout_pages surface = {surfacePas.data(), uint32_t(surfacePas.size())};
+	const tgm_relayout_pages rows = {rowsPas.data(), uint32_t(rowsPas.size())};
+
+	EXPECT_EQ(tgm_relayout(&surface, &rows, &l, 256, TGM_RELAYOUT_TILE_IN_PLACE, nullptr, 0),
+		  -5);
+	EXPECT_EQ(flushJobs, 1u);
+	EXPECT_GT(cpuReads, 0u);
+	EXPECT_EQ(cpuReadsBehindL2, 0u);
+	EXPECT_TRUE(memory.dirty.empty());
+	EXPECT_EQ(memcmp(surfaceBytes.data(), rowsBytes.data(), 64 * 256), 0);
+
+	// Faulted compressed UNTILE_IN_PLACE after checkpoint flushes L2 and finishes pitch copy.
+	flushJobs = cpuReads = cpuReadsBehindL2 = 0;
+	std::fill(surfaceBytes.begin(), surfaceBytes.end(), 0xaa);
+	EXPECT_EQ(tgm_relayout(&surface, &rows, &l, 256, TGM_RELAYOUT_UNTILE_IN_PLACE, nullptr, 0),
+		  0);
+	EXPECT_EQ(flushJobs, 1u);
+	EXPECT_GT(cpuReads, 0u);
+	EXPECT_EQ(cpuReadsBehindL2, 0u);
+	EXPECT_EQ(memcmp(surfaceBytes.data(), rowsBytes.data(), 64 * 256), 0);
+
+	surfaceMap.tiledKind = 0;
+	channelsOpen = faultMoves = false;
+	faulted = flushedOn = nullptr;
 }
 }  // namespace

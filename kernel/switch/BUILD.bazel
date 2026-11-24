@@ -6,6 +6,12 @@ package(default_visibility = ["//kernel:__subpackages__"])
 
 lint_files()
 
+# The recorder's object table, which xnu_recorder_hooks_source_test checks against the sources that use its hooks.
+exports_files(
+    ["objects.bzl"],
+    visibility = ["//kernel/tests:__pkg__"],
+)
+
 # The sources and hook headers kernel/tests reads or compiles on the host.
 exports_files(glob([
     "include/switch/*.h",

@@ -51,8 +51,8 @@ IOReturn AGXDeviceUserClient::cpuAccess(const TegraGM20BAbiCpuAccess *in, bool r
 		return ioreturn(result);
 	}
 	const Bo *bo = findBo(in->handle);
-	if (submitGate_.closed() || !bo || !bo->backing || bo->chunked || bo->nativeView ||
-	    in->offset > bo->bytes || in->bytes > bo->bytes - in->offset ||
+	if (submitGate_.closed() || !bo || !bo->backing || bo->chunked || bo->smmuCompressible ||
+	    bo->nativeView || in->offset > bo->bytes || in->bytes > bo->bytes - in->offset ||
 	    ((in->access & TegraGM20BCpuWrite) && bo->readOnly)) {
 		IOLockUnlock(lock_);
 		return kIOReturnBadArgument;

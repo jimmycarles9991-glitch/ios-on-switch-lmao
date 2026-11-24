@@ -64,6 +64,9 @@
     d[@"banded_draws"] = @(gRM->raw->stats.bandedDraws.load());
     d[@"bands"] = @(gRM->raw->stats.bands.load());
     d[@"learned_draws"] = @(gRM->raw->stats.learnedDraws.load());
+    d[@"priced_static"] = @(gRM->raw->stats.pricedStatic.load());
+    d[@"priced_learned"] = @(gRM->raw->stats.pricedLearned.load());
+    d[@"unpriced_large"] = @(gRM->raw->stats.unpricedLarge.load());
     d[@"banded_dispatches"] = @(gRM->raw->stats.bandedDispatches.load());
     d[@"storage_barriers"] = @(gRM->raw->stats.storageBarriers.load());
     d[@"texture_uploads"] = @(gRM->raw->stats.textureUploads.load());
@@ -152,7 +155,9 @@
 // footprint); backings: memoryless attachments' uncompressed backings (trimBackings' last count); grows: allocations that
 // wired a chunk themselves; headers_left: the texture headers not held (8191 at most, gpu.h kTextureHeaders); textures:
 // the memory live textures took of their own and their kept blocks', which returns to where it was once they go (pool
-// and wc keep a chunk's worth free).
+// and wc keep a chunk's worth free); imports_made: surface and no-copy imports since open; arenas_made and arena_restores:
+// heaps' arenas made and purged ones bound again since open; host_zeroed: the bytes of untouched host pages imported
+// since open, each zero-filled on the importing thread.
 // hw_test_app's gpu.path.set_survives_trim: the latest resource set registration the kernel refused, its member and why
 - (NSString *)switchMetalSetRefusal
 {
@@ -170,7 +175,21 @@
         @"backings" : @(d.stats.backingBytes.load()),
         @"grows" : @(d.stats.poolStalls.load()),
         @"headers_left" : @(d.headersLeft()),
-        @"textures" : @(d.stats.textureBytes.load())
+        @"textures" : @(d.stats.textureBytes.load()),
+        @"imports_made" : @(d.stats.importsMade.load()),
+        @"arenas_made" : @(d.stats.arenasMade.load()),
+        @"arena_restores" : @(d.stats.arenaRestores.load()),
+        @"host_zeroed" : @(d.stats.hostZeroedBytes.load()),
+        @"parked_chunks" : @(d.stats.parkedChunkBytes.load()),
+        @"parked_chunk_count" : @(d.stats.parkedChunks.load()),
+        @"chunk_parks" : @(d.stats.chunkParks.load()),
+        @"chunk_unparks_resident" : @(d.stats.chunkUnparksResident.load()),
+        @"chunk_unparks_reclaimed" : @(d.stats.chunkUnparksReclaimed.load()),
+        @"parked_heaps" : @(d.stats.parkedHeapBytes.load()),
+        @"parked_heap_count" : @(d.stats.parkedHeaps.load()),
+        @"heap_parks" : @(d.stats.heapParks.load()),
+        @"heap_unparks_resident" : @(d.stats.heapUnparksResident.load()),
+        @"heap_unparks_reclaimed" : @(d.stats.heapUnparksReclaimed.load())
     };
 }
 
@@ -271,12 +290,12 @@
     // GPU (its buffer pool, its gamma and weight tables: QuartzCore MetalBufferPool::allocate_buffer, options 0): nothing to clean
     // before a draw reads it, nothing to scan for the vertices an indexed draw reads (r16: 600-1300 KB cleaned a command buffer)
     const bool wc = (o & MTLResourceStorageModeMask) == MTLResourceStorageModeShared;
-    if (!gRM->raw->createBuffer(n ? n : 16, b->_raw, wc)) {
+    const bool hostVisible = (o & MTLResourceStorageModeMask) != MTLResourceStorageModePrivate;
+    if (!gRM->raw->createBuffer(n ? n : 16, b->_raw, wc, hostVisible, wc)) {
         os_log_error(gm20bLog(), "SwitchMetal: %{public}s: no memory for a %lu-byte buffer: none made", getprogname(),
                      (unsigned long)n);
         return nil;
     }
-    b->_raw.hostVisible = (o & MTLResourceStorageModeMask) != MTLResourceStorageModePrivate;
     return (id<MTLBuffer>)b;
 }
 

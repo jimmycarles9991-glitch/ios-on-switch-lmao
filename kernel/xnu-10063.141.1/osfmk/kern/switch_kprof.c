@@ -130,6 +130,13 @@ switch_footprint_breakdown(task_t task, char *buf, size_t size)
 extern void qsort(void *a, size_t n, size_t es, int (*cmp)(const void *, const void *));
 extern int  vsnprintf(char *, size_t, const char *, va_list);
 
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_KPROF) && SWITCH_KPROF
+#define SWITCH_KPROF_ROLE_ON 1
+#include <switch/kprof_role.h>
+#else
+#define SWITCH_KPROF_ROLE_ON 0
+#endif
+
 #define KPROF_PERIOD_NS   4000000ull        /* one sample per 4 ms of CPU work */
 #define KPROF_WINDOW_NS   10000000000ull    /* one summary every 10 s */
 #define KPROF_MAX_CPUS    8
@@ -191,6 +198,9 @@ struct kprof_task {
 	int32_t  pid;
 	uint16_t user;
 	uint16_t kernel;
+#if SWITCH_KPROF_ROLE_ON
+	uint16_t user_main;
+#endif
 	char     name[28];
 	bool     used;
 	bool     fresh;         /* merged table: the process started in this window (age_ms) */
@@ -235,11 +245,16 @@ struct kprof_cpu_last {
 };
 #define KPROF_CPU_LAST    2048
 
+#if SWITCH_KPROF_ROLE_ON
+typedef struct switch_kprof_user kprof_user_t;
+#else
 struct kprof_user {
 	uint64_t key;           /* KPROF_U_* | bucket; 0: empty */
 	int32_t  pid;
 	uint32_t samples;
 };
+typedef struct kprof_user kprof_user_t;
+#endif
 
 struct kprof_masked {
 	uintptr_t chain[3];     /* the masking code's return addresses as function keys; chain[0] 0: empty */
@@ -251,8 +266,8 @@ struct kprof_buf {
 	uint32_t            samples, user, kernel, kernel_task, lost;
 	struct kprof_fn     fn[KPROF_CPU_FNS];
 	struct kprof_task   task[KPROF_CPU_TASKS];
-	struct kprof_user   user_pc[KPROF_CPU_USER];
-	struct kprof_user   image[KPROF_CPU_IMAGES];  /* key: kprof_region_key() */
+	kprof_user_t        user_pc[KPROF_CPU_USER];
+	kprof_user_t        image[KPROF_CPU_IMAGES];  /* key: kprof_region_key() */
 	uint32_t            image_lost;
 	struct kprof_masked masked[KPROF_CPU_MASKED];
 	struct kprof_faults faults;
@@ -289,8 +304,8 @@ static uint32_t           *kprof_starts;        /* function starts, offsets from
 static uint32_t            kprof_nstarts;
 static struct kprof_fn    *kprof_fns;           /* merged window */
 static struct kprof_task  *kprof_tasks;
-static struct kprof_user  *kprof_users;
-static struct kprof_user  *kprof_images;        /* merged (process, region) table */
+static kprof_user_t       *kprof_users;
+static kprof_user_t       *kprof_images;        /* merged (process, region) table */
 static uint32_t            kprof_images_lost;
 static struct kprof_masked *kprof_masks;        /* merged window */
 static struct kprof_faults kprof_fault_sum;     /* merged window (r17-faults) */
@@ -401,6 +416,7 @@ kprof_task_slot(struct kprof_task *table, unsigned int bits, int32_t pid)
 	return NULL;
 }
 
+#if !SWITCH_KPROF_ROLE_ON
 static struct kprof_user *
 kprof_user_slot(struct kprof_user *table, unsigned int bits, int32_t pid, uint64_t key)
 {
@@ -419,6 +435,7 @@ kprof_user_slot(struct kprof_user *table, unsigned int bits, int32_t pid, uint64
 	}
 	return NULL;
 }
+#endif
 
 /* A user PC as something the host can name: the unslid shared cache address, or main executable + offset. */
 static uint64_t
@@ -436,6 +453,7 @@ kprof_user_location(task_t task, uint64_t pc)
 	return KPROF_U_OTHER | (pc & KPROF_U_ADDR);
 }
 
+#if !SWITCH_KPROF_ROLE_ON
 static uint64_t
 kprof_user_key(task_t task, uint64_t pc)
 {
@@ -451,6 +469,7 @@ kprof_region_key(uint64_t key)
 {
 	return (key & ~KPROF_U_ADDR) | ((key & KPROF_U_ADDR) & ~(KPROF_REGION - 1));
 }
+#endif
 
 /* The caller of the sampled function: LR in a leaf, else the return address in the function's frame record. */
 static uintptr_t
@@ -549,6 +568,20 @@ kprof_sample(struct kprof_cpu *kc)
 		task_best_name(task, ts->name, sizeof(ts->name));
 	}
 	if (PSR64_IS_USER(get_saved_state_cpsr(state))) {
+#if SWITCH_KPROF_ROLE_ON
+		const bool     is_main = (thread->thread_tag & THREAD_TAG_MAINTHREAD) != 0;
+		const uint64_t key = switch_kprof_user_key(kprof_user_location(task, get_saved_state_pc(state)), is_main);
+		kprof_user_t  *u = switch_kprof_user_slot(b->user_pc, 11, task_pid(task), key);
+		kprof_user_t  *r = switch_kprof_user_slot(b->image, 8, task_pid(task), switch_kprof_user_region_key(key));
+
+		b->user++;
+		if (ts != NULL) {
+			ts->user++;
+			if (is_main) {
+				ts->user_main++;
+			}
+		}
+#else
 		const uint64_t     key = kprof_user_key(task, get_saved_state_pc(state));
 		struct kprof_user *u = kprof_user_slot(b->user_pc, 11, task_pid(task), key);
 		struct kprof_user *r = kprof_user_slot(b->image, 8, task_pid(task), kprof_region_key(key));
@@ -557,6 +590,7 @@ kprof_sample(struct kprof_cpu *kc)
 		if (ts != NULL) {
 			ts->user++;
 		}
+#endif
 		if (u != NULL) {
 			u->samples++;
 		}
@@ -1148,6 +1182,27 @@ kprof_decmpfs_line(void)
 }
 
 /* The busiest processes' user-mode hot spots, two processes per line. */
+#if SWITCH_KPROF_ROLE_ON
+static void
+kprof_user_hot_spots(void)
+{
+	static char  proc_line[KPROF_LINE];
+	unsigned int procs[KPROF_TOP_USER], nprocs;
+
+	for (unsigned int i = 0; i < KPROF_TASKS; i++) {
+		kprof_vals[i] = kprof_tasks[i].used ? kprof_tasks[i].user : 0;
+	}
+	nprocs = kprof_top(kprof_vals, KPROF_TASKS, procs, KPROF_TOP_USER);
+	for (unsigned int p = 0; p < nprocs; p++) {
+		const struct kprof_task *t = &kprof_tasks[procs[p]];
+
+		switch_kprof_format_user_proc(proc_line, sizeof(proc_line), t->name, t->pid, t->user, t->user_main,
+		    kprof_users, KPROF_USER, KPROF_TOP_USER_PC);
+		kprof_put("SwitchKprof user %u/%u: %s", p + 1, nprocs, proc_line);
+		kprof_flush();
+	}
+}
+#else
 static void
 kprof_user_hot_spots(void)
 {
@@ -1186,6 +1241,7 @@ kprof_user_hot_spots(void)
 		}
 	}
 }
+#endif
 
 /*
  * A process keeps the name it had at its first sample of the window, and a spawn's first sample is often still
@@ -1342,6 +1398,35 @@ kprof_image_line(void)
 
 /* The same processes' user samples by 1 MiB region, one line each: which images (SwiftUI, CoreText, libobjc...) a flat
  * profile is in, where the 64-byte hot spots above cover only its busiest tenth (r12-widgets). */
+#if SWITCH_KPROF_ROLE_ON
+static void
+kprof_user_images(void)
+{
+	static char  img_line[KPROF_LINE];
+	unsigned int procs[KPROF_TOP_USER], nprocs;
+
+	for (unsigned int i = 0; i < KPROF_TASKS; i++) {
+		kprof_vals[i] = kprof_tasks[i].used ? kprof_tasks[i].user : 0;
+	}
+	nprocs = kprof_top(kprof_vals, KPROF_TASKS, procs, KPROF_TOP_USER);
+	for (unsigned int p = 0; p < nprocs; p++) {
+		const struct kprof_task *t = &kprof_tasks[procs[p]];
+		const uint32_t           main_user = MIN(t->user_main, t->user);
+		const uint32_t           worker_user = t->user - main_user;
+
+		if (main_user > 0) {
+			switch_kprof_format_images_role(img_line, sizeof(img_line), t->name, t->pid, true, main_user, t->user,
+			    kprof_images, KPROF_IMAGES, KPROF_TOP_IMAGES, kprof_images_lost);
+			os_log(OS_LOG_DEFAULT, "%s", img_line);
+		}
+		if (worker_user > 0) {
+			switch_kprof_format_images_role(img_line, sizeof(img_line), t->name, t->pid, false, worker_user,
+			    t->user, kprof_images, KPROF_IMAGES, KPROF_TOP_IMAGES, kprof_images_lost);
+			os_log(OS_LOG_DEFAULT, "%s", img_line);
+		}
+	}
+}
+#else
 static void
 kprof_user_images(void)
 {
@@ -1372,6 +1457,7 @@ kprof_user_images(void)
 		kprof_flush();
 	}
 }
+#endif
 
 /* --- r17-faults: the faults lines ---------------------------------------------------------------------------------- */
 
@@ -1705,6 +1791,11 @@ kprof_summary(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 				dst->kernel_task += src->kernel_task;
 			}
 		}
+#if SWITCH_KPROF_ROLE_ON
+		switch_kprof_user_merge(kprof_users, 13, b->user_pc, KPROF_CPU_USER, NULL);
+		kprof_images_lost += b->image_lost;
+		switch_kprof_user_merge(kprof_images, 10, b->image, KPROF_CPU_IMAGES, &kprof_images_lost);
+#else
 		for (unsigned int i = 0; i < KPROF_CPU_USER; i++) {
 			const struct kprof_user *src = &b->user_pc[i];
 			struct kprof_user       *dst;
@@ -1732,6 +1823,7 @@ kprof_summary(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 				kprof_images_lost += src->samples;
 			}
 		}
+#endif
 		for (unsigned int i = 0; i < KPROF_CPU_TASKS; i++) {
 			const struct kprof_task *src = &b->task[i];
 			struct kprof_task       *dst;
@@ -1744,6 +1836,9 @@ kprof_summary(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 				continue;
 			}
 			dst->user += src->user;
+#if SWITCH_KPROF_ROLE_ON
+			dst->user_main += src->user_main;
+#endif
 			dst->kernel += src->kernel;
 			dst->pageins += src->pageins;
 			dst->pagein_kib += src->pagein_kib;

@@ -29,6 +29,7 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
         if (slot.memory == memory && slot.stride == stride && slot.pages == pages && slot.sourceOffset == offset &&
             slot.allocationId == snapshot.allocation.allocation_id &&
             slot.allocationGeneration == snapshot.allocation.allocation_generation) {
+            bool tookSnapshot = false;
             if (slot.read && slot.read->lease) {
                 if (slot.read->allocation.content_generation != snapshot.allocation.content_generation) {
                     switch_native_scanout_release(&snapshot);
@@ -37,10 +38,21 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
                 switch_native_scanout_release(&snapshot);
             } else {
                 *slot.read = snapshot;
+                tookSnapshot = true;
+            }
+            const int entry = kSlot0 + static_cast<int>(k);
+            const bool heldTiled = holdLayout(slot, tiled);
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            if (surfaceCompressed(memory)) {
+                if (!ring.busy(entry) && gpuDirect != entry && gpuPresentedEntry != entry)
+                    dropSlot(k);
+                else if (tookSnapshot && slot.read)
+                    switch_native_scanout_release(slot.read);
+                return kNoBuffer;
             }
             slot.used = ++slotUses;
-            slot.tiled = holdLayout(slot, tiled);
-            return kSlot0 + static_cast<int>(k);
+            slot.tiled = heldTiled;
+            return entry;
         }
         if (!ring.busy(kSlot0 + static_cast<int>(k)) && (victim < 0 || slots[k].used < slots[victim].used))
             victim = static_cast<int>(k);
@@ -87,6 +99,11 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
     *slot.read = snapshot;
     holdScanoutBacking(static_cast<unsigned>(victim));
     slot.tiled = holdLayout(slot, tiled);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (surfaceCompressed(memory)) {
+        dropSlot(static_cast<unsigned>(victim));
+        return kNoBuffer;
+    }
     cleanDomain();
     return kSlot0 + victim;
 }
@@ -114,6 +131,13 @@ static int surfaceBlockLog2(IOMemoryDescriptor *memory)
     const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
     tgm_layout layout = {};
     return (pa != 0u) && tegra_gm20b_surface_layout(pa & ~0xfffULL, &layout) == 1 ? layout.y_log2 : -1;
+}
+
+static bool surfaceCompressed(IOMemoryDescriptor *memory)
+{
+    IOByteCount length = 0;
+    const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+    return (pa != 0u) && tegra_gm20b_surface_compressed(pa & ~0xfffULL) != 0;
 }
 
 // A slot's mapping and its surface given back (it is neither scanned nor asked for).

@@ -6,14 +6,17 @@ encoders, images, audio, display, sensors, input, networking, storage, CPU and c
 The first launch on a boot runs every test that needs no person. If the latest run is unfinished, startup waits for
 Continue run or Start new run. Continue keeps completed results; Start new run saves the old run as cancelled before
 starting fresh. Other launches show this boot's last results until you tap Run All. Interactive runs the tests that need
-someone to plug, press or pick something. Each run writes `Documents/hwtest/<boot uuid>-<stamp>.json` with `F_FULLFSYNC`
-before every test and after it, so a run the app or the OS doesn't survive still keeps every result and the name of the
-test that was running (`run.current`). If the app's process dies mid-run, choosing Continue records that test as a FAIL
-with `crashed=1` and runs the rest. A test interrupted by closing/backgrounding the app runs again. Continuing after a
-reboot puts the interrupted test last and records the new boot's identity alongside the original run. When a GPU test
-times out, a one-fill probe checks the app's Metal device; if the probe hangs too, the later tests that draw are skipped
-and named after the test that wedged it. `pull_logs` copies the reports off the card, and `//tools/hwtest` compares each
-run with the ones before it.
+someone to plug, press or pick something. While a run goes, the app keeps it in
+`Library/Application Support/hwtest/<boot uuid>-<stamp>.journal`, one line per finished test, written off the main
+thread. Documents, which Files shows and Spotlight indexes, gets only finished pictures, each renamed in whole. Each
+test's result and the next test's name reach the card (`F_FULLFSYNC`) before that test starts, so a run the app or the
+OS doesn't survive still keeps every result and the name of the test that was running (`run.current`). When the run
+ends, the app writes it once, whole, as `<boot uuid>-<stamp>.json` and removes the journal. If the app's process dies
+mid-run, choosing Continue records that test as a FAIL with `crashed=1` and runs the rest. A test interrupted by
+closing/backgrounding the app runs again. Continuing after a reboot puts the interrupted test last and records the new
+boot's identity alongside the original run. When a GPU test times out, a one-fill probe checks the app's Metal device;
+if the probe hangs too, the later tests that draw are skipped and named after the test that wedged it. `pull_logs`
+copies the reports off the card, and `//tools/hwtest` compares each run with the ones before it.
 
 One library, `HWTestKit` (`kit/` and `tests/`), holds the tests, the runner, the log lines and the report. Each iOS
 version has an app that wraps it and adds the tests only that version has: `SwitchHWTest17` (`app17/`, built for iOS

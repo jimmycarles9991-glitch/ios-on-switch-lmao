@@ -39,7 +39,6 @@ cc_library(
         "golden_files.h",
         "record_digest.h",
         "//drivers/TegraGM20BMetal:pack.h",
-        "//drivers/TegraGM20BMetal:pack_selectors.h",
         "//drivers/TegraGM20BMetal:set_entries.h",
     ],
     copts = [
@@ -166,7 +165,6 @@ cc_test(
         GM20B_METAL + ":emit.h",
         GM20B_METAL + ":pack.cpp",
         GM20B_METAL + ":pack.h",
-        GM20B_METAL + ":pack_selectors.h",
         GM20B_METAL + ":set_entries.h",
         GM20B_METAL + ":slot_mask.h",
         GM20B_METAL + ":sample_shading.h",
@@ -201,7 +199,6 @@ cc_test(
         GM20B_METAL + ":emit.h",
         GM20B_METAL + ":pack.cpp",
         GM20B_METAL + ":pack.h",
-        GM20B_METAL + ":pack_selectors.h",
         GM20B_METAL + ":set_entries.h",
         GM20B_METAL + ":slot_mask.h",
         GM20B_METAL + ":sample_shading.h",

@@ -26,17 +26,27 @@ DEFINE_MUTEX(tgm_live_lock);
 LIST_HEAD(tgm_live_chans);
 
 static struct nvkm_device device;
+static struct nvkm_ltc ltc_stub;
 static struct switch_chan_new_host host;
 static struct tgm_vm vm;
 static volatile u32 fence;
+static volatile u32 visible_word;
 static struct tgm_chan *made;
 static u32 push_words[1024];
 static u32 userd[128];
 static int timeline;
 static int isolated_critical = -1;
+static uint32_t ltc_flushes;
+
+void nvkm_ltc_flush(struct nvkm_ltc *ltc)
+{
+	(void)ltc;
+	++ltc_flushes;
+}
 
 __attribute__((constructor)) static void switch_chan_new_device(void)
 {
+	device.ltc = &ltc_stub;
 	tgm_gpu.device = &device;
 	tgm_gpu.stage = 3;
 }
@@ -49,6 +59,9 @@ struct switch_chan_new_host *switch_chan_new_host(void)
 int switch_chan_new_make(uint32_t chid, int critical)
 {
 	host = (struct switch_chan_new_host){.chid = chid};
+	fence = 0;
+	visible_word = 0;
+	ltc_flushes = 0;
 	vm.owner = &vm;
 	return tgm_chan_new(&vm, &vm, &fence, 0x200000, "backboardd", critical, &made);
 }
@@ -71,6 +84,19 @@ void switch_chan_new_leave_running(void)
 int switch_chan_new_isolated_critical(void)
 {
 	return isolated_critical;
+}
+
+void switch_chan_new_set_visibility(uint32_t submitted, uint32_t completed, uint32_t visible)
+{
+	fence = completed;
+	visible_word = visible;
+	made->submitted = submitted;
+	made->visible_cpu = &visible_word;
+}
+
+uint32_t switch_chan_new_ltc_flushes(void)
+{
+	return ltc_flushes;
 }
 
 void switch_chan_new_set_level(int high, int critical)

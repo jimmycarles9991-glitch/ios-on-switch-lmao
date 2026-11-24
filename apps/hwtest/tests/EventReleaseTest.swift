@@ -57,7 +57,7 @@ struct EventReleaseTest: HWTest {
         var jobs = 0, released = 0, signalJobs = 0
         var heardBeforeEnd = false
         var commitToHeardMs = 0.0, heardBeforeEndMs = 0.0
-        var waiterDone = false, waiterWrong = 0
+        var waited = false, waiterDone = false, waiterWrong = 0
     }
 
     func run(_ context: TestContext) async throws -> Outcome {
@@ -90,7 +90,8 @@ struct EventReleaseTest: HWTest {
             let value = UInt64(round + 1)
             rounds.append(try await signalled(work, event, value, iterations, waiter: round == 0 ? nil : other))
         }
-        guard let privateData = gpu.device.makeBuffer(length: Self.threads * 4, options: .storageModePrivate),
+        let dataBytes = EventReleaseCheck.fmaLoopBufferBytes(threads: Self.threads)
+        guard let privateData = gpu.device.makeBuffer(length: dataBytes, options: .storageModePrivate),
               let privateSource = gpu.device.makeBuffer(length: Self.bytes, options: .storageModePrivate)
         else { throw TestFailure("no private buffers") }
         let privateWork = Work(gpu: gpu, kernel: work.kernel, data: privateData, source: privateSource)
@@ -115,7 +116,12 @@ struct EventReleaseTest: HWTest {
         if solo.jobs != 1 { wrong.append("jobs_per_cb") }
         if rounds.contains(where: { $0.released != 1 }) { wrong.append("released") }
         if rounds.contains(where: { !$0.heardBeforeEnd }) { wrong.append("heard_after_end") }
-        if rounds.dropFirst().contains(where: { !$0.waiterDone || $0.waiterWrong != 0 }) { wrong.append("waiter") }
+        let waiterOutcomes = rounds.map {
+            EventReleaseCheck.WaiterOutcome(waited: $0.waited, done: $0.waiterDone, wrongBytes: $0.waiterWrong)
+        }
+        if !EventReleaseCheck.waitersPassed(waiterOutcomes, expectedWaited: 2 * (Self.rounds - 1)) {
+            wrong.append("waiter")
+        }
         let exactJobs = (EventJobs.read(gpu.device)["exact_jobs"] ?? 0) != 0
         metrics.set("unflushed_signals", unflushed)
         metrics.set("exact_jobs", exactJobs ? 1 : 0)
@@ -147,6 +153,7 @@ struct EventReleaseTest: HWTest {
         commands.addCompletedHandler { _ in ended.value = CFAbsoluteTimeGetCurrent() }
         let done = NativeSharedEventTest.completion(of: commands)
         let copy = try work.gpu.buffer(Self.bytes)
+        copy.contents().initializeMemory(as: UInt8.self, repeating: fill ^ 0xff, count: Self.bytes)
         let committed = CFAbsoluteTimeGetCurrent()
         commands.commit()
         var waited: DispatchSemaphore?
@@ -159,6 +166,7 @@ struct EventReleaseTest: HWTest {
             consumer.commit()
         }
         var round = Round()
+        round.waited = waiter != nil
         let completed = await NativeSharedEventTest.waited(done, seconds: 10)
         let listened = await NativeSharedEventTest.waited(heardSignal, seconds: 2)
         if let waited {

@@ -3,6 +3,7 @@
 
 Tiers, each name in the first that has it:
   corpus     every Core Animation state the device's journals hold (precompile/corpus.log), by name
+  demand     every state the build's devices made (closure.py demand-<build>.json), by name
   manifest   QuartzCore's offline compilation manifest (CA::OGL::MetalContext::offline_compilation_manifest: the states
              Apple compiles ahead for its GPUs; warmup_shaders makes the ones of the device's GPU family at boot), each
              as Apple names it and as this device's QuartzCore does (deepcolour.py: Apple names them for its
@@ -18,6 +19,9 @@ Tiers, each name in the first that has it:
              the state's own format where m2v draws it once (not the extended-range formats, which mkpack.py leaves out)
   fetch      every fixed-function fragment state of the tiers above with no blend of its own under every blend CA leaves
              in the fragment (framebuffer fetch: the separable and non-separable modes a compositing filter asks for)
+  closure    every state of the corpus and demand tiers under every context value the build's table gives (closure.py,
+             context-<build>.json): attachment set, written attachment, float target and filters for every content,
+             the flags v n s p e for the contents a device made (the demand tier's)
 A state is made from its name alone (caspec.state_fields): its descriptor is what QuartzCore makes of the name.
 
 usage: caset.py <qc-<build>.json> <corpus.log> [tier ...]   prints the R lines (every tier when none is named)
@@ -26,10 +30,11 @@ usage: caset.py <qc-<build>.json> <corpus.log> [tier ...]   prints the R lines (
 import sys
 
 import caspec
+import closure
 import deepcolour
 import fetchfree
 
-TIERS = ('corpus', 'manifest', 'variants', 'blend', 'fetch')
+TIERS = ('corpus', 'demand', 'manifest', 'variants', 'blend', 'fetch', 'closure')
 LIFTABLE = range(1, 26)  # lift_blend_function: the blend functions above 25 stay in the fragment
 CLOSURE_FORMATS = ('BGRA',)
 SINGLE_DRAW_FORMATS = ('BGRA', 'RGBA', 'RGhA', 'RGfA')
@@ -147,12 +152,15 @@ def labels(
     ]
     variants = _variant_tier(tables, list(corpus) + manifest)
     fragments = _fragments(tables, list(corpus) + manifest + variants)
+    demanded = _demand_tier(tables)
     made = {
         'corpus': lambda: list(corpus),
+        'demand': lambda: demanded,
         'manifest': lambda: manifest,
         'variants': lambda: variants,
         'blend': lambda: _blend_tier(tables, fragments),
         'fetch': lambda: _fetch_tier(tables, fragments),
+        'closure': lambda: _closure_tier(tables, list(corpus) + demanded, demanded),
     }
     seen: set[str] = set()
     out: dict[str, list[str]] = {}
@@ -160,6 +168,17 @@ def labels(
         if tier in tiers:
             out[tier] = [n for n in made[tier]() if not (n in seen or seen.add(n))]
     return out
+
+
+def _demand_tier(tables: caspec.Tables) -> list[str]:
+    if not tables.v27:
+        return []
+    return [n for n in closure.demand(tables.t['build']) if closure.strict(tables.v27, n)]
+
+
+def _closure_tier(tables: caspec.Tables, seeds: list[str], demanded: list[str]) -> list[str]:
+    table = closure.context(tables.t['build']) if tables.v27 else None
+    return closure.closure(tables.v27, table, seeds, demanded) if table else []
 
 
 def _variant_tier(tables: caspec.Tables, seeds: list[str]) -> list[str]:
