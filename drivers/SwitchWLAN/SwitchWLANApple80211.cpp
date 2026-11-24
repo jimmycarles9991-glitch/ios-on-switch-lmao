@@ -14,9 +14,11 @@
 #include <net/kpi_interface.h>
 #include <sys/errno.h>
 #include <sys/kern_event.h>
+#include <sys/proc.h>
 #include <sys/systm.h>
 #include "SwitchWLANApple80211.h"
 #include "SwitchWLANAwdlRadio.h"
+#include "awdl/awdl_apple80211.h"
 #include "SwitchWLANNet.h"
 #include "SwitchWLANStation.h"
 
@@ -150,6 +152,25 @@ int copy_in(const apple80211req &rq, void *dst, size_t size)
     memset(dst, 0, size);
     return copyin(rq.req_data, dst, rq.req_len < size ? rq.req_len : size);
 }
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+constexpr int kBtCoexProfile = 255;  // APPLE80211_IOC_BTCOEX_PROFILE, as 24B119's wifid names it
+bool gBtCoexProfileLogged;
+
+void logBtCoexProfile(const apple80211req &rq)
+{
+    if (__atomic_exchange_n(&gBtCoexProfileLogged, true, __ATOMIC_RELAXED))
+        return;
+    uint8_t payload[56];
+    const int error = copy_in(rq, payload, sizeof payload);
+    char hex[2 * sizeof payload + 1] = {};
+    for (size_t i = 0; i < sizeof payload && !error; ++i)
+        snprintf(hex + 2 * i, 3, "%02x", payload[i]);
+    char caller[32] = {};
+    proc_selfname(caller, sizeof caller);
+    IOLog("SwitchWLAN: probe btcoex profile from %s, %u bytes (copyin %d): %s\n", caller, rq.req_len, error, hex);
+}
+#endif
 
 // The regulatory country as the access points announce it (802.11d: the Country element, id 7, of the strongest
 // network that has one), else "XX".
@@ -314,6 +335,16 @@ int answer(bool set, apple80211req &rq)
                 return EFAULT;
             return r;
         }
+#if defined(SWITCH_IPSW_KIND_24B119)
+        case A80211_IOC_VIRTUAL_IF_STATE: {
+            if (rq.req_len != sizeof(switch_a80211_virtual_if_state))
+                return EINVAL;
+            switch_a80211_virtual_if_state state;
+            if (copy_in(rq, &state, sizeof state))
+                return EFAULT;
+            return switch_wlan_awdl_vif_state(&state, sizeof state);
+        }
+#endif
         case kBtCoexFlags:
         case kBtPower:
             // What Bluetooth does, for the radio's coexistence handling and its stats line (SwitchWLANCoex.h); wifid
@@ -338,6 +369,10 @@ int answer(bool set, apple80211req &rq)
         case kFilterMonitorEvents:
             return 0;
         default:
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+            if (type == kBtCoexProfile)
+                logBtCoexProfile(rq);
+#endif
             return EOPNOTSUPP;
         }
     }

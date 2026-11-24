@@ -20,4 +20,5 @@ TEST(Awdl, CoreApple80211AndFirmware)
     EXPECT_THAT(out, testing::HasSubstr("creation failures: ok"));
     EXPECT_THAT(out, testing::HasSubstr("channel forms: ok"));
     EXPECT_THAT(out, testing::HasSubstr("beside the access point: ok"));
+    EXPECT_THAT(out, testing::HasSubstr("a Mac's decisions and sequences: ok"));
 }

@@ -9,6 +9,17 @@
 // brcmf_pcie_reset_device's ChipCommon watchdog reset is not used: TegraPcie power-cycles WL_REG_ON instead.
 #include <IOKit/IOLib.h>
 #include "SwitchWLANPrivate.h"
+#if DEVELOPMENT || DEBUG
+#include <libkern/crypto/sha2.h>
+#include <pexpert/pexpert.h>
+#include "SwitchWLANA3.h"
+#include "firmware/a3/image.h"
+#include "firmware/rom_capture.h"
+
+extern "C" void switch_wlan_rom_captured(const uint8_t *bytes, size_t length, uint32_t overwrittenPrefix);
+static_assert(SWITCH_WLAN_ROM_START_OFFSET + sizeof switch_wlan_rom_start_code <= SWITCH_WLAN_ROM_HEADER_OFFSET);
+static_assert(sizeof(switch_wlan_rom_header) == 24);
+#endif
 
 namespace swlan {
 namespace {
@@ -47,7 +58,7 @@ bool Chip::attach(TegraPcie *pcie, uint32_t bar0PA, uint32_t bar2PA, char *why, 
     pcie_ = pcie;
     window_ = ~0u;
     // Mapped once: a chip brought back after a reset is enumerated to the same BARs (TegraPcie::restart).
-    if ((!bar0_.base && !bar0_.map(bar0PA, 0x1000)) || (!tcm_.base && !tcm_.map(bar2PA, 0x400000))) {
+    if ((!bar0_.base && !bar0_.map(bar0PA, 0x1000)) || (!tcm_.base && !tcm_.map(bar2PA, kTcmLength))) {
         snprintf(why, whyLength, "BAR mapping failed");
         return false;
     }
@@ -69,12 +80,27 @@ bool Chip::attach(TegraPcie *pcie, uint32_t bar0PA, uint32_t bar2PA, char *why, 
     ramBase_ = 0x180000;
     ramSize_ = 0;
     const uint32_t cap = read(arm->base + kCr4Cap);
+#if DEVELOPMENT || DEBUG
+    const uint32_t bankIndex = read(arm->base + kCr4BankIdx);
+#endif
     const uint32_t banks = (cap & 0xF) + ((cap >> 4) & 0xF);
     for (uint32_t i = 0; i < banks; ++i) {
         write(arm->base + kCr4BankIdx, i);
         const uint32_t info = read(arm->base + kCr4BankInfo);
         ramSize_ += ((info & 0x7F) + 1) * ((info & kCr4Bank1K) ? 1024 : 8192);
     }
+#if DEVELOPMENT || DEBUG
+    romSize_ = 0;
+    const uint32_t romBanks = (cap >> 8) & 0xF;
+    for (uint32_t i = 0; i < romBanks; ++i) {
+        write(arm->base + kCr4BankIdx, 0x100u | i);
+        const uint32_t info = read(arm->base + kCr4BankInfo);
+        romSize_ += ((info & 0x3F) + 1) * 8192;
+        IOLog("SwitchWLAN: ROM bank %u: info %#x\n", i, info);
+    }
+    write(arm->base + kCr4BankIdx, bankIndex);
+    IOLog("SwitchWLAN: ROM map: ARM %#x cap %#x, %u banks, %u bytes at 0\n", arm->base, cap, romBanks, romSize_);
+#endif
     return true;
 }
 
@@ -232,8 +258,88 @@ void Chip::tcmCopy(uint32_t address, const uint8_t *data, size_t length)
     }
 }
 
+#if DEVELOPMENT || DEBUG
+bool Chip::captureRom(const uint8_t *image, size_t imageLength, const Core &arm)
+{
+    if (!switch_wlan_rom_bounds(romSize_, ramSize_) || imageLength != SWITCH_WLAN_ROM_IMAGE_BYTES) {
+        IOLog("SwitchWLAN: ROM capture refused: ROM %u, RAM %u, image %zu\n", romSize_, ramSize_, imageLength);
+        return false;
+    }
+    uint8_t hash[32];
+    SHA256_CTX context;
+    SHA256_Init(&context);
+    SHA256_Update(&context, image, imageLength);
+    SHA256_Final(hash, &context);
+    if (memcmp(hash, switch_wlan_rom_image_sha256, sizeof hash) ||
+        memcmp(image + SWITCH_WLAN_ROM_START_OFFSET, switch_wlan_rom_start_original,
+               sizeof switch_wlan_rom_start_original)) {
+        IOLog("SwitchWLAN: ROM capture refused: firmware fingerprint changed\n");
+        return false;
+    }
+    auto *bytes = static_cast<uint8_t *>(IOMallocZero(romSize_));
+    if (!bytes) {
+        IOLog("SwitchWLAN: ROM capture refused: no %u-byte buffer\n", romSize_);
+        return false;
+    }
+    const switch_wlan_rom_header header = {SWITCH_WLAN_ROM_MAGIC, 0, romSize_, ramSize_, 0, 0};
+    tcmCopy(ramBase_, image, imageLength);
+    tcmCopy(ramBase_ + SWITCH_WLAN_ROM_START_OFFSET, switch_wlan_rom_start_code, sizeof switch_wlan_rom_start_code);
+    tcmCopy(ramBase_ + SWITCH_WLAN_ROM_HEADER_OFFSET, reinterpret_cast<const uint8_t *>(&header), sizeof header);
+    tcm_.w32(0, le32(image));
+    coreReset(arm, kCr4CpuHalt, 0, 0);
+    const uint32_t statusAddress = ramBase_ + SWITCH_WLAN_ROM_HEADER_OFFSET + 4;
+    uint32_t state = 0;
+    for (uint32_t waited = 0; waited < kBootTimeoutMs; waited += 10) {
+        state = tcm_.r32(statusAddress);
+        if (state >= SWITCH_WLAN_ROM_DONE)
+            break;
+        IOSleep(10);
+    }
+    coreReset(arm, kCr4CpuHalt, kCr4CpuHalt, kCr4CpuHalt);
+    const uint32_t copied = tcm_.r32(ramBase_ + SWITCH_WLAN_ROM_HEADER_OFFSET + 16);
+    bool ok = state == SWITCH_WLAN_ROM_DONE && copied == romSize_;
+    if (ok) {
+        uint32_t checksum = 0;
+        for (uint32_t offset = 0; offset < romSize_; offset += 4) {
+            const uint32_t word = tcm_.r32(ramBase_ + SWITCH_WLAN_ROM_DATA_OFFSET + offset);
+            put32(bytes + offset, word);
+            checksum ^= word;
+        }
+        ok = checksum == tcm_.r32(ramBase_ + SWITCH_WLAN_ROM_HEADER_OFFSET + 20);
+        if (ok)
+            switch_wlan_rom_captured(bytes, romSize_, 4);
+    }
+    if (!ok)
+        IOLog("SwitchWLAN: ROM capture failed: state %u, copied %u of %u\n", state, copied, romSize_);
+    IOFree(bytes, romSize_);
+    return ok;
+}
+#endif
+
 bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, size_t nvramLength, char *why,
                 size_t whyLength)
+{
+#if DEVELOPMENT || DEBUG
+    int backend = 3, capture = 0;
+    PE_parse_boot_argn("switch-wlan-rom", &capture, sizeof capture);
+    PE_parse_boot_argn("switch-wlan-backend", &backend, sizeof backend);
+    if (!capture && backend && id_ == 0x4356 && rev_ == 3 && romSize_ == 0xa0000 && ramSize_ == 0xc0000) {
+        size_t length = 0;
+        uint8_t *patched = switch_wlan_a3_build(image, imageLength, &length, backend >= 3);
+        if (patched) {
+            const bool ready = bootImage(patched, length, nvram, nvramLength, why, whyLength);
+            IOFree(patched, length);
+            if (ready)
+                return true;
+            IOLog("SwitchWLAN: A3 backend boot failed (%s); restoring stock firmware\n", why);
+        }
+    }
+#endif
+    return bootImage(image, imageLength, nvram, nvramLength, why, whyLength);
+}
+
+bool Chip::bootImage(const uint8_t *image, size_t imageLength, const uint8_t *nvram, size_t nvramLength, char *why,
+                     size_t whyLength)
 {
     const Core *arm = find(kCoreArmCr4);
     const Core *pcie2 = find(kCorePcie2);
@@ -241,7 +347,8 @@ bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, 
     // A RAM size recorded in the image ("SMAR" at 0x6c) wins over the banks (brcmf_pcie_adjust_ramsize).
     if (imageLength >= 0x6c + 8 && le32(image + 0x6c) == 0x534D4152)
         ramSize_ = le32(image + 0x70);
-    if (imageLength < 4 || imageLength + nvramLength > ramSize_) {
+    if (!containsRam(ramBase_, ramSize_) || imageLength < 4 || imageLength > ramSize_ ||
+        nvramLength > ramSize_ - imageLength) {
         snprintf(why, whyLength, "%zu + %zu bytes do not fit %u of RAM", imageLength, nvramLength, ramSize_);
         return false;
     }
@@ -257,9 +364,28 @@ bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, 
     if (stale && stale != 0xFFFFFFFF)
         write(pcie2->base + kPcie2MailboxInt, stale);
 
+#if DEVELOPMENT || DEBUG
+    static bool captured;
+    int capture = 0;
+    if (!captured && PE_parse_boot_argn("switch-wlan-rom", &capture, sizeof capture) && capture) {
+        captured = true;
+        captureRom(image, imageLength, *arm);
+    }
+#endif
     const uint64_t t0 = nowNs();
     const uint32_t top = ramBase_ + ramSize_ - 4;
     tcmCopy(ramBase_, image, imageLength);
+#if DEVELOPMENT || DEBUG
+    int backendLevel = 3;
+    PE_parse_boot_argn("switch-wlan-backend", &backendLevel, sizeof backendLevel);
+    if (backendLevel) {
+        const uint32_t state = switch_wlan_a3_state_address(backendLevel >= 3);
+        if (switch_a3_state_range_valid(state, ramBase_, ramSize_) && imageLength >= 12 &&
+            state - ramBase_ <= imageLength - 12 && le32(image + state - ramBase_) == SWITCH_A3_CAPS_MAGIC)
+            IOLog("SwitchWLAN: A3 upload header at %#x: %#x/%u/%u\n", state, tcm_.r32(state), tcm_.r32(state + 4),
+                  tcm_.r32(state + 8));
+    }
+#endif
     // The last RAM word ends the NVRAM (its length token); the firmware replaces it with its shared area's address.
     tcm_.w32(top, 0);
     tcmCopy(static_cast<uint32_t>(ramBase_ + ramSize_ - nvramLength), nvram, nvramLength);
@@ -277,7 +403,7 @@ bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, 
                  kBootTimeoutMs, ramSize_ / 1024, ramBase_, read(arm->wrap + kAiIoctl), read(arm->wrap + kAiResetCtl));
         return false;
     }
-    if (shared < ramBase_ || shared >= ramBase_ + ramSize_) {
+    if (!containsRam(shared, 76)) {
         snprintf(why, whyLength, "shared area at %#x, outside RAM", shared);
         return false;
     }
@@ -298,9 +424,11 @@ bool Chip::boot(const uint8_t *image, size_t imageLength, const uint8_t *nvram, 
 
 void Chip::crash(char *out, size_t length)
 {
+    if (!length)
+        return;
     const auto text = [this](uint32_t address, char *buffer, size_t size) {
         size_t n = 0;
-        for (uint32_t k = 0; k < 96 && n + 1 < size && address >= ramBase_ && address + k < ramBase_ + ramSize_; ++k) {
+        for (uint32_t k = 0; k < 96 && n + 1 < size && containsRam(address, k + 1, 1); ++k) {
             const uint8_t c = tcm_.r8(address + k);
             if (!c)
                 break;
@@ -309,7 +437,7 @@ void Chip::crash(char *out, size_t length)
         }
         buffer[n] = 0;
     };
-    const uint32_t flags = shared_ ? tcm_.r32(shared_) : 0;
+    const uint32_t flags = shared_ && containsRam(shared_, 76) ? tcm_.r32(shared_) : 0;
     size_t used = 0;
     const auto append = [&](int written) {
         if (written > 0)
@@ -328,7 +456,7 @@ void Chip::crash(char *out, size_t length)
     }
     if (flags & kSharedTrapFlag) {
         const uint32_t trap = tcm_.r32(shared_ + kSharedTrap);
-        if (trap >= ramBase_ && trap + 80 <= ramBase_ + ramSize_) {
+        if (containsRam(trap, 80)) {
             // trap_t: type, epc, cpsr, spsr, r0..r15 (sp = r13, lr = r14, pc = r15).
             append(snprintf(out + used, length - used,
                             ", trap %#x pc %#x epc %#x lr %#x sp %#x cpsr %#x r0-r3 %#x %#x %#x %#x", tcm_.r32(trap),
@@ -342,13 +470,15 @@ void Chip::crash(char *out, size_t length)
 // The newest printable bytes of the firmware's console ring (lines joined by " | "): what it said last.
 void Chip::consoleTail(char *out, size_t length)
 {
+    if (!length)
+        return;
     out[0] = 0;
-    if (!console_ || console_ < ramBase_ || console_ >= ramBase_ + ramSize_ || length < 2)
+    if (!console_ || !containsRam(console_, 20) || length < 2)
         return;
     const uint32_t buffer = tcm_.r32(console_ + 8);
     const uint32_t size = tcm_.r32(console_ + 12);
     const uint32_t index = tcm_.r32(console_ + 16);
-    if (!size || size > 0x10000 || index >= size || buffer < ramBase_ || buffer + size > ramBase_ + ramSize_) {
+    if (!size || size > 0x10000 || index >= size || !containsRam(buffer, size, 1)) {
         snprintf(out, length, "(console unreadable: buf %#x size %u index %u)", buffer, size, index);
         return;
     }

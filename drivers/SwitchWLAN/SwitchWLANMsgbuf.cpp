@@ -27,6 +27,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IOLib.h>
 #include "SwitchWLANPrivate.h"
+#include "SwitchWLANDma.h"
 #include "../../kits/SwitchRing/SwitchRing.h"
 
 namespace swlan {
@@ -171,7 +172,7 @@ bool Msgbuf::allocateArea(char *why, size_t whyLength)
     }
     txFree_ = static_cast<uint16_t *>(txSlots_);
     txStatus_ = txFree_ + kSlots;
-    txBusy_ = reinterpret_cast<uint8_t *>(txStatus_ + kSlots);
+    txRing_ = reinterpret_cast<uint8_t *>(txStatus_ + kSlots);
     return true;
 }
 
@@ -194,11 +195,42 @@ bool Msgbuf::attach(Chip *chip, EventHandler events, FrameHandler frames, void *
     context_ = context;
     const Mmio &tcm = chip->tcm();
     const uint32_t shared = chip->shared();
+    if (!chip->containsRam(shared, SHARED_RINGUPD_ADDR + 8)) {
+        snprintf(why, whyLength, "shared area outside firmware RAM");
+        return false;
+    }
+    const uint32_t info = tcm.r32(shared + SHARED_RING_INFO);
+    if (!chip->containsRam(info, kRingInfoMaxFlowRings + 2)) {
+        snprintf(why, whyLength, "ring info outside firmware RAM");
+        return false;
+    }
+    uint32_t mem = tcm.r32(info + RINGINFO_MEM);
+    const uint32_t h2dW = tcm.r32(info + RINGINFO_H2D_W);
+    const uint32_t h2dR = tcm.r32(info + RINGINFO_H2D_R);
+    const uint32_t d2hW = tcm.r32(info + RINGINFO_D2H_W);
+    const uint32_t d2hR = tcm.r32(info + RINGINFO_D2H_R);
+    const uint32_t mailbox = tcm.r32(shared + SHARED_DTOH_MB_DATA);
+    const uint16_t submissionRings = tcm.r16(info + kRingInfoMaxFlowRings);
+    if (submissionRings <= kFlowRingId || !chip->containsRam(mem, RING_COUNT * kRingMemSize) ||
+        !chip->containsRam(h2dW, 4u * submissionRings, 2) ||
+        !chip->containsRam(h2dR, 4u * submissionRings, 2) || !chip->containsRam(d2hW, 12, 2) ||
+        !chip->containsRam(d2hR, 12, 2) || !chip->containsRam(mailbox, 4)) {
+        snprintf(why, whyLength, "ring or mailbox span outside firmware RAM");
+        return false;
+    }
+    const uint32_t dataOffset = tcm.r32(shared + SHARED_RX_DATAOFFSET);
+    if (dataOffset >= kRxBufferSize) {
+        snprintf(why, whyLength, "invalid shared receive offset %u (buffer %u bytes)", dataOffset, kRxBufferSize);
+        return false;
+    }
+    dataOffset_ = dataOffset;
     const Core *pcie2 = chip->find(0x83C);
     pcie2_ = pcie2 ? pcie2->base : 0;
 
     // One physically contiguous area below 4 GiB, zeroed and out of the caches before the chip learns of it.
     if (!memory_ && !allocateArea(why, whyLength))
+        return false;
+    if (!switch_wlan_dma_map(areaPA_, layout_.length, why, whyLength))
         return false;
     areaUsed_ = 0;
     bzero(area_, layout_.length);
@@ -206,6 +238,7 @@ bool Msgbuf::attach(Chip *chip, EventHandler events, FrameHandler frames, void *
     flow_ = FLOW_CLOSED;
     flowStatus_ = 0;
     replyReady_ = false;
+    ioctlPending_ = false;
     awdlRings_ = 0;
     awdlRefused_ = 0;
     for (auto &f : awdl_)
@@ -217,12 +250,6 @@ bool Msgbuf::attach(Chip *chip, EventHandler events, FrameHandler frames, void *
     allocate(4096, 4096, msi);  // the MSI target page: the AFI decodes writes to it, memory never sees them
     msiPA_ = msi.pa;
 
-    const uint32_t info = tcm.r32(shared + SHARED_RING_INFO);
-    uint32_t mem = tcm.r32(info + RINGINFO_MEM);
-    const uint32_t h2dW = tcm.r32(info + RINGINFO_H2D_W);
-    const uint32_t h2dR = tcm.r32(info + RINGINFO_H2D_R);
-    const uint32_t d2hW = tcm.r32(info + RINGINFO_D2H_W);
-    const uint32_t d2hR = tcm.r32(info + RINGINFO_D2H_R);
     for (unsigned k = 0; k <= RING_COUNT; ++k) {
         const uint16_t items = k == FLOW ? kFlowItems : kRingItems[k];
         const uint16_t size = k == FLOW ? kFlowItemSize : kRingItemSize[k];
@@ -275,7 +302,7 @@ bool Msgbuf::attach(Chip *chip, EventHandler events, FrameHandler frames, void *
     txBase_ = static_cast<uint32_t>(txBuffers.va - area_);
     for (unsigned i = 0; i < txCount_; ++i) {
         txFree_[i] = static_cast<uint16_t>(i + 1);
-        txBusy_[i] = 0;
+        txRing_[i] = 0;
         txStatus_[i] = 0;
     }
     txFreeHead_ = 0;
@@ -290,12 +317,10 @@ bool Msgbuf::attach(Chip *chip, EventHandler events, FrameHandler frames, void *
         return false;
     }
     rxBase_ = static_cast<uint32_t>(rxBuffers.va - area_);
-    dataOffset_ = tcm.r32(shared + SHARED_RX_DATAOFFSET);
-    dtohMailbox_ = tcm.r32(shared + SHARED_DTOH_MB_DATA);
+    dtohMailbox_ = mailbox;
 
     // The AWDL flow rings, last, so none of the station's memory moves; as many as the firmware's flow rings
     // (v5: max_flowrings counts the two common submission rings too) and the area allow. Unused until AWDL runs.
-    const uint16_t submissionRings = tcm.r16(info + kRingInfoMaxFlowRings);
     maxFlowRings_ = submissionRings > 2 ? static_cast<uint16_t>(submissionRings - 2) : 0;
     for (unsigned k = 0; k < kAwdlFlows && 1u + k < maxFlowRings_; ++k) {
         Buffer b;
@@ -521,9 +546,9 @@ void Msgbuf::retire(unsigned ring)
 
 void Msgbuf::txRelease(uint32_t id, uint16_t status)
 {
-    if (id < 1 || id > txCount_ || !txBusy_[id - 1])
+    if (id < 1 || id > txCount_ || !txRing_[id - 1])
         return;  // not one of ours in flight (a stale completion)
-    txBusy_[id - 1] = 0;
+    txRing_[id - 1] = 0;
     txStatus_[id - 1] = status;
     txFree_[switch_ring_advance(txFreeHead_, txFreeCount_, txCount_)] = static_cast<uint16_t>(id);
     ++txFreeCount_;
@@ -546,19 +571,24 @@ void Msgbuf::drain()
         while (next(CONTROL_COMPLETE, item)) {
             const uint32_t id = le32(item + 4);
             if (item[0] == MSG_IOCTL_CMPLT && id < kControlBuffers) {
-                size_t length = le16(item + 12);
-                if (length > sizeof(reply_))
-                    length = sizeof(reply_);
-                switch_dcache_clean_invalidate(control_[id].va, length);
-                memcpy(reply_, control_[id].va, length);
-                replyLength_ = length;
-                replyStatus_ = static_cast<int16_t>(le16(item + 8));
-                replyReady_ = true;
+                if (ioctlPending_ && le16(item + 14) == transId_ && le32(item + 16) == ioctlCommand_) {
+                    size_t length = le16(item + 12);
+                    if (length > sizeof(reply_))
+                        length = sizeof(reply_);
+                    switch_dcache_clean_invalidate(control_[id].va, length);
+                    memcpy(reply_, control_[id].va, length);
+                    replyLength_ = length;
+                    replyStatus_ = static_cast<int16_t>(le16(item + 8));
+                    replyReady_ = true;
+                    ioctlPending_ = false;
+                }
                 postControl(id);
             } else if (item[0] == MSG_WL_EVENT && id >= kControlBuffers && id < 2 * kControlBuffers) {
-                uint32_t length = le16(item + 12);
-                if (dataOffset_ + length > kControlBufferSize)
-                    length = kControlBufferSize - dataOffset_;
+                const uint32_t length = le16(item + 12);
+                if (dataOffset_ >= kControlBufferSize || length > kControlBufferSize - dataOffset_) {
+                    postControl(id);
+                    continue;
+                }
                 const uint8_t *frame = control_[id].va + dataOffset_;
                 switch_dcache_clean_invalidate(frame, length);
                 if (length >= kEventData && ((static_cast<unsigned>(frame[12]) << 8) | frame[13]) == kEthPLinkCtl &&
@@ -582,21 +612,23 @@ void Msgbuf::drain()
                 if (k < awdlRings_ && awdl_[k].state == FLOW_PENDING) {
                     AwdlFlow &f = awdl_[k];
                     f.state = le16(item + 8) ? FLOW_REFUSED : FLOW_OPEN;
-                    if (f.state == FLOW_OPEN && f.pendingLength)
-                        post(FLOW + 1 + k, f.ifidx, f.pending.va, f.pendingLength);
-                    f.pendingLength = 0;
+                    if (f.state != FLOW_OPEN)
+                        f.pendingLength = 0;
                 }
             } else if (item[0] == MSG_FLOW_RING_CREATE_CMPLT) {
                 flowStatus_ = le16(item + 8);
                 flow_ = flowStatus_ ? FLOW_REFUSED : FLOW_OPEN;
             } else if (item[0] == MSG_FLOW_RING_DELETE_CMPLT && le16(item + 10) > kFlowRingId) {
                 const unsigned k = le16(item + 10) - kFlowRingId - 1u;
-                if (k < awdlRings_)
-                    awdl_[k].state = FLOW_CLOSED;
+                if (k < awdlRings_ && awdl_[k].state == FLOW_DELETING)
+                    awdl_[k].state = le16(item + 8) ? FLOW_DELETE_FAILED : FLOW_CLOSED;
             }
             // MSG_IOCTLPTR_REQ_ACK and status messages (general and ring status) need no answer.
         }
         retire(CONTROL_COMPLETE);
+        for (unsigned k = 0; k < awdlRings_; ++k)
+            if (awdl_[k].state == FLOW_DELETE_PENDING)
+                awdlDelete(k);
         // Transmit completions first: they free the buffers the next batch (and the receive direction's ACKs) go
         // out of.
         unsigned n = 0;
@@ -606,6 +638,11 @@ void Msgbuf::drain()
                 txRelease(le32(item + 4), le16(item + 8));
         }
         retire(TX_COMPLETE);
+        for (unsigned k = 0; k < awdlRings_ && txFreeCount_; ++k) {
+            AwdlFlow &f = awdl_[k];
+            if (f.state == FLOW_OPEN && f.pendingLength && post(FLOW + 1 + k, f.ifidx, f.pending.va, f.pendingLength))
+                f.pendingLength = 0;
+        }
 
         // brcmf_msgbuf_process_rx_complete: the frame at its own offset, or at the firmware's default one; each
         // buffer back to the chip after its frame was copied out, one doorbell for the pass. Every frame's lines are
@@ -624,14 +661,13 @@ void Msgbuf::drain()
             const uint32_t id = le32(item + 4);
             if (item[0] != MSG_RX_CMPLT || id >= rxCount_)
                 continue;
-            const uint32_t offset = le16(item + 16) ? le16(item + 16) : dataOffset_;
+            uint32_t offset = le16(item + 16) ? le16(item + 16) : dataOffset_;
             uint32_t length = le16(item + 14);
-            if (offset >= kRxBufferSize) {
-                length = 0;
-            } else if (offset + length > kRxBufferSize) {
-                length = kRxBufferSize - offset;
+            if (offset >= kRxBufferSize || length > kRxBufferSize - offset) {
+                offset = length = 0;
+            } else if (length) {
+                switch_dcache_clean_invalidate_lines(rxVa(id) + offset, length);
             }
-            switch_dcache_clean_invalidate_lines(rxVa(id) + offset, length);
             arrivals[arrived++] = {id, static_cast<uint16_t>(offset), static_cast<uint16_t>(length), item[1],
                                    static_cast<uint8_t>(le16(item + kRxFlags) & kRxFrameMask)};
         }
@@ -684,6 +720,10 @@ uint32_t Msgbuf::service(bool *halted)
 bool Msgbuf::ioctlSubmit(uint32_t cmd, uint8_t ifidx, const uint8_t *data, size_t length, size_t outLength, char *why,
                          size_t whyLength)
 {
+    if (ioctlPending_) {
+        snprintf(why, whyLength, "previous ioctl still owns its DMA buffer");
+        return false;
+    }
     size_t n = length > outLength ? length : outLength;
     // brcmf_msgbuf_tx_ioctl: a longer request (actframe's whole brcmf_fil_af_params_le) declares its length as the
     // output length and carries its first BRCMF_TX_IOCTL_MAX_MSG_SIZE bytes
@@ -707,6 +747,8 @@ bool Msgbuf::ioctlSubmit(uint32_t cmd, uint8_t ifidx, const uint8_t *data, size_
     put16(p + 16, declared);                  // output_buf_len
     put32(p + 24, ioctlBuffer_.pa);
     put32(p + 28, 0);
+    ioctlCommand_ = cmd;
+    ioctlPending_ = true;
     replyReady_ = false;
     replyLength_ = 0;
     commit(CONTROL_SUBMIT);
@@ -824,7 +866,7 @@ uint32_t Msgbuf::postFrame(unsigned ring, uint8_t ifidx, size_t length)
     --txFreeCount_;
     const uint8_t *frame = txVa(id);
     switch_dcache_clean_lines(frame, length);
-    txBusy_[id - 1] = 1;
+    txRing_[id - 1] = static_cast<uint8_t>(ring + 1);
     p[0] = MSG_TX_POST;
     p[1] = ifidx;
     put32(p + 4, id);
@@ -858,7 +900,7 @@ uint32_t Msgbuf::post(unsigned ring, uint8_t ifidx, const uint8_t *frame, size_t
 
 bool Msgbuf::sent(uint32_t id, uint16_t *status) const
 {
-    if (id < 1 || id > txCount_ || txBusy_[id - 1])
+    if (id < 1 || id > txCount_ || txRing_[id - 1])
         return false;
     *status = txStatus_[id - 1];
     return true;
@@ -866,9 +908,40 @@ bool Msgbuf::sent(uint32_t id, uint16_t *status) const
 
 // brcmf_flowring_create for a non-station interface: one ring per destination, every group address on the
 // broadcast one. The first frame to a new destination is kept until its ring is open (drain sends it).
-int Msgbuf::awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length)
+uint16_t Msgbuf::awdlFirstRing() const
 {
-    if (length < kEthHeader || length > kTxBufferSize) {
+    return kFlowRingId + 1;
+}
+
+unsigned Msgbuf::awdlOutstanding() const
+{
+    unsigned count = 0;
+    for (unsigned index = 0; index < txCount_; ++index)
+        count += txRing_[index] > FLOW + 1;
+    for (unsigned index = 0; index < awdlRings_; ++index)
+        count += awdl_[index].pendingLength != 0;
+    return count;
+}
+
+bool Msgbuf::awdlFailed() const
+{
+    for (unsigned index = 0; index < awdlRings_; ++index)
+        if (awdl_[index].state == FLOW_DELETE_FAILED)
+            return true;
+    return false;
+}
+
+bool Msgbuf::awdlClosed() const
+{
+    for (unsigned index = 0; index < awdlRings_; ++index)
+        if (awdl_[index].state != FLOW_CLOSED && awdl_[index].state != FLOW_REFUSED)
+            return false;
+    return true;
+}
+
+int Msgbuf::awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length, const uint8_t *source)
+{
+    if (!frame || length < kEthHeader || length > kTxBufferSize) {
         ++awdlRefused_;
         return -1;
     }
@@ -886,9 +959,9 @@ int Msgbuf::awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length)
     if (k < awdlRings_) {
         AwdlFlow &f = awdl_[k];
         f.lastUse = ++awdlUse_;
-        if (f.state == FLOW_OPEN)
+        if (f.state == FLOW_OPEN && !f.pendingLength)
             return post(FLOW + 1 + k, ifidx, frame, length) ? 1 : -1;
-        if (f.pendingLength) {
+        if (source || f.pendingLength) {
             ++awdlRefused_;
             return -1;
         }
@@ -911,8 +984,11 @@ int Msgbuf::awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length)
     f.ifidx = ifidx;
     f.state = FLOW_PENDING;
     f.lastUse = ++awdlUse_;
-    memcpy(f.pending.va, frame, length);
-    f.pendingLength = static_cast<uint16_t>(length);
+    // Private envelopes remain caller-owned until an actual DMA post, including flow creation.
+    if (!source) {
+        memcpy(f.pending.va, frame, length);
+        f.pendingLength = static_cast<uint16_t>(length);
+    }
     r.pos = r.seen = r.told = 0;  // a fresh ring: both indices from zero
     chip_->tcm().w16(r.wIndex, 0);
     bzero(r.va, static_cast<size_t>(r.items) * r.size);
@@ -920,14 +996,27 @@ int Msgbuf::awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length)
     p[0] = MSG_FLOW_RING_CREATE;
     p[1] = ifidx;
     memcpy(p + 8, da, 6);
-    memcpy(p + 14, frame + 6, 6);
+    memcpy(p + 14, source ? source : frame + 6, 6);
     put16(p + 22, static_cast<uint16_t>(kFlowRingId + 1 + free));
     put16(p + 28, r.items);
     put16(p + 30, r.size);
     put32(p + 32, r.pa);
     put32(p + 36, 0);
     commit(CONTROL_SUBMIT);
-    return 0;
+    return source ? -1 : 0;
+}
+
+void Msgbuf::awdlDelete(unsigned index)
+{
+    AwdlFlow &flow = awdl_[index];
+    uint8_t *p = reserve(CONTROL_SUBMIT);
+    if (!p)
+        return;
+    p[0] = MSG_FLOW_RING_DELETE;
+    p[1] = flow.ifidx;
+    put16(p + 8, static_cast<uint16_t>(kFlowRingId + 1 + index));
+    commit(CONTROL_SUBMIT);
+    flow.state = FLOW_DELETING;
 }
 
 void Msgbuf::awdlClose()
@@ -935,18 +1024,10 @@ void Msgbuf::awdlClose()
     for (unsigned k = 0; k < awdlRings_; ++k) {
         AwdlFlow &f = awdl_[k];
         f.pendingLength = 0;
-        if (f.state != FLOW_OPEN && f.state != FLOW_PENDING)
-            continue;
-        uint8_t *p = reserve(CONTROL_SUBMIT);
-        if (!p) {
-            f.state = FLOW_CLOSED;  // the control ring is full: forget it (the chip is in trouble anyway)
-            continue;
-        }
-        p[0] = MSG_FLOW_RING_DELETE;
-        p[1] = f.ifidx;
-        put16(p + 8, static_cast<uint16_t>(kFlowRingId + 1 + k));
-        commit(CONTROL_SUBMIT);
-        f.state = FLOW_DELETING;
+        if (f.state == FLOW_OPEN || f.state == FLOW_PENDING)
+            f.state = FLOW_DELETE_PENDING;
+        if (f.state == FLOW_DELETE_PENDING)
+            awdlDelete(k);
     }
 }
 

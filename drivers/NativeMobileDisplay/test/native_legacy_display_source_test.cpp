@@ -411,6 +411,15 @@ TEST(FrameEndSource, TheFilterHandsOffWithoutReadModifyWrites)
     EXPECT_TRUE(method("void checkFlipDeadline()").has("frameEndPending(kFrameEndInt)"));
 }
 
+TEST(FrameEndSource, ConsoleTapeRearmsBeforePublishingItsWaitCallback)
+{
+    const CodeText start = method("void startConsoleTape()");
+    EXPECT_TRUE(start.has("tapeAttached = true; unmaskFrameEnd();"));
+    EXPECT_TRUE(start.before("unmaskFrameEnd();", "vc_tape_attach("));
+    EXPECT_TRUE(method("bool frameEndNeeded()").has("tapeAttached"));
+    EXPECT_TRUE(method("int waitTapeFrame()").has("panic(\"SwitchDisplay: the console waited"));
+}
+
 // One gate pass a period: a completion that wrote window A's flip leaves its pass to the frame end's takeCompletionFlip
 // unless the gate wants it now; one deadline while anything is out, never armed or cancelled per flip or per offer.
 TEST(FrameEndSource, OnePassAndOneDeadlineAPeriod)

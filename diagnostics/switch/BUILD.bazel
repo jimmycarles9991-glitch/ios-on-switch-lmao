@@ -68,12 +68,14 @@ kernel_driver(
 )
 
 # Debug kernels only (//kernel:libSwitchDiag never links it in release): the single-CPU HUD and its observers, the
-# power trail, and the SD, FAT and raw APFS readers of the signed PID 1 fixture.
+# power trail, the freeze heartbeat's part of the panic record, and the SD, FAT and raw APFS readers of the signed PID 1
+# fixture.
 kernel_driver(
     name = "SwitchDiagDebug",
     srcs = [
         "SwitchDiagHud.c",
         "SwitchPowerTrail.c",
+        "SwitchPanicHeartbeat.c",
         "SwitchFiles.c",
         "SwitchSD.c",
         "storage/block_backend.c",
@@ -86,6 +88,7 @@ kernel_driver(
         "storage/raw_apfs.c",
         "storage/sdmmc_dma.c",
     ],
+    hdrs = ["//kernel/switch:include/switch/heartbeat.h"],
     c_copts = _C_COPTS,
     hdr_deps = _HDR_DEPS,
 )

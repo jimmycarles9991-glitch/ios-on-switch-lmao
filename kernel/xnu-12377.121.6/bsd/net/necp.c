@@ -26,6 +26,7 @@
  * @APPLE_OSREFERENCE_LICENSE_HEADER_END@
  */
 
+#include <switch/necp.h>
 #include <string.h>
 #include <sys/systm.h>
 #include <sys/types.h>
@@ -372,6 +373,7 @@ struct necp_socket_info {
 	unsigned is_delegated : 1;
 	unsigned is_local : 1;
 	unsigned __pad_bits : 7;
+	SWITCH_NECP_INFO_FIELDS
 };
 
 static  LCK_GRP_DECLARE(necp_kernel_policy_mtx_grp, NECP_CONTROL_NAME);
@@ -5066,6 +5068,7 @@ necp_kernel_socket_policy_add(necp_policy_order order, u_int32_t session_order, 
 	if (necp_debug) {
 		NECPLOG(LOG_DEBUG, "Added kernel policy: socket, id=%d, mask=%llx\n", new_kernel_policy->id, new_kernel_policy->condition_mask);
 	}
+	SWITCH_NECP_POLICY_ADDED(new_kernel_policy);
 	LIST_INSERT_SORTED_TWICE_ASCENDING(&necp_kernel_socket_policies, new_kernel_policy, chain, session_order, order, tmp_kernel_policy);
 
 	return new_kernel_policy ? new_kernel_policy->id : 0;
@@ -5100,6 +5103,7 @@ necp_kernel_socket_policy_delete(necp_kernel_policy_id policy_id)
 	policy = necp_kernel_socket_policy_find(policy_id);
 	if (policy) {
 		LIST_REMOVE(policy, chain);
+		SWITCH_NECP_POLICY_DELETED(policy);
 
 		if (policy->cond_bound_interface) {
 			ifnet_release(policy->cond_bound_interface);
@@ -5521,6 +5525,12 @@ necp_kernel_socket_policy_is_unnecessary(struct necp_kernel_socket_policy *polic
 
 		if (compared_policy->condition_mask & NECP_KERNEL_CONDITION_APP_ID &&
 		    compared_policy->cond_app_id != policy->cond_app_id) {
+			continue;
+		}
+
+		if (compared_policy->condition_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER &&
+		    (compared_policy->cond_signing_identifier == NULL || policy->cond_signing_identifier == NULL ||
+		    strcmp(compared_policy->cond_signing_identifier, policy->cond_signing_identifier) != 0)) {
 			continue;
 		}
 
@@ -8543,6 +8553,7 @@ necp_application_find_policy_match_internal(proc_t proc,
 
 	if (returned_result->routing_result == NECP_KERNEL_POLICY_RESULT_DROP &&
 	    returned_result->routing_result_parameter.drop_flags & NECP_KERNEL_POLICY_DROP_FLAG_LOCAL_NETWORK) {
+		SWITCH_NECP_CLIENT_LOCAL_DROP(info, matched_policy, skip_policy_id, proc, effective_proc, responsible_proc, necp_kernel_application_policies_condition_mask);
 		if (!(matched_policy->result_parameter.drop_flags & NECP_KERNEL_POLICY_DROP_FLAG_SUPPRESS_ALERTS)) {
 			// Trigger the event that we dropped due to a local network policy
 #if defined(XNU_TARGET_OS_OSX)
@@ -9133,7 +9144,9 @@ necp_socket_check_policy(struct necp_kernel_socket_policy *kernel_policy,
     u_int32_t bound_interface_xflags,
     struct necp_socket_info *info,
     bool is_delegated,
-    struct socket *socket)
+    struct socket *socket,
+    bool check_signing_id,
+    bool *skipped_signing_id)
 {
 	if (!(kernel_policy->condition_mask & NECP_KERNEL_CONDITION_ALL_INTERFACES)) {
 		if (kernel_policy->condition_mask & NECP_KERNEL_CONDITION_BOUND_INTERFACE) {
@@ -9203,30 +9216,35 @@ necp_socket_check_policy(struct necp_kernel_socket_policy *kernel_policy,
 				return FALSE;
 			}
 		}
+	}
 
-		// Check signing identifier only after APP ID matched
-		if (kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER ||
-		    kernel_policy->condition_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER) {
-			u_int8_t matched = necp_boolean_state_false;
-			const char *signing_id __null_terminated = cs_identity_get(proc ? proc : current_proc());
-			NECP_DATA_TRACE_LOG_CONDITION_SOCKET_STR(debug, socket, "SOCKET", kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER,
-			    "NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER",
-			    kernel_policy->cond_signing_identifier ? kernel_policy->cond_signing_identifier : "<n/a>",
-			    signing_id ? signing_id : "<n/a>");
-			if (signing_id != NULL) {
-				if (strcmp(signing_id, kernel_policy->cond_signing_identifier) == 0) {
-					matched = necp_boolean_state_true;
-				}
+	if (kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER ||
+	    kernel_policy->condition_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER) {
+		if (!check_signing_id && !(kernel_policy->condition_mask & NECP_KERNEL_CONDITION_APP_ID)) {
+			if (skipped_signing_id != NULL) {
+				*skipped_signing_id = true;
 			}
+			return FALSE;
+		}
+		u_int8_t matched = necp_boolean_state_false;
+		const char *signing_id __null_terminated = cs_identity_get(proc ? proc : current_proc());
+		NECP_DATA_TRACE_LOG_CONDITION_SOCKET_STR(debug, socket, "SOCKET", kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER,
+		    "NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER",
+		    kernel_policy->cond_signing_identifier ? kernel_policy->cond_signing_identifier : "<n/a>",
+		    signing_id ? signing_id : "<n/a>");
+		if (signing_id != NULL && kernel_policy->cond_signing_identifier != NULL) {
+			if (strcmp(signing_id, kernel_policy->cond_signing_identifier) == 0) {
+				matched = necp_boolean_state_true;
+			}
+		}
 
-			if (kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER) {
-				if (matched == necp_boolean_state_true) {
-					return FALSE;
-				}
-			} else {
-				if (matched != necp_boolean_state_true) {
-					return FALSE;
-				}
+		if (kernel_policy->condition_negated_mask & NECP_KERNEL_CONDITION_SIGNING_IDENTIFIER) {
+			if (matched == necp_boolean_state_true) {
+				return FALSE;
+			}
+		} else {
+			if (matched != necp_boolean_state_true) {
+				return FALSE;
 			}
 		}
 	}
@@ -10166,6 +10184,22 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 	*return_drop_dest_policy_result = NECP_KERNEL_POLICY_RESULT_NONE;
 
 	if (policy_search_array != NULL) {
+		u_int32_t current_session_order = 0;
+		int session_start_index = -1;
+		bool check_signing_id = false;
+		bool skipped_signing_id = false;
+		u_int32_t saved_netagent_ids[NECP_MAX_NETAGENTS] = {};
+		u_int32_t saved_netagent_use_flags[NECP_MAX_NETAGENTS] = {};
+		size_t saved_netagent_cursor = 0;
+		size_t saved_route_rule_id_count = 0;
+		necp_kernel_policy_filter saved_return_filter = 0;
+		u_int32_t saved_flow_divert_aggregate_unit = 0;
+		necp_kernel_policy_id saved_skip_policy_id = NECP_KERNEL_POLICY_ID_NONE;
+		bool saved_skipped_ip_result = false;
+		u_int32_t saved_drop_order = 0;
+#if DEVELOPMENT || DEBUG
+		const struct necp_kernel_socket_policy *saved_last_skip = NULL;
+#endif
 		for (i = 0; policy_search_array[i] != NULL; i++) {
 			NECP_DATA_TRACE_LOG_POLICY_SOCKET(debug, so, "SOCKET", "EXAMINING");
 
@@ -10201,6 +10235,30 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 					*skip_policy_id = NECP_KERNEL_POLICY_ID_NONE;
 					NECP_DATA_TRACE_LOG_POLICY_SOCKET(debug, so, "SOCKET", "SKIP (cleared saved skip)");
 				}
+			}
+			if (session_start_index < 0 || policy_search_array[i]->session_order != current_session_order) {
+				current_session_order = policy_search_array[i]->session_order;
+				session_start_index = i;
+				check_signing_id = false;
+				skipped_signing_id = false;
+				memcpy(&saved_netagent_ids, &netagent_ids, sizeof(saved_netagent_ids));
+				memcpy(&saved_netagent_use_flags, &netagent_use_flags, sizeof(saved_netagent_use_flags));
+				saved_netagent_cursor = netagent_cursor;
+				saved_route_rule_id_count = route_rule_id_count;
+				if (return_filter != NULL) {
+					saved_return_filter = *return_filter;
+				}
+				if (return_flow_divert_aggregate_unit != NULL) {
+					saved_flow_divert_aggregate_unit = *return_flow_divert_aggregate_unit;
+				}
+				if (skip_policy_id != NULL) {
+					saved_skip_policy_id = *skip_policy_id;
+				}
+				saved_skipped_ip_result = skipped_ip_result;
+				saved_drop_order = info->drop_order;
+#if DEVELOPMENT || DEBUG
+				saved_last_skip = info->switch_last_skip;
+#endif
 			}
 			if (skip_order) {
 				if (policy_search_array[i]->order < skip_order) {
@@ -10265,7 +10323,9 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 			    info->bound_interface_xflags,
 			    info,
 			    info->is_delegated,
-			    so)) {
+			    so,
+			    check_signing_id,
+			    &skipped_signing_id)) {
 				if (!debug && necp_data_tracing_session_order) {
 					if ((necp_data_tracing_session_order == policy_search_array[i]->session_order) &&
 					    (!necp_data_tracing_policy_order || (necp_data_tracing_policy_order == policy_search_array[i]->order))) {
@@ -10394,6 +10454,7 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 					NECP_DATA_TRACE_LOG_POLICY_SOCKET(debug, so, "SOCKET", "MATCHED SKIP POLICY");
 					skip_order = policy_search_array[i]->result_parameter.skip_policy_order;
 					skip_session_order = policy_search_array[i]->session_order + 1;
+					SWITCH_NECP_SKIP_TAKEN(info, policy_search_array[i]);
 					if (skip_policy_id && *skip_policy_id == NECP_KERNEL_POLICY_ID_NONE) {
 						*skip_policy_id = policy_search_array[i]->id;
 						if (necp_debug > 1 || NECP_DATA_TRACE_POLICY_ON(debug)) {
@@ -10406,6 +10467,36 @@ necp_socket_find_policy_match_with_info_locked(struct necp_kernel_socket_policy 
 				// Matched an allow unentitled, which clears any drop order
 				if (policy_search_array[i]->result == NECP_KERNEL_POLICY_RESULT_ALLOW_UNENTITLED) {
 					info->drop_order = 0;
+					continue;
+				}
+
+				if (policy_search_array[i]->result == NECP_KERNEL_POLICY_RESULT_DROP &&
+				    skipped_signing_id &&
+				    (policy_search_array[i]->result_parameter.drop_flags & NECP_KERNEL_POLICY_DROP_FLAG_RETRY_SIGNING_IDENTIFIER)) {
+					skipped_signing_id = false;
+					check_signing_id = true;
+					memcpy(&netagent_ids, &saved_netagent_ids, sizeof(netagent_ids));
+					memcpy(&netagent_use_flags, &saved_netagent_use_flags, sizeof(netagent_use_flags));
+					netagent_cursor = saved_netagent_cursor;
+					route_rule_id_count = saved_route_rule_id_count;
+					if (return_filter != NULL) {
+						*return_filter = saved_return_filter;
+					}
+					if (return_flow_divert_aggregate_unit != NULL) {
+						*return_flow_divert_aggregate_unit = saved_flow_divert_aggregate_unit;
+					}
+					if (skip_policy_id != NULL) {
+						*skip_policy_id = saved_skip_policy_id;
+					}
+					skipped_ip_result = saved_skipped_ip_result;
+					info->drop_order = saved_drop_order;
+#if DEVELOPMENT || DEBUG
+					info->switch_last_skip = saved_last_skip;
+#endif
+					skip_order = 0;
+					skip_session_order = 0;
+					NECP_DATA_TRACE_LOG_POLICY_SOCKET(debug, so, "SOCKET", "RETRY SESSION (Signing Identifier Drop)");
+					i = session_start_index - 1;
 					continue;
 				}
 
@@ -10872,6 +10963,7 @@ necp_socket_find_policy_match(struct inpcb *inp, struct sockaddr *override_local
 		    !(matched_policy->result_parameter.drop_flags & NECP_KERNEL_POLICY_DROP_FLAG_SUPPRESS_ALERTS)) {
 			// Trigger the event that we dropped due to a local network policy
 			send_local_network_denied_event = true;
+			SWITCH_NECP_SOCKET_LOCAL_DROP(2, info, matched_policy, skip_policy_id, so, effective_proc, necp_kernel_socket_policies_condition_mask);
 		}
 	} else {
 		bool drop_all = false;
@@ -13142,6 +13234,7 @@ skip_agent_check:
 		    !(matched_policy->result_parameter.drop_flags & NECP_KERNEL_POLICY_DROP_FLAG_SUPPRESS_ALERTS)) {
 			// Trigger the event that we dropped due to a local network policy
 			send_local_network_denied_event = true;
+			SWITCH_NECP_SOCKET_LOCAL_DROP(3, info, matched_policy, return_skip_policy_id ? *return_skip_policy_id : ~0u, so, effective_proc, necp_kernel_socket_policies_condition_mask);
 		}
 
 		if (matched_policy->result == NECP_KERNEL_POLICY_RESULT_DROP ||

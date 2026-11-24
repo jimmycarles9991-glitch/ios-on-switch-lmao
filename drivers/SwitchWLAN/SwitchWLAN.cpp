@@ -46,9 +46,21 @@
 #include "SwitchWLANStation.h"
 #include "SwitchWLANTrace.h"
 #include "SwitchWLANWpa.h"
+#include "SwitchWLANKeyState.h"
+#include "SwitchWLANStationChange.h"
+#include "SwitchWLANRecovery.h"
 #include "../SwitchSuspend/SwitchWake.h"
 #include "SwitchWLANAwdlSoft.h"
+#include "SwitchWLANA3Radio.h"
+#include "SwitchWLANA3Wire.h"
+#include "SwitchWLANA3TxProbe.h"
+#include "SwitchWLANProbeHooks.h"
 #include "awdl/awdl_bcm.h"
+#if DEVELOPMENT || DEBUG
+#include "SwitchWLANA3.h"
+#include "firmware/a3/abi.h"
+#include "firmware/a3/image.h"
+#endif
 
 // firmware.S
 extern "C" const uint8_t switch_wlan_fw_image[], switch_wlan_fw_nvram[];
@@ -263,6 +275,14 @@ OSDeclareDefaultStructors(SwitchWLAN)
     int awdlVar(bool set, uint8_t ifidx, const char *name, const void *in, size_t inLength, void *out, size_t outLength,
                 size_t *returned);
     int awdlTransmit(const uint8_t *eth, size_t length);
+    int awdlRawTransmit(const uint8_t *frame, size_t length);
+    int awdlTransportIdle();
+#if DEVELOPMENT || DEBUG
+    int awdlProbeClaim(uint32_t session, uint32_t epoch);
+    int awdlProbeTransmit(const uint8_t *frame, size_t length);
+    int awdlProbeCleanup(uint32_t session, uint32_t epoch, unsigned flags, switch_wlan_a3_probe_ownership *ownership);
+#endif
+    void awdlNotify(const swlan_awdl_event *event);
     int awdlIoctlSet(uint32_t cmd, const void *buf, size_t length);  // the soft backend's actframe and monitor mode
 
     int awdlD11n() const
@@ -295,13 +315,16 @@ private:
 
     IOWorkLoop *loop_ = nullptr;
     IOCommandGate *gate_ = nullptr;
+    bool ioctlBusy_ = false;
     IOInterruptEventSource *msi_ = nullptr;
+    bool msiEnabled_ = false;
     swlan::TegraPcie pcie_;
     swlan::TegraPcie::Endpoint ep_ = {};
     swlan::Chip chip_;
     swlan::Msgbuf mb_;
     // Chip state: up_ while the rings are served; gone_/halted_ as the MSI path found it.
     bool up_ = false, gone_ = false, halted_ = false, netStarted_ = false;
+    swlan::SwitchRadioRecovery recovery_;
     uint8_t mac_[6] = {};
     uint64_t interrupts_ = 0;
     char why_[512] = {};
@@ -349,6 +372,9 @@ private:
     // AWDL: the firmware's cap list has "awdl"; open (event mask on, frames and events routed); the AWDL
     // interface's firmware index from its WLC_E_IF (-1 until then).
     bool capAwdl_ = false, capRead_ = false, awdlOpen_ = false;
+#if DEVELOPMENT || DEBUG
+    switch_wlan_a3_probe_lease awdlProbeLease_;
+#endif
     int awdlIfidx_ = -1, awdlBssidx_ = -1;  // from its WLC_E_IF add (wl_event_data_if_t ifidx, bssidx)
     bool awdlStrayFrameSaid_ = false;
     uint32_t awdlRxDropped_ = 0, awdlEventsIn_ = 0;
@@ -359,14 +385,27 @@ private:
     swlan_evt_fn awdlLossFn_ = nullptr;
     void *awdlLossCtx_ = nullptr;
     bool setEventMask(bool awdl);
+    void setMpc(bool enabled);
     void awdlEvent(const swlan::Event &event);
     // Once a boot, after the first bring-up: GET of every AWDL variable either firmware generation uses, one os_log
     // line each (status, bytes), so one boot settles which AWDL API this firmware's table has (gAwdlProbe).
     void awdlProbe();
     void monitorProbe();
+#if DEVELOPMENT || DEBUG
+    static bool probeRead(const uint32_t *addresses, uint32_t *values, unsigned count);
+#endif
 
     // Worker only.
     swlan::wpa::Supplicant sup_;
+    swlan::wpa::InstalledKeys installedKeys_;
+    swlan::StationChanges stationChanges_{[]() {
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+        switch_wlan_awdl_station_change();
+#endif
+        return switch_wlan_a3_radio_station_prepare();
+    }, switch_wlan_a3_radio_station_resume};
+    bool scanStationHeld_ = false;
+
     bool secured_ = false;
     uint64_t nextRssiNs_ = 0, scanEndNs_ = 0, nextStatsNs_ = 0;
     uint64_t statsSinceNs_ = 0;  // the start of the window logStats is counting (lastCounts_)
@@ -448,6 +487,7 @@ private:
     bool bringUp();
     bool bootChip(const char **stage);
     void stop(const char *stage);
+    void disableMsi();
     void attachInterrupt();
     static void msiFired(OSObject *owner, IOInterruptEventSource *sender, int count);
     static void onEvent(void *context, const swlan::Event &event);
@@ -468,6 +508,7 @@ private:
     };
 
     static IOReturn ioctlGated(OSObject *owner, void *argument, void *, void *, void *);
+    static IOReturn ioctlLocked(OSObject *owner, void *argument, void *, void *, void *);
     bool ioctl(uint32_t cmd, const uint8_t *data, size_t length, size_t outLength, uint8_t *out, size_t *outReturned);
     // The same on firmware interface `ifidx`; *fwStatus gets the firmware's BCME code when it refused (0 when the
     // request did not reach it or succeeded).
@@ -481,7 +522,7 @@ private:
     bool radioInit();
 
     bool startScan(const uint8_t *ssid, size_t ssidLength);
-    void abortScan();
+    void abortScan(bool timedOut = true);
     void finishScan();
     bool scanAndWait(const uint8_t *ssid, size_t ssidLength);
     bool readJoinedBss(swlan_bss &out);
@@ -525,10 +566,16 @@ OSDefineMetaClassAndStructors(SwitchWLAN, IOService)
     // AWDL's free slots on the access point's channel (no mchan on this firmware: AWDL and the station share the
     // one radio by time).
     uint32_t gInfraFreq;
+    uint8_t gAwdlActive;
     // What the firmware's iovar table answered to the AWDL probe (awdlProbe, once a boot).
     bcm_awdl_probe gAwdlProbe;
 }
 
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+extern "C" __attribute__((weak)) void switch_wlan_awdl_station_change(void) {}
+#endif
+
+#if DEVELOPMENT || DEBUG
 // A short AWDL suffix for the stats line, written by SwitchWLANAwdl.cpp (empty when AWDL is off); weak so the driver
 // links without the AWDL unit.
 // NOLINTNEXTLINE(misc-const-correctness,readability-non-const-parameter): the strong definition writes buf
@@ -538,6 +585,7 @@ extern "C" __attribute__((weak)) int switch_wlan_awdl_stat(char *buf, size_t siz
     (void)size;
     return 0;
 }
+#endif
 
 // SwitchBluetooth's coexistence snapshot (SwitchCoex.h); weak so the driver links without the Bluetooth unit.
 // NOLINTNEXTLINE(misc-const-correctness): the strong definition (SwitchBluetooth.cpp) fills state
@@ -548,6 +596,9 @@ extern "C" __attribute__((weak)) bool switch_bluetooth_coex(struct switch_coex_b
         links[0] = 0;
     return false;
 }
+
+extern "C" __attribute__((weak)) void switch_bluetooth_awdl_changed(void)
+{}
 
 bool SwitchWLAN::start(IOService *provider)
 {
@@ -618,10 +669,14 @@ void SwitchWLAN::msiFired(OSObject *owner, IOInterruptEventSource *, int)
         return;
     self->pcie_.msiTake();
     ++self->interrupts_;
-    if (!self->up_ || self->gone_ || self->halted_)
+    if (!self->recovery_.canService(self->up_, self->gone_, self->halted_))
         return;
     bool halted = false;
     const uint32_t status = self->mb_.service(&halted);
+    switch_wlan_a3_radio_dma_ready();
+#if DEVELOPMENT || DEBUG
+    switch_wlan_a3_tx_probe_dma(self->mb_.awdlOutstanding(), self->mb_.awdlClosed());
+#endif
     if (status == 0xFFFFFFFF) {
         self->gone_ = true;
         self->kick();
@@ -640,10 +695,23 @@ void SwitchWLAN::msiFired(OSObject *owner, IOInterruptEventSource *, int)
     self->gate_->commandWakeup(&self->mb_);
 }
 
+void SwitchWLAN::disableMsi()
+{
+    if (msi_ && msiEnabled_) {
+        msi_->disable();
+        msiEnabled_ = false;
+    }
+}
+
 void SwitchWLAN::attachInterrupt()
 {
-    if (msi_)
+    if (msi_) {
+        if (!msiEnabled_) {
+            msi_->enable();
+            msiEnabled_ = true;
+        }
         return;  // one owner per INTID: kept across chip recoveries
+    }
     IOService *nub = switch_interrupt_nub(kMsiIntid, false);
     msi_ = nub ? IOInterruptEventSource::interruptEventSource(this, &SwitchWLAN::msiFired, nub, 0) : nullptr;
     if (!msi_ || loop_->addEventSource(msi_) != kIOReturnSuccess) {
@@ -652,6 +720,7 @@ void SwitchWLAN::attachInterrupt()
         panic("SwitchWLAN: cannot attach the PCIe MSI interrupt (INTID %u, nub %p): %s", kMsiIntid, nub, gic);
     }
     msi_->enable();
+    msiEnabled_ = true;
 }
 
 // Work loop. Scan results into the table; the events a join or a joined station follows, and EAPOL frames, to the
@@ -747,6 +816,11 @@ void SwitchWLAN::onFrame(void *context, const uint8_t *frame, size_t length, uin
 {
     auto *self = static_cast<SwitchWLAN *>(context);
     if (kind == BCM_MSGBUF_RX_FRAME_802_11) {  // monitor mode's: only the soft AWDL backend asks for it
+#if DEVELOPMENT || DEBUG
+        switch_wlan_a3_tx_probe_observe(frame, length);
+#endif
+        if (switch_wlan_a3_radio_frame(frame, length))
+            return;
         if (self->awdlOpen_) {
             switch_wlan_soft_frame(frame, length);
         } else {
@@ -835,18 +909,53 @@ void SwitchWLAN::keepBss(const swlan_bss &s, uint64_t now)
 IOReturn SwitchWLAN::ioctlGated(OSObject *owner, void *argument, void *, void *, void *)
 {
     auto *self = static_cast<SwitchWLAN *>(owner);
+    // commandSleep drops the gate while the firmware owns the shared ioctl buffers.
+    while (self->ioctlBusy_)
+        self->gate_->commandSleep(&self->ioctlBusy_, THREAD_UNINT);
+    self->ioctlBusy_ = true;
+    const IOReturn result = ioctlLocked(owner, argument, nullptr, nullptr, nullptr);
+    self->ioctlBusy_ = false;
+    self->gate_->commandWakeup(&self->ioctlBusy_);
+    return result;
+}
+
+IOReturn SwitchWLAN::ioctlLocked(OSObject *owner, void *argument, void *, void *, void *)
+{
+    auto *self = static_cast<SwitchWLAN *>(owner);
     auto *call = static_cast<Call *>(argument);
     call->ok = false;
-    if (!self->up_ || self->gone_ || self->halted_) {
-        const char *state = self->halted_ ? "firmware halted" : "not up";
+    if (!self->recovery_.canSubmit(self->up_, self->gone_, self->halted_)) {
+        const char *state = self->halted_                 ? "firmware halted"
+                            : self->recovery_.requested() ? "recovery pending"
+                                                          : "not up";
         if (self->gone_)
             state = "gone from the bus";
         snprintf(self->why_, sizeof(self->why_), "chip %s", state);
         return kIOReturnNotReady;
     }
+#if DEVELOPMENT || DEBUG
+    constexpr char probeIovar[] = SWITCH_A3_CONTROL_IOVAR;
+    if (call->cmd == WLC_GET_VAR && call->length >= sizeof probeIovar + sizeof(switch_a3_control) &&
+        !memcmp(call->data, probeIovar, sizeof probeIovar)) {
+        switch_a3_control request = {};
+        memcpy(&request, call->data + sizeof probeIovar, sizeof request);
+        if ((request.request_id & 0xf0000000u) == 0x90000000u) {
+            swlan_awdl_state state = {};
+            switch_wlan_a3_radio_state(&state);
+            const switch_wlan_a3_probe_driver_state radio = {state.generation, state.clock.epoch, self->up_,
+                                                             self->powerOn_,   self->gone_,       self->halted_,
+                                                             self->awdlOpen_};
+            if (!switch_wlan_a3_probe_control_allowed(self->awdlProbeLease_, radio, request)) {
+                snprintf(self->why_, sizeof self->why_, "stale A3 qualification lease");
+                return kIOReturnNotReady;
+            }
+        }
+    }
+#endif
     if (!self->mb_.ioctlSubmit(call->cmd, call->ifidx, call->data, call->length, call->outLength, self->why_,
                                sizeof(self->why_)))
         return kIOReturnNoResources;
+    const uint64_t started = swlan::nowNs();
     uint64_t deadline = deadlineIn(kIoctlTimeoutMs);
     while (!self->mb_.replyReady() && !self->gone_ && !self->halted_) {
         if (self->gate_->commandSleep(&self->mb_, deadline, THREAD_UNINT) == THREAD_TIMED_OUT)
@@ -855,13 +964,14 @@ IOReturn SwitchWLAN::ioctlGated(OSObject *owner, void *argument, void *, void *,
     if (!self->mb_.replyReady()) {
         uint32_t mailboxInt = 0;
         uint32_t mailboxMask = 0;
-        if (!self->gone_ && !self->halted_ &&
-            (self->mb_.chipSignalling(&mailboxInt, &mailboxMask) || self->pcie_.msiPending())) {
+        bool mailboxAvailable = self->recovery_.canService(self->up_, self->gone_, self->halted_);
+        if (mailboxAvailable && (self->mb_.chipSignalling(&mailboxInt, &mailboxMask) || self->pcie_.msiPending())) {
             deadline = deadlineIn(kRecheckMs);
-            while (!self->mb_.replyReady() &&
+            while (!self->mb_.replyReady() && self->recovery_.canService(self->up_, self->gone_, self->halted_) &&
                    self->gate_->commandSleep(&self->mb_, deadline, THREAD_UNINT) != THREAD_TIMED_OUT) {
             }
-            if (!self->mb_.replyReady() &&
+            mailboxAvailable = self->recovery_.canService(self->up_, self->gone_, self->halted_);
+            if (!self->mb_.replyReady() && mailboxAvailable &&
                 (self->mb_.chipSignalling(&mailboxInt, &mailboxMask) || self->pcie_.msiPending())) {
                 char gic[160];
                 char state[200];
@@ -874,12 +984,25 @@ IOReturn SwitchWLAN::ioctlGated(OSObject *owner, void *argument, void *, void *,
         }
         if (!self->mb_.replyReady()) {
             char console[200];
-            self->chip_.consoleTail(console, sizeof(console));
+            char mailbox[96];
+            if (mailboxAvailable) {
+                snprintf(mailbox, sizeof mailbox, "int %08x mask %08x", mailboxInt, mailboxMask);
+                self->chip_.consoleTail(console, sizeof(console));
+            } else {
+                snprintf(mailbox, sizeof mailbox, "unavailable (chip %s)",
+                         self->gone_     ? "gone"
+                         : self->halted_ ? "halted"
+                                         : "not up");
+                snprintf(console, sizeof console, "unavailable");
+            }
             snprintf(self->why_, sizeof(self->why_),
-                     "no answer to ioctl %u in %u ms (mailbox int %08x mask %08x, %u "
+                     "no answer to ioctl %u after %llu ms (mailbox %s, %u "
                      "MSIs); console: %s",
-                     call->cmd, kIoctlTimeoutMs, mailboxInt, mailboxMask, static_cast<unsigned>(self->interrupts_),
-                     console);
+                     call->cmd, static_cast<unsigned long long>((swlan::nowNs() - started) / 1000000), mailbox,
+                     static_cast<unsigned>(self->interrupts_), console);
+            // A timeout does not return DMA ownership; reset the chip before another ioctl can reuse the buffer.
+            self->recovery_.request();
+            self->kick();
             return kIOReturnTimeout;
         }
     }
@@ -907,6 +1030,12 @@ bool SwitchWLAN::ioctl(uint32_t cmd, const uint8_t *data, size_t length, size_t 
 bool SwitchWLAN::ioctlOn(uint8_t ifidx, uint32_t cmd, const uint8_t *data, size_t length, size_t outLength,
                          uint8_t *out, size_t *outReturned, int16_t *fwStatus)
 {
+    if (outReturned)
+        *outReturned = 0;
+    if (fwStatus)
+        *fwStatus = 0;
+    if (loop_->onThread())
+        return false;
     Call call = {cmd, data, length, outLength, out, outReturned, false, ifidx, 0};
     gate_->runAction(&SwitchWLAN::ioctlGated, &call);
     if (fwStatus)
@@ -952,6 +1081,13 @@ bool SwitchWLAN::cmdInt(uint32_t cmd, uint32_t value)
     return ioctl(cmd, le, sizeof(le), 0, nullptr, nullptr);
 }
 
+void SwitchWLAN::setMpc(bool enabled)
+{
+    const uint8_t value[4] = {static_cast<uint8_t>(enabled ? 1 : 0), 0, 0, 0};
+    if (!setVar("mpc", value, sizeof(value)))
+        IOLog("SwitchWLAN: mpc %u refused: %s\n", enabled ? 1u : 0u, why_);
+}
+
 // nxk wl.rs `init` (brcmf_c_preinit_dcmds, brcmf_config_dongle): our address, the events handled, station mode,
 // no power saving, no firmware roaming (it would start a key handshake with another access point behind the
 // supplicant's back; wifid decides on roams), en0's multicast groups (multicastApply), brcmf's join preference
@@ -969,6 +1105,8 @@ bool SwitchWLAN::radioInit()
     });  // after a recovery an open AWDL keeps its events
     if (!setVar("cur_etheraddr", mac_, 6) || !setEventMask(awdl) || !cmdInt(WLC_SET_INFRA, 1) || !cmdInt(WLC_SET_PM, 0))
         return false;
+    if (awdl)
+        setMpc(false);
     if (!setVar("roam_off", on, sizeof(on)))
         IOLog("SwitchWLAN: roam_off refused: %s\n", why_);
     multicastApply();
@@ -990,17 +1128,26 @@ bool SwitchWLAN::radioInit()
     }
     IOLog("SwitchWLAN: radio up, MAC %02x:%02x:%02x:%02x:%02x:%02x, country %s/%d (%s)\n", mac_[0], mac_[1], mac_[2],
           mac_[3], mac_[4], mac_[5], abbrev, static_cast<int>(swlan::le32(country + 4)), code);
-    if (capAwdl_)
-        awdlProbe();  // once a boot, while the radio is up and before the station uses it
 #if DEVELOPMENT || DEBUG
-    monitorProbe();
+    switch_a3_caps a3 = {};
+    size_t a3Length = 0;
+    if (getVar(SWITCH_A3_CAPS_IOVAR, reinterpret_cast<uint8_t *>(&a3), sizeof a3, &a3Length) && a3Length == sizeof a3) {
+        switch_wlan_a3_radio_attach(&a3, mac_, awdlD11n(), mb_.awdlFirstRing(), mb_.awdlRingCount());
+        IOLog("SwitchWLAN: A3 backend: status %u, registration %d, features %#x\n", a3.status, a3.register_status,
+              a3.features);
+    }
+    switch_wlan_probe_attached(probeRead);
 #endif
+    if (capAwdl_ && !switch_wlan_a3_radio_present())
+        awdlProbe();
     locked([&] {
         status_.state = powerOn_ ? SWLAN_STA_IDLE : SWLAN_STA_OFF;
         status_.power = powerOn_;
     });
-    if (!powerOn_)
+    if (!powerOn_) {
+        switch_wlan_a3_radio_power(false);
         cmdInt(WLC_DOWN, 1);
+    }
     return true;
 }
 
@@ -1034,6 +1181,7 @@ bool SwitchWLAN::bootChip(const char **stage)
     attachInterrupt();
     locked([&] {
         gone_ = halted_ = false;
+        recovery_.reset();
         up_ = true;
         mb_.enableInterrupts();
     });
@@ -1057,10 +1205,7 @@ bool SwitchWLAN::bootChip(const char **stage)
     size_t ioLength = 0;
     if (ioctl(WLC_GET_VERSION, nullptr, 0, sizeof(io), io, &ioLength) && ioLength >= 4)
         iotype_ = swlan::le32(io) == SWLAN_IOTYPE_D11N ? SWLAN_IOTYPE_D11N : SWLAN_IOTYPE_D11AC;
-    // What this firmware build was compiled with, as brcmfmac reads it (brcmf_feat_firmware_capabilities): "cap"
-    // names p2p, mchan, monitor, rtap, awdl and nan when present. AirDrop needs AWDL, or failing that monitor mode with
-    // injection; the image's own strings cannot tell (most of the firmware is in the chip's ROM). Read once; a refusal
-    // is logged and changes nothing.
+    // This image appends "awdl" to cap unconditionally; the creation API must establish usable native support.
     uint8_t cap[768] = {};
     size_t capLength = 0;
     if (getVar("cap", cap, sizeof(cap) - 1, &capLength)) {
@@ -1116,6 +1261,14 @@ void SwitchWLAN::watchdog()
     locked([&] {
         if (!up_)
             return;
+        if (recovery_.requested()) {
+            while (!recovery_.canReset(ioctlBusy_))
+                gate_->commandSleep(&ioctlBusy_, THREAD_UNINT);
+            if (!up_)
+                return;
+            snprintf(why, sizeof why, "host requested radio recovery");
+            return;
+        }
         if (gone_) {
             snprintf(why, sizeof(why), "chip reads all ones (interrupt)");
             return;
@@ -1146,6 +1299,9 @@ void SwitchWLAN::lost(const char *why)
         wasUp = status_.state == SWLAN_STA_UP;
         status_.state = SWLAN_STA_OFF;
         ++losses_;
+#if DEVELOPMENT || DEBUG
+        awdlProbeLease_ = {};
+#endif
     });
     __atomic_store_n(&gInfraFreq, 0u, __ATOMIC_RELEASE);
     char state[200];
@@ -1160,8 +1316,11 @@ void SwitchWLAN::lost(const char *why)
         awdl = awdlOpen_;
         awdlIfidx_ = awdlBssidx_ = -1;  // the firmware's AWDL interface went with it; rings rebuilt at the next attach
     });
+    switch_wlan_a3_radio_lost();
+    stationChanges_.reset();
+    scanStationHeld_ = false;
     if (awdl && awdlLossFn_) {
-        const swlan_awdl_event e = {SWLAN_AWDL_CHIP_LOST, 0, 0, 0};
+        const swlan_awdl_event e = {SWLAN_AWDL_CHIP_LOST, 0, 0, 0, 0, 0};
         awdlLossFn_(awdlLossCtx_, &e);
     }
 }
@@ -1170,6 +1329,11 @@ void SwitchWLAN::lost(const char *why)
 // network again with the key wifid gave for it.
 bool SwitchWLAN::recover(bool afterSleep)
 {
+    locked([&] {
+        while (ioctlBusy_)
+            gate_->commandSleep(&ioctlBusy_, THREAD_UNINT);
+    });
+    disableMsi();
     swlan::TegraPcie::Endpoint ep = {};
     if (!(afterSleep ? pcie_.bringUp(ep, why_, sizeof(why_)) : pcie_.restart(ep, why_, sizeof(why_)))) {
         sleptRecover_ = afterSleep;  // the next try needs the whole bring-up too
@@ -1180,8 +1344,10 @@ bool SwitchWLAN::recover(bool afterSleep)
         return false;
     }
     const char *stage = "chip";
-    if (!bootChip(&stage))
+    if (!bootChip(&stage)) {
+        disableMsi();
         return false;
+    }
     ++recoveries_;
     IOLog("SwitchWLAN: chip back after loss %u\n", losses_);
     locked([&] {
@@ -1207,8 +1373,7 @@ void SwitchWLAN::parkForSleep()
     });
     if (wasUp)
         lost("system sleep");
-    if (msi_)
-        msi_->disable();
+    disableMsi();
     locked([&] {
         sleep_ = kParked;
         gate_->commandWakeup(&sleep_);
@@ -1216,8 +1381,6 @@ void SwitchWLAN::parkForSleep()
             gate_->commandSleep(&sleep_, THREAD_UNINT);
         sleep_ = kAwake;
     });
-    if (msi_)
-        msi_->enable();
 }
 
 void SwitchWLAN::systemSleep()
@@ -1257,6 +1420,13 @@ void SwitchWLAN::systemWake()
 // per channel (with the firmware's defaults nxk never heard a 5 GHz network). Results arrive in the work loop.
 bool SwitchWLAN::startScan(const uint8_t *ssid, size_t ssidLength)
 {
+    if (stationChanges_.enter()) {
+        IOLog("SwitchWLAN: scan postponed: AWDL did not return home\n");
+        if (events_ && events_->scan_done)
+            events_->scan_done();
+        return false;
+    }
+    scanStationHeld_ = true;
     uint8_t request[72] = {};
     swlan::put32(request + 0, 1);  // BRCMF_ESCAN_REQ_VERSION
     swlan::put16(request + 4, 1);  // WL_ESCAN_ACTION_START
@@ -1290,15 +1460,20 @@ bool SwitchWLAN::startScan(const uint8_t *ssid, size_t ssidLength)
         if (status_.state == SWLAN_STA_SCANNING)
             status_.state = SWLAN_STA_IDLE;
     });
+    scanStationHeld_ = false;
+    stationChanges_.leave();
+    if (events_ && events_->scan_done)
+        events_->scan_done();
     return false;
 }
 
 // An escan whose last result (status other than partial) has not come in the time a full scan takes: the firmware's
 // scan engine is stopped (brcmf_notify_escan_complete with fw_abort: WLC_SCAN on channel -1) and the scan ends as
 // aborted with what came, so the next request can start. Without this one lost event would wedge scanning for good.
-void SwitchWLAN::abortScan()
+void SwitchWLAN::abortScan(bool timedOut)
 {
-    IOLog("SwitchWLAN: scan: no final escan result in %u ms, aborting it\n", kScanTimeoutMs);
+    if (timedOut)
+        IOLog("SwitchWLAN: scan: no final escan result in %u ms, aborting it\n", kScanTimeoutMs);
     uint8_t params[68] = {};       // brcmf_scan_params_le
     memset(params + 36, 0xFF, 6);  // any BSSID
     params[42] = 2;                // DOT11_BSSTYPE_ANY
@@ -1333,6 +1508,10 @@ void SwitchWLAN::finishScan()
         IOLog("SwitchWLAN: scan: %u networks%s\n", count, status ? " (scan aborted)" : "");
     if (events_ && events_->scan_done)
         events_->scan_done();
+    if (scanStationHeld_) {
+        scanStationHeld_ = false;
+        stationChanges_.leave();
+    }
 }
 
 bool SwitchWLAN::scanAndWait(const uint8_t *ssid, size_t ssidLength)
@@ -1418,6 +1597,8 @@ bool SwitchWLAN::ensureFlow(const uint8_t destination[6])
 {
     swlan::Msgbuf::Flow flow = swlan::Msgbuf::FLOW_CLOSED;
     locked([&] {
+        if (!recovery_.canSubmit(up_, gone_, halted_))
+            return;
         if (mb_.flow() == swlan::Msgbuf::FLOW_CLOSED || mb_.flow() == swlan::Msgbuf::FLOW_REFUSED)
             mb_.flowCreateSubmit(destination, mac_);
         const uint64_t deadline = deadlineIn(kFlowWaitMs);
@@ -1439,7 +1620,7 @@ uint32_t SwitchWLAN::sendFrame(const uint8_t *frame, size_t length)
         return 0;
     uint32_t id = 0;
     locked([&] {
-        id = up_ ? mb_.send(frame, length) : 0;
+        id = recovery_.canSubmit(up_, gone_, halted_) ? mb_.send(frame, length) : 0;
     });
     return id;
 }
@@ -1458,7 +1639,7 @@ bool SwitchWLAN::waitSent(uint32_t id)
     });
     if (done && status)
         IOLog("SwitchWLAN: handshake frame sent with status %u\n", status);
-    return done;
+    return done && !status;
 }
 
 // A CCMP key to the firmware (brcmf_cfg80211_add_key, nxk `add_key`): pairwise for the access point, or a group key
@@ -1500,30 +1681,41 @@ bool SwitchWLAN::handleEapol(const uint8_t *frame, size_t length)
             IOLog("SwitchWLAN: EAPOL-Key frame dropped: %s\n", why);
         return false;
     }
+    const swlan::StationChanges::Scope station(stationChanges_);
+    if (!station) {
+        installedKeys_.fail();
+        memset(&step, 0, sizeof step);
+        return false;
+    }
     if (step.replyLength) {
         const uint32_t id = sendFrame(step.reply, step.replyLength);
-        if (!id) {
-            IOLog("SwitchWLAN: handshake reply not sent\n");
-        } else if (step.hasPtk || step.hasGtk) {
-            waitSent(id);
+        if (!id || ((step.hasPtk || step.hasGtk) && !waitSent(id))) {
+            IOLog("SwitchWLAN: handshake reply did not complete\n");
+            installedKeys_.fail();
+            memset(&step, 0, sizeof(step));
+            return false;
         }
     }
     if (step.hasPtk)
-        addKey(0, step.tk, sup_.aa(), nullptr);
+        installedKeys_.record(true, addKey(0, step.tk, sup_.aa(), nullptr));
     if (step.hasGtk)
-        addKey(step.gtk.index, step.gtk.key, nullptr, step.gtk.rsc);
+        installedKeys_.record(false, addKey(step.gtk.index, step.gtk.key, nullptr, step.gtk.rsc));
     memset(&step, 0, sizeof(step));
-    return sup_.keyed();
+    return sup_.keyed() && installedKeys_.ready();
 }
 
 // Leave the network (brcmf_link_down: WLC_DISASSOC with reason 3, "leaving").
 void SwitchWLAN::leave()
 {
+    const swlan::StationChanges::Scope station(stationChanges_);
+    if (!station)
+        return;
     uint8_t scb[12] = {};
     swlan::put32(scb, kReasonLeaving);
     ioctl(WLC_DISASSOC, scb, sizeof(scb), 0, nullptr, nullptr);
     secured_ = false;
     sup_.wipe();
+    __atomic_store_n(&gInfraFreq, 0u, __ATOMIC_RELEASE);
     locked([&] {
         if (status_.state != SWLAN_STA_OFF)
             status_.state = SWLAN_STA_IDLE;
@@ -1535,11 +1727,13 @@ void SwitchWLAN::leave()
 // 2 disassociated, 6 reassociation for a roam failed).
 void SwitchWLAN::linkDown(const FwEvent &e)
 {
+    const swlan::StationChanges::Scope station(stationChanges_);
     const char *what = linkDownCause(e.type);
     char counts[200];
     counters(counts, sizeof(counts));
     IOLog("SwitchWLAN: link lost: %s, reason %u (status %u, flags %#x); %s\n", what, e.reason, e.status, e.flags,
           counts);
+    switch_wlan_probe_heap("link-lost");
     secured_ = false;
     sup_.wipe();
     setState(SWLAN_STA_IDLE);
@@ -1617,6 +1811,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
         memset(pmk, 0, sizeof(pmk));
     }
     secured_ = secured;
+    installedKeys_ = {};
 
     // Stale events and EAPOL frames (an earlier scan or join) must not decide this one.
     locked([&] {
@@ -1751,6 +1946,8 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
             }
             keyed |= handleEapol(f.frame, f.length);
         }
+        if (installedKeys_.failed())
+            return SWLAN_RES_FAILED;
         bool leaving = false;
         locked([&] {
             leaving = leaveRequested_;
@@ -1781,6 +1978,7 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
             });
             __atomic_store_n(&gInfraFreq, mhz, __ATOMIC_RELEASE);
             IOLog("SwitchWLAN: joined '%s' (%s) at %u MHz, %d dBm\n", ssidText, secured ? "WPA2" : "open", mhz, rssi);
+            switch_wlan_probe_heap("associated");
             coexJoined();
             logLink();
             // en0's frames can go now: its start routine runs (it found no room while the station was not up).
@@ -1810,6 +2008,15 @@ int SwitchWLAN::joinOnce(const JoinParams &p, char *ssidText)
 
 void SwitchWLAN::join(const JoinParams &p)
 {
+    const swlan::StationChanges::Scope station(stationChanges_);
+    if (!station) {
+        locked([&] {
+            status_.result = SWLAN_RES_FAILED;
+        });
+        if (events_ && events_->connect_done)
+            events_->connect_done(SWLAN_RES_FAILED);
+        return;
+    }
     char ssidText[33];
     printable(p.ssid, p.ssidLength, ssidText);
     bool wasScanning = false;
@@ -1840,6 +2047,7 @@ void SwitchWLAN::join(const JoinParams &p)
         ioctl(WLC_DISASSOC, scb, sizeof(scb), 0, nullptr, nullptr);
         secured_ = false;
         sup_.wipe();
+        __atomic_store_n(&gInfraFreq, 0u, __ATOMIC_RELEASE);
     }
     locked([&] {
         status_.result = result;
@@ -1883,13 +2091,15 @@ void SwitchWLAN::run()
         }
         const uint64_t now = swlan::nowNs();
         bool chipUp = false;
+        bool checkRadio = false;
         bool scanning = false;
         locked([&] {
             chipUp = up_;
+            checkRadio = recovery_.watchdogDue(up_, gone_, halted_, now, nextWatchdog);
             scanning = scanning_ || scanRequested_;
         });
         tickMs = chipUp && !scanning ? kIdleTickMs : kWatchdogMs;
-        if (chipUp && now >= nextWatchdog) {
+        if (checkRadio) {
             nextWatchdog = now + tickMs * 1000000ULL;
             watchdog();
             locked([&] {
@@ -1949,25 +2159,49 @@ void SwitchWLAN::run()
         });
         if (doPower) {
             if (!powerOn) {
-                leave();
+                const bool parked = stationChanges_.enter() == 0;
+                if (scanStationHeld_) {
+                    abortScan(false);
+                    finishScan();
+                    scanFinished = scanOverdue = false;
+                }
+#if DEVELOPMENT || DEBUG
+                locked([&] {
+                    awdlProbeLease_ = {};
+                });
+#endif
+                if (parked) {
+                    leave();
+                } else {
+                    secured_ = false;
+                    sup_.wipe();
+                    __atomic_store_n(&gInfraFreq, 0u, __ATOMIC_RELEASE);
+                }
+                switch_wlan_a3_radio_power(false);
+                if (parked)
+                    stationChanges_.leave();
+                else
+                    stationChanges_.reset();
                 cmdInt(WLC_DOWN, 1);
                 setState(SWLAN_STA_OFF);
+                doLeave = false;
             } else {
-                cmdInt(WLC_UP, 1);
+                if (cmdInt(WLC_UP, 1))
+                    switch_wlan_a3_radio_power(true);
                 setState(SWLAN_STA_IDLE);
             }
             locked([&] {
                 status_.power = powerOn;
             });
         }
-        if (doLeave)
-            leave();
         if (scanOverdue)
             abortScan();
         if (scanFinished || scanOverdue)
             finishScan();
         if (!powerOn)
             continue;
+        if (doLeave)
+            leave();
         if (doJoin) {
             join(params);
             memset(&params, 0, sizeof(params));
@@ -2007,13 +2241,23 @@ void SwitchWLAN::run()
         }
         EapolFrame f;
         while (popEapol(f)) {
-            if (state == SWLAN_STA_UP)
+            if (state == SWLAN_STA_UP) {
                 handleEapol(f.frame, f.length);
+                if (installedKeys_.failed()) {
+                    IOLog("SwitchWLAN: key update failed; disconnecting\n");
+                    leave();
+                    __atomic_store_n(&gInfraFreq, 0u, __ATOMIC_RELEASE);
+                    if (events_ && events_->link_lost)
+                        events_->link_lost(-1);
+                    state = SWLAN_STA_IDLE;
+                }
+            }
         }
         if (state == SWLAN_STA_UP && swlan::nowNs() >= nextStatsNs_) {
             nextStatsNs_ = swlan::nowNs() + kStatsMs * 1000000ULL;
 #if DEVELOPMENT || DEBUG
             logStats();
+            switch_wlan_probe_heap("periodic");
 #else
             refreshRates();
 #endif
@@ -2893,7 +3137,7 @@ int SwitchWLAN::transmit(const uint8_t *frame, size_t length)
 {
     uint32_t id = 0;
     locked([&] {
-        if (up_ && status_.state == SWLAN_STA_UP)
+        if (recovery_.canSubmit(up_, gone_, halted_) && status_.state == SWLAN_STA_UP)
             id = mb_.send(frame, length);
         if (id)
             txBytes_ += length;
@@ -2907,7 +3151,7 @@ unsigned SwitchWLAN::txRoom()
 {
     unsigned room = 0;
     locked([&] {
-        if (up_ && status_.state == SWLAN_STA_UP)
+        if (recovery_.canSubmit(up_, gone_, halted_) && status_.state == SWLAN_STA_UP)
             room = mb_.txRoom();
     });
     return room;
@@ -2918,7 +3162,7 @@ unsigned SwitchWLAN::transmitFrames(swlan_tx_fill_fn fill, void *context, unsign
 {
     unsigned taken = 0;
     locked([&] {
-        if (!up_ || status_.state != SWLAN_STA_UP)
+        if (!recovery_.canSubmit(up_, gone_, halted_) || status_.state != SWLAN_STA_UP)
             return;
         const uint64_t now = swlan::nowNs();
         uint32_t readBackId = 0;
@@ -3023,6 +3267,13 @@ void SwitchWLAN::awdlEvent(const swlan::Event &event)
 int SwitchWLAN::awdlQuery(const swlan_awdl_caps **caps)
 {
     static swlan_awdl_caps c;
+    memset(&c, 0, sizeof c);
+    c.abi_version = SWLAN_AWDL_ABI_VERSION;
+    if (switch_wlan_a3_radio_caps(&c)) {
+        if (caps)
+            *caps = &c;
+        return 0;
+    }
     if (!__atomic_load_n(&capRead_, __ATOMIC_ACQUIRE))
         return -EAGAIN;  // the capability list is read at bring-up
     if (!capAwdl_)
@@ -3048,14 +3299,47 @@ int SwitchWLAN::awdlOpen(const swlan_awdl_caps **caps)
         return -EDEADLK;
     bool up = false;
     bool open = false;
+    const auto markOpen = [&] {
+        bool allowed = false;
+        locked([&] {
+            if (!powerOn_ || !recovery_.canSubmit(up_, gone_, halted_))
+                return;
+#if DEVELOPMENT || DEBUG
+            swlan_awdl_state state = {};
+            switch_wlan_a3_radio_state(&state);
+            const switch_wlan_a3_probe_driver_state radio = {state.generation, state.clock.epoch, up_, powerOn_, gone_,
+                                                             halted_,          awdlOpen_};
+            if (!switch_wlan_a3_probe_mark_open(awdlProbeLease_, radio, awdlOpen_))
+                return;
+#else
+            awdlOpen_ = true;
+#endif
+            allowed = true;
+        });
+        if (allowed) {
+            __atomic_store_n(&gAwdlActive, 1u, __ATOMIC_RELEASE);
+            switch_bluetooth_awdl_changed();
+        }
+        return allowed;
+    };
     locked([&] {
-        up = up_;
+        up = up_ && powerOn_;
         open = awdlOpen_;
     });
     static swlan_awdl_caps c;
     if (!up) {
         IOLog("SwitchWLAN: AWDL: not opened: the radio is not up\n");
         return -ENXIO;
+    }
+    memset(&c, 0, sizeof c);
+    c.abi_version = SWLAN_AWDL_ABI_VERSION;
+    if (switch_wlan_a3_radio_caps(&c)) {
+        if (!markOpen())
+            return -EBUSY;
+        setMpc(false);
+        if (caps)
+            *caps = &c;
+        return 0;
     }
     if (!capAwdl_) {
         IOLog("SwitchWLAN: AWDL: not opened: the firmware's capabilities do not list awdl\n");
@@ -3066,16 +3350,18 @@ int SwitchWLAN::awdlOpen(const swlan_awdl_caps **caps)
         return -ENOSPC;
     }
     if (!open) {
-        locked([&] {
-            awdlOpen_ = true;
-        });
+        if (!markOpen())
+            return -EBUSY;
         if (!setEventMask(true)) {
             IOLog("SwitchWLAN: AWDL: not opened: the AWDL events were refused: %s\n", why_);
             locked([&] {
                 awdlOpen_ = false;
             });
+            __atomic_store_n(&gAwdlActive, 0u, __ATOMIC_RELEASE);
+            switch_bluetooth_awdl_changed();
             return -EIO;
         }
+        setMpc(false);
         IOLog("SwitchWLAN: AWDL: firmware AWDL opened (AWDL events on, %u AWDL flow rings)\n", mb_.awdlRingCount());
     }
     switch_wlan_soft_init();
@@ -3091,10 +3377,7 @@ int SwitchWLAN::awdlOpen(const swlan_awdl_caps **caps)
 }
 
 #if DEVELOPMENT || DEBUG
-// Once a boot (a probe the firmware does not survive is not retried by the recovery): every AWDL variable either
-// firmware generation sets, read with GET on the station's interface. UNSUPPORTED means the name is not in the
-// firmware's table; any other answer means its handler exists. The interface_create query is brcmf_feat_awdl_check's
-// (version 3 = the series' AWDL interface). os_log only: status, bytes returned, the first 16 of them.
+// GET results describe only the queried interface and direction; an unchanged request is inconclusive.
 void SwitchWLAN::monitorProbe()
 {
     static bool tried;
@@ -3107,16 +3390,36 @@ void SwitchWLAN::monitorProbe()
         size_t got = 0;
         int16_t fw = 0;
         const size_t n = bcm_monitor_probe_request(i, request, sizeof(request));
+        const size_t replySize = i == BCM_MONITOR_PROBE_TSF           ? 8
+                                 : i == BCM_MONITOR_PROBE_STA_MONITOR ? sizeof(reply)
+                                                                      : 4;
         const bool ok = i == BCM_MONITOR_PROBE_GET_MONITOR
                             ? ioctlOn(0, BCM_WLC_GET_MONITOR, nullptr, 0, 4, reply, &got, &fw)
-                            : n && ioctlOn(0, WLC_GET_VAR, request, n, sizeof(reply), reply, &got, &fw);
+                            : n && ioctlOn(0, WLC_GET_VAR, request, n, replySize, reply, &got, &fw);
+        const bool echo = ok && n && switch_awdl_reply_is_echo(request, n, reply, got);
         int status = fw ? fw : BCM_PROBE_NO_ANSWER;
-        if (ok)
+        if (ok && !echo)
             status = 0;
-        os_log(OS_LOG_DEFAULT, "SwitchWLAN: monitor probe: %s: %d %s, %u bytes, first word %u",
+        os_log(OS_LOG_DEFAULT, "SwitchWLAN: monitor probe: %s: %d %s, %u bytes, first word %u%s",
                bcm_monitor_probe_names[i], status, bcme_name(status), static_cast<unsigned>(ok ? got : 0),
-               static_cast<unsigned>(ok && got >= 4 ? swlan::le32(reply) : 0));
+               static_cast<unsigned>(ok && got >= 4 ? swlan::le32(reply) : 0), echo ? " (request echo)" : "");
     }
+}
+
+// The probe's reads hold the gate and check the link first: after system sleep the PCIe partition stays unpowered
+// until recovery, and touching it then hangs the bus.
+bool SwitchWLAN::probeRead(const uint32_t *addresses, uint32_t *values, unsigned count)
+{
+    bool ok = false;
+    if (SwitchWLAN *self = gDriver)
+        self->locked([&] {
+            ok = self->recovery_.canSubmit(self->up_, self->gone_, self->halted_);
+            for (unsigned i = 0; ok && i < count; ++i)
+                ok = self->chip_.containsRam(addresses[i], 4);
+            for (unsigned i = 0; ok && i < count; ++i)
+                values[i] = self->chip_.tcm().r32(addresses[i]);
+        });
+    return ok;
 }
 #endif
 
@@ -3127,28 +3430,86 @@ void SwitchWLAN::awdlProbe()
         return;
     tried = true;
 #if DEVELOPMENT || DEBUG
+    int backend = 0;
+    if (PE_parse_boot_argn("switch-wlan-backend", &backend, sizeof backend) && backend) {
+        switch_a3_caps caps = {};
+        size_t got = 0;
+        if (getVar(SWITCH_A3_CAPS_IOVAR, reinterpret_cast<uint8_t *>(&caps), sizeof caps, &got) && got >= sizeof caps &&
+            caps.magic == SWITCH_A3_CAPS_MAGIC && caps.version == SWITCH_A3_CAPS_VERSION && caps.size == sizeof caps) {
+            os_log(OS_LOG_DEFAULT,
+                   "SwitchWLAN: A3 backend: status %u, registration %d, features %#x, initialized %u, "
+                   "reserved %u bytes, heap %#x..%#x",
+                   caps.status, caps.register_status, caps.features, caps.initialized,
+                   caps.island_end - caps.island_begin, caps.heap_begin, caps.heap_end);
+        } else {
+            IOLog("SwitchWLAN: A3 backend caps unavailable: %s\n", why_);
+            const uint32_t address = switch_wlan_a3_state_address(backend >= 3);
+            if (switch_a3_state_range_valid(address, chip_.ramBase(), chip_.ramSize())) {
+                auto *words = reinterpret_cast<uint32_t *>(&caps);
+                for (unsigned index = 0; index < sizeof caps / sizeof *words; ++index)
+                    words[index] = chip_.tcm().r32(address + index * sizeof *words);
+                if (caps.magic == SWITCH_A3_CAPS_MAGIC && caps.version == SWITCH_A3_CAPS_VERSION &&
+                    caps.size == sizeof caps)
+                    IOLog("SwitchWLAN: A3 reserved state at %#x: status %u registration %d, heap %#x..%#x, "
+                          "detail %#x/%#x/%#x\n",
+                          address, caps.status, caps.register_status, caps.heap_begin, caps.heap_end, caps.reserved[0],
+                          caps.reserved[1], caps.reserved[2]);
+                else
+                    IOLog("SwitchWLAN: A3 reserved state at %#x: invalid header %#x/%u/%u\n", address, caps.magic,
+                          caps.version, caps.size);
+            }
+        }
+    }
     os_log(OS_LOG_DEFAULT, "SwitchWLAN: AWDL probe: %u variables, GET only", static_cast<unsigned>(BCM_PROBE_COUNT));
+    bool controlsValid = true;
+    static const char *const controls[] = {"ver", "switch_probe_missing"};
+    for (const char *name : controls) {
+        uint8_t reply[96] = {};
+        size_t got = 0;
+        int16_t fw = 0;
+        const auto *request = reinterpret_cast<const uint8_t *>(name);
+        const size_t n = strlen(name) + 1;
+        const bool ok = ioctlOn(0, WLC_GET_VAR, request, n, sizeof(reply), reply, &got, &fw);
+        const bool echo = ok && switch_awdl_reply_is_echo(request, n, reply, got);
+        const bool valid = !strcmp(name, "ver") ? ok && !echo && got > 1 && reply[0]
+                                                : !ok && (fw == BCME_UNSUPPORTED || fw == BCME_NOTFOUND);
+        controlsValid &= valid;
+        os_log(OS_LOG_DEFAULT, "SwitchWLAN: AWDL probe control: %s: %d, %u bytes%s, %s", name, static_cast<int>(fw),
+               static_cast<unsigned>(got), echo ? " (request echo)" : "", valid ? "valid" : "invalid");
+    }
 #endif
     for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i) {
+        bcm_probe_record(&gAwdlProbe, i, BCM_PROBE_NO_ANSWER, nullptr, 0);
+#if !DEVELOPMENT && !DEBUG
+        if (i != BCM_PROBE_INTERFACE_CREATE && i != BCM_PROBE_AWDL_IF && i != BCM_PROBE_AWDL_IF2)
+            continue;
+#endif
         uint8_t request[64];
         uint8_t reply[256] = {};
         const size_t n = bcm_probe_request(i, request, sizeof(request));
         size_t got = 0;
         int16_t fw = 0;
-        const bool ok = (n != 0u) && ioctlOn(0, WLC_GET_VAR, request, n, sizeof(reply), reply, &got, &fw);
+        const bool ok =
+            (n != 0u) && ioctlOn(0, WLC_GET_VAR, request, n, switch_awdl_probe_reply_size(i), reply, &got, &fw);
+        const bool echo = ok && switch_awdl_reply_is_echo(request, n, reply, got);
         int status = fw ? fw : BCM_PROBE_NO_ANSWER;
-        if (ok)
+        if (ok && !echo)
             status = 0;
-        bcm_probe_record(&gAwdlProbe, i, status, ok ? reply : nullptr, ok ? got : 0);
+#if DEVELOPMENT || DEBUG
+        if (!controlsValid)
+            status = BCM_PROBE_NO_ANSWER;
+#endif
+        bcm_probe_record(&gAwdlProbe, i, status, status == 0 ? reply : nullptr, status == 0 ? got : 0);
 #if DEVELOPMENT || DEBUG
         char hex[3 * 16 + 1] = {};
         for (size_t k = 0; ok && k < got && k < 16; ++k)
             snprintf(hex + 3 * k, 4, " %02x", reply[k]);
-        os_log(OS_LOG_DEFAULT, "SwitchWLAN: AWDL probe: %s: %d %s, %u bytes%s", bcm_probe_names[i], status,
-               bcme_name(status), static_cast<unsigned>(ok ? got : 0), hex);
+        os_log(OS_LOG_DEFAULT, "SwitchWLAN: AWDL probe: %s: %d %s, %u bytes%s%s", bcm_probe_names[i], status,
+               bcme_name(status), static_cast<unsigned>(ok ? got : 0), hex, echo ? " (request echo)" : "");
 #endif
     }
     __atomic_store_n(&gAwdlProbe.done, 1, __ATOMIC_RELEASE);  // awdlQuery reads it from another thread
+#if DEVELOPMENT || DEBUG
     const enum bcm_awdl_api api = bcm_awdl_api_of(&gAwdlProbe);
     os_log(OS_LOG_DEFAULT,
            "SwitchWLAN: AWDL probe: API %s (interface_create version %u, awdl_if %s, slot_bss %s, awdl_chan_seq %s, "
@@ -3160,10 +3521,13 @@ void SwitchWLAN::awdlProbe()
            bcm_probe_has(&gAwdlProbe, BCM_PROBE_MCHAN) ? "yes" : "no",
            static_cast<unsigned>(BCM_PROBE_COUNT - __builtin_popcount(bcm_probe_absent(&gAwdlProbe))),
            static_cast<unsigned>(BCM_PROBE_COUNT));
+#endif
 }
 
 void SwitchWLAN::awdlClose()
 {
+    if (switch_wlan_a3_radio_present())
+        switch_wlan_a3_radio_close();
     bool was = false;
     locked([&] {
         was = awdlOpen_;
@@ -3172,8 +3536,14 @@ void SwitchWLAN::awdlClose()
         if (up_)
             mb_.awdlClose();
     });
-    if (was && !loop_->onThread())
+    if (was) {
+        __atomic_store_n(&gAwdlActive, 0u, __ATOMIC_RELEASE);
+        switch_bluetooth_awdl_changed();
+    }
+    if (was && !loop_->onThread()) {
         setEventMask(false);
+        setMpc(true);
+    }
 }
 
 // "<name>\0<value>" on firmware interface `ifidx` (brcmf_fil_iovar_data_set/get on that interface's ifp: the msgbuf
@@ -3221,10 +3591,123 @@ int SwitchWLAN::awdlTransmit(const uint8_t *eth, size_t length)
 {
     int r = -1;
     locked([&] {
-        if (up_ && awdlOpen_ && awdlIfidx_ >= 0)
+        if (recovery_.canSubmit(up_, gone_, halted_) && awdlOpen_ && awdlIfidx_ >= 0)
             r = mb_.awdlSend(static_cast<uint8_t>(awdlIfidx_), eth, length);
     });
     return r < 0 ? -1 : 0;
+}
+
+int SwitchWLAN::awdlRawTransmit(const uint8_t *frame, size_t length)
+{
+    int result = -ENXIO;
+    locked([&] {
+        swlan_awdl_state state = {};
+        if (!recovery_.canSubmit(up_, gone_, halted_) || !powerOn_ || !awdlOpen_ ||
+            switch_wlan_a3_radio_state(&state) || !state.ready)
+            return;
+        switch_a3_tx_header header = {};
+        if (!switch_a3_tx_decode(frame, length, state.generation, state.clock.epoch, &header) ||
+            !switch_wlan_a3_radio_tx_allowed(frame, length)) {
+            result = -ESTALE;
+            return;
+        }
+        result = mb_.awdlSend(0, frame, length, mac_) < 0 ? -ENOBUFS : 0;
+    });
+    return result;
+}
+
+int SwitchWLAN::awdlTransportIdle()
+{
+    int result = -ENXIO;
+    locked([&] {
+        swlan_awdl_state state = {};
+        if (recovery_.canSubmit(up_, gone_, halted_) && !switch_wlan_a3_radio_state(&state) && state.generation)
+            result = mb_.awdlFailed() ? -EIO : mb_.awdlOutstanding() == 0;
+    });
+    return result;
+}
+
+#if DEVELOPMENT || DEBUG
+int SwitchWLAN::awdlProbeClaim(uint32_t session, uint32_t epoch)
+{
+    int result = -EBUSY;
+    locked([&] {
+        swlan_awdl_state state = {};
+        if (!recovery_.canSubmit(up_, gone_, halted_) || !powerOn_ || switch_wlan_a3_radio_state(&state) ||
+            state.ready || state.generation != session || state.clock.epoch != epoch)
+            return;
+        if (awdlProbeLease_.claim(session, epoch, awdlOpen_))
+            result = 0;
+    });
+    return result;
+}
+
+int SwitchWLAN::awdlProbeTransmit(const uint8_t *frame, size_t length)
+{
+    int result = -ENXIO;
+    locked([&] {
+        swlan_awdl_state state = {};
+        switch_a3_tx_header header = {};
+        if (!recovery_.canSubmit(up_, gone_, halted_) || !powerOn_ || awdlOpen_ || switch_wlan_a3_radio_state(&state) ||
+            state.ready || !awdlProbeLease_.current(state.generation, state.clock.epoch) ||
+            !switch_a3_tx_decode(frame, length, state.generation, state.clock.epoch, &header))
+            return;
+        if (!switch_wlan_a3_tx_probe_authorize(frame, length)) {
+            result = -EPERM;
+            return;
+        }
+        result = mb_.awdlSend(0, frame, length, mac_) < 0 ? -ENOBUFS : 0;
+    });
+    return result;
+}
+
+int SwitchWLAN::awdlProbeCleanup(uint32_t session, uint32_t epoch, unsigned flags,
+                                 switch_wlan_a3_probe_ownership *ownership)
+{
+    int result = -ESTALE;
+    locked([&] {
+        swlan_awdl_state state = {};
+        if (!ownership ||
+            (flags &
+             ~static_cast<unsigned>(SWITCH_A3_PROBE_CLOSE | SWITCH_A3_PROBE_RECOVER | SWITCH_A3_PROBE_RELEASE)) ||
+            !up_ || gone_ || awdlOpen_ || switch_wlan_a3_radio_state(&state) || state.generation != session ||
+            state.clock.epoch != epoch || !awdlProbeLease_.current(session, epoch))
+            return;
+        if (flags & SWITCH_A3_PROBE_CLOSE)
+            mb_.awdlClose();
+        ownership->dma_pending = mb_.awdlOutstanding();
+        ownership->rings_closed = mb_.awdlClosed();
+        result = 0;
+        if (flags & SWITCH_A3_PROBE_RECOVER) {
+            recovery_.request();
+            kick();
+        } else if ((flags & SWITCH_A3_PROBE_RELEASE) && !ownership->dma_pending && ownership->rings_closed) {
+            awdlProbeLease_ = {};
+        }
+    });
+    return result;
+}
+#endif
+
+void SwitchWLAN::awdlNotify(const swlan_awdl_event *event)
+{
+    if (!event)
+        return;
+    swlan_evt_fn callback = nullptr;
+    void *context = nullptr;
+    locked([&] {
+        if (event->type == SWLAN_AWDL_RECOVERY_REQUIRED) {
+            swlan_awdl_state state = {};
+            if (!switch_wlan_a3_radio_state(&state) && state.generation == event->generation && !state.ready) {
+                recovery_.request();
+                kick();
+            }
+        }
+        callback = awdlLossFn_;
+        context = awdlLossCtx_;
+    });
+    if (callback)
+        callback(context, event);
 }
 
 // Only stored (any thread, no gate): pointer-sized stores, the context before its function.
@@ -3250,6 +3733,11 @@ void SwitchWLAN::awdlCallbacks(swlan_fw_event_fn events, void *eventsContext, sw
 extern "C" uint16_t swlan_awdl_infra_freq(void)
 {
     return static_cast<uint16_t>(__atomic_load_n(&gInfraFreq, __ATOMIC_ACQUIRE));
+}
+
+extern "C" int swlan_awdl_active(void)
+{
+    return __atomic_load_n(&gAwdlActive, __ATOMIC_ACQUIRE) != 0;
 }
 
 extern "C" void switch_wlan_set_events(const struct swlan_events *events)
@@ -3395,6 +3883,46 @@ extern "C" int swlan_awdl_events(swlan_evt_fn fn, void *ctx)
         return -ENXIO;
     gDriver->awdlCallbacks(nullptr, nullptr, nullptr, nullptr, fn, ctx);
     return 0;
+}
+
+int switch_wlan_a3_control(const void *request, size_t length, void *reply, size_t capacity, size_t *returned)
+{
+    return gDriver ? gDriver->awdlVar(false, 0, SWITCH_A3_CONTROL_IOVAR, request, length, reply, capacity, returned)
+                   : -ENXIO;
+}
+
+int switch_wlan_a3_dma_tx(const uint8_t *envelope, size_t length)
+{
+    return gDriver ? gDriver->awdlRawTransmit(envelope, length) : -ENXIO;
+}
+
+int switch_wlan_a3_transport_idle(void)
+{
+    return gDriver ? gDriver->awdlTransportIdle() : -ENXIO;
+}
+
+#if DEVELOPMENT || DEBUG
+int switch_wlan_a3_tx_probe_claim(uint32_t session, uint32_t epoch)
+{
+    return gDriver ? gDriver->awdlProbeClaim(session, epoch) : -ENXIO;
+}
+
+int switch_wlan_a3_tx_probe_transmit(const uint8_t *envelope, size_t length)
+{
+    return gDriver ? gDriver->awdlProbeTransmit(envelope, length) : -ENXIO;
+}
+
+int switch_wlan_a3_tx_probe_cleanup(uint32_t session, uint32_t epoch, unsigned flags,
+                                    switch_wlan_a3_probe_ownership *ownership)
+{
+    return gDriver ? gDriver->awdlProbeCleanup(session, epoch, flags, ownership) : -ENXIO;
+}
+#endif
+
+void switch_wlan_a3_notify(const swlan_awdl_event *event)
+{
+    if (gDriver)
+        gDriver->awdlNotify(event);
 }
 
 extern "C" int swlan_awdl_eth_tx(const uint8_t *eth, size_t len)

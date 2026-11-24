@@ -29,6 +29,8 @@ void awdl_core_fw_event(struct awdl_core *c, const struct awdl_fw_event *e, cons
     case WLC_E_ACTION_FRAME_RX:
     case WLC_E_AWDL_EVENT:
     case WLC_E_AWDL_RX_ACT_FRAME: {
+        if (!switch_awdl_core_ready(c))
+            return;
         // The header (be16 version) and the frame from its category on; the sender is the event's address.
         struct bcm_rx_frame meta;
         const uint8_t *body = NULL;
@@ -102,7 +104,7 @@ void awdl_core_fw_event(struct awdl_core *c, const struct awdl_fw_event *e, cons
         if (ie.opcode == 1 && c->nstate == AWDL_N_CREATING && ie.ifidx &&
             (awdl_addr_eq(e->addr, c->cfg.addr) || awdl_addr_eq(e->addr, zero))) {
             awdl_native_if_up(c, ie.ifidx, ie.bssidx, now);
-        } else if (ie.opcode == 2 && c->nstate == AWDL_N_UP && ie.ifidx == c->fw_ifidx) {
+        } else if (ie.opcode == 2 && ie.ifidx == c->fw_ifidx) {
             awdl_native_fail(c, "the firmware removed the AWDL interface (ifidx %u) on its own", ie.ifidx);
         }
         return;
@@ -122,7 +124,7 @@ void awdl_core_fw_event(struct awdl_core *c, const struct awdl_fw_event *e, cons
 
 void awdl_core_rx_eth(struct awdl_core *c, const uint8_t *frame, size_t len, uint64_t now)
 {
-    if (!c->running || len < 14)
+    if (!switch_awdl_core_ready(c) || len < 14)
         return;
     uint16_t seq = 0;
     const size_t n = bcm_awdl_decap(frame, len, c->scratch, sizeof c->scratch, &seq);
@@ -140,5 +142,4 @@ void awdl_core_rx_eth(struct awdl_core *c, const uint8_t *frame, size_t len, uin
     c->stats.data_rx++;
     if (c->host.deliver)
         c->host.deliver(c->host.ctx, c->scratch, n);
-    awdl_sched_traffic(c, c->scratch, n, 0, now);
 }

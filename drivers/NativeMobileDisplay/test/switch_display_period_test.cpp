@@ -220,6 +220,31 @@ TEST_F(DisplayPeriod, EachSwapRetiresAtTheFrameEndThatShowsIt)
     }
 }
 
+TEST_F(DisplayPeriod, ConsoleTapeRearmsAfterStartupFramesWereMaskedAtIdle)
+{
+    gFrameEndHolds = 0;
+    d.tapeAttached = false;
+    frameEnd();
+    frameEnd();
+    d.maskIdleFrameEnd();
+    const unsigned signals = d.vblankSource.signals;
+    const uint64_t frames = d.tapeFrames;
+    d.model.boundary();
+    d.model.general[Display::kDcIntStatus] |= Display::kFrameEndInt;
+    ASSERT_EQ(d.model.general[Display::kDcIntMask] & Display::kFrameEndInt, 0u);
+    EXPECT_EQ(d.vblankSource.signals, signals);
+    EXPECT_EQ(d.tapeFrames, frames);
+
+    d.tapeAttached = true;
+    d.unmaskFrameEnd();
+    ASSERT_NE(d.model.general[Display::kDcIntMask] & Display::kFrameEndInt, 0u);
+    EXPECT_EQ(d.model.general[Display::kDcIntStatus] & Display::kFrameEndInt, 0u);
+    EXPECT_EQ(d.tapeFrames, frames);
+    frameEnd();
+    EXPECT_EQ(d.vblankSource.signals, signals + 1);
+    EXPECT_EQ(d.tapeFrames, frames + 1);
+}
+
 // FRAME_END stays routed while a hold is out: the kick skips intMaskLock only while the bit it last saw set is the gate's
 // to clear, the idle mask leaves it for a hold, and a mask the gate wrote sends the next kick through the lock again.
 TEST_F(DisplayPeriod, TheKicksMaskShadowFollowsEveryWriter)

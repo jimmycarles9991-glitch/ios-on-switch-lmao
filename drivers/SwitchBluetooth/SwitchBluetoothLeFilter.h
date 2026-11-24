@@ -109,10 +109,41 @@ typedef struct {
     switch_le_address addresses[SWITCH_LE_MAX_ADDRESSES];
 } switch_le_filter;
 
+#if defined(SWITCH_IPSW_KIND_24B119)
+/* This daemon's filtered scans on A3 stopped delivering advertising reports. */
+#define SWITCH_LE_HOST_FILTERING 1
+#else
+#define SWITCH_LE_HOST_FILTERING 0
+#endif
+
 /* The 0xFD53 reply's return parameters (status first): APCF needs status 0, filter_support and max_filter >= 3. */
 SWITCH_LE_FN bool switch_le_filter_capabilities(const uint8_t *ret, uint8_t length)
 {
-    return length >= 8 && ret[0] == 0 && ret[6] != 0 && ret[7] >= 3;
+    return !SWITCH_LE_HOST_FILTERING && length >= 8 && ret[0] == 0 && ret[6] != 0 && ret[7] >= 3;
+}
+
+SWITCH_LE_FN bool switch_le_filter_host_command(uint16_t opcode, const uint8_t *params, uint8_t length)
+{
+    if (!SWITCH_LE_HOST_FILTERING)
+        return false;
+    if (opcode == SWITCH_LE_OP_APCF)
+        return true;
+    if (opcode != SWITCH_LE_OP_META || !length)
+        return false;
+    switch (params[0]) {
+    case SWITCH_LE_META_ENABLE:
+    case SWITCH_LE_META_PCF_SELECT:
+    case SWITCH_LE_META_UUID:
+    case SWITCH_LE_META_UUID_V2:
+    case SWITCH_LE_META_UUID_V3:
+    case SWITCH_LE_META_RULE_ADD:
+    case SWITCH_LE_META_RULE_REMOVE:
+    case SWITCH_LE_META_RULES_RESET:
+    case SWITCH_LE_META_ADDRESSES:
+        return true;
+    default:
+        return false;
+    }
 }
 
 SWITCH_LE_FN void switch_le_command_init(switch_le_command *c, uint16_t opcode)
@@ -335,7 +366,7 @@ SWITCH_LE_FN void switch_le_address_update(switch_le_filter *f, uint8_t action, 
 SWITCH_LE_FN bool switch_le_filter_take(switch_le_filter *f, uint16_t opcode, const uint8_t *p, uint8_t length,
                                         uint8_t *sub)
 {
-    if (!f->apcf || !length)
+    if ((!f->apcf && !SWITCH_LE_HOST_FILTERING) || !length)
         return false;
     *sub = p[0];
     if (opcode == SWITCH_LE_OP_OLYMPIC) {
@@ -344,7 +375,7 @@ SWITCH_LE_FN bool switch_le_filter_take(switch_le_filter *f, uint16_t opcode, co
         f->dupBypass = (uint32_t)p[4] | (uint32_t)p[5] << 8 | (uint32_t)p[6] << 16 | (uint32_t)p[7] << 24;
         return true;
     }
-    if (opcode != SWITCH_LE_OP_META)
+    if (!f->apcf || opcode != SWITCH_LE_OP_META)
         return false;
     switch (p[0]) {
     case SWITCH_LE_META_ENABLE:
@@ -390,7 +421,7 @@ SWITCH_LE_FN bool switch_le_filter_take(switch_le_filter *f, uint16_t opcode, co
  * changed the command. */
 SWITCH_LE_FN bool switch_le_filter_scan_enable(const switch_le_filter *f, uint8_t *params, uint8_t length)
 {
-    if (!f->apcf || !f->dupBypass || length < 2 || !params[1])
+    if ((!f->apcf && !SWITCH_LE_HOST_FILTERING) || !f->dupBypass || length < 2 || !params[1])
         return false;
     params[1] = 0;
     return true;

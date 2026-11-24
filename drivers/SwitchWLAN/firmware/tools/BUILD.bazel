@@ -1,0 +1,80 @@
+load("@rules_python//python:py_binary.bzl", "py_binary")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+load("//bazel/lint:defs.bzl", "lint_files")
+load("//drivers/SwitchWLAN/firmware/a3:defs.bzl", "switch_wlan_a3_test_image")
+
+lint_files()
+
+py_library(
+    name = "arm_tools",
+    srcs = ["arm_tools.py"],
+    data = [
+        "@arm_none_eabi//:all",
+        "@qemu_arm//:qemu-system-arm",
+    ],
+    visibility = ["//drivers/SwitchWLAN/firmware/a3:__pkg__"],
+    deps = ["@rules_python//python/runfiles"],
+)
+
+py_library(
+    name = "a3_cpu_harness",
+    srcs = ["a3_cpu_harness.py"],
+    visibility = ["//drivers/SwitchWLAN/firmware/a3:__pkg__"],
+)
+
+py_library(
+    name = "rom_capture_lib",
+    srcs = ["rom_capture.py"],
+    data = ["//drivers/SwitchWLAN:firmware/rom_capture.h"],
+)
+
+py_binary(
+    name = "rom_capture",
+    srcs = ["rom_capture.py"],
+    data = ["//drivers/SwitchWLAN:firmware/rom_capture.h"],
+)
+
+py_test(
+    name = "rom_capture_test",
+    srcs = ["rom_capture_test.py"],
+    data = ["//drivers/SwitchWLAN:firmware/brcm/brcmfmac4356A3-pcie.bin"],
+    deps = [":rom_capture_lib"],
+)
+
+switch_wlan_a3_test_image(
+    name = "rom_capture_cpu",
+    srcs = ["rom_capture.S"],
+    copts = [
+        "-mcpu=cortex-r4",
+        "-mthumb",
+        "-nostdlib",
+        "-Wl,-Ttext=0x180080,--entry=switch_wlan_rom_start,--build-id=none",
+    ],
+)
+
+py_test(
+    name = "rom_capture_cpu_test",
+    srcs = ["rom_capture_cpu_test.py"],
+    data = [":rom_capture_cpu"],
+    tags = ["no-sandbox"],
+    deps = [
+        ":a3_cpu_harness",
+        ":arm_tools",
+        ":rom_capture_lib",
+    ],
+)
+
+py_test(
+    name = "a3_rx_cpu_test",
+    srcs = ["a3_rx_cpu_test.py"],
+    data = [
+        "//drivers/SwitchWLAN/firmware/a3:rx_cpu",
+        "//drivers/SwitchWLAN/firmware/a3:rx_link",
+    ],
+    tags = ["no-sandbox"],
+    deps = [
+        ":a3_cpu_harness",
+        ":arm_tools",
+    ],
+)

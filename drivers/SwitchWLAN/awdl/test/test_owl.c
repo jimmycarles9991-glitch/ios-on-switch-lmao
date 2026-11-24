@@ -4,6 +4,7 @@
 // produced by running it), a master whose sync parameters come from OWL's src/sync.c formulas, and the cases of its
 // tests/test_awdl_election.cpp. OWL is GPL-3.0; nothing of it is compiled here.
 #include "../awdl.h"
+#include "switch_apple_frames.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -92,9 +93,13 @@ static const char *const kOwlBody =
     // service params: 3 unknown, SUI 0, bitmask 0
     " 06 0900 000000 0000 00000000";
 static const char *const kOwlMifOnly =
-    // HT capabilities: 0x11ce, A-MPDU 0x1b, one stream's MCS 0-7; arpa "owl.local"
+    // HT capabilities: 0x11ce, A-MPDU 0x1b, one stream's MCS 0-7; arpa "owl.local", which 24B119 sends only once
+    // wifip2pd names the host
     " 07 0800 0000 ce11 1b ff 0000"
-    " 10 0700 03 03 6f776c c00c";
+#if !defined(SWITCH_IPSW_KIND_24B119)
+    " 10 0700 03 03 6f776c c00c"
+#endif
+    "";
 static const char *const kOwlTail =
     // data path state: flags 0x8f24, "X0", social map 149, AWDL address, extension flags; version 3.4, macOS
     " 0c 0f00 248f 583000 0400 021122334401 0000"
@@ -249,7 +254,8 @@ static void test_owl_election(void)
     feed(us, 0x20, 0x20, 0, 0, 60, 1000000);
     OCHECK(awdl_core_role(us) == AWDL_ROLE_ROOT && root_is(us, 0x30));
     free(us);
-    // counter_metric: metric 1000 against our 1000 (address), against 1001 (we win), then the counter decides first
+    // counter_metric: metric 1000 against our 1000 (address), against 1001 (we win); unlike OWL, macOS never lets the
+    // counter rank two roots
     us = o_core(0x10, 1000, "us", 1000000);
     feed(us, 0x20, 0x20, 0, 0, 1000, 1000000);
     OCHECK(root_is(us, 0x20));
@@ -258,7 +264,7 @@ static void test_owl_election(void)
     feed(us, 0x20, 0x20, 0, 0, 1000, 1000000);
     OCHECK(awdl_core_role(us) == AWDL_ROLE_ROOT);
     feed(us, 0x20, 0x20, 1, 0, 1000, 1100000);
-    OCHECK(awdl_core_role(us) == AWDL_ROLE_FOLLOWER && root_is(us, 0x20));
+    OCHECK(awdl_core_role(us) == AWDL_ROLE_ROOT);
     free(us);
     // our own counter grows while we are root (every π s): 1 against the peer's 1, and our metric wins again
     us = o_core(0x10, 1001, "us", 1000000);
@@ -271,13 +277,13 @@ static void test_owl_election(void)
     feed(us, 0x20, 0x10, 0, 1, 1000, 1000000);
     OCHECK(awdl_core_role(us) == AWDL_ROLE_ROOT);
     free(us);
-    // same root and score through two peers: the one nearer the root, then the higher address
+    // same root and score through two peers: the one nearer the root; on a tie the parent we have
     us = o_core(0x10, 60, "us", 1000000);
     feed(us, 0x40, 0x50, 9, 2, 500, 1000000);
     feed(us, 0x20, 0x50, 9, 1, 500, 1000000);
     OCHECK(awdl_core_election(us)->parent[5] == 0x20 && awdl_core_election(us)->hops == 2);
     feed(us, 0x30, 0x50, 9, 1, 500, 1000000);
-    OCHECK(awdl_core_election(us)->parent[5] == 0x30);
+    OCHECK(awdl_core_election(us)->parent[5] == 0x20);
     free(us);
     free(shape);
 }
@@ -326,8 +332,44 @@ static void test_channels(void)
            awdl_chan_centre80(100) == 106 && awdl_chan_centre80(6) == 0);
 }
 
+static void test_apple_discovery(void)
+{
+    const uint8_t peer[6] = {2, 0, 0, 0, 0, 2};
+    struct awdl_core *core = o_core(1, 1, "receiver", 1000000);
+    const struct {
+        const uint8_t *frame;
+        size_t length;
+        uint64_t received;
+        uint8_t subtype;
+        uint16_t counter, aw_seq;
+    } recorded[] = {
+        {switch_apple_psf, sizeof switch_apple_psf - 4, 1084690, AWDL_SUBTYPE_PSF, 6, 0x09d3},
+        {switch_apple_mif, sizeof switch_apple_mif - 4, 1379390, AWDL_SUBTYPE_MIF, 38, 0x09e5},
+    };
+    for (size_t i = 0; i < sizeof recorded / sizeof recorded[0]; ++i) {
+        struct awdl_af af;
+        OCHECK(awdl_af_parse(recorded[i].frame, recorded[i].length - 1, &af) < 0);
+        const int result = awdl_af_parse(recorded[i].frame, recorded[i].length, &af);
+        OCHECK(result == 0);
+        if (result)
+            continue;
+        OCHECK(af.subtype == recorded[i].subtype && !memcmp(af.src, peer, sizeof peer));
+        OCHECK(af.sync.tx_counter == recorded[i].counter && af.sync.tx_channel == 44);
+        OCHECK(af.sync.aw_seq == recorded[i].aw_seq && af.sync.ap_beacon_delta == 0);
+        OCHECK(af.chanseq.count == 16 && awdl_chan_primary(af.chanseq.chan[0]) == 44);
+        OCHECK(af.sync.has_seq && awdl_chan_primary(af.sync.seq.chan[0]) == 44);
+        struct awdl_rx_meta meta = {recorded[i].received, 5220, -42};
+        awdl_core_rx(core, recorded[i].frame, recorded[i].length, &meta);
+    }
+    const struct awdl_peer *found = awdl_core_find(core, peer);
+    OCHECK(found && found->reachable && found->last_seen == recorded[1].received);
+    OCHECK(awdl_core_stats(core)->af_rx == 2);
+    free(core);
+}
+
 void test_owl_main(void)
 {
+    test_apple_discovery();
     test_owl_bytes();
     test_owl_sync();
     test_owl_election();

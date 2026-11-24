@@ -43,6 +43,7 @@ kernel_driver(
         "drivers/SwitchPower",
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
+        "drivers/TegraSMMU",
         "kits/SwitchCAR",
         "kits/SwitchDMA",
         "kits/SwitchMMIO",

@@ -10,12 +10,21 @@
 
 _Static_assert(sizeof(struct a80211_virt_if_create) == 32, "VIRTUAL_IF_CREATE payload");
 _Static_assert(sizeof(struct a80211_virt_if_delete) == 20, "VIRTUAL_IF_DELETE payload");
+_Static_assert(sizeof(struct switch_a80211_virtual_if_state) == 20, "VIRTUAL_IF_STATE payload");
 _Static_assert(sizeof(struct a80211_awdl_sync_channel_sequence) == 400, "AWDL_SYNC_CHANNEL_SEQUENCE payload");
 _Static_assert(sizeof(struct a80211_awdl_peer_traffic_registration) == 184, "PEER_TRAFFIC_REGISTRATION payload");
 _Static_assert(sizeof(struct a80211_peer_service_request) == 20, "PEER_SERVICE_REQUEST payload");
 _Static_assert(sizeof(struct a80211_awdl_peer_advert) == 44, "awdl_peer_advert_add");
 _Static_assert(sizeof(struct a80211_ppp_done) == 12, "POST_PRESENCE_DONE payload");
 _Static_assert(sizeof(struct a80211_peer_presence) == 68, "PEER_PRESENCE payload");
+_Static_assert(offsetof(struct a80211_virt_if_create, role) == 12 &&
+                   offsetof(struct a80211_virt_if_create, bsd_name) == 16,
+               "VIRTUAL_IF_CREATE fields");
+_Static_assert(offsetof(struct switch_a80211_virtual_if_state, role) == 4 &&
+                   offsetof(struct switch_a80211_virtual_if_state, channel) == 8,
+               "VIRTUAL_IF_STATE fields");
+_Static_assert(offsetof(struct a80211_peer_presence, state) == 8 && offsetof(struct a80211_peer_presence, rssi) == 12,
+               "PEER_PRESENCE fields");
 _Static_assert(sizeof(struct a80211_ring_header) == A80211_RING_HEADER, "ring header");
 
 // ---- event ring -------------------------------------------------------------------------------------------------------
@@ -134,6 +143,12 @@ void a80211_awdl_init(struct a80211_awdl *f, struct awdl_core *core, const struc
         f->parent[i] = parent[i];
     memcpy(f->caps, caps, 12);
     f->preferred = f->master_channel = 149;
+#if defined(SWITCH_IPSW_KIND_24B119)
+    if (core && switch_awdl_services_clear(core))
+        core->service_update_indicator++;
+#endif
+    if (core)
+        switch_awdl_core_set_traffic(core, 0, 0);
 }
 
 static void flog(struct a80211_awdl *f, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
@@ -170,6 +185,15 @@ static int answer_u32(void *data, uint32_t *len, uint32_t capacity, int32_t *val
     return answer(data, len, capacity, w, sizeof w);
 }
 
+static int switch_awdl_payload(const void *data, uint32_t length, uint32_t expected)
+{
+    uint32_t version;
+    if (!data || length != expected)
+        return EINVAL;
+    memcpy(&version, data, sizeof version);
+    return version == 1 ? 0 : EINVAL;
+}
+
 static void fill_channel(struct a80211_channel *ch, struct awdl_chan c)
 {
     const uint8_t p = awdl_chan_primary(c);
@@ -179,36 +203,161 @@ static void fill_channel(struct a80211_channel *ch, struct awdl_chan c)
     ch->flags = p <= 14 ? 0x2u | 0x8u : (c.opclass == 0x80 ? 0x400u : 0x2u) | 0x10u;
 }
 
+static int switch_awdl_set_running(struct a80211_awdl *f, int on, uint64_t now)
+{
+    const int running = awdl_core_running(f->core);
+    if (on && !running) {
+        const int e = f->ops.start ? f->ops.start(f->ops.ctx) : 0;
+        if (e && e != EINPROGRESS) {
+            flog(f, "AWDL: wifip2pd enabled AWDL, but it did not start (%d)", e);
+            return e;
+        }
+        if (!e)
+            awdl_core_start(f->core, now);
+    } else if (!on && (running || f->enabled)) {
+        awdl_core_stop(f->core);
+        if (f->ops.stop)
+            f->ops.stop(f->ops.ctx);
+    }
+    f->enabled = (uint8_t)on;
+    return 0;
+}
+
+void switch_a80211_awdl_suspend(struct a80211_awdl *f)
+{
+    if (f->core)
+        awdl_core_stop(f->core);
+    switch_a80211_awdl_refresh(f);
+}
+
+int switch_a80211_awdl_resume(struct a80211_awdl *f, uint64_t now)
+{
+    if (!f->core)
+        return ENXIO;
+    return switch_awdl_set_running(f, f->enabled, now);
+}
+
+#if defined(SWITCH_IPSW_KIND_24B119)
+static int switch_awdl_virtual_state(const void *data, size_t length, struct switch_a80211_virtual_if_state *state)
+{
+    if (!data || length != sizeof *state)
+        return EINVAL;
+    memcpy(state, data, sizeof *state);
+    if (state->role != A80211_VIF_ROLE_AWDL)
+        return EOPNOTSUPP;
+    if (state->active > 1 || state->channel.version != 1)
+        return EINVAL;
+    return state->channel.channel || state->channel.flags ? EOPNOTSUPP : 0;
+}
+
+int switch_a80211_awdl_parent_state(const struct a80211_awdl *f, const void *data, size_t length)
+{
+    struct switch_a80211_virtual_if_state state;
+    return f && f->core ? switch_awdl_virtual_state(data, length, &state) : ENXIO;
+}
+
+static int switch_awdl_request_activity(struct a80211_awdl *f, uint64_t now)
+{
+    if (f->switch_activation_explicit || f->enabled || awdl_native(f->core))
+        return 0;
+    return switch_awdl_set_running(f, 1, now);
+}
+
+static void switch_awdl_stop_if_idle(struct a80211_awdl *f, uint64_t now)
+{
+    if (!f->switch_activation_explicit && !awdl_native(f->core) && !f->core->switch_service_bytes &&
+        !f->traffic_registrations)
+        switch_awdl_set_running(f, 0, now);
+}
+
+static int switch_awdl_service_request(struct a80211_awdl *f, const void *data, size_t length, uint64_t now)
+{
+    struct awdl_core *const c = f->core;
+    struct a80211_peer_service_request request;
+    if (length < sizeof request)
+        return EINVAL;
+    memcpy(&request, data, sizeof request);
+    if (request.version != 1 || request.delete_request > 1 || request.data_len != length - sizeof request)
+        return EINVAL;
+    const uint8_t zero[6] = {0};
+    if (request.aw_offset || request.token || request.expect_fragmented_response || memcmp(request.peer, zero, sizeof zero))
+        return EOPNOTSUPP;
+    if (!request.data_len) {
+        if (!request.delete_request)
+            return EOPNOTSUPP;
+        if (switch_awdl_services_clear(c)) {
+            c->service_update_indicator++;
+            switch_awdl_stop_if_idle(f, now);
+        }
+        return 0;
+    }
+    if (awdl_native(c))
+        return EOPNOTSUPP;
+    const int staged = switch_awdl_service_stage(c, (const uint8_t *)data + sizeof request, request.data_len);
+    if (request.delete_request) {
+        if (!staged && switch_awdl_service_drop(c))
+            switch_awdl_stop_if_idle(f, now);
+        return staged == ENOSPC ? 0 : staged;  // too large to have been kept
+    }
+    if (staged)
+        return staged;
+    if (switch_awdl_service_held(c))
+        return 0;
+    if (!switch_awdl_service_fits(c))
+        return ENOSPC;
+    const int start = switch_awdl_request_activity(f, now);
+    if (start)
+        return start;
+    switch_awdl_service_keep(c);
+    switch_awdl_sched_discovery(c, now);
+    if (c->switch_staged[0] == AWDL_TLV_SERVICE_RESPONSE)
+        switch_awdl_core_service_changed(c, now);
+    return 0;
+}
+#endif
+
 int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *val, void *data, uint32_t *len,
                         uint32_t capacity, uint64_t now)
 {
+    if (!f || !f->core || !val || !len || (set && (*len > capacity || (*len && !data))))
+        return EINVAL;
     const uint32_t in = set ? *len : 0;
     if (set) {
         switch (type) {
         case A80211_IOC_AWDL_SYNC_ENABLED: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_awdl_sync_enabled)))
+                return EINVAL;
             struct a80211_awdl_sync_enabled s;
             memset(&s, 0, sizeof s);
             memcpy(&s, data, in < sizeof s ? in : sizeof s);
-            f->sync_flags = s.flags;
+            if (s.enabled > 1)
+                return EINVAL;
             const int on = s.enabled != 0;
-            if (on == f->enabled)
-                return 0;
-            if (on) {
-                const int e = f->ops.start ? f->ops.start(f->ops.ctx) : 0;
-                if (e) {
-                    flog(f, "AWDL: wifip2pd enabled AWDL, but it did not start (%d)", e);
-                    return e;
-                }
-                awdl_core_start(f->core, now);
-            } else {
-                awdl_core_stop(f->core);
-                if (f->ops.stop)
-                    f->ops.stop(f->ops.ctx);
-            }
-            f->enabled = (uint8_t)on;
+            const int e = switch_awdl_set_running(f, on, now);
+            if (e)
+                return e;
+            f->sync_flags = s.flags;
+#if defined(SWITCH_IPSW_KIND_24B119)
+            f->switch_activation_explicit = 1;
+#endif
             return 0;
         }
+#if defined(SWITCH_IPSW_KIND_24B119)
+        case A80211_IOC_VIRTUAL_IF_STATE: {
+            struct switch_a80211_virtual_if_state s;
+            const int invalid = switch_awdl_virtual_state(data, in, &s);
+            if (invalid)
+                return invalid;
+            const int e = switch_awdl_set_running(f, (int)s.active, now);
+            if (e)
+                return e;
+            f->switch_activation_explicit = 1;
+            return 0;
+        }
+#endif
         case A80211_IOC_AWDL_STRATEGY: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_awdl_strategy)))
+                return EINVAL;
             struct a80211_awdl_strategy s;
             memset(&s, 0, sizeof s);
             memcpy(&s, data, in < sizeof s ? in : sizeof s);
@@ -217,6 +366,8 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
             return 0;
         }
         case A80211_IOC_AWDL_OPER_MODE: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_awdl_oper_mode)))
+                return EINVAL;
             struct a80211_awdl_oper_mode m;
             memset(&m, 0, sizeof m);
             memcpy(&m, data, in < sizeof m ? in : sizeof m);
@@ -224,13 +375,19 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
             return 0;
         }
         case A80211_IOC_AWDL_SOCIAL_TIME_SLOTS: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_awdl_social_time_slots)))
+                return EINVAL;
             struct a80211_awdl_social_time_slots s;
             memset(&s, 0, sizeof s);
             memcpy(&s, data, in < sizeof s ? in : sizeof s);
+            if (s.enabled > 1)
+                return EINVAL;
             f->social_time_slots = s.enabled;
             return 0;
         }
         case A80211_IOC_AWDL_PREFERRED_CHANNELS: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_awdl_preferred_channels)))
+                return EINVAL;
             struct a80211_awdl_preferred_channels p;
             memset(&p, 0, sizeof p);
             memcpy(&p, data, in < sizeof p ? in : sizeof p);
@@ -240,6 +397,8 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
             return 0;
         }
         case A80211_IOC_USERSPACE_P2P_OPTIONS: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_userspace_p2p_options)))
+                return EINVAL;
             struct a80211_userspace_p2p_options o;
             memset(&o, 0, sizeof o);
             memcpy(&o, data, in < sizeof o ? in : sizeof o);
@@ -249,36 +408,59 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
             return 0;
         }
         case A80211_IOC_AWDL_PEER_TRAFFIC_REGISTRATION: {
+            if (switch_awdl_payload(data, in, sizeof(struct a80211_awdl_peer_traffic_registration)))
+                return EINVAL;
             struct a80211_awdl_peer_traffic_registration t;
             memset(&t, 0, sizeof t);
             memcpy(&t, data, in < sizeof t ? in : sizeof t);
-            t.unique_id[sizeof t.unique_id - 1] = 0;
+            if (t.active > 1 || t.unique_id_length > sizeof t.unique_id)
+                return EINVAL;
+            const uint32_t unique_bytes =
+                t.unique_id_length < sizeof t.unique_id ? t.unique_id_length : sizeof t.unique_id - 1;
+            t.unique_id[unique_bytes] = 0;
             if (t.active) {
+#if defined(SWITCH_IPSW_KIND_24B119)
+                const int start = switch_awdl_request_activity(f, now);
+                if (start)
+                    return start;
+#endif
                 f->traffic_registrations++;
-                awdl_core_traffic_registered(f->core, (const char *)t.unique_id, now);  // a session starts
+                if (f->traffic_registrations == 1)
+                    switch_awdl_core_set_traffic(f->core, 1, now);
             } else if (f->traffic_registrations) {
                 f->traffic_registrations--;
+                if (!f->traffic_registrations)
+                    switch_awdl_core_set_traffic(f->core, 0, now);
+#if defined(SWITCH_IPSW_KIND_24B119)
+                switch_awdl_stop_if_idle(f, now);
+#endif
             }
             flog(f, "AWDL: traffic %s for %02x:%02x:%02x:%02x:%02x:%02x (%.40s), %u active",
                  t.active ? "registered" : "cleared", t.address[0], t.address[1], t.address[2], t.address[3],
                  t.address[4], t.address[5], (const char *)t.unique_id, f->traffic_registrations);
             return 0;
         }
-        case A80211_IOC_POST_PRESENCE_DONE:  // wifip2pd took our PEER_PRESENCE
+        case A80211_IOC_POST_PRESENCE_DONE:
+            return switch_awdl_payload(data, in, sizeof(struct a80211_ppp_done));
+        case A80211_IOC_AWDL_PEER_SERVICE_REQUEST:
+#if defined(SWITCH_IPSW_KIND_24B119)
+            return switch_awdl_service_request(f, data, in, now);
+#else
+            return EOPNOTSUPP;
+#endif
         case A80211_IOC_AWDL_CTL:
-        case A80211_IOC_AWDL_PEER_SERVICE_REQUEST:  // Bonjour offload: answered by mDNS over awdl0 instead
-        case A80211_IOC_AWDL_ADVERTISERS:           // peer hints from Bluetooth: the air tells us anyway
+        case A80211_IOC_AWDL_ADVERTISERS:
         case A80211_IOC_AWDL_UMI_TX_PEER:
         case A80211_IOC_GATEWAY_ADDRESS:
         case A80211_IOC_UNICAST_INFRA_PEER_ADDRESS:
-            return 0;
+            return EOPNOTSUPP;
         default:
             break;
         }
     } else {
         switch (type) {
         case A80211_IOC_AWDL_SYNC_ENABLED: {
-            const struct a80211_awdl_sync_enabled s = {1, f->sync_flags, f->enabled};
+            const struct a80211_awdl_sync_enabled s = {1, f->sync_flags, switch_a80211_awdl_active(f)};
             return answer(data, len, capacity, &s, sizeof s);
         }
         case A80211_IOC_AWDL_STRATEGY: {
@@ -325,7 +507,7 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
         case A80211_IOC_VIRTUAL_IF_ROLE:
             return answer_u32(data, len, capacity, val, 1, A80211_VIF_ROLE_AWDL);
         case A80211_IOC_STATE:
-            return answer_u32(data, len, capacity, val, 1, f->enabled ? 4 : 0);
+            return answer_u32(data, len, capacity, val, 1, switch_a80211_awdl_active(f) ? 4 : 0);
         case A80211_IOC_POWER: {
             const uint32_t w[6] = {1, 1, 1, 0, 0, 0};
             return answer(data, len, capacity, w, sizeof w);
@@ -342,13 +524,7 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
         case A80211_IOC_AWDL_STATISTICS:
         case A80211_IOC_AWDL_LOW_LATENCY_STATISTICS:
         case A80211_IOC_LOWLATENCY_STATISTICS:
-            // all counters zero: valid for every version (the caller sized the buffer)
-            if (!data || !capacity)
-                return EINVAL;
-            memset(data, 0, capacity);
-            ((uint32_t *)data)[0] = 1;
-            *len = capacity;
-            return 0;
+            return EOPNOTSUPP;
         case A80211_IOC_AWDL_ADVERTISERS: {
             // the peer table as awdl_peer_advert_add records, as many as fit
             uint32_t n = 0;
@@ -395,6 +571,24 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
     return EOPNOTSUPP;
 }
 
+int switch_a80211_awdl_active(const struct a80211_awdl *f)
+{
+    return f && f->core && f->enabled && awdl_core_running(f->core) &&
+           (f->ops.active ? f->ops.active(f->ops.ctx) : switch_awdl_core_ready(f->core));
+}
+
+void switch_a80211_awdl_refresh(struct a80211_awdl *f)
+{
+    if (!f->core)
+        return;
+    const uint8_t ready = switch_a80211_awdl_active(f);
+    if (ready == f->published_ready)
+        return;
+    f->published_ready = ready;
+    if (f->ops.post)
+        f->ops.post(f->ops.ctx, A80211_M_AWDL_SYNC_STATE_CHANGED, NULL, 0);
+}
+
 void a80211_awdl_peer(struct a80211_awdl *f, const uint8_t addr[6], int present, int8_t rssi)
 {
     struct a80211_peer_presence p;
@@ -407,6 +601,31 @@ void a80211_awdl_peer(struct a80211_awdl *f, const uint8_t addr[6], int present,
     if (f->ops.post)
         f->ops.post(f->ops.ctx, A80211_M_PEER_PRESENCE, &p, sizeof p);
 }
+
+#if defined(SWITCH_IPSW_KIND_24B119)
+size_t switch_a80211_awdl_action_rx(void *out, size_t capacity, const uint8_t *frame, size_t length,
+                                   const struct awdl_rx_meta *meta)
+{
+    enum { mac_header = 24, event_header = 72 };
+    if (length < mac_header + 16 || length > AWDL_MAX_FRAME || capacity < event_header + length - mac_header)
+        return 0;
+    const struct awdl_chan channel = awdl_chan_of_freq(meta->freq_mhz);
+    if (!channel.number)
+        return 0;
+    struct a80211_channel channel_info;
+    fill_channel(&channel_info, channel);
+
+    uint8_t *event = out;
+    memset(event, 0, event_header);
+    memcpy(event, frame + 10, 6);
+    memcpy(event + 6, frame + 16, 6);
+    memcpy(event + 12, &channel_info, sizeof channel_info);
+    awdl_put32(event + 44, (uint32_t)(int32_t)meta->rssi);
+    memcpy(event + 56, &meta->tsf, sizeof meta->tsf);
+    memcpy(event + event_header, frame + mac_header, length - mac_header);
+    return event_header + length - mac_header;
+}
+#endif
 
 int a80211_awdl_down_if(const uint8_t station[6], struct a80211_awdl_down_if *out)
 {

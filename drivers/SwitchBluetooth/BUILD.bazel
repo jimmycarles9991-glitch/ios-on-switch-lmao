@@ -1,6 +1,7 @@
 load("//bazel/lint:defs.bzl", "lint_files")
 
 # drivers/SwitchBluetooth: moved from out/native-a57/root-v1/tree/drivers/SwitchBluetooth by the layout move.
+load("//kernel/rules:driver_flags.bzl", "IPSW_KIND_FLAGS")
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
 load("//kernel/rules:package.bzl", "ios_binary")
 
@@ -31,6 +32,7 @@ kernel_headers()
 kernel_driver(
     name = "SwitchBluetooth",
     srcs = ["SwitchBluetooth.cpp"],
+    copts = IPSW_KIND_FLAGS,
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/SwitchSuspend",

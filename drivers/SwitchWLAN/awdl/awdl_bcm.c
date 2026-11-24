@@ -136,6 +136,23 @@ size_t bcm_probe_request(unsigned item, uint8_t *out, size_t size)
 const char *const bcm_monitor_probe_names[BCM_MONITOR_PROBE_COUNT] = {"WLC_GET_MONITOR", "monitor_promisc_level",
                                                                       "sta_monitor", "af_flying_max", "tsf"};
 
+size_t switch_awdl_probe_reply_size(unsigned item)
+{
+    return item >= BCM_PROBE_COUNT ? 0 : item == BCM_PROBE_INTERFACE_CREATE ? 4 : 256;
+}
+
+int switch_awdl_reply_is_echo(const uint8_t *request, size_t request_len, const uint8_t *reply, size_t reply_len)
+{
+    if (!request_len)
+        return !reply_len;
+    const size_t prefix = request_len < reply_len ? request_len : reply_len;
+    for (size_t i = 0; i < prefix; ++i) {
+        if (reply[i] != request[i])
+            return 0;
+    }
+    return 1;
+}
+
 size_t bcm_monitor_probe_request(unsigned item, uint8_t *out, size_t size)
 {
     if (item == BCM_MONITOR_PROBE_GET_MONITOR || item >= BCM_MONITOR_PROBE_COUNT)
@@ -497,7 +514,7 @@ static const uint8_t kAwdlLlc[10] = {0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0
 
 size_t bcm_awdl_encap(const uint8_t *eth, size_t length, uint16_t seq, uint8_t *out, size_t size)
 {
-    if (length < 14 || length + BCM_AWDL_DATA_HDR_LEN > size)
+    if (length < 14 || length > SWITCH_AWDL_NATIVE_FRAME_MAX || length + BCM_AWDL_DATA_HDR_LEN > size)
         return 0;
     const size_t n = length + BCM_AWDL_DATA_HDR_LEN;
     memmove(out + 14 + BCM_AWDL_DATA_HDR_LEN, eth + 14, length - 14);  // payload first: out may overlap eth's tail
@@ -516,16 +533,19 @@ size_t bcm_awdl_encap(const uint8_t *eth, size_t length, uint16_t seq, uint8_t *
 
 size_t bcm_awdl_decap(const uint8_t *f, size_t length, uint8_t *out, size_t size, uint16_t *seq)
 {
-    if (length < 14 + BCM_AWDL_DATA_HDR_LEN || be16(f + 12) >= 0x600 || memcmp(f + 14, kAwdlLlc, sizeof kAwdlLlc))
+    if (length < 14 + BCM_AWDL_DATA_HDR_LEN || memcmp(f + 14, kAwdlLlc, sizeof kAwdlLlc))
         return 0;
-    const size_t n = length - BCM_AWDL_DATA_HDR_LEN;
+    const size_t payload = be16(f + 12);
+    if (payload < BCM_AWDL_DATA_HDR_LEN || payload > 1500 || payload + 14 > length)
+        return 0;
+    const size_t n = payload + 14 - BCM_AWDL_DATA_HDR_LEN;
     if (n > size)
         return 0;
     if (seq)
         *seq = (uint16_t)(f[24] | ((unsigned)f[25] << 8));
     const uint8_t type0 = f[28];
     const uint8_t type1 = f[29];
-    memmove(out + 14, f + 30, length - 30);
+    memmove(out + 14, f + 30, payload - BCM_AWDL_DATA_HDR_LEN);
     memmove(out, f, 12);
     out[12] = type0;
     out[13] = type1;

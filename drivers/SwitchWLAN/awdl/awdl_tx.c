@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Our PSFs and MIFs, field for field as OWL sends them (src/tx.c awdl_init_full_action_frame), which Apple devices
-// synchronise to and elect with. The constant fields are OWL's values, which it took from Apple's frames.
+// PSF and MIF layout follows OWL's awdl_init_full_action_frame and captured Apple action frames.
 #include "awdl_internal.h"
 
 #define AWDL_ACTION_VERSION 0x10  // AWDL 1.0, the only action frame version (OWL AWDL_VERSION_COMPAT)
@@ -16,7 +15,11 @@ static void write_service_params(struct awdl_core *c, struct awdl_writer *w)
     awdl_w_begin(w, AWDL_TLV_SERVICE_PARAMS);
     awdl_w_bytes(w, unknown, sizeof unknown);
     awdl_w_u16(w, c->service_update_indicator);
+#if defined(SWITCH_IPSW_KIND_24B119)
+    switch_awdl_write_service_bloom(c, w);
+#else
     awdl_w_u32(w, 0);  // no value bitmask
+#endif
     awdl_w_end(w);
 }
 
@@ -35,6 +38,14 @@ static void write_ht_caps(struct awdl_core *c, struct awdl_writer *w)
 
 static void write_arpa(struct awdl_core *c, struct awdl_writer *w)
 {
+#if defined(SWITCH_IPSW_KIND_24B119)
+    // Like Apple's driver, no ARPA TLV until wifip2pd supplies the reverse-lookup record naming the host its records
+    // point at: a Mac may keep the first host name a peer announces, so a placeholder could stick.
+    if (!awdl_native(c)) {
+        switch_awdl_write_arpa(c, w);
+        return;
+    }
+#endif
     awdl_w_begin(w, AWDL_TLV_ARPA);
     awdl_w_u8(w, 3);
     const size_t n = strnlen(c->cfg.hostname, sizeof c->cfg.hostname);
@@ -98,7 +109,7 @@ static void write_sync_params(struct awdl_core *c, struct awdl_writer *w, uint64
     awdl_w_u8(w, awdl_master_chan(c));
     awdl_w_u8(w, 0);  // guard time
     awdl_w_u16(w, AWDL_AW_TU);
-    awdl_w_u16(w, AWDL_PSF_INTERVAL_TU);
+    awdl_w_u16(w, awdl_psf_period_tu(c->role));
     awdl_w_u16(w, AWDL_SYNC_FLAGS);
     awdl_w_u16(w, AWDL_AW_TU);  // AW extension length
     awdl_w_u16(w, AWDL_AW_TU);  // AW common length
@@ -109,7 +120,7 @@ static void write_sync_params(struct awdl_core *c, struct awdl_writer *w, uint64
     awdl_w_u8(w, AWDL_PRESENCE_MODE);
     awdl_w_u8(w, 0);
     awdl_w_u16(w, aw);
-    awdl_w_u16(w, aw);  // AP beacon alignment: Apple puts the AW number here too (OWL)
+    awdl_w_u16(w, 0);  // No AP beacon alignment is advertised.
     awdl_w_chanseq(w, c->cfg.seq);
     awdl_w_u16(w, 0);
     awdl_w_end(w);
@@ -166,5 +177,9 @@ size_t awdl_core_build_af(struct awdl_core *c, uint8_t subtype, uint64_t now, ui
     write_sync_params(c, &w, now);
     write_election(c, &w);
     awdl_write_extras(c, &w, subtype == AWDL_SUBTYPE_MIF);
+#if defined(SWITCH_IPSW_KIND_24B119)
+    if (subtype == AWDL_SUBTYPE_MIF && !awdl_native(c))
+        switch_awdl_write_service_responses(c, &w);
+#endif
     return w.overflow ? 0 : w.at;
 }

@@ -19,6 +19,11 @@ unsigned coex_command(uint16_t opcode, const uint8_t *params, uint32_t length)
     return switch_coex_bt_command(&state, opcode, params, length);
 }
 
+int coex_le_scan_shape(int awdl_active, uint16_t opcode, uint8_t *params, uint32_t length)
+{
+    return switch_coex_le_scan_shape(awdl_active != 0, opcode, params, length) ? 1 : 0;
+}
+
 int coex_describe(char *out, size_t size)
 {
     return switch_coex_describe(&state, out, size);

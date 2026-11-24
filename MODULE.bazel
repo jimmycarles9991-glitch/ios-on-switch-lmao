@@ -129,10 +129,16 @@ llvm_tools = use_repo_rule("//bazel/llvm:llvm.bzl", "llvm_tools")
 
 llvm_tools(name = "llvm")
 
-# The Arm GNU Toolchain 14.3.rel1 for hekate payloads (install-ios.bin), the compiler hekate itself is built with.
+# The Arm GNU Toolchain 14.3.rel1 for hekate payloads (install-ios.bin), the compiler hekate itself is built with, and
+# for the Wi-Fi chip's payload.
 arm_none_eabi = use_repo_rule("//bazel/arm:arm_none_eabi.bzl", "arm_none_eabi")
 
 arm_none_eabi(name = "arm_none_eabi")
+
+# QEMU 9.2.4 (xPack) for the Wi-Fi chip payload's CPU tests (drivers/SwitchWLAN/firmware), test-only.
+qemu_arm = use_repo_rule("//bazel/arm:qemu_arm.bzl", "qemu_arm")
+
+qemu_arm(name = "qemu_arm")
 
 bazel_dep(name = "rules_rust", version = "0.75.0")
 

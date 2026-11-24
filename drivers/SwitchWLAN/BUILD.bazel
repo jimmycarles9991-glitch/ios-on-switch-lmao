@@ -27,7 +27,16 @@ filegroup(
 )
 
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
-kernel_headers()
+kernel_headers(extra = [
+    "//drivers/SwitchWLAN/firmware/a3:abi.h",
+    "//drivers/SwitchWLAN/firmware/a3:bootstrap",
+    "//drivers/SwitchWLAN/firmware/a3:candidate",
+    "//drivers/SwitchWLAN/firmware/a3:beacon.h",
+    "//drivers/SwitchWLAN/firmware/a3:diagnostic.h",
+    "//drivers/SwitchWLAN/firmware/a3:fault.h",
+    "//drivers/SwitchWLAN/firmware/a3:image.h",
+    "//drivers/SwitchWLAN/firmware/a3:wire.h",
+])
 
 # SwitchWLAN: BCM4356A3 Wi-Fi on PCIe port 1; firmware.S .incbins drivers/SwitchWLAN/firmware. en0 is an
 # IONetworkingFamily driver: SwitchWLANFamily.cpp subclasses the original IOEthernetController and IOEthernetInterface
@@ -39,7 +48,17 @@ kernel_driver(
         "SwitchWLANProbe.cpp",
         "TegraPCIe.cpp",
         "SwitchWLANChip.cpp",
+        "SwitchWLANA3.cpp",
+        "SwitchWLANA3Radio.cpp",
+        "SwitchWLANA3Data.cpp",
+        "SwitchWLANA3Lifecycle.cpp",
+        "SwitchWLANA3Schedule.cpp",
+        "SwitchWLANA3Clock.cpp",
+        "SwitchWLANA3TxProbe.cpp",
+        "SwitchWLANChipProbe.cpp",
+        "SwitchWLANRom.cpp",
         "SwitchWLANMsgbuf.cpp",
+        "SwitchWLANDma.cpp",
         "SwitchWLANCrypto.cpp",
         "SwitchWLANWpa.cpp",
         "SwitchWLANNet.cpp",
@@ -51,11 +70,13 @@ kernel_driver(
         "SwitchWLANAwdlSoft.cpp",
         "awdl/awdl_wire.c",
         "awdl/awdl_core.c",
+        "awdl/awdl_radio.c",
         "awdl/awdl_data.c",
         "awdl/awdl_native.c",
         "awdl/awdl_native_rx.c",
         "awdl/awdl_schedule.c",
         "awdl/awdl_tx.c",
+        "awdl/awdl_services.c",
         "awdl/awdl_bcm.c",
         "awdl/awdl_bcm_trace.c",
         "awdl/awdl_apple80211.c",
@@ -69,15 +90,18 @@ kernel_driver(
         "-mgeneral-regs-only",
         "-mstrict-align",
         "-std=gnu11",
-    ],
+    ] + IPSW_KIND_FLAGS,
     copts = [
         "-mgeneral-regs-only",
         "-mstrict-align",
+        "-iquote",
+        "$(GENDIR)/drivers/SwitchWLAN",
     ] + IPSW_KIND_FLAGS,
     hdr_deps = [
         "drivers/ArmGIC",
         "drivers/SwitchBluetooth",
         "drivers/SwitchSuspend",
+        "drivers/TegraSMMU",
         "drivers/TegraI2C",
         "kits/SwitchCAR",
         "kits/SwitchDMA",
@@ -86,6 +110,14 @@ kernel_driver(
     ],
     late = ["SwitchWLANFamily.cpp"],
     prelink = ["com.apple.iokit.IONetworkingFamily"],
+)
+
+kernel_driver(
+    name = "SwitchWLANAwdlNeighbor",
+    srcs = ["SwitchWLANAwdlNeighbor.c"],
+    c_recipe = "bsd_c",
+    c_copts = ["-mgeneral-regs-only", "-mstrict-align"],
+    hdr_deps = [],
 )
 
 switch_abi_bindings(

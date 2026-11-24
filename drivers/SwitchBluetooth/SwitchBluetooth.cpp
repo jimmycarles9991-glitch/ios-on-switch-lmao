@@ -136,6 +136,9 @@
 #include <miscfs/devfs/devfs.h>
 #include <string.h>
 #include "SwitchBluetooth.h"
+#ifndef SWITCH_IPSW_BUILD
+#error "SwitchBluetooth requires the selected IPSW build"
+#endif
 #include "SwitchBluetoothLeFilter.h"
 #include "../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../kits/SwitchDT/SwitchDTProperty.h"
@@ -144,6 +147,9 @@
 #include "SwitchBluetoothLinks.h"
 #include "SwitchBluetoothRxDma.h"
 #include "SwitchCoex.h"
+#if DEVELOPMENT || DEBUG
+#include "SwitchBluetoothProbe.h"
+#endif
 #include "../ArmGIC/SwitchInterrupts.h"
 #include "../TegraAPBDMA/TegraAPBDMA.h"
 #include "../SwitchSuspend/SwitchWake.h"
@@ -154,6 +160,11 @@ extern "C" __attribute__((weak)) void switch_joycon_bluetooth_address(const uint
 
 // SwitchWLAN.cpp: the Wi-Fi infra channel in MHz while associated, else 0 (for AFH, "Coexistence").
 extern "C" __attribute__((weak)) uint16_t swlan_awdl_infra_freq(void)
+{
+    return 0;
+}
+
+extern "C" __attribute__((weak)) int swlan_awdl_active(void)
 {
     return 0;
 }
@@ -614,6 +625,9 @@ class SwitchBluetooth : public IOService {
     bool leApcf = false, leDirty = false, leScanning = false, leCapsLogged = false;
     bool answer(uint16_t opcode, uint8_t status, int sub);
     bool programLeFilter();
+#if DEVELOPMENT || DEBUG
+    switch_bt_probe hciProbe = {};
+#endif
 
     struct Traced {
         uint16_t opcode;
@@ -687,6 +701,13 @@ class SwitchBluetooth : public IOService {
     bool afhSet = false, afhRefused = false;  // our classification is in the controller; it refused one
     uint8_t inject(uint16_t opcode, const uint8_t *params, uint8_t length, uint8_t *ret, uint8_t *retLength);
     void coexAfh(uint16_t opcode);
+    uint8_t rawLeScan[7] = {}, appliedLeScan[7] = {};
+    uint8_t rawLeScanLen = 0, leScanFilterDup = 0;
+    bool haveRawLeScan = false, haveAppliedLeScan = false;
+    thread_call_t leScanCall = nullptr;
+    void coexLeScan(uint16_t opcode, bool wasScanning, const uint8_t *params, uint8_t length);
+    void syncLeScanLocked(bool scanning);
+    static void leScanSync(thread_call_param_t owner, thread_call_param_t);
 
     // System sleep (SwitchBluetooth.h): the client's sends wait at sendGate from suspend to resume; disconnects counts
     // Disconnection Complete events (thread_wakeup on it) for the controllers suspend drops.
@@ -703,6 +724,7 @@ public:
 private:
 public:
     bool coexSnapshot(switch_coex_bt *out, char *linksText, size_t size);
+    void awdlActiveChanged();
 
 private:
     // Scratch for the work loop's link event and stats line (both under the work-loop gate: action or runAction), off
@@ -939,10 +961,11 @@ bool SwitchBluetooth::start(IOService *provider)
     tx.data = tegra_apbdma_alloc(kRingBytes, &txBuf) ? txBuf.va : static_cast<uint8_t *>(IOMalloc(kRingBytes));
     loop = IOWorkLoop::workLoop();
     stuckCall = thread_call_allocate(&SwitchBluetooth::stuck, this);
+    leScanCall = thread_call_allocate(&SwitchBluetooth::leScanSync, this);
     nanoseconds_to_absolutetime(kIdleStormNs, &idleStormAbs);
     nanoseconds_to_absolutetime(static_cast<uint64_t>(kStatsMs) * 1000000ULL, &statsWindow);
     if (!uart || !car || !gpio || !pinmux || !hwLock || !stateLock || !hciLock || !txLock || !rx.data || !tx.data ||
-        !loop || !stuckCall || !cmdLock || !sendGate) {
+        !loop || !stuckCall || !leScanCall || !cmdLock || !sendGate) {
         IOLog("SwitchBluetooth: out of memory or mappings\n");
         return false;
     }
@@ -1812,7 +1835,7 @@ bool SwitchBluetooth::clientRoom(size_t need)
 //   in the host; so 0xFCE9 sub-operations 1, 5 and 7 (and the UUID filter's later forms 0x50, 0x61) are answered here
 //   with that status and never reach the controller, which keeps its default of reporting every advert
 //   (answerHere: a Command Complete with the controller's last credit count, passed on between its packets).
-//   A controller that has Android's APCF (0xFD53 at bring-up) takes the filtering after all: bluetoothd's UUIDs,
+//   On 21H461 a controller with Android's APCF (0xFD53 at bring-up) takes the filtering: bluetoothd's UUIDs,
 //   Apple matching rules, address list and duplicate bypass become three APCF filters (SwitchBluetoothLeFilter.h),
 //   programmed by injected commands before the scan that uses them, and each of those commands is answered here
 //   with success and its sub-operation; the rest stay refused, one SwitchRefusal line per sub-operation.
@@ -1846,6 +1869,9 @@ void SwitchBluetooth::resetClientFraming()
     afhCheckAt = 0;
     afhLinks = 0;
     afhSet = false;
+    rawLeScanLen = 0;
+    leScanFilterDup = 0;
+    haveRawLeScan = haveAppliedLeScan = false;
     IOSimpleLockUnlockEnableInterrupt(cmdLock, s);
     switch_wlan_bt_links(0);
 }
@@ -2053,6 +2079,7 @@ bool SwitchBluetooth::frameRx(uint32_t avail)
 #if DEVELOPMENT || DEBUG
             traceCompletion(opcode, status, static_cast<uint8_t>(was), ret, retLength);
             linkCompletion(opcode, status, static_cast<uint8_t>(was));
+            switch_bt_probe_completion(opcode, vendor, status, static_cast<uint8_t>(was), ret, retLength);
 #endif
         }
         if (stray) {  // not passed on (top of section)
@@ -2124,6 +2151,9 @@ errno_t SwitchBluetooth::clientCommand(uint8_t *packet, size_t size)
     const uint16_t opcode = le16(packet + 1);
     uint8_t *const params = packet + 4;
     const uint8_t length = packet[3];
+#if DEVELOPMENT || DEBUG
+    const switch_bt_probe_command issued = switch_bt_probe_issue(&hciProbe, opcode, params, length);
+#endif
     __atomic_fetch_add(&st.commands, 1, __ATOMIC_RELAXED);
     if ((opcode >> 10) == kOgfLe)
         __atomic_fetch_add(&st.leCommands, 1, __ATOMIC_RELAXED);
@@ -2131,27 +2161,50 @@ errno_t SwitchBluetooth::clientCommand(uint8_t *packet, size_t size)
         __atomic_fetch_add(&st.vendorCommands, 1, __ATOMIC_RELAXED);
     if (opcode == OP_LE_SET_SCAN_ENABLE && length)
         __atomic_fetch_add(params[0] ? &st.scanOn : &st.scanOff, 1, __ATOMIC_RELAXED);
+    const bool wasScanning = leScanning;
     if (opcode == OP_LE_SET_SCAN_ENABLE && length) {
+        if (length >= 2)
+            leScanFilterDup = params[1];
         leScanning = params[0] != 0;
         if (leScanning && leDirty && leFilter.apcf)
             programLeFilter();
         switch_le_filter_scan_enable(&leFilter, params, length);
     }
-    if (answerHere(opcode, params, length)) {
+    const bool hostFilter = switch_le_filter_host_command(opcode, params, length);
+    if (hostFilter && !answer(opcode, kUnknownCommand, -1)) {
+#if DEVELOPMENT || DEBUG
+        switch_bt_probe_dropped(&issued);
+#endif
+        return ENOBUFS;
+    }
+    if (hostFilter || answerHere(opcode, params, length)) {
 #if DEVELOPMENT || DEBUG
         traceCommand(opcode, params, length, true);
+        switch_bt_probe_answered(&issued, answers[(answerHead - 1u) % (sizeof(answers) / sizeof(answers[0]))]);
 #endif
         loop->runAction(&SwitchBluetooth::gated, this, reinterpret_cast<void *>(1));  // deliver(): the answer goes out
         return 0;
     }
     if (fixAdvertising(opcode, params, length))
         __atomic_fetch_add(&st.advFixed, 1, __ATOMIC_RELAXED);
+    if (opcode == SWITCH_COEX_OP_LE_SCAN_PARAMS && length >= 5 && length <= sizeof(rawLeScan)) {
+        memcpy(rawLeScan, params, length);
+        rawLeScanLen = length;
+        haveRawLeScan = true;
+        switch_coex_le_scan_shape(swlan_awdl_active() != 0, opcode, params, length);
+        memcpy(appliedLeScan, params, length);
+        haveAppliedLeScan = true;
+    } else if (opcode == SWITCH_COEX_OP_LE_EXT_SCAN_PARAMS) {
+        switch_coex_le_scan_shape(swlan_awdl_active() != 0, opcode, params, length);
+    }
     if (opcode == OP_ACCEPT_CONNECTION && acceptAsCentral(params, length))
         __atomic_fetch_add(&st.central, 1, __ATOMIC_RELAXED);
 #if DEVELOPMENT || DEBUG
     traceCommand(opcode, params, length, false);
     linkCommand(opcode, params, length);
+    switch_bt_probe_forwarded(&issued, params);
 #endif
+    coexLeScan(opcode, wasScanning, params, length);
     coexCommand(opcode, params, length);
     coexAfh(opcode);
     const IOInterruptState s = IOSimpleLockLockDisableInterrupt(cmdLock);
@@ -2170,9 +2223,11 @@ bool SwitchBluetooth::answerHere(uint16_t opcode, const uint8_t *params, uint8_t
         return false;
     uint8_t sub = 0;
     if (switch_le_filter_take(&leFilter, opcode, params, length, &sub)) {
-        leDirty = true;
-        if (leScanning && !programLeFilter())
-            return answer(opcode, kUnknownCommand, -1);
+        if (leFilter.apcf) {
+            leDirty = true;
+            if (leScanning && !programLeFilter())
+                return answer(opcode, kUnknownCommand, -1);
+        }
         return answer(opcode, 0, sub);
     }
     if (opcode != OP_BCM_LE_META)
@@ -2229,6 +2284,9 @@ bool SwitchBluetooth::programLeFilter()
         uint8_t ret[8];
         uint8_t retLength = sizeof(ret);
         const uint8_t status = inject(commands[i].opcode, commands[i].params, commands[i].length, ret, &retLength);
+#if DEVELOPMENT || DEBUG
+        switch_bt_probe_injected(&commands[i], status, ret, retLength);
+#endif
         if (!status)
             continue;
         if (status == kInjectBusy || status == kInjectNotSent || status == kInjectNoAnswer) {
@@ -2366,7 +2424,7 @@ void SwitchBluetooth::traceCommand(uint16_t opcode, const uint8_t *params, uint8
         return;
     char p[2 * kTraceParams + 1];
     hex(p, sizeof(p), entry.params, entry.length < kTraceParams ? entry.length : kTraceParams);
-    os_log(OS_LOG_DEFAULT, "SwitchBluetooth: HCI %04x/%02x %u bytes [%s] -> answered here: Unknown HCI Command", opcode,
+    os_log(OS_LOG_DEFAULT, "SwitchBluetooth: HCI %04x/%02x %u bytes [%s] -> answered here", opcode,
            sub, entry.length, p);
 }
 #endif
@@ -2637,12 +2695,79 @@ void SwitchBluetooth::coexAfh(uint16_t opcode)
            first, last, afhMhz, usable);
 }
 
+void SwitchBluetooth::syncLeScanLocked(bool scanning)
+{
+    if (!haveRawLeScan || rawLeScanLen < 5 || rawLeScanLen > sizeof(rawLeScan))
+        return;
+    uint8_t target[sizeof(rawLeScan)];
+    memcpy(target, rawLeScan, rawLeScanLen);
+    switch_coex_le_scan_shape(swlan_awdl_active() != 0, SWITCH_COEX_OP_LE_SCAN_PARAMS, target, rawLeScanLen);
+    if (haveAppliedLeScan && memcmp(target, appliedLeScan, rawLeScanLen) == 0)
+        return;
+    bool disabled = false;
+    if (scanning) {
+        const uint8_t off[2] = {0, leScanFilterDup};
+        if (inject(OP_LE_SET_SCAN_ENABLE, off, sizeof(off), nullptr, nullptr) != 0)
+            return;
+        disabled = true;
+    }
+    const uint8_t status = inject(SWITCH_COEX_OP_LE_SCAN_PARAMS, target, rawLeScanLen, nullptr, nullptr);
+    if (disabled) {
+        const uint8_t on[2] = {1, leScanFilterDup};
+        inject(OP_LE_SET_SCAN_ENABLE, on, sizeof(on), nullptr, nullptr);
+    }
+    if (!status) {
+        memcpy(appliedLeScan, target, rawLeScanLen);
+        haveAppliedLeScan = true;
+        coexCommand(SWITCH_COEX_OP_LE_SCAN_PARAMS, target, rawLeScanLen);
+    }
+}
+
+void SwitchBluetooth::coexLeScan(uint16_t opcode, bool wasScanning, const uint8_t *params, uint8_t length)
+{
+    if (opcode == OP_RESET) {
+        rawLeScanLen = 0;
+        leScanFilterDup = 0;
+        haveRawLeScan = haveAppliedLeScan = false;
+        return;
+    }
+    if (opcode == SWITCH_COEX_OP_LE_SCAN_PARAMS || (opcode == OP_LE_SET_SCAN_ENABLE && length && !params[0]))
+        return;
+    syncLeScanLocked(wasScanning);
+}
+
+void SwitchBluetooth::leScanSync(thread_call_param_t owner, thread_call_param_t)
+{
+    auto *self = static_cast<SwitchBluetooth *>(owner);
+    IOLockLock(self->sendGate);
+    IOLockLock(self->stateLock);
+    const bool ok = !self->asleep && self->mode == kClient && self->client != 0 && self->state == kReady &&
+                    self->chipOn && self->txFrame.state == 0 && !self->framingLost;
+    IOLockUnlock(self->stateLock);
+    if (ok)
+        self->syncLeScanLocked(self->leScanning);
+    IOLockUnlock(self->sendGate);
+}
+
+void SwitchBluetooth::awdlActiveChanged()
+{
+    if (leScanCall)
+        thread_call_enter(leScanCall);
+}
+
 extern "C" bool switch_bluetooth_coex(struct switch_coex_bt *state, char *links, size_t size)
 {
     SwitchBluetooth *self = gDriver;
     if (size)
         links[0] = 0;
     return (self != nullptr) && self->coexSnapshot(state, links, size);
+}
+
+extern "C" void switch_bluetooth_awdl_changed(void)
+{
+    SwitchBluetooth *self = __atomic_load_n(&gDriver, __ATOMIC_ACQUIRE);
+    if (self)
+        self->awdlActiveChanged();
 }
 
 // ---- Links -------------------------------------------------------------------------------------------------------
@@ -3478,6 +3603,9 @@ bool SwitchBluetooth::bringUp(uint32_t offMs, char *why, size_t whySize)
                   "filter in the %s\n",
                   capsError ? "refused" : "answered", capsLength > 6 ? caps[6] : 0, capsLength > 7 ? caps[7] : 0,
                   apcf ? "controller" : "host");
+#if DEVELOPMENT || DEBUG
+            switch_bt_probe_capabilities(capsError, caps, capsLength);
+#endif
         }
 
         // Sleep mode off (12 zero bytes, nxk): BT_WAKE stays asserted and host wake is unused. bluetoothd may
@@ -3730,6 +3858,7 @@ errno_t SwitchBluetooth::ctlConnect(kern_ctl_ref, struct sockaddr_ctl *sac, void
 errno_t SwitchBluetooth::ctlDisconnect(kern_ctl_ref, u_int32_t unit, void *)
 {
     SwitchBluetooth *self = gDriver;
+    IOLockLock(self->sendGate);
     IOLockLock(self->stateLock);
     const bool mine = self->client == unit;
     if (mine) {
@@ -3742,6 +3871,7 @@ errno_t SwitchBluetooth::ctlDisconnect(kern_ctl_ref, u_int32_t unit, void *)
             self->power(false);
     }
     IOLockUnlock(self->stateLock);
+    IOLockUnlock(self->sendGate);
     if (mine) {
         self->setMode(kIdle);
         switch_wake_bt_reset();  // every connection went with the client: no controller holds a button

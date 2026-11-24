@@ -5,11 +5,11 @@
 // goes through here, under one lock. Page tables are TegraSMMUDomain.h.
 //
 // Registers (Linux memory/tegra/tegra210.c, iommu/tegra-smmu.c): PTB_ASID 0x1c, PTB_DATA 0x20, TLB_FLUSH 0x30 (ASID match
-// bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (0: all; PA[31:4] | 1: one PTE group, whose
-// PA[33:32] PTC_FLUSH_1 0x9b8 holds; Tegra X1 TRM 18.11.1.10, .11, .122). A swgroup's ASID register is ENABLE 31 |
-// ASID; each memory client has a translation bit in TRANSLATION_ENABLE_0..4 (0x228..0x238), which switchroot's bl31 sets
-// for every client while leaving every swgroup in bypass. The global SMMU enable is secure-only (reads back garbage), so a
-// whether translation is on is known from what the unit's engines did (TegraVIC.cpp), not read back.
+// bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (type ALL with bit 3 set, or PA[31:4] | 1 for
+// one PTE group), PTC_FLUSH_1 0x9b8 (PA[33:32]; Tegra X1 TRM 18.11.1.10, .11, .122). The client translation
+// registers used here are TRANSLATION_ENABLE_0..3 (0x228..0x234), secure-only. Switchroot's bl31 sets the client bits
+// and leaves the swgroups in bypass. The global SMMU enable is secure-only too. The engines show whether translation
+// is on (TegraVIC.cpp).
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -26,7 +26,11 @@ enum tegra_smmu_asid {
     TEGRA_SMMU_ASID_NVJPG = 125,
     TEGRA_SMMU_ASID_XUSB_HOST = 124,
     TEGRA_SMMU_ASID_NVDEC = 123,
-    TEGRA_SMMU_ASID_NVENC = 122
+    TEGRA_SMMU_ASID_NVENC = 122,
+    TEGRA_SMMU_ASID_XUSB_DEV = 121,
+    TEGRA_SMMU_ASID_DISPLAY_B = 120,
+    TEGRA_SMMU_ASID_HDA = 119,
+    TEGRA_SMMU_ASID_AFI = 118
 };
 
 enum tegra_smmu_register {
@@ -34,9 +38,13 @@ enum tegra_smmu_register {
     TEGRA_SMMU_TRANSLATION_ENABLE_1 = 0x22c,
     TEGRA_SMMU_TRANSLATION_ENABLE_2 = 0x230,
     TEGRA_SMMU_TRANSLATION_ENABLE_3 = 0x234,
+    TEGRA_SMMU_AFI_ASID = 0x238,
     TEGRA_SMMU_DC_ASID = 0x240,
+    TEGRA_SMMU_DCB_ASID = 0x244,
+    TEGRA_SMMU_HDA_ASID = 0x254,
     TEGRA_SMMU_VIC_ASID = 0x284,
     TEGRA_SMMU_XUSB_HOST_ASID = 0x288,  // swgroup "xusb_host" (xusb_hostr/xusb_hostw: TRANSLATION_ENABLE_2 bits 10/11)
+    TEGRA_SMMU_XUSB_DEV_ASID = 0x28c,   // swgroup "xusb_dev" (xusb_devr/xusb_devw: TRANSLATION_ENABLE_2 bits 12/13)
     TEGRA_SMMU_NVJPG_ASID = 0xac0,      // swgroup "nvjpg" (clients nvjpgsrd/nvjpgswr: TRANSLATION_ENABLE_3 bits 30/31)
     TEGRA_SMMU_NVDEC_ASID = 0xab4,      // swgroup "nvdec" (clients nvdecsrd/nvdecswr: TRANSLATION_ENABLE_3 bits 24/25)
     TEGRA_SMMU_NVENC_ASID = 0x264,      // swgroup "nvenc" (nvencsrd: TRANSLATION_ENABLE_0 bit 28, nvencswr: _1 bit 11)
@@ -53,6 +61,10 @@ static inline void tegra_smmu_ids_distinct(enum tegra_smmu_asid asid, enum tegra
     case TEGRA_SMMU_ASID_XUSB_HOST:
     case TEGRA_SMMU_ASID_NVDEC:
     case TEGRA_SMMU_ASID_NVENC:
+    case TEGRA_SMMU_ASID_XUSB_DEV:
+    case TEGRA_SMMU_ASID_DISPLAY_B:
+    case TEGRA_SMMU_ASID_HDA:
+    case TEGRA_SMMU_ASID_AFI:
         break;
     }
     switch (reg) {
@@ -60,9 +72,13 @@ static inline void tegra_smmu_ids_distinct(enum tegra_smmu_asid asid, enum tegra
     case TEGRA_SMMU_TRANSLATION_ENABLE_1:
     case TEGRA_SMMU_TRANSLATION_ENABLE_2:
     case TEGRA_SMMU_TRANSLATION_ENABLE_3:
+    case TEGRA_SMMU_AFI_ASID:
     case TEGRA_SMMU_DC_ASID:
+    case TEGRA_SMMU_DCB_ASID:
+    case TEGRA_SMMU_HDA_ASID:
     case TEGRA_SMMU_VIC_ASID:
     case TEGRA_SMMU_XUSB_HOST_ASID:
+    case TEGRA_SMMU_XUSB_DEV_ASID:
     case TEGRA_SMMU_NVJPG_ASID:
     case TEGRA_SMMU_NVDEC_ASID:
     case TEGRA_SMMU_NVENC_ASID:
@@ -71,10 +87,14 @@ static inline void tegra_smmu_ids_distinct(enum tegra_smmu_asid asid, enum tegra
 }
 
 // Points swgroup register asidReg at the directory ptb (TegraSMMUDomain::ptb) under asid: the directory (read back),
-// a flush, the clients' translation bits in translationReg, the swgroup, a flush. 0, or -1 with one line in `line`: the
-// swgroup is translated by another ASID, or a register did not take.
+// a flush, the clients' translation bits in translationReg checked (the secure world sets them), the swgroup, a flush.
+// 0, or -1 with one line in `line`: the swgroup is translated by another ASID, a translation bit is off, or a register
+// did not take.
 int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg, uint32_t translationBits,
                       char *line, size_t size);
+// The same for a 34-bit client's swgroup (XUSB_HOST, XUSB_DEV): asid in all four of its ASID fields, one per va[33:32].
+int tegra_smmu_attach_wide(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg,
+                           uint32_t translationBits, char *line, size_t size);
 // Restore a retained attachment after reset, before that client resumes DMA. A different or detached identity is refused.
 int switch_smmu_restore(uint32_t asid, uint32_t ptb, uint32_t asidReg, char *line, size_t size);
 // The swgroup back to bypass, the ASID's directory cleared, a flush.

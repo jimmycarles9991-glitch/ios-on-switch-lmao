@@ -160,7 +160,7 @@ public:
     void describe(char *out, size_t length);
 
 private:
-    Mmio car_, pmc_, gpio_, pinmux_, mc_, padctl_, pcie_, cs_, mselect_;
+    Mmio car_, pmc_, gpio_, pinmux_, padctl_, pcie_, cs_, mselect_;
     bool mapped_ = false;
     uint32_t cfgPage_ = ~0u;
 
@@ -193,6 +193,7 @@ struct Core {
 
 class Chip {
 public:
+    static constexpr uint32_t kTcmLength = 0x400000;
     // BAR0 is a 4 KiB view of the chip's backplane; BAR2 its RAM (TCM) from backplane address 0.
     bool attach(TegraPcie *pcie, uint32_t bar0PA, uint32_t bar2PA, char *why, size_t whyLength);
 
@@ -229,6 +230,13 @@ public:
     uint32_t ramSize() const
     {
         return ramSize_;
+    }
+
+    bool containsRam(uint32_t address, uint32_t length, uint32_t alignment = 4) const
+    {
+        return ramBase_ <= kTcmLength && ramSize_ <= kTcmLength - ramBase_ && !(address % alignment) &&
+               address >= ramBase_ && length <= ramSize_ &&
+               address - ramBase_ <= ramSize_ - length;
     }
 
     // brcmf_pcie_download_fw_nvram: ARM halted, image and NVRAM into RAM, ARM started, then the firmware's shared
@@ -269,8 +277,14 @@ private:
     Core cores_[24] = {};
     unsigned coreCount_ = 0;
     uint32_t ramBase_ = 0, ramSize_ = 0, shared_ = 0, sharedFlags_ = 0, console_ = 0;
+#if DEVELOPMENT || DEBUG
+    uint32_t romSize_ = 0;
+    bool captureRom(const uint8_t *image, size_t imageLength, const Core &arm);
+#endif
 
     uint32_t erom(uint32_t &at, uint32_t &type);
+    bool bootImage(const uint8_t *image, size_t imageLength, const uint8_t *nvram, size_t nvramLength, char *why,
+                   size_t whyLength);
     bool regaddr(uint32_t &at, uint32_t &base, uint32_t &wrap);
     void scanCores();
     void coreDisable(const Core &core, uint32_t prereset, uint32_t reset);
@@ -328,7 +342,9 @@ public:
         FLOW_PENDING,
         FLOW_OPEN,
         FLOW_REFUSED,
-        FLOW_DELETING
+        FLOW_DELETING,
+        FLOW_DELETE_PENDING,
+        FLOW_DELETE_FAILED
     };
 
     // Rings, scratch and ring-update buffers, control, receive and transmit buffers and the TX flow ring, all in one
@@ -422,7 +438,7 @@ public:
     // at the end of the DMA area, after everything the station uses, so the station's layout never changes.
     // awdlSend: 1 posted, 0 kept until its flow ring is open (one frame per ring), -1 refused.
     static constexpr unsigned kAwdlFlows = 4;
-    int awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length);
+    int awdlSend(uint8_t ifidx, const uint8_t *frame, size_t length, const uint8_t *source = nullptr);
     void awdlClose();  // flow rings deleted (or forgotten when the chip is gone)
 
     bool awdlAvailable() const
@@ -434,6 +450,11 @@ public:
     {
         return awdlRings_;
     }
+
+    uint16_t awdlFirstRing() const;
+    unsigned awdlOutstanding() const;
+    bool awdlClosed() const;
+    bool awdlFailed() const;
 
     uint32_t awdlRefused() const
     {
@@ -535,16 +556,17 @@ private:
     unsigned rxCount_ = 0, txCount_ = 0;
     uint16_t *txFree_ = nullptr;  // FIFO of free ids
     uint16_t *txStatus_ = nullptr;
-    uint8_t *txBusy_ = nullptr;
+    uint8_t *txRing_ = nullptr;
     void *txSlots_ = nullptr;
     unsigned txFreeHead_ = 0, txFreeCount_ = 0;
     bool txWanted_ = false;
     DataCounters data_ = {};
     uint32_t pcie2_ = 0, dataOffset_ = 0, dtohMailbox_ = 0;
     uint16_t txFailStatus_ = 0;
+    uint32_t ioctlCommand_ = 0;
     uint16_t transId_ = 0, flowStatus_ = 0;
     Flow flow_ = FLOW_CLOSED;
-    bool replyReady_ = false;
+    bool replyReady_ = false, ioctlPending_ = false;
     int16_t replyStatus_ = 0;
     uint8_t reply_[1536] = {};
     size_t replyLength_ = 0;
@@ -585,6 +607,7 @@ private:
     uint32_t postFrame(unsigned ring, uint8_t ifidx, size_t length);
     uint32_t post(unsigned ring, uint8_t ifidx, const uint8_t *frame, size_t length);
     void txRelease(uint32_t id, uint16_t status);
+    void awdlDelete(unsigned index);
     void retire(unsigned ring);
     void drain();
 };

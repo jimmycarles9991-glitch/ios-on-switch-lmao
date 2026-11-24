@@ -38,6 +38,10 @@
 #include <kern/thread.h>
 #include <kern/thread_call.h>
 #include <machine/machine_routines.h>
+#if DEVELOPMENT || DEBUG
+#include <machine/cpu_number.h>
+#include "../TegraSMMU/TegraSMMU.h"
+#endif
 #include <sys/types.h>
 #include <sys/param.h>
 #include <pexpert/pexpert.h>
@@ -715,6 +719,14 @@ class NativeSwitchBlock : public IOService {
     IOWorkLoop *irqLoop = nullptr;
     IOFilterInterruptEventSource *irqSource = nullptr;
     int irqEvent = 0;
+#if DEVELOPMENT || DEBUG
+    struct {
+        uint64_t deadline, returned, filtersBefore, filtersAfter;
+        uint32_t status, signals, interruptsBefore, interruptsAfter;
+        int result, cpu;
+        char controller[192];
+    } waitFailure = {};
+#endif
     SwitchSdBus bus;
     // Bus state: what the card runs at, its RCA after our re-initialization, the last STATUS a bring-up
     // command saw, and whether SDR104 tuning is in effect (a failed transfer is re-tuned before its retry)
@@ -1110,9 +1122,29 @@ bool NativeSwitchBlock::waitSignal(uint32_t signals, uint64_t timeoutNs)
 {
     uint64_t interval = 0;
     nanoseconds_to_absolutetime(timeoutNs, &interval);
-    assert_wait_deadline(&irqEvent, THREAD_UNINT, mach_absolute_time() + interval);
+    const uint64_t deadline = mach_absolute_time() + interval;
+#if DEVELOPMENT || DEBUG
+    const uint32_t interruptsBefore = switch_interrupt_count(kInterrupt);
+    const uint64_t filtersBefore = __atomic_load_n(&stats.interrupts, __ATOMIC_RELAXED);
+#endif
+    assert_wait_deadline(&irqEvent, THREAD_UNINT, deadline);
     w32(SIGNAL_ENABLE, signals);
     const wait_result_t result = thread_block(THREAD_CONTINUE_NULL);
+#if DEVELOPMENT || DEBUG
+    if (result != THREAD_AWAKENED) {
+        waitFailure.status = r32(STATUS);
+        waitFailure.signals = r32(SIGNAL_ENABLE);
+        switch_interrupt_describe(kInterrupt, waitFailure.controller, sizeof waitFailure.controller);
+        waitFailure.returned = mach_absolute_time();
+        waitFailure.deadline = deadline;
+        waitFailure.interruptsBefore = interruptsBefore;
+        waitFailure.interruptsAfter = switch_interrupt_count(kInterrupt);
+        waitFailure.filtersBefore = filtersBefore;
+        waitFailure.filtersAfter = __atomic_load_n(&stats.interrupts, __ATOMIC_RELAXED);
+        waitFailure.result = result;
+        waitFailure.cpu = cpu_number();
+    }
+#endif
     w32(SIGNAL_ENABLE, 0);
     return result == THREAD_AWAKENED;
 }
@@ -1122,7 +1154,19 @@ void NativeSwitchBlock::interruptLost(uint32_t awaited)
 {
     char gic[192];
     switch_interrupt_describe(kInterrupt, gic, sizeof(gic));
+#if DEVELOPMENT || DEBUG
+    uint32_t mcInterrupts = 0, mcStatus = 0, mcAddress = 0;
+    const uint32_t mcCount = tegra_mc_error_latest(&mcInterrupts, &mcStatus, &mcAddress);
+    panic("SwitchSD: SDMMC1 interrupt lost: STATUS %#x awaited %#x; wait %d CPU %d deadline %#llx returned %#llx "
+          "dispatch %u->%u filter %llu->%llu before-mask %#x/%#x [%s]; after [%s]; MC %u intstatus %#x status %#x "
+          "address %#x",
+          r32(STATUS), awaited, waitFailure.result, waitFailure.cpu, waitFailure.deadline, waitFailure.returned,
+          waitFailure.interruptsBefore, waitFailure.interruptsAfter, waitFailure.filtersBefore,
+          waitFailure.filtersAfter, waitFailure.status, waitFailure.signals, waitFailure.controller, gic, mcCount,
+          mcInterrupts, mcStatus, mcAddress);
+#else
     panic("SwitchSD: SDMMC1 interrupt lost: STATUS %#x awaited %#x, %s", r32(STATUS), awaited, gic);
+#endif
 }
 
 // Sleeps until STATUS shows one of `awaited` or an error, at most limitNs; returns the STATUS it read last. STATUS is

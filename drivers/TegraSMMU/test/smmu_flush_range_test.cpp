@@ -155,7 +155,7 @@ TEST_F(SmmuFlushRange, ADirectoryChangeStillFlushesEverything)
     const uint64_t page = 0x90000000;
     ASSERT_TRUE(domain.map(0x40000000, &page, 1, true));
     switch_smmu_publish(domain, kAsid, SWITCH_DCACHE_CLEAN);
-    const std::vector<Event> expected = {mcWrite(kPtcFlush, 0), mcRead(kPtbAsid), mcWrite(kTlbFlush, kAsidMatch),
+    const std::vector<Event> expected = {mcWrite(kPtcFlush, 1u << 3), mcRead(kPtbAsid), mcWrite(kTlbFlush, kAsidMatch),
                                          mcRead(kPtbAsid)};
     EXPECT_EQ(mcAccesses(), expected);
 }

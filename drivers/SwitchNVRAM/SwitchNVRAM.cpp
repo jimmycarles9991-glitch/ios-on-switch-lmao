@@ -460,10 +460,18 @@ extern "C" int switch_nvram_publish(void)
 extern "C" __attribute__((weak)) void switch_bluetooth_data_mounted(void)
 {}
 
+#if DEVELOPMENT || DEBUG
+extern "C" __attribute__((weak)) void switch_wlan_data_mounted(void)
+{}
+#endif
+
 extern "C" uint32_t switch_nvram_data_mounted(void)
 {
     const uint32_t added = SwitchNVRAM::restoreFromData();
     switch_bluetooth_data_mounted();
+#if DEVELOPMENT || DEBUG
+    switch_wlan_data_mounted();
+#endif
     return added;
 }
 

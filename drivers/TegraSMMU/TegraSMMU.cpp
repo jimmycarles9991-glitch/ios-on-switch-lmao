@@ -24,7 +24,6 @@ enum : uint32_t {
 volatile uint8_t *gMc;
 IOSimpleLock *gLock;
 tegra_smmu_attachments gAttached;  // under gLock
-bool gAttachedFull;                // under gLock: an attachment the table could not keep
 
 inline uint32_t r32(uint32_t o)
 {
@@ -78,15 +77,15 @@ void flushLocked(uint32_t asid)
     switch_smmu::flush(io, asid);
 }
 
-int programLocked(const tegra_smmu_attachment &a, char *line, size_t size)
+int programLocked(const tegra_smmu_attachment &a, const tegra_smmu_attachments &attachments, char *line, size_t size)
 {
     RegisterAccess io;
-    return switch_smmu::program(io, a, line, size);
+    return switch_smmu::program(io, a, line, size, &attachments);
 }
 }  // namespace
 
-extern "C" int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg,
-                                 uint32_t translationBits, char *line, size_t size)
+namespace {
+int attach(const tegra_smmu_attachment &attachment, char *line, size_t size)
 {
     if (!ready()) {
         snprintf(line, size, "cannot map the memory controller");
@@ -94,20 +93,46 @@ extern "C" int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, 
     }
     IOSimpleLockLock(gLock);
     int ret = -1;
-    const uint32_t was = r32(asidReg);
-    if ((was & ASID_ENABLE) && (was & 0x7f) != asid) {
-        snprintf(line, size, "the swgroup is already translated by ASID %u (MC %#x = %#x)", was & 0x7f, asidReg, was);
-        goto out;
+    const uint32_t was = r32(attachment.asidReg);
+    if ((was & ASID_ENABLE) && (was & 0x7f) != attachment.asid) {
+        snprintf(line, size, "the swgroup is already translated by ASID %u (MC %#x = %#x)", was & 0x7f,
+                 attachment.asidReg, was);
+    } else {
+        bool conflict = false;
+        for (uint32_t i = 0; i < gAttached.count; ++i) {
+            const auto &owned = gAttached.entry[i];
+            conflict |=
+                (owned.asid == attachment.asid && owned.ptb != attachment.ptb) ||
+                (owned.asidReg == attachment.asidReg &&
+                 (owned.asid != attachment.asid || owned.ptb != attachment.ptb || owned.wide != attachment.wide));
+        }
+        tegra_smmu_attachments pending = gAttached;
+        if (conflict)
+            snprintf(line, size, "ASID %u or swgroup %#x already owns another directory", attachment.asid,
+                     attachment.asidReg);
+        else if (!tegra_smmu_attachments_note(&pending, &attachment))
+            snprintf(line, size, "no retained slot for ASID %u swgroup %#x", attachment.asid, attachment.asidReg);
+        else {
+            ret = programLocked(attachment, pending, line, size);
+            if (!ret)
+                gAttached = pending;
+        }
     }
-    {
-        const tegra_smmu_attachment attachment = {asid, ptb, asidReg, translationReg, translationBits};
-        ret = programLocked(attachment, line, size);
-        if (!ret && !tegra_smmu_attachments_note(&gAttached, &attachment))
-            gAttachedFull = true;
-    }
-out:
     IOSimpleLockUnlock(gLock);
     return ret;
+}
+}  // namespace
+
+extern "C" int tegra_smmu_attach(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg,
+                                 uint32_t translationBits, char *line, size_t size)
+{
+    return attach({asid, ptb, asidReg, translationReg, translationBits, false}, line, size);
+}
+
+extern "C" int tegra_smmu_attach_wide(uint32_t asid, uint32_t ptb, uint32_t asidReg, uint32_t translationReg,
+                                      uint32_t translationBits, char *line, size_t size)
+{
+    return attach({asid, ptb, asidReg, translationReg, translationBits, true}, line, size);
 }
 
 extern "C" int switch_smmu_restore(uint32_t asid, uint32_t ptb, uint32_t asidReg, char *line, size_t size)
@@ -186,19 +211,21 @@ extern "C" int tegra_smmu_resume(void)
     char failed[TEGRA_SMMU_ATTACHMENTS][96] = {};
     IOSimpleLockLock(gLock);
     const uint32_t count = gAttached.count;
-    const bool full = gAttachedFull;
-    for (uint32_t i = 0; i < count; ++i)
-        (void)programLocked(gAttached.entry[i], failed[i], sizeof(failed[i]));
+    for (uint32_t i = 0; i < count; ++i) {
+        bool seen = false;
+        for (uint32_t j = 0; j < i; ++j)
+            seen |= gAttached.entry[j].asidReg == gAttached.entry[i].asidReg;
+        if (!seen)
+            (void)programLocked(gAttached.entry[i], gAttached, failed[i], sizeof(failed[i]));
+    }
     IOSimpleLockUnlock(gLock);
-    int bad = full ? 1 : 0;
+    int bad = 0;
     for (uint32_t i = 0; i < count; ++i) {
         if (!failed[i][0])
             continue;
         IOLog("TegraSMMU: resume: %s\n", failed[i]);
         ++bad;
     }
-    if (full)
-        IOLog("TegraSMMU: resume: over %u swgroups were attached; one was not restored\n", TEGRA_SMMU_ATTACHMENTS);
     switch_mc_errors_resume();
     return bad;
 }

@@ -3918,6 +3918,11 @@ nd6_output_list(struct ifnet *ifp, struct ifnet *origifp, struct mbuf *m0,
 	rtentry_ref_t rtrele = NULL;
 	struct nd_ifinfo *__single ndi = NULL;
 	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
+#if DEVELOPMENT || DEBUG
+	const uint32_t switch_sample = switch_awdl_echo_sample(m0);
+	const char *switch_disposition = "drop";
+	unsigned int switch_ifindex = ifp->if_index;
+#endif
 
 	if (rt != NULL) {
 		RT_LOCK_SPIN(rt);
@@ -4284,6 +4289,9 @@ lookup:
 		m_freem_list(ln->ln_hold);
 	}
 	ln->ln_hold = m0;
+#if DEVELOPMENT || DEBUG
+	switch_disposition = "held";
+#endif
 	if (!ND6_LLINFO_PERMANENT(ln) && ln->ln_asked == 0) {
 		ln->ln_asked++;
 		ndi = ND_IFINFO(ifp);
@@ -4350,6 +4358,10 @@ sendpkt:
 	if (ifp->if_flags & IFF_LOOPBACK) {
 		/* forwarding rules require the original scope_id */
 		m0->m_pkthdr.rcvif = origifp;
+#if DEVELOPMENT || DEBUG
+		switch_disposition = "loopback";
+		switch_ifindex = origifp->if_index;
+#endif
 		error = dlil_output(origifp, PF_INET6, m0, (caddr_t)rt,
 		    SA(dst), 0, adv);
 		goto release;
@@ -4399,6 +4411,9 @@ sendpkt:
 	if (pktcnt > ip6_maxchainsent) {
 		ip6_maxchainsent = pktcnt;
 	}
+#if DEVELOPMENT || DEBUG
+	switch_disposition = "dlil";
+#endif
 	error = dlil_output(ifp, PF_INET6, m0, (caddr_t)rt, SA(dst), 0, adv);
 	goto release;
 
@@ -4431,6 +4446,12 @@ release:
 			rtfree(rtrele);
 		}
 	}
+#if DEVELOPMENT || DEBUG
+	if (switch_sample != 0) {
+		os_log(OS_LOG_DEFAULT, "SwitchWLAN: XNU echo %u nd6 %{public}s ifindex %u errno %d drop %#x",
+		    switch_sample, switch_disposition, switch_ifindex, error, (unsigned int)drop_reason);
+	}
+#endif
 	return error;
 }
 #undef senderr

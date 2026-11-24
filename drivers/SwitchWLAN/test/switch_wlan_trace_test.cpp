@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include "../SwitchWLANAwdlRxTrace.h"
 #include "../SwitchWLANTrace.h"
 
 namespace {
@@ -74,6 +75,155 @@ std::vector<uint8_t> arp(uint16_t op, uint32_t sender, uint32_t target, bool bro
 swlan_frame_kind kind(const std::vector<uint8_t> &f)
 {
     return swlan_frame_classify(f.data(), f.size()).kind;
+}
+
+// Header bytes from the anonymized channel-44 capture. PSF and MIF differ here only in sequence and subtype.
+constexpr uint8_t kCapturedPsf[] = {
+    0xd0, 0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 2, 0, 0, 0, 0, 2,
+    0, 0x25, 0, 0xff, 0x94, 0x73, 0xc0, 0x84, 127, 0, 0x17, 0xf2, 8, 0x10, 0
+};
+constexpr uint8_t kCapturedAddba[] = {
+    0xd0, 0, 0x30, 0, 2, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 2,
+    0, 0x25, 0, 0xff, 0x94, 0x73, 0xf0, 0x96, 3, 0, 0x3a, 3, 0x10, 0, 0, 0x10, 0
+};
+
+TEST(SwitchWLANTrace, ClassifiesReassembledActionHeaders)
+{
+    using namespace swlan;
+    SwitchAwdlRxAction a;
+    ASSERT_TRUE(switch_awdl_rx_action(kCapturedPsf, sizeof kCapturedPsf, a));
+    EXPECT_EQ(a.kind, SwitchAwdlRxActionKind::Psf);
+    EXPECT_EQ(a.sequenceControl, 0x84c0);
+    EXPECT_EQ(a.headerBytes, 24u);
+    EXPECT_EQ(a.source[5], 2);
+    EXPECT_EQ(a.category, 127);
+    EXPECT_EQ(a.oui, 0x0017f2);
+    EXPECT_EQ(a.appleType, 8);
+    EXPECT_EQ(a.version, 0x10);
+    EXPECT_EQ(a.subtype, 0);
+    std::vector<uint8_t> mif(kCapturedPsf, kCapturedPsf + sizeof kCapturedPsf);
+    mif[22] = 0xf0;
+    mif[30] = 3;
+    ASSERT_TRUE(switch_awdl_rx_action(mif.data(), mif.size(), a));
+    EXPECT_EQ(a.kind, SwitchAwdlRxActionKind::Mif);
+    EXPECT_EQ(a.sequenceControl, 0x84f0);
+    EXPECT_EQ(a.subtype, 3);
+    mif[1] = 0x88;
+    mif.insert(mif.begin() + 24, {3, 0, 0, 0});
+    ASSERT_TRUE(switch_awdl_rx_action(mif.data(), mif.size(), a));
+    EXPECT_EQ(a.fc, 0x88d0);
+    EXPECT_EQ(a.headerBytes, 28u);
+    EXPECT_EQ(a.kind, SwitchAwdlRxActionKind::Mif);
+    ASSERT_TRUE(switch_awdl_rx_action(kCapturedAddba, sizeof kCapturedAddba, a));
+    EXPECT_EQ(a.sequenceControl, 0x96f0);
+    EXPECT_EQ(a.kind, SwitchAwdlRxActionKind::BlockAck);
+    EXPECT_EQ(a.category, 3);
+    EXPECT_EQ(a.blockAckAction, 0);
+    EXPECT_EQ(a.oui, -1);
+    EXPECT_EQ(a.subtype, -1);
+}
+
+TEST(SwitchWLANTrace, RespectsTruncatedOrUnrelatedActionBodies)
+{
+    using namespace swlan;
+    SwitchAwdlRxAction a;
+    EXPECT_FALSE(switch_awdl_rx_action(nullptr, 0, a));
+    for (size_t len = 0; len < sizeof kCapturedPsf; ++len) {
+        std::vector<uint8_t> truncated(kCapturedPsf, kCapturedPsf + len);
+        if (len < 24) {
+            EXPECT_FALSE(switch_awdl_rx_action(truncated.data(), len, a));
+            continue;
+        }
+        ASSERT_TRUE(switch_awdl_rx_action(truncated.data(), len, a));
+        EXPECT_EQ(a.category, len > 24 ? 127 : -1);
+        EXPECT_EQ(a.oui, len >= 28 ? 0x0017f2 : -1);
+        EXPECT_EQ(a.appleType, len >= 29 ? 8 : -1);
+        EXPECT_EQ(a.version, len >= 30 ? 0x10 : -1);
+        EXPECT_EQ(a.subtype, -1);
+        truncated[1] = 0x80;
+        ASSERT_TRUE(switch_awdl_rx_action(truncated.data(), len, a));
+        EXPECT_EQ(a.headerBytes, 28u);
+        if (len <= 28)
+            EXPECT_EQ(a.category, -1);
+    }
+    std::vector<uint8_t> other(kCapturedPsf, kCapturedPsf + sizeof kCapturedPsf);
+    other[27] = 1;
+    ASSERT_TRUE(switch_awdl_rx_action(other.data(), other.size(), a));
+    EXPECT_EQ(a.kind, SwitchAwdlRxActionKind::Vendor);
+    EXPECT_EQ(a.oui, 0x001701);
+    EXPECT_EQ(a.appleType, -1);
+    other[24] = 10;
+    ASSERT_TRUE(switch_awdl_rx_action(other.data(), other.size(), a));
+    EXPECT_EQ(a.kind, SwitchAwdlRxActionKind::Other);
+    EXPECT_EQ(a.blockAckAction, -1);
+    EXPECT_EQ(a.oui, -1);
+    other[0] = 0x08;
+    EXPECT_FALSE(switch_awdl_rx_action(other.data(), other.size(), a));
+}
+
+TEST(SwitchWLANTrace, ReservesSamplesForDistinctSendersAndDiscoveryOutcomes)
+{
+    using namespace swlan;
+    SwitchAwdlRxActionBudget budget;
+    SwitchAwdlRxAction a;
+    ASSERT_TRUE(switch_awdl_rx_action(kCapturedAddba, sizeof kCapturedAddba, a));
+    EXPECT_TRUE(budget.take(a));
+    EXPECT_FALSE(budget.take(a));
+    a.fc |= 0x0800;
+    EXPECT_TRUE(budget.take(a));
+    EXPECT_FALSE(budget.take(a));
+    ASSERT_TRUE(switch_awdl_rx_action(kCapturedPsf, sizeof kCapturedPsf, a));
+    EXPECT_TRUE(budget.take(a));
+    EXPECT_FALSE(budget.take(a));
+    a.source[5] = 3;
+    EXPECT_TRUE(budget.take(a));
+    EXPECT_FALSE(budget.take(a));
+    a.source[5] = 4;
+    EXPECT_FALSE(budget.take(a));
+    a.source[5] = 2;
+    EXPECT_TRUE(budget.take(a, true));
+    EXPECT_FALSE(budget.take(a, true));
+    a.source[5] = 3;
+    a.fc |= 0x8000;
+    EXPECT_TRUE(budget.take(a));
+    EXPECT_FALSE(budget.take(a));
+    a.fc |= 0x0800;
+    EXPECT_TRUE(budget.take(a));
+}
+
+TEST(SwitchWLANTrace, DirectIcmpv6Echo)
+{
+    std::vector<uint8_t> frame(SWITCH_WLAN_ECHO6_PREFIX, 0);
+    put16(frame, 12, 0x86dd);
+    frame[14] = 0x60;
+    put16(frame, 18, 64);
+    frame[20] = 58;
+    put16(frame, 58, 0x1234);
+    put16(frame, 60, 0xabcd);
+    put16(frame, 56, 0x3210);
+    frame[22] = frame[38] = 0xfe;
+    frame[37] = 19;
+    frame[53] = 83;
+    constexpr size_t length = 14 + 40 + 64;
+    for (const uint8_t type : {uint8_t{128}, uint8_t{129}}) {
+        frame[54] = type;
+        const auto echo = switch_wlan_echo6_read(frame.data(), frame.size(), length);
+        EXPECT_EQ(echo.type, type);
+        EXPECT_EQ(echo.id, 0x1234);
+        EXPECT_EQ(echo.sequence, 0xabcd);
+        EXPECT_EQ(echo.checksum, 0x3210);
+        EXPECT_EQ(echo.source[15], 19);
+        EXPECT_EQ(echo.destination[15], 83);
+        EXPECT_EQ(echo.payload, 64);
+        EXPECT_EQ(switch_wlan_echo6_ip(frame.data() + 14, frame.size() - 14, length - 14).id, echo.id);
+    }
+    EXPECT_EQ(switch_wlan_echo6_read(frame.data(), frame.size() - 1, length).type, 0);
+    EXPECT_EQ(switch_wlan_echo6_read(frame.data(), frame.size(), length - 1).type, 0);
+    frame[20] = 17;
+    EXPECT_EQ(switch_wlan_echo6_read(frame.data(), frame.size(), length).type, 0);
+    frame[20] = 58;
+    frame[54] = 135;
+    EXPECT_EQ(switch_wlan_echo6_read(frame.data(), frame.size(), length).type, 0);
 }
 
 TEST(SwitchWlanTrace, ClassifiesDnsAndArp)

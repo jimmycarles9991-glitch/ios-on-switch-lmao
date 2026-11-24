@@ -12,12 +12,14 @@
 #include "SwitchPanicSave.h"
 #include "SwitchPowerTrail.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
+#include "../../kernel/switch/include/switch/heartbeat.h"
 
 #if DEVELOPMENT || DEBUG
 extern int vsnprintf(char *, size_t, const char *, va_list);
 extern uint32_t crc32(uint32_t crc, const void *buf, size_t size);
 
 #define TRAIL_MAGIC UINT64_C(0x3152545048435753) /* "SWCHPTR1" */
+#define BEAT_TAG    0x54414542u                  /* "BEAT": a header an older kernel wrote has none */
 #define TEXT_BYTES  48u
 
 struct trail_line {
@@ -31,7 +33,10 @@ struct trail_header {
     uint64_t magic;
     uint32_t boot; /* counts boots that found a trail, so lines from different boots never pass as one */
     uint32_t lines;
-    uint8_t pad[sizeof(struct trail_line) - 16];
+    uint64_t beat_ns; /* the heartbeat's last beat, 0: not beating */
+    uint64_t beat_interrupt_ns;
+    uint32_t beat_tag;
+    uint8_t pad[sizeof(struct trail_line) - 36];
 };
 
 _Static_assert(sizeof(struct trail_line) == 64, "a line is 64 bytes");
@@ -46,6 +51,7 @@ static uint32_t next_seq;
 static struct trail_line previous[MAX_LINES];
 static uint32_t previous_kept, previous_total, previous_boot;
 static int previous_found;
+static uint64_t previous_beat, previous_beat_interrupt;
 
 static uint32_t line_crc(const struct trail_line *line)
 {
@@ -71,6 +77,8 @@ static void keep_previous(void)
         return;
     previous_found = 1;
     previous_boot = old.boot;
+    previous_beat = old.beat_tag == BEAT_TAG ? old.beat_ns : 0;
+    previous_beat_interrupt = old.beat_tag == BEAT_TAG ? old.beat_interrupt_ns : 0;
     uint32_t last = 0;
     for (uint32_t i = 0; i < count; ++i) {
         struct trail_line line;
@@ -102,7 +110,32 @@ void switch_power_trail_init(volatile uint8_t *slice, uint32_t bytes)
     header->magic = TRAIL_MAGIC;
     header->boot = previous_boot + 1;
     header->lines = count;
+    header->beat_ns = 0;
+    header->beat_interrupt_ns = 0;
+    header->beat_tag = BEAT_TAG;
     __asm__ volatile("dsb sy" ::: "memory");
+}
+
+void switch_power_trail_beat(uint64_t uptime_ns)
+{
+    if (!header)
+        return;
+    header->beat_ns = uptime_ns;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+void switch_power_trail_beat_interrupt(uint64_t uptime_ns)
+{
+    if (!header)
+        return;
+    header->beat_interrupt_ns = uptime_ns;
+    __asm__ volatile("dsb sy" ::: "memory");
+}
+
+uint64_t switch_power_trail_last_beat(uint64_t *interrupt_ns)
+{
+    *interrupt_ns = previous_beat_interrupt;
+    return previous_beat;
 }
 
 void switch_power_trail(const char *format, ...)
@@ -137,7 +170,11 @@ void switch_power_trail_watch(unsigned seconds, const char *why)
 {
     if (seconds > 255)
         seconds = 255;
+    if (seconds)
+        switch_heartbeat_hold(SWITCH_HEARTBEAT_HOLD_POWER);
     switch_panic_save_watchdog(seconds);
+    if (!seconds)
+        switch_heartbeat_release(SWITCH_HEARTBEAT_HOLD_POWER);
     if (seconds) {
         switch_power_trail("watchdog: warm reset in %u s (%s)", seconds, why);
     } else {

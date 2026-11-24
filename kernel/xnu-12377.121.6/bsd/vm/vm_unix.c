@@ -132,6 +132,7 @@
 #include <pexpert/pexpert.h>
 #include <vm/switch_ui_scale.h>
 #endif
+#include <switch/cryptex_map.h>
 
 #include <sys/kern_memorystatus.h>
 #include <sys/kern_memorystatus_freeze.h>
@@ -2534,6 +2535,7 @@ after_root_check:
 					proc_getpid(p), p->p_comm,
 					(void *)VM_KERNEL_ADDRPERM(srfmp->vp),
 					srfmp->vp->v_name));
+				SWITCH_CRYPTEX_MAP_REFUSED(p, srfmp->vp, preboot_vp, error);
 				error = EPERM;
 				if (preboot_vp) {
 					(void)vnode_put(preboot_vp);

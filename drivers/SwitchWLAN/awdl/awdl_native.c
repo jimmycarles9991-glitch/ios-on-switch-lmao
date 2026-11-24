@@ -4,7 +4,7 @@
 #include "awdl_internal.h"
 #include "awdl_bcm.h"
 
-// Native backend: whether the bring-up probe found `name` missing from the firmware's table.
+// Only creation APIs are discovered on the station; AWDL iovars can reject that interface's context.
 static int fw_absent(const struct awdl_core *c, const char *name)
 {
     for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i) {
@@ -16,19 +16,38 @@ static int fw_absent(const struct awdl_core *c, const char *name)
 
 // Native backend: one request to the firmware, through the integration's ordered queue, on firmware interface
 // `ifidx` (the AWDL interface's for every awdl_* variable, as the series' brcmf_fil_iovar_data_set on its ifp).
-// Variables the probe found missing are not sent (counted).
 static void fw_req(struct awdl_core *c, int32_t ifidx, int get, const char *name, const void *buf, size_t len)
 {
-    if (fw_absent(c, name)) {
-        c->stats.iovar_skipped++;
+    if (c->nstate == AWDL_N_OFF)
+        return;
+    for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i) {
+        if (!strcmp(bcm_probe_names[i], name) && ((c->switch_fw_unsupported >> i) & 1u)) {
+            c->stats.iovar_skipped++;
+            return;
+        }
+    }
+    if (!len && strcmp(name, "interface_remove")) {
+        if (c->running)
+            awdl_native_fail(c, "invalid %s request", name);
         return;
     }
-    if (!len && strcmp(name, "interface_remove"))
-        return;  // an encoder refused (too long): nothing to send
+    if (c->nstate == SWITCH_AWDL_N_CONFIGURING)
+        c->switch_fw_pending++;
+    if (!strcmp(name, "awdl_payload") && !c->payload_switched)
+        c->switch_payload_original_pending++;
+    if (!strcmp(name, "awdl_chan_seq") && !c->seq_no_empty) {
+        for (unsigned i = 0; i < AWDL_SEQ_SLOTS; ++i) {
+            if (!c->cfg.seq[i].number) {
+                c->switch_empty_seq_pending++;
+                break;
+            }
+        }
+    }
     c->stats.iovars++;
     if (!c->host.iovar || c->host.iovar(c->host.ctx, ifidx, get, name, buf, len)) {
         c->stats.iovar_refused++;
-        awdl_log(c, "AWDL: iovar %s not queued", name);
+        if (c->running)
+            awdl_native_fail(c, "iovar %s not queued", name);
     }
 }
 
@@ -61,19 +80,18 @@ static void fw_peer_op(struct awdl_core *c, uint8_t op, const struct awdl_peer *
 
 static uint8_t social5_of(const struct awdl_chan seq[AWDL_SEQ_SLOTS])
 {
-    return awdl_chan_primary(seq[0]);
+    return awdl_chan_primary(seq[10]);
 }
 
-// The sequence the native backend runs for its mode: on interface_create v3 the series' slot_bss form (44 and 6, the
-// free slots the firmware's for the station), on 7.x our own (the infra channel and the learnt social channel).
+// The sequence the native backend runs: on interface_create v3 the series' slot_bss form (44 and 6, the free slots the
+// firmware's for the station), on 7.x our own (awdl_schedule).
 void awdl_native_build_seq(struct awdl_core *c)
 {
     if (c->created_with == BCM_AWDL_API_IFC_V3) {
-        awdl_schedule_from(c->cfg.seq, awdl_slot_mask(c->infra_mhz, (enum awdl_mode)c->mode), (struct awdl_chan){0, 0},
-                           44, 44);
+        awdl_schedule_from(c->cfg.seq, AWDL_SLOTS_IDLE, (struct awdl_chan){0, 0}, 44, 44);
         return;
     }
-    awdl_schedule(c->cfg.seq, c->infra_mhz, c->social5, (enum awdl_mode)c->mode);
+    awdl_schedule(c->cfg.seq, c->infra_mhz);
     for (unsigned i = 0; c->seq_no_empty && i < AWDL_SEQ_SLOTS; ++i) {
         if (!c->cfg.seq[i].number)
             c->cfg.seq[i] = c->cfg.seq[0];
@@ -83,8 +101,8 @@ void awdl_native_build_seq(struct awdl_core *c)
 static void native_schedule(struct awdl_core *c)
 {
     uint8_t b[BCM_AWDL_SLOT_BSS_LEN];
-    if (c->created_with == BCM_AWDL_API_IFC_V3 && !fw_absent(c, "slot_bss")) {
-        fw_set(c, "slot_bss", b, bcm_slot_bss(b, awdl_slot_mask(c->infra_mhz, (enum awdl_mode)c->mode)));
+    if (c->created_with == BCM_AWDL_API_IFC_V3 && !(c->switch_fw_unsupported & (1u << BCM_PROBE_SLOT_BSS))) {
+        fw_set(c, "slot_bss", b, bcm_slot_bss(b, AWDL_SLOTS_IDLE));
     } else {
         fw_set(c, "awdl_chan_seq", b, bcm_awdl_chan_seq(b, sizeof b, c->cfg.seq, AWDL_SEQ_SLOTS));
     }
@@ -163,7 +181,9 @@ void awdl_native_fail(struct awdl_core *c, const char *fmt, ...)
     vsnprintf(why, sizeof why, fmt, ap);
     va_end(ap);
     awdl_log(c, "AWDL: %s: AWDL off", why);
+    awdl_core_stop(c);
     c->nstate = AWDL_N_OFF;
+    c->switch_fw_pending = 0;
     c->create_deadline = c->aftx_at = c->settle_at = 0;
     c->running = 0;
     c->role = AWDL_ROLE_OFF;
@@ -183,22 +203,21 @@ static void native_create(struct awdl_core *c, uint8_t api, uint64_t now)
     c->payload_u16 = api == BCM_AWDL_API_IFC_V3;
     c->payload_switched = 0;
     c->seq_no_empty = 0;
+    c->nstate = AWDL_N_CREATING;
+    c->create_deadline = now + AWDL_CREATE_TIMEOUT_US;
     if (api == BCM_AWDL_API_IFC_V3) {
         fw_req(c, 0, 1, "interface_create", b, bcm_ifc_v3_awdl(b, c->cfg.addr));
     } else {
         fw_req(c, 0, 0, awdl_if_name(c), b, bcm_awdl_if2(b, BCM_AWDL_IFIDX, 1, awdl_bssid, c->cfg.addr));
     }
-    c->nstate = AWDL_N_CREATING;
-    c->create_deadline = now + AWDL_CREATE_TIMEOUT_US;
     awdl_log(c, "AWDL: making the firmware's AWDL interface (%s, %02x:%02x:%02x:%02x:%02x:%02x)",
              bcm_awdl_api_name((enum bcm_awdl_api)api), c->cfg.addr[0], c->cfg.addr[1], c->cfg.addr[2], c->cfg.addr[3],
              c->cfg.addr[4], c->cfg.addr[5]);
 }
 
 // The series' brcmf_awdl_enable, in its order, on the AWDL interface; the 7.x firmware gets its own forms of
-// awdl_config (the 28-byte struct), the payload length (u32) and the sequence (awdl_chan_seq), and skips what the
-// probe found missing.
-static void native_enable(struct awdl_core *c, uint64_t now)
+// awdl_config (the 28-byte struct), the payload length (u32) and the sequence (awdl_chan_seq).
+static void native_enable(struct awdl_core *c)
 {
     uint8_t b[BCM_AWDL_CONFIG_LEN];
     const int v3 = c->created_with == BCM_AWDL_API_IFC_V3;
@@ -233,19 +252,23 @@ static void native_enable(struct awdl_core *c, uint64_t now)
     fw_u32(c, "awdl_presencemode", BCM_AWDL_PRESENCEMODE);
     native_schedule(c);
     native_refresh(c);
-    c->aftx_at = now + AWDL_AFTX_DELAY_US;
-    c->settle_at = now + AWDL_SETTLE_DELAY_US;
     for (unsigned i = 0; i < AWDL_MAX_PEERS; ++i) {
         if (c->peers[i].used && c->peers[i].reachable)
             fw_peer_op(c, BCM_AWDL_PEER_OP_ADD, &c->peers[i]);
     }
+}
+
+static void switch_native_ready(struct awdl_core *c, uint64_t now)
+{
+    c->nstate = AWDL_N_UP;
+    c->create_deadline = 0;
+    c->aftx_at = now + AWDL_AFTX_DELAY_US;
+    c->settle_at = now + AWDL_SETTLE_DELAY_US;
     awdl_log(c, "AWDL: started (firmware AWDL, %s), ifidx %d bsscfg %u, social %u/%u, infra %u MHz",
              bcm_awdl_api_name((enum bcm_awdl_api)c->created_with), (int)c->fw_ifidx, c->fw_bsscfg,
              awdl_chan_primary(c->cfg.seq[0]), awdl_chan_primary(c->cfg.seq[9]), c->infra_mhz);
     awdl_sched_log(c, "%s", "start");
 }
-
-// One line per schedule: the mode, why, and how many slots leave the access point's channel.
 
 void awdl_native_resend(struct awdl_core *c, uint16_t old_map)
 {
@@ -258,9 +281,11 @@ void awdl_native_resend(struct awdl_core *c, uint16_t old_map)
 
 static void native_deadlines(struct awdl_core *c, uint64_t now)
 {
-    if (c->nstate == AWDL_N_CREATING && c->create_deadline && now >= c->create_deadline) {
-        awdl_native_fail(c, "no WLC_E_IF for the AWDL interface %u ms after %s", AWDL_CREATE_TIMEOUT_US / 1000,
-                         c->created_with == BCM_AWDL_API_IFC_V3 ? "interface_create" : awdl_if_name(c));
+    if ((c->nstate == AWDL_N_CREATING || c->nstate == SWITCH_AWDL_N_CONFIGURING) && c->create_deadline &&
+        now >= c->create_deadline) {
+        awdl_native_fail(c, "firmware %s timed out after %u ms",
+                         c->nstate == AWDL_N_CREATING ? "interface creation" : "configuration",
+                         AWDL_CREATE_TIMEOUT_US / 1000);
         return;
     }
     if (c->nstate != AWDL_N_UP)
@@ -286,7 +311,8 @@ static uint64_t native_next(const struct awdl_core *c)
     uint64_t t = c->next_slot;
     if (c->nstate == AWDL_N_UP && awdl_sched_next(c) < t)
         t = awdl_sched_next(c);
-    if (c->nstate == AWDL_N_CREATING && c->create_deadline && c->create_deadline < t)
+    if ((c->nstate == AWDL_N_CREATING || c->nstate == SWITCH_AWDL_N_CONFIGURING) && c->create_deadline &&
+        c->create_deadline < t)
         t = c->create_deadline;
     if (c->aftx_at && c->aftx_at < t)
         t = c->aftx_at;
@@ -299,6 +325,9 @@ static void native_begin(struct awdl_core *c, uint64_t now)
 {
     c->fw_ifidx = -1;
     c->fw_bsscfg = 0;
+    c->switch_fw_pending = 0;
+    c->switch_payload_original_pending = c->switch_empty_seq_pending = 0;
+    c->switch_fw_unsupported = 0;
     c->cfg.self_metric = BCM_AWDL_SELF_METRIC;  // what the firmware advertises from awdl_election_tree
     c->self_counter = 0;
     c->role = AWDL_ROLE_ROOT;  // our own master until the election hears a better one (the series starts so)
@@ -320,29 +349,33 @@ static void native_begin(struct awdl_core *c, uint64_t now)
 void awdl_native_stop(struct awdl_core *c)
 {
     uint8_t b[BCM_AWDL_IF2_LEN];
-    if (c->nstate == AWDL_N_UP && c->fw_ifidx >= 0) {
+    const int had_interface = c->nstate == AWDL_N_UP || c->nstate == SWITCH_AWDL_N_CONFIGURING;
+    const int was_open = c->nstate != AWDL_N_OFF;
+    c->nstate = SWITCH_AWDL_N_STOPPING;
+    if (had_interface && c->fw_ifidx >= 0) {
         fw_u32(c, "awdl", 0);
         if (c->created_with == BCM_AWDL_API_IFC_V3)
             fw_set(c, "interface_remove", NULL, 0);
     }
-    if (c->created_with == BCM_AWDL_API_AWDL_IF && c->nstate != AWDL_N_OFF)
+    if (c->created_with == BCM_AWDL_API_AWDL_IF && was_open)
         fw_req(c, 0, 0, awdl_if_name(c), b, bcm_awdl_if2(b, BCM_AWDL_IFIDX, 0, awdl_bssid, c->cfg.addr));
     c->nstate = AWDL_N_OFF;
+    c->switch_fw_pending = 0;
+    c->switch_payload_original_pending = c->switch_empty_seq_pending = 0;
     c->create_deadline = c->aftx_at = c->settle_at = 0;
 }
 
 void awdl_core_fw_result(struct awdl_core *c, const char *name, int status, uint64_t now)
 {
-    if (!status || !awdl_native(c))
+    if (!awdl_native(c) || !c->running)
         return;
-    c->stats.iovar_refused++;
-    if (!c->running)
-        return;
-    const int create =
-        !strcmp(name, "interface_create") ||
-        (!strncmp(name, "awdl_if", 7) && (!name[7] || !strcmp(name + 7, "2")) && c->nstate == AWDL_N_CREATING);
-    if (create && c->nstate == AWDL_N_CREATING) {
-        if (c->created_with == BCM_AWDL_API_IFC_V3 && (!fw_absent(c, "awdl_if") || !fw_absent(c, "awdl_if2"))) {
+    const int create = !strcmp(name, "interface_create") || !strcmp(name, "awdl_if") || !strcmp(name, "awdl_if2");
+    if (create) {
+        if (!status)
+            return;
+        c->stats.iovar_refused++;
+        if (c->nstate == AWDL_N_CREATING && c->created_with == BCM_AWDL_API_IFC_V3 &&
+            (!fw_absent(c, "awdl_if") || !fw_absent(c, "awdl_if2"))) {
             awdl_log(c, "AWDL: interface_create refused (%d %s), trying awdl_if", status, bcme_name(status));
             native_create(c, BCM_AWDL_API_AWDL_IF, now);
             return;
@@ -350,31 +383,54 @@ void awdl_core_fw_result(struct awdl_core *c, const char *name, int status, uint
         awdl_native_fail(c, "the firmware refused %s (%d %s)", name, status, bcme_name(status));
         return;
     }
-    // 7.x: empty slots (unassociated) are the one input of awdl_chan_seq no Apple trace shows a 7.x firmware taking
-    if (!strcmp(name, "awdl_chan_seq") && !c->seq_no_empty &&
-        (status == BCME_BADCHAN || status == BCME_OUTOFRANGECHAN || status == BCME_BADARG || status == BCME_BADLEN)) {
-        int empty = 0;
-        for (unsigned i = 0; i < AWDL_SEQ_SLOTS; ++i) {
-            if (!c->cfg.seq[i].number)
-                empty = 1;
+    if (c->nstate == SWITCH_AWDL_N_CONFIGURING && c->switch_fw_pending)
+        c->switch_fw_pending--;
+    const int original_payload = !strcmp(name, "awdl_payload") && c->switch_payload_original_pending;
+    const int empty_sequence = !strcmp(name, "awdl_chan_seq") && c->switch_empty_seq_pending;
+    if (original_payload)
+        c->switch_payload_original_pending--;
+    if (empty_sequence)
+        c->switch_empty_seq_pending--;
+    if (!status)
+        goto done;
+    c->stats.iovar_refused++;
+    if (status == BCME_UNSUPPORTED &&
+        (!strcmp(name, "awdl_aftxmode") || !strcmp(name, "awdl_osoc_chan") || !strcmp(name, "awdl_psf_dwell") ||
+         !strcmp(name, "awdl_oob_af_auto") || !strcmp(name, "slot_bss"))) {
+        for (unsigned i = 0; i < BCM_PROBE_COUNT; ++i) {
+            if (!strcmp(bcm_probe_names[i], name))
+                c->switch_fw_unsupported |= 1u << i;
         }
-        if (empty) {
-            c->seq_no_empty = 1;
-            awdl_native_build_seq(c);
-            awdl_log(c, "AWDL: awdl_chan_seq refused (%d %s) with empty slots: sending them on channel %u", status,
-                     bcme_name(status), awdl_chan_primary(c->cfg.seq[0]));
+        if (!strcmp(name, "slot_bss"))
             native_schedule(c);
-            return;
-        }
+        goto done;
     }
-    if (!strcmp(name, "awdl_payload") && !c->payload_switched &&
+    // 7.x: empty slots (unassociated) are the one input of awdl_chan_seq no Apple trace shows a 7.x firmware taking
+    if (empty_sequence &&
+        (status == BCME_BADCHAN || status == BCME_OUTOFRANGECHAN || status == BCME_BADARG || status == BCME_BADLEN)) {
+        c->seq_no_empty = 1;
+        awdl_native_build_seq(c);
+        awdl_log(c, "AWDL: awdl_chan_seq refused (%d %s) with empty slots: sending them on channel %u", status,
+                 bcme_name(status), awdl_chan_primary(c->cfg.seq[0]));
+        native_schedule(c);
+        goto done;
+    }
+    if (original_payload &&
         (status == BCME_BADLEN || status == BCME_BUFTOOSHORT || status == BCME_BUFTOOLONG || status == BCME_BADARG)) {
-        c->payload_switched = 1;
-        c->payload_u16 = !c->payload_u16;
+        if (!c->payload_switched) {
+            c->payload_switched = 1;
+            c->payload_u16 = !c->payload_u16;
+        }
         awdl_log(c, "AWDL: awdl_payload refused (%d %s): sending its length as a u%u", status, bcme_name(status),
                  c->payload_u16 ? 16 : 32);
         native_payload(c);
+        goto done;
     }
+    awdl_native_fail(c, "the firmware refused %s (%d %s)", name, status, bcme_name(status));
+    return;
+done:
+    if (c->nstate == SWITCH_AWDL_N_CONFIGURING && !c->switch_fw_pending)
+        switch_native_ready(c, now);
 }
 
 int awdl_core_fw_ifidx(const struct awdl_core *c)
@@ -386,9 +442,9 @@ void awdl_native_if_up(struct awdl_core *c, uint8_t ifidx, uint8_t bssidx, uint6
 {
     c->fw_ifidx = ifidx;
     c->fw_bsscfg = bssidx;
-    c->nstate = AWDL_N_UP;
-    c->create_deadline = 0;
-    native_enable(c, now);
+    c->nstate = SWITCH_AWDL_N_CONFIGURING;
+    c->create_deadline = now + AWDL_CREATE_TIMEOUT_US;
+    native_enable(c);
 }
 
 void awdl_native_start(struct awdl_core *c, uint64_t now)
@@ -432,8 +488,8 @@ int awdl_native_output(struct awdl_core *c, const uint8_t *eth, size_t len, uint
         c->stats.tx_refused++;
         return -3;
     }
+    (void)now;
     c->data_seq++;
     c->stats.data_tx++;
-    awdl_sched_traffic(c, eth, len, 1, now);
     return 0;
 }

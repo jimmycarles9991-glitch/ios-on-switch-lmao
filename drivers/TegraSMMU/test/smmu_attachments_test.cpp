@@ -6,7 +6,7 @@
 namespace {
 tegra_smmu_attachment entry(uint32_t asid, uint32_t ptb, uint32_t asidReg)
 {
-    return {asid, ptb, asidReg, 0x234, 1u << 30};
+    return {asid, ptb, asidReg, 0x234, 1u << 30, false};
 }
 }  // namespace
 
@@ -57,4 +57,24 @@ TEST(SmmuAttachments, FullTableRefusesANewSwgroupButStillUpdatesAKnownOne)
     auto const known = entry(100, 0xabc, 0x300);
     EXPECT_TRUE(tegra_smmu_attachments_note(&t, &known));
     EXPECT_EQ(t.entry[0].ptb, 0xabcu);
+}
+
+TEST(SmmuAttachments, RetainsBothAfiClientRegistersAndMergesTheirBits)
+{
+    tegra_smmu_attachments t = {};
+    tegra_smmu_attachment read{118, 0xe009a000, 0x238, 0x228, 1u << 14, false};
+    tegra_smmu_attachment write{read.asid, read.ptb, read.asidReg, 0x22c, 1u << 17, false};
+    ASSERT_TRUE(tegra_smmu_attachments_note(&t, &read));
+    ASSERT_TRUE(tegra_smmu_attachments_note(&t, &write));
+    read.translationBits |= 1u << 15;
+    ASSERT_TRUE(tegra_smmu_attachments_note(&t, &read));
+    ASSERT_EQ(t.count, 2u);
+    EXPECT_EQ(t.entry[0].translationBits, (1u << 14) | (1u << 15));
+    EXPECT_EQ(t.entry[1].translationReg, 0x22cu);
+    EXPECT_EQ(t.entry[1].translationBits, 1u << 17);
+    write.ptb += 1;
+    EXPECT_FALSE(tegra_smmu_attachments_note(&t, &write));
+    EXPECT_EQ(t.entry[1].ptb, read.ptb);
+    tegra_smmu_attachments_forget(&t, read.asidReg);
+    EXPECT_EQ(t.count, 0u);
 }

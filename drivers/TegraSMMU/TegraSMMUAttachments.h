@@ -10,10 +10,11 @@
 extern "C" {
 #endif
 
-#define TEGRA_SMMU_ATTACHMENTS 8u
+#define TEGRA_SMMU_ATTACHMENTS 16u
 
 struct tegra_smmu_attachment {
     uint32_t asid, ptb, asidReg, translationReg, translationBits;
+    bool wide;  // the swgroup register has an ASID field for each value of va[33:32], all set to asid
 };
 
 struct tegra_smmu_attachments {
@@ -21,13 +22,23 @@ struct tegra_smmu_attachments {
     uint32_t count;
 };
 
-// An attach that took: replaces the entry of the same swgroup register, or adds one. False when the table is full.
+// A swgroup can have clients in multiple translation registers; every one survives SC7.
 static inline bool tegra_smmu_attachments_note(struct tegra_smmu_attachments *t, const struct tegra_smmu_attachment *a)
 {
     for (uint32_t i = 0; i < t->count; ++i) {
         if (t->entry[i].asidReg == a->asidReg) {
-            t->entry[i] = *a;
-            return true;
+            if (t->entry[i].asid != a->asid || t->entry[i].ptb != a->ptb || t->entry[i].wide != a->wide) {
+                for (uint32_t j = 0; j < t->count; ++j) {
+                    if (j != i && t->entry[j].asidReg == a->asidReg)
+                        return false;
+                }
+                t->entry[i] = *a;
+                return true;
+            }
+            if (t->entry[i].translationReg == a->translationReg) {
+                t->entry[i].translationBits |= a->translationBits;
+                return true;
+            }
         }
     }
     if (t->count >= TEGRA_SMMU_ATTACHMENTS)

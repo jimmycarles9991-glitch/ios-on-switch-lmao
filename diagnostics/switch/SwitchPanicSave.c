@@ -34,8 +34,9 @@
 // (kern_exec.c, before launchd) and clears the record. A record whose panic log was never appended (reset by the
 // watchdog) gets XNU's log from +0x000000 at the next boot, before XNU clears that buffer.
 // Holding POWER instead (a PMIC power-off) loses DRAM and the record with it.
-// A watchdog panic (the userspace watchdog's "userspace watchdog timeout: ...", or the kernel's "watchdog timeout: no
-// checkins from watchdogd ...") is a hang, not a bug report to photograph: it warm-resets
+// A watchdog panic (the userspace watchdog's "userspace watchdog timeout: ...", the kernel's "watchdog timeout: no
+// checkins from watchdogd ..." or, in debug kernels, the freeze heartbeat's "SwitchHeartbeat: ...") is a hang, not a
+// bug report to photograph: it warm-resets
 // 60 s after the panic (WATCHDOG_REBOOT_S), so the device restarts and the record (with the hung process's threads in the
 // stackshot) reaches Data, where holding POWER would have lost it.
 // A panic with the panel off (display power: the Switch was locked) has no screen to read or photograph either: it
@@ -61,6 +62,7 @@
 #include "SwitchResetCause.h"
 #include "SwitchDiagDisplay.h"
 #include "SwitchPanicSave.h"
+#include "SwitchPanicHeartbeat.h"
 #include "SwitchPowerTrail.h"
 
 /* SwitchBrightness (SwitchBacklight.cpp): false from a display-off request until the panel is lit again; a plain read.
@@ -618,9 +620,11 @@ int switch_panic_begin(const char *format, va_list *args, unsigned long caller, 
     va_end(copy);
     if (length < 0)
         panic_line[0] = 0;
-    /* watchdogd's (AppleARMWatchdogTimer's IOWatchdogUserClient) and the kernel's own check of watchdogd. */
+    /* watchdogd's (AppleARMWatchdogTimer's IOWatchdogUserClient), the kernel's own check of watchdogd and, in debug
+     * kernels, the freeze heartbeat's (SwitchPanicHeartbeat.h). */
     watchdog_panic = starts_with(panic_line, "userspace watchdog timeout:") ||
-                     starts_with(panic_line, "watchdog timeout: no checkins from ");
+                     starts_with(panic_line, "watchdog timeout: no checkins from ") ||
+                     switch_panic_heartbeat_watchdog(panic_line);
     if (watchdog_panic && !reboot_arg)
         reboot_s = WATCHDOG_REBOOT_S;
     if (get_system_inshutdown() && !reboot_arg && !reboot_s)
@@ -807,7 +811,8 @@ static const char *reset_report(char *path, size_t path_bytes)
     clock_get_calendar_microtime(&secs, &usecs);
     format_time(when, sizeof(when), (uint64_t)secs);
     snprintf(path, path_bytes, "/private/var/Switch/reset-%s.log", when);
-    const char *story = "The SoC watchdog reset a hung console before any panic was recorded.";
+    const char *heartbeat = switch_panic_heartbeat_story(cause == SWITCH_RESET_WATCHDOG);
+    const char *story = heartbeat ? heartbeat : "The SoC watchdog reset a hung console before any panic was recorded.";
     if (thermal != SWITCH_THERMAL_NONE) {
         story = "SwitchThermal shut the console down in order: it crossed its software thermal shutdown threshold "
                 "(SwitchThermalLimits.h).";

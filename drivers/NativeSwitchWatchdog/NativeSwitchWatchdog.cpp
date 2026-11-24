@@ -13,7 +13,8 @@
 // Should watchdogd still crash, kern_exit.c takes no panic for it and calls switch_watchdogd_crashed(): userspace
 // monitoring is turned off here, so its relaunch reads "disabled" and exits 0, and launchd leaves it down. One line in the
 // kernel log; only a hang a running watchdogd reports panics.
-// The Switch has no SoC watchdog, so enable/disable/pet have no hardware to drive. The kernel's half of the userspace
+// enable/disable/pet drive no hardware: the SoC's WDT0 is SwitchPanicSave.c's reset, and in debug kernels WDT4 is the
+// freeze heartbeat's (<switch/heartbeat.h>), armed when watchdogd first connects. The kernel's half of the userspace
 // watchdog, the original check that panics when watchdogd stops checking in, runs from one one-shot timer at the check-in
 // deadline instead of AppleARMWatchdogTimer's periodic interrupt. Check-ins happen in the original user client, which has
 // no hook, but they only move the deadline later (except the first, from start +600 s to now +90 s: covered by never
@@ -41,6 +42,11 @@
 #include <IOKit/pwr_mgt/RootDomain.h>
 #include <kern/clock.h>
 #include "../SwitchPower/SwitchPower.h"
+#if DEVELOPMENT || DEBUG
+#include <IOKit/IOFilterInterruptEventSource.h>
+#include "../ArmGIC/SwitchInterrupts.h"
+#include "../../kernel/switch/include/switch/heartbeat.h"
+#endif
 
 class NativeSwitchWatchdog;
 static NativeSwitchWatchdog *gWatchdog;  // set once its start succeeded; never released
@@ -71,6 +77,13 @@ class NativeSwitchWatchdog : public IOWatchdog {
     static IOReturn wakeGated(OSObject *owner, void *, void *, void *, void *);
     static IOReturn powerMessage(void *target, void *refCon, UInt32 type, IOService *provider, void *argument,
                                  vm_size_t size);
+#if DEVELOPMENT || DEBUG
+    IOFilterInterruptEventSource *heartbeat_ = nullptr;
+    bool heartbeatTried_ = false;  // gate-owned
+    const char *armHeartbeat();
+    static bool heartbeatFilter(OSObject *owner, IOFilterInterruptEventSource *source);
+    static void heartbeatAction(OSObject *owner, IOInterruptEventSource *source, int count);
+#endif
 
 public:
     bool start(IOService *provider) override;
@@ -179,17 +192,56 @@ void NativeSwitchWatchdog::expired(OSObject *owner, IOTimerEventSource *timer)
 IOReturn NativeSwitchWatchdog::connectedGated(OSObject *owner, void *, void *, void *, void *)
 {
     auto *self = static_cast<NativeSwitchWatchdog *>(owner);
+#if DEVELOPMENT || DEBUG
+    if (self->off_ && !self->connected_ && !self->heartbeatTried_)
+        IOLog("SwitchWatchdog: watchdogd connected; userspace watchdog off for this boot; %s\n", self->armHeartbeat());
+#endif
     if (self->connected_ || self->off_)
         return kIOReturnSuccess;  // off: the relaunch reads "disabled" and exits
     self->connected_ = true;
     // The root domain's last kernel clients: watchdogd has already turned monitoring off for sleep (and back on at
     // wake) by the time these arrive.
     self->power_ = registerPrioritySleepWakeInterest(&NativeSwitchWatchdog::powerMessage, self);
+#if DEVELOPMENT || DEBUG
+    IOLog("SwitchWatchdog: watchdogd connected; userspace watchdog armed%s; %s\n",
+          self->power_ ? "" : " (no sleep notifications)", self->armHeartbeat());
+#else
     IOLog("SwitchWatchdog: watchdogd connected; userspace watchdog armed%s\n",
           self->power_ ? "" : " (no sleep notifications)");
+#endif
     self->arm();
     return kIOReturnSuccess;
 }
+
+#if DEVELOPMENT || DEBUG
+// COP_WD is WDT4's alone, enabled only once the heartbeat is armed. The filter clears it or panics.
+const char *NativeSwitchWatchdog::armHeartbeat()
+{
+    heartbeatTried_ = true;
+    IOService *nub = switch_interrupt_nub(SWITCH_HEARTBEAT_INTID, false);
+    if (nub)
+        heartbeat_ = IOFilterInterruptEventSource::filterInterruptEventSource(
+            this, &NativeSwitchWatchdog::heartbeatAction, &NativeSwitchWatchdog::heartbeatFilter, nub, 0);
+    if (!heartbeat_ || loop_->addEventSource(heartbeat_) != kIOReturnSuccess)
+        return "heartbeat not armed: no COP_WD interrupt";
+    bool armed = false;
+    const char *line = switch_heartbeat_arm(&armed);
+    if (armed)
+        heartbeat_->enable();
+    else
+        loop_->removeEventSource(heartbeat_);
+    return line;
+}
+
+bool NativeSwitchWatchdog::heartbeatFilter(OSObject *, IOFilterInterruptEventSource *)
+{
+    switch_heartbeat_interrupt();
+    return false;
+}
+
+void NativeSwitchWatchdog::heartbeatAction(OSObject *, IOInterruptEventSource *, int)
+{}
+#endif
 
 // watchdogd crashed (kern_exit.c, which took no panic for it): userspace monitoring off, as watchdogd's own disable
 // (method 3) leaves it, so the original check stays quiet and watchdogd's relaunch, asking whether monitoring is enabled

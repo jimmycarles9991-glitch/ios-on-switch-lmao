@@ -83,6 +83,7 @@ void reset()
     gInterface.attached = true;
     gInterface.outputHalted = true;
     gInterface.ifp = {};
+    gController.onSetLinkStatus = {};
     for (mbuf_t m : gInterface.delivered)
         mbuf_freem(m);
     gInterface.delivered.clear();
@@ -332,6 +333,28 @@ TEST_F(NetTest, TheLinkAndItsRateGoToTheController)
     EXPECT_EQ(up.speed, 866700000u);
     EXPECT_EQ(down.status, 0x1u);
     EXPECT_EQ(down.speed, 0u);
+}
+
+TEST_F(NetTest, SetLinkStatusRunsUnlockedAndConvergesOnConcurrentChange)
+{
+    gController.reports.clear();
+    swlan::net::set_link(true);
+    gController.reports.clear();
+    bool nested = false;
+    gController.onSetLinkStatus = [&] {
+        EXPECT_EQ(gLocksHeld, 0);
+        if (!nested) {
+            nested = true;
+            swlan::net::set_link(false);
+        }
+    };
+    switch_wlan_net_rate(433300000);
+    gController.onSetLinkStatus = {};
+    EXPECT_TRUE(nested);
+    ASSERT_GE(gController.reports.size(), 3u);
+    EXPECT_EQ(gController.reports.back().status, 0x1u);
+    EXPECT_EQ(gController.reports.back().speed, 0u);
+    EXPECT_EQ(gLocksHeld, 0);
 }
 
 TEST_F(NetTest, MulticastAllAndTheGroupList)

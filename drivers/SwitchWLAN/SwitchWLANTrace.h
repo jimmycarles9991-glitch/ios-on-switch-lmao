@@ -33,6 +33,44 @@ static inline uint16_t swlan_trace_be16(const uint8_t *p)
     return (uint16_t)(((unsigned)p[0] << 8) | p[1]);
 }
 
+enum { SWITCH_WLAN_ECHO6_PREFIX = 14 + 40 + 8 };
+
+struct switch_wlan_echo6 {
+    uint16_t id;
+    uint16_t sequence;
+    uint8_t type;
+    uint16_t checksum, payload;
+    uint8_t source[16], destination[16];
+};
+
+static inline struct switch_wlan_echo6 switch_wlan_echo6_ip(const uint8_t *ip, size_t prefix, size_t length)
+{
+    struct switch_wlan_echo6 echo = {0, 0, 0, 0, 0, {0}, {0}};
+    if (prefix < SWITCH_WLAN_ECHO6_PREFIX - 14 || length < prefix || ip[0] >> 4 != 6 || ip[6] != 58 ||
+        (ip[40] != 128 && ip[40] != 129) || ip[41] != 0)
+        return echo;
+    const size_t payload = swlan_trace_be16(ip + 4);
+    if (payload < 8 || payload > length - 40)
+        return echo;
+    echo.type = ip[40];
+    echo.id = swlan_trace_be16(ip + 44);
+    echo.sequence = swlan_trace_be16(ip + 46);
+    echo.checksum = swlan_trace_be16(ip + 42);
+    echo.payload = (uint16_t)payload;
+    for (unsigned i = 0; i < 16; ++i) {
+        echo.source[i] = ip[8 + i];
+        echo.destination[i] = ip[24 + i];
+    }
+    return echo;
+}
+
+static inline struct switch_wlan_echo6 switch_wlan_echo6_read(const uint8_t *frame, size_t prefix, size_t length)
+{
+    if (prefix < 14 || length < 14 || swlan_trace_be16(frame + 12) != 0x86dd)
+        return switch_wlan_echo6_ip(NULL, 0, 0);
+    return switch_wlan_echo6_ip(frame + 14, prefix - 14, length - 14);
+}
+
 static inline uint32_t swlan_trace_be32(const uint8_t *p)
 {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3];

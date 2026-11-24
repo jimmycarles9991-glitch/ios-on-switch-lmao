@@ -82,3 +82,31 @@ TEST(SdBusSource, TuningWaitStaysInTuning)
         EXPECT_FALSE(Search(body(signature), R"(\b(IOSleep|IODelay|awaitTuningIdle)\b)")) << signature;
     }
 }
+
+TEST(SdBusSource, FailedWaitCapturesTheInterruptBeforeDeassertingItsSource)
+{
+    const std::string wait = body("bool NativeSwitchBlock::waitSignal(");
+    const size_t returned = Index(wait, "thread_block(THREAD_CONTINUE_NULL)");
+    const size_t status = Index(wait, "waitFailure.status = r32(STATUS)");
+    const size_t snapshot = Index(wait, "switch_interrupt_describe(kInterrupt, waitFailure.controller");
+    const size_t masked = Index(wait, "w32(SIGNAL_ENABLE, 0)");
+    EXPECT_LT(returned, status);
+    EXPECT_LT(status, snapshot);
+    EXPECT_LT(snapshot, masked);
+    EXPECT_THAT(wait, HasSubstr("if (result != THREAD_AWAKENED)"));
+    const std::string panic = body("void NativeSwitchBlock::interruptLost(");
+    EXPECT_THAT(panic, HasSubstr("before-mask %#x/%#x"));
+    const size_t development = Index(panic, "#if DEVELOPMENT || DEBUG");
+    const size_t mc = Index(panic, "tegra_mc_error_latest(&mcInterrupts, &mcStatus, &mcAddress)");
+    const size_t release = Index(panic, "#else");
+    EXPECT_LT(development, mc);
+    EXPECT_LT(mc, release);
+    EXPECT_THAT(panic, HasSubstr("MC %u intstatus %#x status %#x "));
+    EXPECT_EQ(panic.substr(release),
+              "#else\n    panic(\"SwitchSD: SDMMC1 interrupt lost: STATUS %#x awaited %#x, %s\", r32(STATUS), "
+              "awaited, gic);\n#endif");
+    EXPECT_EQ(Count(driver(), "tegra_mc_error_latest("), 1u);
+    EXPECT_THAT(driver(), Not(HasSubstr("tegra_mc_errors_start(")));
+    EXPECT_EQ(Count(driver(), "interruptLost(signals);"), 1u);
+    EXPECT_EQ(Count(driver(), "interruptLost(awaited);"), 1u);
+}

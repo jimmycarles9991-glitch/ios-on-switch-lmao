@@ -64,8 +64,14 @@ void switch_power_trail(const char *format, ...) __attribute__((format(printf, 1
 
 // The SoC watchdog (TMR5/WDT0, PMC2CAR: a warm reset, DRAM kept) armed to reset the console `seconds` (at most 255)
 // from now unless called again; 0 disarms it. One trail line names `why`. Any context; never blocks. A panic re-arms it
-// for its own reset. Disarm before SC7 entry and re-arm on the way out: the timer block loses power in SC7.
+// for its own reset. Disarm before SC7 entry and re-arm on the way out: the timer block loses power in SC7. The freeze
+// heartbeat (<switch/heartbeat.h>) is held from the first arming to the disarm.
 void switch_power_trail_watch(unsigned seconds, const char *why);
+// The heartbeat's last beat (uptime; 0: not beating) and the time its interrupt found it late, kept in the slice for
+// the next boot; and the last boot's.
+void switch_power_trail_beat(uint64_t uptime_ns);
+void switch_power_trail_beat_interrupt(uint64_t uptime_ns);
+uint64_t switch_power_trail_last_beat(uint64_t *interrupt_ns);
 
 // A durable mark and a trail line. Any context; never blocks: a kernel thread call writes it over I2C5 (TegraI2C), and
 // marks that come faster than the RTC takes them (one update per 16 ms) give way to the latest. Nothing reaches the RTC
@@ -95,6 +101,9 @@ void switch_pmic_flag_now(uint8_t flag);
 int switch_power_trail_unused(const char *format, ...) __attribute__((format(printf, 1, 2)));
 #define switch_power_trail(...)                        ((void)sizeof(switch_power_trail_unused(__VA_ARGS__)))
 #define switch_power_trail_watch(seconds, why)         ((void)sizeof((seconds) + sizeof(why)))
+#define switch_power_trail_beat(uptime_ns)             ((void)sizeof(uptime_ns))
+#define switch_power_trail_beat_interrupt(uptime_ns)   ((void)sizeof(uptime_ns))
+#define switch_power_trail_last_beat(interrupt_ns)     ((void)sizeof(interrupt_ns), (uint64_t)0)
 #define switch_power_trail_mark(code)                  ((void)sizeof(code))
 #define switch_power_trail_mark_flush()                ((void)0)
 #define switch_power_trail_mark_now(code)              ((void)sizeof(code))

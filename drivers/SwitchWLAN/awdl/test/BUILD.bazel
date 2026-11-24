@@ -13,51 +13,80 @@ load("//bazel/testing:defs.bzl", "host_library", "host_test")
 
 lint_files()
 
+exports_files(["switch_apple_frames.h"], visibility = ["//drivers/SwitchWLAN/firmware/a3:__pkg__"])
+
+KINDS = [
+    ("21H461", ""),
+    ("24B119", "_24B119"),
+]
+
 COPTS = [
     "-O1",
+    "-DDEVELOPMENT=1",
     "-Wno-missing-field-initializers",
 ]
 
-host_library(
-    name = "awdl",
-    srcs = [
-        "//drivers/SwitchWLAN:awdl/awdl_apple80211.c",
-        "//drivers/SwitchWLAN:awdl/awdl_bcm.c",
-        "//drivers/SwitchWLAN:awdl/awdl_bcm_trace.c",
-        "//drivers/SwitchWLAN:awdl/awdl_core.c",
-        "//drivers/SwitchWLAN:awdl/awdl_data.c",
-        "//drivers/SwitchWLAN:awdl/awdl_internal.h",
-        "//drivers/SwitchWLAN:awdl/awdl_native.c",
-        "//drivers/SwitchWLAN:awdl/awdl_native_rx.c",
-        "//drivers/SwitchWLAN:awdl/awdl_schedule.c",
-        "//drivers/SwitchWLAN:awdl/awdl_tx.c",
-        "//drivers/SwitchWLAN:awdl/awdl_wire.c",
-    ],
-    hdrs = [
-        "//drivers/SwitchWLAN:awdl/awdl.h",
-        "//drivers/SwitchWLAN:awdl/awdl_apple80211.h",
-        "//drivers/SwitchWLAN:awdl/awdl_bcm.h",
-        "//drivers/SwitchWLAN:awdl/awdl_bcm_trace.h",
-    ],
-    copts = COPTS,
-)
+[
+    host_library(
+        name = "awdl" + suffix,
+        visibility = ["//drivers/SwitchWLAN/test:__pkg__"],
+        srcs = [
+            "//drivers/SwitchWLAN:awdl/awdl_apple80211.c",
+            "//drivers/SwitchWLAN:awdl/awdl_bcm.c",
+            "//drivers/SwitchWLAN:awdl/awdl_bcm_trace.c",
+            "//drivers/SwitchWLAN:awdl/awdl_core.c",
+            "//drivers/SwitchWLAN:awdl/awdl_data.c",
+            "//drivers/SwitchWLAN:awdl/awdl_internal.h",
+            "//drivers/SwitchWLAN:awdl/awdl_native.c",
+            "//drivers/SwitchWLAN:awdl/awdl_native_rx.c",
+            "//drivers/SwitchWLAN:awdl/awdl_radio.c",
+            "//drivers/SwitchWLAN:awdl/awdl_schedule.c",
+            "//drivers/SwitchWLAN:awdl/awdl_services.c",
+            "//drivers/SwitchWLAN:awdl/awdl_tx.c",
+            "//drivers/SwitchWLAN:awdl/awdl_wire.c",
+        ],
+        hdrs = [
+            "//drivers/SwitchWLAN:awdl/awdl.h",
+            "//drivers/SwitchWLAN:awdl/awdl_apple80211.h",
+            "//drivers/SwitchWLAN:awdl/awdl_bcm.h",
+            "//drivers/SwitchWLAN:awdl/awdl_bcm_trace.h",
+            "//drivers/SwitchWLAN:awdl/awdl_radio.h",
+        ],
+        copts = COPTS,
+        defines = ["SWITCH_IPSW_KIND_" + kind],
+    )
+    for kind, suffix in KINDS
+]
 
 # The two test files, test_awdl.c's main() renamed so the test calls it.
-host_library(
-    name = "awdl_tests",
-    srcs = [
-        "test_awdl.c",
-        "test_native.c",
-        "test_owl.c",
-        "test_sched.c",
-    ],
-    copts = COPTS,
-    defines = ["main=awdl_tests_main"],
-    deps = [":awdl"],
-)
+[
+    host_library(
+        name = "awdl_tests" + suffix,
+        srcs = [
+            "switch_apple_frames.h",
+            "test_awdl.c",
+            "test_election.c",
+            "test_native.c",
+            "test_owl.c",
+            "test_radio.c",
+            "test_sched.c",
+            "test_services.c",
+        ],
+        copts = COPTS,
+        defines = [
+            "main=awdl_tests_main",
+            "SWITCH_IPSW_KIND_" + kind,
+        ],
+        deps = [":awdl" + suffix],
+    )
+    for kind, suffix in KINDS
+]
 
-host_test(
-    name = "awdl_test",
-    srcs = ["awdl_test.cpp"],
-    deps = [":awdl_tests"],
-)
+[
+    host_test(
+        name = "awdl" + suffix + "_test",
+        srcs = ["awdl_test.cpp"],
+        deps = [":awdl_tests" + suffix],
+    )
+    for kind, suffix in KINDS
+]

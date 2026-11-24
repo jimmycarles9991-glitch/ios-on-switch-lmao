@@ -557,6 +557,11 @@ extern struct ip6aux *ip6_addaux(struct mbuf *);
 extern struct ip6aux *ip6_findaux(struct mbuf *);
 extern void ip6_delaux(struct mbuf *);
 
+#if DEVELOPMENT || DEBUG
+extern int switch_awdl_echo_mark(struct mbuf *);
+extern uint32_t switch_awdl_echo_sample(struct mbuf *);
+#endif
+
 extern int ip6_process_hopopts(struct mbuf *, u_int8_t *__sized_by(hbhlen) opthead, int hbhlen,
     u_int32_t *, u_int32_t *);
 extern struct mbuf **ip6_savecontrol_v4(struct inpcb *, struct mbuf *,

@@ -1,12 +1,23 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// awdl0 as iPadOS 21H461's wifip2pd sees it: the Apple80211 request payloads it sends for AWDL, the events it
-// reads back, and the IO80211 user-client event ring they travel through. Portable C (host tests run it); the kernel
+// awdl0 as iPadOS 21H461 and 24B119's wifip2pd see it: the Apple80211 request payloads they send for AWDL, the events they
+// read back, and the IO80211 user-client event ring they travel through. Portable C (host tests run it); the kernel
 // side (SwitchWLANAwdl.cpp) does the copyin/copyout, the IOUserClient and the ifnet. Layouts and numbers are from the
-// 21H461 binaries (AWDL-CONTRACT.md): natural C alignment, little endian.
+// pinned binaries: natural C alignment, little endian. VIRTUAL_IF_STATE is specific to 24B119.
 #ifndef AWDL_APPLE80211_H
 #define AWDL_APPLE80211_H
 
 #include "awdl.h"
+
+#if defined(SWITCH_IPSW_KIND_24B119)
+#define SWITCH_A80211_AWDL_ROLE "AirLink"
+#define SWITCH_A80211_AWDL_CLIENT_PROCESS "wifip2pd"
+#define SWITCH_A80211_AWDL_CLIENT_ENTITLEMENT "com.apple.wifi_awdl.event_monitor"
+#elif defined(SWITCH_IPSW_KIND_21H461)
+#define SWITCH_A80211_AWDL_ROLE "AWDL"
+#endif
+#if defined(SWITCH_IPSW_KIND_21H461) || defined(SWITCH_IPSW_KIND_24B119)
+#define SWITCH_A80211_AWDL_VIRTUAL_ROLE "AirLink"
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -48,6 +59,7 @@ enum {
     A80211_IOC_AWDL_UMI_TX_PEER = 417,
     A80211_IOC_GATEWAY_ADDRESS = 450,
     A80211_IOC_UNICAST_INFRA_PEER_ADDRESS = 451,
+    A80211_IOC_VIRTUAL_IF_STATE = 503,
 };
 
 enum {
@@ -55,6 +67,7 @@ enum {
     A80211_M_PEER_STATE = 40,
     A80211_M_AWDL_SYNC_STATE_CHANGED = 46,
     A80211_M_PEER_PRESENCE = 47,
+    A80211_M_AWDL_ACTION_FRAME_RX = 48,
     A80211_M_INTERFACE_STATE = 58,
     A80211_M_AWDL_CHAN_SEQ_CHANGED = 195,
 };
@@ -70,15 +83,20 @@ enum {
     A80211_VIF_ROLE_NAN_DATA = 10
 };
 
-// apple80211_peer_presence_indication.state: which value means "present" is not settled by the binary (STATUS.md)
+// Apple80211 event 47: wifip2pd maps state 1 to lostPeer and ignores other values.
 enum {
-    A80211_PEER_ABSENT = 0,
-    A80211_PEER_PRESENT = 1
+    A80211_PEER_PRESENT = 0,
+    A80211_PEER_ABSENT = 1
 };
 
 // ---- payloads (wifip2pd's Swift metadata names; sizes checked against its call sites) ------------------------------
 struct a80211_channel {
     uint32_t version, channel, flags;
+};
+
+struct switch_a80211_virtual_if_state {
+    uint32_t active, role;
+    struct a80211_channel channel;
 };
 
 struct a80211_virt_if_create {  // 32
@@ -205,11 +223,12 @@ int a80211_ring_take(struct a80211_ring *r, uint32_t *event, char ifname[16], vo
 // ---- awdl0's request handler ------------------------------------------------------------------------------------------
 struct a80211_awdl_ops {
     void *ctx;
-    int (*start)(void *ctx);  // AWDL_SYNC_ENABLED on: start the stack (radio open, schedule); 0 or an errno
+    int (*start)(void *ctx);  // Start the stack, returning 0 or an errno.
     void (*stop)(void *ctx);
     // an event for awdl0's ring (the integration adds the interface name and wakes the reader)
     void (*post)(void *ctx, uint32_t event, const void *payload, uint32_t len);
     void (*log)(void *ctx, const char *line);
+    int (*active)(void *ctx);
 };
 
 struct a80211_awdl {
@@ -221,7 +240,10 @@ struct a80211_awdl {
     uint16_t preferred, master_channel, secondary_preferred;
     uint64_t userspace_p2p_flags;
     uint32_t traffic_registrations;
-    uint8_t enabled;
+    uint8_t enabled, published_ready;
+#if defined(SWITCH_IPSW_KIND_24B119)
+    uint8_t switch_activation_explicit;
+#endif
     uint16_t presence_handle;
     uint32_t unknown_seen[16];  // request types answered EOPNOTSUPP, logged once each
 };
@@ -234,6 +256,15 @@ int a80211_awdl_request(struct a80211_awdl *f, int set, int32_t type, int32_t *v
                         uint32_t capacity, uint64_t now);
 // The core's peer callback lands here: posts PEER_PRESENCE to wifip2pd.
 void a80211_awdl_peer(struct a80211_awdl *f, const uint8_t addr[6], int present, int8_t rssi);
+#if defined(SWITCH_IPSW_KIND_24B119)
+int switch_a80211_awdl_parent_state(const struct a80211_awdl *f, const void *data, size_t length);
+size_t switch_a80211_awdl_action_rx(void *out, size_t capacity, const uint8_t *frame, size_t length,
+                                   const struct awdl_rx_meta *meta);
+#endif
+void switch_a80211_awdl_refresh(struct a80211_awdl *f);
+int switch_a80211_awdl_active(const struct a80211_awdl *f);
+void switch_a80211_awdl_suspend(struct a80211_awdl *f);
+int switch_a80211_awdl_resume(struct a80211_awdl *f, uint64_t now);
 
 // awdl0 on a radio that cannot run AWDL. 21H461's sharingd force-unwraps nw_interface_create_with_name("awdl0") when
 // it starts its AirDrop Bonjour server and its temporary-pairing server, and traps when awdl0 is missing, so the

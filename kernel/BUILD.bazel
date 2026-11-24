@@ -352,6 +352,7 @@ kernel_archive(
         "//drivers/SwitchSuspend:SwitchSuspend",
         "//drivers/SwitchAudio:SwitchAudio",
         "//drivers/SwitchWLAN:SwitchWLAN",
+        "//drivers/SwitchWLAN:SwitchWLANAwdlNeighbor",
         "//drivers/TegraGM20B:TegraGM20B_nvkm",
         "//drivers/TegraGM20B:TegraGM20B_emit",
         "//drivers/TegraGM20B:TegraGM20B",

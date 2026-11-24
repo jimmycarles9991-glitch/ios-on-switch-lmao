@@ -106,6 +106,9 @@
 #include <sys/time.h>
 #include <sys/kernel.h>
 #include <sys/syslog.h>
+#if DEVELOPMENT || DEBUG
+#include <os/log.h>
+#endif
 #include <sys/domain.h>
 #include <sys/kauth.h>
 
@@ -148,6 +151,48 @@ extern uint32_t rip_sendspace;
 extern uint32_t rip_recvspace;
 
 struct icmp6stat icmp6stat;
+
+#if DEVELOPMENT || DEBUG
+static mbuf_tag_id_t switch_echo_module;
+
+int
+switch_awdl_echo_mark(struct mbuf *m)
+{
+	static uint32_t serial;
+	mbuf_tag_id_t module = os_atomic_load(&switch_echo_module, relaxed);
+	if (module == 0) {
+		int error = mbuf_tag_id_find("com.brunostjohn.switch.wlan.echo", &module);
+		if (error != 0) {
+			return error;
+		}
+		os_atomic_store(&switch_echo_module, module, relaxed);
+	}
+	void *value;
+	int error = mbuf_tag_allocate(m, module, 1, sizeof(uint32_t), MBUF_DONTWAIT, &value);
+	if (error == 0) {
+		uint32_t sample;
+		do {
+			sample = os_atomic_inc(&serial, relaxed);
+		} while (sample == 0);
+		*(uint32_t *)value = sample;
+	}
+	return error;
+}
+
+uint32_t
+switch_awdl_echo_sample(struct mbuf *m)
+{
+	if (SLIST_EMPTY(&m->m_pkthdr.tags)) {
+		return 0;
+	}
+	mbuf_tag_id_t module = os_atomic_load(&switch_echo_module, relaxed);
+	struct m_tag *tag = module != 0 ? m_tag_locate(m, module, 1) : NULL;
+	if (tag == NULL || tag->m_tag_len != sizeof(uint32_t)) {
+		return 0;
+	}
+	return *(uint32_t *)tag->m_tag_data;
+}
+#endif
 
 extern struct inpcbhead ripcb;
 extern int icmp6errppslim;
@@ -475,6 +520,9 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 	int off = *offp;
 	int icmp6len = m->m_pkthdr.len - *offp;
 	int code, sum, noff, proxy = 0;
+#if DEVELOPMENT || DEBUG
+	uint32_t switch_sample = 0;
+#endif
 
 	ifp = m->m_pkthdr.rcvif;
 
@@ -666,6 +714,13 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 		if (code != 0) {
 			goto badcode;
 		}
+#if DEVELOPMENT || DEBUG
+		switch_sample = switch_awdl_echo_sample(m);
+		if (switch_sample != 0) {
+			os_log(OS_LOG_DEFAULT, "SwitchWLAN: XNU echo %u request id %u seq %u ifindex %u",
+			    switch_sample, ntohs(icmp6->icmp6_id), ntohs(icmp6->icmp6_seq), ifp->if_index);
+		}
+#endif
 
 		if ((n = m_copy(m, 0, M_COPYALL)) == NULL) {
 			/* Give up remote */
@@ -732,6 +787,12 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 		if (n) {
 			icmp6stat.icp6s_reflect++;
 			icmp6stat.icp6s_outhist[ICMP6_ECHO_REPLY]++;
+#if DEVELOPMENT || DEBUG
+			if (switch_sample != 0) {
+				os_log(OS_LOG_DEFAULT, "SwitchWLAN: XNU echo %u constructed tagged %d",
+				    switch_sample, switch_awdl_echo_sample(n) == switch_sample);
+			}
+#endif
 			icmp6_reflect(n, noff);
 		}
 		goto rate_limit_checked;
@@ -2258,6 +2319,9 @@ icmp6_reflect(struct mbuf *m, size_t off)
 	uint32_t fifscope = IFSCOPE_NONE;
 	uint32_t tifscope;
 	struct ip6_out_args ip6oa;
+#if DEVELOPMENT || DEBUG
+	const uint32_t switch_sample = switch_awdl_echo_sample(m);
+#endif
 
 	bzero(&ip6oa, sizeof(ip6oa));
 	ip6oa.ip6oa_boundif = IFSCOPE_NONE;
@@ -2434,6 +2498,12 @@ icmp6_reflect(struct mbuf *m, size_t off)
 		    &src_storage, ip6oa.ip6oa_boundif, &e);
 		ROUTE_RELEASE(&ro);
 		if (src == NULL) {
+#if DEVELOPMENT || DEBUG
+			if (switch_sample != 0) {
+				os_log(OS_LOG_DEFAULT, "SwitchWLAN: XNU echo %u source failed scope %u errno %d",
+				    switch_sample, ip6oa.ip6oa_boundif, e);
+			}
+#endif
 			nd6log(debug,
 			    "icmp6_reflect: source can't be determined: "
 			    "dst=%s, error=%d\n",

@@ -16,6 +16,7 @@
 #include <sys/proc.h>
 #include "SwitchWLANAwdlRadio.h"
 #include "SwitchWLANAwdlSoft.h"
+#include "SwitchWLANA3Radio.h"
 #include "awdl/awdl.h"
 #include "awdl/awdl_bcm.h"
 
@@ -322,6 +323,8 @@ extern "C" int switch_wlan_soft_stat(char *buf, size_t size)
 // NOLINTNEXTLINE(misc-const-correctness): the context goes back to the stack's callback, which takes a void *
 extern "C" int swlan_awdl_rx_start(swlan_rx_fn fn, void *ctx)
 {
+    if (switch_wlan_a3_radio_present())
+        return switch_wlan_a3_radio_rx(fn, ctx);
     if (!fn || !gLock)
         return -ENXIO;
     __atomic_store_n(&gRxCtx, ctx, __ATOMIC_RELEASE);
@@ -333,6 +336,8 @@ extern "C" int swlan_awdl_rx_start(swlan_rx_fn fn, void *ctx)
 
 extern "C" int swlan_awdl_rx_stop(void)
 {
+    if (switch_wlan_a3_radio_present())
+        return switch_wlan_a3_radio_rx(nullptr, nullptr);
     __atomic_store_n(&gRxFn, static_cast<swlan_rx_fn>(nullptr), __ATOMIC_RELEASE);
     if (gMonitorOn)
         enqueue(kMonitorOff, nullptr);
@@ -340,13 +345,15 @@ extern "C" int swlan_awdl_rx_stop(void)
 }
 
 // The firmware answers frames to its own address only, which is the soft backend's AWDL address too.
-extern "C" int swlan_awdl_rx_filter(const uint8_t *, const uint8_t *, uint16_t)
+extern "C" int swlan_awdl_rx_filter(const uint8_t *address, const uint8_t *bssid, uint16_t ethertype)
 {
-    return 0;
+    return switch_wlan_a3_radio_present() ? switch_wlan_a3_radio_filter(address, bssid, ethertype) : -EOPNOTSUPP;
 }
 
 extern "C" int swlan_awdl_tx(const struct swlan_tx_req *req)
 {
+    if (switch_wlan_a3_radio_present())
+        return switch_wlan_a3_radio_tx(req);
     if (!req || !req->frame || req->len < 24 || req->len > kFrameMax)
         return -EMSGSIZE;
     if ((req->frame[0] & 0xfc) != 0xd0) {
@@ -357,12 +364,22 @@ extern "C" int swlan_awdl_tx(const struct swlan_tx_req *req)
 }
 
 // This radio cannot run a sequence: each frame's send and stay (swlan_tx_req) is how it follows the slots.
-extern "C" int swlan_awdl_chanseq_set(const struct swlan_chan_seq *)
+extern "C" int swlan_awdl_chanseq_set(const struct swlan_chan_seq *sequence)
 {
-    return 0;
+    return switch_wlan_a3_radio_present() ? switch_wlan_a3_radio_schedule(sequence) : -EOPNOTSUPP;
 }
 
 extern "C" int swlan_awdl_chanseq_clear(void)
 {
-    return 0;
+    return switch_wlan_a3_radio_present() ? switch_wlan_a3_radio_close() : -EOPNOTSUPP;
+}
+
+extern "C" int swlan_awdl_get_state(struct swlan_awdl_state *state)
+{
+    return switch_wlan_a3_radio_state(state);
+}
+
+extern "C" int swlan_awdl_clock_request(void)
+{
+    return switch_wlan_a3_radio_clock();
 }

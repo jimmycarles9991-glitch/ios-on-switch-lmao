@@ -122,6 +122,9 @@
 #include <net/net_osdep.h>
 #include <net/net_perf.h>
 #include <net/droptap.h>
+#if DEVELOPMENT || DEBUG
+#include <os/log.h>
+#endif
 
 #include <netinet/ip.h>
 #include <netinet/in.h>
@@ -358,6 +361,9 @@ ip6_output_list(struct mbuf *m0, int packetchain, struct ip6_pktopts *opt,
 		uint32_t raw;
 	} ip6obf = { .raw = 0 };
 	drop_reason_t drop_reason = DROP_REASON_UNSPECIFIED;
+#if DEVELOPMENT || DEBUG
+	const uint32_t switch_sample = switch_awdl_echo_sample(m0);
+#endif
 
 	/*
 	 * Here we check for restrictions when sending frames.
@@ -1198,6 +1204,12 @@ skip_ipsec:
 	if (!ip6obf.route_selected) {
 		error = in6_selectroute( ip6obf.select_srcif ? &src_sa : NULL,
 		    &dst_sa, opt, im6o, &src_ia, ro, &ifp, &rt, 0, ip6oa);
+#if DEVELOPMENT || DEBUG
+		if (switch_sample != 0) {
+			os_log(OS_LOG_DEFAULT, "SwitchWLAN: XNU echo %u route scope %u ifindex %u present %d errno %d",
+			    switch_sample, dst_sa.sin6_scope_id, ifp != NULL ? ifp->if_index : 0, rt != NULL, error);
+		}
+#endif
 
 		if (error != 0) {
 			switch (error) {
@@ -1652,6 +1664,12 @@ evaluateloop:
 	}
 
 done:
+#if DEVELOPMENT || DEBUG
+	if (switch_sample != 0) {
+		os_log(OS_LOG_DEFAULT, "SwitchWLAN: XNU echo %u ip6_output errno %d drop %#x",
+		    switch_sample, error, (unsigned int)drop_reason);
+	}
+#endif
 	if (ifpp_save != NULL && *ifpp_save != NULL) {
 		ifnet_release(*ifpp_save);
 		*ifpp_save = NULL;

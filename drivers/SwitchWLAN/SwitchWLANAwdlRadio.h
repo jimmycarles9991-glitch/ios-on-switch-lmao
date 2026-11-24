@@ -17,9 +17,8 @@
 extern "C" {
 #endif
 
-// 2: per-interface variables (swlan_awdl_var) and the bring-up probe in the caps; 3: action frames with a stay
-// (can_tx_action, swlan_tx_req.stay_us) in place of timed injection
-#define SWLAN_AWDL_ABI_VERSION 3
+#define SWLAN_AWDL_ABI_VERSION   5
+#define SWLAN_AWDL_STATE_VERSION 2
 
 struct bcm_awdl_probe;  // awdl/awdl_bcm.h
 
@@ -32,6 +31,8 @@ struct swlan_awdl_caps {
     uint8_t can_stay_assoc;      // hops while en0 stays associated (mchan); else time-shared
     uint8_t has_native_awdl;     // the firmware's own awdl iovars (§6)
     uint8_t soft_trial;          // debug builds: the soft backend runs although it cannot carry data (switch-awdl-soft)
+    uint8_t requires_radio_ready;
+    uint8_t has_tsf_clock;
     uint8_t self_mac[6];
     uint16_t max_inject_len;
     // What the firmware's iovar table answered at bring-up (SwitchWLAN.cpp's probe, once a boot): the stack picks the
@@ -48,6 +49,25 @@ int swlan_awdl_open(const struct swlan_awdl_caps **caps_out);
 int swlan_awdl_query(const struct swlan_awdl_caps **caps_out);
 void swlan_awdl_close(void);
 
+struct swlan_awdl_clock_sample {
+    uint64_t tsf_us, host_ns;
+    uint32_t uncertainty_ns, epoch;
+};
+
+struct swlan_awdl_state {
+    uint32_t version, generation, ready, tx_credits;
+    int32_t error;
+    struct swlan_awdl_clock_sample clock;
+    uint32_t applied_generation;
+    uint16_t social_channels, home_chanspec;
+    uint8_t social_channels_valid;
+};
+
+// Cached, nonblocking snapshot. host_ns uses mach_absolute_time converted to ns; uncertainty includes the sampling
+// round trip. generation changes after firmware reload; epoch changes whenever TSF continuity is lost.
+int swlan_awdl_get_state(struct swlan_awdl_state *state);
+int swlan_awdl_clock_request(void);  // coalesces one worker calibration burst; CLOCK_CHANGED completes it
+
 struct swlan_rx_meta {
     uint64_t tsf;  // local TSF at rx, us (0: not stamped)
     uint16_t freq_mhz;
@@ -55,6 +75,7 @@ struct swlan_rx_meta {
     uint8_t flags;  // bit0 FCS_OK, bit1 FCS_PRESENT, bit2 AMPDU, bit3 SHORT_GI
     uint8_t mcs;
     uint8_t _pad[3];
+    uint32_t generation, clock_epoch, applied_generation;
 };
 
 enum {
@@ -76,6 +97,8 @@ struct swlan_tx_req {
     uint8_t rate_mcs;  // 0xff: firmware default
     uint8_t flags;     // bit0 NO_ACK, bit1 fail-if-off-channel
     uint32_t stay_us;  // 0: no need to stay
+    uint64_t deadline_tsf;
+    uint32_t generation, clock_epoch;
 };
 
 enum {
@@ -87,7 +110,7 @@ int swlan_awdl_tx(const struct swlan_tx_req *req);  // >= 0 request id, < 0 errn
 
 struct swlan_chan_slot {
     uint16_t freq_mhz;
-    uint16_t dwell_us;
+    uint32_t dwell_us;
 };
 
 struct swlan_chan_seq {
@@ -105,7 +128,13 @@ enum swlan_awdl_evt {
     SWLAN_AWDL_TXDONE,
     SWLAN_AWDL_SEQ_WRAP,
     SWLAN_AWDL_CHIP_LOST,
-    SWLAN_AWDL_OFFCHAN_DROP
+    SWLAN_AWDL_OFFCHAN_DROP,
+    SWLAN_AWDL_CONFIG_CHANGED,
+    SWLAN_AWDL_CLOCK_CHANGED,
+    SWLAN_AWDL_TX_CREDIT,
+    SWLAN_AWDL_RADIO_DOWN,
+    SWLAN_AWDL_RADIO_UP,
+    SWLAN_AWDL_RECOVERY_REQUIRED
 };
 
 struct swlan_awdl_event {
@@ -113,6 +142,7 @@ struct swlan_awdl_event {
     uint32_t id;
     uint16_t status;
     uint64_t tsf;
+    uint32_t generation, clock_epoch;
 };
 
 typedef void (*swlan_evt_fn)(void *ctx, const struct swlan_awdl_event *e);
@@ -161,6 +191,7 @@ int swlan_awdl_eth_rx(swlan_eth_rx_fn fn, void *ctx);
 // The access point's channel (MHz) while the station is associated, 0 otherwise. Lock-free; SwitchWLANAwdl.cpp gives
 // it to the stack, whose schedule puts the free slots on it (awdl_schedule: AWDL and the station share one radio).
 uint16_t swlan_awdl_infra_freq(void);
+int swlan_awdl_active(void);
 
 // ---- SwitchWLANAwdl.cpp (r12-awdl-stack) -> SwitchWLANNet.cpp ---------------------------------------------------
 // Whether en0 advertises AWDL (CARD_CAPABILITIES bit 32): the radio's bring-up probe found a way to make the
@@ -171,6 +202,9 @@ int switch_wlan_awdl_capable(void);
 // interface's name back into it (the caller copies it out). 0 or an errno.
 int switch_wlan_awdl_vif_create(void *payload, size_t length);
 int switch_wlan_awdl_vif_delete(const void *payload, size_t length);
+#if defined(SWITCH_IPSW_KIND_24B119)
+int switch_wlan_awdl_vif_state(const void *payload, size_t length);
+#endif
 
 #ifdef __cplusplus
 }

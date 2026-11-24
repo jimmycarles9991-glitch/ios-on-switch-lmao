@@ -1,7 +1,8 @@
-"""@arm_none_eabi: the Arm GNU Toolchain for the BPMP's ARM7TDMI (armv4t Thumb), which hekate payloads are built for.
+"""@arm_none_eabi: the Arm GNU Toolchain for the BPMP's ARM7TDMI (armv4t Thumb), which hekate payloads are built for,
+and for the Wi-Fi chip's Cortex-R4 payload and its CPU tests.
 
-Only the C compiler, assembler, linker, objcopy, libgcc and newlib's libc for thumb/nofp are extracted (64 MB of the
-release's 1.3 GB).
+Only the C compiler, assembler, linker, objcopy, nm, objdump, libgcc and newlib's libc for thumb/nofp are extracted
+(67 MB of the release's 1.3 GB).
 """
 
 RELEASE = {
@@ -13,10 +14,13 @@ RELEASE = {
 
 MEMBERS = [
     "bin/arm-none-eabi-gcc",
+    "bin/arm-none-eabi-nm",
     "bin/arm-none-eabi-objcopy",
+    "bin/arm-none-eabi-objdump",
     "libexec/gcc/arm-none-eabi/{gcc}/cc1",
     "libexec/gcc/arm-none-eabi/{gcc}/collect2",
     "libexec/gcc/arm-none-eabi/{gcc}/lto-wrapper",
+    "libexec/gcc/arm-none-eabi/{gcc}/lto1",
     "libexec/gcc/arm-none-eabi/{gcc}/liblto_plugin.so",
     "lib/gcc/arm-none-eabi/{gcc}/include",
     "lib/gcc/arm-none-eabi/{gcc}/include-fixed",
@@ -31,7 +35,7 @@ MEMBERS = [
 
 _BUILD = """package(default_visibility = ["//visibility:public"])
 
-exports_files(["bin/arm-none-eabi-gcc", "bin/arm-none-eabi-objcopy"])
+exports_files(["bin/arm-none-eabi-gcc", "bin/arm-none-eabi-nm", "bin/arm-none-eabi-objcopy", "bin/arm-none-eabi-objdump"])
 
 filegroup(
     name = "all",

@@ -14,9 +14,10 @@
 // channel). Otherwise it never does, and awdl0 exists but stays down (a80211_awdl_down_if) with no IO80211 service and
 // no AWDL stack; 7.35.252.108 has neither. A debug build's switch-awdl-soft boot-arg runs the soft backend there
 // anyway, for a device run to show what its actframe and receive paths do. Nothing touches the firmware before
-// wifip2pd enables AWDL on awdl0: that is when the radio is opened (event mask) and the interface made. Every step
+// wifip2pd enables AWDL: that is when the radio is opened (event mask) and the interface made. Every step
 // that has never run on hardware fails with one log line and AWDL off.
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOBSD.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOPlatformExpert.h>
 #include <IOKit/IOService.h>
@@ -43,11 +44,26 @@ extern "C" {
 #include <net/bpf.h>
 }
 #include "SwitchWLANAwdlRadio.h"
+#include "SwitchWLANAwdlInput.h"
+#include "SwitchWLANAwdlNeighbor.h"
+#include "SwitchWLANAwdlPresence.h"
 #include "SwitchWLANAwdlSoft.h"
+#include "SwitchWLANProbeHooks.h"
 #include "SwitchWLANStation.h"
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+#include <pexpert/pexpert.h>
+#include "SwitchWLANAwdlHomeTrial.h"
+extern "C" int switch_awdl_echo_mark(mbuf_t);
+#endif
+#if DEVELOPMENT || DEBUG
+#include "SwitchWLANA3Diagnostic.h"
+#include "SwitchWLANAwdlRxTrace.h"
+#include "SwitchWLANTrace.h"
+#endif
 #include "awdl/awdl.h"
 #include "awdl/awdl_apple80211.h"
 #include "awdl/awdl_bcm.h"
+#include "awdl/awdl_radio.h"
 
 #define SIOCSA80211 0x802869c8UL
 #define SIOCGA80211 0xc02869c9UL
@@ -77,29 +93,55 @@ const struct swlan_awdl_caps *gCaps;
 struct awdl_core *gCore;
 a80211_awdl gFacade;
 awdl_tsf_clock gClock;
+switch_awdl_radio_clock gRadioClock;
+switch_awdl_radio_clock_request gClockRequest;
+swlan_awdl_state gRadioState;
+int gRadioError;
+bool gRestorePending, gRestoring, gRadioLost;
+bool gActivationCommitted;
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+using HomeTrial = swlan::SwitchAwdlHomeTrial;
+HomeTrial gHomeTrial;
+thread_call_t gHomeTrialTimer;
+uint16_t gHomeTrialChannel;
+const char *gHomeTrialBlocker;
+unsigned gHomeTrialBlockLogs;
+const swlan_rx_meta *gEchoRxMeta;
+unsigned gEchoRxCount;
+#endif
+#if DEVELOPMENT || DEBUG
+unsigned gActivationTransitions;
+uint32_t gRawPsf, gRawMif, gRawData, gRawRxGated;
+swlan::SwitchAwdlRxActionBudget gA3RxActionBudget;
+#endif
 bool gSoft;  // the soft backend (actframe excursions) rather than the firmware's own AWDL
-thread_call_t gTimer, gDeferred, gCreate, gIovarWork;
+thread_call_t gTimer, gDeferred, gCreate, gIovarWork, gRadioWork;
 ifnet_t gIf;
 uint8_t gMac[6];
 unsigned gUnit;
 char gName[16];
 bool gCreating, gRxStarted;
+bool gAddressChanging;
 IOService *gService;
 IOBufferMemoryDescriptor *gRingMemory, *gStateMemory;
 a80211_ring gRing;
 OSAsyncReference64 gAsync;
 bool gAsyncArmed, gMonitoring;
 IOUserClient *gEventClient;  // the client whose ring this is
+IOUserClient *gAsyncClient;
 
 // work done outside gLock: kernel neighbour entries and packets for the stack
-struct Presence {
-    uint8_t addr[6];
-    int8_t rssi;
-    uint8_t present;
+using PeerChange = SwitchWLANAwdlPresence::Change;
+struct PeerSlot {
+    uint64_t incarnation;
+    SwitchWLANAwdlPresence presence;
+    SwitchWLANPeerIdentity bufferedFor;
+    mbuf_t head, tail;
+    unsigned count;
 };
-
-Presence gPresence[16];
-unsigned gPresenceCount;
+PeerSlot gPeers[AWDL_MAX_PEERS];
+bool gPeerWork;
+uint64_t gRetryPresenceAfter;
 mbuf_t gInputHead, gInputTail;
 
 // One log line per (process, reason) for a request awdl0 turns down.
@@ -126,11 +168,11 @@ void refuseOnce(const char *reason)
 
 // The address our AWDL frames leave with: awdl0's, unless the radio sends them through actframe, which takes the
 // station's whatever awdl0 is (said once: peers then know us by the station's address).
-const uint8_t *airAddress()
+const uint8_t *airAddress(const uint8_t *address = gMac)
 {
     if (!gSoft || !gCaps || gCaps->can_inject)
-        return gMac;
-    if (memcmp(gMac, gCaps->self_mac, 6))
+        return address;
+    if (memcmp(address, gCaps->self_mac, 6))
         refuseOnce("awdl0's address stays on awdl0: actframe sends AWDL frames with the station's address");
     return gCaps->self_mac;
 }
@@ -142,13 +184,13 @@ uint64_t hostNs()
     return ns;
 }
 
-// The stack's clock: the host's, in microseconds. Neither backend needs the radio's TSF: the firmware keeps AWDL time
-// in the native one, and the soft one times everything, receive times included, on this clock.
 // The rule for every radio call that waits on the firmware (swlan_awdl_var): never under gLock and never from a radio
 // callback (the radio's work loop would wait on itself). They run from iovarWork only, with gLock dropped.
 uint64_t nowTsf()
 {
     const uint64_t ns = hostNs();
+    if (gCaps && gCaps->has_tsf_clock)
+        return switch_awdl_radio_clock_valid(&gRadioClock, ns) ? awdl_tsf_clock_now(&gRadioClock.affine, ns) : 0;
     if (!gClock.valid)
         awdl_tsf_clock_anchor(&gClock, ns / 1000, ns);
     return awdl_tsf_clock_now(&gClock, ns);
@@ -156,21 +198,297 @@ uint64_t nowTsf()
 
 void armTimer(uint64_t tsf)
 {
-    if (!gTimer || tsf == UINT64_MAX)
+    if (!gTimer)
         return;
+    const bool radioClock = gCaps && gCaps->has_tsf_clock;
+    if (radioClock && !switch_awdl_radio_clock_valid(&gRadioClock, hostNs())) {
+        thread_call_cancel(gTimer);
+        return;
+    }
+    uint64_t host =
+        tsf == UINT64_MAX ? UINT64_MAX : awdl_tsf_clock_host(radioClock ? &gRadioClock.affine : &gClock, tsf);
+    if (radioClock) {
+        const uint64_t clockDeadline = switch_awdl_radio_clock_deadline(&gRadioClock);
+        if (clockDeadline < host)
+            host = clockDeadline;
+    }
+    if (host == UINT64_MAX) {
+        thread_call_cancel(gTimer);
+        return;
+    }
     uint64_t deadline = 0;
     uint64_t leeway = 0;
-    nanoseconds_to_absolutetime(awdl_tsf_clock_host(&gClock, tsf), &deadline);
+    nanoseconds_to_absolutetime(host, &deadline);
     // AWDL accepts 3 ms of synchronisation error and a slot opens 2 ms in (awdl_internal.h AWDL_SLOT_GUARD_US): a
     // millisecond of leeway lets the timer coalesce with others at no cost to either
-    nanoseconds_to_absolutetime(1000000, &leeway);
+    nanoseconds_to_absolutetime(radioClock ? 0 : 1000000, &leeway);
     thread_call_enter_delayed_with_leeway(gTimer, nullptr, deadline, leeway, THREAD_CALL_DELAY_LEEWAY);
+}
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+void advanceHomeTrial();
+
+void armHomeTrialTimer()
+{
+    uint64_t deadline;
+    nanoseconds_to_absolutetime(gHomeTrial.deadlineNs, &deadline);
+    thread_call_enter_delayed(gHomeTrialTimer, deadline);
+}
+
+void endHomeTrial(const char *reason)
+{
+    if (gHomeTrial.phase == HomeTrial::Phase::Off || gHomeTrial.phase == HomeTrial::Phase::Armed)
+        return;
+    const bool applied = gHomeTrial.phase == HomeTrial::Phase::Active;
+    if (applied)
+        switch_wlan_a3_trial_boundary(false, gHomeTrialChannel);
+    gHomeTrial.cancel();
+    thread_call_cancel(gHomeTrialTimer);
+    switch_awdl_core_home_trial(gCore, 0, nowTsf());
+    IOLog("SwitchWLAN: AWDL: home trial ended (%s), applied %u channel %u gen %u, restoring normal scheduling\n",
+          reason, applied, gHomeTrialChannel, gRadioState.applied_generation);
+}
+
+void homeTrialTimeout(thread_call_param_t, thread_call_param_t)
+{
+    IOLockLock(gLock);
+    if (gHomeTrial.deadlineNs && hostNs() < gHomeTrial.deadlineNs)
+        armHomeTrialTimer();
+    else
+        advanceHomeTrial();
+    IOLockUnlock(gLock);
+}
+#endif
+
+void suspendRadio()
+{
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+    endHomeTrial("radio recovery");
+#endif
+    gActivationCommitted = false;
+    if (gFacade.core)
+        switch_a80211_awdl_suspend(&gFacade);
+    if (gCore)
+        switch_awdl_core_radio_ready(gCore, 0);
+    gRestorePending = gFacade.enabled;
+}
+
+bool radioPending(int error)
+{
+    return error == -EAGAIN || error == -ENOBUFS || error == -EBUSY || error == -ESTALE || error == -ENXIO;
+}
+
+void requestClock()
+{
+    if (gCaps && gCaps->requires_radio_ready && gRadioState.social_channels_valid && !gRadioState.social_channels)
+        return;
+    if (!switch_awdl_radio_clock_request_begin(&gClockRequest, 0))
+        return;
+    const int error = swlan_awdl_clock_request();
+    if (error < 0)
+        switch_awdl_radio_clock_request_complete(&gClockRequest, error);
+}
+
+bool radioChannelsReady()
+{
+    return !gCaps || !gCaps->requires_radio_ready ||
+           (gRadioState.social_channels_valid && gRadioState.social_channels);
+}
+
+uint16_t radioInfraFreq()
+{
+    const uint16_t station = swlan_awdl_infra_freq();
+    if (!station || !gCaps || !gCaps->requires_radio_ready || !gRadioState.social_channels_valid)
+        return station;
+    const uint8_t channel = bcm_chanspec_primary(gRadioState.home_chanspec);
+    const uint16_t observed = awdl_chan_freq({channel, awdl_opclass_20mhz(channel)});
+    return observed ? observed : station;
+}
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+const char *homeTrialBlocker(uint16_t station, uint16_t radio, uint64_t tsf)
+{
+    if (!gFacade.enabled)
+        return "waiting for Apple AWDL enable";
+    if (gRadioLost || gRadioError || gRadioState.error)
+        return "radio recovery or error";
+    if (gAddressChanging)
+        return "AWDL address changing";
+    if (!radioChannelsReady())
+        return "no legal social channels";
+    if (!tsf)
+        return "radio clock unavailable";
+    if (!gRxStarted)
+        return "receive registration pending";
+    if (!gRadioState.ready || !gRadioState.applied_generation)
+        return "mandatory radio resources pending";
+    if (!awdl_core_running(gCore))
+        return "AWDL core not running";
+    if (!gActivationCommitted)
+        return "activation not committed";
+    if (!station)
+        return "station not associated";
+    if (station != radio)
+        return "station and firmware channels differ";
+    return nullptr;
+}
+
+void advanceHomeTrial()
+{
+    for (;;) {
+        if (gHomeTrial.phase == HomeTrial::Phase::Off)
+            return;
+        const uint64_t now = hostNs();
+        if (gHomeTrial.phase == HomeTrial::Phase::Active && now < gHomeTrial.deadlineNs)
+            return;
+        const uint16_t station = swlan_awdl_infra_freq(), radio = radioInfraFreq();
+        const uint64_t tsf = nowTsf();
+        const char *reason = homeTrialBlocker(station, radio, tsf);
+        const bool applying = gHomeTrial.phase == HomeTrial::Phase::Applying;
+        const bool applied = applying && gFacade.enabled && gActivationCommitted &&
+                             switch_wlan_a3_trial_applied(gHomeTrialChannel, &reason);
+        const auto action = gHomeTrial.advance(now, gFacade.enabled, gActivationCommitted, !reason, applied);
+        if (reason && gHomeTrialBlocker != reason && gHomeTrialBlockLogs < 10) {
+            ++gHomeTrialBlockLogs;
+            IOLog("SwitchWLAN: AWDL: home trial blocked (%s) station/radio MHz %u/%u legal %#x "
+                  "enabled %u committed %u ready %u error %d/%d session %u epoch %u config %u\n",
+                  reason, station, radio, gRadioState.social_channels, gFacade.enabled, gActivationCommitted,
+                  gRadioState.ready, gRadioError, gRadioState.error, gRadioState.generation,
+                  gRadioClock.epoch, gRadioState.applied_generation);
+        }
+        gHomeTrialBlocker = reason;
+        switch (action) {
+        case HomeTrial::Action::Request:
+            IOLog("SwitchWLAN: AWDL: home trial requested by committed AWDL activation\n");
+            armHomeTrialTimer();
+            break;
+        case HomeTrial::Action::Install:
+            gHomeTrialChannel = switch_awdl_core_home_trial(gCore, 1, tsf);
+            if (!gHomeTrialChannel) {
+                IOLog("SwitchWLAN: AWDL: home trial blocked (core rejected home) station/radio MHz %u/%u legal %#x\n",
+                      station, radio, gRadioState.social_channels);
+                endHomeTrial("core rejected home channel");
+                return;
+            }
+            break;
+        case HomeTrial::Action::Start:
+            armHomeTrialTimer();
+            switch_wlan_a3_trial_boundary(true, gHomeTrialChannel);
+            IOLog("SwitchWLAN: AWDL: home trial started channel %u duration 60s session %u epoch %u config %u\n",
+                  gHomeTrialChannel, gRadioState.generation, gRadioClock.epoch, gRadioState.applied_generation);
+            return;
+        case HomeTrial::Action::Timeout:
+            IOLog("SwitchWLAN: AWDL: home trial setup timed out (%s) station/radio MHz %u/%u config %u\n",
+                  reason ? reason : "deadline elapsed before commit was observed", station, radio,
+                  gRadioState.applied_generation);
+            endHomeTrial("setup timeout");
+            return;
+        case HomeTrial::Action::Finish:
+            endHomeTrial("60 seconds");
+            return;
+        case HomeTrial::Action::None:
+            return;
+        }
+    }
+}
+#endif
+
+void refreshRadio()
+{
+    if (!gCore || !gCaps || (!gCaps->requires_radio_ready && !gCaps->has_tsf_clock))
+        return;
+    swlan_awdl_state state = {};
+    const bool got = swlan_awdl_get_state(&state) >= 0 && state.version == SWLAN_AWDL_STATE_VERSION;
+    if (got && !gRadioLost) {
+        if (gRadioState.generation && state.generation != gRadioState.generation) {
+            suspendRadio();
+            switch_awdl_radio_clock_clear(&gRadioClock);
+            gRxStarted = false;
+            gRadioError = 0;
+            __atomic_store_n(&gRadioOpen, 0, __ATOMIC_RELEASE);
+        }
+        if (state.error && !radioPending(state.error))
+            gRadioError = state.error;
+        else if (radioPending(gRadioError))
+            gRadioError = 0;
+        if (radioPending(state.error) && gFacade.enabled)
+            gRestorePending = true;
+        if (gCaps->has_tsf_clock) {
+            const uint32_t oldEpoch = gRadioClock.epoch;
+            if (oldEpoch && state.clock.epoch != oldEpoch) {
+                suspendRadio();
+                switch_awdl_radio_clock_clear(&gRadioClock);
+                gRxStarted = false;
+            }
+            switch_awdl_radio_clock_update(&gRadioClock, state.clock.tsf_us, state.clock.host_ns,
+                                           state.clock.uncertainty_ns, state.clock.epoch, hostNs());
+        }
+        const uint16_t oldInfra = radioInfraFreq();
+        const uint16_t oldSocial = gRadioState.social_channels_valid ? gRadioState.social_channels : 0;
+        gRadioState = state;
+        if (gCaps->requires_radio_ready) {
+            const uint16_t social = state.social_channels_valid ? state.social_channels : 0;
+            const uint16_t infra = radioInfraFreq();
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+            if ((gHomeTrial.phase == HomeTrial::Phase::Applying || gHomeTrial.phase == HomeTrial::Phase::Active) &&
+                (awdl_chan_of_freq(infra).number != gHomeTrialChannel || social != oldSocial))
+                endHomeTrial("home or regulatory change");
+#endif
+            if (social != oldSocial) {
+                if (!social) {
+                    suspendRadio();
+                    if (state.social_channels_valid && gRxStarted) {
+                        swlan_awdl_chanseq_clear();
+                        swlan_awdl_rx_stop();
+                        gRxStarted = false;
+                    }
+                }
+                switch_awdl_core_set_channels(gCore, social, nowTsf());
+            }
+            if (infra != oldInfra)
+                awdl_core_set_infra(gCore, infra, nowTsf());
+        }
+    }
+    const bool clockValid = !gCaps->has_tsf_clock || switch_awdl_radio_clock_valid(&gRadioClock, hostNs());
+    const bool resources = !gAddressChanging && !gRadioLost && !gRadioError && got && !state.error && state.generation &&
+                           radioChannelsReady() &&
+                           (!gCaps->requires_radio_ready || (gRxStarted && state.ready && state.applied_generation));
+    if (!resources || !awdl_core_running(gCore))
+        gActivationCommitted = false;
+    else if (clockValid) {
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+        if (!gActivationCommitted)
+            gEchoRxCount = 0;
+#endif
+        if (!gActivationCommitted)
+            switch_wlan_probe_activated();
+        gActivationCommitted = true;
+    }
+    switch_awdl_core_radio_ready(gCore, resources && clockValid);
+    if (gRadioError && awdl_core_running(gCore)) {
+        suspendRadio();
+    } else if (!clockValid && !gRadioLost && gFacade.enabled) {
+        if (awdl_core_running(gCore))
+            requestClock();
+    }
 }
 
 void rearm()
 {
-    if (gCore && awdl_core_running(gCore))
-        armTimer(awdl_core_timer(gCore, nowTsf()));
+    refreshRadio();
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+    advanceHomeTrial();
+#endif
+    if (gCore && awdl_core_running(gCore)) {
+        const bool radioClock = gCaps && gCaps->has_tsf_clock;
+        if (radioClock && gFacade.enabled && switch_awdl_radio_clock_try_renew(&gRadioClock, hostNs()))
+            requestClock();
+        const uint64_t now = nowTsf();
+        armTimer(!now && radioClock ? UINT64_MAX : awdl_core_timer(gCore, now));
+    } else if (gTimer) {
+        thread_call_cancel(gTimer);
+    }
+    switch_a80211_awdl_refresh(&gFacade);
 }
 
 // ---- events to wifip2pd ---------------------------------------------------------------------------------------------
@@ -186,13 +504,26 @@ void postEvent(uint32_t event, const void *payload, uint32_t length)
             IOLog("SwitchWLAN: AWDL: event ring full, event %u dropped (%u so far)\n", event, gRing.dropped);
         return;
     }
-    if (gAsyncArmed)
+    if (gAsyncArmed && gAsyncClient == gEventClient)
         wakeEventClient();
 }
 
 // ---- what the core asks of us (gLock held) --------------------------------------------------------------------------
+// The radio's request ids of the core's unicast data frames, until their outcome. A frame whose entry is replaced
+// hears nothing more: the core lets it go and counts it as dropped.
+struct DataTx {
+    uint32_t request, order;
+    uint16_t token;
+};
+DataTx gDataTx[16];
+uint32_t gDataTxOrder;
+
 int hostTx(void *, const uint8_t *frame, size_t length, uint16_t freq, uint64_t stayUntil, int noAck)
 {
+    if (gRadioError)
+        return -1;
+    if (gCaps && gCaps->requires_radio_ready && (!switch_awdl_core_ready(gCore) || !gRadioState.tx_credits))
+        return AWDL_TX_BUSY;
     struct swlan_tx_req r = {};
     r.frame = frame;
     r.len = length;
@@ -200,58 +531,203 @@ int hostTx(void *, const uint8_t *frame, size_t length, uint16_t freq, uint64_t 
     r.rate_mcs = 0xff;
     r.flags = static_cast<uint8_t>((noAck ? SWLAN_TX_NO_ACK : 0u) | SWLAN_TX_ON_CHANNEL_ONLY);
     const uint64_t now = nowTsf();
-    r.stay_us = stayUntil > now ? static_cast<uint32_t>(stayUntil - now) : 0;
-    return swlan_awdl_tx(&r) < 0 ? -1 : 0;
+    if (gCaps && gCaps->has_tsf_clock && !now)
+        return AWDL_TX_BUSY;
+    const uint64_t dwell = stayUntil > now ? stayUntil - now : 0;
+    r.stay_us = static_cast<uint32_t>(dwell > UINT32_MAX ? UINT32_MAX : dwell);
+    r.deadline_tsf = stayUntil;
+    r.generation = gRadioState.generation;
+    r.clock_epoch = gRadioClock.epoch;
+    const int result = swlan_awdl_tx(&r);
+    uint16_t token = 0;
+    if (result > 0 && switch_awdl_data_token(frame, length, &token)) {
+        DataTx *slot = gDataTx;
+        for (auto &sent : gDataTx) {
+            if (!sent.request) {
+                slot = &sent;
+                break;
+            }
+            if (static_cast<int32_t>(sent.order - slot->order) < 0)
+                slot = &sent;
+        }
+        *slot = {static_cast<uint32_t>(result), ++gDataTxOrder, token};
+    }
+    return result == -EAGAIN || result == -ENOBUFS ? AWDL_TX_BUSY
+           : result == -ETIMEDOUT                  ? AWDL_TX_LATE
+           : result < 0                            ? -1
+                                                   : 0;
 }
 
-// The radio takes slots of at most 65535 us (RADIO-API §4): each 64-TU AWDL slot goes as two halves.
+void dataTxDone(const swlan_awdl_event &e)
+{
+    for (auto &sent : gDataTx) {
+        if (!sent.request || sent.request != e.id)
+            continue;
+        const auto outcome = e.status == 0           ? SWITCH_AWDL_TX_ACKED
+                             : e.status == EIO       ? SWITCH_AWDL_TX_UNACKED
+                             : e.status == ETIMEDOUT ? SWITCH_AWDL_TX_EXPIRED
+                             : e.status == ECANCELED ? SWITCH_AWDL_TX_CANCELLED
+                                                     : SWITCH_AWDL_TX_FAILED;
+        switch_awdl_core_tx_done(gCore, sent.token, outcome, e.tsf, nowTsf());
+        sent = {};
+        return;
+    }
+}
+
 void hostSchedule(void *, const struct awdl_chan seq[AWDL_SEQ_SLOTS], uint64_t anchorTsf)
 {
-    static struct swlan_chan_slot slots[2 * AWDL_SEQ_SLOTS];
+    static struct swlan_chan_slot slots[AWDL_SEQ_SLOTS];
     for (unsigned i = 0; i < AWDL_SEQ_SLOTS; ++i)
-        slots[static_cast<size_t>(2) * i] = slots[2 * i + 1] = {awdl_chan_freq(seq[i]), 32768};
-    swlan_status st;
-    switch_wlan_status_get(&st);
-    const struct swlan_chan_seq s = {anchorTsf, 32768u * 2 * AWDL_SEQ_SLOTS, 2 * AWDL_SEQ_SLOTS,
-                                     static_cast<uint16_t>(st.state == SWLAN_STA_UP ? st.freq_mhz : 0), slots};
+        slots[i] = {awdl_chan_freq(seq[i]), AWDL_EAW_TU * AWDL_TU_US};
+    const struct swlan_chan_seq s = {anchorTsf, AWDL_EAW_TU * AWDL_TU_US * AWDL_SEQ_SLOTS, AWDL_SEQ_SLOTS,
+                                     radioInfraFreq(), slots};
     const int e = swlan_awdl_chanseq_set(&s);
+    const bool rejectedUpdate = e == -EINVAL && gCaps && gCaps->requires_radio_ready && gActivationCommitted;
+    if (!rejectedUpdate && ((gCaps && gCaps->requires_radio_ready) || e < 0))
+        switch_awdl_core_radio_ready(gCore, 0);
+    if (e < 0 && !rejectedUpdate) {
+        if (radioPending(e)) {
+            gRestorePending = true;
+            requestClock();
+        } else {
+            gRadioError = e;
+        }
+    }
     static unsigned said;
     if (e < 0 && said++ < 2)
         IOLog("SwitchWLAN: AWDL: the radio refused the channel sequence (%d)\n", e);
 }
 
-void hostPeer(void *, const uint8_t addr[6], int present, int8_t rssi)
+void retryPeerPresence()
 {
-    a80211_awdl_peer(&gFacade, addr, present, rssi);
-    if (gPresenceCount < sizeof gPresence / sizeof gPresence[0]) {
-        Presence &p = gPresence[gPresenceCount++];
-        memcpy(p.addr, addr, 6);
-        p.rssi = rssi;
-        p.present = static_cast<uint8_t>(present != 0);
-        if (gDeferred)
-            thread_call_enter(gDeferred);
+    if (gRetryPresenceAfter && hostNs() >= gRetryPresenceAfter) {
+        gRetryPresenceAfter = 0;
+        thread_call_enter(gDeferred);
     }
 }
 
+void hostPeer(void *, const uint8_t address[6], int present, int8_t)
+{
+    if (present) {
+        for (unsigned i = 0; i < AWDL_MAX_PEERS; ++i) {
+            const auto *peer = awdl_core_peer(gCore, i);
+            if (peer && !memcmp(peer->addr, address, sizeof peer->addr)) {
+                ++gPeers[i].incarnation;
+                break;
+            }
+        }
+    }
+    gPeerWork = true;
+    thread_call_enter(gDeferred);
+}
+
+bool desiredPeer(unsigned index, SwitchWLANPeerIdentity &identity)
+{
+    const auto *peer = awdl_core_peer(gCore, index);
+    if (!peer || !peer->reachable || !awdl_core_running(gCore) || gAddressChanging)
+        return false;
+    memcpy(identity.address, peer->addr, sizeof identity.address);
+    identity.generation = switch_awdl_core_generation(gCore);
+    identity.incarnation = gPeers[index].incarnation;
+    identity.rssi = peer->rssi;
+    return true;
+}
+
+void appendInput(mbuf_t &head, mbuf_t &tail, mbuf_t first, mbuf_t last)
+{
+    if (tail)
+        mbuf_setnextpkt(tail, first);
+    else
+        head = first;
+    tail = last;
+}
+
+void clearPeerInput(PeerSlot &slot)
+{
+    if (slot.head)
+        mbuf_freem_list(slot.head);
+    slot.head = slot.tail = nullptr;
+    slot.count = 0;
+}
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+void logRadioEcho(const uint8_t *eth, size_t length)
+{
+    static uint16_t ids[8];
+    if (!gEchoRxMeta || gEchoRxCount == sizeof ids / sizeof ids[0] || (eth[0] & 1))
+        return;
+    const auto echo = switch_wlan_echo6_read(eth, length, length);
+    if (echo.type != 128 || echo.destination[0] == 0xff)
+        return;
+    for (unsigned i = 0; i < gEchoRxCount; ++i)
+        if (ids[i] == echo.id)
+            return;
+    ids[gEchoRxCount++] = echo.id;
+    char source[SWITCH_WLAN_IPV6_TEXT_LEN], destination[SWITCH_WLAN_IPV6_TEXT_LEN];
+    IOLog("SwitchWLAN: AWDL radio RX echo id %u seq %u src %s dst %s freq %u MHz TSF %llu us session %u epoch %u applied %u\n",
+          echo.id, echo.sequence, switch_wlan_awdl_ipv6_text(echo.source, source),
+          switch_wlan_awdl_ipv6_text(echo.destination, destination), gEchoRxMeta->freq_mhz,
+          static_cast<unsigned long long>(gEchoRxMeta->tsf), gEchoRxMeta->generation,
+          gEchoRxMeta->clock_epoch, gEchoRxMeta->applied_generation);
+}
+#endif
+
+#if DEVELOPMENT || DEBUG
+switch_wlan_awdl_input_facts gQueued;  // hostDeliver's last packet, for the TCP trace (both under gLock)
+
+void hostQueued(void *, char *line, size_t size)
+{
+    switch_wlan_awdl_input_describe(gQueued, line, size);
+}
+#endif
+
 void hostDeliver(void *, const uint8_t *eth, size_t length)
 {
-    if (!gIf)
+#if DEVELOPMENT || DEBUG
+    gQueued = {};
+#endif
+    if (!gIf || length < ETHER_HDR_LEN)
         return;
-    mbuf_t m = nullptr;
-    if (mbuf_allocpacket(MBUF_DONTWAIT, length, nullptr, &m) || !m)
-        return;
-    if (mbuf_copyback(m, 0, length, eth, MBUF_DONTWAIT)) {
-        mbuf_freem(m);
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+    logRadioEcho(eth, length);
+#endif
+    mbuf_t m = switch_wlan_awdl_input_packet(eth, length);
+    if (!m) {
+        ifnet_stat_increment_in(gIf, 0, 0, 1);
         return;
     }
-    mbuf_pkthdr_setlen(m, length);
+#if DEVELOPMENT || DEBUG
+    if (switch_wlan_awdl_input_traced(eth, length))
+        gQueued = switch_wlan_awdl_input_inspect(m);
+#endif
     mbuf_pkthdr_setrcvif(m, gIf);
-    if (gInputTail) {
-        mbuf_setnextpkt(gInputTail, m);
-    } else {
-        gInputHead = m;
+    const auto *source = gPeerWork ? awdl_core_find(gCore, eth + ETHER_ADDR_LEN) : nullptr;
+    if (source && source->reachable) {
+        for (unsigned i = 0; i < AWDL_MAX_PEERS; ++i) {
+            if (awdl_core_peer(gCore, i) != source)
+                continue;
+            SwitchWLANPeerIdentity desired = {};
+            auto &slot = gPeers[i];
+            if (!desiredPeer(i, desired) || slot.presence.ready(desired))
+                break;
+            if (slot.head && !slot.bufferedFor.same(desired))
+                clearPeerInput(slot);
+            if (slot.count < 8) {
+                slot.bufferedFor = desired;
+                appendInput(slot.head, slot.tail, m, m);
+                ++slot.count;
+            } else {
+#if DEVELOPMENT || DEBUG
+                gQueued = {};
+#endif
+                mbuf_freem(m);
+                ifnet_stat_increment_in(gIf, 0, 0, 1);
+            }
+            retryPeerPresence();
+            return;
+        }
     }
-    gInputTail = m;
+    appendInput(gInputHead, gInputTail, m, m);
 }
 
 void hostLog(void *, const char *line)
@@ -259,10 +735,18 @@ void hostLog(void *, const char *line)
     IOLog("SwitchWLAN: %s\n", line);
 }
 
+#if DEVELOPMENT || DEBUG
+void hostProbe(void *, const char *line)
+{
+    os_log(OS_LOG_DEFAULT, "SwitchWLAN: %s", line);
+}
+#endif
+
 // Native backend: the core's firmware requests, in order, from a thread (they wait for the firmware's answer), on
 // the firmware interface the core names; each answer goes back to the core (awdl_core_fw_result), which ends the
 // session on a refused interface creation and resends a refused awdl_payload in its other form.
 struct Iovar {
+    uint32_t generation;
     int32_t ifidx;
     uint8_t get;
     char name[32];
@@ -276,6 +760,8 @@ bool gIovarBusy;  // one worker drains the queue (a thread call entered while it
 
 int hostIovar(void *, int32_t ifidx, int get, const char *name, const void *buf, size_t length)
 {
+    if (gRadioLost)
+        return -1;
     if (gIovarCount == sizeof gIovars / sizeof gIovars[0] || length > sizeof gIovars[0].value || ifidx < 0 ||
         ifidx > 255) {
         static unsigned said;
@@ -286,6 +772,7 @@ int hostIovar(void *, int32_t ifidx, int get, const char *name, const void *buf,
         return -1;
     }
     Iovar &v = gIovars[(gIovarHead + gIovarCount++) % (sizeof gIovars / sizeof gIovars[0])];
+    v.generation = switch_awdl_core_generation(gCore);
     v.ifidx = ifidx;
     v.get = static_cast<uint8_t>(get != 0);
     strlcpy(v.name, name, sizeof v.name);
@@ -318,10 +805,21 @@ void iovarWork(thread_call_param_t, thread_call_param_t)
         v = gIovars[gIovarHead];
         gIovarHead = (gIovarHead + 1) % (sizeof gIovars / sizeof gIovars[0]);
         gIovarCount--;
+        const bool teardown =
+            !v.get &&
+            (!strcmp(v.name, "interface_remove") ||
+             (!strcmp(v.name, "awdl") && v.length == 4 && !(v.value[0] | v.value[1] | v.value[2] | v.value[3])) ||
+             ((!strcmp(v.name, "awdl_if") || !strcmp(v.name, "awdl_if2")) && v.length >= 8 &&
+              !(v.value[4] | v.value[5] | v.value[6] | v.value[7])));
+        if (!gCore || (v.generation != switch_awdl_core_generation(gCore) && !teardown)) {
+            IOLockUnlock(gLock);
+            continue;
+        }
         IOLockUnlock(gLock);
         size_t got = 0;
+        const size_t replySize = !strcmp(v.name, "interface_create") ? BCM_IFC_V3_LEN : sizeof(reply);
         const int e = swlan_awdl_var(v.get ? 0 : 1, static_cast<uint8_t>(v.ifidx), v.name, v.value, v.length,
-                                     v.get ? reply : nullptr, v.get ? sizeof reply : 0, &got);
+                                     v.get ? reply : nullptr, v.get ? replySize : 0, &got);
         int status = swlan_is_fwerr(e) ? swlan_fwerr_code(e) : AWDL_FW_NO_ANSWER;
         if (!e)
             status = 0;
@@ -333,7 +831,7 @@ void iovarWork(thread_call_param_t, thread_call_param_t)
             }
         }
         IOLockLock(gLock);
-        if (gCore)
+        if (gCore && v.generation == switch_awdl_core_generation(gCore))
             awdl_core_fw_result(gCore, v.name, status, nowTsf());
         rearm();
         IOLockUnlock(gLock);
@@ -359,61 +857,286 @@ int hostTxEth(void *, const uint8_t *eth, size_t length)
     return 0;
 }
 
-// Neighbour entries and received packets, outside gLock (ifnet_notice_node_presence takes the routing lock, which
-// the stack's output path may hold while it calls us).
-// From the radio's work loop only packets are passed on (presence = false): neighbour entries take the routing lock and
-// wait for gDeferred's thread.
-void drain(bool presence = true)
+#if DEVELOPMENT || DEBUG
+struct EchoTrial {
+    ifnet_t ifp;
+    mbuf_t packet;
+    uint32_t generation;
+    switch_wlan_echo6 echo;
+    bool logged[2];
+};
+EchoTrial gEchoTrial;
+thread_call_t gEchoAfter;
+uint32_t gEchoGeneration;
+unsigned gEchoLogs[2], gEchoTrials;
+uint16_t gLastEchoId;
+uint64_t gLastEchoStart;
+
+switch_wlan_echo6 echoSample(mbuf_t packet)
 {
-    Presence todo[16];
-    unsigned n = 0;
-    mbuf_t input = nullptr;
-    IOLockLock(gLock);
-    if (presence) {
-        n = gPresenceCount;
-        memcpy(todo, gPresence, n * sizeof todo[0]);
-        gPresenceCount = 0;
-    }
-    input = gInputHead;
-    gInputHead = gInputTail = nullptr;
-    // NOLINTNEXTLINE(misc-const-correctness): a const ifnet_t is a const pointer (misc-misplaced-const)
-    ifnet_t ifp = gIf;
-    IOLockUnlock(gLock);
-    for (mbuf_t m = input, next = nullptr; m; m = next) {
-        next = mbuf_nextpkt(m);
-        mbuf_setnextpkt(m, nullptr);
-        if (!ifp) {
-            mbuf_freem(m);
-            continue;
-        }
-        bpf_tap_in(ifp, DLT_EN10MB, m, nullptr, 0);
-        mbuf_pkthdr_setheader(m, mbuf_data(m));
-        const size_t length = mbuf_pkthdr_len(m);
-        mbuf_adj(m, ETHER_HDR_LEN);
-        struct ifnet_stat_increment_param inc = {};
-        inc.packets_in = 1;
-        inc.bytes_in = static_cast<uint32_t>(length);
-        ifnet_input(ifp, m, &inc);
-    }
-    for (unsigned i = 0; ifp && i < n; ++i) {
-        struct sockaddr_dl sdl = {};
-        sdl.sdl_len = sizeof sdl;
-        sdl.sdl_family = AF_LINK;
-        sdl.sdl_type = IFT_ETHER;
-        sdl.sdl_index = static_cast<u_short>(ifnet_index(ifp));
-        sdl.sdl_alen = ETHER_ADDR_LEN;
-        memcpy(LLADDR(&sdl), todo[i].addr, ETHER_ADDR_LEN);
-        uint8_t srvinfo[48] = {};
-        const errno_t e = todo[i].present ? ifnet_notice_node_presence(ifp, reinterpret_cast<struct sockaddr *>(&sdl),
-                                                                       todo[i].rssi, 0, 0, srvinfo)
-                                          : ifnet_notice_node_absence(ifp, reinterpret_cast<struct sockaddr *>(&sdl));
-        if (e)
-            IOLog("SwitchWLAN: AWDL: node %s failed (%d)\n", todo[i].present ? "presence" : "absence", e);
+    const size_t length = mbuf_pkthdr_len(packet);
+    uint8_t prefix[SWITCH_WLAN_ECHO6_PREFIX];
+    if (length < sizeof prefix || mbuf_copydata(packet, 0, sizeof prefix, prefix))
+        return {};
+    return switch_wlan_echo6_read(prefix, sizeof prefix, length);
+}
+
+void resetEchoBudget(uint32_t generation)
+{
+    if (gEchoGeneration != generation) {
+        gEchoGeneration = generation;
+        gEchoLogs[0] = gEchoLogs[1] = gEchoTrials = 0;
+        gLastEchoStart = 0;
     }
 }
 
+bool stageEcho(ifnet_t ifp, mbuf_t packet, const switch_wlan_echo6 &echo)
+{
+    if (echo.type != 128)
+        return false;
+    IOLockLock(gLock);
+    const uint32_t generation = switch_awdl_core_generation(gCore);
+    resetEchoBudget(generation);
+    const uint64_t now = hostNs();
+    const bool eligible = !gEchoTrial.ifp && gEchoTrials < 8 &&
+                          (!gLastEchoStart || (echo.id != gLastEchoId && now - gLastEchoStart > 3000000000ULL));
+    const bool stage = eligible && gIf == ifp && awdl_core_running(gCore) && !ifnet_reference(ifp);
+    if (stage) {
+        gEchoTrial = {ifp, packet, generation, echo, {false, false}};
+        gLastEchoId = echo.id;
+        gLastEchoStart = now;
+        ++gEchoTrials;
+        if (gCaps && gCaps->requires_radio_ready)
+            switch_wlan_a3_echo_snapshot(gRadioState.generation, gRadioState.clock.epoch, echo.id, echo.sequence);
+        thread_call_enter(gDeferred);
+    }
+    IOLockUnlock(gLock);
+    return stage;
+}
+
+void logEcho(ifnet_t ifp, bool input, const switch_wlan_echo6 &echo, int status)
+{
+    if (!echo.type)
+        return;
+    IOLockLock(gLock);
+    const uint32_t generation = switch_awdl_core_generation(gCore);
+    resetEchoBudget(generation);
+    auto &count = gEchoLogs[input ? 0 : 1];
+    const bool selected = gEchoTrial.ifp == ifp && gEchoTrial.generation == generation &&
+                          gEchoTrial.echo.id == echo.id && gEchoTrial.echo.sequence == echo.sequence;
+    auto &logged = gEchoTrial.logged[input ? 0 : 1];
+    const bool log = (selected && !logged) || count < 16;
+    if (selected)
+        logged = true;
+    if (count < 16)
+        ++count;
+    IOLockUnlock(gLock);
+    if (log) {
+        char source[SWITCH_WLAN_IPV6_TEXT_LEN], destination[SWITCH_WLAN_IPV6_TEXT_LEN];
+        IOLog("SwitchWLAN: AWDL ICMPv6 %s type %u id %u seq %u status %d ifindex %u generation %u "
+              "src %s dst %s checksum %#x\n", input ? "ifnet_input" : "ifOutput", echo.type, echo.id, echo.sequence,
+              status, ifnet_index(ifp), generation, switch_wlan_awdl_ipv6_text(echo.source, source),
+              switch_wlan_awdl_ipv6_text(echo.destination, destination), echo.checksum);
+    }
+}
+
+void snapshotEcho(const char *stage, const EchoTrial &trial)
+{
+    switch_wlan_echo_counters counts = {};
+    switch_wlan_awdl_echo_counters(trial.ifp, trial.echo.source, &counts);
+    IOLog("SwitchWLAN: AWDL echo %s ifindex %u generation %u id %u seq %u requests %llu replies %llu "
+          "stats-error %d neighbor-state %d neighbor-error %d\n", stage, ifnet_index(trial.ifp), trial.generation,
+          trial.echo.id, trial.echo.sequence, counts.input_requests, counts.output_replies, counts.stats_error,
+          counts.neighbor_state, counts.neighbor_error);
+}
+
+void echoAfter(thread_call_param_t, thread_call_param_t)
+{
+    IOLockLock(gLock);
+    const auto trial = gEchoTrial;
+    const bool valid = trial.ifp && gIf == trial.ifp && trial.generation == switch_awdl_core_generation(gCore);
+    gEchoTrial = {};
+    IOLockUnlock(gLock);
+    if (valid)
+        snapshotEcho("after", trial);
+    if (trial.ifp)
+        ifnet_release(trial.ifp);
+}
+#endif
+
+#if DEVELOPMENT || DEBUG
+void deliverPackets(ifnet_t ifp, mbuf_t input, bool measured = false)
+#else
+void deliverPackets(ifnet_t ifp, mbuf_t input)
+#endif
+{
+    for (mbuf_t m = input, next = nullptr; m; m = next) {
+        next = mbuf_nextpkt(m);
+        mbuf_setnextpkt(m, nullptr);
+        const size_t length = mbuf_pkthdr_len(m);
+#if DEVELOPMENT || DEBUG
+        const auto echo = echoSample(m);
+        if (echo.type == 128 && stageEcho(ifp, m, echo))
+            continue;
+#endif
+        bpf_tap_in(ifp, DLT_EN10MB, m, nullptr, 0);
+        mbuf_pkthdr_setheader(m, mbuf_data(m));
+        mbuf_adj(m, ETHER_HDR_LEN);
+#if DEVELOPMENT || DEBUG
+        if (measured) {
+            uint16_t sum = 0;
+            const auto error = mbuf_len(m) < 40 ? EMSGSIZE : mbuf_inet6_cksum(m, IPPROTO_ICMPV6, 40, echo.payload, &sum);
+            IOLog("SwitchWLAN: AWDL echo checksum id %u seq %u residue %#x error %d\n",
+                  echo.id, echo.sequence, sum, error);
+#if defined(SWITCH_IPSW_KIND_24B119)
+            const int tagError = switch_awdl_echo_mark(m);
+            if (tagError)
+                IOLog("SwitchWLAN: XNU echo tag failed id %u seq %u errno %d\n", echo.id, echo.sequence, tagError);
+#endif
+        }
+#endif
+        struct ifnet_stat_increment_param inc = {};
+        inc.packets_in = 1;
+        inc.bytes_in = static_cast<uint32_t>(length);
+        const errno_t inputStatus = ifnet_input(ifp, m, &inc);
+#if DEVELOPMENT || DEBUG
+        logEcho(ifp, true, echo, inputStatus);
+#else
+        (void)inputStatus;
+#endif
+    }
+}
+
+void drain()
+{
+    IOLockLock(gLock);
+    mbuf_t input = gInputHead;
+    gInputHead = gInputTail = nullptr;
+    ifnet_t ifp = gIf;
+    const bool retained = input && ifp && !ifnet_reference(ifp);
+    IOLockUnlock(gLock);
+    if (retained) {
+        deliverPackets(ifp, input);
+        ifnet_release(ifp);
+    } else if (input) {
+        mbuf_freem_list(input);
+    }
+}
+
+bool otherRoute(unsigned index, const SwitchWLANPeerIdentity &peer)
+{
+    for (unsigned i = 0; i < AWDL_MAX_PEERS; ++i) {
+        const auto &p = gPeers[i].presence;
+        if (i != index && p.installedRoute && !memcmp(p.installed.address, peer.address, sizeof peer.address))
+            return true;
+    }
+    return false;
+}
+
+#if DEVELOPMENT || DEBUG
+void measureEcho()
+{
+    IOLockLock(gLock);
+    const auto trial = gEchoTrial;
+    if (!trial.packet) {
+        IOLockUnlock(gLock);
+        return;
+    }
+    gEchoTrial.packet = nullptr;
+    const bool valid = gIf == trial.ifp && trial.generation == switch_awdl_core_generation(gCore);
+    if (!valid)
+        gEchoTrial = {};
+    IOLockUnlock(gLock);
+    if (!valid) {
+        mbuf_freem(trial.packet);
+        ifnet_release(trial.ifp);
+        return;
+    }
+    snapshotEcho("before", trial);
+    IOLockLock(gLock);
+    const bool current = gIf == trial.ifp && trial.generation == switch_awdl_core_generation(gCore);
+    IOLockUnlock(gLock);
+    if (current)
+        deliverPackets(trial.ifp, trial.packet, true);
+    else
+        mbuf_freem(trial.packet);
+    uint64_t deadline = 0;
+    clock_interval_to_deadline(2, NSEC_PER_SEC, &deadline);
+    thread_call_enter_delayed(gEchoAfter, deadline);
+}
+#endif
+
 void deferredWork(thread_call_param_t, thread_call_param_t)
 {
+#if DEVELOPMENT || DEBUG
+    measureEcho();
+#endif
+    IOLockLock(gLock);
+    ifnet_t ifp = gIf;
+    if (!ifp || ifnet_reference(ifp)) {
+        IOLockUnlock(gLock);
+        return;
+    }
+    bool failed = false;
+    const PeerChange passes[] = {PeerChange::Remove, PeerChange::Add};
+    for (PeerChange pass : passes) {
+        for (unsigned i = 0; i < AWDL_MAX_PEERS && gIf == ifp; ++i) {
+            auto &slot = gPeers[i];
+            SwitchWLANPeerIdentity desired = {};
+            const auto *want = desiredPeer(i, desired) ? &desired : nullptr;
+            if (slot.head && (!want || !slot.bufferedFor.same(desired)))
+                clearPeerInput(slot);
+            const auto change = slot.presence.change(want);
+            if (change != pass || (change == PeerChange::Add && otherRoute(i, desired)))
+                continue;
+            const auto request = change == PeerChange::Add ? desired : slot.presence.installed;
+            IOLockUnlock(gLock);
+            uint32_t flags = 0;
+            const int error =
+                switch_wlan_awdl_neighbor_update(ifp, request.address, change == PeerChange::Add, request.rssi, &flags);
+            IOLockLock(gLock);
+            if (gIf != ifp)
+                break;
+            if (error && change == PeerChange::Add) {
+                if (!failed && !gRetryPresenceAfter)
+                    IOLog("SwitchWLAN: AWDL neighbor add failed (%d)\n", error);
+                failed = true;
+                continue;
+            }
+            if (error) {
+                const uint8_t *a = request.address;
+                IOLog("SwitchWLAN: AWDL neighbor remove failed (%d): %02x:%02x:%02x:%02x:%02x:%02x route flags %#x\n",
+                      error, a[0], a[1], a[2], a[3], a[4], a[5], flags);
+            }
+            want = desiredPeer(i, desired) ? &desired : nullptr;
+            const int publish = slot.presence.complete(change, request, want);
+            if (publish)
+                a80211_awdl_peer(&gFacade, request.address, publish > 0, request.rssi);
+            if (want && slot.presence.ready(desired) && slot.head && slot.bufferedFor.same(desired)) {
+                appendInput(gInputHead, gInputTail, slot.head, slot.tail);
+                slot.head = slot.tail = nullptr;
+                slot.count = 0;
+            }
+        }
+    }
+    if (ifp == gIf) {
+        gPeerWork = false;
+        for (unsigned i = 0; i < AWDL_MAX_PEERS; ++i) {
+            SwitchWLANPeerIdentity desired = {};
+            if (gPeers[i].presence.change(desiredPeer(i, desired) ? &desired : nullptr) != PeerChange::None) {
+                gPeerWork = true;
+                break;
+            }
+        }
+        if (failed)
+            gRetryPresenceAfter = hostNs() + 1000000000ULL;
+        else if (gPeerWork)
+            thread_call_enter(gDeferred);
+        else
+            gRetryPresenceAfter = 0;
+    }
+    IOLockUnlock(gLock);
+    ifnet_release(ifp);
     drain();
 }
 
@@ -432,11 +1155,11 @@ void statsLine()
     os_log(
         OS_LOG_DEFAULT,
         "SwitchWLAN: AWDL stats: ifidx %d, fw events %u (unknown %u), AWs %u, frames %u parsed %u bad %u, fw role %d "
-        "(%u), peers +%u -%u, syncs %u, iovars %u refused %u skipped %u, data rx %u tx %u drop %u refused %u "
-        "not-AWDL %u, mode changes %u, sent PSF %u MIF %u, sync error %d us, resyncs %u%s",
+        "(%u), peers +%u -%u, syncs %u, iovars %u refused %u skipped %u, data rx %u tx %u drop %u bad %u refused %u "
+        "not-AWDL %u, sent PSF %u MIF %u, sync error %d us, resyncs %u%s",
         awdl_core_fw_ifidx(gCore), st->fw_events, st->fw_unknown, st->aws, st->fw_frames, st->af_rx, st->af_bad,
         st->fw_role, st->roles, st->peer_adds, st->peer_dels, st->syncs_pushed, st->iovars, st->iovar_refused,
-        st->iovar_skipped, st->data_rx, st->data_tx, st->data_drop, st->tx_refused, st->data_not_awdl, st->mode_changes,
+        st->iovar_skipped, st->data_rx, st->data_tx, st->data_drop, st->data_bad, st->tx_refused, st->data_not_awdl,
         st->psf_tx, st->mif_tx, st->last_sync_error_us, st->resyncs, soft);
 #endif
 }
@@ -444,8 +1167,9 @@ void statsLine()
 void timerFired(thread_call_param_t, thread_call_param_t)
 {
     IOLockLock(gLock);
-    if (gCore && awdl_core_running(gCore))
-        awdl_core_set_infra(gCore, swlan_awdl_infra_freq(), nowTsf());
+    refreshRadio();
+    if (gCore && switch_awdl_core_ready(gCore))
+        awdl_core_set_infra(gCore, radioInfraFreq(), nowTsf());
     rearm();
     statsLine();
     IOLockUnlock(gLock);
@@ -453,6 +1177,39 @@ void timerFired(thread_call_param_t, thread_call_param_t)
 }
 
 // ---- the radio's callbacks -------------------------------------------------------------------------------------------
+#if DEVELOPMENT || DEBUG
+enum class ActionDisposition { Gated, Stopped, Ignored, Malformed, Accepted };
+
+void logA3RxAction(const uint8_t *frame, size_t length, const swlan_rx_meta &meta,
+                   const swlan::SwitchAwdlRxAction &action, ActionDisposition disposition)
+{
+    const char *const names[] = {"gated", "stopped", "ignored", "malformed", "accepted"};
+    int parseResult = 1;  // awdl_af_parse returns zero or a negative error. One marks a skipped parse.
+    if (disposition == ActionDisposition::Accepted)
+        parseResult = 0;
+    else if (disposition == ActionDisposition::Ignored || disposition == ActionDisposition::Malformed) {
+        awdl_af decoded;
+        parseResult = awdl_af_parse(frame, length, &decoded);
+    }
+
+    char oui[7] = "-";
+    if (action.oui >= 0)
+        snprintf(oui, sizeof oui, "%06x", static_cast<unsigned>(action.oui));
+    IOLog("SwitchWLAN: A3 action RX fc %#x order %u retry %u seq %u frag %u "
+          "src %02x:%02x:%02x:%02x:%02x:%02x dst %02x:%02x:%02x:%02x:%02x:%02x "
+          "bssid %02x:%02x:%02x:%02x:%02x:%02x no-fcs-bytes %zu channel %u freq %u MHz TSF %llu "
+          "session %u epoch %u applied %u body-offset %u category %d BA-action %d OUI %s Apple-type %d "
+          "version %d subtype %d core %s parse %d\n",
+          action.fc, action.fc >> 15, (action.fc >> 11) & 1u, action.sequenceControl >> 4, action.sequenceControl & 15u,
+          frame[10], frame[11], frame[12], frame[13], frame[14], frame[15], frame[4], frame[5], frame[6], frame[7],
+          frame[8], frame[9], frame[16], frame[17], frame[18], frame[19], frame[20], frame[21], length,
+          awdl_chan_of_freq(meta.freq_mhz).number, meta.freq_mhz, static_cast<unsigned long long>(meta.tsf),
+          meta.generation, meta.clock_epoch, meta.applied_generation, action.headerBytes, action.category,
+          action.blockAckAction, oui, action.appleType, action.version, action.subtype,
+          names[static_cast<unsigned>(disposition)], parseResult);
+}
+#endif
+
 void radioRx(void *, const uint8_t *frame, size_t length, const struct swlan_rx_meta *meta)
 {
     if (meta && (meta->flags & SWLAN_RX_FCS_PRESENT)) {
@@ -461,16 +1218,89 @@ void radioRx(void *, const uint8_t *frame, size_t length, const struct swlan_rx_
         length -= 4;
     }
     IOLockLock(gLock);
-    if (gCore && awdl_core_running(gCore)) {
+    refreshRadio();
+    const bool stamped = gCaps && gCaps->has_tsf_clock;
+    const bool admitted = stamped ? gActivationCommitted && gRxStarted && gRadioState.ready && meta && meta->tsf &&
+                                      meta->generation == gRadioState.generation &&
+                                      meta->clock_epoch == gRadioState.clock.epoch &&
+                                      meta->applied_generation == gRadioState.applied_generation
+                                  : gCore && switch_awdl_core_ready(gCore);
+#if DEVELOPMENT || DEBUG
+    swlan::SwitchAwdlRxAction sample{};
+    const bool candidate = stamped && gCaps->requires_radio_ready && meta && meta->tsf && meta->generation &&
+                           meta->clock_epoch && meta->applied_generation &&
+                           swlan::switch_awdl_rx_action(frame, length, sample);
+    auto disposition = ActionDisposition::Gated;
+#endif
+    if (gCore && admitted) {
+        const bool action = length >= 24 && (frame[0] & 0xfc) == 0xd0;
+        const uint32_t parsed = action ? awdl_core_stats(gCore)->af_rx : 0;
+#if DEVELOPMENT || DEBUG
+        const uint32_t bad = candidate ? awdl_core_stats(gCore)->af_bad : 0;
+        const bool canParse = candidate && awdl_core_running(gCore);
+#endif
         const struct awdl_rx_meta m = {meta && meta->tsf ? meta->tsf : nowTsf(),
                                        meta ? meta->freq_mhz : static_cast<uint16_t>(0),
                                        meta ? meta->rssi_dbm : static_cast<int8_t>(-90)};
+#if defined(SWITCH_IPSW_KIND_24B119)
+#if DEVELOPMENT || DEBUG
+        gEchoRxMeta = stamped ? meta : nullptr;
+#endif
+        const bool service = awdl_core_rx(gCore, frame, length, &m);
+#if DEVELOPMENT || DEBUG
+        gEchoRxMeta = nullptr;
+#endif
+        if (service && gMonitoring) {
+            static uint8_t event[A80211_RING_MAX_PAYLOAD];
+            const auto size = switch_a80211_awdl_action_rx(event, sizeof event, frame, length, &m);
+            if (size)
+                postEvent(A80211_M_AWDL_ACTION_FRAME_RX, event, static_cast<uint32_t>(size));
+        }
+#else
         awdl_core_rx(gCore, frame, length, &m);
+#endif
+        if (action && awdl_core_stats(gCore)->af_rx != parsed) {
+            retryPeerPresence();
+#if DEVELOPMENT || DEBUG
+            if (length > 30) {
+                gRawPsf += frame[30] == AWDL_SUBTYPE_PSF;
+                gRawMif += frame[30] == AWDL_SUBTYPE_MIF;
+            }
+#endif
+        }
+#if DEVELOPMENT || DEBUG
+        if (candidate) {
+            const awdl_stats *stats = awdl_core_stats(gCore);
+            if (!canParse)
+                disposition = ActionDisposition::Stopped;
+            else if (stats->af_rx != parsed)
+                disposition = ActionDisposition::Accepted;
+            else if (stats->af_bad != bad)
+                disposition = ActionDisposition::Malformed;
+            else
+                disposition = ActionDisposition::Ignored;
+        }
+        gRawData += length >= 24 && (frame[0] & 0x0c) == 8;
+#endif
         rearm();
     }
+#if DEVELOPMENT || DEBUG
+    else if (stamped) {
+        ++gRawRxGated;
+    }
+    const bool discovery = sample.kind == swlan::SwitchAwdlRxActionKind::Psf ||
+                           sample.kind == swlan::SwitchAwdlRxActionKind::Mif;
+    const bool unexpected = disposition == ActionDisposition::Malformed || disposition == ActionDisposition::Gated ||
+                            disposition == ActionDisposition::Stopped ||
+                            (discovery && disposition != ActionDisposition::Accepted);
+    const bool selected = candidate && gA3RxActionBudget.take(sample, unexpected);
+#endif
     IOLockUnlock(gLock);
-    if (gInputHead)
-        drain(false);
+#if DEVELOPMENT || DEBUG
+    if (selected)
+        logA3RxAction(frame, length, *meta, sample, disposition);
+#endif
+    drain();
 }
 
 // Native backend: the firmware's AWDL events and the frames of its AWDL interface.
@@ -485,8 +1315,7 @@ void fwEvent(void *, const struct swlan_fw_event *e, const uint8_t *data, size_t
         rearm();
     }
     IOLockUnlock(gLock);
-    if (gInputHead)
-        drain(false);
+    drain();
 }
 
 // The firmware's AWDL interface: 802.3 frames with the AWDL data header, which the core strips (hostDeliver).
@@ -496,19 +1325,64 @@ void ethRx(void *, const uint8_t *frame, size_t length)
     if (gCore && awdl_core_running(gCore))
         awdl_core_rx_eth(gCore, frame, length, nowTsf());
     IOLockUnlock(gLock);
-    drain(false);
+    drain();
 }
 
 void radioEvent(void *, const struct swlan_awdl_event *e)
 {
-    if (e->type != SWLAN_AWDL_CHIP_LOST)
-        return;
-    IOLog("SwitchWLAN: AWDL: the radio was lost; AWDL stopped (wifip2pd re-enables it after recovery)\n");
     IOLockLock(gLock);
-    if (gCore)
-        awdl_core_stop(gCore);
-    gFacade.enabled = 0;
-    gRxStarted = false;
+    if (e->generation && (e->type == SWLAN_AWDL_RADIO_DOWN || e->type == SWLAN_AWDL_RADIO_UP ||
+                          e->type == SWLAN_AWDL_RECOVERY_REQUIRED)) {
+        swlan_awdl_state state = {};
+        if (!swlan_awdl_get_state(&state) && state.generation != e->generation) {
+            IOLockUnlock(gLock);
+            return;
+        }
+    }
+    if (e->type == SWLAN_AWDL_CHIP_LOST || e->type == SWLAN_AWDL_RADIO_DOWN ||
+        e->type == SWLAN_AWDL_RECOVERY_REQUIRED) {
+        IOLog("SwitchWLAN: AWDL: the radio was lost; requested AWDL state retained for recovery\n");
+        gRadioLost = true;
+        gIovarHead = gIovarCount = 0;
+        suspendRadio();
+        switch_awdl_radio_clock_clear(&gRadioClock);
+        gClockRequest = {};
+        gRadioError = 0;
+        gRxStarted = false;
+        __atomic_store_n(&gRadioOpen, 0, __ATOMIC_RELEASE);
+    } else {
+        const bool powered = e->type == SWLAN_AWDL_RADIO_UP;
+        if (powered) {
+            gRadioLost = false;
+            gRadioError = 0;
+        }
+        const bool stateEvent = powered || e->type == SWLAN_AWDL_CONFIG_CHANGED || e->type == SWLAN_AWDL_CLOCK_CHANGED;
+        if (gRadioLost && stateEvent) {
+            if (gCaps && gCaps->requires_radio_ready && (!e->generation || e->generation == gRadioState.generation)) {
+                IOLockUnlock(gLock);
+                return;
+            }
+            gRadioLost = false;
+        } else if (e->generation && gRadioState.generation && e->generation != gRadioState.generation && !stateEvent) {
+            IOLockUnlock(gLock);
+            return;
+        }
+        if (e->type == SWLAN_AWDL_CLOCK_CHANGED)
+            switch_awdl_radio_clock_request_complete(&gClockRequest, e->status);
+        else if (stateEvent || e->type == SWLAN_AWDL_TXDONE || e->type == SWLAN_AWDL_TX_CREDIT)
+            gClockRequest.blocked = 0;
+        const uint32_t credits = gRadioState.tx_credits, applied = gRadioState.applied_generation;
+        refreshRadio();
+        const bool reopened = stateEvent && gRadioState.tx_credits && (!credits || applied != gRadioState.applied_generation);
+        if (e->type == SWLAN_AWDL_TXDONE && gCore)
+            dataTxDone(*e);
+        if (reopened || e->type == SWLAN_AWDL_TXDONE || e->type == SWLAN_AWDL_TX_CREDIT)
+            if (gCore && (!gCaps || !gCaps->has_tsf_clock || !e->clock_epoch || e->clock_epoch == gRadioClock.epoch))
+                switch_awdl_core_tx_ready(gCore, nowTsf());
+        if (stateEvent && gRestorePending && gFacade.enabled && !gRadioError && gRadioWork)
+            thread_call_enter(gRadioWork);
+    }
+    rearm();
     IOLockUnlock(gLock);
     drain();
 }
@@ -516,8 +1390,36 @@ void radioEvent(void *, const struct swlan_awdl_event *e)
 // ---- the facade's operations (gLock held) ---------------------------------------------------------------------------
 int opStart(void *)
 {
-    // the access point's channel now; timerFired follows it (the core re-sends the schedule when it changes)
-    awdl_core_set_infra(gCore, swlan_awdl_infra_freq(), nowTsf());
+    if (gAddressChanging) {
+        gRestorePending = true;
+        return EINPROGRESS;
+    }
+    const int open = __atomic_load_n(&gRadioOpen, __ATOMIC_ACQUIRE);
+    if (open < 0)
+        return ENXIO;
+    const int registered = swlan_awdl_events(radioEvent, nullptr);
+    if (registered < 0)
+        return -registered;
+    if (gRadioLost || !open) {
+        gRestorePending = true;
+        if (!gRadioLost)
+            thread_call_enter(gRadioWork);
+        return EINPROGRESS;
+    }
+    refreshRadio();
+    if (gRadioError)
+        return gRadioError < 0 ? -gRadioError : gRadioError;
+    if (!radioChannelsReady() ||
+        (gCaps && gCaps->has_tsf_clock && !switch_awdl_radio_clock_valid(&gRadioClock, hostNs()))) {
+        gRestorePending = true;
+        requestClock();
+        return EINPROGRESS;
+    }
+    if (gCaps && gCaps->requires_radio_ready)
+        switch_awdl_core_radio_ready(gCore, 0);
+    else
+        switch_awdl_core_radio_ready(gCore, 1);
+    awdl_core_set_infra(gCore, radioInfraFreq(), nowTsf());
     if (!gRxStarted && !gSoft) {
         int e = swlan_awdl_fw_events(fwEvent, nullptr);
         if (e >= 0)
@@ -526,24 +1428,44 @@ int opStart(void *)
             IOLog("SwitchWLAN: AWDL: the radio would not deliver the firmware's AWDL events and frames (%d): off\n", e);
             return ENXIO;
         }
-        swlan_awdl_events(radioEvent, nullptr);  // chip loss
+        swlan_awdl_events(radioEvent, nullptr);
         gRxStarted = true;
     }
     if (!gRxStarted) {
-        const int e = swlan_awdl_rx_start(radioRx, nullptr);
+        int e = swlan_awdl_events(radioEvent, nullptr);
+        if (e >= 0)
+            e = swlan_awdl_rx_filter(gMac, awdl_bssid, 0);
+        if (e >= 0)
+            e = swlan_awdl_rx_start(radioRx, nullptr);
         if (e < 0) {
-            IOLog("SwitchWLAN: AWDL: the radio would not start receiving (%d): AWDL off\n", e);
-            return ENXIO;
+            IOLog("SwitchWLAN: AWDL: the radio refused receive configuration (%d): AWDL off\n", e);
+            const bool pending = radioPending(e);
+            if (pending)
+                gRestorePending = true;
+            else
+                gRadioError = e;
+            switch_awdl_core_radio_ready(gCore, 0);
+            return pending ? EINPROGRESS : -e;
         }
-        swlan_awdl_events(radioEvent, nullptr);
-        swlan_awdl_rx_filter(gMac, awdl_bssid, 0);  // our address, so the radio ACKs unicast to it (STATUS.md Q1)
         gRxStarted = true;
     }
     return 0;
 }
 
+int opActive(void *)
+{
+    return gCaps && (gCaps->requires_radio_ready || gCaps->has_tsf_clock)
+               ? gActivationCommitted
+               : gCore && switch_awdl_core_ready(gCore);
+}
+
 void opStop(void *)
 {
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+    endHomeTrial("disabled");
+#endif
+    gActivationCommitted = false;
+    gRestorePending = false;
     if (gTimer)
         thread_call_cancel(gTimer);
     if (gSoft) {  // native: the core's "awdl_if down" stops the firmware; its events stay on
@@ -555,6 +1477,30 @@ void opStop(void *)
 
 void opPost(void *, uint32_t event, const void *payload, uint32_t length)
 {
+#if DEVELOPMENT || DEBUG
+    if (event == A80211_M_AWDL_SYNC_STATE_CHANGED && gActivationTransitions < 32) {
+        ++gActivationTransitions;
+        const bool active = switch_a80211_awdl_active(&gFacade);
+        const char *reason = "resources-pending";
+        if (active)
+            reason = "committed";
+        else if (!gFacade.enabled)
+            reason = "disabled";
+        else if (gRadioLost)
+            reason = "radio-lost";
+        else if (gAddressChanging)
+            reason = "address-change";
+        else if (gRadioError)
+            reason = "radio-error";
+        else if (!gCore || !awdl_core_running(gCore))
+            reason = "core-stopped";
+        IOLog("SwitchWLAN: AWDL activation: active=%d desired=%d committed=%d data_ready=%d "
+              "session=%u epoch=%u applied=%u reason=%s status=%d transition=%u\n",
+              active, gFacade.enabled, opActive(nullptr), gCore && switch_awdl_core_ready(gCore),
+              gRadioState.generation, gRadioClock.epoch, gRadioState.applied_generation, reason, gRadioError,
+              gActivationTransitions);
+    }
+#endif
     postEvent(event, payload, length);
 }
 
@@ -563,7 +1509,28 @@ void opLog(void *, const char *line)
     IOLog("SwitchWLAN: %s\n", line);
 }
 
+#if DEVELOPMENT || DEBUG
+void logPeerProbes()
+{
+    for (unsigned index = 0; index < AWDL_MAX_PEERS; ++index) {
+        const awdl_peer *peer = awdl_core_peer(gCore, index);
+        switch_awdl_data_probe p = {};
+        if (!peer || !peer->reachable || !switch_awdl_core_data_probe(gCore, index, &p))
+            continue;
+        os_log(OS_LOG_DEFAULT,
+               "SwitchWLAN: probe peer %02x:%02x:%02x:%02x:%02x:%02x rx ch6 %u ch44 %u ch149 %u other %u retry %u "
+               "dup %u to-awdl0 %u; tx queued %u handed %u acked %u unacked %u expired %u cancelled %u failed %u "
+               "requeued %u; longest queue wait %llu us, hand-off to done %llu us",
+               p.addr[0], p.addr[1], p.addr[2], p.addr[3], p.addr[4], p.addr[5], p.rx_frames[0], p.rx_frames[1],
+               p.rx_frames[2], p.rx_frames[3], p.rx_retry, p.rx_dup, p.rx_delivered, p.tx_queued, p.tx_handed,
+               p.tx_acked, p.tx_unacked, p.tx_expired, p.tx_cancelled, p.tx_failed, p.tx_requeued,
+               static_cast<unsigned long long>(p.max_wait_us), static_cast<unsigned long long>(p.max_done_us));
+    }
+}
+#endif
+
 // A short suffix for SwitchWLAN's 5-s stats line, so en0 rx and AWDL state read off one line (empty when off).
+#if DEVELOPMENT || DEBUG
 extern "C" int switch_wlan_awdl_stat(char *buf, size_t size)
 {
     if (!gLock || !gCore)
@@ -576,14 +1543,20 @@ extern "C" int switch_wlan_awdl_stat(char *buf, size_t size)
         const char *roleName = role == AWDL_ROLE_FOLLOWER ? "follower" : "off";
         if (role == AWDL_ROLE_ROOT)
             roleName = "root";
-        n = snprintf(buf, size, "; AWDL running %s %s, %u/16 slots away, peers +%u-%u af_rx %u aws %u fw_ev %u",
-                     roleName, awdl_core_mode(gCore) == AWDL_MODE_TRANSFER ? "transfer" : "idle",
-                     awdl_slots_away(awdl_core_sequence(gCore), swlan_awdl_infra_freq()), st->peer_adds, st->peer_dels,
-                     st->af_rx, st->aws, st->fw_events);
+        unsigned live = 0;
+        for (unsigned index = 0; index < AWDL_MAX_PEERS; ++index) {
+            const awdl_peer *peer = awdl_core_peer(gCore, index);
+            live += peer && peer->reachable;
+        }
+        n = snprintf(buf, size, "; AWDL %s %u/16 away, peers %u af_rx %u bad %u PSF %u MIF %u data %u gated %u",
+                     roleName, awdl_slots_away(awdl_core_sequence(gCore), radioInfraFreq()), live,
+                     st->af_rx, st->af_bad, gRawPsf, gRawMif, gRawData, gRawRxGated);
+        logPeerProbes();
     }
     IOLockUnlock(gLock);
     return n < 0 ? 0 : n;
 }
+#endif
 
 // ---- the ifnet ------------------------------------------------------------------------------------------------------
 errno_t ifOutput(ifnet_t ifp, mbuf_t m)
@@ -596,7 +1569,9 @@ errno_t ifOutput(ifnet_t ifp, mbuf_t m)
     IOLockLock(gSend);
     IOLockLock(gLock);
     stash.length = 0;
-    if (length >= ETHER_HDR_LEN && length <= sizeof frame - 64 && gCore && !mbuf_copydata(m, 0, length, frame)) {
+    refreshRadio();
+    if (ifp == gIf && !gAddressChanging && length >= ETHER_HDR_LEN && length <= sizeof frame - 64 && gCore &&
+        !mbuf_copydata(m, 0, length, frame)) {
         gStash = &stash;
         r = awdl_core_output(gCore, frame, length, nowTsf());
         gStash = nullptr;
@@ -606,6 +1581,9 @@ errno_t ifOutput(ifnet_t ifp, mbuf_t m)
     if (!r && stash.length && swlan_awdl_eth_tx(stash.frame, stash.length) < 0)
         r = -1;
     IOLockUnlock(gSend);
+#if DEVELOPMENT || DEBUG
+    logEcho(ifp, false, echoSample(m), r);
+#endif
     if (r) {
         ifnet_stat_increment_out(ifp, 0, 0, 1);
     } else {
@@ -615,35 +1593,75 @@ errno_t ifOutput(ifnet_t ifp, mbuf_t m)
     return 0;
 }
 
-// The first AWDL_SYNC_ENABLED on: the radio opens for AWDL (the AWDL event bits in event_msgs; the station is not
+// The first AWDL enable request opens the radio (the AWDL event bits in event_msgs; the station is not
 // touched before). Thread context, without gLock (it waits for the firmware). 0 or an errno for wifip2pd.
 int ensureRadio()
 {
     IOLockLock(gOpenLock);
     int e = 0;
-    if (gRadioOpen < 0) {
+    const int open = __atomic_load_n(&gRadioOpen, __ATOMIC_ACQUIRE);
+    if (open < 0) {
         e = ENXIO;
-    } else if (!gRadioOpen) {
+    } else if (!open) {
         const struct swlan_awdl_caps *caps = nullptr;
         const int r = swlan_awdl_open(&caps);
         if (r >= 0 && caps) {
-            gRadioOpen = 1;
+            IOLockLock(gLock);
+            gCaps = caps;
+            IOLockUnlock(gLock);
+            __atomic_store_n(&gRadioOpen, 1, __ATOMIC_RELEASE);
         } else {
             // the radio says why in its own line; a radio that was only down (recovering) is asked again next time
             IOLog("SwitchWLAN: AWDL: wifip2pd enabled AWDL but the radio did not open for it (%d): AWDL off%s\n", r,
                   r == -ENXIO ? " until the next enable" : "");
-            if (r != -ENXIO)
-                gRadioOpen = -1;
-            e = ENXIO;
+            const bool pending = radioPending(r);
+            if (!pending)
+                __atomic_store_n(&gRadioOpen, -1, __ATOMIC_RELEASE);
+            if (pending) {
+                IOLockLock(gLock);
+                gRestorePending = true;
+                IOLockUnlock(gLock);
+            } else {
+                e = r < 0 ? -r : ENXIO;
+            }
         }
     }
     IOLockUnlock(gOpenLock);
     return e;
 }
 
-int awdlRequest(bool set, apple80211req &rq)
+void radioWork(thread_call_param_t, thread_call_param_t)
 {
-    if (rq.req_len > kMaxRequest)
+    IOLockLock(gLock);
+    if (gAddressChanging || gRestoring || !gRestorePending || !gFacade.enabled || gRadioLost || gRadioError) {
+        IOLockUnlock(gLock);
+        return;
+    }
+    gRestoring = true;
+    IOLockUnlock(gLock);
+    const int opened = ensureRadio();
+    IOLockLock(gLock);
+    refreshRadio();
+    if (!opened && !gAddressChanging && !gRadioLost && !gRadioError && gFacade.enabled &&
+        __atomic_load_n(&gRadioOpen, __ATOMIC_ACQUIRE) == 1) {
+        if (!radioChannelsReady() ||
+            (gCaps && gCaps->has_tsf_clock && !switch_awdl_radio_clock_valid(&gRadioClock, hostNs()))) {
+            requestClock();
+        } else {
+            gRestorePending = false;
+            if (switch_a80211_awdl_resume(&gFacade, nowTsf()))
+                gRestorePending = true;
+        }
+    }
+    gRestoring = false;
+    rearm();
+    IOLockUnlock(gLock);
+    drain();
+}
+
+int awdlRequest(ifnet_t ifp, bool set, apple80211req &rq)
+{
+    if (rq.req_len > kMaxRequest || (set && rq.req_len && !rq.req_data))
         return EINVAL;
     const uint32_t capacity = rq.req_len;
     uint8_t *data = capacity ? static_cast<uint8_t *>(IOMallocZeroData(capacity)) : nullptr;
@@ -652,16 +1670,51 @@ int awdlRequest(bool set, apple80211req &rq)
     int e = 0;
     if (set && capacity && rq.req_data)
         e = copyin(rq.req_data, data, capacity);
-    // apple80211_awdl_sync_enabled {version, flags, enabled}: AWDL on needs the radio opened first, without gLock
-    if (!e && set && rq.req_type == A80211_IOC_AWDL_SYNC_ENABLED && capacity >= 12 &&
-        (static_cast<unsigned>(data[8]) | data[9] | data[10] | data[11]))
-        e = ensureRadio();
+    if (!e && set && rq.req_type == A80211_IOC_AWDL_SYNC_ENABLED) {
+        a80211_awdl_sync_enabled request = {};
+        if (capacity != sizeof request) {
+            e = EINVAL;
+        } else {
+            memcpy(&request, data, sizeof request);
+            if (request.version != 1 || request.enabled > 1)
+                e = EINVAL;
+            else if (request.enabled)
+                e = ensureRadio();
+        }
+    }
     uint32_t length = set ? capacity : 0;
     if (!e) {
         IOLockLock(gLock);
-        e = a80211_awdl_request(&gFacade, static_cast<int>(set), rq.req_type, &rq.req_val, data, &length, capacity,
-                                nowTsf());
-        rearm();
+        if (ifp != gIf) {
+            e = ENXIO;
+        } else {
+            if (set && (rq.req_type == A80211_IOC_AWDL_SYNC_ENABLED ||
+                        rq.req_type == A80211_IOC_VIRTUAL_IF_STATE ||
+                        rq.req_type == A80211_IOC_AWDL_PEER_SERVICE_REQUEST ||
+                        rq.req_type == A80211_IOC_AWDL_PEER_TRAFFIC_REGISTRATION))
+                gClockRequest.blocked = 0;
+            if (!set)
+                refreshRadio();
+            e = a80211_awdl_request(&gFacade, static_cast<int>(set), rq.req_type, &rq.req_val, data, &length, capacity,
+                                    nowTsf());
+#if DEVELOPMENT || DEBUG
+            if (!e && set) {
+                if (rq.req_type == A80211_IOC_AWDL_PEER_SERVICE_REQUEST && capacity > sizeof(a80211_peer_service_request) &&
+                    !reinterpret_cast<const a80211_peer_service_request *>(data)->delete_request) {
+                    switch_wlan_a3_discovery_trial();
+                } else if (rq.req_type == A80211_IOC_AWDL_PEER_TRAFFIC_REGISTRATION &&
+                         capacity == sizeof(a80211_awdl_peer_traffic_registration) &&
+                         reinterpret_cast<const a80211_awdl_peer_traffic_registration *>(data)->active)
+                    switch_wlan_a3_discovery_trial();
+            }
+#endif
+            if (!e && set && !gFacade.enabled &&
+                (rq.req_type == A80211_IOC_AWDL_SYNC_ENABLED || rq.req_type == A80211_IOC_VIRTUAL_IF_STATE)) {
+                gRadioError = 0;
+                gRestorePending = false;
+            }
+            rearm();
+        }
         IOLockUnlock(gLock);
     }
     if (!e && !set && length && rq.req_data)
@@ -688,41 +1741,107 @@ errno_t answerMedia(void *arg, int status)
     return 0;
 }
 
+errno_t changeAddress(ifnet_t ifp, const uint8_t *mac)
+{
+    IOLockLock(gSend);
+    IOLockLock(gLock);
+    errno_t error = 0;
+    const bool changed = memcmp(mac, gMac, ETHER_ADDR_LEN) != 0;
+    bool filterQueued = false;
+    mbuf_t oldInput = nullptr;
+    if (ifp != gIf) {
+        error = ENXIO;
+    } else if (gAddressChanging) {
+        error = EBUSY;
+    } else if (changed) {
+        if (!gSoft && gCore && awdl_core_running(gCore)) {
+            refuseOnce("awdl0's address changes only while AWDL is off");
+            error = EBUSY;
+        } else {
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+            endHomeTrial("address change");
+#endif
+            filterQueued = gRxStarted && !gRadioLost;
+            const int filter = filterQueued ? swlan_awdl_rx_filter(mac, awdl_bssid, 0) : 0;
+            if (filter < 0) {
+                error = -filter;
+            } else {
+                gAddressChanging = true;
+                gActivationCommitted = false;
+                gClockRequest.blocked = 0;
+                if (gCore) {
+                    switch_awdl_core_radio_ready(gCore, 0);
+                    awdl_core_set_addr(gCore, airAddress(mac));
+                }
+                oldInput = gInputHead;
+                gInputHead = gInputTail = nullptr;
+                switch_a80211_awdl_refresh(&gFacade);
+            }
+        }
+    }
+    IOLockUnlock(gLock);
+    IOLockUnlock(gSend);
+    if (error || !changed)
+        return error;
+
+    if (oldInput)
+        mbuf_freem_list(oldInput);
+    // XNU posts link-address events from this call; they must be free to enter the driver again.
+    error = ifnet_set_lladdr(ifp, mac, ETHER_ADDR_LEN);
+
+    IOLockLock(gLock);
+    gAddressChanging = false;
+    if (ifp == gIf) {
+        if (!error) {
+            memcpy(gMac, mac, ETHER_ADDR_LEN);
+        } else {
+            if (gCore)
+                awdl_core_set_addr(gCore, airAddress());
+            if (filterQueued && swlan_awdl_rx_filter(gMac, awdl_bssid, 0) < 0) {
+                gRxStarted = false;
+                suspendRadio();
+            }
+        }
+        if (gRestorePending && gFacade.enabled && !gRadioLost && !gRadioError)
+            thread_call_enter(gRadioWork);
+        rearm();
+    }
+    IOLockUnlock(gLock);
+    drain();
+    return error;
+}
+
 errno_t ifIoctl(ifnet_t ifp, unsigned long cmd, void *arg)
 {
     switch (cmd) {
     case SIOCGA80211:
     case SIOCSA80211:
-        return awdlRequest(cmd == SIOCSA80211, *static_cast<apple80211req *>(arg));
-    case SIOCGIFMEDIA64:
-        return answerMedia(arg, IFM_AVALID | (gCore && awdl_core_running(gCore) ? IFM_ACTIVE : 0u));
+        return awdlRequest(ifp, cmd == SIOCSA80211, *static_cast<apple80211req *>(arg));
+    case SIOCGIFMEDIA64: {
+        IOLockLock(gLock);
+        refreshRadio();
+        const bool ready = ifp == gIf && switch_a80211_awdl_active(&gFacade);
+        IOLockUnlock(gLock);
+        return answerMedia(arg, IFM_AVALID | (ready ? IFM_ACTIVE : 0u));
+    }
     case SIOCSIFLLADDR: {
         // wifip2pd's AWDL address: the stack transmits with it and the kernel derives fe80::/64 from it
         const struct ifreq *ifr = static_cast<const struct ifreq *>(arg);
         if (ifr->ifr_addr.sa_len != ETHER_ADDR_LEN)
             return EINVAL;
         const uint8_t *mac = reinterpret_cast<const uint8_t *>(ifr->ifr_addr.sa_data);
-        if (!memcmp(mac, gMac, 6))
-            return 0;
-        // While AWDL runs on the firmware, its awdl_if and payload carry the address: changed only while off
-        if (!gSoft && gCore && awdl_core_running(gCore)) {
-            refuseOnce("awdl0's address changes only while AWDL is off");
-            return EBUSY;
-        }
-        const errno_t e = ifnet_set_lladdr(ifp, mac, ETHER_ADDR_LEN);
-        if (e)
-            return e;
-        IOLockLock(gLock);
-        memcpy(gMac, mac, 6);
-        if (gCore)
-            awdl_core_set_addr(gCore, airAddress());
-        if (gRxStarted)
-            swlan_awdl_rx_filter(gMac, awdl_bssid, 0);
-        IOLockUnlock(gLock);
-        return 0;
+        static const uint8_t zero[6] = {};
+        if ((mac[0] & 1u) || !memcmp(mac, zero, sizeof zero))
+            return EINVAL;
+        return changeAddress(ifp, mac);
+    }
+    case SIOCSIFMTU: {
+        const int mtu = static_cast<const struct ifreq *>(arg)->ifr_mtu;
+        if (mtu <= 0 || mtu > (gSoft ? 1500 : SWITCH_AWDL_MTU))
+            return EINVAL;
+        return ifnet_set_mtu(ifp, static_cast<uint32_t>(mtu));
     }
     case SIOCSIFFLAGS:
-    case SIOCSIFMTU:
     case SIOCADDMULTI:
     case SIOCDELMULTI:
     case SIOCSIFADDR:
@@ -782,10 +1901,13 @@ IOReturn SwitchAwdlUserClient::clientClose()
     IOLockLock(gLock);
     if (gEventClient == this) {
         gMonitoring = false;
+        gEventClient = nullptr;
+    }
+    if (gAsyncClient == this) {
         if (gAsyncArmed)
             releaseAsyncReference64(gAsync);
         gAsyncArmed = false;
-        gEventClient = nullptr;
+        gAsyncClient = nullptr;
     }
     IOLockUnlock(gLock);
     terminate();
@@ -840,6 +1962,7 @@ IOReturn SwitchAwdlUserClient::passthrough(IOExternalMethodArguments *a)
     uint32_t length = 0;
     const uint32_t capacity = a->structureOutputSize < sizeof out ? a->structureOutputSize : sizeof out;
     IOLockLock(gLock);
+    refreshRadio();
     const int e = a80211_awdl_request(&gFacade, 0, type, &val, out, &length, capacity, nowTsf());
     IOLockUnlock(gLock);
     if (e)
@@ -855,7 +1978,10 @@ IOReturn SwitchAwdlUserClient::externalMethod(uint32_t selector, IOExternalMetho
     switch (selector) {
     case 0:
         return passthrough(a);
-    case 1:    // useIOUCWhenPossible: no, keep Apple80211RawGet/RawSet on the socket
+    case 1:  // useIOUCWhenPossible: no, keep Apple80211RawGet/RawSet on the socket
+#if defined(SWITCH_IPSW_KIND_24B119)
+    case 7:  // isDKSupported
+#endif
     case 5: {  // useIOUCEventPipe: yes
         if (a->structureOutputSize < 1 || !a->structureOutput)
             return kIOReturnBadArgument;
@@ -867,14 +1993,24 @@ IOReturn SwitchAwdlUserClient::externalMethod(uint32_t selector, IOExternalMetho
         IOLockLock(gLock);
         if (gEventClient && gEventClient != this) {
             IOLog("SwitchWLAN: AWDL: a second event monitor on %s takes over the ring\n", gName);
-            if (gAsyncArmed)
+            if (gAsyncArmed && gAsyncClient != this) {
                 releaseAsyncReference64(gAsync);
-            gAsyncArmed = false;
+                gAsyncArmed = false;
+                gAsyncClient = nullptr;
+            }
         }
         gEventClient = this;
         a80211_ring_init(&gRing, gRingMemory->getBytesNoCopy(), kRingSize,
                          static_cast<volatile uint32_t *>(gStateMemory->getBytesNoCopy()));
         gMonitoring = true;
+        postEvent(A80211_M_AWDL_SYNC_STATE_CHANGED, nullptr, 0);
+        if (switch_a80211_awdl_active(&gFacade)) {
+            for (unsigned index = 0; index < AWDL_MAX_PEERS; ++index) {
+                SwitchWLANPeerIdentity current = {};
+                if (desiredPeer(index, current) && gPeers[index].presence.ready(current))
+                    a80211_awdl_peer(&gFacade, current.address, 1, current.rssi);
+            }
+        }
         IOLockUnlock(gLock);
         return kIOReturnSuccess;
     }
@@ -882,10 +2018,13 @@ IOReturn SwitchAwdlUserClient::externalMethod(uint32_t selector, IOExternalMetho
         IOLockLock(gLock);
         if (gEventClient == this) {
             gMonitoring = false;
+            gEventClient = nullptr;
+        }
+        if (gAsyncClient == this) {
             if (gAsyncArmed)
                 releaseAsyncReference64(gAsync);
             gAsyncArmed = false;
-            gEventClient = nullptr;
+            gAsyncClient = nullptr;
         }
         IOLockUnlock(gLock);
         return kIOReturnSuccess;
@@ -898,6 +2037,10 @@ IOReturn SwitchAwdlUserClient::externalMethod(uint32_t selector, IOExternalMetho
             releaseAsyncReference64(gAsync);
         bcopy(a->asyncReference, gAsync, sizeof(OSAsyncReference64));
         gAsyncArmed = true;
+        gAsyncClient = this;
+        if (gEventClient == this && gMonitoring && gRing.state &&
+            __atomic_load_n(&gRing.state[0], __ATOMIC_ACQUIRE) != __atomic_load_n(&gRing.state[1], __ATOMIC_ACQUIRE))
+            wakeEventClient();
         IOLockUnlock(gLock);
         return kIOReturnSuccess;
     }
@@ -917,6 +2060,10 @@ public:
     {
         if (type != 0)
             return kIOReturnBadArgument;
+#if defined(SWITCH_A80211_AWDL_CLIENT_ENTITLEMENT)
+        if (!IOTaskHasEntitlement(task, SWITCH_A80211_AWDL_CLIENT_ENTITLEMENT))
+            return kIOReturnNotPrivileged;
+#endif
         SwitchAwdlUserClient *client = OSTypeAlloc(SwitchAwdlUserClient);
         if (!client || !client->initWithTask(task, security, type, properties)) {
             OSSafeReleaseNULL(client);
@@ -953,12 +2100,15 @@ void publishService()
     s->setProperty("IOInterfaceName", gName);
     s->setProperty("BSD Name", gName);
     s->setProperty("IOInterfaceNamePrefix", "awdl");
-    // The role is a string under IO80211InterfaceRole, the one wifip2pd prints and matches ("Infrastructure" for en0;
-    // the real AppleBCMWLAN driver sets "AWDL" here for awdl0 and sets nothing else). IO80211VirtualInterfaceRole is
-    // only for NAN sub-roles ("WiFi-Aware Discovery"/"+Data"); setting it sent wifip2pd down its virtual-interface
-    // path (AppleDevice.swift:362), which does not know "AWDL", so it logged "Unable to find role for interface:
-    // awdl0" and never built an AWDLInterface or enabled AWDL (r7u, 11-05). Only the normal role key, as the driver does.
-    s->setProperty("IO80211InterfaceRole", "AWDL");
+    s->setProperty("IO80211InterfaceRole", SWITCH_A80211_AWDL_ROLE);
+    s->setProperty("IO80211VirtualInterfaceRole", SWITCH_A80211_AWDL_VIRTUAL_ROLE);
+#if defined(SWITCH_A80211_AWDL_CLIENT_PROCESS)
+    if (!s->setProperty("NativeSandboxGrantProcess", SWITCH_A80211_AWDL_CLIENT_PROCESS)) {
+        s->release();
+        IOLog("SwitchWLAN: AWDL: could not set client access policy for %s\n", gName);
+        return;
+    }
+#endif
     if (OSNumber *n = OSNumber::withNumber(static_cast<unsigned long long>(gUnit), 32)) {
         s->setProperty("IOInterfaceUnit", n);
         n->release();
@@ -1012,7 +2162,7 @@ void createInterface(thread_call_param_t, thread_call_param_t)
         gCreating = false;
         return;
     }
-    ifnet_set_mtu(ifp, 1500);
+    ifnet_set_mtu(ifp, gSoft ? 1500 : SWITCH_AWDL_MTU);
     ifnet_set_flags(ifp, IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST, 0xffff);
     ifnet_set_baudrate(ifp, 300000000ULL);
     ifnet_set_hdrlen(ifp, ETHER_HDR_LEN);
@@ -1027,6 +2177,7 @@ void createInterface(thread_call_param_t, thread_call_param_t)
     }
     ifnet_set_lladdr(ifp, gMac, 6);
     bpf_attach(ifp, DLT_EN10MB, ETHER_HDR_LEN, nullptr, nullptr);
+    ifnet_set_flags(ifp, IFF_RUNNING, IFF_RUNNING);
     IOLockLock(gLock);
     gIf = ifp;
     gCreating = false;
@@ -1153,14 +2304,20 @@ bool allocateStack()
     gTimer = thread_call_allocate_with_priority(timerFired, nullptr, THREAD_CALL_PRIORITY_HIGH);
     if (!gTimer)
         return false;
-    gDeferred = thread_call_allocate(deferredWork, nullptr);
+    gDeferred = thread_call_allocate_with_options(deferredWork, nullptr, THREAD_CALL_PRIORITY_HIGH, THREAD_CALL_OPTIONS_ONCE);
     if (!gDeferred)
         return false;
+#if DEVELOPMENT || DEBUG
+    gEchoAfter = thread_call_allocate_with_options(echoAfter, nullptr, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
+    if (!gEchoAfter)
+        return false;
+#endif
     gCreate = thread_call_allocate(createInterface, nullptr);
     if (!gCreate)
         return false;
     gIovarWork = thread_call_allocate(iovarWork, nullptr);
-    return gIovarWork != nullptr;
+    gRadioWork = thread_call_allocate(radioWork, nullptr);
+    return gIovarWork && gRadioWork;
 }
 
 }  // namespace
@@ -1169,16 +2326,53 @@ namespace {
 
 void startStack(const awdl_radio_verdict &v, const struct swlan_awdl_caps *caps)
 {
+    gActivationCommitted = false;
+#if DEVELOPMENT || DEBUG
+    gActivationTransitions = 0;
+#endif
+    gClockRequest = {};
     gCaps = caps;
     gSoft = v.mode == AWDL_RADIO_SOFT;
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+    unsigned homeTrial = 0;
+    const bool option = PE_parse_boot_argn("switch-awdl-home-trial", &homeTrial, sizeof homeTrial);
+    if (!option || homeTrial != 1) {
+        IOLog("SwitchWLAN: AWDL: home trial disabled by boot argument (present %u value %u)\n", option, homeTrial);
+    } else if (!gSoft || !caps->requires_radio_ready || !caps->has_tsf_clock) {
+        IOLog("SwitchWLAN: AWDL: home trial blocked (backend) soft %u needs-ready %u has-TSF %u\n",
+              gSoft, caps->requires_radio_ready, caps->has_tsf_clock);
+    } else {
+        gHomeTrialTimer = thread_call_allocate_with_options(homeTrialTimeout, nullptr, THREAD_CALL_PRIORITY_HIGH,
+                                                           THREAD_CALL_OPTIONS_ONCE);
+        if (gHomeTrialTimer) {
+            gHomeTrial.arm();
+            IOLog("SwitchWLAN: AWDL: home trial armed, waiting for committed AWDL activation\n");
+        } else {
+            IOLog("SwitchWLAN: AWDL: home trial blocked (timer allocation failed)\n");
+        }
+    }
+#endif
     memcpy(gMac, caps->self_mac, 6);
     awdl_config cfg;
     awdl_config_default(&cfg, gMac);
     cfg.backend = gSoft ? AWDL_BACKEND_SOFT : AWDL_BACKEND_NATIVE;
     cfg.fw_api = static_cast<uint8_t>(v.api);
     cfg.fw_absent = bcm_probe_absent(caps->probe);
-    const awdl_host host = {nullptr, hostTx, hostSchedule, hostPeer, hostDeliver, hostLog, hostIovar, hostTxEth};
+    awdl_host host = {};
+    host.tx = hostTx;
+    host.schedule = hostSchedule;
+    host.peer = hostPeer;
+    host.deliver = hostDeliver;
+    host.log = hostLog;
+    host.iovar = hostIovar;
+    host.tx_eth = hostTxEth;
+#if DEVELOPMENT || DEBUG
+    host.probe = hostProbe;
+    host.queued = hostQueued;
+#endif
     awdl_core_init(gCore, &host, &cfg);
+    if (caps->requires_radio_ready)
+        switch_awdl_core_set_channels(gCore, 0, 0);
     if (v.trial) {
         IOLog("SwitchWLAN: AWDL: soft backend trial (switch-awdl-soft=%u) on a radio without %s: action frames out "
               "through actframe, in through WLC_E_ACTION_FRAME_RX%s; AWDL data cannot leave this radio\n",
@@ -1193,6 +2387,17 @@ void startStack(const awdl_radio_verdict &v, const struct swlan_awdl_caps *caps)
 }
 
 }  // namespace
+
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+extern "C" void switch_wlan_awdl_station_change(void)
+{
+    if (__atomic_load_n(&gCapable, __ATOMIC_ACQUIRE) != 1 || !gHomeTrialTimer)
+        return;
+    IOLockLock(gLock);
+    endHomeTrial("station ownership");
+    IOLockUnlock(gLock);
+}
+#endif
 
 extern "C" int switch_wlan_awdl_capable(void)
 {
@@ -1255,6 +2460,8 @@ extern "C" int switch_wlan_awdl_vif_create(void *payload, size_t length)
     a80211_virt_if_create *r = static_cast<a80211_virt_if_create *>(payload);
     if (r->role != A80211_VIF_ROLE_AWDL || switch_wlan_awdl_capable() != 1)
         return EOPNOTSUPP;
+    if (r->mac[0] & 1u)
+        return EINVAL;
     IOLockLock(gLock);
     if (!gIf && !gCreating) {
         gUnit = r->unit < 8 ? r->unit : 0;
@@ -1264,7 +2471,8 @@ extern "C" int switch_wlan_awdl_vif_create(void *payload, size_t length)
             memcpy(gMac, r->mac, 6);
         awdl_core_set_addr(gCore, airAddress());
         uint8_t caps[12] = {0x4c, 0x46, 0x0a, 0, 0x01};  // en0's bitmap (SwitchWLANNet kCardCaps) plus bit 32
-        const a80211_awdl_ops ops = {nullptr, opStart, opStop, opPost, opLog};
+        const a80211_awdl_ops ops = {nullptr, opStart, opStop, opPost, opLog, opActive};
+        gActivationCommitted = false;
         a80211_awdl_init(&gFacade, gCore, &ops, gName, "en0", caps);
         if (!gRingMemory)
             gRingMemory = IOBufferMemoryDescriptor::withOptions(kSharedOptions, kRingSize, PAGE_SIZE);
@@ -1299,13 +2507,23 @@ extern "C" int switch_wlan_awdl_vif_delete(const void *payload, size_t length)
     awdl_core_stop(gCore);
     opStop(nullptr);
     gFacade.enabled = 0;
+    rearm();
     // NOLINTNEXTLINE(misc-const-correctness): a const ifnet_t is a const pointer (misc-misplaced-const)
     ifnet_t ifp = gIf;
     gIf = nullptr;
+    for (auto &slot : gPeers) {
+        clearPeerInput(slot);
+        slot.presence = {};
+    }
+    mbuf_t oldInput = gInputHead;
+    gInputHead = gInputTail = nullptr;
+    gPeerWork = false;
+    gRetryPresenceAfter = 0;
     IOService *s = gService;
     gService = nullptr;
     IOLockUnlock(gLock);
-    drain();
+    if (oldInput)
+        mbuf_freem_list(oldInput);
     if (s) {
         s->terminate();
         s->release();
@@ -1314,3 +2532,16 @@ extern "C" int switch_wlan_awdl_vif_delete(const void *payload, size_t length)
     IOLog("SwitchWLAN: AWDL: %s deleted\n", gName);
     return 0;
 }
+
+#if defined(SWITCH_IPSW_KIND_24B119)
+extern "C" int switch_wlan_awdl_vif_state(const void *payload, size_t length)
+{
+    if (!gLock)
+        return ENXIO;
+    IOLockLock(gLock);
+    // en0 receives wifip2pd's observed-state feedback. The radio applies coexistence with its schedule.
+    const int status = gIf ? switch_a80211_awdl_parent_state(&gFacade, payload, length) : ENXIO;
+    IOLockUnlock(gLock);
+    return status;
+}
+#endif

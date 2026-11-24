@@ -11,6 +11,193 @@ load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 lint_files()
 
 host_shims(
+    name = "dma_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "IOKit/IOBufferMemoryDescriptor.h",
+    ],
+    stubs = "switch_wlan_dma_stubs.h",
+)
+
+host_library(
+    name = "dma",
+    srcs = ["//drivers/SwitchWLAN:SwitchWLANDma.cpp"],
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANDma.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+        "//kits/SwitchDMA:SwitchDMABuffer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
+    ],
+    deps = [":dma_kernel"],
+)
+
+host_test(
+    name = "switch_wlan_dma_test",
+    srcs = ["switch_wlan_dma_test.cpp"],
+    deps = [
+        ":dma",
+        ":dma_kernel",
+    ],
+)
+
+host_library(
+    name = "awdl_role_abi",
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANAwdlHomeTrial.h",
+        "//drivers/SwitchWLAN:awdl/awdl.h",
+        "//drivers/SwitchWLAN:awdl/awdl_apple80211.h",
+    ],
+)
+
+[
+    host_test(
+        name = "switch_wlan_awdl_role_{}_test".format(kind),
+        srcs = [
+            "switch_wlan_awdl_role_test.cpp",
+            "switch_wlan_awdl_role_fixture.h",
+        ] + (["switch_wlan_awdl_home_trial_test.cpp"] if kind == "24B119" else []),
+        data = ["//drivers/SwitchWLAN:SwitchWLANAwdl.cpp"],
+        defines = ["DEVELOPMENT=1", "SWITCH_IPSW_KIND_{}=1".format(kind)],
+        deps = [":awdl_role_abi"],
+    )
+    for kind in ("21H461", "24B119")
+]
+
+host_library(
+    name = "key_state",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANKeyState.h"],
+)
+
+host_test(
+    name = "switch_wlan_key_state_test",
+    srcs = ["switch_wlan_key_state_test.cpp"],
+    deps = [":key_state"],
+)
+
+host_library(
+    name = "station_change",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANStationChange.h"],
+)
+
+host_test(
+    name = "switch_wlan_station_change_test",
+    srcs = ["switch_wlan_station_change_test.cpp"],
+    deps = [":station_change"],
+)
+
+host_library(
+    name = "recovery",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANRecovery.h"],
+)
+
+host_test(
+    name = "switch_wlan_recovery_test",
+    srcs = ["switch_wlan_recovery_test.cpp"],
+    deps = [":recovery"],
+)
+
+host_library(
+    name = "a3_image",
+    hdrs = ["//drivers/SwitchWLAN/firmware/a3:image.h", "//drivers/SwitchWLAN/firmware/a3:abi.h"],
+)
+
+host_test(
+    name = "switch_wlan_a3_image_test",
+    srcs = ["switch_wlan_a3_image_test.cpp"],
+    deps = [":a3_image"],
+)
+
+host_library(
+    name = "a3_wire",
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANA3Wire.h",
+        "//drivers/SwitchWLAN/firmware/a3:wire.h",
+    ],
+)
+
+host_test(
+    name = "switch_wlan_a3_wire_test",
+    srcs = ["switch_wlan_a3_wire_test.cpp"],
+    deps = [":a3_wire"],
+)
+
+host_shims(
+    name = "a3_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/clock.h",
+        "kern/thread_call.h",
+        "kern/thread.h",
+    ],
+    stubs = "switch_wlan_a3_radio_stubs.h",
+)
+
+host_library(
+    name = "a3_radio",
+    srcs = [
+        "//drivers/SwitchWLAN:SwitchWLANA3Radio.cpp",
+        "//drivers/SwitchWLAN:SwitchWLANA3Data.cpp",
+        "//drivers/SwitchWLAN:SwitchWLANA3Lifecycle.cpp",
+        "//drivers/SwitchWLAN:SwitchWLANA3Schedule.cpp",
+        "//drivers/SwitchWLAN:SwitchWLANA3Clock.cpp",
+        "//drivers/SwitchWLAN:SwitchWLANA3Probe.cpp",
+        "//drivers/SwitchWLAN:SwitchWLANA3TxProbe.cpp",
+    ],
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANA3Radio.h",
+        "//drivers/SwitchWLAN:SwitchWLANA3State.h",
+        "//drivers/SwitchWLAN:SwitchWLANA3Clock.h",
+        "//drivers/SwitchWLAN:SwitchWLANA3Diagnostic.h",
+        "//drivers/SwitchWLAN:SwitchWLANA3Probe.h",
+        "//drivers/SwitchWLAN:SwitchWLANA3TxProbe.h",
+        "//drivers/SwitchWLAN:SwitchWLANAwdlRadio.h",
+        "//drivers/SwitchWLAN/firmware/a3:abi.h",
+        "//drivers/SwitchWLAN/firmware/a3:beacon.h",
+        "//drivers/SwitchWLAN/firmware/a3:diagnostic.h",
+        "//drivers/SwitchWLAN/firmware/a3:fault.h",
+    ],
+    defines = ["DEVELOPMENT=1"],
+    deps = [
+        ":a3_kernel",
+        ":a3_wire",
+        ":trace",
+        "//drivers/SwitchWLAN/awdl/test:awdl",
+    ],
+)
+
+host_test(
+    name = "switch_wlan_a3_radio_test",
+    srcs = ["switch_wlan_a3_radio_test.cpp", "switch_wlan_a3_schedule_cases.h", "switch_wlan_a3_clock_cases.h"],
+    defines = ["DEVELOPMENT=1"],
+    deps = [
+        ":a3_kernel",
+        ":a3_radio",
+    ],
+)
+
+host_test(
+    name = "switch_wlan_a3_tx_probe_test",
+    srcs = ["switch_wlan_a3_tx_probe_test.cpp"],
+    defines = ["DEVELOPMENT=1"],
+    deps = [
+        ":a3_kernel",
+        ":a3_radio",
+    ],
+)
+
+host_library(
+    name = "rom_state",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANRomState.h"],
+)
+
+host_test(
+    name = "switch_wlan_rom_test",
+    srcs = ["switch_wlan_rom_test.cpp"],
+    deps = [":rom_state"],
+)
+
+host_shims(
     name = "kernel",
     headers = [
         "IOKit/IOBufferMemoryDescriptor.h",
@@ -25,6 +212,7 @@ host_library(
     hdrs = [
         "//drivers/SwitchWLAN:SwitchWLANLink.h",
         "//drivers/SwitchWLAN:SwitchWLANPrivate.h",
+        "//drivers/SwitchWLAN:SwitchWLANDma.h",
         "//kits/SwitchDMA:SwitchDcache.h",
         "//kits/SwitchMMIO:SwitchMMIO.h",
         "//kits/SwitchMMIO:SwitchMMIOKernel.h",
@@ -47,6 +235,8 @@ host_test(
     srcs = ["switch_wlan_msgbuf_test.cpp"],
     copts = ["-Wno-unused-parameter"],
     deps = [
+        ":a3_wire",
+        ":recovery",
         ":headers",
         ":kernel",
         ":switch_wlan_msgbuf",
@@ -55,13 +245,79 @@ host_test(
 
 host_library(
     name = "trace",
-    hdrs = ["//drivers/SwitchWLAN:SwitchWLANTrace.h"],
+    hdrs = [
+        "//drivers/SwitchWLAN:SwitchWLANAwdlRxTrace.h",
+        "//drivers/SwitchWLAN:SwitchWLANTrace.h",
+    ],
 )
 
 host_test(
     name = "switch_wlan_trace_test",
     srcs = ["switch_wlan_trace_test.cpp"],
     deps = [":trace"],
+)
+
+host_library(
+    name = "awdl_presence",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANAwdlPresence.h"],
+)
+
+host_test(
+    name = "switch_wlan_awdl_presence_test",
+    srcs = ["switch_wlan_awdl_presence_test.cpp"],
+    deps = [":awdl_presence"],
+)
+
+# awdl0's neighbour cache (SwitchWLANAwdlNeighbor.c) against a model of XNU's node presence, absence and nd6_free.
+host_library(
+    name = "neighbor_model_api",
+    hdrs = ["switch_wlan_neighbor_model.h"],
+)
+
+host_shims(
+    name = "neighbor_kernel",
+    headers = [
+        "net/ethernet.h",
+        "net/if.h",
+        "net/if_dl.h",
+        "net/if_types.h",
+        "net/if_var.h",
+        "net/kpi_interface.h",
+        "net/route.h",
+        "netinet/in.h",
+        "netinet6/in6_var.h",
+        "netinet6/nd6.h",
+        "netinet6/scope6_var.h",
+        "sys/param.h",
+        "sys/socket.h",
+        "sys/sockio.h",
+        "sys/systm.h",
+    ],
+    stubs = "switch_wlan_neighbor_stubs.h",
+    deps = [":neighbor_model_api"],
+)
+
+host_library(
+    name = "neighbor",
+    srcs = [
+        "switch_wlan_neighbor_model.c",
+        "//drivers/SwitchWLAN:SwitchWLANAwdlNeighbor.c",
+        "//drivers/SwitchWLAN:SwitchWLANAwdlNeighbor.h",
+    ],
+    # Release form: the debug-only echo counters use the socket KPI, which the stand-ins leave out.
+    copts = ["-UDEBUG"],
+    defines = ["DEVELOPMENT=0"],
+    # The stand-ins replace <sys/socket.h> and friends: they stay out of the test's own (GoogleTest's) includes.
+    implementation_deps = [":neighbor_kernel"],
+)
+
+host_test(
+    name = "switch_wlan_awdl_neighbor_test",
+    srcs = ["switch_wlan_awdl_neighbor_test.cpp"],
+    deps = [
+        ":neighbor",
+        ":neighbor_model_api",
+    ],
 )
 
 # en0's data path (SwitchWLANNet.cpp) against models of the radio's transmit buffers and IONetworkingFamily's queues.
@@ -110,6 +366,37 @@ host_test(
         ":net_headers",
         ":net_kernel",
         ":switch_wlan_net",
+    ],
+)
+
+# awdl0's receive path (SwitchWLANAwdlInput.h) from an A3 record through the AWDL core to the packet the stack reads,
+# against a model of XNU's mbuf_allocpacket and mbuf_copyback.
+host_shims(
+    name = "awdl_input_kernel",
+    headers = [
+        "libkern/libkern.h",
+        "net/ethernet.h",
+        "sys/mbuf.h",
+    ],
+    stubs = "switch_wlan_awdl_input_stubs.h",
+)
+
+host_library(
+    name = "awdl_input",
+    hdrs = ["//drivers/SwitchWLAN:SwitchWLANAwdlInput.h"],
+    deps = [":awdl_input_kernel"],
+)
+
+host_test(
+    name = "switch_wlan_awdl_input_test",
+    srcs = ["switch_wlan_awdl_input_test.cpp"],
+    data = ["//drivers/SwitchWLAN:SwitchWLANAwdl.cpp"],
+    defines = ["DEVELOPMENT=1"],
+    deps = [
+        ":a3_wire",
+        ":awdl_input",
+        ":awdl_input_kernel",
+        "//drivers/SwitchWLAN/awdl/test:awdl",
     ],
 )
 

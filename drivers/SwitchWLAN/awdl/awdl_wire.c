@@ -6,6 +6,7 @@
 const uint8_t awdl_bssid[6] = {0x00, 0x25, 0x00, 0xff, 0x94, 0x73};
 const uint8_t awdl_oui[3] = {0x00, 0x17, 0xf2};
 static const uint8_t kLlc[8] = {0xaa, 0xaa, 0x03, 0x00, 0x17, 0xf2, 0x08, 0x00};
+static const uint8_t kRfc1042[6] = {0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00};
 
 // Apple's frames name a 5 GHz 80 MHz slot by its primary channel with operating class 0x80 ({149, 0x80}, OWL's
 // CHAN_OPCLASS_149), not by the block's centre as IEEE 802.11 Annex E would. A centre index is still read as its
@@ -115,8 +116,16 @@ static int parse_chanseq(const uint8_t *p, size_t n, struct awdl_chanseq *s)
         const uint8_t *e = p + 6 + (size_t)i * width;
         if (s->encoding == AWDL_CHAN_ENC_SIMPLE) {
             s->chan[i] = (struct awdl_chan){e[0], awdl_opclass_20mhz(e[0])};
-        } else if (s->encoding == AWDL_CHAN_ENC_LEGACY) {  // {flags, channel}
-            s->chan[i] = (struct awdl_chan){e[1], awdl_opclass_20mhz(e[1])};
+        } else if (s->encoding == AWDL_CHAN_ENC_LEGACY) {
+            int primary = e[1];
+            if ((e[0] & 0x0c) == 0x0c) {  // Legacy 40 MHz entries name the centre and encode the primary sideband.
+                if ((e[0] & 3) == 1)
+                    primary -= 2;
+                else if ((e[0] & 3) == 2)
+                    primary += 2;
+            }
+            const uint8_t channel = primary > 0 && primary <= 255 ? (uint8_t)primary : 0;
+            s->chan[i] = (struct awdl_chan){channel, awdl_opclass_20mhz(channel)};
         } else {
             s->chan[i] = (struct awdl_chan){e[0], e[1]};
         }
@@ -418,6 +427,14 @@ size_t awdl_data_encap(const uint8_t *eth, size_t len, const uint8_t self[6], ui
 static int msdu_at(const uint8_t *p, size_t n, const uint8_t *dst, const uint8_t *src, struct awdl_msdu *m,
                    uint16_t *seq)
 {
+    // Broadcom's AWDL firmware wraps non-A-MSDU MSDUs in an 8-byte RFC 1042 LLC/SNAP header with the inner MSDU length.
+    if (n >= 24 && !memcmp(p, kRfc1042, sizeof kRfc1042)) {
+        const size_t inner = ((size_t)p[6] << 8) | p[7];
+        if (inner < 16 || inner > n - 8)
+            return 0;
+        p += 8;
+        n = inner;
+    }
     if (n < 16 || memcmp(p, kLlc, 8) || p[8] != 0x03 || p[9] != 0x04)
         return 0;
     m->dst = dst;

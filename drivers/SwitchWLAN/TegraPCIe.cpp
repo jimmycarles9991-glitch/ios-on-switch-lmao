@@ -27,6 +27,7 @@
 #include <IOKit/IOLib.h>
 #include <kern/clock.h>
 #include "SwitchWLANPrivate.h"
+#include "SwitchWLANDma.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchCAR/SwitchUPHY.h"
@@ -36,7 +37,7 @@ namespace {
 
 // Register blocks (hekate bdk/soc/t210.h; Linux tegra210.dtsi pcie@1003000).
 constexpr uint64_t kCarPA = 0x60006000, kGpioPA = 0x6000D000, kPinmuxPA = 0x70003000, kPmcPA = 0x7000E000;
-constexpr uint64_t kMcPA = 0x70019000, kPadctlPA = 0x7009F000, kPciePA = 0x01000000, kCsPA = 0x02000000;
+constexpr uint64_t kPadctlPA = 0x7009F000, kPciePA = 0x01000000, kCsPA = 0x02000000;
 constexpr uint64_t kMselectPA = 0x50060000;
 // Downstream windows given to the endpoint's BARs: BAR0 32 KiB + BAR2 4 MiB (4 MiB aligned), both
 // non-prefetchable, inside the 208 MiB non-prefetchable aperture (nxk pcie.rs MEM_WINDOW).
@@ -95,8 +96,6 @@ constexpr uint32_t kPartPcie = 3;             // TEGRA_POWERGATE_PCIE
 constexpr uint32_t kDpdPexPads = 7u << 4;     // PEX_BIAS, PEX_CLK1, PEX_CLK2 (Linux pmc.c)
 constexpr unsigned kDpdPexPad[] = {4, 5, 6};  // the same, as the kit's pad numbers
 
-// MC SMMU (hekate bdk/mem/mc_t210.h): bit 31 of a client's ASID register routes its DMA through the SMMU.
-constexpr uint32_t kMcSmmuAfiAsid = 0x238, kAsidEnable = 1u << 31;
 
 // Pinmux pads (hekate bdk/soc/pinmux.h; nxk PADS) and their fields.
 enum : uint32_t {
@@ -254,8 +253,8 @@ bool TegraPcie::map()
     if (mapped_)
         return true;
     mapped_ = car_.map(kCarPA, 0x1000) && gpio_.map(kGpioPA, 0x1000) && pinmux_.map(kPinmuxPA, 0x1000) &&
-              pmc_.map(kPmcPA, 0x1000) && mc_.map(kMcPA, 0x1000) && padctl_.map(kPadctlPA, 0x1000) &&
-              pcie_.map(kPciePA, 0x4000) && cs_.map(kCsPA, 0x1000) && mselect_.map(kMselectPA, 0x1000);
+              pmc_.map(kPmcPA, 0x1000) && padctl_.map(kPadctlPA, 0x1000) && pcie_.map(kPciePA, 0x4000) &&
+              cs_.map(kCsPA, 0x1000) && mselect_.map(kMselectPA, 0x1000);
     return mapped_;
 }
 
@@ -616,6 +615,8 @@ void TegraPcie::epConfigWrite(uint32_t offset, uint32_t value)
 // placed (BAR0 32 KiB, BAR2 4 MiB aligned), memory decoding and bus mastering on.
 bool TegraPcie::enumerate(Endpoint &ep, char *why, size_t whyLength)
 {
+    if (!switch_wlan_dma_start(why, whyLength))
+        return false;
     rpWrite(CFG_BUS, (1u << 16) | (1u << 8));
     rpWrite(CFG_IO, 0xF0);  // I/O base above limit: no I/O window
     rpWrite(CFG_MEM, bridgeWindow(kMemWindow, kMemWindowLength));
@@ -718,11 +719,6 @@ bool TegraPcie::bringUp(Endpoint &ep, char *why, size_t whyLength)
     // MSELECT: wrap transactions for normal non-cacheable/GRE mappings, no error responses (tegra_pcie_enable_wrap;
     // hekate's L4T launcher sets the same bits).
     mselect_.modify(0, 1u << 24, 1u << 28);
-    // The AFI's DMA must not go through the SMMU, which nothing here programs (MC_SMMU_AFI_ASID bit 31).
-    if (mc_.r32(kMcSmmuAfiAsid) & kAsidEnable) {
-        IOLog("SwitchWLAN: AFI was routed through the SMMU (asid %08x), now direct\n", mc_.r32(kMcSmmuAfiAsid));
-        mc_.w32(kMcSmmuAfiAsid, 0);
-    }
     if (!powerUp(why, whyLength) || !uphyManagementClock(why, whyLength))
         return false;
     // First AFI/root-port access: powered, clocked and out of reset by now. A hang right after this line means the

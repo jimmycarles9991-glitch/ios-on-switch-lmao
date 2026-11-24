@@ -191,6 +191,60 @@ TEST_F(Coex, ExtendedScanAndShortCommands)
     EXPECT_EQ(command(0xfc57, {0x0b, 0x00}), 0u);
 }
 
+TEST_F(Coex, LeScanShapingWhileAwdlActive)
+{
+    auto u16 = [](const Bytes &b, size_t at) {
+        return (unsigned)(b[at] | (unsigned)b[at + 1] << 8);
+    };
+
+    Bytes p75 = scanParams(64, 48, 0);
+    EXPECT_EQ(coex_le_scan_shape(0, 0x200b, p75.data(), (uint32_t)p75.size()), 0);
+    EXPECT_EQ(u16(p75, 1), 64u);
+    EXPECT_EQ(u16(p75, 3), 48u);
+
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, p75.data(), (uint32_t)p75.size()), 1);
+    EXPECT_EQ(u16(p75, 1), 160u);
+    EXPECT_EQ(u16(p75, 3), 16u);
+    EXPECT_EQ(p75[5], 0x00);
+    EXPECT_EQ(p75[6], 0x01);
+
+    Bytes p10 = scanParams(480, 48, 0);
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, p10.data(), (uint32_t)p10.size()), 1);
+    EXPECT_EQ(u16(p10, 1), 160u);
+    EXPECT_EQ(u16(p10, 3), 16u);
+
+    Bytes p3 = scanParams(1544, 48, 0);
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, p3.data(), (uint32_t)p3.size()), 1);
+    EXPECT_EQ(u16(p3, 1), 514u);
+    EXPECT_EQ(u16(p3, 3), 16u);
+
+    Bytes active = scanParams(48, 48, 1);
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, active.data(), (uint32_t)active.size()), 1);
+    EXPECT_EQ(u16(active, 1), 80u);
+    EXPECT_EQ(u16(active, 3), 16u);
+
+    Bytes already = scanParams(160, 8, 0);
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, already.data(), (uint32_t)already.size()), 0);
+    EXPECT_EQ(u16(already, 1), 160u);
+    EXPECT_EQ(u16(already, 3), 8u);
+
+    Bytes smallDuty = scanParams(32, 16, 0);
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, smallDuty.data(), (uint32_t)smallDuty.size()), 1);
+    EXPECT_EQ(u16(smallDuty, 1), 160u);
+    EXPECT_EQ(u16(smallDuty, 3), 16u);
+
+    Bytes ext = hex("00000500400030000130003000");
+    EXPECT_EQ(coex_le_scan_shape(1, 0x2041, ext.data(), (uint32_t)ext.size()), 1);
+    EXPECT_EQ(u16(ext, 4), 160u);
+    EXPECT_EQ(u16(ext, 6), 16u);
+    EXPECT_EQ(u16(ext, 9), 80u);
+    EXPECT_EQ(u16(ext, 11), 16u);
+
+    Bytes shortCmd = {0x00, 0x40, 0x00};
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200b, shortCmd.data(), (uint32_t)shortCmd.size()), 0);
+    EXPECT_EQ(coex_le_scan_shape(1, 0x200c, p75.data(), (uint32_t)p75.size()), 0);
+}
+
 // --- Bluetooth: classic scans --------------------------------------------------------------------------------------
 TEST_F(Coex, PageAndInquiryScan)
 {

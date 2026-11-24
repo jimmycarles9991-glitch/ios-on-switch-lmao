@@ -37,8 +37,10 @@ kernel_driver(
         "NativeSwitchWatchdog.cpp",
         "original-bindings.S",
     ],
+    hdrs = ["//kernel/switch:include/switch/heartbeat.h"],
     abi = ["IOWatchdog"],
     hdr_deps = [
+        "drivers/ArmGIC",
         "drivers/SwitchPower",
     ],
     late = ["NativeSwitchWatchdog.cpp"],

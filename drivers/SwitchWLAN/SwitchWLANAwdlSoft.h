@@ -11,6 +11,9 @@ extern "C" {
 #endif
 
 struct swlan_awdl_caps;
+#if (DEVELOPMENT || DEBUG) && defined(SWITCH_IPSW_KIND_24B119)
+void switch_wlan_awdl_station_change(void);
+#endif
 
 // SwitchWLAN.cpp -> the soft radio. Work loop, gate held: a monitor-mode 802.11 frame; an event while AWDL is open
 // (1: the soft radio took it: received action frames, action frame completions).

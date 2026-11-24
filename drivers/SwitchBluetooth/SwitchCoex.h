@@ -67,6 +67,80 @@ static inline uint16_t switch_coex_le16(const uint8_t *p)
     return (uint16_t)(p[0] | (unsigned)p[1] << 8);
 }
 
+static inline void switch_coex_put_le16(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+/* CYW4356A3 shares one 2.4 GHz antenna and wlc_scan waits only 5 ms for PM-null ACKs, so a 30 ms
+ * / 75% BLE scan starves 2.4 GHz Wi-Fi and AWDL excursions. Cap to <=10 ms windows (<=10% passive,
+ * <=20% active) while preserving lower requested duty cycles proportionally. */
+enum {
+    SWITCH_COEX_LE_AWDL_MAX_WINDOW = 16u,
+    SWITCH_COEX_LE_AWDL_PASSIVE_DIV = 10u,
+    SWITCH_COEX_LE_AWDL_ACTIVE_DIV = 5u,
+    SWITCH_COEX_LE_MAX_INTERVAL = 0x4000u,
+};
+
+static inline bool switch_coex_le_scan_clamp(bool awdl_active, uint8_t type, uint16_t *interval, uint16_t *window)
+{
+    if (!awdl_active || !interval || !window || !*interval || !*window)
+        return false;
+    const uint16_t orig_interval = *interval;
+    const uint16_t orig_window = *window;
+    const uint16_t new_window =
+        orig_window > SWITCH_COEX_LE_AWDL_MAX_WINDOW ? SWITCH_COEX_LE_AWDL_MAX_WINDOW : orig_window;
+    const uint32_t scaled = (uint32_t)orig_interval * new_window / orig_window;
+    const uint32_t div = type == 1 ? SWITCH_COEX_LE_AWDL_ACTIVE_DIV : SWITCH_COEX_LE_AWDL_PASSIVE_DIV;
+    const uint32_t min_interval = (uint32_t)new_window * div;
+    uint32_t new_interval = scaled < min_interval ? min_interval : scaled;
+    if (new_interval > SWITCH_COEX_LE_MAX_INTERVAL)
+        new_interval = SWITCH_COEX_LE_MAX_INTERVAL;
+    if (new_window == orig_window && new_interval == orig_interval)
+        return false;
+    *interval = (uint16_t)new_interval;
+    *window = new_window;
+    return true;
+}
+
+static inline bool switch_coex_le_scan_shape(bool awdl_active, uint16_t opcode, uint8_t *p, uint32_t length)
+{
+    if (!awdl_active || !p)
+        return false;
+    if (opcode == SWITCH_COEX_OP_LE_SCAN_PARAMS) {
+        if (length < 5)
+            return false;
+        uint16_t interval = switch_coex_le16(p + 1);
+        uint16_t window = switch_coex_le16(p + 3);
+        if (!switch_coex_le_scan_clamp(true, p[0], &interval, &window))
+            return false;
+        switch_coex_put_le16(p + 1, interval);
+        switch_coex_put_le16(p + 3, window);
+        return true;
+    }
+    if (opcode == SWITCH_COEX_OP_LE_EXT_SCAN_PARAMS) {
+        if (length < 8)
+            return false;
+        bool changed = false;
+        uint32_t offset = 3;
+        for (unsigned bit = 0; bit < 8 && offset + 5 <= length; ++bit) {
+            if (!(p[2] & (1u << bit)))
+                continue;
+            uint16_t interval = switch_coex_le16(p + offset + 1);
+            uint16_t window = switch_coex_le16(p + offset + 3);
+            if (switch_coex_le_scan_clamp(true, p[offset], &interval, &window)) {
+                switch_coex_put_le16(p + offset + 1, interval);
+                switch_coex_put_le16(p + offset + 3, window);
+                changed = true;
+            }
+            offset += 5;
+        }
+        return changed;
+    }
+    return false;
+}
+
 // One command of the client's on its way to the controller: the state it sets. Returns the SWITCH_COEX_* parts it
 // changed (0 for anything else, a short command, or the same values again).
 static inline unsigned switch_coex_bt_command(struct switch_coex_bt *s, uint16_t opcode, const uint8_t *p,

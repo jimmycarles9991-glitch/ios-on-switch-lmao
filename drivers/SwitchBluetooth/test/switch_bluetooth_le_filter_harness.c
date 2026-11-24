@@ -8,6 +8,11 @@ bool h_le_capabilities(const uint8_t *ret, uint8_t length)
     return switch_le_filter_capabilities(ret, length);
 }
 
+bool h_le_host_command(uint16_t opcode, const uint8_t *params, uint8_t length)
+{
+    return switch_le_filter_host_command(opcode, params, length);
+}
+
 bool h_le_take(switch_le_filter *f, uint16_t opcode, const uint8_t *params, uint8_t length, uint8_t *sub)
 {
     return switch_le_filter_take(f, opcode, params, length, sub);

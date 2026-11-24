@@ -62,6 +62,16 @@
 #   switch_fsctl_diag_test   <switch/fsctl_diag.h>: a refused APFS fsctl's file described by its first bytes (an Apple
 #                            texture's format, size and internal LZFSE, a KTX's format and size), and both trees'
 #                            fsctl_internal reporting each filesystem fsctl after its answer, nothing in release
+#   switch_necp_diag_test    <switch/necp.h>: the first local-network drop of each of 256 processes is logged; 12377's
+#                            NECP reports client and alerted socket drops under its policy lock with the last skip
+#                            their evaluation took, a drop dumps the policy table at most four times a boot (first
+#                            drop, then only after a change in orders 18000-18200), the dropping session's window
+#                            first; adds and deletes there are logged, then counted; <switch/cryptex_map.h>: a shared
+#                            cache refused for its volume is logged; 10063 has no hook, nothing in release
+#   switch_heartbeat_test    kernel/switch/diag/heartbeat.h: WDT4's interrupt 11.75-12 s and warm reset 47.75-48 s
+#                            after the last beat in the TRM's TMR6/WDT4 words, only on an idle timer block; a running
+#                            core without interrupts as class a, any interrupt as a late beat (class b), no wrap on a
+#                            later sample; held across power steps, a watchdog panic, nothing in release
 #   switch_protection_test   <switch/protection_rules.h>: an unlabelled vnode reads as D before the epoch and as a new one
 #                            after it, a new one is labelled only when it would read otherwise, listxattr loses only
 #                            the label; 12377's hooks label after authorization and the MAC check, a failed label fails
@@ -614,6 +624,57 @@ host_test(
         "//kernel/switch:vfs/fsctl_diag.c",
         "//kernel/xnu-10063.141.1/bsd:vfs/vfs_syscalls.c",
         "//kernel/xnu-12377.121.6/bsd:vfs/vfs_syscalls.c",
+    ],
+    includes = ["."],
+)
+
+copy_file(
+    name = "switch_necp_diag",
+    src = "//kernel/switch:include/switch/necp.h",
+    out = "switch/necp.h",
+)
+
+host_test(
+    name = "switch_necp_diag_test",
+    srcs = [
+        "switch/necp.h",
+        "switch_necp_diag_test.cpp",
+    ],
+    data = [
+        "//kernel/switch:diag/cryptex_map.c",
+        "//kernel/switch:diag/necp.c",
+        "//kernel/switch:diag/necp_table.c",
+        "//kernel/switch:include/switch/cryptex_map.h",
+        "//kernel/switch:include/switch/necp.h",
+        "//kernel/xnu-10063.141.1/bsd:net/necp.c",
+        "//kernel/xnu-10063.141.1/bsd:vm/vm_unix.c",
+        "//kernel/xnu-12377.121.6/bsd:net/necp.c",
+        "//kernel/xnu-12377.121.6/bsd:net/necp.h",
+        "//kernel/xnu-12377.121.6/bsd:vm/vm_unix.c",
+    ],
+    includes = ["."],
+)
+
+copy_file(
+    name = "switch_heartbeat",
+    src = "//kernel/switch:diag/heartbeat.h",
+    out = "switch_heartbeat.h",
+)
+
+host_test(
+    name = "switch_heartbeat_test",
+    srcs = [
+        "switch_heartbeat.h",
+        "switch_heartbeat_test.cpp",
+    ],
+    data = [
+        "//diagnostics/switch:SwitchPanicHeartbeat.c",
+        "//diagnostics/switch:SwitchPanicHeartbeat.h",
+        "//diagnostics/switch:SwitchPanicSave.c",
+        "//diagnostics/switch:SwitchPowerTrail.c",
+        "//drivers/NativeSwitchWatchdog:NativeSwitchWatchdog.cpp",
+        "//kernel/switch:diag/heartbeat.c",
+        "//kernel/switch:include/switch/heartbeat.h",
     ],
     includes = ["."],
 )

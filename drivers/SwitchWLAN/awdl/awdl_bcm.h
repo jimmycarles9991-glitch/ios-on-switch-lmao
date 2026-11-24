@@ -77,8 +77,7 @@ struct awdl_fw_event {
 };
 
 // ---- the bring-up probe: which AWDL iovars this firmware's table has --------------------------------------------------
-// GET of each, once a boot (no side effects: peer_op asks INFO for no one, interface_create its version). A name
-// the table lacks answers UNSUPPORTED; anything else (OK, BADARG, NOTFOUND, BUFTOOSHORT, ...) means the handler exists.
+// Station-context GETs (peer_op asks INFO, interface_create its version); AWDL-interface support can differ.
 enum bcm_probe_item {
     BCM_PROBE_INTERFACE_CREATE,  // "bsscfg:interface_create" version query, as brcmf_feat_awdl_check
     BCM_PROBE_AWDL_IF,
@@ -108,6 +107,8 @@ enum bcm_probe_item {
 extern const char *const bcm_probe_names[BCM_PROBE_COUNT];
 // The GET_VAR request for one item: name, NUL, parameters. Returns its length (0 if `size` is too small).
 size_t bcm_probe_request(unsigned item, uint8_t *out, size_t size);
+size_t switch_awdl_probe_reply_size(unsigned item);
+int switch_awdl_reply_is_echo(const uint8_t *request, size_t request_len, const uint8_t *reply, size_t reply_len);
 
 struct bcm_awdl_probe {
     int16_t status[BCM_PROBE_COUNT];  // BCME code, or BCM_PROBE_NO_ANSWER
@@ -119,7 +120,7 @@ struct bcm_awdl_probe {
 void bcm_probe_record(struct bcm_awdl_probe *p, unsigned item, int status, const uint8_t *reply, size_t length);
 // The handler exists (the probe ran and the firmware answered with anything but UNSUPPORTED).
 int bcm_probe_has(const struct bcm_awdl_probe *p, unsigned item);
-// Bit `item` set for every probe item this firmware lacks (the bring-up skips those iovars).
+// Bit `item` set for each probe rejected in its queried interface and direction.
 uint32_t bcm_probe_absent(const struct bcm_awdl_probe *p);
 
 enum bcm_awdl_api {
@@ -314,7 +315,9 @@ uint8_t bcm_chanspec_primary(uint16_t chanspec);
 // The firmware carries AWDL data as 802.3 frames: DA, SA, length, then LLC/SNAP aa aa 03 00 17 f2 08 00, the AWDL
 // data header 03 04, le16 sequence, 00 00, and the original ethertype (be16).
 enum {
-    BCM_AWDL_DATA_HDR_LEN = 16
+    BCM_AWDL_DATA_HDR_LEN = 16,
+    SWITCH_AWDL_MTU = 1500 - BCM_AWDL_DATA_HDR_LEN,
+    SWITCH_AWDL_NATIVE_FRAME_MAX = 14 + SWITCH_AWDL_MTU
 };
 
 // Ethernet frame -> the 802.3 frame for the firmware. Returns its length (0 if malformed or `size` is too small).

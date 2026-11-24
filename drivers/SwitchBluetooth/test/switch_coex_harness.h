@@ -10,6 +10,7 @@ extern "C" {
 
 void coex_reset(void);
 unsigned coex_command(uint16_t opcode, const uint8_t *params, uint32_t length);
+int coex_le_scan_shape(int awdl_active, uint16_t opcode, uint8_t *params, uint32_t length);
 int coex_describe(char *out, size_t size);
 void coex_state(uint32_t *out);
 int bt_flags_describe(uint32_t flags, char *out, size_t size);

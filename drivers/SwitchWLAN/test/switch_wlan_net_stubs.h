@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,8 @@ struct IOLock {
     int held = 0;
 };
 
+inline int gLocksHeld;
+
 inline IOLock *IOLockAlloc()
 {
     return new IOLock;
@@ -53,11 +56,13 @@ inline IOLock *IOLockAlloc()
 inline void IOLockLock(IOLock *l)
 {
     ++l->held;
+    ++gLocksHeld;
 }
 
 inline void IOLockUnlock(IOLock *l)
 {
     --l->held;
+    --gLocksHeld;
 }
 
 inline uint64_t mach_absolute_time()
@@ -242,10 +247,13 @@ public:
     };
 
     std::vector<Report> reports;
+    std::function<void()> onSetLinkStatus;
 
     bool setLinkStatus(UInt32 status, const IONetworkMedium * = nullptr, UInt64 speed = 0, OSData * = nullptr)
     {
         reports.push_back({status, speed});
+        if (onSetLinkStatus)
+            onSetLinkStatus();
         return true;
     }
 };

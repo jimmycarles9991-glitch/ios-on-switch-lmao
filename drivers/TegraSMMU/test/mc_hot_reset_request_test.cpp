@@ -60,6 +60,48 @@ TEST_F(McHotResetRequest, AReleaseThatDoesNotTakeIsOneLineNamingTheClient)
     EXPECT_EQ(gLines[0], "TegraSMMU: MC hot reset release of VIC did not take: MC 0x200 reads 0x40000 after 0 was "
                          "written\n");
 }
+
+TEST_F(McHotResetRequest, AfiAttachmentRestoresBothClientsAndRejectsAnotherDirectory)
+{
+    constexpr uint32_t asid = 118, ptb = 0xe009a000, group = 0x238;
+    char line[160] = {};
+    gRegisters[kMc + 0x228] = 1u << 14;
+    ASSERT_EQ(tegra_smmu_attach(asid, ptb, group, 0x228, 1u << 14, line, sizeof(line)), 0);
+    gRegisters[kMc + 0x22c] = 1u << 17;
+    ASSERT_EQ(tegra_smmu_attach(asid, ptb, group, 0x22c, 1u << 17, line, sizeof(line)), 0);
+    gRegisters.clear();
+    gRegisters[kMc + 0x22c] = 1u << 17;
+    gRegisters[kMc + 0x228] = 1u << 14;
+    ASSERT_EQ(switch_smmu_restore(asid, ptb, group, line, sizeof(line)), 0);
+    EXPECT_EQ(gRegisters[kMc + 0x228], 1u << 14);
+    EXPECT_EQ(gRegisters[kMc + 0x22c], 1u << 17);
+    EXPECT_EQ(gRegisters[kMc + group], (1u << 31) | asid);
+    const auto before = gRegisters;
+    EXPECT_LT(tegra_smmu_attach(asid, ptb + 1, group, 0x228, 1u << 14, line, sizeof(line)), 0);
+    EXPECT_EQ(gRegisters, before);
+    EXPECT_LT(tegra_smmu_attach_wide(asid, ptb, group, 0x228, 1u << 14, line, sizeof(line)), 0);
+    EXPECT_EQ(gRegisters, before);
+    EXPECT_LT(tegra_smmu_attach(asid, ptb + 1, 0x284, 0x234, 1u << 12, line, sizeof(line)), 0);
+    EXPECT_EQ(gRegisters[kMc + 0x20], ptb);
+    tegra_smmu_detach(asid, group);
+    EXPECT_LT(switch_smmu_restore(asid, ptb, group, line, sizeof(line)), 0);
+}
+
+TEST_F(McHotResetRequest, FailedSecondClientIsNeverRetainedForResume)
+{
+    constexpr uint32_t asid = 117, ptb = 0xe009b000, group = 0x238;
+    char line[160] = {};
+    gRegisters[kMc + 0x228] = 1u << 14;
+    ASSERT_EQ(tegra_smmu_attach(asid, ptb, group, 0x228, 1u << 14, line, sizeof(line)), 0);
+    gRegisters[kMc + 0x22c] = 0;
+    EXPECT_LT(tegra_smmu_attach(asid, ptb, group, 0x22c, 1u << 17, line, sizeof(line)), 0);
+    gRegisters.clear();
+    gRegisters[kMc + 0x228] = 1u << 14;
+    ASSERT_EQ(switch_smmu_restore(asid, ptb, group, line, sizeof(line)), 0);
+    EXPECT_EQ(gRegisters[kMc + 0x228], 1u << 14);
+    EXPECT_EQ(gRegisters[kMc + 0x22c], 0u);
+    tegra_smmu_detach(asid, group);
+}
 }  // namespace
 
 IOSimpleLock *IOSimpleLockAlloc()

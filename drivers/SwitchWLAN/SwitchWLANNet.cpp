@@ -30,6 +30,7 @@ uint32_t gRxFrames, gRxErrors, gRxNoBuffer, gTxOversize, gTxStarts, gTxBatches, 
 IOLock *gLinkLock;
 bool gLinkUp;
 uint64_t gLinkBps;
+uint32_t gLinkGen;
 
 // The multicast filter: the stack's groups and whether a filter wants every group.
 uint8_t gGroups[SWLAN_MCAST_MAX][6];
@@ -56,9 +57,19 @@ void report_link()
 {
     if (!gController || !gLinkLock)
         return;
+    // setLinkStatus enters the controller's work loop while callers like set_link already hold it; drop gLinkLock
+    // across the call to avoid lock-order inversion, and retry if state changed concurrently.
     IOLockLock(gLinkLock);
-    gController->setLinkStatus(kIONetworkLinkValid | (gLinkUp ? kIONetworkLinkActive : 0), nullptr,
-                               gLinkUp ? gLinkBps : 0);
+    for (;;) {
+        const bool up = gLinkUp;
+        const uint64_t bps = gLinkBps;
+        const uint32_t gen = gLinkGen;
+        IOLockUnlock(gLinkLock);
+        gController->setLinkStatus(kIONetworkLinkValid | (up ? kIONetworkLinkActive : 0), nullptr, up ? bps : 0);
+        IOLockLock(gLinkLock);
+        if (gLinkGen == gen)
+            break;
+    }
     IOLockUnlock(gLinkLock);
 }
 
@@ -283,6 +294,7 @@ void swlan::net::set_link(bool up)
         return;
     IOLockLock(gLinkLock);
     gLinkUp = up;
+    ++gLinkGen;
     IOLockUnlock(gLinkLock);
     report_link();
 }
@@ -323,6 +335,8 @@ extern "C" void switch_wlan_net_rate(uint64_t bps)
     IOLockLock(gLinkLock);
     const bool changed = gLinkBps != bps;
     gLinkBps = bps;
+    if (changed)
+        ++gLinkGen;
     IOLockUnlock(gLinkLock);
     if (changed)
         report_link();

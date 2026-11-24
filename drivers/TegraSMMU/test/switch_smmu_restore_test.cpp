@@ -28,7 +28,7 @@ class SmmuRestore : public testing::Test {
 public:
     Registers io;
     tegra_smmu_attachments attachments{};
-    tegra_smmu_attachment display{126, 0x8000800, 0x240, 0x228, 7};
+    tegra_smmu_attachment display{126, 0x8000800, 0x240, 0x228, 7, false};
     char line[160]{};
 
 protected:
@@ -46,17 +46,20 @@ protected:
 TEST_F(SmmuRestore, RestoresRetainedDirectoryAndEveryClientAfterFirmwareStateChanged)
 {
     io.words[display.asidReg / 4] = (1u << 31) | 5;
-    io.words[display.translationReg / 4] = 1u << 25;
+    io.words[display.translationReg / 4] = (1u << 25) | display.translationBits;
     ASSERT_EQ(restore(), 0);
     EXPECT_EQ(io.words[0x20 / 4], display.ptb);
     EXPECT_EQ(io.words[display.asidReg / 4], (1u << 31) | display.asid);
-    EXPECT_EQ(io.words[display.translationReg / 4], (1u << 25) | display.translationBits);
+    for (const auto &[offset, value] : io.writes)
+        EXPECT_NE(offset, display.translationReg) << "the translation enables are the secure world's";
     unsigned flushes = 0;
     for (const auto &[offset, value] : io.writes) {
         if (offset == switch_smmu::kTlbFlush) {
             ++flushes;
             EXPECT_EQ(value, (1u << 31) | (126u << 24));
         }
+        if (offset == switch_smmu::kPtcFlush)
+            EXPECT_EQ(value, 1u << 3) << "flush all, PTC_NO_WAIT_IDLE_FLUSH left at its reset 1";
     }
     EXPECT_EQ(flushes, 2u);
 }
@@ -86,15 +89,58 @@ TEST_F(SmmuRestore, FailedDirectoryReadbackNeverEnablesTranslation)
 
 TEST_F(SmmuRestore, FailedSwgroupReadbackIsNotReportedAsRestored)
 {
+    io.words[display.translationReg / 4] = display.translationBits;
     io.refused = display.asidReg;
     EXPECT_LT(restore(), 0);
     EXPECT_EQ(io.words[display.asidReg / 4], 0u);
 }
 
-TEST_F(SmmuRestore, FailedClientTranslationReadbackDoesNotEnableTheSwgroup)
+// A 34-bit client's swgroup (XUSB_DEV here) gets its ASID in all four fields, one per va[33:32], and is restored so.
+TEST_F(SmmuRestore, WideSwgroupGetsTheAsidInEveryField)
 {
-    io.refused = display.translationReg;
+    const tegra_smmu_attachment dev{121, 0x8001800, 0x28c, 0x230, 3u << 12, true};
+    ASSERT_TRUE(tegra_smmu_attachments_note(&attachments, &dev));
+    io.words[dev.translationReg / 4] = dev.translationBits;
+    ASSERT_EQ(switch_smmu::restore(io, attachments, 121, 0x8001800, 0x28c, line, sizeof(line)), 0) << line;
+    EXPECT_EQ(io.words[0x28c / 4], 0xf979'7979u);
+    EXPECT_EQ(switch_smmu::selection(display), (1u << 31) | 126u);
+}
+
+TEST_F(SmmuRestore, ClientTranslationBitsOffDoNotEnableTheSwgroup)
+{
+    io.words[display.translationReg / 4] = display.translationBits & ~1u;
     EXPECT_LT(restore(), 0);
     EXPECT_EQ(io.words[display.asidReg / 4], 0u);
+}
+
+TEST_F(SmmuRestore, BothAfiClientsAreRequiredWithoutWritingSecureRegisters)
+{
+    tegra_smmu_attachment read{118, 0xe009a000, 0x238, 0x228, 1u << 14, false};
+    tegra_smmu_attachment write{118, read.ptb, read.asidReg, 0x22c, 1u << 17, false};
+    ASSERT_TRUE(tegra_smmu_attachments_note(&attachments, &read));
+    ASSERT_TRUE(tegra_smmu_attachments_note(&attachments, &write));
+    io.words[read.translationReg / 4] = (1u << 5) | read.translationBits;
+    io.words[write.translationReg / 4] = (1u << 11) | write.translationBits;
+    ASSERT_EQ(restore(read.asid, read.ptb, read.asidReg), 0);
+    EXPECT_EQ(io.words[read.asidReg / 4], (1u << 31) | read.asid);
+    EXPECT_EQ(io.words[display.asidReg / 4], 0u);
+    for (const auto &[offset, value] : io.writes) {
+        EXPECT_NE(offset, read.translationReg);
+        EXPECT_NE(offset, write.translationReg);
+    }
+    io.writes.clear();
+    io.words[read.asidReg / 4] = 0;
+    io.words[write.translationReg / 4] = 1u << 11;
+    EXPECT_LT(restore(read.asid, read.ptb, read.asidReg), 0);
+    EXPECT_EQ(io.words[read.asidReg / 4], 0u);
+}
+
+TEST_F(SmmuRestore, ConflictingRetainedClientsCannotProgramADirectory)
+{
+    auto conflicting = display;
+    conflicting.ptb++;
+    attachments.entry[attachments.count++] = conflicting;
+    EXPECT_LT(restore(), 0);
+    EXPECT_TRUE(io.writes.empty());
 }
 }
