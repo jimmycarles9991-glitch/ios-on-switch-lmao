@@ -60,9 +60,15 @@ jobs:
           except Exception as e:
               print('simctl json did not parse:', e)
           " || true
-          xcrun simctl runtime delete --all 2>/dev/null || {
-            sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
-          }
+          # `simctl runtime delete --all` is not supported on every Xcode, and deleting only the Profiles
+          # leaves the multi-gigabyte runtime images in Volumes in place. Remove both, plus the user's
+          # simulator devices and DerivedData, so df actually moves before the compose stage checks it.
+          xcrun simctl runtime delete --all 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Volumes/* 2>/dev/null || true
+          sudo rm -rf /Library/Developer/CoreSimulator/Profiles/Runtimes/* 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/Volumes/* 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/Devices/* 2>/dev/null || true
+          sudo rm -rf /Users/runner/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
           # The image run's runfiles reach out to: the pip hub, the Xcode repo, the IPSW mods, the Apple
           # crosstool, Mesa. Everything else (LLVM, Rust, arm gcc, Apple OSS tarballs, ...) only fed
           # build actions that are already done; drop their last remaining extraction.
