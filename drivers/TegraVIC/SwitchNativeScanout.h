@@ -6,6 +6,8 @@ struct SwitchNativeScanout {
     SwitchNativeSurfaceView view = {};
     switch_gpu_cpu_lease *lease = nullptr;
     switch_gpu_backing_info allocation = {};
+    switch_gpu_backing_token promises[SWITCH_GPU_BACKING_PROMISES] = {};
+    uint32_t promiseCount = 0;
     uint64_t pitchOffset = 0;
 };
 
@@ -25,7 +27,20 @@ void switch_native_scanout_release(SwitchNativeScanout *scanout);
 // The display latched (or dropped) the frame the scanout shows: a recorded turn's request signals go now.
 void switch_native_scanout_deliver(SwitchNativeScanout *scanout);
 
-// What a scanout of the picture is ordered after: its producer, and a recorded turn's request waits. At most capacity.
+inline bool switch_native_scanout_same_promises(const SwitchNativeScanout &a, const SwitchNativeScanout &b)
+{
+    if (a.promiseCount != b.promiseCount)
+        return false;
+    for (uint32_t i = 0; i < a.promiseCount; ++i)
+        if (a.promises[i].engine != b.promises[i].engine || a.promises[i].queue != b.promises[i].queue ||
+            a.promises[i].reset_generation != b.promises[i].reset_generation ||
+            a.promises[i].value != b.promises[i].value)
+            return false;
+    return true;
+}
+
+// What a scanout of the picture is ordered after: its producer, a recorded turn's request waits, and any writer
+// promises captured atomically with the snapshot. At most capacity.
 inline uint32_t switch_native_scanout_dependencies(const SwitchNativeScanout &scanout, switch_gpu_backing_token *tokens,
                                                    uint32_t capacity)
 {
@@ -35,5 +50,8 @@ inline uint32_t switch_native_scanout_dependencies(const SwitchNativeScanout &sc
     for (uint32_t i = 0; i < scanout.view.waitCount && count < capacity; ++i)
         if (scanout.view.waits[i].engine)
             tokens[count++] = scanout.view.waits[i];
+    for (uint32_t i = 0; i < scanout.promiseCount && count < capacity; ++i)
+        if (scanout.promises[i].engine)
+            tokens[count++] = scanout.promises[i];
     return count;
 }

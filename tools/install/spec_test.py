@@ -25,7 +25,9 @@ class SpecTest(unittest.TestCase):
         self.assertEqual(s['partition_name'], 'iOS')
         self.assertEqual(s['partition_type'], '7C3457EF-0000-11AA-AA11-00306543ECAC')
         self.assertEqual(s['volumes']['data']['uuid'], 'D1B1D053-D0A6-496C-8625-A947A3DA863E')
+        self.assertEqual(s['volumes']['data']['name'], 'Switch-iOS-Data')
         self.assertEqual(s['volumes']['preboot']['uuid'], '4AA4A761-5138-439D-9A30-D4138F6887FA')
+        self.assertEqual(s['volumes']['preboot']['name'], 'Switch-iOS-Preboot')
 
     def test_the_selected_kind_volumes(self):
         """The System volume and cryptexes the kernel mounts are the ones the selected IPSW kind's image holds."""

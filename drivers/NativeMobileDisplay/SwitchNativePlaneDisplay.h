@@ -78,7 +78,8 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
             slot.mappedGeneration != allocation.allocation_generation || slot.low != image.readLow ||
             slot.high != image.readHigh)
             continue;
-        if (slot.native->lease && slot.native->allocation.content_generation == allocation.content_generation) {
+        if (slot.native->lease && slot.native->allocation.content_generation == allocation.content_generation &&
+            (!scanout.promiseCount || switch_native_scanout_same_promises(*slot.native, scanout))) {
             slot.used = ++planeSlotUses;
             releaseLocalBacking();
             switch_native_scanout_release(&scanout);
@@ -136,12 +137,7 @@ int planeMapSnapshot(SwitchNativeScanout &scanout, const native_planes::Image &i
 // writer promises (SwitchGpuWriterPromise.h), which the set's GPU fence acquires.
 static uint32_t planeOverlayDependencies(const SwitchNativeScanout &native, switch_gpu_backing_token *tokens)
 {
-    const uint32_t count = switch_native_scanout_dependencies(native, tokens, kPlaneOverlayDependencies);
-    const int promised = native.view.native
-                             ? switch_gpu_backing_promise_tokens(native.view.native, 0, 0, tokens + count,
-                                                                 kPlaneOverlayDependencies - count)
-                             : 0;
-    return count + (promised > 0 ? uint32_t(promised) : 0u);
+    return switch_native_scanout_dependencies(native, tokens, kPlaneOverlayDependencies);
 }
 
 // A picture's producer, a recorded turn's request wait or a writer promise not complete yet: the set goes out once the

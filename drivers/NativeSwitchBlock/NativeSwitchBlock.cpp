@@ -61,11 +61,13 @@
 #include "SwitchAdma.h"
 #include "SwitchQueue.h"
 #include "SwitchSdPool.h"
+#include "SwitchSdRoot.h"
 #include "SwitchSdVolume.h"
 #include "SwitchSdWindow.h"
 #include "SwitchSdWriteFence.h"
 #include "SwitchSdBus.h"
 #include "SwitchSdCard.h"
+#include "SwitchSdCardDetect.h"
 #include "SwitchSdTrim.h"
 #if DEVELOPMENT || DEBUG
 #include <sys/sysctl.h>
@@ -316,28 +318,6 @@ constexpr Speed kSpeeds[] = {{SOURCE_PLLC4_OUT2, 0, 0, 199680},
                              {SOURCE_PLLC4_OUT2, 0, 1, 99840},
                              {SOURCE_PLLC4_OUT2, 0, 2, 49920}};
 constexpr unsigned kSpeedCount = sizeof(kSpeeds) / sizeof(kSpeeds[0]);
-
-inline uint32_t le32(const uint8_t *p)
-{
-    return p[0] | static_cast<uint32_t>(p[1]) << 8 | static_cast<uint32_t>(p[2]) << 16 |
-           static_cast<uint32_t>(p[3]) << 24;
-}
-
-inline uint64_t le64(const uint8_t *p)
-{
-    return le32(p) | static_cast<uint64_t>(le32(p + 4)) << 32;
-}
-
-bool partitionNamed(const uint8_t *entry, const char *name)
-{
-    const uint8_t *field = entry + 56;
-    unsigned i = 0;
-    for (; name[i]; ++i) {
-        if (i == 36 || field[2 * static_cast<size_t>(i)] != static_cast<uint8_t>(name[i]) || field[2 * i + 1])
-            return false;
-    }
-    return i == 36 || ((field[2 * static_cast<size_t>(i)] == 0u) && (field[2 * i + 1] == 0u));
-}
 
 struct Request {
     Request *next;
@@ -634,6 +614,8 @@ class NativeSwitchBlock : public IOService {
     // waits for and sleeps on irqEvent; the filter disables them again (lowering the line) and wakes it.
     IOWorkLoop *irqLoop = nullptr;
     IOFilterInterruptEventSource *irqSource = nullptr;
+    IOFilterInterruptEventSource *cdSource = nullptr;
+    bool cardDetectArmed = false;
     int irqEvent = 0;
 #if DEVELOPMENT || DEBUG
     struct {
@@ -711,6 +693,10 @@ class NativeSwitchBlock : public IOService {
     int awaitRelease();
     void startInterrupt();
     static bool interruptFilter(OSObject *, IOFilterInterruptEventSource *);
+    void startCardDetect();
+    static bool cardDetectFilter(OSObject *, IOFilterInterruptEventSource *);
+    void checkCardPresent(const char *where);
+    [[noreturn]] void cardRemovedPanic(const char *where, int level);
     bool waitSignal(uint32_t signals, uint64_t timeoutNs);
     uint32_t awaitStatus(uint32_t awaited, uint64_t limitNs);
     [[noreturn]] void interruptLost(uint32_t awaited);
@@ -822,7 +808,7 @@ public:
     bool filesOnline = false;
     bool filesPublishQueued = false;
 
-    bool findFiles(switch_sd_files_slice *);
+    int findFiles(switch_sd_files_slice *);
     void verifyFilesCard();
     IOReturn sync(const SwitchSdWindow *window);
     IOReturn syncLocked(const SwitchSdWindow *window, bool acknowledgeErrors = true);
@@ -1190,6 +1176,46 @@ void NativeSwitchBlock::startInterrupt()
     irqSource->enable();
 }
 
+bool NativeSwitchBlock::cardDetectFilter(OSObject *owner, IOFilterInterruptEventSource *)
+{
+    static_cast<NativeSwitchBlock *>(owner)->checkCardPresent("interrupt");
+    return false;
+}
+
+void NativeSwitchBlock::cardRemovedPanic(const char *where, int level)
+{
+    panic("SwitchSD: SD card removed (%s, GPIO PZ1=%d)", where, level);
+}
+
+void NativeSwitchBlock::checkCardPresent(const char *where)
+{
+    const bool armed = __atomic_load_n(&cardDetectArmed, __ATOMIC_ACQUIRE);
+    if (!armed)
+        return;
+    const int level = tegra_gpio_read(TEGRA_GPIO_SD_CD);
+    if (switchSdShouldPanicOnRemoval(armed, panic_active() != 0, level))
+        cardRemovedPanic(where, level);
+}
+
+void NativeSwitchBlock::startCardDetect()
+{
+    // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): TegraGPIO keeps its nubs; this reference is not ours
+    IOService *nub = tegra_gpio_interrupt_nub(TEGRA_GPIO_SD_CD, TEGRA_GPIO_EDGE_RISING);
+    if (!nub) {
+        char state[256];
+        tegra_gpio_describe(TEGRA_GPIO_SD_CD, state, sizeof(state));
+        panic("SwitchSD: no interrupt nub for SD card detect (PZ1): %s", state);
+    }
+    cdSource = irqLoop ? IOFilterInterruptEventSource::filterInterruptEventSource(
+                             this, nullptr, &NativeSwitchBlock::cardDetectFilter, nub, 0)
+                       : nullptr;
+    if (!cdSource || irqLoop->addEventSource(cdSource) != kIOReturnSuccess)
+        panic("SwitchSD: cannot attach SD card detect interrupt (GPIO %u, PZ1)", TEGRA_GPIO_SD_CD);
+    __atomic_store_n(&cardDetectArmed, true, __ATOMIC_RELEASE);
+    cdSource->enable();
+    checkCardPresent("boot");
+}
+
 // Software-reset the CMD and DAT state machines (hekate _sdmmc_reset_cmd_data); STATUS is left alone.
 void NativeSwitchBlock::resetLines()
 {
@@ -1375,6 +1401,7 @@ int NativeSwitchBlock::transfer(uint64_t lba, uint32_t sectors, bool write, uint
 bool NativeSwitchBlock::failed(int step, uint32_t status, uint64_t lba, uint32_t sectors, bool write,
                                unsigned descriptors, bool retry)
 {
+    checkCardPresent("io error");
     IOLog("SwitchSD: %s%s lba=%llu n=%u failed step=%d status=0x%08x present=0x%08x acmd=0x%04x\n",
           retry ? "retry " : "", write ? "write" : "read", lba, sectors, step, status, r32(PRESENT),
           r16(AUTO_CMD_ERROR));
@@ -3468,6 +3495,9 @@ void NativeSwitchBlock::suspend()
         IOLockSleep(queueLock, &working, THREAD_UNINT);
     IOLockUnlock(queueLock);
     dmaSuspend();
+    __atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE);
+    if (cdSource)
+        cdSource->disable();
     if (irqSource)
         irqSource->disable();
     powerOffCard();
@@ -3557,6 +3587,12 @@ void NativeSwitchBlock::releaseRequestPool()
 
 void NativeSwitchBlock::stop(IOService *provider)
 {
+    __atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE);
+    if (cdSource) {
+        cdSource->disable();
+        if (irqLoop)
+            irqLoop->removeEventSource(cdSource);
+    }
     if (queueLock) {
         IOLockLock(queueLock);
         suspended = true;
@@ -3580,6 +3616,7 @@ void NativeSwitchBlock::stop(IOService *provider)
 
 void NativeSwitchBlock::free()
 {
+    OSSafeReleaseNULL(cdSource);
     releaseRequestPool();
     IOService::free();
 }
@@ -3604,6 +3641,9 @@ void NativeSwitchBlock::shutdown()
         IOLockSleep(queueLock, &working, THREAD_UNINT);
     Request *const abandoned = drainQueueLocked();
     IOLockUnlock(queueLock);
+    __atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE);
+    if (cdSource)
+        cdSource->disable();
     if (abandoned) {
         Batch b = {};
         b.first = abandoned;
@@ -3649,6 +3689,11 @@ IOReturn NativeSwitchBlock::callPlatformFunction(const OSSymbol *function, bool 
 
 void NativeSwitchBlock::resume()
 {
+    if (cdSource) {
+        __atomic_store_n(&cardDetectArmed, true, __ATOMIC_RELEASE);
+        cdSource->enable();
+        checkCardPresent("resume");
+    }
     powerOnController();
     if (irqSource)
         irqSource->enable();
@@ -3760,41 +3805,27 @@ bool NativeSwitchBlock::setup()
         haveCid = switch_sd_boot_card_cid(cid);
     identify();
     disableFoundCache();
-    const uint64_t entriesLBA = le64(header + 72);
-    const uint32_t entryCount = le32(header + 80);
-    const uint32_t entrySize = le32(header + 84);
-    if (memcmp(header, "EFI PART", 8) || entrySize < 128 || entrySize > 512 || (entrySize & 7) || !entryCount ||
-        entryCount > (64 * 1024) / entrySize || entriesLBA < 2 || entriesLBA > UINT32_MAX) {
+    SwitchSdGptArray array;
+    if (!switchSdGptArray(header, &array)) {
         IOLog("SwitchSD: invalid GPT header\n");
         return false;
     }
-    const uint32_t entrySectors = (entryCount * entrySize + kSector - 1) / kSector;
-    if (entrySectors - 1 > UINT32_MAX - entriesLBA)
+    const uint32_t entrySectors = switchSdGptArraySectors(array);
+    if (!entrySectors)
         return false;
-    static uint8_t entries[64 * 1024];
+    static uint8_t entries[kSwitchSdGptArrayBytes];
     for (uint32_t done = 0; done < entrySectors;) {
         const uint32_t n = entrySectors - done > 64 ? 64 : entrySectors - done;
-        if (transfer(entriesLBA + done, n, false, entries + static_cast<size_t>(done) * kSector)) {
+        if (transfer(array.lba + done, n, false, entries + static_cast<size_t>(done) * kSector)) {
             IOLog("SwitchSD: GPT entry read failed\n");
             return false;
         }
         done += n;
     }
-    unsigned found = 0;
-    for (uint32_t i = 0; i < entryCount; ++i) {
-        const uint8_t *e = entries + static_cast<size_t>(i) * entrySize;
-        if (memcmp(e, kApfsType, 16) && !partitionNamed(e, kPartitionName))
-            continue;
-        const uint64_t first = le64(e + 32);
-        const uint64_t last = le64(e + 40);
-        if (!first || last < first || last > UINT32_MAX)
-            continue;
-        rootWindow.first = first;
-        rootWindow.count = last - first + 1;
-        ++found;
-    }
-    if (found != 1 || !rootWindow.contains(rootWindow.first, rootWindow.count)) {
-        IOLog("SwitchSD: expected one APFS or \"%s\" partition, found %u\n", kPartitionName, found);
+    const SwitchSdRoot root = switchSdFindRoot(entries, array, kApfsType, kPartitionName);
+    rootWindow = root.window;
+    if (!root.unique()) {
+        IOLog("SwitchSD: expected one APFS or \"%s\" partition, found %u\n", kPartitionName, root.found);
         return false;
     }
 
@@ -3824,13 +3855,17 @@ bool NativeSwitchBlock::setup()
               gapsOn ? "on" : "off (no sink page below 4 GiB)");
     }
 
-    if (findFiles(&filesSlice) && (!haveCid || !memcmp(cid, filesSlice.cid, 15))) {
+    const int lookup = findFiles(&filesSlice);
+    const int files = switchSdFilesStatus(lookup, haveCid, cid, filesSlice.cid);
+    if (files == SWITCH_GPT_OK) {
         if (!haveCid) {
             memcpy(cid, filesSlice.cid, sizeof(cid));
             haveCid = true;
         }
         filesWindow = {filesSlice.first_sector, filesSlice.sector_count};
         __atomic_store_n(&filesOnline, true, __ATOMIC_RELEASE);
+    } else {
+        IOLog("SwitchSD: no shared SD volume (%s)\n", switchSdFilesReason(files));
     }
 
     requestSlab = static_cast<Request *>(IOMallocZero(kRequestPool * sizeof(Request)));
@@ -3847,15 +3882,16 @@ bool NativeSwitchBlock::setup()
         return false;
     }
     thread_deallocate(thread);
+    startCardDetect();
     return true;
 }
 
-bool NativeSwitchBlock::findFiles(switch_sd_files_slice *slice)
+int NativeSwitchBlock::findFiles(switch_sd_files_slice *slice)
 {
     const auto read = [](void *arg, uint64_t lba, uint8_t *sector) {
         return static_cast<NativeSwitchBlock *>(arg)->transfer(lba, 1, false, sector);
     };
-    return switch_sd_files_volume(read, this, rootWindow.first, rootWindow.count, slice) == 0;
+    return switch_sd_files_volume(read, this, rootWindow.first, rootWindow.count, slice);
 }
 
 void NativeSwitchBlock::verifyFilesCard()
@@ -3863,8 +3899,8 @@ void NativeSwitchBlock::verifyFilesCard()
     if (!filesPresent())
         return;
     switch_sd_files_slice current = {};
-    if (findFiles(&current) && current.first_sector == filesWindow.first && current.sector_count == filesWindow.count &&
-        current.exfat == filesSlice.exfat &&
+    if (findFiles(&current) == SWITCH_GPT_OK && current.first_sector == filesWindow.first &&
+        current.sector_count == filesWindow.count && current.exfat == filesSlice.exfat &&
         !memcmp(current.unique_guid, filesSlice.unique_guid, sizeof(current.unique_guid)))
         return;
     IOLockLock(queueLock);

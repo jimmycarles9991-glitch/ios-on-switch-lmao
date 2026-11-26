@@ -75,6 +75,14 @@ extern "C" void switch_gpu_backing_promise_drop(switch_gpu_backing *backing, uin
 {
 	const bool claimed = switch_gpu_backing_enter(backing);
 	switch_gpu_promise_ref_drop(backing->promises, &backing->promise_count, offset);
+	for (uint32_t i = 0; i < backing->access_count; ++i) {
+		auto &access = backing->accesses[i];
+		uint32_t kept = 0;
+		for (uint32_t j = 0; j < access.promise_count; ++j)
+			if (access.promises[j].offset != offset)
+				access.promises[kept++] = access.promises[j];
+		access.promise_count = kept;
+	}
 	IOLockWakeup(backing->lock, &backing->cpu_writers, false);
 	switch_gpu_backing_leave(backing, claimed);
 }

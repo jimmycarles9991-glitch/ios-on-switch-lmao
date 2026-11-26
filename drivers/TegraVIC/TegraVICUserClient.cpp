@@ -247,7 +247,7 @@ struct Job {
     SwitchVICWriteReservation dstReserve;
     TegraVICPlan plan;
     uint32_t chromaSite;
-    bool bounceSrc, bounceDst;  // through the copy engine's scratch (TegraVICBounce.h)
+    bool bounceSrc, bounceDst, mayDeferTurn;  // through the copy engine's scratch (TegraVICBounce.h)
     bool async, reply;
     OSAsyncReference64 ref;
     uint64_t info;
@@ -302,6 +302,16 @@ void transformed(void *context, int status)
 
 bool runJob(Job *job, IOReturn *status)
 {
+    // Checked before touching job->dstReserve: a cancelled job may still be inside eventsReady(), which finishJob
+    // drains via switch_vic_events_fail() before releasing job->dstReserve.
+    const int prepared = job->eventStatus ? job->eventStatus : switch_vic_events_prepare(job->events);
+    if (prepared) {
+#if TEGRA_VIC_STATS
+        firstFailure(job, "events", prepared);
+#endif
+        *status = ioreturn(prepared);
+        return true;
+    }
     // Move to the stack before submission: finishJob may free `job` before the submit call returns.
     struct WriteReservationGuard {
         SwitchVICWriteReservation reservation;
@@ -313,15 +323,6 @@ bool runJob(Job *job, IOReturn *status)
     };
     WriteReservationGuard dstReserve{job->dstReserve};
     job->dstReserve = {};
-
-    const int prepared = job->eventStatus ? job->eventStatus : switch_vic_events_prepare(job->events);
-    if (prepared) {
-#if TEGRA_VIC_STATS
-        firstFailure(job, "events", prepared);
-#endif
-        *status = ioreturn(prepared);
-        return true;
-    }
 #if TEGRA_VIC_STATS
     const uint64_t entered = mach_absolute_time();
     const bool eventTurn = job->events && job->plan.count == 1 && (job->plan.op[0].transform & TEGRA_VIC_ROT90);
@@ -381,6 +382,9 @@ void statsLine()
 void eventsReady(void *context, int status)
 {
     auto *job = static_cast<Job *>(context);
+    if (!status && !job->dstReserve.lease && !job->mayDeferTurn &&
+        !__atomic_load_n(&job->conn->closing, __ATOMIC_ACQUIRE))
+        switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
     IOLockLock(gQueueLock);
     gRequests.ready(job, status);
     IOLockWakeup(gQueueLock, &gRequests, false);
@@ -413,7 +417,10 @@ void finishJob(Job *job, IOReturn status)
     gStats.finished(status, job->submittedUs ? switch_now_us() - job->submittedUs : 0);
     statsLine();
 #endif
-    switch_vic_events_release(&job->events);
+    if (status == kIOReturnSuccess)
+        switch_vic_events_release(&job->events);
+    else
+        switch_vic_events_fail(&job->events, status == kIOReturnAborted ? -125 : -5);
     switch_vic_surface_release_write(&job->dstReserve);
     tegra_vic_surface_written(&job->dst);
     tegra_vic_surface_release(&job->src);
@@ -625,9 +632,9 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
     IOLockUnlock(conn->lock);
     job->eventReady = job->events == nullptr;
     const bool async = job->async;
-    const bool mayDeferTurn = !job->bounceSrc && !job->bounceDst && job->plan.count == 1 &&
-                              (job->plan.op[0].transform & TEGRA_VIC_ROT90) != 0 && job->dst.desc.planes == 2;
-    if (!job->events && !mayDeferTurn)
+    job->mayDeferTurn = !job->bounceSrc && !job->bounceDst && job->plan.count == 1 &&
+                        (job->plan.op[0].transform & TEGRA_VIC_ROT90) != 0 && job->dst.desc.planes == 2;
+    if (!job->events && !job->mayDeferTurn)
         switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
     switch_vic_events_arm(job->events);
     if (!queueJob(job)) {

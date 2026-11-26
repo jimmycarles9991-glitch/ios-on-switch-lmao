@@ -1263,6 +1263,7 @@ host_test(
         "//drivers/TegraGM20B:SwitchGpuClientRetirement.h",
         "//drivers/TegraGM20B:SwitchGpuClientBinds.h",
         "//drivers/TegraGM20B:SwitchGpuIdleDeadline.h",
+        "//drivers/TegraGM20B:TegraGM20BCopy.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClient.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientChannel.cpp",
         "//drivers/TegraGM20B:TegraGM20BUserClientJobSubmit.cpp",

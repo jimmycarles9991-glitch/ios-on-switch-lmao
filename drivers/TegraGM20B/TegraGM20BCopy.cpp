@@ -276,6 +276,10 @@ int submit(Job &job, const tgm_push &push, switch_gpu_backing *source,
 			result = captured;
 		}
 		if (!result)
+			result = switch_gpu_backing_promise_dependencies(
+				&transaction, queue.dependencies, TegraGM20BMaxJobDependencies,
+				&count, 0, 0);
+		if (!result)
 			result = queue.events.bind(&job.completion);
 		bool retained = false;
 		if (!result) {

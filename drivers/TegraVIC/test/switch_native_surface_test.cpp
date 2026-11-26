@@ -16,6 +16,7 @@ struct switch_gpu_backing {
     uint32_t pageCount = 1024, readers = 0, writers = 0, concurrentReaders = 0, concurrentWriters = 0;
     uint64_t content = 1;
     switch_gpu_backing_token producer = {11, 1, SWITCH_GPU_ENGINE_NVDEC, 7};
+    std::vector<switch_gpu_backing_token> promises;
     std::mutex lock;
     std::condition_variable changed;
 };
@@ -44,8 +45,8 @@ struct Surface : OSObject {
 };
 
 std::atomic<unsigned> transfers{0}, seeds{0}, descriptions{0}, registrations{0}, finishedViews{0};
-int transferError = 0, generationError = 0;
-unsigned gpuReservations = 0, queuedTransfers = 0, cpuAcquisitions = 0;
+int transferError = 0, generationError = 0, tokenRetainError = 0;
+unsigned gpuReservations = 0, queuedTransfers = 0, cpuAcquisitions = 0, promiseTokenRefs = 0;
 bool reservingGpu = false;
 bool ready = true;
 TegraVICSurfaceDesc convertedDesc;
@@ -192,6 +193,35 @@ extern "C" int switch_gpu_backing_snapshot_read(switch_gpu_backing *backing, swi
                                                 switch_gpu_cpu_lease **owned)
 {
     return switch_gpu_backing_export_read(backing, producer, owned);
+}
+
+extern "C" int switch_gpu_backing_token_retain(const switch_gpu_backing_token *)
+{
+    if (tokenRetainError)
+        return tokenRetainError;
+    ++promiseTokenRefs;
+    return 0;
+}
+
+extern "C" void switch_gpu_backing_token_release(const switch_gpu_backing_token *)
+{
+    EXPECT_GT(promiseTokenRefs, 0u);
+    --promiseTokenRefs;
+}
+
+extern "C" int switch_gpu_backing_snapshot_read_promises(switch_gpu_backing *backing,
+                                                         switch_gpu_backing_token *producer,
+                                                         switch_gpu_cpu_lease **owned,
+                                                         switch_gpu_backing_token *promises, uint32_t capacity)
+{
+    if (backing->promises.size() > capacity)
+        return -28;
+    const int error = switch_gpu_backing_export_read(backing, producer, owned);
+    if (error)
+        return error;
+    for (size_t i = 0; i < backing->promises.size(); ++i)
+        promises[i] = backing->promises[i];
+    return static_cast<int>(backing->promises.size());
 }
 
 extern "C" int switch_gpu_backing_snapshot_read_wait(switch_gpu_backing *backing, switch_gpu_backing_token *producer,
@@ -355,9 +385,9 @@ protected:
     {
         transfers = seeds = descriptions = registrations = 0;
         ready = true;
-        gpuReservations = queuedTransfers = cpuAcquisitions = 0;
+        gpuReservations = queuedTransfers = cpuAcquisitions = promiseTokenRefs = 0;
         reservingGpu = false;
-        transferError = generationError = 0;
+        transferError = generationError = tokenRetainError = 0;
         duringTransfer = duringGeneration = duringExport = {};
         memory = new IOMemoryDescriptor;
         memory->length = 1536 * 720 * 3 / 2;
@@ -399,6 +429,7 @@ protected:
         EXPECT_EQ(native.refs, 1u);
         EXPECT_EQ(logical.refs, 1u);
         EXPECT_EQ(replacement.refs, 1u);
+        EXPECT_EQ(promiseTokenRefs, 0u);
     }
 
     int prepareCpu(Surface *input, uint32_t options, switch_gpu_backing **backing, switch_gpu_cpu_lease **owned)
@@ -1378,4 +1409,47 @@ TEST_F(NativeSurface, AdmissionDoesNotWaitForPreparationAndRejectsAnotherBacking
     EXPECT_EQ(switch_native_surface_gpu_admission(object, kRead, &logical), 1);
     payload->release();
     SwitchMemoryAttachment::leaveCpu(memory);
+}
+
+TEST_F(NativeSurface, PitchScanoutCapturesAndRetainsWriterPromisesAtomically)
+{
+    logical.promises = {{42, 0, SWITCH_GPU_ENGINE_PROMISE, 2048}};
+    SwitchNativeScanout scanout = {};
+    ASSERT_EQ(switch_native_scanout_pitch(object, &scanout), 0);
+    ASSERT_EQ(scanout.promiseCount, 1u);
+    EXPECT_EQ(promiseTokenRefs, 1u);
+    EXPECT_EQ(scanout.promises[0].engine, uint32_t(SWITCH_GPU_ENGINE_PROMISE));
+    EXPECT_EQ(scanout.promises[0].queue, 2048u);
+    EXPECT_EQ(scanout.promises[0].value, 42u);
+    EXPECT_EQ(scanout.allocation.content_generation, logical.content + 1);
+    switch_gpu_backing_token tokens[3 + SWITCH_GPU_BACKING_PROMISES] = {};
+    const uint32_t count = switch_native_scanout_dependencies(scanout, tokens, 3 + SWITCH_GPU_BACKING_PROMISES);
+    ASSERT_EQ(count, 2u);
+    EXPECT_EQ(tokens[0].engine, logical.producer.engine);
+    EXPECT_EQ(tokens[1].engine, uint32_t(SWITCH_GPU_ENGINE_PROMISE));
+    EXPECT_EQ(tokens[1].value, 42u);
+
+    logical.promises = {{43, 0, SWITCH_GPU_ENGINE_PROMISE, 2048}};
+    SwitchNativeScanout replaced = {};
+    ASSERT_EQ(switch_native_scanout_pitch(object, &replaced), 0);
+    EXPECT_EQ(promiseTokenRefs, 2u);
+    EXPECT_FALSE(switch_native_scanout_same_promises(scanout, replaced));
+    switch_native_scanout_release(&replaced);
+    EXPECT_EQ(promiseTokenRefs, 1u);
+
+    logical.promises.clear();
+    ++logical.content;
+    SwitchNativeScanout after = {};
+    ASSERT_EQ(switch_native_scanout_pitch(object, &after), 0);
+    EXPECT_EQ(after.promiseCount, 0u);
+    EXPECT_EQ(after.allocation.content_generation, scanout.allocation.content_generation);
+    switch_native_scanout_release(&after);
+    switch_native_scanout_release(&scanout);
+    EXPECT_EQ(promiseTokenRefs, 0u);
+
+    logical.promises = {{44, 0, SWITCH_GPU_ENGINE_PROMISE, 2048}};
+    tokenRetainError = -19;
+    EXPECT_EQ(switch_native_scanout_pitch(object, &scanout), -19);
+    EXPECT_EQ(scanout.lease, nullptr);
+    EXPECT_EQ(promiseTokenRefs, 0u);
 }

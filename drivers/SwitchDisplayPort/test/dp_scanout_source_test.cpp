@@ -47,6 +47,10 @@ TEST(ExternalOwnership, FrontReadLivesUntilReplacementAndGenerationChangesRefuse
                     .has("if (connected) recordLayers(reinterpret_cast<const uint8_t *>(request));"));
     EXPECT_TRUE(Block(lifecycle, "void SwitchExternalScreen::linkUp(").has("unshownErrors = 0;"));
     EXPECT_TRUE(Block(source, "void SwitchExternalScreen::recordLayers(").has("surface->retain();"));
+    EXPECT_TRUE(
+        Block(source, "void SwitchExternalScreen::requestFrame()")
+            .before("(native_planes::wordAt(bytes, swapUpdated) & ~native_planes::wordAt(bytes, swapReady)) & native_planes::kLayerBits",
+                    "takeLayers(bytes, present, layers, surfaces)"));
     EXPECT_TRUE(Block(source, "void SwitchExternalScreen::requestFrame()")
                     .has("if (!takeLayers(bytes, present, layers, surfaces)) { dropFrame(request); return; }"));
 
@@ -209,8 +213,8 @@ TEST(ExternalOwnership, OneFenceOverEveryWindow)
 {
     const auto present = SourceText("../SwitchExternalPresent.cpp");
     const auto gather = Block(present, "uint32_t SwitchExternalScreen::gatherFence(");
-    EXPECT_TRUE(gather.has("switch_native_scanout_dependencies(read, own, 3)"));
-    EXPECT_TRUE(gather.has("switch_gpu_backing_promise_tokens(read.view.native, 0, 0, own + n,"));
+    EXPECT_TRUE(gather.has("switch_native_scanout_dependencies(read, own, 3 + SWITCH_GPU_BACKING_PROMISES)"));
+    EXPECT_FALSE(gather.has("switch_gpu_backing_promise_tokens("));
     EXPECT_TRUE(gather.has("switch_gpu_backing_token_external_status(&own[t]) == 1"));
     const auto fence = Block(present, "void SwitchExternalScreen::fenceFrame()");
     EXPECT_TRUE(

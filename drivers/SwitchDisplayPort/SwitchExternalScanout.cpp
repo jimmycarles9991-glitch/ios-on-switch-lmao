@@ -153,7 +153,8 @@ int SwitchExternalScreen::prepareSlot(OSObject *surface, uint32_t building)
                 return -1;
             }
             if (slot.read.lease) {
-                if (slot.read.allocation.content_generation != snapshot.allocation.content_generation) {
+                if (slot.read.allocation.content_generation != snapshot.allocation.content_generation ||
+                    (snapshot.promiseCount && !switch_native_scanout_same_promises(slot.read, snapshot))) {
                     switch_native_scanout_release(&snapshot);
                     return -1;
                 }
@@ -319,6 +320,9 @@ void SwitchExternalScreen::requestFrame()
     if (!request)
         return;
     const auto *bytes = reinterpret_cast<const uint8_t *>(request);
+    if ((native_planes::wordAt(bytes, swapUpdated) & ~native_planes::wordAt(bytes, swapReady)) &
+        native_planes::kLayerBits)
+        return;
     bool present[kLayers] = {};
     native_planes::Layer layers[kLayers];
     OSObject *surfaces[kLayers] = {};

@@ -310,6 +310,11 @@ TEST(GM20BPromiseSource, PresentsAndJobsOrderBehindWriterPromises)
 		EXPECT_TRUE(CodeText(unit(reader))
 				    .before("switch_gpu_backing_promise_dependencies(&transaction,",
 					    "dependency.engine == SWITCH_GPU_ENGINE_PROMISE"));
+	const CodeText ceCopy = Block(unit("TegraGM20BCopy.cpp"), "int submit(");
+	EXPECT_TRUE(ceCopy.before("queue.events.captureDependencies(queue.dependencies, count);",
+				  "switch_gpu_backing_promise_dependencies("));
+	EXPECT_TRUE(ceCopy.before("switch_gpu_backing_promise_dependencies(",
+				  "switch_gpu_chan_exec_visibility("));
 	const std::string retirement = unit("SwitchGpuClientRetirement.h");
 	EXPECT_TRUE(Block(retirement, "void AGXDeviceUserClient::drainResources()")
 			    .before("releasePromises(true);", "tgm_chan_del(&chan);"));

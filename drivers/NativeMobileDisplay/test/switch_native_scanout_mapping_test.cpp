@@ -242,8 +242,8 @@ TEST_F(NativeScanoutMapping, ARecordedTurnsRequestWaitsOrderTheSetLikeItsProduce
 TEST_F(NativeScanoutMapping, AnOverlaysWriterPromiseIsOneOfItsDependencies)
 {
     ASSERT_EQ(admit(), 0);
-    display->planeSlots[0].native->view.native = reinterpret_cast<switch_gpu_backing *>(0x1000);
-    promised = {{100, 0, SWITCH_GPU_ENGINE_PROMISE, 2048}};
+    display->planeSlots[0].native->promises[0] = {100, 0, SWITCH_GPU_ENGINE_PROMISE, 2048};
+    display->planeSlots[0].native->promiseCount = 1;
     display->planeNextSet = true;
     display->planeNext.window[0].on = true;
     display->planeNext.window[0].slot = 0;
@@ -256,8 +256,7 @@ TEST_F(NativeScanoutMapping, AnOverlaysWriterPromiseIsOneOfItsDependencies)
     EXPECT_TRUE(display->planeOverlayWaits(*display->planeSlots[0].native));
     completedThrough = 100;
     EXPECT_FALSE(display->planeOverlayWaits(*display->planeSlots[0].native));
-    promised.clear();
-    display->planeSlots[0].native->view.native = nullptr;
+    display->planeSlots[0].native->promiseCount = 0;
 }
 
 // The signals go when the set showing the frame latches, and a frame dropped before it was shown still delivers them

@@ -143,12 +143,8 @@ void switch_vic_events_arm(SwitchVICEvents *work)
     notice(work);
 }
 
-void switch_vic_events_release(SwitchVICEvents **owned)
+static void detach(SwitchVICEvents *work)
 {
-    if (!owned || !*owned)
-        return;
-    auto *work = *owned;
-    *owned = nullptr;
     IOLockLock(work->lock);
     work->notified = true;
     while (work->notifying)
@@ -156,6 +152,27 @@ void switch_vic_events_release(SwitchVICEvents **owned)
     IOLockUnlock(work->lock);
     for (auto &watch : work->watches)
         switch_gpu_event_observe_cancel(&watch);
+}
+
+void switch_vic_events_release(SwitchVICEvents **owned)
+{
+    if (!owned || !*owned)
+        return;
+    auto *work = *owned;
+    *owned = nullptr;
+    detach(work);
+    drop(work);
+}
+
+void switch_vic_events_fail(SwitchVICEvents **owned, int status)
+{
+    if (!owned || !*owned)
+        return;
+    auto *work = *owned;
+    *owned = nullptr;
+    detach(work);
+    for (auto &signal : work->signals)
+        switch_gpu_event_signal_fail(&signal, status);
     drop(work);
 }
 

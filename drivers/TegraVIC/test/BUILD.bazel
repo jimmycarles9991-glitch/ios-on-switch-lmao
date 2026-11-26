@@ -258,6 +258,7 @@ host_test(
         "//drivers/TegraVIC:TegraVIC.cpp",
         "//drivers/TegraVIC:TegraVIC.h",
         "//drivers/TegraVIC:TegraVICColor.h",
+        "//drivers/TegraVIC:TegraVICUserClient.cpp",
     ],
 )
 

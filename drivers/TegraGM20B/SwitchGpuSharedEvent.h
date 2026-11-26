@@ -62,6 +62,7 @@ int switch_gpu_event_signal_inherit(struct switch_gpu_event_signal *signal,
 				    struct switch_gpu_event_waits *waits);
 void switch_gpu_event_signal_commit(struct switch_gpu_event_signal **signal);
 void switch_gpu_event_signal_abort(struct switch_gpu_event_signal **signal);
+void switch_gpu_event_signal_fail(struct switch_gpu_event_signal **signal, int status);
 
 /* One callback owns the transferred context reference. Readiness and cancellation race to consume it; cancel does
  * not send a second callback if readiness already won. The watch handle remains caller-owned until cancel/release. */

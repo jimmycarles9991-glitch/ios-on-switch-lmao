@@ -73,8 +73,8 @@ def parse(raw_mount: str, cryptex_h: str, cryptex_cpp: str, block_cpp: str, volu
         'partition_name': name.group(1),
         'volumes': {
             'system': {'uuid': system, 'role': 0x0001},
-            'data': {'uuid': data, 'role': 0x0040, 'name': 'SwitchDataTrial'},
-            'preboot': {'uuid': preboot, 'role': 0x0010, 'name': 'SwitchPrebootTrial'},
+            'data': {'uuid': data, 'role': 0x0040, 'name': 'Switch-iOS-Data'},
+            'preboot': {'uuid': preboot, 'role': 0x0010, 'name': 'Switch-iOS-Preboot'},
         },
         'cryptexes': cryptexes,
         'sources': {

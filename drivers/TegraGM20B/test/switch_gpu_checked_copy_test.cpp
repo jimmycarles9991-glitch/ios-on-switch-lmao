@@ -52,9 +52,10 @@ bool retireAtFullRing;
 uint32_t channelId;
 unsigned channelsMade, resets;
 std::map<uint32_t, tgm_chan> replaced;
-int nextError, guardError, semanticStatus;
-unsigned memoryCalls, memoryFailure, poolFrees;
+int nextError, guardError, promiseError, semanticStatus;
+unsigned memoryCalls, memoryFailure, poolFrees, promiseCalls;
 bool locked, entered, early, capture, covered;
+std::vector<switch_gpu_backing_token> promiseDeps, capturedDeps, execDeps;
 uint32_t leaseCount;
 void (*irq)(void *);
 void *irqContext;
@@ -305,13 +306,15 @@ extern "C" void switch_gpu_chan_next_token(tgm_chan *, switch_gpu_backing_token 
 }
 
 extern "C" int switch_gpu_chan_exec_visibility(tgm_chan *, const tgm_push *push, uint32_t count,
-					       const switch_gpu_backing_token *, uint32_t,
-					       uint32_t *sequence, const tgm_prof *, uint32_t flags)
+					       const switch_gpu_backing_token *deps,
+					       uint32_t depCount, uint32_t *sequence,
+					       const tgm_prof *, uint32_t flags)
 {
 	EXPECT_TRUE(entered);
 	EXPECT_TRUE(locked);
 	EXPECT_GT(binds, 0u);
 	EXPECT_TRUE(flags & SWITCH_GPU_SUBMIT_EXTERNAL_VISIBILITY);
+	execDeps.assign(deps, deps + depCount);
 	++execs;
 	if (nextError) {
 		int result = nextError;
@@ -461,6 +464,24 @@ extern "C" int switch_gpu_backing_dependencies(const switch_gpu_backing_transact
 	return 0;
 }
 
+extern "C" int switch_gpu_backing_promise_dependencies(switch_gpu_backing_transaction *,
+						       switch_gpu_backing_token *out,
+						       uint32_t capacity, uint32_t *count,
+						       uint32_t ownFirst, uint32_t ownEnd)
+{
+	EXPECT_TRUE(locked);
+	EXPECT_EQ(ownFirst, 0u);
+	EXPECT_EQ(ownEnd, 0u);
+	++promiseCalls;
+	if (promiseError)
+		return promiseError;
+	if (*count + promiseDeps.size() > capacity)
+		return -28;
+	for (const auto &token : promiseDeps)
+		out[(*count)++] = token;
+	return 0;
+}
+
 extern "C" void switch_gpu_backing_commit(switch_gpu_backing_transaction *p)
 {
 	EXPECT_TRUE(locked);
@@ -532,8 +553,9 @@ int SwitchGpuEventJob::append(switch_gpu_backing_token *, uint32_t, uint32_t *) 
 	return 0;
 }
 
-int SwitchGpuEventJob::captureDependencies(switch_gpu_backing_token *, uint32_t)
+int SwitchGpuEventJob::captureDependencies(switch_gpu_backing_token *deps, uint32_t count)
 {
+	capturedDeps.assign(deps, deps + count);
 	return capture && !covered ? 1 : 0;
 }
 
@@ -582,8 +604,11 @@ protected:
 				resets = retirementPendingAtRoomWait = 0;
 		retireAtFullRing = false;
 		replaced.clear();
-		nextError = guardError = 0;
-		memoryCalls = memoryFailure = poolFrees = 0;
+		nextError = guardError = promiseError = 0;
+		memoryCalls = memoryFailure = poolFrees = promiseCalls = 0;
+		promiseDeps.clear();
+		capturedDeps.clear();
+		execDeps.clear();
 		semanticStatus = 1;
 		locked = entered = early = capture = covered = false;
 		emulate = mappedSinceExec = false;
@@ -992,4 +1017,30 @@ TEST_F(CheckedCopy, CopyMappingChecksTiledKindAndEvictsIdleConflictingSlot)
 	EXPECT_EQ(unmaps, 2u);
 	switch_gpu_copy_mapping_put(second);
 	switch_gpu_copy_mappings_clear(&space, &cache);
+}
+
+TEST_F(CheckedCopy, WriterPromisesAreRequestedAfterEventCaptureAndPassedToExec)
+{
+	auto a = allocation(), b = allocation();
+	promiseDeps = {{7, 0, SWITCH_GPU_ENGINE_PROMISE, 2048}};
+	ASSERT_EQ(copy(a, b), 0);
+	EXPECT_EQ(promiseCalls, 1u);
+	ASSERT_EQ(capturedDeps.size(), 1u);
+	EXPECT_EQ(capturedDeps[0].engine, uint32_t(SWITCH_GPU_ENGINE_VIC));
+	ASSERT_EQ(execDeps.size(), 2u);
+	EXPECT_EQ(execDeps[1].engine, uint32_t(SWITCH_GPU_ENGINE_PROMISE));
+	EXPECT_EQ(execDeps[1].queue, 2048u);
+	EXPECT_EQ(execDeps[1].value, 7u);
+}
+
+TEST_F(CheckedCopy, WriterPromiseErrorAbortsWithoutBindingOrExecuting)
+{
+	auto a = allocation(), b = allocation();
+	promiseError = -28;
+	EXPECT_EQ(copy(a, b), -28);
+	EXPECT_EQ(promiseCalls, 1u);
+	EXPECT_EQ(binds, 0u);
+	EXPECT_EQ(execs, 0u);
+	EXPECT_EQ(aborts, 1u);
+	EXPECT_EQ(tokenRefs, 0u);
 }

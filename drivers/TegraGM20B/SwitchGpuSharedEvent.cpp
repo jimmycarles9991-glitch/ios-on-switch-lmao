@@ -341,6 +341,30 @@ extern "C" void switch_gpu_event_signal_abort(switch_gpu_event_signal **owned)
 	switch_gpu_event_signal_drop(signal);
 }
 
+extern "C" void switch_gpu_event_signal_fail(switch_gpu_event_signal **owned, int status)
+{
+	if (!owned || !*owned)
+		return;
+	auto *signal = *owned;
+	*owned = nullptr;
+	auto *event = signal->event;
+	const uint64_t value = signal->value;
+	const int failure = status < 0 ? status : -5;
+	IOLockLock(state->lock);
+	if (value >= event->failedThrough) {
+		event->failedThrough = value;
+		event->failure = failure;
+	}
+	--event->reservations;
+	if (signal->word)
+		switch_gpu_event_word_aborted_locked(signal);
+	IOLockUnlock(state->lock);
+	switch_gpu_event_native_signal(event->native, value, true);
+	switch_gpu_event_watches_retire();
+	switch_gpu_event_release(&signal->event);
+	switch_gpu_event_signal_drop(signal);
+}
+
 void switch_gpu_event_signal_drop(switch_gpu_event_signal *signal)
 {
 	if (__atomic_sub_fetch(&signal->refs, 1u, __ATOMIC_ACQ_REL))

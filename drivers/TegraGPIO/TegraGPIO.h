@@ -26,6 +26,7 @@
 //   PX7 191  volume down, active low         both edges  bank 5 SPI 87
 //   PY0 192  MAX17050 ALRT (I2C1 0x36)       falling     bank 6 SPI 89
 //   PZ0 200  BQ24193 INT (I2C1 0x6b)         falling     bank 6 SPI 89
+//   PZ1 201  SD card detect (SDMMC1), active low, pull-up  rising  bank 6 SPI 89
 //   PK4  84  BM92T36 ALERT (I2C1 0x18)       DT: rising  bank 2 SPI 34
 //   PJ7  79  FTM4 touch reset/VIO enable     output, active high (DT stm,vio-gpio; hekate touch.c)
 //   PX3 187  v_vdd5v3 enable (USB-C source) output, active high (DT tegra210-nx-power-fixed regulator@0xb)
@@ -102,6 +103,7 @@ enum {
     TEGRA_GPIO_PX7 = 23 * 8 + 7,
     TEGRA_GPIO_PY0 = 24 * 8 + 0,
     TEGRA_GPIO_PZ0 = 25 * 8 + 0,
+    TEGRA_GPIO_PZ1 = 25 * 8 + 1,
     TEGRA_GPIO_TOUCH_INT = TEGRA_GPIO_PX1,    // TEGRA_GPIO_LEVEL_LOW
     TEGRA_GPIO_IMU_INT = TEGRA_GPIO_PX2,      // TEGRA_GPIO_LEVEL_HIGH
     TEGRA_GPIO_TOUCH_RESET = TEGRA_GPIO_PJ7,  // output, 1 = running
@@ -110,6 +112,7 @@ enum {
     TEGRA_GPIO_VOLUME_DOWN = TEGRA_GPIO_PX7,  // pressed = 0; TEGRA_GPIO_EDGE_BOTH, debounce 16 ms (DT)
     TEGRA_GPIO_GAUGE_ALERT = TEGRA_GPIO_PY0,
     TEGRA_GPIO_CHARGER_INT = TEGRA_GPIO_PZ0,
+    TEGRA_GPIO_SD_CD = TEGRA_GPIO_PZ1,  // 0 = inserted, 1 = removed; TEGRA_GPIO_EDGE_RISING
     TEGRA_GPIO_PD_ALERT = TEGRA_GPIO_PK4,
     TEGRA_GPIO_COUNT = 256,
 };

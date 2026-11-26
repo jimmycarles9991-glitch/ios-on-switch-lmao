@@ -77,6 +77,7 @@ constexpr PinMux kPinMux[] = {
     {TEGRA_GPIO_PX7, 0x238, PULL_UP},    // button_vol_down_px7, 1016-1021
     {TEGRA_GPIO_PY0, 0x23c, PULL_NONE},  // button_slide_sw_py0, 1246-1251
     {TEGRA_GPIO_PZ0, 0x27c, PULL_NONE},  // pz0, 1061-1066
+    {TEGRA_GPIO_PZ1, 0x280, PULL_UP},    // pz1: SDMMC1 card detect (0 = inserted, 1 = removed)
     {TEGRA_GPIO_PK4, 0x264, PULL_UP},    // pk4, 1079-1084
 };
 

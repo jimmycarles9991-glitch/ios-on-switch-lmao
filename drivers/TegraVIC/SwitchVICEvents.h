@@ -8,6 +8,7 @@ int switch_vic_events_create(void *task, const TegraVICRequest &, void (*ready)(
                              SwitchVICEvents **);
 void switch_vic_events_arm(SwitchVICEvents *);
 void switch_vic_events_release(SwitchVICEvents **);
+void switch_vic_events_fail(SwitchVICEvents **, int status);
 int switch_vic_events_prepare(SwitchVICEvents *);
 uint32_t switch_vic_events_tokens(SwitchVICEvents *, const switch_gpu_backing_token **);
 switch_gpu_event_waits *switch_vic_events_batch(SwitchVICEvents *);

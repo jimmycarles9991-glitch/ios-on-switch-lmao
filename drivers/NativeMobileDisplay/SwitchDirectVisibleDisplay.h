@@ -45,9 +45,13 @@ bool directSlotVisible(int entry) const
     const auto *read = slots[entry - kSlot0].read;
     if (!read || !read->lease)
         return false;
+    if (switch_gpu_backing_promised(read->view.native))
+        return false;
+    for (uint32_t i = 0; i < read->promiseCount; ++i)
+        if (read->promises[i].engine && switch_gpu_backing_token_external_status(&read->promises[i]) != 1)
+            return false;
     const auto &producer = read->view.producer;
-    return !switch_gpu_backing_promised(read->view.native) &&
-           (!producer.engine || switch_gpu_backing_token_external_status(&producer) == 1);
+    return !producer.engine || switch_gpu_backing_token_external_status(&producer) == 1;
 }
 
 // The slot's first frame was written before its backing was held scanned, by a job that may have ended Internal: only

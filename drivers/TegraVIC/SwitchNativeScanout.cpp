@@ -6,6 +6,9 @@ void switch_native_scanout_release(SwitchNativeScanout *scanout)
 {
     if (!scanout)
         return;
+    for (uint32_t i = 0; i < scanout->promiseCount; ++i)
+        if (scanout->promises[i].engine)
+            switch_gpu_backing_token_release(&scanout->promises[i]);
     if (scanout->lease)
         switch_gpu_backing_cpu_release_owned(&scanout->lease, 0);
     switch_native_surface_release(&scanout->view);
@@ -83,16 +86,31 @@ static int pitchSnapshot(OSObject *object, SwitchNativeScanout *scanout, Snapsho
         switch_gpu_backing_describe(access.backing, &before);
         if (access.owned)
             switch_gpu_backing_cpu_release_owned(&access.owned, 0);
-        error = how == SnapshotWait::cpuReader
-                    ? switch_gpu_backing_snapshot_read_cpu(access.backing, &scanout->view.producer, &scanout->lease)
-                : wait ? switch_gpu_backing_snapshot_read_wait(access.backing, &scanout->view.producer, &scanout->lease)
-                       : switch_gpu_backing_snapshot_read(access.backing, &scanout->view.producer, &scanout->lease);
+        if (how == SnapshotWait::cpuReader) {
+            error = switch_gpu_backing_snapshot_read_cpu(access.backing, &scanout->view.producer, &scanout->lease);
+        } else if (wait) {
+            error = switch_gpu_backing_snapshot_read_wait(access.backing, &scanout->view.producer, &scanout->lease);
+        } else {
+            const int promised = switch_gpu_backing_snapshot_read_promises(
+                access.backing, &scanout->view.producer, &scanout->lease, scanout->promises,
+                SWITCH_GPU_BACKING_PROMISES);
+            if (promised < 0) {
+                error = promised;
+            } else {
+                for (int i = 0; !error && i < promised; ++i) {
+                    error = switch_gpu_backing_token_retain(&scanout->promises[i]);
+                    if (!error)
+                        scanout->promiseCount = static_cast<uint32_t>(i + 1);
+                }
+            }
+        }
     }
     if (!error) {
         switch_gpu_backing_describe(access.backing, &scanout->allocation);
         if (!wait && before.content_generation != scanout->allocation.content_generation)
             error = SWITCH_GPU_BACKING_STALE;
         else {
+            scanout->allocation.content_generation += scanout->promiseCount;
             scanout->pitchOffset = access.offset;
             scanout->view.native = access.backing;
             switch_gpu_backing_retain(scanout->view.native);

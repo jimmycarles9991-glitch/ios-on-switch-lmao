@@ -38,7 +38,8 @@ int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride
             slot.allocationGeneration == snapshot.allocation.allocation_generation) {
             bool tookSnapshot = false;
             if (slot.read && slot.read->lease) {
-                if (slot.read->allocation.content_generation != snapshot.allocation.content_generation) {
+                if (slot.read->allocation.content_generation != snapshot.allocation.content_generation ||
+                    (snapshot.promiseCount && !switch_native_scanout_same_promises(*slot.read, snapshot))) {
                     switch_native_scanout_release(&snapshot);
                     return kNoBuffer;
                 }

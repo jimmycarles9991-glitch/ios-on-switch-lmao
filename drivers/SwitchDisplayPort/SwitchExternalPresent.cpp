@@ -46,11 +46,7 @@ uint32_t SwitchExternalScreen::gatherFence(bool &media)
             continue;
         const SwitchNativeScanout &read = slots[k].read;
         switch_gpu_backing_token own[3 + SWITCH_GPU_BACKING_PROMISES] = {};
-        uint32_t n = switch_native_scanout_dependencies(read, own, 3);
-        const int promised = read.view.native ? switch_gpu_backing_promise_tokens(read.view.native, 0, 0, own + n,
-                                                                                  SWITCH_GPU_BACKING_PROMISES)
-                                              : 0;
-        n += promised > 0 ? static_cast<uint32_t>(promised) : 0u;
+        const uint32_t n = switch_native_scanout_dependencies(read, own, 3 + SWITCH_GPU_BACKING_PROMISES);
         for (uint32_t t = 0; t < n; ++t) {
             if (!own[t].engine || switch_gpu_backing_token_external_status(&own[t]) == 1)
                 continue;

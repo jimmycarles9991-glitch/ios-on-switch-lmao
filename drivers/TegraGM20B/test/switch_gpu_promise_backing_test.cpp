@@ -518,6 +518,64 @@ TEST_F(Backing, AReadOutsideThePromisedRangeIsAnOrdinaryRead)
 	switch_gpu_backing_release(b);
 }
 
+TEST_F(Backing, AMultiJobPromisedWriteNeverWaitsForAReaderOrderedBehindItsPromise)
+{
+	auto *b = promised();
+	readBehindPromises(b, token(9, 2));
+	readBehindPromises(b, token(160, 3, SWITCH_GPU_ENGINE_VIC));
+	const auto firstJob = waitedFor(b, token(3, 4));
+	EXPECT_FALSE(has(firstJob, SWITCH_GPU_ENGINE_GM20B));
+	EXPECT_FALSE(has(firstJob, SWITCH_GPU_ENGINE_VIC));
+	const auto keepingJob = waitedFor(b, token(3, 5));
+	EXPECT_FALSE(has(keepingJob, SWITCH_GPU_ENGINE_GM20B))
+		<< "keeping job must not wait on a reader still blocked on its promise";
+	EXPECT_FALSE(has(keepingJob, SWITCH_GPU_ENGINE_VIC));
+	switch_gpu_backing_promise_drop(b, kOffset);
+	const auto next = waitedFor(b, token(3, 6));
+	EXPECT_TRUE(has(next, SWITCH_GPU_ENGINE_GM20B));
+	EXPECT_TRUE(has(next, SWITCH_GPU_ENGINE_VIC));
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(Backing, APromiseAddedAfterAReadDoesNotSkipThatRead)
+{
+	auto *b = promised();
+	readBehindPromises(b, token(9, 2));
+	fence[(kOffset + 4) / 4] = 0;
+	const switch_gpu_promise_ref second = {tgm_fence_word(kOffset + 4), kOffset + 4, 1};
+	ASSERT_EQ(switch_gpu_backing_promise_add(b, &second), 0);
+	EXPECT_FALSE(has(waitedFor(b, token(3, 4)), SWITCH_GPU_ENGINE_GM20B));
+	switch_gpu_backing_promise_drop(b, kOffset);
+	EXPECT_TRUE(has(waitedFor(b, token(4, 1)), SWITCH_GPU_ENGINE_GM20B));
+	switch_gpu_backing_promise_drop(b, kOffset + 4);
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(Backing, ALaterReadOnTheSameTimelineInheritsPendingPromises)
+{
+	auto *b = promised();
+	const auto firstRead = token(9, 2);
+	readBehindPromises(b, firstRead);
+	readBehindPromises(b, token(9, 3), kOffset, kOffset + 4);
+	EXPECT_FALSE(has(waitedFor(b, token(3, 4)), SWITCH_GPU_ENGINE_GM20B));
+	switch_gpu_backing_promise_drop(b, kOffset);
+	EXPECT_TRUE(has(waitedFor(b, token(3, 5)), SWITCH_GPU_ENGINE_GM20B));
+	switch_gpu_backing_release(b);
+}
+
+TEST_F(Backing, ADroppedPromiseCannotMatchAReusedFenceOffsetWithTheSameValue)
+{
+	auto *b = promised(1);
+	readBehindPromises(b, token(9, 2));
+	switch_gpu_backing_promise_drop(b, kOffset);
+	fence[kOffset / 4] = 0;
+	const switch_gpu_promise_ref reused = {tgm_fence_word(kOffset), kOffset, 1};
+	ASSERT_EQ(switch_gpu_backing_promise_add(b, &reused), 0);
+	EXPECT_TRUE(has(waitedFor(b, token(3, 4)), SWITCH_GPU_ENGINE_GM20B));
+	switch_gpu_backing_promise_drop(b, kOffset);
+	switch_gpu_backing_release(b);
+}
+
 // A promise given up on (the give-up's raise, a refused submission of its job) is a write that never came: the present
 // that waited for it finishes WRITE_REFUSED (TEGRA_SCANOUT_SOURCE_REFUSED), and the display does not show the frame.
 // The word the release raised does not make it kept.

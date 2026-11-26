@@ -45,3 +45,20 @@ TEST(VicOwnershipSource, NoJobMapsAWindowOrHoldsTheEngine)
     EXPECT_THAT(SourceText("../TegraVIC.cpp"), Not(HasSubstr("gJobLock")));
     EXPECT_THAT(SourceText("../../TegraGM20B/SwitchGpuCopyMappings.h"), Not(HasSubstr("switch_gpu_copy_register(")));
 }
+
+TEST(VicOwnershipSource, EventBearingJobsReserveDestinationWhenReadyAndFailUncommittedSignals)
+{
+    const std::string client = SourceText("../TegraVICUserClient.cpp");
+    const auto transform = switch_ios::test::Block(client, "IOReturn transform(");
+    EXPECT_TRUE(transform.before("if (!job->events && !job->mayDeferTurn)", "switch_vic_events_arm(job->events);"));
+    const auto ready = switch_ios::test::Block(client, "void eventsReady(");
+    EXPECT_TRUE(ready.before("switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);",
+                             "gRequests.ready(job, status);"));
+    const auto run = switch_ios::test::Block(client, "bool runJob(");
+    EXPECT_TRUE(run.before("const int prepared = job->eventStatus ? job->eventStatus",
+                           "WriteReservationGuard dstReserve{job->dstReserve};"));
+    const auto finish = switch_ios::test::Block(client, "void finishJob(");
+    EXPECT_TRUE(finish.has("switch_vic_events_fail(&job->events,"));
+    const auto abandon = switch_ios::test::Block(client, "void abandonUnqueued(");
+    EXPECT_FALSE(abandon.has("switch_vic_events_fail"));
+}

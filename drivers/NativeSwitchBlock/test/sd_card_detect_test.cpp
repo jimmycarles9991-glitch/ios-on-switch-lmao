@@ -1,0 +1,103 @@
+// SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
+#include <string>
+
+#include "../SwitchSdCardDetect.h"
+#include "bazel/testing/source_text.h"
+#include "source_checks.h"
+
+using switch_ios::test::Body;
+using switch_ios::test::Index;
+using switch_ios::test::Search;
+using switch_ios::test::SourceText;
+using testing::HasSubstr;
+using testing::Not;
+
+namespace {
+const std::string &driver()
+{
+    static const std::string source = SourceText("../NativeSwitchBlock.cpp");
+    return source;
+}
+
+std::string body(const char *signature)
+{
+    return Body(driver(), signature);
+}
+}  // namespace
+
+TEST(SdCardDetect, ActiveLowLevelRules)
+{
+    EXPECT_FALSE(switchSdCardRemoved(-1));
+    EXPECT_FALSE(switchSdCardRemoved(0));
+    EXPECT_TRUE(switchSdCardRemoved(1));
+
+    EXPECT_TRUE(switchSdShouldPanicOnRemoval(true, false, 1));
+    EXPECT_FALSE(switchSdShouldPanicOnRemoval(true, false, 0));
+    EXPECT_FALSE(switchSdShouldPanicOnRemoval(true, false, -1));
+    EXPECT_FALSE(switchSdShouldPanicOnRemoval(false, false, 1));
+    EXPECT_FALSE(switchSdShouldPanicOnRemoval(true, true, 1));
+    EXPECT_FALSE(switchSdShouldPanicOnRemoval(false, true, 1));
+}
+
+TEST(SdCardDetectSource, TegraGpioDefinesAndMuxesPz1WithPullUp)
+{
+    const std::string gpioH = SourceText("../../TegraGPIO/TegraGPIO.h");
+    EXPECT_THAT(gpioH, HasSubstr("TEGRA_GPIO_PZ1 = 25 * 8 + 1"));
+    EXPECT_THAT(gpioH, HasSubstr("TEGRA_GPIO_SD_CD = TEGRA_GPIO_PZ1"));
+
+    const std::string gpioCpp = SourceText("../../TegraGPIO/TegraGPIO.cpp");
+    EXPECT_THAT(gpioCpp, HasSubstr("{TEGRA_GPIO_PZ1, 0x280, PULL_UP}"));
+}
+
+TEST(SdCardDetectSource, PrimaryInterruptFilterAndLifecycleOrder)
+{
+    const std::string startCd = body("void NativeSwitchBlock::startCardDetect()");
+    EXPECT_THAT(startCd, HasSubstr("tegra_gpio_interrupt_nub(TEGRA_GPIO_SD_CD, TEGRA_GPIO_EDGE_RISING)"));
+    EXPECT_THAT(startCd, HasSubstr("IOFilterInterruptEventSource::filterInterruptEventSource("));
+    EXPECT_THAT(startCd, HasSubstr("this, nullptr, &NativeSwitchBlock::cardDetectFilter, nub, 0"));
+    EXPECT_LT(Index(startCd, "__atomic_store_n(&cardDetectArmed, true, __ATOMIC_RELEASE)"),
+              Index(startCd, "cdSource->enable()"));
+    EXPECT_LT(Index(startCd, "cdSource->enable()"), Index(startCd, "checkCardPresent(\"boot\")"));
+
+    const std::string setup = body("bool NativeSwitchBlock::setup()");
+    EXPECT_LT(Index(setup, "kernel_thread_start("), Index(setup, "startCardDetect();"));
+
+    const std::string filter = body("bool NativeSwitchBlock::cardDetectFilter(");
+    EXPECT_THAT(filter, HasSubstr("checkCardPresent(\"interrupt\")"));
+    EXPECT_THAT(filter, HasSubstr("return false;"));
+
+    const std::string check = body("void NativeSwitchBlock::checkCardPresent(");
+    EXPECT_LT(Index(check, "__atomic_load_n(&cardDetectArmed, __ATOMIC_ACQUIRE)"),
+              Index(check, "tegra_gpio_read(TEGRA_GPIO_SD_CD)"));
+    EXPECT_THAT(check, HasSubstr("switchSdShouldPanicOnRemoval(armed, panic_active() != 0, level)"));
+
+    const std::string removePanic = body("void NativeSwitchBlock::cardRemovedPanic(");
+    EXPECT_THAT(removePanic, HasSubstr("panic(\"SwitchSD: SD card removed"));
+    EXPECT_THAT(removePanic, Not(HasSubstr("r32(PRESENT)")));
+
+    const std::string failed = body("bool NativeSwitchBlock::failed(");
+    EXPECT_LT(Index(failed, "checkCardPresent(\"io error\")"), Index(failed, "recover(true)"));
+
+    const std::string suspend = body("void NativeSwitchBlock::suspend()");
+    EXPECT_LT(Index(suspend, "__atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE)"),
+              Index(suspend, "cdSource->disable()"));
+    EXPECT_LT(Index(suspend, "cdSource->disable()"), Index(suspend, "powerOffCard()"));
+
+    const std::string resume = body("void NativeSwitchBlock::resume()");
+    EXPECT_LT(Index(resume, "__atomic_store_n(&cardDetectArmed, true, __ATOMIC_RELEASE)"),
+              Index(resume, "cdSource->enable()"));
+    EXPECT_LT(Index(resume, "cdSource->enable()"), Index(resume, "checkCardPresent(\"resume\")"));
+    EXPECT_LT(Index(resume, "checkCardPresent(\"resume\")"), Index(resume, "powerOnController()"));
+
+    const std::string shutdown = body("void NativeSwitchBlock::shutdown()");
+    EXPECT_LT(Index(shutdown, "__atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE)"),
+              Index(shutdown, "cdSource->disable()"));
+
+    const std::string stop = body("void NativeSwitchBlock::stop(");
+    EXPECT_LT(Index(stop, "__atomic_store_n(&cardDetectArmed, false, __ATOMIC_RELEASE)"),
+              Index(stop, "cdSource->disable()"));
+    EXPECT_FALSE(Search(startCd, R"(\b(IOTimerEventSource|thread_call|IOSleep)\b)"));
+}

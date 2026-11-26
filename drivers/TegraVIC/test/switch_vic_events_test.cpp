@@ -295,3 +295,36 @@ TEST_F(Events, AVicJobEndingInTheEventsRetirementReleasesItsRequestThere)
     Results::complete(&record, 0);
     pump();
 }
+
+TEST_F(Events, VicFailedUncommittedJobAdvancesNativeSignalAndWakesWatchers)
+{
+    TegraVICRequest request = {};
+    request.dst_event_port = port;
+    request.dst_wait = 0;
+    request.dst_signal = 9;
+    auto &notices = makeNotices();
+    SwitchVICEvents *work = nullptr;
+    ASSERT_EQ(switch_vic_events_create(this, request, ready, &notices, &work), 0);
+    switch_vic_events_arm(work);
+    pump();
+    ASSERT_EQ(notices.count, 1);
+
+    TegraVICRequest waiter = {};
+    waiter.src_event_port = port;
+    waiter.src_wait = 9;
+    auto &waiterNotices = makeNotices();
+    SwitchVICEvents *blocked = nullptr;
+    ASSERT_EQ(switch_vic_events_create(this, waiter, ready, &waiterNotices, &blocked), 0);
+    switch_vic_events_arm(blocked);
+    pump();
+    EXPECT_EQ(waiterNotices.count, 0);
+
+    switch_vic_events_fail(&work, -5);
+    nativePump();
+    pump();
+    EXPECT_EQ(native->value, 9u);
+    EXPECT_EQ(waiterNotices.count, 1);
+    EXPECT_EQ(waiterNotices.result, 0);
+    switch_vic_events_release(&blocked);
+    pump();
+}

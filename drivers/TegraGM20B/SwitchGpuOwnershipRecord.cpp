@@ -13,23 +13,67 @@ bool conflicts(uint32_t old_access, uint32_t access)
 	return (old_access | access) & SWITCH_GPU_BACKING_WRITE;
 }
 
-// A read ordered on the GPU behind writer promises still pending reads what the promised writes leave (its content is
-// past the backing's): the promised job waiting for it would wait for itself.
-bool reads_promised(const switch_gpu_backing &backing, const switch_gpu_backing_access &access)
+bool promise_pending_on(const switch_gpu_backing &backing, uint32_t offset, uint32_t value)
 {
-	return !(access.access & SWITCH_GPU_BACKING_WRITE) && access.content > backing.content &&
-	       switch_gpu_backing_promise_pending_locked(&backing);
+	for (uint32_t i = 0; i < backing.promise_count; ++i) {
+		const auto &ref = backing.promises[i];
+		if (ref.offset == offset && ref.value == value &&
+		    !switch_gpu_promise_ref_released(&ref) &&
+		    !tgm_promise_abandoned(ref.offset, ref.value))
+			return true;
+	}
+	return false;
 }
 
-// What a committed read reads: the backing's content after the promised writes it orders behind, else 0 (the current).
-uint64_t read_content(const switch_gpu_backing_transaction &transaction,
-		      const switch_gpu_backing &backing)
+void append_promise_wait(switch_gpu_promise_wait out[SWITCH_GPU_BACKING_PROMISES], uint32_t &count,
+			 uint32_t offset, uint32_t value)
 {
-	if (!transaction.promised || !backing.promise_count)
+	for (uint32_t i = 0; i < count; ++i)
+		if (out[i].offset == offset && out[i].value == value)
+			return;
+	if (count < SWITCH_GPU_BACKING_PROMISES)
+		out[count++] = {offset, value};
+}
+
+// A read ordered on the GPU behind writer promises still pending on this backing reads what the
+// promised writes leave: any write before those promises drop waiting for it would deadlock.
+bool reads_promised(const switch_gpu_backing &backing, const switch_gpu_backing_access &access)
+{
+	if ((access.access & SWITCH_GPU_BACKING_WRITE) || !access.promise_count ||
+	    !backing.promise_count)
+		return false;
+	for (uint32_t i = 0; i < access.promise_count; ++i)
+		if (promise_pending_on(backing, access.promises[i].offset,
+				       access.promises[i].value))
+			return true;
+	return false;
+}
+
+uint32_t collect_read_promises(const switch_gpu_backing_transaction &transaction,
+			       const switch_gpu_backing &backing,
+			       const switch_gpu_backing_access *previous,
+			       switch_gpu_promise_wait out[SWITCH_GPU_BACKING_PROMISES])
+{
+	if (!backing.promise_count)
 		return 0;
-	const int pending = switch_gpu_backing_promises_locked(&backing, transaction.promise_first,
-							       transaction.promise_end, nullptr, 0);
-	return pending > 0 ? backing.content + uint64_t(pending) : 0;
+	uint32_t count = 0;
+	if (transaction.promised) {
+		switch_gpu_backing_token found[SWITCH_GPU_BACKING_PROMISES];
+		const int pending = switch_gpu_backing_promises_locked(
+			&backing, transaction.promise_first, transaction.promise_end, found,
+			SWITCH_GPU_BACKING_PROMISES);
+		for (int i = 0; i < pending; ++i)
+			append_promise_wait(out, count, found[i].queue, uint32_t(found[i].value));
+	}
+	if (previous && previous->promise_count &&
+	    switch_gpu_backing_access_status(*previous) == 0) {
+		for (uint32_t i = 0; i < previous->promise_count; ++i)
+			if (promise_pending_on(backing, previous->promises[i].offset,
+					       previous->promises[i].value))
+				append_promise_wait(out, count, previous->promises[i].offset,
+						    previous->promises[i].value);
+	}
+	return count;
 }
 
 void unlock_transaction(switch_gpu_backing_transaction *transaction)
@@ -187,23 +231,31 @@ bool publish_transaction(switch_gpu_backing_transaction *transaction)
 			backing->host_acquire_epoch = backing->host_epoch;
 		}
 		const uint32_t slot = access_slot(backing, transaction->completion, access);
-		uint64_t content = access & SWITCH_GPU_BACKING_WRITE
-					   ? backing->content + 1
-					   : read_content(*transaction, *backing);
+		const bool write = (access & SWITCH_GPU_BACKING_WRITE) != 0;
+		const switch_gpu_backing_access *previous =
+			slot < backing->access_count ? &backing->accesses[slot] : nullptr;
+		switch_gpu_promise_wait read_promises[SWITCH_GPU_BACKING_PROMISES] = {};
+		const uint32_t promise_count =
+			write ? 0u
+			      : collect_read_promises(*transaction, *backing, previous,
+						      read_promises);
 		if (slot < backing->access_count) {
-			// a later read on the same timeline runs after the earlier one, so after what that one waits for
-			if (!(access & SWITCH_GPU_BACKING_WRITE) &&
-			    backing->accesses[slot].content > content)
-				content = backing->accesses[slot].content;
 			if (!timeline)
 				switch_gpu_backing_drop_token(backing->accesses[slot].token);
 		} else {
 			++backing->access_count;
 			used += timeline != nullptr;
 		}
-		backing->accesses[slot] = {transaction->completion, content, access, false,
+		backing->accesses[slot] = {transaction->completion,
+					   write ? backing->content + 1 : 0,
+					   access,
+					   promise_count,
+					   {},
+					   false,
 					   transaction->handle};
-		if (access & SWITCH_GPU_BACKING_WRITE) {
+		for (uint32_t p = 0; p < promise_count; ++p)
+			backing->accesses[slot].promises[p] = read_promises[p];
+		if (write) {
 			switch_gpu_backing_writer_commit_locked(backing, transaction->completion);
 			++backing->content;
 			if (transaction->completion.engine != SWITCH_GPU_ENGINE_GM20B)
@@ -289,7 +341,7 @@ int switch_gpu_backing_adopt_locked(switch_gpu_backing *backing,
 		else
 			++backing->access_count;
 		const bool write = kind & SWITCH_GPU_BACKING_WRITE;
-		backing->accesses[slot] = {job, write ? backing->content + 1 : 0, kind, false,
+		backing->accesses[slot] = {job, write ? backing->content + 1 : 0, kind, 0, {}, false,
 					   nullptr};
 		if (write) {
 			++backing->content;

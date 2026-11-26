@@ -59,7 +59,7 @@ class LaunchdMilestoneTest(unittest.TestCase):
     def test_the_kernels_mounts_before_launchd_do_not_count(self):
         for line in (
             (
-                '[    17.834832] apfs_log_op_with_proc:3290: disk1s3 mounting volume SwitchPrebootTrial, '
+                '[    17.834832] apfs_log_op_with_proc:3290: disk1s3 mounting volume Switch-iOS-Preboot, '
                 'requested by: init (pid 1); parent: kernel_task (pid 0)'
             ),
             (

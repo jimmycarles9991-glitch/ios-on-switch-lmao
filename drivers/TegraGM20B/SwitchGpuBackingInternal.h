@@ -13,10 +13,16 @@ struct switch_gpu_backing_pages {
 	uint32_t count;
 };
 
+struct switch_gpu_promise_wait {
+	uint32_t offset, value;
+};
+
 struct switch_gpu_backing_access {
 	switch_gpu_backing_token token;
 	uint64_t content;
 	uint32_t access;
+	uint32_t promise_count;
+	switch_gpu_promise_wait promises[SWITCH_GPU_BACKING_PROMISES];
 	bool noted;  // its failure was already logged, or needs no log
 	// the token's timeline (switch_gpu_backing_timeline_refs), held by the record's reference; null: the engine's status
 	const void *handle;

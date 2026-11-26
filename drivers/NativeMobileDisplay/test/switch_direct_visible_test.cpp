@@ -55,6 +55,7 @@ struct switch_gpu_backing {
 
 namespace {
 int visible = 1;
+int promiseVisible = 1;
 }  // namespace
 
 extern "C" void switch_gpu_backing_retain(switch_gpu_backing *b)
@@ -72,9 +73,9 @@ extern "C" void switch_gpu_backing_scanout(switch_gpu_backing *b, int add)
     add ? ++b->holds : --b->holds;
 }
 
-extern "C" int switch_gpu_backing_token_external_status(const switch_gpu_backing_token *)
+extern "C" int switch_gpu_backing_token_external_status(const switch_gpu_backing_token *token)
 {
-    return visible;
+    return token && token->engine == SWITCH_GPU_ENGINE_PROMISE ? promiseVisible : visible;
 }
 
 extern "C" int switch_gpu_backing_promised(switch_gpu_backing *b)
@@ -170,6 +171,7 @@ protected:
     void SetUp() override
     {
         visible = 1;
+        promiseVisible = 1;
         display.reads[1].lease = reinterpret_cast<switch_gpu_cpu_lease *>(1);
         display.reads[1].view.native = &backing;
         display.reads[1].view.producer = {7, 1, SWITCH_GPU_ENGINE_GM20B, 3};
@@ -223,6 +225,11 @@ TEST_F(DirectVisible, APromisedSurfaceKeepsThePresentJobWhateverItsProducer)
     EXPECT_FALSE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
     EXPECT_TRUE(display.presented.empty());
     backing.promises = 0;
+    display.reads[1].promises[0] = {9, 0, SWITCH_GPU_ENGINE_PROMISE, 2048};
+    display.reads[1].promiseCount = 1;
+    promiseVisible = 0;
+    EXPECT_FALSE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
+    promiseVisible = 1;
     EXPECT_TRUE(display.presentDirectVisible(&request, NativeLegacyDisplay::kSlot0 + 1, 1280, 720, 5));
 }
 

@@ -10,6 +10,12 @@ load("//bazel/testing:defs.bzl", "host_test")
 
 lint_files()
 
+# The installer's card checks test their layouts against the same model cards the kernel's rules are tested on.
+exports_files(
+    ["sd_card_model.h"],
+    visibility = ["//install:__subpackages__"],
+)
+
 # The randomized tests run their thousands of cases at -O1 (as the cryptex map's always did): ASan at -O0 took
 # minutes.
 host_test(
@@ -118,6 +124,17 @@ host_test(
 )
 
 host_test(
+    name = "sd_root_test",
+    srcs = [
+        "sd_root_test.cpp",
+        "//diagnostics/switch:storage/fat32.h",
+        "//diagnostics/switch:storage/partition.h",
+        "//drivers/NativeSwitchBlock:SwitchSdRoot.h",
+        "//drivers/NativeSwitchBlock:SwitchSdWindow.h",
+    ],
+)
+
+host_test(
     name = "cryptex_map_test",
     size = "medium",
     srcs = [
@@ -201,6 +218,29 @@ host_test(
 )
 
 host_test(
+    name = "sd_card_detect_test",
+    srcs = [
+        "sd_card_detect_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdCardDetect.h",
+    ],
+    copts = ["-O1"],
+    data = [
+        "//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp",
+        "//drivers/TegraGPIO:TegraGPIO.cpp",
+        "//drivers/TegraGPIO:TegraGPIO.h",
+    ],
+    deps = [":source_checks"],
+)
+
+host_test(
+    name = "sd_root_source_test",
+    srcs = ["sd_root_source_test.cpp"],
+    copts = ["-O1"],
+    data = ["//drivers/NativeSwitchBlock:NativeSwitchBlock.cpp"],
+    deps = [":source_checks"],
+)
+
+host_test(
     name = "cryptex_source_test",
     srcs = ["cryptex_source_test.cpp"],
     copts = ["-O1"],
@@ -211,17 +251,32 @@ host_test(
     deps = [":source_checks"],
 )
 
+# The shared volume's selection (SwitchSdVolume.cpp) and the strict GPT scan it runs, on cards sd_card_model.h builds.
+FILES_VOLUME_SRCS = [
+    "sd_card_model.h",
+    "//diagnostics/switch:storage/fat32.h",
+    "//diagnostics/switch:storage/partition.c",
+    "//diagnostics/switch:storage/partition.h",
+    "//diagnostics/switch:storage/sd_reference.c",
+    "//diagnostics/switch:storage/sd_reference.h",
+    "//drivers/NativeSwitchBlock:SwitchSdVolume.cpp",
+    "//drivers/NativeSwitchBlock:SwitchSdVolume.h",
+    "//drivers/NativeSwitchBlock:SwitchSdVolumeInternal.h",
+]
+
 host_test(
     name = "sd_files_volume_test",
+    srcs = ["sd_files_volume_test.cpp"] + FILES_VOLUME_SRCS,
+)
+
+# setup()'s root rule and the shared volume's selection on the owner's 1 TB card, as read before the first install and
+# in the layouts the driver boots.
+host_test(
+    name = "sd_layout_test",
     srcs = [
-        "sd_files_volume_test.cpp",
-        "//diagnostics/switch:storage/fat32.h",
-        "//diagnostics/switch:storage/partition.c",
-        "//diagnostics/switch:storage/partition.h",
-        "//diagnostics/switch:storage/sd_reference.c",
-        "//diagnostics/switch:storage/sd_reference.h",
-        "//drivers/NativeSwitchBlock:SwitchSdVolume.cpp",
-        "//drivers/NativeSwitchBlock:SwitchSdVolume.h",
-        "//drivers/NativeSwitchBlock:SwitchSdVolumeInternal.h",
-    ],
+        "sd_layout_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdRoot.h",
+        "//drivers/NativeSwitchBlock:SwitchSdWindow.h",
+    ] + FILES_VOLUME_SRCS,
+    data = ["//install:testdata/switch-card-1tb.json"],
 )
