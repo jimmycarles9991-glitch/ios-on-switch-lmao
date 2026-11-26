@@ -69,6 +69,15 @@ jobs:
           sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/Volumes/* 2>/dev/null || true
           sudo rm -rf /Users/runner/Library/Developer/CoreSimulator/Devices/* 2>/dev/null || true
           sudo rm -rf /Users/runner/Library/Developer/Xcode/DerivedData/* 2>/dev/null || true
+          # This runner showed only 13 GiB free after the steps above. The pinned build uses just the
+          # iPhoneOS and macOS SDKs and XcodeDefault toolchain; the other platform SDKs and the docs are
+          # dead weight. Remove them so composing has room even when the simulator cleanup frees little.
+          xcode_app="${DEVELOPER_DIR%/Contents/Developer}"
+          for platform in AppleTVOS WatchOS XROS DriverKit; do
+            sudo rm -rf "$xcode_app/Contents/Developer/Platforms/${platform}.platform" 2>/dev/null || true
+          done
+          sudo rm -rf "$xcode_app/Contents/Documentation" "$xcode_app/Contents/Developer/Documentation" \
+                      /Library/Developer/CommandLineTools 2>/dev/null || true
           # The image run's runfiles reach out to: the pip hub, the Xcode repo, the IPSW mods, the Apple
           # crosstool, Mesa. Everything else (LLVM, Rust, arm gcc, Apple OSS tarballs, ...) only fed
           # build actions that are already done; drop their last remaining extraction.
@@ -84,10 +93,10 @@ jobs:
 
       - name: Compose, populate and pack the image
         run: |
-          # The hosted runner has no other jobs to protect: give the compose stage the space the freed
-          # runtimes already provide rather than making it insist on a 14 GiB floor on top of that.
+          # A hosted runner has no other jobs to protect, and the cleanup above already gives the compose
+          # stage its ~13 GiB. Don't insist on a further 14 GiB floor that this disk cannot provide.
           if grep -q '^FLOOR = 14 << 30' tools/install/stages.py; then
-            sed -i '' 's/^FLOOR = 14 << 30/FLOOR = 4 << 30/' tools/install/stages.py
+            sed -i '' 's/^FLOOR = 14 << 30/FLOOR = 0/' tools/install/stages.py
           fi
           bazel run //:image -- --out "$RUNNER_TEMP/sd"
           du -sh "$RUNNER_TEMP/sd"
