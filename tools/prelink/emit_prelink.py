@@ -15,7 +15,8 @@ The work splits by what it reads (kernel/rules/kernel.bzl kernel_prelink runs ea
     emit_prelink.py ORIGINAL-ARGS --kernel K --output O         both in one process: O and O's .json (the old form)
 
 ORIGINAL-ARGS: --prelinked, --root, --new-root, --cut, --defer, --slide, --early-security-init,
---inherit-original-report, --previous. emit() = apply(prepare()): the same bytes, whichever way it runs.
+--inherit-original-report, --previous, --kind, --sites. emit() = apply(prepare()): the same bytes, whichever way it
+runs.
 --options PRELINK_JSON stands for --root through --early-security-init: the prelink.json //install:kernel_inputs puts in
 the release, read the way kernel_prelink passes its flags.
 """
@@ -38,6 +39,7 @@ from typing import NamedTuple, Self
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from native_prelink import native_bindings, plan_original, prelink_info
 
+from kits.SwitchABI import sites as declared_sites
 from tools.common.macho import backed_offset, macho
 
 # Standard SHA-256 round constants, stored as 64 little-endian words. Some
@@ -258,6 +260,7 @@ class Original(NamedTuple):
     slide: int
     early_security_init: dict[str, int] | None
     inherited_report: dict[str, object]
+    sites: list[declared_sites.Site]
 
 
 @dataclasses.dataclass
@@ -337,6 +340,7 @@ def prepare(original: Original) -> tuple[Plan, dict[str, object], dict[str, list
     report['early_security_initializers'] = early_security_initializers(cache, early_security_init, slide)
     image = CoalescedImage()
     segments = copy_coalesced_segments(image, cache, report['kernel_interfaces'], slide)
+    write_sites(image, cache, original.sites, report['known_inline_data'], slide)
     pointers = component_pointers(image, report['bindings'], unbound)
     rebase_headers(image, cache, slide)
     report['module_entrypoints'] = module_entrypoints(image, cache, report['components'], slide)
@@ -349,17 +353,20 @@ def prepare(original: Original) -> tuple[Plan, dict[str, object], dict[str, list
     xml_head, xml_tail = prelink_info_xml(
         selected_entries(cache, report, early_security_init, slide), kaslr_offsets(image, report)
     )
-    text_hashes = executable_hashes(image, cache, native_sites, inherited, slide)
+    text_hashes, patched_hashes = executable_hashes(image, cache, native_sites, original)
     report['kcid_derivation'] = 'SHA256(domain + new_native_bytes + inherited_original_sha256_bytes)[:16]'
     report.update(
         candidate_sha256=None,
         coalesced_segments=None,
         original_executable_sha256=text_hashes,
+        declared_sites=declared_sites.record(original.sites, slide),
+        patched_executable_sha256=patched_hashes,
         candidate_bytes=None,
         source_inputs_modified=False,
         runtime_qualified=False,
         loadable=False,
     )
+    report['original_input_validation']['patched_executable_hashes_checked_against_apple'] = sorted(patched_hashes)
     result = Plan(
         slide=slide,
         original_sha256=inherited['original_sha256'],
@@ -627,32 +634,81 @@ def prelink_info_xml(entries: list[dict[str, object]], offsets: list[int]) -> tu
     return xml_head, xml_tail
 
 
+def write_sites(
+    image: CoalescedImage,
+    cache: Kernelcache,
+    sites: list[declared_sites.Site],
+    inline_data: list[dict[str, object]],
+    slide: int,
+) -> None:
+    """Write the kind's declared sites into the copied code, each original word checked first (kits/SwitchABI/sites.py).
+
+    A site may not touch what the inherited findings describe: it is neither a PC-relative encoding before or after
+    (pc_relative_encodings_preserved counts Apple's) nor inside known inline data.
+    """
+    for site in sites:
+        module = cache.modules.get(site.bundle)
+        if module is None:
+            raise ValueError(f'{site.bundle}: sites declared for a kext that is not prelinked')
+        if not any(
+            s['name'] == '__TEXT_EXEC' and s['va'] <= site.at and site.at + 4 <= s['va'] + s['filesize']
+            for s in module['segments']
+        ):
+            raise ValueError(f'{site.bundle} {site.at:#x}: a declared site outside its code')
+        if any(pc_relative_target(word, site.at) is not None for word in (site.original, site.replacement)):
+            raise ValueError(f'{site.bundle} {site.at:#x}: a declared site with a PC-relative encoding')
+        if any(d['va'] <= site.at < d['va'] + d['size'] for d in inline_data):
+            raise ValueError(f'{site.bundle} {site.at:#x}: a declared site in known inline data')
+
+    def at(address: int) -> int:
+        return image.new_offset(address + slide, 4)
+
+    declared_sites.apply(
+        sites,
+        lambda address: struct.unpack_from('<I', image.output, at(address))[0],
+        lambda address, word: image.write('<I', at(address), word),
+    )
+
+
 def executable_hashes(
-    image: CoalescedImage, cache: Kernelcache, native_sites: NativeSites, inherited: dict[str, object], slide: int
-) -> dict[str, str]:
-    # No executable instruction byte is patched, including original POST code.
-    text_hashes = {}
+    image: CoalescedImage, cache: Kernelcache, native_sites: NativeSites, original: Original
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ({kext: SHA-256 of Apple's code}, {kext: SHA-256 of its code as prelinked} for kexts with sites).
+
+    Every executable byte is Apple's except at the kind's declared sites, whose original words write_sites checked
+    before writing: the inherited V20 findings (PC-relative encodings, inline data, these hashes) describe Apple's code,
+    and nothing else may rewrite it, original POST code included. A kext with sites has its Apple hash recomputed from
+    the kernelcache and checked against the inherited one, since its prelinked code no longer has that hash.
+    """
+    inherited, slide, sites = original.inherited_report, original.slide, original.sites
+    text_hashes, patched_hashes = {}, {}
     for identifier, module in cache.modules.items():
         for segment in module['segments']:
             if segment['name'] == '__TEXT_EXEC' and segment['filesize']:
                 old = backed_offset(cache.parent, segment['va'], segment['filesize'], len(cache.data))
                 new = image.new_offset(segment['va'] + slide, segment['filesize'])
-                if image.output[new : new + segment['filesize']] != cache.data[
-                    old : old + segment['filesize']
-                ] or native_sites.hits(new, segment['filesize']):
-                    raise ValueError('Original executable bytes changed')
-                text_hashes[identifier] = (
-                    hashlib.sha256(cache.data[old : old + segment['filesize']]).hexdigest()
-                    if identifier in NEW_ORIGINAL_COMPONENTS
-                    else inherited['original_executable_sha256'][identifier]
-                )
+                apple = cache.data[old : old + segment['filesize']]
+                expected = bytearray(apple)
+                own = [s for s in sites if segment['va'] <= s.at < segment['va'] + segment['filesize']]
+                for site in own:
+                    struct.pack_into('<I', expected, site.at - segment['va'], site.replacement)
+                if image.output[new : new + segment['filesize']] != expected or native_sites.hits(
+                    new, segment['filesize']
+                ):
+                    raise ValueError('Original executable bytes changed outside the declared sites')
+                if identifier in NEW_ORIGINAL_COMPONENTS or own:
+                    text_hashes[identifier] = hashlib.sha256(apple).hexdigest()
+                else:
+                    text_hashes[identifier] = inherited['original_executable_sha256'][identifier]
+                if own:
+                    patched_hashes[identifier] = hashlib.sha256(expected).hexdigest()
     if {k: v for k, v in text_hashes.items() if k not in NEW_ORIGINAL_COMPONENTS} != inherited[
         'original_executable_sha256'
     ] or set(text_hashes) != set(inherited['original_executable_sha256']) | (
         NEW_ORIGINAL_COMPONENTS & cache.modules.keys()
     ):
         raise ValueError('Original executable identity set changed')
-    return text_hashes
+    return text_hashes, patched_hashes
 
 
 class NativeImage:
@@ -842,6 +898,8 @@ def original_arguments(parser: argparse.ArgumentParser) -> None:
         type=Path,
         help='the V20 prelink: its roots and the sha256s of its kernelcache and report',
     )
+    parser.add_argument('--kind', default='', help='the IPSW kind the --sites tables are declared for')
+    parser.add_argument('--sites', action='append', default=[], type=Path, help="a kind's declared sites table")
 
 
 def take_options(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
@@ -892,6 +950,8 @@ def original_inputs(
     inherited = json.loads(report_bytes)
     if len(inherited['components']) != 33:
         raise ValueError('Expected 33 original components')
+    if args.sites and not args.kind:
+        parser.error('--sites needs --kind')
     return prelinked, inherited, initializers, previous
 
 
@@ -908,7 +968,7 @@ def main() -> None:
             raise SystemExit('Refuse to overwrite an existing candidate')
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_bytes(image)
-        print(f'Experimental candidate: {len(image)} bytes; executable bytes unchanged; runtime unqualified')
+        print(f"Experimental candidate: {len(image)} bytes; Apple's code but the declared sites; runtime unqualified")
         return
     original_arguments(parser)
     if mode == 'plan':
@@ -922,7 +982,9 @@ def main() -> None:
             parser.add_argument('--output', required=True, type=Path)
     args = parser.parse_args(sys.argv[2:] if mode else sys.argv[1:])
     prelinked, inherited, initializers, previous = original_inputs(parser, args)
-    original = Original(prelinked, args.root, args.slide, initializers, inherited)
+    original = Original(
+        prelinked, args.root, args.slide, initializers, inherited, declared_sites.load_all(args.sites, args.kind)
+    )
     if mode == 'plan':
         plan, _, _ = prepare(original)
         args.plan_output.parent.mkdir(parents=True, exist_ok=True)
@@ -947,7 +1009,8 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_bytes(image)
     args.output.with_suffix('.json').write_text(json.dumps(report, indent=2) + '\n')
-    print(f'Experimental candidate: {len(image)} bytes; executable bytes unchanged; runtime unqualified')
+    sites = len(report['declared_sites'])
+    print(f"Experimental candidate: {len(image)} bytes; Apple's code but {sites} declared sites; runtime unqualified")
 
 
 if __name__ == '__main__':

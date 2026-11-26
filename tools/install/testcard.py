@@ -28,7 +28,7 @@ from pathlib import Path
 
 if __package__ in (None, ''):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from tools.install import gpt, host
+from tools.install import disks, gpt, host
 
 DEFAULT_LAYOUT = Path(__file__).resolve().parents[2] / 'install/testdata/switch-card-1tb.json'
 OTHER_FILES = {
@@ -65,7 +65,9 @@ def _recrc(sectors: dict[int, bytearray], disk_sectors: int) -> None:
         header[16:20] = zlib.crc32(bytes(header[:92])).to_bytes(4, 'little')
 
 
-def create(image: str, layout_path: str, variant: str) -> None:
+def create(image: str, layout_path: str, variant: str, filesystem: str = 'fat32') -> None:
+    if filesystem not in ('fat32', 'exfat'):
+        raise ValueError(f'unsupported filesystem {filesystem!r}')
     layout = json.loads(Path(layout_path).read_text())
     size = layout['disk_bytes']
     sectors = _sectors(layout)
@@ -85,6 +87,8 @@ def create(image: str, layout_path: str, variant: str) -> None:
         entries[at : at + 16] = gpt.LINUX_DATA.bytes_le
         sectors[0][446 : 446 + 16] = bytes(16)
         _recrc(sectors, disk_sectors)
+    if filesystem == 'exfat' and variant != 'no-switch':
+        sectors[0][446 + 4] = 0x07
     image = Path(image)
     if image.exists():
         raise SystemExit(f'{image} exists')
@@ -97,22 +101,22 @@ def create(image: str, layout_path: str, variant: str) -> None:
     try:
         if variant != 'no-switch':
             fat = device + 's1'
+            formatter = ['/sbin/newfs_exfat'] if filesystem == 'exfat' else ['/sbin/newfs_msdos', '-F', '32']
             subprocess.run(
-                ['/sbin/newfs_msdos', '-F', '32', '-v', 'SWITCH SD', '/dev/r' + fat[5:]],
+                [*formatter, '-v', 'SWITCH SD', '/dev/r' + fat[5:]],
                 check=True,
                 capture_output=True,
             )
-            with tempfile.TemporaryDirectory() as mount:
-                subprocess.run(
-                    ['/usr/sbin/diskutil', 'mount', '-mountPoint', mount, fat], check=True, capture_output=True
-                )
+            with tempfile.TemporaryDirectory() as work:
+                log = host.Log(Path(work) / 'mount.log')
                 try:
-                    for relative, data in OTHER_FILES.items():
-                        path = Path(mount) / relative
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_bytes(data)
+                    with disks.mounted(fat, log, owners=False) as mount:
+                        for relative, data in OTHER_FILES.items():
+                            path = mount / relative
+                            path.parent.mkdir(parents=True, exist_ok=True)
+                            path.write_bytes(data)
                 finally:
-                    subprocess.run(['/usr/sbin/diskutil', 'unmount', fat], check=True, capture_output=True)
+                    log.file.close()
     finally:
         detach(image)
     print(f'{image}: {size} bytes, variant {variant}')
@@ -171,6 +175,7 @@ def main() -> None:
     c = sub.add_parser('create')
     c.add_argument('image')
     c.add_argument('--layout', default=str(DEFAULT_LAYOUT))
+    c.add_argument('--filesystem', choices=['fat32', 'exfat'], default='fat32')
     c.add_argument('--variant', default='normal', choices=['normal', 'no-switch', 'wrong-size', 'two-apfs'])
     a = sub.add_parser('attach')
     a.add_argument('image')
@@ -178,7 +183,7 @@ def main() -> None:
     d.add_argument('image')
     args = parser.parse_args()
     if args.command == 'create':
-        create(args.image, args.layout, args.variant)
+        create(args.image, args.layout, args.variant, args.filesystem)
     elif args.command == 'attach':
         print(attach(args.image))
     else:

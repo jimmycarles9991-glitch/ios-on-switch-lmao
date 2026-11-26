@@ -38,6 +38,17 @@ template <typename Request> inline bool switchOverlapsRange(const Request *a, co
     return a->sectors != 0 && b.sectors != 0 && a->lba < b.lba + b.sectors && b.lba < a->lba + a->sectors;
 }
 
+template <typename Request>
+inline auto switchSameWindow(const Request *a, const Request *b, int) -> decltype(a->shared == b->shared)
+{
+    return a->shared == b->shared;
+}
+
+template <typename Request> inline bool switchSameWindow(const Request *, const Request *, ...)
+{
+    return true;
+}
+
 // Marks `first` and the reads that join it (`chained`), returns how many, and the chain's first LBA and length (gaps
 // included). `first` is in the queue; nothing is unlinked yet (switchUnlinkChain does that).
 template <typename Request>
@@ -54,7 +65,7 @@ inline uint32_t switchGatherReads(Request *head, Request *first, uint32_t limit,
         grew = false;
         unsigned seen = 0;
         for (Request *r = head; r && seen < scan && count < maxCount; r = r->next, ++seen) {
-            if (r->write || r->chained)
+            if (r->write || r->chained || !switchSameWindow(r, first, 0))
                 continue;
             const uint64_t from = r->lba;
             const uint64_t to = r->lba + r->sectors;
@@ -95,10 +106,15 @@ inline uint32_t switchGatherReads(Request *head, Request *first, uint32_t limit,
     return count;
 }
 
+// `inOrder`: a synchronize waits on this window's writes. Its barrier counts completions (SwitchSdWriteFence.h), so
+// while it waits no write may join past an older write still queued: one submitted after the barrier would complete in
+// the place of one it waits for. With no barrier waiting, any barrier that begins later counts both writes. This keeps
+// the chain a prefix of the window's queued writes only because the pick starts a write chain with the window's oldest
+// queued write; a pick that let `first` pass an older write would break the fence with or without this rule.
 template <typename Request>
 inline uint32_t switchGatherWrites(Request *head, Request *first, uint32_t limit, uint32_t maxCount, unsigned scan,
                                    uint64_t *start, uint32_t *sectors, const SwitchLbaRange *inFlight = nullptr,
-                                   unsigned inFlightCount = 0)
+                                   unsigned inFlightCount = 0, bool inOrder = false)
 {
     first->chained = true;
     uint64_t low = first->lba;
@@ -108,7 +124,7 @@ inline uint32_t switchGatherWrites(Request *head, Request *first, uint32_t limit
         grew = false;
         unsigned seen = 0;
         for (Request *r = head; r && seen < scan && count < maxCount; r = r->next, ++seen) {
-            if (!r->write || r->chained)
+            if (!r->write || r->chained || !switchSameWindow(r, first, 0))
                 continue;
             const uint64_t from = r->lba;
             const uint64_t to = r->lba + r->sectors;
@@ -126,8 +142,10 @@ inline uint32_t switchGatherWrites(Request *head, Request *first, uint32_t limit
             bool overlaps = false;
             for (unsigned i = 0; i < inFlightCount && !overlaps; ++i)
                 overlaps = switchOverlapsRange(r, inFlight[i]);
-            for (const Request *older = head; older != r && !overlaps; older = older->next)
-                overlaps = !older->chained && switchOverlaps(older, r);
+            for (const Request *older = head; older != r && !overlaps; older = older->next) {
+                overlaps = !older->chained &&
+                           (switchOverlaps(older, r) || (inOrder && older->write && switchSameWindow(older, r, 0)));
+            }
             if (overlaps)
                 continue;
             r->chained = true;
@@ -150,14 +168,17 @@ inline bool switchChainFitsDirection(const Request *head, uint64_t start, uint32
         return false;
     uint64_t total = 0;
     uint32_t found = 0;
+    const Request *first = nullptr;
     bool atStart = false;
     bool atEnd = false;
     for (const Request *r = head; r; r = r->next) {
         if (!r->chained)
             continue;
+        if (!first)
+            first = r;
         ++found;
-        if (r->write != write || !r->sectors || r->lba < start || r->sectors > sectors ||
-            r->lba - start > sectors - r->sectors)
+        if (!switchSameWindow(r, first, 0) || r->write != write || !r->sectors || r->lba < start ||
+            r->sectors > sectors || r->lba - start > sectors - r->sectors)
             return false;
         total += r->sectors;
         atStart |= r->lba == start;

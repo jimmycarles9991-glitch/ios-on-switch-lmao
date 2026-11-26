@@ -18,11 +18,13 @@ host_shims(
         "IOKit/IOInterruptEventSource.h",
         "IOKit/IOLib.h",
         "IOKit/IOLocks.h",
+        "IOKit/IOMessage.h",
         "IOKit/IOService.h",
         "IOKit/IOTimerEventSource.h",
         "IOKit/IOWorkLoop.h",
         "IOKit/pwr_mgt/IOPM.h",
         "IOKit/pwr_mgt/IOPMPowerSource.h",
+        "IOKit/pwr_mgt/RootDomain.h",
         "libkern/c++/OSBoolean.h",
         "libkern/c++/OSDictionary.h",
         "libkern/c++/OSNumber.h",
@@ -50,6 +52,7 @@ host_library(
         "//drivers/SwitchDisplayPort:SwitchPDAltMode.h",
         "//drivers/SwitchDisplayPort:SwitchPDAltModeHook.h",
         "//drivers/SwitchDisplayPort:SwitchPDAltModeSteps.h",
+        "//drivers/SwitchDisplayPort:SwitchDisplayPort.h",
         "//drivers/TegraGPIO:TegraGPIO.h",
         "//drivers/TegraI2C:TegraI2C.h",
     ],
@@ -87,7 +90,12 @@ host_library(
 
 host_library(
     name = "switch_pd",
-    srcs = ["//drivers/SwitchUSB:SwitchPD.cpp"],
+    srcs = [
+        "//drivers/SwitchUSB:SwitchPD.cpp",
+        "//drivers/SwitchUSB:SwitchPDRequest.cpp",
+        "//drivers/SwitchUSB:SwitchPDService.h",
+        "//drivers/SwitchUSB:SwitchPDSettings.cpp",
+    ],
     copts = ["-Wno-unused-parameter"],
     deps = [
         ":headers",
@@ -149,6 +157,6 @@ host_test(
     srcs = ["switch_charging_source_test.cpp"],
     data = [
         "//drivers/SwitchBattery:SwitchBattery.cpp",
-        "//drivers/SwitchUSB:SwitchPD.cpp",
+        "//drivers/SwitchUSB:SwitchPDRequest.cpp",
     ],
 )

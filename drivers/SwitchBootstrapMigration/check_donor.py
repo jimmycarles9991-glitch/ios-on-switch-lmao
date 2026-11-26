@@ -3,10 +3,7 @@ import plistlib
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
-
-from tools.install import disks, host
 
 METHODS = {
     'dataClassName': '@16@0:8',
@@ -96,24 +93,10 @@ def report(root: Path) -> dict:
     }
 
 
-def main(image: Path, pins_file: Path, out: Path) -> None:
+def main(system_version: Path, pins_file: Path, out: Path) -> None:
     pins = json.loads(pins_file.read_bytes())
-    with tempfile.TemporaryDirectory() as scratch:
-        log = host.Log(Path(scratch) / 'mount.log')
-        try:
-            with disks.interrupts(), disks.attached(image, log, writable=False) as disk:
-                matching = [
-                    v
-                    for v in disk.volumes
-                    if (host.disk_info(v) or {}).get('VolumeUUID', '').upper()
-                    == pins['volumes']['os_volume_uuid'].upper()
-                ]
-                if len(matching) != 1:
-                    raise ValueError('Pinned System volume UUID missing or ambiguous')
-                with disks.mounted(matching[0], log, owners=False, read_only=True) as root:
-                    result = report(root)
-        finally:
-            log.file.close()
+    root = system_version.parents[3]
+    result = report(root)
     if result['build'] != pins['build']:
         raise ValueError(f'Expected {pins["build"]}, mounted {result["build"]}')
     out.parent.mkdir(parents=True, exist_ok=True)

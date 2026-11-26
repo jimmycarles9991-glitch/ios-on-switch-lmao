@@ -13,9 +13,9 @@
 // is user space (all verified in the 21H461 OS image):
 //   * AppleGameControllerPersonality.kext Info.plist, "Nintendo JoyCon L/R IOService" and "... Property Merge" (and the
 //     same pair for Pro Controller 0x2009, SNES 0x2017, N64 0x2019): IOHIDEventDummyService on the IOHIDInterface,
-//     HIDServiceSupport merged into the IOHIDDevice. That kext is in the J120 kernelcache but not in the default
-//     prelink set, so prepare() adds the same personalities (IOHIDFamily owns both classes); when the kext is
-//     prelinked, its own entries are taken out (switch_joycon_hid_select_personalities).
+//     HIDServiceSupport merged into the IOHIDDevice. prepare() adds the same pairs (IOHIDFamily owns both classes) at
+//     scores over IOHIDEventDriver's, and switch_joycon_hid_select_personalities takes the prelinked kext's Nintendo
+//     pairs out; its other vendors' entries stay.
 //   * HIDServiceSupport makes backboardd's HID event system create a user-space service for the IOHIDDevice
 //     (IOHIDEventServicePlugin.plugin matches HIDServiceSupport=true), and JoyConHIDServicePlugin.plugin (Matching
 //     PrimaryUsagePage 1 / PrimaryUsage 5, which the descriptor below declares) claims it:
@@ -123,9 +123,6 @@ constexpr uint32_t kNintendo = 0x057e;
 constexpr uint32_t kDummyScore = 10000, kMergerScore = 1000;
 // AppleGameControllerPersonality's Nintendo entries: Joy-Con L, Joy-Con R, Pro Controller, SNES, N64.
 constexpr uint32_t kNintendoProducts[] = {0x2006, 0x2007, 0x2009, 0x2017, 0x2019};
-#endif
-constexpr size_t kLargestInput = 1 + 0x169;  // reports 0x31-0x33
-constexpr size_t kStandardInput = 1 + 0x30;  // reports 0x21 and 0x30
 // AppleGameControllerPersonality.kext (21H461 Info.plist, 45 personalities): 44 IOHIDEventDummyService /
 // IOHIDProviderPropertyMerger pairs for Xbox (0x045e), Sony (0x054c), Luna (0x0171) and Nintendo ProductIDs, whose
 // classes are IOHIDFamily's, so OSKext marks them IOPersonalityPublisher = the kext; and "Generic Controller
@@ -134,6 +131,9 @@ constexpr size_t kStandardInput = 1 + 0x30;  // reports 0x21 and 0x30
 // in its controller database, and then sets HIDServiceSupport/GamepadHIDServiceSupport for
 // GenericGamepadHIDServicePlugin.
 constexpr char kAppleGCBundle[] = "com.apple.driver.AppleGameControllerPersonality";
+#endif
+constexpr size_t kLargestInput = 1 + 0x169;  // reports 0x31-0x33
+constexpr size_t kStandardInput = 1 + 0x30;  // reports 0x21 and 0x30
 
 const uint8_t kJoyConDescriptor[] = {
     0x05, 0x01, 0x09, 0x05, 0xa1, 0x01, 0x06, 0x01, 0xff, 0x85, 0x21, 0x09, 0x21, 0x75, 0x08, 0x95, 0x30, 0x81, 0x02,
@@ -583,46 +583,51 @@ static void addNintendoPersonalities()
 }
 #endif
 
-// A one-key matching dictionary for IOCatalogue (which compares only the keys it carries).
-static OSDictionary *catalogueMatch(const char *key, const char *value)
+#if !XNU_12377_121_6
+// The kext's two catalogue entries for one Nintendo ProductID: the dummy service carries the IDs itself, the merger in
+// IOPropertyMatch. IOCatalogue compares only the keys a lookup carries.
+static void removeAppleNintendoEntries(uint32_t productID)
 {
-    const OSString *string = OSString::withCString(value);
-    OSDictionary *dict = string ? OSDictionary::withCapacity(1) : nullptr;
-    if (dict && !dict->setObject(key, string))
-        OSSafeReleaseNULL(dict);
-    OSSafeReleaseNULL(string);
-    if (!dict)
+    OSNumber *vendor = OSNumber::withNumber(kNintendo, 32);
+    OSNumber *product = OSNumber::withNumber(productID, 32);
+    OSString *publisher = OSString::withCString(kAppleGCBundle);
+    const char *idKeys[] = {"VendorID", "ProductID"};
+    const OSObject *idValues[] = {vendor, product};
+    OSDictionary *ids = dictionary(idKeys, idValues, 2);
+    const char *dummyKeys[] = {kIOPersonalityPublisherKey, "VendorID", "ProductID"};
+    const OSObject *dummyValues[] = {publisher, vendor, product};
+    OSDictionary *dummy = dictionary(dummyKeys, dummyValues, 3);
+    const char *mergerKeys[] = {kIOPersonalityPublisherKey, "IOPropertyMatch"};
+    const OSObject *mergerValues[] = {publisher, ids};
+    OSDictionary *merger = dictionary(mergerKeys, mergerValues, 2);
+    if (!dummy || !merger)
         panic("SwitchJoyCon: no memory for a catalogue lookup");
-    return dict;
+    gIOCatalogue->removeDrivers(dummy, false);
+    gIOCatalogue->removeDrivers(merger, false);
+    OSObject *all[] = {vendor, product, publisher, ids, dummy, merger};
+    for (const OSObject *object : all) {
+        if (object)
+            object->release();
+    }
 }
+#endif
 
 // The prelinked kext's personalities reach the catalogue at bootstrap (OSKext::sendAllKextPersonalitiesToCatalog);
-// none can match before a game controller exists, and none exists before the board thread (Bluetooth HID devices
-// come from bluetoothd, USB is not integrated), so taking them out here is safe. Both removal keys are needed:
-// IOPersonalityPublisher marks the 44 IOHIDFamily-class entries, CFBundleIdentifier the kext's own class. Double
-// matching cannot happen with both sets present either (same classes, one default match category: one
-// IOHIDEventDummyService wins per interface; mergers fail their probe after setting absent keys), but one source of
-// truth is simpler to reason about.
+// none can match before a game controller exists, and none exists before the board thread, so taking some out here is
+// safe. Only its Nintendo pairs go, so that the pairs prepare() adds are the one source for those controllers. The
+// other vendors' pairs and the Generic Controller stay. The Generic Controller ties with the dummy services at 10000
+// (on an iPad it outranks the kext's Nintendo entries, most at score 0), and its probe declines a device
+// gamecontrollerd has not set GameControllerSupportedHIDDevice on.
 void switch_joycon_hid_select_personalities()
 {
+#if !XNU_12377_121_6
     static bool done;
     if (done)
         return;
     done = true;
-    OSDictionary *byClass = catalogueMatch("IOClass", "AppleGCHIDEventDummyService");
-    SInt32 generation = 0;
-    const OSOrderedSet *found = gIOCatalogue->findDrivers(byClass, &generation);
-    const bool present = (found != nullptr) && (found->getCount() != 0u);
-    OSSafeReleaseNULL(found);
-    OSSafeReleaseNULL(byClass);
-    if (!present)
-        return;
-    static const char *const keys[] = {kIOPersonalityPublisherKey, kCFBundleIdentifierKey};
-    for (const char *key : keys) {
-        OSDictionary *match = catalogueMatch(key, kAppleGCBundle);
-        gIOCatalogue->removeDrivers(match, false);
-        match->release();
-    }
+    for (const uint32_t product : kNintendoProducts)
+        removeAppleNintendoEntries(product);
+#endif
 }
 
 void switch_joycon_hid_prepare()

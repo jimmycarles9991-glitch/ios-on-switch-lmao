@@ -86,12 +86,15 @@ tool_output(
     name = "installd",
     srcs = [
         ":ipsw",
-        "@ipsw//:os",
+        "@ipsw//:os_installd",
+        "@ipsw//:os_system_version",
     ],
     outs = ["build/switch-apps/installd"],
     args = [
-        "--os",
-        "$(execpath @ipsw//:os)",
+        "--system-version",
+        "$(execpath @ipsw//:os_system_version)",
+        "--installd",
+        "$(execpath @ipsw//:os_installd)",
         "--pins",
         "$(execpath :ipsw)",
         "--out",
@@ -101,7 +104,6 @@ tool_output(
     message = "Preparing the selected IPSW's installd policy dependency",
     mnemonic = "InstallPolicy",
     requirements = [
-        "no-sandbox",
         "requires-darwin",
     ],
     xcode = False,

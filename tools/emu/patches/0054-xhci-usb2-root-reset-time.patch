@@ -1,0 +1,88 @@
+Emulator: a USB 2.0 root port's reset lasts TDRSTR (50 ms, USB 2.0 7.1.7.5) with PORTSC.PR set, instead of completing
+within the write that started it
+
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -2726,12 +2726,42 @@
+     trace_usb_xhci_port_link(port->portnr, pls);
+     xhci_port_notify(port, PORTSC_CSC);
+ }
++
++/*
++ * A USB 2.0 port drives reset for TDRSTR, at least 50 ms at a root port (USB 2.0 7.1.7.5), with PORTSC.PR set
++ * throughout; the device is enabled when it ends. Completing at once let a driver that times its resets see a reset
++ * too short to have happened.
++ */
++#define USB2_ROOT_RESET_NS  (50 * SCALE_MS)
++
++static void xhci_port_reset_done(void *opaque)
++{
++    XHCIPort *port = opaque;
+ 
++    if (xhci_port_have_device(port)) {
++        usb_device_reset(port->uport->dev);
++        set_field(&port->portsc, PLS_U0, PORTSC_PLS);
++        trace_usb_xhci_port_link(port->portnr, PLS_U0);
++        port->portsc |= PORTSC_PED;
++    }
++    port->portsc &= ~PORTSC_PR;
++    xhci_port_notify(port, PORTSC_PRC);
++}
++
+ static void xhci_port_reset(XHCIPort *port, bool warm_reset)
+ {
+     trace_usb_xhci_port_reset(port->portnr, warm_reset);
+ 
+     if (!xhci_port_have_device(port)) {
++        return;
++    }
++
++    if (port->uport->dev->speed != USB_SPEED_SUPER) {
++        if (!timer_pending(port->reset_timer)) {
++            port->portsc |= PORTSC_PR;
++            port->portsc &= ~PORTSC_PED;
++            timer_mod(port->reset_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + USB2_ROOT_RESET_NS);
++        }
+         return;
+     }
+ 
+@@ -2781,6 +2811,10 @@
+ 
+     for (i = 0; i < xhci->numports; i++) {
+         xhci->ports[i].powered_off = false;
++        if (xhci->ports[i].reset_timer) {
++            timer_del(xhci->ports[i].reset_timer);
++        }
++        xhci->ports[i].portsc &= ~PORTSC_PR;
+         xhci_port_update(xhci->ports + i, 0);
+     }
+ 
+@@ -3578,6 +3612,7 @@
+         XHCIPort *port = &xhci->ports[i];
+         uint32_t offset = len_cap + 0x400 + 0x10 * i;
+         port->xhci = xhci;
++        port->reset_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, xhci_port_reset_done, port);
+         memory_region_init_io(&port->mem, OBJECT(dev), &xhci_port_ops, port,
+                               port->name, 0x10);
+         memory_region_add_subregion(&xhci->mem, offset, &port->mem);
+@@ -3610,6 +3645,8 @@
+ 
+     for (i = 0; i < xhci->numports; i++) {
+         XHCIPort *port = &xhci->ports[i];
++        timer_free(port->reset_timer);
++        port->reset_timer = NULL;
+         memory_region_del_subregion(&xhci->mem, &port->mem);
+     }
+ 
+diff --git a/hw/usb/hcd-xhci.h b/hw/usb/hcd-xhci.h
+--- a/hw/usb/hcd-xhci.h
++++ b/hw/usb/hcd-xhci.h
+@@ -127,6 +127,7 @@
+     USBPort  *uport;
+     uint32_t speedmask;
+     bool powered_off;
++    QEMUTimer *reset_timer;  /* a USB 2.0 port's reset in progress */
+     char name[20];
+     MemoryRegion mem;
+ } XHCIPort;

@@ -113,7 +113,7 @@ IOLock *IOLockAlloc()
     return new IOLock{};
 }
 
-void IOLockFree(IOLock *lock)
+void IOLockFree(const IOLock *lock)
 {
     delete lock;
 }
@@ -144,7 +144,7 @@ void IODelay(unsigned us)
 void panic(const char *format, ...)
 {
     char line[256];
-    va_list ap;
+    va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
     va_start(ap, format);
     vsnprintf(line, sizeof(line), format, ap);
     va_end(ap);
@@ -157,16 +157,17 @@ uint32_t switch_mmio_model_read32(uintptr_t address)
     tick();
     const uint32_t value = gRegisters[address];
     if (address == gSecondAt && gSecond) {
-        std::function<void()> second = std::move(gSecond);
+        const std::function<void()> second = std::move(gSecond);
         gSecond = nullptr;
-        std::function<void()> run = [second] {
+        const std::function<void()> run = [second] {
             second();
             gSecondRan = true;
         };
-        if (gLocksHeld)
+        if (gLocksHeld) {
             gBlocked.push_back(run);
-        else
+        } else {
             run();
+        }
     }
     return value;
 }
@@ -176,10 +177,11 @@ void switch_mmio_model_write32(uintptr_t address, uint32_t value)
     tick();
     gRegisters[address] = value;
     gWrites.emplace_back(address, value);
-    if (address == kPmc + kDpdReq)
+    if (address == kPmc + kDpdReq) {
         dpdRequest(kPmc + kDpdStatus, value);
-    else if (address == kPmc + kDpd2Req)
+    } else if (address == kPmc + kDpd2Req) {
         dpdRequest(kPmc + kDpd2Status, value);
+    }
 }
 
 uint16_t switch_mmio_model_read16(uintptr_t address)

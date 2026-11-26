@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from tools.emu import hekate
+from tools.emu import hekate, usbdev
 
 IRAM_STUB = 0x40010000  # where hekate itself runs; free once it has handed over
 RAM = '4G'
@@ -18,6 +18,8 @@ class Inputs:
     qmp: Path
     kernel: Path | None = None
     icount: bool = True
+    usb: tuple[str, ...] = ()  # usbdev.DEVICES on the USB-C port
+    cache_log: bool = False  # cachecheck.py's log of cache maintenance and xHCI DMA
 
 
 def _load(path: str, address: int) -> list[str]:
@@ -73,4 +75,6 @@ def command(run: Path, inputs: Inputs) -> list[str]:
         args += ['-icount', 'shift=0']
     if inputs.sd:
         args += ['-drive', f'if=sd,index=0,format=vmdk,file={inputs.sd},snapshot=on']
-    return args
+    if inputs.cache_log:
+        args += ['-global', f'driver=tegra.xusb,property=cache-log,value={run / "cache.bin"}']
+    return args + usbdev.qemu_args(run, list(inputs.usb))

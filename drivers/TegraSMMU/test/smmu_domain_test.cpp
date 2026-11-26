@@ -264,3 +264,44 @@ TEST(TegraSMMUDomain, VicTablesUnchanged)
 {
     vicTablesUnchanged();
 }
+
+// tablesFor counts what reserve() installs in an empty domain: every 4 MiB span the range touches.
+TEST(TegraSMMUDomain, TablesForIsWhatReserveInstalls)
+{
+    struct Range {
+        uint64_t iova, bytes;
+    };
+
+    for (const Range r : {Range{1ULL << 20, 64ULL << 20}, Range{0, 4ULL << 20}, Range{(4ULL << 20) - 1, 2},
+                          Range{8ULL << 20, 1}, Range{0x80000000, 0x80000000}}) {
+        const uint32_t count = TegraSMMUDomain::tablesFor(r.iova, r.bytes);
+        std::vector<uint32_t> tables(static_cast<size_t>(count + 1) * TegraSMMUDomain::kEntries);
+        TegraSMMUDomain domain;
+        ASSERT_TRUE(domain.init(tables.data(), 0x9000'0000, count + 1));
+        EXPECT_TRUE(domain.reserve(r.iova, r.bytes)) << r.iova << " + " << r.bytes;
+        EXPECT_EQ(domain.used - 1, count) << r.iova << " + " << r.bytes;
+    }
+    EXPECT_EQ(TegraSMMUDomain::tablesFor(1ULL << 20, 64ULL << 20), 17u) << "a window from 1 MiB";
+    EXPECT_EQ(TegraSMMUDomain::tablesFor(1ULL << 20, 0), 0u);
+}
+
+// A 4 MiB section (L4T tegra-smmu.c: a directory entry without NEXT): one entry maps the whole span, offsets and all; it
+// needs an aligned IOVA and target and an empty entry, and no table is ever installed over it.
+TEST(TegraSMMUDomain, SectionsMapFourMiB)
+{
+    std::vector<uint32_t> tables(size_t{2} * TegraSMMUDomain::kEntries);
+    TegraSMMUDomain d;
+    ASSERT_TRUE(d.init(tables.data(), 0x9000'0000, 2));
+    ASSERT_TRUE(d.section(0x0040'0000, 0x1'0040'0000, true));
+    EXPECT_EQ(tables[1], 0x10'0400u | TegraSMMUDomain::kRead | TegraSMMUDomain::kWrite | TegraSMMUDomain::kNonSecure);
+    for (const uint64_t offset : {0ULL, 0x1234ULL, 0x3f'ffffULL})
+        EXPECT_EQ(d.translate(0x0040'0000 + offset), 0x1'0040'0000 + offset);
+    EXPECT_EQ(d.translate(0x0080'0000), UINT64_MAX);
+    EXPECT_FALSE(d.section(0x0040'0000, 0x8000'0000, true)) << "over a section";
+    EXPECT_FALSE(d.section(0x0080'1000, 0x8000'0000, true)) << "IOVA not at 4 MiB";
+    EXPECT_FALSE(d.section(0x0080'0000, 0x8000'1000, true)) << "target not at 4 MiB";
+    EXPECT_FALSE(d.pte(0x0040'1000, true)) << "a table over a section";
+    EXPECT_EQ(d.used, 1u);
+    ASSERT_TRUE(d.reserve(0x0080'0000, 4096));
+    EXPECT_FALSE(d.section(0x0080'0000, 0x8000'0000, true)) << "over a table";
+}

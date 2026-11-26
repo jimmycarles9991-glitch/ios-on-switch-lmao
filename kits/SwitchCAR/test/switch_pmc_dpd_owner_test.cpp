@@ -72,8 +72,13 @@ TEST(DpdOwnerSource, OnlyTheKitWritesTheRequestRegisters)
             for (unsigned number = 1; std::getline(file, line); ++number) {
                 if (line.find("DPD") == std::string::npos && line.find("Dpd") == std::string::npos)
                     continue;
-                if (std::regex_search(line, call) && std::regex_search(line, named))
-                    writers.push_back(name + ":" + std::to_string(number) + ": " + line);
+                if (std::regex_search(line, call) && std::regex_search(line, named)) {
+                    std::string &site = writers.emplace_back(name);
+                    site += ':';
+                    site += std::to_string(number);
+                    site += ": ";
+                    site += line;
+                }
             }
         }
     }

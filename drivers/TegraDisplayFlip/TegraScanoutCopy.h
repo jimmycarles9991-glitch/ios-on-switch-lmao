@@ -92,6 +92,7 @@ void native_legacy_gpu_complete(void *display, int status);
 // is delivered on another, so fn checks the offer it writes for; offers the producer's own pass cannot finish (a present
 // job, a semantic wait in front) never call it. fn only stores to memory and registers under a simple lock of its own.
 // Registered once.
+void tgm_present_filter_owner(const void *display);
 void tgm_present_filter_callout(void (*fn)(void *ctx, int status), void *ctx);
 // Why a swapped frame is not there (an offer's answer or its completion's status), the GPU driver's SwitchGpuBacking.h
 // WRITER_GONE, WRITER_FAILED and WRITE_REFUSED. The display shows nothing of the frame, through the copy or the CPU, and
@@ -114,6 +115,7 @@ int tegra_gm20b_scanout_outstanding(const void *display);
 // direct frame flipped from the kick, a CPU, VIC or blank frame), so the scanout read-back has no frame before the next
 // offer to re-read (TegraGM20BReadbackABI.h). Under the display's gate, in thread context.
 void tegra_gm20b_scanout_bypassed(void);
+void tegra_gm20b_scanout_presented(uint64_t queued_ns);
 // Provided by the GPU driver (weak in NativeLegacyDisplay): whether the IOSurface whose first page is `pa` holds
 // block-linear pixels. A surface's layout is decided once, at its first GPU import, and holds while any GPU client
 // imports it; a CPU lock never changes what its pages hold. Thread context; never waits for the GPU.

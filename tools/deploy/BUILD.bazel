@@ -12,6 +12,7 @@ exports_files([
     "deploy.py",
     "icon_cache.py",
     "pull_logs.py",
+    "system_update.py",
 ])
 
 py_library(
@@ -43,6 +44,16 @@ py_library(
     srcs = ["deploy.py"],
     imports = ["../.."],
     deps = [":lib"],
+)
+
+py_library(
+    name = "system_update",
+    srcs = ["system_update.py"],
+    imports = ["../.."],
+    deps = [
+        ":deploy",
+        ":lib",
+    ],
 )
 
 py_test(
@@ -120,4 +131,11 @@ py_test(
     size = "small",
     srcs = ["system_apps_test.py"],
     deps = [":lib"],
+)
+
+py_test(
+    name = "system_update_test",
+    size = "small",
+    srcs = ["system_update_test.py"],
+    deps = [":system_update"],
 )

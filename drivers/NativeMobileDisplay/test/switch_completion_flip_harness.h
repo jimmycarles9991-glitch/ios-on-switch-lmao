@@ -1026,6 +1026,9 @@ extern "C" inline int tegra_gm20b_scanout_copy(const TegraScanoutCopy *copy)
     return completion_flip_test::gOffer ? completion_flip_test::gOffer(copy) : 0;
 }
 
+extern "C" inline void tgm_present_filter_owner(const void *)
+{}
+
 extern "C" inline void tgm_present_filter_callout(void (*fn)(void *, int), void *ctx)
 {
     completion_flip_test::gGpuCallout = fn;

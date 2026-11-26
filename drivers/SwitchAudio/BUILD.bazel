@@ -28,24 +28,37 @@ filegroup(
 # This package's headers (kernel_headers): what other drivers' hdr_deps name.
 kernel_headers()
 
-# SwitchAudio: kernel service + Tegra I2S1/ADMA backend, and the RT5639 codec (SwitchRT5639).
+# SwitchAudio: kernel service + Tegra APE (ADMA/ADMAIF/AXBAR/MIXER/SFC/MVC/OPE/I2S1) and RT5639 codec.
 kernel_driver(
     name = "SwitchAudio",
     srcs = [
         "SwitchAudio.cpp",
         "SwitchAudioClocks.cpp",
         "SwitchAudioCodec.cpp",
+        "SwitchAudioMixer.cpp",
+        "SwitchAudioMvc.cpp",
+        "SwitchAudioOpe.cpp",
+        "SwitchAudioSfc.cpp",
         "SwitchAudioStream.cpp",
+        "SwitchAudioSysctl.cpp",
+        "SwitchDisplayAudio.cpp",
+        "SwitchHDA.cpp",
+        "SwitchHDACodec.cpp",
         "SwitchRT5639.cpp",
     ],
     hdr_deps = [
         "drivers/ArmGIC",
+        "drivers/SwitchDisplayPort",
         "drivers/TegraGPIO",
         "drivers/TegraI2C",
+        "drivers/TegraSMMU",
         "kits/SwitchCAR",
         "kits/SwitchDMA",
+        "kits/SwitchEngineGate",
         "kits/SwitchMMIO",
         "kits/SwitchRefusal",
+        "kits/SwitchSysctl",
+        "kits/SwitchTime",
     ],
 )
 
@@ -55,6 +68,7 @@ ios_binary(
     name = "SwitchAudioHAL",
     srcs = [
         "hal/SwitchAudioPlugIn.c",
+        "hal/SwitchDisplayAudio.c",
         "//kits/SwitchRefusal:SwitchRefusal.c",
     ] + select({
         "//ipsw:24B119": ["hal/SwitchAudioControls.c"],
@@ -67,6 +81,7 @@ ios_binary(
         "hal/SwitchAudioControls.h",
         "hal/SwitchAudioConvert.h",
         "hal/SwitchAudioObjects.h",
+        "hal/SwitchDisplayAudio.h",
         "//kits/SwitchDMA:SwitchDcache.h",
         "//kits/SwitchRefusal:SwitchRefusal.h",
     ],

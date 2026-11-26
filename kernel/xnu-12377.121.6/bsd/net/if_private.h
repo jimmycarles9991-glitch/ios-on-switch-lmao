@@ -169,6 +169,7 @@ struct if_clonereq32 {
 #define IFXF_INBAND_WAKE_PKT_TAGGING    0x04000000 /* Inband tagging of packet wake flag */
 #define IFXF_LOW_POWER_WAKE             0x08000000 /* Low Power Wake */
 #define IFXF_REQUIRE_CELL_THREAD_GROUP  0x10000000 /* Require cellular thread group */
+#define IFXF_SYNCHRONOUS_INPUT          0x20000000 /* Input runs in the netif's context, no DLIL input thread */
 
 /*
  * Current requirements for an AWDL interface.  Setting/clearing IFEF_AWDL

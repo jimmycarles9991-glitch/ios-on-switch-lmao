@@ -34,3 +34,48 @@ TEST(SwitchChargePolicy, LimitsAreTheCitedOnes)
 {
     SUCCEED();
 }
+
+TEST(SwitchChargePolicy, ZeroCurrentCompletesPowerHandshakeWithoutInputBudget)
+{
+    const uint32_t pdos[] = {100u << 10 | 1u << 25 | 1u << 26};
+    const auto choice = charge::choosePdo(pdos, 1);
+    ASSERT_EQ(choice.position, 1u);
+    EXPECT_EQ(choice.millivolts, 5000u);
+    EXPECT_EQ(choice.milliamps, 0u);
+    EXPECT_EQ(choice.inputLimit, 0u);
+    EXPECT_FALSE(choice.dock);
+    EXPECT_EQ(choice.refusal, nullptr);
+    EXPECT_EQ(charge::pdInputLimit(5000, 0), 0u);
+    const uint32_t rdo = charge::encodeRdo(choice);
+    EXPECT_EQ(rdo, 1u << 28 | charge::kRdoUsbCommunications | charge::kRdoNoUsbSuspend);
+    EXPECT_EQ(charge::rdoOperatingMilliamps(rdo), 0u);
+    EXPECT_EQ(charge::rdoMaxMilliamps(rdo), 0u);
+    EXPECT_TRUE(charge::contractMatches(choice, pdos[0], rdo));
+    EXPECT_FALSE(charge::contractMatches(choice, pdos[0], rdo | 1u));
+}
+
+TEST(SwitchChargePolicy, UsablePositiveBudgetWinsOverZeroCurrentFallback)
+{
+    const uint32_t zero = 100u << 10;
+    const uint32_t positive = 180u << 10 | 150u;
+    const uint32_t first[] = {zero, positive};
+    const uint32_t last[] = {positive, zero};
+    const uint32_t *const sets[] = {first, last};
+    for (const auto *pdos : sets) {
+        const auto choice = charge::choosePdo(pdos, 2);
+        EXPECT_EQ(choice.pdo, positive);
+        EXPECT_EQ(choice.millivolts, 9000u);
+        EXPECT_EQ(choice.milliamps, 1500u);
+        EXPECT_EQ(choice.inputLimit, 1500u);
+    }
+}
+
+TEST(SwitchChargePolicy, ZeroCurrentFallbackIsOnlyFixedFiveVolts)
+{
+    const uint32_t invalid[] = {180u << 10, 2u << 30 | 100u << 10};
+    EXPECT_EQ(charge::choosePdo(invalid, 2).position, 0u);
+    const uint32_t low[] = {100u << 10 | 40u, 100u << 10};
+    const auto choice = charge::choosePdo(low, 2);
+    EXPECT_EQ(choice.position, 2u);
+    EXPECT_EQ(choice.inputLimit, 0u);
+}

@@ -4,6 +4,7 @@ struct SourceWait {
     OSObject *surface;
     SwitchNativeScanout read;
     int status;
+    bool waitPresent;
 };
 
 SourceWait *sourceWait = nullptr;
@@ -16,9 +17,10 @@ void releaseSourceWait()
     switch_native_scanout_release(&sourceWait->read);
     OSSafeReleaseNULL(sourceWait->surface);
     sourceWait->request = nullptr;
+    sourceWait->waitPresent = false;
 }
 
-bool deferSource(const OriginalLegacySwapRequest *request, OSObject *surface)
+bool deferSource(const OriginalLegacySwapRequest *request, OSObject *surface, bool waitPresent = false)
 {
     if (!copySource || !surface || copyStopping) {
         native_legacy_transfer_observed(kIOReturnNotReady, request, 0);
@@ -33,6 +35,7 @@ bool deferSource(const OriginalLegacySwapRequest *request, OSObject *surface)
     releaseSourceWait();
     sourceWait->request = request;
     sourceWait->surface = surface;
+    sourceWait->waitPresent = waitPresent;
     surface->retain();
     sourceWaitQueued = transferred = true;
     watchSource();

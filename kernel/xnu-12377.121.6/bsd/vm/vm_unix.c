@@ -154,6 +154,8 @@
 #include <IOKit/IOBSD.h>
 #include <switch/diag.h>
 
+#include <switch/shared_cache.h>
+
 #if VM_MAP_DEBUG_APPLE_PROTECT
 SYSCTL_INT(_vm, OID_AUTO, map_debug_apple_protect, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_debug_apple_protect, 0, "");
 #endif /* VM_MAP_DEBUG_APPLE_PROTECT */
@@ -2656,6 +2658,12 @@ scdir_ok:
 				goto done;
 			}
 		}
+#if CONFIG_A64X
+		if (switch_shared_cache_unusable(p, srfmp->vp, is_driverkit)) {
+			error = EPERM;
+			goto done;
+		}
+#endif
 	}
 done:
 	if (error != 0) {

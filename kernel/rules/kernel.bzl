@@ -26,6 +26,7 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("@xcode//:defs.bzl", "IPHONEOS_SDK", "XCODE_TOOLCHAIN")
 load("//bazel/platforms:transitions.bzl", "kernel_transition")
+load("//ipsw:ipsw.bzl", "IpswInfo")
 load("//kits/SwitchABI:defs.bzl", "ABI_INCLUDE", "ABI_PACKAGE")
 load(":common.bzl", "KERNEL_TOOL_ATTRS", "PY_TOOLCHAIN", "XCODE_EXECUTION", "run_tool")
 load(":layout.bzl", "KERNEL_PACKAGE", "TREE_ROOT")
@@ -561,7 +562,10 @@ def _kernel_prelink_impl(ctx):
         "--previous",
         ctx.file.previous.path,
         "--slide=" + ctx.attr.slide,
+        "--kind=" + ctx.attr._ipsw_kind[IpswInfo].kind,
     ]
+    for table in ctx.files.sites:
+        original += ["--sites", table.path]
     for root in ctx.attr.base_roots + new_roots:
         original += ["--root", root]
     for root in new_roots:
@@ -572,7 +576,7 @@ def _kernel_prelink_impl(ctx):
         original += ["--defer", defer]
     for init in ctx.attr.early_security_init:
         original += ["--early-security-init", init]
-    original_inputs = [ctx.file.kernelcache, ctx.file.inherit_report, ctx.file.previous]
+    original_inputs = [ctx.file.kernelcache, ctx.file.inherit_report, ctx.file.previous] + ctx.files.sites
     run_tool(
         ctx,
         ctx.attr._emit_prelink,
@@ -608,7 +612,8 @@ kernel_prelink = rule(
     implementation = _kernel_prelink_impl,
     doc = "tools/prelink/emit_prelink.py: Apple's original kexts (the V20 roots plus every driver's prelink list) " +
           "prelinked into the linked kernel: a plan from the original kernelcache alone (rerun only when it or the " +
-          "lists change), applied to the native kernel; the report in the report output group.",
+          "lists change), applied to the native kernel; the report in the report output group. The selected kind's " +
+          "declared sites (kits/SwitchABI/sites.py) are the one change to Apple's code, each original word checked first.",
     attrs = dict(KERNEL_TOOL_ATTRS, **{
         "out": attr.string(default = "kernel.macho"),
         "kernel": attr.label(mandatory = True, providers = [KernelObjectsInfo]),
@@ -618,7 +623,9 @@ kernel_prelink = rule(
         "base_roots": attr.string_list(mandatory = True),
         "slide": attr.string(mandatory = True),
         "early_security_init": attr.string_list(),
+        "sites": attr.label(default = "//kits/SwitchABI:sites", allow_files = [".json"], doc = "the selected kind's declared sites in Apple's kexts (kits/SwitchABI/sites.py)"),
         "_emit_prelink": attr.label(default = "//tools/prelink:emit_prelink", executable = True, cfg = "exec"),
+        "_ipsw_kind": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
     }),
     toolchains = [PY_TOOLCHAIN],
 )

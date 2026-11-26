@@ -1,0 +1,108 @@
+port-power-control: HCCPARAMS1.PPC set and PORTSC.PP obeyed. PP 0 powers a port off (PORTSC reads PLS Disabled,
+0x80, as the Switch's XUSB firmware reads after PP off) and hides its device; PP 1 detects it again. Ports come out of
+a controller reset powered, as QEMU had them and as the Switch's are seen after AppleUSBXHCI starts.
+
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index 81bf61b..62d438d 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -1099,6 +1099,7 @@ static void __tegrax1_init(MachineState *machine)
+     qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "p3", 4);
+     qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "intrs", 1);
+     qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "slots", 36);
++    qdev_prop_set_bit(DEVICE(tegra_xusb_dev), "port-power-control", true);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(tegra_xusb_dev), &error_fatal);
+     qdev_connect_gpio_out_named(DEVICE(tegra_xusb_dev), "host-irq", 0, DIRQ(INT_USB3_HOST_INT));
+     qdev_connect_gpio_out_named(DEVICE(tegra_xusb_dev), "smi-irq", 0, DIRQ(INT_USB3_HOST_SMI));
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+index d21ebb7..41c550d 100644
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -83,6 +83,7 @@
+ #define USBSTS_SSS      (1<<8)
+ #define USBSTS_RSS      (1<<9)
+ #define USBSTS_SRE      (1<<10)
++#define HCCPARAMS_PPC   (1<<3)
+ #define USBSTS_CNR      (1<<11)
+ #define USBSTS_HCE      (1<<12)
+ 
+@@ -2647,6 +2648,11 @@ static void xhci_port_update(XHCIPort *port, int is_detach)
+     uint32_t pls = PLS_RX_DETECT;
+ 
+     assert(port);
++    if (port->powered_off) {
++        port->portsc = 0;
++        set_field(&port->portsc, PLS_DISABLED, PORTSC_PLS);
++        return;
++    }
+     port->portsc = PORTSC_PP;
+     if (!is_detach && xhci_port_have_device(port)) {
+         port->portsc |= PORTSC_CCS;
+@@ -2728,6 +2734,7 @@ static void xhci_reset(DeviceState *dev)
+     }
+ 
+     for (i = 0; i < xhci->numports; i++) {
++        xhci->ports[i].powered_off = false;
+         xhci_port_update(xhci->ports + i, 0);
+     }
+ 
+@@ -2775,6 +2782,9 @@ static uint64_t xhci_cap_read(void *ptr, hwaddr reg, unsigned size)
+         } else {
+             ret = 0x00080001 | (xhci->max_pstreams_mask << 12);
+         }
++        if (xhci->port_power_control) {
++            ret |= HCCPARAMS_PPC;
++        }
+         break;
+     case 0x14: /* DBOFF */
+         ret = OFF_DOORBELL;
+@@ -2850,6 +2860,21 @@ static void xhci_port_write(void *ptr, hwaddr reg,
+ 
+     switch (reg) {
+     case 0x00: /* PORTSC */
++        if (port->powered_off) {
++            if (val & PORTSC_PP) {
++                port->powered_off = false;
++                xhci_port_update(port, 0);
++            }
++            break;
++        }
++        if (port->xhci->port_power_control && !(val & PORTSC_PP)) {
++            if (xhci_port_have_device(port)) {
++                xhci_detach_slot(port->xhci, port->uport);
++            }
++            port->powered_off = true;
++            xhci_port_update(port, 1);
++            break;
++        }
+         /* write-1-to-start bits */
+         if (val & PORTSC_WPR) {
+             xhci_port_reset(port, true);
+@@ -3656,6 +3681,7 @@ static Property xhci_properties[] = {
+                     XHCI_FLAG_ENABLE_STREAMS, true),
+     DEFINE_PROP_UINT32("p2",    XHCIState, numports_2, 4),
+     DEFINE_PROP_UINT32("p3",    XHCIState, numports_3, 4),
++    DEFINE_PROP_BOOL("port-power-control", XHCIState, port_power_control, false),
+     DEFINE_PROP_LINK("host",    XHCIState, hostOpaque, TYPE_DEVICE,
+                      DeviceState *),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/hw/usb/hcd-xhci.h b/hw/usb/hcd-xhci.h
+index fda2a10..d2e5424 100644
+--- a/hw/usb/hcd-xhci.h
++++ b/hw/usb/hcd-xhci.h
+@@ -126,6 +126,7 @@ typedef struct XHCIPort {
+     uint32_t portnr;
+     USBPort  *uport;
+     uint32_t speedmask;
++    bool powered_off;
+     char name[20];
+     MemoryRegion mem;
+ } XHCIPort;
+@@ -191,6 +192,7 @@ typedef struct XHCIState {
+     uint32_t numslots;
+     uint32_t flags;
+     uint32_t max_pstreams_mask;
++    bool port_power_control;
+     void (*intr_update)(XHCIState *s, int n, bool enable);
+     bool (*intr_raise)(XHCIState *s, int n, bool level);
+     DeviceState *hostOpaque;

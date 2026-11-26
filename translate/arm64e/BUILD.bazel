@@ -133,6 +133,7 @@ py_library(
         exclude = ["xnu/prelink26/*_test.py"],
     ),
     deps = [
+        "//kits/SwitchABI:sites_lib",
         "//tools/common:macho",
         "//tools/prelink:native_prelink",
     ],

@@ -44,6 +44,17 @@ AUDIO = [
         note='boots 15 to 17: error -4 (NACK) every boot, the null backend',
     ),
     Check(
+        'audio.ape-idle-gate',
+        OWNER,
+        'SwitchAudio: idle power off:',
+        REPORT,
+        process=KERNEL,
+        regex=r'gates=(?P<gates>\d+) ungates=(?P<ungates>\d+) resume=(?P<resume_us>\d+)us max=(?P<max_us>\d+)us',
+        show=('gates', 'ungates', 'resume_us', 'max_us'),
+        source='drivers/SwitchAudio/SwitchAudioClocks.cpp',
+        note='APE AUD partition idle power-gating cycles and resume latency',
+    ),
+    Check(
         'audio.speaker-strip',
         OWNER,
         f'setting {STRIP}',

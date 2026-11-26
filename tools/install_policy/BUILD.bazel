@@ -9,10 +9,7 @@ lint_files()
 py_binary(
     name = "installd",
     srcs = ["installd.py"],
-    deps = [
-        "//tools/common:macho",
-        "//tools/install:lib",
-    ],
+    deps = ["//tools/common:macho"],
 )
 
 py_test(
@@ -23,8 +20,5 @@ py_test(
         "installd_test.py",
     ],
     imports = ["."],
-    deps = [
-        "//tools/common:macho",
-        "//tools/install:lib",
-    ],
+    deps = ["//tools/common:macho"],
 )

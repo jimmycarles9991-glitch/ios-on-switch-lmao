@@ -227,6 +227,31 @@
       "decl": "virtual bool areTimingsEnabled() const = 0",
       "pac": "_ZNK25IOMobileFramebufferLegacy19are_timings_enabledEv",
       "doc": "Whether the display's timing generator runs. swap_wait_gated logs it as TimingEnable when a swap wait times out (5 s) and cancels the swaps; disp_has_no_clients_gated asks it before its power request. J120's AppleCLCD and J181's UnifiedPipeline answer the flag their timing enable sets (UnifiedPipeline::enable_timings_gated)."
+    },
+    "setDisplayDevice": {
+      "decl": "virtual IOReturn setDisplayDevice(uint32_t device)",
+      "pac": "_ZN19IOMobileFramebuffer18set_display_deviceEj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy16setDisplayDeviceEj"
+    },
+    "setDigitalOutMode": {
+      "decl": "virtual IOReturn setDigitalOutMode(uint32_t color, uint32_t timing)",
+      "pac": "_ZN19IOMobileFramebuffer20set_digital_out_modeEjj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy17setDigitalOutModeEjj"
+    },
+    "getDigitalOutState": {
+      "decl": "virtual IOReturn getDigitalOutState(uint32_t *state)",
+      "pac": "_ZN19IOMobileFramebuffer21get_digital_out_stateEPj",
+      "mangled": "__ZN25IOMobileFramebufferLegacy18getDigitalOutStateEPj"
+    },
+    "hotPlugNotify": {
+      "decl": "virtual void hotPlugNotify(uint64_t state)",
+      "pac": "_ZN25IOMobileFramebufferLegacy14hotPlug_notifyEy",
+      "mangled": "__ZN25IOMobileFramebufferLegacy13hotPlugNotifyEy"
+    },
+    "getRefreshAttributes": {
+      "decl": "virtual bool getRefreshAttributes(uint64_t *periods, uint32_t internal)",
+      "mangled": "__ZN25IOMobileFramebufferLegacy20getRefreshAttributesEPyj",
+      "doc": "The refresh publisher dispatches this slot with six uint64 words and the internal-display flag. Shortest, longest and step each pair a 32.32-second period with its nanoseconds_to_absolutetime conversion. On 24B119 the calling slot's discriminator is 0xdcfc."
     }
   },
   "fields": {
@@ -335,6 +360,10 @@
     "native_legacy_set_display_refresh_properties": {
       "decl": "bool native_legacy_set_display_refresh_properties(void *display)",
       "doc": "IOMobileFramebufferLegacy::setDisplayRefreshProperties: publishes IOMFBDisplayRefresh (the six refresh-interval numbers QuartzCore's AppleDisplay::update_display_limits reads) from the timing getter, which it passes internalDisplay. Apple's UnifiedPipeline calls it from its own hardware start; false when the getter or the dictionary fails."
+    },
+    "switch_external_complete_current": {
+      "decl": "void switch_external_complete_current(void *display, bool shown)",
+      "doc": "The original completion of the current swap, with its shown flag; completeCurrentSwap calls it with true."
     }
   }
 }

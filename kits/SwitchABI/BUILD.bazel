@@ -115,6 +115,30 @@ py_test(
     ],
 )
 
+py_library(
+    name = "sites_lib",
+    srcs = ["sites.py"],
+)
+
+# The selected kind's declared sites in Apple's kexts (sites.py), which both prelinks check and apply. A kind without
+# an entry here has no table: its build fails at this select rather than prelinking AppleUSBXHCI unpatched.
+filegroup(
+    name = "sites",
+    srcs = select({
+        "//ipsw:21H461": glob(["kinds/21H461/sites/*.json"]),
+        "//ipsw:24B119": glob(["kinds/24B119/sites/*.json"]),
+    }),
+)
+
+py_test(
+    name = "sites_test",
+    srcs = [
+        "sites.py",
+        "test/sites_test.py",
+    ],
+    data = glob(["kinds/*/sites/*.json"]),
+)
+
 py_test(
     name = "gen_test",
     srcs = ["test/gen_test.py"],
@@ -143,6 +167,8 @@ switch_abi_class(name = "ApplePMGRNub")
 switch_abi_class(name = "AppleUSBXHCI")
 
 switch_abi_class(name = "IOAESAccelerator")
+
+switch_abi_class(name = "IOPort")
 
 switch_abi_class(
     name = "IOAcceleratorES",

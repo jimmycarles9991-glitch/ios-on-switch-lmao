@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.brunostjohn.switch.sdwake</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/libexec/switch-sdwake</string>
+	</array>
+	<key>UserName</key>
+	<string>root</string>
+	<key>POSIXSpawnType</key>
+	<string>Adaptive</string>
+	<key>LaunchEvents</key>
+	<dict>
+		<key>com.apple.iokit.matching</key>
+		<dict>
+			<key>com.brunostjohn.switch.sdwake.shared-volume</key>
+			<dict>
+				<key>IOMatchLaunchStream</key>
+				<true/>
+				<key>IOProviderClass</key>
+				<string>IOMedia</string>
+				<key>IOParentMatch</key>
+				<dict>
+					<key>IOProviderClass</key>
+					<string>IOBlockStorageDevice</string>
+					<key>IONameMatch</key>
+					<string>SwitchSDSharedVolume</string>
+				</dict>
+			</dict>
+		</dict>
+	</dict>
+</dict>
+</plist>

@@ -58,7 +58,7 @@ TEST(SdCardSource, Cmd23FramingIsGated)
     const std::string issue = body("int NativeSwitchBlock::issue(");
     EXPECT_THAT(issue, HasSubstr("switchSdBlockFrame(sectors, write, cmd23)"));
     // Argument 2 before the command that uses it, and the partition guard still first.
-    EXPECT_LT(Index(issue, "outside the APFS partition"), Index(issue, "w32(ARGUMENT2, frame.argument2)"));
+    EXPECT_LT(Index(issue, "outside its partition"), Index(issue, "w32(ARGUMENT2, frame.argument2)"));
     EXPECT_LT(Index(issue, "w32(ARGUMENT2, frame.argument2)"), Index(issue, "w16(COMMAND, frame.command)"));
     const std::string complete = body("int NativeSwitchBlock::complete(");
     EXPECT_THAT(complete, HasSubstr("if (r16(AUTO_CMD_ERROR) & 0x9f)\n            return 8;"));
@@ -68,11 +68,13 @@ TEST(SdCardSource, Cmd23FramingIsGated)
                 HasSubstr("b.cmd23 = b.direct && sectors > 1 && autoCmd23;"));
     // Retries go back to CMD12 (command()'s default), as do transfer()/run() (the bounce path and the proofs).
     EXPECT_THAT(body("int NativeSwitchBlock::retry("),
-                HasSubstr("step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status);"));
+                HasSubstr("step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status, false, "
+                          "window);"));
     EXPECT_THAT(body("int NativeSwitchBlock::run("),
-                HasSubstr("command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status);"));
-    EXPECT_TRUE(Search(source, R"(int command\(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, )"
-                               R"(uint32_t \*status, bool cmd23 = false\);)"));
+                HasSubstr("command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status, false, window);"));
+    EXPECT_TRUE(Search(source,
+                       R"(int command\(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, )"
+                       R"(uint32_t \*status, bool cmd23 = false,\s*const SwitchSdWindow \*window = nullptr\);)"));
     // setup(): from the registers (switchSdPath: ADMA2, and the SCR listing CMD23).
     EXPECT_THAT(body("bool NativeSwitchBlock::setup()"),
                 HasSubstr("autoCmd23 = switchSdPath(r32(CAPABILITIES), r16(HOST_CONTROL2), haveScr ? &scr : nullptr)"));

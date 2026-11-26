@@ -10,8 +10,11 @@ bazel run //tools/emu:boot -- --kind=ios27                   # build //:boot for
 bazel run //tools/emu:boot -- --kind=ios17 --sd none --seconds 60 --bootargs -v
 bazel run //tools/emu:check -- --kind=ios17 --until launchd  # a gate: 0 milestone, 1 panic, 2 timeout, 3 no kernel log
 bazel run //tools/emu:check -- --kind=ios27 --until gpu --sd none  # 4: the GPU kext or its kernel channels failed
+bazel run //tools/emu:check -- --kind=ios27 --until usb --sd none  # 5: a device on the USB-C port was not enumerated
+bazel run //tools/emu:boot -- --kind=ios27 --sd none --usb hub --usb keyboard
 bazel run //tools/emu:build                                  # only the emulator: prints its path
 bazel test //tools/emu:dc_test                               # the display controller and SMMU under qtest
+bazel test //tools/emu:usb_test                              # the USB-C port's PD controller, charger and XUSB host
 ```
 
 `check` watches the live kernel log and the panic record every 3 s and stops at the first of the milestone (`cores`,
@@ -70,6 +73,62 @@ channel's instance block. A bad or unmapped VA, or a write to a read-only page, 
 fault record at 0x2800 + unit, PFIFO's MMU_FAULT interrupt) and stops the channel. 3D, compute and 2D methods are
 logged, never drawn, apart from their report semaphores.
 
+## USB host
+
+`--usb keyboard|storage|hub` (repeatable) plugs QEMU devices into the USB-C port: the first on the XUSB host's port 1
+(bus `xusb.0`), the rest behind it when it is a hub. A device on the port is also a sink-only partner on CC, so the
+driver's sequence runs as on the device: SwitchPD classifies the partner and sources VBUS, the role thread starts the
+host (`switchxhci_start`), and Apple's stack enumerates whatever shows once VBUS is on.
+
+`--until usb` (a keyboard when `--usb` is not given) is reached when every device has Apple's own "enumerated" line.
+It exits 5 at the first line that ends host mode or gives a device up: "host mode off", a connector root port that did
+not start or a transport the USB-C port refused, a device Apple could not create or identify. Each device's traffic
+lands in `usbN-<name>.pcap`; `check` prints the control requests it saw, the data that moved and every non-zero
+interrupter target Apple wrote (traced into `qemu-guest.log`).
+
+`--until typing` boots the kind's install image to SpringBoard, then plugs a keyboard into the port over QMP
+(`device_add usb-kbd`, the BM92T36's `partner` to sink), waits for the kind's HID path, types `h` and `i` with
+`send-key`, and checks each key's interrupt IN report before sending the next. On iOS 17 the log identifies either
+IOUSBHostHIDDevice opened by IOHIDEventDriver or the USB HID and event services started by DriverKit. On iOS 27
+the gate requires the AppleUserHIDDrivers launch and open. Set `--timeout` for the host's load. QMP's
+`input-send-event` with `device=` aborts this QEMU (its console lookup reads a property a
+text console lacks); `send-key` reaches the hot-plugged keyboard, the machine's only keyboard handler.
+
+`--cache-log` (patch 0056) writes `cache.bin`: every data-cache maintenance instruction with the line it resolved to
+through the guest's translation, every range the xHCI read or wrote, and the CPU's next mapping of each such page, in
+TCG's order. `check` then judges it with `cachecheck.py`: a line the controller wrote must be invalidated before the CPU
+next touches it through a cacheable mapping, and one it reads must be cleaned after the CPU's last cacheable touch. A
+kernel-only boot logs about 250 MB.
+
+A run without an image waits about 60 guest seconds for root before it panics. That is enough for enumeration and the
+kernel's class drivers: a stick reaches IOMedia, and on iOS 17 a keyboard reaches IOHIDEventDriver. iOS 27 defers
+HID's driver until driverkitd checks in (IOMatchDefer), so without userspace its keyboard stops at "matching deferred
+by IOUSBHostHIDDevice".
+
+Patches 0041-0054 model the port. The BM92T36 answers as the device's did (boot 1109-2145) for a sink-only partner, and
+its `partner` property (none, sink, source) can change over QMP. A source is a host powering the port: we are its
+device, and the xHCI's devices stay away. The BQ24193 reports only its own boost's VBUS. The host is QEMU's xHCI shaped
+like the Switch's (HCSPARAMS1 0x09000124: USB3 ports 1-4, USB2 ports 5-9, one interrupter), its other registers where
+the Tegra X1 manual puts them (CAPLENGTH 20h, runtime at 800h, doorbells at C00h, xECP at 600h), behind its IPFS/FPCI
+bridge. A USB 2.0 port's reset lasts the 50 ms a root port drives it. It answers only while partition XUSBC (off at
+reset, as the console leaves it), its clock and its reset allow it, decodes only after IPFS and FPCI do, and raises SPI
+39 only through IPFS's mask. The falcon runs no firmware: an L2IMEMOP load must DMA readable blocks through the SMMU and
+STARTCPU must point into them before Controller Not Ready clears. The falcon takes the driver's commands as the
+console's firmware does: MSG_ENABLED by releasing the mailbox, any other with an ACK message (SPI 40) while the mailbox
+stays the driver's until its handler releases it. The `mbox-message` property posts a message from the firmware. An
+Address Device for a route another slot holds takes it over, as AppleUSBHub's re-addressing needs. DMA goes through the
+SMMU's XUSB_HOST clients while bus mastering is on. A device shows only with VBUS, at USB 2.0 unless the pad controller
+has the SuperSpeed lane up, and PORTSC.PP powers a port off.
+
+`SWITCH_EMU_QEMU_CACHE=DIR` builds and keeps the emulator in DIR instead of the shared cache, whose one checkout every
+worktree's runs build from. Tests need it passed with `--test_env`.
+
+The loop cannot show the falcon firmware's own behaviour: with one interrupter the model follows xHCI 1.2c p.264 and
+sends every event to interrupter 0 whatever its target, ports come out of a reset powered, and the firmware sends no
+mailbox message of its own. Nor can it show the pads' electrical state, VBUS power and current, the BM92T36's CC
+behaviour beyond the replayed trace, cache maintenance (QEMU has no caches), SuperSpeed (PCIe never announces the UPHY
+here, so the lane stays down) or SC7.
+
 ## Caches
 
 Every worktree and output base on the Mac shares these, under `~/Library/Caches/switch-ios`:
@@ -87,7 +146,8 @@ emulator needs Homebrew's glib, pixman, libgcrypt, dtc, pkgconf, ninja and mtool
 
 Modelled: the Cortex-A57 cores (CPUECTLR included), GICv2 behind the legacy interrupt controller, the flow
 controller, PMC, CAR, MC, fuses, I2C with the PMIC and its RTC, display controller A, the SMMU for the display's reads,
-and SDMMC1 as an SD Host Controller 3.00 in Tegra's v4 mode.
+and SDMMC1 as an SD Host Controller 3.00 in Tegra's v4 mode, the USB-C port's PD controller and charger and the XUSB
+host (USB host, above).
 
 Display controller A keeps three copies of each window register. `*_UPDATE` copies the assembly copy to the armed
 one, and `*_ACT_REQ` reads 1 until the next frame end makes the armed copy active. Windows A to D scan pitch or
@@ -114,7 +174,8 @@ Different from the hardware:
   acquire looks idle to the kext's hang checks. There is no L2: every GPU access goes to DRAM, so a missing L2 flush or
   invalidate goes unnoticed (M3's L2-cached target included). An invalid pushbuffer header stops its channel without the
   PBDMA interrupt the hardware raises.
-- Missing: security engine keys, TSEC, audio, USB, and the Wi-Fi and Bluetooth radios behind their buses.
+- Missing: security engine keys, TSEC, audio, USB device mode's transfers, and the Wi-Fi and Bluetooth radios behind
+  their buses.
 
 A boot that gets further here is a hint. A panic here is a lead to check on the device.
 

@@ -1,11 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-// The sink's modes from its EDID (base block detailed timings, the 640x480 established timing every DisplayPort sink
-// must take, CTA-861 extension detailed timings and short video descriptors) and the one to drive. Plain C for the
-// host tests.
-//
-// Output is capped at 1920x1080 and 60 Hz whatever the sink offers: the Tegra X1 composites the UI for the panel and
-// the TV together, and more pixels than 1080p60 cost frame rate everywhere. 1080p60 first, then modes of 50 Hz and up
-// by size, then the rest; a mode must also fit the trained link.
+// EDID base and CTA detailed timings, established VGA, and CTA short video descriptors.
 #ifndef SWITCH_DP_MODES_H
 #define SWITCH_DP_MODES_H
 
@@ -14,12 +8,11 @@
 #include <stdint.h>
 
 // NOLINTBEGIN(modernize-avoid-c-style-cast,modernize-loop-convert): plain C, compiled by C host tests as well
-#define SWITCH_DP_MAX_WIDTH      1920u
-#define SWITCH_DP_MAX_HEIGHT     1080u
-#define SWITCH_DP_MAX_REFRESH    60500u  // mHz: 60 Hz and 59.94 Hz
-#define SWITCH_DP_SMOOTH         49900u  // mHz: 50 Hz and up count as smooth
+#define SWITCH_DP_MAX_WIDTH      4096u
+#define SWITCH_DP_MAX_HEIGHT     4096u
+#define SWITCH_DP_MAX_PIXEL_KHZ  750000u
 #define SWITCH_DP_BITS_PER_PIXEL 24u
-#define SWITCH_DP_MAX_MODES      32u
+#define SWITCH_DP_MAX_MODES      64u
 
 struct switch_dp_mode {
     uint32_t pixel_khz;
@@ -39,10 +32,23 @@ static inline uint32_t switch_dp_mode_vtotal(const struct switch_dp_mode *m)
     return (uint32_t)m->vactive + m->vfront + m->vsync + m->vback;
 }
 
+static inline uint64_t switch_dp_refresh_period(const struct switch_dp_mode *m)
+{
+    const uint64_t pixels = (uint64_t)switch_dp_mode_htotal(m) * switch_dp_mode_vtotal(m);
+    return m->pixel_khz ? (pixels << 32) / ((uint64_t)m->pixel_khz * 1000u) : 0;
+}
+
 static inline uint32_t switch_dp_mode_refresh_mhz(const struct switch_dp_mode *m)
 {
     const uint64_t total = (uint64_t)switch_dp_mode_htotal(m) * switch_dp_mode_vtotal(m);
     return total == 0 ? 0 : (uint32_t)(((uint64_t)m->pixel_khz * 1000000u + total / 2) / total);
+}
+
+static inline bool switch_dp_source_timing(const struct switch_dp_mode *m)
+{
+    const uint64_t total = (uint64_t)switch_dp_mode_htotal(m) * switch_dp_mode_vtotal(m);
+    return m->hactive <= SWITCH_DP_MAX_WIDTH && m->vactive <= SWITCH_DP_MAX_HEIGHT &&
+           m->pixel_khz <= SWITCH_DP_MAX_PIXEL_KHZ && (uint64_t)m->pixel_khz * 10000u <= total * 605u;
 }
 
 static inline bool switch_dp_edid_block_valid(const uint8_t *block)
@@ -102,7 +108,7 @@ static inline bool switch_dp_edid_dtd(const uint8_t *d, struct switch_dp_mode *m
     return true;
 }
 
-// CTA-861 VICs a 1080p60 cap leaves (progressive, 1920x1080 or smaller), from the standard's timing tables.
+// Progressive CTA-861 timings. Interlaced and pixel-repeated modes need separate scanout support.
 static inline bool switch_dp_cta_vic(unsigned vic, struct switch_dp_mode *mode)
 {
     static const struct {
@@ -121,6 +127,20 @@ static inline bool switch_dp_cta_vic(unsigned vic, struct switch_dp_mode *mode)
         {32, {74250, 1920, 638, 44, 148, 1080, 4, 5, 36, true, true, false}},
         {33, {74250, 1920, 528, 44, 148, 1080, 4, 5, 36, true, true, false}},
         {34, {74250, 1920, 88, 44, 148, 1080, 4, 5, 36, true, true, false}},
+        {41, {148500, 1280, 440, 40, 220, 720, 5, 5, 20, true, true, false}},
+        {47, {148500, 1280, 110, 40, 220, 720, 5, 5, 20, true, true, false}},
+        {63, {297000, 1920, 88, 44, 148, 1080, 4, 5, 36, true, true, false}},
+        {64, {297000, 1920, 528, 44, 148, 1080, 4, 5, 36, true, true, false}},
+        {93, {297000, 3840, 1276, 88, 296, 2160, 8, 10, 72, true, true, false}},
+        {94, {297000, 3840, 1056, 88, 296, 2160, 8, 10, 72, true, true, false}},
+        {95, {297000, 3840, 176, 88, 296, 2160, 8, 10, 72, true, true, false}},
+        {96, {594000, 3840, 1056, 88, 296, 2160, 8, 10, 72, true, true, false}},
+        {97, {594000, 3840, 176, 88, 296, 2160, 8, 10, 72, true, true, false}},
+        {98, {297000, 4096, 1020, 88, 296, 2160, 8, 10, 72, true, true, false}},
+        {99, {297000, 4096, 968, 88, 128, 2160, 8, 10, 72, true, true, false}},
+        {100, {297000, 4096, 88, 88, 128, 2160, 8, 10, 72, true, true, false}},
+        {101, {594000, 4096, 968, 88, 128, 2160, 8, 10, 72, true, true, false}},
+        {102, {594000, 4096, 88, 88, 128, 2160, 8, 10, 72, true, true, false}},
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
@@ -137,11 +157,28 @@ struct switch_dp_mode_list {
     unsigned count;
 };
 
+static inline bool switch_dp_prefer(const struct switch_dp_mode *m, const struct switch_dp_mode *best)
+{
+    if (m->preferred != best->preferred)
+        return m->preferred;
+    const unsigned pixels = (unsigned)m->hactive * m->vactive;
+    const unsigned previous = (unsigned)best->hactive * best->vactive;
+    return pixels != previous ? pixels > previous : switch_dp_mode_refresh_mhz(m) > switch_dp_mode_refresh_mhz(best);
+}
+
 static inline void switch_dp_modes_add(struct switch_dp_mode_list *list, const struct switch_dp_mode *mode)
 {
-    if (list->count < SWITCH_DP_MAX_MODES) {
-        list->modes[list->count++] = *mode;
+    if (!switch_dp_source_timing(mode))
+        return;
+    for (unsigned i = 0; i < list->count; ++i) {
+        struct switch_dp_mode *existing = &list->modes[i];
+        if (__builtin_memcmp(existing, mode, offsetof(struct switch_dp_mode, preferred)) == 0) {
+            existing->preferred |= mode->preferred;
+            return;
+        }
     }
+    if (list->count < SWITCH_DP_MAX_MODES)
+        list->modes[list->count++] = *mode;
 }
 
 static inline void switch_dp_edid_cta(const uint8_t *block, struct switch_dp_mode_list *list)
@@ -161,7 +198,13 @@ static inline void switch_dp_edid_cta(const uint8_t *block, struct switch_dp_mod
             const unsigned vic = (svd >= 129 && svd <= 192) ? svd & 0x7Fu : svd;
             struct switch_dp_mode mode;
             if (switch_dp_cta_vic(vic, &mode)) {
+                mode.preferred = svd >= 129 && svd <= 192;
                 switch_dp_modes_add(list, &mode);
+                if (vic == 4 || vic == 16 || vic == 95 || vic == 97 || vic == 100 || vic == 102) {
+                    mode.pixel_khz = (mode.pixel_khz * 1000u + 500u) / 1001u;
+                    mode.preferred = false;
+                    switch_dp_modes_add(list, &mode);
+                }
             }
         }
         at += 1 + length;
@@ -174,17 +217,117 @@ static inline void switch_dp_edid_cta(const uint8_t *block, struct switch_dp_mod
     }
 }
 
-// Every mode of `edid` (`blocks` 128-byte blocks read). A bad base block yields only 640x480, which DisplayPort
-// requires every sink to take; a bad extension is skipped.
-static inline void switch_dp_edid_modes(const uint8_t *edid, unsigned blocks, struct switch_dp_mode_list *list)
+static inline bool switch_dp_standard_timing(uint8_t b0, uint8_t b1, bool edid13, struct switch_dp_mode *mode)
 {
-    list->count = 0;
-    struct switch_dp_mode vga;
-    (void)switch_dp_cta_vic(1, &vga);
-    if (blocks == 0 || !switch_dp_edid_header_valid(edid)) {
-        switch_dp_modes_add(list, &vga);
-        return;
+    if ((b0 == 0x01u && b1 == 0x01u) || (b0 == 0x00u && b1 == 0x00u) || (b0 == 0x20u && b1 == 0x20u))
+        return false;
+    if ((b1 & 0x3Fu) != 0)
+        return false;
+    const uint16_t hactive = (uint16_t)(((unsigned)b0 + 31u) * 8u);
+    uint16_t vactive = 0;
+    switch (b1 >> 6) {
+    case 0:
+        vactive = edid13 ? (uint16_t)(hactive * 10u / 16u) : hactive;
+        break;
+    case 1:
+        vactive = (uint16_t)(hactive * 3u / 4u);
+        break;
+    case 2:
+        vactive = (uint16_t)(hactive * 4u / 5u);
+        break;
+    case 3:
+        vactive = (uint16_t)(hactive * 9u / 16u);
+        break;
     }
+    static const struct switch_dp_mode table[] = {
+        {148500, 1920, 88, 44, 148, 1080, 4, 5, 36, true, true, false},
+        {97750, 1600, 48, 32, 80, 900, 3, 5, 18, true, false, false},
+        {74250, 1280, 110, 40, 220, 720, 5, 5, 20, true, true, false},
+        {91000, 1280, 48, 32, 80, 1024, 3, 7, 20, true, false, false},
+        {65000, 1024, 24, 136, 160, 768, 3, 6, 29, false, false, false},
+        {35500, 800, 48, 32, 80, 600, 3, 4, 11, true, false, false},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); ++i) {
+        if (table[i].hactive == hactive && table[i].vactive == vactive) {
+            *mode = table[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+static inline void switch_dp_edid_displayid(const uint8_t *block, struct switch_dp_mode_list *list)
+{
+    const unsigned section_len = block[2];
+    if (block[0] != 0x70u || section_len > 121u)
+        return;
+    uint8_t sum = 0;
+    for (unsigned i = 1; i <= 5u + section_len; ++i)
+        sum = (uint8_t)(sum + block[i]);
+    if (sum != 0)
+        return;
+    const unsigned section_end = 5u + section_len;
+    for (unsigned at = 5u; at + 3u <= section_end;) {
+        const uint8_t tag = block[at];
+        const unsigned len = block[at + 2u];
+        if (at + 3u + len > section_end)
+            break;
+        if (tag == 0x03u || tag == 0x22u) {
+            for (unsigned d = at + 3u; d + 20u <= at + 3u + len; d += 20u) {
+                const uint8_t *t = block + d;
+                if ((t[3] & 0x10u) != 0)
+                    continue;
+                const uint32_t raw_clk =
+                    ((uint32_t)t[0] | ((uint32_t)t[1] << 8) | ((uint32_t)t[2] << 16)) + 1u;
+                if (tag == 0x03u && raw_clk > SWITCH_DP_MAX_PIXEL_KHZ / 10u)
+                    continue;
+                const uint32_t pixel_khz = tag == 0x03u ? raw_clk * 10u : raw_clk;
+                const uint32_t hactive = ((uint32_t)t[4] | ((uint32_t)t[5] << 8)) + 1u;
+                const uint32_t hblank = ((uint32_t)t[6] | ((uint32_t)t[7] << 8)) + 1u;
+                const uint32_t hfront = ((uint32_t)t[8] | (((uint32_t)t[9] & 0x7Fu) << 8)) + 1u;
+                const uint32_t hsync = ((uint32_t)t[10] | ((uint32_t)t[11] << 8)) + 1u;
+                const uint32_t vactive = ((uint32_t)t[12] | ((uint32_t)t[13] << 8)) + 1u;
+                const uint32_t vblank = ((uint32_t)t[14] | ((uint32_t)t[15] << 8)) + 1u;
+                const uint32_t vfront = ((uint32_t)t[16] | (((uint32_t)t[17] & 0x7Fu) << 8)) + 1u;
+                const uint32_t vsync = ((uint32_t)t[18] | ((uint32_t)t[19] << 8)) + 1u;
+                if (hactive > SWITCH_DP_MAX_WIDTH || vactive > SWITCH_DP_MAX_HEIGHT || hblank > 0x7FFFu ||
+                    vblank > 0x7FFFu || hfront + hsync >= hblank || vfront + vsync >= vblank)
+                    continue;
+                const struct switch_dp_mode mode = {
+                    pixel_khz,
+                    (uint16_t)hactive,
+                    (uint16_t)hfront,
+                    (uint16_t)hsync,
+                    (uint16_t)(hblank - hfront - hsync),
+                    (uint16_t)vactive,
+                    (uint16_t)vfront,
+                    (uint16_t)vsync,
+                    (uint16_t)(vblank - vfront - vsync),
+                    (t[9] & 0x80u) != 0,
+                    (t[17] & 0x80u) != 0,
+                    (t[3] & 0x80u) != 0,
+                };
+                switch_dp_modes_add(list, &mode);
+            }
+        }
+        at += 3u + len;
+    }
+}
+
+static inline bool switch_dp_edid_block_modes(const uint8_t *edid, bool base, struct switch_dp_mode_list *list)
+{
+    if (!base) {
+        if (!switch_dp_edid_block_valid(edid))
+            return false;
+        if (edid[0] == 0x02u)
+            switch_dp_edid_cta(edid, list);
+        else if (edid[0] == 0x70u)
+            switch_dp_edid_displayid(edid, list);
+        return true;
+    }
+    list->count = 0;
+    if (!switch_dp_edid_header_valid(edid))
+        return false;
     for (unsigned at = 54; at + 18 <= 126; at += 18) {
         struct switch_dp_mode mode;
         if (switch_dp_edid_dtd(edid + at, &mode)) {
@@ -192,65 +335,27 @@ static inline void switch_dp_edid_modes(const uint8_t *edid, unsigned blocks, st
             switch_dp_modes_add(list, &mode);
         }
     }
-    if ((edid[35] & 0x20u) != 0 || list->count == 0) {
+    const bool edid13 = edid[18] > 1 || (edid[18] == 1 && edid[19] >= 3);
+    for (unsigned at = 38; at + 2 <= 54; at += 2) {
+        struct switch_dp_mode mode;
+        if (switch_dp_standard_timing(edid[at], edid[at + 1], edid13, &mode))
+            switch_dp_modes_add(list, &mode);
+    }
+    if ((edid[35] & 0x20u) != 0) {
+        struct switch_dp_mode vga;
+        (void)switch_dp_cta_vic(1, &vga);
         switch_dp_modes_add(list, &vga);
     }
-    const unsigned extensions = edid[126] < blocks - 1 ? edid[126] : blocks - 1;
-    for (unsigned b = 1; b <= extensions; ++b) {
-        const uint8_t *block = edid + (size_t)128 * b;
-        if (switch_dp_edid_block_valid(block)) {
-            switch_dp_edid_cta(block, list);
-        }
-    }
+    return true;
 }
 
 static inline bool switch_dp_mode_allowed(const struct switch_dp_mode *m, uint64_t link_payload_kbps)
 {
-    const uint32_t refresh = switch_dp_mode_refresh_mhz(m);
-    return m->hactive <= SWITCH_DP_MAX_WIDTH && m->vactive <= SWITCH_DP_MAX_HEIGHT && refresh != 0 &&
-           refresh <= SWITCH_DP_MAX_REFRESH && (uint64_t)m->pixel_khz * SWITCH_DP_BITS_PER_PIXEL < link_payload_kbps;
-}
-
-static inline bool switch_dp_mode_is_1080p60(const struct switch_dp_mode *m)
-{
-    return m->hactive == 1920 && m->vactive == 1080 && switch_dp_mode_refresh_mhz(m) >= 59900;
-}
-
-// True when `a` is the better choice: 1080p60, then smooth (50 Hz and up) before slow, then more pixels, then a higher
-// refresh, then the sink's own preference.
-static inline bool switch_dp_mode_better(const struct switch_dp_mode *a, const struct switch_dp_mode *b)
-{
-    if (switch_dp_mode_is_1080p60(a) != switch_dp_mode_is_1080p60(b)) {
-        return switch_dp_mode_is_1080p60(a);
-    }
-    const uint32_t ra = switch_dp_mode_refresh_mhz(a);
-    const uint32_t rb = switch_dp_mode_refresh_mhz(b);
-    if ((ra >= SWITCH_DP_SMOOTH) != (rb >= SWITCH_DP_SMOOTH)) {
-        return ra >= SWITCH_DP_SMOOTH;
-    }
-    const uint32_t area_a = (uint32_t)a->hactive * a->vactive;
-    const uint32_t area_b = (uint32_t)b->hactive * b->vactive;
-    if (area_a != area_b) {
-        return area_a > area_b;
-    }
-    if (ra / 100 != rb / 100) {
-        return ra > rb;
-    }
-    return a->preferred && !b->preferred;
-}
-
-// The index of the mode to drive over a link carrying `link_payload_kbps`, or -1 when none fits.
-static inline int switch_dp_pick_mode(const struct switch_dp_mode_list *list, uint64_t link_payload_kbps)
-{
-    int best = -1;
-    for (unsigned i = 0; i < list->count; ++i) {
-        const struct switch_dp_mode *m = &list->modes[i];
-        if (switch_dp_mode_allowed(m, link_payload_kbps) &&
-            (best < 0 || switch_dp_mode_better(m, &list->modes[best]))) {
-            best = (int)i;
-        }
-    }
-    return best;
+    return switch_dp_source_timing(m) && m->hactive >= 16 &&
+           m->vactive >= 16 && m->hsync != 0 && m->vsync != 0 &&
+           m->hfront >= 2 && m->vfront >= 2 && m->hsync + m->hback >= 20 &&
+           switch_dp_mode_htotal(m) <= 0x7fffu && switch_dp_mode_vtotal(m) <= 0x7fffu &&
+           m->pixel_khz >= 11719 && (uint64_t)m->pixel_khz * SWITCH_DP_BITS_PER_PIXEL < link_payload_kbps;
 }
 
 // NOLINTEND(modernize-avoid-c-style-cast,modernize-loop-convert)

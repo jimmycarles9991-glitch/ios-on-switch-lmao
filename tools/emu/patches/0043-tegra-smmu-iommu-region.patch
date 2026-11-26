@@ -1,0 +1,173 @@
+diff --git a/hw/arm/tegra2/axi/mc/mc.c b/hw/arm/tegra2/axi/mc/mc.c
+index e0049e9..2bb00df 100644
+--- a/hw/arm/tegra2/axi/mc/mc.c
++++ b/hw/arm/tegra2/axi/mc/mc.c
+@@ -40,6 +40,7 @@
+ #define SMMU_PTB_ASID       0x1c
+ #define SMMU_PTB_DATA       0x20
+ #define SMMU_READABLE       (1u << 31)
++#define SMMU_WRITABLE       (1u << 30)
+ #define SMMU_PDE_NEXT       (1u << 28)
+ #define SMMU_PFN_MASK       0x3fffffu
+ #define SMMU_ASID_ENABLE    (1u << 31)
+@@ -1500,9 +1501,10 @@ static void tegra_mc_priv_write(void *opaque, hwaddr offset,
+     }
+ }
+ 
+-enum tegra_smmu_result tegra_smmu_translate(const TegraSmmuClient *client, uint64_t address, hwaddr *pa,
+-                                            unsigned *asid)
++enum tegra_smmu_result tegra_smmu_translate_access(const TegraSmmuClient *client, uint64_t address, bool write,
++                                                   hwaddr *pa, unsigned *asid)
+ {
++    uint32_t leaf = SMMU_READABLE | (write ? SMMU_WRITABLE : 0);
+     tegra_mc *s = tegra_mc_dev;
+     uint32_t group, ptb, pde, pte;
+     hwaddr table;
+@@ -1528,19 +1530,28 @@ enum tegra_smmu_result tegra_smmu_translate(const TegraSmmuClient *client, uint6
+         return TEGRA_SMMU_FAULT;
+     }
+     if (!(pde & SMMU_PDE_NEXT)) {
++        if ((pde & leaf) != leaf) {
++            return TEGRA_SMMU_FAULT;
++        }
+         *pa = ((hwaddr)(pde & SMMU_PFN_MASK) << 12 & ~(hwaddr)0x3fffff) | (address & 0x3fffff);
+         return TEGRA_SMMU_MAPPED;
+     }
+     table = (hwaddr)(pde & SMMU_PFN_MASK) << 12;
+     pte = address_space_ldl_le(&address_space_memory, table + ((address >> 12) & 0x3ff) * 4, MEMTXATTRS_UNSPECIFIED,
+                                NULL);
+-    if (!(pte & SMMU_READABLE)) {
++    if ((pte & leaf) != leaf) {
+         return TEGRA_SMMU_FAULT;
+     }
+     *pa = (hwaddr)(pte & SMMU_PFN_MASK) << 12 | (address & 0xfff);
+     return TEGRA_SMMU_MAPPED;
+ }
+ 
++enum tegra_smmu_result tegra_smmu_translate(const TegraSmmuClient *client, uint64_t address, hwaddr *pa,
++                                            unsigned *asid)
++{
++    return tegra_smmu_translate_access(client, address, false, pa, asid);
++}
++
+ static void tegra_mc_priv_reset(DeviceState *dev)
+ {
+     tegra_mc *s = TEGRA_MC(dev);
+diff --git a/hw/arm/tegra2/axi/mc/smmu_iommu.c b/hw/arm/tegra2/axi/mc/smmu_iommu.c
+new file mode 100644
+index 0000000..cd98691
+--- /dev/null
++++ b/hw/arm/tegra2/axi/mc/smmu_iommu.c
+@@ -0,0 +1,69 @@
++/*
++ * Tegra X1 SMMU as an IOMMU memory region for a DMA master.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "exec/address-spaces.h"
++
++#include "tegra_smmu.h"
++
++static IOMMUTLBEntry tegra_smmu_iommu_translate(IOMMUMemoryRegion *mr, hwaddr addr, IOMMUAccessFlags flag,
++                                                int iommu_idx)
++{
++    TegraSmmuIommu *iommu = container_of(mr, TegraSmmuIommu, parent_obj);
++    bool write = flag & IOMMU_WO;
++    IOMMUTLBEntry entry = {
++        .target_as = &address_space_memory,
++        .iova = addr & ~(hwaddr)0xfff,
++        .addr_mask = 0xfff,
++        .perm = IOMMU_NONE,
++    };
++    hwaddr pa;
++    unsigned asid;
++
++    if (tegra_smmu_translate_access(write ? &iommu->write : &iommu->read, addr, write, &pa, &asid) ==
++        TEGRA_SMMU_FAULT) {
++        qemu_log_mask(LOG_GUEST_ERROR, "%s: SMMU fault on a %s at %#" HWADDR_PRIx " (ASID %u)\n",
++                      memory_region_name(MEMORY_REGION(mr)), write ? "write" : "read", addr, asid);
++        return entry;
++    }
++    entry.translated_addr = pa & ~(hwaddr)0xfff;
++    entry.perm = write ? IOMMU_WO : IOMMU_RO;
++    return entry;
++}
++
++void tegra_smmu_iommu_init(TegraSmmuIommu *iommu, Object *owner, const char *name, TegraSmmuClient read,
++                           TegraSmmuClient write)
++{
++    memory_region_init_iommu(iommu, sizeof(*iommu), TYPE_TEGRA_SMMU_IOMMU, owner, name, UINT64_MAX);
++    iommu->read = read;
++    iommu->write = write;
++}
++
++static void tegra_smmu_iommu_class_init(ObjectClass *klass, void *data)
++{
++    IOMMUMemoryRegionClass *imrc = IOMMU_MEMORY_REGION_CLASS(klass);
++
++    imrc->translate = tegra_smmu_iommu_translate;
++}
++
++static const TypeInfo tegra_smmu_iommu_info = {
++    .name          = TYPE_TEGRA_SMMU_IOMMU,
++    .parent        = TYPE_IOMMU_MEMORY_REGION,
++    .instance_size = sizeof(TegraSmmuIommu),
++    .class_init    = tegra_smmu_iommu_class_init,
++};
++
++static void tegra_smmu_iommu_register_types(void)
++{
++    type_register_static(&tegra_smmu_iommu_info);
++}
++
++type_init(tegra_smmu_iommu_register_types)
+diff --git a/hw/arm/tegra2/include/tegra_smmu.h b/hw/arm/tegra2/include/tegra_smmu.h
+index f9a8419..a300e2e 100644
+--- a/hw/arm/tegra2/include/tegra_smmu.h
++++ b/hw/arm/tegra2/include/tegra_smmu.h
+@@ -10,6 +10,7 @@
+ #define TEGRA_SMMU_H
+ 
+ #include "exec/hwaddr.h"
++#include "exec/memory.h"
+ 
+ /* A memory client (Linux memory/tegra/tegra210.c): its TRANSLATION_ENABLE_n bit and its swgroup's ASID register. */
+ typedef struct TegraSmmuClient {
+@@ -32,5 +33,18 @@ enum tegra_smmu_result {
+  */
+ enum tegra_smmu_result tegra_smmu_translate(const TegraSmmuClient *client, uint64_t address, hwaddr *pa,
+                                             unsigned *asid);
++/* As tegra_smmu_translate, for a read or a write: a write also faults on a page entry without WRITE (bit 30). */
++enum tegra_smmu_result tegra_smmu_translate_access(const TegraSmmuClient *client, uint64_t address, bool write,
++                                                   hwaddr *pa, unsigned *asid);
++
++/* A DMA master's view of memory through the SMMU: its read and write clients, translated per access. */
++#define TYPE_TEGRA_SMMU_IOMMU "tegra.smmu-iommu"
++typedef struct TegraSmmuIommu {
++    IOMMUMemoryRegion parent_obj;
++    TegraSmmuClient read, write;
++} TegraSmmuIommu;
++
++void tegra_smmu_iommu_init(TegraSmmuIommu *iommu, Object *owner, const char *name, TegraSmmuClient read,
++                           TegraSmmuClient write);
+ 
+ #endif
+diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
+index 7130d63..61cf837 100644
+--- a/hw/arm/tegra2/meson.build
++++ b/hw/arm/tegra2/meson.build
+@@ -5,6 +5,7 @@ tegra2_dep = declare_dependency(include_directories : tegra2_inc)
+ arm_ss.add(files(
+   'axi/emc/emc.c',
+   'axi/mc/mc.c',
++  'axi/mc/smmu_iommu.c',
+ 
+   'ppsb/arb_sema/arb_sema.c',
+   'ppsb/res_sema/res_sema.c',

@@ -115,6 +115,8 @@
 #   xnu_workloop_handoff_test  <switch/workloop_handoff.h>'s SwitchWL handoff lines (which a process logs, as devicerun
 #                            reads them); 12377's workloop filter hooks each event where its state is held, 10063's has
 #                            no hook, and a release kernel compiles them to nothing
+#   xnu_workloop_owner_test  12377's filt_wlupdate over reference-counted threads: iOS 27's owner hint (0x388) never
+#                            wakes or attaches, takes an idle workloop, and costs a current owner no reference
 #
 #   bazel test //kernel/tests:all
 load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
@@ -247,9 +249,65 @@ host_test(
         "//kernel/switch:diag/workloop.c",
         "//kernel/switch:include/switch/diag.h",
         "//kernel/xnu-10063.141.1/bsd:kern/kern_event.c",
+        "//kernel/xnu-10063.141.1/bsd:sys/event_private.h",
         "//kernel/xnu-12377.121.6/bsd:kern/kern_event.c",
+        "//kernel/xnu-12377.121.6/bsd:sys/event_private.h",
+        "//kernel/xnu-12377.121.6/bsd:sys/eventvar.h",
     ],
     includes = ["."],
+)
+
+# --- xnu-12377's filt_wlupdate ------------------------------------------------------------------------------------
+# wlupdate.h: kern_event.c's filt_wlupdate and the constants it reads. wl_flags.h: event_private.h's workloop flags,
+# without their comments (some run on past the line).
+genrule(
+    name = "workloop_update",
+    srcs = ["//kernel/xnu-12377.121.6/bsd:kern/kern_event.c"],
+    outs = ["wlupdate.h"],
+    cmd = """awk '
+        /^#define (EPREEMPTDISABLED|EWLNOATTACH|EVFILT_WORKLOOP_EFAULT_RETRY_COUNT|FILT_WL(ATTACH|TOUCH|DROP)) / { print; next }
+        !on && /^filt_wlupdate\\(struct kqworkloop \\*kqwl, struct knote \\*kn,$$/ { on = 1; print "static int" }
+        on { print }
+        on && /^}$$/ { done = 1; exit }
+        END { if (!done) exit 1 }
+    ' $< > $@""",
+)
+
+genrule(
+    name = "workloop_flags",
+    srcs = ["//kernel/xnu-12377.121.6/bsd:sys/event_private.h"],
+    outs = ["wl_flags.h"],
+    cmd = "grep -E '^#define (NOTE_WL_|EV_EXTIDX_WL_)' $< | sed -E 's@[[:space:]]*/\\*.*@@' > $@",
+)
+
+host_library(
+    name = "workloop_owner",
+    srcs = [
+        "wlupdate.h",
+        "xnu_workloop_owner_harness.c",
+    ],
+    hdrs = [
+        "wl_flags.h",
+        "xnu_workloop_owner_harness.h",
+    ],
+    includes = ["."],
+)
+
+host_test(
+    name = "xnu_workloop_owner_test",
+    srcs = ["xnu_workloop_owner_test.cpp"],
+    deps = [":workloop_owner"],
+)
+
+host_test(
+    name = "xnu_shared_cache_source_test",
+    srcs = ["xnu_shared_cache_source_test.cpp"],
+    data = [
+        "//diagnostics/switch:SwitchRawMount.h",
+        "//kernel/switch:vm/shared_cache.c",
+        "//kernel/xnu-10063.141.1/bsd:vm/vm_unix.c",
+        "//kernel/xnu-12377.121.6/bsd:vm/vm_unix.c",
+    ],
 )
 
 host_test(

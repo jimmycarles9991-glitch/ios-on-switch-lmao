@@ -1,0 +1,343 @@
+"""The USB-C port: Apple's IOPort, the connector's two root ports, the USB transports and their data role.
+
+The driver's development lines are the evidence: the IOPort found with its type, each root port created, each transport
+added, kept or removed with its role and reason. Apple's IOPort and IOPortTransportState lines are debug lines a pulled
+archive may not hold (a 24B119 device logs no "Found port properties" line); they corroborate when present and never
+decide alone. Apple's error lines (identification blocked, a duplicate transport) fail on sight.
+"""
+
+from tools.devicerun.rules import REPORT, Check
+
+KERNEL = 'kernel'
+OWNER = 'usb-host'
+USB = 'drivers/SwitchUSB'
+XHCI = f'{USB}/SwitchXHCI.cpp'
+PORT = f'{USB}/SwitchUSBPort.cpp'
+LANES = f'{USB}/XusbLanes.h'
+APPLE_PORT = 'IOPortFamily, both versions (emulator usb-emu runs 2026-11-13)'
+APPLE_USB = 'IOUSBHostFamily, both versions (24B119 kernelcache strings, emulator usb-emu runs, boot-1109-2145)'
+ROOT_PORT = r'AppleUSB[23]0XHCI(?:TypeC)?Port'
+FOUND = r'SwitchUSB: USB-C port (?P<port>\S+) found \(port type (?P<type>-?\d+), port number (?P<number>-?\d+)\)'
+CREATED = (
+    r'SwitchUSB: root port (?P<number>\d+) created as (?P<cls>\S+) '
+    r'\((?P<speed>USB 2\.0|SuperSpeed), (?P<how>[^)]*)\)'
+)
+TRANSPORT_LINE = 'SwitchUSB: USB-C port transport '
+TRANSPORT = (
+    r'SwitchUSB: USB-C port transport (?P<what>added|removed|kept until its device is torn down): USB (?P<usb>[23]), '
+    r'index (?P<index>\d+), data role (?P<role>host|device|none) \((?P<why>[^)]*)\)'
+)
+REMOVED_IN_USE = '(?:detach|role change)'
+
+USB_PORT = [
+    Check(
+        'usb.port.found',
+        OWNER,
+        'SwitchUSB: USB-C port ',
+        REPORT,
+        process=KERNEL,
+        regex=FOUND,
+        show=('port', 'type', 'number'),
+        source=PORT,
+        note='once per boot',
+    ),
+    Check(
+        'usb.port.found-usbc',
+        OWNER,
+        'SwitchUSB: USB-C port ',
+        REPORT,
+        process=KERNEL,
+        regex=FOUND.replace('(?P<type>-?\\d+)', '(?P<type>2)').replace('(?P<number>-?\\d+)', '(?P<number>1)'),
+        source=PORT,
+    ),
+    Check(
+        'usb.port.found-wrong',
+        OWNER,
+        'SwitchUSB: USB-C port ',
+        process=KERNEL,
+        regex=r'found \(port type (?!2, port number 1\))',
+        failure='the IOPort is not USB-C (type 2) number 1',
+        source=PORT,
+    ),
+    Check(
+        'usb.port.created-any',
+        OWNER,
+        'SwitchUSB: root port ',
+        REPORT,
+        process=KERNEL,
+        regex=CREATED,
+        show=('number', 'cls', 'how'),
+        source=XHCI,
+        note='development builds, once per boot',
+    ),
+    Check(
+        'usb.port.created-usb2',
+        OWNER,
+        'SwitchUSB: root port ',
+        'count > 0',
+        process=KERNEL,
+        regex=r'SwitchUSB: root port 5 created as AppleUSB20XHCI(?:TypeC)?Port \(USB 2\.0, ',
+        needs=('usb.host.up', 'usb.port.created-any'),
+        source=XHCI,
+    ),
+    Check(
+        'usb.port.created-usb3',
+        OWNER,
+        'SwitchUSB: root port ',
+        'count > 0',
+        process=KERNEL,
+        regex=r'SwitchUSB: root port 1 created as AppleUSB30XHCI(?:TypeC)?Port \(SuperSpeed, ',
+        needs=('usb.host.up', 'usb.port.created-any'),
+        source=XHCI,
+    ),
+    Check(
+        'usb.port.created-other',
+        OWNER,
+        'SwitchUSB: root port ',
+        process=KERNEL,
+        regex=r'SwitchUSB: root port (?![15] created)\d+ created',
+        failure="a root port other than the connector's 5 and 1 was created",
+        source=XHCI,
+    ),
+    Check(
+        'usb.port.transports',
+        OWNER,
+        TRANSPORT_LINE,
+        REPORT,
+        process=KERNEL,
+        regex=TRANSPORT,
+        show=('what', 'usb', 'role', 'why'),
+        source=f'{PORT}, {LANES}',
+    ),
+    Check(
+        'usb.port.transport-host',
+        OWNER,
+        TRANSPORT_LINE,
+        'count > 0',
+        process=KERNEL,
+        regex=r'transport added: USB 2, index (?P<index>\d+), data role host \(',
+        needs=('usb.host.role', 'usb.port.transports'),
+        after='usb.host.role',
+        within=2.0,
+        source=PORT,
+    ),
+    Check(
+        'usb.port.transport-device',
+        OWNER,
+        TRANSPORT_LINE,
+        REPORT,
+        process=KERNEL,
+        regex=r'transport added: USB 2, index \d+, data role device \(',
+        source=PORT,
+    ),
+    Check(
+        'usb.port.device-role-powered',
+        OWNER,
+        'cableChangeOccurred: powering on',
+        process=KERNEL,
+        after='usb.port.transport-device',
+        within=2.0,
+        failure="Apple's root port powered on for a device-role transport",
+        source=APPLE_USB,
+    ),
+    Check(
+        'usb.apple.ioport-lines',
+        OWNER,
+        ('Searching registry for port-type, port-number properties', 'Setting provider specified port type'),
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+        note="Apple's IOPort debug lines: the IOPort checks need them",
+    ),
+    Check(
+        'usb.apple.transport-lines',
+        OWNER,
+        ('IOPort::addTransport()', 'IOPort::removeTransport()', '::setDataRole(): '),
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+        note="Apple's transport debug lines: the transport checks need them",
+    ),
+    Check(
+        'usb.port.ioport',
+        OWNER,
+        'Setting provider specified port type: 2 [USB-C]',
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+        note='Port-USB-C@1 from /arm-io/port-usb-c-1, once per boot',
+    ),
+    Check(
+        'usb.port.usb2',
+        OWNER,
+        'Found port properties for registry entry',
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        regex=r'portType: 2 \[USB-C\], portNumber: 1, registryEntry: \S+/AppleUSB20XHCIPort@00500000\)',
+        needs=('usb.host.role', 'usb.apple.ioport-lines'),
+        applies='usb.kernel darwin=25',
+        source=APPLE_PORT,
+    ),
+    Check(
+        'usb.port.usb3',
+        OWNER,
+        'Found port properties for registry entry',
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        regex=r'portType: 2 \[USB-C\], portNumber: 1, registryEntry: \S+/AppleUSB30XHCIPort@00100000\)',
+        needs=('usb.host.role', 'usb.apple.ioport-lines'),
+        applies='usb.kernel darwin=25',
+        source=APPLE_PORT,
+    ),
+    Check(
+        'usb.port.usb2-typec',
+        OWNER,
+        'AppleUSB20XHCITypeCPort@00500000: ',
+        REPORT,
+        process=KERNEL,
+        needs='usb.host.role',
+        applies='usb.kernel darwin=23',
+        source=APPLE_USB,
+    ),
+    Check(
+        'usb.port.usb3-typec',
+        OWNER,
+        'AppleUSB30XHCITypeCPort@00100000: ',
+        REPORT,
+        process=KERNEL,
+        needs='usb.host.role',
+        applies='usb.kernel darwin=23',
+        source=APPLE_USB,
+    ),
+    Check(
+        'usb.port.no-properties',
+        OWNER,
+        'Did not find port properties for registry entry',
+        process=KERNEL,
+        regex=rf'registryEntry: IOService:/IOResources/usb-xhci/SwitchXHCI@\w+/(?P<port>{ROOT_PORT})@\w+\)$',
+        show=('port',),
+        source='IOAccessoryManager, iOS 27 (boot-1109-2145)',
+        note="root ports only: a hub's downstream ports have no connector",
+    ),
+    Check(
+        'usb.port.no-ioport',
+        OWNER,
+        (': the USB-C port has no IOPort', 'SwitchUSB: USB-C root port '),
+        process=KERNEL,
+        regex=r'SwitchUSB: (?P<what>.*)$',
+        show=('what',),
+        source=f'{PORT}, {XHCI}',
+    ),
+    Check(
+        'usb.port.transport',
+        OWNER,
+        'IOPort::addTransport(): [Port-USB-C@1] Adding transport... (transportType: 2 [USB2]',
+        'count > 0',
+        process=KERNEL,
+        debug=True,
+        needs=('usb.host.role', 'usb.apple.transport-lines'),
+        after='usb.host.role',
+        within=2.0,
+        source=APPLE_PORT,
+    ),
+    Check(
+        'usb.port.data-role-host',
+        OWNER,
+        '::setDataRole(): ',
+        'count > 0',
+        process=KERNEL,
+        debug=True,
+        regex=r'(?:\(dataRole: 2 \[Host\]\)|-> 2 \[Host\])$',
+        needs=('usb.host.role', 'usb.apple.transport-lines'),
+        source=APPLE_PORT,
+    ),
+    Check(
+        'usb.port.transport-usb3',
+        OWNER,
+        'Adding transport... (transportType: 3 [USB3]',
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+    ),
+    Check(
+        'usb.port.usb2-removed',
+        OWNER,
+        TRANSPORT_LINE,
+        process=KERNEL,
+        regex=rf'transport removed: USB 2, index \d+, data role (?P<role>host|device) \((?!{REMOVED_IN_USE}\))'
+        r'(?P<why>[^)]*)\)',
+        show=('role', 'why'),
+        failure='a USB 2.0 transport removed while the port stayed attached (only a detach or a role swap removes it)',
+        source=f'{PORT}, {LANES}',
+        note="24B119 device boot 2026-11-14: removed at 'SuperSpeed reset taken', the keyboard's port powered off",
+    ),
+    Check(
+        'usb.port.transport-duplicate',
+        OWNER,
+        'Multiple transports of this type are not allowed',
+        process=KERNEL,
+        regex=r'transportType: (?P<type>\d+) \[(?P<name>\w+)\]',
+        show=('name',),
+        failure='a second transport of a type the port already holds',
+        source='IOAccessoryManager, iOS 27 (24B119 device boot 2026-11-14)',
+    ),
+    Check(
+        'usb.port.transport-refused',
+        OWNER,
+        ('SwitchUSB: USB-C port refused a USB ', 'SwitchUSB: USB-C port kept its USB '),
+        process=KERNEL,
+        source=PORT,
+    ),
+    Check(
+        'usb.port.transport-terminated',
+        OWNER,
+        'Transport has been terminated',
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+        note="emulator iOS 17: at every detach, right after the transport's removal",
+    ),
+    Check(
+        'usb.port.transports-supported',
+        OWNER,
+        'Could not find transports-supported property',
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+        note='features-supported (both) and transports-provisioned (iOS 27) are expected',
+    ),
+    Check(
+        'usb.port.removed',
+        OWNER,
+        'IOPort::removeTransport()',
+        REPORT,
+        process=KERNEL,
+        debug=True,
+        source=APPLE_PORT,
+    ),
+    Check(
+        'usb.port.identification-blocked', OWNER, 'identification blocked', process=KERNEL, debug=True, source=APPLE_USB
+    ),
+    Check(
+        'usb.port.powering-on',
+        OWNER,
+        (
+            'cableChangeOccurred: powering on',
+            'cableChangeOccurred: cable connected, powering on',
+            'AppleUSBXHCIPort::powerOn: deadline passed',
+        ),
+        'count > 0',
+        process=KERNEL,
+        regex=rf'^(?P<port>{ROOT_PORT})@\w+: \S+::(?P<what>cableChangeOccurred|powerOn)',
+        show=('port', 'what'),
+        needs='usb.host.role',
+        source=APPLE_USB,
+        note='a powerOn deadline counts: the port tried, the controller did not answer',
+    ),
+]

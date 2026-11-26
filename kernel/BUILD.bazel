@@ -4,7 +4,7 @@ load("//bazel/lint:defs.bzl", "lint_files")
 load("//ipsw:ipsw.bzl", "ipsw_volumes_header")
 # The kernel: which XNU it is built from, and (from the layout move on) the kernelcache's archives, link and prelink.
 
-load("//kernel:prelink.bzl", "kernel_prelink_switch")
+load("//kernel:prelink.bzl", "PRELINK", "kernel_prelink_switch")
 load("//kernel/rules:firehose.bzl", "kernel_firehose")
 load("//kernel/rules:inputs.bzl", "tool_output")
 load("//kernel/rules:kernel.bzl", "kernel_archive", "kernel_driver")
@@ -388,15 +388,13 @@ kernel_archive(
         "//drivers/TegraNVJPG:TegraNVJPG",
         "//drivers/SwitchUSB:SwitchUSB",
         "//drivers/SwitchDisplayPort:SwitchPDAltMode",
+        "//drivers/SwitchDisplayPort:SwitchDisplayPort",
         "//kits/SwitchCAR:SwitchCAR",
         "//kits/SwitchDMA:SwitchDMA",
         "//kits/SwitchFalcon:SwitchFalcon",
         "//kits/SwitchLinux:SwitchLinux",
         "//kits/SwitchScratch:SwitchScratch",
-    ] + select({
-        "//drivers/SwitchDisplayPort:on": ["//drivers/SwitchDisplayPort:SwitchDisplayPort"],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 # XNU's mockfs (the same source in xnu-10063 and xnu-12377; it compiles against the selected XNU's SDK).
@@ -583,6 +581,7 @@ xnu_kernel_12377(
 kernel_prelink_fileset(
     name = "kernel_12377",
     out = "build/xnu-12377/kernel.macho",
+    base_roots = PRELINK["base_roots"],
     kernel = ":kernel_unprelinked_12377",
     # 24B119's kernel is Darwin 27.2.
     signatures = "@symbolicator//:kernel_27_2",

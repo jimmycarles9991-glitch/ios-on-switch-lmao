@@ -35,7 +35,7 @@ struct Tegra {
     unsigned enqueue = 0, slots = 0;
     bool sawCss = false, sawCrs = false;
 
-    uint32_t erstbaAt() const
+    static uint32_t erstbaAt()
     {
         return kRuntime + hold_erstba0();
     }
@@ -91,35 +91,35 @@ struct Tegra {
 
 // SwitchXHCI's register overrides around the model host.
 struct Switch {
-    Tegra &hw;
+    Tegra *hw;
 
     uint32_t read32(uint32_t at) const
     {
-        const uint32_t value = hw.read32(at);
+        const uint32_t value = hw->read32(at);
         return at == kUsbsts ? hold_usbsts(value) : value;
     }
 
-    void write32(uint32_t at, uint32_t value)
+    void write32(uint32_t at, uint32_t value) const
     {
         if (at == kUsbsts)
             hold_usbsts_write(value);
         if (at == kUsbcmd)
             value = hold_usbcmd(value);
-        if ((at == hw.erstbaAt() || at == hw.erstbaAt() + 4) && (hold_keeps(value, hw.read32(at)) != 0))
+        if ((at == Tegra::erstbaAt() || at == Tegra::erstbaAt() + 4) && (hold_keeps(value, hw->read32(at)) != 0))
             return;
-        hw.write32(at, value);
+        hw->write32(at, value);
     }
 
-    void write64(uint32_t at, uint64_t value)
+    void write64(uint32_t at, uint64_t value) const
     {
-        if (at == hw.erstbaAt() && (hold_keeps(value, hw.erstba) != 0))
+        if (at == Tegra::erstbaAt() && (hold_keeps(value, hw->erstba) != 0))
             return;
-        hw.write64(at, value);
+        hw->write64(at, value);
     }
 };
 
 template <typename Io> struct Apple {
-    Io &io;
+    Io *io;
     bool saved = false;
     int exception = kNoException;
     unsigned devices = 0;
@@ -128,12 +128,12 @@ template <typename Io> struct Apple {
     // lowerOnePowerStateTo(1): kIOReturnSuccess (0) or kIOReturnDeviceError (1 here)
     int sleep()
     {
-        io.write32(kUsbcmd, io.read32(kUsbcmd) & ~kRs);
-        if (!(io.read32(kUsbsts) & kHch))
+        io->write32(kUsbcmd, io->read32(kUsbcmd) & ~kRs);
+        if (!(io->read32(kUsbsts) & kHch))
             return 1;
-        savedUsbcmd = io.read32(kUsbcmd);
-        io.write32(kUsbcmd, io.read32(kUsbcmd) | kCss);
-        const uint32_t status = io.read32(kUsbsts);
+        savedUsbcmd = io->read32(kUsbcmd);
+        io->write32(kUsbcmd, io->read32(kUsbcmd) | kCss);
+        const uint32_t status = io->read32(kUsbsts);
         if ((status & kSre) || (status & kSss)) {
             exception = kSaveStateFailed;
             return 1;
@@ -150,18 +150,18 @@ template <typename Io> struct Apple {
 
     void reset()
     {
-        io.write32(kUsbcmd, kHcrst);
-        io.write64(kRuntime + hold_erstba0(), kRing);
+        io->write32(kUsbcmd, kHcrst);
+        io->write64(kRuntime + hold_erstba0(), kRing);
     }
 
     // raiseOnePowerStateTo(2) and the run that follows
     int wake()
     {
         if (saved) {
-            io.write32(kUsbcmd, savedUsbcmd);
-            io.write64(kRuntime + hold_erstba0(), kRing);
-            io.write32(kUsbcmd, io.read32(kUsbcmd) | kCrs);
-            const uint32_t status = io.read32(kUsbsts);
+            io->write32(kUsbcmd, savedUsbcmd);
+            io->write64(kRuntime + hold_erstba0(), kRing);
+            io->write32(kUsbcmd, io->read32(kUsbcmd) | kCrs);
+            const uint32_t status = io->read32(kUsbsts);
             if ((status & kSre) || (status & kRss)) {
                 exception = kSaveStateFailed;
                 return 1;
@@ -169,14 +169,14 @@ template <typename Io> struct Apple {
         } else {
             reset();
         }
-        io.write32(kUsbcmd, io.read32(kUsbcmd) | kRs);
+        io->write32(kUsbcmd, io->read32(kUsbcmd) | kRs);
         return 0;
     }
 
     // exception 4's recovery: Off, then up through reset
     void recover()
     {
-        io.write32(kUsbsts, io.read32(kUsbsts) & kSre);
+        io->write32(kUsbsts, io->read32(kUsbsts) & kSre);
         off();
         exception = kNoException;
         (void)wake();
@@ -192,12 +192,12 @@ protected:
         tegra.slots = 1;
         tegra.enqueue = 5;
         apple.devices = 1;
-        apple.io.write32(kUsbcmd, kRs);
+        apple.io->write32(kUsbcmd, kRs);
     }
 
     Tegra tegra;
-    Switch io{tegra};
-    Apple<Switch> apple{io};
+    Switch io{&tegra};
+    Apple<Switch> apple{&io};
 };
 
 }  // namespace
@@ -205,7 +205,7 @@ protected:
 TEST(SwitchUsbHoldBare, TegraAnswersSaveStateWithSre)
 {
     Tegra tegra;
-    Apple<Tegra> apple{tegra};
+    Apple<Tegra> apple{&tegra};
     apple.reset();
     tegra.write32(kUsbcmd, kRs);
     EXPECT_EQ(apple.sleep(), 1);
@@ -234,8 +234,8 @@ TEST_F(SwitchUsbHold, IdleSleepAndWakeKeepTheControllersState)
 TEST_F(SwitchUsbHold, ThirtyTwoBitHalvesOfErstbaAreKeptToo)
 {
     ASSERT_EQ(apple.sleep(), 0);
-    io.write32(tegra.erstbaAt(), static_cast<uint32_t>(kRing));
-    io.write32(tegra.erstbaAt() + 4, static_cast<uint32_t>(kRing >> 32));
+    io.write32(Tegra::erstbaAt(), static_cast<uint32_t>(kRing));
+    io.write32(Tegra::erstbaAt() + 4, static_cast<uint32_t>(kRing >> 32));
     EXPECT_EQ(tegra.enqueue, 5u);
 }
 
@@ -282,6 +282,9 @@ TEST_F(SwitchUsbHold, RestoreWithNothingHeldFails)
     io.write32(kUsbcmd, io.read32(kUsbcmd) & ~kRs);
     io.write32(kUsbcmd, io.read32(kUsbcmd) | kCrs);
     EXPECT_NE(io.read32(kUsbsts) & kSre, 0u);
+    io.write32(kUsbcmd, kCss);
+    io.write32(kUsbcmd, kCrs);
+    EXPECT_NE(io.read32(kUsbsts) & kSre, 0u) << "SRE is write-one-to-clear across a subsequent successful restore";
     io.write32(kUsbsts, kSre);
     EXPECT_EQ(io.read32(kUsbsts) & kSre, 0u);
 }

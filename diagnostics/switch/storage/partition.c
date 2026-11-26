@@ -104,6 +104,9 @@ static int parse_header(uint8_t *p, uint64_t capacity, uint32_t backup, struct s
 
 static int parse_entry(const uint8_t *p, uint32_t index, struct switch_gpt_workspace *w, uint32_t *used)
 {
+    static const uint8_t hos_data[72] = {'h', 0, 'o', 0, 's', 0, '_', 0, 'd', 0, 'a', 0, 't', 0, 'a'};
+    /* Microsoft Basic Data flags: read-only, hidden or no automount; UEFI bit 1 suppresses block I/O. */
+    const uint64_t excluded = UINT64_C(0xd000000000000002);
     const struct switch_gpt_header *h = &w->headers[0];
     if (!zero(p + 128, h->entry_size - 128))
         return SWITCH_GPT_ENTRIES;
@@ -125,10 +128,13 @@ static int parse_entry(const uint8_t *p, uint32_t index, struct switch_gpt_works
     copy(extent->guid, p + 16, 16);
     copy(extent->type_guid, p, 16);
     extent->partition_index = index;
-    extent->basic_data = (uint32_t)equal(p, basic_data, 16);
+    extent->basic_data = (uint8_t)equal(p, basic_data, 16);
+    extent->writable = (uint8_t)!(get64(p + 48) & excluded);
+    extent->hos_data = (uint8_t)(extent->basic_data && extent->writable && equal(p + 56, hos_data, sizeof(hos_data)));
     return SWITCH_GPT_OK;
 }
 
+#if DEVELOPMENT || DEBUG
 static int select_slice(const struct switch_gpt_workspace *w, uint32_t used, switch_gpt_probe_slice probe,
                         void *probe_context, struct switch_gpt_slice *output)
 {
@@ -162,6 +168,8 @@ static int select_slice(const struct switch_gpt_workspace *w, uint32_t used, swi
     copy(output->unique_guid, selected.unique_guid, 16);
     return SWITCH_GPT_OK;
 }
+
+#endif
 
 int switch_gpt_scan(switch_fat_read512 read512, void *context, uint64_t capacity, struct switch_gpt_workspace *w,
                     uint32_t *used_count)
@@ -221,6 +229,7 @@ int switch_gpt_scan(switch_fat_read512 read512, void *context, uint64_t capacity
     return SWITCH_GPT_OK;
 }
 
+#if DEVELOPMENT || DEBUG
 int switch_gpt_find(switch_fat_read512 read512, void *context, uint64_t capacity, switch_gpt_probe_slice probe,
                     void *probe_context, struct switch_gpt_workspace *w, struct switch_gpt_slice *output)
 {
@@ -274,7 +283,8 @@ int switch_partition_find(switch_fat_read512 read512, void *context, uint64_t ca
         }
         struct switch_gpt_extent *extent = &w->used[used++];
         *extent = (struct switch_gpt_extent){
-            .first = first, .last = last, .partition_index = i, .basic_data = (type == 0x0b || type == 0x0c)};
+            .first = first, .last = last, .partition_index = i, .basic_data = (uint8_t)(type == 0x0b || type == 0x0c)};
     }
     return select_slice(w, used, probe, probe_context, output);
 }
+#endif

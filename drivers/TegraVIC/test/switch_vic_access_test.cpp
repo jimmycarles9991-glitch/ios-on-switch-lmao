@@ -16,8 +16,8 @@ namespace {
 switch_gpu_backing backing;
 switch_gpu_cpu_lease lease;
 bool attached, backingAvailable;
-int prepareError;
-uint32_t prepareOptions, finishes, registrations, leaseReleases;
+int prepareError, reserveError;
+uint32_t prepareOptions, finishes, registrations, leaseReleases, reserveCalls;
 }
 
 extern "C" int switch_native_surface_prepare_gpu(OSObject *, uint32_t, void *, uint32_t options,
@@ -60,6 +60,21 @@ extern "C" void switch_gpu_backing_release(switch_gpu_backing *value)
 extern "C" void switch_gpu_admission_changed(void)
 {}
 
+extern "C" int switch_gpu_backing_conversion_reserve(switch_gpu_backing *value, uint32_t access, int nonblocking,
+                                                     switch_gpu_cpu_lease **owned)
+{
+    ++reserveCalls;
+    EXPECT_EQ(value, &backing);
+    EXPECT_EQ(access, uint32_t(SWITCH_GPU_BACKING_WRITE));
+    EXPECT_EQ(nonblocking, 1);
+    *owned = nullptr;
+    if (reserveError)
+        return reserveError;
+    lease.live = true;
+    *owned = &lease;
+    return 0;
+}
+
 extern "C" int switch_gpu_backing_cpu_release_owned(switch_gpu_cpu_lease **owned, int wrote)
 {
     EXPECT_EQ(*owned, &lease);
@@ -89,8 +104,8 @@ protected:
     {
         attached = false;
         backingAvailable = true;
-        prepareError = 0;
-        prepareOptions = finishes = registrations = leaseReleases = 0;
+        prepareError = reserveError = 0;
+        prepareOptions = finishes = registrations = leaseReleases = reserveCalls = 0;
         backing = {};
         lease = {};
         object = new OSObject;
@@ -166,5 +181,45 @@ TEST_F(SwitchVICAccessTest, AvoidSyncNeverWaitsForExclusivePublisher)
     SwitchMemoryAttachment::leaveExclusive(memory);
     ASSERT_EQ(switch_vic_surface_access(&surface, false, &access, true), 0);
     EXPECT_EQ(prepareOptions, 3u);
+}
+
+TEST_F(SwitchVICAccessTest, WriteReservationAcquiresNonBlockingWriteLeaseAndReleasesCleanly)
+{
+    SwitchVICWriteReservation reservation;
+    switch_vic_surface_reserve_write(&surface, &reservation);
+    EXPECT_EQ(reserveCalls, 1u);
+    EXPECT_EQ(reservation.backing, &backing);
+    EXPECT_EQ(reservation.lease, &lease);
+    EXPECT_TRUE(lease.live);
+    EXPECT_EQ(backing.refs, 2u);
+    switch_vic_surface_release_write(&reservation);
+    EXPECT_EQ(reservation.backing, nullptr);
+    EXPECT_EQ(reservation.lease, nullptr);
+    EXPECT_EQ(leaseReleases, 1u);
+    EXPECT_FALSE(lease.live);
+    EXPECT_EQ(backing.refs, 1u);
+    switch_vic_surface_release_write(&reservation);
+    EXPECT_EQ(leaseReleases, 1u);
+}
+
+TEST_F(SwitchVICAccessTest, WriteReservationSkipsAttachedMemoryAndReleasesBackingOnBusy)
+{
+    reserveError = -16;
+    SwitchVICWriteReservation reservation;
+    switch_vic_surface_reserve_write(&surface, &reservation);
+    EXPECT_EQ(reserveCalls, 1u);
+    EXPECT_EQ(reservation.backing, nullptr);
+    EXPECT_EQ(reservation.lease, nullptr);
+    EXPECT_EQ(backing.refs, 1u);
+
+    reserveError = 0;
+    auto *attachment = new OSObject;
+    ASSERT_TRUE(SwitchMemoryAttachment::replace(memory, nullptr, attachment));
+    switch_vic_surface_reserve_write(&surface, &reservation);
+    EXPECT_EQ(reserveCalls, 1u);
+    EXPECT_EQ(reservation.backing, nullptr);
+    EXPECT_EQ(reservation.lease, nullptr);
+    EXPECT_TRUE(SwitchMemoryAttachment::replace(memory, attachment, nullptr));
+    attachment->release();
 }
 }  // namespace

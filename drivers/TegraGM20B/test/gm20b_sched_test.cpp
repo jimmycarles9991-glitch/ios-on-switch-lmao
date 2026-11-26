@@ -853,6 +853,9 @@ TEST(HangSuspects, APbdmaParkedOnASemaphoreAcquireNamesNoSuspect)
 	EXPECT_FALSE(tgm_pbdma_acquiring(0x80000021, 0x00000000));  // NON_STALL_INTERRUPT
 	EXPECT_FALSE(
 		tgm_pbdma_acquiring(0x80010e01, 0x00001004));  // a 3D method with ACQ_GEQ-like data
+	EXPECT_TRUE(tgm_pbdma_acquiring(0x80000075, (161u << 8) | (1u << 4)));
+	EXPECT_TRUE(tgm_pbdma_acquiring(0x00000075, (161u << 8) | (1u << 4)));
+	EXPECT_FALSE(tgm_pbdma_acquiring(0x80000075, (161u << 8) | 1u));  // SYNCPOINTB INCR
 }
 
 // The panic: the present waited 2 s for backboardd's fence; GR idle, PBDMA0 between the two channels' acquires and on
@@ -871,4 +874,16 @@ TEST(HangBlame, SliceVBoot2ThePresentOnItsAcquireLeavesTheBlameToItsProducer)
 	Candidates before{{kStuckKernel, kStuckClient}};
 	EXPECT_EQ(before.verdict(blame), TGM_HANG_KERNEL);
 	EXPECT_EQ(blame, 0);
+}
+
+TEST(HangBlame, AChannelParkedOnSyncpointWaitIsNotResidentOrKilled)
+{
+	const bool compositorResident = !tgm_pbdma_acquiring(0x80000075, (161u << 8) | (1u << 4));
+	EXPECT_FALSE(compositorResident);
+	tgm_hang_candidate compositor = victim(kStuckClient);
+	compositor.resident = compositorResident ? 1 : 0;
+	Candidates k{{compositor}};
+	int blame;
+	EXPECT_EQ(k.verdict(blame), TGM_HANG_PROGRESSING);
+	EXPECT_EQ(blame, -1);
 }

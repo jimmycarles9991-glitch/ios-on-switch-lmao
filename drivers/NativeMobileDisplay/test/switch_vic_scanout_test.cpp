@@ -50,13 +50,30 @@ public:
 
 using IOByteCount = uint64_t;
 constexpr unsigned kIOMemoryMapperNone = 0x800;
+constexpr int kIODirectionOut = 1, kIOReturnSuccess = 0;
 
 class IOMemoryDescriptor {
 public:
-    uint64_t pa;
+    uint64_t pa = 0;
+    unsigned prepares = 0;
+    bool fail = false;
+
+    int prepare(int)
+    {
+        if (fail)
+            return -1;
+        ++prepares;
+        return kIOReturnSuccess;
+    }
+
+    void complete(int)
+    {
+        --prepares;
+    }
 
     uint64_t getPhysicalSegment(uint64_t offset, IOByteCount *length, unsigned)
     {
+        EXPECT_GT(prepares, 0u) << "IOGMD: getPhysicalSegment requires a prepared descriptor";
         *length = 4096 - (offset & 4095);
         return pa + offset;
     }
@@ -390,6 +407,7 @@ protected:
     void SetUp() override
     {
         display.startVicCopy();
+        descriptor = {0x90000000, 0, false};
         traits = kTegraVICTraits;
         vicUp = true;
         refusals = fences = placed = swapStages = snapshots = 0;
@@ -634,5 +652,19 @@ TEST_F(VicScanout, TheKickTriesVicAfterTheGpuCopyAndBeforeTheCpu)
                                            "        vicCopyLate();"));
     EXPECT_THAT(source, testing::HasSubstr("        startGpuCopy();\n        startVicCopy();"));
     EXPECT_THAT(source, testing::HasSubstr("                self->stopVicCopy();"));
+}
+
+TEST_F(VicScanout, DescriptorPrepareFailureRefusesTiledOfferAndSnapshotCheckCleanly)
+{
+    descriptor.fail = true;
+    EXPECT_FALSE(display.offerVicCopy(&request, &surface, 2880, kNativeBlockBytes, 720, 1280, 4, 1));
+    EXPECT_EQ(descriptor.prepares, 0u);
+
+    descriptor.fail = false;
+    ASSERT_TRUE(offer(3072));
+    descriptor.fail = true;
+    EXPECT_TRUE(display.vicCopyWork());
+    EXPECT_EQ(completedStatus, -22);
+    EXPECT_EQ(descriptor.prepares, 0u);
 }
 }  // namespace

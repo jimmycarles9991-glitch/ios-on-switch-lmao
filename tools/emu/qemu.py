@@ -2,7 +2,8 @@
 
 The key is the commit, every patch's bytes, the configure flags and BUILD_REVISION; nothing else rebuilds it. One
 checkout and one ninja tree under ~/Library/Caches/switch-ios/tegra-qemu serve every key, so a new patch set recompiles
-only the files it touches.
+only the files it touches. Building a key checks out its patches in that tree, so a patch set under development builds
+in a directory of its own, SWITCH_EMU_QEMU_CACHE, while other worktrees keep running theirs.
 """
 
 import os
@@ -46,6 +47,11 @@ CONFIGURE = [
     f'--extra-ldflags=-L{BREW}/lib',
 ]
 BINARY = 'qemu-system-aarch64'
+
+
+def cache_root() -> Path:
+    override = os.environ.get('SWITCH_EMU_QEMU_CACHE')
+    return Path(override) if override else cache.ROOT / 'tegra-qemu'
 
 
 def patches() -> list[Path]:
@@ -135,15 +141,15 @@ def _make(tmp: Path, base: Path) -> None:
 
 def ever_built() -> bool:
     """Return whether this Mac has built tegra_qemu at all, for any key."""
-    return (cache.ROOT / 'tegra-qemu' / 'entries').is_dir()
+    return (cache_root() / 'entries').is_dir()
 
 
 def built() -> Path | None:
     """Return the patched tegra_qemu binary if this Mac has a build of this key; never build it."""
-    done = cache.existing('tegra-qemu', key())
+    done = cache.existing(cache_root(), key())
     return done / BINARY if done else None
 
 
 def ensure() -> Path:
     """Return the patched tegra_qemu binary, built first if this Mac has no build of this key."""
-    return cache.entry('tegra-qemu', key(), _make) / BINARY
+    return cache.entry(cache_root(), key(), _make) / BINARY

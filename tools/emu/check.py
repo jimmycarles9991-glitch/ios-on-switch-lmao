@@ -4,7 +4,8 @@
 
 Exits 0 once the kernel log shows the milestone, 1 on a panic (its line printed), 2 when the time runs out first (the
 last kernel lines printed), 3 when the kernel runs but no log line comes out of it (what the reader found printed),
-4 when the `gpu` milestone's checks fail (gpucheck.py). The run directory is kept as boot.py writes it.
+4 when the `gpu` milestone's checks fail (gpucheck.py), 5 when the `usb` milestone's do (usbcheck.py), 6 when the
+`typing` milestone's do (hidcheck.py). The run directory is kept as boot.py writes it.
 """
 
 import argparse
@@ -15,7 +16,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from tools.emu import boot, gpucheck, msgbuf, report
+from tools.emu import boot, cachecheck, gpucheck, hidcheck, msgbuf, report, usbcheck, usbdev
 from tools.emu.monitor import Monitor
 
 MILESTONES = {
@@ -30,6 +31,7 @@ MILESTONES = {
     'early-boot': r'\[Subsystem: launchd\] \[Event: boot\] Early boot complete',
 }
 PANIC_TEXT = (report.RAMOOPS[0] + 0x180000, 0x80000)
+FAIL_CODES = {'gpu': 4, 'usb': 5, 'typing': 6}
 # Polls (3 s apart) with a core in the kernel and still no log line before check stops: a booting kernel logs from
 # its first second, so a run this quiet has a log reader that cannot reach it, or a kernel that stopped before printing.
 QUIET_POLLS = 10
@@ -77,13 +79,63 @@ class Watch:
         return f'{self.ring.describe()}, no log line in them'
 
 
+@dataclass
+class TypingWatch(Watch):
+    """The `typing` milestone acts on the machine as it goes (hidcheck.Typing): the plug, then the keys."""
+
+    typing: hidcheck.Typing | None = None
+
+    def __call__(self, monitor: Monitor) -> bool:
+        if super().__call__(monitor):
+            return True
+        done = self.typing.step(self.log, monitor, self.run)
+        if done:
+            self.reached = 'keys reported'
+        return done
+
+
+def watch_for(args: argparse.Namespace, run: Path, kernel: Path | None) -> Watch:
+    if args.until == 'gpu':
+        return Watch(run, kernel, gpucheck.reached, gpucheck.failure)
+    if args.until == 'typing':
+        return TypingWatch(run, kernel, lambda _log: None, typing=hidcheck.Typing(args.kind))
+    if args.until == 'usb':
+        products = [usbdev.DEVICES[name].product for name in args.usb]
+        return Watch(run, kernel, usbcheck.reached(products), usbcheck.failure)
+    return Watch(run, kernel, first_match(re.compile(MILESTONES[args.until])))
+
+
+def after_run(args: argparse.Namespace, run: Path, watch: Watch) -> list[str]:
+    """Return what the run's own logs hold against a reached milestone; print what the USB devices saw."""
+    if args.until == 'usb':
+        problems, notes = usbcheck.after_run(run, args.usb)
+        print(*notes, sep='\n')
+        return problems
+    if args.until == 'gpu' and watch.reached:
+        return gpucheck.after_run(run)
+    if args.until == 'typing':
+        problems, notes = watch.typing.judge(watch.log, run)
+        print(*notes, sep='\n')
+        return problems
+    return []
+
+
+def cache_problems(args: argparse.Namespace, run: Path) -> list[str]:
+    """Return what cachecheck.py finds in the run's cache log, printing its notes; nothing without --cache-log."""
+    if not args.cache_log:
+        return []
+    problems, notes = cachecheck.report(run / 'cache.bin')
+    print(*notes, sep='\n')
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     boot.add_arguments(parser)
-    parser.add_argument('--until', choices=sorted([*MILESTONES, 'gpu']), default='launchd')
+    parser.add_argument('--until', choices=sorted([*MILESTONES, 'gpu', 'typing', 'usb']), default='launchd')
     parser.add_argument('--timeout', type=float, default=600, help='wall seconds before giving up')
     args = parser.parse_args()
-    if args.until in ('root', 'launchd', 'early-boot'):
+    if args.until in ('root', 'launchd', 'early-boot', 'typing'):
         image = None if args.sd == 'none' else Path(args.sd) if args.sd else boot.default_image(args.kind)
         if image is None:
             parser.error(
@@ -91,11 +143,10 @@ def main() -> int:
                 f'or build //:image for {boot.KINDS[args.kind]}'
             )
         args.sd = str(image)
+    if args.until == 'usb' and not args.usb:
+        args.usb = ['keyboard']
     run, inputs = boot.prepare(args)
-    if args.until == 'gpu':
-        watch = Watch(run, inputs.kernel, gpucheck.reached, gpucheck.failure)
-    else:
-        watch = Watch(run, inputs.kernel, first_match(re.compile(MILESTONES[args.until])))
+    watch = watch_for(args, run, inputs.kernel)
     started = time.monotonic()
     boot.run_machine(run, inputs, args.timeout, watch)
     wall = time.monotonic() - started
@@ -106,13 +157,14 @@ def main() -> int:
     if panic:
         print(f'PANIC after {wall:.0f} s wall ({run}):\n{panic}')
         return 1
+    code = FAIL_CODES.get(args.until)
+    problems = after_run(args, run, watch) + cache_problems(args, run)
     if watch.failed:
-        print(f'GPU FAIL after {wall:.0f} s wall ({run}): {watch.failed}')
-        return 4
-    problems = gpucheck.after_run(run) if watch.reached and args.until == 'gpu' else []
-    if problems:
-        print(f'GPU FAIL after {wall:.0f} s wall ({run}):', *problems[:8], sep='\n')
-        return 4
+        print(f'{args.until.upper()} FAIL after {wall:.0f} s wall ({run}): {watch.failed}')
+        return code
+    if watch.reached and problems:
+        print(f'{args.until.upper()} FAIL after {wall:.0f} s wall ({run}):', *problems[:8], sep='\n')
+        return code
     if watch.reached:
         print(f'reached {args.until} after {wall:.0f} s wall: {watch.reached} ({run})')
         return 0

@@ -101,10 +101,7 @@ py_binary(
 py_binary(
     name = "launchd_catalog",
     srcs = ["launchd_catalog.py"],
-    deps = [
-        "//tools/install:lib",
-        "//tools/trustcache",
-    ],
+    deps = ["//tools/trustcache"],
 )
 
 py_test(
@@ -114,12 +111,12 @@ py_test(
         "launchd_catalog.py",
         "launchd_catalog_test.py",
     ],
-    data = ["//drivers/SwitchAppRegistration:com.brunostjohn.switch.bootstrap-apps.plist"],
-    imports = ["."],
-    deps = [
-        "//tools/install:lib",
-        "//tools/trustcache",
+    data = [
+        "//drivers/NativeSwitchBlock:helper/com.brunostjohn.switch.sdwake.plist",
+        "//drivers/SwitchAppRegistration:com.brunostjohn.switch.bootstrap-apps.plist",
     ],
+    imports = ["."],
+    deps = ["//tools/trustcache"],
 )
 
 py_binary(

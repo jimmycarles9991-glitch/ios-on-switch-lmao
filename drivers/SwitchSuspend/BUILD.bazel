@@ -38,6 +38,7 @@ kernel_driver(
         "drivers/SwitchMotion",
         "drivers/SwitchPower",
         "drivers/SwitchUSB",
+        "drivers/SwitchDisplayPort",
         "drivers/SwitchWLAN",
         "drivers/TegraBPMP",
         "drivers/TegraGM20B",

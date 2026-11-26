@@ -2,17 +2,24 @@
 // The slot entry holding memory (mapped now, into the least recently used slot neither scanned nor asked for, if not yet);
 // kNoBuffer when every slot is in use or the pages cannot be had. A surface a slot already holds is snapshotted through
 // the backing the slot holds scanned, not looked up in the IOSurface cache again (its lock, every swap).
-int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride, uint64_t allocation, bool tiled)
+int directSlotFor(OSObject *surface, IOMemoryDescriptor *memory, uint64_t stride, uint64_t allocation, bool tiled,
+                  int *snapshotError = nullptr)
 {
+    if (snapshotError)
+        *snapshotError = 0;
     SwitchNativeScanout snapshot = {};
     switch_gpu_backing *held = nullptr;
     for (unsigned k = 0; k < kSlots && !held; ++k) {
         if (slots[k].memory == memory && slots[k].surface == surface)
             held = scanoutHeld[k];
     }
+    int snap = 0;
     if ((!held || switch_native_scanout_pitch_held(surface, held, &snapshot)) &&
-        switch_native_scanout_pitch(surface, &snapshot))
+        (snap = switch_native_scanout_pitch(surface, &snapshot)) != 0) {
+        if (snapshotError)
+            *snapshotError = snap;
         return kNoBuffer;
+    }
 #if (defined(DEVELOPMENT) && DEVELOPMENT) || (defined(DEBUG) && DEBUG)
     switch_gpu_cpu_lease_look(snapshot.lease, &directLook);
 #endif
@@ -125,18 +132,26 @@ static bool holdLayout(DirectSlot &slot, bool tiled)
 
 // The GPU driver's word on the surface's pixels (by its first page): the block height of its block-linear layout, -1
 // when they are rows.
-static int surfaceBlockLog2(IOMemoryDescriptor *memory)
+static addr64_t surfaceFirstPa(IOMemoryDescriptor *memory)
 {
+    if (!memory || memory->prepare(kIODirectionOut) != kIOReturnSuccess)
+        return 0;
     IOByteCount length = 0;
     const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+    memory->complete(kIODirectionOut);
+    return pa;
+}
+
+static int surfaceBlockLog2(IOMemoryDescriptor *memory)
+{
+    const addr64_t pa = surfaceFirstPa(memory);
     tgm_layout layout = {};
     return (pa != 0u) && tegra_gm20b_surface_layout(pa & ~0xfffULL, &layout) == 1 ? layout.y_log2 : -1;
 }
 
 static bool surfaceCompressed(IOMemoryDescriptor *memory)
 {
-    IOByteCount length = 0;
-    const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+    const addr64_t pa = surfaceFirstPa(memory);
     return (pa != 0u) && tegra_gm20b_surface_compressed(pa & ~0xfffULL) != 0;
 }
 

@@ -1,0 +1,761 @@
+diff --git a/hw/arm/tegra2/ahb/usb/xusb.c b/hw/arm/tegra2/ahb/usb/xusb.c
+index 9cd4e31..fd6e48a 100644
+--- a/hw/arm/tegra2/ahb/usb/xusb.c
++++ b/hw/arm/tegra2/ahb/usb/xusb.c
+@@ -30,22 +30,27 @@
+ 
+ #include "hw/usb/hcd-xhci.h"
+ #include "hw/usb/hcd-xhci-sysbus.h"
++#include "hw/irq.h"
++#include "qapi/error.h"
+ 
+ #include "tegra_trace.h"
++#include "xusb.h"
+ 
+-#define TYPE_TEGRA_XUSB "tegra.xusb"
+-#define TEGRA_XUSB(obj) OBJECT_CHECK(tegra_xusb, (obj), TYPE_TEGRA_XUSB)
+ #define DEFINE_REG32(reg) reg##_t reg
+ 
+-typedef struct tegra_xusb_state {
+-    XHCISysbusState parent_obj;
++#define PADCTL_SS_PORT_MAP          0x014
++#define PADCTL_ELPG_PROGRAM_1       0x024
++#define PADCTL_USB3_PAD_MUX         0x028
++#define PADCTL_UPHY_PLL_P0_CTL1     0x360
++#define SS_LANE                     5
++#define SS_PORT_MAP_PORT0           0x7
++#define ELPG_SSP0_CLAMPS            0x7
++#define PAD_MUX_LANE_XUSB(l)        (1u << (12 + 2 * (l)))
++#define PAD_MUX_LANE_MASK(l)        (3u << (12 + 2 * (l)))
++#define PAD_MUX_IDDQ_DISABLE(l)     BIT(1 + (l))
++#define UPHY_PLL_LOCKDET            BIT(15)
+ 
+-    uint32_t regs_padctl[TEGRA_XUSB_PADCTL_SIZE>>2];
+-    uint32_t regs_device[(SZ_32K + SZ_8K)>>2];
+-
+-    MemoryRegion iomem_padctl;
+-    MemoryRegion iomem_device;
+-} tegra_xusb;
++static DeviceRealize tegra_xusb_parent_realize;
+ 
+ static const VMStateDescription vmstate_tegra_xusb = {
+     .name = TYPE_TEGRA_XUSB,
+@@ -59,6 +64,40 @@ static const VMStateDescription vmstate_tegra_xusb = {
+     }
+ };
+ 
++/* SuperSpeed port 0 (USB-C) has its lane only while the pad controller gives UPHY lane 5 to XUSB, out of IDDQ and its
++ * clamps, mapped to USB2 port 0 with the UPHY PLL locked; without it a device falls back to USB 2.0. */
++static void tegra_xusb_follow_ss_lane(tegra_xusb *s)
++{
++    uint32_t mux = s->regs_padctl[PADCTL_USB3_PAD_MUX >> 2];
++    bool up = (mux & PAD_MUX_LANE_MASK(SS_LANE)) == PAD_MUX_LANE_XUSB(SS_LANE) &&
++              (mux & PAD_MUX_IDDQ_DISABLE(SS_LANE)) &&
++              !(s->regs_padctl[PADCTL_ELPG_PROGRAM_1 >> 2] & ELPG_SSP0_CLAMPS) &&
++              !(s->regs_padctl[PADCTL_SS_PORT_MAP >> 2] & SS_PORT_MAP_PORT0) &&
++              (s->regs_padctl[PADCTL_UPHY_PLL_P0_CTL1 >> 2] & UPHY_PLL_LOCKDET);
++    USBPort *port = &s->parent_obj.xhci.uports[0];
++    int speedmask = USB_SPEED_MASK_LOW | USB_SPEED_MASK_FULL | USB_SPEED_MASK_HIGH | (up ? USB_SPEED_MASK_SUPER : 0);
++    Error *err = NULL;
++
++    if (port->speedmask == speedmask) {
++        return;
++    }
++    port->speedmask = speedmask;
++    if (port->dev && port->dev->attached) {
++        usb_device_detach(port->dev);
++        usb_device_attach(port->dev, &err);
++        if (err) {
++            error_report_err(err);
++        }
++    }
++}
++
++static void tegra_xusb_set_vbus(void *opaque, int line, int level)
++{
++    tegra_xusb *s = opaque;
++
++    xhci_set_port_vbus(&s->parent_obj.xhci, 0, level);
++}
++
+ static uint64_t tegra_xusb_padctl_priv_read(void *opaque, hwaddr offset,
+                                             unsigned size)
+ {
+@@ -94,6 +133,7 @@ static void tegra_xusb_padctl_priv_write(void *opaque, hwaddr offset,
+         }
+ 
+         s->regs_padctl[offset/sizeof(uint32_t)] = (s->regs_padctl[offset/sizeof(uint32_t)] & ~((1ULL<<size*8)-1)) | value;
++        tegra_xusb_follow_ss_lane(s);
+     }
+ }
+ 
+@@ -137,6 +177,8 @@ static void tegra_xusb_priv_reset(DeviceState *dev)
+     s->regs_device[0x8000>>2] = 0x10DE | (0xFAD<<16);
+ 
+     xhci_sysbus_reset(dev);
++    tegra_xusb_host_reset(s);
++    tegra_xusb_follow_ss_lane(s);
+ }
+ 
+ static const MemoryRegionOps tegra_xusb_padctl_mem_ops = {
+@@ -161,6 +203,22 @@ static void tegra_xusb_priv_init(Object *obj)
+                           "tegra.xusb_dev", SZ_32K + SZ_8K);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem_padctl);
+     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem_device);
++    tegra_xusb_host_init(s);
++    qdev_init_gpio_in_named(DEVICE(obj), tegra_xusb_set_vbus, "vbus", 1);
++}
++
++static void tegra_xusb_realize(DeviceState *dev, Error **errp)
++{
++    ERRP_GUARD();
++    tegra_xusb *s = TEGRA_XUSB(dev);
++
++    tegra_xusb_parent_realize(dev, errp);
++    if (*errp) {
++        return;
++    }
++    tegra_xusb_host_realize(s);
++    xhci_set_port_vbus(&s->parent_obj.xhci, 0, false);
++    tegra_xusb_follow_ss_lane(s);
+ }
+ 
+ static void tegra_xusb_class_init(ObjectClass *klass, void *data)
+@@ -168,6 +226,9 @@ static void tegra_xusb_class_init(ObjectClass *klass, void *data)
+     DeviceClass *dc = DEVICE_CLASS(klass);
+ 
+     dc->vmsd = &vmstate_tegra_xusb;
++    tegra_xusb_parent_realize = dc->realize;
++    dc->realize = tegra_xusb_realize;
++    tegra_xusb_host_add_properties(klass);
+     device_class_set_legacy_reset(dc, tegra_xusb_priv_reset);
+ 
+     set_bit(DEVICE_CATEGORY_USB, dc->categories);
+diff --git a/hw/arm/tegra2/ahb/usb/xusb.h b/hw/arm/tegra2/ahb/usb/xusb.h
+new file mode 100644
+index 0000000..85408e3
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/usb/xusb.h
+@@ -0,0 +1,49 @@
++/*
++ * Tegra X1 XUSB: pad controller, device controller and the host behind its IPFS/FPCI bridge.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ */
++
++#ifndef TEGRA_XUSB_H
++#define TEGRA_XUSB_H
++
++#include "hw/usb/hcd-xhci-sysbus.h"
++#include "qemu/timer.h"
++#include "iomap.h"
++#include "tegra_smmu.h"
++
++#define TYPE_TEGRA_XUSB "tegra.xusb"
++#define TEGRA_XUSB(obj) OBJECT_CHECK(tegra_xusb, (obj), TYPE_TEGRA_XUSB)
++
++typedef struct tegra_xusb_state {
++    XHCISysbusState parent_obj;
++
++    uint32_t regs_padctl[TEGRA_XUSB_PADCTL_SIZE>>2];
++    uint32_t regs_device[(SZ_32K + SZ_8K)>>2];
++
++    MemoryRegion iomem_padctl;
++    MemoryRegion iomem_device;
++
++    /* The host: its window (xHCI, FPCI, IPFS) and its DMA path through the SMMU while it masters the bus. */
++    MemoryRegion host, host_xhci, host_fpci, host_ipfs;
++    AddressSpace xhci_as;
++    MemoryRegion dma;
++    TegraSmmuIommu smmu;
++    uint32_t fpci[TEGRA_XUSB_FPCI_SIZE>>2];
++    uint32_t ipfs[TEGRA_XUSB_IPFS_SIZE>>2];
++    GHashTable *csb;
++    bool host_lost, falcon_loaded, falcon_running, xhci_level;
++    uint32_t load_first, load_count;
++    QEMUTimer *falcon_timer, *mbox_timer;
++    qemu_irq host_irq, smi_irq;
++} tegra_xusb;
++
++void tegra_xusb_host_init(tegra_xusb *s);
++void tegra_xusb_host_realize(tegra_xusb *s);
++void tegra_xusb_host_reset(tegra_xusb *s);
++void tegra_xusb_host_add_properties(ObjectClass *klass);
++
++#endif
+diff --git a/hw/arm/tegra2/ahb/usb/xusb_host.c b/hw/arm/tegra2/ahb/usb/xusb_host.c
+new file mode 100644
+index 0000000..4566b97
+--- /dev/null
++++ b/hw/arm/tegra2/ahb/usb/xusb_host.c
+@@ -0,0 +1,484 @@
++/*
++ * Tegra X1 XUSB host: the IPFS/FPCI bridge, the falcon's boot and its mailbox around QEMU's xHCI.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT
++ *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ *  for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * The block as Linux xhci-tegra.c brings it up. Its window answers only while partition XUSBC is on, the XUSB_HOST
++ * clock runs and its reset is released; the partition or the reset going down loses all of it, which the model sees
++ * at the next access. FPCI decodes once IPFS has EN_FPCI; the xHCI registers once FPCI's BAR0 holds 0x70090000 with
++ * memory space on. The interrupt reaches SPI 39 only through IPFS INTR_MASK.IP_INT_MASK, the controller masters the
++ * bus (through the SMMU's XUSB_HOST clients) only with CFG_1 bus master on.
++ *
++ * The falcon runs no firmware here. Its boot is the part the driver can get wrong: an L2IMEMOP load DMAs the blocks
++ * L2IMEMOP_SIZE names from ILOAD_BASE (they must lie within ILOAD_ATTR and be readable through the SMMU), and
++ * STARTCPU boots it only when IMFILLCTL, IMFILLRNG1 and BOOTVEC describe that load. The xHCI then leaves
++ * Controller Not Ready. The mailbox takes the driver's messages (the falcon releases ownership) and the
++ * mbox-message property posts one from the firmware (SMI_INTR, SPI 40); the firmware's own traffic is unknown.
++ */
++
++#define CONFIG_ARCH_TEGRA_21x_SOC
++
++#include "tegra_common.h"
++
++#include "exec/address-spaces.h"
++#include "hw/qdev-core.h"
++#include "hw/irq.h"
++#include "qapi/error.h"
++#include "qapi/visitor.h"
++#include "qemu/bswap.h"
++#include "qemu/log.h"
++
++#include "clk_rst.h"
++#include "xusb.h"
++#include "../../apb/pmc/pmc.h"
++
++#define XUSB_XHCI_SIZE              0x8000
++#define XUSB_FPCI_OFFSET            0x8000
++#define XUSB_IPFS_OFFSET            0x9000
++#define XUSB_HOST_SIZE              0xa000
++
++#define XUSB_CFG_1                  0x004
++#define XUSB_CFG_1_MEMORY           BIT(1)
++#define XUSB_CFG_1_BUS_MASTER       BIT(2)
++#define XUSB_CFG_4                  0x010
++#define XUSB_CFG_4_BASE_MASK        (0x1ffffu << 15)
++#define XUSB_MBOX_CMD               0x0e4
++#define XUSB_MBOX_DEST_FALC         BIT(27)
++#define XUSB_MBOX_DEST_SMI          BIT(29)
++#define XUSB_MBOX_INT_EN            BIT(31)
++#define XUSB_MBOX_DATA_IN           0x0e8
++#define XUSB_MBOX_DATA_OUT          0x0ec
++#define XUSB_MBOX_OWNER             0x0f0
++#define XUSB_MBOX_OWNER_NONE        0
++#define XUSB_MBOX_OWNER_FW          1
++#define XUSB_C11_CSBRANGE           0x41c
++#define XUSB_SMI_INTR               0x428
++#define XUSB_SMI_INTR_FW_HANG       BIT(1)
++#define XUSB_SMI_INTR_EN            BIT(3)
++#define XUSB_CSB_WINDOW             0x800
++#define XUSB_CSB_PAGE               0x200
++
++#define XUSB_IPFS_CONFIGURATION     0x180
++#define XUSB_IPFS_EN_FPCI           BIT(0)
++#define XUSB_IPFS_INTR_MASK         0x188
++#define XUSB_IPFS_IP_INT_MASK       BIT(16)
++
++#define XUSB_FALC_CPUCTL            0x100
++#define XUSB_FALC_STARTCPU          BIT(1)
++#define XUSB_FALC_HALTED            BIT(4)
++#define XUSB_FALC_BOOTVEC           0x104
++#define XUSB_FALC_IMFILLRNG1        0x154
++#define XUSB_FALC_IMFILLCTL         0x158
++#define XUSB_ILOAD_ATTR             0x101a00
++#define XUSB_ILOAD_BASE_LO          0x101a04
++#define XUSB_ILOAD_BASE_HI          0x101a08
++#define XUSB_L2IMEMOP_SIZE          0x101a10
++#define XUSB_L2IMEMOP_TRIG          0x101a14
++#define XUSB_L2IMEMOP_RESULT        0x101a18
++#define XUSB_L2IMEMOP_INVALIDATE    0x40
++#define XUSB_L2IMEMOP_LOAD          0x11
++#define XUSB_L2IMEMOP_VALID         BIT(31)
++#define XUSB_IMEM_BLOCK             256
++
++#define XUSB_PART_XUSBC             22
++#define XUSB_CLK_HOST               (64 + 25)
++#define XUSB_USBSTS_CNR             BIT(11)
++#define XUSB_FALCON_BOOT_NS         (1 * SCALE_MS)
++#define XUSB_FALCON_MBOX_NS         (10 * SCALE_US)
++
++static const TegraSmmuClient xusb_hostr = { 0x230, 10, 0x288 };
++static const TegraSmmuClient xusb_hostw = { 0x230, 11, 0x288 };
++
++static uint32_t *fpci_reg(tegra_xusb *s, hwaddr offset)
++{
++    return &s->fpci[offset >> 2];
++}
++
++static uint32_t *ipfs_reg(tegra_xusb *s, hwaddr offset)
++{
++    return &s->ipfs[offset >> 2];
++}
++
++static uint32_t csb_get(tegra_xusb *s, uint32_t address)
++{
++    return GPOINTER_TO_UINT(g_hash_table_lookup(s->csb, GUINT_TO_POINTER(address)));
++}
++
++static void csb_set(tegra_xusb *s, uint32_t address, uint32_t value)
++{
++    g_hash_table_insert(s->csb, GUINT_TO_POINTER(address), GUINT_TO_POINTER(value));
++}
++
++static void xusb_update_irqs(tegra_xusb *s)
++{
++    bool unmasked = (*ipfs_reg(s, XUSB_IPFS_CONFIGURATION) & XUSB_IPFS_EN_FPCI) &&
++                    (*ipfs_reg(s, XUSB_IPFS_INTR_MASK) & XUSB_IPFS_IP_INT_MASK);
++
++    qemu_set_irq(s->host_irq, s->xhci_level && unmasked);
++    qemu_set_irq(s->smi_irq, (*fpci_reg(s, XUSB_SMI_INTR) & (XUSB_SMI_INTR_EN | XUSB_SMI_INTR_FW_HANG)) != 0);
++}
++
++static void xusb_update_dma(tegra_xusb *s)
++{
++    memory_region_set_enabled(MEMORY_REGION(&s->smmu), *fpci_reg(s, XUSB_CFG_1) & XUSB_CFG_1_BUS_MASTER);
++}
++
++/* Powered with its reset released keeps the block's state; it answers only with its clock running too. */
++static bool xusb_host_live(tegra_xusb *s, const char *part, hwaddr offset, bool write)
++{
++    bool kept = tegra_pmc_partition_on(XUSB_PART_XUSBC) && !tegra_rst_asserted(XUSB_CLK_HOST);
++
++    if (!kept) {
++        s->host_lost = true;
++    }
++    if (!kept || !tegra_clk_enabled(XUSB_CLK_HOST)) {
++        qemu_log_mask(LOG_GUEST_ERROR, "tegra.xusb: %s %s at %#" HWADDR_PRIx " while the host is %s\n", part,
++                      write ? "write" : "read", offset, kept ? "unclocked" : "unpowered or in reset");
++        return false;
++    }
++    if (s->host_lost) {
++        tegra_xusb_host_reset(s);
++    }
++    return true;
++}
++
++static bool xusb_xhci_decoded(tegra_xusb *s, hwaddr offset, bool write)
++{
++    uint32_t cfg1 = *fpci_reg(s, XUSB_CFG_1), cfg4 = *fpci_reg(s, XUSB_CFG_4);
++
++    if ((*ipfs_reg(s, XUSB_IPFS_CONFIGURATION) & XUSB_IPFS_EN_FPCI) && (cfg1 & XUSB_CFG_1_MEMORY) &&
++        (cfg4 & XUSB_CFG_4_BASE_MASK) == TEGRA_XUSB_HOST_BASE) {
++        return true;
++    }
++    qemu_log_mask(LOG_GUEST_ERROR, "tegra.xusb: xHCI %s at %#" HWADDR_PRIx " not decoded (IPFS CONFIGURATION %#x, "
++                  "FPCI CFG_1 %#x CFG_4 %#x)\n", write ? "write" : "read", offset,
++                  *ipfs_reg(s, XUSB_IPFS_CONFIGURATION), cfg1, cfg4);
++    return false;
++}
++
++static void xusb_falcon_load(tegra_xusb *s)
++{
++    uint64_t base = (uint64_t)csb_get(s, XUSB_ILOAD_BASE_HI) << 32 | csb_get(s, XUSB_ILOAD_BASE_LO);
++    uint32_t size = csb_get(s, XUSB_L2IMEMOP_SIZE), attr = csb_get(s, XUSB_ILOAD_ATTR);
++    uint32_t first = (size >> 8) & 0x3ff, count = (size >> 24) & 0xff;
++    uint32_t bytes = count * XUSB_IMEM_BLOCK;
++    g_autofree uint8_t *code = g_malloc(bytes ? bytes : 1);
++
++    if (!count || (uint64_t)(first + count) * XUSB_IMEM_BLOCK > attr) {
++        qemu_log_mask(LOG_GUEST_ERROR, "tegra.xusb: falcon load of blocks %u+%u outside ILOAD_ATTR %#x\n", first,
++                      count, attr);
++        return;
++    }
++    if (address_space_read(s->parent_obj.xhci.as, base + first * XUSB_IMEM_BLOCK, MEMTXATTRS_UNSPECIFIED, code,
++                           bytes) != MEMTX_OK) {
++        qemu_log_mask(LOG_GUEST_ERROR, "tegra.xusb: falcon load DMA from %#" PRIx64 " (%u bytes) failed\n",
++                      base + first * XUSB_IMEM_BLOCK, bytes);
++        return;
++    }
++    s->falcon_loaded = true;
++    s->load_first = first;
++    s->load_count = count;
++    csb_set(s, XUSB_L2IMEMOP_RESULT, XUSB_L2IMEMOP_VALID);
++}
++
++static void xusb_falcon_l2imemop(tegra_xusb *s, uint32_t trigger)
++{
++    switch (trigger >> 24) {
++    case XUSB_L2IMEMOP_INVALIDATE:
++        s->falcon_loaded = false;
++        csb_set(s, XUSB_L2IMEMOP_RESULT, 0);
++        break;
++    case XUSB_L2IMEMOP_LOAD:
++        xusb_falcon_load(s);
++        break;
++    default:
++        qemu_log_mask(LOG_UNIMP, "tegra.xusb: L2IMEMOP action %#x\n", trigger >> 24);
++        break;
++    }
++}
++
++static void xusb_falcon_start(tegra_xusb *s)
++{
++    uint32_t first = s->load_first, last = s->load_first + s->load_count;
++    uint32_t bootvec = csb_get(s, XUSB_FALC_BOOTVEC);
++
++    if (s->falcon_running || timer_pending(s->falcon_timer)) {
++        return;
++    }
++    if (!s->falcon_loaded || csb_get(s, XUSB_FALC_IMFILLCTL) != s->load_count ||
++        csb_get(s, XUSB_FALC_IMFILLRNG1) != (first | last << 16) || bootvec < first * XUSB_IMEM_BLOCK ||
++        bootvec >= last * XUSB_IMEM_BLOCK) {
++        qemu_log_mask(LOG_GUEST_ERROR, "tegra.xusb: falcon started without its boot code (loaded %d, blocks %u+%u, "
++                      "IMFILLCTL %#x, IMFILLRNG1 %#x, BOOTVEC %#x)\n", s->falcon_loaded, first, s->load_count,
++                      csb_get(s, XUSB_FALC_IMFILLCTL), csb_get(s, XUSB_FALC_IMFILLRNG1), bootvec);
++        return;
++    }
++    timer_mod(s->falcon_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + XUSB_FALCON_BOOT_NS);
++}
++
++static void xusb_falcon_booted(void *opaque)
++{
++    tegra_xusb *s = opaque;
++
++    s->falcon_running = true;
++    s->parent_obj.xhci.usbsts &= ~XUSB_USBSTS_CNR;
++}
++
++static void xusb_falcon_took_message(void *opaque)
++{
++    tegra_xusb *s = opaque;
++
++    *fpci_reg(s, XUSB_MBOX_CMD) &= ~XUSB_MBOX_DEST_FALC;
++    *fpci_reg(s, XUSB_MBOX_OWNER) = XUSB_MBOX_OWNER_NONE;
++}
++
++static uint32_t xusb_csb_read(tegra_xusb *s, uint32_t address)
++{
++    if (address == XUSB_FALC_CPUCTL) {
++        return s->falcon_running ? 0 : XUSB_FALC_HALTED;
++    }
++    return csb_get(s, address);
++}
++
++static void xusb_csb_write(tegra_xusb *s, uint32_t address, uint32_t value)
++{
++    csb_set(s, address, value);
++    if (address == XUSB_L2IMEMOP_TRIG) {
++        xusb_falcon_l2imemop(s, value);
++    } else if (address == XUSB_FALC_CPUCTL && (value & XUSB_FALC_STARTCPU)) {
++        xusb_falcon_start(s);
++    }
++}
++
++static uint32_t xusb_csb_address(tegra_xusb *s, hwaddr offset)
++{
++    return *fpci_reg(s, XUSB_C11_CSBRANGE) << 9 | (offset & (XUSB_CSB_PAGE - 1));
++}
++
++static bool xusb_in_csb_window(hwaddr offset)
++{
++    return offset >= XUSB_CSB_WINDOW && offset < XUSB_CSB_WINDOW + XUSB_CSB_PAGE;
++}
++
++static bool xusb_fpci_decoded(tegra_xusb *s, hwaddr offset, bool write)
++{
++    if (*ipfs_reg(s, XUSB_IPFS_CONFIGURATION) & XUSB_IPFS_EN_FPCI) {
++        return true;
++    }
++    qemu_log_mask(LOG_GUEST_ERROR, "tegra.xusb: FPCI %s at %#" HWADDR_PRIx " before IPFS EN_FPCI\n",
++                  write ? "write" : "read", offset);
++    return false;
++}
++
++static uint64_t xusb_fpci_read(void *opaque, hwaddr offset, unsigned size)
++{
++    tegra_xusb *s = opaque;
++
++    if (!xusb_host_live(s, "FPCI", offset, false) || !xusb_fpci_decoded(s, offset, false)) {
++        return 0;
++    }
++    if (xusb_in_csb_window(offset)) {
++        return xusb_csb_read(s, xusb_csb_address(s, offset));
++    }
++    return *fpci_reg(s, offset);
++}
++
++static void xusb_fpci_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    tegra_xusb *s = opaque;
++    uint32_t *reg = fpci_reg(s, offset);
++
++    if (!xusb_host_live(s, "FPCI", offset, true) || !xusb_fpci_decoded(s, offset, true)) {
++        return;
++    }
++    if (xusb_in_csb_window(offset)) {
++        xusb_csb_write(s, xusb_csb_address(s, offset), value);
++        return;
++    }
++    switch (offset) {
++    case XUSB_MBOX_DATA_OUT:
++        return;
++    case XUSB_MBOX_OWNER:
++        if (value == XUSB_MBOX_OWNER_NONE || *reg == XUSB_MBOX_OWNER_NONE) {
++            *reg = value;
++        }
++        return;
++    case XUSB_SMI_INTR:
++        *reg &= ~value;
++        xusb_update_irqs(s);
++        return;
++    case XUSB_MBOX_CMD:
++        *reg = value;
++        if ((value & XUSB_MBOX_DEST_FALC) && s->falcon_running &&
++            *fpci_reg(s, XUSB_MBOX_OWNER) != XUSB_MBOX_OWNER_NONE) {
++            timer_mod(s->mbox_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + XUSB_FALCON_MBOX_NS);
++        }
++        return;
++    case XUSB_CFG_1:
++        *reg = value;
++        xusb_update_dma(s);
++        return;
++    default:
++        *reg = value;
++        return;
++    }
++}
++
++static uint64_t xusb_ipfs_read(void *opaque, hwaddr offset, unsigned size)
++{
++    tegra_xusb *s = opaque;
++
++    return xusb_host_live(s, "IPFS", offset, false) ? *ipfs_reg(s, offset) : 0;
++}
++
++static void xusb_ipfs_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
++{
++    tegra_xusb *s = opaque;
++
++    if (xusb_host_live(s, "IPFS", offset, true)) {
++        *ipfs_reg(s, offset) = value;
++        xusb_update_irqs(s);
++    }
++}
++
++static MemTxResult xusb_xhci_read(void *opaque, hwaddr offset, uint64_t *data, unsigned size, MemTxAttrs attrs)
++{
++    tegra_xusb *s = opaque;
++    uint8_t buf[8] = {};
++
++    *data = 0;
++    if (xusb_host_live(s, "xHCI", offset, false) && xusb_xhci_decoded(s, offset, false)) {
++        address_space_read(&s->xhci_as, offset, attrs, buf, size);
++        *data = ldn_le_p(buf, size);
++    }
++    return MEMTX_OK;
++}
++
++static MemTxResult xusb_xhci_write(void *opaque, hwaddr offset, uint64_t data, unsigned size, MemTxAttrs attrs)
++{
++    tegra_xusb *s = opaque;
++    uint8_t buf[8];
++
++    if (xusb_host_live(s, "xHCI", offset, true) && xusb_xhci_decoded(s, offset, true)) {
++        stn_le_p(buf, size, data);
++        address_space_write(&s->xhci_as, offset, attrs, buf, size);
++    }
++    return MEMTX_OK;
++}
++
++static const MemoryRegionOps xusb_xhci_ops = {
++    .read_with_attrs = xusb_xhci_read,
++    .write_with_attrs = xusb_xhci_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 1, .max_access_size = 8 },
++    .impl = { .min_access_size = 1, .max_access_size = 8 },
++};
++
++static const MemoryRegionOps xusb_fpci_ops = {
++    .read = xusb_fpci_read,
++    .write = xusb_fpci_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static const MemoryRegionOps xusb_ipfs_ops = {
++    .read = xusb_ipfs_read,
++    .write = xusb_ipfs_write,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++    .valid = { .min_access_size = 4, .max_access_size = 4 },
++};
++
++static bool xusb_intr_raise(XHCIState *xhci, int n, bool level)
++{
++    tegra_xusb *s = container_of(xhci, tegra_xusb, parent_obj.xhci);
++
++    if (n == 0) {
++        s->xhci_level = level;
++        xusb_update_irqs(s);
++    }
++    return false;
++}
++
++static void xusb_set_mbox_message(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    tegra_xusb *s = TEGRA_XUSB(obj);
++    uint32_t message;
++
++    if (!visit_type_uint32(v, name, &message, errp)) {
++        return;
++    }
++    if (!s->falcon_running || *fpci_reg(s, XUSB_MBOX_OWNER) != XUSB_MBOX_OWNER_NONE) {
++        error_setg(errp, "tegra.xusb: the falcon is not running or does not own the mailbox");
++        return;
++    }
++    *fpci_reg(s, XUSB_MBOX_OWNER) = XUSB_MBOX_OWNER_FW;
++    *fpci_reg(s, XUSB_MBOX_DATA_OUT) = message;
++    *fpci_reg(s, XUSB_MBOX_CMD) |= XUSB_MBOX_DEST_SMI | XUSB_MBOX_INT_EN;
++    *fpci_reg(s, XUSB_SMI_INTR) |= XUSB_SMI_INTR_EN;
++    xusb_update_irqs(s);
++}
++
++void tegra_xusb_host_add_properties(ObjectClass *klass)
++{
++    object_class_property_add(klass, "mbox-message", "uint32", NULL, xusb_set_mbox_message, NULL, NULL);
++}
++
++void tegra_xusb_host_init(tegra_xusb *s)
++{
++    Object *obj = OBJECT(s);
++
++    memory_region_init(&s->host, obj, "tegra.xusb_host", XUSB_HOST_SIZE);
++    memory_region_init_io(&s->host_xhci, obj, &xusb_xhci_ops, s, "tegra.xusb_host.xhci", XUSB_XHCI_SIZE);
++    memory_region_init_io(&s->host_fpci, obj, &xusb_fpci_ops, s, "tegra.xusb_host.fpci", TEGRA_XUSB_FPCI_SIZE);
++    memory_region_init_io(&s->host_ipfs, obj, &xusb_ipfs_ops, s, "tegra.xusb_host.ipfs", TEGRA_XUSB_IPFS_SIZE);
++    memory_region_add_subregion(&s->host, 0, &s->host_xhci);
++    memory_region_add_subregion(&s->host, XUSB_FPCI_OFFSET, &s->host_fpci);
++    memory_region_add_subregion(&s->host, XUSB_IPFS_OFFSET, &s->host_ipfs);
++    sysbus_init_mmio(SYS_BUS_DEVICE(s), &s->host);
++
++    memory_region_init(&s->dma, obj, "tegra.xusb_host.dma", UINT64_MAX);
++    tegra_smmu_iommu_init(&s->smmu, obj, "tegra.xusb_host.smmu", xusb_hostr, xusb_hostw);
++    memory_region_add_subregion(&s->dma, 0, MEMORY_REGION(&s->smmu));
++    s->parent_obj.xhci.dma_mr = &s->dma;
++    s->parent_obj.xhci.intr_raise = xusb_intr_raise;
++
++    s->csb = g_hash_table_new(NULL, NULL);
++    s->falcon_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, xusb_falcon_booted, s);
++    s->mbox_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, xusb_falcon_took_message, s);
++    qdev_init_gpio_out_named(DEVICE(s), &s->host_irq, "host-irq", 1);
++    qdev_init_gpio_out_named(DEVICE(s), &s->smi_irq, "smi-irq", 1);
++}
++
++void tegra_xusb_host_realize(tegra_xusb *s)
++{
++    address_space_init(&s->xhci_as, &s->parent_obj.xhci.mem, "tegra.xusb_host.xhci");
++}
++
++void tegra_xusb_host_reset(tegra_xusb *s)
++{
++    memset(s->fpci, 0, sizeof(s->fpci));
++    memset(s->ipfs, 0, sizeof(s->ipfs));
++    g_hash_table_remove_all(s->csb);
++    timer_del(s->falcon_timer);
++    timer_del(s->mbox_timer);
++    s->falcon_loaded = false;
++    s->falcon_running = false;
++    s->host_lost = false;
++    device_cold_reset(DEVICE(&s->parent_obj.xhci));
++    s->parent_obj.xhci.usbsts |= XUSB_USBSTS_CNR;
++    xusb_update_dma(s);
++    xusb_update_irqs(s);
++}
+diff --git a/hw/arm/tegra2/apb/pmc/pmc.c b/hw/arm/tegra2/apb/pmc/pmc.c
+index 38fde6a..10f66b6 100644
+--- a/hw/arm/tegra2/apb/pmc/pmc.c
++++ b/hw/arm/tegra2/apb/pmc/pmc.c
+@@ -1164,6 +1164,13 @@ void tegra_pmc_set_crypto_op(uint32_t value)
+     s->crypto_op.reg32 = value;
+ }
+ 
++bool tegra_pmc_partition_on(unsigned int partition)
++{
++    tegra_pmc *s = tegra_pmc_dev;
++
++    return (s->pwrgate_status.reg32 >> partition) & 1;
++}
++
+ void tegra_pmc_update_crail(void)
+ {
+     tegra_pmc *s = tegra_pmc_dev;
+diff --git a/hw/arm/tegra2/apb/pmc/pmc.h b/hw/arm/tegra2/apb/pmc/pmc.h
+index dc584af..acf4496 100644
+--- a/hw/arm/tegra2/apb/pmc/pmc.h
++++ b/hw/arm/tegra2/apb/pmc/pmc.h
+@@ -1222,6 +1222,8 @@ void tegra_pmc_set_crypto_op(uint32_t value);
+ 
+ void tegra_pmc_update_crail(void);
+ 
++bool tegra_pmc_partition_on(unsigned int partition);
++
+ void tegra_pmc_reset(DeviceState *dev, ShutdownCause cause);
+ 
+ #endif // TEGRA_PMC_H
+diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
+index 61cf837..a14e1dd 100644
+--- a/hw/arm/tegra2/meson.build
++++ b/hw/arm/tegra2/meson.build
+@@ -43,6 +43,7 @@ arm_ss.add(files(
+   'ahb/sb/sb.c',
+   'ahb/usb/usb.c',
+   'ahb/usb/xusb.c',
++  'ahb/usb/xusb_host.c',
+   'ahb/gpu/gpu.c',
+   'ahb/gpu/gm20b_falcon.c',
+   'ahb/gpu/gm20b_mmu.c',
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index 13d7d38..81bf61b 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -41,6 +41,7 @@
+ #include "hw/sd/sdhci.h"
+ #include "hw/ssi/ssi.h"
+ #include "hw/irq.h"
++#include "monitor/qdev.h"
+ #include "hw/cpu/a9mpcore.h"
+ #include "sysemu/reset.h"
+ #include "sysemu/sysemu.h"
+@@ -1090,7 +1091,17 @@ static void __tegrax1_init(MachineState *machine)
+                                            TEGRA_XUSB_PADCTL_BASE, DIRQ(INT_USB3_HOST_INT));
+     sysbus_mmio_map(SYS_BUS_DEVICE(tegra_xusb_dev), 1, TEGRA_XUSB_DEV_BASE);
+     sysbus_mmio_map(SYS_BUS_DEVICE(tegra_xusb_dev), 2, TEGRA_XUSB_HOST_BASE);*/
+-    tegra_xusb_dev = tegra_init_obj_simple(TEGRA_XUSB_PADCTL_BASE, DIRQ(INT_USB3_HOST_INT), "tegra.xusb", true);
++    /* The host as the Switch's XUSB firmware presents it: HCSPARAMS1 0x09000124, USB3 ports 1-4 and USB2 ports 5-9
++     * (boot 1109-2145). Its bus is xusb.0; the USB-C connector is its port 1. */
++    tegra_xusb_dev = qdev_new("tegra.xusb");
++    qdev_set_id(DEVICE(tegra_xusb_dev), g_strdup("xusb"), &error_fatal);
++    qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "p2", 5);
++    qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "p3", 4);
++    qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "intrs", 1);
++    qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "slots", 36);
++    sysbus_realize_and_unref(SYS_BUS_DEVICE(tegra_xusb_dev), &error_fatal);
++    qdev_connect_gpio_out_named(DEVICE(tegra_xusb_dev), "host-irq", 0, DIRQ(INT_USB3_HOST_INT));
++    qdev_connect_gpio_out_named(DEVICE(tegra_xusb_dev), "smi-irq", 0, DIRQ(INT_USB3_HOST_SMI));
+ 
+     /* Unified Command Queue */
+     //tegra_ucq_dev = sysbus_create_simple("tegra.dummy256", 0x60010000, NULL);
+@@ -1333,6 +1344,8 @@ static void __tegrax1_init(MachineState *machine)
+                                 qdev_get_gpio_in(DEVICE(tegra_gpios_dev), 10 * 8 + 4));
+     qdev_connect_gpio_out_named(DEVICE(tegra_gpios_dev), "pad", 23 * 8 + 3,
+                                 qdev_get_gpio_in_named(DEVICE(tegra_i2c_usbpd_dev), "rail", 0));
++    qdev_connect_gpio_out_named(DEVICE(tegra_i2c_usbpd_dev), "vbus", 0,
++                                qdev_get_gpio_in_named(DEVICE(tegra_xusb_dev), "vbus", 0));
+ 
+     /* Host1x IO */
+     tegra_grhost_dev = sysbus_create_varargs("tegra.grhost",

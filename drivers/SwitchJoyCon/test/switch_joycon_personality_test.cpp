@@ -13,6 +13,7 @@
 namespace {
 
 using switch_ios::test::Configured;
+using switch_ios::test::Count;
 using switch_ios::test::SourceText;
 using testing::HasSubstr;
 using testing::Not;
@@ -24,6 +25,23 @@ TEST(SwitchJoyConPersonalities, Ios17CarriesTheNintendoEntries)
     EXPECT_THAT(build, HasSubstr("OSString::withCString(\"IOHIDEventDummyService\")"));
     EXPECT_THAT(build, HasSubstr("setProperty(\"HIDServiceSupport\", true);"));
     EXPECT_THAT(build, HasSubstr("        addButtonsPersonality();"));
+}
+
+// The prelinked kext's other entries (Xbox, Sony, Luna, the Generic Controller) serve their pads on iOS 17: only the
+// pairs for the Nintendo ProductIDs addNintendoPersonalities() carries are taken out of the catalogue, by publisher and
+// IDs, never by publisher alone.
+TEST(SwitchJoyConPersonalities, Ios17TakesOutOnlyApplesNintendoEntries)
+{
+    const std::string build = Configured(SourceText("../SwitchJoyConHID.cpp"), "XNU_12377_121_6", false);
+    EXPECT_THAT(
+        build,
+        HasSubstr("for (const uint32_t product : kNintendoProducts)\n        removeAppleNintendoEntries(product);"));
+    EXPECT_THAT(build, HasSubstr("{kIOPersonalityPublisherKey, \"VendorID\", \"ProductID\"}"));
+    EXPECT_THAT(build, HasSubstr("{kIOPersonalityPublisherKey, \"IOPropertyMatch\"}"));
+    EXPECT_EQ(Count(build, "gIOCatalogue->removeDrivers("), 2u);
+
+    const std::string ios27 = Configured(SourceText("../SwitchJoyConHID.cpp"), "XNU_12377_121_6", true);
+    EXPECT_THAT(ios27, Not(HasSubstr("removeDrivers"))) << "iOS 27's kext serves every controller as Apple ships it";
 }
 
 TEST(SwitchJoyConPersonalities, Ios27LeavesTheInterfaceToApplesDriver)

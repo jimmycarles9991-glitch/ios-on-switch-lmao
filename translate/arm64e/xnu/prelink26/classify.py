@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 import sys, collections, bisect, json, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kcinfo import KC, ROOTS, decode8
+from kcinfo import KC, decode8
 import paths
-CUTS = {("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.AppleSMC"),
-        ("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.usb.AppleUSBHostPlatformProperties"),
-        ("com.apple.iokit.IOAccessoryManager", "com.apple.driver.AppleOnboardSerial")}
+ROOTS, CUTS, _ = paths.prelink_lists()
 kc = KC(sys.argv[1])
 roots = [r for r in ROOTS if r in kc.plist]
-sel, ifaces, codeless = kc.closure(roots, CUTS)
+sel, ifaces, codeless = kc.closure(roots, set(CUTS))
 print("closure with main's cuts:", len(sel))
 print(sorted(sel))
 ext = []

@@ -37,7 +37,8 @@ struct switch_gpt_header {
 struct switch_gpt_extent {
     uint64_t first, last;
     uint8_t guid[16], type_guid[16];
-    uint32_t partition_index, basic_data;
+    uint32_t partition_index;
+    uint8_t basic_data, writable, hos_data;
 };
 
 /* Caller-owned scratch, normally static for kernel callers. No initialization

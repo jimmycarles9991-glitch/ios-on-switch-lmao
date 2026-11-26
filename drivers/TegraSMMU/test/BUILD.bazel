@@ -36,6 +36,7 @@ host_test(
     name = "smmu_attachments_test",
     srcs = [
         "smmu_attachments_test.cpp",
+        "//drivers/TegraSMMU:TegraSMMU.h",
         "//drivers/TegraSMMU:TegraSMMUAttachments.h",
     ],
 )
@@ -71,8 +72,10 @@ host_library(
     name = "mc_owner",
     srcs = [
         "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:SwitchExternalWindows.h",
         "//drivers/SwitchDisplayPort:TegraDisplayB.cpp",
         "//drivers/SwitchDisplayPort:TegraDisplayB.h",
+        "//drivers/SwitchPower:SwitchDisplayMemory.h",
         "//drivers/TegraDisplayFlip:SwitchDisplayPriority.h",
         "//drivers/TegraGM20B:platform.c",
         "//drivers/TegraGM20B:shim/include/nvxnu.h",
@@ -100,7 +103,9 @@ host_test(
     srcs = [
         "mc_hot_reset_owner_test.cpp",
         "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:SwitchExternalWindows.h",
         "//drivers/SwitchDisplayPort:TegraDisplayB.h",
+        "//drivers/SwitchPower:SwitchDisplayMemory.h",
         "//drivers/TegraGM20B:shim/include/nvxnu.h",
         "//drivers/TegraI2C:TegraI2C.h",
         "//drivers/TegraSMMU:TegraSMMU.h",

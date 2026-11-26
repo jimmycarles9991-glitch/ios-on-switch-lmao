@@ -79,7 +79,10 @@ switch_abi_bindings(
     name = "original_bindings",
     out = "original-bindings.S",
     classes = ["//kits/SwitchABI:IOMobileFramebufferLegacy"],
-    objects = [":NativeLegacyDisplay_cc"],
+    objects = [
+        ":NativeLegacyDisplay_cc",
+        "//drivers/SwitchDisplayPort:SwitchDisplayPort_cc",
+    ],
 )
 
 kernel_driver(

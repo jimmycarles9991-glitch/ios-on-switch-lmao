@@ -12,9 +12,10 @@
 // (0x8000), FPCI 0x70098000, IPFS 0x70099000; interrupts SPI 39 host (INTID 71), SPI 40 mailbox (INTID 72);
 // usb2-0 "otg"; iommus = XUSB_HOST: in bypass until UsbSmmuMapper.cpp translates it (ASID TEGRA_SMMU_ASID_XUSB_HOST).
 //
-// Waits on hardware status with no interrupt behind it (PLL lock, falcon DMA, CNR after the firmware starts, mailbox
-// ownership) are bounded register polls at bring-up, as in Linux; events are interrupt-driven only.
+// Waits on hardware status with no interrupt behind it (PLL lock, falcon DMA, CNR after the firmware starts) are bounded
+// register polls at bring-up, as in Linux; events, the mailbox's answers included, are interrupt-driven only.
 #pragma once
+#include "../../kits/SwitchCAR/SwitchPMC.h"
 #include "../../kits/SwitchMMIO/SwitchMMIOKernel.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -23,7 +24,6 @@ namespace xhost {
 
 constexpr uint64_t kXhciPA = 0x70090000, kXhciBytes = 0x8000;
 constexpr uint32_t kHostIntid = 32 + 39, kMailboxIntid = 32 + 40;
-constexpr uint32_t kFalconKHz = 204000;  // CLK_SOURCE_XUSB_FALCON: PLLP 408 MHz / 2
 
 // Falcon mailbox commands (xhci-tegra.c enum tegra_xusb_mbox_cmd).
 enum MboxCmd : uint32_t {
@@ -61,6 +61,11 @@ public:
         return isPowered;
     }  // powerOn succeeded: the xHCI registers can be read
 
+    // Before SC7, while the block is still powered: the FPCI and IPFS registers xhci-tegra.c saves, which powerOn puts
+    // back after SC7, with the host role's ID override (tegra_xhci_exit_elpg).
+    void saveContext();
+    static constexpr unsigned kFpciContextRegs = 8, kIpfsContextRegs = 11;
+
     // SC7 takes VDD_CORE, and with it the partitions, the falcon and its firmware: no register access until powerOn and
     // loadFirmware have run again (loadFirmware finds ILOAD_BASE back at reset and reloads).
     void lostPower()
@@ -86,20 +91,17 @@ public:
     unsigned otgPort();
     // The xHCI port of SS port 0 (XusbLanes.h xusb_ss_xhci_port; 0: not found, or not powered).
     unsigned ssPort();
-    // PORTSC.PP on or off, followed for up to 1 ms (the falcon firmware implements PORTSC); `trace` gets PORTSC before
-    // and after. Call on AppleUSBXHCI's work loop. False if PP did not follow.
-    bool setPortPower(unsigned port, bool on, uint32_t trace[2]);
-    // tegra_xhci_set_host_mode (otg_set_port_power): PORTSC.PP off, then on again, each followed for up to 1 ms (Linux:
-    // 10 x 10-20 us; the falcon firmware implements PORTSC); `trace` gets the three PORTSC values. Call on
-    // AppleUSBXHCI's work loop (its port register writes happen there). False if PP did not follow.
-    bool cyclePortPower(unsigned port, uint32_t trace[3]);
     uint32_t portsc(unsigned port) const;
+    // PORTSC.PP on or off, nothing else changed (the falcon firmware implements PORTSC). Not followed: see the caller.
+    void setPortPower(unsigned port, bool on);
+#if DEVELOPMENT || DEBUG
     // One-line reports for the role line (SwitchUSB.cpp): the pad controller's port 0 state; the xHCI's USBCMD,
     // USBSTS and every PORTSC (only when powered).
     void describePads(char *buffer, size_t size);
     void describePorts(char *buffer, size_t size);
+#endif
 
-    // xHCI registers through our own mapping (bring-up, the lost-interrupt check).
+    // xHCI registers through our own mapping (bring-up, the SuperSpeed interface reset).
     uint32_t xhci(uint32_t offset) const
     {
         return switch_mmio_read32(regs, offset);
@@ -117,27 +119,33 @@ public:
 
     // Mailbox. takeMailboxInterrupt() runs in the primary interrupt filter: it acknowledges SMI_INTR (W1C) and says
     // whether a message waits (or the firmware hung). serviceMailbox() runs on the work loop: reads the message,
-    // answers it (ACK/NAK), returns false only on a firmware hang.
+    // answers it (ACK/NAK), passes on the firmware's own ACK or NAK in `answer` (0 for anything else) and returns false
+    // only on a firmware hang. sendMailbox takes ownership for a command and writes it; false when the mailbox is busy.
     bool takeMailboxInterrupt();
-    bool serviceMailbox();
-    bool sendMailbox(uint32_t cmd, uint32_t data);  // takes ownership, waits (bounded) for the firmware to take it
-    bool mailboxPending() const;                    // SMI_INTR raised and not yet acknowledged
+    bool serviceMailbox(uint32_t &answer, uint32_t &answerData);
+    bool sendMailbox(uint32_t cmd, uint32_t data);
+    uint32_t mailboxOwner() const;
     // One line of the interrupt path, xHCI to IPFS: USBCMD/USBSTS/IMAN0/ERDP0, the OTG port's PORTSC, FPCI CFG_1, the
     // IPFS configuration/mask/enable/MSI, SMI and mailbox owner, the partitions powerOn found already on.
     void describe(char *buffer, size_t size) const;
-    // IMAN0, USBCMD, USBSTS, ERDP0 for the interrupt check (false before powerOn).
-    bool interruptSample(uint32_t &iman, uint32_t &usbcmd, uint32_t &usbsts, uint32_t &erdp) const;
 
 private:
     volatile uint8_t *car = nullptr, *fusePage = nullptr, *mc = nullptr, *padctl = nullptr, *regs = nullptr,
                      *fpci = nullptr, *ipfs = nullptr;
     bool mailboxHang = false, isMapped = false, isPowered = false;
+    bool hostRole = false;      // setHostRole's last role
+    bool contextSaved = false;  // saveContext ran: powerOn is a return from SC7
+    uint32_t fpciContext[kFpciContextRegs] = {}, ipfsContext[kIpfsContextRegs] = {};
+    uint32_t falconKHz = 0;  // CLK_SOURCE_XUSB_FALCON's rate (startPllre), what INC/DEC_FALC_CLOCK are answered with
     unsigned usb2First = 0, usb2Count = 0, usb3First = 0, usb3Count = 0;
     uint32_t partitionsFound = 0;  // PMC partitions powerOn found already powered (bits as PWRGATE_STATUS)
 
     void padctlUp();
 
-    bool powerUp(unsigned partition, unsigned id);
+    bool powerUp(unsigned partition, unsigned id, const struct switch_pmc_mc_client *client);
+    uint32_t startPllre();
+    void groundId();
+    void restoreContext();
     uint32_t csbRead(uint32_t offset);
     void csbWrite(uint32_t offset, uint32_t value);
 };

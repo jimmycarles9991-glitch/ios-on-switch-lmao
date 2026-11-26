@@ -2,6 +2,10 @@
 #pragma once
 #include "TegraVICSurface.h"
 struct SwitchVICEvents;
+struct SwitchVICWriteReservation;
 int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurface *destination,
                              const TegraVICPlan *plan, uint32_t chromaSite, void (*completion)(void *, int),
                              void *context, SwitchVICEvents *events);
+int switch_vic_bounce_submit(const TegraVICSurface *source, const TegraVICSurface *destination,
+                             const TegraVICPlan *plan, uint32_t chromaSite, void (*completion)(void *, int),
+                             void *context, SwitchVICEvents *events, SwitchVICWriteReservation *dstReserve);

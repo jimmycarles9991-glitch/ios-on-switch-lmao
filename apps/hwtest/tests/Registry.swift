@@ -128,8 +128,10 @@ public enum Registry {
         ]
 
     static let audio: [any HWTest] = [
-        AudioPlaybackTest(rate: 44_100), AudioPlaybackTest(rate: 48_000), AudioLatencyTest(), AudioRouteTest(),
-        HeadsetTest(), MicrophoneTest(),
+        AudioPlaybackTest(rate: 16_000), AudioPlaybackTest(rate: 44_100), AudioPlaybackTest(rate: 48_000),
+        AudioPlaybackTest(rate: 96_000), AudioLatencyTest(), AudioApePipelineTest(), AudioSfcRatesTest(),
+        AudioIdleWakeTest(), AudioZeroTimestampTest(), AudioRouteOverrideTest(), AudioLimiterHeadroomTest(),
+        AudioRouteTest(), HeadsetTest(), MicrophoneTest(),
     ]
 
     static let display: [any HWTest] =

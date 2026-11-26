@@ -1,5 +1,4 @@
 # drivers/SwitchUSB: moved from out/native-a57/root-v1/tree/drivers/SwitchUSB by the layout move.
-load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//kernel/rules:kernel.bzl", "kernel_driver")
@@ -26,21 +25,7 @@ filegroup(
     ),
 )
 
-# Device mode's data requests without prepare() (XudcRequestMemory.h, SwitchDMADirect.h): their runs from the page
-# tables when their memory is zone memory (mbufs). Same TRBs, same cache lines; off until a device boot has compared the
-# stats line's CPU share.
-bool_flag(
-    name = "xudc_direct",
-    build_setting_default = False,
-)
-
-config_setting(
-    name = "xudc_direct_on",
-    flag_values = {":xudc_direct": "True"},
-)
-
-# This package's headers, as kernel_headers() makes them, with the settings' defines, which every driver whose hdr_deps
-# name drivers/SwitchUSB compiles with (the kernel toolchain's preprocessor_defines feature).
+# This package's headers, as kernel_headers() makes them.
 filegroup(
     name = "headers",
     srcs = glob(
@@ -56,10 +41,6 @@ filegroup(
 cc_library(
     name = "hdrs",
     hdrs = [":headers"],
-    defines = select({
-        ":xudc_direct_on": ["SWITCH_XUDC_DIRECT=1"],
-        "//conditions:default": [],
-    }),
     tags = ["kernel"],
     target_compatible_with = ["//bazel/platforms:kernel"],
 )
@@ -75,21 +56,38 @@ kernel_driver(
         "XudcHardware.cpp",
         "SwitchUSB.cpp",
         "SwitchXUDC.cpp",
+        "SwitchXUDCEvents.cpp",
+        "SwitchXUDCData.cpp",
+        "SwitchXUDCIsoch.cpp",
+        "SwitchXUDCEndpoints.cpp",
+        "SwitchXUDCStats.cpp",
+        "SwitchXUDCSmmu.cpp",
         "original-bindings.S",
         "SwitchPD.cpp",
+        "SwitchPDRequest.cpp",
+        "SwitchPDSettings.cpp",
         "XusbHost.cpp",
+        "XusbHostPower.cpp",
+        "XusbPadctl.cpp",
         "XusbSleepwalk.cpp",
         "XusbSuperSpeed.cpp",
+        "XusbUtmiPad.cpp",
         "UsbDmaMapper.cpp",
+        "UsbDmaProbe.cpp",
+        "UsbDmaProbeHeld.cpp",
         "UsbSmmuMapper.cpp",
+        "UsbSmmuSpace.cpp",
         "SwitchXHCI.cpp",
         "SwitchXHCIEvents.cpp",
         "SwitchXHCIServices.cpp",
         "xhci-original-bindings.S",
+        "SwitchUSBPort.cpp",
+        "port-bindings.S",
         "firmware.S",
     ],
     abi = [
         "AppleUSBXHCI",
+        "IOPort",
         "IOUSBDeviceController",
     ],
     hdr_deps = [
@@ -118,19 +116,21 @@ kernel_driver(
         "com.apple.driver.AppleUSBDeviceMux",
         # J120's other device functions (USBDeviceConfiguration.plist stdMuxPTPEthValIDA), prelinked ahead of the switch
         # to that configuration: the iPod USB audio interface (USBAudioControl/USBAudioStreaming), USB Audio 2 for
-        # Interdevice Audio and its IDAM interface. NCM, USB Ethernet and IOAccessoryPortUSB (iAP over HID) need
-        # IONetworkingFamily (and AppleOnboardSerial's IOSkywalkFamily), which SwitchWLAN still defines natively.
+        # Interdevice Audio and its IDAM interface, and NCM (AppleUSBDeviceNCM, on usb.networking and the
+        # IONetworkingFamily SwitchWLAN prelinks).
         "com.apple.driver.AppleUSBMike",
         "com.apple.driver.AppleUSBDeviceAudioController",
         "com.apple.driver.AppleIDAMInterface",
+        "com.apple.driver.AppleUSBDeviceNCM",
         # Host mode: Apple's host stack and xHCI driver, which SwitchXHCI subclasses, and what it needs
-        # (IOAccessoryManager: AppleUSBXHCI's Type-C port classes; IOPortFamily: declared by AppleUSBXHCI) ...
+        # (IOAccessoryManager: the USB-C port's IOPort and transports, SwitchUSBPort.cpp, and AppleUSBXHCI's Type-C
+        # port classes; IOPortFamily: declared by AppleUSBXHCI) ...
         "com.apple.iokit.IOUSBHostFamily",
         "com.apple.driver.usb.AppleUSBXHCI",
         "com.apple.iokit.IOAccessoryManager",
         "com.apple.iokit.IOPortFamily",
-        # The host stack's packet capture (usbdump, PacketLogger); it matches AppleUSBHostResources, so it loads with
-        # the host.
+        # The host stack's packet capture (usbdump, PacketLogger). 21H461's matches AppleUSBHostResources, so it loads
+        # with the host; 24B119's matches IOResources and is deferred below.
         "com.apple.driver.usb.AppleUSBHostPacketFilter",
         # ... and the class drivers: hubs, composite devices, USB audio, HID (keyboard, mouse) and mass storage with its
         # SCSI layers and IOPCIFamily (one pointer).
@@ -144,24 +144,24 @@ kernel_driver(
         "com.apple.iokit.IOPCIFamily",
         # Mass storage as J120 has it: Apple's SD card readers, the bridges that need their own interface nub, the
         # codeless USB and SCSI quirk tables, and the file systems Files mounts an external drive with (lifs is the
-        # kernel side of userfsd's FAT and exFAT; HFS+ is a kext only up to iOS 17).
+        # kernel side of userfsd's FAT and exFAT).
         "com.apple.driver.AppleUSBCardReader",
         "com.apple.driver.AppleUSBMassStorageInterfaceNub",
         "com.apple.driver.USBStorageDeviceSpecifics",
         "com.apple.driver.SCSIDeviceSpecifics",
         "com.apple.filesystems.lifs",
-        "com.apple.filesystems.hfs.kext",
-        # USB serial: CDC-ACM modems and boards (/dev/cu.usbmodem*) and their families. On iOS 17 usb.networking needs
-        # no IONetworkingFamily.
+        # USB serial: CDC-ACM modems and boards (/dev/cu.usbmodem*) and their families, and IOUserSerial, the kernel
+        # class DriverKit serial drivers (USB serial adapters' dexts) run on. On iOS 17 usb.networking needs no
+        # IONetworkingFamily.
         "com.apple.driver.usb.cdc",
         "com.apple.driver.usb.cdc.acm",
         "com.apple.driver.usb.serial",
         "com.apple.driver.usb.networking",
         "com.apple.iokit.IOSerialFamily",
+        "com.apple.driver.driverkit.serial",
         # Codeless kexts, personalities only, in every iPad's boot catalogue: IOUSBHostHIDDevice on every HID interface
         # (IOUSBHostHIDDevice's own personality takes boot keyboards only) and IOHIDFamily's IOHIDEventDriver for
         # keyboards, pointers, consumer and system control. Without them a HID device enumerates and sends nothing.
-        # The iOS 27 prelink's list is translate/arm64e/xnu/prelink26/kcinfo.py ROOTS.
         "com.apple.driver.usb.IOUSBHostHIDDeviceSafeBoot",
         "com.apple.iokit.IOHIDEventDriver",
         "com.apple.iokit.IOHIDEventDriverSafeBoot",
@@ -175,14 +175,12 @@ kernel_driver(
         "com.apple.driver.AppleHIDKeyboardEmbedded",
         "com.apple.driver.AppleTopCaseDriverV2",
         "com.apple.driver.AppleTopCaseHIDEventDriver",
-        "com.apple.driver.AppleTopCaseActuatorHIDDriver",
         "com.apple.driver.AppleUSBTopCaseDriver",
         "com.apple.driver.AppleMultitouchDriver",
         "com.apple.driver.AppleMultitouchSPI",
         "com.apple.driver.AppleActuatorDriver",
         "com.apple.driver.ApplePencilDriver",
         "com.apple.driver.AppleInputDeviceSupport",
-        "com.apple.driver.AppleFirmwareUpdateKext",
         "com.apple.driver.IOSlaveProcessor",
         "com.apple.driver.usb.AppleUSBHostiOSDevice",
         "com.apple.driver.AppleUSBHostMergeProperties",
@@ -192,19 +190,36 @@ kernel_driver(
         "com.apple.driver.usb.cdc.ncm",
         "com.apple.driver.usb.ethernet.asix",
         "com.apple.driver.AppleUSBEthernetHost",
-    ],
+        # IOSkywalkFamily: IOUserNetworkEthernet, the kernel half of the AppleUserECM dext, which the catalogue puts on
+        # a CDC ECM interface ahead of cdc.ecm (probe score 100000), and of the PCIe Ethernet dexts; with
+        # mDNSOffloadUserClient-Embedded, which it links.
+        "com.apple.iokit.IOSkywalkFamily",
+        "com.apple.driver.mDNSOffloadUserClient-Embedded",
+        # The device-mode iAP function (IOAccessoryPortUSB, iAP over HID) and the AppleOnboardSerial it links, which
+        # links IOSkywalkFamily.
+        "com.apple.driver.AppleOnboardSerial",
+        "com.apple.iokit.IOAccessoryPortUSB",
+    ] + select({
+        "//ipsw:21H461": [
+            # Only 21H461 ships these: HFS+ (a kext up to iOS 17) and the top case's actuator driver.
+            "com.apple.filesystems.hfs.kext",
+            "com.apple.driver.AppleTopCaseActuatorHIDDriver",
+            # 21H461's AppleInputDeviceSupport links it. 24B119's does not, nothing else prelinked there links it, and
+            # it has no personalities, so it could never load there.
+            "com.apple.driver.AppleFirmwareUpdateKext",
+        ],
+        # Only 24B119 ships it: Apple's USB-C Digital AV Multiport Adapter.
+        "//ipsw:24B119": ["com.apple.driver.usb.AppleUSBHostDeviceSupport"],
+    }),
     # Declared dependencies left out of the prelink (COMPONENT=DEPENDENCY=pointer sites; a nonzero cut rebinds each
     # site to _switch_prelink_cut_null in SwitchUSB.cpp, so OSDynamicCast yields NULL):
     # - AppleSMC (Mac SMC): IOUSBHostFamily's one site is OSDynamicCast(AppleSMC, waitForMatchingService(AppleSMC)) on
     #   a path taken only for a port with a "UsbCPortNumber" property (fn 0xfffffff005e4fe88), never published here;
-    # - AppleUSBHostPlatformProperties: codeless, no personalities (the planner cannot carry it); no pointers;
-    # - AppleOnboardSerial would pull IOSkywalkFamily and IONetworkingFamily, whose classes SwitchWLAN defines natively;
-    #   its one site is OSDynamicCast(AppleOnboardSerial, provider) in the serial-accessory port's start
-    #   (fn 0xfffffff005cc3f0c), whose NULL path is a logged failure return.
+    # - AppleUSBHostPlatformProperties: codeless, no pointers. 21H461's has no personalities (the planner cannot carry
+    #   it); 24B119's two set hub power properties on the Mac's internal hubs (Apple 0x8009-0x8010).
     prelink_cuts = [
         "com.apple.iokit.IOUSBHostFamily=com.apple.driver.AppleSMC=1",
         "com.apple.iokit.IOUSBHostFamily=com.apple.driver.usb.AppleUSBHostPlatformProperties=0",
-        "com.apple.iokit.IOAccessoryManager=com.apple.driver.AppleOnboardSerial=1",
     ],
     # Personalities kept out of the boot catalogue so the USB host stack does not load at every boot (they match
     # IOResources); SwitchXHCI adds AppleUSBHostResources and IOUSBMassStorageResource back when the host comes up.
@@ -213,7 +228,12 @@ kernel_driver(
         "com.apple.iokit.IOUSBHostFamily=AppleUSBHostResources",
         "com.apple.iokit.IOUSBHostFamily=AppleUSBHostResourcesTypeC",
         "com.apple.iokit.IOUSBMassStorageDriver=IOUSBMassStorageResource",
-    ],
+    ] + select({
+        # 21H461's packet capture matches AppleUSBHostResources, so it loads with the host; 24B119's matches
+        # IOResources, and SwitchXHCI adds it back with the others.
+        "//ipsw:21H461": [],
+        "//ipsw:24B119": ["com.apple.driver.usb.AppleUSBHostPacketFilter=AppleUSBHostPacketFilter"],
+    }),
 )
 
 switch_abi_bindings(
@@ -257,13 +277,26 @@ switch_abi_bindings(
     objects = [":SwitchUSB_cc"],
     own = [
         "copyMapper",
+        "createPort",
         "free",
+        "powerStateDidChangeTo",
+        "powerStateWillChangeTo",
         "regRead32",
         "regRead64",
         "regWrite32",
         "regWrite64",
         "start",
         "stop",
-    ],
+    ] + select({
+        "//ipsw:21H461": ["createIOBuffer"],
+        "//conditions:default": [],
+    }),
     subclass = "SwitchXHCI",
+)
+
+switch_abi_bindings(
+    name = "port_bindings",
+    out = "port-bindings.S",
+    classes = ["//kits/SwitchABI:IOPort"],
+    objects = [":SwitchUSB_cc"],
 )

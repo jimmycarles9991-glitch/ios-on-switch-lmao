@@ -1,4 +1,8 @@
-"""A memo filled by one run gives the next run the same tree without translating, and any changed key input misses."""
+"""translate_tree's memo and its dyld caches.
+
+A memo filled by one run gives the next run the same tree without translating, and any changed key input misses. The
+SystemOS cryptex's run translates DriverKit's dyld cache beside the main one.
+"""
 
 import hashlib
 import importlib.util
@@ -50,6 +54,12 @@ if sys.argv[1] == 'pretranslate':
     slice = dict(status='translated', cdhash_in=hashlib.sha1(raw).hexdigest(),
                  cdhash_out=hashlib.sha1(out.read_bytes()).hexdigest())
     Path(report).write_text(json.dumps(dict(slices=[slice])))
+elif sys.argv[1] == 'plan':
+    Path(sys.argv[3]).write_bytes(b'plan of ' + hashlib.sha1(Path(sys.argv[4]).read_bytes()).hexdigest().encode())
+elif sys.argv[1] == 'dsc-apply':
+    pairs, plan, src, out = (Path(a) for a in sys.argv[3:7])
+    out.write_bytes(b'translated ' + src.read_bytes() + plan.read_bytes() + pairs.read_bytes())
+    print(hashlib.sha1(out.read_bytes()).hexdigest(), 'pages 1')
 """
 
 
@@ -102,6 +112,64 @@ class MemoRunTest(unittest.TestCase):
         out.write_bytes(b'bad')
         self.memo.run(['a'], dst, lambda: self.produce(dst, b'good'))
         self.assertEqual((self.produced, dst.read_bytes()), (2, b'good'))
+
+
+def fake_cache(tag: bytes) -> bytes:
+    """Make a dyld cache file as the driver reads one: no subcaches, a CodeDirectory at its signature offset."""
+    data = bytearray(0x400)
+    data[:16] = b'dyld_v1  arm64e\0'
+    struct.pack_into('<QQ', data, 0x28, 0x300, 0x100)
+    struct.pack_into('<II', data, 0x188, 0x190, 0)
+    struct.pack_into('>4sI', data, 0x300, b'\xfa\xde\x0c\x02', 12)
+    return bytes(data) + tag
+
+
+MAIN_CACHE = 'System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64e'
+DRIVERKIT_CACHE = 'System/DriverKit/System/Library/dyld/dyld_shared_cache_arm64e'
+
+
+class CachesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.volume = self.dir / 'volume'
+        for path, tag in ((MAIN_CACHE, b'main'), (DRIVERKIT_CACHE, b'driverkit')):
+            (self.volume / path).parent.mkdir(parents=True)
+            (self.volume / path).write_bytes(fake_cache(tag))
+        (self.volume / (DRIVERKIT_CACHE + '.symbols')).write_bytes(b'symbols')
+        self.tool = self.dir / 'arm64e'
+        self.tool.write_text(FAKE_TOOL.format(python=sys.executable, salt='one'))
+        self.tool.chmod(0o755)
+        self.pairs = self.dir / 'os.cdhash-pairs'
+        self.pairs.write_text('aa bb\n')
+
+    def run_driver(self, role: str) -> Path:
+        out = self.dir / role
+        command = [sys.executable, str(DRIVER), '--role', role, '--tool', str(self.tool), '--volume', str(self.volume)]
+        command += ['--out', str(out), '--cdhash-pairs', str(self.pairs)]
+        subprocess.run(command, check=True, capture_output=True)
+        return out
+
+    def test_the_system_cryptex_translates_both_caches_each_with_its_plan(self):
+        out = self.run_driver('system_cryptex')
+        manifest = json.loads((out / 'system_cryptex.manifest.json').read_text())
+        cdhash = {e['path']: e['cdhash'][0] for e in manifest['files']}
+        self.assertEqual(sorted(cdhash), ['/' + DRIVERKIT_CACHE, '/' + MAIN_CACHE])
+        listed = (out / 'a64x-cache-pretranslated.bin').read_bytes()
+        self.assertEqual(listed, bytes.fromhex(cdhash['/' + MAIN_CACHE] + cdhash['/' + DRIVERKIT_CACHE]))
+        main_plan = (out / 'system_cryptex.a64xplan').read_bytes()
+        driverkit_plan = (out / 'system_cryptex.driverkit.a64xplan').read_bytes()
+        self.assertNotEqual(main_plan, driverkit_plan)
+        self.assertTrue((out / 'files' / DRIVERKIT_CACHE).read_bytes().endswith(driverkit_plan + b'aa bb\n'))
+        self.assertFalse((out / 'files' / (DRIVERKIT_CACHE + '.symbols')).exists())
+        module = (out / 'system_cryptex.trustcache').read_bytes()
+        count = struct.unpack_from('<I', module, 20)[0]
+        trusted = {module[24 + 24 * i : 44 + 24 * i].hex() for i in range(count)}
+        self.assertEqual(trusted, set(cdhash.values()))
+
+    def test_no_other_role_translates_a_cache(self):
+        out = self.run_driver('os')
+        self.assertEqual(json.loads((out / 'os.manifest.json').read_text())['files'], [])
+        self.assertFalse((out / 'a64x-cache-pretranslated.bin').exists())
 
 
 class WarmThenColdTest(unittest.TestCase):

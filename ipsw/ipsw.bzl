@@ -23,6 +23,7 @@ them, so building it never needs the OS image or the cryptexes.
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo", "string_flag")
 load("//gpu/seed:crawl.bzl", "QUARTZCORE", "shader_crawl_repository")
+load(":os_files.bzl", "os_files_repository")
 load(":pins.bzl", "DEFAULT_KIND", "IPSWS")
 
 # Members above this are inflated only on demand (the SD install): they stay out of `bazel build //...`.
@@ -38,6 +39,15 @@ _CRAWL_TARGETS = {
     "crawl_inventory": ":inventory.json",
     "crawl_qc": ":tree/" + QUARTZCORE,
     "crawl_tree": ":tree",
+}
+_OS_FILES_TARGETS = {
+    "os_installd": ":files/usr/libexec/installd",
+    "os_migration_files": ":migration_files",
+    "os_system_version": ":files/System/Library/CoreServices/SystemVersion.plist",
+}
+_LAUNCHD_CATALOG_TARGETS = {
+    "os_launchd_catalog": ":files/System/Library/xpc/launchd.plist",
+    "os_launchd_catalog_signature": ":files/System/Library/xpc/launchd.plist.sig",
 }
 
 def pinned_kinds():
@@ -98,6 +108,26 @@ def _ipsw_hub_impl(rctx):
             lines.append('        "@@//ipsw:{}": "{}",'.format(kind, actual))
         lines.append("    }),")
         lines.append(")")
+    for name, target in sorted(_OS_FILES_TARGETS.items()):
+        lines.append("")
+        lines.append("alias(")
+        lines.append('    name = "{}",'.format(name))
+        lines.append("    actual = select({")
+        for kind, repo in sorted(rctx.attr.os_files.items()):
+            actual = "@{}//{}".format(repo, target) if repo else "@@//ipsw:{}_unpinned".format(kind)
+            lines.append('        "@@//ipsw:{}": "{}",'.format(kind, actual))
+        lines.append("    }),")
+        lines.append(")")
+    for name, target in sorted(_LAUNCHD_CATALOG_TARGETS.items()):
+        lines.append("")
+        lines.append("alias(")
+        lines.append('    name = "{}",'.format(name))
+        lines.append("    actual = select({")
+        for kind, repo in sorted(rctx.attr.launchd_catalogs.items()):
+            actual = "@{}//{}".format(repo, target) if repo else "@@//ipsw:{}_unpinned".format(kind)
+            lines.append('        "@@//ipsw:{}": "{}",'.format(kind, actual))
+        lines.append("    }),")
+        lines.append(")")
     rctx.file("BUILD.bazel", "\n".join(lines) + "\n")
 
 _ipsw_hub = repository_rule(
@@ -106,6 +136,8 @@ _ipsw_hub = repository_rule(
         "members": attr.string(doc = "JSON: role -> {kind -> label of its file}"),
         "stored": attr.string_dict(doc = "stored_<kind>_<role> -> the deflated member's stored bytes"),
         "crawls": attr.string_dict(doc = "kind -> its crawl repository, or empty where the kind lacks a crawled member"),
+        "os_files": attr.string_dict(doc = "kind -> its os_files repository, or empty where unpinned"),
+        "launchd_catalogs": attr.string_dict(doc = "kind -> its os_files repository when it pins launchd_catalog, else empty"),
     },
 )
 
@@ -140,9 +172,27 @@ def _ipsw_extension_impl(module_ctx):
             else:
                 roles[role][kind] = "@{}//:{}".format(repo, _filename(pin))
     crawls = {}
+    os_files = {}
+    launchd_catalogs = {}
     for kind, ipsw in IPSWS.items():
         members = ipsw.get("members", {})
         crawls[kind] = ""
+        os_files[kind] = ""
+        launchd_catalogs[kind] = ""
+        if members.get("os") and ipsw.get("volumes", {}).get("os_volume_uuid"):
+            derived = ipsw.get("derived", {})
+            os_files[kind] = "ipsw_{}_os_files".format(kind)
+            if derived.get("launchd_catalog_sha256"):
+                launchd_catalogs[kind] = os_files[kind]
+            os_files_repository(
+                name = os_files[kind],
+                url = ipsw["url"],
+                pin = json.encode(members["os"]),
+                build = ipsw["build"],
+                volume_uuid = ipsw["volumes"]["os_volume_uuid"],
+                launchd_catalog_sha256 = derived.get("launchd_catalog_sha256", ""),
+                launchd_catalog_signature_sha256 = derived.get("launchd_catalog_signature_sha256", ""),
+            )
         if [role for role in _CRAWLED if not members.get(role)]:
             continue
         crawls[kind] = "ipsw_{}_crawl".format(kind)
@@ -151,7 +201,14 @@ def _ipsw_extension_impl(module_ctx):
             url = ipsw["url"],
             pins = json.encode({role: members[role] for role in _CRAWLED}),
         )
-    _ipsw_hub(name = "ipsw", members = json.encode(roles), stored = stored, crawls = crawls)
+    _ipsw_hub(
+        name = "ipsw",
+        members = json.encode(roles),
+        stored = stored,
+        crawls = crawls,
+        os_files = os_files,
+        launchd_catalogs = launchd_catalogs,
+    )
     return module_ctx.extension_metadata(reproducible = True)
 
 ipsw = module_extension(implementation = _ipsw_extension_impl)
@@ -383,7 +440,7 @@ def ipsw_kinds():  # buildifier: disable=unnamed-macro
             flag_values = {":kind": kind},
             visibility = ["//visibility:public"],
         )
-        if [role for role in roles if role not in ipsw.get("members", {})]:
+        if [role for role in roles if role not in ipsw.get("members", {})] or not ipsw.get("derived", {}).get("launchd_catalog_sha256"):
             # What @ipsw//:<role> selects for a declared slot (or a kind without that member): analysis fails with
             # the pin command. Manual, so `bazel build //...` does not analyze it.
             _ipsw_unpinned(name = kind + "_unpinned", kind = kind, tags = ["manual"], visibility = ["//visibility:public"])

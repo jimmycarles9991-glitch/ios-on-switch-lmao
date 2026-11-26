@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// How SwitchXUDC.cpp lays a request out on a transfer ring (header "Data endpoints"), what an OUT transfer event says
+// How SwitchXUDCData.cpp lays a request out on a transfer ring, what an OUT transfer event says
 // it received, and which request a transfer event is for (TdRing, "Completion accounting" below). No IOKit:
 // test/xudc_transfer_test.cpp and test/xudc_completion_test.cpp drive the same code on the host.
 //
@@ -16,14 +16,11 @@
 // two packets share is all this transfer's). A buffer of whole pages below 4 GiB, what large I/O is, goes entirely
 // direct.
 //
-// OUT residue. Linux tegra-xudc takes a TD's actual length as its length minus the transfer event's residue, which
-// holds only if the controller reports what is left of the whole TD (its context keeps EDTLA, the bytes of the TD so
-// far); xHCI hosts report what is left of the event's TRB. Linux never builds a multi-TRB OUT TD on this controller in
-// practice, so which it is has not been seen. The driver learns it: until known, a multi-TRB OUT TD's first TRB is one
-// packet with IOC, whose event (full: residue 0 or the rest of the TD; short: below one packet or above the rest) can
-// only mean one of the two, and then each OUT event is read the one way. A request too small to probe (under two
-// packets) goes through one bounce page as one TRB; an event that fits neither marks the residue broken, the request
-// fails rather than report a length that may be wrong, and the endpoint takes OUT requests one TRB at a time from then.
+// OUT residue. An OUT transfer event's residue is what is left of the event's TRB, as xHCI hosts report it (not of the
+// whole TD, as Linux tegra-xudc reads it; Linux never builds a multi-TRB OUT TD). Every boot since 2026-11-11 has shown
+// it ("SwitchUSB: OUT transfer events report the residue of the event's TRB"): a TD received the TRBs before the event's
+// whole and the event's TRB's length less the residue. A residue larger than its TRB fits no reading: the request fails
+// rather than report a length that may be wrong.
 #pragma once
 #include <stdint.h>
 
@@ -43,9 +40,11 @@ enum : uint32_t {
     TRB_ISP = 1u << 2,
     TRB_CHAIN = 1u << 4,
     TRB_IOC = 1u << 5,
+    TRB_BEI = 1u << 9,  // Block Event Interrupt (Normal and Isoch TRBs): the IOC event is written, no interrupt raised
     TRB_DIR_IN = 1u << 16,
     // Completion codes (Linux tegra-xudc TRB_CMPL_CODE_*).
     COMP_SUCCESS = 1,
+    COMP_BABBLE = 3,
     COMP_STALL = 6,
     COMP_SHORT_PACKET = 13,
     COMP_EVENT_RING_FULL = 21,
@@ -72,19 +71,15 @@ constexpr uint32_t linkControl(uint32_t link, uint32_t previous, uint32_t cycle)
 }
 
 constexpr uint32_t kRingTrbs = 16;  // EP0's ring (in the control area); the last one is the link TRB
-constexpr uint32_t kDataRingTrbs =
-    256;  // a data endpoint's ring, one 4 KiB page of its own (SwitchXUDC "Data endpoints"); the last is the link TRB
+// A data endpoint's ring: 16 KiB, one VM page of its own (a 4 KiB ring took a whole 16 KiB page too); the last TRB is
+// the link.
+constexpr uint32_t kDataRingTrbs = 1024;
 constexpr uint32_t kMaxDci = 32;
 // The event ring: two segments of this many events (Linux tegra-xudc's XUDC_EVENT_RING_SIZE). It holds every event the
-// controller can owe at once, so it never overflows: each TRB on a ring raises at most one event (the ISP event of the
-// short packet that ends its TD, or its IOC event), a data ring holds at most kDataRingTrbs - 2 TRBs of TDs and
-// reserved tails (TdRing::room), a cancel's stale events stand in for TRBs that were on the ring (nothing goes on a
-// fenced ring), EP0 has one TD at a time; the rest is setup and port events, paced by the host through EP0 (256 left
-// for those). A ring sized for one TD per endpoint (64 events) fills: 64 TDs per endpoint can complete in one burst
-// while the drain waits, and an event the controller cannot write is lost.
+// controller can owe at once (SwitchXUDC.h counts them), so it never overflows. A ring sized for one TD per endpoint (64
+// events) fills: 64 TDs per endpoint can complete in one burst while the drain waits, and an event the controller
+// cannot write is lost.
 constexpr uint32_t kEventSegmentTrbs = 4096;
-static_assert((kMaxDci - 2) * (kDataRingTrbs - 2) + (kRingTrbs - 1) + 256 < 2 * kEventSegmentTrbs,
-              "the event ring holds every event the rings can owe");
 
 constexpr uint32_t kTrbMaxBytes = 65536;  // a TRB's length field and the 64 KiB boundary no TRB may cross
 constexpr uint32_t kBouncePageBytes = 4096;
@@ -102,22 +97,48 @@ struct Piece {        // one TRB
     bool bounce;
 };
 
-enum : uint8_t {
-    kResidueUnknown,
-    kResiduePerTrb,
-    kResiduePerTd,
-    kResidueBroken
+enum class Bounce : uint8_t {
+    Discontinuity,
+    Boundary,
+    High,
+    Edge
 };
 
 struct PlanStats {
     uint32_t bounceBytes, discontinuity, boundary, high, edge;  // bounced bytes; packets bounced by reason
+
+    void bounced(Bounce why, uint32_t bytes)
+    {
+        bounceBytes += bytes;
+        switch (why) {
+        case Bounce::Discontinuity:
+            ++discontinuity;
+            break;
+        case Bounce::Boundary:
+            ++boundary;
+            break;
+        case Bounce::High:
+            ++high;
+            break;
+        case Bounce::Edge:
+            ++edge;
+            break;
+        }
+    }
+};
+
+// plan()'s stats for a caller that counts nothing (a release kernel).
+struct NoPlanStats {
+    void bounced(Bounce, uint32_t)
+    {}
 };
 
 // Lays out a request of `total` bytes in `runs` (covering it in order) for an endpoint of max packet `mps`: pieces in
-// request order, at most `max`. firstPacket: the first piece is one packet alone (the OUT residue probe). reach: the
-// first physical address the controller cannot use. Returns the piece count, 0 if more than `max` would be needed.
-inline uint32_t plan(const Run *runs, uint32_t runCount, uint32_t total, uint32_t mps, bool out, bool firstPacket,
-                     uint64_t reach, Piece *pieces, uint32_t max, PlanStats *stats)
+// request order, at most `max`. reach: the first physical address the controller cannot use. Returns the piece count, 0
+// if more than `max` would be needed.
+template <class Stats = PlanStats>
+inline uint32_t plan(const Run *runs, uint32_t runCount, uint32_t total, uint32_t mps, bool out, uint64_t reach,
+                     Piece *pieces, uint32_t max, Stats *stats)
 {
     if (!mps)
         return 0;
@@ -151,19 +172,17 @@ inline uint32_t plan(const Run *runs, uint32_t runCount, uint32_t total, uint32_
                            ((pa + packet + kCacheLine - 1) & lineMask) > runs[run].pa + runs[run].length);
         const bool bounce = !inRun || crosses || high || edge;
         if (bounce) {
-            stats->bounceBytes += packet;
+            Bounce why = Bounce::Edge;
             if (!inRun) {
-                ++stats->discontinuity;
+                why = Bounce::Discontinuity;
             } else if (high) {
-                ++stats->high;
+                why = Bounce::High;
             } else if (crosses) {
-                ++stats->boundary;
-            } else {
-                ++stats->edge;
+                why = Bounce::Boundary;
             }
+            stats->bounced(why, packet);
         }
-        const bool probeCut = firstPacket && offset == mps;  // the probe packet stands alone
-        const bool joins = (open != nullptr) && !probeCut && open->bounce == bounce &&
+        const bool joins = (open != nullptr) && open->bounce == bounce &&
                            (bounce ? open->length + packet <= bounceMax
                                    : open->pa + open->length == pa && open->length + packet <= directMax &&
                                          (pa & (kTrbMaxBytes - 1)) != 0);
@@ -181,82 +200,38 @@ inline uint32_t plan(const Run *runs, uint32_t runCount, uint32_t total, uint32_
 }
 
 struct OutResult {
-    bool done;        // the TD is complete (else: a mid-TD event, the probe's)
-    bool failed;      // the residue fits neither reading: fail the request
-    uint32_t actual;  // bytes received, when done
-    uint8_t learned;  // kResidue*: what this event showed (kResidueUnknown: nothing)
+    bool failed;      // the residue is larger than its TRB: fail the request
+    uint32_t actual;  // bytes received
 };
 
-// A transfer event in an OUT TD of `count` TRBs (`lengthOf(i)`: TRB i's length), at TRB `index`, with `residue`, short
-// packet or not, read with the residue as known so far.
+// An event at TRB `index` of an OUT TD of `count` TRBs (`lengthOf(i)`: TRB i's length) with `residue`: the TD received
+// every TRB before the event's whole, and the event's TRB less the residue (see "OUT residue" above).
 template <class LengthOf>
-inline OutResult outEventAt(uint8_t known, LengthOf lengthOf, uint32_t count, uint32_t index, uint32_t residue,
-                            bool shortPacket)
+inline OutResult outEventAt(LengthOf lengthOf, uint32_t count, uint32_t index, uint32_t residue)
 {
+    if (index >= count)
+        return {true, 0};
     uint32_t before = 0;
-    uint32_t after = 0;
-    uint32_t total = 0;
-    uint32_t length = 0;
-    for (uint32_t i = 0; i < count; ++i) {
-        const uint32_t l = lengthOf(i);
-        total += l;
-        if (i < index)
-            before += l;
-        if (i > index)
-            after += l;
-        if (i == index)
-            length = l;
-    }
-    OutResult r = {true, false, 0, kResidueUnknown};
-    if (index >= count) {
-        r.failed = true;
-        return r;
-    }
-    if (index == count - 1) {  // the last TRB: both readings agree
-        r.failed = residue > length;
-        r.actual = r.failed ? 0 : total - residue;
-        return r;
-    }
-    if (!shortPacket) {  // a full TRB in the middle: only the probe asks for one
-        r.done = false;
-        r.learned = residue == after ? kResiduePerTd : kResidueBroken;
-        if (residue == 0)
-            r.learned = kResiduePerTrb;
-        return r;
-    }
-    const bool perTrb = residue <= length;
-    const bool perTd = residue > after && residue <= length + after;
-    uint8_t reading = known;
-    if (known == kResidueUnknown) {
-        reading = perTd && !perTrb ? kResiduePerTd : 0;
-        if (perTrb && !perTd)
-            reading = kResiduePerTrb;
-    }
-    if ((reading == kResiduePerTrb && perTrb) || (reading == kResiduePerTd && perTd)) {
-        r.actual = reading == kResiduePerTrb ? before + length - residue : total - residue;
-        if (known == kResidueUnknown)
-            r.learned = reading;
-        return r;
-    }
-    r.failed = true;
-    r.learned = kResidueBroken;
-    return r;
+    for (uint32_t i = 0; i < index; ++i)
+        before += lengthOf(i);
+    const uint32_t length = lengthOf(index);
+    if (residue > length)
+        return {true, 0};
+    return {false, before + length - residue};
 }
 
-inline OutResult outEvent(uint8_t known, const uint32_t *lengths, uint32_t count, uint32_t index, uint32_t residue,
-                          bool shortPacket)
+inline OutResult outEvent(const uint32_t *lengths, uint32_t count, uint32_t index, uint32_t residue)
 {
     return outEventAt(
-        known,
         [lengths](uint32_t i) {
             return lengths[i];
         },
-        count, index, residue, shortPacket);
+        count, index, residue);
 }
 
 // Completion accounting: a data endpoint's requests are TDs on its ring in request order, and the controller works
-// through them in that order (xHCI; Linux tegra-xudc). Every TD asks for its own event: IOC on its last TRB (and on the
-// OUT probe's first, above), and ISP on every OUT TRB, so the short packet that ends an OUT TD early raises an event on
+// through them in that order (xHCI; Linux tegra-xudc). Every TD asks for its own event: IOC on its last TRB, and ISP on
+// every OUT TRB, so the short packet that ends an OUT TD early raises an event on
 // the TRB it landed in. So an event is always for the oldest request on the ring (the head), and requests complete
 // strictly in order, each from its own event, with its own length.
 //
@@ -271,7 +246,7 @@ inline OutResult outEvent(uint8_t known, const uint32_t *lengths, uint32_t count
 //
 // A cancel (abort, deactivate, off the bus) takes everything off the ring while the event ring may still hold events
 // for those TRBs: the endpoint is fenced. Nothing goes on its ring and every event for it is stale, until an event
-// drain that ran after the cancel has emptied the event ring (SwitchXUDC.cpp serviceEvents), or at once if it was
+// drain that ran after the cancel has emptied the event ring (SwitchXUDCEvents.cpp serviceEvents), or at once if it was
 // empty: the controller wrote those events before the cancel's pause completed.
 //
 // What is left can only be a lost event: an event for a later request while the head has had none (its IOC or ISP
@@ -288,18 +263,17 @@ enum class Verdict : uint8_t {
 };
 
 enum class Outcome : uint8_t {
-    Pending,  // the OUT probe's event: the rest of the TD is still coming
-    Done,     // complete with `actual`
-    Failed,   // OUT residue fits neither reading (outEvent): fail the request
-    Error,    // a completion code other than success, short packet or stall
+    None,    // not the head's event
+    Done,    // complete with `actual`
+    Failed,  // an OUT residue larger than its TRB (outEvent): fail the request
+    Error,   // a completion code other than success, short packet or stall
     Stall,
 };
 
 struct Decision {
     Verdict verdict;
     Outcome outcome;  // Head only
-    bool armTail;     // Head, completing: the TD ended before its last TRB, so its TRBs stay reserved
-    uint8_t learned;  // Head, OUT: the residue reading this event showed (kResidueUnknown: nothing)
+    bool armTail;     // Head: the TD ended before its last TRB, so its TRBs stay reserved
     uint32_t actual;  // Done: bytes moved
     uint32_t k, pos;  // Head, Lost: the request (0 = the head) and the TRB within its TD the event names
 };
@@ -313,7 +287,6 @@ public:
     struct Td {
         uint16_t first, trbs;  // ring index of the first TRB, TRBs in the TD
         uint32_t bytes;        // the request's length (the serial path: this piece's)
-        bool probe;            // OUT residue probe: IOC on the first TRB too
     };
 
     static constexpr uint32_t kNoTrb = ~0u;  // an event TRB outside the ring
@@ -364,11 +337,11 @@ public:
     }
 
     // What a transfer event on ring TRB `index` (kNoTrb: outside the ring) with `code` and `residue` means; `in` is the
-    // endpoint's direction, `known` the OUT residue reading so far, lengthOf(ring index) a TRB's length as written.
+    // endpoint's direction, lengthOf(ring index) a TRB's length as written.
     template <class LengthOf>
-    Decision decide(uint32_t index, uint32_t code, uint32_t residue, bool in, uint8_t known, LengthOf lengthOf) const
+    Decision decide(uint32_t index, uint32_t code, uint32_t residue, bool in, LengthOf lengthOf) const
     {
-        Decision d = {Verdict::Unexplained, Outcome::Pending, false, kResidueUnknown, 0, 0, 0};
+        Decision d = {Verdict::Unexplained, Outcome::None, false, 0, 0, 0};
         if (fenced_) {
             d.verdict = Verdict::Stale;
             return d;
@@ -404,7 +377,7 @@ public:
             d.armTail = !last;
             return d;
         }
-        if (!last && !shortPacket && (in || !t.probe || pos != 0))
+        if (!last && !shortPacket)
             return d;  // a full TRB nothing asked an event for
         d.verdict = Verdict::Head;
         if (in) {
@@ -414,14 +387,10 @@ public:
             return d;
         }
         const OutResult o = outEventAt(
-            known,
             [&](uint32_t i) {
                 return lengthOf(at(t.first, i));
             },
-            t.trbs, pos, residue, shortPacket);
-        d.learned = o.learned;
-        if (!o.done)
-            return d;  // the probe's packet: Pending
+            t.trbs, pos, residue);
         d.outcome = o.failed ? Outcome::Failed : Outcome::Done;
         d.actual = o.failed ? 0 : o.actual;
         d.armTail = !last;
@@ -439,8 +408,6 @@ public:
         if (d.verdict != Verdict::Head)
             return;
         tail_ = Td{};
-        if (d.outcome == Outcome::Pending)
-            return;
         const Td t = td(0);
         head_ = (head_ + 1) % MaxTds;
         --count_;

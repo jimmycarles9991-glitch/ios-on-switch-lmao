@@ -93,4 +93,15 @@ TEST(GpuChanNew, ClosingChannelFlushesLtcOnlyWhenWorkWasNotExternallyVisible)
 	switch_chan_new_delete();
 	EXPECT_EQ(switch_chan_new_ltc_flushes(), 1u);
 }
+
+TEST(GpuChanNew, KernelCopyQueueIsNotTrackedAsAnAppChannel)
+{
+	ASSERT_EQ(switch_chan_new_make(8, 0), 0);
+	EXPECT_TRUE(switch_chan_new_app());
+	switch_chan_new_delete();
+
+	ASSERT_EQ(switch_chan_new_make_copy_kqueue(9, 0), 0);
+	EXPECT_FALSE(switch_chan_new_app());
+	switch_chan_new_delete();
+}
 }  // namespace

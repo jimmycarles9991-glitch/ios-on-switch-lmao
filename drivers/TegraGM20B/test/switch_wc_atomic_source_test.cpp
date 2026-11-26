@@ -126,10 +126,15 @@ const Mapping kMappings[] = {
 	 nullptr, "the scanout and the boot framebuffer, pixel copies only"},
 	{"drivers/NativeMobileDisplay/NativeLegacyDisplay.cpp", "mapDeviceMemoryWithIndex", 1,
 	 nullptr, "the boot framebuffer"},
-	{"drivers/SwitchUSB/SwitchXHCI.cpp", "kIOMapWriteCombineCache", 1, nullptr,
+	{"drivers/SwitchAudio/SwitchHDA.cpp", "kIOMapWriteCombineCache", 1,
+	 R"(\bcommands\.va\b|\bcorb\b|\brirb\b|\bbdl\b)", "the HDA CORB, RIRB and BDL"},
+	{"drivers/SwitchUSB/SwitchXHCI.cpp", "kIOMapWriteCombineCache", 2, nullptr,
 	 "XHCI rings, Apple's AppleUSBXHCI"},
 	{"drivers/SwitchUSB/UsbDmaMapper.cpp", "kIOMapWriteCombineCache", 1, nullptr,
 	 "the bounce pool, readBytes/writeBytes"},
+	{"drivers/SwitchUSB/XudcHardware.cpp", "kIOMapWriteCombineCache", 1,
+	 R"(\bring\.trb\b|\brings\s*\[[^\]]*\]\s*\.trb\b|\bcontext\s*\(|\bevents\.va\b|\bcontrol\.va\b)",
+	 "the XUDC's transfer rings, event ring and endpoint contexts (DmaBuffer::allocate)"},
 };
 
 // Functions that read, modify and write through a pointer argument: their calls are checked argument by argument

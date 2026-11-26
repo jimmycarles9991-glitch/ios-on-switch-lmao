@@ -48,6 +48,7 @@ static struct {
 	/* system sleep's and the wake's */
 	u32 recal;
 	int suspended;
+	u64 direct_queued;
 
 	/* the gate's. A present's: when the last one completed, the frame epoch it closed, and whether a work item completed
 	 * it (a kill's, a late look's): a pass may still add that frame's last job to the next frame's time */
@@ -65,6 +66,12 @@ static struct {
 
 static void wake_work(void *arg);
 static void timer_work(void *arg);
+static void presented_run(void *arg);
+
+struct presented {
+	u64 queued;
+	int pass;
+};
 
 void tgm_deadline_init(struct nvkm_device *device)
 {
@@ -284,6 +291,18 @@ static void period_run(int fired)
 		WRITE_ONCE(dl.wake_runs, dl.wake_runs + 1);
 	}
 	tgm_hold_settle(dl.device, now);
+	if (__atomic_load_n(&dl.direct_queued, __ATOMIC_RELAXED)) {
+		u64 direct = __atomic_load_n(&dl.direct_queued, __ATOMIC_ACQUIRE);
+
+		if (direct &&
+		    __atomic_compare_exchange_n(&dl.direct_queued, &direct, 0, 0, __ATOMIC_ACQ_REL,
+						__ATOMIC_RELAXED) &&
+		    (READ_ONCE(dl.kick_last) > dl.presented_at || dl.target)) {
+			struct presented p = {direct, 0};
+
+			presented_run(&p);
+		}
+	}
 	if (dl.target && now >= dl.expire_at)
 		window_expire(now);
 	if (!dl.target)
@@ -431,11 +450,6 @@ void tgm_deadline_progress(uint64_t ns, int biased)
 		WRITE_ONCE(dl.pass_biased, 1);
 }
 
-struct presented {
-	u64 queued;
-	int pass;
-};
-
 /* The gate held: the window the present queued at `queued` ends, or the window kept for its frame; its vblank, 0 if
  * neither is this frame's. */
 static u64 present_ends(u64 queued, u64 now)
@@ -530,11 +544,29 @@ void tgm_deadline_presented(uint64_t queued, int pass)
 	}
 }
 
+void tegra_gm20b_scanout_presented(uint64_t queued_ns)
+{
+	struct presented p = {queued_ns ? queued_ns : 1, 0};
+	u64 since = 0;
+
+	if (!READ_ONCE(dl.device))
+		return;
+	if (READ_ONCE(dl.kick_last) <= READ_ONCE(dl.presented_at) &&
+	    !__atomic_load_n(&dl.target, __ATOMIC_RELAXED) &&
+	    !switch_gpu_kept_window(&dl.kept, nvxnu_nanotime(), latest_target(), &since))
+		return;
+	if (nvxnu_pass_try(presented_run, &p))
+		return;
+	__atomic_store_n(&dl.direct_queued, p.queued, __ATOMIC_RELEASE);
+	nvxnu_work_schedule(dl.wake_work);
+}
+
 static void suspend_run(void *arg)
 {
 	const u64 now = nvxnu_nanotime();
 
 	(void)arg;
+	__atomic_store_n(&dl.direct_queued, 0, __ATOMIC_RELAXED);
 	switch_gpu_kept_done(&dl.kept, __atomic_load_n(&dl.kept.frame_end, __ATOMIC_ACQUIRE));
 	__atomic_store_n(&dl.kept.present, 0, __ATOMIC_RELAXED);
 	if (dl.target)

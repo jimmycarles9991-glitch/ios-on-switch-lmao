@@ -28,7 +28,10 @@
     "155": "setPowerState",
     "156": "maxCapabilityForDomainState",
     "160": "powerStateDidChangeTo",
+    "229": "createIOBuffer",
+    "249": "hardwareException",
     "253": "copyMapper",
+    "273": "createPort",
     "289": "regRead16",
     "290": "regRead32",
     "291": "regRead64",
@@ -36,7 +39,8 @@
     "293": "regWrite64"
   },
   "fields": {
-    "ringBufferOptions": "0x494"
+    "ringBufferOptions": "0x494",
+    "clientBufferOptions": "0x498"
   },
   "addresses": {
     "gMetaClass": "0xfffffff007af5468",
@@ -117,7 +121,6 @@
     "opaque226": "0xfffffff005ec58f0",
     "opaque227": "0xfffffff005ec5a0c",
     "opaque228": "0xfffffff005ec5b24",
-    "opaque229": "0xfffffff005ec0cd4",
     "opaque230": "0xfffffff005ec0c30",
     "opaque231": "0xfffffff005ec0c40",
     "opaque232": "0xfffffff005e1b8d4",
@@ -137,7 +140,6 @@
     "opaque246": "0xfffffff005ec81e4",
     "opaque247": "0xfffffff005ec5c08",
     "opaque248": "0xfffffff005ec5ca0",
-    "opaque249": "0xfffffff005ecd38c",
     "opaque250": "0xfffffff005ecd620",
     "opaque251": "0xfffffff005e21324",
     "opaque252": "0xfffffff005ecd6ec",
@@ -160,7 +162,6 @@
     "opaque270": "0xfffffff005ec6b6c",
     "opaque271": "0xfffffff005ec7dc4",
     "opaque272": "0xfffffff005ec7e14",
-    "opaque273": "0xfffffff005ec93c8",
     "opaque274": "0xfffffff005ecc7c0",
     "opaque275": "0xfffffff005ec0abc",
     "opaque276": "0xfffffff005ec0b20",
@@ -187,6 +188,39 @@
     "D2": "0xfffffff005ebdb80",
     "getWorkLoop": "0xfffffff005e1846c",
     "handleIsOpen": "0xfffffff005e1991c",
-    "vtable": "0xfffffff006dd4d38"
+    "vtable": "0xfffffff006dd4d38",
+    "createPort": "0xfffffff005ec93c8",
+    "switch_original_xhci_typec_usb2_port": "0xfffffff005eb62d4",
+    "switch_original_xhci_typec_usb3_port": "0xfffffff005ee4160",
+    "switch_original_xhci_port_properties": "unported",
+    "switch_original_xhci_usb2_port": "unported",
+    "switch_original_xhci_usb3_port": "unported",
+    "hardwareException": "0xfffffff005ecd38c",
+    "createIOBuffer": "0xfffffff005ec0cd4"
+  },
+  "hints": {
+    "functions": {
+      "switch_original_xhci_port_properties": "unported",
+      "switch_original_xhci_typec_usb2_port": {
+        "at": "0xfffffff005eb62d4",
+        "body": "a9bc5ff8 a90157f6 a9024ff4 a9037bfd 9100c3fd aa0303f4 aa0203f5 aa0103f6 aa0003f7 f0007900 91374000 52808201 9400ef9c aa0003f3 f000e1f8 910f6318 aa1803e1 9400aaf1 d00078e8 9101e108 f9000008 aa1803e0 9400f06d f9400268 f943ad08",
+        "why": "allocates 0x410 bytes of AppleUSB20XHCITypeCPort (vtable 0xfffffff006dd4078, the one AppleNubT8011USBXHCI::createPort makes for a port-type 4 node) and calls its init at +0x758, the variant base createPort uses (port number as \"port\"); 0xfffffff005eb61f0 before it calls +0x750, which takes a registry entry to adopt instead"
+      },
+      "switch_original_xhci_typec_usb3_port": {
+        "at": "0xfffffff005ee4160",
+        "body": "a9bc5ff8 a90157f6 a9024ff4 a9037bfd 9100c3fd aa0303f4 aa0203f5 aa0103f6 aa0003f7 d00077a0 910f4000 52808201 940037f9 aa0003f3 b000e098 91188318 aa1803e1 94002244 f0007788 91254108 f9000008 aa1803e0 940038ca f9400268 f943ad08",
+        "why": "allocates 0x410 bytes of AppleUSB30XHCITypeCPort (vtable 0xfffffff006dd7950) and calls its init at +0x758, as the USB 2.0 one; 0xfffffff005ee407c before it is the +0x750 variant"
+      },
+      "switch_original_xhci_usb2_port": "unported",
+      "switch_original_xhci_usb3_port": "unported"
+    },
+    "evidence": {
+      "createPort": "createPorts (slot 246, 0xfffffff005ec81e4) calls slot 273 with x1 the protocol copy, x2 the port number (0xfffffff005ec8794); the function logs \"%s@%s: %s::%s: port %d USB 2.%x with %d speed IDs\" under the name createPort",
+      "hardwareException": "slot 249: its log lines name it hardwareException (\"XHCI.USBCommand = 0x%08x\"), 21H461's exception code table as 24B119's (0x100 lost power)",
+      "createIOBuffer": "slot 229: x0 controller, w1 options, x2 capacity; the factory rounds capacity to the controller alignment, allocates IOBufferMemoryDescriptor, sets its tag and restores requested length"
+    },
+    "layout": {
+      "229": "createIOBuffer"
+    }
   }
 }

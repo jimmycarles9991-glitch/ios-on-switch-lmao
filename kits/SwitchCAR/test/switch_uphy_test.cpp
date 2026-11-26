@@ -66,7 +66,7 @@ TEST(SwitchUphy, NoCalibrationUnderALiveLane)
         [](void *context, bool ready) {
             auto *l = static_cast<Lane *>(context);
             if (!ready) {
-                std::lock_guard<std::mutex> guard(l->lock);
+                const std::lock_guard<std::mutex> guard(l->lock);
                 l->up = false;
             }
         },
@@ -76,7 +76,7 @@ TEST(SwitchUphy, NoCalibrationUnderALiveLane)
     std::thread role([&] {
         while (!stop.load()) {
             {
-                std::lock_guard<std::mutex> guard(lane.lock);
+                const std::lock_guard<std::mutex> guard(lane.lock);
                 if (switch_uphy_ready()) {
                     lane.up = true;
                     if (lane.pllBusy.load())
@@ -90,7 +90,7 @@ TEST(SwitchUphy, NoCalibrationUnderALiveLane)
         switch_uphy_announce(false);
         lane.pllBusy = true;
         {
-            std::lock_guard<std::mutex> guard(lane.lock);
+            const std::lock_guard<std::mutex> guard(lane.lock);
             if (lane.up)
                 ++lane.violations;
         }

@@ -776,6 +776,9 @@ extern "C" inline int tegra_gm20b_scanout_copy(const TegraScanoutCopy *copy)
     return display_promise_test::gOffer ? display_promise_test::gOffer(copy) : 0;
 }
 
+extern "C" inline void tgm_present_filter_owner(const void *)
+{}
+
 extern "C" inline void tgm_present_filter_callout(void (*fn)(void *, int), void *ctx)
 {
     display_promise_test::gGpuCallout = fn;

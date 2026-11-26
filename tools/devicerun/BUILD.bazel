@@ -30,6 +30,18 @@ py_library(
         "springboard.py",
         "stutter.py",
         "textures.py",
+        "usb.py",
+        "usb_class.py",
+        "usb_controller.py",
+        "usb_device.py",
+        "usb_dma.py",
+        "usb_driver.py",
+        "usb_host.py",
+        "usb_pd.py",
+        "usb_port.py",
+        "usb_probe.py",
+        "usb_sequence.py",
+        "usb_watch.py",
     ],
     visibility = ["//tools/perf:__pkg__"],
     deps = [
@@ -210,7 +222,6 @@ py_test(
     srcs = ["joycon_test.py"],
     deps = [":lib"],
 )
-
 # bazel run //tools/devicerun:frame_weights -- <absolute .logarchive> --pack <pack.bin>: the frame-weights capture's table
 # (drivers/TegraGM20BMetal/draw_times.h, tools/devicerun/README.md)
 py_library(
@@ -233,4 +244,51 @@ py_test(
     size = "small",
     srcs = ["frame_weights_test.py"],
     deps = [":frame_weights_lib"],
+)
+
+# usb.py's layers over the emulator's port-contract runs, and every Switch line's format string in the sources the
+# checks name.
+py_test(
+    name = "usb_test",
+    size = "small",
+    srcs = ["usb_test.py"],
+    data = glob(["test/usb/**"]) + [
+        "//drivers/SwitchBattery:all_files",
+        "//drivers/SwitchDisplayPort:all_files",
+        "//drivers/SwitchSuspend:all_files",
+        "//drivers/SwitchUSB:all_files",
+        "//drivers/TegraSMMU:all_files",
+        "//kernel/xnu-12377.121.6/bsd:vm/vm_unix.c",
+        "//kernel/xnu-12377.121.6/iokit:Kernel/IOService.cpp",
+        "//kernel/xnu-12377.121.6/iokit:Kernel/IOUserServer.cpp",
+    ],
+    deps = [":lib"],
+)
+
+# usb.py over the device boots, and the stale-data and class-driver rows over synthetic lines; usb_test.py's helpers.
+py_test(
+    name = "usb_boot_test",
+    size = "small",
+    srcs = [
+        "usb_boot_test.py",
+        "usb_test.py",
+    ],
+    data = glob(["test/usb/**"]),
+    main = "usb_boot_test.py",
+    deps = [":lib"],
+)
+
+# usb_dma.py and usb_probe.py: the XUSB clients' MC faults, the mapper's errors and the DMA probe; usb_test.py's and
+# usb_boot_test.py's helpers.
+py_test(
+    name = "usb_dma_test",
+    size = "small",
+    srcs = [
+        "usb_boot_test.py",
+        "usb_dma_test.py",
+        "usb_test.py",
+    ],
+    data = glob(["test/usb/**"]),
+    main = "usb_dma_test.py",
+    deps = [":lib"],
 )

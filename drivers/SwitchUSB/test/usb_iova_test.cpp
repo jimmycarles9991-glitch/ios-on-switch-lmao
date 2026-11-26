@@ -51,14 +51,14 @@ Buffer randomBuffer(std::mt19937_64 &rng, bool aligned)
     Buffer b;
     const int pieces = 1 + static_cast<int>(rng() % 6);
     for (int i = 0; i < pieces; ++i) {
-        const uint64_t base = 0x8000'0000ull + (rng() % 100000) * kPage;
+        const uint64_t base = 0x8000'0000ULL + (rng() % 100000) * kPage;
         const uint64_t start = i == 0 ? rng() % kPage : 0;
         uint64_t end = (1 + rng() % 8) * kPage;
         if (i == pieces - 1)
             end -= rng() % kPage;
         if (end <= start)
             end = start + 1;
-        b.pieces.push_back({base + start, end - start});
+        b.pieces.emplace_back(base + start, end - start);
     }
     if (!aligned && pieces > 1)
         b.pieces[1].first += 64;
@@ -69,11 +69,11 @@ Buffer randomBuffer(std::mt19937_64 &rng, bool aligned)
 
 TEST(UsbIova, ScatteredPagesTranslateByteForByte)
 {
-    std::mt19937_64 rng(5);
+    std::mt19937_64 rng(5);  // NOLINT(bugprone-random-generator-seed): a fixed seed, so a failure reproduces
     for (int layout = 0; layout < 2000; ++layout) {
         const Buffer b = randomBuffer(rng, true);
         uint64_t firstPa = 0;
-        ASSERT_TRUE(usb_iova_page_aligned(b.segment(), b.length, 1ull << 34, &firstPa)) << layout;
+        ASSERT_TRUE(usb_iova_page_aligned(b.segment(), b.length, 1ULL << 34, &firstPa)) << layout;
         ASSERT_EQ(firstPa, b.pieces[0].first);
         const uint32_t pages = UsbIovaWindow::pagesFor(firstPa, b.length);
         std::map<uint32_t, uint64_t> table;
@@ -97,28 +97,28 @@ TEST(UsbIova, ScatteredPagesTranslateByteForByte)
 
 TEST(UsbIova, BreaksInsideAPageAreRefused)
 {
-    std::mt19937_64 rng(7);
+    std::mt19937_64 rng(7);  // NOLINT(bugprone-random-generator-seed): a fixed seed, so a failure reproduces
     for (int layout = 0; layout < 500; ++layout) {
         const Buffer b = randomBuffer(rng, false);
         uint64_t firstPa = 0;
         if (b.pieces.size() > 1)
-            EXPECT_FALSE(usb_iova_page_aligned(b.segment(), b.length, 1ull << 34, &firstPa)) << layout;
+            EXPECT_FALSE(usb_iova_page_aligned(b.segment(), b.length, 1ULL << 34, &firstPa)) << layout;
     }
     Buffer high;
-    high.pieces = {{(1ull << 34) - kPage, 2 * kPage}};
+    high.pieces = {{(1ULL << 34) - kPage, 2 * kPage}};
     high.length = 2 * kPage;
     uint64_t firstPa = 0;
-    EXPECT_FALSE(usb_iova_page_aligned(high.segment(), high.length, 1ull << 34, &firstPa)) << "past the SMMU's reach";
+    EXPECT_FALSE(usb_iova_page_aligned(high.segment(), high.length, 1ULL << 34, &firstPa)) << "past the SMMU's reach";
 }
 
 TEST(UsbIova, WindowNeverHandsAPageOutTwice)
 {
     std::vector<uint8_t> map(1024);
     UsbIovaWindow window;
-    window.init(map.data(), 1024, 1ull << 20);
+    window.init(map.data(), 1024, 1ULL << 20);
     std::vector<int> owner(1024, -1);
     std::map<int, std::pair<uint32_t, uint32_t>> live;
-    std::mt19937_64 rng(11);
+    std::mt19937_64 rng(11);  // NOLINT(bugprone-random-generator-seed): a fixed seed, so a failure reproduces
     int id = 0;
     for (int step = 0; step < 20000; ++step) {
         if (live.empty() || rng() % 3) {
@@ -142,8 +142,8 @@ TEST(UsbIova, WindowNeverHandsAPageOutTwice)
             live.erase(it);
         }
         uint32_t used = 0;
-        for (int o : owner)
-            used += o >= 0;
+        for (const int o : owner)
+            used += o >= 0 ? 1 : 0;
         ASSERT_EQ(window.free, 1024u - used);
     }
 }

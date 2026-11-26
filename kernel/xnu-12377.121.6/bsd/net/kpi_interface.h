@@ -3978,6 +3978,15 @@ extern errno_t ifnet_get_low_power_wake(ifnet_t interface, boolean_t *on);
 extern void ifnet_enable_cellular_thread_group(ifnet_t interface);
 
 /*!
+ *       @function ifnet_enable_synchronous_input
+ *       @discussion Deliver the interface's input to the stack in the
+ *               caller's context instead of a DLIL input thread. Only
+ *               allowed before the interface is attached.
+ *       @param interface The interface.
+ */
+extern void ifnet_enable_synchronous_input(ifnet_t interface);
+
+/*!
  *       @function ifnet_get_rx_steering_rules
  *       @discussion Get RX flow steering rules from the interface's flowswitch.
  *       @param interface The interface.

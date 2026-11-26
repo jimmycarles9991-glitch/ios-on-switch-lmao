@@ -5,11 +5,11 @@
 // goes through here, under one lock. Page tables are TegraSMMUDomain.h.
 //
 // Registers (Linux memory/tegra/tegra210.c, iommu/tegra-smmu.c): PTB_ASID 0x1c, PTB_DATA 0x20, TLB_FLUSH 0x30 (ASID match
-// bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (type ALL with bit 3 set, or PA[31:4] | 1 for
-// one PTE group), PTC_FLUSH_1 0x9b8 (PA[33:32]; Tegra X1 TRM 18.11.1.10, .11, .122). The client translation
-// registers used here are TRANSLATION_ENABLE_0..3 (0x228..0x234) and _4 (0xb98), secure-only. Switchroot's bl31 sets
-// the client bits and leaves the swgroups in bypass. The global SMMU enable is secure-only too. The engines show
-// whether translation is on (TegraVIC.cpp).
+// bit 31, ASID in 30:24 here written as asid << 24), PTC_FLUSH 0x34 (bit 0: all or one PTE group, bit 3 kept set),
+// PTC_FLUSH_1 0x9b8 (PA[33:32]; Tegra X1 TRM 18.11.1.10, .11, .122). The client translation registers used here are
+// TRANSLATION_ENABLE_0..3 (0x228..0x234) and _4 (0xb98), secure-only. Switchroot's bl31 sets the client bits and
+// leaves the swgroups in bypass. The global SMMU enable is secure-only too. The engines show whether translation is on
+// (TegraVIC.cpp).
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>

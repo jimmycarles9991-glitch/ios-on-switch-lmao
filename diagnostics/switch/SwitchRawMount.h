@@ -194,7 +194,6 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
         "/usr/lib",                                                     // libobjc-trampolines, libffi-trampolines, ...
         "/System/Library/PrivateFrameworks/PlugInKitDaemon.framework",  // pkd's framework, not in the cache
         "/System/Library/PrivateFrameworks/VisualTestKit.framework",
-        "/System/DriverKit/System/Library",                                        // the DriverKit shared cache
         "/System/Library/PrivateFrameworks/DeviceRecoveryBrainSupport.framework",  // devicerecoveryd (KeepAlive)
         "/System/Library/PrivateFrameworks/PeriodicSystemMetricsCore.framework",
         "/System/Library/PrivateFrameworks/Nodes.framework",
@@ -203,7 +202,13 @@ static int native_switch_raw_cache_prepare(proc_t p, user_addr_t scratch, user_a
         "/System/Library/PrivateFrameworks/_NutritionCore_AppIntents.framework",
         "/System/Library/PrivateFrameworks/iCloudDriveCore.framework/Frameworks",
         "/usr/libexec/Moments.framework",
-        "/usr/libexec/AppleLatticeSupport.framework"};
+        "/usr/libexec/AppleLatticeSupport.framework",
+#if !XNU_12377_121_6
+        /* The DriverKit shared cache: 21H461's dyld opens it only here. 24B119's dyld goes on to the cryptex's own path,
+         * a file the shared region maps as it is (kernel/switch/vm/shared_cache.c). */
+        "/System/DriverKit/System/Library",
+#endif
+    };
     for (unsigned i = 0; i < sizeof(cryptex_only) / sizeof(cryptex_only[0]); ++i) {
         char source[128];
         snprintf(source, sizeof(source), "/private/preboot/Cryptexes/OS%s", cryptex_only[i]);

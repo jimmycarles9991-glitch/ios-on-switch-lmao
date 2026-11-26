@@ -56,9 +56,10 @@ TEST_F(FuseOwner, NoWriteEverClearsTheVisibleBit)
     switch_car_fuse_readable();
     switch_car_rmw(kMiscClkEnb, kDev1OscDiv, 0);
     switch_car_fuse_readable();
-    for (const auto &[address, value] : writes())
+    for (const auto &[address, value] : writes()) {
         if (address == kCar + kMiscClkEnb)
             EXPECT_TRUE(value & kVisible) << std::hex << value;
+    }
 }
 
 struct Site {
@@ -96,22 +97,21 @@ TEST(FuseOwnerSource, OnlyTheKitWritesMiscClkEnb)
     const std::regex call(R"((write32\w*|rmw32|\bw32|\.modify|nvkm_wr32|nvkm_mask)\s*\()");
     const std::regex misc(R"(MISC_CLK_ENB|MiscClkEnb)");
     std::vector<std::string> writers;
-    for (const Site &site : sitesMatching({"MISC_CLK_ENB", "MiscClkEnb"}, call, misc))
+    for (const Site &site : sitesMatching({"MISC_CLK_ENB", "MiscClkEnb"}, call, misc)) {
         if (site.where.find("kits/SwitchCAR/SwitchCAR.cpp") == std::string::npos)
             writers.push_back(site.where + ": " + site.line);
+    }
     EXPECT_THAT(writers, testing::IsEmpty());
 }
 
-// SwitchUSB's XudcHardware.cpp turns the clock back off after its own fuse reads; that is the one left.
-TEST(FuseOwnerSource, NobodyElseTurnsTheFuseClockOff)
+TEST(FuseOwnerSource, NobodyTurnsTheFuseClockOff)
 {
     const std::regex call(R"((write32\w*|\bw32|switch_car_clock_disable)\s*\()");
     const std::regex fuse(
         R"((CLK_ENB_H_CLR|ClkEnbHClr)[^;]*(FUSE|Fuse)|switch_car_clock_disable\s*\(\s*(kFuseClock|39)\b)");
     std::vector<std::string> clearers;
     for (const Site &site : sitesMatching({"CLK_ENB_H_CLR", "ClkEnbHClr", "switch_car_clock_disable"}, call, fuse))
-        if (site.where.find("SwitchUSB/XudcHardware.cpp") == std::string::npos)
-            clearers.push_back(site.where + ": " + site.line);
+        clearers.push_back(site.where + ": " + site.line);
     EXPECT_THAT(clearers, testing::IsEmpty());
 }
 }  // namespace

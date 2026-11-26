@@ -61,6 +61,9 @@ TEST(DirectScanoutSource, FenceOnlyPresentNoRetireAtTheOffer)
 {
     const CodeText offer = method("bool offerDirect(");
     EXPECT_TRUE(offer.has("TEGRA_SCANOUT_COPY_FENCE_ONLY"));
+    EXPECT_TRUE(offer.has("tegra_gm20b_scanout_presented(ticksNs(kickAt));"));
+    EXPECT_TRUE(offer.has("sourceUnshown(snapError, request, \"direct\")"));
+    EXPECT_TRUE(offer.has("offered == kIOReturnBusy && tegra_gm20b_scanout_outstanding(nullptr)"));
     EXPECT_FALSE(offer.has("retireSwap("));
 }
 

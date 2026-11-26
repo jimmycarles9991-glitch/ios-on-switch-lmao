@@ -51,6 +51,7 @@ public:
 
     uint64_t getPhysicalSegment(uint64_t at, IOByteCount *length, int)
     {
+        EXPECT_GT(prepares, 0u) << "IOGMD: getPhysicalSegment requires a prepared descriptor";
         *length = 4096;
         return 0x80000000 + at;
     }
@@ -407,4 +408,27 @@ TEST_F(DirectSlots, PostHoldCompressionRaceRejectsIdleAndBusyCachedSlotsWithoutL
     EXPECT_EQ(offer(), -1);
     EXPECT_EQ(leases, 1u);
     EXPECT_EQ(display->probeDomain.unmaps, 1u);
+}
+
+TEST_F(DirectSlots, SnapshotErrorsAreReportedToCaller)
+{
+    for (const int expected : {-16, int(SWITCH_GPU_BACKING_WRITER_GONE), int(SWITCH_GPU_BACKING_WRITER_FAILED)}) {
+        error = expected;
+        int snapError = 0;
+        EXPECT_EQ(display->directSlotFor(&surface, &memory, 256, 16384, false, &snapError), -1);
+        EXPECT_EQ(snapError, expected);
+    }
+}
+
+TEST_F(DirectSlots, LayoutAndCompressionLookupsPrepareAndCompleteUnwiredDescriptors)
+{
+    surfaceIsCompressed = true;
+    EXPECT_EQ(display->surfaceBlockLog2(&memory), -1);
+    EXPECT_TRUE(display->surfaceCompressed(&memory));
+    EXPECT_EQ(memory.prepares, 0u);
+
+    memory.fail = true;
+    EXPECT_EQ(display->surfaceBlockLog2(&memory), -1);
+    EXPECT_FALSE(display->surfaceCompressed(&memory));
+    EXPECT_EQ(memory.prepares, 0u);
 }

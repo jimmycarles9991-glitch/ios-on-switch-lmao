@@ -31,6 +31,7 @@ extern int tegra_nvjpg_probe(void);     /* on by default; own thread, waits for 
 extern int
 switch_audio_publish(void); /* null sink with switch-no-audio; the Tegra backend sleeps on I2C1, PZ4 and the GIC */
 extern int switch_suspend_start(void); /* after every board driver it suspends */
+extern int switch_displayport_start(void);
 extern int switch_usb_start(void); /* no-op without the ADT's /arm-io/usb-device; runs its bring-up on its own thread */
 extern int switch_watchdog_publish(void); /* the IOWatchdog launchd starts watchdogd for (NativeSwitchWatchdog) */
 extern int tegra_se_start(void);          /* SE2: known answers, kernel PRNG reseed, a timing run later; own thread */
@@ -55,6 +56,8 @@ static void switch_board_thread(void *parameter __unused, wait_result_t result _
     /* After Bluetooth: rail pairing hands Joy-Cons the console's (fuse-derived) BD address. */
     if (switch_joycon_start())
         printf("Switch: SwitchJoyCon did not start\n");
+    if (switch_displayport_start())
+        printf("Switch: SwitchDisplayPort did not start\n");
     if (switch_usb_start())
         printf("Switch: SwitchUSB did not start\n");
     if (tegra_gpio_start())

@@ -15,8 +15,8 @@
 
 namespace {
 constexpr uintptr_t kCar = 0x60006000, kPmc = 0x7000e400;
-constexpr uint32_t kToggle = 0x30, kClamp = 0x34, kStatus = 0x38, kDpd = 0x1b8, kDpdStatus = 0x1bc, kDpd2 = 0x1c0,
-                   kDpd2Status = 0x1c4;
+constexpr uint32_t kDpdSample = 0x20, kToggle = 0x30, kClamp = 0x34, kStatus = 0x38, kDpd = 0x1b8, kDpdStatus = 0x1bc,
+                   kDpd2 = 0x1c0, kDpd2Status = 0x1c4;
 constexpr uint32_t kStart = 1u << 8;
 
 struct Model {
@@ -26,6 +26,7 @@ struct Model {
     int startReads = 0;  // reads of PWRGATE_TOGGLE that still show START
     unsigned pending = 0;
     bool stuck = false;
+    bool clampsStuck = false;  // REMOVE_CLAMPING_CMD's bits never clear
     int collisions = 0;
 };
 
@@ -33,17 +34,18 @@ Model gModel;
 
 void reset()
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     gModel.registers.clear();
     gModel.writes.clear();
     gModel.startReads = 0;
     gModel.stuck = false;
+    gModel.clampsStuck = false;
     gModel.collisions = 0;
 }
 
 std::vector<std::pair<uintptr_t, uint32_t>> writes()
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     return gModel.writes;
 }
 
@@ -82,27 +84,65 @@ TEST_F(SwitchCAR, WaitsOnCarRegisters)
 
 TEST_F(SwitchCAR, PowerUpFollowsLinuxOrder)
 {
-    ASSERT_TRUE(switch_pmc_power_up(2, 178, 178));
+    ASSERT_TRUE(switch_pmc_power_up(2, 178, 178, nullptr));
     EXPECT_EQ(writes(), (std::vector<std::pair<uintptr_t, uint32_t>>{
-                            {kCar + 0x290, 1u << 18},
                             {kPmc + kToggle, 2 | kStart},
                             {kCar + 0x284, 1u << 18},
+                            {kCar + 0x290, 1u << 18},
                             {kPmc + kClamp, 1u << 2},
                             {kCar + 0x294, 1u << 18},
                         }));
     EXPECT_TRUE(switch_pmc_partition_is_on(2));
 }
 
-TEST_F(SwitchCAR, PowerUpInResetLeavesTheResetAsserted)
+// XUSBC (22) as xhci-tegra powers it: clock and reset XUSB_HOST (89), then the client's hot reset released last
+// (powergate-t21x.c tegra210_pg_mc_info XUSBC: MC_CLIENT_XUSB_HOST, MC_CLIENT_HOTRESET_CTRL bit 19).
+TEST_F(SwitchCAR, PowerUpReleasesTheMemoryClientLast)
 {
-    ASSERT_TRUE(switch_pmc_power_up_in_reset(20, 156, 156));
+    constexpr uintptr_t kHotReset = 0x70019000 + 0x200;
+    const switch_pmc_mc_client client = {0x200, 1u << 19, [](uint32_t ctrl, uint32_t bit, bool on) {
+                                             const std::lock_guard<std::mutex> hold(gModel.mutex);
+                                             gModel.writes.emplace_back(0x70019000 + ctrl, on ? bit : ~bit);
+                                         }};
+    ASSERT_TRUE(switch_pmc_power_up(22, 89, 89, &client));
     EXPECT_EQ(writes(), (std::vector<std::pair<uintptr_t, uint32_t>>{
-                            {kCar + 0x438, 1u << 28},
-                            {kPmc + kToggle, 20 | kStart},
-                            {kCar + 0x448, 1u << 28},
-                            {kPmc + kClamp, 1u << 20},
+                            {kPmc + kToggle, 22 | kStart},
+                            {kCar + 0x330, 1u << 25},
+                            {kCar + 0x310, 1u << 25},
+                            {kPmc + kClamp, 1u << 22},
+                            {kCar + 0x314, 1u << 25},
+                            {kHotReset, ~(1u << 19)},
                         }));
-    EXPECT_TRUE(switch_pmc_partition_is_on(20));
+}
+
+// Clamp removal is done when REMOVE_CLAMPING_CMD's own bit reads 0 (Tegra X1 TRM 12.6.14); one that never clears runs
+// the power-up to its end and fails.
+TEST_F(SwitchCAR, PowerUpWithClampsStuckRunsToItsEndAndFails)
+{
+    gModel.clampsStuck = true;
+    EXPECT_FALSE(switch_pmc_power_up(20, 156, 156, nullptr));
+    const auto done = writes();
+    ASSERT_FALSE(done.empty());
+    EXPECT_EQ(done.back(), (std::pair<uintptr_t, uint32_t>{kCar + 0x43c, 1u << 28}));
+}
+
+// PCX is partition 3 but REMOVE_CLAMPING_CMD bit 4 (Tegra X1 TRM 12.6.14, p.467), for the write and the wait alike.
+TEST_F(SwitchCAR, PcxIsUnclampedThroughCommandBit4)
+{
+    ASSERT_TRUE(switch_pmc_unclamp(3));
+    EXPECT_EQ(writes(), (std::vector<std::pair<uintptr_t, uint32_t>>{{kPmc + kClamp, 1u << 4}}));
+    gModel.clampsStuck = true;
+    EXPECT_FALSE(switch_pmc_unclamp(3)) << "bit 4 never cleared";
+}
+
+TEST_F(SwitchCAR, T210B01IsChip0x21AtMajorRevision2)
+{
+    constexpr uintptr_t kHidrev = 0x70000804;
+    for (const auto &[hidrev, b01] : {std::pair{0x2121u, true}, std::pair{0x2111u, false}, std::pair{0x2131u, true},
+                                      std::pair{0x1821u, false}, std::pair{0u, false}}) {
+        gModel.registers[kHidrev] = hidrev;
+        EXPECT_EQ(switch_car_soc_t210b01(), b01) << std::hex << hidrev;
+    }
 }
 
 TEST_F(SwitchCAR, PartitionAlreadyInStateIsNotToggled)
@@ -124,47 +164,59 @@ TEST_F(SwitchCAR, UnacknowledgedToggleFailsWithinItsBound)
 TEST_F(SwitchCAR, ConcurrentTogglesNeverCollide)
 {
     std::vector<std::thread> threads;
-    for (unsigned partition = 0; partition < 4; ++partition)
+    threads.reserve(4);
+    for (unsigned partition = 0; partition < 4; ++partition) {
         threads.emplace_back([partition] {
             for (int i = 0; i < 200; ++i) {
                 EXPECT_TRUE(switch_pmc_partition_on(partition));
                 EXPECT_TRUE(switch_pmc_partition_off(partition));
             }
         });
+    }
     for (auto &thread : threads)
         thread.join();
     EXPECT_EQ(gModel.collisions, 0);
 }
 
+// Each IO deep power-down request is preceded by DPD_SAMPLE (Tegra X1 TRM 12.6.111) and the sample released after it.
 TEST_F(SwitchCAR, IoPadsUseTheirRegister)
 {
     EXPECT_TRUE(switch_pmc_io_pad_on(28));
     EXPECT_TRUE(switch_pmc_io_pad_on(39));
     EXPECT_TRUE(switch_pmc_io_pad_off(2));
     EXPECT_EQ(writes(), (std::vector<std::pair<uintptr_t, uint32_t>>{
+                            {kPmc + kDpdSample, 1},
                             {kPmc + kDpd, (1u << 30) | (1u << 28)},
+                            {kPmc + kDpdSample, 0},
+                            {kPmc + kDpdSample, 1},
                             {kPmc + kDpd2, (1u << 30) | (1u << 7)},
+                            {kPmc + kDpdSample, 0},
+                            {kPmc + kDpdSample, 1},
                             {kPmc + kDpd, (2u << 30) | (1u << 2)},
+                            {kPmc + kDpdSample, 0},
                         }));
 }
 }  // namespace
 
 // The PMC model: a toggle stays in flight (START set, status unchanged) for three more reads of the PMC, then flips
-// the partition's status bit and drops START. DPD requests settle at once (code 1 takes the pad out of deep power
-// down, code 2 puts it in).
+// the partition's status bit and drops START. Clamp removal clears its command bit at once. DPD requests settle at once
+// (code 1 takes the pad out of deep power down, code 2 puts it in).
 extern "C" uint32_t switch_mmio_model_read32(uintptr_t address)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
-    if ((address == kPmc + kToggle || address == kPmc + kStatus) && gModel.startReads > 0 && --gModel.startReads == 0) {
-        gModel.registers[kPmc + kStatus] ^= 1u << gModel.pending;
-        gModel.registers[kPmc + kToggle] &= ~kStart;
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
+    if ((address == kPmc + kToggle || address == kPmc + kStatus) && gModel.startReads > 0) {
+        --gModel.startReads;
+        if (gModel.startReads == 0) {
+            gModel.registers[kPmc + kStatus] ^= 1u << gModel.pending;
+            gModel.registers[kPmc + kToggle] &= ~kStart;
+        }
     }
     return gModel.registers[address];
 }
 
 extern "C" void switch_mmio_model_write32(uintptr_t address, uint32_t value)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     gModel.writes.emplace_back(address, value);
     if (address == kPmc + kToggle) {
         if (gModel.startReads > 0)
@@ -172,6 +224,10 @@ extern "C" void switch_mmio_model_write32(uintptr_t address, uint32_t value)
         gModel.pending = value & 0x1f;
         gModel.startReads = gModel.stuck ? 1 << 30 : 3;
         gModel.registers[address] = value;
+        return;
+    }
+    if (address == kPmc + kClamp && !gModel.clampsStuck) {
+        gModel.registers[address] = 0;
         return;
     }
     if (address == kPmc + kDpd || address == kPmc + kDpd2) {

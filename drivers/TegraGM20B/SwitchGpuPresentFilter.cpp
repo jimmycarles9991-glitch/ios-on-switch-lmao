@@ -42,6 +42,7 @@ struct Dropped {
 
 Published gView;
 Callout gCallout;
+const void *gOwner;
 uint32_t gRuns[kCpus];  // each written by its own CPU's filter alone, with interrupts off
 
 // the writers' own: the attached view's reference, and a dropped one still waiting for the filters to leave it
@@ -129,6 +130,17 @@ bool readCallout(void (**fn)(void *, int), void **context)
 }
 }  // namespace
 
+extern "C" void tgm_present_filter_owner(const void *display)
+{
+	__atomic_store_n(&gOwner, display, __ATOMIC_RELEASE);
+}
+
+extern "C" int tgm_present_filter_is_owner(const void *display)
+{
+	const void *owner = __atomic_load_n(&gOwner, __ATOMIC_ACQUIRE);
+	return owner != nullptr && display == owner ? 1 : 0;
+}
+
 // Once, at the display's start: it has one writer.
 extern "C" void tgm_present_filter_callout(void (*fn)(void *, int), void *ctx)
 {
@@ -157,8 +169,23 @@ extern "C" void tgm_present_filter_attach(const struct switch_gpu_backing_token 
 	publish(view.timeline, view.value);
 }
 
+extern "C" void tgm_present_filter_attach_for(const void *display,
+					      const struct switch_gpu_backing_token *token)
+{
+	if (!tgm_present_filter_is_owner(display))
+		return;
+	tgm_present_filter_attach(token);
+}
+
 extern "C" void tgm_present_filter_detach(void)
 {
+	drop();
+}
+
+extern "C" void tgm_present_filter_detach_for(const void *display)
+{
+	if (!tgm_present_filter_is_owner(display))
+		return;
 	drop();
 }
 

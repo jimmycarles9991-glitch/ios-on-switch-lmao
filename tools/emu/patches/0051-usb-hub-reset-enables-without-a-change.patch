@@ -1,0 +1,21 @@
+Emulator: a hub port reset that enables the port reports C_PORT_RESET alone. USB 2.0 11.24.2.7.2.2 sets
+C_PORT_ENABLE only when the port is disabled by a Port_Error; dev-hub.c recorded it on the enable as well, so
+AppleUSBHub took every reset port as one the hardware had disabled and enumerated its device again.
+
+diff --git a/hw/usb/dev-hub.c b/hw/usb/dev-hub.c
+--- a/hw/usb/dev-hub.c
++++ b/hw/usb/dev-hub.c
+@@ -421,7 +421,12 @@
+                 usb_hub_port_clear(port, PORT_STAT_RESET);
+                 if (pdev && pdev->attached) {
+                     usb_device_reset(pdev);
+-                    usb_hub_port_set(port, PORT_STAT_ENABLE);
++                    /*
++                     * USB 2.0 11.24.2.7.2.2: C_PORT_ENABLE is set only when a
++                     * port is disabled by a Port_Error. A reset that enables
++                     * the port reports C_PORT_RESET alone.
++                     */
++                    port->wPortStatus |= PORT_STAT_ENABLE;
+                 }
+                 usb_wakeup(s->intr, 0);
+                 break;

@@ -48,8 +48,11 @@ kernel_driver(
         "kits/SwitchTime",
     ],
     late = ["SwitchJoyConHID.cpp"],
-    # Game-controller personalities.
-    prelink = ["com.apple.driver.AppleGameControllerPersonality"],
+    # Game-controller personalities, and on 24B119 (21H461 has none) gamecontrollerd's dynamic probe of every gamepad.
+    prelink = ["com.apple.driver.AppleGameControllerPersonality"] + select({
+        "//ipsw:21H461": [],
+        "//ipsw:24B119": ["com.apple.iokit.IOGameControllerFamily"],
+    }),
 )
 
 # joyconpaird / joyconnfc: Joy-Con Bluetooth pairing hand-off and NFC.

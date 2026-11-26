@@ -32,9 +32,11 @@ py_library(
     name = "emu_lib",
     srcs = [
         "cache.py",
+        "cachecheck.py",
         "gpucheck.py",
         "gpulog.py",
         "hekate.py",
+        "hidcheck.py",
         "machine.py",
         "monitor.py",
         "msgbuf.py",
@@ -42,6 +44,8 @@ py_library(
         "qtest.py",
         "report.py",
         "sdcard.py",
+        "usbcheck.py",
+        "usbdev.py",
     ],
     data = glob(
         ["patches/*.patch"],
@@ -123,11 +127,49 @@ py_test(
 )
 
 py_test(
+    name = "cachecheck_test",
+    srcs = ["cachecheck_test.py"],
+    deps = [":emu_lib"],
+)
+
+py_test(
+    name = "hidcheck_test",
+    srcs = ["hidcheck_test.py"],
+    deps = [":emu_lib"],
+)
+
+py_test(
+    name = "usbcheck_test",
+    srcs = ["usbcheck_test.py"],
+    deps = [":emu_lib"],
+)
+
+# The USB-C port's PD controller and charger, replaying the device's trace, and the XUSB host's bring-up, under qtest
+# from the shared emulator build of the current patches (or SWITCH_EMU_QEMU_CACHE's, passed with --test_env).
+py_test(
+    name = "usb_test",
+    srcs = ["usb_test.py"],
+    tags = ["requires-darwin"],
+    deps = [":emu_lib"],
+)
+
+py_test(
     name = "msgbuf_test",
     srcs = ["msgbuf_test.py"],
     deps = [":emu_lib"],
 )
 
+py_test(
+    name = "report_test",
+    srcs = ["report_test.py"],
+    deps = [":emu_lib"],
+)
+
+py_test(
+    name = "sdcard_test",
+    srcs = ["sdcard_test.py"],
+    deps = [":emu_lib"],
+)
 # bazel run //tools/emu:boot -- --kind=ios17|ios27 [--sd IMAGE] [--seconds N] (README.md).
 py_library(
     name = "boot_lib",

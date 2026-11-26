@@ -1,0 +1,233 @@
+Emulator: the XUSB host's xHCI registers where the Tegra X1 TRM puts them (22.16.11, p.1596-1607): CAPLENGTH 20h,
+the runtime registers at 800h, the doorbells at C00h, the extended capabilities at 600h (USB Legacy Support, then
+USB 3 and USB 2.0 Supported Protocol, the latter with HLC set as at reset), HCSPARAMS2 F8h, HCSPARAMS3 00400002h and
+MaxPSASize Fh; the port and slot counts stay the console's (HCSPARAMS1 09000124h)
+
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -1100,6 +1100,7 @@
+     qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "intrs", 1);
+     qdev_prop_set_uint32(DEVICE(tegra_xusb_dev), "slots", 36);
+     qdev_prop_set_bit(DEVICE(tegra_xusb_dev), "port-power-control", true);
++    qdev_prop_set_bit(DEVICE(tegra_xusb_dev), "t210-registers", true);
+     sysbus_realize_and_unref(SYS_BUS_DEVICE(tegra_xusb_dev), &error_fatal);
+     qdev_connect_gpio_out_named(DEVICE(tegra_xusb_dev), "host-irq", 0, DIRQ(INT_USB3_HOST_INT));
+     qdev_connect_gpio_out_named(DEVICE(tegra_xusb_dev), "smi-irq", 0, DIRQ(INT_USB3_HOST_SMI));
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -55,6 +55,26 @@
+ #define OFF_RUNTIME     0x1000
+ #define OFF_DOORBELL    0x2000
+ 
++/*
++ * The T210 XUSB host's layout (Tegra X1 TRM 22.16.11, p.1596-1607): CAPLENGTH 20h, DBOFF 300h dwords, RTSOFF 40h
++ * 32-byte units, xECP 180h dwords (USB Legacy Support, then the USB 3 and USB 2.0 Supported Protocol capabilities),
++ * HCSPARAMS2 ERST Max Fh and IST 8, HCSPARAMS3 U2 latency 40h and U1 latency 2, MaxPSASize Fh. The manual puts the
++ * USB 2.0 capability at 187h, inside a four-dword USB 3 capability at 184h; it follows that one here (188h).
++ */
++#define T210_LEN_CAP        0x20
++#define T210_OFF_RUNTIME    (0x40 << 5)
++#define T210_OFF_DOORBELL   (0x300 << 2)
++#define T210_OFF_EXTCAP     (0x180 << 2)
++#define T210_LEN_EXTCAP     0x30
++#define T210_USB2_HLC       (1 << 19)
++
++#if (T210_LEN_CAP + LEN_OPER) > T210_OFF_EXTCAP
++#error The T210 port registers reach its extended capabilities
++#endif
++#if (T210_OFF_RUNTIME + LEN_RUNTIME) > T210_OFF_DOORBELL
++#error The T210 runtime registers reach its doorbells
++#endif
++
+ #if (OFF_OPER + LEN_OPER) > OFF_RUNTIME
+ #error Increase OFF_RUNTIME
+ #endif
+@@ -2790,33 +2810,33 @@
+ 
+     switch (reg) {
+     case 0x00: /* HCIVERSION, CAPLENGTH */
+-        ret = 0x01000000 | LEN_CAP;
++        ret = 0x01000000 | (xhci->t210_registers ? T210_LEN_CAP : LEN_CAP);
+         break;
+     case 0x04: /* HCSPARAMS 1 */
+         ret = ((xhci->numports_2+xhci->numports_3)<<24)
+             | (xhci->numintrs<<8) | xhci->numslots;
+         break;
+     case 0x08: /* HCSPARAMS 2 */
+-        ret = 0x0000000f;
++        ret = xhci->t210_registers ? 0x000000f8 : 0x0000000f;
+         break;
+     case 0x0c: /* HCSPARAMS 3 */
+-        ret = 0x00000000;
++        ret = xhci->t210_registers ? 0x00400002 : 0x00000000;
+         break;
+     case 0x10: /* HCCPARAMS */
+-        if (sizeof(dma_addr_t) == 4) {
+-            ret = 0x00080000 | (xhci->max_pstreams_mask << 12);
+-        } else {
+-            ret = 0x00080001 | (xhci->max_pstreams_mask << 12);
++        ret = (xhci->t210_registers ? T210_OFF_EXTCAP >> 2 : 0x0008) << 16;
++        ret |= xhci->max_pstreams_mask << 12;
++        if (sizeof(dma_addr_t) != 4) {
++            ret |= 1;
+         }
+         if (xhci->port_power_control) {
+             ret |= HCCPARAMS_PPC;
+         }
+         break;
+     case 0x14: /* DBOFF */
+-        ret = OFF_DOORBELL;
++        ret = xhci->t210_registers ? T210_OFF_DOORBELL : OFF_DOORBELL;
+         break;
+     case 0x18: /* RTSOFF */
+-        ret = OFF_RUNTIME;
++        ret = xhci->t210_registers ? T210_OFF_RUNTIME : OFF_RUNTIME;
+         break;
+ 
+     /* extended capabilities */
+@@ -2850,9 +2870,55 @@
+     }
+ 
+     trace_usb_xhci_cap_read(reg, ret);
++    return ret;
++}
++
++static uint64_t xhci_t210_extcap_read(void *ptr, hwaddr reg, unsigned size)
++{
++    XHCIState *xhci = ptr;
++    uint32_t ret;
++
++    switch (reg) {
++    case 0x00: /* USB Legacy Support: ID 1, next 4 dwords on, no BIOS or OS ownership claimed */
++        ret = 0x00000401;
++        break;
++    case 0x10: /* Supported Protocol, USB 3.0: next 4 dwords on */
++        ret = 0x03000402;
++        break;
++    case 0x14:
++    case 0x24:
++        ret = 0x20425355; /* "USB " */
++        break;
++    case 0x18: /* USB 3 ports first */
++        ret = (xhci->numports_3 << 8) | 1;
++        break;
++    case 0x20: /* Supported Protocol, USB 2.0: the last capability */
++        ret = 0x02000002;
++        break;
++    case 0x28: /* HLC set at reset (TRM p.1607), though the ports have no hardware L1 LPM (22.4, p.1323) */
++        ret = T210_USB2_HLC | (xhci->numports_2 << 8) | (xhci->numports_3 + 1);
++        break;
++    default:
++        ret = 0;
++        break;
++    }
++    trace_usb_xhci_cap_read(T210_OFF_EXTCAP + reg, ret);
+     return ret;
+ }
+ 
++static void xhci_t210_extcap_write(void *ptr, hwaddr reg, uint64_t val, unsigned size)
++{
++    trace_usb_xhci_unimplemented("extended capability write", T210_OFF_EXTCAP + reg);
++}
++
++static const MemoryRegionOps xhci_t210_extcap_ops = {
++    .read = xhci_t210_extcap_read,
++    .write = xhci_t210_extcap_write,
++    .valid.min_access_size = 4,
++    .valid.max_access_size = 4,
++    .endianness = DEVICE_LITTLE_ENDIAN,
++};
++
+ static uint64_t xhci_port_read(void *ptr, hwaddr reg, unsigned size)
+ {
+     XHCIPort *port = ptr;
+@@ -3460,6 +3526,9 @@
+     int i;
+ 
+     XHCIState *xhci = XHCI(dev);
++    uint32_t len_cap = xhci->t210_registers ? T210_LEN_CAP : LEN_CAP;
++    uint32_t off_runtime = xhci->t210_registers ? T210_OFF_RUNTIME : OFF_RUNTIME;
++    uint32_t off_doorbell = xhci->t210_registers ? T210_OFF_DOORBELL : OFF_DOORBELL;
+ 
+     if (xhci->numintrs > XHCI_MAXINTRS) {
+         xhci->numintrs = XHCI_MAXINTRS;
+@@ -3477,7 +3546,7 @@
+         xhci->numslots = 1;
+     }
+     if (xhci_get_flag(xhci, XHCI_FLAG_ENABLE_STREAMS)) {
+-        xhci->max_pstreams_mask = 7; /* == 256 primary streams */
++        xhci->max_pstreams_mask = xhci->t210_registers ? 0xf : 7; /* 64Ki or 256 primary streams */
+     } else {
+         xhci->max_pstreams_mask = 0;
+     }
+@@ -3487,7 +3556,7 @@
+ 
+     memory_region_init(&xhci->mem, OBJECT(dev), "xhci", XHCI_LEN_REGS);
+     memory_region_init_io(&xhci->mem_cap, OBJECT(dev), &xhci_cap_ops, xhci,
+-                          "capabilities", LEN_CAP);
++                          "capabilities", len_cap);
+     memory_region_init_io(&xhci->mem_oper, OBJECT(dev), &xhci_oper_ops, xhci,
+                           "operational", 0x400);
+     memory_region_init_io(&xhci->mem_runtime, OBJECT(dev), &xhci_runtime_ops,
+@@ -3496,13 +3565,18 @@
+                            xhci, "doorbell", LEN_DOORBELL);
+ 
+     memory_region_add_subregion(&xhci->mem, 0,            &xhci->mem_cap);
+-    memory_region_add_subregion(&xhci->mem, OFF_OPER,     &xhci->mem_oper);
+-    memory_region_add_subregion(&xhci->mem, OFF_RUNTIME,  &xhci->mem_runtime);
+-    memory_region_add_subregion(&xhci->mem, OFF_DOORBELL, &xhci->mem_doorbell);
++    memory_region_add_subregion(&xhci->mem, len_cap,      &xhci->mem_oper);
++    memory_region_add_subregion(&xhci->mem, off_runtime,  &xhci->mem_runtime);
++    memory_region_add_subregion(&xhci->mem, off_doorbell, &xhci->mem_doorbell);
++    if (xhci->t210_registers) {
++        memory_region_init_io(&xhci->mem_extcap, OBJECT(dev), &xhci_t210_extcap_ops, xhci,
++                              "extended capabilities", T210_LEN_EXTCAP);
++        memory_region_add_subregion(&xhci->mem, T210_OFF_EXTCAP, &xhci->mem_extcap);
++    }
+ 
+     for (i = 0; i < xhci->numports; i++) {
+         XHCIPort *port = &xhci->ports[i];
+-        uint32_t offset = OFF_OPER + 0x400 + 0x10 * i;
++        uint32_t offset = len_cap + 0x400 + 0x10 * i;
+         port->xhci = xhci;
+         memory_region_init_io(&port->mem, OBJECT(dev), &xhci_port_ops, port,
+                               port->name, 0x10);
+@@ -3530,6 +3604,9 @@
+     memory_region_del_subregion(&xhci->mem, &xhci->mem_oper);
+     memory_region_del_subregion(&xhci->mem, &xhci->mem_runtime);
+     memory_region_del_subregion(&xhci->mem, &xhci->mem_doorbell);
++    if (xhci->t210_registers) {
++        memory_region_del_subregion(&xhci->mem, &xhci->mem_extcap);
++    }
+ 
+     for (i = 0; i < xhci->numports; i++) {
+         XHCIPort *port = &xhci->ports[i];
+@@ -3708,6 +3785,7 @@
+     DEFINE_PROP_UINT32("p2",    XHCIState, numports_2, 4),
+     DEFINE_PROP_UINT32("p3",    XHCIState, numports_3, 4),
+     DEFINE_PROP_BOOL("port-power-control", XHCIState, port_power_control, false),
++    DEFINE_PROP_BOOL("t210-registers", XHCIState, t210_registers, false),
+     DEFINE_PROP_LINK("host",    XHCIState, hostOpaque, TYPE_DEVICE,
+                      DeviceState *),
+     DEFINE_PROP_END_OF_LIST(),
+diff --git a/hw/usb/hcd-xhci.h b/hw/usb/hcd-xhci.h
+--- a/hw/usb/hcd-xhci.h
++++ b/hw/usb/hcd-xhci.h
+@@ -184,6 +184,7 @@
+     MemoryRegion mem_oper;
+     MemoryRegion mem_runtime;
+     MemoryRegion mem_doorbell;
++    MemoryRegion mem_extcap;
+ 
+     /* properties */
+     uint32_t numports_2;
+@@ -193,6 +194,7 @@
+     uint32_t flags;
+     uint32_t max_pstreams_mask;
+     bool port_power_control;
++    bool t210_registers;
+     void (*intr_update)(XHCIState *s, int n, bool enable);
+     bool (*intr_raise)(XHCIState *s, int n, bool level);
+     DeviceState *hostOpaque;

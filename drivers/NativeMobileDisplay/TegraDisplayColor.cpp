@@ -78,6 +78,7 @@ void TegraDisplayColor::Platform::deviceWritesDone()
 bool TegraDisplayColor::init()
 {
     inputs = Inputs();
+    __atomic_store_n(&edrScaleCached, inputs.edrScale, __ATOMIC_RELAXED);
     identityGamma(inputs.gamma);
     for (unsigned point = 0; point < kGammaPoints; ++point) {
         for (unsigned channel = 0; channel < 3; ++channel)
@@ -306,9 +307,12 @@ IOReturn TegraDisplayColor::setAccessibilityScale(uint32_t scale)
 void TegraDisplayColor::setEdrFactor(float factor)
 {
     const uint32_t scale = switch_edr_display_scale(factor);
+    if (__atomic_load_n(&edrScaleCached, __ATOMIC_ACQUIRE) == scale)
+        return;
     (void)change([&] {
         if (inputs.edrScale != scale) {
             inputs.edrScale = scale;
+            __atomic_store_n(&edrScaleCached, scale, __ATOMIC_RELEASE);
             commit(false);
         }
         return kIOReturnSuccess;

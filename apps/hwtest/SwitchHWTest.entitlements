@@ -60,6 +60,7 @@
 		<string>kern.switch_display_refresh_max_mach</string>
 		<string>kern.switch_display_refresh_step</string>
 		<string>kern.switch_display_refresh_step_mach</string>
+		<string>kern.switch_audio</string>
 		<string>kern.switch_joycon</string>
 		<string>kern.switch_soctherm</string>
 		<string>kern.switch_sd</string>

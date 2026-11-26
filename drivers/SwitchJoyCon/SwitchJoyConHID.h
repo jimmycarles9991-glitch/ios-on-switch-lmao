@@ -39,15 +39,16 @@ enum : uint32_t {
     kSwitchJoyConRightPID = 0x2007
 };
 
-// Once, before any game controller can appear (switch_joycon_start calls it first): removes
-// AppleGameControllerPersonality.kext's personalities if it is prelinked. Thread context.
+// Once, before any game controller can appear (switch_joycon_start calls it first): on iOS 17, removes
+// AppleGameControllerPersonality.kext's entries for the Nintendo ProductIDs that switch_joycon_hid_prepare adds itself;
+// its other entries stay. Nothing on iOS 27. Thread context.
 void switch_joycon_hid_select_personalities();
 
-// Loads IOHIDFamily, registers SwitchJoyConDevice and adds the Nintendo entries of
-// AppleGameControllerPersonality.kext (not in the default prelink set): for every Nintendo controller ProductID, an IOHIDEventDummyService on the IOHIDInterface (so neither IOHIDEventDriver nor the
-// DriverKit AppleUserHIDEventDriver turns the pad into keyboard/pointer events) and an IOHIDProviderPropertyMerger
-// that sets HIDServiceSupport on the IOHIDDevice (so the HID event system makes a user-space service for the device
-// and loads JoyConHIDServicePlugin on it). They match Bluetooth Joy-Cons (bluetoothd's IOHIDUserDevice) as well.
+// Loads IOHIDFamily, registers SwitchJoyConDevice and adds the Nintendo entries of AppleGameControllerPersonality.kext:
+// for every Nintendo controller ProductID, an IOHIDEventDummyService on the IOHIDInterface (so neither IOHIDEventDriver
+// nor the DriverKit AppleUserHIDEventDriver turns the pad into keyboard/pointer events) and an
+// IOHIDProviderPropertyMerger that sets HIDServiceSupport on the IOHIDDevice (so the HID event system makes a
+// user-space service for the device and loads JoyConHIDServicePlugin on it). They match Bluetooth Joy-Cons (bluetoothd's IOHIDUserDevice) as well.
 // The iOS 27 build adds no Nintendo entries: its prelinked kext's own driver serves Joy-Cons (SwitchJoyConHID.cpp).
 // Idempotent; thread context; panics with the reason on failure.
 void switch_joycon_hid_prepare();

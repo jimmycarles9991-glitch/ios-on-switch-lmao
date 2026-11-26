@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
+#include <IOKit/IOMemoryDescriptor.h>
 #include <switch/memory_attachment.h>
 #include "SwitchVICSurfaceAccess.h"
 #include "SwitchNativeSurface.h"
@@ -48,4 +49,38 @@ void switch_vic_surface_release_access(SwitchVICSurfaceAccess *access)
     if (access->backing)
         switch_gpu_backing_release(access->backing);
     *access = {};
+}
+
+void switch_vic_surface_reserve_write(const TegraVICSurface *surface, SwitchVICWriteReservation *reservation)
+{
+    if (!reservation)
+        return;
+    *reservation = {};
+    if (!surface || !surface->surface || !surface->memory)
+        return;
+    if (auto *attached = SwitchMemoryAttachment::copy(surface->memory)) {
+        attached->release();
+        return;
+    }
+    auto *backing = switch_vic_surface_backing(surface);
+    if (!backing)
+        return;
+    switch_gpu_cpu_lease *lease = nullptr;
+    if (switch_gpu_backing_conversion_reserve(backing, SWITCH_GPU_BACKING_WRITE, 1, &lease) == 0) {
+        reservation->backing = backing;
+        reservation->lease = lease;
+    } else {
+        switch_gpu_backing_release(backing);
+    }
+}
+
+void switch_vic_surface_release_write(SwitchVICWriteReservation *reservation)
+{
+    if (!reservation)
+        return;
+    if (reservation->lease)
+        switch_gpu_backing_cpu_release_owned(&reservation->lease, 0);
+    if (reservation->backing)
+        switch_gpu_backing_release(reservation->backing);
+    *reservation = {};
 }

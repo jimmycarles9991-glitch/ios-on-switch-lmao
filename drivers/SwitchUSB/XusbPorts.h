@@ -82,51 +82,69 @@ struct xhci_port_range {
     unsigned count;
 };
 
-// The ports of protocol `major` (2: USB 2.0, 3: USB 3.x) from the Supported Protocol capabilities in the extended
-// capability list. `read` reads a 32-bit register at a byte offset from the capability base; `window` bounds the
-// offsets (the register window's size). The first capability of that major wins (Tegra XUSB: one per protocol).
-// A malformed list (a loop, an offset outside the window) ends the walk: at most 64 capabilities are read.
-static inline struct xhci_port_range xhci_find_ports(uint32_t (*read)(void *context, uint32_t offset), void *context,
-                                                     uint32_t window, unsigned major)
+// The Supported Protocol capability of `major` (2: USB 2.0, 3: USB 3.x) in the extended capability list: its byte
+// offset from the capability base, 0 if there is none. `read` reads a 32-bit register at a byte offset from the
+// capability base; `window` bounds the offsets (the register window's size). The first capability of that major wins
+// (Tegra XUSB: one per protocol). A malformed list (a loop, an offset outside the window) ends the walk: at most 64
+// capabilities are read.
+static inline uint32_t xhci_find_protocol(uint32_t (*read)(void *context, uint32_t offset), void *context,
+                                          uint32_t window, unsigned major)
 {
-    struct xhci_port_range range = {0, 0};
     uint32_t offset = (read(context, XHCI_HCCPARAMS1) >> 16) << 2;
     for (unsigned i = 0; i < 64 && offset && offset + 12 <= window; ++i) {
         const uint32_t head = read(context, offset);
-        if ((head & 0xffu) == XHCI_XECP_SUPPORTED_PROT && (head >> 24) == major) {
-            const uint32_t ports = read(context, offset + 8);
-            range.first = ports & 0xffu;
-            range.count = (ports >> 8) & 0xffu;
-            return range;
-        }
+        if ((head & 0xffu) == XHCI_XECP_SUPPORTED_PROT && (head >> 24) == major)
+            return offset;
         const uint32_t next = ((head >> 8) & 0xffu) << 2;
         if (!next)
             break;
         offset += next;
     }
+    return 0;
+}
+
+// The ports of protocol `major`, from its Supported Protocol capability.
+static inline struct xhci_port_range xhci_find_ports(uint32_t (*read)(void *context, uint32_t offset), void *context,
+                                                     uint32_t window, unsigned major)
+{
+    struct xhci_port_range range = {0, 0};
+    const uint32_t offset = xhci_find_protocol(read, context, window, major);
+    if (offset) {
+        const uint32_t ports = read(context, offset + 8);
+        range.first = ports & 0xffu;
+        range.count = (ports >> 8) & 0xffu;
+    }
     return range;
 }
 
+// The USB 2.0 protocol's Hardware LPM Capability (HLC, bit 19 of the capability's third dword; xHCI 1.2 7.2.2.1.3.2).
+static inline bool xhci_usb2_hlc(uint32_t (*read)(void *context, uint32_t offset), void *context, uint32_t window)
+{
+    const uint32_t offset = xhci_find_protocol(read, context, window, 2);
+    return offset != 0u && ((read(context, offset + 8) >> 19) & 1u) != 0u;
+}
+
 // --- XUSB pad controller, USB2 port 0 (the USB-C port's D+/D-) ------------------------------------------------------
-#define XUSB_USB2_PORT_CAP          0x008u
-#define XUSB_USB2_OC_MAP            0x010u
-#define XUSB_VBUS_OC_MAP            0x018u
-#define XUSB_OC_DET                 0x01cu
-#define XUSB_CHRG_OTGPAD0_CTL0      0x080u
-#define XUSB_CHRG_OTGPAD0_CTL1      0x084u
-#define XUSB_USB2_VBUS_ID           0xc60u
-#define XUSB_PORT0_CAP_MASK         3u
-#define XUSB_PORT0_CAP_DEVICE       2u
-#define XUSB_PORT0_CAP_OTG          3u
-#define XUSB_VBUS_ID_VBUS_SRC_OVR   (1u << 12)  // VBUS source: the override
-#define XUSB_VBUS_ID_VBUS_ON        (1u << 14)  // the VBUS override's value
-#define XUSB_VBUS_ID_ID_SRC_OVR     (1u << 16)  // ID source: the override
-#define XUSB_VBUS_ID_ID_MASK        (0xfu << 18)
-#define XUSB_VBUS_ID_ID_GROUNDED    (0u << 18)  // a host's ID: the XHCI owns the pad
-#define XUSB_VBUS_ID_ID_FLOATING    (8u << 18)  // a device's ID: the XUDC owns it
-#define XUSB_CHRG_CTL0_PD_CHG       (1u << 0)
-#define XUSB_CHRG_CTL0_SRC_SINK     ((1u << 9) | (1u << 10) | (1u << 11) | (1u << 12))   // OP/ON source and sink
+#define XUSB_USB2_PORT_CAP        0x008u
+#define XUSB_USB2_OC_MAP          0x010u
+#define XUSB_VBUS_OC_MAP          0x018u
+#define XUSB_OC_DET               0x01cu
+#define XUSB_CHRG_OTGPAD0_CTL0    0x080u
+#define XUSB_CHRG_OTGPAD0_CTL1    0x084u
+#define XUSB_USB2_VBUS_ID         0xc60u
+#define XUSB_PORT0_CAP_MASK       3u
+#define XUSB_PORT0_CAP_OTG        3u
+#define XUSB_VBUS_ID_VBUS_SRC_OVR (1u << 12)  // VBUS source: the override
+#define XUSB_VBUS_ID_VBUS_ON      (1u << 14)  // the VBUS override's value
+#define XUSB_VBUS_ID_ID_SRC_OVR   (1u << 16)  // ID source: the override
+#define XUSB_VBUS_ID_ID_MASK      (0xfu << 18)
+#define XUSB_VBUS_ID_ID_GROUNDED  (0u << 18)  // a host's ID: the XHCI owns the pad
+#define XUSB_VBUS_ID_ID_FLOATING  (8u << 18)  // a device's ID: the XUDC owns it
+#define XUSB_CHRG_CTL0_PD_CHG     (1u << 0)
+// OP/ON source and sink and OP_I_SRC_EN, and CTL1's DIV_DET_EN: all 0 outside a detection (Tegra X1 TRM 22.8.11).
+#define XUSB_CHRG_CTL0_SRC_SINK     ((1u << 9) | (1u << 10) | (1u << 11) | (1u << 12) | (1u << 13))
 #define XUSB_CHRG_CTL1_RPD_RPU_OVRD ((1u << 16) | (1u << 18) | (1u << 20) | (1u << 22))  // D+/D- pull overrides
+#define XUSB_CHRG_CTL1_DIV_DET_EN   (1u << 4)
 #define XUSB_OC_MAP_PORT0_MASK      0xfu
 #define XUSB_OC_MAP_PORT0_DISABLED  0xfu
 
@@ -150,8 +168,8 @@ static inline uint32_t xusb_vbus_id_device(uint32_t v)
 }
 
 // The charger-detection leftovers a host's D+/D- must not have (a boot stage's BC1.2 detection): the pull-up/down
-// overrides off (utmi_pad_charger_detect_off) so the pad's own 15 kOhm host pull-downs apply, and no D+/D- source or
-// sink. PD_CHG is left as found (hekate and the XUDC clear it; the sources it powers are off).
+// overrides off (utmi_pad_charger_detect_off) so the pad's own 15 kOhm host pull-downs apply, no D+/D- source, sink or
+// current source and no divider detection. PD_CHG is XusbUtmiPad.cpp's (set, as charger detection off leaves it).
 static inline uint32_t xusb_chrg_ctl0_host(uint32_t v)
 {
     return v & ~XUSB_CHRG_CTL0_SRC_SINK;
@@ -159,7 +177,7 @@ static inline uint32_t xusb_chrg_ctl0_host(uint32_t v)
 
 static inline uint32_t xusb_chrg_ctl1_host(uint32_t v)
 {
-    return v & ~XUSB_CHRG_CTL1_RPD_RPU_OVRD;
+    return v & ~(XUSB_CHRG_CTL1_RPD_RPU_OVRD | XUSB_CHRG_CTL1_DIV_DET_EN);
 }
 
 // Port 0's over-current pin: none on this board (no nvidia,oc-pin), so detection off; a mapped pin that reads
@@ -187,61 +205,14 @@ static inline const char *xusb_id_name(uint32_t vbus_id)
     }
 }
 
-// --- The host interrupts' check (SwitchXHCI.cpp) --------------------------------------------------------------------
-// INTID 71 (xHCI, DT xusb@70090000 GIC_SPI 39, level high, through the LIC) and INTID 72 (falcon mailbox, xusb_mbox
-// GIC_SPI 40) had never fired on this hardware when this was written. Until a line has reached its handler once this
-// boot (switch_interrupt_count), a missing delivery is a never-booted path failing: one line and host mode off for the
-// boot (device mode is the proven path), no panic. Once it has fired, a lost interrupt panics as for every proven line.
-//   - delivered: the INTID's handler count moved since the check was armed;
-//   - pending: the interrupter has an event (IMAN.IP, or USBSTS.EINT) that nobody consumed (ERDP unmoved);
-//   - first: the check follows the controller's first start with a device on the port, so a port event is due even
-//     if nothing is pending (no connect seen, or no interrupt asserted at all);
-//   - deliverable: IMAN.IE and USBCMD.INTE are on (a proven line is only judged lost when the controller asks for it).
-// Stage 1 runs kCheckMS after arming; anything short of fine is looked at once more 50 ms later (stage 2) before it acts.
+// --- USBCMD, USBSTS and IMAN bits SwitchXHCI and the panic text read -------------------------------------------------
+#define XHCI_USBCMD_RS   (1u << 0)
 #define XHCI_USBCMD_INTE (1u << 2)
 #define XHCI_USBCMD_EU3S (1u << 11)
+#define XHCI_USBSTS_HCH  (1u << 0)
 #define XHCI_USBSTS_EINT (1u << 3)
 #define XHCI_IMAN_IP     (1u << 0)
 #define XHCI_IMAN_IE     (1u << 1)
-
-enum xusb_irq_verdict {
-    XUSB_IRQ_FINE,     // delivered, or nothing due
-    XUSB_IRQ_CONFIRM,  // looks lost: check again in 50 ms
-    XUSB_IRQ_OFF,      // never fired this boot and still not delivered: one line, host mode off for the boot
-    XUSB_IRQ_PANIC,    // fired before, now lost
-};
-
-struct xusb_irq_sample {
-    uint32_t count;    // the INTID's handler count (switch_interrupt_count)
-    uint32_t erdp;     // ERDP0 (low word), or for the mailbox anything constant
-    bool pending;      // an event waits: IMAN.IP or USBSTS.EINT (xHCI), SMI_INTR (mailbox)
-    bool deliverable;  // the source asks for an interrupt: IMAN.IE and USBCMD.INTE (xHCI); always (mailbox)
-};
-
-static inline enum xusb_irq_verdict xusb_irq_judge(struct xusb_irq_sample armed, struct xusb_irq_sample now, bool first,
-                                                   unsigned stage)
-{
-    const bool delivered = now.count != armed.count;
-    const bool waiting = now.pending && now.erdp == armed.erdp && !delivered;
-    enum xusb_irq_verdict act = XUSB_IRQ_CONFIRM;
-    if (stage >= 2)
-        act = now.count ? XUSB_IRQ_PANIC : XUSB_IRQ_OFF;
-    if (now.count)
-        return waiting && now.deliverable ? act : XUSB_IRQ_FINE;
-    if (waiting || (first && !delivered))
-        return act;
-    return XUSB_IRQ_FINE;
-}
-
-static inline bool xusb_xhci_pending(uint32_t iman, uint32_t usbsts)
-{
-    return ((iman & XHCI_IMAN_IP) != 0u) || ((usbsts & XHCI_USBSTS_EINT) != 0u);
-}
-
-static inline bool xusb_xhci_deliverable(uint32_t iman, uint32_t usbcmd)
-{
-    return ((iman & XHCI_IMAN_IE) != 0u) && ((usbcmd & XHCI_USBCMD_INTE) != 0u);
-}
 
 // --- Save State and Restore State (xHCI 1.2 4.23.2) -----------------------------------------------------------------
 // AppleUSBXHCI lowers an idle controller to its Sleep state by halting it and setting USBCMD.CSS, and raises it again
@@ -277,7 +248,7 @@ static inline uint32_t xusb_hold_usbcmd(struct xusb_hold *hold, uint32_t value)
         hold->lost = false;
     }
     if (value & XHCI_USBCMD_CRS) {
-        hold->sre = !hold->held || hold->lost;
+        hold->sre |= !hold->held || hold->lost;
         hold->held = false;
     }
     return value & ~(XHCI_USBCMD_CSS | XHCI_USBCMD_CRS);
@@ -299,10 +270,9 @@ static inline void xusb_hold_lost(struct xusb_hold *hold)
     hold->lost = true;
 }
 
-// Whether a write of interrupter 0's ERSTBA (either half) is the restore putting back what the controller still holds.
-static inline bool xusb_hold_keeps(const struct xusb_hold *hold, uint64_t value, uint64_t current)
+static inline bool xusb_hold_retained(const struct xusb_hold *hold)
 {
-    return hold->held && !hold->lost && value == current;
+    return hold->held && !hold->lost;
 }
 
 #endif

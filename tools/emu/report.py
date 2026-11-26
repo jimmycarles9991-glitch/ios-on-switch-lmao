@@ -12,6 +12,8 @@ from tools.emu.monitor import Monitor
 RAMOOPS = (0xB0000000, 0x200000)
 FRAMEBUFFER = (0xF5A00000, 720 * 1280 * 4)
 LOG_LINE = re.compile(rb'\[ *(\d+)\.(\d{6})\]: ?([\x20-\x7e]*)')
+# kextlog=<filter> colours every OSKext message (OSKext.cpp colorForFlags): the line starts with a VT100 escape.
+TERMINAL_COLOUR = re.compile(rb'\x1b\[[0-9;]*m')
 PANIC = re.compile(rb'panic\(cpu \d+ caller [^\n\0]*')
 
 
@@ -33,7 +35,7 @@ def capture(monitor: Monitor, run: Path, kernel: Path | None) -> None:
 def kernel_log(ramoops: bytes) -> list[str]:
     """Return the log lines in the kernel's RAM log, oldest first (the ring may have wrapped)."""
     lines = {}
-    for match in LOG_LINE.finditer(ramoops):
+    for match in LOG_LINE.finditer(TERMINAL_COLOUR.sub(b'', ramoops)):
         stamp = int(match.group(1)) * 1_000_000 + int(match.group(2))
         lines.setdefault((stamp, match.group(3)), None)
     return [f'[{s // 1_000_000:6d}.{s % 1_000_000:06d}] {text.decode()}' for s, text in sorted(lines)]

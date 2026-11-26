@@ -13,18 +13,26 @@ extern "C" {
 // --- SwitchPDPolicy.h ---
 int pd_decide(int phase, uint16_t alert, uint16_t status1, uint16_t status2, int allow, int *next, int *cancel,
               char *why, size_t why_size);
-int pd_window_end(int phase, int saw_detach, uint16_t status1, int *next, char *why, size_t why_size);
+int pd_window_end(int phase, int saw_detach, uint16_t status1, uint16_t status2, int *next, char *why,
+                  size_t why_size);
 int pd_switches_on(int phase, int allow);
-int pd_rails_on(int phase);
+int pd_vbus_rail_on(int phase);
+int pd_vconn_on(int phase, uint16_t status1, uint16_t status2);
+int pd_boost_on(int phase);
 int pd_vbus_ours(uint16_t status1);
 const char *pd_phase_name(int phase);
 int pd_usb_host(int sourcing, uint16_t status1);
+int pd_usb_device_vbus(int sourcing, uint16_t status1);
+int pd_reset_at_start(uint16_t status1, uint16_t dp_status);
+int pd_reset_on_fault(uint16_t alert, uint16_t status1);
+int pd_hard_reset(uint16_t alert, uint16_t status1);
 
 // --- XusbPorts.h ---
 void fake_reset(void);
 void fake_write(uint32_t offset, uint32_t value);
 // first << 16 | count, and the number of reads the walk took in *reads.
 uint32_t find_ports(uint32_t window, unsigned major, unsigned *reads);
+int usb2_hlc(uint32_t window);
 uint32_t portsc_offset(uint32_t cap_length, unsigned port);
 uint32_t portsc_power(uint32_t portsc, int on);
 uint32_t portsc_keep(void);
@@ -35,11 +43,6 @@ uint32_t chrg_ctl0_host(uint32_t v);
 uint32_t chrg_ctl1_host(uint32_t v);
 uint32_t oc_map_host(uint32_t v);
 const char *id_name(uint32_t v);
-// verdict of xusb_irq_judge for an armed and a current sample
-int irq_judge(uint32_t armed_count, uint32_t armed_erdp, int armed_pending, int armed_deliverable, uint32_t now_count,
-              uint32_t now_erdp, int now_pending, int now_deliverable, int first, unsigned stage);
-int xhci_pending(uint32_t iman, uint32_t usbsts);
-int xhci_deliverable(uint32_t iman, uint32_t usbcmd);
 const char *portsc_link_name(uint32_t portsc);
 const char *portsc_speed_name(uint32_t portsc);
 // xusb_hold over one held state

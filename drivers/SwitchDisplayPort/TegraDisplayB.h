@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Display controller B (0x54240000, SPI 74 level-high) driving SOR1: its power partition and clock, the mode's timing,
-// and window A scanning a pitch-linear BGRA surface by DMA through the SMMU (swgroup dcb), flipped at frame end.
+// and windows A, B and C scanning surfaces by DMA through the SMMU (swgroup dcb), switched together at a frame end.
 #ifndef TEGRA_DISPLAY_B_H
 #define TEGRA_DISPLAY_B_H
 
@@ -8,27 +8,57 @@
 #include <stdint.h>
 
 #include "SwitchDPModes.h"
+#include "SwitchExternalWindows.h"
+#include "../SwitchPower/SwitchDisplayMemory.h"
 
 #define TEGRA_DISPLAY_B_INTID (32u + 74u)
 
 class TegraDisplayB {
 public:
+    using Frame = switch_external::Frame;
     // The DISB partition with DISP2 (already sourced from pll_d2_out0) and the controller's base configuration.
     bool powerUp(char *why, size_t size);
-    // The mode's timing; the controller runs continuously from here, every window off. The frame-end interrupt is on
-    // only while a flip waits to be taken: a still screen costs the CPU nothing.
     void setMode(const struct switch_dp_mode &mode);
     void enableSor(bool on);
-    // Window A scans `width` x `height` BGRA at `iova` (rows of `stride` bytes) from the next frame on; its frame end
-    // interrupt says it was taken.
-    void scanout(uint32_t iova, uint32_t width, uint32_t height, uint32_t stride);
-    void windowOff();
-    // The interrupt's cause, cleared; the frame-end interrupt off again until the next scanout().
+    // Every window's registers for the next frame boundary, in one request; a CSC written under a window that may be
+    // scanning panics.
+    void present(const Frame &frame);
+    // At a frame end after present: false while the request is out, then true with every window it named scanning what it
+    // was given (its START_ADDR, or off); anything else panics.
+    bool latch();
+    switch_external::WindowState windowState(unsigned window) const;
+
+    uint32_t pixelClockHz() const
+    {
+        return memory.pixel_clock_hz;
+    }
+
+    void windowsOff();
+    void frameInterrupt(bool enable);
     uint32_t takeInterrupt();
     void powerDown();
 
 private:
+    struct WindowCache {
+        switch_external::WindowRegisters written;  // the assembly copy, while valid
+        bool valid;
+        bool live;  // may be scanning
+        bool expectOn;
+        uint32_t expectStart;
+    };
+
     volatile uint8_t *base = nullptr;
+    switch_display_memory_head memory = {};  // the timing, and the windows' plan as last asked of the EMC
+    Frame latched = {}, requestedFrame = {};
+    WindowCache windows[switch_external::kWindows] = {};
+    int csc[switch_external::kWindows][2] = {{-1, -1}, {-1, -1}, {-1, -1}};
+    uint32_t requested = 0;
+    bool frameInterruptEnabled = false, emcRefusedLogged = false;
+    void reserve(const switch_display_memory_head &next);
+    void releaseBandwidth();
+    void forgetWindows();
+    void select(unsigned window);
+    void writeWindow(unsigned window, const switch_external::WindowRegisters &next);
     uint32_t read(uint32_t word) const;
     void write(uint32_t word, uint32_t value);
     void commit(uint32_t update);

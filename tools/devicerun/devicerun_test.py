@@ -18,6 +18,22 @@ def run(*check_list: Check) -> dict[str, rules.Result]:
     return {r.check.name: r for r in results}
 
 
+def record(second: float, message: str, level: str = 'Default', boot: str = 'B1') -> dict:
+    return {
+        'eventType': 'logEvent',
+        'timestamp': f'2026-11-14 09:00:{second:09.6f}+0000',
+        'bootUUID': boot,
+        'processImagePath': '/kernel.development',
+        'messageType': level,
+        'eventMessage': message,
+    }
+
+
+def judged(records: list[dict], *check_list: Check) -> dict[str, rules.Result]:
+    results, _ = devicerun.run_checks(records, list(check_list))
+    return {r.check.name: r for r in results}
+
+
 class Checks(unittest.TestCase):
     def test_every_check_is_well_formed(self):
         names = [c.name for group in checks.GROUPS.values() for c in group]
@@ -28,11 +44,10 @@ class Checks(unittest.TestCase):
                 self.assertTrue(all(c.literals()), c.name)
                 if c.regex:
                     re.compile(c.regex)
-                self.assertTrue(not c.needs or c.needs in names, c.name)
-                self.assertTrue(not c.against or c.against in names, c.name)
-                self.assertTrue(not c.during or c.during in names, c.name)
-                self.assertTrue(not c.per or c.per in names, c.name)
-                self.assertTrue(not c.preceded or c.preceded in names, c.name)
+                self.assertTrue(all(n in names for n in c.needed()), c.name)
+                for other in (c.against, c.after, c.unless, c.followed, c.during, c.per, c.preceded):
+                    self.assertTrue(not other or other in names, c.name)
+                self.assertTrue(all(n in names for n in c.outside), c.name)
 
     def test_zbc_full_lines_are_one_a_process_and_type(self):
         full = next(c for c in checks.GROUPS['gpu'] if c.name == 'gm20b.zbc-full-lines')
@@ -72,6 +87,17 @@ class Checks(unittest.TestCase):
         negated = devicerun.clause(Check('n', 'o', 'x', process='!SwitchHWTest'))
         self.assertIn('NOT (process BEGINSWITH "SwitchHWTest")', negated)
         self.assertIn('messageType == error', devicerun.clause(Check('l', 'o', 'x', level='Error')))
+
+    def test_debug_checks_alone_see_info_and_debug_lines(self):
+        plain = Check('plain', 'o', 'x', 'count > 0')
+        debug = Check('debug', 'o', 'x', 'count > 0', debug=True)
+        self.assertNotIn('messageType', devicerun.predicate([plain]))
+        query = devicerun.predicate([plain, debug])
+        self.assertTrue(query.startswith('((((eventMessage CONTAINS "x")) OR eventMessage BEGINSWITH "SwitchFrame")'))
+        self.assertIn('AND messageType != info AND messageType != debug) OR ((eventMessage CONTAINS "x"))', query)
+        records = [record(0, 'x', 'Debug')]
+        got = {r.check.name: r.verdict for r in devicerun.run_checks(records, [plain, debug])[0]}
+        self.assertEqual(got, {'plain': FAIL, 'debug': PASS})
 
 
 class Rules(unittest.TestCase):
@@ -971,71 +997,35 @@ class Widgets(unittest.TestCase):
         self.assertIn('Music.MusicWidgets x1', result.observed)
 
 
-class UsbHost(unittest.TestCase):
-    """The host-mode checks over boot-1109-2145's lines (a keyboard plugged twice) and a boot that enumerates."""
+class Windows(unittest.TestCase):
+    def test_unless_within_excuses_only_nearby_lines(self):
+        restore = Check('restore', 'o', 'restore', 'timeline')
+        exception = Check('exception', 'o', 'exception', unless='restore', unless_within=5.0)
+        near = judged([record(10, 'restore'), record(12, 'exception')], restore, exception)
+        self.assertEqual(near['exception'].verdict, PASS)
+        far = judged([record(10, 'restore'), record(30, 'exception')], restore, exception)
+        self.assertEqual(far['exception'].verdict, FAIL)
 
-    @staticmethod
-    def usb(records: list[dict]) -> dict[str, rules.Result]:
-        results, _ = devicerun.run_checks(records, checks.GROUPS['usb'])
-        return {r.check.name: r for r in results}
+    def test_after_keeps_lines_soon_after_its_check(self):
+        role = Check('role', 'o', 'role', 'timeline')
+        halted = Check('halted', 'o', 'halted', after='role', within=2.0)
+        self.assertEqual(judged([record(1, 'role'), record(2, 'halted')], role, halted)['halted'].verdict, FAIL)
+        self.assertEqual(judged([record(1, 'role'), record(9, 'halted')], role, halted)['halted'].verdict, PASS)
 
-    @staticmethod
-    def kernel(second: int, message: str, boot: str = 'B0000000-0000-0000-0000-000000000001') -> dict:
-        return {
-            'timestamp': f'2026-11-10 09:00:{second:02d}.000000+0000',
-            'bootUUID': boot,
-            'processImagePath': '/kernel.development',
-            'subsystem': '',
-            'category': '',
-            'messageType': 'Default',
-            'eventMessage': message,
-        }
+    def test_every_needed_check_must_have_matched(self):
+        a, b = Check('a', 'o', 'a', 'timeline'), Check('b', 'o', 'b', 'timeline')
+        needy = Check('needy', 'o', 'needy', 'count > 0', needs=('a', 'b'))
+        self.assertEqual(judged([record(1, 'a')], a, b, needy)['needy'].observed, 'no b line')
+        self.assertEqual(judged([record(1, 'a'), record(2, 'b')], a, b, needy)['needy'].verdict, FAIL)
 
-    def test_boot_1109_2145(self):
-        got = self.usb(list(devicerun.read_ndjson(str(TEST / 'usb_host_boot1109.ndjson'))))
-        for name in (
-            'usb.host-save-state',
-            'usb.host-exception',
-            'usb.host-port-properties',
-            'usb.host-connect',
-            'usb.host-device-arrives',
-        ):
-            self.assertEqual(got[name].verdict, FAIL, name)
-        self.assertIn('save state failed', got['usb.host-exception'].observed)
-
-    def test_a_keyboard_that_enumerates(self):
-        got = self.usb(
-            [
-                self.kernel(0, 'SwitchUSB: host controller up (AppleUSBXHCI, 1 interrupter, 3 shown to AppleUSBXHCI)'),
-                self.kernel(1, 'SwitchUSB: host role (a device on the port, VBUS on)'),
-                self.kernel(
-                    2,
-                    'SwitchUSB: host role +1 s (change 1, 1/2): xHCI USBCMD 0x801 USBSTS 0x8, pad 0 = port 5 '
-                    '(USB2 5+5): U0 low speed, SS port 0 = port 1 (USB3 1+4): RxDetect nothing',
-                ),
-                self.kernel(3, 'SwitchUSB: USB device Keyboard (05ac:024f) registered at location 0x5000000'),
-            ]
-        )
-        for name in (
-            'usb.host-save-state',
-            'usb.host-exception',
-            'usb.host-port-properties',
-            'usb.host-connect',
-            'usb.host-device-arrives',
-        ):
-            self.assertEqual(got[name].verdict, PASS, name)
-
-    def test_the_restore_after_sc7_excuses_its_exception(self):
-        exception = (
-            'SwitchXHCI@00000000: AppleUSBHostController::hardwareExceptionThreadCallGated: 0x00000004 '
-            '(save state failed)'
-        )
-        up = 'SwitchUSB: host controller up (AppleUSBXHCI, 1 interrupter, 3 shown to AppleUSBXHCI)'
-        restore = "SwitchUSB: XUSB host restore after SC7: the controller's state went with the falcon, USBSTS.SRE"
-        got = self.usb([self.kernel(0, up), self.kernel(1, restore), self.kernel(2, exception)])
-        self.assertEqual(got['usb.host-exception'].verdict, PASS)
-        got = self.usb([self.kernel(0, up), self.kernel(2, exception)])
-        self.assertEqual(got['usb.host-exception'].verdict, FAIL)
+    def test_a_window_the_log_end_cuts_is_pending_and_failure_text_leads(self):
+        done = Check('done', 'o', 'done', 'timeline')
+        wait = Check('wait', 'o', 'wait', followed='done', within=120.0, pending_at_end=True, failure='nothing came')
+        self.assertEqual(judged([record(1, 'wait'), record(20, 'tail')], done, wait)['wait'].verdict, NO_DATA)
+        later = [record(1, 'wait'), {**record(0, 'tail'), 'timestamp': '2026-11-14 09:05:00.000000+0000'}]
+        got = judged(later, done, wait)['wait']
+        self.assertEqual(got.verdict, FAIL)
+        self.assertTrue(got.observed.startswith('nothing came: 1 lines, 1 without a done line'))
 
 
 class Sbim(unittest.TestCase):
@@ -1081,6 +1071,12 @@ class Reports(unittest.TestCase):
         self.assertEqual(crash['crash.stale-sync-waiter'].verdict, FAIL)
         self.assertEqual(crash['crash.stale-sync-waiter'].observed, '2, newest locationd-2026-11-09-034109.ips')
         self.assertEqual(devicerun.crash_rows(None)[0].verdict, NO_DATA)
+
+    def test_the_usb_boot_prints_its_own_steps(self):
+        steps = devicerun.checklist('U')
+        self.assertIn('1 A USB stick', steps)
+        self.assertIn('kernel HID after 120 s, up to 3 tries', steps)
+        self.assertNotIn('App Library scroll', steps)
 
     def test_boot_label_selects_checks_and_steps(self):
         names = {c.name for group in devicerun.selected('A').values() for c in group}

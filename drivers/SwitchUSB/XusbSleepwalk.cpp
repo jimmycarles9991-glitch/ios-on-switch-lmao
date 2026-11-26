@@ -25,7 +25,7 @@ bool Controller::armRemoteWake(unsigned port)
     const uint32_t otg = switch_mmio_read32(padctl, XUSB_PADCTL_USB2_OTG_PAD0_CTL1);
     switch_pmc_rmw(XUSB_PMC_UTMIP_SLEEP_CFG, XUSB_SLEEP_MASTER_ENABLE, 0);
     switch_pmc_rmw(XUSB_PMC_UTMIP_MASTER_CONFIG, 0, XUSB_MASTER_CONFIG_PWR);
-    switch_pmc_rmw(XUSB_PMC_USB_DEBOUNCE_DEL, XUSB_DEBOUNCE_LINE_MASK, XUSB_DEBOUNCE_LINE_ONE);
+    switch_pmc_rmw(XUSB_PMC_USB_DEBOUNCE_DEL, XUSB_DEBOUNCE_LINE_MASK, XUSB_DEBOUNCE_LINE_TWO);
     switch_pmc_rmw(XUSB_PMC_UTMIP_FAKE, XUSB_FAKE_MASK, 0);
     switch_pmc_rmw(XUSB_PMC_UTMIP_LINE_WAKEUP, XUSB_LINE_WAKEUP_EN, 0);
     switch_pmc_rmw(XUSB_PMC_UTMIP_SLEEP_CFG, XUSB_SLEEP_WAKE_VAL_MASK, XUSB_SLEEP_WAKE_VAL_NONE);
@@ -38,7 +38,7 @@ bool Controller::armRemoteWake(unsigned port)
     switch_pmc_write(XUSB_PMC_UTMIP_PAD_CFG0, xusb_sleepwalk_rpd(switch_pmc_read(XUSB_PMC_UTMIP_PAD_CFG0), otg));
     switch_pmc_write(XUSB_PMC_UTMIP_SLEEPWALK_P0, xusb_sleepwalk_phases(speed));
     switch_pmc_rmw(XUSB_PMC_USB_AO, XUSB_USB_AO_LINE_PD, 0);
-    IODelay(100);
+    IODelay(1);  // Tegra X1 TRM 22.8.9.2: "Wait 1 µs" after the line-state detectors power up
     switch_pmc_rmw(XUSB_PMC_UTMIP_SLEEP_CFG, 0, XUSB_SLEEP_USE_PMC);
     switch_pmc_rmw(XUSB_PMC_UTMIP_SLEEP_CFG1, 0, XUSB_SLEEP_CFG1_USE_PMC);
     switch_pmc_rmw(XUSB_PMC_UTMIP_SLEEP_CFG, XUSB_SLEEP_WAKE_VAL_MASK, XUSB_SLEEP_WAKE_VAL_ANY);

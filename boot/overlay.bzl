@@ -10,6 +10,7 @@ OVERLAY_BINARIES = {
     "//drivers/SwitchAppRegistration:switch-appregd": "build/switch-apps/switch-appregd",
     "//drivers/SwitchInstallPolicy:SwitchInstallPolicy": "build/switch-apps/libSwitchInstallPolicy.dylib",
     "//drivers/SwitchBootstrap:switch-bootstrap": "build/switch-bootstrap/switch-bootstrap",
+    "//drivers/NativeSwitchBlock:switch-sdwake": "build/switch-block/switch-sdwake",
     "//drivers/SwitchVideoDecoders:HEVCH8": "build/switch-video/HEVCH8.videodecoder",
     "//drivers/SwitchVideoDecoders:AVD": "build/switch-video/AVD.videodecoder",
     "//drivers/SwitchVideoEncoders:AVE": "build/switch-video/H264H7.videoencoder",

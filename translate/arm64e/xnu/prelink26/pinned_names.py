@@ -7,6 +7,8 @@ function, so they apply only to the kernelcache whose decompressed sha256 is KER
 import hashlib
 from pathlib import Path
 
+from pinned_skywalk import SKYWALK
+
 KERNELCACHE_SHA256 = '250337d45598da0e5cc578413704981368afe92f84b3450dc956e21da1b21bd4'
 
 NAMES = {
@@ -401,6 +403,24 @@ NAMES = {
     # 21H461 import of its kext in its GOT gap.
     0xFFFFFFF00A8F3050: '__ZN19IOPerfControlClient18querySubmitterRoleEP9IOServiceP4taskPj',
     0xFFFFFFF00A80E7D8: '_IORecursiveLockSleepDeadline',
+    # IOLocks.cpp between IORecursiveLockLock and IORecursiveLockUnlock, read from the code: the owner (+0x18) already
+    # the current thread bumps the count (+0x20) and returns true, else lck_mtx_try_lock inlined (one CASA on the
+    # mutex, no slow path) takes owner and count 1 or returns false. IOUserSerial's one entry between
+    # IORecursiveLockSleepDeadline and IORecursiveLockUnlock; its 21H461 build imported nothing there.
+    0xFFFFFFF00A80E6F0: '_IORecursiveLockTryLock',
+    # kpi_mbuf.c, read from the code, IOUserEthernet's six entries in its GOT gaps between mbuf_freem_list and
+    # mbuf_get_csum_requested, mbuf_get_csum_requested and mbuf_len, mbuf_set_csum_performed and mbuf_setnextpkt:
+    # set_csum_requested masks the request with 0x1067 (IP, TCP, UDP, partial, TCP and UDP over IPv6) into csum_flags'
+    # low half (+0x64) and stores csum_data (+0x68); get_gso_info maps the TSO flags (0x300000) to a type and reads
+    # tx_seg_size and tx_hdr_len (+0xa0, +0xa2); set_gso_info sets or clears those flags and both fields;
+    # get_lro_info reads rx_seg_cnt (+0xa0) and zeroes dup_ack_cnt; set_lro_info stores rx_seg_cnt and returns EINVAL
+    # as the source does; get_csum_performed reads the performed flags (0x1f00) and csum_data.
+    0xFFFFFFF00A667C40: '_mbuf_set_csum_requested',
+    0xFFFFFFF00A667C9C: '_mbuf_get_gso_info',
+    0xFFFFFFF00A667D0C: '_mbuf_set_gso_info',
+    0xFFFFFFF00A667D80: '_mbuf_get_lro_info',
+    0xFFFFFFF00A667DB8: '_mbuf_set_lro_info',
+    0xFFFFFFF00A667E28: '_mbuf_get_csum_performed',
     # apfs between lck_mtx_lock and lck_mtx_unlock (IOLockLock and IOLockUnlock's own names): six arguments, the
     # sleep action's flags tested first, the deadline in x5.
     0xFFFFFFF00A13C1F0: '_lck_mtx_sleep_with_inheritor',
@@ -430,7 +450,7 @@ NAMES = {
     # vm_allocate_external: the GOT pass named it that, and the sandbox's mount_notify_mount hook took a kern_return_t
     # for the covered vnode at devfs's mount in bsd_init (a data abort in vnode_vtype).
     0xFFFFFFF00A3218C8: '_vfs_vnodecovered_noblock',
-}
+} | SKYWALK
 
 
 def names_for(kernelcache: str) -> dict[int, str]:

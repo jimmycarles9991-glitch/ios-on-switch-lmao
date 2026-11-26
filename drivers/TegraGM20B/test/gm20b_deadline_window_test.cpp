@@ -13,6 +13,7 @@ extern "C" {
 }
 
 extern "C" void tegra_gm20b_compositor_vsync(uint64_t stamp, uint32_t lead_us, uint64_t interval);
+extern "C" void tegra_gm20b_scanout_presented(uint64_t queued_ns);
 extern "C" {
 #include "drivers/TegraGM20B/deadline_stats.h"
 }
@@ -21,7 +22,7 @@ namespace
 {
 constexpr u64 kPeriod = 16666667, kStatusReads = 3;
 u64 now;
-unsigned schedules, statusReads, dues, spinDepth, releases, spinLocks, gateDepth;
+unsigned schedules, statusReads, dues, spinDepth, releases, spinLocks, gateDepth, passTries;
 int workAsksUntilKick = -1;  // tgm_hold_wanted(1) calls before an app's kick lands (-1: none lands)
 u64 dueVblank;
 int lastResident;
@@ -142,6 +143,7 @@ void nvxnu_pass_run(void (*fn)(void *), void *arg)
 
 int nvxnu_pass_try(void (*fn)(void *), void *arg)
 {
+	++passTries;
 	nvxnu_pass_run(fn, arg);
 	return 1;
 }
@@ -466,4 +468,27 @@ TEST_F(DeadlineWindow, LaterCompositorKicksReportNotFirstUntilPresent)
 	EXPECT_EQ(tgm_deadline_kicked(1, 0), 0);
 	now += 1000;
 	EXPECT_EQ(tgm_deadline_kicked(1, 1), 1);
+}
+
+TEST_F(DeadlineWindow, DirectVisiblePresentAdvancesDeadlineAndSkipsGateWhenIdle)
+{
+	tgm_deadline_presented(now, 1);
+	char window[320];
+	tgm_deadline_miss_stats(window, sizeof(window));
+
+	frameEnd();
+	now += 1000000;
+	EXPECT_EQ(tgm_deadline_kicked(1, 0), 0);
+	now += 1000000;
+	tegra_gm20b_scanout_presented(now);
+	now += kPeriod;
+	frameEnd();
+	now += 1000000;
+	EXPECT_EQ(tgm_deadline_kicked(1, 0), 0);
+	EXPECT_EQ(tgm_deadline_miss_stats(window, sizeof(window)), 0);
+
+	tegra_gm20b_scanout_presented(now);
+	const unsigned triesBefore = passTries;
+	tegra_gm20b_scanout_presented(now + 1000);
+	EXPECT_EQ(passTries, triesBefore);
 }

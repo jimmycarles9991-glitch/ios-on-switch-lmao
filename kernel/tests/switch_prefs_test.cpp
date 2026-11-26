@@ -538,4 +538,21 @@ TEST(SwitchPrefsGuard, TimedCacheKeptOnlyFromThisClock)
         EXPECT_EQ(body, first) << path << ": the two kernels' drops differ";
     }
 }
+
+TEST(SwitchPrefsGuard, DiskArbitrationEnablesInternalUserFSMountInBothKernels)
+{
+    using switch_ios::test::Body;
+    using switch_ios::test::Count;
+    using switch_ios::test::SourceText;
+    for (const char *path : kKernels) {
+        const std::string setup =
+            Body(SourceText(path), "native_switch_setup_state(proc_t p, user_addr_t scratch, mount_t data_mount)");
+        EXPECT_EQ(Count(setup, "\"/private/var/preferences/SystemConfiguration\""), 1u) << path;
+        EXPECT_EQ(Count(setup, "\"/private/var/preferences/SystemConfiguration/"
+                               "com.apple.DiskArbitration.diskarbitrationd.plist\""),
+                  1u)
+            << path;
+        EXPECT_EQ(Count(setup, "<key>DAEnableUserFSMountInternal</key><true/>"), 1u) << path;
+    }
+}
 }  // namespace

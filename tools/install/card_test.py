@@ -111,6 +111,33 @@ class CardTest(unittest.TestCase):
         with self.assertRaisesRegex(cards.RefusedError, 'already has iOS'):
             cards.check_layout(table(retype(1, gpt.APFS)), SPEC, partition='userdata')
 
+    def test_shared_filesystem_requires_one_correctly_typed_full_mbr_extent(self):
+        card = table()
+        fat = card.table.entries[0]
+        other = [p for p in card.table.mbr_partitions if p.first != fat.first]
+        for fs, kind, delta, duplicate, accepted in (
+            ('exfat', 7, 0, False, True),
+            ('exfat', 12, 0, False, True),
+            ('', 12, 0, False, True),
+            ('', 7, 0, False, True),
+            (None, 12, 0, False, True),
+            ('ntfs', 7, 0, False, False),
+            ('msdos', 7, 0, False, False),
+            ('exfat', 7, -1, False, False),
+            ('exfat', 7, 0, True, False),
+        ):
+            mirror = gpt.MbrPartition(0, 0, kind, fat.first, fat.sectors + delta)
+            card.table.mbr_partitions = [*other, mirror] + ([mirror] if duplicate else [])
+            with (
+                self.subTest(fs=fs, kind=kind, delta=delta, duplicate=duplicate),
+                mock.patch.object(cards.host, 'disk_info', return_value={'FilesystemType': fs}),
+            ):
+                if accepted:
+                    self.assertEqual(cards.check_layout(card, SPEC, 'userdata').index, 8)
+                else:
+                    with self.assertRaises(cards.RefusedError):
+                        cards.check_layout(card, SPEC, 'userdata')
+
     def test_hybrid_mbr_may_list_the_whole_target(self):
         card = table()
         l4t = card.table.entries[1]

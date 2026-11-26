@@ -109,7 +109,12 @@ kernel_driver(
         "kits/SwitchRing",
     ],
     late = ["SwitchWLANFamily.cpp"],
-    prelink = ["com.apple.iokit.IONetworkingFamily"],
+    # IOUserEthernet: the Ethernet interfaces user space creates (IOEthernetControllerCreate: bluetoothd's PAN, misd's
+    # Internet Sharing, nesessionmanager), from IOUserEthernetResource on IOResources.
+    prelink = [
+        "com.apple.iokit.IONetworkingFamily",
+        "com.apple.iokit.IOUserEthernet",
+    ],
 )
 
 kernel_driver(

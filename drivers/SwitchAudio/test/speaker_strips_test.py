@@ -13,6 +13,7 @@ it. Version 2 takes 'aupreset' as optional, so J181's strips are version 2 and s
 
 import json
 import plistlib
+import struct
 import unittest
 from pathlib import Path
 
@@ -91,12 +92,47 @@ def dsp_graph_refusal(strip: dict) -> str | None:
     return None
 
 
+def assert_flat_vrq2_preset(test: unittest.TestCase, effect: dict, source: str) -> None:
+    preset = effect.get('aupreset')
+    test.assertIsInstance(preset, dict, f'{source}: vrq2 missing flat aupreset')
+    test.assertEqual(fourcc(preset['type']), AUFX, source)
+    test.assertEqual(fourcc(preset['subtype']), 'vrq2', source)
+    test.assertEqual(fourcc(preset['manufacturer']), APPL, source)
+    data = preset.get('data')
+    test.assertIsInstance(data, bytes, source)
+    test.assertEqual(len(data), 1744, source)
+
+    offset = 0
+    scope, elem, nparams = struct.unpack_from('>III', data, offset)
+    offset += 12
+    test.assertEqual((scope, elem, nparams), (0, 0, 4), source)
+    offset += nparams * 8
+
+    for curve in range(5):
+        scope, elem, nparams = struct.unpack_from('>III', data, offset)
+        offset += 12
+        test.assertEqual((scope, elem, nparams), (4, curve, 41), f'{source} curve {curve}')
+        params = {}
+        for _ in range(nparams):
+            pid, val = struct.unpack_from('>If', data, offset)
+            offset += 8
+            params[pid] = val
+        test.assertEqual(params[0], 0.0, f'{source} curve {curve} master gain')
+        for band in range(8):
+            test.assertEqual(params[1000 + band], 1.0, f'{source} curve {curve} band {band} bypass')
+            test.assertEqual(params[4000 + band], 0.0, f'{source} curve {curve} band {band} gain')
+    test.assertEqual(offset, len(data), source)
+
+
 class SpeakerStrips(unittest.TestCase):
     def assert_only_volume_runs(self, source: str) -> None:
         dsp = effects(source)
-        running = [fourcc(e['unit']['subtype']) for e in dsp if not e['bypass']]
+        running = [e for e in dsp if not e['bypass']]
         self.assertEqual(len(running), 1, source)
-        self.assertIn(running[0], VOLUME, source)
+        subtype = fourcc(running[0]['unit']['subtype'])
+        self.assertIn(subtype, VOLUME, source)
+        if subtype == 'vrq2':
+            assert_flat_vrq2_preset(self, running[0], source)
         for effect in dsp:
             self.assertEqual((fourcc(effect['unit']['type']), fourcc(effect['unit']['manufacturer'])), (AUFX, APPL))
 

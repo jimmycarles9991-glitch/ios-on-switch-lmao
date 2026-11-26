@@ -50,10 +50,10 @@
 #include "../../kits/SwitchRefusal/SwitchRefusal.h"
 #include "../../kits/SwitchTime/SwitchTime.h"
 #include "TegraVICBounce.h"
-#include "TegraVICBounce.h"
 #include "SwitchVICBounceSubmit.h"
 #include "TegraVICPresent.h"
 #include "TegraVICSurface.h"
+#include "SwitchVICSurfaceAccess.h"
 #include "SwitchVICTransform.h"
 #include "SwitchVICMapping.h"
 #include "SwitchVICJobs.h"
@@ -244,6 +244,7 @@ struct Job {
     IOUserClient *client;  // retained
     struct Conn *conn;
     TegraVICSurface src, dst;
+    SwitchVICWriteReservation dstReserve;
     TegraVICPlan plan;
     uint32_t chromaSite;
     bool bounceSrc, bounceDst;  // through the copy engine's scratch (TegraVICBounce.h)
@@ -301,6 +302,18 @@ void transformed(void *context, int status)
 
 bool runJob(Job *job, IOReturn *status)
 {
+    // Move to the stack before submission: finishJob may free `job` before the submit call returns.
+    struct WriteReservationGuard {
+        SwitchVICWriteReservation reservation;
+
+        ~WriteReservationGuard()
+        {
+            switch_vic_surface_release_write(&reservation);
+        }
+    };
+    WriteReservationGuard dstReserve{job->dstReserve};
+    job->dstReserve = {};
+
     const int prepared = job->eventStatus ? job->eventStatus : switch_vic_events_prepare(job->events);
     if (prepared) {
 #if TEGRA_VIC_STATS
@@ -335,12 +348,12 @@ bool runJob(Job *job, IOReturn *status)
                                (job->plan.readsSource ? tegra_vic_surface_extent(&job->src.desc) : 0);
 #endif
     if (!job->bounceSrc && !job->bounceDst)
-        submitted =
-            switch_vic_transform(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job, job->events);
+        submitted = switch_vic_transform(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job,
+                                         job->events, nullptr, &dstReserve.reservation);
     const bool bounced = !submitted;
     if (bounced)
-        submitted =
-            switch_vic_bounce_submit(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job, job->events);
+        submitted = switch_vic_bounce_submit(&job->src, &job->dst, &job->plan, job->chromaSite, transformed, job,
+                                             job->events, &dstReserve.reservation);
     if (submitted <= 0) {
 #if TEGRA_VIC_STATS
         firstFailure(job, bounced ? "bounce submission" : "direct submission", submitted);
@@ -401,6 +414,7 @@ void finishJob(Job *job, IOReturn status)
     statsLine();
 #endif
     switch_vic_events_release(&job->events);
+    switch_vic_surface_release_write(&job->dstReserve);
     tegra_vic_surface_written(&job->dst);
     tegra_vic_surface_release(&job->src);
     tegra_vic_surface_release(&job->dst);
@@ -453,6 +467,7 @@ bool queueJob(Job *job)
 void abandonUnqueued(Job *job)
 {
     switch_vic_events_release(&job->events);
+    switch_vic_surface_release_write(&job->dstReserve);
     tegra_vic_surface_release(&job->src);
     tegra_vic_surface_release(&job->dst);
     IOLockLock(job->conn->lock);
@@ -610,6 +625,10 @@ IOReturn transform(Conn *conn, const void *in, uint32_t size)
     IOLockUnlock(conn->lock);
     job->eventReady = job->events == nullptr;
     const bool async = job->async;
+    const bool mayDeferTurn = !job->bounceSrc && !job->bounceDst && job->plan.count == 1 &&
+                              (job->plan.op[0].transform & TEGRA_VIC_ROT90) != 0 && job->dst.desc.planes == 2;
+    if (!job->events && !mayDeferTurn)
+        switch_vic_surface_reserve_write(&job->dst, &job->dstReserve);
     switch_vic_events_arm(job->events);
     if (!queueJob(job)) {
         abandonUnqueued(job);

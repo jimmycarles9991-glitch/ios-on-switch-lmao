@@ -18,6 +18,7 @@ public:
     // pending. False with one line in `why` when a clock or PLL does not come up.
     bool powerUp(char *why, size_t size);
     void powerDown();
+    void setDownspread(bool enabled);
 
     bool hpdHigh() const;
 
@@ -25,6 +26,7 @@ public:
     void start(const struct switch_dp_aux_request &request);
     // After AUX_DONE: the reply, and a read's bytes into request.data.
     enum switch_dp_aux_result finish(struct switch_dp_aux_request &request);
+    void resetAux();
 
     // The interrupt's cause, cleared (the line is level: reading and clearing INTR_AUX drops it).
     uint32_t takeInterrupt();

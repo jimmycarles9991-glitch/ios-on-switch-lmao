@@ -31,13 +31,16 @@ static inline int switch_engine_soc_process(int32_t soc_speedo)
 {
     if (soc_speedo <= 0)
         return -1;
-    return soc_speedo < 1598 ? 0 : soc_speedo < 1709 ? 1 : 2;
+    if (soc_speedo < 1598)
+        return 0;
+    return soc_speedo < 1709 ? 1 : 2;
 }
 
 // coreb01_dvfs_table's 637 mV column: "c3bus", "nvdec", "nvenc" and "c2bus", "nvjpg" rows, processes 0-2.
 static inline uint32_t switch_engine_vmin_khz(unsigned bus, int process)
 {
-    static const uint32_t kC3[3] = {364800, 460800, 556800}, kC2[3] = {307200, 422400, 499200};
+    static const uint32_t kC3[3] = {364800, 460800, 556800};
+    static const uint32_t kC2[3] = {307200, 422400, 499200};
     if (process < 0 || process > 2 || (bus != SWITCH_ENGINE_BUS_C2 && bus != SWITCH_ENGINE_BUS_C3))
         return 0;
     return bus == SWITCH_ENGINE_BUS_C3 ? kC3[process] : kC2[process];
@@ -57,6 +60,7 @@ static inline uint32_t switch_engine_pllcx_base(uint32_t khz)
     const uint32_t kComparisonKHz = 19200;
     if (!khz)
         return 0;
+    // NOLINTNEXTLINE(modernize-loop-convert): a C header (extern "C"), so no range-for
     for (unsigned i = 0; i < sizeof(kQlin) / sizeof(kQlin[0]); i++) {
         const uint64_t vco = (uint64_t)khz * kQlin[i].divider;
         if (vco < 614400)

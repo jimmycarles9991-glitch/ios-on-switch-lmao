@@ -146,8 +146,12 @@ boot_package(
         "//install:from_release": "//install:release_kernel",
         "//conditions:default": "//kernel:prelinked",
     }),
-    launchd_catalog_os = select({
-        "//ipsw:21H461": "@ipsw//:os",
+    launchd_catalog = select({
+        "//ipsw:21H461": "@ipsw//:os_launchd_catalog",
+        "//conditions:default": None,
+    }),
+    launchd_catalog_signature = select({
+        "//ipsw:21H461": "@ipsw//:os_launchd_catalog_signature",
         "//conditions:default": None,
     }),
     linker_script = ":loader/link.ld",

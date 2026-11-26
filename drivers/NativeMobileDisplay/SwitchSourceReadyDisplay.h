@@ -69,6 +69,8 @@ static int sourceReadyQuery(void *owner)
     auto *self = static_cast<NativeLegacyDisplay *>(owner);
     if (__atomic_load_n(&self->copyStopping, __ATOMIC_ACQUIRE))
         return kIOReturnAborted;
+    if (self->sourceWait->waitPresent && tegra_gm20b_scanout_outstanding(nullptr))
+        return 0;
     const int error = switch_native_scanout_pitch(self->sourceWait->surface, &self->sourceWait->read);
     if (!error)
         return 1;

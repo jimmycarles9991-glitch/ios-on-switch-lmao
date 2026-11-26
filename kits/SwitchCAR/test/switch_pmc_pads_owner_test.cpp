@@ -72,8 +72,13 @@ TEST(PadsOwnerSource, OnlyTheKitWritesTheRailWords)
                 if (line.find("IOPOWER") == std::string::npos && line.find("PWR_DET") == std::string::npos &&
                     line.find("IoPower") == std::string::npos && line.find("PwrDet") == std::string::npos)
                     continue;
-                if (std::regex_search(line, call) && std::regex_search(line, named))
-                    writers.push_back(name + ":" + std::to_string(number) + ": " + line);
+                if (std::regex_search(line, call) && std::regex_search(line, named)) {
+                    std::string &site = writers.emplace_back(name);
+                    site += ':';
+                    site += std::to_string(number);
+                    site += ": ";
+                    site += line;
+                }
             }
         }
     }

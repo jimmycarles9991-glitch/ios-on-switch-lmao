@@ -1,0 +1,48 @@
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+index f025276..ab53c55 100644
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -2097,6 +2097,8 @@ static USBPort *xhci_lookup_uport(XHCIState *xhci, uint32_t *slot_ctx)
+     return NULL;
+ }
+ 
++static void xhci_detach_slot(XHCIState *xhci, USBPort *uport);
++
+ static TRBCCode xhci_address_slot(XHCIState *xhci, unsigned int slotid,
+                                   uint64_t pictx, bool bsr)
+ {
+@@ -2151,14 +2153,19 @@ static TRBCCode xhci_address_slot(XHCIState *xhci, unsigned int slotid,
+         return CC_USB_TRANSACTION_ERROR;
+     }
+ 
++    /*
++     * A hub driver may address a device's new slot before it disables the
++     * slot of its first attempt (AppleUSBHub does). The route goes to the
++     * newest slot; the older one keeps its ID and loses the device, as a
++     * slot whose device went away.
++     */
+     for (i = 0; i < xhci->numslots; i++) {
+         if (i == slotid-1) {
+             continue;
+         }
+         if (xhci->slots[i].uport == uport) {
+-            DPRINTF("xhci: port %s already assigned to slot %d\n",
+-                    uport->path, i+1);
+-            return CC_TRB_ERROR;
++            trace_usb_xhci_slot_takeover(i + 1, slotid, uport->path);
++            xhci_detach_slot(xhci, uport);
+         }
+     }
+ 
+diff --git a/hw/usb/trace-events b/hw/usb/trace-events
+index 3f4b20b..56d29bb 100644
+--- a/hw/usb/trace-events
++++ b/hw/usb/trace-events
+@@ -167,6 +167,7 @@ usb_xhci_port_notify(uint32_t port, uint32_t pls) "port %d, bits 0x%x"
+ usb_xhci_slot_enable(uint32_t slotid) "slotid %d"
+ usb_xhci_slot_disable(uint32_t slotid) "slotid %d"
+ usb_xhci_slot_address(uint32_t slotid, const char *port) "slotid %d, port %s"
++usb_xhci_slot_takeover(uint32_t old, uint32_t slotid, const char *port) "slot %d to slotid %d, port %s"
+ usb_xhci_slot_configure(uint32_t slotid) "slotid %d"
+ usb_xhci_slot_evaluate(uint32_t slotid) "slotid %d"
+ usb_xhci_slot_reset(uint32_t slotid) "slotid %d"

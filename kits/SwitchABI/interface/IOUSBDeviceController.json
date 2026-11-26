@@ -106,7 +106,7 @@
     "getConnectionSpeed": {
       "decl": "virtual int getConnectionSpeed() = 0",
       "mangled": "__ZN21IOUSBDeviceController18getConnectionSpeedEv",
-      "doc": "1 full speed, 2 high speed, -1 none."
+      "doc": "1 full speed, 2 high speed, 3 SuperSpeed, -1 none."
     },
     "provideEndpointIDsForConfiguration": {
       "decl": "virtual IOReturn provideEndpointIDsForConfiguration(OSArray *interfaces, uint8_t *ids) = 0",
@@ -188,6 +188,11 @@
       "type": "IOUSBDeviceControlRequest *",
       "access": "get",
       "doc": "EP0's control request state machine, which readyForHost creates."
+    },
+    "deviceCapabilities": {
+      "type": "OSArray *",
+      "access": "get",
+      "doc": "Capability descriptors appended to the family's BOS descriptor."
     }
   },
   "functions": {
@@ -244,6 +249,12 @@
         "_ZN15IOUSBDevicePipe12getDirectionEv"
       ],
       "doc": "IOUSBDevicePipe::getDirection(): 0 OUT, 1 IN"
+    }
+  },
+  "constants": {
+    "superSpeedBulkMaxBurst": {
+      "type": "uint32_t",
+      "doc": "bMaxBurst in the family's generated bulk endpoint companion descriptor."
     }
   }
 }

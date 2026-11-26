@@ -1,0 +1,75 @@
+xHCI 1.2c section 4.17.1, p.264: "If Interrupter Mapping is not supported, the Interrupter Target field shall be
+ignored by the xHC and all Events targeted at Interrupter 0"; p.263 makes mapping optional for MaxIntrs 1. QEMU drops
+an event whose target is >= numintrs, the out-of-range rule for a controller that maps. With one interrupter every
+event goes to interrupter 0; non-zero targets in transfer TRBs and in Address Device, Configure Endpoint and Evaluate
+Context slot contexts are traced (usb_xhci_intr_target, usb_xhci_slot_intr_target).
+
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+index 20a4563..d21ebb7 100644
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -644,6 +644,11 @@ static void xhci_event(XHCIState *xhci, XHCIEvent *event, int v)
+     dma_addr_t erdp;
+     unsigned int dp_idx;
+ 
++    if (xhci->numintrs == 1) {
++        /* xHCI 1.2c 4.17.1: a controller with one interrupter has no Interrupter Mapping, ignores every Interrupter
++         * Target and sends all events to interrupter 0. */
++        v = 0;
++    }
+     if (v >= xhci->numintrs) {
+         DPRINTF("intr nr out of range (%d >= %d)\n", v, xhci->numintrs);
+         return;
+@@ -1543,6 +1548,9 @@ static void xhci_xfer_report(XHCITransfer *xfer)
+                 DPRINTF("xhci_xfer_data: EDTLA=%d\n", event.length);
+                 edtla = 0;
+             }
++            if (TRB_INTR(*trb)) {
++                trace_usb_xhci_intr_target(trb_name(trb), event.slotid, event.epid, TRB_INTR(*trb));
++            }
+             xhci_event(xhci, &event, TRB_INTR(*trb));
+             reported = 1;
+             if (xfer->status != CC_SUCCESS) {
+@@ -2151,6 +2159,9 @@ static TRBCCode xhci_address_slot(XHCIState *xhci, unsigned int slotid,
+     slot->uport = uport;
+     slot->ctx = octx;
+     slot->intr = get_field(slot_ctx[2], TRB_INTR);
++    if (slot->intr) {
++        trace_usb_xhci_slot_intr_target("address device", slotid, slot->intr);
++    }
+ 
+     /* Make sure device is in USB_STATE_DEFAULT state */
+     usb_device_reset(dev);
+@@ -2235,6 +2246,9 @@ static TRBCCode xhci_configure_slot(XHCIState *xhci, unsigned int slotid,
+ 
+     xhci_dma_read_u32s(xhci, ictx+32, islot_ctx, sizeof(islot_ctx));
+     xhci_dma_read_u32s(xhci, octx, slot_ctx, sizeof(slot_ctx));
++    if (get_field(islot_ctx[2], TRB_INTR)) {
++        trace_usb_xhci_slot_intr_target("configure endpoint", slotid, get_field(islot_ctx[2], TRB_INTR));
++    }
+ 
+     if (SLOT_STATE(slot_ctx[3]) < SLOT_ADDRESSED) {
+         DPRINTF("xhci: invalid slot state %08x\n", slot_ctx[3]);
+@@ -2327,6 +2341,9 @@ static TRBCCode xhci_evaluate_slot(XHCIState *xhci, unsigned int slotid,
+         slot_ctx[1] |= islot_ctx[1] & 0xFFFF;
+         /* update interrupter target field */
+         xhci->slots[slotid-1].intr = get_field(islot_ctx[2], TRB_INTR);
++        if (xhci->slots[slotid-1].intr) {
++            trace_usb_xhci_slot_intr_target("evaluate context", slotid, xhci->slots[slotid-1].intr);
++        }
+         set_field(&slot_ctx[2], xhci->slots[slotid-1].intr, TRB_INTR);
+ 
+         DPRINTF("xhci: output slot context: %08x %08x %08x %08x\n",
+diff --git a/hw/usb/trace-events b/hw/usb/trace-events
+index dd04f14..3f4b20b 100644
+--- a/hw/usb/trace-events
++++ b/hw/usb/trace-events
+@@ -158,6 +158,8 @@ usb_xhci_irq_msix(uint32_t nr) "nr %d"
+ usb_xhci_irq_msix_use(uint32_t nr) "nr %d"
+ usb_xhci_irq_msix_unuse(uint32_t nr) "nr %d"
+ usb_xhci_queue_event(uint32_t vector, uint32_t idx, const char *trb, const char *evt, uint64_t param, uint32_t status, uint32_t control) "v %d, idx %d, %s, %s, p 0x%016" PRIx64 ", s 0x%08x, c 0x%08x"
++usb_xhci_intr_target(const char *trb, uint32_t slotid, uint32_t epid, uint32_t target) "%s, slot %d, ep %d, interrupter target %d"
++usb_xhci_slot_intr_target(const char *command, uint32_t slotid, uint32_t target) "%s, slot %d, slot context interrupter target %d"
+ usb_xhci_fetch_trb(uint64_t addr, const char *name, uint64_t param, uint32_t status, uint32_t control) "addr 0x%016" PRIx64 ", %s, p 0x%016" PRIx64 ", s 0x%08x, c 0x%08x"
+ usb_xhci_port_reset(uint32_t port, bool warm) "port %d, warm %d"
+ usb_xhci_port_link(uint32_t port, uint32_t pls) "port %d, pls %d"

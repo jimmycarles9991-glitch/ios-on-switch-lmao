@@ -269,7 +269,8 @@ typedef uint64_t kqueue_id_t;
 #define NOTE_WL_END_OWNERSHIP    0x00000020
 #define NOTE_WL_DISCOVER_OWNER   0x00000080
 #define NOTE_WL_IGNORE_ESTALE    0x00000100
-#define NOTE_WL_UPDATES_MASK     0x000001f0 /* Mask of all the [in] updates above */
+#define NOTE_WL_OWNER_HINT       0x00000200
+#define NOTE_WL_UPDATES_MASK     0x000003f0 /* Mask of all the [in] updates above */
 
 #define NOTE_WL_UPDATE_OWNER     0 /* ... compatibility define ... */
 

@@ -16,7 +16,10 @@
     "111": "getWorkLoop",
     "141": "newUserClient",
     "155": "setPowerState",
+    "185": "setDisplayDevice",
     "186": "isMainDisplay",
+    "187": "setDigitalOutMode",
+    "188": "getDigitalOutState",
     "190": "getDotPitch",
     "202": "getGammaTable",
     "203": "setGammaTable",
@@ -32,12 +35,14 @@
     "257": "platformInternalPlug",
     "258": "platformInternalUnplug",
     "261": "getDisplayDimensions",
+    "278": "hotPlugNotify",
     "290": "setDisplayTemperature",
     "292": "setAccessibilityScale",
     "305": "startHardware",
     "307": "kickSwapQueue",
     "312": "completeCurrentSwap",
     "313": "validateSwap",
+    "319": "getRefreshAttributes",
     "324": "platformFrameInfoNotify",
     "325": "sendFrameInfo",
     "344": "setEdrFactor",
@@ -151,7 +156,6 @@
     "native_legacy_vsync_notify": "0xfffffff00997cdc0",
     "native_legacy_frame_info_notify": "0xfffffff00997cf8c",
     "opaque279": "0xfffffff00997d08c",
-    "opaque278": "0xfffffff00997d094",
     "opaque217": "0xfffffff00997d174",
     "opaque218": "0xfffffff00997d264",
     "opaque219": "0xfffffff00997d380",
@@ -161,14 +165,11 @@
     "opaque365": "0xfffffff00997d564",
     "setPowerState": "0xfffffff00997d620",
     "opaque241": "0xfffffff00997d6b4",
-    "opaque185": "0xfffffff00997d808",
-    "opaque187": "0xfffffff00997d818",
     "opaque193": "0xfffffff00997d828",
     "opaque197": "0xfffffff00997d990",
     "opaque194": "0xfffffff00997da34",
     "opaque195": "0xfffffff00997dd94",
     "opaque196": "0xfffffff00997df70",
-    "opaque188": "0xfffffff00997dff4",
     "getDotPitch": "0xfffffff00997e05c",
     "opaque191": "0xfffffff00997e130",
     "opaque192": "0xfffffff00997e194",
@@ -197,7 +198,6 @@
     "opaque333": "0xfffffff0099804b0",
     "opaque360": "0xfffffff009980954",
     "opaque334": "0xfffffff009980e3c",
-    "opaque319": "0xfffffff009980e44",
     "native_legacy_set_display_refresh_properties": "0xfffffff009980f94",
     "opaque225": "0xfffffff009981124",
     "opaque226": "0xfffffff009981130",
@@ -296,7 +296,13 @@
     "opaque373": "0xfffffff009982070",
     "opaque374": "0xfffffff009982078",
     "opaque376": "0xfffffff009982080",
-    "gMetaClass": "0xfffffff00aeaf830"
+    "gMetaClass": "0xfffffff00aeaf830",
+    "setDisplayDevice": "0xfffffff00997d808",
+    "setDigitalOutMode": "0xfffffff00997d818",
+    "getDigitalOutState": "0xfffffff00997dff4",
+    "hotPlugNotify": "0xfffffff00997d094",
+    "switch_external_complete_current": "0xfffffff0099758d4",
+    "getRefreshAttributes": "0xfffffff009980e44"
   },
   "found": {
     "C2": "stores the vtable",
@@ -371,7 +377,12 @@
     "systemWillShutdown": "slot 79 by PAC of _ZN9IOService18systemWillShutdownEj",
     "validateSwap": "slot 313 by hint",
     "vsyncClientList": "value shown by f94d5e68 at 0xfffffff009975894",
-    "vtable": "metaclass initialiser"
+    "vtable": "metaclass initialiser",
+    "setDisplayDevice": "PAC root on IOMobileFramebuffer",
+    "setDigitalOutMode": "PAC root on IOMobileFramebuffer",
+    "getDigitalOutState": "PAC root on IOMobileFramebuffer",
+    "hotPlugNotify": "slot 278 by PAC; stores state at +0x1dc0 and sends two type-0 scalars",
+    "getRefreshAttributes": "slot 319 by hint"
   },
   "hints": {
     "layout": {
@@ -402,7 +413,12 @@
       "344": "setEdrFactor",
       "358": "collectCompletionReports",
       "359": "platformRefreshRates",
-      "375": "setDisplayPowerState"
+      "375": "setDisplayPowerState",
+      "185": "setDisplayDevice",
+      "187": "setDigitalOutMode",
+      "188": "getDigitalOutState",
+      "278": "hotPlugNotify",
+      "319": "getRefreshAttributes"
     },
     "functions": {
       "native_legacy_vsync_notify": {
@@ -424,6 +440,11 @@
         "at": "0xfffffff009980f94",
         "body": "d503237f d101c3ff a90457f6 a9054ff4 a9067bfd 910183fd aa0003f4 52800020 94000a31 b4000aa0 aa0003f3 4f05e540",
         "why": "IOMobileFramebufferLegacy::setDisplayRefreshProperties (its failure line names it, 0xfffffff0099810f4): an OSDictionary, the timing getter at slot 319 given bit 0 of +0x1cc2, then the six IOMFBDisplayRefresh numbers; UnifiedPipeline::start_hardware_boot calls it (0xfffffff008e1e878)"
+      },
+      "switch_external_complete_current": {
+        "at": "0xfffffff0099758d4",
+        "body": "d503245f d503237f d10303ff a9066ffc a90767fa a9085ff8 a90957f6 a90a4ff4 a90b7bfd 9102c3fd aa0103f6 aa0003f3",
+        "why": "completeCurrentSwap tail-calls this with shown=true; the current swap is +0x1a40"
       }
     },
     "fields": {

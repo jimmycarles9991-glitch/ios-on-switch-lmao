@@ -4,8 +4,8 @@ Guard rails (every command):
   * the argument must name a whole disk (diskN or /dev/diskN), never a partition, volume or path;
   * never the boot disk or a disk holding the running system's APFS container;
   * never an internal non-removable disk;
-  * it must look like a Switch card: valid primary and backup GPT, entry #0 "hos_data" a Microsoft basic data (FAT32)
-    partition that the hybrid MBR also lists;
+  * it must look like a Switch card: valid primary and backup GPT, entry #0 "hos_data" a Microsoft basic data partition
+    holding FAT32 or exFAT that the hybrid MBR also lists;
   * the target is the one partition target.py selects (any size the kernel takes), Linux-data or APFS typed, not the
     FAT, not emuMMC; no other APFS or iOS entry on the card (the kernel takes the only one);
   * the hybrid MBR may list the target only as the whole partition (hekate lists l4t), never part of it.
@@ -136,12 +136,20 @@ def check_layout(card: Card, spec: dict, partition: str | None = None) -> gpt.En
     entries = table.used
     first = table.entries[0]
     if first.type != gpt.BASIC_DATA or first.name != 'hos_data':
-        raise RefusedError(f"{card.disk}: entry #0 is {first.describe()}, not the Switch's hos_data FAT32 partition")
-    if not any(p.kind in (0x0B, 0x0C) and p.first == first.first for p in table.mbr_partitions):
-        raise RefusedError(f'{card.disk}: the MBR does not list hos_data as FAT32 (no hybrid MBR: not a Switch card?)')
-    fat_info = host.disk_info(card.slice(first)) or {}
-    if fat_info.get('FilesystemType') not in ('msdos', None) and fat_info.get('FilesystemType'):
-        raise RefusedError('{}: hos_data is {}, not FAT'.format(card.disk, fat_info.get('FilesystemType')))
+        raise RefusedError(f"{card.disk}: entry #0 is {first.describe()}, not the Switch's hos_data FAT partition")
+    filesystem = (host.disk_info(card.slice(first)) or {}).get('FilesystemType') or ''
+    if filesystem and filesystem not in ('msdos', 'exfat'):
+        raise RefusedError(f'{card.disk}: hos_data is {filesystem}, not FAT32 or exFAT')
+    mirrors = [
+        p
+        for p in table.mbr_partitions
+        if p.kind not in (0, 0xEE) and p.first <= first.last and first.first < p.first + p.sectors
+    ]
+    if len(mirrors) != 1 or (mirrors[0].first, mirrors[0].sectors) != (first.first, first.sectors):
+        raise RefusedError(f'{card.disk}: the hybrid MBR does not uniquely mirror hos_data')
+    allowed = (0x07, 0x0C) if filesystem == 'exfat' else (0x0B, 0x0C) if filesystem == 'msdos' else (0x07, 0x0B, 0x0C)
+    if mirrors[0].kind not in allowed:
+        raise RefusedError(f'{card.disk}: the hybrid MBR type does not match {filesystem or "FAT32/exFAT"}')
     eligible = [e for e in entries if e.index != first.index and e.type != gpt.EMUMMC]
     chosen = _select(
         card, [targets.Candidate(e.index, e.name, e.type == gpt.APFS, e.bytes) for e in eligible], spec, partition
@@ -190,24 +198,29 @@ def diskutil_partitions(card: Card) -> list[Part]:
     return out
 
 
+def shared_partition(card: Card, parts: list[Part]) -> Part:
+    if not parts or not (
+        parts[0].index == 0
+        and parts[0].name == 'hos_data'
+        and parts[0].content == 'Microsoft Basic Data'
+        and parts[0].filesystem in ('msdos', 'exfat', '')
+    ):
+        raise RefusedError(f'{card.disk}: expected the Switch hos_data FAT32 or exFAT partition in slot one')
+    return parts[0]
+
+
 def check_layout_unprivileged(card: Card, spec: dict, partition: str | None = None) -> tuple[Part, Part]:
     """Apply check_layout's guards from diskutil's view (deploy, image sizing, dry runs without root).
 
     Returns (fat partition, target partition).
     """
     parts = diskutil_partitions(card)
-    if (
-        not parts
-        or parts[0].name != 'hos_data'
-        or parts[0].content != 'Microsoft Basic Data'
-        or parts[0].filesystem not in ('msdos', '')
-    ):
-        raise RefusedError(f"{card.disk}: the first partition is not the Switch's hos_data FAT32")
+    fat = shared_partition(card, parts)
     eligible = [p for p in parts[1:] if p.content.upper() != str(gpt.EMUMMC).upper()]
     chosen = _select(
         card, [targets.Candidate(p.index, p.name, p.content == 'Apple_APFS', p.size) for p in eligible], spec, partition
     )
-    return parts[0], next(p for p in eligible if p.index == chosen.index)
+    return fat, next(p for p in eligible if p.index == chosen.index)
 
 
 def table_snapshot(card: Card) -> bytes:

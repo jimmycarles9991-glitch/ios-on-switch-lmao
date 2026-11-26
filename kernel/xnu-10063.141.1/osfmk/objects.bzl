@@ -7,6 +7,7 @@ DEVELOPMENT = struct(
     objects = [
         "gen:gssd/gssd_mach.c",
         "gen:lockd/lockd_mach.c",
+        "gen:kextd/kextd_mach.c",
         "osfmk/UserNotification/KUNCUserNotifications.c",
         "osfmk/kdp/kdp.c",
         "osfmk/kern/kern_stackshot.c",
@@ -601,6 +602,7 @@ RELEASE = struct(
     objects = [
         "gen:gssd/gssd_mach.c",
         "gen:lockd/lockd_mach.c",
+        "gen:kextd/kextd_mach.c",
         "osfmk/UserNotification/KUNCUserNotifications.c",
         "osfmk/kern/kern_stackshot.c",
         "osfmk/kdp/kdp_common.c",

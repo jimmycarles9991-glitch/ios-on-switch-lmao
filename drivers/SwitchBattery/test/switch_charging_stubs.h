@@ -41,9 +41,12 @@ inline void IODelay(unsigned us)
     gDelayedUS += us;
 }
 
+inline uint64_t gSleptMS = 0;  // IOSleep total
+
 inline void IOSleep(unsigned ms)
 {
     gNow += ms * 1000000ull;
+    gSleptMS += ms;
 }
 
 // IOLog and os_log lines, in order, each prefixed with its channel.
@@ -249,9 +252,47 @@ public:
 };
 
 class IOWorkLoop;
+class IOService;
+
+// System power messages (IOKit/IOMessage.h): a priority sleep/wake interest gets them; stubSystemPowerMessage() sends
+// one to every registered handler, as IOPMrootDomain does before Shut Down or Restart.
+using UInt32 = uint32_t;
+using vm_size_t = size_t;
+constexpr UInt32 kIOMessageSystemWillPowerOff = 0xe0000250;
+constexpr UInt32 kIOMessageSystemWillRestart = 0xe0000310;
+constexpr UInt32 kIOMessageSystemWillSleep = 0xe0000280;
+typedef IOReturn (*IOServiceInterestHandler)(void *target, void *refCon, UInt32 messageType, IOService *provider,
+                                             void *messageArgument, vm_size_t argSize);
+
+class IONotifier : public OSObject {};
+
+struct StubPowerInterest {
+    IOServiceInterestHandler handler;
+    void *target;
+};
+
+inline std::vector<StubPowerInterest> gPowerInterests;
+
+inline void stubSystemPowerMessage(UInt32 type)
+{
+    for (const StubPowerInterest &interest : gPowerInterests)
+        interest.handler(interest.target, nullptr, type, nullptr, nullptr, 0);
+}
+
+inline IONotifier *registerPrioritySleepWakeInterest(IOServiceInterestHandler handler, void *target, void * = nullptr)
+{
+    static IONotifier notifier;
+    gPowerInterests.push_back({handler, target});
+    return &notifier;
+}
 
 class IOService : public OSObject {
 public:
+    IOService *getPMRootDomain()
+    {
+        return this;
+    }
+
     virtual IOWorkLoop *getWorkLoop() const
     {
         return nullptr;

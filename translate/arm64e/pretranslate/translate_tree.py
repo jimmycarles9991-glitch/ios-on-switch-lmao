@@ -5,8 +5,9 @@
 The tree is read-only (a decrypted image mounted on the Mac). For every Mach-O whose translation changes bytes, the
 replacement file goes to DIR under its volume path and an entry to DIR/<role>.manifest.json. The new cdhashes become
 DIR/<role>.trustcache, a version-2 module carrying each binary's launch-constraint category from Apple's own trust
-caches. For the SystemOS cryptex the dyld shared cache is translated with its plan (made here, DIR/<role>.a64xplan),
-the prebuilt-loader cdhashes of on-disk binaries are updated to their translations, and the translated cache files'
+caches. For the SystemOS cryptex both dyld shared caches, the main one and DriverKit's (which every dext maps), are
+translated each with its own plan (made here, DIR/<role>.a64xplan and DIR/<role>.driverkit.a64xplan), the
+prebuilt-loader cdhashes of on-disk binaries are updated to their translations, and the translated cache files'
 cdhashes go to DIR/a64x-cache-pretranslated.bin for the device tree.
 
 Each file is translated by one `arm64e` subprocess, skipped when DIR already holds its output for this input and
@@ -31,7 +32,8 @@ from typing import NamedTuple
 from tools.common import files, hashing
 from tools.trustcache.trustcache import trust_module
 
-CACHE_DIR = 'System/Library/Caches/com.apple.dyld'
+# Each cache directory and the name its plan takes after the role's.
+CACHES = {'System/Library/Caches/com.apple.dyld': '', 'System/DriverKit/System/Library/dyld': '.driverkit'}
 MACHO_MAGIC = (b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xca\xfe\xba\xbf')  # thin 64, fat BE, fat64 BE
 
 
@@ -220,10 +222,10 @@ def _report(args: argparse.Namespace, what: str) -> None:
         print('progress', what, flush=True)
 
 
-def _machos(volume: Path, cache: Path) -> list[Path]:
+def _machos(volume: Path, caches: list[Path]) -> list[Path]:
     machos = []
     for root, _, names in os.walk(volume):
-        if os.path.abspath(root).startswith(os.path.abspath(cache)):
+        if any(os.path.abspath(root).startswith(os.path.abspath(cache)) for cache in caches):
             continue
         for name in names:
             p = Path(root) / name
@@ -273,9 +275,9 @@ def main() -> None:
     external_pairs = _external_pairs(args.cdhash_pairs)
     no_category = 0
 
-    cache = args.volume / CACHE_DIR
+    caches = [args.volume / directory for directory in CACHES]
     _report(args, 'finding the Mach-O files')
-    machos = sorted(_machos(args.volume, cache))
+    machos = sorted(_machos(args.volume, caches))
     seen_paths = {'/' + str(p.relative_to(args.volume)) for p in machos}
     missing = sorted(set(edits_by_path) - seen_paths)
     if missing:
@@ -325,8 +327,8 @@ def main() -> None:
             trust.append((bytes.fromhex(s['cdhash_out']), flags, cat))
 
     (out / f'{args.role}.cdhash-pairs').write_text(''.join(f'{a} {b}\n' for a, b in pairs))
-    if args.role == 'system_cryptex' and cache.is_dir():
-        _translate_cache(args, pairs + external_pairs, trust, apple, manifest)
+    if args.role == 'system_cryptex':
+        _translate_caches(args, pairs + external_pairs, trust, apple, manifest)
 
     (out / f'{args.role}.manifest.json').write_text(json.dumps(manifest, indent=1))
     (out / f'{args.role}.trustcache').write_bytes(trust_module(trust))
@@ -338,17 +340,32 @@ def main() -> None:
     print(f'{args.role}: {len(manifest["files"])} files translated, {len(trust)} trust entries')
 
 
-def _translate_cache(
+def _translate_caches(
     args: argparse.Namespace,
     pairs: list[tuple[str, str]],
     trust: list[tuple[bytes, int, int]],
     apple: dict[str, tuple[int, int]],
     manifest: dict,
 ) -> None:
-    cache, out = args.volume / CACHE_DIR, args.out
+    listed = []
+    for directory in CACHES:
+        if (args.volume / directory).is_dir():
+            for cdhash, original in _translate_cache(args, args.volume / directory, pairs, manifest):
+                listed.append(cdhash)
+                if original:
+                    trust.append((cdhash, *apple.get(original, (0, 0))))
+    if listed:
+        (args.out / 'a64x-cache-pretranslated.bin').write_bytes(b''.join(listed))
+
+
+def _translate_cache(
+    args: argparse.Namespace, cache: Path, pairs: list[tuple[str, str]], manifest: dict
+) -> list[tuple[bytes, str | None]]:
+    """Translate one cache directory's files: (new cdhash, the original's, None if unchanged) for each."""
+    out = args.out
     memo, version = (Memo(args.memo) if args.memo else None), _tool_version(args.tool)
     main_cache = cache / 'dyld_shared_cache_arm64e'
-    plan = out / f'{args.role}.a64xplan'
+    plan = out / f'{args.role}{CACHES[str(cache.relative_to(args.volume))]}.a64xplan'
 
     def make_plan() -> dict:
         run_tool(args.tool, 'plan', '-o', str(plan), str(main_cache))
@@ -367,7 +384,7 @@ def _translate_cache(
     sources = [cache / n for n in names if not n.endswith(('.symbols', '.atlas')) and (cache / n).exists()]
 
     def apply(src: Path) -> tuple[Path, Path, str, str, str]:
-        dst = out / 'files' / CACHE_DIR / src.name
+        dst = out / 'files' / src.relative_to(args.volume)
         dst.parent.mkdir(parents=True, exist_ok=True)
         sha_in = hashing.sha256_file(src)
 
@@ -383,8 +400,8 @@ def _translate_cache(
 
     cdhashes = []
     for src, dst, cdhash, sha_in, sha_out in _in_order(args, apply, sources, 'dyld cache files'):
-        cdhashes.append(bytes.fromhex(cdhash))
         if sha_out == sha_in:
+            cdhashes.append((bytes.fromhex(cdhash), None))
             dst.unlink()
             continue
         manifest['files'].append(
@@ -396,9 +413,8 @@ def _translate_cache(
                 'cdhash': [cdhash],
             }
         )
-        flags, cat = apple.get(_cache_cdhash_in(src), (0, 0))
-        trust.append((bytes.fromhex(cdhash), flags, cat))
-    (out / 'a64x-cache-pretranslated.bin').write_bytes(b''.join(cdhashes))
+        cdhashes.append((bytes.fromhex(cdhash), _cache_cdhash_in(src)))
+    return cdhashes
 
 
 def _in_order[T, R](args: argparse.Namespace, work: Callable[[T], R], items: list[T], unit: str) -> list[R]:

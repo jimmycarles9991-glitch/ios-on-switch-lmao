@@ -36,16 +36,19 @@
 #define XUSB_SLEEP_CFG1_USE_PMC      ((1u << 8) | (1u << 16))  // RPU switch low, RPD control
 #define XUSB_MASTER_CONFIG_PWR       (1u << 0)
 #define XUSB_DEBOUNCE_LINE_MASK      (0xfu << 16)
-#define XUSB_DEBOUNCE_LINE_ONE       (1u << 16)
+#define XUSB_DEBOUNCE_LINE_TWO       (2u << 16)  // 32 kHz cycles; "must be greater than 1" (Tegra X1 TRM 12.6.60)
 #define XUSB_FAKE_MASK               0xfu
 #define XUSB_LINE_WAKEUP_EN          (1u << 0)
 #define XUSB_USB_AO_LINE_PD          ((1u << 0) | (1u << 1))  // USBOP and USBON line-state detectors down
 #define XUSB_SAVED_SPEED_MASK        3u
-#define XUSB_WALK_EN                 (1u << 7)
-#define XUSB_TRIGGER_ARM             ((1u << 0) | (1u << 4) | (1u << 12))  // walk pointer, capture, clear alarm
-#define XUSB_TRIGGER_CLEAR_ALARM     (1u << 12)
-#define XUSB_TERM_MASK               ((0x3fu << 1) | (0x3fu << 7))
-#define XUSB_PAD_CFG_RPD_MASK        (0x1fu << 22)
+// LINEVAL_WALK_EN only, as L4T: the walk on a USB line change (a device's remote wake). WAKE_WALK_EN ("Perform Walk on
+// any chip wake up event", TRM 12.6.125) would also drive resume on the bus for a wake from anything else, which the TRM's
+// 22.8.9.2 sets and L4T leaves to the host controller.
+#define XUSB_WALK_EN             (1u << 7)
+#define XUSB_TRIGGER_ARM         ((1u << 0) | (1u << 4) | (1u << 12))  // walk pointer, capture, clear alarm
+#define XUSB_TRIGGER_CLEAR_ALARM (1u << 12)
+#define XUSB_TERM_MASK           ((0x3fu << 1) | (0x3fu << 7))
+#define XUSB_PAD_CFG_RPD_MASK    (0x1fu << 22)
 // XUSB pad controller: the bias pad's tracked TCTRL/PCTRL and pad 0's RPD_CTRL, which the PMC takes over.
 #define XUSB_PADCTL_USB2_BIAS_PAD_CTL1 0x288u
 #define XUSB_PADCTL_USB2_OTG_PAD0_CTL1 0x08cu

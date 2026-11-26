@@ -166,6 +166,8 @@ static inline void tgm_layout_read(const struct tgm_layout *l, const uint8_t *ti
 int tegra_gm20b_surface_layout(uint64_t pa, struct tgm_layout *out);
 uint32_t tegra_gm20b_surface_kind(uint64_t pa);
 int tegra_gm20b_surface_compressed(uint64_t pa);
+void tegra_gm20b_set_external_scanout(int active);
+int tegra_gm20b_external_scanout(void);
 
 // For a kernel CPU reader of a block-linear IOSurface, by the physical address of any byte of it (`pa`): the surface's bytes
 // as a CPU lock sees them (its texels as rows bytes_per_row apart, from its first byte) in a scratch, the copy engine's,

@@ -14,7 +14,15 @@ import sys
 import unittest
 from pathlib import Path
 
-EVERY_CONFIG_UNITS = {'SwitchDiag.o', 'SwitchPanicEarly.o', 'SwitchPanicSave.o', 'SwitchRootBoot.o'}
+EVERY_CONFIG_UNITS = {
+    'SwitchDiag.o',
+    'SwitchPanicEarly.o',
+    'SwitchPanicSave.o',
+    'SwitchRootBoot.o',
+    'SwitchSdHandoff.o',
+    'partition.o',
+    'sd_reference.o',
+}
 
 KEPT = {
     'switch_diag_panic',
@@ -28,6 +36,8 @@ KEPT = {
     'switch_panic_save_pending',
     'switch_root_boot_prepare',
     'boot_progress_prepare_scanout',
+    'switch_gpt_scan',
+    'switch_sd_card_reference_validate',
 }
 
 # One or more names from each debug unit and each debug hook.
@@ -53,11 +63,10 @@ DEBUG_ONLY = {
     'switch_raw_apfs_open',
     'switch_sd_read_sectors',
     'switch_split_open',
-    'switch_gpt_scan',
+    'switch_gpt_find',
     'switch_data_create',
     'switch_block_create',
     'switch_sd_dma_bind',
-    'switch_sd_crc32',
 }
 
 PANIC_TEXT = [

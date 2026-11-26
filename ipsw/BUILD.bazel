@@ -101,6 +101,18 @@ py_binary(
     srcs = ["inflate.py"],
 )
 
+exports_files(["os_files.py"])
+
+py_library(
+    name = "os_files_lib",
+    srcs = ["os_files.py"],
+)
+
+py_binary(
+    name = "os_files",
+    srcs = ["os_files.py"],
+)
+
 # --//ipsw:kind (default pins.bzl's DEFAULT_KIND), a config_setting per kind (//ipsw:<kind>), the deflated
 # members inflated (//ipsw:<kind>_<role>, what @ipsw//:<role> selects), :current (the kind's IpswInfo).
 ipsw_kinds()

@@ -1,9 +1,11 @@
 # drivers/SwitchDisplayPort's pure-C policies on the host:
 #   alt_mode_test   the BM92T36 alternate-mode steps against a model dock, adapters and chargers; pin assignment D first
-#   dp_modes_test   EDID parsing and the 1080p60 cap on the mode driven
+#   dp_modes_test   EDID parsing, source limits and native IOAV timing payloads
 #   dp_link_test    the link for a mode, SOR1's transfer units (Linux's numbers), PLL_D2, training against a model sink
 #   dp_aux_test     DPAUX1 control words (Linux's), replies, retries, the EDID read plan
 #   policy_c11      every header again as C11 under -Wconversion -Wsign-conversion
+#   external_planes_<kind>_test  SwitchExternalPlanes.h: clone swaps onto DC B's windows, the published limits
+#   dcb_scanout_test             TegraDisplayB against a model of DC B's banked window registers
 #
 #   bazel test //drivers/SwitchDisplayPort/test:all
 load("//bazel/lint:defs.bzl", "lint_files")
@@ -13,6 +15,8 @@ lint_files()
 
 POLICY = [
     "//drivers/SwitchDisplayPort:SwitchDPAux.h",
+    "//drivers/SwitchDisplayPort:SwitchDPCEC.h",
+    "//drivers/SwitchDisplayPort:SwitchDPAppleTiming.h",
     "//drivers/SwitchDisplayPort:SwitchDPLink.h",
     "//drivers/SwitchDisplayPort:SwitchDPModes.h",
     "//drivers/SwitchDisplayPort:SwitchDPTraining.h",
@@ -51,4 +55,127 @@ host_test(
     name = "dp_aux_test",
     srcs = ["dp_aux_test.cpp"] + POLICY,
     deps = [":policy_c11"],
+)
+
+host_library(
+    name = "sor_registers",
+    srcs = [
+        "//drivers/SwitchDisplayPort:TegraDpaux1.cpp",
+        "//drivers/SwitchDisplayPort:TegraSor1.cpp",
+        "//kits/SwitchCAR:SwitchCAR.cpp",
+    ],
+    hdrs = [
+        "//drivers/SwitchDisplayPort:SwitchDPAux.h",
+        "//drivers/SwitchDisplayPort:SwitchDPLink.h",
+        "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:SwitchDPTraining.h",
+        "//drivers/SwitchDisplayPort:TegraDpaux1.h",
+        "//drivers/SwitchDisplayPort:TegraSor1.h",
+        "//drivers/TegraI2C:TegraI2C.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = ["//drivers/SwitchUSB/test:xusb_kernel"],
+)
+
+host_test(
+    name = "sor_registers_test",
+    srcs = [
+        "sor_registers_test.cpp",
+        "//drivers/SwitchDisplayPort:TegraSor1.h",
+    ],
+    deps = [
+        ":sor_registers",
+        "//drivers/SwitchUSB/test:xusb_register_model",
+    ],
+)
+
+PLANES = [
+    "//drivers/NativeMobileDisplay:NativePlanes.h",
+    "//drivers/NativeMobileDisplay:SwitchWindowCaps.h",
+    "//drivers/NativeMobileDisplay:SwitchWindowFormatImage.h",
+    "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+    "//drivers/SwitchDisplayPort:SwitchExternalPlanes.h",
+    "//drivers/SwitchDisplayPort:SwitchExternalWindows.h",
+    "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
+    "//drivers/SwitchPower:SwitchDisplayMemory.h",
+    "//drivers/SwitchPower:SwitchDisplayMemoryMath.h",
+    "//drivers/TegraGM20B:TegraGM20BLayout.h",
+    "//drivers/TegraVIC:SwitchSurfaceColor.h",
+    "//drivers/TegraVIC:TegraVICFormats.h",
+]
+
+# The planner as each IPSW kind builds it (the published dictionary differs).
+[
+    host_test(
+        name = "external_planes_{}_test".format(kind),
+        srcs = ["external_planes_test.cpp"] + PLANES,
+        copts = ["-O1"],
+        defines = ["SWITCH_IPSW_KIND_{}=1".format(kind)],
+    )
+    for kind in ("21H461", "24B119")
+]
+
+host_test(
+    name = "dcb_scanout_test",
+    srcs = [
+        "dcb_scanout_test.cpp",
+        "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:SwitchExternalWindows.h",
+        "//drivers/SwitchDisplayPort:TegraDisplayB.cpp",
+        "//drivers/SwitchDisplayPort:TegraDisplayB.h",
+        "//drivers/SwitchDisplayPort:TegraDpaux1.h",
+        "//drivers/SwitchDisplayPort:TegraSor1.h",
+        "//drivers/SwitchPower:SwitchDisplayBandwidth.h",
+        "//drivers/SwitchPower:SwitchDisplayMemory.h",
+        "//drivers/TegraDisplayFlip:SwitchDisplayPriority.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [
+        ":sor_registers",
+        "//drivers/SwitchUSB/test:xusb_kernel",
+        "//drivers/SwitchUSB/test:xusb_register_model",
+    ],
+)
+
+host_test(
+    name = "dp_scanout_source_test",
+    srcs = ["dp_scanout_source_test.cpp"],
+    data = [
+        "//drivers/SwitchDisplayPort:SwitchDPSession.cpp",
+        "//drivers/SwitchDisplayPort:SwitchDisplayPort.cpp",
+        "//drivers/SwitchDisplayPort:SwitchExternalConvert.cpp",
+        "//drivers/SwitchDisplayPort:SwitchExternalPresent.cpp",
+        "//drivers/SwitchDisplayPort:SwitchExternalScanout.cpp",
+        "//drivers/SwitchDisplayPort:SwitchExternalScreen.cpp",
+        "//drivers/SwitchDisplayPort:SwitchExternalScreen.h",
+    ],
+)
+
+host_test(
+    name = "dp_cec_test",
+    srcs = ["dp_cec_test.cpp"] + POLICY,
+    data = ["//drivers/SwitchDisplayPort:SwitchDPCEC.cpp"],
+    deps = [":policy_c11"],
+)
+
+host_test(
+    name = "dp_properties_test",
+    srcs = [
+        "dp_properties_test.cpp",
+        "switch_dp_properties_stubs.h",
+        "//drivers/SwitchDisplayPort:SwitchDPAppleTiming.h",
+        "//drivers/SwitchDisplayPort:SwitchDPModes.h",
+        "//drivers/SwitchDisplayPort:SwitchDPProperties.cpp",
+        "//drivers/SwitchDisplayPort:SwitchDPProperties.h",
+    ],
+    defines = ["SWITCH_DP_PROPERTIES_TEST"],
 )

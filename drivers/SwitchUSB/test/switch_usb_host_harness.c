@@ -32,9 +32,10 @@ int pd_decide(int phase, uint16_t alert, uint16_t status1, uint16_t status2, int
     return (int)step.act;
 }
 
-int pd_window_end(int phase, int saw_detach, uint16_t status1, int *next, char *why, size_t why_size)
+int pd_window_end(int phase, int saw_detach, uint16_t status1, uint16_t status2, int *next, char *why, size_t why_size)
 {
-    const struct switch_pd_step step = switch_pd_window_end((enum switch_pd_phase)phase, saw_detach != 0, status1);
+    const struct switch_pd_step step =
+        switch_pd_window_end((enum switch_pd_phase)phase, saw_detach != 0, status1, status2);
     *next = (int)step.next;
     copy_why(step.why, why, why_size);
     return (int)step.act;
@@ -42,17 +43,27 @@ int pd_window_end(int phase, int saw_detach, uint16_t status1, int *next, char *
 
 int pd_switches_on(int phase, int allow)
 {
-    return switch_pd_switches_on((enum switch_pd_phase)phase, allow != 0);
+    return switch_pd_switches_on((enum switch_pd_phase)phase, allow != 0) ? 1 : 0;
 }
 
-int pd_rails_on(int phase)
+int pd_vbus_rail_on(int phase)
 {
-    return switch_pd_rails_on((enum switch_pd_phase)phase);
+    return switch_pd_vbus_rail_on((enum switch_pd_phase)phase) ? 1 : 0;
+}
+
+int pd_vconn_on(int phase, uint16_t status1, uint16_t status2)
+{
+    return switch_pd_vconn_on((enum switch_pd_phase)phase, status1, status2) ? 1 : 0;
+}
+
+int pd_boost_on(int phase)
+{
+    return switch_pd_boost_on((enum switch_pd_phase)phase) ? 1 : 0;
 }
 
 int pd_vbus_ours(uint16_t status1)
 {
-    return switch_pd_vbus_ours(status1);
+    return switch_pd_vbus_ours(status1) ? 1 : 0;
 }
 
 const char *pd_phase_name(int phase)
@@ -62,7 +73,27 @@ const char *pd_phase_name(int phase)
 
 int pd_usb_host(int sourcing, uint16_t status1)
 {
-    return switch_pd_usb_host(sourcing != 0, status1);
+    return switch_pd_usb_host(sourcing != 0, status1) ? 1 : 0;
+}
+
+int pd_usb_device_vbus(int sourcing, uint16_t status1)
+{
+    return switch_pd_usb_device_vbus(sourcing != 0, status1) ? 1 : 0;
+}
+
+int pd_reset_at_start(uint16_t status1, uint16_t dp_status)
+{
+    return switch_pd_reset_at_start(status1, dp_status) ? 1 : 0;
+}
+
+int pd_reset_on_fault(uint16_t alert, uint16_t status1)
+{
+    return switch_pd_reset_on_fault(alert, status1) ? 1 : 0;
+}
+
+int pd_hard_reset(uint16_t alert, uint16_t status1)
+{
+    return switch_pd_hard_reset(alert, status1) ? 1 : 0;
 }
 
 // --- XusbPorts.h ---
@@ -92,6 +123,12 @@ uint32_t find_ports(uint32_t window, unsigned major, unsigned *reads)
     *reads = 0;
     const struct xhci_port_range range = xhci_find_ports(&fake_read, reads, window, major);
     return range.first << 16 | range.count;
+}
+
+int usb2_hlc(uint32_t window)
+{
+    unsigned reads = 0;
+    return xhci_usb2_hlc(&fake_read, &reads, window) ? 1 : 0;
 }
 
 uint32_t portsc_offset(uint32_t cap_length, unsigned port)
@@ -144,25 +181,6 @@ const char *id_name(uint32_t v)
     return xusb_id_name(v);
 }
 
-// verdict of xusb_irq_judge for an armed and a current sample
-int irq_judge(uint32_t armed_count, uint32_t armed_erdp, int armed_pending, int armed_deliverable, uint32_t now_count,
-              uint32_t now_erdp, int now_pending, int now_deliverable, int first, unsigned stage)
-{
-    const struct xusb_irq_sample armed = {armed_count, armed_erdp, armed_pending != 0, armed_deliverable != 0};
-    const struct xusb_irq_sample now = {now_count, now_erdp, now_pending != 0, now_deliverable != 0};
-    return (int)xusb_irq_judge(armed, now, first != 0, stage);
-}
-
-int xhci_pending(uint32_t iman, uint32_t usbsts)
-{
-    return xusb_xhci_pending(iman, usbsts);
-}
-
-int xhci_deliverable(uint32_t iman, uint32_t usbcmd)
-{
-    return xusb_xhci_deliverable(iman, usbcmd);
-}
-
 const char *portsc_link_name(uint32_t portsc)
 {
     return xhci_portsc_link_name(portsc);
@@ -203,7 +221,7 @@ void hold_lost(void)
 
 int hold_keeps(uint64_t value, uint64_t current)
 {
-    return xusb_hold_keeps(&hold, value, current);
+    return xusb_hold_retained(&hold) && value == current;
 }
 
 uint32_t hold_erstba0(void)

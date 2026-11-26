@@ -11,3 +11,10 @@ py_test(
     tags = ["requires-darwin"],
     deps = ["//ipsw:aea"],
 )
+
+py_test(
+    name = "os_files_test",
+    size = "small",
+    srcs = ["os_files_test.py"],
+    deps = ["//ipsw:os_files_lib"],
+)

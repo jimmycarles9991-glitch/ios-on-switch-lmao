@@ -17,6 +17,7 @@
 #include "SwitchPD.h"
 #include "SwitchPDPolicy.h"
 #include "SwitchUSB.h"
+#include "SwitchUSBPort.h"
 #include "UsbDmaMapper.h"
 #include "XusbLanes.h"
 #include "XusbSuperSpeed.h"
@@ -31,21 +32,19 @@ bool gHostPackaged;
 // sleep: kext loads, firmware) follows it with the data role. Everything below gLock is touched only with it held,
 // the apply step only from the thread call.
 IOLock *gLock;
-thread_call_t gRoleCall, gReportCall;
-bool gWantHost, gHostCable;            // from the last PD state
+thread_call_t gRoleCall;
+bool gWantHost, gAttached;             // from the last PD state; attached: plugged, the partner's role settled
+bool gDeviceVbus;                      // from the last PD state: a host's VBUS (switch_pd_usb_device_vbus)
 bool gPadLost;                         // SC7 took PADCTL's host role with it: the role thread puts it back
 bool gHostUp, gHostBroken, gHostRole;  // what has been done
-bool gHostFailed;                      // switch_usb_host_failed (SwitchXHCI's interrupt check), any thread
-uint32_t gRoleChanges;                 // role changes applied (the report names the one it follows)
-constexpr uint32_t kReportMS = 1000;   // the role line: this long after a change, when the port has settled
+bool gHostTeardown;                    // role thread: waiting for host devices and SwitchXHCI power state 0 before releasing pad 0
 // The dock (a PD source that swapped us to DFP) wants the host role too. The SuperSpeed pair follows DisplayPort's
 // decision (switch_usb_set_alt_lanes, below gLock); the lane itself moves on the role thread, and is clamped on PCIe's
 // thread while the UPHY PLL is recalibrated (uphyChanged).
 bool gDockHost;
 enum switch_usb3_lanes gLanes = SWITCH_USB3_LANES_FREE;
-bool gDockHub;
-bool gSsInit;              // the lane's pad controller and lock (switch_usb_ss_init)
-bool gSsUp, gDockHubSeen;  // role thread: the lane as last reported
+bool gSsInit;  // the lane's pad controller and lock (switch_usb_ss_init)
+bool gSsUp;    // role thread: the lane as last reported
 
 // avddio_usb (OLED DTB xudc@700d0000 / xusb@70090000) is MAX77620 LDO1 at 1.05 V, shared with PCIe (drivers/SwitchWLAN
 // TegraPCIe rail(): same register, same value); normally on already. hvdd_usb (3.3 V) and avdd_pll_utmip (SD3, 1.8 V)
@@ -70,8 +69,9 @@ bool railOn(char *why, size_t whySize)
     return err == 0;
 }
 
-// SwitchPD's work loop: short. Our VBUS on a sink-only partner wants the host role; a cable from a host while we are
-// its device means a bus reset is due. Nothing else (a bus suspend included) changes the role.
+// SwitchPD's work loop: short. Our VBUS on a sink-only partner wants the host role; a partner attached with its role
+// settled (not while SwitchPD still classifies it) or gone changes the port's transports. Nothing else (a bus suspend
+// included) changes the role.
 void pdChanged(void *, const SwitchPDState *state)
 {
     IOLockLock(gLock);
@@ -79,23 +79,40 @@ void pdChanged(void *, const SwitchPDState *state)
     const bool usbHost = switch_pd_usb_host(sourcing, state->status1);
     const bool wantHost = gHostPackaged && usbHost;
     gDockHost = usbHost && !sourcing;
-    const bool hostCable =
-        state->role == SWITCH_PD_ROLE_SINK && state->plugged && state->vbusPresent && !state->dataHost;
-    const bool changed = wantHost != gWantHost || (hostCable && !gHostCable);
+    const bool attached = state->plugged && state->settled;
+    const bool deviceVbus = switch_pd_usb_device_vbus(sourcing, state->status1);
+    const bool changed = wantHost != gWantHost || attached != gAttached || deviceVbus != gDeviceVbus;
     gWantHost = wantHost;
-    gHostCable = hostCable;
+    gAttached = attached;
+    gDeviceVbus = deviceVbus;
     IOLockUnlock(gLock);
     if (changed)
         thread_call_enter(gRoleCall);
 }
 
+#if DEVELOPMENT || DEBUG
+thread_call_t gReportCall;
+uint32_t gRoleChanges;                // role changes applied (the report names the one it follows)
+uint64_t gChangeAt;                   // mach_absolute_time of the last of them
+constexpr uint32_t kReportMS = 1000;  // the role line: this long after a change, when the port has settled
+
 // The role line, kReportMS after a role change (its own thread call, re-armed by every change: the last one wins):
 // one os_log record with where the port stands, so a boot shows where host mode stops. The xHCI (USBCMD, USBSTS,
-// every PORTSC, the last PP cycle) and the pad controller (port 0's capability, ID and VBUS overrides, pad power,
+// every PORTSC) and the pad controller (port 0's capability, ID and VBUS overrides, pad power,
 // charger detection, over-current maps); the PD controller (phase, STATUS1/2, switches, rails' GPIOs); the charger
 // (REG01/05/08/09, battery current). Log only, never the boot console.
+//
+// The role is taken before the registers are read. A report whose change a later one has replaced is dropped (that
+// one's report is due); one that a change overtakes while it reads says so, and every line says how long after its
+// change it was read.
 void reportRole(thread_call_param_t, thread_call_param_t change)
 {
+    const auto number = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(change));
+    if (__atomic_load_n(&gRoleChanges, __ATOMIC_ACQUIRE) != number)
+        return;
+    const char *role = __atomic_load_n(&gHostRole, __ATOMIC_ACQUIRE) ? "host" : "device";
+    uint64_t sinceNs = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time() - __atomic_load_n(&gChangeAt, __ATOMIC_ACQUIRE), &sinceNs);
     char xhci[720];
     char lane[200];
     char pd[300];
@@ -104,38 +121,47 @@ void reportRole(thread_call_param_t, thread_call_param_t change)
     switch_usb_ss_describe(lane, sizeof(lane));
     (void)switch_pd_describe(pd, sizeof(pd));
     (void)switch_battery_describe_otg(charger, sizeof(charger));
-    const char *role = gHostRole ? "host" : "device";
-    const unsigned number = static_cast<unsigned>(reinterpret_cast<uintptr_t>(change));
+    char age[80];
+    snprintf(age, sizeof(age), "read %llu ms after the change%s", sinceNs / 1000000ULL,
+             __atomic_load_n(&gRoleChanges, __ATOMIC_ACQUIRE) != number ? ", a later change came while it read" : "");
     // Under the 1 KiB os_log record (kprof keeps its lines under 900): one line, or two when it would not fit.
-    if (strlen(xhci) + strlen(lane) + strlen(pd) + strlen(charger) < 820) {
-        os_log(OS_LOG_DEFAULT, "SwitchUSB: %s role +1 s (change %u): %s | %s | %s | %s", role, number, xhci, lane, pd,
-               charger);
+    if (strlen(xhci) + strlen(lane) + strlen(pd) + strlen(charger) + strlen(age) < 820) {
+        os_log(OS_LOG_DEFAULT, "SwitchUSB: %s role +1 s (change %u): %s | %s | %s | %s | %s", role, number, xhci, lane,
+               pd, charger, age);
     } else {
         os_log(OS_LOG_DEFAULT, "SwitchUSB: %s role +1 s (change %u, 1/2): %s", role, number, xhci);
-        os_log(OS_LOG_DEFAULT, "SwitchUSB: %s role +1 s (change %u, 2/2): %s | %s | %s", role, number, lane, pd,
-               charger);
+        os_log(OS_LOG_DEFAULT, "SwitchUSB: %s role +1 s (change %u, 2/2): %s | %s | %s | %s", role, number, lane, pd,
+               charger, age);
     }
 }
 
 void armReport()
 {
+    if (!gReportCall)
+        return;
     uint64_t deadline = 0;
     clock_interval_to_deadline(kReportMS, kMillisecondScale, &deadline);
     thread_call_cancel(gReportCall);
-    thread_call_enter1_delayed(gReportCall,
-                               reinterpret_cast<thread_call_param_t>(static_cast<uintptr_t>(++gRoleChanges)), deadline);
+    __atomic_store_n(&gChangeAt, mach_absolute_time(), __ATOMIC_RELEASE);
+    const uint32_t number = __atomic_add_fetch(&gRoleChanges, 1, __ATOMIC_ACQ_REL);
+    thread_call_enter1_delayed(gReportCall, reinterpret_cast<thread_call_param_t>(static_cast<uintptr_t>(number)),
+                               deadline);
 }
+#else
+void armReport()
+{}
+#endif
 
-// Role thread: SS port 0's lane up for a host whose SuperSpeed pair DisplayPort leaves free, once PCIe has calibrated
-// the UPHY PLL; down otherwise (XusbLanes.h). The lane's pads only: the root ports are switchxhci_cable's and
-// switchxhci_superspeed's.
-void followLane()
+// Role thread: SS port 0's lane up for either data role whose pair DisplayPort leaves free, once PCIe has calibrated
+// the UPHY PLL; down otherwise (XusbLanes.h). The lane's pads only: the port's USB 3 transport follows it.
+void followLane(bool attached)
 {
     IOLockLock(gLock);
     const enum switch_usb3_lanes lanes = gLanes;
+    const bool device = attached && gDeviceVbus && gDevicePort;
     IOLockUnlock(gLock);
     const bool host = gHostRole && gHostUp;
-    const bool up = gSsInit && switch_usb_ss_lane(xusb_ss_lane_wanted(host, lanes, switch_uphy_ready()));
+    const bool up = gSsInit && switch_usb_ss_lane(xusb_ss_lane_wanted(host || device, lanes, switch_uphy_ready()));
     if (up == gSsUp)
         return;
     gSsUp = up;
@@ -144,27 +170,39 @@ void followLane()
     armReport();
 }
 
-// Role thread, at the end of every pass: the lane, its root port, and the dock hub's port event.
-void applyLanes()
+bool deviceLaneReady()
 {
-    followLane();
-    switchxhci_superspeed();
     IOLockLock(gLock);
-    const bool dockHub = gDockHub;
-    const bool dockHost = gDockHost;
+    const bool ready = gLanes == SWITCH_USB3_LANES_TAKEN || (gLanes == SWITCH_USB3_LANES_FREE && gSsUp);
     IOLockUnlock(gLock);
-    const bool host = gHostRole && gHostUp;
-    if (dockHost && dockHub && host && !gDockHubSeen) {
-        gDockHubSeen = true;
-        switchxhci_expect_port_change();
-        armReport();
+    return ready;
+}
+
+enum xusb_port_role portRole(bool attached)
+{
+    if (gHostRole)
+        return XUSB_PORT_HOST;
+    return attached ? XUSB_PORT_DEVICE : XUSB_PORT_EMPTY;
+}
+
+// Role thread, at the end of every pass: the lane and the port's transports. In the host
+// role an owed SuperSpeed interface reset first takes the USB 3 transport out, then is done once the controller runs
+// (the run wakes this thread), and only then does the USB 3 transport go back.
+void applyLanes(bool attached)
+{
+    followLane(attached);
+    const enum xusb_port_role role = portRole(attached);
+    bool superSpeedReset = true;
+    if (role == XUSB_PORT_HOST) {
+        if (switchxhci_superspeed_reset_owed())
+            switch_usb_port_follow(role, gSsUp, false);
+        superSpeedReset = switchxhci_reset_superspeed();
     }
-    if (!dockHub || !dockHost)
-        gDockHubSeen = false;
+    switch_usb_port_follow(role, gSsUp, superSpeedReset);
 }
 
 // PCIe's thread (kits/SwitchCAR/SwitchUPHY.h): the lane is clamped before PCIe resets the UPHY; either way the role
-// thread follows (the root port off, or the lane and the root port back on).
+// thread follows (the lane, and with it the port's USB 3 transport).
 void uphyChanged(void *, bool ready)
 {
     if (!ready)
@@ -172,59 +210,76 @@ void uphyChanged(void *, bool ready)
     thread_call_enter(gRoleCall);
 }
 
-// Thread call (THREAD_CALL_OPTIONS_ONCE: never two at once; entered again while it runs, it runs again after).
-// Host: the XUDC off the bus first (as a cable pull), the pad to the host (ID grounded; PP cycled when the controller
-// already runs), then the controller the first time, then SS port 0's lane, then the cable to the connector's root
-// ports (switchxhci_cable), which powers them for the device already on the port. Device: the reverse, the ports held
-// off and the lane clamped before the pad goes.
+void finishHostTeardown()
+{
+    if (!gHostTeardown || switch_usb_port_holding_retired() || !switchxhci_is_off())
+        return;
+    switch_usb_ss_clamp();
+    gSsUp = false;
+    switchxhci_set_host_role(false);
+    switchxudc_set_host_owns_port(false);
+    gHostTeardown = false;
+    IOLog("SwitchUSB: device role\n");
+    switch_usb_dma_session_end();
+    armReport();
+}
+
+// Thread call (THREAD_CALL_OPTIONS_ONCE: never two at once; entered again while it runs, it runs again after; the
+// IOPort's arrival enters it too). Host: the XUDC off the bus first (as a cable pull), the pad to the host (ID
+// grounded), then the controller the first time, then SS port 0's lane, then the port's host-role transports
+// (applyLanes), for which Apple's root ports power themselves and the controller. Device: the reverse, keeping the pad
+// on xHCI until retired transports drop and SwitchXHCI reaches power state 0.
 void applyRole(thread_call_param_t, thread_call_param_t)
 {
     IOLockLock(gLock);
     const bool wantHost = gWantHost;
-    const bool hostCable = gHostCable;
+    const bool attached = gAttached;
+    const bool deviceVbus = gDeviceVbus;
     const bool padLost = gPadLost;
     gPadLost = false;
     IOLockUnlock(gLock);
-    if (__atomic_load_n(&gHostFailed, __ATOMIC_ACQUIRE))
-        gHostBroken = true;
-    if (padLost && gHostRole && wantHost) {
+    if (padLost && ((gHostRole && wantHost) || gHostTeardown))
         switchxhci_set_host_role(true);
-        switchxhci_cable(true);
-    }
     if (wantHost && !gHostRole && !gHostBroken) {
-        char why[160] = "";
-        switchxudc_set_host_owns_port(true);
-        switchxhci_set_host_role(true);
-        if (!gHostUp && !switchxhci_start(why, sizeof(why))) {
-            IOLog("SwitchUSB: host mode off: %s\n", why);
-            gHostBroken = true;
-            switchxhci_set_host_role(false);
-            switchxudc_set_host_owns_port(false);
-            (void)switch_pd_allow_source(false);  // SwitchPD takes VBUS off and keeps the port sink-only
-            return;
+        if (gHostTeardown) {
+            gHostTeardown = false;
+            switch_usb_ss_clamp();
+            gSsUp = false;
+        } else {
+            char why[160] = "";
+            switch_usb_dma_session_start();
+            switch_usb_ss_clamp();
+            gSsUp = false;
+            switchxudc_set_host_owns_port(true);
+            switchxhci_set_host_role(true);
+            if (!gHostUp && !switchxhci_start(why, sizeof(why))) {
+                IOLog("SwitchUSB: host mode off: %s\n", why);
+                gHostBroken = true;
+                switchxhci_set_host_role(false);
+                switchxudc_set_vbus(false, false);
+                switchxudc_set_host_owns_port(false);
+                (void)switch_pd_allow_source(false);  // SwitchPD takes VBUS off and keeps the port sink-only
+                return;
+            }
+            __atomic_store_n(&gHostUp, true, __ATOMIC_RELEASE);
         }
-        __atomic_store_n(&gHostUp, true, __ATOMIC_RELEASE);
-        gHostRole = true;
-        followLane();
-        switchxhci_cable(true);
-        // The dock's hub appears only once its HUB_CONTROL is acknowledged: its port event is due then (applyLanes).
+        __atomic_store_n(&gHostRole, true, __ATOMIC_RELEASE);  // the role report reads it
+        switchxhci_superspeed_reset_due();
         IOLog("SwitchUSB: host role (%s)\n",
               gDockHost ? "a source that made us DFP, the dock or a powered hub" : "a device on the port, VBUS on");
-        if (!gDockHost)
-            switchxhci_expect_port_change();
         armReport();
     } else if (!wantHost && gHostRole) {
-        switchxhci_cable(false);
-        gHostRole = false;
-        followLane();
-        switchxhci_set_host_role(false);
-        switchxudc_set_host_owns_port(false);
-        IOLog("SwitchUSB: device role\n");
-        armReport();
+        __atomic_store_n(&gHostRole, false, __ATOMIC_RELEASE);
+        gHostTeardown = true;
     }
-    if (hostCable && !gHostRole)
-        switchxudc_host_expected();
-    applyLanes();
+    if (gHostTeardown) {
+        switch_usb_port_follow(portRole(attached), false, true);
+        finishHostTeardown();
+        if (gHostTeardown)
+            return;
+    }
+    applyLanes(attached);
+    switchxudc_set_vbus(deviceVbus && !gHostRole, deviceLaneReady());
 }
 
 void usbThread(void *, wait_result_t)
@@ -270,12 +325,10 @@ IOService *publishedNode(const char *path)
 }
 }  // namespace
 
-// SwitchXHCI's interrupt check gave host mode up for this boot (it logged why): SwitchPD stops sourcing and keeps the
-// port sink-only, which ends the host role through pdChanged; the role thread never takes the host role again.
-void switch_usb_host_failed()
+void switch_usb_reconsider()
 {
-    __atomic_store_n(&gHostFailed, true, __ATOMIC_RELEASE);
-    (void)switch_pd_allow_source(false);
+    if (gRoleCall)
+        thread_call_enter(gRoleCall);
 }
 
 extern "C" int switch_usb_start(void)
@@ -294,17 +347,22 @@ extern "C" int switch_usb_start(void)
     gRoleCall = gLock ? thread_call_allocate_with_options(&applyRole, nullptr, THREAD_CALL_PRIORITY_KERNEL,
                                                           THREAD_CALL_OPTIONS_ONCE)
                       : nullptr;
-    gReportCall = gRoleCall ? thread_call_allocate_with_options(&reportRole, nullptr, THREAD_CALL_PRIORITY_LOW,
-                                                                THREAD_CALL_OPTIONS_ONCE)
-                            : nullptr;
-    gSsInit = (gReportCall != nullptr) && gHostPackaged && switch_usb_ss_init();
+#if DEVELOPMENT || DEBUG
+    // Not THREAD_CALL_PRIORITY_LOW: its threads run at MAXPRI_THROTTLE, and a busy system (a device's dexts launching)
+    // held a report back for seconds while the port moved on.
+    gReportCall =
+        thread_call_allocate_with_options(&reportRole, nullptr, THREAD_CALL_PRIORITY_USER, THREAD_CALL_OPTIONS_ONCE);
+#endif
+    if (gRoleCall && gHostPackaged && !switch_usb_port_watch(gRoleCall))
+        IOLog("SwitchUSB: host mode off: the USB-C port's IOPort cannot be watched\n");
+    gSsInit = (gRoleCall != nullptr) && switch_usb_ss_init();
     if (gSsInit) {
         switch_uphy_listen(&uphyChanged, nullptr);
-    } else if (gReportCall && gHostPackaged) {
+    } else if (gRoleCall && gHostPackaged) {
         IOLog("SwitchUSB: SuperSpeed off: no pad controller mapping or lock\n");
     }
     thread_t thread = THREAD_NULL;
-    if (!gReportCall || kernel_thread_start(&usbThread, nullptr, &thread) != KERN_SUCCESS) {
+    if (!gRoleCall || kernel_thread_start(&usbThread, nullptr, &thread) != KERN_SUCCESS) {
         IOLog("SwitchUSB: device mode off: no thread\n");
         return -1;
     }
@@ -347,15 +405,15 @@ extern "C" void switch_usb_resume(void)
         thread_call_enter(gRoleCall);  // a cable that came or went while asleep
 }
 
-// DisplayPort's sequencer, on the PD work loop: record and let the role thread follow.
-void switch_usb_set_alt_lanes(enum switch_usb3_lanes lanes, bool dock_hub_enabled)
+// DisplayPort's sequencer, on the PD work loop: record and let the role thread follow. The dock's hub, once enabled,
+// connects as any device does: nothing here waits for it.
+void switch_usb_set_alt_lanes(enum switch_usb3_lanes lanes, bool)
 {
     if (!gLock || !gRoleCall)
         return;
     IOLockLock(gLock);
-    const bool changed = lanes != gLanes || dock_hub_enabled != gDockHub;
+    const bool changed = lanes != gLanes;
     gLanes = lanes;
-    gDockHub = dock_hub_enabled;
     IOLockUnlock(gLock);
     if (changed)
         thread_call_enter(gRoleCall);

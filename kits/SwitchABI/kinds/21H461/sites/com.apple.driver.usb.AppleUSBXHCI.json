@@ -1,0 +1,97 @@
+{
+  "kind": "21H461",
+  "bundle": "com.apple.driver.usb.AppleUSBXHCI",
+  "doc": "AppleUSBXHCI on one interrupter, as the falcon reports (MaxIntrs 1), which xHCI 1.2 (p. 264) then routes every event to: the start check takes one, and no TRB or slot names interrupter 1 or 2.",
+  "sites": [
+    {
+      "at": "0xfffffff005ebfd54",
+      "from": "710c011f",
+      "to": "7104011f",
+      "why": "AppleUSBXHCI::start refuses fewer than three interrupters (cmp w8, #0x300): cmp w8, #0x100, at least one"
+    },
+    {
+      "at": "0xfffffff005ebb1e4",
+      "from": "72a00808",
+      "to": "72a00008",
+      "why": "request prepare: movk w8, #0x40, lsl #16 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff005ebb5a0",
+      "from": "52a00809",
+      "to": "52800009",
+      "why": "request prepare: mov w9, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff005ebb87c",
+      "from": "320a0108",
+      "to": "d503201f",
+      "why": "request prepare: orr w8, w8, #0x400000 (target 1) -> nop"
+    },
+    {
+      "at": "0xfffffff005ebba44",
+      "from": "52a00809",
+      "to": "52800009",
+      "why": "request prepare: mov w9, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff005ebba94",
+      "from": "52a00809",
+      "to": "52800009",
+      "why": "request prepare: mov w9, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff005ed4068",
+      "from": "32090129",
+      "to": "d503201f",
+      "why": "isochronous prepare: orr w9, w9, #0x800000 (target 2) -> nop"
+    },
+    {
+      "at": "0xfffffff005ed41d8",
+      "from": "52a0100a",
+      "to": "5280000a",
+      "why": "isochronous prepare: mov w10, #0x800000 (target 2) -> #0"
+    },
+    {
+      "at": "0xfffffff005ed45f0",
+      "from": "52a01009",
+      "to": "52800009",
+      "why": "isochronous prepare: mov w9, #0x800000 (target 2) -> #0"
+    },
+    {
+      "at": "0xfffffff005ef15f4",
+      "from": "52a0080a",
+      "to": "5280000a",
+      "why": "the sparse request's No-Op TRB with IOC: mov w10, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff005ebb990",
+      "from": "52800023",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #1 -> #0"
+    },
+    {
+      "at": "0xfffffff005ebba20",
+      "from": "52800023",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #1 -> #0"
+    },
+    {
+      "at": "0xfffffff005ed3cec",
+      "from": "52800043",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #2 -> #0"
+    },
+    {
+      "at": "0xfffffff005ed3ed8",
+      "from": "52800043",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #2 -> #0"
+    },
+    {
+      "at": "0xfffffff005ef15b0",
+      "from": "52800023",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #1 -> #0"
+    }
+  ]
+}

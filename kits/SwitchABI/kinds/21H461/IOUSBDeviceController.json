@@ -38,7 +38,8 @@
     "233": "getBufferOptions"
   },
   "fields": {
-    "controlRequest": "0x1b0"
+    "controlRequest": "0x1b0",
+    "deviceCapabilities": "0x180"
   },
   "addresses": {
     "getDirection": "0xfffffff006173e34",
@@ -102,5 +103,24 @@
     "processSetupPacket": "0xfffffff00617641c",
     "getAlternateSettingCount": "0xfffffff00616fa0c",
     "vtable": "0xfffffff006e81d90"
+  },
+  "hints": {
+    "fields": {
+      "deviceCapabilities": {
+        "offset": "0x180",
+        "at": "0xfffffff006185974",
+        "word": "f940c000"
+      }
+    },
+    "constants": {
+      "superSpeedBulkMaxBurst": {
+        "value": 15,
+        "at": "0xfffffff0061731e0",
+        "word": "528001e9"
+      }
+    }
+  },
+  "constants": {
+    "superSpeedBulkMaxBurst": 15
   }
 }

@@ -19,16 +19,11 @@ import xml.etree.ElementTree as ET
 HERE = os.path.dirname(os.path.abspath(__file__))
 R = os.path.join(HERE, "..")
 sys.path.insert(0, HERE)
-from kcinfo import KC, ROOTS, decode8
+from kcinfo import KC, decode8
 import paths
 from tools.common.macho import macho, exports, backed_offset
+from kits.SwitchABI import sites as abi_sites
 
-CUTS = {("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.AppleSMC"): "_switch_prelink_cut_null",
-        ("com.apple.iokit.IOUSBHostFamily", "com.apple.driver.usb.AppleUSBHostPlatformProperties"): None,
-        ("com.apple.iokit.IOAccessoryManager", "com.apple.driver.AppleOnboardSerial"): "_switch_prelink_cut_null"}
-DEFERRED_PERSONALITIES = {"com.apple.iokit.IOUSBHostFamily": ("AppleUSBHostResources", "AppleUSBHostResourcesTypeC"),
-                          "com.apple.iokit.IOUSBMassStorageDriver": ("IOUSBMassStorageResource",),
-                          "com.apple.driver.usb.AppleUSBHostPacketFilter": ("AppleUSBHostPacketFilter",)}
 COALESCED = {"__PRELINK_TEXT": "__TEXT", "__PLK_DATA_CONST": "__DATA_CONST", "__PLK_TEXT_EXEC": "__TEXT_EXEC",
              "__PRELINK_DATA": "__DATA"}
 M64 = (1 << 64) - 1
@@ -138,10 +133,11 @@ def main():
         raise SystemExit("our kernel lacks the sparse prelink index ABI v1")
     kc = KC(kc_path)
     d = kc.d
-    missing = [r for r in ROOTS if r not in kc.plist]
+    roots, cuts, deferred = paths.prelink_lists()
+    missing = [r for r in roots if r not in kc.plist]
     if missing:
         raise SystemExit("roots this kernelcache does not ship: %s" % ", ".join(missing))
-    sel, ifaces, codeless = kc.closure(ROOTS, set(CUTS))
+    sel, ifaces, codeless = kc.closure(roots, set(cuts))
     names = {int(a, 16): n for a, n in json.load(open(paths.work("kernel-names.json")))["names"].items()}
     # kexts link against the KPI only: a kext target named outside the 26.5.2 symbol sets (or iOS 17's imports) is
     # a naming error, so it stays unresolved
@@ -247,6 +243,20 @@ def main():
         xlate[p[1]] = {"words": int(p[2]), "changed": int(p[3]), "stub_words": int(p[5]) - int(p[4]),
                        "stub_va": stub_va + 4 * int(p[4]) + slide,
                        "classes": {k: v for k, v in (x.split("=") for x in p[6:])}}
+    # 2b. the selected kind's declared sites (kits/SwitchABI/sites.py), in the translated text: every original word is
+    # checked where it is written, so a word a64x rewrote fails the build by its site. Before the branches into the
+    # kernel are re-aimed (no site is a branch) and before the FIPS MACs, which cover the final text.
+    declared = abi_sites.load_all([p for p in os.environ.get("PRELINK_SITES", "").split(os.pathsep) if p],
+                              os.environ.get("PRELINK_KIND", ""))
+    text = blobs["__PLK_TEXT_EXEC"]
+    for site in declared:
+        if site.bundle not in sel:
+            raise SystemExit("%s: sites declared for a kext that is not prelinked" % site.bundle)
+        if not any(sec["va"] <= site.at < sec["va"] + sec["size"] and sec["flags"] & 0x80000400
+                   for s in segs_of[site.bundle] for sec in s["sections"]):
+            raise SystemExit("%s %#x: a declared site outside its code" % (site.bundle, site.at))
+    abi_sites.apply(declared, lambda va: struct.unpack_from("<I", text, va - text_lo)[0],
+                lambda va, word: struct.pack_into("<I", text, va - text_lo, word))
     # 3. pointers
     pointer_sites = []
     unresolved_fn, unresolved_data = collections.Counter(), collections.Counter()
@@ -254,6 +264,7 @@ def main():
     cut_null = nsym.get("_switch_prelink_cut_null")
     kmod_address_sites = {(kc.plist[b]["_PrelinkKmodInfo"] & M64) + 156 for b in sel}
     kinds = collections.Counter()
+    cut_sites = collections.Counter()
     fixup_sites = set()
     for site, raw, fmt in kc.fixups_all():
         o = owner(site)
@@ -272,8 +283,8 @@ def main():
             else:
                 new = 0; unresolved_data[tgt] += 1; kinds["kernel unresolved data"] += 1
                 unresolved_by_component[o[2]]["data"].add(tgt)
-        elif t and (o[2], t[2]) in CUTS:
-            new = cut_null; kinds["cut"] += 1
+        elif t and (o[2], t[2]) in cuts:
+            new = cut_null; kinds["cut"] += 1; cut_sites[(o[2], t[2])] += 1
         else:
             raise SystemExit("pointer from %s to unselected %s" % (o[2], t and t[2]))
         n_, at = blob_at(site)
@@ -283,6 +294,9 @@ def main():
             kinds["kmod_info.address (slid by OSKext, not listed)"] += 1
         else:
             pointer_sites.append(site + slide)
+    for cut, sites in cuts.items():
+        if cut_sites[cut] != sites:
+            raise SystemExit("cut %s=%s: %d pointer sites, declared %d" % (*cut, cut_sites[cut], sites))
     # 4. branches into the kernel
     br = collections.Counter()
     islands.sort(); isl_starts = [x[0] for x in islands]
@@ -398,10 +412,10 @@ def main():
         e = copy.deepcopy(kc.plist[b])
         for k in ("_PrelinkExecutableLoadAddr", "_PrelinkExecutableSourceAddr", "_PrelinkKmodInfo"):
             if e.get(k) and b in sel: e[k] = ((e[k] & M64) + slide) & M64
-        for (c, dep) in CUTS:
+        for (c, dep) in cuts:
             if c == b: e.get("OSBundleLibraries", {}).pop(dep, None)
-        for p in DEFERRED_PERSONALITIES.get(b, ()):
-            e.get("IOKitPersonalities", {}).pop(p, None)
+        for p in deferred.get(b, ()):
+            del e["IOKitPersonalities"][p]
         entries.append(e)
     base_va = prelink_text["va"]
     offsets = sorted(((s & M64) - base_va) for s in pointer_sites)
@@ -433,7 +447,7 @@ def main():
     report = {"kernelcache_sha256": hashlib.sha256(d).hexdigest(), "native_sha256": hashlib.sha256(native_data).hexdigest(),
               "output_sha256": hashlib.sha256(output).hexdigest(), "output_bytes": len(output), "slide": slide,
               "components": sorted(sel), "codeless_components": sorted(codeless), "kernel_interfaces": sorted(ifaces),
-              "cuts": [list(k) for k in CUTS],
+              "cuts": [list(k) for k in cuts],
               "segments": [{k: (hex(v) if isinstance(v, int) else v) for k, v in s.items()} for s in new_segments],
               "pointer_kinds": dict(kinds), "pointer_sites": len(pointer_sites), "branch_kinds": dict(br),
               "fips_macs": fips_macs,
@@ -443,7 +457,8 @@ def main():
                                           for b, u in sorted(unresolved_by_component.items())},
               "translation": xlate, "stub_area": {"va": hex(stub_va + slide), "a64x_words": len(stubs) // 4},
               "kmod_info": kmods, "sparse_index": {"va": hex(index_va), "headers": len(headers)},
-              "early_security_initializers": {}, "runtime_qualified": False}
+              "early_security_initializers": {}, "declared_sites": abi_sites.record(declared, slide),
+              "runtime_qualified": False}
     json.dump(report, open(out_path + ".json", "w"), indent=1)
     print("kexts %d, slide %#x, output %d bytes" % (len(sel), slide & M64, len(output)))
     print("pointers", dict(kinds)); print("branches", dict(br))

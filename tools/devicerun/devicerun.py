@@ -12,7 +12,7 @@ import subprocess
 import sys
 from collections.abc import Iterable, Iterator
 
-from tools.devicerun import renamed
+from tools.devicerun import renamed, usb
 from tools.devicerun.checks import FRAME_PREFIX, GROUPS
 from tools.devicerun.commit import commit_rows
 from tools.devicerun.cpu import cpu_rows
@@ -21,10 +21,11 @@ from tools.devicerun.launch import launch_rows
 from tools.devicerun.memory import memory_rows
 from tools.devicerun.morning import CHECKLIST
 from tools.devicerun.reports import crash_rows, frame_rows, headline, rolled_up
-from tools.devicerun.rules import FAIL, Check, Event, Result, evaluate, match
+from tools.devicerun.rules import FAIL, INFO, REPORT, Check, Event, Result, evaluate, match
 from tools.devicerun.springboard import springboard_rows
 
 OBSERVED_WIDTH = 110
+KERNEL_LINE = 'Darwin Kernel Version '
 
 
 def quote(text: str) -> str:
@@ -50,13 +51,22 @@ def clause(check: Check) -> str:
 
 
 def predicate(checks: Iterable[Check]) -> str:
-    clauses = dict.fromkeys(clause(c) for c in checks)
-    return ' OR '.join([*clauses, f'eventMessage BEGINSWITH {quote(FRAME_PREFIX)}'])
+    """Return every check's clause; with any debug check, keep the others to default, error and fault lines."""
+    checks = list(checks)
+    clauses = list(dict.fromkeys(clause(c) for c in checks if not c.debug))
+    debug = list(dict.fromkeys(clause(c) for c in checks if c.debug))
+    frames = f'eventMessage BEGINSWITH {quote(FRAME_PREFIX)}'
+    if not debug:
+        return ' OR '.join([*clauses, frames])
+    plain = '(' + ' OR '.join([*clauses, frames]) + ') AND messageType != info AND messageType != debug'
+    return ' OR '.join([f'({plain})', *debug])
 
 
-def log_show(archive: str, query: str, start: str | None, end: str | None) -> Iterator[dict]:
+def log_show(archive: str, query: str, start: str | None, end: str | None, debug: bool = False) -> Iterator[dict]:
     """Yield the archive's matching records, as `log show --style ndjson` prints them."""
     cmd = ['/usr/bin/log', 'show', '--archive', archive, '--style', 'ndjson', '--predicate', query]
+    if debug:
+        cmd += ['--info', '--debug']
     if start:
         cmd += ['--start', start]
     if end:
@@ -93,7 +103,7 @@ def run_checks(records: Iterable[dict], checks: list[Check]) -> tuple[list[Resul
             if fields is not None:
                 by_name[check.name].append(fields)
     minutes = (last - first).total_seconds() / 60 if first else 0.0
-    return [evaluate(c, by_name[c.name], minutes, by_name) for c in checks], frame_lines
+    return [evaluate(c, by_name[c.name], minutes, by_name, last) for c in checks], frame_lines
 
 
 def expected(check: Check) -> str:
@@ -135,22 +145,75 @@ def all_checks(label: str | None) -> list[Check]:
 
 
 def checklist(label: str | None) -> str:
-    steps = CHECKLIST[''] + (CHECKLIST.get(label, []) if label else [])
+    steps = usb.STEPS if label == usb.LABEL else CHECKLIST[''] + (CHECKLIST.get(label, []) if label else [])
     return '\n'.join([f'Boot {label or "(no label)"}: manual steps before pulling the logs', *steps, ''])
 
 
+def split_boots(records: list[dict]) -> dict[str, list[dict]]:
+    """Return the records by boot UUID, the boots in the order their first lines come."""
+    by_boot: dict[str, list[dict]] = {}
+    for record in records:
+        by_boot.setdefault(record.get('bootUUID') or '', []).append(record)
+    return by_boot
+
+
+def starts(records: list[dict]) -> bool:
+    return any((r.get('eventMessage') or '').startswith(KERNEL_LINE) for r in records)
+
+
+def usb_boot(by_boot: dict[str, list[dict]], wanted: str | None) -> str:
+    """Return the boot the usb group judges: the one `--boot` names, else the last that starts in the archive.
+
+    A boot starts in the archive when its kernel version line (uptime 0) is there; with none that does, the last boot.
+    """
+    if wanted:
+        found = [boot for boot in by_boot if boot.upper().startswith(wanted.upper())]
+        if len(found) != 1:
+            listed = ', '.join(boot[:8] for boot in by_boot)
+            raise SystemExit(f"--boot {wanted}: {len(found)} of the archive's boots match ({listed})")
+        return found[0]
+    whole = [boot for boot, records in by_boot.items() if starts(records)]
+    return (whole or list(by_boot))[-1]
+
+
+def boot_text(boot: str, records: list[dict]) -> str:
+    times = [Event.from_ndjson(r).time for r in records]
+    span = f'{boot[:8]} {min(times):%Y-%m-%d %H:%M:%S} to {max(times):%H:%M:%S}'
+    return span + ('' if starts(records) else ', no kernel line (it started before the archive)')
+
+
+def boot_row(by_boot: dict[str, list[dict]], boot: str) -> Result:
+    others = [other for other in by_boot if other != boot]
+    observed = f'boot {boot_text(boot, by_boot[boot])}; {len(others)} other boot{"" if len(others) == 1 else "s"} in '
+    observed += 'the archive' + (
+        ': ' + '; '.join(boot_text(other, by_boot[other]) for other in others) if others else ''
+    )
+    return Result(Check('usb.boot', usb.OWNER, '', REPORT), INFO, observed)
+
+
 def evaluate_all(
-    records: Iterable[dict], crashes: str | None, label: str | None = None
+    records: Iterable[dict], crashes: str | None, label: str | None = None, boot: str | None = None
 ) -> list[tuple[str, list[Result]]]:
+    """Return every group's rows; the usb group judges one boot (`boot`, a UUID prefix, or the last that starts)."""
     groups_in = selected(label)
-    results, frame_lines = run_checks(records, all_checks(label))
-    by_check = {r.check.name: r for r in results}
+    records = list(records)
+    usb_checks = groups_in['usb']
+    names = {c.name for c in usb_checks}
+    results, frame_lines = run_checks(records, [c for c in all_checks(label) if c.name not in names])
+    by_boot = split_boots(records)
+    judged = usb_boot(by_boot, boot) if by_boot else ''
+    usb_records = by_boot.get(judged, [])
+    usb_results, _ = run_checks(usb_records, usb_checks)
+    by_check = {r.check.name: r for r in results + usb_results}
+    end = max((Event.from_ndjson(r).time for r in usb_records), default=None)
     groups = [(name, rolled_up([by_check[c.name] for c in group])) for name, group in groups_in.items()]
     groups.append(('cpu-summary', cpu_rows(by_check)))
     groups.append(('commit-summary', commit_rows(by_check)))
     groups.append(('launch-summary', launch_rows(by_check)))
     groups.append(('springboard-life', springboard_rows(by_check)))
     groups.append(('memory-watch', memory_rows(by_check)))
+    head = [boot_row(by_boot, judged)] if by_boot else []
+    groups.append(('usb-layers', [*head, *usb.rows(by_check, crashes, end)]))
     groups.append(('frames', frame_rows(frame_lines)))
     groups.append(('crashes', crash_rows(crashes)))
     return groups
@@ -164,7 +227,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--tsv', help='also write the table, with every check source, as TSV here')
     parser.add_argument('--start', help="log show's --start, e.g. '2026-11-07 09:00:00'")
     parser.add_argument('--end', help="log show's --end")
-    parser.add_argument('--boot-label', choices=['A', 'B', 'K'], help='the morning boot: A, B tiled cache, K kprof')
+    parser.add_argument(
+        '--boot-label',
+        choices=['A', 'B', 'K', usb.LABEL],
+        help='the morning boot: A, B tiled cache, K kprof; U the USB boot (its own manual steps)',
+    )
+    parser.add_argument('--boot', help="the usb group's boot, a boot UUID prefix (default: the last that starts)")
     parser.add_argument('--ndjson', action='store_true', help='the input is `log show --style ndjson` output')
     parser.add_argument('--predicate', action='store_true', help='print the log show predicate and exit')
     args = parser.parse_args(argv)
@@ -175,10 +243,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.ndjson:
         records = read_ndjson(args.archive)
     else:
-        records = log_show(args.archive, predicate(checks), args.start, args.end)
+        records = log_show(args.archive, predicate(checks), args.start, args.end, any(c.debug for c in checks))
     print(checklist(args.boot_label))
-    groups = evaluate_all(records, args.crashes, args.boot_label)
+    groups = evaluate_all(records, args.crashes, args.boot_label, args.boot)
     print(headline(groups))
+    judged = [r for group, results in groups if group == 'usb-layers' for r in results if r.check.name == 'usb.boot']
+    print(*(f'The usb group judges {r.observed}\n' for r in judged), sep='')
     print(table(groups))
     if args.tsv:
         write_tsv(args.tsv, groups)

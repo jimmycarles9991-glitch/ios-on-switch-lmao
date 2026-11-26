@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Isochronous endpoints on the XUDC (SwitchXUDC.cpp "Isochronous endpoints"): the frame list IOUSBDeviceFamily hands
+// Isochronous endpoints on the XUDC (SwitchXUDCIsoch.cpp): the frame list IOUSBDeviceFamily hands
 // over, the endpoint context's interval, which bytes of a request each frame is, and what the controller's events mean
 // for the requests on an isochronous ring (IsocRing). No IOKit: test/xudc_isoch_test.cpp drives the same code.
 //

@@ -205,7 +205,9 @@ void tgm_present_promise_kept(uint32_t offset, uint32_t value,
 			nvxnu_work_schedule_after(tgm_present.deadline_work, TGM_PRESENT_NS);
 			/* before the re-arm, as the offer attaches before its arm: the job's end then runs the display's flip
 			 * from the nonstall filter, and a pass claiming the watch detaches the view after this */
-			tgm_present_filter_attach(producer);
+			tgm_present_filter_attach_for(
+				__atomic_load_n(&tgm_present.filter_display, __ATOMIC_ACQUIRE),
+				producer);
 			switch_gpu_present_watch_rearm(&tgm_present.watch);
 			watched = 1;
 		} else {

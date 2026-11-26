@@ -527,9 +527,17 @@ TEST(GM20BPresentSource, TiledSourceIsCopiedBlockLinear)
 	const CodeText scanout = Block(client(), "extern \"C\" int tegra_gm20b_scanout_copy(");
 	EXPECT_TRUE(scanout.has(
 		"sourceBlock ? static_cast<int32_t>(copy->sourceBlockHeightLog2) : -1;"));
+	EXPECT_TRUE(scanout.has("(!fenceOnly && sourceBlock && (copy->width * 4) % 64)"));
+	EXPECT_TRUE(scanout.has("(fenceOnly && sourceBlock && (copy->sourceStride % 64))"));
+	EXPECT_TRUE(scanout.has("tgm_present_set_filter_display(copy->display);"));
 	EXPECT_TRUE(scanout.has("tgm_readback_take(copy, source, blockLog2, target, reads)"));
 	EXPECT_FALSE(Block(SourceText("../TegraGM20BReadback.cpp"), "uint32_t tgm_readback_take(")
 			     .has("TEGRA_SCANOUT_TILED"));
+	const CodeText compKind = Block(client(), "uint32_t presentCompressedKind(");
+	EXPECT_TRUE(compKind.before("memory->prepare(kIODirectionOut)",
+				    "memory->getPhysicalSegment(0, &len, kIOMemoryMapperNone)"));
+	EXPECT_TRUE(compKind.before("memory->getPhysicalSegment(0, &len, kIOMemoryMapperNone)",
+				    "memory->complete(kIODirectionOut);"));
 	const CodeText surface = Block(client(), "uint64_t presentSurface(");
 	EXPECT_TRUE(surface.has("uint32_t kind = compressed ? compKind : "
 				"(blockLinear ? TGM_LAYOUT_KIND : 0);"));
@@ -1912,4 +1920,25 @@ TEST(GM20BParkedBoSource, ParkedDiagnosticsCompileOutOfRelease)
 		EXPECT_EQ(release.count("reclaimedCached"), 0u);
 		EXPECT_EQ(release.count("reclaimedSystem"), 0u);
 	}
+}
+
+TEST(GM20BPresentSource, LargeFenceOnlyPresentAndDisplayOwnerTracking)
+{
+	const CodeText scanout = Block(client(), "extern \"C\" int tegra_gm20b_scanout_copy(");
+	EXPECT_TRUE(scanout.has("if (tgm_present_outstanding(nullptr) ||"));
+	EXPECT_TRUE(scanout.has("presentFenceBacking(memory, copy->sourceBytes)"));
+	EXPECT_TRUE(scanout.has("tgm_present_set_owner(copy->display);"));
+	EXPECT_TRUE(scanout.has("switch_gpu_backing_release(ownedSourceBacking);"));
+
+	const CodeText fence = Block(client(), "extern \"C\" int tegra_gm20b_scanout_fence(");
+	EXPECT_TRUE(fence.has("tgm_present_outstanding(nullptr)"));
+	EXPECT_TRUE(fence.has("tgm_present_set_owner(display);"));
+
+	const CodeText outstanding = Block(gpu(), "int tgm_present_outstanding(const void *arg)");
+	EXPECT_TRUE(outstanding.has("tgm_present.owner"));
+	EXPECT_TRUE(outstanding.has("!arg || tgm_present.arg == arg || owner == arg"));
+
+	const CodeText take =
+		Block(SourceText("../TegraGM20BReadback.cpp"), "uint32_t tgm_readback_take(");
+	EXPECT_TRUE(take.has("(direct && !source)"));
 }

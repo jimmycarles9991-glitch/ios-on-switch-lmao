@@ -53,8 +53,18 @@ extern "C" void switch_gpu_path_taken(enum switch_gpu_path path, uint32_t count)
 }
 #endif
 
+extern "C" int switch_gpu_backing_cpu_release_owned(switch_gpu_cpu_lease **lease, int wrote);
+
+namespace
+{
+SwitchGpuScanoutSnapshot *observedSnapshot = nullptr;
+uint32_t activeDuringRelease = 1;
+}  // namespace
+
 extern "C" int switch_gpu_backing_cpu_release_owned(switch_gpu_cpu_lease **lease, int wrote)
 {
+	if (observedSnapshot)
+		activeDuringRelease = __atomic_load_n(&observedSnapshot->active, __ATOMIC_ACQUIRE);
 	EXPECT_EQ(wrote, 0);
 	--(*lease)->backing->users;
 	delete *lease;
@@ -157,4 +167,18 @@ TEST(ScanoutSnapshot, APromisedSurfaceAddsItsPromises)
 	EXPECT_EQ(snapshot.tokens[2].engine, uint32_t(SWITCH_GPU_ENGINE_GM20B));
 	snapshot.cancel();
 	EXPECT_EQ(drawable.users, 0u);
+}
+
+TEST(ScanoutSnapshot, CancelClearsActiveBeforeReleasingLeases)
+{
+	SwitchGpuScanoutSnapshot snapshot = {};
+	switch_gpu_backing ui{{}};
+	ASSERT_EQ(snapshot.begin(nullptr, 0), 0);
+	ASSERT_EQ(snapshot.add(&ui), 0);
+	observedSnapshot = &snapshot;
+	activeDuringRelease = 1;
+	snapshot.cancel();
+	observedSnapshot = nullptr;
+	EXPECT_EQ(activeDuringRelease, 0u);
+	EXPECT_EQ(ui.users, 0u);
 }

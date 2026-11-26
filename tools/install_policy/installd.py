@@ -8,7 +8,6 @@ import tempfile
 from pathlib import Path
 
 from tools.common import macho
-from tools.install import disks, host
 
 LIBRARY = '/usr/lib/libSwitchInstallPolicy.dylib'
 SOURCE = 'usr/libexec/installd'
@@ -134,11 +133,10 @@ def entitlements(path: Path) -> dict:
     return value
 
 
-def prepare(root: Path, pins: dict, out: Path) -> None:
-    build = plistlib.loads((root / 'System/Library/CoreServices/SystemVersion.plist').read_bytes())
+def prepare_files(system_version: Path, source: Path, pins: dict, out: Path) -> None:
+    build = plistlib.loads(system_version.read_bytes())
     if build.get('ProductBuildVersion') != pins['build']:
         raise ValueError('OS volume build differs from the selected IPSW pins')
-    source = root / SOURCE
     original = entitlements(source)
     data = inject(source.read_bytes())
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -171,29 +169,19 @@ def prepare(root: Path, pins: dict, out: Path) -> None:
         os.replace(target, out)
 
 
+def prepare(root: Path, pins: dict, out: Path) -> None:
+    prepare_files(root / 'System/Library/CoreServices/SystemVersion.plist', root / SOURCE, pins, out)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument('--os', required=True, type=Path)
+    parser.add_argument('--system-version', required=True, type=Path)
+    parser.add_argument('--installd', required=True, type=Path)
     parser.add_argument('--pins', required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
     args = parser.parse_args()
     pins = json.loads(args.pins.read_text())
-    with tempfile.TemporaryDirectory(prefix='switch-install-policy-') as scratch:
-        log = host.Log(Path(scratch) / 'mount.log')
-        try:
-            with disks.interrupts(), disks.attached(args.os, log, writable=False) as image:
-                volumes = [
-                    v
-                    for v in image.volumes
-                    if (host.disk_info(v) or {}).get('VolumeUUID', '').upper()
-                    == pins['volumes']['os_volume_uuid'].upper()
-                ]
-                if len(volumes) != 1:
-                    raise ValueError('selected IPSW System volume UUID not found')
-                with disks.mounted(volumes[0], log, owners=False, read_only=True) as root:
-                    prepare(root, pins, args.out)
-        finally:
-            log.file.close()
+    prepare_files(args.system_version, args.installd, pins, args.out)
 
 
 if __name__ == '__main__':
@@ -201,5 +189,5 @@ if __name__ == '__main__':
         main()
     except subprocess.CalledProcessError as error:
         raise SystemExit((error.stderr or b'').decode(errors='replace') or str(error)) from None
-    except (ValueError, OSError, host.HostError) as error:
+    except (ValueError, OSError) as error:
         raise SystemExit(str(error)) from None

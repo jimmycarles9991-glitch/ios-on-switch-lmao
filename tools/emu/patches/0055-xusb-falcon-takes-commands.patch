@@ -1,0 +1,49 @@
+Emulator: the falcon takes the driver's mailbox commands as the Switch's firmware does on a 24B119 boot: MSG_ENABLED
+by releasing the mailbox with no message, any other by an ACK message (SMI interrupt) with the mailbox left the driver's
+until its handler releases it
+
+diff --git a/hw/arm/tegra2/ahb/usb/xusb_host.c b/hw/arm/tegra2/ahb/usb/xusb_host.c
+--- a/hw/arm/tegra2/ahb/usb/xusb_host.c
++++ b/hw/arm/tegra2/ahb/usb/xusb_host.c
+@@ -25,8 +25,10 @@
+  * The falcon runs no firmware here. Its boot is the part the driver can get wrong: an L2IMEMOP load DMAs the blocks
+  * L2IMEMOP_SIZE names from ILOAD_BASE (they must lie within ILOAD_ATTR and be readable through the SMMU), and
+  * STARTCPU boots it only when IMFILLCTL, IMFILLRNG1 and BOOTVEC describe that load. The xHCI then leaves
+- * Controller Not Ready. The mailbox takes the driver's messages (the falcon releases ownership) and the
+- * mbox-message property posts one from the firmware (SMI_INTR, SPI 40); the firmware's own traffic is unknown.
++ * Controller Not Ready. The falcon takes the driver's commands as the Switch's firmware did on a 24B119 boot: MSG_ENABLED
++ * by releasing the mailbox, with no message; any other (RESET_SSPI there) by an ACK message (SMI_INTR, SPI 40), the
++ * mailbox left the driver's until its handler releases it. It takes the driver's ACK or NAK replies and releases the
++ * mailbox. The mbox-message property posts a message from the firmware; the firmware's own traffic is unknown.
+  */
+ 
+ #define CONFIG_ARCH_TEGRA_21x_SOC
+@@ -64,6 +66,9 @@
+ #define XUSB_MBOX_OWNER             0x0f0
+ #define XUSB_MBOX_OWNER_NONE        0
+ #define XUSB_MBOX_OWNER_FW          1
++#define XUSB_MBOX_MSG_ENABLED       1
++#define XUSB_MBOX_ACK               128
++#define XUSB_MBOX_NAK               129
+ #define XUSB_C11_CSBRANGE           0x41c
+ #define XUSB_SMI_INTR               0x428
+ #define XUSB_SMI_INTR_FW_HANG       BIT(1)
+@@ -240,9 +245,17 @@
+ static void xusb_falcon_took_message(void *opaque)
+ {
+     tegra_xusb *s = opaque;
++    uint32_t cmd = *fpci_reg(s, XUSB_MBOX_DATA_IN) >> 24;
+ 
+     *fpci_reg(s, XUSB_MBOX_CMD) &= ~XUSB_MBOX_DEST_FALC;
+-    *fpci_reg(s, XUSB_MBOX_OWNER) = XUSB_MBOX_OWNER_NONE;
++    if (cmd == XUSB_MBOX_ACK || cmd == XUSB_MBOX_NAK || cmd == XUSB_MBOX_MSG_ENABLED) {
++        *fpci_reg(s, XUSB_MBOX_OWNER) = XUSB_MBOX_OWNER_NONE;
++        return;
++    }
++    *fpci_reg(s, XUSB_MBOX_DATA_OUT) = (uint32_t)XUSB_MBOX_ACK << 24;
++    *fpci_reg(s, XUSB_MBOX_CMD) |= XUSB_MBOX_DEST_SMI | XUSB_MBOX_INT_EN;
++    *fpci_reg(s, XUSB_SMI_INTR) |= XUSB_SMI_INTR_EN;
++    xusb_update_irqs(s);
+ }
+ 
+ static uint32_t xusb_csb_read(tegra_xusb *s, uint32_t address)

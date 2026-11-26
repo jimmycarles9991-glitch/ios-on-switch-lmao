@@ -82,6 +82,7 @@ public:
 
     addr64_t getPhysicalSegment(uint64_t offset, IOByteCount *bytes, int) const
     {
+        EXPECT_GT(prepares, completes) << "IOGMD: getPhysicalSegment requires a prepared descriptor";
         *bytes = 4096;
         return int64_t(offset / 4096) == hole ? 0 : pa + offset;
     }

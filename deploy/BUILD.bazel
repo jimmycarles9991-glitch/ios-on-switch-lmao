@@ -94,3 +94,55 @@ py_binary(
         "@rules_python//python/runfiles",
     ],
 )
+
+# The two files of the System cryptex's delta that the boot package pins, on their own, so //deploy:system's runfiles
+# carry them and not the whole delta (gigabytes of translated dyld caches).
+genrule(
+    name = "system_cryptex_trusted",
+    srcs = ["//install:delta_system_cryptex"],
+    outs = [
+        "system_cryptex_trusted/system_cryptex.trustcache",
+        "system_cryptex_trusted/a64x-cache-pretranslated.bin",
+    ],
+    cmd = "for out in $(OUTS); do cp \"$(execpath //install:delta_system_cryptex)/$$(basename $$out)\" $$out; done",
+    tags = ["manual"],
+)
+
+# iOS 27: this build's translated System cryptex onto an installed card's Preboot, Data untouched
+# (tools/deploy/system_update.py). It builds the IPSW's translation (//install:translated_system_cryptex).
+py_binary(
+    name = "system",
+    srcs = ["//tools/deploy:system_update.py"],
+    args = [
+        "--boot-package=$(rlocationpath :boot_package)",
+        "--spec=$(rlocationpath //install:spec)",
+        "--ipsw=$(rlocationpath //install:ipsw_pins)",
+    ] + select({
+        "//ipsw:ios27": [
+            "--pretranslated-pins=$(rlocationpath //install:pretranslated_pins)",
+            "--image=$(rlocationpath //install:translated_system_cryptex)",
+            "--trusted=$(rlocationpath :system_cryptex_trusted/system_cryptex.trustcache)",
+            "--trusted=$(rlocationpath :system_cryptex_trusted/a64x-cache-pretranslated.bin)",
+        ],
+        "//conditions:default": [],
+    }),
+    data = [
+        ":boot_package",
+        "//install:ipsw_pins",
+        "//install:spec",
+    ] + select({
+        "//ipsw:ios27": [
+            ":system_cryptex_trusted/a64x-cache-pretranslated.bin",
+            ":system_cryptex_trusted/system_cryptex.trustcache",
+            "//install:pretranslated_pins",
+            "//install:translated_system_cryptex",
+        ],
+        "//conditions:default": [],
+    }),
+    main = "//tools/deploy:system_update.py",
+    tags = ["manual"],
+    deps = [
+        "//tools/deploy:system_update",
+        "@rules_python//python/runfiles",
+    ],
+)

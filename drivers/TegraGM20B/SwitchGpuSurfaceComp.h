@@ -14,6 +14,15 @@ static inline int switch_gpu_surface_is_panel_scanout(uint32_t width, uint32_t h
 	return (width == 720u && height == 1280u) || (width == 1280u && height == 720u);
 }
 
+static inline int switch_gpu_surface_is_external_scanout(uint32_t width, uint32_t height,
+							 uint32_t bpp, int compositor,
+							 int external_active)
+{
+	if (!external_active || !compositor || bpp != 4u || !width || !height)
+		return 0;
+	return width <= 4096u && height <= 4096u;
+}
+
 static inline uint32_t switch_gpu_surface_comp_kind(uint32_t width, uint32_t height, uint32_t bpp,
 						    uint64_t alloc_bytes, uint64_t layout_bytes,
 						    int scanned, int comp_enabled, int smmu_ready)

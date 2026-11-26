@@ -349,16 +349,17 @@ int tgm_recover_suspects(struct nvkm_device *device, int *chids, int max);
  * hold (tgm_engine_contexts) and the one each busy PBDMA feeds, unless it waits in an acquire */
 int tgm_recover_resident(struct nvkm_device *device, int *chids, int max);
 
-/* A PBDMA on a host semaphore acquire that has not passed (NV906F SEMAPHORED with an ACQUIRE, ACQ_GEQ or ACQ_AND
- * operation): its channel waits for another one's release, and the PBDMA switches between such channels
- * (ACQUIRE_SWITCH), so the one a check finds it on is only a waiter. A kernel channel waiting so (the present's acquire
- * of the compositor's fence) would otherwise be taken for a stuck kernel channel, which is fatal. */
+/* A PBDMA on a host semaphore acquire (NV906F SEMAPHORED with ACQUIRE, ACQ_GEQ or ACQ_AND) or a host1x syncpoint wait
+ * (NV906F SYNCPOINTB with WAIT) that has not passed: its channel waits for another producer's release, and the PBDMA
+ * switches between such channels (ACQUIRE_SWITCH/WAIT_SWITCH), so the one a check finds it on is only a waiter. */
 static inline int tgm_pbdma_acquiring(uint32_t method0, uint32_t data0)
 {
+	const uint32_t addr = PBDMA_METHOD_ADDR(method0);
 	const uint32_t operation = data0 & 0xf;
 
-	return PBDMA_METHOD_ADDR(method0) == 0x1c &&
-	       (operation == 0x1 || operation == 0x4 || operation == 0x8);
+	if (addr == TGM_HOST_SEMAPHORED)
+		return operation == 0x1 || operation == 0x4 || operation == 0x8;
+	return addr == TGM_HOST_SYNCPOINTB && !(data0 & 0x3u);
 }
 
 /* A channel with work pending that has completed nothing for this long is stuck (one rule for the context-switch timeout

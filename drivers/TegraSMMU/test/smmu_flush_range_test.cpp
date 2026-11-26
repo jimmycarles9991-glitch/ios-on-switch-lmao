@@ -25,6 +25,7 @@ void switch_test_barrier();
 namespace {
 constexpr uintptr_t kMc = 0x70019000;
 constexpr uint32_t kPtbAsid = 0x1c, kTlbFlush = 0x30, kPtcFlush = 0x34, kPtcFlushHi = 0x9b8;
+constexpr uint32_t kPtcNoWaitIdle = 1u << 3, kPtcAddress = kPtcNoWaitIdle | 1u;
 constexpr uint32_t kAsid = TEGRA_SMMU_ASID_VIC, kAsidMatch = (1u << 31) | (kAsid << 24), kSectionMatch = 2;
 constexpr uint64_t kTablesPa = 0xe1000000, kWindow = 0x10000000, kWindowBytes = 128ULL << 20, kSection = 4ULL << 20;
 constexpr uint32_t kTables = 1 + 32 + 2;  // the directory, the window's 32 tables (pages 1..32), two more
@@ -111,7 +112,7 @@ TEST_F(SmmuFlushRange, AThreeMiBMapFlushesItsPteGroupsAndTwoSectionsOnly)
     ASSERT_EQ(end - first, 768u * 4);
     std::vector<Event> expected = {mcWrite(kPtcFlushHi, 0)};
     for (uint64_t at = first; at < end; at += 32)
-        expected.push_back(mcWrite(kPtcFlush, static_cast<uint32_t>(at) | 1));
+        expected.push_back(mcWrite(kPtcFlush, static_cast<uint32_t>(at) | kPtcAddress));
     expected.push_back(mcWrite(kTlbFlush, section(kWindow)));
     expected.push_back(mcWrite(kTlbFlush, section(kWindow + kSection)));
     expected.push_back(mcRead(kPtbAsid));
@@ -142,7 +143,7 @@ TEST_F(SmmuFlushRange, AnUnmapCleansAndInvalidatesAndFlushesItsOneGroup)
         {"civac", entryVa(iova) & ~uintptr_t{63}, 0},
         {"dsb", 0, 0},
         mcWrite(kPtcFlushHi, 0),
-        mcWrite(kPtcFlush, static_cast<uint32_t>(kTablesPa + 2 * 4096 + 256 * 4) | 1),
+        mcWrite(kPtcFlush, static_cast<uint32_t>(kTablesPa + 2 * 4096 + 256 * 4) | kPtcAddress),
         mcWrite(kTlbFlush, section(kWindow + kSection)),
         mcRead(kPtbAsid),
     };
@@ -155,8 +156,8 @@ TEST_F(SmmuFlushRange, ADirectoryChangeStillFlushesEverything)
     const uint64_t page = 0x90000000;
     ASSERT_TRUE(domain.map(0x40000000, &page, 1, true));
     switch_smmu_publish(domain, kAsid, SWITCH_DCACHE_CLEAN);
-    const std::vector<Event> expected = {mcWrite(kPtcFlush, 1u << 3), mcRead(kPtbAsid), mcWrite(kTlbFlush, kAsidMatch),
-                                         mcRead(kPtbAsid)};
+    const std::vector<Event> expected = {mcWrite(kPtcFlush, kPtcNoWaitIdle), mcRead(kPtbAsid),
+                                         mcWrite(kTlbFlush, kAsidMatch), mcRead(kPtbAsid)};
     EXPECT_EQ(mcAccesses(), expected);
 }
 
@@ -240,8 +241,8 @@ TEST(SmmuFlushRangeFields, HighPhysicalBitsAndTheLastSection)
     switch_smmu::flushRange(io, 122, 0x240000010ULL, 40, 0xffc00000ULL, kSection);
     const std::vector<Event> expected = {
         mcWrite(kPtcFlushHi, 2),
-        mcWrite(kPtcFlush, 0x40000000u | 1),
-        mcWrite(kPtcFlush, 0x40000020u | 1),
+        mcWrite(kPtcFlush, 0x40000000u | kPtcAddress),
+        mcWrite(kPtcFlush, 0x40000020u | kPtcAddress),
         mcWrite(kTlbFlush, (1u << 31) | (122u << 24) | 0xffc00u | kSectionMatch),
         mcRead(kPtbAsid),
     };
@@ -270,8 +271,8 @@ TEST(SmmuFlushRangeFields, AnEntryInAGroupsUpperHalfFlushesTheGroupsBase)
     switch_smmu::flushRange(io, 127, 0x80001024ULL, 4, 0x10000000ULL, 4096);
     const std::vector<Event> expected = {
         mcWrite(kPtcFlushHi, 0),
-        mcWrite(kPtcFlush, 0x80001000u | 1),
-        mcWrite(kPtcFlush, 0x80001020u | 1),
+        mcWrite(kPtcFlush, 0x80001000u | kPtcAddress),
+        mcWrite(kPtcFlush, 0x80001020u | kPtcAddress),
         mcWrite(kTlbFlush, (1u << 31) | (127u << 24) | 0x10000u | kSectionMatch),
         mcRead(kPtbAsid),
     };

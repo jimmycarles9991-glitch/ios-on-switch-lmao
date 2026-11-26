@@ -7,15 +7,22 @@ constexpr uint32_t kPtbAsid = 0x1c, kPtbData = 0x20, kTlbFlush = 0x30, kPtcFlush
 constexpr uint32_t kAsidEnable = 1u << 31, kTlbAsidMatch = 1u << 31, kTlbMatchSection = 2, kTlbSectionField = 0xffc00;
 constexpr uint32_t kPtcFlushAddress = 1, kPtcGroup = 32, kPtcSixteenEntries = 64;
 constexpr uint64_t kTlbSection = 4ULL << 20;
-// PTC_FLUSH: type ALL (bit 0 clear) with PTC_NO_WAIT_IDLE_FLUSH (bit 3) kept at its reset value, 1 (T210 TRM 18.11.1.11).
-constexpr uint32_t kPtcFlushAll = 1u << 3;
+// T210 TRM 18.11.1.11: neither flush type needs to wait for the hit FIFO to go idle (bit 3 kept at reset value, 1).
+constexpr uint32_t kPtcNoWaitIdle = 1u << 3;
 
 template <class Registers> void flush(Registers &io, uint32_t asid)
 {
-    io.write(kPtcFlush, kPtcFlushAll);
+    io.write(kPtcFlush, kPtcNoWaitIdle);
     (void)io.read(kPtbAsid);
     io.write(kTlbFlush, kTlbAsidMatch | (asid << 24));
     (void)io.read(kPtbAsid);
+}
+
+// The swgroup register's value: enabled, with the ASID in the one field, or in all four of a 34-bit client's swgroup
+// (one per va[33:32]; T210 TRM 18.11.1.84-85, p.894-895), as L4T's tegra-smmu writes them.
+constexpr uint32_t selection(const tegra_smmu_attachment &a)
+{
+    return kAsidEnable | a.asid | (a.wide ? a.asid << 8 | a.asid << 16 | a.asid << 24 : 0u);
 }
 
 // After page entries changed (TRM 18.6.3.3): the PTC's copies of the table bytes [pa, pa + bytes), then the ASID's TLB
@@ -29,18 +36,11 @@ void flushRange(Registers &io, uint32_t asid, uint64_t pa, uint64_t bytes, uint6
 {
     io.write(kPtcFlushHi, static_cast<uint32_t>(pa >> 32) & 3);
     for (uint64_t at = pa & ~uint64_t{kPtcSixteenEntries - 1}; at < pa + bytes; at += kPtcGroup)
-        io.write(kPtcFlush, static_cast<uint32_t>(at) | kPtcFlushAddress);
+        io.write(kPtcFlush, static_cast<uint32_t>(at) | kPtcNoWaitIdle | kPtcFlushAddress);
     for (uint64_t at = iova & ~(kTlbSection - 1); at < iova + iovaBytes; at += kTlbSection)
         io.write(kTlbFlush, kTlbAsidMatch | (asid << 24) | (static_cast<uint32_t>(at >> 12) & kTlbSectionField) |
                                 kTlbMatchSection);
     (void)io.read(kPtbAsid);
-}
-
-// The swgroup register's value: enabled, with the ASID in the one field, or in all four of a 34-bit client's swgroup
-// (one per va[33:32]; T210 TRM 18.11.1.84-85, p.894-895), as L4T's tegra-smmu writes them.
-constexpr uint32_t selection(const tegra_smmu_attachment &a)
-{
-    return kAsidEnable | a.asid | (a.wide ? a.asid << 8 | a.asid << 16 | a.asid << 24 : 0u);
 }
 
 template <class Registers>

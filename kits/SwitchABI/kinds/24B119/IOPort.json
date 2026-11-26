@@ -1,0 +1,60 @@
+{
+  "class": "IOPort",
+  "kind": "24B119",
+  "size": "0x1a8",
+  "first_slot": 0,
+  "slots": 196,
+  "slide": "-0x4088000",
+  "layout": {},
+  "fields": {},
+  "addresses": {
+    "switch_original_port_add_transport": "0xfffffff0097804a8",
+    "switch_original_port_remove_transport": "0xfffffff00972f80c",
+    "switch_original_port_usb2_set_data_role": "0xfffffff0097140f0",
+    "switch_original_port_usb2_transport": "0xfffffff00971a514",
+    "switch_original_port_usb3_set_data_role": "0xfffffff0097140f0",
+    "switch_original_port_usb3_transport": "0xfffffff00971edf4"
+  },
+  "found": {
+    "switch_original_port_add_transport": "IOPort::addTransport(transport, index): x2 the index, returns bool (and w0, w19, #1)",
+    "switch_original_port_remove_transport": "IOPort::removeTransport(type, index): x1 type, x2 index; mov w0, #0 on the path that found and removed it",
+    "switch_original_port_usb2_set_data_role": "IOPortTransportStateUSB::setDataRole(role): x1 the role, x0 the transport",
+    "switch_original_port_usb2_transport": "allocates 0x1a8 bytes of the IOPortTransportStateUSB2 class (0xfffffff007fa0008) and initialises it",
+    "switch_original_port_usb3_set_data_role": "IOPortTransportStateUSB::setDataRole(role): x1 the role, x0 the transport",
+    "switch_original_port_usb3_transport": "allocates 0x1a8 bytes of the IOPortTransportStateUSB3 class (0xfffffff007fa0108) and initialises it"
+  },
+  "hints": {
+    "functions": {
+      "switch_original_port_usb2_transport": {
+        "at": "0xfffffff00971a514",
+        "body": "d503237f a9be4ff4 a9017bfd 910043fd d0ff4420 91002000 52803501 9401d0e3 aa0003f3 f000bc54 9116c294",
+        "why": "allocates 0x1a8 bytes of the IOPortTransportStateUSB2 class (0xfffffff007fa0008) and initialises it"
+      },
+      "switch_original_port_usb3_transport": {
+        "at": "0xfffffff00971edf4",
+        "body": "d503237f a9be4ff4 a9017bfd 910043fd d0ff4400 91042000 52803501 9401beab aa0003f3 f000bc34 91198294",
+        "why": "allocates 0x1a8 bytes of the IOPortTransportStateUSB3 class (0xfffffff007fa0108) and initialises it"
+      },
+      "switch_original_port_add_transport": {
+        "at": "0xfffffff0097804a8",
+        "body": "d503237f d10503ff 6d0d23e9 a90e6ffc a90f67fa a9105ff8 a91157f6 a9124ff4 a9137bfd 9104c3fd aa0203f4",
+        "why": "IOPort::addTransport(transport, index): x2 the index, returns bool (and w0, w19, #1)"
+      },
+      "switch_original_port_remove_transport": {
+        "at": "0xfffffff00972f80c",
+        "body": "d503237f d10243ff a90467fa a9055ff8 a90657f6 a9074ff4 a9087bfd 910203fd aa0203f4 aa0103f5 aa0003f3",
+        "why": "IOPort::removeTransport(type, index): x1 type, x2 index; mov w0, #0 on the path that found and removed it"
+      },
+      "switch_original_port_usb2_set_data_role": {
+        "at": "0xfffffff0097140f0",
+        "body": "d503237f d10283ff a90567fa a9065ff8 a90757f6 a9084ff4 a9097bfd 910243fd aa0103f3 aa0003f4 b000bc80",
+        "why": "IOPortTransportStateUSB::setDataRole(role): x1 the role, x0 the transport"
+      },
+      "switch_original_port_usb3_set_data_role": {
+        "at": "0xfffffff0097140f0",
+        "body": "d503237f d10283ff a90567fa a9065ff8 a90757f6 a9084ff4 a9097bfd 910243fd aa0103f3 aa0003f4 b000bc80",
+        "why": "IOPortTransportStateUSB::setDataRole(role): x1 the role, x0 the transport"
+      }
+    }
+  }
+}

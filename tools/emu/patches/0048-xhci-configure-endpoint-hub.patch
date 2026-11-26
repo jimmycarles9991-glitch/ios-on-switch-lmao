@@ -1,0 +1,42 @@
+xHCI 1.2c 6.2.2.2, p.412: "If the Input Hub field = '1', then the Output Hub and Number of Ports field shall be
+initialized. If Input Hub = '1' and Speed = High-Speed, then the Output TT Think Time (TTT) and Multi-TT (MTT) fields
+shall be initialized." QEMU's Configure Endpoint updated only Context Entries, so a driver that reads the output slot
+context (AppleUSBXHCI: "parent slot 1 ... is not a hub") found no hub above a hub's devices.
+
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+index 41c550d..f025276 100644
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -213,6 +213,12 @@ enum {
+ 
+ #define SLOT_CONTEXT_ENTRIES_MASK 0x1f
+ #define SLOT_CONTEXT_ENTRIES_SHIFT 27
++#define SLOT_CONTEXT_MTT        (1u << 25)
++#define SLOT_CONTEXT_HUB        (1u << 26)
++#define SLOT_CONTEXT_PORTS      (0xffu << 24)
++#define SLOT_CONTEXT_TTT        (3u << 16)
++#define SLOT_CONTEXT_SPEED      (0xfu << 20)
++#define SLOT_CONTEXT_SPEED_HS   (3u << 20)
+ 
+ #define get_field(data, field)                  \
+     (((data) >> field##_SHIFT) & field##_MASK)
+@@ -2294,6 +2300,19 @@ static TRBCCode xhci_configure_slot(XHCIState *xhci, unsigned int slotid,
+     slot_ctx[0] &= ~(SLOT_CONTEXT_ENTRIES_MASK << SLOT_CONTEXT_ENTRIES_SHIFT);
+     slot_ctx[0] |= islot_ctx[0] & (SLOT_CONTEXT_ENTRIES_MASK <<
+                                    SLOT_CONTEXT_ENTRIES_SHIFT);
++    /* xHCI 1.2c 6.2.2.2: an input Hub flag initializes the output Hub and Number of Ports, and MTT and TT Think Time
++     * for a high-speed hub. */
++    if (islot_ctx[0] & SLOT_CONTEXT_HUB) {
++        slot_ctx[0] |= SLOT_CONTEXT_HUB;
++        slot_ctx[1] &= ~SLOT_CONTEXT_PORTS;
++        slot_ctx[1] |= islot_ctx[1] & SLOT_CONTEXT_PORTS;
++        if ((slot_ctx[0] & SLOT_CONTEXT_SPEED) == SLOT_CONTEXT_SPEED_HS) {
++            slot_ctx[0] &= ~SLOT_CONTEXT_MTT;
++            slot_ctx[0] |= islot_ctx[0] & SLOT_CONTEXT_MTT;
++            slot_ctx[2] &= ~SLOT_CONTEXT_TTT;
++            slot_ctx[2] |= islot_ctx[2] & SLOT_CONTEXT_TTT;
++        }
++    }
+     DPRINTF("xhci: output slot context: %08x %08x %08x %08x\n",
+             slot_ctx[0], slot_ctx[1], slot_ctx[2], slot_ctx[3]);
+ 

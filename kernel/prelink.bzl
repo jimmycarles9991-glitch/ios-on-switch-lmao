@@ -1,5 +1,5 @@
 """The prelink's own options: //kernel:kernel uses them, and //install:release_inputs carries them so a Mac without
-Xcode can prelink the released kernel the same way."""
+Xcode can prelink the released kernel the same way. //kernel:kernel_12377 takes the same base_roots."""
 
 load("//kernel/rules:kernel.bzl", "kernel_prelink")
 

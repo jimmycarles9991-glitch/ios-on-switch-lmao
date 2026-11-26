@@ -3,9 +3,11 @@
   "doc": "Apple's generic xHCI driver (com.apple.driver.usb.AppleUSBXHCI on IOUSBHostFamily's AppleUSBHostController: rings, slots, endpoints, ports, hubs, power), which SwitchXHCI subclasses for the Tegra X1 XUSB host controller as the SoC subclasses do. Concrete: no pure virtual slot. Declared on IOService: AppleUSBHostController's slots are opaque.",
   "superclass": "IOService",
   "kext": "com.apple.driver.usb.AppleUSBXHCI",
+  "bind": "imports",
   "structors": "default",
   "includes": [
-    "IOKit/IOService.h"
+    "IOKit/IOService.h",
+    "IOKit/IOBufferMemoryDescriptor.h"
   ],
   "methods": {
     "free": {
@@ -139,6 +141,16 @@
       "pac": "_ZN22AppleUSBHostController10copyMapperEv",
       "doc": "AppleUSBHostController::start keeps what it returns as the mapper of every controller DMA buffer and transfer DMA command (a reference)."
     },
+    "createPort": {
+      "decl": "virtual IOService *createPort(void *protocol, uint32_t port, uint32_t protocolPort)",
+      "mangled": "__ZN12AppleUSBXHCI10createPortEPvjj",
+      "doc": "createPorts' call for each xHCI port (1-based `port`): protocol is its own copy of the port's Supported Protocol capability, protocolPort the port's 1-based place in it. Makes the port from its operational registers, the protocol and a property dictionary (iOS 27), attaches and starts it (no registerService) and returns it; createPorts keeps it at port - 1, and for NULL logs \"port %d not created\" and clears that port's PORTSC.PP through regRead32/regWrite32."
+    },
+    "hardwareException": {
+      "decl": "virtual void hardwareException(uint32_t code)",
+      "mangled": "__ZN12AppleUSBXHCI17hardwareExceptionEj",
+      "doc": "The controller's recovery for a hardware exception, by code (0x100: it lost power); from a thread call it takes the controller through Off and initializes it again."
+    },
     "regRead16": {
       "decl": "virtual uint16_t regRead16(uint64_t base, uint32_t offset)",
       "mangled": "__ZN12AppleUSBXHCI9regRead16Eyj",
@@ -159,6 +171,11 @@
     "regWrite64": {
       "decl": "virtual void regWrite64(uint64_t base, uint32_t offset, uint64_t value)",
       "mangled": "__ZN12AppleUSBXHCI10regWrite64Eyjy"
+    },
+    "createIOBuffer": {
+      "decl": "virtual IOBufferMemoryDescriptor *createIOBuffer(IOOptionBits options, uint64_t capacity)",
+      "mangled": "__ZN12AppleUSBXHCI14createIOBufferEjy",
+      "doc": "Allocates a client buffer with the original capacity rounding, tag and requested cache mode. On 21H461 this returns a plain IOBufferMemoryDescriptor, prepared and completed per transfer."
     }
   },
   "fields": {
@@ -166,6 +183,33 @@
       "type": "uint32_t",
       "access": "get set",
       "doc": "The memory options ring buffers are allocated with: AppleUSBHostController::init sets them, the SoC subclasses clear the cache-mode bits before AppleUSBXHCI::start."
+    },
+    "clientBufferOptions": {
+      "type": "uint32_t",
+      "access": "get set",
+      "doc": "The cache mode (kIOMapCacheMask bits) of every buffer the controller allocates for transfers: client buffers, the request pool's and the DMA command's bounces, and the buffers IOUSBHostInterface hands class drivers and dexts. Read at each allocation; with cache bits set they replace the direction's, else they are or-ed in. 0 after AppleUSBHostController::init; Apple's non-coherent controllers store 0x100 or 0x400 from their \"buffer-options\" property. The rings and contexts take ringBufferOptions instead."
+    }
+  },
+  "functions": {
+    "switch_original_xhci_typec_usb2_port": {
+      "decl": "IOService *switch_original_xhci_typec_usb2_port(IODeviceMemory *registers, void *protocol, uint32_t port, uint32_t reserved)",
+      "doc": "iOS 17: AppleUSB20XHCITypeCPort's factory with createPort's arguments to the plain port factories (the port's 16 bytes of operational registers, the protocol copy, the port number as its \"port\" property, 0). A Type-C root port takes its cable state from the IOPort that IOPort::copyParentPortForService finds for its controller. Not attached or started."
+    },
+    "switch_original_xhci_typec_usb3_port": {
+      "decl": "IOService *switch_original_xhci_typec_usb3_port(IODeviceMemory *registers, void *protocol, uint32_t port, uint32_t reserved)",
+      "doc": "iOS 17: AppleUSB30XHCITypeCPort's, as switch_original_xhci_typec_usb2_port."
+    },
+    "switch_original_xhci_port_properties": {
+      "decl": "OSDictionary *switch_original_xhci_port_properties(uint32_t port, uint32_t hostPortType, uint32_t location)",
+      "doc": "IOUSBHostFamily's port property dictionary, as base createPort makes it for each port: usb-port-number, usb-port-type (the device-tree value for a tIOUSBHostPortType: 1 to 1, 2 to 5, 3 to 2, 5 USB-C to 4, 6 none) and usb-port-location when non-zero. A port's dictionary init reads them. NULL for a port above 15 or a type above 6."
+    },
+    "switch_original_xhci_usb2_port": {
+      "decl": "IOService *switch_original_xhci_usb2_port(IODeviceMemory *registers, void *protocol, OSDictionary *properties)",
+      "doc": "iOS 27: AppleUSB20XHCIPort's factory as base createPort calls it (the port's 16 bytes of operational registers, the protocol copy, switch_original_xhci_port_properties' dictionary for the dictionary init). Not attached or started."
+    },
+    "switch_original_xhci_usb3_port": {
+      "decl": "IOService *switch_original_xhci_usb3_port(IODeviceMemory *registers, void *protocol, OSDictionary *properties)",
+      "doc": "iOS 27: AppleUSB30XHCIPort's, as switch_original_xhci_usb2_port."
     }
   }
 }

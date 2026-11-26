@@ -1,0 +1,103 @@
+{
+  "kind": "24B119",
+  "bundle": "com.apple.driver.usb.AppleUSBXHCI",
+  "doc": "AppleUSBXHCI on one interrupter, as the falcon reports (MaxIntrs 1), which xHCI 1.2 (p. 264) then routes every event to: the start check takes one, and no TRB or slot names interrupter 1 or 2.",
+  "sites": [
+    {
+      "at": "0xfffffff009d34af4",
+      "from": "71000a9f",
+      "to": "7100029f",
+      "why": "AppleUSBXHCI::start refuses MaxIntrs <= 2 (cmp w20, #2; b.hi): cmp w20, #0, at least one"
+    },
+    {
+      "at": "0xfffffff009d2d99c",
+      "from": "72a00808",
+      "to": "72a00008",
+      "why": "AppleUSBXHCIRequest::prepare: movk w8, #0x40, lsl #16 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff009d2de84",
+      "from": "320a0108",
+      "to": "d503201f",
+      "why": "AppleUSBXHCIRequest::prepare: orr w8, w8, #0x400000 (target 1) -> nop"
+    },
+    {
+      "at": "0xfffffff009d2de8c",
+      "from": "52a00809",
+      "to": "52800009",
+      "why": "AppleUSBXHCIRequest::prepare: mov w9, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff009d2e128",
+      "from": "52a00808",
+      "to": "52800008",
+      "why": "AppleUSBXHCIRequest::prepare: mov w8, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff009d2e244",
+      "from": "52a00808",
+      "to": "52800008",
+      "why": "AppleUSBXHCIRequest::prepare: mov w8, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff009d2e300",
+      "from": "52a00809",
+      "to": "52800009",
+      "why": "AppleUSBXHCIRequest::prepare: mov w9, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff009d50304",
+      "from": "52a0100a",
+      "to": "5280000a",
+      "why": "AppleUSBXHCIIsochronousRequest::prepare: mov w10, #0x800000 (target 2) -> #0"
+    },
+    {
+      "at": "0xfffffff009d50770",
+      "from": "32090129",
+      "to": "d503201f",
+      "why": "AppleUSBXHCIIsochronousRequest::prepare: orr w9, w9, #0x800000 (target 2) -> nop"
+    },
+    {
+      "at": "0xfffffff009d51448",
+      "from": "52a01009",
+      "to": "52800009",
+      "why": "AppleUSBXHCIIsochronousRequest::prepare: mov w9, #0x800000 (target 2) -> #0"
+    },
+    {
+      "at": "0xfffffff009d72b14",
+      "from": "52a0080b",
+      "to": "5280000b",
+      "why": "the sparse request's No-Op TRB with IOC (0xfffffff009d72914): mov w11, #0x400000 (target 1) -> #0"
+    },
+    {
+      "at": "0xfffffff009d72a98",
+      "from": "52800023",
+      "to": "52800003",
+      "why": "Link TRB writer 0xfffffff009d31828 (lsl w8, w22, #22): mov w3, #1 -> #0"
+    },
+    {
+      "at": "0xfffffff009d2e0a8",
+      "from": "52800023",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #1 -> #0"
+    },
+    {
+      "at": "0xfffffff009d2e1dc",
+      "from": "52800023",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #1 -> #0"
+    },
+    {
+      "at": "0xfffffff009d500c8",
+      "from": "52800043",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #2 -> #0"
+    },
+    {
+      "at": "0xfffffff009d504fc",
+      "from": "52800043",
+      "to": "52800003",
+      "why": "Link TRB writer argument: mov w3, #2 -> #0"
+    }
+  ]
+}

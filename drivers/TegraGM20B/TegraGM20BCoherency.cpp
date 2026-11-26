@@ -88,6 +88,7 @@ tgm_coh *gByPage[kBuckets], *gById[kBuckets];
 uint32_t gWithId;  // atomic: entries reachable by surface ID; 0 lets every trap return at once
 uint32_t
 	gDeferred;  // atomic: entries deferred on their records; 0 lets every import and engine go on at once
+int gExternalScanout;
 
 #if TGM_STATS
 struct {
@@ -687,6 +688,16 @@ extern "C" int tegra_gm20b_surface_compressed(uint64_t pa)
 {
 	const uint32_t kind = tegra_gm20b_surface_kind(pa);
 	return static_cast<int>(kind != 0u && kind != TGM_LAYOUT_KIND);
+}
+
+extern "C" void tegra_gm20b_set_external_scanout(int active)
+{
+	__atomic_store_n(&gExternalScanout, active ? 1 : 0, __ATOMIC_RELEASE);
+}
+
+extern "C" int tegra_gm20b_external_scanout(void)
+{
+	return __atomic_load_n(&gExternalScanout, __ATOMIC_ACQUIRE);
 }
 
 // NOLINTNEXTLINE(misc-const-correctness): the host tests' stubs and the C callers share this signature

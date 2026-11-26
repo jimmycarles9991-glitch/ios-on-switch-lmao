@@ -30,6 +30,7 @@
 #include "SwitchWLANDma.h"
 #include "../TegraI2C/TegraI2C.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
+#include "../../kits/SwitchCAR/SwitchPadctl.h"
 #include "../../kits/SwitchCAR/SwitchUPHY.h"
 
 namespace swlan {
@@ -341,8 +342,9 @@ bool TegraPcie::powerUp(char *why, size_t whyLength)
     car_.w32(CLK_ENB_U_SET, kUAfi | kUPcie);
     IODelay(2);
 
-    const uint32_t part = 1u << kPartPcie;
-    if (!(pmc_.r32(PMC_PWRGATE_STATUS) & part)) {
+    // Clamps are removed only after a real ungate: a partition already on has none left (TRM 12.2.7; L4T returns early
+    // for one), and the command's effect on it is documented nowhere.
+    if (!switch_pmc_partition_is_on(kPartPcie)) {
         if (!switch_pmc_partition_on(kPartPcie)) {
             car_.w32(CLK_ENB_U_CLR, kUAfi | kUPcie);  // a block left half powered hangs its bus
             snprintf(why, whyLength, "PCIe power partition stays gated (PMC status %08x toggle %08x)",
@@ -350,11 +352,11 @@ bool TegraPcie::powerUp(char *why, size_t whyLength)
             return false;
         }
         IODelay(10);
-    }
-    pmc_.w32(PMC_REMOVE_CLAMPING, part);
-    if (!pmc_.wait(PMC_CLAMP_STATUS, part, 0, 5000)) {
-        snprintf(why, whyLength, "PCIe partition stays clamped (PMC clamp %08x)", pmc_.r32(PMC_CLAMP_STATUS));
-        return false;
+        if (!switch_pmc_unclamp(kPartPcie)) {
+            snprintf(why, whyLength, "PCIe partition stays clamped (PMC REMOVE_CLAMPING_CMD %08x CLAMP_STATUS %08x)",
+                     pmc_.r32(PMC_REMOVE_CLAMPING), pmc_.r32(PMC_CLAMP_STATUS));
+            return false;
+        }
     }
     if (!plle(why, whyLength))
         return false;
@@ -453,12 +455,17 @@ bool TegraPcie::uphy(char *why, size_t whyLength)
     p.modify(UPHY_PLL_P0_CTL2, kCtl2CalOvrd, 0);
     p.modify(UPHY_PLL_P0_CTL8, kCtl8RcalOvrd, 0);
     IODelay(20);
-    // Lane 0 to pcie-x1 and out of IDDQ; the other lanes' functions stay as the loader set them (XUSB's).
-    p.modify(PADCTL_USB3_PAD_MUX, kLane0FunctionMask, kLane0IddqDisable);
-    // AUX mux clamps off in Linux's order (aux_mux_lp0_clamp disable): CLAMP_EN, CLAMP_EN_EARLY, VCORE_DOWN.
-    for (const uint32_t bit : kAuxMuxLp0) {
-        p.modify(PADCTL_ELPG_PROGRAM1, bit, 0);
-        IODelay(200);
+    {
+        // USB's lane and controllers read-modify-write these two registers too (SwitchPadctl.h).
+        const SwitchPadctlLocked locked;
+        // Lane 0 to pcie-x1 and out of IDDQ; the other lanes' functions stay as the loader set them (XUSB's).
+        p.modify(PADCTL_USB3_PAD_MUX, kLane0FunctionMask, kLane0IddqDisable);
+        IODelay(1);  // Tegra X1 TRM 22.8.4 step 8: "Wait 1 μs" before the AUX clamp release
+        // AUX mux clamps off in Linux's order (aux_mux_lp0_clamp disable): CLAMP_EN, CLAMP_EN_EARLY, VCORE_DOWN.
+        for (const uint32_t bit : kAuxMuxLp0) {
+            p.modify(PADCTL_ELPG_PROGRAM1, bit, 0);
+            IODelay(200);
+        }
     }
     switch_uphy_announce(true);
     return true;

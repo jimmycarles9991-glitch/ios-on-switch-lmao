@@ -754,11 +754,15 @@ struct present_state {
 	u32 typed_pending;
 	u32 pending; /* seqno of the present in flight, 0: none (atomic: the interrupt pass completes it) */
 	u64 queued;
+	int primary;
 	/* the interrupt pass's own: a present job its scan completed, delivered at the pass's end (tgm_present_pass) */
 	u64 fenced_queued;
 	int fenced_due;
+	int fenced_primary;
 	void (*done)(void *, int);
 	void *arg;
+	const void *owner;
+	const void *filter_display;
 	u32 completing; /* completions claimed and not yet handed to their callback */
 	u32 stamped;    /* stats: seqno of the present in flight, whose copy is stamped */
 	u32 presents;   /* stats */
@@ -780,6 +784,7 @@ struct present_state {
 	void *redo_work;
 };
 extern struct present_state tgm_present;
+void switch_gpu_admission_changed(void);
 void tgm_present_stats(u32 *presents, u64 *sum, u64 *max);
 /* tgm_ctxsw_decide, tgm_live_lock held, before the engine on the present's channel is reset: the present in flight, if it
  * copies, is copied again once its fence completes, and the display gets its completion only from that copy. */

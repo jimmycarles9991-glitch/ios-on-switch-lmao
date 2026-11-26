@@ -1,0 +1,67 @@
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+index d85adac..20a4563 100644
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -2600,6 +2600,9 @@ static bool xhci_port_have_device(XHCIPort *port)
+     if (!port->uport->dev || !port->uport->dev->attached) {
+         return false; /* no device present */
+     }
++    if (port->xhci->vbus_off & BIT(port->uport->index)) {
++        return false; /* no VBUS: the device has no power to signal its attach */
++    }
+     if (!((1 << port->uport->dev->speed) & port->speedmask)) {
+         return false; /* speed mismatch */
+     }
+@@ -3220,6 +3223,32 @@ static void xhci_detach(USBPort *usbport)
+     xhci_port_update(port, 1);
+ }
+ 
++void xhci_set_port_vbus(XHCIState *xhci, unsigned int uport, bool on)
++{
++    USBPort *usbport = &xhci->uports[uport];
++    XHCIPort *port;
++
++    if (!(xhci->vbus_off & BIT(uport)) == on) {
++        return;
++    }
++    if (on) {
++        xhci->vbus_off &= ~BIT(uport);
++    } else {
++        xhci->vbus_off |= BIT(uport);
++        xhci_detach_slot(xhci, usbport);
++    }
++    if (!usbport->dev || !usbport->dev->attached) {
++        return;
++    }
++    if (!on) {
++        usb_device_reset(usbport->dev);
++    }
++    port = xhci_lookup_port(xhci, usbport);
++    if (port) {
++        xhci_port_update(port, !on);
++    }
++}
++
+ static void xhci_wakeup(USBPort *usbport)
+ {
+     XHCIState *xhci = usbport->opaque;
+diff --git a/hw/usb/hcd-xhci.h b/hw/usb/hcd-xhci.h
+index fe16d7a..fda2a10 100644
+--- a/hw/usb/hcd-xhci.h
++++ b/hw/usb/hcd-xhci.h
+@@ -206,6 +206,8 @@ typedef struct XHCIState {
+     uint32_t config;
+ 
+     USBPort  uports[MAX_CONST(XHCI_MAXPORTS_2, XHCI_MAXPORTS_3)];
++    /* Physical ports (uports) whose VBUS the board has off: a device there is unpowered and invisible. */
++    uint32_t vbus_off;
+     XHCIPort ports[XHCI_MAXPORTS];
+     XHCISlot slots[XHCI_MAXSLOTS];
+     uint32_t numports;
+@@ -222,5 +224,6 @@ typedef struct XHCIState {
+ 
+ extern const VMStateDescription vmstate_xhci;
+ bool xhci_get_flag(XHCIState *xhci, enum xhci_flags bit);
++void xhci_set_port_vbus(XHCIState *xhci, unsigned int uport, bool on);
+ void xhci_set_flag(XHCIState *xhci, enum xhci_flags bit);
+ #endif

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-// The pad controller's mapping and the lane lock; false when either cannot be had. Once, before the others.
+// The pad controller's mapping; false when it cannot be had. Once, before the others.
 bool switch_usb_ss_init(void);
 // Role thread: the lane up (defaults, mux out of IDDQ, port map, equalisation, clamps released) only while the UPHY
 // PLL is announced ready and locked; down (clamped, VCORE down). Returns whether the lane is up now.
@@ -21,8 +21,10 @@ void switch_usb_ss_clamp(void);
 void switch_usb_ss_lost(void);
 // LFPS detection on the lane, as the falcon asks (DISABLE/ENABLE_SS_LFPS_DETECTION). Mailbox work loop.
 void switch_usb_ss_lfps(bool enable);
+#if DEVELOPMENT || DEBUG
 // One clause for the role line: lane state, pad mux, port map, clamps, PLL lock and the UPHY announcement.
 void switch_usb_ss_describe(char *buffer, size_t size);
+#endif
 
 #ifdef __cplusplus
 }

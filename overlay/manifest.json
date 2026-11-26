@@ -176,6 +176,21 @@
       "trust": true
     },
     {
+      "path": "/usr/libexec/switch-sdwake",
+      "source": "build/switch-block/switch-sdwake",
+      "trust": true
+    },
+    {
+      "path": "/private/etc/fstab",
+      "source": "drivers/NativeSwitchBlock/helper/fstab"
+    },
+    {
+      "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.sdwake.plist",
+      "source": "drivers/NativeSwitchBlock/helper/com.brunostjohn.switch.sdwake.plist",
+      "union": "/private/preboot/Cryptexes/Supplemental",
+      "kind": "24B119"
+    },
+    {
       "path": "/private/preboot/Cryptexes/Supplemental/System/Library/LaunchDaemons/com.brunostjohn.switch.joyconpaird.plist",
       "source": "drivers/SwitchJoyCon/helper/com.brunostjohn.switch.joyconpaird.plist",
       "union": "/private/preboot/Cryptexes/Supplemental",

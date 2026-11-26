@@ -3837,6 +3837,20 @@ ifnet_enable_cellular_thread_group(ifnet_t ifp)
 	if_set_xflags(ifp, IFXF_REQUIRE_CELL_THREAD_GROUP);
 }
 
+void
+ifnet_enable_synchronous_input(ifnet_t ifp)
+{
+	VERIFY(ifp != NULL);
+
+	/* This function can only be called when the ifp is just created and
+	 * not yet attached.
+	 */
+	VERIFY(ifp->if_inp == NULL);
+	VERIFY(ifp->if_refflags & IFRF_EMBRYONIC);
+
+	if_set_xflags(ifp, IFXF_SYNCHRONOUS_INPUT);
+}
+
 errno_t
 ifnet_get_rx_steering_rules(ifnet_t interface,
     struct ifnet_rx_steering_rule *__counted_by(buffer_count) rules_buffer, uint32_t buffer_count, uint32_t *count_out)

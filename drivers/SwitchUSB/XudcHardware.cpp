@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // Tegra X1 XUSB device controller hardware layer; see XudcHardware.h.
 #include "XudcHardware.h"
+#include "UsbDmaCache.h"
+#include "../../kits/SwitchCAR/SwitchCAR.h"
 #include "../../kits/SwitchCAR/SwitchPMC.h"
+#include "../TegraSMMU/TegraSMMU.h"
+#include "XusbPadctl.h"
+#include "XusbUtmiPad.h"
+#include "XusbPartitions.h"
 #include <IOKit/IOLib.h>
 
 namespace xudc {
@@ -9,11 +15,10 @@ namespace {
 // Physical bases: Tegra X1 TRM; hekate bdk/soc/t210.h. Page-aligned maps.
 constexpr uint64_t kCarPA = 0x60006000, kFusePagePA = 0x7000F000, kMcPA = 0x70019000, kPadctlPA = 0x7009F000,
                    kXudcPA = 0x700D0000;
-constexpr uint32_t kFuseOffset = 0x800, kXudcBytes = 0xA000;
+constexpr uint32_t kXudcBytes = 0xA000;
 
 enum : uint32_t {  // clock and reset controller (hekate bdk/soc/clock.h)
     RST_DEVICES_U = 0x00c,
-    CLK_OUT_ENB_H = 0x014,
     CLK_OUT_ENB_U = 0x018,
     PLLU_BASE = 0x0c0,
     PLLU_OUTA = 0x0c4,
@@ -24,8 +29,6 @@ enum : uint32_t {  // clock and reset controller (hekate bdk/soc/clock.h)
     RST_DEV_U_SET = 0x310,
     RST_DEV_U_CLR = 0x314,
     CLK_ENB_L_CLR = 0x324,
-    CLK_ENB_H_SET = 0x328,
-    CLK_ENB_H_CLR = 0x32c,
     CLK_ENB_U_SET = 0x330,
     RST_DEVICES_W = 0x35c,
     CLK_OUT_ENB_W = 0x364,
@@ -44,7 +47,6 @@ enum : uint32_t {  // clock and reset controller (hekate bdk/soc/clock.h)
 
 enum : uint32_t {
     L_USBD = 1u << 22,
-    H_FUSE = 1u << 7,
     U_XUSB_DEV = 1u << 31,
     Y_USB2_TRK = 1u << 18,
     W_XUSB_PADCTL = 1u << 14,
@@ -61,8 +63,6 @@ enum : uint32_t {  // PMC (from 0x7000E400; hekate bdk/soc/pmc_t210.h)
     PWRGATE_STATUS = 0x38,
     USB_AO = 0xf0,
     TOGGLE_START = 1u << 8,
-    PART_XUSBA = 20,
-    PART_XUSBB = 21,
 };
 
 enum : uint32_t {
@@ -70,16 +70,10 @@ enum : uint32_t {
     FUSE_USB_CALIB_EXT = 0x350
 };  // from 0x7000F800
 
-enum : uint32_t {
-    MC_SMMU_XUSB_DEV_ASID = 0x28c
-};  // Linux tegra210.c, bit 31 = translate
-
 enum : uint32_t {  // XUSB pad controller (hekate usb_t210.h)
     USB2_PAD_MUX = 0x004,
     USB2_PORT_CAP = 0x008,
     SS_PORT_MAP = 0x014,
-    ELPG_PROGRAM_0 = 0x020,
-    ELPG_PROGRAM_1 = 0x024,
     BATTERY_CHRG_OTGPAD0_CTL0 = 0x080,
     BATTERY_CHRG_OTGPAD0_CTL1 = 0x084,
     OTG_PAD0_CTL_0 = 0x088,
@@ -113,12 +107,21 @@ enum : uint32_t {  // XUDC: xHCI-like block at +0, FPCI config at +0x8000, IPFS 
     EP_STCHG = 0x5c,
     PORTHALT = 0x6c,
     EP_THREAD_ACTIVE = 0x74,
+    EP_STOPPED = 0x78,
+    SSPX_CORE_CNT0 = 0x610,
+    SSPX_CORE_CNT30 = 0x688,
+    SSPX_CORE_CNT32 = 0x690,
+    SSPX_CORE_PADCTL4 = 0x750,
+    CFG_DEV_SSPI_XFER = 0x858,
     CFG_DEV_FE = 0x85c,
     FPCI_CFG_1 = 0x8004,
     FPCI_CFG_4 = 0x8010,
     FPCI_CFG_5 = 0x8014,
+    IPFS_FPCI_BAR0 = 0x9080,
     IPFS_CONFIGURATION = 0x9180,
     IPFS_INTR_MASK = 0x9188,
+    IPFS_INTR_CODE = 0x918c,       // T210 TRM 22.16.13.35
+    IPFS_INTR_SIGNATURE = 0x9190,  // 22.16.13.36
 };
 
 enum : uint32_t {
@@ -128,6 +131,7 @@ enum : uint32_t {
     CTRL_ENABLE = 1u << 31,
     ST_RC = 1u << 0,
     ST_IP = 1u << 4,
+    ST_DSE = 1u << 5,  // an error on the FPCI wrapper (T210 TRM, XUSB_DEV_XHCI_ST)
     EREP_ECS = 1u << 0,
     ERDP_EHB = 1u << 3,
     PORTSC_CCS = 1u << 0,
@@ -137,8 +141,6 @@ enum : uint32_t {
     PORTSC_PLS_U0 = 0u << 5,
     PORTSC_PLS_U3 = 3u << 5,
     PORTSC_PLS_RXDETECT = 5u << 5,
-    PORTSC_PS_FS = 1u << 10,
-    PORTSC_PS_MASK = 0xfu << 10,
     PORTSC_LWS = 1u << 16,
     PORTSC_CSC = 1u << 17,
     PORTSC_WRC = 1u << 19,
@@ -148,11 +150,14 @@ enum : uint32_t {
     PORTSC_WPR = 1u << 30,
     PORTSC_CHANGES = PORTSC_CSC | PORTSC_WRC | PORTSC_PRC | PORTSC_PLC | PORTSC_CEC,
     PORTPM_L1S_MASK = 3u,
-    PORTPM_L1S_NYET = 2u,  // no USB2 LPM (Linux tegra210 soc: lpm_enable = false)
+    PORTPM_L1S_NYET = 2u,  // L1 refused for now: no USB2 LPM (Linux tegra210 and tegra210b01 soc: lpm_enable = false)
     PORTHALT_HALT_LTSSM = 1u << 0,
     PORTHALT_STCHG_REQ = 1u << 20,
+    PORTHALT_STCHG_INTR_EN = 1u << 24,
     FE_PORTREGSEL_MASK = 3u,
+    FE_PORTREGSEL_SS = 1u,
     FE_PORTREGSEL_HSFS = 2u,
+    FE_INFINITE_SS_RETRY = 1u << 29,
     VBUS_ID_VBUS_OVR_MASK = 3u << 12,
     VBUS_ID_VBUS_OVR_EN = 1u << 12,
     VBUS_ID_VBUS_ON = 1u << 14,
@@ -166,6 +171,28 @@ enum : uint32_t {
 // two segments of kEventSegmentTrbs (XudcTransfer.h: sized for every event the rings can owe), is a buffer of its own.
 constexpr uint32_t kContextOffset = 0x0800, kRingOffset = 0x1000, kControlBytes = 0x4000;
 constexpr uint32_t kEventBytes = 2 * kEventSegmentTrbs * 16;
+// Hardware::settled's period: the bound the spins it replaced had (switch_mmio_wait32, 1 ms), until the device probe
+// gives the real completion time; Linux gives up at 100 us (tegra_xudc.c xudc_readl_poll).
+constexpr uint32_t kStateChangeMs = 1;
+constexpr unsigned kPortPasses = 8;  // Hardware::portChange
+
+const char *registerName(uint32_t offset)
+{
+    switch (offset) {
+    case EP_HALT:
+        return "EP_HALT";
+    case EP_PAUSE:
+        return "EP_PAUSE";
+    case EP_RELOAD:
+        return "EP_RELOAD";
+    case EP_STCHG:
+        return "EP_STCHG";
+    case EP_STOPPED:
+        return "EP_STOPPED";
+    default:
+        return "EP_THREAD_ACTIVE";
+    }
+}
 
 inline void barrier()
 {
@@ -173,9 +200,9 @@ inline void barrier()
 }
 }  // namespace
 
-bool DmaBuffer::allocate(uint32_t bytes)
+bool DmaBuffer::allocate(uint32_t bytes, bool writeCombined)
 {
-    if (!switch_dma_alloc(&buffer, bytes))
+    if (!switch_dma_alloc(&buffer, bytes, kSwitchDMABelow4G, writeCombined ? kIOMapWriteCombineCache : 0))
         return false;
     va = buffer.va;
     pa = static_cast<uint32_t>(buffer.pa);
@@ -201,105 +228,29 @@ bool Hardware::map()
     return (car != nullptr) && (fusePage != nullptr) && (mc != nullptr) && (padctl != nullptr) && (xudc != nullptr);
 }
 
-// Linux tegra_powergate_power_up order, the reset left asserted for the caller to release. A partition already on (the
-// boot chain's) is left as it is.
-bool Hardware::powerUp(unsigned partition, unsigned id)
+// A partition already on (the boot chain's, the host's) is left as it is but for its clock, which SC7 takes with the
+// CAR. Otherwise its clock goes on only once the partition is (switch_pmc_power_up).
+bool Hardware::powerUp(unsigned partition, unsigned id, const switch_pmc_mc_client *client)
 {
-    return switch_pmc_partition_is_on(partition) || switch_pmc_power_up_in_reset(partition, id, id);
-}
-
-// hekate _xusb_init_phy(): PLLU, UTMIPLL, OTG pad 0 calibration from fuses, bias pad tracking. Each PLL is started
-// only when it is not already running. Shared with the host controller (XusbHost.cpp): the pad is the same UTMI pad 0
-// whichever controller owns the port.
-bool usb2PadInit(volatile uint8_t *car, volatile uint8_t *fusePage, volatile uint8_t *padctl)
-{
-    const uint32_t pllu = switch_mmio_read32(car, PLLU_BASE);
-    if (!(pllu & PLL_ENABLE) || !(pllu & PLL_LOCK)) {  // hekate clock_enable_pllu
-        switch_mmio_write32(car, PLLU_MISC, switch_mmio_read32(car, PLLU_MISC) | (1u << 29));
-        const uint32_t cfg = (pllu & 0xffe00000u) | (1u << 24) | (1u << 16) | (0x19u << 8) | 2;
-        switch_mmio_write32(car, PLLU_BASE, cfg);
-        switch_mmio_write32(car, PLLU_BASE, cfg | PLL_ENABLE);
-        if (!switch_mmio_wait32(car, PLLU_BASE, PLL_LOCK, PLL_LOCK, 1000))
-            return false;
-        IODelay(8);
+    if (switch_pmc_partition_is_on(partition)) {
+        switch_car_clock_enable(id);
+        return true;
     }
-    switch_mmio_write32(car, PLLU_BASE,
-                        switch_mmio_read32(car, PLLU_BASE) | 0x2e00000u);  // USB, HSIC, ICUSB and 48 MHz outputs
-
-    if (!(switch_mmio_read32(car, UTMIPLL_HW_PWRDN_CFG0) &
-          UTMIPLL_LOCK)) {  // hekate clock_enable_utmipll: 38.4 MHz * 25 = 960 MHz
-        switch_mmio_write32(car, UTMIPLL_HW_PWRDN_CFG0,
-                            (switch_mmio_read32(car, UTMIPLL_HW_PWRDN_CFG0) & ~3u) |
-                                1);  // software IDDQ control, IDDQ off
-        switch_mmio_write32(car, UTMIP_PLL_CFG0,
-                            (switch_mmio_read32(car, UTMIP_PLL_CFG0) & 0xff0000ffu) | (25u << 16) | (1u << 8));
-        switch_mmio_write32(car, UTMIP_PLL_CFG2, (switch_mmio_read32(car, UTMIP_PLL_CFG2) & 0xff00003fu) | (24u << 18));
-        switch_mmio_write32(car, UTMIP_PLL_CFG1,
-                            (switch_mmio_read32(car, UTMIP_PLL_CFG1) & 0x07ffa000u) | (1u << 15) | 375);
-        (void)switch_mmio_wait32(car, UTMIPLL_HW_PWRDN_CFG0, UTMIPLL_LOCK, UTMIPLL_LOCK,
-                                 1000);  // hekate does not insist either
-    }
-    switch_mmio_write32(car, UTMIP_PLL_CFG2,
-                        (switch_mmio_read32(car, UTMIP_PLL_CFG2) & 0xfeffffe8u) | 0x2000008u | 0x20 | 2);
-    IODelay(2);
-
-    // Pad calibration from fuses; the fuse block needs its clock for reads.
-    const bool fuseClock = (switch_mmio_read32(car, CLK_OUT_ENB_H) & H_FUSE) != 0u;
-    if (!fuseClock) {
-        switch_mmio_write32(car, CLK_ENB_H_SET, H_FUSE);
-        IODelay(2);
-    }
-    const uint32_t calib = switch_mmio_read32(fusePage, kFuseOffset + FUSE_USB_CALIB);
-    const uint32_t calibExt = switch_mmio_read32(fusePage, kFuseOffset + FUSE_USB_CALIB_EXT);
-    if (!fuseClock)
-        switch_mmio_write32(car, CLK_ENB_H_CLR, H_FUSE);
-    switch_mmio_write32(padctl, OTG_PAD0_CTL_0,
-                        (switch_mmio_read32(padctl, OTG_PAD0_CTL_0) & 0xffffffc0u) | (calib & 0x3f));  // HS_CURR_LEVEL
-    switch_mmio_write32(padctl, OTG_PAD0_CTL_1,
-                        (switch_mmio_read32(padctl, OTG_PAD0_CTL_1) & 0x83ffff87u) |  // TERM_RANGE_ADJ,
-                            ((calib & 0x780) >> 4) | ((calibExt << 27) >> 1));        // RPD_CTRL
-    switch_mmio_write32(padctl, BATTERY_CHRG_OTGPAD0_CTL1,
-                        (switch_mmio_read32(padctl, BATTERY_CHRG_OTGPAD0_CTL1) & 0xfffffe3fu) | 0x80);  // VREG_LEV 1
-
-    switch_mmio_write32(padctl, OTG_PAD0_CTL_0, switch_mmio_read32(padctl, OTG_PAD0_CTL_0) & 0xdbffffffu);  // PD, PD_ZI
-    switch_mmio_write32(padctl, OTG_PAD0_CTL_1, switch_mmio_read32(padctl, OTG_PAD0_CTL_1) & 0xfffffffbu);  // PD_DR
-    switch_mmio_write32(padctl, BATTERY_CHRG_OTGPAD0_CTL0,
-                        switch_mmio_read32(padctl, BATTERY_CHRG_OTGPAD0_CTL0) & 0xfffffffeu);               // PD_CHG
-    switch_mmio_write32(padctl, BIAS_PAD_CTL_0, switch_mmio_read32(padctl, BIAS_PAD_CTL_0) & 0xfffff7ffu);  // bias PD
-    (void)switch_mmio_read32(padctl, OTG_PAD0_CTL_1);
-
-    // Bias pad tracking, two cycles, then tracking powered down again.
-    switch_mmio_write32(car, CLK_ENB_Y_SET, Y_USB2_TRK);
-    switch_mmio_write32(car, CLK_SOURCE_USB2_HSIC_TRK,
-                        (switch_mmio_read32(car, CLK_SOURCE_USB2_HSIC_TRK) & 0xffffff00u) | 6);
-    switch_mmio_write32(padctl, BIAS_PAD_CTL_1, 0x451e000);
-    switch_mmio_write32(padctl, BIAS_PAD_CTL_1, 0x051e000);
-    IODelay(100);
-    switch_mmio_write32(padctl, BIAS_PAD_CTL_1, 0x451e000);
-    IODelay(3);
-    switch_mmio_write32(padctl, BIAS_PAD_CTL_1, 0x051e000);
-    IODelay(100);
-    switch_mmio_write32(padctl, BIAS_PAD_CTL_1, switch_mmio_read32(padctl, BIAS_PAD_CTL_1) | 0x4000000);
-    switch_mmio_write32(car, CLK_ENB_Y_CLR, Y_USB2_TRK);
-    IODelay(30);
-    return true;
-}
-
-bool Hardware::initPhy()
-{
-    return usb2PadInit(car, fusePage, padctl);
+    return switch_pmc_power_up(partition, id, id, client);
 }
 
 // hekate xusb_device_init(): clocks, pads, FPCI/IPFS, event ring, EP0. The XUSB top and pad controller are shared
 // with the PCIe controller (drivers/SwitchWLAN): their clocks are enabled and resets released, never asserted.
 bool Hardware::powerOn(char *why, size_t whySize)
 {
-    if (switch_mmio_read32(mc, MC_SMMU_XUSB_DEV_ASID) & 0x80000000u) {
-        snprintf(why, whySize, "SMMU translation is on for XUSB_DEV (ASID 0x%08x)",
-                 switch_mmio_read32(mc, MC_SMMU_XUSB_DEV_ASID));
+    const uint32_t asid = switch_mmio_read32(mc, TEGRA_SMMU_XUSB_DEV_ASID);
+    if ((asid & 0x80000000u) && (asid & 0x7fu) != TEGRA_SMMU_ASID_XUSB_DEV) {
+        snprintf(why, whySize, "XUSB_DEV is translated by another SMMU ASID (MC %#x = %#x)", TEGRA_SMMU_XUSB_DEV_ASID,
+                 asid);
         return false;
     }
-    if ((!control.va && !control.allocate(kControlBytes)) || (!events.va && !events.allocate(kEventBytes))) {
+    if ((!control.va && !control.allocate(kControlBytes, true)) ||
+        (!events.va && !events.allocate(kEventBytes, true))) {
         snprintf(why, whySize, "no DMA memory below 4 GiB");
         return false;
     }
@@ -314,44 +265,47 @@ bool Hardware::powerOn(char *why, size_t whySize)
     switch_mmio_write32(car, CLK_ENB_W_SET, W_XUSB);
     switch_mmio_write32(car, RST_DEV_W_CLR, W_XUSB | W_XUSB_PADCTL);
     IODelay(2);
-    if (!powerUp(PART_XUSBA, kClockXusbSs) || !powerUp(PART_XUSBB, kClockXusbDev)) {
+    if (!xpad::startPlls(car)) {
+        snprintf(why, whySize, "PLLU or UTMIPLL did not lock (PLLU_BASE 0x%08x UTMIPLL_HW_PWRDN_CFG0 0x%08x)",
+                 switch_mmio_read32(car, PLLU_BASE), switch_mmio_read32(car, UTMIPLL_HW_PWRDN_CFG0));
+        return false;
+    }
+
+    // Clock sources, the port assignment and pad, then partitions XUSBB and XUSBA (each partition's clock after it).
+    // Device core 102 MHz from PLLP, FS logic from FO 48 MHz, SS 120 MHz from HSIC 480.
+    switch_mmio_write32(car, PLLU_OUTA, switch_mmio_read32(car, PLLU_OUTA) | 1);
+    IODelay(2);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_CORE_DEV,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_CORE_DEV) & 0x1fffff00u) | 1u << 29 | 6);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_FS,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_FS) & 0x1fffff00u) | 2u << 29);
+    switch_mmio_write32(car, CLK_SOURCE_XUSB_SS,
+                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_SS) & 0x1fffff00u) | 3u << 29 | 6);
+    // OTG pad 0 and the bias pad to XUSB while the controller is still in reset: "the XUSB and USB2 controllers should be
+    // under reset when updating the port assignments" (Tegra X1 TRM 22.8.4 step 5, p.1350).
+    switch_padctl_modify(padctl, USB2_PAD_MUX, 3u << 18 | 3u, 1u << 18 | 1u);
+    xpad::powerOn(car, fusePage, padctl);
+    switch_padctl_modify(padctl, SS_PORT_MAP, 0xfu, 0);
+    switch_pmc_rmw(USB_AO, 0xcu, 0);  // ID and VBUS wake detectors powered
+    IODelay(1);
+    // Tegra X1 TRM 22.8.7.5 (ELPG exit): XUSBB before XUSBA, one at a time, as tegra_xudc_unpowergate.
+    if (!powerUp(xusb::PART_XUSBB, xusb::kClockXusbDev, &xusb::kXusbDevClient) ||
+        !powerUp(xusb::PART_XUSBA, xusb::kClockXusbSs, nullptr)) {
         snprintf(why, whySize, "XUSB partitions did not power up (PMC PWRGATE_STATUS 0x%08x)",
                  switch_pmc_read(PWRGATE_STATUS));
         return false;
     }
-
-    // OTG pad 0 and the bias pad belong to XUSB; port 0 is a device port.
-    switch_mmio_write32(padctl, USB2_PAD_MUX,
-                        (switch_mmio_read32(padctl, USB2_PAD_MUX) & ~(3u << 18 | 3u)) | 1u << 18 | 1u);
-    if (!initPhy()) {
-        snprintf(why, whySize, "PLLU did not lock (PLLU_BASE 0x%08x)", switch_mmio_read32(car, PLLU_BASE));
-        return false;
-    }
-    switch_mmio_write32(padctl, USB2_PORT_CAP, (switch_mmio_read32(padctl, USB2_PORT_CAP) & ~3u) | 2);
-    switch_mmio_write32(padctl, SS_PORT_MAP, switch_mmio_read32(padctl, SS_PORT_MAP) & ~0xfu);
-    switch_pmc_write(USB_AO, switch_pmc_read(USB_AO) & 0xfffffff3u);  // ID and VBUS wake detectors powered
-    IODelay(1);
-
-    // Device core 102 MHz from PLLP, FS logic from FO 48 MHz, SS 120 MHz from HSIC 480.
-    switch_mmio_write32(car, PLLU_OUTA, switch_mmio_read32(car, PLLU_OUTA) | 1);
-    IODelay(2);
-    switch_mmio_write32(car, CLK_ENB_U_SET, U_XUSB_DEV);
-    switch_mmio_write32(car, CLK_SOURCE_XUSB_CORE_DEV,
-                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_CORE_DEV) & 0x1fffff00u) | 1u << 29 | 6);
-    IODelay(2);
-    switch_mmio_write32(car, CLK_SOURCE_XUSB_FS,
-                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_FS) & 0x1fffffffu) | 2u << 29);
-    switch_mmio_write32(car, CLK_ENB_W_SET, W_XUSB_SS);
-    switch_mmio_write32(car, CLK_SOURCE_XUSB_SS,
-                        (switch_mmio_read32(car, CLK_SOURCE_XUSB_SS) & 0x1fffff00u) | 3u << 29 | 6);
     switch_mmio_write32(car, RST_DEV_W_CLR, W_XUSB_SS);
     switch_mmio_write32(car, RST_DEV_U_CLR, U_XUSB_DEV);
     IODelay(2);
 
     // IPFS bridge, then the controller's PCI-style config space: BAR0 = its own base (Linux tegra_xudc_fpci_ipfs_init).
+    // The controller's BAR as memory-mapped space, posted writes (Tegra X1 TRM 22.8.4 step 9: FPCI_BAR0_ACCESS_TYPE 0);
+    // Linux leaves the reset value, non-posted I/O or config access.
+    xw(IPFS_FPCI_BAR0, xr(IPFS_FPCI_BAR0) & ~1u);
     xw(IPFS_CONFIGURATION, xr(IPFS_CONFIGURATION) | 1);
     IODelay(10);
-    xw(FPCI_CFG_1, xr(FPCI_CFG_1) | 7);  // IO, memory, bus master
+    xw(FPCI_CFG_1, xr(FPCI_CFG_1) | 6);  // memory space, bus master
     IODelay(1);
     xw(FPCI_CFG_4, static_cast<uint32_t>(kXudcPA));
     xw(FPCI_CFG_5, 0);
@@ -373,45 +327,70 @@ bool Hardware::powerOn(char *why, size_t whySize)
 
     initEndpoint(0, EP_CONTROL, 64, 0);
     xw(CTRL, xr(CTRL) | CTRL_IE | CTRL_LSE);
+    // Linux tegra_xudc_gadget_start: a link state change request (PORTHALT_STCHG_REQ, the LTSSM held until software
+    // releases it) raises a port status event instead of waiting for the next one.
+    xw(PORTHALT, xr(PORTHALT) | PORTHALT_STCHG_INTR_EN);
     xw(ECPLO, control.pa + kContextOffset);
     xw(ECPHI, 0);
+    // L4T tegra_xudc_device_params_init: LFPS and link-configuration timing, and the SSPI transaction timeout.
+    xw(SSPX_CORE_CNT0, (xr(SSPX_CORE_CNT0) & ~0xffu) | 0xau);
+    xw(SSPX_CORE_CNT30, (xr(SSPX_CORE_CNT30) & ~0xfffffu) | 0x978u);
+    xw(SSPX_CORE_CNT32, (xr(SSPX_CORE_CNT32) & ~0xffu) | 0xb0u);
+    xw(SSPX_CORE_PADCTL4, (xr(SSPX_CORE_PADCTL4) & ~0xfffffu) | 0x5dc0u);
+    xw(CFG_DEV_SSPI_XFER, 0xf000u);
+    xw(CFG_DEV_FE, xr(CFG_DEV_FE) | FE_INFINITE_SS_RETRY);
     return true;
 }
 
 // hekate xusb_device_enumerate(): VBUS/ID overrides, enable, port to RxDetect, pull-up on; interrupt moderation as
-// Linux tegra_xudc_init sets it (IMODI and the counter, kImodUs).
+// Linux tegra_xudc_init sets it (IMODI and the counter, kImodUs). Of the ELPG registers hekate zeroes, only what
+// tegra_xudc_device_mode_on's phy_power_on(utmi) changes (the fake SS port, XusbPadctl.h): ELPG_PROGRAM_0's wake bits
+// and the other ports' and PCIe's AUX clamps in ELPG_PROGRAM_1 are left to their owners.
 void Hardware::connect()
 {
     xw(RT_IMOD, (kImodUs * 4) << 16 | (kImodUs * 4));
-    switch_mmio_write32(padctl, ELPG_PROGRAM_0, 0);
-    switch_mmio_write32(padctl, ELPG_PROGRAM_1, 0);
-    switch_mmio_write32(padctl, USB2_VBUS_ID,
-                        (switch_mmio_read32(padctl, USB2_VBUS_ID) & ~(VBUS_ID_VBUS_OVR_MASK | VBUS_ID_SRC_MASK)) |
-                            VBUS_ID_VBUS_OVR_EN | VBUS_ID_SRC_ID_OVR_EN);
+    switch_usb_padctl_fake_port_up(padctl);
+    switch_padctl_modify(padctl, USB2_VBUS_ID, VBUS_ID_VBUS_OVR_MASK | VBUS_ID_SRC_MASK,
+                         VBUS_ID_VBUS_OVR_EN | VBUS_ID_SRC_ID_OVR_EN);
     xw(PORTHALT, xr(PORTHALT) & ~PORTHALT_HALT_LTSSM);
-    xw(CTRL, xr(CTRL) | CTRL_ENABLE);
-    xw(CFG_DEV_FE, (xr(CFG_DEV_FE) & ~FE_PORTREGSEL_MASK) | FE_PORTREGSEL_HSFS);
-    xw(PORTSC, (xr(PORTSC) & ~(PORTSC_PLS_MASK | PORTSC_CHANGES)) | PORTSC_LWS | PORTSC_PLS_RXDETECT);
+    // A change latched while the port was off the bus (the host role drives the same pad) is not this connection's:
+    // cleared in both port instances (Linux tegra_xudc_device_params_init's PORTREGSEL) before the controller is enabled.
+    constexpr uint32_t kInstances[] = {FE_PORTREGSEL_HSFS, FE_PORTREGSEL_SS};
+    for (const uint32_t instance : kInstances) {
+        xw(CFG_DEV_FE, (xr(CFG_DEV_FE) & ~FE_PORTREGSEL_MASK) | instance);
+        if (const uint32_t latched = xr(PORTSC) & PORTSC_CHANGES)
+            clearPortChange(latched);
+    }
     xw(CFG_DEV_FE, xr(CFG_DEV_FE) & ~FE_PORTREGSEL_MASK);
-    switch_mmio_write32(padctl, USB2_VBUS_ID,
-                        (switch_mmio_read32(padctl, USB2_VBUS_ID) & ~VBUS_ID_OVR_MASK) | VBUS_ID_OVR_FLOAT |
-                            VBUS_ID_VBUS_ON);
+    xw(CTRL, xr(CTRL) | CTRL_ENABLE);
+    for (const uint32_t instance : kInstances) {
+        xw(CFG_DEV_FE, (xr(CFG_DEV_FE) & ~FE_PORTREGSEL_MASK) | instance);
+        xw(PORTSC, (xr(PORTSC) & ~(PORTSC_PLS_MASK | PORTSC_CHANGES)) | PORTSC_LWS | PORTSC_PLS_RXDETECT);
+    }
+    xw(CFG_DEV_FE, xr(CFG_DEV_FE) & ~FE_PORTREGSEL_MASK);
+    switch_padctl_modify(padctl, USB2_VBUS_ID, VBUS_ID_OVR_MASK, VBUS_ID_OVR_FLOAT);
 }
 
-// Device mode off and the VBUS override low: the pull-up goes away.
+void Hardware::setVbus(bool present)
+{
+    switch_padctl_modify(padctl, USB2_VBUS_ID, VBUS_ID_VBUS_ON, present ? VBUS_ID_VBUS_ON : 0);
+}
+
+// Device mode off and the VBUS override low: the pull-up goes away, and SS port 0 is clamped again.
 void Hardware::disconnect()
 {
     xw(CTRL, xr(CTRL) & ~(CTRL_ENABLE | CTRL_RUN));
-    switch_mmio_write32(padctl, USB2_VBUS_ID, switch_mmio_read32(padctl, USB2_VBUS_ID) & ~VBUS_ID_VBUS_ON);
+    switch_padctl_modify(padctl, USB2_VBUS_ID, VBUS_ID_VBUS_ON, 0);
+    switch_usb_padctl_fake_port_down(padctl);
 }
 
 bool Hardware::nextEvent(Event &event)
 {
     volatile uint32_t *e = reinterpret_cast<volatile uint32_t *>(events.va) + static_cast<size_t>(eventIndex) * 4;
-    switch_dcache_clean_invalidate(e, 16);
     const uint32_t d3 = e[3];
     if ((d3 & TRB_CYCLE) != eventCycle)
         return false;
+    switch_dma_consume();
     event.d[0] = e[0];
     event.d[1] = e[1];
     event.d[2] = e[2];
@@ -423,11 +402,9 @@ bool Hardware::nextEvent(Event &event)
     return true;
 }
 
-// The CPU never writes the event ring: the clean of a dirty line would overwrite events written since.
 bool Hardware::eventPending() const
 {
     volatile uint32_t *e = reinterpret_cast<volatile uint32_t *>(events.va) + static_cast<size_t>(eventIndex) * 4;
-    switch_dcache_clean_invalidate(e, 16);
     return (e[3] & TRB_CYCLE) == eventCycle;
 }
 
@@ -439,23 +416,21 @@ void Hardware::finishEvents()
     xw(ERDPLO, (events.pa + eventIndex * 16) | ERDP_EHB);
 }
 
-bool Hardware::interruptPending()
-{
-    return (xr(ST) & ST_IP) != 0u;
-}
-
-void Hardware::describeInterrupt(char *buffer, size_t size)
-{
-    snprintf(buffer, size, "ST %#x CTRL %#x ERDP %#x EREP %#x PORTSC %#x IPFS_INTR_MASK %#x", xr(ST), xr(CTRL),
-             xr(ERDPLO), xr(EREPLO), xr(PORTSC), xr(IPFS_INTR_MASK));
-}
-
 // Linux tegra_xudc_irq(): acknowledge ST.IP alone (ST.RC is W1C too), before the ring is drained.
+// ST.DSE is acknowledged here too, with the IPFS's error code and signature kept for the work loop's one line (code 0
+// re-arms the IPFS's capture). The BAR takes posted writes (powerOn), so the acknowledgement is read back before the
+// filter returns: the level line must have dropped before the GIC's end of interrupt, or it fires again for nothing.
 bool Hardware::takeInterrupt()
 {
-    if (!(xr(ST) & ST_IP))
+    const uint32_t ack = xr(ST) & (ST_IP | ST_DSE);
+    if (ack == 0u)
         return false;
-    xw(ST, ST_IP);
+    if ((ack & ST_DSE) != 0u && !systemError.seen) {
+        systemError = {true, xr(IPFS_INTR_CODE), xr(IPFS_INTR_SIGNATURE)};
+        xw(IPFS_INTR_CODE, 0);
+    }
+    xw(ST, ack);
+    (void)xr(ST);
     return true;
 }
 
@@ -471,22 +446,17 @@ void Hardware::resetEp0()
 {
     const Ring &ring = rings[0];
     volatile uint32_t *c = context(0);
-    switch_dcache_clean_invalidate(c, 64);
     c[2] = ((ring.pa + ring.enqueue * 16) & ~0xfu) | ring.cycle;
     c[3] = 0;
-    c[5] &= 0x00ffffffu;                      // rsvd, partial_td, splitxstate, seq_num
-    c[11] &= ~0x7fu;                          // device address
-    c[1] = (c[1] & 0x0000ffffu) | 64u << 16;  // max packet 64 below SuperSpeed
-    switch_dcache_clean_invalidate(c, 64);
+    c[5] &= 0x00ffffffu;  // rsvd, partial_td, splitxstate, seq_num
+    c[11] &= ~0x7fu;      // device address
+    c[1] = (c[1] & 0x0000ffffu) | ep0Packet(portSpeed(xr(PORTSC))) << 16;
+    switch_dma_publish();
     xw(CTRL, xr(CTRL) & ~(0x7fu << 24));
-    if (const uint32_t halted = xr(EP_HALT)) {  // Linux ep_unhalt_all
-        xw(EP_HALT, 0);
-        if (switch_mmio_wait32(xudc, EP_STCHG, halted, halted, 1000))
-            xw(EP_STCHG, halted);
-    }
-    xw(EP_RELOAD, 1u);
-    (void)switch_mmio_wait32(xudc, EP_RELOAD, 1u, 0, 1000);
-    toggleBit(EP_PAUSE, 0, false);
+    if (const uint32_t halted = xr(EP_HALT))  // Linux ep_unhalt_all
+        (void)changeState(EP_HALT, halted, 0);
+    (void)reload(0);
+    (void)toggleBit(EP_PAUSE, 0, false);
 }
 
 // Linux __tegra_xudc_handle_port_status(), run until no change is left (tegra_xudc_handle_port_status). Port reset and
@@ -494,7 +464,13 @@ void Hardware::resetEp0()
 PortChange Hardware::portChange()
 {
     PortChange change;
-    for (unsigned pass = 0; pass < 8; ++pass) {
+    for (unsigned pass = 0;; ++pass) {
+        if (pass == kPortPasses) {
+            IOLog("SwitchUSB: port changes still set after %u passes (PORTSC %#x, PORTHALT %#x): left for the next "
+                  "port event\n",
+                  kPortPasses, xr(PORTSC), xr(PORTHALT));
+            break;
+        }
         const uint32_t halt = xr(PORTHALT);
         if ((halt & PORTHALT_STCHG_REQ) && (halt & PORTHALT_HALT_LTSSM))
             xw(PORTHALT, halt & ~PORTHALT_HALT_LTSSM);
@@ -520,6 +496,7 @@ PortChange Hardware::portChange()
         if (sc & PORTSC_CSC) {
             clearPortChange(PORTSC_CSC);
             if (sc & PORTSC_CCS) {
+                resetEp0();
                 change.connected = connectNow = true;
             } else {
                 resetEp0();
@@ -527,8 +504,11 @@ PortChange Hardware::portChange()
             }
         }
         if (connectNow) {
-            change.fullSpeed = (xr(PORTSC) & PORTSC_PS_MASK) == PORTSC_PS_FS;
-            xw(PORTPM, (xr(PORTPM) & ~PORTPM_L1S_MASK) | PORTPM_L1S_NYET);
+            change.speed = portSpeed(xr(PORTSC));
+            if (change.speed == kSpeedSuper)
+                xw(PORTPM, xr(PORTPM) & ~(0xffu << 16));  // T210/T210B01 disable U1, as L4T.
+            else
+                xw(PORTPM, (xr(PORTPM) & ~PORTPM_L1S_MASK) | PORTPM_L1S_NYET);
             if (xr(ST) & ST_RC)
                 xw(ST, ST_RC);
         }
@@ -563,7 +543,7 @@ void Hardware::resetRing(uint32_t dci)
     link[3] = trbType(TRB_LINK) | TRB_TOGGLE;
     ring.enqueue = 0;
     ring.cycle = 1;
-    switch_dcache_clean_invalidate(ring.trb, static_cast<size_t>(ring.trbs) * 16);
+    switch_dma_publish();
 }
 
 // hekate xusb_ep_ctx_t / Linux tegra_xudc_ep_context_setup: state running, CErr/CEC 3, dequeue = ring start with
@@ -574,7 +554,9 @@ bool Hardware::initEndpoint(uint32_t dci, uint32_t type, uint32_t maxPacket, uin
 {
     Ring &ring = rings[dci];
     if (dci && !ring.trb) {
-        if (!ring.own.allocate(kDataRingTrbs * 16))
+        if (!ring.written)
+            ring.written = IONewZero(Written, kDataRingTrbs);
+        if (!ring.written || !ring.own.allocate(kDataRingTrbs * 16, true))
             return false;
         ring.trb = reinterpret_cast<volatile uint32_t *>(ring.own.va);
         ring.pa = ring.own.pa;
@@ -592,45 +574,99 @@ bool Hardware::initEndpoint(uint32_t dci, uint32_t type, uint32_t maxPacket, uin
     for (uint32_t i = 0; i < 16; ++i)
         c[i] = 0;
     c[0] = 1 | interval << 16;
+    if ((type == EP_BULK_IN || type == EP_BULK_OUT) && portSpeed(xr(PORTSC)) == kSpeedSuper)
+        c[0] |= 1u << 15;
     c[1] = 3u << 1 | type << 3 | (maxBurst & 0xff) << 8 | maxPacket << 16;
     c[2] = (rings[dci].pa & ~0xfu) | 1;
     c[4] = average | esit << 16;
     c[6] = 3u << 18;
     c[11] = address;
-    switch_dcache_clean_invalidate(c, 64);
+    switch_dma_publish();
     return true;
 }
 
-bool Hardware::reloadEndpoint(uint32_t dci)
+// No interrupt or event for an endpoint's halt, pause or reload taking effect or its thread going idle was found in the
+// sources this driver follows: the event types are transfer, port status and setup (Linux tegra-xudc TRB_TYPE_*), ST
+// holds IP, RC and DSE, CTRL's SMI_EVT, SMI_DSE and EWE are defined and used nowhere, the T210 TRM (22.9.4-5) says to
+// poll, and both Linux drivers poll EP_STCHG, EP_RELOAD and EP_THREAD_ACTIVE (and ignore the result: their 100 us is
+// when they give up, not when the change is known done). Nothing spins on one here: the work-loop thread sleeps
+// kStateChangeMs and reads the register once. A miss is one line naming the endpoints and the register.
+bool Hardware::settled(uint32_t offset, uint32_t mask, uint32_t value)
+{
+    IOSleep(kStateChangeMs);
+    const uint32_t seen = xr(offset) & mask;
+    if (seen == value)
+        return true;
+    IOLog("SwitchUSB: DCI bits %#x: %s reads %#x, not %#x, %u ms after the change\n", mask, registerName(offset), seen,
+          value, kStateChangeMs);
+    return false;
+}
+
+// Linux ep_reload.
+bool Hardware::reload(uint32_t dci)
 {
     xw(EP_RELOAD, 1u << dci);
-    if (!switch_mmio_wait32(xudc, EP_RELOAD, 1u << dci, 0, 1000))
-        return false;
-    xw(EP_PAUSE, xr(EP_PAUSE) & ~(1u << dci));
-    xw(EP_HALT, xr(EP_HALT) & ~(1u << dci));
-    return true;
+    return settled(EP_RELOAD, 1u << dci, 0);
 }
 
-// Linux ep_pause/ep_halt pattern: change the bit, wait for EP_STCHG, ack it.
-void Hardware::toggleBit(uint32_t reg, uint32_t dci, bool set)
+// T210 TRM 22.9.4.2, Set_Configuration in the addressed state, which each endpoint added later follows too: Reload,
+// CTRL.RUN right after the first Reload, then the wait for Reload to clear; Pause cleared, its EP_STCHG waited for and
+// cleared; Halt cleared and its EP_STCHG cleared, not waited on.
+bool Hardware::enableEndpoint(uint32_t dci)
 {
     const uint32_t bit = 1u << dci;
-    const uint32_t value = xr(reg);
-    if (((value & bit) != 0u) == set)
-        return;
-    xw(reg, set ? value | bit : value & ~bit);
-    if (switch_mmio_wait32(xudc, EP_STCHG, bit, bit, 1000))
-        xw(EP_STCHG, bit);
+    xw(EP_RELOAD, bit);
+    run();
+    const bool reloaded = settled(EP_RELOAD, bit, 0);
+    (void)toggleBit(EP_PAUSE, dci, false);
+    xw(EP_HALT, xr(EP_HALT) & ~bit);
+    xw(EP_STCHG, bit);
+    return reloaded;
+}
+
+// Linux __tegra_xudc_ep_enable: reload, unpause, unhalt. Only the reload decides: Linux ignores every one of these
+// waits, and an EP_STCHG miss is logged but has not been seen to leave an endpoint unusable.
+bool Hardware::reloadEndpoint(uint32_t dci)
+{
+    const bool reloaded = reload(dci);
+    (void)toggleBit(EP_PAUSE, dci, false);
+    (void)toggleBit(EP_HALT, dci, false);
+    return reloaded;
+}
+
+// Linux ep_pause/ep_halt/ep_unhalt_all: change the bits, wait for EP_STCHG to report them, acknowledge it whatever the
+// wait saw (write 1 to clear). The bits are cleared first too, so a report left from an earlier change cannot pass this
+// wait. With CTRL.RUN clear the controller runs no endpoint and reports nothing: the bits are written for when it does,
+// and not waited on (T210 TRM 22.9.5.3-4 step 1).
+bool Hardware::changeState(uint32_t reg, uint32_t bits, uint32_t value)
+{
+    if ((xr(CTRL) & CTRL_RUN) == 0u) {
+        xw(reg, (xr(reg) & ~bits) | value);
+        return true;
+    }
+    xw(EP_STCHG, bits);
+    xw(reg, (xr(reg) & ~bits) | value);
+    const bool done = settled(EP_STCHG, bits, bits);
+    xw(EP_STCHG, bits);
+    return done;
+}
+
+bool Hardware::toggleBit(uint32_t reg, uint32_t dci, bool set)
+{
+    const uint32_t bit = 1u << dci;
+    if (((xr(reg) & bit) != 0u) == set)
+        return true;
+    return changeState(reg, bit, set ? bit : 0);
 }
 
 void Hardware::setHalt(uint32_t dci, bool halt)
 {
-    toggleBit(EP_HALT, dci, halt);
+    (void)toggleBit(EP_HALT, dci, halt);
 }
 
 void Hardware::setPause(uint32_t dci, bool pause)
 {
-    toggleBit(EP_PAUSE, dci, pause);
+    (void)toggleBit(EP_PAUSE, dci, pause);
 }
 
 bool Hardware::halted(uint32_t dci)
@@ -638,14 +674,28 @@ bool Hardware::halted(uint32_t dci)
     return ((xr(EP_HALT) >> dci) & 1) != 0u;
 }
 
+// T210 TRM 22.9.4.2, removing an endpoint: Pause and its state change; Disabled, with the context past the xHCI
+// fields (DW5 on: sequence number, partial TD, the controller's own state) cleared; Reload and its state change,
+// acknowledged. EP_STOPPED acknowledged as Linux __tegra_xudc_ep_disable does.
 void Hardware::disableEndpoint(uint32_t dci)
 {
+    const uint32_t bit = 1u << dci;
+    (void)toggleBit(EP_PAUSE, dci, true);
     volatile uint32_t *c = context(dci);
-    switch_dcache_clean_invalidate(c, 64);
     c[0] &= ~7u;
-    switch_dcache_clean_invalidate(c, 64);
-    xw(EP_RELOAD, 1u << dci);
-    (void)switch_mmio_wait32(xudc, EP_RELOAD, 1u << dci, 0, 1000);
+    for (uint32_t i = 5; i < 16; ++i)
+        c[i] = 0;
+    switch_dma_publish();
+    if ((xr(CTRL) & CTRL_RUN) != 0u) {
+        xw(EP_STCHG, bit);
+        xw(EP_RELOAD, bit);
+        (void)settled(EP_STCHG, bit, bit);
+        xw(EP_STCHG, bit);
+    } else {
+        xw(EP_RELOAD, bit);
+    }
+    if (xr(EP_STOPPED) & bit)
+        xw(EP_STOPPED, bit);
 }
 
 // Linux __tegra_xudc_ep_set_halt(false): disable, reload, running with the sequence number and partial-TD state
@@ -653,17 +703,13 @@ void Hardware::disableEndpoint(uint32_t dci)
 void Hardware::resetSequence(uint32_t dci)
 {
     volatile uint32_t *c = context(dci);
-    switch_dcache_clean_invalidate(c, 64);
     c[0] &= ~7u;
-    switch_dcache_clean_invalidate(c, 64);
-    (void)reloadEndpoint(dci);
-    switch_dcache_clean_invalidate(c, 64);
+    switch_dma_publish();
+    (void)reload(dci);
     c[0] = (c[0] & ~7u) | 1;
     c[5] &= 0x00ffffffu;  // rsvd, partial_td, splitxstate, seq_num
-    switch_dcache_clean_invalidate(c, 64);
+    switch_dma_publish();
     (void)reloadEndpoint(dci);
-    toggleBit(EP_PAUSE, dci, false);
-    toggleBit(EP_HALT, dci, false);
 }
 
 // Linux __tegra_xudc_ep_dequeue (busy case): pause, wait until idle, move the dequeue pointer to the enqueue position,
@@ -671,17 +717,15 @@ void Hardware::resetSequence(uint32_t dci)
 void Hardware::dropQueued(uint32_t dci)
 {
     const Ring &ring = rings[dci];
-    toggleBit(EP_PAUSE, dci, true);
-    (void)switch_mmio_wait32(xudc, EP_THREAD_ACTIVE, 1u << dci, 0, 1000);
+    (void)toggleBit(EP_PAUSE, dci, true);
+    (void)settled(EP_THREAD_ACTIVE, 1u << dci, 0);
     volatile uint32_t *c = context(dci);
-    switch_dcache_clean_invalidate(c, 64);
     c[2] = ((ring.pa + ring.enqueue * 16) & ~0xfu) | ring.cycle;
     c[3] = 0;
     c[5] &= 0xf8000000u;  // keep seq_num; clear edtla, rsvd, partial_td, splitxstate
-    switch_dcache_clean_invalidate(c, 64);
-    xw(EP_RELOAD, 1u << dci);
-    (void)switch_mmio_wait32(xudc, EP_RELOAD, 1u << dci, 0, 1000);
-    toggleBit(EP_PAUSE, dci, false);
+    switch_dma_publish();
+    (void)reload(dci);
+    (void)toggleBit(EP_PAUSE, dci, false);
 }
 
 uint32_t Hardware::push(uint32_t dci, uint32_t bufferPA, uint32_t length, uint32_t flags)
@@ -690,26 +734,40 @@ uint32_t Hardware::push(uint32_t dci, uint32_t bufferPA, uint32_t length, uint32
     return rings[dci].pa + index * 16;
 }
 
-// The TRB (the controller reads it once its line is cleaned), and the link TRB (XudcTransfer.h linkControl) when the
-// ring wraps.
 uint32_t Hardware::pushData(uint32_t dci, uint64_t bufferPA, uint32_t length, uint32_t tdSize, uint32_t flags)
 {
+    const Slot slot = reserveData(dci, flags);
+    fillData(dci, slot, bufferPA, length, tdSize, flags);
+    return slot.index;
+}
+
+// The link TRB (XudcTransfer.h linkControl) is handed over when the ring wraps; the controller cannot reach it before
+// the slot it follows is written.
+Hardware::Slot Hardware::reserveData(uint32_t dci, uint32_t flags)
+{
     Ring &ring = rings[dci];
-    const uint32_t index = ring.enqueue;
-    volatile uint32_t *t = ring.trb + static_cast<size_t>(index) * 4;
-    t[0] = static_cast<uint32_t>(bufferPA);
-    t[1] = static_cast<uint32_t>(bufferPA >> 32);
-    t[2] = (length & 0x1ffff) | (tdSize > 31 ? 31 : tdSize) << 17;
-    t[3] = flags | ring.cycle;
-    switch_dcache_clean_invalidate(t, 16);
+    const Slot slot = {ring.enqueue, ring.cycle};
     if (++ring.enqueue == ring.trbs - 1) {
         volatile uint32_t *link = ring.trb + static_cast<size_t>(ring.enqueue) * 4;
         link[3] = linkControl(link[3], flags, ring.cycle);
-        switch_dcache_clean_invalidate(link, 16);
         ring.enqueue = 0;
         ring.cycle ^= 1;
     }
-    return index;
+    return slot;
+}
+
+// The TRB, its cycle bit stored last: the controller may be reading the ring.
+void Hardware::fillData(uint32_t dci, Slot slot, uint64_t bufferPA, uint32_t length, uint32_t tdSize, uint32_t flags)
+{
+    const Ring &ring = rings[dci];
+    volatile uint32_t *t = ring.trb + static_cast<size_t>(slot.index) * 4;
+    t[0] = static_cast<uint32_t>(bufferPA);
+    t[1] = static_cast<uint32_t>(bufferPA >> 32);
+    t[2] = (length & 0x1ffff) | (tdSize > 31 ? 31 : tdSize) << 17;
+    switch_dma_publish();
+    t[3] = flags | slot.cycle;
+    if (ring.written)
+        ring.written[slot.index] = {bufferPA, length & 0x1ffff};
 }
 
 bool Hardware::trbIndex(uint32_t dci, uint32_t trbPA, uint32_t *index) const
@@ -732,9 +790,26 @@ void Hardware::setAddress(uint32_t address)
 {
     xw(CTRL, (xr(CTRL) & ~(0x7fu << 24)) | (address & 0x7f) << 24);
     volatile uint32_t *c = context(0);
-    switch_dcache_clean_invalidate(c, 64);
     c[11] = (c[11] & ~0x7fu) | (address & 0x7f);
-    switch_dcache_clean_invalidate(c, 64);
+    switch_dma_publish();
+}
+
+// After a babble (the host sent more than a data packet's length): the controller stops the endpoint; once it reports
+// that, it is acknowledged and the endpoint halted, so the host's next request is answered with STALL (T210 TRM
+// 22.9.8.7; Linux tegra_xudc waits for EP_STOPPED the same way).
+void Hardware::haltAfterBabble(uint32_t dci)
+{
+    const uint32_t bit = 1u << dci;
+    (void)settled(EP_STOPPED, bit, bit);
+    xw(EP_STOPPED, bit);
+    (void)toggleBit(EP_HALT, dci, true);
+}
+
+// Back to the addressed state once no data endpoint is left (T210 TRM 22.9.4.2, SET_CONFIGURATION 0; Linux
+// __tegra_xudc_ep_disable): the controller gives up the endpoint contexts.
+void Hardware::stop()
+{
+    xw(CTRL, xr(CTRL) & ~CTRL_RUN);
 }
 
 void Hardware::run()

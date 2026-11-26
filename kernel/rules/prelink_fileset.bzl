@@ -4,9 +4,15 @@ The kernelcache's kexts are arm64e and stripped. They are translated in kernel m
 a plain pointer, and each Apple kernel address they use is named from the kernelcache's vtables (PAC-checked), GOT
 order (iOS 17's import names), its vnode operation vectors and ipsw's signatures, then pinned_names.py's hand pins.
 The prelink refuses an import that nothing names unless shims.py answers it.
+
+Which kexts it takes is base_roots and the drivers' prelink, prelink_cuts and prelink_deferred lists, as the iOS 17
+prelink takes them; a kext only one kind's kernelcache ships is named in a select on that kind (//ipsw:<kind>).
+The selected kind's declared sites (kits/SwitchABI/sites.py) are written into the translated code, each original word
+checked first.
 """
 
 load("@xcode//:defs.bzl", "DEVELOPER_DIR")
+load("//ipsw:ipsw.bzl", "IpswInfo")
 load(":common.bzl", "XCODE_EXECUTION")
 load(":kernel.bzl", "KernelObjectsInfo")
 
@@ -15,9 +21,13 @@ def _kernel_prelink_fileset_impl(ctx):
     out = ctx.actions.declare_file(ctx.attr.out)
     report = ctx.actions.declare_file(stem + ".json")
     names = ctx.actions.declare_file(stem + ".names.json")
-    kernel = ctx.attr.kernel[KernelObjectsInfo].objects[0]
+    lists = ctx.attr.kernel[KernelObjectsInfo]
+    kernel = lists.objects[0]
     args = ctx.actions.args()
     args.add("--kernel", kernel)
+    args.add_all({r: True for r in ctx.attr.base_roots + lists.prelink}.keys(), before_each = "--root")
+    args.add_all(lists.cuts, before_each = "--cut")
+    args.add_all(lists.deferred, before_each = "--defer")
     args.add("--kernelcache", ctx.file.kernelcache)
     args.add("--kernelcache-17", ctx.file.kernelcache_17)
     args.add("--arm64e", ctx.executable._arm64e)
@@ -28,13 +38,16 @@ def _kernel_prelink_fileset_impl(ctx):
         fail("signatures must hold exactly one xnu.json")
     args.add("--signatures", xnu_signatures[0])
     args.add("--slide=" + ctx.attr.slide)
+    args.add("--kind=" + ctx.attr._ipsw_kind[IpswInfo].kind)
+    args.add_all(ctx.files.sites, before_each = "--sites")
     args.add("--out", out)
     args.add("--report", report)
     args.add("--names", names)
     ctx.actions.run(
         executable = ctx.executable._prelink,
         arguments = [args],
-        inputs = [kernel, ctx.file.kernelcache, ctx.file.kernelcache_17, ctx.file.symbolsets] + ctx.files._signature_tree,
+        inputs = [kernel, ctx.file.kernelcache, ctx.file.kernelcache_17, ctx.file.symbolsets] + ctx.files._signature_tree +
+                 ctx.files.sites,
         tools = [ctx.executable._arm64e, ctx.executable._ipsw],
         outputs = [out, report, names],
         env = {"DEVELOPER_DIR": DEVELOPER_DIR},
@@ -49,14 +62,17 @@ kernel_prelink_fileset = rule(
     doc = "Our kernel with a fileset kernelcache's kexts prelinked (out); its report (.json) and kernel names (.names.json) in the report output group.",
     attrs = {
         "kernel": attr.label(mandatory = True, providers = [KernelObjectsInfo], doc = "the unprelinked kernel"),
+        "base_roots": attr.string_list(mandatory = True, doc = "the kexts prelinked before any driver's list"),
         "kernelcache": attr.label(default = "//ipsw:kernelcache", allow_single_file = True),
         "kernelcache_17": attr.label(default = "//ipsw:kernelcache_21H461", allow_single_file = True),
         "symbolsets": attr.label(mandatory = True, allow_single_file = [".plist"], doc = "the kernel's symbolsets.plist"),
         "signatures": attr.label(mandatory = True, allow_files = True, doc = "ipsw's signatures of the kernelcache's Darwin version (<version>/xnu.json and kexts/)"),
         "out": attr.string(mandatory = True, doc = "the prelinked kernel's path in the package, ending in .macho"),
         "slide": attr.string(mandatory = True, doc = "the kexts' slide the bindings assume (kits/SwitchABI's tables)"),
+        "sites": attr.label(default = "//kits/SwitchABI:sites", allow_files = [".json"], doc = "the selected kind's declared sites in Apple's kexts (kits/SwitchABI/sites.py)"),
         "_arm64e": attr.label(default = "//translate/arm64e", executable = True, cfg = "exec"),
         "_ipsw": attr.label(default = "@ipsw_cli//:ipsw", executable = True, allow_single_file = True, cfg = "exec"),
+        "_ipsw_kind": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
         "_prelink": attr.label(default = "//translate/arm64e:prelink", executable = True, cfg = "exec"),
         # ipsw reads every Darwin version's signatures below the directory that holds `signatures`. With 27.2's alone
         # it names half the functions and the prelink refuses its GOT bindings. Only a remote worker, whose inputs are

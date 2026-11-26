@@ -28,6 +28,12 @@ unsigned logs, pitchCalls, blocks;
 std::vector<int> pitchAnswers;
 int observeError;
 bool armedAtBlock;
+bool presentOutstanding;
+
+extern "C" int tegra_gm20b_scanout_outstanding(const void *)
+{
+    return presentOutstanding ? 1 : 0;
+}
 
 class OSObject {
 public:
@@ -184,6 +190,7 @@ struct NativeLegacyDisplay : OSObject {
         OSObject *surface;
         SwitchNativeScanout read;
         int status;
+        bool waitPresent;
     };
 
     SourceWait storage = {};
@@ -228,6 +235,7 @@ protected:
         logs = pitchCalls = blocks = 0;
         observeError = 0;
         armedAtBlock = false;
+        presentOutstanding = false;
         pitchAnswers.clear();
         for (auto *watch : watches)
             delete watch;
@@ -325,5 +333,22 @@ TEST_F(SourceReady, StopWithNothingArmedDoesNotWait)
     EXPECT_EQ(blocks, 0u);
     EXPECT_EQ(display.sourceReadySource, nullptr);
     delete source;
+}
+
+TEST_F(SourceReady, BusyPresentWaitsForAdmissionChangeBeforeRetrying)
+{
+    presentOutstanding = true;
+    display.sourceWait->waitPresent = true;
+    display.watchSource();
+    admissionChanged();
+    EXPECT_EQ(pitchCalls, 0u);
+    EXPECT_EQ(display.sourceReadySource->fires, 0u);
+    presentOutstanding = false;
+    admissionChanged();
+    EXPECT_EQ(pitchCalls, 1u);
+    EXPECT_EQ(display.sourceReadySource->fires, 1u);
+    display.sourceReadySource->run();
+    ASSERT_EQ(display.finished.size(), 1u);
+    EXPECT_EQ(display.finished[0], 0);
 }
 }  // namespace

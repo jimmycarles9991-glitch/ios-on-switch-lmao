@@ -1,0 +1,19 @@
+{
+  "kind": "24B119",
+  "bundle": "com.apple.iokit.IOUSBHostFamily",
+  "doc": "Mapped client buffers on the non-coherent XUSB host use the request pool command per transfer, so prepare and complete reach its mapper. Controller DMA buffers retain their separate persistent mapping.",
+  "sites": [
+    {
+      "at": "0xfffffff009c628e4",
+      "from": "eb09011f",
+      "to": "f100011f",
+      "why": "AppleUSBHostBufferMemoryDescriptor::dmaCommandOperation: remember a command only without a mapper (cmp x8, #0), rather than when the mapping uses the buffer owner mapper (cmp x8, x9). SwitchXHCI always supplies its mapper, so request completion clears the command and unmaps before client reads."
+    },
+    {
+      "at": "0xfffffff009c85614",
+      "from": "aa1503e1",
+      "to": "321602a1",
+      "why": "AppleUSBHostControllerDMACommand::setMemoryDescriptor: its own bounce is read by synchronize(IN) before complete unmaps it. Pass getDirection() | kIOMapWriteCombineCache to its bounce allocator, preserving that copy order without a cached alias."
+    }
+  ]
+}

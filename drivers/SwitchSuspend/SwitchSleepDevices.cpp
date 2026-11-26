@@ -6,6 +6,7 @@
 #include "../SwitchBluetooth/SwitchBluetooth.h"
 #include "../SwitchMotion/SwitchMotion.h"
 #include "../SwitchUSB/SwitchUSB.h"
+#include "../SwitchDisplayPort/SwitchDisplayPort.h"
 #include "../SwitchWLAN/SwitchWLANStation.h"
 #include "../TegraGM20B/TegraGM20BSleep.h"
 #include "../TegraHost1x/TegraHost1x.h"
@@ -57,6 +58,7 @@ bool switch_sleep_devices()
 {
     // first: it shares LDO6 with the touch panel, and its clock is the display's frame end
     switch_sleep_timed(SWITCH_STEP_SLEEP_ALS, switch_als_suspend);
+    switch_displayport_suspend();
     switch_sleep_timed(SWITCH_STEP_SLEEP_DISPLAY, tegra_display_suspend);
     switch_sleep_timed(SWITCH_STEP_SLEEP_GPU, tegra_gm20b_suspend);
     switch_sleep_timed(SWITCH_STEP_SLEEP_TOUCH, switch_touch_suspend);
@@ -108,6 +110,7 @@ void switch_wake_devices()
     switch_sleep_timed(SWITCH_STEP_WAKE_JOYCON, switch_joycon_resume);
     switch_sleep_timed(SWITCH_STEP_WAKE_MOTION, switch_motion_resume);
     switch_sleep_timed(SWITCH_STEP_WAKE_TOUCH, switch_touch_resume);
+    switch_displayport_resume();
     switch_sleep_timed(SWITCH_STEP_WAKE_DISPLAY, tegra_display_resume);
     switch_sleep_timed(SWITCH_STEP_WAKE_ALS,
                        switch_als_resume);  // last: after LDO6 (touch) and the frame ends (display) are back

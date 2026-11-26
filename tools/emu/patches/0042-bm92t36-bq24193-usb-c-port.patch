@@ -1,0 +1,616 @@
+diff --git a/hw/arm/tegra2/apb/i2c/bm92t36.c b/hw/arm/tegra2/apb/i2c/bm92t36.c
+new file mode 100644
+index 0000000..3df5f15
+--- /dev/null
++++ b/hw/arm/tegra2/apb/i2c/bm92t36.c
+@@ -0,0 +1,378 @@
++/*
++ * ROHM BM92T36 USB Type-C and PD controller (the Switch's, I2C1 0x18) and the partner on its port.
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT
++ *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ *  for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * Registers as Linux bm92txx.c reads them: 8-bit addresses, 16-bit little-endian values, the PDO and RDO registers a
++ * count byte and its payload. ALERT_STATUS clears on read and holds ALERT (PK4) low while it is not zero.
++ *
++ * The partner property is what is plugged in: "none", "sink", a sink-only device (an OTG keyboard or stick), or
++ * "source", a host that powers the port (a Mac). A sink is attached while CONFIG1 offers the source role (SPDSRC not
++ * off) and leaves when the offer goes; once it is attached and v_vdd5v3 (the "rail" input, GPIO PX3) is up, the
++ * controller's switch closes and puts that rail on VBUS (the "vbus" output). The switch opens only when the offer or
++ * the rail goes, so a sink pulled out while sourced reads SPDSRC1 | VSAFE without INSERT. Values and timings are the
++ * device's (boot 1109-2145, 2026-11-09 18:04): STATUS1 0x1280 and STATUS2 0x2000 at an attach, 0x9680 while sourced,
++ * 0x8400 after a pull; the sink attached about 30 ms after the switches went on. A source attaches whatever CONFIG1
++ * offers and reads INSERT, UFP, VSAFE and the sink switch: its VBUS is its own, so "vbus" stays low and the xHCI's
++ * devices stay away. PD messaging is not modelled: COMMAND is logged and ignored.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/log.h"
++#include "qemu/module.h"
++#include "qemu/timer.h"
++#include "hw/i2c/i2c.h"
++#include "hw/irq.h"
++#include "hw/qdev-core.h"
++#include "qapi/error.h"
++#include "qom/object.h"
++
++#define TYPE_BM92T36 "bm92t36"
++OBJECT_DECLARE_SIMPLE_TYPE(BM92T36State, BM92T36)
++
++#define BM92_ALERT_STATUS       0x02
++#define BM92_STATUS1            0x03
++#define BM92_STATUS2            0x04
++#define BM92_COMMAND            0x05
++#define BM92_CONFIG1            0x06
++#define BM92_READ_PDOS_SRC      0x08
++#define BM92_VENDOR_CONFIG      0x1a
++#define BM92_CURRENT_PDO        0x28
++#define BM92_CURRENT_RDO        0x2b
++#define BM92_SET_RDO            0x30
++#define BM92_FW_TYPE            0x4b
++#define BM92_FW_REVISION        0x4c
++
++#define ALERT_PLUGPULL          BIT(3)
++#define STATUS1_INSERT          BIT(7)
++#define STATUS1_DR_UFP          (1 << 8)
++#define STATUS1_DR_DFP          (2 << 8)
++#define STATUS1_VSAFE           BIT(10)
++#define STATUS1_SRC_MODE        BIT(12)
++#define STATUS1_SPDSNK          BIT(14)
++#define STATUS1_SPDSRC1         BIT(15)
++#define STATUS2_OTG_INSERT      BIT(13)
++#define CONFIG1_SPDSRC_MASK     (3 << 14)
++#define CONFIG1_SPDSRC_OFF      (3 << 14)
++
++#define ATTACH_NS               (30 * SCALE_MS)
++#define DETACH_NS               (20 * SCALE_MS)
++#define SWITCH_NS               (10 * SCALE_MS)
++
++enum bm92_partner {
++    BM92_PARTNER_NONE,
++    BM92_PARTNER_SINK,
++    BM92_PARTNER_SOURCE,
++};
++
++static const char *const bm92_partner_names[] = {
++    [BM92_PARTNER_NONE] = "none",
++    [BM92_PARTNER_SINK] = "sink",
++    [BM92_PARTNER_SOURCE] = "source",
++};
++
++struct BM92T36State {
++    I2CSlave parent_obj;
++
++    uint16_t regs[256];
++    uint8_t reg;
++    bool addressed;
++    uint8_t out[32];
++    uint8_t out_len, out_pos;
++    uint8_t in[8];
++    uint8_t in_len;
++
++    enum bm92_partner partner, attached_partner;
++    bool attached, closed, rail;
++    QEMUTimer *cc_timer, *switch_timer;
++    qemu_irq alert, vbus;
++};
++
++static bool bm92_offers_source(BM92T36State *s)
++{
++    return (s->regs[BM92_CONFIG1] & CONFIG1_SPDSRC_MASK) != CONFIG1_SPDSRC_OFF;
++}
++
++static void bm92_raise(BM92T36State *s, uint16_t bits)
++{
++    s->regs[BM92_ALERT_STATUS] |= bits;
++    qemu_set_irq(s->alert, s->regs[BM92_ALERT_STATUS] == 0);
++}
++
++static void bm92_set_closed(BM92T36State *s, bool closed)
++{
++    s->closed = closed;
++    qemu_set_irq(s->vbus, closed);
++}
++
++static bool bm92_sink_attached(BM92T36State *s)
++{
++    return s->attached && s->attached_partner == BM92_PARTNER_SINK;
++}
++
++static void bm92_follow(BM92T36State *s)
++{
++    bool attach = (s->partner == BM92_PARTNER_SINK && bm92_offers_source(s)) || s->partner == BM92_PARTNER_SOURCE;
++    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
++
++    if (s->attached && s->partner != s->attached_partner) {
++        attach = false;
++    }
++    if (attach == s->attached) {
++        timer_del(s->cc_timer);
++    } else if (!timer_pending(s->cc_timer)) {
++        timer_mod(s->cc_timer, now + (attach ? ATTACH_NS : DETACH_NS));
++    }
++
++    if (s->closed && (!bm92_offers_source(s) || !s->rail)) {
++        bm92_set_closed(s, false);
++    }
++    if (!s->closed && bm92_sink_attached(s) && bm92_offers_source(s) && s->rail) {
++        if (!timer_pending(s->switch_timer)) {
++            timer_mod(s->switch_timer, now + SWITCH_NS);
++        }
++    } else {
++        timer_del(s->switch_timer);
++    }
++}
++
++static void bm92_cc_settled(void *opaque)
++{
++    BM92T36State *s = opaque;
++
++    s->attached = !s->attached;
++    s->attached_partner = s->attached ? s->partner : BM92_PARTNER_NONE;
++    bm92_raise(s, ALERT_PLUGPULL);
++    bm92_follow(s);
++}
++
++static void bm92_switch_settled(void *opaque)
++{
++    BM92T36State *s = opaque;
++
++    bm92_set_closed(s, true);
++}
++
++static void bm92_set_rail(void *opaque, int line, int level)
++{
++    BM92T36State *s = opaque;
++
++    s->rail = level;
++    bm92_follow(s);
++}
++
++static uint16_t bm92_status1(BM92T36State *s)
++{
++    uint16_t value = 0;
++
++    if (bm92_sink_attached(s)) {
++        value |= STATUS1_INSERT | STATUS1_DR_DFP | STATUS1_SRC_MODE;
++    } else if (s->attached) {
++        value |= STATUS1_INSERT | STATUS1_DR_UFP | STATUS1_VSAFE | STATUS1_SPDSNK;
++    }
++    if (s->closed) {
++        value |= STATUS1_SPDSRC1 | STATUS1_VSAFE;
++    }
++    return value;
++}
++
++static void bm92_snapshot(BM92T36State *s)
++{
++    uint16_t value;
++
++    s->out_pos = 0;
++    switch (s->reg) {
++    case BM92_READ_PDOS_SRC:
++    case BM92_CURRENT_PDO:
++    case BM92_CURRENT_RDO:
++        s->out[0] = 0;
++        s->out_len = 1;
++        return;
++    case BM92_ALERT_STATUS:
++        value = s->regs[BM92_ALERT_STATUS];
++        s->regs[BM92_ALERT_STATUS] = 0;
++        qemu_set_irq(s->alert, 1);
++        break;
++    case BM92_STATUS1:
++        value = bm92_status1(s);
++        break;
++    case BM92_STATUS2:
++        value = bm92_sink_attached(s) ? STATUS2_OTG_INSERT : 0;
++        break;
++    default:
++        value = s->regs[s->reg];
++        break;
++    }
++    s->out[0] = value;
++    s->out[1] = value >> 8;
++    s->out_len = 2;
++}
++
++static void bm92_write(BM92T36State *s)
++{
++    uint16_t value = s->in[0] | s->in[1] << 8;
++
++    if (s->reg == BM92_SET_RDO) {
++        if (s->in_len == 1 + s->in[0] || s->in_len == sizeof(s->in)) {
++            s->in_len = 0;
++        }
++        return;
++    }
++    if (s->in_len < 2) {
++        return;
++    }
++    s->in_len = 0;
++    switch (s->reg) {
++    case BM92_ALERT_STATUS:
++    case BM92_STATUS1:
++    case BM92_STATUS2:
++    case BM92_FW_TYPE:
++    case BM92_FW_REVISION:
++        return;
++    case BM92_COMMAND:
++        qemu_log_mask(LOG_UNIMP, "bm92t36: command %#x is not modelled (no source partner)\n", value);
++        return;
++    case BM92_CONFIG1:
++        s->regs[BM92_CONFIG1] = value;
++        bm92_follow(s);
++        return;
++    default:
++        s->regs[s->reg] = value;
++        return;
++    }
++}
++
++static int bm92_event(I2CSlave *i2c, enum i2c_event event)
++{
++    BM92T36State *s = BM92T36(i2c);
++
++    switch (event) {
++    case I2C_START_SEND:
++        s->addressed = false;
++        s->in_len = 0;
++        break;
++    case I2C_START_RECV:
++        bm92_snapshot(s);
++        break;
++    default:
++        break;
++    }
++    return 0;
++}
++
++static int bm92_send(I2CSlave *i2c, uint8_t data)
++{
++    BM92T36State *s = BM92T36(i2c);
++
++    if (!s->addressed) {
++        s->reg = data;
++        s->addressed = true;
++        return 0;
++    }
++    if (s->in_len < sizeof(s->in)) {
++        s->in[s->in_len++] = data;
++    }
++    bm92_write(s);
++    return 0;
++}
++
++static uint8_t bm92_recv(I2CSlave *i2c)
++{
++    BM92T36State *s = BM92T36(i2c);
++
++    return s->out_pos < s->out_len ? s->out[s->out_pos++] : 0;
++}
++
++static char *bm92_get_partner(Object *obj, Error **errp)
++{
++    return g_strdup(bm92_partner_names[BM92T36(obj)->partner]);
++}
++
++static void bm92_set_partner(Object *obj, const char *value, Error **errp)
++{
++    BM92T36State *s = BM92T36(obj);
++
++    for (int i = 0; i < ARRAY_SIZE(bm92_partner_names); i++) {
++        if (!strcmp(value, bm92_partner_names[i])) {
++            s->partner = i;
++            if (s->cc_timer) {
++                bm92_follow(s);
++            }
++            return;
++        }
++    }
++    error_setg(errp, "bm92t36: partner must be none, sink or source, not '%s'", value);
++}
++
++static void bm92_reset(DeviceState *dev)
++{
++    BM92T36State *s = BM92T36(dev);
++
++    timer_del(s->cc_timer);
++    timer_del(s->switch_timer);
++    memset(s->regs, 0, sizeof(s->regs));
++    s->regs[BM92_CONFIG1] = 0xc0e0;
++    s->regs[BM92_VENDOR_CONFIG] = 0x8072;
++    s->regs[BM92_FW_TYPE] = 0x0603;
++    s->regs[BM92_FW_REVISION] = 0x0d7c;
++    s->regs[0x4e] = 0x0001;
++    s->addressed = false;
++    s->in_len = 0;
++    s->out_len = 0;
++    s->attached = false;
++    s->attached_partner = BM92_PARTNER_NONE;
++    bm92_set_closed(s, false);
++    qemu_set_irq(s->alert, 1);
++    bm92_follow(s);
++}
++
++static void bm92_realize(DeviceState *dev, Error **errp)
++{
++    BM92T36State *s = BM92T36(dev);
++
++    s->cc_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, bm92_cc_settled, s);
++    s->switch_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, bm92_switch_settled, s);
++    qdev_init_gpio_out_named(dev, &s->alert, "alert", 1);
++    qdev_init_gpio_out_named(dev, &s->vbus, "vbus", 1);
++    qdev_init_gpio_in_named(dev, bm92_set_rail, "rail", 1);
++}
++
++static void bm92_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
++
++    dc->realize = bm92_realize;
++    device_class_set_legacy_reset(dc, bm92_reset);
++    sc->event = bm92_event;
++    sc->send = bm92_send;
++    sc->recv = bm92_recv;
++    object_class_property_add_str(klass, "partner", bm92_get_partner, bm92_set_partner);
++}
++
++static const TypeInfo bm92_info = {
++    .name          = TYPE_BM92T36,
++    .parent        = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(BM92T36State),
++    .class_init    = bm92_class_init,
++};
++
++static void bm92_register_types(void)
++{
++    type_register_static(&bm92_info);
++}
++
++type_init(bm92_register_types)
+diff --git a/hw/arm/tegra2/apb/i2c/bq24193.c b/hw/arm/tegra2/apb/i2c/bq24193.c
+new file mode 100644
+index 0000000..69ecd18
+--- /dev/null
++++ b/hw/arm/tegra2/apb/i2c/bq24193.c
+@@ -0,0 +1,151 @@
++/*
++ * TI BQ24193 charger (the Switch's, I2C1 0x6B).
++ *
++ *  This program is free software; you can redistribute it and/or modify it
++ *  under the terms of the GNU General Public License as published by the
++ *  Free Software Foundation; either version 2 of the License, or
++ *  (at your option) any later version.
++ *
++ *  This program is distributed in the hope that it will be useful, but WITHOUT
++ *  ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License
++ *  for more details.
++ *
++ *  You should have received a copy of the GNU General Public License along
++ *  with this program; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++/*
++ * The register file at its power-on values, 8-bit addresses that auto-increment. Nothing supplies VBUS (the PD model
++ * has no source partner), so the system status reads no input and not charging, or the boost's own VBUS while CHG_CONFIG
++ * asks for OTG (REG08 0xc0, as the device read it while sourcing a sink, boot 1109-2145). No faults are raised.
++ */
++
++#include "qemu/osdep.h"
++#include "qemu/module.h"
++#include "hw/i2c/i2c.h"
++#include "hw/qdev-core.h"
++#include "qom/object.h"
++
++#define TYPE_BQ24193 "bq24193"
++OBJECT_DECLARE_SIMPLE_TYPE(BQ24193State, BQ24193)
++
++#define BQ_POWER_ON_CONFIG      0x01
++#define BQ_SYSTEM_STATUS        0x08
++#define BQ_FAULT                0x09
++#define BQ_PART                 0x0a
++#define BQ_REGS                 11
++
++#define POWER_ON_REG_RESET      BIT(7)
++#define POWER_ON_WD_RESET       BIT(6)
++#define POWER_ON_CHG_CONFIG(v)  (((v) >> 4) & 3)
++#define CHG_CONFIG_OTG          2
++#define STATUS_VBUS_OTG         (3 << 6)
++
++static const uint8_t bq_power_on[BQ_REGS] = {
++    0x30, 0x1b, 0x60, 0x03, 0xb2, 0x9a, 0x03, 0x4b, 0x00, 0x00, 0x2f,
++};
++
++struct BQ24193State {
++    I2CSlave parent_obj;
++
++    uint8_t regs[BQ_REGS];
++    uint8_t reg;
++    bool addressed;
++};
++
++static uint8_t bq_read(BQ24193State *s, uint8_t reg)
++{
++    if (reg >= BQ_REGS) {
++        return 0;
++    }
++    if (reg == BQ_SYSTEM_STATUS) {
++        return POWER_ON_CHG_CONFIG(s->regs[BQ_POWER_ON_CONFIG]) == CHG_CONFIG_OTG ? STATUS_VBUS_OTG : 0;
++    }
++    return s->regs[reg];
++}
++
++static void bq_write(BQ24193State *s, uint8_t reg, uint8_t value)
++{
++    switch (reg) {
++    case BQ_POWER_ON_CONFIG:
++        if (value & POWER_ON_REG_RESET) {
++            memcpy(s->regs, bq_power_on, sizeof(s->regs));
++            return;
++        }
++        s->regs[reg] = value & ~POWER_ON_WD_RESET;
++        return;
++    case BQ_SYSTEM_STATUS:
++    case BQ_FAULT:
++    case BQ_PART:
++        return;
++    default:
++        if (reg < BQ_REGS) {
++            s->regs[reg] = value;
++        }
++        return;
++    }
++}
++
++static int bq_event(I2CSlave *i2c, enum i2c_event event)
++{
++    BQ24193State *s = BQ24193(i2c);
++
++    if (event == I2C_START_SEND) {
++        s->addressed = false;
++    }
++    return 0;
++}
++
++static int bq_send(I2CSlave *i2c, uint8_t data)
++{
++    BQ24193State *s = BQ24193(i2c);
++
++    if (!s->addressed) {
++        s->reg = data;
++        s->addressed = true;
++        return 0;
++    }
++    bq_write(s, s->reg++, data);
++    return 0;
++}
++
++static uint8_t bq_recv(I2CSlave *i2c)
++{
++    BQ24193State *s = BQ24193(i2c);
++
++    return bq_read(s, s->reg++);
++}
++
++static void bq_reset(DeviceState *dev)
++{
++    BQ24193State *s = BQ24193(dev);
++
++    memcpy(s->regs, bq_power_on, sizeof(s->regs));
++    s->addressed = false;
++}
++
++static void bq_class_init(ObjectClass *klass, void *data)
++{
++    DeviceClass *dc = DEVICE_CLASS(klass);
++    I2CSlaveClass *sc = I2C_SLAVE_CLASS(klass);
++
++    device_class_set_legacy_reset(dc, bq_reset);
++    sc->event = bq_event;
++    sc->send = bq_send;
++    sc->recv = bq_recv;
++}
++
++static const TypeInfo bq_info = {
++    .name          = TYPE_BQ24193,
++    .parent        = TYPE_I2C_SLAVE,
++    .instance_size = sizeof(BQ24193State),
++    .class_init    = bq_class_init,
++};
++
++static void bq_register_types(void)
++{
++    type_register_static(&bq_info);
++}
++
++type_init(bq_register_types)
+diff --git a/hw/arm/tegra2/meson.build b/hw/arm/tegra2/meson.build
+index b966cd3..7130d63 100644
+--- a/hw/arm/tegra2/meson.build
++++ b/hw/arm/tegra2/meson.build
+@@ -52,6 +52,8 @@ arm_ss.add(files(
+   'apb/fuse/fuse.c',
+   'apb/i2c/i2c.c',
+   'apb/i2c/rt5639.c',
++  'apb/i2c/bm92t36.c',
++  'apb/i2c/bq24193.c',
+   'apb/pmc/pmc.c',
+   'apb/rtc/rtc.c',
+   'apb/uart/uart.c',
+diff --git a/hw/arm/tegra2/tegrax1.c b/hw/arm/tegra2/tegrax1.c
+index 22bef40..13d7d38 100644
+--- a/hw/arm/tegra2/tegrax1.c
++++ b/hw/arm/tegra2/tegrax1.c
+@@ -1181,9 +1181,9 @@ static void __tegrax1_init(MachineState *machine)
+     }
+ 
+     /* Lines the board pulls up while nothing drives them low: the volume buttons PX6/PX7 (released), the temperature
+-     * alert PX4 and PK4 (idle), and the headphone jack detect PV6 (1 = no plug). */
++     * alert PX4 (idle), and the headphone jack detect PV6 (1 = no plug). */
+     {
+-        static const int pulled_up[] = {23 * 8 + 4, 23 * 8 + 6, 23 * 8 + 7, 10 * 8 + 4, 21 * 8 + 6};
++        static const int pulled_up[] = {23 * 8 + 4, 23 * 8 + 6, 23 * 8 + 7, 21 * 8 + 6};
+         for (i = 0; i < ARRAY_SIZE(pulled_up); i++) {
+             qemu_set_irq(qdev_get_gpio_in(DEVICE(tegra_gpios_dev), pulled_up[i]), 1);
+         }
+@@ -1233,23 +1233,7 @@ static void __tegrax1_init(MachineState *machine)
+     tegra_i2c_subpmic_devs[2] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x31, pmic_version, 0x40);
+     tegra_i2c_subpmic_devs[3] = tegra_init_pmic(tegra_i2c_get_bus(tegra_idc5_dev), 0x33, pmic_version, 0x50);
+ 
+-    /* Bq24193 */
+-    tegra_i2c_charger_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "dummyi2c", 0x6B);
+-
+-    uint8_t charger_regs[0xB]={}; // Power-on reset values.
+-    charger_regs[0x0] = 0x30; // Input Source Control Register
+-    charger_regs[0x1] = 0x1B; // Power-On Configuration Register
+-    charger_regs[0x2] = 0x60; // Charge Current Control Register
+-    charger_regs[0x3] = 0x3; // Pre-Charge/Termination Current Control Register
+-    charger_regs[0x4] = 0xB2; // Charge Voltage Control Register
+-    charger_regs[0x5] = 0x9A; // Charge Termination/Timer Control Register
+-    charger_regs[0x6] = 0x03; // IR Compensation / Thermal Regulation Control Register
+-    charger_regs[0x7] = 0x4B; // Misc Operation Control Register
+-    charger_regs[0x8] = 0x00; // System Status Register
+-    charger_regs[0x8] |= BIT(2) | (3<<4) | (2<<6); // PG_STAT = Power Good, CHRG_STAT = Charge Termination Done, VBUS_STAT = Adapter port.
+-    charger_regs[0x9] = 0x00; // Fault Register
+-    charger_regs[0xA] = 0x2F; // Vender / Part / Revision Status Register
+-    dummyi2c_set_regs(tegra_i2c_charger_dev, charger_regs, sizeof(charger_regs), sizeof(uint8_t), sizeof(charger_regs));
++    tegra_i2c_charger_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "bq24193", 0x6B);
+ 
+     /* Fuel Gauge */
+     tegra_i2c_fuel_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "dummyi2c", 0x36);
+@@ -1343,14 +1327,12 @@ static void __tegrax1_init(MachineState *machine)
+ 
+     dummyi2c_set_regs(tegra_i2c_fuel_dev, fuel_regs, sizeof(fuel_regs), sizeof(uint16_t), sizeof(fuel_regs)/sizeof(uint16_t));
+ 
+-    /* USB-PD controller */
+-    tegra_i2c_usbpd_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "dummyi2c", 0x18);
+-
+-    uint16_t usbpd_regs[0x100]={};
+-
+-    usbpd_regs[0x4E] = 0x0001;
+-
+-    dummyi2c_set_regs(tegra_i2c_usbpd_dev, usbpd_regs, sizeof(usbpd_regs), sizeof(uint16_t), sizeof(usbpd_regs)/sizeof(uint16_t));
++    /* USB-PD controller: its ALERT on PK4, v_vdd5v3's enable (PX3) the rail it switches onto VBUS. */
++    tegra_i2c_usbpd_dev = i2c_slave_create_simple(tegra_i2c_get_bus(tegra_idc1_dev), "bm92t36", 0x18);
++    qdev_connect_gpio_out_named(DEVICE(tegra_i2c_usbpd_dev), "alert", 0,
++                                qdev_get_gpio_in(DEVICE(tegra_gpios_dev), 10 * 8 + 4));
++    qdev_connect_gpio_out_named(DEVICE(tegra_gpios_dev), "pad", 23 * 8 + 3,
++                                qdev_get_gpio_in_named(DEVICE(tegra_i2c_usbpd_dev), "rail", 0));
+ 
+     /* Host1x IO */
+     tegra_grhost_dev = sysbus_create_varargs("tegra.grhost",

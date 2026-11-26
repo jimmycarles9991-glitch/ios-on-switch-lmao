@@ -119,6 +119,36 @@ TEST(WorkloopHandoffSource, Xnu12377HooksEachEventWhereItsStateIsHeld)
                 HasSubstr("switch_wl_line(SWITCH_WL_END_ENOENT"));
 }
 
+TEST(WorkloopHandoffSource, Xnu12377HandlesNoteWlOwnerHintWithoutAttachingOrWaking)
+{
+    const std::string priv = SourceText("../xnu-12377.121.6/bsd/sys/event_private.h");
+    EXPECT_THAT(priv, HasSubstr("#define NOTE_WL_OWNER_HINT       0x00000200"));
+    EXPECT_THAT(priv, HasSubstr("#define NOTE_WL_UPDATES_MASK     0x000003f0"));
+
+    const std::string var = SourceText("../xnu-12377.121.6/bsd/sys/eventvar.h");
+    EXPECT_THAT(var, HasSubstr("kqwl_owner_hint"));
+
+    const std::string source = SourceText("../xnu-12377.121.6/bsd/kern/kern_event.c");
+    const std::string update = Body(source, "filt_wlupdate(struct kqworkloop *kqwl, struct knote *kn,");
+    EXPECT_THAT(Between(update, "struct turnstile *ts = TURNSTILE_NULL;", "filt_wllock(kqwl);"),
+                HasSubstr("if (op == FILT_WLTOUCH && (kev->fflags & NOTE_WL_OWNER_HINT))"));
+    EXPECT_THAT(update, HasSubstr("if (kev->fflags & NOTE_WL_OWNER_HINT) {"));
+    EXPECT_THAT(update, HasSubstr("kqwl->kqwl_owner_hint = new_owner != THREAD_NULL &&"));
+    EXPECT_THAT(update, HasSubstr("if (error == 0 && (kev->fflags & NOTE_WL_OWNER_HINT))"));
+
+    const std::string attach = Body(source, "filt_wlattach(struct knote *kn, struct kevent_qos_s *kev)\n{");
+    EXPECT_THAT(Between(attach, "out:\n\tif (error) {", "knote_set_error(kn, error);"),
+                HasSubstr("error == EWLNOATTACH"));
+
+    const std::string touch = Body(source, "filt_wltouch(struct knote *kn, struct kevent_qos_s *kev)\n{");
+    EXPECT_THAT(Between(touch, "out:\n\tif (error) {", "kev->flags |= EV_ERROR;"), HasSubstr("error == EWLNOATTACH"));
+
+    const std::string validate = Body(source, "filt_wlvalidate_kev_flags(struct knote *kn, struct kevent_qos_s *kev,");
+    EXPECT_THAT(validate, HasSubstr("NOTE_WL_DISCOVER_OWNER | NOTE_WL_OWNER_HINT"));
+
+    EXPECT_THAT(SourceText("../xnu-10063.141.1/bsd/sys/event_private.h"), Not(HasSubstr("NOTE_WL_OWNER_HINT")));
+}
+
 TEST(WorkloopHandoffSource, Xnu10063HasNoHandoffHook)
 {
     const std::string source = SourceText("../xnu-10063.141.1/bsd/kern/kern_event.c");

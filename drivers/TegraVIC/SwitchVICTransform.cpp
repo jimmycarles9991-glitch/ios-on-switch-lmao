@@ -60,6 +60,13 @@ int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *d
                          uint32_t chromaSite, void (*completion)(void *, int), void *context, SwitchVICEvents *events,
                          const TegraVICAcquire *acquire)
 {
+    return switch_vic_transform(source, destination, plan, chromaSite, completion, context, events, acquire, nullptr);
+}
+
+int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *destination, const TegraVICPlan *plan,
+                         uint32_t chromaSite, void (*completion)(void *, int), void *context, SwitchVICEvents *events,
+                         const TegraVICAcquire *acquire, SwitchVICWriteReservation *dstReserve)
+{
     if (!completion || !destination || !plan || !plan->count || plan->count > 3 || (plan->readsSource && !source))
         return -22;
     if (plan->readsSource && source->memory == destination->memory)
@@ -140,17 +147,21 @@ int switch_vic_transform(const TegraVICSurface *source, const TegraVICSurface *d
     } else if (plan->readsSource) {
         guards[guardCount++] = work->access[0].guard;
     }
-    switch_gpu_cpu_lease *leases[2] = {};
+    switch_gpu_cpu_lease *leases[3] = {};
     uint32_t leaseCount = 0;
     for (auto &access : work->access)
         if (access.owned)
             leases[leaseCount++] = access.owned;
+    if (dstReserve && dstReserve->lease && dstReserve->backing == output && !work->access[1].owned)
+        leases[leaseCount++] = dstReserve->lease;
     const SwitchVICOwnership ownership = {
         uses, work->native.owner ? 3u : plan->readsSource ? 2u : 1u, guards, guardCount, leases, leaseCount};
     __atomic_add_fetch(&work->refs, 1, __ATOMIC_RELAXED);
     error = switch_vic_submit_checked(work->jobs, plan->count, acquire, ownership, completed, work, nullptr, events);
     for (auto &access : work->access)
         switch_vic_surface_unreserve(&access);
+    if (dstReserve)
+        switch_vic_surface_release_write(dstReserve);
     if (error)
         release(work);
     release(work);

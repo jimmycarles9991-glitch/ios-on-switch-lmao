@@ -1,0 +1,35 @@
+{
+  "class": "IOPort",
+  "doc": "IOAccessoryManager's IOPort (the object a connector is to iPadOS) and its USB transports, which SwitchUSB's port publisher creates, adds, gives a data role and removes as the USB-C port's role changes. A root port on the IOPort (AppleUSBHostPort in IOPort mode on iOS 27, the Type-C root ports on iOS 17) takes its cable state from these transports. Called by address under their own C names.",
+  "superclass": "IOService",
+  "kext": "com.apple.iokit.IOAccessoryManager",
+  "functions_only": true,
+  "methods": {},
+  "constants": {},
+  "functions": {
+    "switch_original_port_usb2_transport": {
+      "decl": "void *switch_original_port_usb2_transport(void)",
+      "doc": "A new IOPortTransportStateUSB2 (transport type 2), retained, not yet added to a port."
+    },
+    "switch_original_port_usb3_transport": {
+      "decl": "void *switch_original_port_usb3_transport(void)",
+      "doc": "A new IOPortTransportStateUSB3 (transport type 3), retained, not yet added to a port."
+    },
+    "switch_original_port_add_transport": {
+      "decl": "bool switch_original_port_add_transport(void *port, void *transport, uint32_t index)",
+      "doc": "IOPort::addTransport: attaches the transport to the port in the service and IOPort planes, starts and registers it. False for a type and index the port already has, or a transport already started."
+    },
+    "switch_original_port_remove_transport": {
+      "decl": "int switch_original_port_remove_transport(void *port, uint32_t type, uint32_t index)",
+      "doc": "IOPort::removeTransport(type, index): terminates and detaches the port's transport of that type and index (1 CC, 2 USB2, 3 USB3, 5 DisplayPort); kIOReturnSuccess, or an error when the port has none."
+    },
+    "switch_original_port_usb2_set_data_role": {
+      "decl": "void switch_original_port_usb2_set_data_role(void *transport, int role)",
+      "doc": "setDataRole on a USB 2.0 transport: -1 unknown, 0 none, 1 device, 2 host. A root port in IOPort mode is connected only while its port's newest USB transport has role 2. Non-virtual on iOS 27; on iOS 17 a virtual (slot 180) that IOPortTransportStateUSB2 overrides, bound to that override."
+    },
+    "switch_original_port_usb3_set_data_role": {
+      "decl": "void switch_original_port_usb3_set_data_role(void *transport, int role)",
+      "doc": "setDataRole on a USB 3 transport, as switch_original_port_usb2_set_data_role."
+    }
+  }
+}

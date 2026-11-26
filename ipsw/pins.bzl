@@ -147,10 +147,10 @@ IPSWS = {
             "kernel_virt_base": "0xfffffff00307c000",
             "kernelcache_sha256": "250337d45598da0e5cc578413704981368afe92f84b3450dc956e21da1b21bd4",
             "pretranslated": {
-                "a64x-cache-pretranslated.bin": "7368d8e566f251b287a0fb10d397d3a8cc538d823666dce59848a178630cf725",
+                "a64x-cache-pretranslated.bin": "83a4d557cf5364eb3bad93f34e3e9d0ca3fa3a17116d483e85f9a07a6105c2eb",
                 "app_cryptex.trustcache": "cfbb939e981575846f2da3218bb445a533eb22d6e2c981f0f35a05698459da75",
                 "os.trustcache": "14a722a71ab8d580e7fac6a3b16faf0482adb07116efa1bb41f52500a78a88d5",
-                "system_cryptex.trustcache": "2096595c2d8a052677065debcc49a0299cd67415808f951fd90f3d8e460f49ca",
+                "system_cryptex.trustcache": "8599ae6f24501a2973630f87094b60309c8903f25fce0c688c452fec0c4d7599",
             },
             "quartzcore_metallib_sha256": "342e3ee16a83e7b04837dcdadf4a786020711e3179afcf0ca50a461e7331218b",
         },

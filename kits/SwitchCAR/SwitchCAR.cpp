@@ -18,6 +18,8 @@ constexpr Bank kBanks[SWITCH_CAR_BANKS] = {
 };
 
 enum : uint32_t {
+    APB_MISC_GP_HIDREV = 0x804,
+    DPD_SAMPLE = 0x20,
     PWRGATE_TOGGLE = 0x30,
     REMOVE_CLAMPING = 0x34,
     PWRGATE_STATUS = 0x38,
@@ -37,10 +39,18 @@ enum : uint32_t {
 constexpr unsigned kFuseClock = 39;  // TEGRA210_CLK_FUSE: bank H bit 7
 constexpr uint32_t kToggleStart = 1u << 8;
 constexpr uint32_t kDpdCodeOff = 1u << 30, kDpdCodeOn = 2u << 30;
-constexpr uint32_t kToggleUs = 5000, kDpdUs = 250, kSequenceStepUs = 10;
+// PWRGATE_TOGGLE's START clearing, PWRGATE_STATUS following it, REMOVE_CLAMPING_CMD's bit clearing ("automatically
+// reset to 0b when the clamping has been removed"; CLAMP_STATUS is "kept for backward code compatibility", Tegra X1 TRM
+// 12.6.12-14, p.464-466) and IO_DPD(2)_STATUS following a request (read once its settle time is out, dpdSettleUs) raise
+// no PMC interrupt. The TRM prescribes polling each (12.6.13 p.465; 12.6.111 p.494). Each is read until it is done
+// (switch_mmio_wait32) within these bounds, as L4T does (powergate-t21x.c tegra_powergate_set 719-756 and
+// tegra210_powergate_remove_clamping 1036-1041: udelay(1) up to 100 times; pmc.c tegra_pmc_io_pad_poll 2530-2548). A
+// deliberate exception to the no-polling rule: they finish in microseconds on the media engines' power-up path, where a
+// sleep would cost milliseconds and a fixed busy wait more CPU than leaving as soon as the bit says so.
+constexpr uint32_t kToggleUs = 5000, kDpdUs = 250, kSequenceStepUs = 10, kClampUs = 100;
 constexpr uint32_t kSlowestSclkKHz = 38400;  // CLK_M: SCLK runs from it or from a faster source
 
-volatile uint8_t *gCar, *gPmc;
+volatile uint8_t *gCar, *gPmc, *gApbMisc;
 IOLock *gLock;
 
 // First use is in a driver's start (thread context); each pointer is published once and never changes. A losing
@@ -67,6 +77,13 @@ volatile uint8_t *pmc()
 {
     return once(&gPmc, [] {
         return switch_mmio_map(SWITCH_PMC_PA & ~0xfffULL, 0x1000) + 0x400;
+    });
+}
+
+volatile uint8_t *apbMisc()
+{
+    return once(&gApbMisc, [] {
+        return switch_mmio_map(0x70000000, 0x1000);
     });
 }
 
@@ -108,6 +125,16 @@ bool toggle(unsigned partition, bool on)
     return done;
 }
 
+// REMOVE_CLAMPING_CMD numbers PCX bit 4, while PWRGATE_TOGGLE, PWRGATE_STATUS and CLAMP_STATUS number it 3 (Tegra X1
+// TRM 12.6.12-15, p.465-467; Linux's tegra_powergate_remove_clamping swaps the same pair). Every other partition's
+// command bit is its number.
+uint32_t clampCommandBit(unsigned partition)
+{
+    constexpr unsigned kPartitionPcx = 3;
+    constexpr unsigned kPcxClampCommandBit = 4;
+    return 1u << (partition == kPartitionPcx ? kPcxClampCommandBit : partition);
+}
+
 // TRM 12.6.111: IO_DPD_REQ and IO_DPD2_REQ share one state machine, which drops a request written before the previous
 // one finished, SEL_DPD_TIM APB clocks plus five after it was written, and STATUS reads valid only after that. The APB
 // clock is SCLK / (AHB_RATE + 1) / (APB_RATE + 1) (TRM 5.2.11).
@@ -119,16 +146,21 @@ uint32_t dpdSettleUs(const volatile uint8_t *p)
     return (clocks * divider * 1000 + kSlowestSclkKHz - 1) / kSlowestSclkKHz;
 }
 
+// "Setting IO_DPD_REQ should be preceded by writing to the DPD_SAMPLE registers" (TRM 12.6.111, p.494); the sample is
+// released again once the request is done, as L4T's tegra_pmc_io_pad_prepare/unprepare. SEL_DPD_TIM keeps its reset
+// value, which the TRM calls safe.
 bool pad(unsigned dpd, uint32_t code)
 {
     const bool second = dpd >= 32;
     const uint32_t mask = 1u << (dpd % 32);
     volatile uint8_t *p = pmc();
     IOLockLock(lock());
+    switch_mmio_write32(p, DPD_SAMPLE, 1);
     switch_mmio_write32(p, second ? IO_DPD2_REQ : IO_DPD_REQ, code | mask);
     IODelay(dpdSettleUs(p));
     const bool done =
         switch_mmio_wait32(p, second ? IO_DPD2_STATUS : IO_DPD_STATUS, mask, code == kDpdCodeOn ? mask : 0, kDpdUs);
+    switch_mmio_write32(p, DPD_SAMPLE, 0);
     IOLockUnlock(lock());
     return done;
 }
@@ -186,6 +218,12 @@ bool switch_car_wait(uint32_t offset, uint32_t mask, uint32_t value, uint32_t ti
     return switch_mmio_wait32(car(), offset, mask, value, timeout_us);
 }
 
+bool switch_car_soc_t210b01(void)
+{
+    const uint32_t hidrev = switch_mmio_read32(apbMisc(), APB_MISC_GP_HIDREV);
+    return ((hidrev >> 8) & 0xff) == 0x21 && ((hidrev >> 4) & 0xf) >= 2;
+}
+
 void switch_car_fuse_readable(void)
 {
     switch_car_clock_enable(kFuseClock);
@@ -210,29 +248,32 @@ bool switch_pmc_partition_off(unsigned partition)
 
 void switch_pmc_remove_clamping(unsigned partition)
 {
-    switch_mmio_write32(pmc(), REMOVE_CLAMPING, 1u << partition);
+    switch_mmio_write32(pmc(), REMOVE_CLAMPING, clampCommandBit(partition));
 }
 
-bool switch_pmc_power_up_in_reset(unsigned partition, unsigned clock_id, unsigned reset_id)
+bool switch_pmc_unclamp(unsigned partition)
 {
-    switch_car_reset_assert(reset_id);
+    switch_pmc_remove_clamping(partition);
+    return switch_mmio_wait32(pmc(), REMOVE_CLAMPING, clampCommandBit(partition), 0, kClampUs);
+}
+
+bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id,
+                         const struct switch_pmc_mc_client *client)
+{
     if (!switch_pmc_partition_on(partition))
         return false;
     IODelay(kSequenceStepUs);
     switch_car_clock_enable(clock_id);
+    switch_car_reset_assert(reset_id);
     IODelay(kSequenceStepUs);
-    switch_pmc_remove_clamping(partition);
+    const bool unclamped = switch_pmc_unclamp(partition);
     IODelay(kSequenceStepUs);
-    return true;
-}
-
-bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id)
-{
-    if (!switch_pmc_power_up_in_reset(partition, clock_id, reset_id))
-        return false;
     switch_car_reset_deassert(reset_id);
     IODelay(kSequenceStepUs);
-    return true;
+    if (client)
+        client->hot_reset(client->ctrl, client->bit, false);
+    IODelay(kSequenceStepUs);
+    return unclamped;
 }
 
 bool switch_pmc_power_down(unsigned partition, unsigned clock_id, unsigned reset_id)

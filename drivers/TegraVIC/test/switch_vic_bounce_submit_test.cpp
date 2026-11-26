@@ -19,9 +19,13 @@ SwitchVICMapping sourceMap{0x10000000}, destinationMap{0x20000000}, scratchMaps[
 SwitchVICBounceSlot pool;
 std::vector<std::string> stages;
 std::vector<uint32_t> guardCounts;
+std::vector<std::vector<switch_gpu_cpu_lease *>> stageLeases;
+std::vector<switch_gpu_backing *> vicUses, vicGuards;
 std::vector<std::pair<uint32_t, uint32_t>> copybackPlanes, sourcePlanes;  // bytes a row, rows
 bool immediate = false;
 int failStage = -1, gates = 0, callbacks = 0, result = 0, unreservesAtCallback = -1;
+unsigned writeReleases = 0;
+int writeReleasesAtCallback = -1;
 
 struct Callback {
     void (*fn)(void *, int);
@@ -50,6 +54,7 @@ void notify(void *, int status)
     ++callbacks;
     result = status;
     unreservesAtCallback = gates;
+    writeReleasesAtCallback = int(writeReleases);
 }
 
 void finish()
@@ -77,12 +82,17 @@ protected:
     {
         stages.clear();
         guardCounts.clear();
+        stageLeases.clear();
+        vicUses.clear();
+        vicGuards.clear();
         copybackPlanes.clear();
         sourcePlanes.clear();
         failStage = -1;
         immediate = false;
         gates = callbacks = result = 0;
         unreservesAtCallback = -1;
+        writeReleases = 0;
+        writeReleasesAtCallback = -1;
         pending.clear();
         pool = {};
         sourceBacking.refs = destinationBacking.refs = 1;
@@ -165,6 +175,16 @@ void switch_vic_surface_release_access(SwitchVICSurfaceAccess *a)
     *a = {};
 }
 
+void switch_vic_surface_release_write(SwitchVICWriteReservation *r)
+{
+    if (!r || (!r->lease && !r->backing))
+        return;
+    ++writeReleases;
+    if (r->backing)
+        --r->backing->refs;
+    *r = {};
+}
+
 int switch_native_surface_acquire(const TegraVICSurface *, SwitchNativeSurfaceView *, bool, bool)
 {
     return -2;
@@ -239,6 +259,7 @@ extern "C" int tegra_gm20b_ce_copy_plane_checked(const tegra_gm20b_ce_plane *, c
     if (dst == &scratchBacking[0])
         sourcePlanes.emplace_back(rowBytes, rows);
     guardCounts.push_back(ownership->guard_count);
+    stageLeases.emplace_back(ownership->leases, ownership->leases + ownership->lease_count);
     for (uint32_t i = 0; i < ownership->guard_count; ++i)
         EXPECT_TRUE(ownership->guards[i].backing == src || ownership->guards[i].backing == dst);
     if (int(stages.size()) == failStage)
@@ -253,7 +274,13 @@ int switch_vic_submit_checked(const TegraVICJob *, uint32_t, const TegraVICAcqui
                               SwitchVICEvents *)
 {
     stages.push_back("vic");
+    stageLeases.emplace_back(ownership.leases, ownership.leases + ownership.leaseCount);
+    vicUses.clear();
+    vicGuards.clear();
+    for (uint32_t j = 0; j < ownership.useCount; ++j)
+        vicUses.push_back(ownership.uses[j].backing);
     for (uint32_t i = 0; i < ownership.guardCount; ++i) {
+        vicGuards.push_back(ownership.guards[i].backing);
         bool found = false;
         for (uint32_t j = 0; j < ownership.useCount; ++j)
             found |= ownership.guards[i].backing == ownership.uses[j].backing;
@@ -498,4 +525,45 @@ TEST_F(Bounce, OddSurfacesBounceTheirLastChromaPairAndRow)
     finish();
     EXPECT_EQ(callbacks, 1);
     EXPECT_EQ(result, 0);
+}
+
+TEST_F(Bounce, PreReservedWriteLeaseCoversDestinationStagesAndReleasesBeforeCallback)
+{
+    immediate = true;
+    auto src = makeSurface(true, 192), dst = makeSurface(false, 160);
+    auto p = plan(false);
+    auto *lease = reinterpret_cast<switch_gpu_cpu_lease *>(0x1ea5e);
+    ++destinationBacking.refs;
+    SwitchVICWriteReservation reservation{&destinationBacking, lease};
+    ASSERT_EQ(switch_vic_bounce_submit(&src, &dst, &p, 0, notify, nullptr, nullptr, &reservation), 1);
+    ASSERT_EQ(stages, (std::vector<std::string>{"source", "preserve", "vic", "copyback"}));
+    ASSERT_EQ(stageLeases.size(), 4u);
+    EXPECT_TRUE(stageLeases[0].empty());
+    EXPECT_EQ(stageLeases[1], (std::vector<switch_gpu_cpu_lease *>{lease}));
+    EXPECT_EQ(stageLeases[2], (std::vector<switch_gpu_cpu_lease *>{lease}));
+    EXPECT_EQ(stageLeases[3], (std::vector<switch_gpu_cpu_lease *>{lease}));
+    EXPECT_EQ(callbacks, 1);
+    EXPECT_EQ(writeReleases, 1u);
+    EXPECT_EQ(writeReleasesAtCallback, 1);
+    EXPECT_EQ(reservation.lease, nullptr);
+    EXPECT_EQ(reservation.backing, nullptr);
+}
+
+TEST_F(Bounce, BouncedSourceDoesNotAttachOriginalSourceToVic)
+{
+    auto src = makeSurface(true, 192), dst = makeSurface(false, 256);
+    auto p = plan();
+    ASSERT_EQ(switch_vic_bounce_submit(&src, &dst, &p, 0, notify, nullptr, nullptr), 1);
+    EXPECT_EQ(stages, (std::vector<std::string>{"source", "vic"}));
+    EXPECT_EQ(vicUses, (std::vector<switch_gpu_backing *>{&destinationBacking, &scratchBacking[0]}));
+    EXPECT_EQ(vicGuards, (std::vector<switch_gpu_backing *>{&destinationBacking}));
+    finish();
+
+    stages.clear();
+    src = makeSurface(true, 256);
+    ASSERT_EQ(switch_vic_bounce_submit(&src, &dst, &p, 0, notify, nullptr, nullptr), 1);
+    EXPECT_EQ(stages, (std::vector<std::string>{"vic"}));
+    EXPECT_EQ(vicUses, (std::vector<switch_gpu_backing *>{&destinationBacking, &sourceBacking}));
+    EXPECT_EQ(vicGuards, (std::vector<switch_gpu_backing *>{&destinationBacking, &sourceBacking}));
+    finish();
 }

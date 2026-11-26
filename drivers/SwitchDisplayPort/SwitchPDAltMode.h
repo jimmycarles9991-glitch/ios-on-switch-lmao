@@ -20,6 +20,7 @@ extern "C" {
 
 #define SWITCH_PD_ALT_ALERT_CMD_DONE     (1u << 2)
 #define SWITCH_PD_ALT_ALERT_PLUGPULL     (1u << 3)
+#define SWITCH_PD_ALT_ALERT_PR_SWAP      (1u << 4)
 #define SWITCH_PD_ALT_ALERT_VDM_RECEIVED (1u << 11)
 #define SWITCH_PD_ALT_ALERT_CONTRACT     (1u << 12)
 #define SWITCH_PD_ALT_STATUS1_LASTCMD    (7u << 4)
@@ -38,20 +39,26 @@ extern "C" {
 #define SWITCH_PD_ALT_CMD_DP_CONFIGURE 0x3636u
 #define SWITCH_PD_ALT_CMD_DP_EXIT      0x3B3Bu
 
-#define SWITCH_PD_ALT_VDM_MAX      13u  // count byte + 12 bytes: the longest message sent (the dock's LED)
-#define SWITCH_PD_ALT_INCOMING_MAX 29u  // count byte + header + six VDOs
-#define SWITCH_PD_ALT_REPLY_MS     1500u
-#define SWITCH_PD_ALT_HUB_POWER_MS 500u
-#define SWITCH_PD_ALT_HUB_RETRY_MS 250u
-#define SWITCH_PD_ALT_HUB_RETRIES  10u
+#define SWITCH_PD_ALT_VDM_MAX           13u  // count byte + 12 bytes: the longest message sent (the dock's LED)
+#define SWITCH_PD_ALT_INCOMING_MAX      29u  // count byte + header + six VDOs
+#define SWITCH_PD_ALT_REPLY_MS          1500u
+#define SWITCH_PD_ALT_DRAIN_MS          500u
+#define SWITCH_PD_ALT_DRAIN_MAX         4u
+#define SWITCH_PD_ALT_DISCOVER_RETRY_MS 500u
+#define SWITCH_PD_ALT_DISCOVER_FINAL_MS 1000u
+#define SWITCH_PD_ALT_HUB_POWER_MS      500u
+#define SWITCH_PD_ALT_HUB_RETRY_MS      250u
+#define SWITCH_PD_ALT_HUB_RETRIES       10u
 
 #define SWITCH_PD_ALT_PIN_C (1u << 2)
 #define SWITCH_PD_ALT_PIN_D (1u << 3)
 
 enum switch_pd_alt_step {
     SWITCH_PD_ALT_IDLE,
+    SWITCH_PD_ALT_DRAIN_VDM,
     SWITCH_PD_ALT_STALE_EXIT,  // an earlier boot left DisplayPort configured
     SWITCH_PD_ALT_DR_SWAP,
+    SWITCH_PD_ALT_DR_SWAP_TO_UFP,
     SWITCH_PD_ALT_DISCOVER_ID,
     SWITCH_PD_ALT_DISCOVER_SVID,
     SWITCH_PD_ALT_DISCOVER_MODE,
@@ -63,6 +70,8 @@ enum switch_pd_alt_step {
     SWITCH_PD_ALT_HUB_POWER,  // the dock's hub powers up after its LED reply
     SWITCH_PD_ALT_HUB_ENABLE,
     SWITCH_PD_ALT_HUB_RETRY,
+    SWITCH_PD_ALT_DOCK_DP_SLEEP,
+    SWITCH_PD_ALT_DOCK_DP_WAKE,
     SWITCH_PD_ALT_DONE,
     SWITCH_PD_ALT_FAILED,
 };
@@ -91,11 +100,16 @@ struct switch_pd_alt_out {
 struct switch_pd_alt {
     enum switch_pd_alt_step step;
     bool want_dp;
-    bool dock_power;  // the source's PDOs are the dock's signature (SwitchChargePolicy.h): the only partner swapped to
+    bool dock_power;  // the source's PDOs are the dock's signature (SwitchChargePolicy.h): swapped without asking
+    bool as_ufp;      // the session began as UFP and has not become DFP: a swap by the partner restarts it
     bool accepted;    // the step's VDM was answered and ACCEPT went out: its CMD_DONE means the reply is readable
-    bool paused;      // a contract alert while a command was out: the step goes again once SwitchPD is at rest
+    bool paused;      // a contract/PR_Swap alert or aborted VDM: the step goes again once SwitchPD is at rest
     bool dock, old_dock_firmware, hub_enabled;
-    uint8_t pin, dp_lanes, hub_tries;
+    bool is_source, partner_is_usb_host, vdm_retried;
+    bool vdm_pending, drain_dock_power, drain_retried;
+    uint8_t offered_pins, pin, dp_lanes, hub_tries, drain_count;
+    uint16_t drain_status1, drain_dp_status;
+    enum switch_pd_alt_step drain_resume;
     uint8_t configure[4];
     enum switch_pd_alt_lanes lanes;
 };
@@ -103,14 +117,22 @@ struct switch_pd_alt {
 static inline void switch_pd_alt_init(struct switch_pd_alt *alt, bool want_dp)
 {
     const struct switch_pd_alt fresh = {
-        SWITCH_PD_ALT_IDLE,      want_dp, false, false, false, false, false, false, 0, 0, 0, {0, 0, 0, 0},
-        SWITCH_PD_ALT_LANES_FREE};
+        SWITCH_PD_ALT_IDLE, want_dp, false, false, false, false, false, false, false, false, false, false, false,
+        false,              false,   0,     0,     0,     0,     0,     0,     0,     SWITCH_PD_ALT_IDLE,
+        {0, 0, 0, 0},       SWITCH_PD_ALT_LANES_FREE};
     *alt = fresh;
 }
 
 static inline bool switch_pd_alt_active(const struct switch_pd_alt *alt)
 {
     return alt->step != SWITCH_PD_ALT_IDLE && alt->step != SWITCH_PD_ALT_DONE && alt->step != SWITCH_PD_ALT_FAILED;
+}
+
+static inline unsigned switch_pd_alt_display_lanes(const struct switch_pd_alt *alt, bool resume_pending)
+{
+    if (resume_pending || alt->step == SWITCH_PD_ALT_DOCK_DP_SLEEP || alt->step == SWITCH_PD_ALT_DOCK_DP_WAKE)
+        return 0;
+    return alt->dp_lanes;
 }
 
 static inline struct switch_pd_alt_out switch_pd_alt_none()
@@ -161,25 +183,26 @@ static inline struct switch_pd_alt_out switch_pd_alt_dock_led()
 }
 
 struct switch_pd_alt_config {
-    uint8_t pin;    // SWITCH_PD_ALT_PIN_C or _D, 0 when nothing usable is offered
-    uint8_t lanes;  // 4 for C, 2 for D
+    uint8_t pin;      // SWITCH_PD_ALT_PIN_C or _D, 0 when nothing usable is offered
+    uint8_t lanes;    // 4 for C, 2 for D
+    uint8_t offered;  // UFP_D pin assignments offered by the partner
     uint8_t vdo[4];
 };
 
 // DisplayPort Configure from the partner's capabilities VDO (`caps` = INCOMING_VDM after DP discovery: count, then the
-// VDO's bytes). Pin assignment D (two lanes, the other SuperSpeed pair stays USB 3) whenever it is offered, C (four
-// lanes) otherwise. The UFP_D assignments are bits 23:16 for a receptacle and 15:8 for a plug. The dock reports a plug
+// VDO's bytes). The Nintendo dock prefers C (four DP lanes); a multifunction adapter prefers D to retain USB3. The UFP_D assignments are bits 23:16 for a receptacle and 15:8 for a plug. The dock reports a plug
 // but answers as a receptacle and ignores where the Configure's assignment is: bm92txx puts the dock's in bits 23:16
 // and everyone else's in the standard 15:8, which is what the dock is known to work with.
 static inline struct switch_pd_alt_config switch_pd_alt_choose_pins(const uint8_t *caps, size_t len, bool dock)
 {
-    struct switch_pd_alt_config config = {0, 0, {0x06, 0, 0, 0}};  // UFP_U as UFP_D, DP v1.3 signalling
+    struct switch_pd_alt_config config = {0, 0, 0, {0x06, 0, 0, 0}};  // UFP_U as UFP_D, DP v1.3 signalling
     if (len < 5 || caps[0] != 4) {
         return config;
     }
     const bool receptacle = dock || (caps[1] & 0x40u) != 0;
     const uint8_t offered = receptacle ? caps[3] : caps[2];
-    if ((offered & SWITCH_PD_ALT_PIN_D) != 0) {
+    config.offered = offered;
+    if ((offered & SWITCH_PD_ALT_PIN_D) != 0 && (!dock || (offered & SWITCH_PD_ALT_PIN_C) == 0)) {
         config.pin = SWITCH_PD_ALT_PIN_D;
         config.lanes = 2;
     } else if ((offered & SWITCH_PD_ALT_PIN_C) != 0) {
@@ -194,8 +217,7 @@ static inline struct switch_pd_alt_config switch_pd_alt_choose_pins(const uint8_
 
 static inline bool switch_pd_alt_has_svid(const uint8_t *vdm, size_t len, uint16_t svid)
 {
-    const size_t count = vdm[0] < len ? vdm[0] : len - 1;
-    for (size_t i = 5; i + 1 <= count; i += 2) {
+    for (size_t i = 5; i + 1 < len; i += 2) {
         if ((uint16_t)((unsigned)vdm[i] | (unsigned)vdm[i + 1] << 8U) == svid) {
             return true;
         }
@@ -203,9 +225,23 @@ static inline bool switch_pd_alt_has_svid(const uint8_t *vdm, size_t len, uint16
     return false;
 }
 
+static inline bool switch_pd_alt_dock_answer(const uint8_t *vdm, size_t len, uint8_t reply)
+{
+    return len >= 9 && vdm[1] == 0x40 && vdm[2] == 0 && vdm[3] == 0x7E && vdm[4] == 0x05 &&
+           vdm[6] == 2 && vdm[7] == reply;
+}
+
 static inline bool switch_pd_alt_acked(const uint8_t *vdm, uint8_t command)
 {
     return vdm[1] == (uint8_t)(0x40u | command);
+}
+
+// A response (ACK, NAK or BUSY) to our Discover Identity, as opposed to the partner's own request: a DFP discovers us
+// too, and its REQ lands in the same INCOMING_VDM.
+static inline bool switch_pd_alt_identity_response(const uint8_t *vdm, size_t len)
+{
+    return len >= 5 && vdm[0] >= 4 && (vdm[1] & 0x1Fu) == 0x01u && (vdm[1] >> 6) != 0 && (vdm[2] & 0x80u) != 0 &&
+           vdm[3] == 0x00 && vdm[4] == 0xFF;
 }
 
 #ifdef __cplusplus

@@ -183,8 +183,12 @@ TEST(DisplayPlanesSource, PlaneSlotsHoldTheSurfaceTheyScan)
     const CodeText native(SourceText("../SwitchNativePlaneDisplay.h"));
     EXPECT_TRUE(native.before("switch_native_scanout_acquire(surface", "planeMapSnapshot(scanout, image)"));
     EXPECT_TRUE(native.has("surfaceLayout(surface, block)"));
-    EXPECT_TRUE(Block(planes, "static const tgm_layout *surfaceLayout(")
-                    .has("tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1"));
+    const CodeText layout = Block(planes, "static const tgm_layout *surfaceLayout(");
+    EXPECT_TRUE(layout.before("memory->prepare(kIODirectionOut)",
+                              "memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone)"));
+    EXPECT_TRUE(layout.before("memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone)",
+                              "memory->complete(kIODirectionOut);"));
+    EXPECT_TRUE(layout.has("tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1"));
     const CodeText write =
         Block(planes, "void planeWriteWindowRegisters(Window w, const switch_display::Overlay &p, bool live)");
     EXPECT_TRUE(write.has("buf[kSurfaceKind] = m.surfaceKind;"));

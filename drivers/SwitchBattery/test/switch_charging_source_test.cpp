@@ -12,7 +12,6 @@
 
 #include "bazel/testing/source_text.h"
 
-using switch_ios::test::Between;
 using switch_ios::test::Body;
 using switch_ios::test::Count;
 using switch_ios::test::SourceText;
@@ -21,11 +20,27 @@ using testing::Not;
 
 TEST(SwitchChargingSource, PdRequestNeverWaits)
 {
-    const std::string negotiation = Between(SourceText("../../SwitchUSB/SwitchPD.cpp"),
-                                            "// --- USB-PD request (SwitchPD.h)", "namespace {\nSwitchPD *startPD()");
+    const std::string negotiation = SourceText("../../SwitchUSB/SwitchPDRequest.cpp");
     ASSERT_FALSE(negotiation.empty());
     for (const char *wait : {"IOSleep", "IODelay", "while (", "for (;;)", "check_delivery"})
         EXPECT_THAT(negotiation, Not(HasSubstr(wait))) << wait;
+}
+
+// The input limit's ramp sleeps between its steps (the battery's work loop may): no busy wait.
+TEST(SwitchChargingSource, InputRampSleeps)
+{
+    const std::string apply = Body(SourceText("../SwitchBattery.cpp"), "void SwitchBattery::applyInput(");
+    ASSERT_FALSE(apply.empty());
+    EXPECT_THAT(apply, Not(HasSubstr("IODelay")));
+    EXPECT_THAT(apply, HasSubstr("IOSleep(1);"));
+}
+
+// The refresh timer re-reads what has no interrupt; it samples no interrupt line.
+TEST(SwitchChargingSource, RefreshSamplesNoInterruptLine)
+{
+    const std::string fired = Body(SourceText("../SwitchBattery.cpp"), "void SwitchBattery::timerFired(");
+    ASSERT_FALSE(fired.empty());
+    EXPECT_THAT(fired, Not(HasSubstr("check_delivery")));
 }
 
 TEST(SwitchChargingSource, Reg05HasTwoWriters)

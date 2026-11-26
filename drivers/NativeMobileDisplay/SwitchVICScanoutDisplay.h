@@ -131,8 +131,11 @@ bool offerVicCopy(const OriginalLegacySwapRequest *request, OSObject *surface, u
         return false;
     if (tiled) {
         if (IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface)) {
+            if (memory->prepare(kIODirectionOut) != kIOReturnSuccess)
+                return false;
             IOByteCount length = 0;
             const uint64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+            memory->complete(kIODirectionOut);
             if (pa && tegra_gm20b_surface_compressed(pa & ~0xfffULL))
                 return false;
         }
@@ -219,9 +222,12 @@ TegraVICImage vicSource(const VicScanoutJob &job) const
 static bool vicSourceIsDescriptor(const VicScanoutJob &job)
 {
     IOMemoryDescriptor *memory = native_legacy_surface_descriptor(job.surface);
+    if (!memory || memory->prepare(kIODirectionOut) != kIOReturnSuccess)
+        return false;
     const uint64_t at = job.source.pitchOffset;
     IOByteCount length = 0;
-    const uint64_t pa = memory ? memory->getPhysicalSegment(at, &length, kIOMemoryMapperNone) : 0;
+    const uint64_t pa = memory->getPhysicalSegment(at, &length, kIOMemoryMapperNone);
+    memory->complete(kIODirectionOut);
     const auto &pages = job.source.allocation;
     return pa && pages.pages && (at >> 12) < pages.page_count && pages.pages[at >> 12] + (at & 4095) == pa;
 }

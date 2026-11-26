@@ -42,8 +42,6 @@ build --spawn_strategy=sandboxed
 build --strategy=Pretranslate=remote,local
 build --strategy=TranslatedCryptex=remote,local
 build --strategy=ImagePack=remote,local
-build --strategy=InstallPolicy=remote,local
-build --strategy=LaunchdCatalog=remote,local
 # And rules_apple's actool (the HW Test apps' asset catalog), which asks CoreSimulator's services for its compile and is
 # marked no-sandbox.
 build --strategy=AssetCatalogCompile=remote,local

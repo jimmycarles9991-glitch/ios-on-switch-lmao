@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// Tegra210 SDMMC1 raw block device: exposes the SD card's single APFS GPT
-// partition as a whole-disk IOBlockStorageDevice and lets IOKit/APFS do the rest.
+// Tegra210 SDMMC1 block devices for the APFS root and the shared SD volume.
 //
 // The card is inherited from U-Boot already initialized, selected and in transfer
 // state, at 3.3 V high speed, 4-bit, 48 MHz (~24 MB/s raw): switchroot U-Boot's
@@ -62,6 +61,9 @@
 #include "SwitchAdma.h"
 #include "SwitchQueue.h"
 #include "SwitchSdPool.h"
+#include "SwitchSdVolume.h"
+#include "SwitchSdWindow.h"
+#include "SwitchSdWriteFence.h"
 #include "SwitchSdBus.h"
 #include "SwitchSdCard.h"
 #include "SwitchSdTrim.h"
@@ -345,9 +347,10 @@ struct Request {
     // r6-lows: the request's IOStoragePriority class (IOStorageAttributes priority >> 6: 0 high (I/O tier 0, the UI's page-ins),
     // 1 default, 2 low, 3 background).
     uint8_t klass;
-    bool write;
-    bool chained;  // r12-sdio: taken into the chain being picked (SwitchQueue.h), under queueLock
-    bool pooled;   // owned by requestPool slab (SwitchSdPool.h); false for overflow IOMalloc nodes
+    bool write : 1;
+    bool chained : 1;  // r12-sdio: taken into the chain being picked (SwitchQueue.h), under queueLock
+    bool pooled : 1;   // owned by requestPool slab (SwitchSdPool.h); false for overflow IOMalloc nodes
+    bool shared : 1;
     IOStorageCompletion completion;
     uint64_t queuedNs;
 };
@@ -450,10 +453,11 @@ class NativeSwitchBlock;
 class NativeSwitchBlockDevice : public IOBlockStorageDevice {
     // NOLINTNEXTLINE(misc-explicit-constructor): IOKit's structors macro declares the metaclass constructor
     OSDeclareDefaultStructors(NativeSwitchBlockDevice) NativeSwitchBlock *owner = nullptr;
-    uint64_t blocks = 0;
+    const SwitchSdWindow *window = nullptr;
+    bool shared = false;
 
 public:
-    bool configure(NativeSwitchBlock *, uint64_t sectors);
+    bool configure(NativeSwitchBlock *, const SwitchSdWindow *, bool shared);
 
     IOReturn doEjectMedia() override
     {
@@ -480,8 +484,8 @@ public:
 
     char *getProductString() override
     {
-        static char product[] = "SD APFS";
-        return product;
+        static char rootName[] = "SD APFS", sharedName[] = "SD Card";
+        return shared ? sharedName : rootName;
     }
 
     char *getRevisionString() override
@@ -492,8 +496,8 @@ public:
 
     char *getAdditionalDeviceInfoString() override
     {
-        static char info[] = "SDMMC1 APFS partition";
-        return info;
+        static char rootInfo[] = "SDMMC1 APFS partition", sharedInfo[] = "SDMMC1 shared partition";
+        return shared ? sharedInfo : rootInfo;
     }
 
     IOReturn reportBlockSize(UInt64 *value) override
@@ -504,7 +508,7 @@ public:
 
     IOReturn reportMaxValidBlock(UInt64 *value) override
     {
-        *value = blocks - 1;
+        *value = window->count - 1;
         return kIOReturnSuccess;
     }
 
@@ -516,7 +520,7 @@ public:
 
     IOReturn reportRemovability(bool *value) override
     {
-        *value = false;
+        *value = shared;
         return kIOReturnSuccess;
     }
 
@@ -526,26 +530,17 @@ public:
         return kIOReturnSuccess;
     }
 
-    IOReturn reportMediaState(bool *present, bool *changed) override
-    {
-        *present = true;
-        if (changed)
-            *changed = false;
-        return kIOReturnSuccess;
-    }
+    IOReturn reportMediaState(bool *present, bool *changed) override;
 
     // Writes complete only after the card releases busy and with no card cache enabled, so every completed write is
     // already durable. Nothing turns the card's cache on, and setup() turns off one found on before any write
     // (disableFoundCache).
     IOReturn doSynchronize(UInt64, UInt64, IOOptionBits) override
     {
-        return kIOReturnSuccess;
+        return doSynchronizeCache();
     }
 
-    IOReturn doSynchronizeCache() override
-    {
-        return kIOReturnSuccess;
-    }
+    IOReturn doSynchronizeCache() override;
 
     IOReturn getWriteCacheState(bool *value) override
     {
@@ -571,6 +566,19 @@ class NativeSwitchBlock : public IOService {
     uint8_t *bounce = nullptr;
     uint64_t bouncePA = 0;
     IOLock *queueLock = nullptr;
+    thread_t workerThread = THREAD_NULL;
+    SwitchSdWriteFence rootWrites, filesWrites;
+
+    SwitchSdWriteFence &writes(const SwitchSdWindow *window)
+    {
+        return window == &rootWindow ? rootWrites : filesWrites;
+    }
+
+    const SwitchSdWindow *windowOf(bool shared) const
+    {
+        return shared ? &filesWindow : &rootWindow;
+    }
+
     Request *requestSlab = nullptr;
     SwitchSdPool<Request> requestPool = {};
     Request *head = nullptr, *tail = nullptr;
@@ -580,6 +588,7 @@ class NativeSwitchBlock : public IOService {
     uint64_t *trimBits = nullptr;
     size_t trimBytes = 0;
     thread_call_t trimCall = nullptr;
+    thread_call_t filesRemoval = nullptr;
     uint64_t lastIoNs = 0, trimBootSectors = 0, trimSinceSave = 0;
     bool trimCursorLoaded = false, trimFailed = false;
     unsigned chainsSinceUnmap = 0;         // under queueLock: chains picked while a discard waited
@@ -707,15 +716,18 @@ class NativeSwitchBlock : public IOService {
     [[noreturn]] void interruptLost(uint32_t awaited);
     void resetLines();
     void recover(bool data);
-    int command(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, uint32_t *status, bool cmd23 = false);
+    int command(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, uint32_t *status, bool cmd23 = false,
+                const SwitchSdWindow *window = nullptr);
     // r12-sdio: command()'s halves, so the worker can do other work while the card moves the data. r14-sdcq: `cmd23`
     // frames a multi-block command with Auto CMD23 instead of Auto CMD12 (switchSdBlockFrame).
-    int issue(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, bool cmd23 = false);
+    int issue(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, bool cmd23 = false,
+              const SwitchSdWindow *window = nullptr);
     int complete(uint32_t sectors, bool write, unsigned descriptors, uint32_t *status, bool *early, bool cmd23 = false);
     bool failed(int step, uint32_t status, uint64_t lba, uint32_t sectors, bool write, unsigned descriptors,
                 bool retry);
-    int run(uint64_t lba, uint32_t sectors, bool write, unsigned descriptors);
-    int retry(int step, uint32_t status, uint64_t lba, uint32_t sectors, bool write, unsigned descriptors);
+    int run(uint64_t lba, uint32_t sectors, bool write, unsigned descriptors, const SwitchSdWindow *window);
+    int retry(int step, uint32_t status, uint64_t lba, uint32_t sectors, bool write, unsigned descriptors,
+              const SwitchSdWindow *window);
     static void worker(void *, wait_result_t);
     void enqueueLocked(Request *request);
     Request *drainQueueLocked();
@@ -805,16 +817,32 @@ public:
     void logIo(uint64_t now);
     size_t formatTotals(char *out, size_t size) const;
 #endif
-    uint64_t firstSector = 0, sectorCount = 0;
+    SwitchSdWindow rootWindow, filesWindow;
+    switch_sd_files_slice filesSlice = {};
+    bool filesOnline = false;
+    bool filesPublishQueued = false;
+
+    bool findFiles(switch_sd_files_slice *);
+    void verifyFilesCard();
+    IOReturn sync(const SwitchSdWindow *window);
+    IOReturn syncLocked(const SwitchSdWindow *window, bool acknowledgeErrors = true);
+    void publishFiles();
+    void publishFilesNow();
+    void removeFilesIfOfflineLocked();
     // Per request and per merged command, as advertised: reads kBounceSectors with ADMA2 or once setup() has checked
     // SDMA boundary resumes, else kSafeSectors; writes kDirectWriteSectors with ADMA2, else kSafeSectors.
     uint32_t maxSectors = kSafeSectors, maxWriteSectors = kSafeSectors;
     NativeSwitchBlockDevice *device = nullptr;
 
     bool setup();
-    int transfer(uint64_t lba, uint32_t sectors, bool write, uint8_t *bytes);
+    int transfer(uint64_t lba, uint32_t sectors, bool write, uint8_t *bytes, const SwitchSdWindow *window = nullptr);
     IOReturn submit(const Request &);
     IOReturn unmap(const IOBlockStorageDeviceExtent *extents, uint32_t count, uint64_t blocks);
+
+    bool filesPresent() const
+    {
+        return __atomic_load_n(&filesOnline, __ATOMIC_ACQUIRE);
+    }
 
     void prepareTrim();
 
@@ -864,28 +892,38 @@ extern "C" bool switch_sd_trim_stats(uint64_t *erases, uint64_t *sectors, uint64
 }
 
 namespace {
-void putString(OSDictionary *dictionary, const char *key, const char *value)
+bool putString(OSDictionary *dictionary, const char *key, const char *value)
 {
-    if (const OSString *string = OSString::withCStringNoCopy(value)) {
-        dictionary->setObject(key, string);
-        string->release();
-    }
+    const OSString *string = OSString::withCStringNoCopy(value);
+    if (!string)
+        return false;
+    const bool stored = dictionary->setObject(key, string);
+    string->release();
+    return stored;
 }
 }
 
-bool NativeSwitchBlockDevice::configure(NativeSwitchBlock *provider, uint64_t sectors)
+bool NativeSwitchBlockDevice::configure(NativeSwitchBlock *provider, const SwitchSdWindow *range, bool files)
 {
     owner = provider;
-    blocks = sectors;
+    window = range;
+    shared = files;
     setProperty(kIOMaximumBlockCountReadKey, provider->maxSectors, 64);
     setProperty(kIOMaximumBlockCountWriteKey, provider->maxWriteSectors, 64);
     setProperty(kIOMaximumByteCountReadKey, static_cast<unsigned long long>(provider->maxSectors) * kSector, 64);
     setProperty(kIOMaximumByteCountWriteKey, static_cast<unsigned long long>(provider->maxWriteSectors) * kSector, 64);
     if (OSDictionary *protocol = OSDictionary::withCapacity(2)) {
-        putString(protocol, kIOPropertyPhysicalInterconnectTypeKey, "SD");
-        putString(protocol, kIOPropertyPhysicalInterconnectLocationKey, kIOPropertyInternalKey);
-        setProperty(kIOPropertyProtocolCharacteristicsKey, protocol);
+        // Report SwitchSDSharedVolume as Internal so SKDisk.isInternal hides Erase in Files.app; /etc/fstab,
+        // DAEnableUserFSMountInternal, and switch-sdwake handle auto-mounting it via UserFS.
+        const bool hasType = putString(protocol, kIOPropertyPhysicalInterconnectTypeKey, "SD");
+        const bool hasLocation =
+            putString(protocol, kIOPropertyPhysicalInterconnectLocationKey, kIOPropertyInternalKey);
+        const bool installed = setProperty(kIOPropertyProtocolCharacteristicsKey, protocol);
         protocol->release();
+        if (shared && !(hasType && hasLocation && installed))
+            return false;
+    } else if (shared) {
+        return false;
     }
     if (OSDictionary *device = OSDictionary::withCapacity(1)) {
         putString(device, kIOPropertyMediumTypeKey, kIOPropertyMediumTypeSolidStateKey);
@@ -895,21 +933,36 @@ bool NativeSwitchBlockDevice::configure(NativeSwitchBlock *provider, uint64_t se
     // Force Unit Access: every write completes only once it is on flash (doSynchronize). Unmap: SD discard.
     if (OSDictionary *features = OSDictionary::withCapacity(2)) {
         features->setObject(kIOStorageFeatureForceUnitAccess, kOSBooleanTrue);
-        if (provider->canUnmap())
+        if (!shared && provider->canUnmap())
             features->setObject(kIOStorageFeatureUnmap, kOSBooleanTrue);
         setProperty(kIOStorageFeaturesKey, features);
         features->release();
     }
-    setName("SwitchSD");
+    setName(shared ? "SwitchSDSharedVolume" : "SwitchSD");
     return true;
+}
+
+IOReturn NativeSwitchBlockDevice::reportMediaState(bool *present, bool *changed)
+{
+    *present = !shared || owner->filesPresent();
+    if (changed)
+        *changed = false;
+    return kIOReturnSuccess;
+}
+
+IOReturn NativeSwitchBlockDevice::doSynchronizeCache()
+{
+    return owner->sync(window);
 }
 
 IOReturn NativeSwitchBlockDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, UInt64 block, UInt64 count,
                                                    IOStorageAttributes *attributes, IOStorageCompletion *completion)
 {
-    if (!buffer || !completion || !count || block >= blocks || count > blocks - block || count > owner->maxSectors ||
-        buffer->getLength() < count * kSector)
+    if (!buffer || !completion || !count || block >= window->count || count > window->count - block ||
+        count > owner->maxSectors || buffer->getLength() < count * kSector)
         return kIOReturnBadArgument;
+    if (shared && !owner->filesPresent())
+        return kIOReturnNoMedia;
     const IODirection direction = buffer->getDirection();
     if (direction != kIODirectionIn && direction != kIODirectionOut)
         return kIOReturnBadArgument;
@@ -929,12 +982,13 @@ IOReturn NativeSwitchBlockDevice::doAsyncReadWrite(IOMemoryDescriptor *buffer, U
     }
     const Request spec = {nullptr,
                           buffer,
-                          owner->firstSector + block,
+                          window->first + block,
                           static_cast<uint32_t>(count),
                           static_cast<uint8_t>(priority >> 6),
                           direction == kIODirectionOut,
                           false,
                           false,
+                          shared,
                           *completion,
                           0};
     buffer->retain();
@@ -1171,24 +1225,23 @@ void NativeSwitchBlock::recover(bool data)
 // caller), else by SDMA into/out of the bounce buffer. Returns 0 or a nonzero step code; *status receives the last
 // interrupt status sample. r12-sdio: issue() then complete(); the worker's ADMA2 commands call the two apart.
 int NativeSwitchBlock::command(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, uint32_t *status,
-                               bool cmd23)
+                               bool cmd23, const SwitchSdWindow *window)
 {
     *status = 0;
-    if (const int step = issue(lba, sectors, write, descriptors, cmd23))
+    if (const int step = issue(lba, sectors, write, descriptors, cmd23, window))
         return step;
     return complete(sectors, write, descriptors, status, nullptr, cmd23);
 }
 
 // The command's first half: the partition check, the registers and the command itself. 0, or step 1 when the bus was not
 // free (claimBus; then nothing was issued).
-int NativeSwitchBlock::issue(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, bool cmd23)
+int NativeSwitchBlock::issue(uint32_t lba, uint32_t sectors, bool write, unsigned descriptors, bool cmd23,
+                             const SwitchSdWindow *window)
 {
-    // Every card write passes here, whichever path staged it: none may reach outside the APFS partition. (Until setup()
-    // has found the partition, sectorCount is 0 and so no write can be issued at all.)
-    if (write && (lba < firstSector || sectors > sectorCount || lba - firstSector > sectorCount - sectors)) {
-        panic("SwitchSD: write lba=%u n=%u outside the APFS partition [%llu, +%llu)", lba, sectors, firstSector,
-              sectorCount);
-    }
+    if ((window && !window->contains(lba, sectors)) || (write && !window) || !sectors || sectors - 1 > UINT32_MAX - lba)
+        panic("SwitchSD: command outside its partition lba=%u n=%u write=%d", lba, sectors, write);
+    if (window == &filesWindow && !filesPresent())
+        return -1;
     if (!claimBus(write ? SwitchSdUse::kWrite : SwitchSdUse::kRead))
         return 1;
     w32(STATUS, 0xffffffff);
@@ -1294,17 +1347,19 @@ int NativeSwitchBlock::complete(uint32_t sectors, bool write, unsigned descripto
     return 0;
 }
 
-int NativeSwitchBlock::transfer(uint64_t lba, uint32_t sectors, bool write, uint8_t *bytes)
+int NativeSwitchBlock::transfer(uint64_t lba, uint32_t sectors, bool write, uint8_t *bytes,
+                                const SwitchSdWindow *window)
 {
     const uint32_t length = sectors * kSector;
-    if (lba > UINT32_MAX || sectors == 0 || sectors > (write ? kSafeSectors : kBounceSectors))
+    if (!sectors || lba > UINT32_MAX || sectors - 1 > UINT32_MAX - lba ||
+        sectors > (write ? kSafeSectors : kBounceSectors))
         return -1;
     if (write && bytes != bounce)
         memcpy(bounce, bytes, length);
     // Clean (write) or clean+invalidate (read) before the device owns the lines.
     switch_dcache_clean_invalidate_lines(bounce, length);
     switch_dcache_sync();
-    if (const int step = run(lba, sectors, write, 0))
+    if (const int step = run(lba, sectors, write, 0, window))
         return step;
     if (!write) {
         switch_dcache_invalidate_lines(bounce, length);
@@ -1341,18 +1396,21 @@ bool NativeSwitchBlock::failed(int step, uint32_t status, uint64_t lba, uint32_t
 // bus is tuned again before the one retry, as the Linux MMC core re-tunes on CRC errors. Failing again right after a
 // re-tune, later I/O runs one clock step slower (hekate's own answer to errors at SDR104 is its slower SDR82,
 // sd.c:96-117).
-int NativeSwitchBlock::run(uint64_t lba, uint32_t sectors, bool write, unsigned descriptors)
+int NativeSwitchBlock::run(uint64_t lba, uint32_t sectors, bool write, unsigned descriptors,
+                           const SwitchSdWindow *window)
 {
     uint32_t status = 0;
-    const int step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status);
-    return step ? retry(step, status, lba, sectors, write, descriptors) : 0;
+    const int step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status, false, window);
+    return step ? retry(step, status, lba, sectors, write, descriptors, window) : 0;
 }
 
 // run()'s error handling for a command that failed with `step` (also for the worker's split ADMA2 commands): logged and
 // recovered, re-tuned, issued once more. r14-sdcq: the retry stops by Auto CMD12 whatever the first try's framing was.
 int NativeSwitchBlock::retry(int step, uint32_t status, uint64_t lba, uint32_t sectors, bool write,
-                             unsigned descriptors)
+                             unsigned descriptors, const SwitchSdWindow *window)
 {
+    if (window == &filesWindow && !filesPresent())
+        return step;
     if (failed(step, status, lba, sectors, write, descriptors, false))
         return step;
     stats.retries++;
@@ -1362,18 +1420,50 @@ int NativeSwitchBlock::retry(int step, uint32_t status, uint64_t lba, uint32_t s
         switch_dcache_clean_invalidate_lines(bounce, static_cast<uintptr_t>(sectors) * kSector);
         switch_dcache_sync();
     }
-    step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status);
+    step = command(static_cast<uint32_t>(lba), sectors, write, descriptors, &status, false, window);
     if (step && !failed(step, status, lba, sectors, write, descriptors, true) && tuned && speed + 1 < kSpeedCount)
         retune(true);
     return step;
+}
+
+IOReturn NativeSwitchBlock::sync(const SwitchSdWindow *window)
+{
+    IOLockLock(queueLock);
+    const IOReturn result = syncLocked(window);
+    IOLockUnlock(queueLock);
+    return result;
+}
+
+IOReturn NativeSwitchBlock::syncLocked(const SwitchSdWindow *window, bool acknowledgeErrors)
+{
+    auto &fence = writes(window);
+    SwitchSdWriteFence::Barrier barrier;
+    fence.begin(barrier);
+    IOReturn result = kIOReturnSuccess;
+    while (fence.completed < barrier.target) {
+        if (window == &filesWindow && !filesPresent())
+            break;
+        if (suspended || shutdownDone || current_thread() == workerThread) {
+            result = kIOReturnBusy;
+            break;
+        }
+        IOLockSleep(queueLock, &fence, THREAD_UNINT);
+    }
+    fence.end(barrier, !acknowledgeErrors || result == kIOReturnBusy);
+    if (window == &filesWindow && !filesPresent())
+        return kIOReturnNoMedia;
+    return !result && barrier.failed ? kIOReturnIOError : result;
 }
 
 void NativeSwitchBlock::enqueueLocked(Request *request)
 {
     if (request->queuedNs > lastIoNs)
         lastIoNs = request->queuedNs;
-    if (request->write)
-        switchSdTrimClear(&trim, request->lba, request->sectors);
+    if (request->write) {
+        ++writes(windowOf(request->shared)).submitted;
+        if (!request->shared)
+            switchSdTrimClear(&trim, request->lba, request->sectors);
+    }
     if (tail) {
         tail->next = request;
     } else {
@@ -1397,6 +1487,7 @@ IOReturn NativeSwitchBlock::submit(const Request &spec)
 {
     struct Ops {
         NativeSwitchBlock *self;
+        bool shared;
 
         void lock() const
         {
@@ -1410,7 +1501,7 @@ IOReturn NativeSwitchBlock::submit(const Request &spec)
 
         bool isShutdown() const
         {
-            return self->shutdownDone;
+            return self->shutdownDone || (shared && !self->filesPresent());
         }
 
         static uint64_t nowNs()
@@ -1440,15 +1531,17 @@ IOReturn NativeSwitchBlock::submit(const Request &spec)
         }
     };
 
-    const SwitchSdPoolSubmitResult status = switchSdPoolSubmit(requestPool, spec, Ops{this});
+    const SwitchSdPoolSubmitResult status = switchSdPoolSubmit(requestPool, spec, Ops{this, spec.shared});
     if (status == SwitchSdPoolSubmitResult::kQueued)
         return kIOReturnSuccess;
-    return status == SwitchSdPoolSubmitResult::kNoMemory ? kIOReturnNoMemory : kIOReturnNotReady;
+    if (status == SwitchSdPoolSubmitResult::kNoMemory)
+        return kIOReturnNoMemory;
+    return spec.shared && !filesPresent() ? kIOReturnNoMedia : kIOReturnNotReady;
 }
 
 IOReturn NativeSwitchBlockDevice::doUnmap(IOBlockStorageDeviceExtent *extents, UInt32 count, IOStorageUnmapOptions)
 {
-    return owner->unmap(extents, count, blocks);
+    return shared ? kIOReturnUnsupported : owner->unmap(extents, count, window->count);
 }
 
 // Thread context: queues the extents for the worker and sleeps until it has run them, so the controller keeps one
@@ -1472,7 +1565,7 @@ IOReturn NativeSwitchBlock::unmap(const IOBlockStorageDeviceExtent *extents, uin
             return kIOReturnNotReady;
         }
         for (uint32_t i = 0; i < count; ++i)
-            switchSdTrimMark(&trim, firstSector + extents[i].blockStart, extents[i].blockCount);
+            switchSdTrimMark(&trim, rootWindow.first + extents[i].blockStart, extents[i].blockCount);
         IOLockWakeup(queueLock, &head, true);
         IOLockUnlock(queueLock);
         return kIOReturnSuccess;
@@ -1494,13 +1587,13 @@ IOReturn NativeSwitchBlock::unmap(const IOBlockStorageDeviceExtent *extents, uin
     return job.result;
 }
 
-// Worker thread, no chain in flight: the job's next discard. Extents are the APFS partition's blocks: firstSector maps
-// them onto the card. True once the job is finished (result set).
+// Worker thread, no chain in flight: the job's next discard. Extents are the APFS partition's blocks: rootWindow.first
+// maps them onto the card. True once the job is finished (result set).
 bool NativeSwitchBlock::stepUnmap(Unmap &job)
 {
     if (job.at == job.end) {
         const IOBlockStorageDeviceExtent &extent = job.extents[job.index++];
-        job.at = firstSector + extent.blockStart;
+        job.at = rootWindow.first + extent.blockStart;
         job.end = job.at + extent.blockCount;
     }
     const uint64_t length = job.end - job.at < kDiscardSectors ? job.end - job.at : kDiscardSectors;
@@ -1519,6 +1612,8 @@ bool NativeSwitchBlock::stepUnmap(Unmap &job)
 // (ERASE_SEQ). Busy after CMD38 ends in transfer complete, an interrupt like any other command's.
 int NativeSwitchBlock::erase(uint64_t first, uint64_t last, uint32_t argument, uint64_t limitNs)
 {
+    if (last < first || !rootWindow.contains(first, last - first + 1))
+        return -1;
     uint32_t r1 = 0;
     int step = controlCommand(32, static_cast<uint32_t>(first), RSP_R1, &r1, kRegNone);
     if (!step && !(r1 & R1_ERRORS))
@@ -1537,7 +1632,7 @@ void NativeSwitchBlock::prepareTrim()
 {
     if (!haveSsr || sdStatus.discard || !sdStatus.auSectors)
         return;
-    const uint64_t words = switchSdTrimWords(firstSector, sectorCount, sdStatus.auSectors);
+    const uint64_t words = switchSdTrimWords(rootWindow.first, rootWindow.count, sdStatus.auSectors);
     trimBytes = words * sizeof(uint64_t);
     trimBits = words ? static_cast<uint64_t *>(IOMallocZero(trimBytes)) : nullptr;
     trimCall = trimBits ? thread_call_allocate_with_options(&NativeSwitchBlock::trimFired, this,
@@ -1549,7 +1644,7 @@ void NativeSwitchBlock::prepareTrim()
         trimBits = nullptr;
         return;
     }
-    switchSdTrimInit(&trim, trimBits, firstSector, sectorCount, sdStatus.auSectors);
+    switchSdTrimInit(&trim, trimBits, rootWindow.first, rootWindow.count, sdStatus.auSectors);
 }
 
 void NativeSwitchBlock::trimFired(thread_call_param_t owner, thread_call_param_t)
@@ -1828,11 +1923,12 @@ bool NativeSwitchBlock::stageChain(Request *first, uint32_t from, uint32_t lengt
 bool NativeSwitchBlock::bounceChain(Request *first, uint32_t sectors)
 {
     const bool write = first->write;
+    const SwitchSdWindow *const bounds = windowOf(first->shared);
     for (uint32_t done = 0; done < sectors;) {
         const uint32_t n = sectors - done < kSafeSectors ? sectors - done : kSafeSectors;
         if (write && !stageChain(first, done * kSector, n * kSector, bounce, false))
             return false;
-        if (transfer(first->lba + done, n, write, bounce))
+        if (transfer(first->lba + done, n, write, bounce, bounds))
             return false;
         if (!write && !stageChain(first, done * kSector, n * kSector, bounce, true))
             return false;
@@ -1850,18 +1946,17 @@ void NativeSwitchBlock::beginBatch(Batch &b)
 {
     Request *const first = b.first;
     const uint32_t sectors = b.sectors;
-    // Each request was checked against the partition window in doAsyncReadWrite and the
-    // chain is their contiguous union; checking the command itself keeps any bug here from
-    // ever reaching outside the APFS partition (issue() checks every write again).
-    if (first->lba < firstSector || sectors > sectorCount || first->lba - firstSector > sectorCount - sectors) {
-        panic("SwitchSD: command lba=%llu n=%u outside the APFS partition [%llu, +%llu)", first->lba, sectors,
-              firstSector, sectorCount);
-    }
+    const SwitchSdWindow *const bounds = windowOf(first->shared);
+    if (!bounds->contains(first->lba, sectors))
+        panic("SwitchSD: chain outside its partition lba=%llu n=%u", first->lba, sectors);
     // r14-sdcq: the sectors no request of the chain covers (a read chain's gaps). A write chain has none: every byte it
     // puts on the card comes from its requests (switchGatherWrites tiles with zero gaps).
     uint64_t payload = 0;
-    for (const Request *r = first; r; r = r->next)
+    for (const Request *r = first; r; r = r->next) {
+        if (r->shared != first->shared || !bounds->contains(r->lba, r->sectors))
+            panic("SwitchSD: request outside its partition lba=%llu n=%u", r->lba, r->sectors);
         payload += r->sectors;
+    }
     if (first->write && payload != sectors)
         panic("SwitchSD: write chain lba=%llu n=%u carries %llu sectors of requests", first->lba, sectors, payload);
     b.gapSectors = static_cast<uint32_t>(sectors - payload);
@@ -1870,6 +1965,10 @@ void NativeSwitchBlock::beginBatch(Batch &b)
     b.overlapNs = 0;
     b.issued = false;
     b.issueStep = 0;
+    if (first->shared && !filesPresent()) {
+        b.direct = false;
+        return;
+    }
     // r10-adma2: straight between the card and the requests' pages by ADMA2 when it is on and the whole chain qualifies;
     // through the bounce buffer otherwise, counted by why.
     b.why = kAdmaOk;
@@ -1883,7 +1982,7 @@ void NativeSwitchBlock::beginBatch(Batch &b)
         return;
     }
     prepareDirect(b.write);
-    b.issueStep = issue(static_cast<uint32_t>(first->lba), sectors, b.write, table.count, b.cmd23);
+    b.issueStep = issue(static_cast<uint32_t>(first->lba), sectors, b.write, table.count, b.cmd23, bounds);
     b.issued = true;
 #if DEVELOPMENT || DEBUG
     if (!b.issueStep) {
@@ -1927,7 +2026,7 @@ void NativeSwitchBlock::endBatch(Batch &b)
                 ++stats.early;
         }
         if (step)
-            step = retry(step, status, first->lba, sectors, write, table.count);
+            step = retry(step, status, first->lba, sectors, write, table.count, windowOf(first->shared));
         finishDirect(write);
         // r12-sdio: staged segments out to their requests.
         if (!step && b.staged) {
@@ -1945,13 +2044,23 @@ void NativeSwitchBlock::endBatch(Batch &b)
             result = kIOReturnIOError;
         }
     }
-    if (b.direct) {
+    if (first->shared && !filesPresent()) {
+        result = kIOReturnNoMedia;
+    } else if (b.direct) {
         stats.direct += b.count;
         stats.descriptors += table.count;
     } else {
         if (!bounceChain(first, sectors))
             result = kIOReturnIOError;
         stats.bounced[b.why] += b.count;
+    }
+    if (write) {
+        IOLockLock(queueLock);
+        auto &fence = writes(windowOf(first->shared));
+        fence.finish(b.count, result != kIOReturnSuccess);
+        if (fence.waiters)
+            IOLockWakeup(queueLock, &fence, false);
+        IOLockUnlock(queueLock);
     }
     b.result = result;
     account(b);
@@ -2171,7 +2280,7 @@ Request *NativeSwitchBlock::pickLocked(uint32_t *chainSectors, uint32_t *chainCo
         bool fits = false;
         if (first->write) {
             count = switchGatherWrites(head, first, limit, kMaxChain, kMergeScan, &start, &sectors, inFlight,
-                                       inFlightCount);
+                                       inFlightCount, writes(windowOf(first->shared)).waiters != nullptr);
             fits = switchWriteChainTiles(head, start, sectors, count);
         } else {
             const uint32_t maxGap = gapsOn ? kGapSectors : 0;
@@ -2214,9 +2323,9 @@ Request *NativeSwitchBlock::pickLocked(uint32_t *chainSectors, uint32_t *chainCo
             }
             return false;
         };
-        while (merge && count < kMaxChain && last->next && last->next->write == first->write &&
-               last->next->lba == last->lba + last->sectors && sectors + last->next->sectors <= limit &&
-               !overlapsOlder(last->next) && !overlapsInFlight(last->next)) {
+        while (merge && count < kMaxChain && last->next && last->next->shared == first->shared &&
+               last->next->write == first->write && last->next->lba == last->lba + last->sectors &&
+               sectors + last->next->sectors <= limit && !overlapsOlder(last->next) && !overlapsInFlight(last->next)) {
             last = last->next;
             sectors += last->sectors;
             ++count;
@@ -2262,6 +2371,9 @@ void NativeSwitchBlock::takenLocked(Request *first, uint32_t count, uint64_t pic
 void NativeSwitchBlock::worker(void *context, wait_result_t)
 {
     auto *self = static_cast<NativeSwitchBlock *>(context);
+    IOLockLock(self->queueLock);
+    self->workerThread = current_thread();
+    IOLockUnlock(self->queueLock);
     // r12-sdio: the chain whose command runs (next) and the one whose requests are still to complete (pending), in turns.
     Batch batches[2] = {};
     unsigned turn = 0;
@@ -3172,6 +3284,11 @@ bool NativeSwitchBlock::reinitialize(uint32_t baseKHz, uint8_t ldo2, bool uhs, b
     if (!resume) {
         readR2(cid);
         haveCid = true;
+    } else if (haveCid) {
+        uint8_t currentCid[16];
+        readR2(currentCid);
+        if (memcmp(currentCid, cid, 15))
+            fail("boot card changed", 0);
     }
     for (const uint64_t ready = switch_now_ns(); !rca;) {
         error = cardCommand(3, 0, RSP_R1, &r);
@@ -3341,7 +3458,12 @@ void NativeSwitchBlock::powerOnController()
 void NativeSwitchBlock::suspend()
 {
     IOLockLock(queueLock);
+    (void)syncLocked(&rootWindow, false);
+    if (filesPresent())
+        (void)syncLocked(&filesWindow, false);
     suspended = true;
+    IOLockWakeup(queueLock, &rootWrites, false);
+    IOLockWakeup(queueLock, &filesWrites, false);
     while (working)
         IOLockSleep(queueLock, &working, THREAD_UNINT);
     IOLockUnlock(queueLock);
@@ -3389,7 +3511,18 @@ Request *NativeSwitchBlock::drainQueueLocked()
         queued = 0;
         for (unsigned c = 0; c < kClasses; ++c)
             queuedReads[c] = 0;
+        uint32_t rootAbandoned = 0, filesAbandoned = 0;
+        for (const Request *r = abandoned; r; r = r->next) {
+            if (r->write)
+                ++(r->shared ? filesAbandoned : rootAbandoned);
+        }
+        if (rootAbandoned)
+            rootWrites.finish(rootAbandoned, true);
+        if (filesAbandoned)
+            filesWrites.finish(filesAbandoned, true);
     }
+    IOLockWakeup(queueLock, &rootWrites, false);
+    IOLockWakeup(queueLock, &filesWrites, false);
     if (Unmap *u = unmaps) {
         unmaps = nullptr;
         while (u) {
@@ -3529,6 +3662,7 @@ void NativeSwitchBlock::resume()
         panic("SwitchSD: LBA 1 differs after sleep (read step %d, bus %s): not the card this boot started from", step,
               busMode);
     }
+    verifyFilesCard();
     dmaResume();
     IOLockLock(queueLock);
     suspended = false;
@@ -3622,17 +3756,21 @@ bool NativeSwitchBlock::setup()
         return false;
     }
     memcpy(gptHeader, header, sizeof(gptHeader));
+    if (!haveCid)
+        haveCid = switch_sd_boot_card_cid(cid);
     identify();
     disableFoundCache();
     const uint64_t entriesLBA = le64(header + 72);
     const uint32_t entryCount = le32(header + 80);
     const uint32_t entrySize = le32(header + 84);
     if (memcmp(header, "EFI PART", 8) || entrySize < 128 || entrySize > 512 || (entrySize & 7) || !entryCount ||
-        entryCount * entrySize > 64 * 1024 || entriesLBA < 2) {
+        entryCount > (64 * 1024) / entrySize || entriesLBA < 2 || entriesLBA > UINT32_MAX) {
         IOLog("SwitchSD: invalid GPT header\n");
         return false;
     }
     const uint32_t entrySectors = (entryCount * entrySize + kSector - 1) / kSector;
+    if (entrySectors - 1 > UINT32_MAX - entriesLBA)
+        return false;
     static uint8_t entries[64 * 1024];
     for (uint32_t done = 0; done < entrySectors;) {
         const uint32_t n = entrySectors - done > 64 ? 64 : entrySectors - done;
@@ -3649,13 +3787,13 @@ bool NativeSwitchBlock::setup()
             continue;
         const uint64_t first = le64(e + 32);
         const uint64_t last = le64(e + 40);
-        if (!first || last < first)
+        if (!first || last < first || last > UINT32_MAX)
             continue;
-        firstSector = first;
-        sectorCount = last - first + 1;
+        rootWindow.first = first;
+        rootWindow.count = last - first + 1;
         ++found;
     }
-    if (found != 1 || firstSector + sectorCount > UINT32_MAX) {
+    if (found != 1 || !rootWindow.contains(rootWindow.first, rootWindow.count)) {
         IOLog("SwitchSD: expected one APFS or \"%s\" partition, found %u\n", kPartitionName, found);
         return false;
     }
@@ -3686,6 +3824,15 @@ bool NativeSwitchBlock::setup()
               gapsOn ? "on" : "off (no sink page below 4 GiB)");
     }
 
+    if (findFiles(&filesSlice) && (!haveCid || !memcmp(cid, filesSlice.cid, 15))) {
+        if (!haveCid) {
+            memcpy(cid, filesSlice.cid, sizeof(cid));
+            haveCid = true;
+        }
+        filesWindow = {filesSlice.first_sector, filesSlice.sector_count};
+        __atomic_store_n(&filesOnline, true, __ATOMIC_RELEASE);
+    }
+
     requestSlab = static_cast<Request *>(IOMallocZero(kRequestPool * sizeof(Request)));
     if (requestSlab) {
         requestPool.init(requestSlab, kRequestPool);
@@ -3701,6 +3848,110 @@ bool NativeSwitchBlock::setup()
     }
     thread_deallocate(thread);
     return true;
+}
+
+bool NativeSwitchBlock::findFiles(switch_sd_files_slice *slice)
+{
+    const auto read = [](void *arg, uint64_t lba, uint8_t *sector) {
+        return static_cast<NativeSwitchBlock *>(arg)->transfer(lba, 1, false, sector);
+    };
+    return switch_sd_files_volume(read, this, rootWindow.first, rootWindow.count, slice) == 0;
+}
+
+void NativeSwitchBlock::verifyFilesCard()
+{
+    if (!filesPresent())
+        return;
+    switch_sd_files_slice current = {};
+    if (findFiles(&current) && current.first_sector == filesWindow.first && current.sector_count == filesWindow.count &&
+        current.exfat == filesSlice.exfat &&
+        !memcmp(current.unique_guid, filesSlice.unique_guid, sizeof(current.unique_guid)))
+        return;
+    IOLockLock(queueLock);
+    __atomic_store_n(&filesOnline, false, __ATOMIC_RELEASE);
+    IOLockWakeup(queueLock, &filesWrites, false);
+    removeFilesIfOfflineLocked();
+    IOLockUnlock(queueLock);
+    IOLog("SwitchSD: shared SD volume no longer matches its boot geometry\n");
+}
+
+void NativeSwitchBlock::removeFilesIfOfflineLocked()
+{
+    if (filesPresent() || !filesRemoval)
+        return;
+    thread_call_enter1(filesRemoval, filesRemoval);
+    filesRemoval = nullptr;
+}
+
+void NativeSwitchBlock::publishFiles()
+{
+    if (!filesPresent())
+        return;
+    const auto publish = [](thread_call_param_t arg, thread_call_param_t call) {
+        static_cast<NativeSwitchBlock *>(arg)->publishFilesNow();
+        thread_call_free(static_cast<thread_call_t>(call));
+    };
+    thread_call_t call = thread_call_allocate(publish, this);
+    if (!call)
+        return;
+    // Wait until root's whole-disk IOMedia has claimed disk0 before publishing the shared volume.
+    const auto matched = [](void *target, void *ref, IOService *client, IONotifier *notifier) -> bool {
+        auto *self = static_cast<NativeSwitchBlock *>(target);
+        const IOService *media = client ? client->getProvider() : nullptr;
+        const IOService *driver = media ? media->getProvider() : nullptr;
+        if (!driver || driver->getProvider() != self->device ||
+            media->getProperty(kIOMediaWholeKey) != kOSBooleanTrue) {
+            return true;
+        }
+        if (__atomic_exchange_n(&self->filesPublishQueued, true, __ATOMIC_ACQ_REL))
+            return true;
+        notifier->remove();
+        thread_call_enter1(static_cast<thread_call_t>(ref), ref);
+        return false;
+    };
+    OSDictionary *match = IOService::serviceMatching("IOMediaBSDClient");
+    IONotifier *notifier =
+        match ? IOService::addMatchingNotification(gIOFirstPublishNotification, match, matched, this, call) : nullptr;
+    OSSafeReleaseNULL(match);
+    if (!notifier)
+        thread_call_free(call);
+}
+
+void NativeSwitchBlock::publishFilesNow()
+{
+    if (!filesPresent())
+        return;
+    auto *sharedDevice = OSTypeAlloc(NativeSwitchBlockDevice);
+    if (!sharedDevice)
+        return;
+    if (sharedDevice->init(static_cast<OSDictionary *>(nullptr)) && sharedDevice->configure(this, &filesWindow, true) &&
+        sharedDevice->attach(this)) {
+        // Removal invokes filesystem clients, which may need our worker to finish older requests.
+        const auto remove = [](thread_call_param_t device, thread_call_param_t call) {
+            auto *retired = static_cast<NativeSwitchBlockDevice *>(device);
+            retired->terminate();
+            retired->release();
+            thread_call_free(static_cast<thread_call_t>(call));
+        };
+        thread_call_t removal = thread_call_allocate(remove, sharedDevice);
+        if (removal && sharedDevice->start(this)) {
+            sharedDevice->retain();
+            sharedDevice->registerService();
+            IOLockLock(queueLock);
+            filesRemoval = removal;
+            removeFilesIfOfflineLocked();
+            IOLockUnlock(queueLock);
+#if DEVELOPMENT || DEBUG
+            IOLog("SwitchSD: registered external %s volume at %llu for %llu sectors\n",
+                  filesSlice.exfat ? "exFAT" : "FAT32", filesWindow.first, filesWindow.count);
+#endif
+        } else {
+            if (removal)
+                thread_call_free(removal);
+            sharedDevice->detach(this);
+        }
+    }
+    sharedDevice->release();
 }
 
 extern "C" void switch_block_suspend(void)
@@ -3766,7 +4017,7 @@ extern "C" int switch_block_publish(void)
     owner->prepareTrim();
     auto *device = OSTypeAlloc(NativeSwitchBlockDevice);
     if (!device || !device->init(static_cast<OSDictionary *>(nullptr)) ||
-        !device->configure(owner, owner->sectorCount) || !device->attach(owner) || !device->start(owner)) {
+        !device->configure(owner, &owner->rootWindow, false) || !device->attach(owner) || !device->start(owner)) {
         // NOLINTNEXTLINE(clang-analyzer-osx.cocoa.RetainCount): a half-published device is kept, never freed
         IOLog("SwitchSD: device start failed\n");
         return gPublishStatus;
@@ -3782,6 +4033,7 @@ extern "C" int switch_block_publish(void)
 #endif
     device->registerService();
     device->release();
+    owner->publishFiles();
     gPublishStatus = SWITCH_BLOCK_OK;
     return gPublishStatus;
 }
@@ -3817,7 +4069,7 @@ switch_block_device(IOService **controller, dev_t *whole, uint64_t *sectors, uin
         drivers->release();
     }
     *controller = gOwner;
-    *sectors = gOwner->sectorCount;
+    *sectors = gOwner->rootWindow.count;
     *maxReadSectors = gOwner->maxSectors;
     return gOwner->device;
 }
@@ -3928,7 +4180,7 @@ extern "C" int switch_raw_volume_status(const char *uuid, dev_t *device, char *p
     *bytes = 0;
     const int status = findVolume(uuid, device, path, capacity);
     if (!status)
-        *bytes = gOwner->sectorCount * kSector;
+        *bytes = gOwner->rootWindow.count * kSector;
     return status;
 }
 

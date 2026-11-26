@@ -24,3 +24,22 @@ and each pull's `boot.logarchive` is made of hard links into it.
 `--//deploy:gpu_bundle` defaults to `//gpu:bundle`, a manifest over Bazel's outputs that nothing copies on the Mac.
 Point it at an lkg snapshot's `gpu/` directory to stage that build instead. `--remove-gpu` takes the bundle off the
 card.
+
+## iOS 27's System cryptex
+
+```sh
+bazel run //deploy:system --config=ios27 -- disk4                          # dry run: what it would write
+bazel run //deploy:system --config=ios27 -- disk4 --yes --confirm=disk4    # write it, then eject
+```
+
+The translated SystemOS cryptex, DriverKit's dyld cache included, is one sealed image file on the card's Preboot volume,
+`/private/preboot/Switch-Staging/141-10410-227.dmg`, which the kernel attaches at every boot. This replaces that file
+with the current build's and leaves Data and the rest of Preboot alone, so a change to the translation reaches an
+installed card without a reinstall.
+
+Run `//deploy:sd` with the same build first. The kernel runs the image's translated code only if the boot entry's
+trust modules list it, so the tool refuses a card whose boot entry differs from this build's, and a translation that
+differs from the pins in `ipsw/pretranslated/24B119`. iOS 17 has nothing to replace.
+
+The first build translates the IPSW (`//install:translated_system_cryptex`): the decrypted OS and SystemOS images take
+15 GB of Bazel's outputs, the deltas and the rebuilt image about 13 GB more.

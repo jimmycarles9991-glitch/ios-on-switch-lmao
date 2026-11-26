@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """The kext prelink of a fileset kernelcache (iPadOS 26/27) into our 12377 kernel, as one build step: the kexts of
-kcinfo.ROOTS' closure, translated in kernel mode and linked against our kernel by name, in the main tree's prelink
+the roots' closure, translated in kernel mode and linked against our kernel by name, in the main tree's prelink
 format (emit26.py). Runs classify.py, pcrel.py, names.py, emit26.py and verify26.py over a work directory holding
 the ipsw CLI's views of the kernelcache.
 
 usage: prelink.py --kernel K --kernelcache KC --kernelcache-17 KC17 --arm64e CLI --ipsw IPSW --symbolsets PLIST
                   --signatures VERSION/xnu.json --slide SLIDE --out OUT --report REPORT --names NAMES
+                  --root BUNDLE... [--cut COMPONENT=DEPENDENCY=SITES...] [--defer COMPONENT=PERSONALITY...]
 
 SLIDE is the slide the drivers' bindings (kits/SwitchABI's tables) assume: a prelink that moves the kexts elsewhere
 fails here instead of linking addresses that miss.
@@ -41,6 +42,11 @@ def main():
                  'names'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--slide', required=True, type=lambda v: int(v, 0))
+    parser.add_argument('--root', required=True, action='append')
+    parser.add_argument('--cut', action='append', default=[], type=lambda v: v.split('='))
+    parser.add_argument('--defer', action='append', default=[], type=lambda v: v.split('='))
+    parser.add_argument('--kind', required=True)
+    parser.add_argument('--sites', action='append', default=[], type=Path)
     args = parser.parse_args()
     work = Path(tempfile.mkdtemp(prefix='prelink-'))
     env = dict(
@@ -52,9 +58,17 @@ def main():
         PRELINK_KERNELCACHE_17=str(args.kernelcache_17.resolve()),
         PRELINK_ARM64E=str(args.arm64e.resolve()),
         PRELINK_SLIDE=hex(args.slide),
+        PRELINK_KIND=args.kind,
+        PRELINK_SITES=os.pathsep.join(str(p.resolve()) for p in args.sites),
         PYTHONPATH=os.pathsep.join([str(HERE)] + sys.path),
     )
     try:
+        cuts = [[component, dependency, int(sites)] for component, dependency, sites in args.cut]
+        deferred = {}
+        for component, personality in args.defer:
+            deferred.setdefault(component, []).append(personality)
+        lists = {'roots': args.root, 'cuts': cuts, 'deferred': deferred}
+        (work / 'prelink-lists.json').write_text(json.dumps(lists))
         nm = subprocess.run(['xcrun', 'nm', str(args.kernel)], env=env, check=True, capture_output=True, text=True)
         (work / 'ours.nm').write_text(''.join(line + '\n' for line in nm.stdout.splitlines() if len(line.split()) == 3))
         with open(work / 'cpp26.json', 'wb') as cpp:

@@ -50,7 +50,10 @@ and `cswitch.s` read UAO. Any binary built for this core (the `__TEXT,__a64x_tar
 Everything derived from Apple's binaries stays out (as for the IPSW): the 26.5.2 kernelcache, the prelinked kernel,
 `kernel-names.json` and the discriminator cache. They were made from iPad11,6 (J171aAP); for iPad12,1 (J181AP, which
 has AppleUSBXHCI) they are redone from its kernelcache. On 27.2 the A13 also ships SPTM and TXM, and its kexts were
-built against an SPTM/TXM kernel; our kernel keeps XNU's non-SPTM pmap. To redo them:
-`ipsw kernel cpp --json --methods KC`, `ipsw kernel cpp --inheritance KC`, `ipsw kernel symbolicate --signatures
-SYMBOLICATOR --json KC`, then `prelink26/kcinfo.py`, `classify.py`, `pcrel.py`, `names.py`, `emit26.py OUR_KERNEL KC
-OUT`, `verify26.py OUT KC`, `bindings26.py`.
+built against an SPTM/TXM kernel; our kernel keeps XNU's non-SPTM pmap.
+
+The build redoes the prelink: `bazel build --//ipsw:kind=24B119 //kernel:kernel_12377` runs `prelink26/prelink.py`,
+which runs the ipsw CLI over the kernelcache, then `classify.py`, `pcrel.py`, `names.py`, `emit26.py` and
+`verify26.py` in a temporary directory (`PRELINK_WORK`, see `paths.py`). To run one of those steps by hand, give it
+that directory as `prelink.py` fills it, `prelink-lists.json` included: the roots, cuts and deferred personalities
+that `kernel/rules/prelink_fileset.bzl` takes from the drivers' `prelink`, `prelink_cuts` and `prelink_deferred`.

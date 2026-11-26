@@ -7,9 +7,11 @@
 
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "../hal/SwitchAudioObjects.h"
+#include "../hal/SwitchDisplayAudio.h"
 
 #ifndef SWITCH_AUDIO_J181
 #define SWITCH_AUDIO_J181 0
@@ -128,6 +130,41 @@ TEST_F(PlugIn, DevicesAreTheIPadsOwn)
     EXPECT_EQ(String(kMic, kAudioDevicePropertyDeviceUID), kJ181 ? "Digital Mic" : "Hawking");
 }
 
+TEST_F(PlugIn, DisplayDeviceFollowsSinkAvailabilityThroughThePluginInterface)
+{
+    SwitchAudioControl control{};
+    switch_audio_display_attach(&gHostInterface, &control, nullptr);
+    EXPECT_THAT(List(kPlugIn, kAudioPlugInPropertyDeviceList), ElementsAre(kSpeaker, kCodec, kMic));
+    control.jack = SwitchAudioJackHeadphones;
+    switch_audio_display_changed();
+    EXPECT_THAT(List(kPlugIn, kAudioPlugInPropertyDeviceList), ElementsAre(kSpeaker, kCodec, kMic, kDisplay));
+    EXPECT_EQ(DeviceWithUID(CFSTR(SWITCH_AUDIO_DISPLAY_UID)), static_cast<AudioObjectID>(kDisplay));
+    EXPECT_EQ(Value<UInt32>(kDisplay, kAudioDevicePropertyTransportType),
+              static_cast<UInt32>(kAudioDeviceTransportTypeDisplayPort));
+    EXPECT_THAT(List(kDisplay, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput), ElementsAre(kDisplayOut));
+    EXPECT_THAT(List(kDisplay, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput), IsEmpty());
+    const AudioObjectPropertyAddress transport = {kAudioDevicePropertyTransportType, kAudioObjectPropertyScopeGlobal,
+                                                  kAudioObjectPropertyElementMain};
+    const AudioObjectPropertyAddress unknown = {'nope', kAudioObjectPropertyScopeGlobal,
+                                                kAudioObjectPropertyElementMain};
+    EXPECT_TRUE((*driver_)->HasProperty(driver_, kDisplay, 0, &transport));
+    EXPECT_FALSE((*driver_)->HasProperty(driver_, kDisplay, 0, &unknown));
+    EXPECT_TRUE(Settable(kDisplay, kAudioDevicePropertyNominalSampleRate));
+    EXPECT_FALSE(Settable(kDisplay, kAudioDevicePropertyTransportType));
+    EXPECT_TRUE(Settable(kDisplayOut, kAudioStreamPropertyPhysicalFormat));
+    Boolean will = true, inPlace = false;
+    EXPECT_EQ(
+        (*driver_)->WillDoIOOperation(driver_, kDisplay, 0, kAudioServerPlugInIOOperationReadInput, &will, &inPlace),
+        0);
+    EXPECT_FALSE(will);
+    EXPECT_TRUE(inPlace);
+    control.jack = 0;
+    switch_audio_display_changed();
+    EXPECT_THAT(List(kPlugIn, kAudioPlugInPropertyDeviceList), ElementsAre(kSpeaker, kCodec, kMic));
+    EXPECT_EQ(DeviceWithUID(CFSTR(SWITCH_AUDIO_DISPLAY_UID)), kAudioObjectUnknown);
+    switch_audio_display_attach(nullptr, nullptr, nullptr);
+}
+
 // The built-in input: a silent microphone stream, one channel on J120, J181's two microphones on J181 (AID2003's mic
 // graphs take two channels).
 TEST_F(PlugIn, BuiltInInputIsAMicrophoneStream)
@@ -141,24 +178,26 @@ TEST_F(PlugIn, BuiltInInputIsAMicrophoneStream)
     EXPECT_EQ(format.mBytesPerFrame, format.mChannelsPerFrame * 4);
 }
 
-// J181's speaker stream has its four channels, so VirtualAudio passes the speaker graph's left, left, right, right
-// through instead of keeping channels 0 and 1; a stereo client of the device lands on channels 1 and 3 (1-based).
+// J181's speaker stream has its four channels so VirtualAudio passes the speaker graph's left, left, right, right
+// through instead of keeping channels 0 and 1. Its layout uses Unknown labels and {1, 2} stereo pair (matching
+// ASDAudioDevice/ASDStream) so VirtualAudio forwarding 'srnd' onto its 2-ch vdef stream does not drop right.
 TEST_F(PlugIn, SpeakerHasTheIPadsChannels)
 {
     const auto format = Value<AudioStreamBasicDescription>(kSpeakerOut, kAudioStreamPropertyVirtualFormat);
     EXPECT_EQ(format.mChannelsPerFrame, kJ181 ? 4u : 2u);
     const auto stereo = List(kSpeaker, kAudioDevicePropertyPreferredChannelsForStereo, kAudioObjectPropertyScopeOutput);
-    EXPECT_THAT(stereo, kJ181 ? ElementsAre(1u, 3u) : ElementsAre(1u, 2u));
+    EXPECT_THAT(stereo, ElementsAre(1u, 2u));
 
     std::vector<uint8_t> out;
     ASSERT_EQ(Get(kSpeaker, kAudioDevicePropertyPreferredChannelLayout, out, kAudioObjectPropertyScopeOutput), 0);
     const auto *layout = reinterpret_cast<const AudioChannelLayout *>(out.data());
+    EXPECT_EQ(layout->mChannelLayoutTag, kAudioChannelLayoutTag_UseChannelDescriptions);
     std::vector<AudioChannelLabel> labels;
     for (UInt32 i = 0; i < layout->mNumberChannelDescriptions; ++i)
         labels.push_back(layout->mChannelDescriptions[i].mChannelLabel);
     if (kJ181) {
-        EXPECT_THAT(labels, ElementsAre(kAudioChannelLabel_Left, kAudioChannelLabel_Unused, kAudioChannelLabel_Right,
-                                        kAudioChannelLabel_Unused));
+        EXPECT_THAT(labels, ElementsAre(kAudioChannelLabel_Unknown, kAudioChannelLabel_Unknown,
+                                        kAudioChannelLabel_Unknown, kAudioChannelLabel_Unknown));
     } else {
         EXPECT_THAT(labels, ElementsAre(kAudioChannelLabel_Left, kAudioChannelLabel_Right));
     }
@@ -181,17 +220,19 @@ TEST_F(PlugIn, CodecControls)
     const auto input = List(kCodec, kAudioObjectPropertyControlList, kAudioObjectPropertyScopeInput);
     const auto output = List(kCodec, kAudioObjectPropertyControlList, kAudioObjectPropertyScopeOutput);
     if (!kJ181) {
-        EXPECT_THAT(all, ElementsAre(kCodecVolume));
+        EXPECT_THAT(all, UnorderedElementsAre(kCodecVolume, kCodecMute));
         EXPECT_THAT(input, IsEmpty());
+        EXPECT_THAT(output, UnorderedElementsAre(kCodecVolume, kCodecMute));
         std::vector<uint8_t> out;
         EXPECT_EQ(Get(kCodecJackOut, kAudioObjectPropertyClass, out), kAudioHardwareBadObjectError);
         return;
     }
-    EXPECT_THAT(all, UnorderedElementsAre(kCodecVolume, kCodecJackOut, kCodecJackIn, kCodecSources));
+    EXPECT_THAT(all, UnorderedElementsAre(kCodecVolume, kCodecMute, kCodecJackOut, kCodecJackIn, kCodecSources));
     EXPECT_THAT(input, UnorderedElementsAre(kCodecJackIn, kCodecSources));
-    EXPECT_THAT(output, UnorderedElementsAre(kCodecVolume, kCodecJackOut));
+    EXPECT_THAT(output, UnorderedElementsAre(kCodecVolume, kCodecMute, kCodecJackOut));
     EXPECT_THAT(List(kCodec, kAudioObjectPropertyOwnedObjects),
-                UnorderedElementsAre(kCodecIn, kCodecOut, kCodecVolume, kCodecJackOut, kCodecJackIn, kCodecSources));
+                UnorderedElementsAre(kCodecIn, kCodecOut, kCodecVolume, kCodecMute, kCodecJackOut, kCodecJackIn,
+                                     kCodecSources));
 
     for (const auto [jack, scope] : {std::pair{kCodecJackOut, kAudioObjectPropertyScopeOutput},
                                      std::pair{kCodecJackIn, kAudioObjectPropertyScopeInput}}) {
@@ -239,11 +280,39 @@ TEST_F(PlugIn, DigitalMicSources)
     EXPECT_FALSE(Settable(kMicSources, kAudioSelectorControlPropertyCurrentItem));
 }
 
+TEST_F(PlugIn, OutputMuteControlsAndTiming)
+{
+    EXPECT_THAT(List(kSpeaker, kAudioObjectPropertyControlList, kAudioObjectPropertyScopeOutput),
+                UnorderedElementsAre(kVolume, kSpeakerMute));
+    for (const auto [mute, owner, elem] :
+         {std::tuple<AudioObjectID, AudioObjectID, AudioObjectPropertyElement>{kSpeakerMute, kSpeaker,
+                                                                               kAudioObjectPropertyElementMain},
+          std::tuple<AudioObjectID, AudioObjectID, AudioObjectPropertyElement>{kCodecMute, kCodec, 1u}}) {
+        EXPECT_EQ(Value<AudioClassID>(mute, kAudioObjectPropertyClass), (AudioClassID)kAudioMuteControlClassID);
+        EXPECT_EQ(Value<AudioClassID>(mute, kAudioObjectPropertyBaseClass), (AudioClassID)kAudioBooleanControlClassID);
+        EXPECT_EQ(Value<AudioObjectID>(mute, kAudioObjectPropertyOwner), owner);
+        EXPECT_EQ(Value<AudioObjectPropertyScope>(mute, kAudioControlPropertyScope), kAudioObjectPropertyScopeOutput);
+        EXPECT_EQ(Value<AudioObjectPropertyElement>(mute, kAudioControlPropertyElement), elem);
+        EXPECT_TRUE(Settable(mute, kAudioBooleanControlPropertyValue));
+        const AudioObjectPropertyAddress addr = {kAudioBooleanControlPropertyValue, kAudioObjectPropertyScopeGlobal,
+                                                 kAudioObjectPropertyElementMain};
+        UInt32 on = 1u, off = 0u;
+        EXPECT_EQ((*driver_)->SetPropertyData(driver_, mute, 0, &addr, 0, nullptr, sizeof on, &on), 0);
+        EXPECT_EQ(Value<UInt32>(mute, kAudioBooleanControlPropertyValue), 1u);
+        EXPECT_EQ((*driver_)->SetPropertyData(driver_, mute, 0, &addr, 0, nullptr, sizeof off, &off), 0);
+        EXPECT_EQ(Value<UInt32>(mute, kAudioBooleanControlPropertyValue), 0u);
+    }
+
+    EXPECT_EQ(Value<UInt32>(kSpeaker, kAudioDevicePropertyLatency), 480u);
+    EXPECT_EQ(Value<UInt32>(kSpeaker, kAudioDevicePropertySafetyOffset, kAudioObjectPropertyScopeOutput), 960u);
+    EXPECT_EQ(Value<UInt32>(kSpeaker, kAudioDevicePropertyZeroTimeStampPeriod), 16384u);
+}
+
 // The audio server drops an object whose custom property list does not answer (empty here).
 TEST_F(PlugIn, EveryObjectListsNoCustomProperties)
 {
-    std::vector<AudioObjectID> objects = {kPlugIn,  kSpeaker,  kSpeakerOut,  kSpeakerTap, kVolume, kCodec,
-                                          kCodecIn, kCodecOut, kCodecVolume, kMic,        kMicIn};
+    std::vector<AudioObjectID> objects = {kPlugIn,  kSpeaker,  kSpeakerOut,  kSpeakerTap, kVolume, kSpeakerMute, kCodec,
+                                          kCodecIn, kCodecOut, kCodecVolume, kCodecMute,  kMic,    kMicIn};
     if (kJ181)
         objects.insert(objects.end(), {kCodecJackOut, kCodecJackIn, kCodecSources, kMicSources});
     for (const AudioObjectID object : objects) {

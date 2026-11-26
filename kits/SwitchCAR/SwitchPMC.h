@@ -23,12 +23,23 @@ bool switch_pmc_partition_is_on(unsigned partition);
 bool switch_pmc_partition_on(unsigned partition);
 bool switch_pmc_partition_off(unsigned partition);
 void switch_pmc_remove_clamping(unsigned partition);
+// switch_pmc_remove_clamping, then REMOVE_CLAMPING_CMD's bit read until it clears (100 us). False if it stays.
+bool switch_pmc_unclamp(unsigned partition);
 
-// tegra_powergate_sequence_power_up: reset asserted, partition on, clock on, clamps off, reset deasserted (10 us
-// between steps). Engine quirks (MC hot reset, MBIST work-arounds, clock sources) stay with the engine's driver.
-bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id);
-// The same up to the clamps, the reset left asserted for a driver that programs its engine's clocks first (XUSB).
-bool switch_pmc_power_up_in_reset(unsigned partition, unsigned clock_id, unsigned reset_id);
+// A partition's memory client in MC_CLIENT_HOTRESET_CTRL (0x200) or CTRL_1 (0x970), released through the MC's locked
+// read-modify-write (TegraSMMU.h tegra_mc_hot_reset).
+struct switch_pmc_mc_client {
+    uint32_t ctrl, bit;
+    void (*hot_reset)(uint32_t ctrl, uint32_t bit, bool on);
+};
+
+// L4T powergate-t21x.c __tegra1xx_unpowergate: partition on, clock on, reset asserted, clamps removed (until
+// REMOVE_CLAMPING_CMD's bit clears, 100 us), reset deasserted, the memory client's hot reset released (`client` NULL: the
+// partition has none, or its driver releases it), 10 us between steps. Clock sources go first (the caller's), and
+// engine quirks (MBIST work-arounds) stay with the engine's driver. False if the partition did not power on or its
+// clamps stayed; the sequence runs to its end either way.
+bool switch_pmc_power_up(unsigned partition, unsigned clock_id, unsigned reset_id,
+                         const struct switch_pmc_mc_client *client);
 // tegra_powergate_power_down: clock on, reset asserted, clock off, partition off.
 bool switch_pmc_power_down(unsigned partition, unsigned clock_id, unsigned reset_id);
 

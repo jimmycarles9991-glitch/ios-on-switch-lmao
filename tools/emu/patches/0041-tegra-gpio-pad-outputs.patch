@@ -1,0 +1,58 @@
+diff --git a/hw/arm/tegra2/ppsb/gpio/gpio.c b/hw/arm/tegra2/ppsb/gpio/gpio.c
+index 2475a04..f95371c 100644
+--- a/hw/arm/tegra2/ppsb/gpio/gpio.c
++++ b/hw/arm/tegra2/ppsb/gpio/gpio.c
+@@ -97,6 +97,8 @@ typedef struct tegra_gpio_state {
+     /* What drives each pad from outside (qdev GPIO input port * 8 + pin), and each pad's level last evaluated. */
+     uint8_t external[BANKS_NB * PORTS_NB];
+     uint8_t pad[BANKS_NB * PORTS_NB];
++    /* Each pad's level as the board sees it, for devices a pad drives (port * 8 + pin, as the inputs). */
++    qemu_irq pad_out[BANKS_NB * PORTS_NB * 8];
+ } tegra_gpio;
+ 
+ static const VMStateDescription vmstate_tegra_gpio = {
+@@ -182,6 +184,18 @@ static uint8_t tegra_gpio_pad_level(tegra_gpio *s, int port_nb)
+     return (p->gpio_out.reg32 & driven) | (s->external[port_nb] & ~driven);
+ }
+ 
++static void tegra_gpio_set_pads(tegra_gpio *s, int port_nb, uint8_t now)
++{
++    uint8_t changed = s->pad[port_nb] ^ now;
++
++    s->pad[port_nb] = now;
++    for (int pin = 0; pin < 8; pin++) {
++        if (changed & BIT(pin)) {
++            qemu_set_irq(s->pad_out[port_nb * 8 + pin], (now >> pin) & 1);
++        }
++    }
++}
++
+ /* INT_LVL per pin: bit n high/rising, bit n+8 edge (else level), bit n+16 both edges (gpio-tegra.c). A level source
+  * stays pending while its level holds, so INT_CLR only ends it once the line has gone back. */
+ static void tegra_gpio_evaluate(tegra_gpio *s, int port_nb)
+@@ -196,7 +210,7 @@ static void tegra_gpio_evaluate(tegra_gpio *s, int port_nb)
+     uint8_t levels = ~(now ^ high);
+ 
+     p->gpio_int_sta.reg32 |= ((edge & edges) | (~edge & levels)) & p->gpio_cnf.reg32 & 0xFF;
+-    s->pad[port_nb] = now;
++    tegra_gpio_set_pads(s, port_nb, now);
+     tegra_gpio_update_bank(s, port_nb / PORTS_NB);
+ }
+ 
+@@ -425,7 +439,7 @@ static void tegra_gpio_priv_reset(DeviceState *dev)
+             tegra_gpio_port *p = &s->regs[bank * PORTS_NB + port];
+ 
+             p->gpio_in.reg32 = s->reset_values[bank][port];
+-            s->pad[bank * PORTS_NB + port] = tegra_gpio_pad_level(s, bank * PORTS_NB + port);
++            tegra_gpio_set_pads(s, bank * PORTS_NB + port, tegra_gpio_pad_level(s, bank * PORTS_NB + port));
+         }
+     }
+     for (i = 0; i < BANKS_NB; i++) {
+@@ -464,6 +478,7 @@ static void tegra_gpio_priv_realize(DeviceState *dev, Error **errp)
+     for (i = 0; i < s->num_banks; i++)
+         sysbus_init_irq(SYS_BUS_DEVICE(dev), &s->irq[i]);
+     qdev_init_gpio_in(dev, tegra_gpio_set_input, BANKS_NB * PORTS_NB * 8);
++    qdev_init_gpio_out_named(dev, s->pad_out, "pad", BANKS_NB * PORTS_NB * 8);
+     /* Pads take their external level once: devices drive theirs from their own resets, in any order. */
+     for (int bank = 0; bank < BANKS_NB; bank++) {
+         for (int port = 0; port < PORTS_NB; port++) {

@@ -41,6 +41,7 @@ OSDeclareDefaultStructors(ArmDTPlatform) public : bool configure(IOService *prov
     const char *excludeList() override;
     void getUTCTimeOfDay(clock_sec_t *secs, clock_nsec_t *nsecs) override;
     void setUTCTimeOfDay(clock_sec_t secs, clock_nsec_t nsecs) override;
+    void PMRegisterDevice(IOService *theNub, IOService *theDevice) override;
 
 private:
     static bool hasNVRAMProxy(IOService *provider);
@@ -64,6 +65,20 @@ OSDefineMetaClassAndStructors(ArmDTPlatform, IODTPlatformExpert)
 const char *ArmDTPlatform::excludeList()
 {
     return "('options')";
+}
+
+// A driver joins the power tree under the nearest of its providers that is already in it, as AppleARMPE does; XNU's
+// IOPlatformExpert puts every one under the root domain. Apple's USB root ports rely on it: a port that goes On must
+// raise its host controller, which otherwise idles to Off and gates every port register access.
+void ArmDTPlatform::PMRegisterDevice(IOService *theNub, IOService *theDevice)
+{
+    for (IOService *parent = theNub; parent != nullptr; parent = parent->getProvider()) {
+        if (parent->inPlane(gIOPowerPlane)) {
+            parent->addPowerChild(theDevice);
+            return;
+        }
+    }
+    IODTPlatformExpert::PMRegisterDevice(theNub, theDevice);
 }
 
 // The wall clock. XNU reads it in IOKitInitializeTime() -> clock_initialize_calendar() ->

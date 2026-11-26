@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
 // One Tegra210 MC SMMU address space (Linux iommu/tegra-smmu.c layout): a 4 KiB page directory of 1024 entries, each
 // covering 4 MiB, and 4 KiB page tables of 1024 entries. A directory entry is its table's PFN | READ 31 | WRITE 30 |
-// NONSECURE 29 | NEXT 28; a table entry is the page's PFN | READ | (WRITE) | NONSECURE. Addresses are 32 bits.
+// NONSECURE 29 | NEXT 28, or without NEXT a 4 MiB section: the section's PFN | READ | (WRITE) | NONSECURE (L4T's
+// tegra-smmu.c, the Switch's Linux, maps, splits and walks them; mainline maps 4 KiB only); a table entry is the page's
+// PFN | READ | (WRITE) | NONSECURE. Addresses are 32 bits.
 //
 // Plain state over the caller's physically contiguous, below-4-GiB table buffer: page 0 is the directory, the others are
 // handed out as tables in order (so the tables reserve() installs for a range are consecutive pages). No IOKit: TegraVIC,
@@ -67,13 +69,15 @@ struct TegraSMMUDomain {
         return static_cast<uint32_t>(page >> 12) | kRead | kNonSecure | (writable ? kWrite : 0);
     }
 
-    // The table covering iova; installed (the next free page) when create. nullptr: out of range, out of tables, or a
-    // directory entry that is not one of this buffer's tables.
+    // The table covering iova; installed (the next free page) when create. nullptr: out of range, out of tables, a
+    // section, or a directory entry that is not one of this buffer's tables.
     uint32_t *tableFor(uint64_t iova, bool create)
     {
         if (!va || iova >= kLimit)
             return nullptr;
         uint32_t &pde = va[iova >> 22];
+        if (pde != 0 && !(pde & kNext))
+            return nullptr;
         if (!(pde & kNext)) {
             if (!create || used == pages)
                 return nullptr;
@@ -94,6 +98,12 @@ struct TegraSMMUDomain {
         return t ? &t[(iova >> 12) & (kEntries - 1)] : nullptr;
     }
 
+    // The tables [iova, iova + bytes) touches: what reserve() or identity() installs for it in an empty domain.
+    static constexpr uint32_t tablesFor(uint64_t iova, uint64_t bytes)
+    {
+        return bytes ? static_cast<uint32_t>((iova + bytes - 1) / kSpan - iova / kSpan + 1) : 0;
+    }
+
     // Tables for [iova, iova + bytes), installed now; a range not yet covered gets consecutive pages. False when out of tables.
     bool reserve(uint64_t iova, uint64_t bytes)
     {
@@ -101,6 +111,17 @@ struct TegraSMMUDomain {
             if (!tableFor(at, true))
                 return false;
         }
+        return true;
+    }
+
+    // The 4 MiB at iova (aligned, its directory entry empty) mapped to the 4 MiB at target (aligned) by one directory
+    // entry.
+    bool section(uint64_t iova, uint64_t target, bool writable)
+    {
+        if (!va || iova >= kLimit || ((iova | target) & (kSpan - 1)) != 0 || va[iova >> 22] != 0)
+            return false;
+        va[iova >> 22] = entry(target, writable);
+        touch(&va[iova >> 22], sizeof(uint32_t));
         return true;
     }
 
@@ -145,7 +166,7 @@ struct TegraSMMUDomain {
             return UINT64_MAX;
         const uint32_t pde = va[iova >> 22];
         if (!(pde & kNext))
-            return UINT64_MAX;
+            return (pde & kRead) ? (static_cast<uint64_t>(pde & kPfnMask) << 12) + (iova & (kSpan - 1)) : UINT64_MAX;
         const uint64_t at = static_cast<uint64_t>(pde & kPfnMask) << 12;
         if (at < pa + kPage || at >= pa + static_cast<uint64_t>(pages) * kPage)
             return UINT64_MAX;

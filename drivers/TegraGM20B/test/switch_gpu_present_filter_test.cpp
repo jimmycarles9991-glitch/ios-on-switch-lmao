@@ -448,33 +448,87 @@ TEST_F(PromisedPresentFilter, AWorkItemThatClaimsFirstLeavesTheFilterNothing)
 	EXPECT_TRUE(callouts.empty());
 }
 
+TEST_F(PresentFilter, NonOwnerDisplayNeverOverwritesViewOrInvokesCallout)
+{
+	int display1 = 1, display2 = 2;
+	volatile uint32_t fence2 = 10, visible2 = 10;
+	auto *timeline2 = switch_gpu_timeline_create(++nextId, &fence2);
+	ASSERT_NE(timeline2, nullptr);
+	switch_gpu_timeline_visibility(timeline2, &visible2);
+	switch_gpu_backing_token token2{};
+	switch_gpu_timeline_token(timeline2, 10, &token2);
+	ASSERT_EQ(operations.retain_token(&token2), 0);
+
+	tgm_present_filter_owner(nullptr);
+	EXPECT_EQ(tgm_present_filter_is_owner(&display1), 0);
+	EXPECT_EQ(tgm_present_filter_is_owner(&display2), 0);
+	tgm_present_filter_attach_for(&display2, &token2);
+	filter();
+	EXPECT_TRUE(callouts.empty());
+
+	tgm_present_filter_owner(&display1);
+	EXPECT_EQ(tgm_present_filter_is_owner(&display1), 1);
+	EXPECT_EQ(tgm_present_filter_is_owner(&display2), 0);
+	tgm_present_filter_attach_for(&display2, &token2);
+	filter();
+	EXPECT_TRUE(callouts.empty());
+
+	tgm_present_filter_attach_for(&display1, &watched);
+	tgm_present_filter_attach_for(&display2, &token2);
+	tgm_present_filter_detach_for(&display2);
+	filter();
+	EXPECT_TRUE(callouts.empty());
+
+	__atomic_store_n(&fence, 5u, __ATOMIC_RELEASE);
+	__atomic_store_n(&visible, 5u, __ATOMIC_RELEASE);
+	filter();
+	EXPECT_EQ(callouts, std::vector<int>{0});
+
+	tgm_present_filter_detach_for(&display1);
+	tgm_present_filter_owner(nullptr);
+	operations.release_token(&token2);
+	switch_gpu_timeline_close(timeline2);
+}
+
 TEST(PresentFilterSource, TheWatchAttachesBeforeItsArmAndEachClaimDetachesFirst)
 {
 	using switch_ios::test::Between;
+	using switch_ios::test::Block;
 	using switch_ios::test::SourceText;
 	const std::string present = SourceText("../gpu_present.c");
 	const std::string watch = Between(present, "int tgm_present_watch_dependencies(", "\n}\n");
 	EXPECT_NE(watch.find("switch_gpu_present_watch_arm_many("), std::string::npos);
 	EXPECT_LT(watch.find("if (watch_count == 1)"),
-		  watch.find("tgm_present_filter_attach(&watch_tokens[0]);"));
-	EXPECT_LT(watch.find("tgm_present_filter_attach(&watch_tokens[0]);"),
+		  watch.find("tgm_present_filter_attach_for("));
+	EXPECT_LT(watch.find("tgm_present_filter_attach_for("),
 		  watch.find("switch_gpu_present_watch_arm_many("));
+	const auto copy = Block(present, "static int present_copy(");
+	EXPECT_TRUE(copy.before("tgm_present_filter_attach_for(", "switch_gpu_chan_fence_sealed("));
+	EXPECT_TRUE(copy.has("tgm_present.primary = tgm_present_filter_is_owner("));
+	const auto deliver = Block(present, "static void present_deliver(");
+	EXPECT_TRUE(deliver.before(
+		"switch_gpu_present_deliver(&tgm_present.completing, done, arg, status);",
+		"switch_gpu_admission_changed();"));
+	EXPECT_TRUE(Block(present, "static void present_watch_complete(")
+			    .has("if (tgm_present.primary) tgm_deadline_presented("));
 	const std::string pass = Between(present, "void tgm_present_pass(void)\n{", "\n}\n");
+	EXPECT_NE(pass.find("if (tgm_present.fenced_primary)"), std::string::npos);
 	EXPECT_LT(pass.find("switch_gpu_present_watch_take_visible("),
-		  pass.find("tgm_present_filter_detach();"));
-	EXPECT_LT(pass.find("tgm_present_filter_detach();"), pass.find("present_watch_complete("));
+		  pass.find("tgm_present_filter_detach_for("));
+	EXPECT_LT(pass.find("tgm_present_filter_detach_for("),
+		  pass.find("present_watch_complete("));
 	const std::string work =
 		Between(present, "static void present_watch_work(void *unused)", "\n}\n");
 	EXPECT_LT(work.find("switch_gpu_present_watch_claim("),
-		  work.find("tgm_present_filter_detach();"));
-	EXPECT_LT(work.find("tgm_present_filter_detach();"), work.find("present_watch_flush();"));
+		  work.find("tgm_present_filter_detach_for("));
+	EXPECT_LT(work.find("tgm_present_filter_detach_for("), work.find("present_watch_flush();"));
 	const std::string kept =
 		Between(SourceText("../gpu_promise.c"), "void tgm_present_promise_kept(", "\n}\n");
 	EXPECT_LT(kept.find("switch_gpu_present_watch_kept("),
-		  kept.find("tgm_present_filter_attach(producer);"));
-	EXPECT_LT(kept.find("tgm_present_filter_attach(producer);"),
+		  kept.find("tgm_present_filter_attach_for("));
+	EXPECT_LT(kept.find("tgm_present_filter_attach_for("),
 		  kept.find("switch_gpu_present_watch_rearm("));
-	EXPECT_NE(kept.find("tgm_present_filter_attach(producer);"), std::string::npos);
+	EXPECT_NE(kept.find("tgm_present_filter_attach_for("), std::string::npos);
 	const std::string glue = SourceText("../shim/xnu_glue.cpp");
 	const std::string filterBody = Between(glue, "bool gpuFilter(", "\n}\n");
 	EXPECT_NE(filterBody.find("tgm_present_filter();"), std::string::npos);

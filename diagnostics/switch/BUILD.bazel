@@ -46,6 +46,7 @@ _C_COPTS = [
 ]
 
 _HDR_DEPS = [
+    "drivers/NativeSwitchBlock",
     "drivers/SwitchSuspend",
     "kits/SwitchDMA",
     "kits/SwitchMMIO",
@@ -62,6 +63,9 @@ kernel_driver(
         "SwitchPanicEarly.c",
         "SwitchPanicSave.c",
         "SwitchRootBoot.c",
+        "SwitchSdHandoff.c",
+        "storage/partition.c",
+        "storage/sd_reference.c",
     ],
     c_copts = _C_COPTS,
     hdr_deps = _HDR_DEPS,
@@ -80,8 +84,6 @@ kernel_driver(
         "SwitchSD.c",
         "storage/block_backend.c",
         "storage/fat32.c",
-        "storage/partition.c",
-        "storage/sd_reference.c",
         "storage/sdmmc_read.c",
         "storage/split_disk.c",
         "storage/data_backend.c",

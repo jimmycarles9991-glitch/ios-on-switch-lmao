@@ -108,6 +108,18 @@ TEST_F(McErrors, AnSmmuFaultNamesThePagesPermissions)
                                     "INTSTATUS 0x400 ERR_STATUS 0x6a00006c ERR_ADR 0x4001d400\n");
 }
 
+TEST_F(McErrors, AnXusbFaultNamesTheClientAndTheIova)
+{
+    mc(0x0) = 1u << 10;
+    mc(0x8) = 0x6c01004b;
+    mc(0xc) = 0x80123000;
+    ASSERT_TRUE(started()->fire());
+    ASSERT_EQ(switch_test_lines.size(), 1u);
+    EXPECT_EQ(switch_test_lines[0], "TegraSMMU: MC error INVALID_SMMU_PAGE: INVALID_SMMU_PAGE (page readable 1 "
+                                    "writable 1 nonsecure 0), a write by csw_xusb_hostw (XUSB host) (client 0x4b) at "
+                                    "0x80123000; INTSTATUS 0x400 ERR_STATUS 0x6c01004b ERR_ADR 0x80123000\n");
+}
+
 TEST_F(McErrors, AnInterruptWithNoErrorBitTakesNothing)
 {
     mc(0x0) = 1u << 9;

@@ -30,7 +30,10 @@
     "157": "initialPowerStateForDomainState",
     "159": "powerStateWillChangeTo",
     "160": "powerStateDidChangeTo",
+    "231": "createIOBuffer",
     "240": "copyMapper",
+    "259": "hardwareException",
+    "295": "createPort",
     "313": "regRead16",
     "314": "regRead32",
     "315": "regRead64",
@@ -38,6 +41,7 @@
     "317": "regWrite64"
   },
   "fields": {
+    "clientBufferOptions": "0x5b0",
     "ringBufferOptions": "0x5ac"
   },
   "addresses": {
@@ -137,6 +141,7 @@
     "opaque247": "0xfffffff009c1d5e4",
     "opaque179": "0xfffffff009c1d764",
     "opaque248": "0xfffffff009c1d774",
+    "switch_original_xhci_port_properties": "0xfffffff009c1f81c",
     "C2": "0xfffffff009d31ecc",
     "D2": "0xfffffff009d31f3c",
     "init": "0xfffffff009d32028",
@@ -153,7 +158,6 @@
     "opaque277": "0xfffffff009d35f68",
     "opaque278": "0xfffffff009d35fb0",
     "opaque279": "0xfffffff009d35fbc",
-    "opaque231": "0xfffffff009d36150",
     "opaque193": "0xfffffff009d362b8",
     "opaque194": "0xfffffff009d37f28",
     "opaque283": "0xfffffff009d38654",
@@ -187,7 +191,7 @@
     "opaque293": "0xfffffff009d3f9e8",
     "opaque294": "0xfffffff009d3fa94",
     "opaque256": "0xfffffff009d3ff2c",
-    "opaque295": "0xfffffff009d41598",
+    "createPort": "0xfffffff009d41598",
     "opaque180": "0xfffffff009d41e24",
     "opaque182": "0xfffffff009d41eac",
     "opaque183": "0xfffffff009d42d9c",
@@ -201,7 +205,7 @@
     "opaque307": "0xfffffff009d464fc",
     "opaque308": "0xfffffff009d46510",
     "opaque250": "0xfffffff009d46518",
-    "opaque259": "0xfffffff009d46948",
+    "hardwareException": "0xfffffff009d46948",
     "opaque260": "0xfffffff009d46cd4",
     "opaque262": "0xfffffff009d46fb8",
     "opaque281": "0xfffffff009d4705c",
@@ -223,15 +227,22 @@
     "opaque319": "0xfffffff009d496d8",
     "opaque320": "0xfffffff009d49788",
     "opaque321": "0xfffffff009d49838",
-    "gMetaClass": "0xfffffff00aece6d0"
+    "switch_original_xhci_usb2_port": "0xfffffff009d6126c",
+    "switch_original_xhci_usb3_port": "0xfffffff009d6c508",
+    "gMetaClass": "0xfffffff00aece6d0",
+    "switch_original_xhci_typec_usb2_port": "unported",
+    "switch_original_xhci_typec_usb3_port": "unported",
+    "createIOBuffer": "0xfffffff009d36150"
   },
   "found": {
     "C2": "stores the vtable",
     "D2": "branch after the constructors",
     "PMstop": "slot 145 by PAC of _ZN9IOService6PMstopEv",
     "attach": "slot 108 by PAC of _ZN9IOService6attachEPS_",
+    "clientBufferOptions": "offset shown by b945b008 at 0xfffffff009c1d338",
     "close": "slot 89 by PAC of _ZN9IOService5closeEPS_j",
     "copyMapper": "slot 240 by PAC of _ZN22AppleUSBHostController10copyMapperEv",
+    "createPort": "slot 295 by hint",
     "didTerminate": "slot 77 by PAC of _ZN9IOService12didTerminateEPS_jPb",
     "free": "slot 14 by PAC of _ZN8OSObject4freeEv",
     "gMetaClass": "metaclass initialiser",
@@ -239,6 +250,7 @@
     "handleClose": "slot 92 by PAC of _ZN9IOService11handleCloseEPS_j",
     "handleIsOpen": "slot 93 by PAC of _ZNK9IOService12handleIsOpenEPKS_",
     "handleOpen": "slot 91 by PAC of _ZN9IOService10handleOpenEPS_jPv",
+    "hardwareException": "slot 259 by hint",
     "init": "slot 21 by PAC of _ZN15IORegistryEntry4initEP12OSDictionary",
     "initialPowerStateForDomainState": "slot 157 by PAC of _ZN9IOService31initialPowerStateForDomainStateEm",
     "matchPropertyTable": "slot 101 by PAC of _ZN9IOService18matchPropertyTableEP12OSDictionaryPi",
@@ -258,9 +270,15 @@
     "setProperties": "slot 44 by PAC of _ZN15IORegistryEntry13setPropertiesEP8OSObject",
     "start": "slot 86 by PAC of _ZN9IOService5startEPS_",
     "stop": "slot 87 by PAC of _ZN9IOService4stopEPS_",
+    "switch_original_xhci_port_properties": "IOUSBHostFamily: base createPort calls it through its stub (0xfffffff009d41718) with the port number, the host port type (6, or 1 for a port AAPL,ExternalConnectorBitmap leaves out) and 0, and hands the dictionary to the port factory; it sets \"usb-port-number\", \"usb-port-type\" (1 to 1, 2 to 5, 3 to 2, 5 to 4) and \"usb-port-location\"",
+    "switch_original_xhci_typec_usb2_port": "not located in this kind yet",
+    "switch_original_xhci_typec_usb3_port": "not located in this kind yet",
+    "switch_original_xhci_usb2_port": "allocates 0x430 bytes of AppleUSB20XHCIPort and calls its slot 240 (PAC 0x64b, the dictionary init: AppleUSBXHCIPort's calls IORegistryEntry::init(OSDictionary *)); base createPort's USB 2.0 call (0xfffffff009d41bd4)",
+    "switch_original_xhci_usb3_port": "allocates 0x428 bytes of AppleUSB30XHCIPort and calls its slot 240, as the USB 2.0 one; base createPort's USB 3 call (0xfffffff009d41b10)",
     "systemWillShutdown": "slot 79 by PAC of _ZN9IOService18systemWillShutdownEj",
     "terminate": "slot 94 by PAC of _ZN9IOService9terminateEj",
-    "vtable": "metaclass initialiser"
+    "vtable": "metaclass initialiser",
+    "createIOBuffer": "slot 231 by hint"
   },
   "hints": {
     "fields": {
@@ -268,12 +286,45 @@
         "offset": "0x5ac",
         "at": "0xfffffff009c0a720",
         "word": "b905ae68"
+      },
+      "clientBufferOptions": {
+        "offset": "0x5b0",
+        "at": "0xfffffff009c1d338",
+        "word": "b945b008"
       }
     },
     "evidence": {
+      "clientBufferOptions": "the controller's buffer-options routine (slot 238, 0xfffffff009c1d334) loads +0x5b0 and returns (options & ~0xf00) | field when the field has cache bits, options | field otherwise; the allocation helpers at 0xfffffff009c1ca1c and 0xfffffff009d361a0 read it too, dropping its cache bits when the caller passes its own",
       "ringBufferOptions": "AppleUSBHostController::init stores 0x3 (0x703 with the commpage flag) at +0x5ac, where 21H461 stores 0x13/0x713 at +0x494; AppleUSBXHCIARM's start clears its cache-mode bits (and 0xfffff0ff, 0xfffffff009cafc40) and AppleUSBXHCI allocates its rings with it",
       "copyMapper": "AppleUSBHostController::start keeps copyMapper() (vtable +0x780, slot 240) at +0x310 when that is still NULL (0xfffffff009c0a954); the rings pass +0x310 as their mapper",
-      "regRead32": "AppleUSBXHCI reads and writes its registers through slots 313-317 (120 calls through +0x9d0); ml_io_read32 is called directly only from regRead16 and regRead32"
+      "regRead32": "AppleUSBXHCI reads and writes its registers through slots 313-317 (120 calls through +0x9d0); ml_io_read32 is called directly only from regRead16 and regRead32",
+      "createPort": "createPorts (slot 256, 0xfffffff009d3ff2c) calls slot 295 (vtable +0x938, PAC 0x847a) with x1 its copy of the Supported Protocol capability, x2 the port number, x3 the port's place in the protocol, and stores x0 at +0x548[port - 1]; no mangled name gives 0x847a, the function's log lines name it createPort",
+      "hardwareException": "slot 259 (vtable +0x818, PAC 0xa179): its log lines name it hardwareException; x1 the exception code, 0x80 returned early (cmp w19, #0x80 at 0xfffffff009d469c8)",
+      "createIOBuffer": "slot 231: x0 controller, w1 options, x2 capacity; the factory rounds capacity to the controller alignment, allocates IOBufferMemoryDescriptor, sets its tag and restores requested length"
+    },
+    "layout": {
+      "259": "hardwareException",
+      "295": "createPort",
+      "231": "createIOBuffer"
+    },
+    "functions": {
+      "switch_original_xhci_port_properties": {
+        "at": "0xfffffff009c1f81c",
+        "body": "d503237f d10143ff a9015ff8 a90257f6 a9034ff4 a9047bfd 910103fd 290103e2 340006a0 aa0203f4 aa0103f5 d2800013",
+        "why": "IOUSBHostFamily: base createPort calls it through its stub (0xfffffff009d41718) with the port number, the host port type (6, or 1 for a port AAPL,ExternalConnectorBitmap leaves out) and 0, and hands the dictionary to the port factory; it sets \"usb-port-number\", \"usb-port-type\" (1 to 1, 2 to 5, 3 to 2, 5 to 4) and \"usb-port-location\""
+      },
+      "switch_original_xhci_typec_usb2_port": "unported",
+      "switch_original_xhci_typec_usb3_port": "unported",
+      "switch_original_xhci_usb2_port": {
+        "at": "0xfffffff009d6126c",
+        "body": "d503237f a9bc5ff8 a90157f6 a9024ff4 a9037bfd 9100c3fd aa0203f4 aa0103f5 aa0003f6 d0ff1960 91204000 52808601",
+        "why": "allocates 0x430 bytes of AppleUSB20XHCIPort and calls its slot 240 (PAC 0x64b, the dictionary init: AppleUSBXHCIPort's calls IORegistryEntry::init(OSDictionary *)); base createPort's USB 2.0 call (0xfffffff009d41bd4)"
+      },
+      "switch_original_xhci_usb3_port": {
+        "at": "0xfffffff009d6c508",
+        "body": "d503237f a9bc5ff8 a90157f6 a9024ff4 a9037bfd 9100c3fd aa0203f4 aa0103f5 aa0003f6 f0ff1900 91304000 52808501",
+        "why": "allocates 0x428 bytes of AppleUSB30XHCIPort and calls its slot 240, as the USB 2.0 one; base createPort's USB 3 call (0xfffffff009d41b10)"
+      }
     }
   }
 }

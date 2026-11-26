@@ -80,6 +80,7 @@
 #include "SwitchAudioConvert.h"
 #include "SwitchAudioFormat.h"
 #include "SwitchAudioObjects.h"
+#include "SwitchDisplayAudio.h"
 #include "../../../kits/SwitchDMA/SwitchDcache.h"
 #include "../../../kits/SwitchRefusal/SwitchRefusal.h"
 
@@ -99,7 +100,7 @@ enum {
 #define kMicInName "Digital Mic"
 
 enum {
-    kDeviceObjects = 6,  // the Codec's: two streams, its volume, two jacks and a data source
+    kDeviceObjects = 7,  // Codec: two streams, volume, mute, two jacks and data source
 };
 #else
 #define kMicUID    "Hawking"
@@ -107,7 +108,7 @@ enum {
 #define kMicInName "Hawking Input"
 
 enum {
-    kDeviceObjects = 3,
+    kDeviceObjects = 4,  // Speaker/Codec: two streams, volume and mute
 };
 #endif
 
@@ -116,7 +117,7 @@ enum {
 #define kModelUID   "SwitchAudioModel"
 static const UInt32 kClockDomain = SWITCH_AUDIO_MAGIC;  // speaker and microphone: the service's one clock
 static const Float64 kRate = SWITCH_AUDIO_RATE;  // the built-in input's, and the service's until another is picked
-static const UInt32 kZeroPeriod = SWITCH_AUDIO_RING_FRAMES;
+static const UInt32 kZeroPeriod = SWITCH_AUDIO_RING_FRAMES / 4;  // matches ADMA ch0 kOutPeriodFrames (16384)
 
 static AudioServerPlugInHostRef gHost;
 static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
@@ -124,18 +125,19 @@ static atomic_uint gRefs = 1;
 static io_connect_t gConnect;
 static SwitchAudioControl *gControl;
 static switch_audio_sample_t *gOut, *gIn;
-static UInt32 gSpeakerUsers, gCodecUsers, gMicUsers;  // IO clients per device (gLock)
+static UInt32 gSpeakerUsers, gCodecUsers, gMicUsers;  // IO clients per device (gLock; read atomically)
 // The audio server marks the Codec's input stream inactive while no client reads it (kAudioStreamPropertyIsActive):
 // headphone playback alone then leaves the microphone's path (DMA, I2S TX, the codec's ADC and bias) off. gLock.
-static Boolean gCodecInActive = true, gCodecInRunning;
-static Float32 gVolume = 1.0f, gCodecVolume = 1.0f;
+static Boolean gCodecInActive = true, gCodecOutActive = true, gCodecInRunning;
+static _Atomic Float32 gVolume = 1.0f, gCodecVolume = 1.0f, gSpeakerGain = 1.0f;
+static _Atomic UInt32 gSpeakerMuted = 0, gCodecMuted = 0;
 static uint32_t gJack;  // SwitchAudioJack*, as last told to the audio server
 static IONotificationPortRef gJackPort;
 static io_object_t gJackNotification;
-static Float64 gRate = SWITCH_AUDIO_RATE;  // the service's clock: speaker and microphone (gLock)
-static Float64 gTicksPerFrame;             // the service's clock (its control page), nominal until it is mapped
-static Float64 gHostTicksPerFrame;         // the host clock's nominal rate: the built-in input's
-static uint64_t gZeroOrigin, gZeroSeed, gMicOrigin, gMicSeed;
+static _Atomic Float64 gRate = SWITCH_AUDIO_RATE;  // the service's clock: speaker and codec
+static _Atomic Float64 gTicksPerFrame = 0.0;       // the service's clock (its control page), nominal until mapped
+static Float64 gHostTicksPerFrame;                 // the host clock's nominal rate: the built-in input's
+static _Atomic uint64_t gZeroOrigin = 0, gZeroSeed = 0, gMicOrigin = 0, gMicSeed = 0;
 
 static int mapType(uint32_t type, void **out)
 {
@@ -172,6 +174,8 @@ static void setHostClock(void)
 static void jackChanged(void *refcon, io_service_t service, uint32_t type, void *argument);
 static Float32 levelToDb(Float32 min, Float32 scalar);
 static void sendHeadphoneLevel(void);
+static void sendSpeakerLevel(void);
+static void sendMuteLocked(AudioObjectID fallbackObj);
 
 static int connectService(void)
 {
@@ -202,18 +206,30 @@ static int connectService(void)
         gConnect = 0;
         return -1;
     }
+    SwitchAudioControl *c = control;
     gOut = out;
     gIn = in;
-    gControl = control;
-    gTicksPerFrame = (Float64)gControl->ticks_per_frame_q32 / 4294967296.0;
-    __atomic_store_n(&gJack, gControl->jack, __ATOMIC_RELAXED);
+    void *displayControl = NULL;
+    if (!mapType(SwitchAudioMemoryDisplayControl, &displayControl) &&
+        ((SwitchAudioControl *)displayControl)->magic == SWITCH_AUDIO_MAGIC &&
+        ((SwitchAudioControl *)displayControl)->version == SWITCH_AUDIO_VERSION)
+        switch_audio_display_attach(gHost, displayControl, NULL);
+    atomic_store_explicit(&gTicksPerFrame, (Float64)c->ticks_per_frame_q32 / 4294967296.0, memory_order_release);
+    if (c->rate)
+        atomic_store_explicit(&gRate, (Float64)c->rate, memory_order_release);
+    __atomic_store_n(&gJack, c->jack, __ATOMIC_RELAXED);
+    __atomic_store_n(&gControl, c, __ATOMIC_RELEASE);
     setHostClock();
     sendHeadphoneLevel();
+    sendSpeakerLevel();
+    sendMuteLocked(kSpeakerMute);
     return 0;
 }
 
 static int connectServiceLocked(void)
 {
+    if (__atomic_load_n(&gControl, __ATOMIC_ACQUIRE))
+        return 0;
     pthread_mutex_lock(&gLock);
     const int r = connectService();
     pthread_mutex_unlock(&gLock);
@@ -231,9 +247,11 @@ static void jackChanged(void *refcon, io_service_t service, uint32_t type, void 
     (void)refcon;
     (void)service;
     (void)argument;
-    if (type != kIOMessageServicePropertyChange || !gControl)
+    const SwitchAudioControl *c = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    if (type != kIOMessageServicePropertyChange || !c)
         return;
-    const uint32_t now = gControl->jack, was = __atomic_exchange_n(&gJack, now, __ATOMIC_RELAXED);
+    switch_audio_display_changed();
+    const uint32_t now = c->jack, was = __atomic_exchange_n(&gJack, now, __ATOMIC_RELAXED);
     AudioObjectPropertyAddress changed[2];
     UInt32 n = 0;
     if ((now ^ was) & SwitchAudioJackHeadphones) {
@@ -264,11 +282,11 @@ static void jackChanged(void *refcon, io_service_t service, uint32_t type, void 
 // gConnect is open (connectService): the headphone level to the codec, as attenuation in millidecibels.
 static void sendHeadphoneLevel(void)
 {
+    const Float32 level = atomic_load_explicit(&gCodecVolume, memory_order_relaxed);
     const uint64_t attenuation =
-        gCodecVolume <= 0.0f
+        level <= 0.0f
             ? UINT32_MAX
-            : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_HEADPHONE_RANGE_MDB / 1000.0f, gCodecVolume) * 1000.0f +
-                         0.5f);
+            : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_HEADPHONE_RANGE_MDB / 1000.0f, level) * 1000.0f + 0.5f);
     if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetHeadphoneLevel, &attenuation, 1, NULL, NULL) != KERN_SUCCESS)
         os_log_error(OS_LOG_DEFAULT, "SwitchAudio: headphone level not set");
 }
@@ -283,6 +301,66 @@ static void applyHeadphoneLevel(void)
     pthread_mutex_unlock(&gLock);
 }
 
+static void sendSpeakerLevel(void)
+{
+    const Float32 level = atomic_load_explicit(&gVolume, memory_order_relaxed);
+    const uint64_t attenuation =
+        level <= 0.0f
+            ? UINT32_MAX
+            : (uint64_t)(-levelToDb(-(Float32)SWITCH_AUDIO_SPEAKER_RANGE_MDB / 1000.0f, level) * 1000.0f + 0.5f);
+    if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetSpeakerLevel, &attenuation, 1, NULL, NULL) != KERN_SUCCESS)
+        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: speaker level not set");
+}
+
+static void applySpeakerLevel(void)
+{
+    pthread_mutex_lock(&gLock);
+    if (gControl)
+        sendSpeakerLevel();
+    else
+        connectService();
+    pthread_mutex_unlock(&gLock);
+}
+
+static uint64_t effectiveMuteLocked(AudioObjectID fallbackObj)
+{
+    const UInt32 spk = atomic_load_explicit(&gSpeakerMuted, memory_order_relaxed);
+    const UInt32 hp = atomic_load_explicit(&gCodecMuted, memory_order_relaxed);
+    if (gSpeakerUsers && !gCodecUsers)
+        return spk;
+    if (gCodecUsers && !gSpeakerUsers)
+        return hp;
+    if (gSpeakerUsers && gCodecUsers)
+        return gCodecOutActive ? hp : spk;
+    return fallbackObj == kCodecMute ? hp : spk;
+}
+
+static void sendMuteLocked(AudioObjectID fallbackObj)
+{
+    if (!gConnect)
+        return;
+    const uint64_t muted = effectiveMuteLocked(fallbackObj);
+    if (IOConnectCallScalarMethod(gConnect, SwitchAudioSetMute, &muted, 1, NULL, NULL) != KERN_SUCCESS)
+        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: output mute not set");
+}
+
+static void applyMute(AudioObjectID obj)
+{
+    pthread_mutex_lock(&gLock);
+    if (gControl)
+        sendMuteLocked(obj);
+    else
+        connectService();
+    pthread_mutex_unlock(&gLock);
+}
+
+static void sendRouteLocked(uint32_t route)
+{
+    const uint64_t arg = route;
+    if (gConnect && IOConnectCallScalarMethod(gConnect, SwitchAudioSetRoute, &arg, 1, NULL, NULL) != KERN_SUCCESS)
+        os_log_error(OS_LOG_DEFAULT, "SwitchAudio: route %u not set", (unsigned)route);
+}
+
 static kern_return_t call(uint32_t selector)
 {
     return gConnect ? IOConnectCallScalarMethod(gConnect, selector, NULL, 0, NULL, NULL) : KERN_FAILURE;
@@ -290,13 +368,15 @@ static kern_return_t call(uint32_t selector)
 
 static UInt32 latencyFrames(void)
 {
-    return gControl ? gControl->lead_frames : 2 * SWITCH_AUDIO_PERIOD_FRAMES;
+    const SwitchAudioControl *c = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    return c ? c->lead_frames : SWITCH_AUDIO_LEAD_FRAMES;
 }
 
 // Capture becomes valid a period at a time (in_frames), so input is read at least that much plus the lead behind now.
 static UInt32 inputSafetyFrames(void)
 {
-    return latencyFrames() + (gControl ? gControl->period_frames : SWITCH_AUDIO_PERIOD_FRAMES);
+    const SwitchAudioControl *c = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    return latencyFrames() + (c ? c->period_frames : SWITCH_AUDIO_PERIOD_FRAMES);
 }
 
 static AudioStreamBasicDescription format(UInt32 channels, Float64 rate)
@@ -323,16 +403,17 @@ static AudioStreamBasicDescription format(UInt32 channels, Float64 rate)
     } while (0)
 #define REPLY_STR(text) REPLY(CFStringRef, CFSTR(text))
 
-// A volume control spans its minimum..0 dB on a squared curve over the scalar; scalar 0 mutes (sheng's tuned curve).
-// The speaker's is applied here, in the ring mix; the headphones' is the codec's DAC volume.
-static const Float32 kMinDb = -36.0f, kCodecMinDb = -(Float32)SWITCH_AUDIO_HEADPHONE_RANGE_MDB / 1000.0f;
+// A volume control spans its minimum..0 dB on a squared curve over the scalar; scalar 0 mutes.
+// On Tegra hardware, speaker attenuation runs in APE MVC1 and headphone attenuation splits across RT5639 HP_VOL + MVC1.
+static const Float32 kMinDb = -(Float32)SWITCH_AUDIO_SPEAKER_RANGE_MDB / 1000.0f;
+static const Float32 kCodecMinDb = -(Float32)SWITCH_AUDIO_HEADPHONE_RANGE_MDB / 1000.0f;
 
 static Float32 minDbOf(AudioObjectID control)
 {
     return control == kCodecVolume ? kCodecMinDb : kMinDb;
 }
 
-static Float32 *levelOf(AudioObjectID control)
+static _Atomic Float32 *levelOf(AudioObjectID control)
 {
     return control == kCodecVolume ? &gCodecVolume : &gVolume;
 }
@@ -353,11 +434,6 @@ static Float32 toDb(Float32 scalar)
     return levelToDb(kMinDb, scalar);
 }
 
-static Float32 gain(void)
-{
-    return gVolume <= 0.0f ? 0.0f : powf(10.0f, toDb(gVolume) / 20.0f);
-}
-
 static Boolean isDevice(AudioObjectID o)
 {
     return o == kSpeaker || o == kCodec || o == kMic;
@@ -373,9 +449,16 @@ static Boolean isVolume(AudioObjectID o)
     return o == kVolume || o == kCodecVolume;
 }
 
+static Boolean isMute(AudioObjectID o)
+{
+    return o == kSpeakerMute || o == kCodecMute;
+}
+
 static AudioObjectID deviceOf(AudioObjectID o)  // the device a stream or control belongs to
 {
-    return o == kCodecIn || o == kCodecOut || o == kCodecVolume ? kCodec : o == kMicIn ? kMic : kSpeaker;
+    return o == kCodecIn || o == kCodecOut || o == kCodecVolume || o == kCodecMute ? kCodec
+           : o == kMicIn                                                           ? kMic
+                                                                                   : kSpeaker;
 }
 
 static AudioObjectID outputOf(AudioObjectID device)
@@ -399,24 +482,28 @@ static UInt32 channelsOf(AudioObjectID stream)
 
 static UInt32 usersOf(AudioObjectID device)
 {
-    return device == kSpeaker ? gSpeakerUsers : device == kCodec ? gCodecUsers : gMicUsers;
+    return __atomic_load_n(device == kSpeaker ? &gSpeakerUsers
+                           : device == kCodec ? &gCodecUsers
+                                              : &gMicUsers,
+                           __ATOMIC_ACQUIRE);
 }
 
 static Float64 rateOf(AudioObjectID device)
 {
-    return device == kMic ? kRate : gRate;
+    return device == kMic ? kRate : atomic_load_explicit(&gRate, memory_order_acquire);
 }
 
-// The rates a device runs at: the service's (its control page) for the speaker and microphone, which share its clock.
+// The rates a device runs at: the service's (its control page) for the speaker and codec, which share its clock.
 static UInt32 ratesOf(AudioObjectID device, Float64 rates[SWITCH_AUDIO_MAX_RATES])
 {
     rates[0] = kRate;
     if (device == kMic || connectServiceLocked())
         return 1;
+    const SwitchAudioControl *c = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
     UInt32 n = 0;
-    for (UInt32 i = 0; i < SWITCH_AUDIO_MAX_RATES && gControl->rates[i]; ++i)
-        rates[n++] = gControl->rates[i];
-    return n;
+    for (UInt32 i = 0; i < SWITCH_AUDIO_MAX_RATES && c->rates[i]; ++i)
+        rates[n++] = c->rates[i];
+    return n ? n : 1;
 }
 
 static OSStatus requestRate(AudioObjectID device, Float64 rate)
@@ -501,20 +588,30 @@ static OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef d, A
 {
     (void)d;
     (void)i;
-    if (o == kMic || (Float64)a == gRate)
+    if (o == kDisplay) {
+        pthread_mutex_lock(&gLock);
+        const OSStatus result =
+            connectService() ? kAudioHardwareNotRunningError : switch_audio_display_perform(gConnect, a);
+        pthread_mutex_unlock(&gLock);
+        return result;
+    }
+    if (o == kMic || (Float64)a == atomic_load_explicit(&gRate, memory_order_acquire))
         return 0;
     const uint64_t rate = a;
     pthread_mutex_lock(&gLock);
     kern_return_t kr =
         connectService() ? KERN_FAILURE : IOConnectCallScalarMethod(gConnect, SwitchAudioSetRate, &rate, 1, NULL, NULL);
+    Float64 newRate = atomic_load_explicit(&gRate, memory_order_relaxed);
     if (kr == KERN_SUCCESS) {
-        gRate = gControl->rate;
-        gTicksPerFrame = (Float64)gControl->ticks_per_frame_q32 / 4294967296.0;
+        newRate = (Float64)gControl->rate;
+        atomic_store_explicit(&gTicksPerFrame, (Float64)gControl->ticks_per_frame_q32 / 4294967296.0,
+                              memory_order_release);
+        atomic_store_explicit(&gRate, newRate, memory_order_release);
     }
     pthread_mutex_unlock(&gLock);
     if (kr != KERN_SUCCESS)
         return kAudioHardwareIllegalOperationError;
-    os_log(OS_LOG_DEFAULT, "SwitchAudio: clock now %.0f Hz", gRate);
+    os_log(OS_LOG_DEFAULT, "SwitchAudio: clock now %.0f Hz", newRate);
     gHost->RequestDeviceConfigurationChange(gHost, o == kSpeaker ? kCodec : kSpeaker, a, NULL);
     return 0;
 }
@@ -535,6 +632,22 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
 static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid,
                                     const AudioObjectPropertyAddress *a, UInt32 qs, const void *q, UInt32 *size)
 {
+    if (o == kCodec && a->mSelector == kJackIsConnected) {
+        if (a->mScope != kAudioObjectPropertyScopeOutput && a->mScope != kAudioObjectPropertyScopeInput)
+            return kAudioHardwareUnknownPropertyError;
+        *size = sizeof(UInt32);
+        return 0;
+    }
+#if SWITCH_AUDIO_J181
+    if (switch_audio_is_control(o)) {
+        UInt8 scratch[64];
+        UInt32 written = 0;
+        const OSStatus r = switch_audio_control_property(o, a, qs, q, 0, sizeof scratch, &written, scratch);
+        if (r == 0)
+            *size = written;
+        return r;
+    }
+#endif
     UInt8 scratch[1024];
     UInt32 written = 0;
     const OSStatus r = GetPropertyData(d, o, pid, a, qs, q, sizeof scratch, &written, scratch);
@@ -546,16 +659,156 @@ static OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef d, AudioObjectID 
 static Boolean HasProperty(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid,
                            const AudioObjectPropertyAddress *a)
 {
-    UInt32 size = 0;
-    return GetPropertyDataSize(d, o, pid, a, 0, NULL, &size) == 0;
+    (void)d;
+    (void)pid;
+    if (switch_audio_display_object(o)) {
+        UInt8 scratch[256];
+        UInt32 written = 0;
+        return switch_audio_display_get(o, a, sizeof scratch, &written, scratch) == 0;
+    }
+    const AudioObjectPropertySelector s = a->mSelector;
+    if (o == kPlugIn) {
+        switch (s) {
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case kAudioPlugInPropertyBoxList:
+        case kAudioPlugInPropertyClockDeviceList:
+        case kAudioObjectPropertyBaseClass:
+        case kAudioObjectPropertyClass:
+        case kAudioObjectPropertyOwner:
+        case kAudioObjectPropertyManufacturer:
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioPlugInPropertyDeviceList:
+        case kAudioPlugInPropertyTranslateUIDToDevice:
+        case kAudioPlugInPropertyResourceBundle:
+            return true;
+        default:
+            return false;
+        }
+    }
+    if (isDevice(o)) {
+        switch (s) {
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case kAudioObjectPropertyBaseClass:
+        case kAudioObjectPropertyClass:
+        case kAudioObjectPropertyOwner:
+        case kAudioObjectPropertyName:
+        case kAudioObjectPropertyModelName:
+        case kAudioObjectPropertyManufacturer:
+        case kAudioDevicePropertyDeviceUID:
+        case kAudioDevicePropertyModelUID:
+        case kAudioObjectPropertySerialNumber:
+        case kAudioObjectPropertyFirmwareVersion:
+        case kAudioObjectPropertyIdentify:
+        case 'accs':
+        case 'auto':
+        case kAudioObjectPropertyElementName:
+        case kAudioDevicePropertyConfigurationApplication:
+        case kAudioDevicePropertyTransportType:
+        case kAudioDevicePropertyRelatedDevices:
+        case kAudioDevicePropertyClockDomain:
+        case kAudioDevicePropertyDeviceIsAlive:
+        case kAudioDevicePropertyDeviceIsRunning:
+        case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+        case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+        case kAudioDevicePropertyLatency:
+        case kAudioDevicePropertySafetyOffset:
+        case kAudioDevicePropertyNominalSampleRate:
+        case kAudioDevicePropertyAvailableNominalSampleRates:
+        case kAudioDevicePropertyIsHidden:
+        case kAudioDevicePropertyZeroTimeStampPeriod:
+        case kAudioDevicePropertyClockIsStable:
+        case kAudioDevicePropertyClockAlgorithm:
+        case kAudioDevicePropertyPreferredChannelsForStereo:
+        case kAudioDevicePropertyPreferredChannelLayout:
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioDevicePropertyStreams:
+        case kAudioObjectPropertyControlList:
+            return true;
+        case kJackIsConnected:
+            return o == kCodec &&
+                   (a->mScope == kAudioObjectPropertyScopeOutput || a->mScope == kAudioObjectPropertyScopeInput);
+        default:
+            return false;
+        }
+    }
+    if (isStream(o)) {
+        switch (s) {
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case 'taps':
+        case kAudioObjectPropertyBaseClass:
+        case kAudioObjectPropertyClass:
+        case kAudioObjectPropertyOwner:
+        case kAudioObjectPropertyName:
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioStreamPropertyIsActive:
+        case kAudioStreamPropertyDirection:
+        case kAudioStreamPropertyTerminalType:
+        case kAudioStreamPropertyStartingChannel:
+        case kAudioStreamPropertyLatency:
+        case kAudioStreamPropertyVirtualFormat:
+        case kAudioStreamPropertyPhysicalFormat:
+        case kAudioStreamPropertyAvailableVirtualFormats:
+        case kAudioStreamPropertyAvailablePhysicalFormats:
+            return true;
+        default:
+            return false;
+        }
+    }
+    if (isVolume(o)) {
+        switch (s) {
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case kAudioObjectPropertyBaseClass:
+        case kAudioObjectPropertyClass:
+        case kAudioObjectPropertyOwner:
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioControlPropertyScope:
+        case kAudioControlPropertyElement:
+        case kAudioLevelControlPropertyScalarValue:
+        case kAudioLevelControlPropertyDecibelValue:
+        case kAudioLevelControlPropertyDecibelRange:
+        case kAudioLevelControlPropertyConvertScalarToDecibels:
+        case kAudioLevelControlPropertyConvertDecibelsToScalar:
+            return true;
+        default:
+            return false;
+        }
+    }
+    if (isMute(o)) {
+        switch (s) {
+        case kAudioObjectPropertyCustomPropertyInfoList:
+        case kAudioObjectPropertyBaseClass:
+        case kAudioObjectPropertyClass:
+        case kAudioObjectPropertyOwner:
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioControlPropertyScope:
+        case kAudioControlPropertyElement:
+        case kAudioBooleanControlPropertyValue:
+            return true;
+        default:
+            return false;
+        }
+    }
+#if SWITCH_AUDIO_J181
+    if (switch_audio_is_control(o)) {
+        UInt8 scratch[64];
+        UInt32 written = 0;
+        return switch_audio_control_property(o, a, 0, NULL, 0, sizeof scratch, &written, scratch) == 0;
+    }
+#endif
+    return false;
 }
 
 static OSStatus IsPropertySettable(AudioServerPlugInDriverRef d, AudioObjectID o, pid_t pid,
                                    const AudioObjectPropertyAddress *a, Boolean *out)
 {
     const AudioObjectPropertySelector s = a->mSelector;
+    if (switch_audio_display_object(o)) {
+        *out = switch_audio_display_settable(s);
+        return HasProperty(d, o, pid, a) ? 0 : kAudioHardwareUnknownPropertyError;
+    }
     *out =
         (isVolume(o) && (s == kAudioLevelControlPropertyScalarValue || s == kAudioLevelControlPropertyDecibelValue)) ||
+        (isMute(o) && s == kAudioBooleanControlPropertyValue) ||
         (isStream(o) && (s == kAudioStreamPropertyVirtualFormat || s == kAudioStreamPropertyPhysicalFormat ||
                          s == kAudioStreamPropertyIsActive)) ||
         (isDevice(o) && s == kAudioDevicePropertyNominalSampleRate);
@@ -584,6 +837,8 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
     (void)pid;
     (void)qs;
     (void)q;
+    if (switch_audio_display_object(o))
+        return switch_audio_display_set(o, a, size, data);
     if (isVolume(o) && size >= sizeof(Float32)) {
         const Float32 min = minDbOf(o);
         Float32 v = *(const Float32 *)data;
@@ -591,16 +846,34 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             v = levelToScalar(min, v);
         else if (a->mSelector != kAudioLevelControlPropertyScalarValue)
             return kAudioHardwareUnknownPropertyError;
-        Float32 *level = levelOf(o);
-        *level = v < 0 ? 0 : v > 1 ? 1 : v;
-        if (o == kCodecVolume)
+        const Float32 clamped = v < 0 ? 0 : v > 1 ? 1 : v;
+        atomic_store_explicit(levelOf(o), clamped, memory_order_relaxed);
+        if (o == kCodecVolume) {
             applyHeadphoneLevel();
+        } else {
+            const Float32 linear = clamped <= 0.0f ? 0.0f : powf(10.0f, levelToDb(min, clamped) / 20.0f);
+            atomic_store_explicit(&gSpeakerGain, linear, memory_order_relaxed);
+            applySpeakerLevel();
+        }
         os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s volume control %.3f (%.1f dB)",
-               o == kCodecVolume ? "headphone" : "output", (double)*level, (double)levelToDb(min, *level));
+               o == kCodecVolume ? "headphone" : "output", (double)clamped, (double)levelToDb(min, clamped));
         const AudioObjectPropertyAddress changed[2] = {
             {kAudioLevelControlPropertyScalarValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain},
             {kAudioLevelControlPropertyDecibelValue, kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain}};
         gHost->PropertiesChanged(gHost, o, 2, changed);
+        return 0;
+    }
+    if (isMute(o) && a->mSelector == kAudioBooleanControlPropertyValue) {
+        if (size < sizeof(UInt32))
+            return kAudioHardwareBadPropertySizeError;
+        const UInt32 muted = *(const UInt32 *)data != 0 ? 1u : 0u;
+        atomic_store_explicit(o == kCodecMute ? &gCodecMuted : &gSpeakerMuted, muted, memory_order_relaxed);
+        applyMute(o);
+        os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s mute %{public}s", o == kCodecMute ? "headphone" : "speaker",
+               muted ? "on" : "off");
+        const AudioObjectPropertyAddress changed = {kAudioBooleanControlPropertyValue, kAudioObjectPropertyScopeGlobal,
+                                                    kAudioObjectPropertyElementMain};
+        gHost->PropertiesChanged(gHost, o, 1, &changed);
         return 0;
     }
     if (isStream(o) &&
@@ -612,14 +885,27 @@ static OSStatus SetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
     }
     if (isDevice(o) && a->mSelector == kAudioDevicePropertyNominalSampleRate)
         return size >= sizeof(Float64) ? requestRate(o, *(const Float64 *)data) : kAudioHardwareBadPropertySizeError;
-    // The audio server turns streams it does not use off and on. Only the Codec's input has hardware behind it.
     if (isStream(o) && a->mSelector == kAudioStreamPropertyIsActive) {
         if (size < sizeof(UInt32))
             return kAudioHardwareBadPropertySizeError;
+        const Boolean active = *(const UInt32 *)data != 0;
         if (o == kCodecIn) {
             pthread_mutex_lock(&gLock);
-            gCodecInActive = *(const UInt32 *)data != 0;
+            __atomic_store_n(&gCodecInActive, active, __ATOMIC_RELEASE);
             syncCodecInput();
+            pthread_mutex_unlock(&gLock);
+        } else if (o == kCodecOut) {
+            pthread_mutex_lock(&gLock);
+            __atomic_store_n(&gCodecOutActive, active, __ATOMIC_RELEASE);
+            if (gCodecUsers > 0 && gControl) {
+                if (active) {
+                    sendRouteLocked(SwitchAudioRouteHeadphones);
+                    sendMuteLocked(kCodecMute);
+                } else if (gSpeakerUsers > 0) {
+                    sendRouteLocked(SwitchAudioRouteSpeaker);
+                    sendMuteLocked(kSpeakerMute);
+                }
+            }
             pthread_mutex_unlock(&gLock);
         }
         return 0;
@@ -634,12 +920,14 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
     (void)d;
     (void)pid;
     const AudioObjectPropertySelector s = a->mSelector;
+    if (switch_audio_display_object(o))
+        return switch_audio_display_get(o, a, inDataSize, outDataSize, outData);
     // Lists the audio server reads for each new device and that must answer, empty: custom properties on every
     // object, boxes and clock devices on the plug-in, taps on the streams (an unknown-property error drops the device).
     // The speaker's tap stream answers 'taps' with 1 (top of file).
     if (o == kSpeakerTap && s == 'taps')
         REPLY(UInt32, 1);
-    if (o <= kCodecVolume &&
+    if ((o <= kCodecVolume || isMute(o)) &&
         (s == kAudioObjectPropertyCustomPropertyInfoList ||
          ((s == kAudioPlugInPropertyBoxList || s == kAudioPlugInPropertyClockDeviceList) && o == kPlugIn) ||
          (s == 'taps' && isStream(o)))) {
@@ -658,8 +946,8 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             REPLY_STR("Switch");
         case kAudioObjectPropertyOwnedObjects:
         case kAudioPlugInPropertyDeviceList: {
-            static const AudioObjectID devices[] = {kSpeaker, kCodec, kMic};
-            UInt32 n = sizeof devices / sizeof devices[0];
+            const AudioObjectID devices[] = {kSpeaker, kCodec, kMic, kDisplay};
+            UInt32 n = switch_audio_display_available() ? 4 : 3;
             if (inDataSize / sizeof(AudioObjectID) < n)
                 n = inDataSize / (UInt32)sizeof(AudioObjectID);
             memcpy(outData, devices, n * sizeof(AudioObjectID));
@@ -675,6 +963,9 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 device = kCodec;
             if (uid && CFStringCompare(uid, CFSTR(kMicUID), 0) == kCFCompareEqualTo)
                 device = kMic;
+            if (uid && switch_audio_display_available() &&
+                CFStringCompare(uid, CFSTR(SWITCH_AUDIO_DISPLAY_UID), 0) == kCFCompareEqualTo)
+                device = kDisplay;
             REPLY(AudioObjectID, device);
         }
         case kAudioPlugInPropertyResourceBundle:
@@ -746,7 +1037,7 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
         case kAudioDevicePropertySafetyOffset:
             if (o == kMic)
                 REPLY(UInt32, SWITCH_AUDIO_PERIOD_FRAMES);
-            REPLY(UInt32, scopeIn ? inputSafetyFrames() : latencyFrames() + 2 * SWITCH_AUDIO_PERIOD_FRAMES);
+            REPLY(UInt32, scopeIn ? inputSafetyFrames() : latencyFrames() + SWITCH_AUDIO_PERIOD_FRAMES);
         case kAudioDevicePropertyNominalSampleRate:
             REPLY(Float64, rateOf(o));
         case kAudioDevicePropertyAvailableNominalSampleRates: {
@@ -765,14 +1056,19 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             REPLY(UInt32, kZeroPeriod);
         case kAudioDevicePropertyClockIsStable:
             REPLY(UInt32, 1);
-        case kAudioDevicePropertyClockAlgorithm:
-            REPLY(UInt32, kAudioDeviceClockAlgorithmRaw);
+        case kAudioDevicePropertyClockAlgorithm: {
+            const SwitchAudioControl *ctrl = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+            const UInt32 algo = (o != kMic && ctrl && ctrl->backend == SwitchAudioBackendTegraI2S)
+                                    ? kAudioDeviceClockAlgorithmSimpleIIR
+                                    : kAudioDeviceClockAlgorithmRaw;
+            REPLY(UInt32, algo);
+        }
         case kAudioDevicePropertyPreferredChannelsForStereo: {
             if (inDataSize < 2 * sizeof(UInt32))
                 return kAudioHardwareBadPropertySizeError;
             const UInt32 channels = channelsOf(scopeIn || !output ? input : output);
             ((UInt32 *)outData)[0] = 1;
-            ((UInt32 *)outData)[1] = SWITCH_AUDIO_J181 && channels == 4 ? 3 : channels;
+            ((UInt32 *)outData)[1] = channels >= 2 ? 2 : 1;
             *outDataSize = 2 * sizeof(UInt32);
             return 0;
         }
@@ -786,13 +1082,18 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             memset(l, 0, bytes);
             l->mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelDescriptions;
             l->mNumberChannelDescriptions = channels;
-            l->mChannelDescriptions[0].mChannelLabel =
-                channels == 1 ? kAudioChannelLabel_Mono : kAudioChannelLabel_Left;
-            if (channels == 2)
-                l->mChannelDescriptions[1].mChannelLabel = kAudioChannelLabel_Right;
-            // J181's speaker plays channels 0 and 2; 1 and 3 repeat them (top of file).
-            if (SWITCH_AUDIO_J181 && channels == 4)
-                l->mChannelDescriptions[2].mChannelLabel = kAudioChannelLabel_Right;
+            if (SWITCH_AUDIO_J181 && channels == 4) {
+                // VirtualAudio forwards this layout verbatim onto its 2-ch vdef stream. Matching ASDStream's
+                // kAudioChannelLabel_Unknown causes AQMEIO_HAL to fall back to PreferredChannelsForStereo {1, 2};
+                // labeling ch 0/2 Left/Right leaves vdef's 2-ch prefix {Left, Unused} and zeroes the right channel.
+                for (UInt32 i = 0; i < channels; ++i)
+                    l->mChannelDescriptions[i].mChannelLabel = kAudioChannelLabel_Unknown;
+            } else {
+                l->mChannelDescriptions[0].mChannelLabel =
+                    channels == 1 ? kAudioChannelLabel_Mono : kAudioChannelLabel_Left;
+                if (channels == 2)
+                    l->mChannelDescriptions[1].mChannelLabel = kAudioChannelLabel_Right;
+            }
             *outDataSize = bytes;
             return 0;
         }
@@ -806,10 +1107,14 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
                 list[n++] = output;
             if (streams && a->mScope != kAudioObjectPropertyScopeOutput)
                 list[n++] = input;
-            if (controls && o == kSpeaker && !scopeIn)
+            if (controls && o == kSpeaker && !scopeIn) {
                 list[n++] = kVolume;
-            if (controls && o == kCodec && !scopeIn)
+                list[n++] = kSpeakerMute;
+            }
+            if (controls && o == kCodec && !scopeIn) {
                 list[n++] = kCodecVolume;
+                list[n++] = kCodecMute;
+            }
 #if SWITCH_AUDIO_J181
             if (controls)
                 n += switch_audio_controls_of(o, a->mScope, list + n, kDeviceObjects - n);
@@ -847,7 +1152,9 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             *outDataSize = 0;
             return 0;
         case kAudioStreamPropertyIsActive:
-            REPLY(UInt32, o == kCodecIn ? gCodecInActive : 1);
+            REPLY(UInt32, o == kCodecIn    ? __atomic_load_n(&gCodecInActive, __ATOMIC_ACQUIRE)
+                          : o == kCodecOut ? __atomic_load_n(&gCodecOutActive, __ATOMIC_ACQUIRE)
+                                           : 1);
         case kAudioStreamPropertyDirection:
             REPLY(UInt32, o != kSpeakerOut && o != kCodecOut);
         case kAudioStreamPropertyTerminalType:
@@ -881,7 +1188,7 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
         }
     }
     if (isVolume(o)) {
-        const Float32 min = minDbOf(o), level = *levelOf(o);
+        const Float32 min = minDbOf(o), level = atomic_load_explicit(levelOf(o), memory_order_relaxed);
         switch (s) {
         case kAudioObjectPropertyBaseClass:
             REPLY(AudioClassID, kAudioLevelControlClassID);
@@ -919,6 +1226,29 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
             return kAudioHardwareUnknownPropertyError;
         }
     }
+    if (isMute(o)) {
+        switch (s) {
+        case kAudioObjectPropertyBaseClass:
+            REPLY(AudioClassID, kAudioBooleanControlClassID);
+        case kAudioObjectPropertyClass:
+            REPLY(AudioClassID, kAudioMuteControlClassID);
+        case kAudioObjectPropertyOwner:
+            REPLY(AudioObjectID, deviceOf(o));
+        case kAudioObjectPropertyOwnedObjects:
+        case kAudioObjectPropertyCustomPropertyInfoList:
+            *outDataSize = 0;
+            return 0;
+        case kAudioControlPropertyScope:
+            REPLY(AudioObjectPropertyScope, kAudioObjectPropertyScopeOutput);
+        case kAudioControlPropertyElement:
+            REPLY(AudioObjectPropertyElement, o == kCodecMute ? 1 : kAudioObjectPropertyElementMain);
+        case kAudioBooleanControlPropertyValue:
+            REPLY(UInt32, o == kCodecMute ? atomic_load_explicit(&gCodecMuted, memory_order_relaxed)
+                                          : atomic_load_explicit(&gSpeakerMuted, memory_order_relaxed));
+        default:
+            return kAudioHardwareUnknownPropertyError;
+        }
+    }
 #if SWITCH_AUDIO_J181
     if (switch_audio_is_control(o)) {
         const uint32_t jack = o == kCodecJackOut || o == kCodecJackIn ? jackState() : 0;
@@ -931,8 +1261,40 @@ static OSStatus GetPropertyData(AudioServerPlugInDriverRef d, AudioObjectID o, p
 // The play position now, in sample time on the service's timeline.
 static uint64_t nowFrames(void)
 {
-    const uint64_t host = mach_absolute_time(), anchor = gControl->anchor_host;
-    return host > anchor ? (uint64_t)((Float64)(host - anchor) / gTicksPerFrame) : 0;
+    const SwitchAudioControl *c = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    const Float64 tpf = atomic_load_explicit(&gTicksPerFrame, memory_order_acquire);
+    if (!c || tpf <= 0.0)
+        return 0;
+    const uint64_t anchor = __atomic_load_n(&c->anchor_host, __ATOMIC_ACQUIRE);
+    const uint64_t host = mach_absolute_time();
+    return host > anchor ? (uint64_t)((Float64)(host - anchor) / tpf) : 0;
+}
+
+typedef struct {
+    uint64_t sample;
+    uint64_t host;
+    uint32_t seed;
+} HwAnchor;
+
+static Boolean readHwAnchor(const SwitchAudioControl *c, HwAnchor *out)
+{
+    for (int tries = 0; tries < 8; ++tries) {
+        const uint32_t s0 = __atomic_load_n(&c->hw_seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1u)
+            continue;
+        const uint32_t seed = __atomic_load_n(&c->hw_seed, __ATOMIC_RELAXED);
+        const uint64_t sample = __atomic_load_n(&c->hw_sample_time, __ATOMIC_RELAXED);
+        const uint64_t host = __atomic_load_n(&c->hw_host_time, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        const uint32_t s1 = __atomic_load_n(&c->hw_seq, __ATOMIC_ACQUIRE);
+        if (s0 == s1) {
+            out->sample = sample;
+            out->host = host;
+            out->seed = seed;
+            return seed != 0 && host != 0;
+        }
+    }
+    return false;
 }
 
 // The speaker and the codec device start the service's output (syncCodecInput the microphone); the hardware runs while
@@ -942,15 +1304,22 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
 {
     (void)d;
     (void)client;
+    if (o == kDisplay) {
+        pthread_mutex_lock(&gLock);
+        const OSStatus result = connectService() ? kAudioHardwareNotRunningError : switch_audio_display_start(gConnect);
+        pthread_mutex_unlock(&gLock);
+        return result;
+    }
     if (!isDevice(o))
         return kAudioHardwareBadObjectError;
     OSStatus r = 0;
     pthread_mutex_lock(&gLock);
     if (o == kMic) {
-        if (!gMicUsers++) {
-            gMicOrigin = mach_absolute_time();
-            gMicSeed++;
+        if (!gMicUsers) {
+            atomic_store_explicit(&gMicOrigin, mach_absolute_time(), memory_order_release);
+            atomic_fetch_add_explicit(&gMicSeed, 1, memory_order_acq_rel);
         }
+        __atomic_store_n(&gMicUsers, gMicUsers + 1, __ATOMIC_RELEASE);
         pthread_mutex_unlock(&gLock);
         return 0;
     }
@@ -958,23 +1327,33 @@ static OSStatus StartIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cl
     const char *const what = o == kSpeaker ? "speaker" : "headphone";
     if (*users == 0) {
         const Boolean first = !gSpeakerUsers && !gCodecUsers;
-        // The service's output runs while either device does; the microphone only while a client reads it
-        // (syncCodecInput, once the codec's IO counts).
-        if (connectService() || (first && call(SwitchAudioStartOutput) != KERN_SUCCESS)) {
+        if (connectService()) {
             r = kAudioHardwareNotRunningError;
             os_log_error(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO not started: the kernel service refused", what);
         } else {
-            if (first) {
-                setHostClock();  // again: the shared page may have been read back from disk since
-                gZeroOrigin = nowFrames();
-                gZeroSeed++;
+            const uint32_t route = o == kSpeaker || !gSpeakerUsers || gCodecOutActive
+                                       ? (o == kSpeaker ? SwitchAudioRouteSpeaker : SwitchAudioRouteHeadphones)
+                                       : SwitchAudioRouteSpeaker;
+            sendRouteLocked(route);
+            sendMuteLocked(route == SwitchAudioRouteHeadphones ? kCodecMute : kSpeakerMute);
+            if (first && call(SwitchAudioStartOutput) != KERN_SUCCESS) {
+                sendRouteLocked(SwitchAudioRouteAuto);
+                r = kAudioHardwareNotRunningError;
+                os_log_error(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO not started: the kernel service refused",
+                             what);
+            } else {
+                if (first) {
+                    setHostClock();  // again: the shared page may have been read back from disk since
+                    atomic_store_explicit(&gZeroOrigin, nowFrames(), memory_order_release);
+                    atomic_fetch_add_explicit(&gZeroSeed, 1, memory_order_acq_rel);
+                }
+                os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO started (volume control %.1f dB)", what,
+                       (double)toDb(atomic_load_explicit(&gVolume, memory_order_relaxed)));
             }
-            os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO started (volume control %.1f dB)", what,
-                   (double)toDb(gVolume));
         }
     }
     if (!r) {
-        ++*users;
+        __atomic_store_n(users, *users + 1, __ATOMIC_RELEASE);
         syncCodecInput();
     }
     pthread_mutex_unlock(&gLock);
@@ -985,49 +1364,80 @@ static OSStatus StopIO(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 cli
 {
     (void)d;
     (void)client;
+    if (o == kDisplay) {
+        pthread_mutex_lock(&gLock);
+        const OSStatus result = switch_audio_display_stop(gConnect);
+        pthread_mutex_unlock(&gLock);
+        return result;
+    }
     if (!isDevice(o))
         return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gLock);
     if (o == kMic) {
         if (gMicUsers)
-            --gMicUsers;
+            __atomic_store_n(&gMicUsers, gMicUsers - 1, __ATOMIC_RELEASE);
     } else {
         UInt32 *users = o == kSpeaker ? &gSpeakerUsers : &gCodecUsers;
-        if (*users && --*users == 0) {
-            syncCodecInput();
-            if (!gSpeakerUsers && !gCodecUsers)
-                call(SwitchAudioStopOutput);
-            os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO stopped", o == kSpeaker ? "speaker" : "headphone");
+        if (*users) {
+            const UInt32 next = *users - 1;
+            __atomic_store_n(users, next, __ATOMIC_RELEASE);
+            if (next == 0) {
+                syncCodecInput();
+                if (!gSpeakerUsers && !gCodecUsers) {
+                    call(SwitchAudioStopOutput);
+                    sendRouteLocked(SwitchAudioRouteAuto);
+                } else if (gSpeakerUsers) {
+                    sendRouteLocked(SwitchAudioRouteSpeaker);
+                    sendMuteLocked(kSpeakerMute);
+                } else {
+                    sendRouteLocked(SwitchAudioRouteHeadphones);
+                    sendMuteLocked(kCodecMute);
+                }
+                os_log(OS_LOG_DEFAULT, "SwitchAudio: %{public}s IO stopped", o == kSpeaker ? "speaker" : "headphone");
+            }
         }
     }
     pthread_mutex_unlock(&gLock);
     return 0;
 }
 
-// Time stamps start at the frame IO started on and repeat every kZeroPeriod frames: on the service's timeline for the
-// speaker and microphone, on the host clock at the nominal rate for the built-in input.
 static OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef d, AudioObjectID o, UInt32 client, Float64 *sampleTime,
                                  UInt64 *hostTime, UInt64 *seed)
 {
     (void)d;
     (void)client;
-    const uint64_t now = mach_absolute_time();
+    if (o == kDisplay)
+        return switch_audio_display_timestamp(sampleTime, hostTime, seed);
     if (o == kMic) {
+        const uint64_t origin = atomic_load_explicit(&gMicOrigin, memory_order_acquire);
+        const uint64_t now = mach_absolute_time();
         const Float64 period = gHostTicksPerFrame * kZeroPeriod;
-        const uint64_t wraps = now > gMicOrigin ? (uint64_t)((Float64)(now - gMicOrigin) / period) : 0;
+        const uint64_t wraps = now > origin ? (uint64_t)((Float64)(now - origin) / period) : 0;
         *sampleTime = (Float64)(wraps * kZeroPeriod);
-        *hostTime = gMicOrigin + (uint64_t)((Float64)wraps * period);
-        *seed = gMicSeed;
+        *hostTime = origin + (uint64_t)((Float64)wraps * period);
+        *seed = atomic_load_explicit(&gMicSeed, memory_order_acquire);
         return 0;
     }
-    if (!gControl)
+    const SwitchAudioControl *ctrl = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    const Float64 tpf = atomic_load_explicit(&gTicksPerFrame, memory_order_acquire);
+    if (!ctrl || tpf <= 0.0)
         return kAudioHardwareNotRunningError;
-    const Float64 period = gTicksPerFrame * kZeroPeriod;
-    const uint64_t origin = gControl->anchor_host + (uint64_t)((Float64)gZeroOrigin * gTicksPerFrame);
+    HwAnchor hw;
+    if (readHwAnchor(ctrl, &hw)) {
+        *sampleTime = (Float64)hw.sample;
+        *hostTime = hw.host;
+        *seed = (atomic_load_explicit(&gZeroSeed, memory_order_acquire) << 32) | hw.seed;
+        return 0;
+    }
+    const uint64_t anchor = __atomic_load_n(&ctrl->anchor_host, __ATOMIC_ACQUIRE);
+    const uint64_t originFrames = atomic_load_explicit(&gZeroOrigin, memory_order_acquire);
+    const uint64_t origin = anchor + (uint64_t)((Float64)originFrames * tpf);
+    const uint64_t now = mach_absolute_time();
+    const Float64 period = tpf * kZeroPeriod;
     const uint64_t wraps = now > origin ? (uint64_t)((Float64)(now - origin) / period) : 0;
-    *sampleTime = (Float64)(gZeroOrigin + wraps * kZeroPeriod);
+    *sampleTime = (Float64)(originFrames + wraps * kZeroPeriod);
     *hostTime = origin + (uint64_t)((Float64)wraps * period);
-    *seed = gZeroSeed;
+    *seed = atomic_load_explicit(&gZeroSeed, memory_order_acquire);
     return 0;
 }
 
@@ -1036,8 +1446,8 @@ static OSStatus WillDoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o,
 {
     (void)d;
     (void)client;
-    *will = (op == kAudioServerPlugInIOOperationWriteMix && (o == kSpeaker || o == kCodec)) ||
-            op == kAudioServerPlugInIOOperationReadInput;
+    *will = (op == kAudioServerPlugInIOOperationWriteMix && (o == kSpeaker || o == kCodec || o == kDisplay)) ||
+            (op == kAudioServerPlugInIOOperationReadInput && o != kDisplay);
     *inPlace = true;
     return 0;
 }
@@ -1062,51 +1472,78 @@ static OSStatus DoIOOperation(AudioServerPlugInDriverRef d, AudioObjectID o, Aud
     (void)o;
     (void)client;
     (void)secondary;
+    if (o == kDisplay && stream == kDisplayOut && op == kAudioServerPlugInIOOperationWriteMix) {
+        switch_audio_display_mix(frames, info, main);
+        return 0;
+    }
     if (op == kAudioServerPlugInIOOperationReadInput && (stream == kSpeakerTap || stream == kMicIn)) {
         memset(main, 0, (size_t)frames * channelsOf(stream) * sizeof(Float32));  // silent inputs (top of file)
         return 0;
     }
-    if (!gControl)
+    SwitchAudioControl *ctrl = __atomic_load_n(&gControl, __ATOMIC_ACQUIRE);
+    if (!ctrl)
         return 0;
     if (op == kAudioServerPlugInIOOperationWriteMix && (stream == kSpeakerOut || stream == kCodecOut)) {
-        // The audio server can run more than one IO context on the device, each with its own mix: add to what the ring
-        // holds (the service clears every period it consumes) so one context's silence does not erase another's sound.
-        // (On 21H461 one context plays the speaker, VirtualAudio's aggregate: the add meets silence.) Float32 becomes
-        // S32 in one saturating step (SwitchAudioConvert.h), in at most two runs either side of the ring's end.
-        const uint64_t first = (uint64_t)info->mOutputTime.mSampleTime;
-        const uint32_t total = frames < SWITCH_AUDIO_RING_FRAMES ? frames : SWITCH_AUDIO_RING_FRAMES;
+        if (!frames || info->mOutputTime.mSampleTime < 0.0)
+            return 0;
+        uint64_t first = (uint64_t)info->mOutputTime.mSampleTime;
+        const uint64_t played = __atomic_load_n(&ctrl->out_frames, __ATOMIC_ACQUIRE);
+        const Float32 *src = main;
+        UInt32 count = frames;
+        if (first + count <= played)
+            return 0;
+        if (first < played) {
+            const uint64_t skip = played - first;
+            src += skip * channelsOf(stream);
+            first = played;
+            count -= (UInt32)skip;
+        }
+        const uint64_t limit = played + (SWITCH_AUDIO_RING_FRAMES - SWITCH_AUDIO_RING_FRAMES / 4);
+        if (first >= limit)
+            return 0;
+        if (first + count > limit)
+            count = (UInt32)(limit - first);
+        Float32 mixGain = 1.0f;
+        if (ctrl->backend != SwitchAudioBackendTegraI2S) {
+            if (stream == kSpeakerOut) {
+                mixGain = atomic_load_explicit(&gSpeakerMuted, memory_order_relaxed)
+                              ? 0.0f
+                              : atomic_load_explicit(&gSpeakerGain, memory_order_relaxed);
+            } else if (atomic_load_explicit(&gCodecMuted, memory_order_relaxed)) {
+                mixGain = 0.0f;
+            }
+        }
         const uint32_t at = (uint32_t)(first % SWITCH_AUDIO_RING_FRAMES);
 #if SWITCH_AUDIO_J181
         const uint32_t run = stream == kSpeakerOut
-                                 ? switch_audio_ring_fold(gOut, SWITCH_AUDIO_RING_FRAMES, first, main, frames, gain())
-                                 : switch_audio_ring_mix(gOut, SWITCH_AUDIO_RING_FRAMES, 2, first, main, frames, 1.0f);
+                                 ? switch_audio_ring_fold(gOut, SWITCH_AUDIO_RING_FRAMES, first, src, count, mixGain)
+                                 : switch_audio_ring_mix(gOut, SWITCH_AUDIO_RING_FRAMES, 2, first, src, count, mixGain);
 #else
-        const uint32_t run = switch_audio_ring_mix(gOut, SWITCH_AUDIO_RING_FRAMES, 2, first, main, frames,
-                                                   stream == kSpeakerOut ? gain() : 1.0f);
+        const uint32_t run = switch_audio_ring_mix(gOut, SWITCH_AUDIO_RING_FRAMES, 2, first, src, count, mixGain);
 #endif
         // The Tegra backend's DMA reads the ring from memory and does not snoop the caches: write back what was mixed.
-        if (gControl->backend == SwitchAudioBackendTegraI2S && total) {
+        if (ctrl->backend == SwitchAudioBackendTegraI2S && count) {
             switch_dcache_clean_lines(gOut + 2 * at, run * 2 * sizeof(switch_audio_sample_t));
-            if (run < total)
-                switch_dcache_clean_lines(gOut, (total - run) * 2 * sizeof(switch_audio_sample_t));
+            if (run < count)
+                switch_dcache_clean_lines(gOut, (count - run) * 2 * sizeof(switch_audio_sample_t));
             switch_dcache_sync();
         }
-        const uint64_t t = first + frames;
-        if (t > gControl->out_written)
-            gControl->out_written = t;
+        const uint64_t t = first + count;
+        if (t > __atomic_load_n(&ctrl->out_written, __ATOMIC_RELAXED))
+            __atomic_store_n(&ctrl->out_written, t, __ATOMIC_RELEASE);
 #if SWITCH_DEBUG
-        // IO cycle accounting for the service's stats line (wake-ups per second, frames per cycle).
-        gControl->io_cycles = gControl->io_cycles + 1;
-        gControl->io_frames = gControl->io_frames + frames;
+        ctrl->io_cycles = ctrl->io_cycles + 1;
+        ctrl->io_frames = ctrl->io_frames + count;
 #endif
     } else if (op == kAudioServerPlugInIOOperationReadInput && stream == kCodecIn) {
-        Float32 *dst = main;
-        uint64_t t = (uint64_t)info->mInputTime.mSampleTime;
-        const uint64_t anchor = __atomic_load_n(&gControl->in_anchor, __ATOMIC_ACQUIRE), captured = gControl->in_frames;
-        for (UInt32 i = 0; i < frames; ++i, ++t) {
-            const int64_t at = switch_audio_capture_frame(t, anchor, captured, SWITCH_AUDIO_IN_RING_FRAMES);
-            dst[i] = at < 0 ? 0.0f : switch_audio_s32_to_float(gIn[at]);
+        if (info->mInputTime.mSampleTime < 0.0) {
+            memset(main, 0, (size_t)frames * sizeof(Float32));
+            return 0;
         }
+        const uint64_t t = (uint64_t)info->mInputTime.mSampleTime;
+        const uint64_t anchor = __atomic_load_n(&ctrl->in_anchor, __ATOMIC_ACQUIRE);
+        const uint64_t captured = __atomic_load_n(&ctrl->in_frames, __ATOMIC_ACQUIRE);
+        switch_audio_ring_read_s32(main, gIn, SWITCH_AUDIO_IN_RING_FRAMES, t, frames, anchor, captured);
     }
     return 0;
 }
@@ -1170,8 +1607,8 @@ __attribute__((visibility("default"))) void *SwitchAudio_Create(CFAllocatorRef a
         mach_timebase_info_data_t tb;
         mach_timebase_info(&tb);
         gHostTicksPerFrame = 1e9 / kRate * tb.denom / tb.numer;
-        if (!gTicksPerFrame)
-            gTicksPerFrame = gHostTicksPerFrame;
+        if (atomic_load_explicit(&gTicksPerFrame, memory_order_relaxed) == 0.0)
+            atomic_store_explicit(&gTicksPerFrame, gHostTicksPerFrame, memory_order_release);
     }
     return &gInterfacePtr;
 }

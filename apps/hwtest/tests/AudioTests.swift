@@ -147,6 +147,202 @@ struct AudioLatencyTest: HWTest {
     }
 }
 
+struct AudioIdleWakeTest: HWTest {
+    let id = "audio.idle_wake"
+    let name = "Audio playback across APE idle power-off"
+    let subsystem = Subsystem.audio
+
+    func run(_ context: TestContext) async throws -> Outcome {
+        try Audio.activate(category: .playback, rate: 48_000)
+        var sessionActive = true
+        defer {
+            if sessionActive {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
+        }
+        let firstSessionRate = AVAudioSession.sharedInstance().sampleRate
+        var beforeSnap: AudioKernelSnapshot?
+        let beforeRate = try await AudioSysctl.playToneWithProbe(seconds: 0.6) {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            beforeSnap = AudioSysctl.optional()
+        }
+        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        sessionActive = false
+        try await Task.sleep(nanoseconds: 6_500_000_000)
+        let idleSnap = AudioSysctl.optional()
+
+        try Audio.activate(category: .playback, rate: 48_000)
+        sessionActive = true
+        let session = AVAudioSession.sharedInstance()
+        var wakeSnap1: AudioKernelSnapshot?
+        var wakeSnap2: AudioKernelSnapshot?
+        let afterRate = try await AudioSysctl.playToneWithProbe(seconds: 1.0) {
+            try await Task.sleep(nanoseconds: 300_000_000)
+            wakeSnap1 = AudioSysctl.optional()
+            try await Task.sleep(nanoseconds: 500_000_000)
+            wakeSnap2 = AudioSysctl.optional()
+        }
+
+        var metrics = Metrics()
+        metrics.set("session_rate", Int(session.sampleRate))
+        metrics.set("before_rate", beforeRate, digits: 0)
+        metrics.set("after_rate", afterRate, digits: 0)
+        metrics.set("route", Audio.outputs())
+
+        var checks: [(String, Bool)] = [
+            ("hardware runs at 48000 Hz after idle wake", session.sampleRate == 48_000),
+            (
+                "initial playback runs at session rate (within 2%)",
+                abs(beforeRate - firstSessionRate) <= firstSessionRate * 0.02
+            ),
+            (
+                "post-idle playback runs at session rate (within 2%)",
+                abs(afterRate - session.sampleRate) <= session.sampleRate * 0.02
+            ),
+        ]
+        if let b = beforeSnap, let idle = idleSnap, let w1 = wakeSnap1, let w2 = wakeSnap2, b.backend == "tegra" {
+            metrics.set("idle_powered", idle.powered)
+            metrics.set("gates_delta", Int(idle.gates &- b.gates))
+            metrics.set("ungates_delta", Int(w2.ungates &- b.ungates))
+            metrics.set("resume_us", Int(w2.resumeUs))
+            metrics.set("wake_mixer_delta", Int(w2.mixerSamples &- w1.mixerSamples))
+            checks.append(("APE AUD partition powered off while idle", idle.powered == 0 && idle.gates > b.gates))
+            checks.append(("APE AUD partition ungated cleanly on wake", w2.powered == 1 && w2.ungates > b.ungates))
+            checks.append(
+                ("MIXER1 active and advancing after wake", w2.mixerEn == 1 && w2.mixerSamples != w1.mixerSamples)
+            )
+        }
+        return .judged(checks, metrics, proof: "route=\(Audio.outputs())")
+    }
+}
+
+final class TimestampTracker: @unchecked Sendable {
+    private let lock = NSLock()
+    private var measuring = false
+    private var callbacks = 0
+    private var invalidTimestamps = 0
+    private var sampleRegressions = 0
+    private var hostRegressions = 0
+    private var firstSample: Double?
+    private var firstHost: UInt64?
+    private var lastSample: Double?
+    private var lastHost: UInt64?
+
+    func beginMeasurement() {
+        lock.lock()
+        measuring = true
+        lock.unlock()
+    }
+
+    func record(_ timestamp: AudioTimeStamp) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard measuring else { return }
+        callbacks += 1
+        let flags = timestamp.mFlags
+        guard flags.contains(.sampleTimeValid), flags.contains(.hostTimeValid) else {
+            invalidTimestamps += 1
+            return
+        }
+        let sample = timestamp.mSampleTime
+        let host = timestamp.mHostTime
+        if let prevSample = lastSample, sample <= prevSample { sampleRegressions += 1 }
+        if let prevHost = lastHost, host <= prevHost { hostRegressions += 1 }
+        if firstSample == nil {
+            firstSample = sample
+            firstHost = host
+        }
+        lastSample = sample
+        lastHost = host
+    }
+
+    struct Snapshot {
+        let callbacks: Int
+        let invalid: Int
+        let sampleRegressions: Int
+        let hostRegressions: Int
+        let deltaSamples: Double
+        let deltaHost: UInt64
+    }
+
+    var snapshot: Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        let ds = (lastSample ?? 0) - (firstSample ?? 0)
+        let dh = (lastHost ?? 0) >= (firstHost ?? 0) ? (lastHost ?? 0) - (firstHost ?? 0) : 0
+        return Snapshot(
+            callbacks: callbacks, invalid: invalidTimestamps, sampleRegressions: sampleRegressions,
+            hostRegressions: hostRegressions, deltaSamples: ds, deltaHost: dh
+        )
+    }
+}
+
+struct AudioZeroTimestampTest: HWTest {
+    let id = "audio.zero_timestamp"
+    let name = "Hardware-anchored zero timestamp monotonicity and drift"
+    let subsystem = Subsystem.audio
+
+    func run(_ context: TestContext) async throws -> Outcome {
+        try Audio.activate(category: .playback, rate: 48_000)
+        defer { try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+        let session = AVAudioSession.sharedInstance()
+        let rate = session.sampleRate
+        let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
+        let tracker = TimestampTracker()
+        var phase = 0.0
+        let source = AVAudioSourceNode(format: format) { _, timestamp, count, buffers in
+            if count > 0 { tracker.record(timestamp.pointee) }
+            let list = UnsafeMutableAudioBufferListPointer(buffers)
+            for frame in 0 ..< Int(count) {
+                let sample = Float(sin(phase) * 0.1)
+                phase += 2 * .pi * 1000 / rate
+                for buffer in list { buffer.mData!.assumingMemoryBound(to: Float.self)[frame] = sample }
+            }
+            return noErr
+        }
+        let engine = AVAudioEngine()
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: format)
+        try engine.start()
+        defer { engine.stop() }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let startSnap = AudioSysctl.optional()
+        tracker.beginMeasurement()
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+        let endSnap = AudioSysctl.optional()
+        let stats = tracker.snapshot
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        let hostSeconds = Double(stats.deltaHost) * Double(tb.numer) / Double(tb.denom) / 1e9
+        let sampleSeconds = stats.deltaSamples / rate
+        let driftPct = hostSeconds > 0 ? abs(sampleSeconds - hostSeconds) / hostSeconds * 100.0 : 100.0
+        let measuredRate = hostSeconds > 0 ? stats.deltaSamples / hostSeconds : 0
+        var metrics = Metrics()
+        metrics.set("session_rate", Int(rate))
+        metrics.set("callbacks", stats.callbacks)
+        metrics.set("invalid_timestamps", stats.invalid)
+        metrics.set("sample_regressions", stats.sampleRegressions)
+        metrics.set("host_regressions", stats.hostRegressions)
+        metrics.set("drift_pct", driftPct, digits: 4)
+        metrics.set("measured_rate", measuredRate, digits: 1)
+        var checks: [(String, Bool)] = [
+            ("render callbacks ran across the window", stats.callbacks >= 20),
+            ("every callback had valid sample and host timestamps", stats.invalid == 0),
+            ("mSampleTime is strictly monotonic", stats.sampleRegressions == 0),
+            ("mHostTime is strictly monotonic", stats.hostRegressions == 0),
+            ("clock drift against host clock is under 0.5%", hostSeconds > 0.5 && driftPct < 0.5),
+        ]
+        if let s1 = startSnap, let s2 = endSnap, s2.backend == "tegra" {
+            let hwDelta = s2.hwSample >= s1.hwSample ? s2.hwSample - s1.hwSample : 0
+            metrics.set("hw_seed", Int(s2.hwSeed))
+            metrics.set("hw_sample_delta", Int(hwDelta))
+            checks.append(("hardware ZeroTimeStamp seqlock seed published", s2.hwSeed > 0))
+            checks.append(("ADMA period interrupts advanced hw_sample", hwDelta >= 49_152))
+        }
+        return .judged(checks, metrics, proof: "route=\(Audio.outputs())")
+    }
+}
+
 struct AudioRouteTest: HWTest {
     let id = "audio.route"
     let name = "Audio route"

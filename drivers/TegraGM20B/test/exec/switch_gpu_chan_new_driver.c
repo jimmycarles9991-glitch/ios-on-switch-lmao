@@ -63,7 +63,24 @@ int switch_chan_new_make(uint32_t chid, int critical)
 	visible_word = 0;
 	ltc_flushes = 0;
 	vm.owner = &vm;
+	vm.connection = &vm;
 	return tgm_chan_new(&vm, &vm, &fence, 0x200000, "backboardd", critical, &made);
+}
+
+int switch_chan_new_make_copy_kqueue(uint32_t chid, int high)
+{
+	host = (struct switch_chan_new_host){.chid = chid};
+	fence = 0;
+	visible_word = 0;
+	ltc_flushes = 0;
+	vm.owner = &vm;
+	vm.connection = NULL;
+	return tgm_chan_new_copy(&vm, &vm, &fence, 0x200000, "ce-copy", high, &made);
+}
+
+int switch_chan_new_app(void)
+{
+	return made->app;
 }
 
 uint32_t switch_chan_new_recorded_timeslice(void)

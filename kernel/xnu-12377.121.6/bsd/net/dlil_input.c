@@ -111,7 +111,8 @@ dlil_create_input_thread(ifnet_t ifp, struct dlil_threading_info *inp,
 		VERIFY(inp != dlil_main_input_thread);
 		inp->dlth_name = tsnprintf(inp->dlth_name_storage, sizeof(inp->dlth_name_storage),
 		    "%s_input_poll", if_name(ifp));
-	} else if (net_async || (ifp->if_xflags & IFXF_LEGACY)) {
+	} else if (!(ifp->if_xflags & IFXF_SYNCHRONOUS_INPUT) &&
+	    (net_async || (ifp->if_xflags & IFXF_LEGACY))) {
 		/*
 		 * Asynchronous strategy.
 		 */

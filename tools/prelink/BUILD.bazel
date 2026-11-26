@@ -21,6 +21,7 @@ py_binary(
     srcs = ["emit_prelink.py"],
     deps = [
         ":native_prelink",
+        "//kits/SwitchABI:sites_lib",
         "//tools/common:macho",
     ],
 )
@@ -34,6 +35,22 @@ py_test(
     ],
     deps = [
         ":native_prelink",
+        "//kits/SwitchABI:sites_lib",
+        "//tools/common:macho",
+    ],
+)
+
+py_test(
+    name = "emit_prelink_sites_test",
+    size = "small",
+    srcs = [
+        "emit_prelink.py",
+        "emit_prelink_sites_test.py",
+    ],
+    data = ["//translate/arm64e:xnu/prelink26/emit26.py"],
+    deps = [
+        ":native_prelink",
+        "//kits/SwitchABI:sites_lib",
         "//tools/common:macho",
     ],
 )

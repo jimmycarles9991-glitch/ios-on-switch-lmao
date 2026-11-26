@@ -28,8 +28,9 @@ TEST(VicOwnershipSource, EveryVicSubmissionRecordsItsUses)
     EXPECT_THAT(engine, Not(HasSubstr("int tegra_vic_run(")));
     EXPECT_THAT(engine, Not(HasSubstr("int tegra_vic_run_after(")));
     EXPECT_THAT(SourceText("../SwitchVICJobs.h"), Not(HasSubstr("switch_vic_submit_after(")));
-    EXPECT_THAT(SourceText("../SwitchVICBounceSubmit.cpp"),
-                HasSubstr("switch_gpu_backing_use uses[5] = {{output, SWITCH_GPU_BACKING_WRITE, 0}};"));
+    const std::string bounce = SourceText("../SwitchVICBounceSubmit.cpp");
+    EXPECT_THAT(bounce, HasSubstr("switch_gpu_backing_use uses[4] = {{output, SWITCH_GPU_BACKING_WRITE, 0}};"));
+    EXPECT_THAT(bounce, Not(HasSubstr("if (bounceSrc && !alias)")));
 }
 
 // A job's surfaces map through VIC's mapping space (switch_vic_mapping_create) and jobs queue in SwitchVICJobs: the

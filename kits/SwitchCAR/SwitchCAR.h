@@ -31,6 +31,8 @@ void switch_car_write(uint32_t offset, uint32_t value);
 void switch_car_rmw(uint32_t offset, uint32_t clear, uint32_t set);
 // A CAR handshake with no interrupt (a PLL's lock bit): switch_mmio_wait32 on the CAR.
 bool switch_car_wait(uint32_t offset, uint32_t mask, uint32_t value, uint32_t timeout_us);
+// APB_MISC_GP_HIDREV: chip 0x21 at major revision 2 or later, L4T's tegra210b01 (t210b01_compatible).
+bool switch_car_soc_t210b01(void);
 
 // The fuse cache readable from here on: the FUSE clock on (CLK_ENB_H_SET bit 7) and MISC_CLK_ENB's CFG_ALL_VISIBLE
 // (bit 28) set. MISC_CLK_ENB has no set/clear form (TRM 5.2.13), so the kit is its one writer, under its lock. Nothing

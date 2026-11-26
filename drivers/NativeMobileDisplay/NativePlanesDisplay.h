@@ -98,10 +98,11 @@ struct PlaneDecision {
 static const tgm_layout *surfaceLayout(OSObject *surface, tgm_layout &block)
 {
     IOMemoryDescriptor *memory = native_legacy_surface_descriptor(surface);
-    if (!memory || !memory->metaCast("IOMemoryDescriptor"))
+    if (!memory || !memory->metaCast("IOMemoryDescriptor") || memory->prepare(kIODirectionOut) != kIOReturnSuccess)
         return nullptr;
     IOByteCount length = 0;
     const addr64_t pa = memory->getPhysicalSegment(0, &length, kIOMemoryMapperNone);
+    memory->complete(kIODirectionOut);
     return pa && tegra_gm20b_surface_layout(pa & ~0xfffULL, &block) == 1 ? &block : nullptr;
 }
 

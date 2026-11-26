@@ -284,8 +284,8 @@ uint32_t tgm_readback_take(const TegraScanoutCopy *copy, uint64_t source, int32_
 	    !__atomic_compare_exchange_n(&r.state, &armed, TegraGM20BReadbackInFlight, false,
 					 __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
 		return 0;
-	if (static_cast<uint64_t>(pitch) * copy->height > kReadbackBytes) {
-		r.status = EFBIG;
+	if ((direct && !source) || static_cast<uint64_t>(pitch) * copy->height > kReadbackBytes) {
+		r.status = (direct && !source) ? ENOMEM : EFBIG;
 		__atomic_store_n(&r.state, TegraGM20BReadbackFailed, __ATOMIC_RELEASE);
 		return 0;
 	}

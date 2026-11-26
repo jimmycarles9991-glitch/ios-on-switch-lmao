@@ -1,8 +1,8 @@
 """One machine-wide, content-addressed cache for the emulator's heavy, shared builds.
 
 Every worktree and output base on this Mac shares ~/Library/Caches/switch-ios/<kind>/<key>/. An entry is built once:
-the builder holds an exclusive lock on the kind while it builds into a temporary directory, then renames it into place,
-so a reader sees a whole entry or none, and a second builder waits and then reuses the first one's.
+the builder holds an exclusive lock on the kind's directory while it builds into a temporary directory, then renames it
+into place, so a reader sees a whole entry or none, and a second builder waits and then reuses the first one's.
 """
 
 import fcntl
@@ -33,9 +33,8 @@ def file_digest(path: Path) -> str:
 
 
 @contextmanager
-def locked(kind: str) -> Iterator[Path]:
-    """Hold the kind's lock (blocking) and yield its directory."""
-    base = ROOT / kind
+def locked(base: Path) -> Iterator[Path]:
+    """Hold the lock of a kind's directory (blocking) and yield it."""
     base.mkdir(parents=True, exist_ok=True)
     with (base / 'lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -45,18 +44,18 @@ def locked(kind: str) -> Iterator[Path]:
             fcntl.flock(lock, fcntl.LOCK_UN)
 
 
-def existing(kind: str, key: str) -> Path | None:
-    """Return the kind's entry for key if it has been built, without building it."""
-    done = ROOT / kind / 'entries' / key
+def existing(base: Path, key: str) -> Path | None:
+    """Return the entry for key in a kind's directory if it has been built, without building it."""
+    done = base / 'entries' / key
     return done if done.is_dir() else None
 
 
-def entry(kind: str, key: str, make: Callable[[Path, Path], None]) -> Path:
-    """Return the kind's entry for key, building it with make(tmp, base) first if it is not there yet."""
-    done = ROOT / kind / 'entries' / key
+def entry(base: Path, key: str, make: Callable[[Path, Path], None]) -> Path:
+    """Return the entry for key in a kind's directory, building it with make(tmp, base) first if it is not there yet."""
+    done = base / 'entries' / key
     if done.is_dir():
         return done
-    with locked(kind) as base:
+    with locked(base):
         if done.is_dir():
             return done
         tmp = base / 'entries' / f'.{key}.partial'

@@ -21,7 +21,7 @@ inline IOLock *IOLockAlloc()
     return new IOLock;
 }
 
-inline void IOLockFree(IOLock *lock)
+inline void IOLockFree(const IOLock *lock)
 {
     delete lock;
 }
@@ -48,7 +48,7 @@ struct SwitchCarPanic : std::runtime_error {
 __attribute__((format(printf, 1, 2), noreturn)) inline void panic(const char *format, ...)
 {
     char line[256];
-    va_list ap;
+    va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
     va_start(ap, format);
     vsnprintf(line, sizeof(line), format, ap);
     va_end(ap);
@@ -61,7 +61,7 @@ extern "C" {
 #define NSEC_PER_USEC 1000u
 __attribute__((format(printf, 1, 2))) void IOLog(const char *format, ...);
 uint64_t mach_absolute_time(void);
-void clock_interval_to_deadline(uint32_t interval, uint32_t scale_factor, uint64_t *result);
+void clock_interval_to_deadline(uint32_t interval, uint32_t scale, uint64_t *deadline);
 uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t size);
 
 #ifdef __cplusplus

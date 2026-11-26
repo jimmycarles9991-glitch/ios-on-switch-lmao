@@ -204,8 +204,7 @@ static int chan_parked(u32 chid, u32 ccsr)
 		return 0;
 	method0 = nvkm_rd32(device, PBDMA_METHOD0(0));
 	data0 = nvkm_rd32(device, PBDMA_DATA0(0));
-	return tgm_pbdma_acquiring(method0, data0) ||
-	       (PBDMA_METHOD_ADDR(method0) == TGM_HOST_SYNCPOINTB && !(data0 & 0x3u));
+	return tgm_pbdma_acquiring(method0, data0);
 }
 
 /* What the channel's push waits on: a live channel's fence (*source), something the kernel or a host1x engine releases

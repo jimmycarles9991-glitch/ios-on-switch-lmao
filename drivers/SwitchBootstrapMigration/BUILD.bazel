@@ -12,18 +12,18 @@ ipsw_pins(name = "ipsw")
 py_binary(
     name = "check_donor",
     srcs = ["check_donor.py"],
-    deps = ["//tools/install:lib"],
 )
 
 tool_output(
     name = "donor_contract",
     srcs = [
         ":ipsw",
-        "@ipsw//:os",
+        "@ipsw//:os_migration_files",
+        "@ipsw//:os_system_version",
     ],
     outs = ["build/switch-bootstrap-migration/donor.json"],
     args = [
-        "$(execpath @ipsw//:os)",
+        "$(execpath @ipsw//:os_system_version)",
         "$(execpath :ipsw)",
         "{out}",
     ],
@@ -31,7 +31,6 @@ tool_output(
     message = "Checking the selected IPSW's native migration contract",
     mnemonic = "SwitchMigrationContract",
     requirements = [
-        "no-sandbox",
         "requires-darwin",
     ],
 )

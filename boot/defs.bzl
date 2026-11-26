@@ -197,18 +197,22 @@ def _boot_package_impl(ctx):
     catalog_trust = []
     catalog_outputs = []
     catalog_digest = None
-    if ctx.file.launchd_catalog_os:
+    if ctx.file.launchd_catalog:
+        if not ctx.file.launchd_catalog_signature:
+            fail("launchd_catalog and launchd_catalog_signature go together")
         catalog = out("launchd/launchd.plist")
         signature = out("launchd/launchd.plist.sig")
         trust = out("launchd/launchd.trustcache")
         catalog_digest = out("launchd/launchd.sha256")
         job = ctx.file._bootstrap_job
         apps_job = ctx.file._bootstrap_apps_job
+        sdwake_job = ctx.file._sdwake_job
         args = ctx.actions.args()
-        args.add("--os", ctx.file.launchd_catalog_os)
+        args.add("--native-catalog", ctx.file.launchd_catalog)
+        args.add("--native-signature", ctx.file.launchd_catalog_signature)
         args.add("--job", job)
         args.add("--apps-job", apps_job)
-        args.add("--volume-uuid", pins["volumes"]["os_volume_uuid"])
+        args.add("--sdwake-job", sdwake_job)
         args.add("--catalog-sha256", pins["derived"]["launchd_catalog_sha256"])
         args.add("--signature-sha256", pins["derived"]["launchd_catalog_signature_sha256"])
         args.add("--catalog", catalog)
@@ -219,11 +223,11 @@ def _boot_package_impl(ctx):
         ctx.actions.run(
             executable = ctx.attr._launchd_catalog[DefaultInfo].files_to_run,
             arguments = [args],
-            inputs = [ctx.file.launchd_catalog_os, job, apps_job],
+            inputs = [ctx.file.launchd_catalog, ctx.file.launchd_catalog_signature, job, apps_job, sdwake_job],
             outputs = catalog_outputs,
             mnemonic = "LaunchdCatalog",
             progress_message = "Preparing the %s native launchd catalogue" % pins["build"],
-            execution_requirements = {"requires-darwin": "", "no-sandbox": ""},
+            execution_requirements = {"requires-darwin": ""},
         )
         files["build/switch-bootstrap/launchd.plist"] = catalog
         files["build/switch-bootstrap/launchd.plist.sig"] = signature
@@ -476,7 +480,8 @@ boot_package = rule(
         "bt_patch": attr.label(mandatory = True, allow_single_file = True),
         "bootstrap_payload": attr.label(mandatory = True, allow_single_file = True),
         "bootstrap_manifest": attr.label(mandatory = True, allow_single_file = True),
-        "launchd_catalog_os": attr.label(allow_single_file = True),
+        "launchd_catalog": attr.label(allow_single_file = True),
+        "launchd_catalog_signature": attr.label(allow_single_file = True),
         "overlay_manifest": attr.label(mandatory = True, allow_single_file = True),
         "installer_entitlements": attr.label(allow_single_file = True),
         "_installer_seed_pin": _tool("//tools/package:installer_seed_pin"),
@@ -522,6 +527,7 @@ boot_package = rule(
         "_bootstrap_configuration": _tool("//drivers/SwitchBootstrap:configuration"),
         "_bootstrap_job": attr.label(default = "//drivers/SwitchBootstrap:com.brunostjohn.switch.bootstrap.plist", allow_single_file = True),
         "_bootstrap_apps_job": attr.label(default = "//drivers/SwitchAppRegistration:com.brunostjohn.switch.bootstrap-apps.plist", allow_single_file = True),
+        "_sdwake_job": attr.label(default = "//drivers/NativeSwitchBlock:helper/com.brunostjohn.switch.sdwake.plist", allow_single_file = True),
         "_launchd_catalog": _tool("//tools/package:launchd_catalog"),
         "_overlay": _tool("//tools/package:overlay"),
         "_adt_edit": _tool("//tools/package:adt_edit"),

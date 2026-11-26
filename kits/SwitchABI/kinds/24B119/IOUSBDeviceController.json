@@ -44,7 +44,8 @@
     "241": "getBufferOptions"
   },
   "fields": {
-    "controlRequest": "0x1e8"
+    "controlRequest": "0x1e8",
+    "deviceCapabilities": "0x1b0"
   },
   "addresses": {
     "vtable": "0xfffffff008054f58",
@@ -237,6 +238,11 @@
         "offset": "0x1e8",
         "at": "0xfffffff009b60ca0",
         "word": "f900f660"
+      },
+      "deviceCapabilities": {
+        "offset": "0x1b0",
+        "at": "0xfffffff009b6f05c",
+        "word": "f940d800"
       }
     },
     "evidence": {
@@ -245,6 +251,16 @@
       "handleControlRequestStateChange": "slot 218 (PAC 39884): IOUSBDeviceControlRequest calls it with w1=2, w2=[req+0xc] (0xfffffff009b5482c), as 21H461 calls slot 215; the original is bti; ret",
       "request": "_IOUSBDeviceIORequestTag as in 21H461: io() (slot 233) stores the endpoint at +0, the buffer at +8, the length at +0x40; completeEndpointIO reads the status at +0x28 and the actual at +0x48",
       "controlRequestState": "IOUSBDeviceControlRequest as in 21H461: state at +0xc, the setup packet at +0x10 (inputSetupPacket)"
+    },
+    "constants": {
+      "superSpeedBulkMaxBurst": {
+        "value": 15,
+        "at": "0xfffffff009b50a4c",
+        "word": "528001e9"
+      }
     }
+  },
+  "constants": {
+    "superSpeedBulkMaxBurst": 15
   }
 }

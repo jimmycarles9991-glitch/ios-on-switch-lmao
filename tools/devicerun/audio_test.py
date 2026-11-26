@@ -83,6 +83,12 @@ class Audio(unittest.TestCase):
         self.assertEqual(got['audio.codec-ready'].verdict, PASS)
         self.assertEqual(got['audio.codec-absent'].verdict, PASS)
 
+    def test_ape_idle_gate_is_reported(self):
+        idle = 'SwitchAudio: idle power off: gates=2 ungates=1 resume=1840us max=2100us'
+        got = results(record(CODEC_READY, process=KERNEL), record(idle, second=6, process=KERNEL))
+        self.assertEqual(got['audio.ape-idle-gate'].verdict, INFO)
+        self.assertIn('2/1/1840/2100', got['audio.ape-idle-gate'].observed)
+
     def test_boot_17_dropped_the_codec_and_had_no_input(self):
         got = results(
             record(CODEC_ADDED),

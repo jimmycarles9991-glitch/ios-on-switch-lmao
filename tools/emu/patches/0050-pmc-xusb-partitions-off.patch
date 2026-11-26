@@ -1,0 +1,15 @@
+diff --git a/hw/arm/tegra2/apb/pmc/pmc.c b/hw/arm/tegra2/apb/pmc/pmc.c
+index 10f66b6..d4ea95e 100644
+--- a/hw/arm/tegra2/apb/pmc/pmc.c
++++ b/hw/arm/tegra2/apb/pmc/pmc.c
+@@ -1305,7 +1305,9 @@ void tegra_pmc_reset(DeviceState *dev, ShutdownCause cause)
+             s->regs[(tegra_pmc_regdef_tegrax1_reset_table[i]-0x160)>>2] = tegra_pmc_regdef_tegrax1_reset_table[i+1];
+         }
+ 
+-        s->pwrgate_status.reg32 = 0x3FFE814C & ~BIT(3); // Value from hardware. PCX (PCIE) is cleared since sw expects it to be off.
++        // Value from hardware. PCX (PCIE) is cleared since sw expects it to be off, and XUSBA/XUSBB/XUSBC (20-22) as
++        // the console's boots leave them for the kernel: off.
++        s->pwrgate_status.reg32 = 0x3FFE814C & ~(BIT(3) | BIT(20) | BIT(21) | BIT(22));
+ 
+         // Setup regs as validated by Erista NX_Bootloader with certain versions.
+         s->pwr_det_val.reg32 = 0x007C3C2C;

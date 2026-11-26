@@ -33,7 +33,7 @@ Model gModel;
 
 void reset(int32_t speedo, uint32_t hidrev = kB01)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     gModel.registers.clear();
     gModel.writes.clear();
     gModel.lines.clear();
@@ -44,7 +44,7 @@ void reset(int32_t speedo, uint32_t hidrev = kB01)
 
 std::vector<std::pair<uintptr_t, uint32_t>> pllWrites(uintptr_t first, uintptr_t last)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     std::vector<std::pair<uintptr_t, uint32_t>> found;
     for (const auto &write : gModel.writes) {
         if (write.first >= first && write.first <= last)
@@ -55,7 +55,7 @@ std::vector<std::pair<uintptr_t, uint32_t>> pllWrites(uintptr_t first, uintptr_t
 
 std::string lines()
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     std::string all;
     for (const auto &line : gModel.lines)
         all += line;
@@ -64,7 +64,7 @@ std::string lines()
 
 void preset(uintptr_t address, uint32_t value)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     gModel.registers[address] = value;
 }
 
@@ -77,7 +77,7 @@ constexpr uint32_t base(uint32_t p, uint32_t n)
 // A PLLC2/PLLC3 BASE reads its lock bit once it is enabled out of IDDQ and reset.
 extern "C" uint32_t switch_mmio_model_read32(uintptr_t address)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     uint32_t value = gModel.registers[address];
     for (auto [pllBase, misc0, misc1] :
          {std::tuple{kC2Base, kC2Misc0, kC2Misc1}, std::tuple{kC3Base, kC3Misc0, kC3Misc1}}) {
@@ -90,7 +90,7 @@ extern "C" uint32_t switch_mmio_model_read32(uintptr_t address)
 
 extern "C" void switch_mmio_model_write32(uintptr_t address, uint32_t value)
 {
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     gModel.writes.emplace_back(address, value);
     gModel.registers[address] = value;
 }
@@ -131,11 +131,11 @@ extern "C" uintptr_t ml_io_map(uintptr_t phys_addr, uintptr_t)
 extern "C" void IOLog(const char *format, ...)
 {
     char line[512];
-    va_list ap;
+    va_list ap;  // NOLINT(cppcoreguidelines-init-variables): va_start initializes it
     va_start(ap, format);
     vsnprintf(line, sizeof(line), format, ap);
     va_end(ap);
-    std::lock_guard<std::mutex> hold(gModel.mutex);
+    const std::lock_guard<std::mutex> hold(gModel.mutex);
     gModel.lines.emplace_back(line);
 }
 
@@ -240,7 +240,7 @@ TEST(SwitchEngineClock, NoLockPutsThePllBackOff)
 {
     reset(1698);
     {
-        std::lock_guard<std::mutex> hold(gModel.mutex);
+        const std::lock_guard<std::mutex> hold(gModel.mutex);
         gModel.locks = false;
     }
     uint32_t khz = 0;

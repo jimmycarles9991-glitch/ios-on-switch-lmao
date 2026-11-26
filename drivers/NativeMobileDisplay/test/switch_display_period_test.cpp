@@ -414,5 +414,19 @@ TEST_F(DisplayPeriod, TheFrameEndFilterTakesNoLock)
     }
 }
 
+TEST_F(DisplayPeriod, RepeatedEdrFactorTakesNoLock)
+{
+    colour.setEdrFactor(1.0f);
+    const unsigned takesBefore = colour.lockTakes();
+    for (int i = 0; i < 8; ++i)
+        colour.setEdrFactor(1.0f);
+    EXPECT_EQ(colour.lockTakes(), takesBefore);
+    colour.setEdrFactor(0.5f);
+    EXPECT_EQ(colour.lockTakes(), takesBefore + 1);
+    for (int i = 0; i < 8; ++i)
+        colour.setEdrFactor(0.5f);
+    EXPECT_EQ(colour.lockTakes(), takesBefore + 1);
+}
+
 }  // namespace
 }  // namespace completion_flip_test

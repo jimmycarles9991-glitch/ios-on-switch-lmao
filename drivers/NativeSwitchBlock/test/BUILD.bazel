@@ -93,6 +93,7 @@ host_test(
     srcs = [
         "sd_queue_test.cpp",
         "//drivers/NativeSwitchBlock:SwitchQueue.h",
+        "//drivers/NativeSwitchBlock:SwitchSdWriteFence.h",
     ],
     copts = ["-O1"],
 )
@@ -105,6 +106,15 @@ host_test(
         "//drivers/NativeSwitchBlock:SwitchQueue.h",
     ],
     copts = ["-O1"],
+)
+
+host_test(
+    name = "sd_window_test",
+    srcs = [
+        "sd_window_test.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdWindow.h",
+        "//drivers/NativeSwitchBlock:SwitchSdWriteFence.h",
+    ],
 )
 
 host_test(
@@ -199,4 +209,19 @@ host_test(
         "//diagnostics/switch:SwitchRawMount.h",
     ],
     deps = [":source_checks"],
+)
+
+host_test(
+    name = "sd_files_volume_test",
+    srcs = [
+        "sd_files_volume_test.cpp",
+        "//diagnostics/switch:storage/fat32.h",
+        "//diagnostics/switch:storage/partition.c",
+        "//diagnostics/switch:storage/partition.h",
+        "//diagnostics/switch:storage/sd_reference.c",
+        "//diagnostics/switch:storage/sd_reference.h",
+        "//drivers/NativeSwitchBlock:SwitchSdVolume.cpp",
+        "//drivers/NativeSwitchBlock:SwitchSdVolume.h",
+        "//drivers/NativeSwitchBlock:SwitchSdVolumeInternal.h",
+    ],
 )

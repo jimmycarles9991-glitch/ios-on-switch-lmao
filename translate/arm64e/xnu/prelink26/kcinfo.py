@@ -5,35 +5,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from fileset import Fileset
 import base64, xml.etree.ElementTree as ET
 
-# main's 17 roots (passes/native-root-smp-v1/prelink-command.json), same bundle ids in 26.5.2
-ROOTS = ["com.apple.driver.AppleMobileFileIntegrity", "com.apple.filesystems.apfs", "com.apple.security.sandbox",
-         "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib", "com.apple.iokit.IOMobileGraphicsFamily",
-         "com.apple.iokit.IOSurface", "com.apple.iokit.IOHIDFamily", "com.apple.driver.DiskImages",
-         "com.apple.driver.DiskImages.FileBackingStore", "com.apple.driver.DiskImages.KernelBacked",
-         "com.apple.driver.DiskImages.ReadWriteDiskImage", "com.apple.driver.AppleGameControllerPersonality",
-         "com.apple.driver.AppleUSBDeviceMux", "com.apple.driver.usb.AppleUSBCommon",
-         "com.apple.driver.usb.AppleUSBHostCompositeDevice", "com.apple.driver.usb.AppleUSBHub",
-         "com.apple.driver.usb.AppleUSBXHCI", "com.apple.driver.usb.IOUSBHostHIDDevice",
-         "com.apple.iokit.IOAccessoryManager", "com.apple.iokit.IOGPUFamily", "com.apple.iokit.IOPCIFamily",
-         "com.apple.iokit.IOPortFamily", "com.apple.iokit.IOSCSIArchitectureModelFamily",
-         "com.apple.iokit.IOSCSIBlockCommandsDevice", "com.apple.iokit.IOUSBDeviceFamily",
-         "com.apple.iokit.IOUSBHostFamily", "com.apple.iokit.IOUSBMassStorageDriver",
-         "com.apple.driver.AppleUSBCardReader", "com.apple.driver.AppleUSBMassStorageInterfaceNub",
-         "com.apple.driver.USBStorageDeviceSpecifics", "com.apple.driver.SCSIDeviceSpecifics",
-         "com.apple.filesystems.lifs", "com.apple.driver.usb.AppleUSBHostPacketFilter",
-         "com.apple.driver.usb.AppleUSBHostDeviceSupport", "com.apple.driver.usb.cdc", "com.apple.driver.usb.cdc.acm",
-         "com.apple.driver.usb.serial", "com.apple.driver.usb.networking", "com.apple.iokit.IOSerialFamily",
-         "com.apple.driver.usb.IOUSBHostHIDDeviceSafeBoot", "com.apple.iokit.IOHIDEventDriver",
-         "com.apple.iokit.IOHIDEventDriverSafeBoot", "com.apple.driver.AppleHIDKeyboard",
-         "com.apple.driver.AppleHIDKeyboardEmbedded", "com.apple.driver.AppleTopCaseDriverV2",
-         "com.apple.driver.AppleTopCaseHIDEventDriver", "com.apple.driver.AppleUSBTopCaseDriver",
-         "com.apple.driver.AppleMultitouchDriver", "com.apple.driver.AppleMultitouchSPI",
-         "com.apple.driver.AppleActuatorDriver", "com.apple.driver.ApplePencilDriver",
-         "com.apple.driver.AppleInputDeviceSupport", "com.apple.driver.IOSlaveProcessor",
-         "com.apple.driver.usb.AppleUSBHostiOSDevice", "com.apple.driver.AppleUSBHostMergeProperties",
-         "com.apple.iokit.IOGameControllerFamily", "com.apple.driver.AppleUSBAudio",
-         "com.apple.iokit.IONetworkingFamily", "com.apple.driver.usb.cdc.ecm", "com.apple.driver.usb.cdc.ncm",
-         "com.apple.driver.usb.ethernet.asix", "com.apple.driver.AppleUSBEthernetHost"]
 # _PrelinkExecutableLoadAddr of a codeless kext in a fileset kernelcache (XNU kOSKextCodelessKextLoadAddr).
 CODELESS_LOAD_ADDR = 0x7FFFFFFFFFFFFFFF
 
@@ -133,10 +104,9 @@ def decode8(raw):
                 key=(raw >> 49) & 3, auth=raw >> 63)
 
 if __name__ == "__main__":
-    kc = KC(sys.argv[1])
-    sel, ifaces, codeless = kc.closure(ROOTS)
+    kc, roots = KC(sys.argv[1]), sys.argv[2:]
+    sel, ifaces, codeless = kc.closure([r for r in roots if r in kc.plist])
     print("plist entries", len(kc.plist), "fileset entries", len(kc.entries))
     print("closure", len(sel), "interfaces", sorted(ifaces))
     print(sorted(sel))
-    missing = [r for r in ROOTS if r not in kc.plist]
-    print("roots missing in 26.5.2:", missing)
+    print("roots missing:", [r for r in roots if r not in kc.plist])

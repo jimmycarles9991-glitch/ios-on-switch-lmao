@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 // VM binds, surface layouts, channels, and the hung submission's interlocks (the push scan: TegraGM20BPushScanRun.cpp).
 #include "TegraGM20BUserClientInternal.h"
+#include "SwitchGpuSurfaceComp.h"
 #include "TegraGM20BFencePageABI.h"
 #include "TegraGM20BLayoutAsk.h"
 #include "TegraGM20BRecord.h"
@@ -184,8 +185,13 @@ IOReturn AGXDeviceUserClient::surfaceLayoutInfo(const TegraGM20BAbiSurfaceLayout
 	tgm_coh *coh = bo->coh;
 	OSObject *object = bo->surface;
 	const uint64_t first = bo->pas[0];
-	const bool canCompress =
-		canonical && bo->backingMemory && bo->mem && tgm_mem_can_compress(bo->mem);
+	const bool externalScanout =
+		surface.width <= UINT32_MAX && surface.height <= UINT32_MAX &&
+		switch_gpu_surface_is_external_scanout(
+			uint32_t(surface.width), uint32_t(surface.height), surface.bpp,
+			static_cast<int>(critical_), tegra_gm20b_external_scanout()) != 0;
+	const bool canCompress = canonical && !externalScanout && bo->backingMemory && bo->mem &&
+				 tgm_mem_can_compress(bo->mem);
 	tgm_coh_hold_asker(coh);
 	if (object)
 		object->retain();

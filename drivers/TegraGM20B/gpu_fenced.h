@@ -292,6 +292,7 @@ static inline void present_fenced(struct tgm_chan *chan)
 			  nvxnu_nanotime() - tgm_present.queued);
 	}
 	tgm_present.fenced_queued = queued;
+	tgm_present.fenced_primary = tgm_present.primary;
 	tgm_present.fenced_due = 1;
 }
 

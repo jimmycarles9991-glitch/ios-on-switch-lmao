@@ -91,6 +91,7 @@ private:
 
     IOLock *lock = nullptr;  // the setters' (and attach, detach, restoreAfterPowerUp): never at a frame end
     uint32_t takes = 0;
+    uint32_t edrScaleCached = 0;
     SwitchMMIOWords dc;
     switch_color::ColourPublication<Platform> unit;
     bool announced = false;  // the last enable was logged (a blank alone is not); the action's

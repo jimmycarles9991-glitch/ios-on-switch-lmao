@@ -4,9 +4,8 @@ QEMU's SD card must be a power of two, so the card is 2 TiB (SDXC's largest) rat
 a VMDK descriptor of flat extents: the partition tables, the FAT, and the iOS partition mapped straight onto the
 install image (tools/install/manifest.py: its copy extents are the container's bytes, uncompressed) with a sparse
 file of zeros between them. QEMU opens it with snapshot=on, so a run writes to a temporary overlay and never to the
-shared base. The base (tables, an empty FAT, APFS clones of the image's parts) is made once per image (cache.py,
-keyed by the manifest, which hashes every chunk of the image); each run gets its own clone of the FAT with its boot
-files.
+shared base. The base (tables, empty FAT32 volume and APFS clones of the image's parts) is shared by manifest digest;
+each run gets its own FAT32 or exFAT volume seeded with its boot files.
 """
 
 import hashlib
@@ -14,6 +13,7 @@ import json
 import shutil
 import struct
 import subprocess
+import tempfile
 import uuid
 import zlib
 from pathlib import Path
@@ -55,10 +55,20 @@ def _header(current: int, backup: int, entries_lba: int, array_crc: int, last_us
     return bytes(header).ljust(SECTOR, b'\0')
 
 
-def _mbr(fat_first: int) -> bytes:
-    """Return hekate's hybrid MBR: its FAT32 as entry 1, the rest of the card behind a protective 0xEE entry."""
+def _mbr(fat_first: int, filesystem: str) -> bytes:
+    """Return hekate's hybrid MBR with a FAT32 or exFAT mirror and a protective entry."""
     mbr = bytearray(SECTOR)
-    struct.pack_into('<B3sB3sII', mbr, 446, 0, b'\xfe\xff\xff', 0x0C, b'\xfe\xff\xff', fat_first, FAT_SECTORS)
+    struct.pack_into(
+        '<B3sB3sII',
+        mbr,
+        446,
+        0,
+        b'\xfe\xff\xff',
+        0x07 if filesystem == 'exfat' else 0x0C,
+        b'\xfe\xff\xff',
+        fat_first,
+        FAT_SECTORS,
+    )
     struct.pack_into('<B3sB3sII', mbr, 462, 0, b'\0\2\0', 0xEE, b'\xfe\xff\xff', 1, IOS_FIRST - 1)
     mbr[510:512] = b'\x55\xaa'
     return bytes(mbr)
@@ -70,14 +80,14 @@ def layout(ios_sectors: int) -> dict:
     return {'ios': [IOS_FIRST, ios_last], 'fat': [fat_first, fat_first + FAT_SECTORS - 1]}
 
 
-def tables(plan: dict) -> tuple[bytes, bytes]:
+def tables(plan: dict, filesystem: str = 'fat32') -> tuple[bytes, bytes]:
     """Return the card's first IOS_FIRST sectors (MBR, primary GPT) and its last TAIL_SECTORS (backup GPT)."""
     array = _entry(BASIC_DATA, FAT_GUID, *plan['fat'], 'hos_data') + _entry(APFS_TYPE, IOS_GUID, *plan['ios'], 'iOS')
     array = array.ljust(ENTRIES * ENTRY_BYTES, b'\0')
     crc = zlib.crc32(array)
     last = CARD_SECTORS - 1
     last_usable = last - TAIL_SECTORS
-    head = _mbr(plan['fat'][0]) + _header(1, last, 2, crc, last_usable) + array
+    head = _mbr(plan['fat'][0], filesystem) + _header(1, last, 2, crc, last_usable) + array
     tail = array + _header(last, 1, last - ENTRY_SECTORS, crc, last_usable)
     return head.ljust(IOS_FIRST * SECTOR, b'\0'), tail
 
@@ -133,7 +143,7 @@ def is_install_image(source: Path) -> bool:
     return source.name.endswith('.SII.001')
 
 
-def _make_base(tmp: Path, first_part: Path | None) -> None:
+def make_base(tmp: Path, first_part: Path | None) -> None:
     if first_part is None:
         runs, ios_sectors = [[NO_IMAGE_SECTORS, None, 0]], NO_IMAGE_SECTORS
     elif not is_install_image(first_part):
@@ -171,7 +181,7 @@ def base(first_part: Path | None) -> Path:
         state = json.loads(first_part.with_name('state.json').read_text())
         identity = {'image': first_part.name, 'state': state, 'size': stat.st_size, 'mtime': stat.st_mtime_ns}
     key = cache.digest({'image': identity, 'revision': LAYOUT_REVISION})
-    return cache.entry('sd-base', key, lambda tmp, _: _make_base(tmp, first_part))
+    return cache.entry(cache.ROOT / 'sd-base', key, lambda tmp, _: make_base(tmp, first_part))
 
 
 def copy_files(fat: Path, files: dict[str, Path]) -> None:
@@ -187,30 +197,89 @@ def copy_files(fat: Path, files: dict[str, Path]) -> None:
         _mtools(fat, 'mcopy', '-o', str(files[card]), '::/' + card)
 
 
-def _descriptor(entry: Path, fat: Path) -> str:
+def _make_exfat(directory: Path, files: dict[str, Path]) -> Path:
+    with tempfile.TemporaryDirectory(dir=directory) as tmp:
+        tree = Path(tmp) / 'source'
+        tree.mkdir()
+        for relative, source in files.items():
+            target = tree / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        image = Path(tmp) / 'fat.cdr'
+        subprocess.run(
+            [
+                '/usr/bin/hdiutil',
+                'create',
+                '-layout',
+                'NONE',
+                '-fs',
+                'ExFAT',
+                '-volname',
+                'SWITCH SD',
+                '-srcfolder',
+                tree,
+                '-sectors',
+                str(FAT_SECTORS),
+                '-format',
+                'UDTO',
+                '-o',
+                image,
+            ],
+            check=True,
+            capture_output=True,
+        )
+        with image.open('rb') as fd:
+            if image.stat().st_size != FAT_SECTORS * SECTOR or fd.read(11)[3:] != b'EXFAT   ':
+                raise ValueError('hdiutil did not produce a raw exFAT volume of the requested size')
+        return image.replace(directory / 'card-fat.img')
+
+
+def _descriptor(entry: Path, fat: Path, head: Path) -> str:
     saved = json.loads((entry / 'layout.json').read_text())
     plan, zero = saved['plan'], entry / 'zero.img'
-    runs = [[IOS_FIRST, 'head.img', 0], *saved['ios']]
+    runs = [[IOS_FIRST, head, 0], *saved['ios']]
     runs.append([plan['fat'][0] - plan['ios'][1] - 1, None, 0])
     runs.append([FAT_SECTORS, fat, 0])
     runs.append([CARD_SECTORS - TAIL_SECTORS - plan['fat'][1] - 1, None, 0])
     runs.append([TAIL_SECTORS, 'tail.img', 0])
     if sum(run[0] for run in runs) != CARD_SECTORS:
         raise SystemExit('sdcard: the card descriptor does not add up to the card')
-    lines = [f'RW {n} FLAT "{entry / name if name else zero}" {offset}' for n, name, offset in runs if n]
+    lines = []
+    for n, name, offset in runs:
+        if n:
+            path = name if isinstance(name, Path) else entry / name if name else zero
+            lines.append(f'RW {n} FLAT "{path}" {offset}')
     header = ['# Disk DescriptorFile', 'version=1', 'CID=fffffffe', 'parentCID=ffffffff', 'createType="monolithicFlat"']
     # No blank line before an extent: QEMU's sscanf skips the newline and reads the next line's extent twice.
     return '\n'.join([*header, '# Extent description', *lines]) + '\n'
 
 
-def card_for_run(first_part: Path | None, run: Path, files: dict[str, Path]) -> Path:
-    """Return the run's card: a VMDK over the shared base and the run's own FAT clone with its boot files."""
+def seed(entry: Path, run: Path, files: dict[str, Path], filesystem: str) -> Path:
+    head = entry / 'head.img'
+    if filesystem == 'exfat':
+        fat = _make_exfat(run, files)
+        plan = json.loads((entry / 'layout.json').read_text())['plan']
+        head = Path('head.img')
+        (run / head).write_bytes(tables(plan, filesystem)[0])
+    else:
+        fat = run / 'card-fat.img'
+        fat.unlink(missing_ok=True)
+        subprocess.run(['/bin/cp', '-c', str(entry / 'fat.img'), str(fat)], check=True)
+        copy_files(fat, files)
+    card = run / 'card.vmdk'
+    card.write_text(_descriptor(entry, Path(fat.name), head))
+    return card
+
+
+def card_for_run(
+    first_part: Path | None,
+    run: Path,
+    files: dict[str, Path],
+    filesystem: str = 'fat32',
+) -> Path:
+    """Seed the run's card descriptor (FAT32 or exFAT hos_data)."""
+    if filesystem not in ('fat32', 'exfat'):
+        raise ValueError(f'unsupported Files volume format {filesystem}')
     entry = base(first_part)
     run.mkdir(parents=True, exist_ok=True)
-    fat = run / 'card-fat.img'
-    fat.unlink(missing_ok=True)
-    subprocess.run(['/bin/cp', '-c', str(entry / 'fat.img'), str(fat)], check=True)
-    copy_files(fat, files)
-    card = run / 'card.vmdk'
-    card.write_text(_descriptor(entry, fat))
-    return card
+    return seed(entry, run, files, filesystem)

@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from tools.emu import machine, qemu, report, sdcard
+from tools.emu import machine, qemu, report, sdcard, usbdev
 from tools.emu.monitor import Monitor, socket_path
 from tools.install import stages
 
@@ -132,6 +132,9 @@ def run_machine(
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--kind', choices=sorted(KINDS), required=True)
     parser.add_argument('--sd', help="IOS27.SII.001, a raw stage image (populated.img) or none (default: //:image's)")
+    parser.add_argument(
+        '--sd-filesystem', choices=('fat32', 'exfat'), default='fat32', help='format of emulated hos_data'
+    )
     parser.add_argument('--bootargs', help='switchroot/ios/bootargs.txt for this run, e.g. -v')
     parser.add_argument('--out', type=Path, help='the run directory (default out/emu/<kind>-<time>)')
     parser.add_argument('--package', type=Path, help='a //:boot output to boot instead of building one')
@@ -139,6 +142,16 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--bazel-flag', action='append', default=[], help='a flag for the //:boot build')
     parser.add_argument('--qemu', type=Path, help='this qemu-system-aarch64 instead of the cached build')
     parser.add_argument('--mttcg', action='store_true', help='one host thread per core, guest time from the clock')
+    parser.add_argument(
+        '--cache-log', action='store_true', help='log cache maintenance and xHCI DMA for cachecheck.py (cache.bin)'
+    )
+    parser.add_argument(
+        '--usb',
+        action='append',
+        default=[],
+        choices=sorted(usbdev.DEVICES),
+        help='a device on the USB-C port; a second one needs --usb hub first',
+    )
 
 
 def prepare(args: argparse.Namespace) -> tuple[Path, machine.Inputs]:
@@ -151,7 +164,7 @@ def prepare(args: argparse.Namespace) -> tuple[Path, machine.Inputs]:
     run = (args.out or workspace() / 'out/emu' / f'{args.kind}-{time.strftime("%Y%m%d-%H%M%S")}').resolve()
     run.mkdir(parents=True, exist_ok=True)
     image = None if args.sd == 'none' else Path(args.sd) if args.sd else default_image(args.kind)
-    card = sdcard.card_for_run(image, run, card_files(package, run, args.bootargs))
+    card = sdcard.card_for_run(image, run, card_files(package, run, args.bootargs), args.sd_filesystem)
     inputs = machine.Inputs(
         qemu=binary,
         package=package,
@@ -160,6 +173,8 @@ def prepare(args: argparse.Namespace) -> tuple[Path, machine.Inputs]:
         qmp=socket_path(),
         kernel=kernel,
         icount=not args.mttcg,
+        usb=tuple(args.usb),
+        cache_log=args.cache_log,
     )
     return run, inputs
 

@@ -403,6 +403,13 @@ thread_policy_set_internal(
 
 		info = (thread_time_constraint_with_priority_policy_t)policy_info;
 
+		/* CoreAudio AMCP caps computation at 50 ms assuming a 24 MHz timer (1,200,000 ticks),
+		 * which is 62.5 ms on a 19.2 MHz timer (max_rt_quantum = 960,000). */
+		if (info->constraint >= info->computation &&
+		    info->computation > max_rt_quantum &&
+		    info->computation <= max_rt_quantum + (max_rt_quantum / 4)) {
+			info->computation = max_rt_quantum;
+		}
 
 		if (info->constraint < info->computation ||
 		    info->computation > max_rt_quantum ||

@@ -24,11 +24,7 @@ from tools.install import card as cards, direct, folder, host, progress
 
 
 def fat_of(card: cards.Card) -> cards.Part:
-    """Return the card's hos_data FAT32, the only partition the copy touches; any iOS target is the installer's."""
-    parts = cards.diskutil_partitions(card)
-    if not parts or parts[0].name != 'hos_data' or parts[0].content != 'Microsoft Basic Data':
-        raise cards.RefusedError(f"{card.disk}: the first partition is not the Switch's hos_data FAT32")
-    return parts[0]
+    return cards.shared_partition(card, cards.diskutil_partitions(card))
 
 
 def stale_bytes(root: Path, relatives: list[str]) -> int:

@@ -58,6 +58,7 @@ static inline struct sysctl_oid flipTotalOids[kFlipTotals] = {};
 void startCompletionFlip()
 {
     __atomic_store_n(&completionFlipOwner, static_cast<void *>(this), __ATOMIC_RELEASE);
+    tgm_present_filter_owner(this);
     flipTotalsRegister();
     mediaFlipTotalsRegister();
 }

@@ -1,7 +1,7 @@
 // Guards on NativeSwitchBlock.cpp's use of the ADMA2 tables (sd_adma_test.cpp tests the tables themselves; the
-// driver is not built for the host): every card command range-checked against the APFS partition before it is issued,
-// ADMA2 never polled nor taken for SDMA, SDMA commands never past 256 KiB, the pipelined worker's ordering, and read
-// staging (r12-sdio, r14-sdcq).
+// driver is not built for the host): every card command range-checked against its originating partition before it is
+// issued, ADMA2 never polled nor taken for SDMA, SDMA commands never past 256 KiB, the pipelined worker's ordering,
+// and read staging (r12-sdio, r14-sdcq).
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
@@ -41,12 +41,13 @@ TEST(SdAdmaSource, DriverGuards)
     // ADMA2 commands both go through), besides beginBatch's check of the whole chain.
     const std::string issue = body("int NativeSwitchBlock::issue("),
                       complete = body("int NativeSwitchBlock::complete(");
-    EXPECT_THAT(issue, HasSubstr("outside the APFS partition"));
-    EXPECT_LT(Index(issue, "outside the APFS partition"), Index(issue, "w16(COMMAND"));
-    EXPECT_THAT(body("int NativeSwitchBlock::command("), HasSubstr("issue(lba, sectors, write, descriptors, cmd23)"));
+    EXPECT_THAT(issue, HasSubstr("outside its partition"));
+    EXPECT_LT(Index(issue, "outside its partition"), Index(issue, "w16(COMMAND"));
+    EXPECT_THAT(body("int NativeSwitchBlock::command("),
+                HasSubstr("issue(lba, sectors, write, descriptors, cmd23, window)"));
     const std::string begin = body("void NativeSwitchBlock::beginBatch(");
-    EXPECT_THAT(begin, HasSubstr("outside the APFS partition"));
-    EXPECT_LT(Index(begin, "outside the APFS partition"), Index(begin, "issue("));
+    EXPECT_THAT(begin, HasSubstr("outside its partition"));
+    EXPECT_LT(Index(begin, "outside its partition"), Index(begin, "issue("));
     // issue() is only called from command() and beginBatch().
     const auto calls = LinesMatching(source, R"(^.*[^:\w]issue\(static_cast|^.*[^:\w]issue\(lba)");
     EXPECT_EQ(calls.size(), 2u) << testing::PrintToString(calls);
@@ -96,7 +97,8 @@ TEST(SdAdmaSource, PipelinedWorker)
         EXPECT_THAT(body(waiter), HasSubstr("awaitStatus(")) << waiter;
     // endBatch: a split command's errors take run()'s retry, and a read's pages are invalidated after the command.
     const std::string end = body("void NativeSwitchBlock::endBatch(");
-    EXPECT_THAT(end, HasSubstr("retry(step, status, first->lba, sectors, write, table.count)"));
+    EXPECT_THAT(end,
+                HasSubstr("retry(step, status, first->lba, sectors, write, table.count, windowOf(first->shared))"));
     EXPECT_LT(Index(end, "retry("), Index(end, "finishDirect(write)"));
 }
 

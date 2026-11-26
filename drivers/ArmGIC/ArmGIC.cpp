@@ -69,8 +69,8 @@ constexpr uint8_t kSerialPriority = 0xc0;  // high-rate UARTs behind hardware fl
 // The SPIs a frame waits on: display controller A (frame end, vblank; NativeLegacyDisplay, TegraPanel), the GM20B
 // stall/nonstall lines (fences and the copy-engine present; TegraGM20B) and host1x's syncpoint line, which ends every
 // VIC job (Core Animation's IOSurfaceAccelerator copies, NVDEC -> VIC video frames; TegraHost1x).
-constexpr uint32_t kDisplayAIntid = 32 + 73, kGpuStallIntid = 32 + 157, kGpuNonstallIntid = 32 + 158,
-                   kHost1xSyncptIntid = 32 + 65;
+constexpr uint32_t kDisplayAIntid = 32 + 73, kDisplayBIntid = 32 + 74, kGpuStallIntid = 32 + 157,
+                   kGpuNonstallIntid = 32 + 158, kHost1xSyncptIntid = 32 + 65;
 
 // SPIs with a secondary core of their own, so CPU0 keeps its timers, I2C, GPIO and UARTs (touch, buttons, Joy-Cons,
 // Bluetooth) to itself: storage and Wi-Fi on CPU1, USB on CPU2; the frame lines take the last core (frameTarget).
@@ -189,8 +189,8 @@ class ArmGIC : public IOInterruptController {
 
     static bool isFrame(uint32_t intid)
     {
-        return intid == kDisplayAIntid || intid == kGpuStallIntid || intid == kGpuNonstallIntid ||
-               intid == kHost1xSyncptIntid;
+        return intid == kDisplayAIntid || intid == kDisplayBIntid || intid == kGpuStallIntid ||
+               intid == kGpuNonstallIntid || intid == kHost1xSyncptIntid;
     }
 
     // GICv2 breaks a priority tie by lowest INTID, so with one priority for every SPI the GPU fence lines (189/190)

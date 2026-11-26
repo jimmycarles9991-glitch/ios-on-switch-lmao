@@ -6,18 +6,27 @@
 #   bazel test //drivers/SwitchUSB/test:all
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
-load("//bazel/testing:defs.bzl", "host_library", "host_test")
+load("//bazel/testing:defs.bzl", "host_library", "host_shims", "host_test")
 
 lint_files()
 
+host_test(
+    name = "xudc_link_test",
+    srcs = [
+        "xudc_link_test.cpp",
+        "//drivers/SwitchUSB:XudcLink.h",
+    ],
+)
+
 # --- Device mode: the XUDC transfer planner ---
 # XudcTransfer.h's planner over 3000 random scatter-gather layouts and its OUT residue protocol against model
-# controllers of both residue kinds, plus the cost model; only the header, so a SwitchXUDC.cpp edit does not rerun it.
+# controllers of both residue kinds, plus the cost model; only the header, so a SwitchXUDC*.cpp edit does not rerun it.
 host_test(
     name = "xudc_transfer_test",
     srcs = [
         "xudc_transfer_test.cpp",
         "//drivers/SwitchUSB:XudcTransfer.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
     ],
     copts = ["-O1"],
 )
@@ -29,6 +38,20 @@ host_test(
     name = "xudc_completion_test",
     srcs = [
         "xudc_completion_test.cpp",
+        "xudc_model.h",
+        "//drivers/SwitchUSB:XudcTransfer.h",
+    ],
+    copts = ["-O1"],
+)
+
+# SwitchXUDCData.cpp "Interrupts" on the same model with drains run only by an interrupt or the driver's drainSoon: BEI
+# on IN TDs another follows strands no event over long sessions, a TD queued after the last keeps its interrupt, a cancel
+# and a halt ask for the drain their stopped endpoint needs, and why OUT never blocks.
+host_test(
+    name = "xudc_interrupt_test",
+    srcs = [
+        "xudc_interrupt_test.cpp",
+        "xudc_model.h",
         "//drivers/SwitchUSB:XudcTransfer.h",
     ],
     copts = ["-O1"],
@@ -47,13 +70,15 @@ host_test(
     copts = ["-O1"],
 )
 
-# SwitchDMADirect.h (//drivers/SwitchUSB:xudc_direct) against SwitchXUDC.cpp admit()'s prepare() path: identical runs
-# and TRBs, cache lines and copied bytes over random kernel-virtual layouts; what it refuses goes through prepare().
+# kits/SwitchDMA/SwitchDMADirect.h against SwitchXUDCData.cpp admit()'s prepare() path: identical runs and TRBs, cache
+# lines and copied bytes over random kernel-virtual layouts; which memory takes which path, and what goes through
+# prepare().
 host_test(
     name = "switch_dma_direct_test",
     srcs = [
         "switch_dma_direct_test.cpp",
-        "//drivers/SwitchUSB:SwitchDMADirect.h",
+        "//kits/SwitchDMA:SwitchDMADirect.h",
+        "//kits/SwitchDMA:SwitchDcache.h",
         "//drivers/SwitchUSB:XudcTransfer.h",
     ],
     copts = ["-O1"],
@@ -65,8 +90,178 @@ host_test(
     srcs = ["switch_xudc_source_test.cpp"],
     data = [
         "//drivers/SwitchUSB:SwitchXUDC.cpp",
+        "//drivers/SwitchUSB:SwitchXUDC.h",
+        "//drivers/SwitchUSB:SwitchXUDCData.cpp",
+        "//drivers/SwitchUSB:SwitchXUDCEndpoints.cpp",
+        "//drivers/SwitchUSB:SwitchXUDCEvents.cpp",
+        "//drivers/SwitchUSB:SwitchXUDCIsoch.cpp",
+        "//drivers/SwitchUSB:SwitchXUDCStats.cpp",
+        "//drivers/SwitchUSB:SwitchXUDCStats.h",
+        "//drivers/SwitchUSB:SwitchXUDCSmmu.cpp",
+        "//drivers/SwitchUSB:UsbDmaMapper.cpp",
+        "//drivers/SwitchUSB:UsbSmmuMapper.cpp",
+        "//drivers/SwitchUSB:UsbSmmuSpace.cpp",
+        "//drivers/SwitchUSB:UsbSmmuSpace.h",
+        "//drivers/SwitchUSB:SwitchUSB.cpp",
+        "//drivers/SwitchUSB:XudcIova.h",
+        "//drivers/SwitchUSB:XudcTransfer.h",
         "//drivers/SwitchUSB:XudcHardware.cpp",
         "//drivers/SwitchUSB:XudcRequestMemory.h",
+    ],
+)
+
+# --- The XUSB bring-up shared by both roles, against a register model of every block it writes ---
+host_shims(
+    name = "xusb_kernel",
+    headers = [
+        "IOKit/IOLib.h",
+        "kern/clock.h",
+        "os/log.h",
+    ],
+    stubs = "xusb_kernel_stubs.h",
+    visibility = ["//drivers/SwitchDisplayPort/test:__pkg__"],
+)
+
+host_library(
+    name = "xusb_register_model",
+    srcs = ["xusb_register_model.cpp"],
+    hdrs = ["xusb_register_model.h"],
+    deps = [":xusb_kernel"],
+    visibility = ["//drivers/SwitchDisplayPort/test:__pkg__"],
+)
+
+host_library(
+    name = "xusb_bringup",
+    srcs = [
+        "//drivers/SwitchUSB:XusbLanes.h",
+        "//drivers/SwitchUSB:XusbPadctl.cpp",
+        "//drivers/SwitchUSB:XusbPadctl.h",
+        "//drivers/SwitchUSB:XusbSuperSpeed.h",
+        "//drivers/SwitchUSB:XusbUtmiPad.cpp",
+        "//drivers/SwitchUSB:XusbUtmiPad.h",
+        "//kits/SwitchCAR:SwitchCAR.cpp",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPadctl.cpp",
+        "//kits/SwitchCAR:SwitchPadctl.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":xusb_kernel"],
+)
+
+# XusbPadctl.cpp: the pad controller lock, and device mode's fake SS port as tegra210_usb2_phy_power_on releases it.
+host_test(
+    name = "xusb_padctl_test",
+    srcs = [
+        "xusb_padctl_test.cpp",
+        "//drivers/SwitchUSB:XusbPadctl.h",
+    ],
+    deps = [
+        ":xusb_bringup",
+        ":xusb_register_model",
+    ],
+)
+
+# Every writer of a pad controller register shared between drivers, anywhere in drivers/ and kits/, takes the pad
+# controller lock (kits/SwitchCAR/SwitchPadctl.h): a scan of the tree's C and C++ sources.
+host_test(
+    name = "padctl_writers_test",
+    srcs = ["padctl_writers_test.cpp"],
+    data = ["//:lint_files"],
+)
+
+# XusbSettle.h: steps without an interrupt looked at twice at most, and the host's waits built on it.
+host_test(
+    name = "xusb_settle_test",
+    srcs = [
+        "xusb_settle_test.cpp",
+        "//drivers/SwitchUSB:XusbSettle.h",
+    ],
+    data = [
+        "//drivers/SwitchUSB:SwitchXHCIEvents.cpp",
+        "//drivers/SwitchUSB:XusbHost.cpp",
+    ],
+    deps = [
+        ":xusb_kernel",
+        ":xusb_register_model",
+    ],
+)
+
+# XusbUtmiPad.cpp: USB2 pad 0 powered as xusb-tegra210.c powers it, every write and delay in order, per SoC revision.
+host_test(
+    name = "xusb_utmi_pad_test",
+    srcs = [
+        "xusb_utmi_pad_test.cpp",
+        "//drivers/SwitchUSB:XusbUtmiPad.h",
+    ],
+    deps = [
+        ":xusb_bringup",
+        ":xusb_register_model",
+    ],
+)
+
+host_library(
+    name = "xusb_host_power",
+    srcs = [
+        "//drivers/SwitchUSB:XusbHost.h",
+        "//drivers/SwitchUSB:XusbHostPower.cpp",
+        "//drivers/SwitchUSB:XusbHostRegisters.h",
+        "//drivers/SwitchUSB:XusbLanes.h",
+        "//drivers/SwitchUSB:XusbPadctl.h",
+        "//drivers/SwitchUSB:XusbPartitions.h",
+        "//drivers/SwitchUSB:XusbPorts.h",
+        "//drivers/SwitchUSB:XusbUtmiPad.h",
+        "//drivers/TegraSMMU:TegraSMMU.h",
+        "//kits/SwitchCAR:SwitchCAR.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [
+        ":xusb_bringup",
+        ":xusb_kernel",
+    ],
+)
+
+# XusbHostPower.cpp: tegra_xusb_probe's order (clocks, pad, partitions with the memory client released last, config)
+# and the falcon from PLLRE as L4T's clock driver sets it.
+host_test(
+    name = "xusb_host_power_test",
+    srcs = [
+        "xusb_host_power_test.cpp",
+        "//drivers/SwitchUSB:XusbHost.h",
+        "//kits/SwitchCAR:SwitchPMC.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+        "//kits/SwitchMMIO:SwitchMMIOKernel.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [
+        ":xusb_host_power",
+        ":xusb_kernel",
+        ":xusb_register_model",
+    ],
+)
+
+# XusbPortTransports.h: the USB-C port's transports, one per type, against a model of the IOPort that refuses a second
+# transport of a type at any index, as 24B119's does.
+host_test(
+    name = "xusb_port_transports_test",
+    srcs = [
+        "xusb_port_transports_test.cpp",
+        "//drivers/SwitchUSB:XusbLanes.h",
+        "//drivers/SwitchUSB:XusbPortTransports.h",
+    ],
+)
+
+# XusbMailbox.h: the falcon's non-SuperSpeed mailbox messages answered as tegra_xusb_mbox_handle answers them.
+host_test(
+    name = "xusb_mailbox_test",
+    srcs = [
+        "xusb_mailbox_test.cpp",
+        "//drivers/SwitchUSB:XusbMailbox.h",
     ],
 )
 
@@ -113,23 +308,40 @@ host_test(
     data = [
         "//drivers/ArmGIC:ArmGIC.cpp",
         "//drivers/SwitchUSB:SwitchPD.cpp",
+        "//drivers/SwitchUSB:SwitchPDService.h",
+        "//drivers/SwitchUSB:SwitchPDSettings.cpp",
         "//drivers/SwitchUSB:SwitchUSB.cpp",
+        "//drivers/SwitchUSB:SwitchUSBPort.cpp",
+        "//drivers/SwitchUSB:SwitchUSBPort.h",
         "//drivers/SwitchUSB:SwitchXHCI.cpp",
+        "//drivers/SwitchUSB:SwitchXHCI.h",
         "//drivers/SwitchUSB:SwitchXHCIEvents.cpp",
         "//drivers/SwitchUSB:SwitchXHCIServices.cpp",
+        "//drivers/SwitchUSB:UsbDmaMapper.cpp",
+        "//drivers/SwitchUSB:UsbDmaProbe.h",
+        "//drivers/SwitchUSB:UsbDmaProbeHeld.cpp",
         "//drivers/SwitchUSB:UsbSmmuMapper.cpp",
+        "//drivers/SwitchUSB:UsbSmmuSpace.h",
+        "//drivers/SwitchUSB:XudcHardware.cpp",
         "//drivers/SwitchUSB:XusbHost.cpp",
         "//drivers/SwitchUSB:XusbHost.h",
+        "//drivers/SwitchUSB:XusbHostPower.cpp",
+        "//drivers/SwitchUSB:XusbHostRegisters.h",
+        "//drivers/SwitchUSB:XusbSleepwalk.cpp",
         "//drivers/SwitchUSB:XusbSuperSpeed.cpp",
+        "//drivers/SwitchUSB:XusbUtmiPad.cpp",
         "//drivers/SwitchWLAN:TegraPCIe.cpp",
+        "//kits/SwitchABI:interface/AppleUSBXHCI.json",
+        "//kits/SwitchABI:kinds/21H461/AppleUSBXHCI.json",
+        "//kits/SwitchABI:kinds/24B119/AppleUSBXHCI.json",
     ],
 )
 
-# --- SuperSpeed: SS port 0's lane and root port, the falcon's SuperSpeed messages, SwitchXHCI's write adjustments ---
+# --- SuperSpeed: SS port 0's lane, the port's transports, the falcon's SuperSpeed messages, SwitchXHCI's writes ---
 # XusbLanes.h compiled as C11 with -Wconversion -Wsign-conversion, and its decisions: the lane across DisplayPort alt
-# mode's pin assignments, the role and PCIe's PLL calibrations, the root port across sessions and SC7, the register
-# writes against the Linux sequences (never a bit of USB2 pad 0 or another lane), LFPS, DFE/CTLE and RESET_SSPI
-# messages, the SMMU state the host accepts, U1/U2 off and the moderation floor.
+# mode's pin assignments, the role and PCIe's PLL calibrations, the USB-C port's transports across sessions and SC7,
+# the register writes against the Linux sequences (never a bit of USB2 pad 0 or another lane), LFPS, DFE/CTLE and
+# RESET_SSPI messages, the SMMU state the host accepts, U1/U2 off and the moderation floor.
 host_library(
     name = "switch_usb_lanes_c",
     srcs = ["switch_usb_lanes_c.c"],
@@ -161,6 +373,35 @@ host_test(
     copts = ["-O1"],
 )
 
+# UsbStaticMap.h (UsbSmmuSpace.cpp): RAM at fixed IOVAs from the loader's ledger, the device controller's layout and
+# the host's, through the tables they build.
+host_test(
+    name = "usb_static_map_test",
+    srcs = [
+        "usb_static_map_test.cpp",
+        "//boot:loader/ram.h",
+        "//drivers/SwitchUSB:UsbIova.h",
+        "//drivers/SwitchUSB:UsbStaticMap.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+    ],
+    copts = ["-O1"],
+)
+
+# XudcIova.h (SwitchXUDCSmmu.cpp): device-mode requests at their fixed IOVAs and in the SMMU's window, byte for byte,
+# and what stays bounced.
+host_test(
+    name = "xudc_iova_test",
+    srcs = [
+        "xudc_iova_test.cpp",
+        "//drivers/SwitchUSB:UsbStaticMap.h",
+        "//drivers/SwitchUSB:XudcIova.h",
+        "//drivers/SwitchUSB:XudcIsoch.h",
+        "//drivers/SwitchUSB:XudcTransfer.h",
+        "//drivers/TegraSMMU:TegraSMMUDomain.h",
+    ],
+    copts = ["-O1"],
+)
+
 # UsbIova.h (UsbSmmuMapper.cpp): the XUSB host's SMMU window and the page layout of a scattered buffer at one IOVA range.
 host_test(
     name = "usb_iova_test",
@@ -171,10 +412,31 @@ host_test(
     copts = ["-O1"],
 )
 
-# The selected kind's prelink report: every host-side USB class kext prelinked, and on iOS 27 no new unnamed import.
+# UsbDmaCache.h (UsbDmaMapper.cpp): the host mapper's cache maintenance against a model of a cache line the XUSB host
+# does not snoop, IN read before and after complete, OUT, speculative fills.
+host_test(
+    name = "usb_dma_cache_test",
+    srcs = [
+        "usb_dma_cache_test.cpp",
+        "//drivers/SwitchUSB:UsbDmaCache.h",
+        "//kits/SwitchDMA:SwitchDMAOrder.h",
+    ],
+    copts = ["-O1"],
+)
+
+# The selected kind's prelink: every USB kext prelinked, its personalities in the prelinked kernel's prelink info those of
+# the kind's kernelcache less the deferred ones, and on iOS 27 no unnamed import.
 py_test(
     name = "usb_prelink_test",
     srcs = ["usb_prelink_test.py"],
-    data = ["//kernel:prelink_report"],
-    deps = ["@rules_python//python/runfiles"],
+    data = [
+        "//ipsw:kernelcache",
+        "//kernel:prelink_report",
+        "//kernel:prelinked",
+    ],
+    deps = [
+        "//tools/common:macho",
+        "//tools/prelink:native_prelink",
+        "@rules_python//python/runfiles",
+    ],
 )

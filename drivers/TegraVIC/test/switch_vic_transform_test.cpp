@@ -23,6 +23,8 @@ TegraVICJob submittedJob;
 TegraVICAcquire submittedAcquire;
 std::vector<switch_gpu_backing_use> declaredUses;
 std::vector<switch_gpu_backing_guard> declaredGuards;
+std::vector<switch_gpu_cpu_lease *> declaredLeases;
+unsigned writeReleases = 0;
 }
 
 extern "C" const TegraVICTraits *tegra_vic_traits()
@@ -78,6 +80,16 @@ void switch_vic_surface_release_access(SwitchVICSurfaceAccess *access)
     if (access->backing)
         --access->backing->refs;
     *access = {};
+}
+
+void switch_vic_surface_release_write(SwitchVICWriteReservation *reservation)
+{
+    if (!reservation || (!reservation->lease && !reservation->backing))
+        return;
+    ++writeReleases;
+    if (reservation->backing)
+        --reservation->backing->refs;
+    *reservation = {};
 }
 
 int switch_native_surface_acquire(const TegraVICSurface *surface, SwitchNativeSurfaceView *view, bool, bool)
@@ -142,6 +154,7 @@ int switch_vic_submit_checked(const TegraVICJob *jobs, uint32_t count, const Teg
     submittedJob = jobs[0];
     declaredUses.assign(ownership.uses, ownership.uses + ownership.useCount);
     declaredGuards.assign(ownership.guards, ownership.guards + ownership.guardCount);
+    declaredLeases.assign(ownership.leases, ownership.leases + ownership.leaseCount);
     if (admission)
         return admission;
     if (immediate)
@@ -205,6 +218,8 @@ protected:
         pendingContext = nullptr;
         declaredUses.clear();
         declaredGuards.clear();
+        declaredLeases.clear();
+        writeReleases = 0;
         source.surface = &inputObject;
         source.memory = &inputMemory;
         source.desc.fourcc = TEGRA_VIC_FOURCC('4', '2', '0', 'v');
@@ -371,6 +386,32 @@ TEST_F(SwitchVICTransformTest, OverlappingDescriptorFallsBackBeforeTakingReserva
     EXPECT_EQ(submit(), 0);
     EXPECT_TRUE(declaredUses.empty());
     EXPECT_EQ(notifications, 0);
+}
+
+TEST_F(SwitchVICTransformTest, PreReservedWriteLeaseIsForwardedAndReleasedAfterSubmit)
+{
+    immediate = true;
+    auto *lease = reinterpret_cast<switch_gpu_cpu_lease *>(0x1ea5e);
+    ++outputPitch.refs;
+    SwitchVICWriteReservation reservation{&outputPitch, lease};
+    ASSERT_EQ(switch_vic_transform(&source, &destination, &plan, 0, done, nullptr, nullptr, nullptr, &reservation), 1);
+    ASSERT_EQ(declaredLeases.size(), 1u);
+    EXPECT_EQ(declaredLeases[0], lease);
+    EXPECT_EQ(writeReleases, 1u);
+    EXPECT_EQ(reservation.lease, nullptr);
+    EXPECT_EQ(reservation.backing, nullptr);
+}
+
+TEST_F(SwitchVICTransformTest, BounceFallbackPreservesPreReservedWriteLeaseForCaller)
+{
+    source.memory = destination.memory;
+    auto *lease = reinterpret_cast<switch_gpu_cpu_lease *>(0x1ea5e);
+    ++outputPitch.refs;
+    SwitchVICWriteReservation reservation{&outputPitch, lease};
+    EXPECT_EQ(switch_vic_transform(&source, &destination, &plan, 0, done, nullptr, nullptr, nullptr, &reservation), 0);
+    EXPECT_EQ(writeReleases, 0u);
+    EXPECT_EQ(reservation.lease, lease);
+    switch_vic_surface_release_write(&reservation);
 }
 
 // A landscape video's turn (SwitchVICTurn.h): a native picture a quarter turn onto all of a portrait '420v' is left to

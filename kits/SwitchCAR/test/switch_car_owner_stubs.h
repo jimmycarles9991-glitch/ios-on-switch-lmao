@@ -17,7 +17,7 @@ struct IOLock {
 };
 
 IOLock *IOLockAlloc();
-void IOLockFree(IOLock *lock);
+void IOLockFree(const IOLock *lock);
 void IOLockLock(IOLock *lock);
 void IOLockUnlock(IOLock *lock);
 void IODelay(unsigned us);

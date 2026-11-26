@@ -140,6 +140,8 @@
 #include <IOKit/IOBSD.h>
 #include <switch/diag.h>
 
+#include <switch/shared_cache.h>
+
 #if VM_MAP_DEBUG_APPLE_PROTECT
 SYSCTL_INT(_vm, OID_AUTO, map_debug_apple_protect, CTLFLAG_RW | CTLFLAG_LOCKED, &vm_map_debug_apple_protect, 0, "");
 #endif /* VM_MAP_DEBUG_APPLE_PROTECT */
@@ -3352,7 +3354,7 @@ after_root_check:
 			if (!error && srfmp->vp->v_mount != preboot_vp->v_mount) {
 				vnode_t cryptex_vp = NULL;
 				if (!vnode_lookup(PREBOOT_CRYPTEX_PATH "/OS", 0, &cryptex_vp, vfs_context_current())) {
-					switch_cryptex = cryptex_vp->v_mount == srfmp->vp->v_mount &&
+					switch_cryptex = switch_shared_cache_on_cryptex(p, srfmp->vp, cryptex_vp->v_mount) &&
 					    (vfs_flags(cryptex_vp->v_mount) & MNT_RDONLY);
 					(void)vnode_put(cryptex_vp);
 				}

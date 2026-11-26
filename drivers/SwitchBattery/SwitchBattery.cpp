@@ -6,7 +6,7 @@
 // slow re-read that bounds the staleness of what has no interrupt (voltage, current) and carries the stats line. The
 // battery temperature has one: the gauge's temperature window, a degree either way of the last reading for
 // thermalmonitord's battery sensors (switch_battery_temperature), narrowed to the charge zone's edges.
-// There is no polled mode: alerts that cannot be attached, keep firing, or never reach the CPU panic.
+// There is no polled mode: alerts that cannot be attached or keep firing panic.
 //
 // powerd (iOS 17) matches IOServiceMatching("IOPMPowerSource") with a first-match
 // notification, then re-reads all properties whenever the source sends
@@ -59,6 +59,7 @@
 #include "../TegraI2C/TegraI2C.h"
 #include "../TegraGPIO/TegraGPIO.h"
 #include "../SwitchUSB/SwitchPD.h"
+#include "../SwitchUSB/SwitchPDPolicy.h"
 #include "SwitchBattery.h"
 #include "SwitchChargePolicy.h"
 #include "SwitchBatteryPack.h"
@@ -139,10 +140,12 @@ const char *inputSource(bool boosting, bool good, const PdSnapshot &pd, unsigned
     return vbus == 2 ? "adapter" : "unknown";
 }
 
+#if DEVELOPMENT || DEBUG
 unsigned flag(unsigned value, unsigned mask)
 {
     return (value & mask) ? 1 : 0;
 }
+#endif
 
 uint64_t packPd(const SwitchPDState *s)
 {
@@ -288,7 +291,7 @@ OSDictionary *chargerData(const charge::Decision &d, uint8_t reg00, bool chargin
     setNumber(dict, "ChargingCurrent", charging ? d.chargeCurrentMA : 0);
     setNumber(dict, "ChargingVoltage", d.chargeVoltageMV);
     setNumber(dict, "VacVoltageLimit", d.chargeVoltageMV);
-    setNumber(dict, "InputCurrentLimit", bq::decodeInputLimit(reg00));
+    setNumber(dict, "InputCurrentLimit", (reg00 & bq::kHiZ) ? 0 : bq::decodeInputLimit(reg00));
     return dict;
 }
 
@@ -300,15 +303,15 @@ OSDictionary *adapterDetails(bool external, uint8_t reg00, uint8_t reg08, const 
     OSDictionary *dict = OSDictionary::withCapacity(5);
     if (!dict)
         return nullptr;
-    if (!external) {
+    if (!external && !pd.millivolts) {
         setNumber(dict, kIOPMPSAdapterDetailsFamilyKey, kIOPSFamilyCodeDisconnected);
         return dict;
     }
     int millivolts = 5000;
-    const int milliamps = static_cast<int>(bq::decodeInputLimit(reg00));
+    const int milliamps = (reg00 & bq::kHiZ) ? 0 : static_cast<int>(bq::decodeInputLimit(reg00));
     int family = bq::vbusStat(reg08) == 1 ? kIOPSFamilyCodeUSBHost : kIOPSFamilyCodeUSBChargingPort;
     const char *description = "usb charger";
-    if (pd.inputLimit) {
+    if (pd.millivolts) {
         millivolts = static_cast<int>(pd.millivolts);
         family = kIOPSFamilyCodeUSBCPD;
         description = "pd charger";
@@ -334,6 +337,7 @@ IOLock *gBoostLock;
 bool gBoosting;              // this boot's boost is on
 bool gChargeAllowed = true;  // the decision (charge::decide: temperature zone and iPadOS's requests) charges
 bool gManaged;               // the charger is ours (SYS_MIN too)
+bool gPdInputBlocked;        // Battery-loop writes and watchdog arbitration share the boost lock.
 
 IOLock *boostLock()
 {
@@ -360,14 +364,14 @@ uint8_t gWatchdogSaved = 0xff;  // REG05 watchdog bits from before we turned it 
 
 int watchdogLocked()
 {
-    if (gManaged)
+    if (gManaged && !gPdInputBlocked)
         return 0;  // off with the rest of the settings (writeCharger); nothing to restore
     uint8_t reg = 0;
     int err = tegra_i2c_read(kBus, kCharger, bq::TerminationTimer, &reg, 1);
     if (err)
         return err;
     uint8_t next = reg;
-    if (gBoosting || !gChargeAllowed) {
+    if (gBoosting || !gChargeAllowed || gPdInputBlocked) {
         if ((reg & bq::kWatchdogMask) && gWatchdogSaved == 0xff)
             gWatchdogSaved = reg & bq::kWatchdogMask;
         next = static_cast<uint8_t>(reg & ~bq::kWatchdogMask);
@@ -376,7 +380,7 @@ int watchdogLocked()
     }
     if (next != reg)
         err = tegra_i2c_write(kBus, kCharger, bq::TerminationTimer, &next, 1);
-    if (!err && !gBoosting && gChargeAllowed)
+    if (!err && !gBoosting && gChargeAllowed && !gPdInputBlocked)
         gWatchdogSaved = 0xff;
     return err;
 }
@@ -537,6 +541,8 @@ int readAll(Reading *r)
 // switch_battery_avg_ma: the last reading's AvgCurrent (mA) and whether external power was in.
 static int gBatteryAvgMa = INT32_MIN;
 static bool gBatteryExternal;
+class SwitchBattery;
+static SwitchBattery *gBatteryService;
 
 extern "C" bool native_aks_device_digest(const char *label, uint8_t out[32]);
 
@@ -562,7 +568,7 @@ class SwitchBattery : public IOPMPowerSource {
     charge::Decision decision = charge::decide(charge::Zone::Cold, charge::Requests{});
     bool wasExternal = false;  // power in (not ours) as of the last reading: an attach is a wake source
     int lastCentiCelsius = 0;  // the last reading's battery temperature
-    bool appliedPd = false;    // an input limit from a USB-PD contract was programmed since the cable came
+    bool appliedPd = false;    // PD owns the input limit or Hi-Z until its conservative budget is restored.
     bool boosting = false;     // this boot's OTG boost, as of the last reading
     bool statsDue = true;
     unsigned refreshes = 0, lostInARow = 0;
@@ -582,11 +588,14 @@ class SwitchBattery : public IOPMPowerSource {
     bool refresh();
     static bool reportAsFound(uint8_t found[11]);
     bool setUpCharger(const uint8_t found[11]);
-    void manage(Reading &r, const PdSnapshot &pd);
+    void manage(Reading &r);
     void apply(const charge::Decision &next, const char *why, int centiCelsius);
     void followZone(const Reading &r);
     static IOReturn requestAction(OSObject *owner, void *dict, void *, void *, void *);
     IOReturn request(const OSDictionary *dict);
+    int disableInput(bool preparePd);
+    void releasePdInput(bool resetInput);
+    void endPdInput(const SwitchPDState &current);
     void applyInput(Reading &r, const PdSnapshot &pd);
     void stats(const Reading &r, const PdSnapshot &pd);
     void setKey(const char *key, OSObject *value);
@@ -603,6 +612,7 @@ public:
     }
 
     void sleep(bool entering);
+    int preparePdInput(const SwitchPDState &current);
 };
 
 OSDefineMetaClassAndStructors(SwitchBattery, IOPMPowerSource);
@@ -656,6 +666,7 @@ bool SwitchBattery::start(IOService *provider)
     setName("SwitchBattery");
     attachAlerts();
     timer->setTimeoutMS(1);
+    __atomic_store_n(&gBatteryService, this, __ATOMIC_RELEASE);
     // The PD controller's events (a plug, a contract): settle and re-read, as for the other two lines.
     if (switch_pd_add_listener(&SwitchBattery::pdChanged, this))
         IOLog("SwitchBattery: no PD controller events\n");
@@ -814,10 +825,13 @@ bool SwitchBattery::refresh()
     lastCentiCelsius = r.centiCelsius;
     const PdSnapshot pd = unpackPd(__atomic_load_n(&pdWord, __ATOMIC_ACQUIRE));
     if (managed) {
-        manage(r, pd);
+        manage(r);
     } else if (zoneControl) {
         followZone(r);
     }
+    if (managed || gPdInputBlocked ||
+        (appliedPd && (!pd.inputLimit || (r.charger[bq::InputSource] & bq::kHiZ))))
+        applyInput(r, pd);
     // What the charger does now (manage may just have stopped or started it), for what is published below.
     if (zoneControl && !tegra_i2c_read(kBus, kCharger, bq::SystemStatus, &r.charger[bq::SystemStatus], 1)) {
         statusFields(&r);
@@ -827,11 +841,12 @@ bool SwitchBattery::refresh()
     if (published && r.external && !wasExternal)
         switch_wake_event(SWITCH_WAKE_POWER_IN);
     wasExternal = r.external;
-    const bool inflowOff = zoneControl && requests.inflowDisabled;  // [IOS-PD] DisableInflow: we report no AC
+    const bool inflowOff = (zoneControl && requests.inflowDisabled) || (r.charger[bq::InputSource] & bq::kHiZ);
+    const bool charging = r.charging && !inflowOff;
     setBatteryInstalled(true);
     setExternalConnected(r.external && !inflowOff);
     setExternalChargeCapable(r.external && !inflowOff);
-    setIsCharging(r.charging && !inflowOff);
+    setIsCharging(charging);
     setAtCriticalLevel(false);
     setCurrentCapacity(r.percent);
     setMaxCapacity(100);
@@ -843,13 +858,13 @@ bool SwitchBattery::refresh()
     setKey(kIOPMFullyChargedKey, r.full ? kOSBooleanTrue : kOSBooleanFalse);
     setKey("AppleRawExternalConnected", (r.external || (inflowOff && pd.plugged)) ? kOSBooleanTrue : kOSBooleanFalse);
     // What iPadOS reads back about the charge ([IOS-PS], [IOS-TLC], [IOS-CLTM]); nothing claimed without the decision.
-    const uint32_t notCharging = zoneControl && r.external && !r.charging ? decision.notChargingReason : 0;
+    const uint32_t notCharging = zoneControl && r.external && !charging ? decision.notChargingReason : 0;
     setKeyNumber("NotChargingReason", notCharging);
     setKeyNumber("ChargingOverride", zoneControl ? decision.chargingOverride : 0);
     setKeyNumber("AppleChargeRateLimitIndex", requests.thermalLimitIndex);
     charge::Decision shown = decision;
     shown.notChargingReason = notCharging;
-    if (OSDictionary *data = chargerData(shown, r.charger[bq::InputSource], r.charging)) {
+    if (OSDictionary *data = chargerData(shown, r.charger[bq::InputSource], charging)) {
         setKey("ChargerData", data);
         data->release();
     }
@@ -894,7 +909,7 @@ bool SwitchBattery::refresh()
 }
 
 // The charger, after every reading: settings still there, the zone, REG01, the input limit.
-void SwitchBattery::manage(Reading &r, const PdSnapshot &pd)
+void SwitchBattery::manage(Reading &r)
 {
     if ((r.fault & bq::kFaultWatchdog) || !chargerMatches(r.charger, decision)) {
         if (++lostInARow > kLostLimit) {
@@ -931,7 +946,6 @@ void SwitchBattery::manage(Reading &r, const PdSnapshot &pd)
     if (!err && was != now) {
         IOLog("SwitchBattery: REG01 was %#x, set %#x (CHG_CONFIG %u)\n", was, now, (now & bq::kChgConfigMask) >> 4);
     }
-    applyInput(r, pd);
 }
 
 // The one place the charger's charge settings change (managed): REG01 by the arbiter, REG02/REG04, less charge first
@@ -986,33 +1000,80 @@ void SwitchBattery::followZone(const Reading &r)
     statsDue = true;
 }
 
+int SwitchBattery::disableInput(bool preparePd)
+{
+    IOLock *lock = boostLock();
+    if (!lock)
+        return -1;
+    IOLockLock(lock);
+    if (preparePd)
+        gPdInputBlocked = true;
+    int err = gBoosting ? -1 : tegra_i2c_init(kBus);
+    if (!err && gPdInputBlocked)
+        err = watchdogLocked();
+    if (!err)
+        err = chargerUpdate(bq::InputSource, bq::kHiZ, bq::kHiZ);
+    IOLockUnlock(lock);
+    return err;
+}
+
+int SwitchBattery::preparePdInput(const SwitchPDState &current)
+{
+    // A preceding positive budget must not release the hold before PD publishes its new request.
+    __atomic_store_n(&pdWord, packPd(&current), __ATOMIC_RELEASE);
+    appliedPd = true;
+    return disableInput(true);
+}
+
+void SwitchBattery::releasePdInput(bool resetInput)
+{
+    if (!gPdInputBlocked && !(resetInput && appliedPd))
+        return;
+    IOLock *lock = boostLock();
+    if (!lock)
+        return;
+    IOLockLock(lock);
+    gPdInputBlocked = false;
+    int err = 0;
+    if (resetInput && (!requests.inflowDisabled || gBoosting)) {
+        err = chargerUpdate(bq::InputSource, bq::kHiZ | bq::kIinlimMask,
+                            bq::encodeInputLimit(charge::kUnknownSourceMA));
+        if (!err)
+            appliedPd = false;
+    }
+    if (!err && !requests.inflowDisabled)
+        err = watchdogLocked();
+    IOLockUnlock(lock);
+    if (err)
+        IOLog("SwitchBattery: USB-PD input release failed (I2C %d)\n", err);
+}
+
+void SwitchBattery::endPdInput(const SwitchPDState &current)
+{
+    __atomic_store_n(&pdWord, packPd(&current), __ATOMIC_RELEASE);
+    releasePdInput(true);
+}
+
 // REG00 IINLIM and Hi-Z (file comment). Raised one step at a time from 500 mA, 1 ms apart, lowered at once
 // (bq2419x_configure_input_charging_current).
 void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
 {
-    if (!pd.plugged)
-        appliedPd = false;  // the next cable starts from the chip's own detection
     uint8_t reg00 = r.charger[bq::InputSource];
     const bool hiZ = (reg00 & bq::kHiZ) != 0;
-    if (decision.hiZ) {  // [IOS-PD] DisableInflow: the input off, the system on the battery, until it is released
-        if (!hiZ && !boosting) {
-            // Under REG01's lock: a boost SwitchPD starts meanwhile is never put behind a disconnected input.
-            IOLock *lock = boostLock();
-            if (!lock)
-                return;
-            IOLockLock(lock);
-            int err = 0;
-            const uint8_t next = static_cast<uint8_t>(reg00 | bq::kHiZ);
-            if (!gBoosting)
-                err = tegra_i2c_write(kBus, kCharger, bq::InputSource, &next, 1);
-            const bool written = !gBoosting && (err == 0);
-            IOLockUnlock(lock);
-            if (written)
-                r.charger[bq::InputSource] = next;
-            if (written || err) {
-                IOLog("SwitchBattery: input off (Hi-Z) for powerd's DisableInflow%s\n", err ? " (I2C error)" : "");
+    if (requests.inflowDisabled || (gPdInputBlocked && !pd.inputLimit)) {
+        const bool watchdogNeedsOff = gPdInputBlocked && (r.charger[bq::TerminationTimer] & bq::kWatchdogMask);
+        if (!boosting && (!hiZ || watchdogNeedsOff)) {
+            const int err = disableInput(false);
+            if (!err) {
+                r.charger[bq::InputSource] = static_cast<uint8_t>(reg00 | bq::kHiZ);
+                if (gPdInputBlocked)
+                    r.charger[bq::TerminationTimer] &= static_cast<uint8_t>(~bq::kWatchdogMask);
             }
-            statsDue = true;
+            if (!hiZ || err) {
+                IOLog("SwitchBattery: input off (Hi-Z) for %s%s\n",
+                      gPdInputBlocked ? "zero-current USB-PD" : "powerd's DisableInflow", err ? " (I2C error)" : "");
+                statsDue = true;
+            }
         }
         return;
     }
@@ -1041,8 +1102,13 @@ void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
         why = "the charger's own detection, raised to 500 mA";
     }
     const uint8_t want = bq::encodeInputLimit(target);
-    if ((reg00 & bq::kIinlimMask) == want && !hiZ)
+    if ((reg00 & bq::kIinlimMask) == want && !hiZ) {
+        if (pd.inputLimit)
+            releasePdInput(false);
+        else
+            appliedPd = false;
         return;
+    }
     uint8_t step = reg00 & bq::kIinlimMask;
     const uint8_t floor = bq::encodeInputLimit(charge::kUnknownSourceMA);
     if (want > step && step < floor)
@@ -1051,17 +1117,24 @@ void SwitchBattery::applyInput(Reading &r, const PdSnapshot &pd)
         step = want;
     int err = 0;
     for (;;) {
-        const uint8_t next = static_cast<uint8_t>((reg00 & ~(bq::kHiZ | bq::kIinlimMask)) | step);
+        const unsigned keepHiZ = gPdInputBlocked && step != want ? bq::kHiZ : 0;
+        const uint8_t next = static_cast<uint8_t>((reg00 & ~(bq::kHiZ | bq::kIinlimMask)) | keepHiZ | step);
         err = tegra_i2c_write(kBus, kCharger, bq::InputSource, &next, 1);
         if (err)
             break;
         reg00 = next;
         if (step >= want)
             break;
-        IODelay(1000);  // BQ2419x_CHARGING_CURRENT_STEP_DELAY_US
+        IOSleep(1);  // BQ2419x_CHARGING_CURRENT_STEP_DELAY_US (1000 us); the battery's work loop may sleep
         ++step;
     }
     r.charger[bq::InputSource] = reg00;
+    if (!err) {
+        if (pd.inputLimit)
+            releasePdInput(false);
+        else
+            appliedPd = false;
+    }
     // What the chip holds now, read back (the proof that the contract's limit applied): one line per change.
     uint8_t back00 = 0;
     uint8_t back02 = 0;
@@ -1250,7 +1323,18 @@ void SwitchBattery::pdChanged(void *context, const SwitchPDState *state)
 {
     auto *self = static_cast<SwitchBattery *>(context);
     const uint64_t word = packPd(state);
-    const uint64_t old = __atomic_exchange_n(&self->pdWord, word, __ATOMIC_ACQ_REL);
+    const uint64_t old = __atomic_load_n(&self->pdWord, __ATOMIC_ACQUIRE);
+    const bool source = state->role == SWITCH_PD_ROLE_SOURCE || (state->status1 & SWITCH_PD_STATUS1_SRC_MODE);
+    if ((old & 2) && (!state->plugged || ((old & 4) && source))) {
+        self->loop->runAction(
+            [](OSObject *owner, void *current, void *, void *, void *) -> IOReturn {
+                static_cast<SwitchBattery *>(owner)->endPdInput(*static_cast<const SwitchPDState *>(current));
+                return kIOReturnSuccess;
+            },
+            self, const_cast<SwitchPDState *>(state));
+    } else {
+        __atomic_store_n(&self->pdWord, word, __ATOMIC_RELEASE);
+    }
     // Before the first reading the identify timer runs on its own (and that reading takes this word).
     if (!__atomic_load_n(&self->published, __ATOMIC_ACQUIRE))
         return;
@@ -1264,10 +1348,6 @@ void SwitchBattery::timerFired(OSObject *owner, IOTimerEventSource *sender)
     if (!self)
         return;
     if (self->published) {
-        // An alert pending at the GPIO controller that never reached us panics here (TegraGPIO.h).
-        for (const Alert &alert : kAlerts)
-            tegra_gpio_check_delivery(alert.gpio, "SwitchBattery");
-        switch_pd_check_delivery("SwitchBattery");
         ++self->refreshes;
         self->refresh();
     } else if (self->identify() && self->refresh()) {  // the first reading also arms the gauge window
@@ -1291,8 +1371,6 @@ extern "C" int switch_battery_avg_ma(bool *external)
     return __atomic_load_n(&gBatteryAvgMa, __ATOMIC_RELAXED);
 }
 
-static SwitchBattery *gBatteryService;  // set once started (switch_battery_suspend/resume)
-
 extern "C" int switch_battery_start(void)
 {
     static SwitchBattery *battery;
@@ -1311,8 +1389,20 @@ extern "C" int switch_battery_start(void)
         return -1;
     }
     battery = candidate;
-    __atomic_store_n(&gBatteryService, candidate, __ATOMIC_RELEASE);
     return 0;
+}
+
+extern "C" int switch_battery_prepare_pd_input(const SwitchPDState *current)
+{
+    SwitchBattery *battery = __atomic_load_n(&gBatteryService, __ATOMIC_ACQUIRE);
+    if (!battery)
+        return -1;
+    return static_cast<int>(battery->getWorkLoop()->runAction(
+        [](OSObject *owner, void *state, void *, void *, void *) -> IOReturn {
+            return static_cast<IOReturn>(
+                static_cast<SwitchBattery *>(owner)->preparePdInput(*static_cast<const SwitchPDState *>(state)));
+        },
+        battery, const_cast<SwitchPDState *>(current)));
 }
 
 // NOLINTNEXTLINE(misc-const-correctness): IOWorkLoop::Action fixes the signature
@@ -1406,6 +1496,7 @@ extern "C" int switch_battery_set_otg_boost(bool on, bool ourVbus)
     return refused ? SWITCH_BATTERY_BOOST_VBUS_PRESENT : 0;
 }
 
+#if DEVELOPMENT || DEBUG
 // The USB role report's charger line (SwitchBattery.h). Writes nothing; REG09's faults go through readFaults, so the
 // next reading still sees what this read cleared.
 extern "C" int switch_battery_describe_otg(char *buffer, size_t size)
@@ -1446,3 +1537,4 @@ extern "C" int switch_battery_describe_otg(char *buffer, size_t size)
              gauge ? 0 : (int16_t)current * 15625 / 100000);
     return 0;
 }
+#endif

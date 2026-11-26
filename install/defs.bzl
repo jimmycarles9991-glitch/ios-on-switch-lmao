@@ -1,6 +1,7 @@
 """Rules behind //install: the kernel-derived install spec, the IPSW pins as JSON, the install artifacts."""
 
 load("//ipsw:defs.bzl", _ipsw_pins = "ipsw_pins")
+load("//ipsw:ipsw.bzl", "IpswInfo")
 load("//kernel:prelink.bzl", "PRELINK")
 load("//kernel/rules:kernel.bzl", "KernelObjectsInfo")
 
@@ -144,11 +145,13 @@ def _release_prelink_impl(ctx):
     args.add("--inherit-original-report", ctx.file.inherit_report)
     args.add("--previous", ctx.file.previous)
     args.add("--options", ctx.file.options)
+    args.add("--kind", ctx.attr._ipsw_kind[IpswInfo].kind)
+    args.add_all(ctx.files.sites, before_each = "--sites")
     args.add("--plan-output", plan)
     ctx.actions.run(
         executable = ctx.executable._emit_prelink,
         arguments = [args],
-        inputs = [ctx.file.kernelcache, ctx.file.inherit_report, ctx.file.previous, ctx.file.options],
+        inputs = [ctx.file.kernelcache, ctx.file.inherit_report, ctx.file.previous, ctx.file.options] + ctx.files.sites,
         outputs = [plan],
         mnemonic = "KernelPrelinkPlan",
         progress_message = "Planning the prelink of the original kexts",
@@ -173,7 +176,9 @@ release_prelink = rule(
         "kernelcache": attr.label(default = "//ipsw:kernelcache", allow_single_file = True),
         "inherit_report": attr.label(mandatory = True, allow_single_file = True),
         "previous": attr.label(mandatory = True, allow_single_file = True),
+        "sites": attr.label(default = "//kits/SwitchABI:sites", allow_files = [".json"], doc = "the kind's declared sites in Apple's kexts"),
         "_emit_prelink": attr.label(default = "//tools/prelink:emit_prelink", executable = True, cfg = "exec"),
+        "_ipsw_kind": attr.label(default = "//ipsw:current", providers = [IpswInfo]),
     },
 )
 

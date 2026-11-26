@@ -35,6 +35,7 @@ filegroup(
     srcs = [
         ":jetsam_properties",
         "//drivers/NativeMobileDisplay:overlay_files",
+        "//drivers/NativeSwitchBlock:overlay_files",
         "//drivers/SwitchAppRegistration:overlay_files",
         "//drivers/SwitchBootstrap:overlay_files",
         "//drivers/SwitchAudio:overlay_files",

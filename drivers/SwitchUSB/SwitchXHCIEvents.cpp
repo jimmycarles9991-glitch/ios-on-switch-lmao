@@ -1,50 +1,46 @@
 // SPDX-License-Identifier: BSD-2-Clause-Patent
-// SwitchXHCI's events (SwitchXHCI.h): the falcon mailbox, the lost-interrupt check, the role, the USB-C cable, SC7.
+// SwitchXHCI's events (SwitchXHCI.h): the falcon mailbox, the SuperSpeed interface reset, the role, SC7.
 //
-// Interrupts only: AppleUSBXHCI's own filter owns INTID 71, the mailbox filter (INTID 72) is ours. No timer runs in
-// steady state. Routing (checked against the sources): the OLED DT's xusb@70090000 has interrupts GIC_SPI 39 (host)
-// and 40 (mailbox), IRQ_TYPE_LEVEL_HIGH, through the root interrupt-parent, the Tegra LIC, into the GIC: INTID 71 and
-// 72. ArmGIC programs a level SPI (ICFGR edge bit clear), CPU0, priority 0xa0, and the LIC gate (IEP_CLASS IRQ, IER
-// set) with GICD_ISENABLER at enable; xhost::makeNub gives AppleUSBXHCI the GIC nub's own interrupt specifier. The
-// Tegra side is xhci-tegra.c tegra_xusb_config exactly: IPFS EN_FPCI, BAR0, FPCI CFG_1 bus master, IPFS INTR_MASK
+// Interrupts only: AppleUSBXHCI's own filter owns INTID 71, the mailbox filter (INTID 72) is ours. No timer runs.
+// Routing (checked against the sources): the OLED DT's xusb@70090000 has interrupts GIC_SPI 39 (host) and 40
+// (mailbox), IRQ_TYPE_LEVEL_HIGH, through the root interrupt-parent, the Tegra LIC, into the GIC: INTID 71 and 72.
+// ArmGIC programs a level SPI (ICFGR edge bit clear), CPU0, priority 0xa0, and the LIC gate (IEP_CLASS IRQ, IER set)
+// with GICD_ISENABLER at enable; xhost::makeNub gives AppleUSBXHCI the GIC nub's own interrupt specifier. The Tegra
+// side is xhci-tegra.c tegra_xusb_config exactly: IPFS EN_FPCI, BAR0, FPCI CFG_1 bus master, IPFS INTR_MASK
 // IP_INT_MASK, hysteresis 0x80 (IPFS INTR_ENABLE and the MSI vectors are left at reset, as Linux leaves them).
-// IMAN0.IE and USBCMD.INTE are AppleUSBXHCI's.
-// Neither line had fired on this hardware when this was written, so their check is a never-booted one until they
-// have (XusbPorts.h xusb_irq_judge): when the PD controller reports a device on the port in host role a port-status
-// event is due (SwitchUSB.cpp calls switchxhci_expect_port_change); 2 s later, and again 50 ms after that, a line that
-// has not reached its handler once this boot (switch_interrupt_count) with an event waiting, or, after the
-// controller's first start, with nothing delivered at all, logs one line with the whole path (xHCI, FPCI, IPFS, GIC)
-// and turns host mode off for the boot (switch_usb_host_failed: device mode stays). Once a line has fired, IMAN0.IP
-// pending (with IE and INTE) and ERDP0 unmoved, or a mailbox interrupt pending with no handler run, panics as for every
-// proven line. A mailbox line that fires with nothing to take is turned off with one line, never left to storm CPU0.
+// IMAN0.IE and USBCMD.INTE are AppleUSBXHCI's. A mailbox line that keeps firing with nothing to take panics.
 #include "SwitchXHCI.h"
 #include "SwitchUSB.h"
 #include "SwitchXHCIServices.h"
 #include "XusbLanes.h"
-#include "XusbSuperSpeed.h"
+#include "XusbSettle.h"
 #include <IOKit/IOLib.h>
+#include <IOKit/pwr_mgt/RootDomain.h>
+#include <kern/clock.h>
+#if DEVELOPMENT || DEBUG
+#include <os/log.h>
+#endif
 #include "../ArmGIC/SwitchInterrupts.h"
 
 using xhost::gHost;
 
 namespace {
-constexpr uint32_t kCheckMS = 2000, kConfirmMS = 50;
 constexpr uint32_t kUnclaimedLimit = 1000;  // mailbox interrupts in a row with no SMI to take: a line we cannot clear
-constexpr uint64_t kPortWaitNS = 2000ULL * 1000 * 1000;  // AppleUSBXHCI's ports registering after its start
 bool gRemoteWake;  // the PMC's sleepwalk holds pad 0 for this SC7 (switchxhci_sleep's thread only)
-bool gCable;       // role thread: the USB-C cable reported in (switchxhci_cable)
-bool gSsHeld;      // role thread: SS port 0's root port held On
 }  // namespace
 
-// SC7 (switchxhci_sleep): entering, nothing may read the block until it is back, so the mailbox line goes off and the
-// interrupt check stops; leaving, after the block is powered and its firmware runs again, the mailbox line comes back.
+// SC7 (switchxhci_sleep): entering, nothing may read the block until it is back, so the mailbox line goes off; leaving,
+// after the block is powered and its firmware runs again, the mailbox line comes back.
 IOReturn SwitchXHCI::systemSleep(bool entering)
 {
     if (entering) {
-        check->cancelTimeout();
-        checkStage = 0;
         mailbox->disable();
+        if (xusb_mbox_wait_abandon(&commandWait))
+            commandGate->commandWakeup(&commandWait);
         gHost.lostPower();
+        // AppleUSBXHCI's Sleep (1) keeps its saved state for the restore; from Off (0) it raises through a reset.
+        constexpr unsigned long kSavedPowerState = 1;
+        __atomic_store_n(&stateLost, hold.held && getPowerState() == kSavedPowerState, __ATOMIC_RELEASE);
         xusb_hold_lost(&hold);
     } else {
         unclaimed = 0;
@@ -53,9 +49,54 @@ IOReturn SwitchXHCI::systemSleep(bool entering)
     return kIOReturnSuccess;
 }
 
+// AppleUSBXHCIARM's hibernate power loss (24B119 0xfffffff009ca462c): as the system wakes, a controller whose saved
+// state SC7 took is reported as having lost power (hardware exception 0x100), on AppleUSBXHCI's work loop. The exception
+// is only queued for a thread call, so the raise before it still restores; its CRS keeps being answered with SRE
+// (xusb_hold) so that the raise cannot run a falcon with nothing in it. Both codes go to the one recovery through Off.
+IOReturn SwitchXHCI::powerStateWillChangeTo(IOPMPowerFlags capabilities, unsigned long stateNumber,
+                                            IOService *whatDevice)
+{
+    if (whatDevice == this) {
+#if DEVELOPMENT || DEBUG
+        powerStateFrom = getPowerState();
+#endif
+        if (stateNumber != 0)
+            __atomic_store_n(&powerState, static_cast<uint32_t>(stateNumber), __ATOMIC_RELEASE);
+    }
+    const IOReturn result = AppleUSBXHCI::powerStateWillChangeTo(capabilities, stateNumber, whatDevice);
+    if (whatDevice == getPMRootDomain() && !(capabilities & kIOPMSleepCapability) &&
+        __atomic_exchange_n(&stateLost, false, __ATOMIC_ACQ_REL)) {
+        const auto lostPower = [](OSObject *owner, void *, void *, void *, void *) {
+            constexpr uint32_t kLostPower = 0x100;
+            static_cast<SwitchXHCI *>(owner)->hardwareException(kLostPower);
+            return kIOReturnSuccess;
+        };
+        getWorkLoop()->runAction(lostPower, this);
+    }
+    return result;
+}
+
+// AppleUSBXHCI logs nothing when its power state change succeeds: development builds say which one it made.
+IOReturn SwitchXHCI::powerStateDidChangeTo(IOPMPowerFlags capabilities, unsigned long stateNumber,
+                                           IOService *whatDevice)
+{
+    const IOReturn result = AppleUSBXHCI::powerStateDidChangeTo(capabilities, stateNumber, whatDevice);
+    if (whatDevice == this) {
+#if DEVELOPMENT || DEBUG
+        os_log(OS_LOG_DEFAULT, "SwitchUSB: controller power state %lu -> %lu", powerStateFrom, stateNumber);
+#endif
+        __atomic_store_n(&powerState, static_cast<uint32_t>(stateNumber), __ATOMIC_RELEASE);
+        if (stateNumber == 0) {
+            switch_usb_dma_controller_off();
+            switch_usb_reconsider();
+        }
+    }
+    return result;
+}
+
 // Primary interrupt context. INTID 72 with no SMI to acknowledge is ignored a few times (a spurious level); a line
 // that keeps firing with nothing to take would storm CPU0, so after kUnclaimedLimit in a row it goes to the action
-// (returning true masks the level source until then), which turns it off for good with one line.
+// (returning true masks the level source until then), which panics with the path.
 bool SwitchXHCI::mailboxFilter(OSObject *owner, IOFilterInterruptEventSource *)
 {
     auto *self = static_cast<SwitchXHCI *>(owner);
@@ -72,127 +113,82 @@ bool SwitchXHCI::mailboxFilter(OSObject *owner, IOFilterInterruptEventSource *)
 
 void SwitchXHCI::mailboxAction(OSObject *owner, IOInterruptEventSource *, int)
 {
-    const auto *self = static_cast<SwitchXHCI *>(owner);
+    auto *self = static_cast<SwitchXHCI *>(owner);
     if (self->mailboxStorm) {
-        self->mailbox->disable();
         char state[200];
         gHost.describe(state, sizeof(state));
-        IOLog("SwitchUSB: XUSB mailbox interrupt (INTID %u) fired %u times with no SMI to take, turned off: %s\n",
+        panic("SwitchUSB: XUSB mailbox interrupt (INTID %u) fired %u times with no SMI to take: %s",
               xhost::kMailboxIntid, kUnclaimedLimit, state);
-        return;
     }
-    if (!gHost.serviceMailbox()) {
+    uint32_t answer = 0;
+    uint32_t data = 0;
+    if (!gHost.serviceMailbox(answer, data)) {
         char state[200];
         gHost.describe(state, sizeof(state));
         panic("SwitchUSB: XUSB falcon firmware hang (mailbox SMI FW_HANG): %s", state);
     }
-}
-
-// A device just appeared on the port in host role: its port-status event is due. The first time after the
-// controller's start, a port event is due even if none is pending (the device was on the port as it powered up).
-IOReturn SwitchXHCI::expectPortChange()
-{
-    if (checkStage || gaveUp)
-        return kIOReturnSuccess;
-    firstCheck = !checked;
-    checked = true;
-    armCheck(kCheckMS, 1);
-    return kIOReturnSuccess;
-}
-
-xusb_irq_sample SwitchXHCI::hostSample()
-{
-    uint32_t iman = 0;
-    uint32_t usbcmd = 0;
-    uint32_t usbsts = 0;
-    uint32_t erdp = 0;
-    (void)gHost.interruptSample(iman, usbcmd, usbsts, erdp);
-    return {switch_interrupt_count(xhost::kHostIntid), erdp, xusb_xhci_pending(iman, usbsts),
-            xusb_xhci_deliverable(iman, usbcmd)};
-}
-
-xusb_irq_sample SwitchXHCI::mailboxSample() const
-{
-    return {switch_interrupt_count(xhost::kMailboxIntid), 0, !mailboxStorm && gHost.mailboxPending(), true};
-}
-
-void SwitchXHCI::armCheck(uint32_t ms, uint8_t stage)
-{
-    checkStage = stage;
-    hostAtCheck = hostSample();
-    mailboxAtCheck = mailboxSample();
-    check->setTimeoutMS(ms);
-}
-
-void SwitchXHCI::checkFired(IOTimerEventSource *)
-{
-    const xusb_irq_sample host = hostSample();
-    const xusb_irq_sample mailboxNow = mailboxSample();
-    const xusb_irq_verdict hostVerdict = xusb_irq_judge(hostAtCheck, host, firstCheck, checkStage);
-    const xusb_irq_verdict mailboxVerdict = xusb_irq_judge(mailboxAtCheck, mailboxNow, false, checkStage);
-    const bool hostSide = hostVerdict >= mailboxVerdict;
-    const xusb_irq_verdict verdict = hostSide ? hostVerdict : mailboxVerdict;
-    if (verdict == XUSB_IRQ_FINE) {
-        checkStage = 0;
-        firstCheck = false;
+    if (!answer)
         return;
+    if (xusb_mbox_wait_answer(&self->commandWait, answer, data)) {
+        self->commandGate->commandWakeup(&self->commandWait);
+    } else {
+        IOLog("SwitchUSB: falcon %s %#x with no command waiting for it\n", answer == xhost::MBOX_ACK ? "ACK" : "NAK",
+              data);
     }
-    if (verdict == XUSB_IRQ_CONFIRM) {
-        armCheck(kConfirmMS, 2);
-        return;
-    }
-    const uint32_t intid = hostSide ? xhost::kHostIntid : xhost::kMailboxIntid;
-    char state[480];
-    char gic[192];
-    gHost.describe(state, sizeof(state));
-    switch_interrupt_describe(intid, gic, sizeof(gic));
-    if (verdict == XUSB_IRQ_PANIC) {
-        panic("SwitchUSB: XUSB %s interrupt lost (INTID %u): %s, %s", hostSide ? "host" : "mailbox", intid, state, gic);
-    }
-    checkStage = 0;
-    gaveUp = true;
-    const bool waiting = hostSide ? host.pending : mailboxNow.pending;
-    IOLog("SwitchUSB: host mode off for this boot: the XUSB %s interrupt (INTID %u, never fired this boot) did not "
-          "reach the CPU %s: %s; %s\n",
-          hostSide ? "host" : "mailbox", intid,
-          waiting ? "with an event waiting" : "2 s after the controller's first start (no event waiting either)", state,
-          gic);
-    switch_usb_host_failed();
 }
 
-namespace {
-// The last PP cycle (SwitchUSB.cpp's role line): port, the three PORTSC values, whether PP followed. Written on
-// AppleUSBXHCI's work loop, read by the report a second later.
-struct PowerCycle {
-    unsigned port;
-    uint32_t trace[3];
-    bool followed;
-} gCycle;
-}  // namespace
+// tegraLoop's gate held (runAction). The firmware takes a command either by an answer (ACK or NAK, by mailboxAction) or by
+// releasing the mailbox, which raises nothing (XusbMailbox.h): the sender sleeps on the answer with the gate open to
+// mailboxAction, and looks at the owner after 1 ms and at tegra_xusb_mbox_send's 250 ms deadline, an error path only.
+bool SwitchXHCI::sendCommand(uint32_t cmd, uint32_t data)
+{
+    constexpr uint32_t kFirstLookMs = 1;
+    constexpr uint32_t kAnswerMs = 250;
+    xusb_mbox_wait_begin(&commandWait, cmd);
+    if (!gHost.sendMailbox(cmd, data)) {
+        (void)xusb_mbox_wait_end(&commandWait);
+        IOLog("SwitchUSB: falcon mailbox busy for command %u (owner %u)\n", cmd, gHost.mailboxOwner());
+        return false;
+    }
+    uint64_t looks[2] = {};
+    clock_interval_to_deadline(kFirstLookMs, kMillisecondScale, &looks[0]);
+    clock_interval_to_deadline(kAnswerMs, kMillisecondScale, &looks[1]);
+    const xusb_mbox_outcome outcome = xusb::awaitAnswer(
+        commandWait,
+        [this, &looks](unsigned look) {
+            return commandGate->commandSleep(&commandWait, looks[look], THREAD_UNINT) != THREAD_TIMED_OUT;
+        },
+        [] {
+            return xusb_mbox_released(gHost.mailboxOwner());
+        });
+    if (outcome == XUSB_MBOX_WAITING) {
+        IOLog("SwitchUSB: falcon mailbox command %u not taken in %u ms (owner %u)\n", cmd, kAnswerMs,
+              gHost.mailboxOwner());
+    } else if (outcome == XUSB_MBOX_NAKED) {
+        IOLog("SwitchUSB: falcon NAK %#x to mailbox command %u\n", commandWait.data, cmd);
+    }
+    return outcome == XUSB_MBOX_ACKED || outcome == XUSB_MBOX_RELEASED;
+}
 
-// The pad first (the ID grounded before the port is powered, as tegra_xhci_set_host_mode), then, with the controller
-// already running, the OTG port's PP off and on again so the firmware powers it with the pad in the host role. The
-// first time, AppleUSBXHCI::start powers the ports itself, after this. Device: ID floating; PP is left on (the XUDC
-// ran with it on after every r7w host session).
+// xhci-tegra.c tegra_xusb_probe_finish's MSG_ENABLED, at the first start and after SC7, with the mailbox line on.
+bool SwitchXHCI::enableMessages()
+{
+    const auto send = [](OSObject *owner, void *, void *, void *, void *) {
+        return static_cast<SwitchXHCI *>(owner)->sendCommand(xhost::MBOX_MSG_ENABLED, 0) ? kIOReturnSuccess
+                                                                                         : kIOReturnError;
+    };
+    return tegraLoop->runAction(send, this) == kIOReturnSuccess;
+}
+
+// The pad's role (the ID grounded before a device can connect, as tegra_xhci_set_host_mode). The ports' power is
+// AppleUSBXHCI's: its root ports are power children of the controller (ArmDTPlatform PMRegisterDevice) and raise it.
 void switchxhci_set_host_role(bool host)
 {
-    if (!gHost.map())
-        return;
-    gHost.setHostRole(host);
-    SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
-    if (!host || !controller)
-        return;
-    controller->getWorkLoop()->runAction(
-        [](OSObject *, void *, void *, void *, void *) -> IOReturn {
-            PowerCycle cycle = {gHost.otgPort(), {}, false};
-            if (cycle.port)
-                cycle.followed = gHost.cyclePortPower(cycle.port, cycle.trace);
-            gCycle = cycle;
-            return kIOReturnSuccess;
-        },
-        controller);
+    if (gHost.map())
+        gHost.setHostRole(host);
 }
 
+#if DEVELOPMENT || DEBUG
 void switchxhci_describe(char *buffer, size_t size)
 {
     if (!size)
@@ -205,30 +201,10 @@ void switchxhci_describe(char *buffer, size_t size)
     char ports[360];
     gHost.describePads(pads, sizeof(pads));
     gHost.describePorts(ports, sizeof(ports));
-    const PowerCycle cycle = gCycle;
-    const unsigned host = switch_interrupt_count(xhost::kHostIntid);
-    const unsigned mailbox = switch_interrupt_count(xhost::kMailboxIntid);
-    if (cycle.port) {
-        snprintf(buffer, size, "%s; INTID 71 x%u 72 x%u; last PP cycle port %u %#x>%#x>%#x%s; %s", ports, host, mailbox,
-                 cycle.port, cycle.trace[0], cycle.trace[1], cycle.trace[2],
-                 cycle.followed ? "" : " (PP did not follow)", pads);
-    } else {
-        snprintf(buffer, size, "%s; INTID 71 x%u 72 x%u; no PP cycle; %s", ports, host, mailbox, pads);
-    }
+    snprintf(buffer, size, "%s; INTID 71 x%u 72 x%u; %s", ports, switch_interrupt_count(xhost::kHostIntid),
+             switch_interrupt_count(xhost::kMailboxIntid), pads);
 }
-
-void switchxhci_expect_port_change()
-{
-    SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
-    IOWorkLoop *loop = controller ? controller->tegraLoopForCheck() : nullptr;
-    if (loop) {
-        loop->runAction(
-            [](OSObject *owner, void *, void *, void *, void *) {
-                return static_cast<SwitchXHCI *>(owner)->expectPortChange();
-            },
-            controller);
-    }
-}
+#endif
 
 // SwitchUSB.cpp's suspend and resume, thread context. IOKit has taken AppleUSBXHCI to Sleep or Off before the platform
 // sleep actions run, and raises it only after the wake actions, so the Tegra side is down for exactly that window. A
@@ -247,7 +223,8 @@ void switchxhci_sleep(bool entering)
     };
     if (entering) {
         gRemoteWake = gHost.armRemoteWake(gHost.otgPort());
-        controller->tegraLoopForCheck()->runAction(gated, controller, controller);
+        gHost.saveContext();
+        controller->tegraWorkLoop()->runAction(gated, controller, controller);
         return;
     }
     if (gRemoteWake) {
@@ -259,133 +236,131 @@ void switchxhci_sleep(bool entering)
         !gHost.loadFirmware(switch_xusb_firmware, xhost::firmwareBytes(), why, sizeof(why))) {
         panic("SwitchUSB: XUSB host did not come back from SC7: %s", why);
     }
-    controller->tegraLoopForCheck()->runAction(gated, controller, nullptr);
-    if (!gHost.sendMailbox(xhost::MBOX_MSG_ENABLED, 0))
+    controller->tegraWorkLoop()->runAction(gated, controller, nullptr);
+    if (!controller->enableMessages())
         IOLog("SwitchUSB: XUSB falcon did not take MSG_ENABLED after SC7\n");
 }
 
-namespace {
-struct PortPower {
-    unsigned port;
-    bool on, followed;
-    uint32_t trace[2];
-};
-
-IOReturn setPortPowerGated(OSObject *, void *request, void *, void *, void *)
+// tegra_xhci_id_work's host branch on T210: the SuperSpeed port's PP off, then RESET_SSPI, with the controller running
+// (xHCI takes PORTSC writes only then). The controller's reset leaves the port powered, and AppleUSBXHCI resets it each
+// time it raises it from Off; so the reset is owed from the host role's start and from every controller reset, and is
+// done on the role thread once the controller runs: one look at the power-off after 1 ms, the last at
+// tegra_xhci_set_port_power's bound for a SuperSpeed port (1000 x 600-700 us). Right after its first run AppleUSBXHCI
+// halts, saves, resets and runs the controller again: a halt or reset inside the window takes the power-off with it
+// (the reset puts PP back), so RESET_SSPI is not sent then and the reset is owed to the next run. The port is not
+// powered again here: AppleUSB30XHCIPort powers it when the USB 3 transport comes, which the role thread adds only
+// after this.
+bool SwitchXHCI::resetSuperSpeed()
 {
-    auto *power = static_cast<PortPower *>(request);
-    power->followed = gHost.setPortPower(power->port, power->on, power->trace);
-    return kIOReturnSuccess;
-}
-
-PortPower portPower(SwitchXHCI *controller, unsigned port, bool on)
-{
-    PortPower power = {port, on, false, {}};
-    controller->getWorkLoop()->runAction(&setPortPowerGated, controller, &power);
-    return power;
-}
-
-// On the mailbox's own loop, so the falcon's messages and this command never take the mailbox at once.
-bool resetSuperSpeedInterface(SwitchXHCI *controller)
-{
-    bool taken = false;
-    controller->tegraLoopForCheck()->runAction(
-        [](OSObject *, void *result, void *, void *, void *) {
-            *static_cast<bool *>(result) = gHost.sendMailbox(xhost::MBOX_RESET_SSPI, XUSB_MBOX_RESET_SSPI_DATA);
-            return kIOReturnSuccess;
-        },
-        controller, &taken);
-    return taken;
-}
-
-// SS port 0's root port as the cable and the lane stand (XusbLanes.h xusb_ss_port_follow). Role thread; nothing while
-// SC7 has the block (the role thread follows again once switchxhci_sleep has it back).
-void followSuperSpeed(SwitchXHCI *controller)
-{
-    if (!gHost.powered())
-        return;
-    const unsigned usb2 = gHost.otgPort();
-    const unsigned number = gHost.ssPort();
-    const bool usb2Connected = (usb2 != 0u) && ((gHost.portsc(usb2) & XHCI_PORTSC_CCS) != 0u);
-    const xusb_ss_port_step step = xusb_ss_port_follow(gCable, switch_usb_ss_up(), gSsHeld, usb2Connected);
-    if (!step.power_on && !step.power_off)
-        return;
-    IOService *port = number ? xhost::waitForRootPort(controller, number, kPortWaitNS) : nullptr;
-    if (!port) {
-        static bool reported;
-        if (!reported) {
-            IOLog("SwitchUSB: no SuperSpeed root port for SS port 0 (xHCI port %u, controller power %u)\n", number,
-                  static_cast<unsigned>(controller->getPowerState()));
-        }
-        reported = true;
-        return;
+    const unsigned port = gHost.ssPort();
+    if (!superSpeedResetOwed())
+        return true;
+    if (!port || !controllerRuns())
+        return false;
+    // Taken before the work: a controller reset inside the power-off window owes it again (heldWrite32).
+    __atomic_store_n(&sspiDue, false, __ATOMIC_RELEASE);
+#if DEVELOPMENT || DEBUG
+    const uint32_t before = gHost.portsc(port);
+    os_log(OS_LOG_DEFAULT, "SwitchUSB: SuperSpeed reset requested on port %u (PORTSC %#x)", port, before);
+#endif
+    gHost.setPortPower(port, false);
+    const auto interrupted = [this] {
+        return superSpeedResetOwed() || !controllerRuns();
+    };
+    const bool off = xusb::settle("SuperSpeed root port power-off", 1, 700, [port, &interrupted] {
+        return (gHost.portsc(port) & XHCI_PORTSC_PP) == 0 || interrupted();
+    });
+    if (!off && !interrupted()) {
+        IOLog("SwitchUSB: SuperSpeed root port %u still powered 700 ms after PP off (PORTSC %#x)\n", port,
+              gHost.portsc(port));
+        superSpeedResetDue();
+        return false;
     }
-    if (step.power_off) {
-        const IOReturn released = xhost::forcePower(port, false);
-        gSsHeld = false;
-        IOLog("SwitchUSB: SuperSpeed root port %u off (UsbForcePower 0: %#x)\n", number, released);
-        port->release();
-        return;
-    }
-    const IOReturn raised = xhost::forcePower(controller, true);
-    const PortPower off = portPower(controller, number, false);
-    const bool reset = resetSuperSpeedInterface(controller);
-    const PortPower on = portPower(controller, number, true);
-    const IOReturn held = xhost::forcePower(port, true);
-    gSsHeld = true;
-    IOLog("SwitchUSB: SuperSpeed root port %u on: PP off %#x>%#x%s, RESET_SSPI %s, PP on %#x>%#x%s, UsbForcePower 1: "
-          "%#x (controller %#x)%s\n",
-          number, off.trace[0], off.trace[1], off.followed ? "" : " (did not follow)", reset ? "taken" : "not taken",
-          on.trace[0], on.trace[1], on.followed ? "" : " (did not follow)", held, raised,
-          step.usb2_cycle ? "; USB 2.0 port cycled for the device already on it" : "");
-    if (step.usb2_cycle) {
-        (void)portPower(controller, usb2, false);
-        (void)portPower(controller, usb2, true);
-    }
-    port->release();
-}
-}  // namespace
 
-void switchxhci_superspeed()
+    // Looked at once more on the mailbox's loop just before RESET_SSPI goes out, and once after: a halt or reset
+    // anywhere in the round owes the reset to the next run instead of counting this one.
+    struct Attempt {
+        SwitchXHCI *controller;
+        bool sent, taken;
+    } attempt{this, false, false};
+
+    if (!interrupted()) {
+        tegraLoop->runAction(
+            [](OSObject *, void *arg, void *, void *, void *) {
+                auto *round = static_cast<Attempt *>(arg);
+                if (!round->controller->superSpeedResetOwed() && controllerRuns()) {
+                    round->sent = true;
+                    round->taken = round->controller->sendCommand(xhost::MBOX_RESET_SSPI, XUSB_MBOX_RESET_SSPI_DATA);
+                }
+                return kIOReturnSuccess;
+            },
+            this, &attempt);
+    }
+    if (!attempt.sent || interrupted()) {
+        superSpeedResetDue();
+#if DEVELOPMENT || DEBUG
+        os_log(OS_LOG_DEFAULT,
+               "SwitchUSB: SuperSpeed reset on port %u deferred: controller halted or reset (PORTSC %#x -> %#x)", port,
+               before, gHost.portsc(port));
+#endif
+        return false;
+    }
+    if (!attempt.taken) {
+        IOLog("SwitchUSB: XUSB falcon did not take RESET_SSPI\n");
+        superSpeedResetDue();
+    }
+#if DEVELOPMENT || DEBUG
+    os_log(OS_LOG_DEFAULT, "SwitchUSB: SuperSpeed reset taken on port %u (PORTSC %#x -> %#x, RESET_SSPI %s)", port,
+           before, gHost.portsc(port), attempt.taken ? "taken" : "refused");
+#endif
+    return !superSpeedResetOwed();
+}
+
+void switchxhci_superspeed_reset_due()
 {
     SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
     if (controller)
-        followSuperSpeed(controller);
+        controller->superSpeedResetDue();
 }
 
-// The USB-C cable in or out in the host role, from SwitchUSB.cpp's role thread (it waits on command gates).
-// AppleUSBHostController's power desire starts at Off and an idle AppleUSBXHCI powers its controller down, so a device
-// that arrives is seen only on a root port that something powered for it: on Apple's boards the port controller's cable
-// change (xhost::forcePower on the port). A port reads PORTSC only while its controller is powered (AppleUSBXHCIPort
-// powerOn otherwise times out on a cached 0, as on the 23:23 boot), so a cable in raises the controller first.
-void switchxhci_cable(bool connected)
+bool switchxhci_superspeed_reset_owed()
+{
+    const SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
+    return controller != nullptr && controller->superSpeedResetOwed();
+}
+
+bool switchxhci_reset_superspeed()
 {
     SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
-    if (!controller)
-        return;
-    const unsigned number = gHost.otgPort();
-    IOService *port = xhost::waitForRootPort(controller, number, kPortWaitNS);
-    if (!port) {
-        char ports[400];
-        xhost::describePorts(controller, ports, sizeof(ports));
-        IOLog("SwitchUSB: AppleUSBXHCI registered no root port %u for the USB-C cable (controller power %u; %s)\n",
-              number, static_cast<unsigned>(controller->getPowerState()), ports);
-        return;
+    return controller == nullptr || controller->resetSuperSpeed();
+}
+
+IOService *switchxhci_copy_root_device()
+{
+    SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
+    IORegistryIterator *it =
+        controller ? IORegistryIterator::iterateOver(controller, gIOServicePlane, kIORegistryIterateRecursively)
+                   : nullptr;
+    IOService *device = nullptr;
+    if (it) {
+        while (IORegistryEntry *entry = it->getNextObject()) {
+            auto *candidate = OSDynamicCast(IOService, entry);
+            if (!candidate || candidate->isInactive())
+                continue;
+            if (candidate->metaCast("IOUSBHostDevice") || candidate->metaCast("IOUSBHostInterface"))
+                device = candidate;
+        }
+        if (device)
+            device->retain();
+        it->release();
     }
-    const unsigned controllerBefore = controller->getPowerState();
-    const unsigned portBefore = port->getPowerState();
-    const IOReturn raised = connected ? xhost::forcePower(controller, true) : kIOReturnSuccess;
-    // SuperSpeed before USB 2.0 going on and off, as tegra_xhci_set_host_mode: a USB 3 device that finds its USB2 port
-    // powered first may settle there.
-    gCable = connected;
-    followSuperSpeed(controller);
-    const IOReturn result = xhost::forcePower(port, connected);
-    IOLog("SwitchUSB: USB-C cable %s: controller power %u -> %u (UsbForcePower %#x), root port %u (%s) power %u -> %u "
-          "(UsbForcePower %u: %#x)\n",
-          connected ? "in" : "out", controllerBefore, static_cast<unsigned>(controller->getPowerState()), raised,
-          number, port->getMetaClass()->getClassName(), portBefore, static_cast<unsigned>(port->getPowerState()),
-          connected ? 1U : 0U, result);
-    port->release();
+    return device;
+}
+
+bool switchxhci_is_off()
+{
+    const SwitchXHCI *controller = __atomic_load_n(&SwitchXHCI::running, __ATOMIC_ACQUIRE);
+    return controller == nullptr || controller->isOff();
 }
 
 bool switchxhci_remote_wake_armed()

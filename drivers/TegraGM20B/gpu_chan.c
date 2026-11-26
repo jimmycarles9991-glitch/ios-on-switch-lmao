@@ -248,7 +248,7 @@ static int chan_new(struct tgm_vm *vm, const void *vm_owner, volatile uint32_t *
 		PUSH_DATA(push, bind_words[i]);
 	PUSH_KICK(push);
 	WRITE_ONCE(chan->progress_held, tgm_hold_held_ns(chan->chid, nvxnu_nanotime()));
-	chan->app = vm_owner != NULL;
+	chan->app = vm_owner != NULL && vm->connection != NULL;
 	ret = switch_gpu_timeline_init();
 	if (ret) {
 		tgm_gpu_lock();

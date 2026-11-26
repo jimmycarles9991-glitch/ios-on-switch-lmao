@@ -1,0 +1,313 @@
+Emulator: a cache log for DMA coherency: each data-cache maintenance instruction the guest runs, with its virtual
+address, the line it resolved to through the guest's translation at that moment, its MAIR attribute and vCPU; each
+byte range the xHCI read or wrote through the SMMU; and the CPU's mappings of those pages as it next touches them, in
+TCG's order (tegra.xusb's cache-log property; tools/emu/cachecheck.py judges it)
+
+diff --git a/target/arm/cpu.h b/target/arm/cpu.h
+--- a/target/arm/cpu.h
++++ b/target/arm/cpu.h
+@@ -3389,5 +3389,11 @@
+     return x;
+ }
+ #endif
++
++/*
++ * Called for each data-cache maintenance instruction by VA or set/way (the op as (CRm << 4) | op2), when a device
++ * model that checks DMA coherency has set it; NULL otherwise, and the instructions stay no-ops.
++ */
++extern void (*arm_dc_observer)(CPUARMState *env, unsigned op, uint64_t value);
+ 
+ #endif
+diff --git a/target/arm/helper.c b/target/arm/helper.c
+--- a/target/arm/helper.c
++++ b/target/arm/helper.c
+@@ -5586,7 +5586,16 @@
+     mmap_unlock();
+ }
+ #endif
++
++void (*arm_dc_observer)(CPUARMState *env, unsigned op, uint64_t value);
+ 
++static void dc_observe_writefn(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
++{
++    if (arm_dc_observer) {
++        arm_dc_observer(env, (ri->crm << 4) | ri->opc2, value);
++    }
++}
++
+ static const ARMCPRegInfo v8_cp_reginfo[] = {
+     /*
+      * Minimal set of EL0-visible registers. This will need to be expanded
+@@ -5657,34 +5666,34 @@
+       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 1,
+       .access = PL1_W, .accessfn = aa64_cacheop_poc_access,
+       .fgt = FGT_DCIVAC,
+-      .type = ARM_CP_NOP },
++      .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn },
+     { .name = "DC_ISW", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 6, .opc2 = 2,
+       .fgt = FGT_DCISW,
+-      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
++      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn },
+     { .name = "DC_CVAC", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 10, .opc2 = 1,
+-      .access = PL0_W, .type = ARM_CP_NOP,
++      .access = PL0_W, .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn,
+       .fgt = FGT_DCCVAC,
+       .accessfn = aa64_cacheop_poc_access },
+     { .name = "DC_CSW", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 10, .opc2 = 2,
+       .fgt = FGT_DCCSW,
+-      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
++      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn },
+     { .name = "DC_CVAU", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 11, .opc2 = 1,
+-      .access = PL0_W, .type = ARM_CP_NOP,
++      .access = PL0_W, .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn,
+       .fgt = FGT_DCCVAU,
+       .accessfn = access_tocu },
+     { .name = "DC_CIVAC", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 3, .crn = 7, .crm = 14, .opc2 = 1,
+-      .access = PL0_W, .type = ARM_CP_NOP,
++      .access = PL0_W, .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn,
+       .fgt = FGT_DCCIVAC,
+       .accessfn = aa64_cacheop_poc_access },
+     { .name = "DC_CISW", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 0, .crn = 7, .crm = 14, .opc2 = 2,
+       .fgt = FGT_DCCISW,
+-      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NOP },
++      .access = PL1_W, .accessfn = access_tsw, .type = ARM_CP_NO_RAW | ARM_CP_SUPPRESS_TB_END, .writefn = dc_observe_writefn },
+     /* TLBI operations */
+     { .name = "TLBI_VMALLE1IS", .state = ARM_CP_STATE_AA64,
+       .opc0 = 1, .opc1 = 0, .crn = 8, .crm = 3, .opc2 = 0,
+diff --git a/include/exec/exec-all.h b/include/exec/exec-all.h
+--- a/include/exec/exec-all.h
++++ b/include/exec/exec-all.h
+@@ -206,6 +206,8 @@
+  */
+ void tlb_set_page_full(CPUState *cpu, int mmu_idx, vaddr addr,
+                        CPUTLBEntryFull *full);
++/* Called with each translation tlb_set_page_full installs when a device model watches CPU mappings; NULL otherwise. */
++extern void (*tlb_fill_observer)(CPUState *cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull *full);
+ 
+ /**
+  * tlb_set_page_with_attrs:
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -1035,9 +1035,15 @@
+  * Called from TCG-generated code, which is under an RCU read-side
+  * critical section.
+  */
++void (*tlb_fill_observer)(CPUState *cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull *full);
++
+ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
+                        vaddr addr, CPUTLBEntryFull *full)
+ {
++    if (tlb_fill_observer) {
++        tlb_fill_observer(cpu, mmu_idx, addr, full);
++    }
++
+     CPUTLB *tlb = &cpu->neg.tlb;
+     CPUTLBDesc *desc = &tlb->d[mmu_idx];
+     MemoryRegionSection *section;
+diff --git a/hw/usb/hcd-xhci.h b/hw/usb/hcd-xhci.h
+--- a/hw/usb/hcd-xhci.h
++++ b/hw/usb/hcd-xhci.h
+@@ -231,4 +231,9 @@
+ bool xhci_get_flag(XHCIState *xhci, enum xhci_flags bit);
+ void xhci_set_port_vbus(XHCIState *xhci, unsigned int uport, bool on);
+ void xhci_set_flag(XHCIState *xhci, enum xhci_flags bit);
++/*
++ * Called with each transfer's data scatter list when a board model checks DMA coherency: the bytes the controller
++ * read from guest memory (OUT, as the packet is set up) or wrote to it (IN, as it completes); NULL otherwise.
++ */
++extern void (*xhci_dma_observer)(QEMUSGList *sgl, bool wrote, uint64_t bytes, unsigned slotid, unsigned epid);
+ #endif
+diff --git a/hw/usb/hcd-xhci.c b/hw/usb/hcd-xhci.c
+--- a/hw/usb/hcd-xhci.c
++++ b/hw/usb/hcd-xhci.c
+@@ -1506,6 +1506,8 @@
+     xhci_die(xhci);
+     return -1;
+ }
++
++void (*xhci_dma_observer)(QEMUSGList *sgl, bool wrote, uint64_t bytes, unsigned slotid, unsigned epid);
+ 
+ static void xhci_xfer_unmap(XHCITransfer *xfer)
+ {
+@@ -1647,6 +1649,9 @@
+         qemu_sglist_destroy(&xfer->sgl);
+         return -1;
+     }
++    if (xhci_dma_observer && !xfer->in_xfer) {
++        xhci_dma_observer(&xfer->sgl, false, xfer->sgl.size, xfer->epctx->slotid, xfer->epctx->epid);
++    }
+     DPRINTF("xhci: setup packet pid 0x%x addr %d ep %d\n",
+             xfer->packet.pid, ep->dev->addr, ep->nr);
+     return 0;
+@@ -1670,6 +1675,10 @@
+         xfer->running_async = 0;
+         xfer->running_retry = 0;
+         xfer->complete = 1;
++        if (xhci_dma_observer && xfer->in_xfer) {
++            xhci_dma_observer(&xfer->sgl, true, xfer->packet.actual_length, xfer->epctx->slotid,
++                              xfer->epctx->epid);
++        }
+         xhci_xfer_unmap(xfer);
+     }
+ 
+diff --git a/hw/arm/tegra2/ahb/usb/xusb_host.c b/hw/arm/tegra2/ahb/usb/xusb_host.c
+--- a/hw/arm/tegra2/ahb/usb/xusb_host.c
++++ b/hw/arm/tegra2/ahb/usb/xusb_host.c
+@@ -42,6 +42,12 @@
+ #include "qapi/visitor.h"
+ #include "qemu/bswap.h"
+ #include "qemu/log.h"
++#include "qemu/rcu.h"
++#include "qemu/timer.h"
++#include "cpu.h"
++#include "exec/exec-all.h"
++#include "exec/ram_addr.h"
++#include "sysemu/dma.h"
+ 
+ #include "clk_rst.h"
+ #include "xusb.h"
+@@ -444,8 +450,137 @@
+     xusb_update_irqs(s);
+ }
+ 
++/*
++ * The cache-log property's file: every data-cache maintenance instruction the guest runs ('D': its VA, the line it
++ * resolved to through the guest's own translation at that moment, its MAIR attribute and vCPU; 'S' for set/way), every
++ * byte range the xHCI read ('R', as an OUT transfer is set up) or wrote ('W', as an IN transfer completes) through the
++ * SMMU with its IOVA and guest physical address, and the CPU's mappings of those pages ('M'), in the one order TCG ran
++ * them. tools/emu/cachecheck.py judges it.
++ */
++typedef struct QEMU_PACKED {
++    uint8_t type, op, who, attrs;
++    uint32_t len;
++    uint64_t seq, ns, ram, addr, va;
++} CacheRecord;
++
++static FILE *cache_log;
++static uint64_t cache_seq;
++static GHashTable *cache_watched;  /* guest physical pages the controller has read or written */
++static bool cache_probing;         /* a maintenance instruction's own translation, not a CPU access */
++
++/* ns is 0 for maintenance: icount cannot be read inside a translation block, so the sequence number orders them. */
++static void cache_put(uint8_t type, uint8_t op, uint8_t who, uint8_t attrs, uint32_t len, uint64_t ns, uint64_t ram,
++                      uint64_t addr, uint64_t va)
++{
++    CacheRecord r = {
++        type, op, who, attrs, cpu_to_le32(len), cpu_to_le64(cache_seq++), cpu_to_le64(ns), cpu_to_le64(ram),
++        cpu_to_le64(addr), cpu_to_le64(va),
++    };
++    fwrite(&r, sizeof(r), 1, cache_log);
++}
++
++static void xusb_observe_dc(CPUARMState *env, unsigned op, uint64_t value)
++{
++    ARMCPU *cpu = env_archcpu(env);
++    uint64_t line_size = 4 << ((cpu->ctr >> 16) & 0xf);
++    uint64_t line = value & ~(line_size - 1), pa = UINT64_MAX, ram = UINT64_MAX;
++    uint8_t attrs = 0;
++    CPUTLBEntryFull *full;
++    void *host = NULL;
++    int flags;
++
++    if ((op & 0xf) != 1) {
++        cache_put('S', op, env_cpu(env)->cpu_index, 0, 0, 0, UINT64_MAX, value, value);
++        return;
++    }
++    cache_probing = true;
++    flags = probe_access_full(env, line, 1, MMU_DATA_LOAD, cpu_mmu_index(env_cpu(env), false), true, &host, &full, 0);
++    cache_probing = false;
++    if (!(flags & TLB_INVALID_MASK)) {
++        ram_addr_t offset;
++        MemoryRegion *mr = host ? memory_region_from_host(host, &offset) : NULL;
++
++        pa = (full->phys_addr & TARGET_PAGE_MASK) | (line & ~TARGET_PAGE_MASK);
++        attrs = full->extra.arm.pte_attrs;
++        ram = mr ? memory_region_get_ram_addr(mr) + offset : UINT64_MAX;
++    }
++    cache_put('D', op, env_cpu(env)->cpu_index, attrs, line_size, 0, ram, pa, line);
++}
++
++/*
++ * 'M': a translation the CPU installed for a page the controller has touched (its VA, PA, MAIR attribute, vCPU, MMU
++ * index and the PC of the block that touched it). The TLBs are flushed after each transfer, so the CPU's next access to the page refills its entry and
++ * shows the mapping, cacheable or not, through which it read or wrote the transfer's data.
++ */
++static void xusb_observe_tlb_fill(CPUState *cpu, int mmu_idx, vaddr addr, CPUTLBEntryFull *full)
++{
++    uint64_t page = full->phys_addr & TARGET_PAGE_MASK;
++
++    if (!cache_probing && g_hash_table_contains(cache_watched, GUINT_TO_POINTER(page >> TARGET_PAGE_BITS))) {
++        /*
++         * The time field carries the PC (the start of the translation block whose access missed the TLB) and the
++         * RAM field the link register, which names the caller of a leaf such as memmove.
++         */
++        cache_put('M', mmu_idx, cpu->cpu_index, full->extra.arm.pte_attrs, TARGET_PAGE_SIZE, cpu_env(cpu)->pc,
++                  cpu_env(cpu)->xregs[30], page, addr & TARGET_PAGE_MASK);
++    }
++}
++
++static void xusb_observe_dma(QEMUSGList *sgl, bool wrote, uint64_t bytes, unsigned slotid, unsigned epid)
++{
++    CPUState *cs;
++
++    RCU_READ_LOCK_GUARD();
++    for (int i = 0; i < sgl->nsg && bytes; i++) {
++        dma_addr_t iova = sgl->sg[i].base;
++        dma_addr_t left = MIN(sgl->sg[i].len, bytes);
++
++        bytes -= left;
++        while (left) {
++            hwaddr xlat, plen = left;
++            MemoryRegion *mr = address_space_translate(sgl->as, iova, &xlat, &plen, wrote, MEMTXATTRS_UNSPECIFIED);
++            bool ram_backed = memory_region_is_ram(mr);
++            uint64_t ram = ram_backed ? memory_region_get_ram_addr(mr) + xlat : UINT64_MAX;
++            uint64_t gpa = ram_backed ? mr->addr + xlat : UINT64_MAX;
++
++            if (!plen) {
++                break;
++            }
++            cache_put(wrote ? 'W' : 'R', 0, slotid, epid, plen, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), ram, iova, gpa);
++            for (uint64_t page = gpa >> TARGET_PAGE_BITS; ram_backed && page <= (gpa + plen - 1) >> TARGET_PAGE_BITS;
++                 page++) {
++                g_hash_table_add(cache_watched, GUINT_TO_POINTER(page));
++            }
++            iova += plen;
++            left -= plen;
++        }
++    }
++    CPU_FOREACH(cs) {
++        tlb_flush(cs);
++    }
++}
++
++static void xusb_set_cache_log(Object *obj, Visitor *v, const char *name, void *opaque, Error **errp)
++{
++    g_autofree char *path = NULL;
++
++    if (!visit_type_str(v, name, &path, errp)) {
++        return;
++    }
++    cache_log = fopen(path, "wb");
++    if (!cache_log) {
++        error_setg_errno(errp, errno, "tegra.xusb: cannot open the cache log %s", path);
++        return;
++    }
++    cache_watched = g_hash_table_new(NULL, NULL);
++    arm_dc_observer = xusb_observe_dc;
++    xhci_dma_observer = xusb_observe_dma;
++    tlb_fill_observer = xusb_observe_tlb_fill;
++}
++
+ void tegra_xusb_host_add_properties(ObjectClass *klass)
+ {
++    object_class_property_add(klass, "cache-log", "str", NULL, xusb_set_cache_log, NULL, NULL);
+     object_class_property_add(klass, "mbox-message", "uint32", NULL, xusb_set_mbox_message, NULL, NULL);
+ }
+ 

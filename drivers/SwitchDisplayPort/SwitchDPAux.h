@@ -20,6 +20,7 @@
 #define SWITCH_DPAUX_AUXDATA_READ(x)     (0x19u + ((x) << 2))
 #define SWITCH_DPAUX_AUXADDR             0x29u
 #define SWITCH_DPAUX_AUXCTL              0x2Du
+#define SWITCH_DPAUX_AUXCTL_RST          (1u << 31)
 #define SWITCH_DPAUX_AUXCTL_TRANSACTREQ  (1u << 16)
 #define SWITCH_DPAUX_AUXCTL_ADDRESS_ONLY (1u << 8)
 #define SWITCH_DPAUX_AUXSTAT             0x31u

@@ -25,6 +25,8 @@ struct switch_chan_new_host {
 struct switch_chan_new_host *switch_chan_new_host(void);
 /* tgm_chan_new on a client address space, the model's channel `chid`: 0 or its error */
 int switch_chan_new_make(uint32_t chid, int critical);
+int switch_chan_new_make_copy_kqueue(uint32_t chid, int high);
+int switch_chan_new_app(void);
 /* The timeslice the driver records as written (gpu_ramfc_probe.c's expected value), and the channel's teardown */
 uint32_t switch_chan_new_recorded_timeslice(void);
 void switch_chan_new_delete(void);

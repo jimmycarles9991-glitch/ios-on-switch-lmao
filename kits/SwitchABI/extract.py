@@ -350,6 +350,12 @@ def check_plain(path: Path, interface: dict, table: dict) -> None:
     if 'vtable' in addresses:
         code = [(g['va'], g['va'] + g['size']) for g in segments if g['initprot'] & 4]
         errors += plain_vtable_errors(read, code, addresses, table)
+    for key, hint in table.get('hints', {}).get('fields', {}).items():
+        at, word = int(hint['at'], 16), int(hint['word'], 16)
+        if read(at, 4) != word:
+            errors.append(f'field {key}: the word at {at:#x} is {read(at, 4):08x}, not {word:08x}')
+        if table['fields'].get(key) != hint['offset']:
+            errors.append(f'field {key}: table offset does not match its instruction evidence')
     errors += plain_constant_errors(lambda va: read(va, 4), table)
     if errors:
         joined = '\n  '.join(errors)

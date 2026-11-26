@@ -1999,6 +1999,7 @@ SECURITY_READ_ONLY_EARLY(static struct filterops) user_filtops = {
 #pragma mark workloop_filtops
 
 #define EPREEMPTDISABLED (-1)
+#define EWLNOATTACH      (-2)
 
 static inline void
 filt_wllock(struct kqworkloop *kqwl)
@@ -2072,6 +2073,10 @@ filt_wlupdate(struct kqworkloop *kqwl, struct knote *kn,
 	uint64_t mask = kev->ext[EV_EXTIDX_WL_MASK];
 	uint64_t udata = 0;
 	struct turnstile *ts = TURNSTILE_NULL;
+
+	if (op == FILT_WLTOUCH && (kev->fflags & NOTE_WL_OWNER_HINT)) {
+		return EWLNOATTACH;
+	}
 
 	filt_wllock(kqwl);
 
@@ -2190,6 +2195,18 @@ again:
 	 * Commit ownership and QoS changes if any, possibly wake up waiters
 	 */
 
+	if (kev->fflags & NOTE_WL_OWNER_HINT) {
+		if (cur_owner != THREAD_NULL || kqr_thread(kqr) != THREAD_NULL ||
+		    new_owner == THREAD_NULL) {
+			/*
+			 * kqwl_owner stays, and so does its reference: out drops
+			 * cur_owner's whenever new_owner differs from it.
+			 */
+			new_owner = cur_owner;
+			goto out;
+		}
+	}
+
 	if (cur_owner == new_owner && action == KQWL_UTQ_NONE && !needs_wake) {
 		goto out;
 	}
@@ -2201,8 +2218,15 @@ again:
 		new_owner = THREAD_NULL;
 	}
 
+	if ((kev->fflags & (NOTE_WL_THREAD_REQUEST | NOTE_WL_DISCOVER_OWNER)) ==
+	    NOTE_WL_THREAD_REQUEST && kqwl->kqwl_owner_hint) {
+		new_owner = THREAD_NULL;
+	}
+
 	if (cur_owner != new_owner) {
 		kqwl->kqwl_owner = new_owner;
+		kqwl->kqwl_owner_hint = new_owner != THREAD_NULL &&
+		    (kev->fflags & NOTE_WL_OWNER_HINT) != 0;
 		if (new_owner == extra_thread_ref) {
 			/* we just transfered this ref to kqwl_owner */
 			extra_thread_ref = THREAD_NULL;
@@ -2224,6 +2248,9 @@ again:
 		    kqwl->kqwl_wakeup_qos) {
 			action = KQWL_UTQ_REDRIVE_EVENTS;
 		}
+	} else if ((kev->fflags & (NOTE_WL_DISCOVER_OWNER | NOTE_WL_OWNER_HINT)) ==
+	    NOTE_WL_DISCOVER_OWNER && kqwl->kqwl_owner_hint) {
+		kqwl->kqwl_owner_hint = false;
 	}
 
 	if (action != KQWL_UTQ_NONE) {
@@ -2317,6 +2344,9 @@ out:
 	}
 	if (extra_thread_ref) {
 		thread_deallocate_safe(extra_thread_ref);
+	}
+	if (error == 0 && (kev->fflags & NOTE_WL_OWNER_HINT)) {
+		return EWLNOATTACH;
 	}
 	return error;
 }
@@ -2457,6 +2487,10 @@ filt_wlattach(struct knote *kn, struct kevent_qos_s *kev)
 	uint32_t command = (kn->kn_sfflags & NOTE_WL_COMMANDS_MASK);
 	switch (command) {
 	case NOTE_WL_THREAD_REQUEST:
+		if (kn->kn_sfflags & NOTE_WL_OWNER_HINT) {
+			error = EINVAL;
+			goto out;
+		}
 		if (kn->kn_id != kqwl->kqwl_dynamicid) {
 			error = EINVAL;
 			goto out;
@@ -2481,11 +2515,20 @@ filt_wlattach(struct knote *kn, struct kevent_qos_s *kev)
 			error = EINVAL;
 			goto out;
 		}
+		if ((kn->kn_sfflags & (NOTE_WL_OWNER_HINT | NOTE_WL_DISCOVER_OWNER)) ==
+		    NOTE_WL_OWNER_HINT) {
+			error = EINVAL;
+			goto out;
+		}
 		if ((kn->kn_flags & EV_DISABLE) == 0) {
 			error = EINVAL;
 			goto out;
 		}
 		if (kn->kn_sfflags & NOTE_WL_END_OWNERSHIP) {
+			error = EINVAL;
+			goto out;
+		}
+		if ((kn->kn_sfflags & NOTE_WL_OWNER_HINT) && kn->kn_qos != 0) {
 			error = EINVAL;
 			goto out;
 		}
@@ -2496,7 +2539,7 @@ filt_wlattach(struct knote *kn, struct kevent_qos_s *kev)
 			error = EINVAL;
 			goto out;
 		}
-		if (kn->kn_sfflags & (NOTE_WL_UPDATE_QOS | NOTE_WL_DISCOVER_OWNER)) {
+		if (kn->kn_sfflags & (NOTE_WL_UPDATE_QOS | NOTE_WL_DISCOVER_OWNER | NOTE_WL_OWNER_HINT)) {
 			error = EINVAL;
 			goto out;
 		}
@@ -2522,7 +2565,8 @@ out:
 			switch_wl_line(SWITCH_WL_OWNER_DEAD, kqwl, kn->kn_id, kev, THREAD_NULL);
 		}
 		/* If userland wants ESTALE to be hidden, fail the attach anyway */
-		if (error == ESTALE && (kn->kn_sfflags & NOTE_WL_IGNORE_ESTALE)) {
+		if ((error == ESTALE && (kn->kn_sfflags & NOTE_WL_IGNORE_ESTALE)) ||
+		    error == EWLNOATTACH) {
 			error = 0;
 		}
 		knote_set_error(kn, error);
@@ -2699,7 +2743,8 @@ filt_wlvalidate_kev_flags(struct knote *kn, struct kevent_qos_s *kev,
 	uint32_t new_commands = kev->fflags & NOTE_WL_COMMANDS_MASK;
 	uint32_t sav_commands = kn->kn_sfflags & NOTE_WL_COMMANDS_MASK;
 
-	if ((kev->fflags & NOTE_WL_DISCOVER_OWNER) && (kev->flags & EV_DELETE)) {
+	if ((kev->fflags & (NOTE_WL_DISCOVER_OWNER | NOTE_WL_OWNER_HINT)) &&
+	    (kev->flags & EV_DELETE)) {
 		return EINVAL;
 	}
 	if (kev->fflags & NOTE_WL_UPDATE_QOS) {
@@ -2782,7 +2827,8 @@ out:
 		if (error == EOWNERDEAD) {
 			switch_wl_line(SWITCH_WL_OWNER_DEAD, kqwl, kn->kn_id, kev, THREAD_NULL);
 		}
-		if (error == ESTALE && (kev->fflags & NOTE_WL_IGNORE_ESTALE)) {
+		if ((error == ESTALE && (kev->fflags & NOTE_WL_IGNORE_ESTALE)) ||
+		    error == EWLNOATTACH) {
 			/* If userland wants ESTALE to be hidden, do not activate */
 			return result;
 		}
@@ -3460,6 +3506,7 @@ kqworkloop_dealloc(struct kqworkloop *kqwl, bool hash_remove)
 		}
 		thread_deallocate(cur_owner);
 		kqwl->kqwl_owner = THREAD_NULL;
+		kqwl->kqwl_owner_hint = false;
 	}
 
 	if (kqwl->kqwl_state & KQ_HAS_TURNSTILE) {
@@ -5708,6 +5755,7 @@ kqueue_threadreq_bind(struct proc *p, workq_threadreq_t kqr, thread_t thread,
 			 * owners and everything would basically go downhill from here.
 			 */
 			kqu.kqwl->kqwl_owner = THREAD_NULL;
+			kqu.kqwl->kqwl_owner_hint = false;
 			if (kqworkloop_override(kqu.kqwl)) {
 				thread_drop_kevent_override(thread);
 			}

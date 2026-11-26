@@ -3,6 +3,7 @@ load("//bazel/lint:defs.bzl", "lint_files")
 # drivers/NativeSwitchBlock: moved from out/native-a57/root-v1/tree/drivers/NativeSwitchBlock by the layout move.
 load("//kernel/rules:driver_flags.bzl", "BLOCK_FLAGS")
 load("//kernel/rules:kernel.bzl", "kernel_driver", "kernel_headers")
+load("//kernel/rules:package.bzl", "ios_binary")
 load("//kits/SwitchABI:defs.bzl", "switch_abi_bindings")
 
 package(default_visibility = ["//visibility:public"])
@@ -35,9 +36,11 @@ kernel_driver(
         "NativeSwitchBlock.cpp",
         "original-bindings.S",
         "SwitchCryptex.cpp",
+        "SwitchSdVolume.cpp",
     ],
     copts = BLOCK_FLAGS,
     hdr_deps = [
+        "diagnostics/switch",
         "drivers/ArmGIC",
         "drivers/SwitchBrightness",
         "drivers/SwitchPower",
@@ -59,4 +62,29 @@ switch_abi_bindings(
     out = "original-bindings.S",
     classes = ["//kits/SwitchABI:IOBlockStorageDevice"],
     objects = [":NativeSwitchBlock_cc"],
+)
+
+ios_binary(
+    name = "switch-sdwake",
+    srcs = ["helper/sdwake.c"],
+    out = "build/switch-block/switch-sdwake",
+    copts = [
+        "-O2",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "-framework",
+        "CoreFoundation",
+    ],
+    entitlements = "helper/sdwake.entitlements",
+    pagesize = "4096",
+    sign_identifier = "com.brunostjohn.switch.sdwake",
+)
+
+filegroup(
+    name = "overlay_files",
+    srcs = [
+        "helper/com.brunostjohn.switch.sdwake.plist",
+        "helper/fstab",
+    ],
 )

@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 class Qtest:
-    def __init__(self, binary: Path, log: Path | None = None):
+    def __init__(self, binary: Path, log: Path | None = None, extra: tuple[str, ...] = ()):
         args = [
             str(binary),
             '-M', 'tegrax1plus',
@@ -22,6 +22,7 @@ class Qtest:
         ]  # fmt: skip
         if log:
             args += ['-d', 'guest_errors,unimp', '-D', str(log)]
+        args += extra
         self.proc = subprocess.Popen(
             args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True
         )

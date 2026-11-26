@@ -1,7 +1,4 @@
-# drivers/SwitchAudio's S32 link on the host: SwitchAudioFormat.h's APE and codec register words against Linux's
-# formulas for that stream, and the plug-in's float32 <-> S32 conversions (hal/SwitchAudioConvert.h) with NEON, as on
-# the device, against the scalar fallback (switch_audio_format_test); the driver and plug-in use them, and the I2S clock
-# is 47999.878 Hz on PLLA (switch_audio_source_test).
+# drivers/SwitchAudio's S32 link, Tegra210 APE offload modules, speaker strips, and CoreAudio HAL plug-in on the host.
 load("@rules_python//python:py_test.bzl", "py_test")
 load("//bazel/lint:defs.bzl", "lint_files")
 load("//bazel/testing:defs.bzl", "host_library", "host_test")
@@ -18,6 +15,15 @@ C_FLAGS = [
     "-Wconversion",
     "-Wsign-conversion",
 ]
+
+host_test(
+    name = "hda_test",
+    srcs = [
+        "hda_test.cpp",
+        "//drivers/SwitchAudio:SwitchHDAFormat.h",
+        "//drivers/SwitchAudio:hal/SwitchAudioConvert.h",
+    ],
+)
 
 # The harness twice: NEON (as on the device), and the scalar fallback the plug-in has without it.
 host_library(
@@ -48,6 +54,36 @@ host_test(
     ],
 )
 
+host_library(
+    name = "ahub_engines",
+    srcs = [
+        "//drivers/SwitchAudio:SwitchAudioAhub.h",
+        "//drivers/SwitchAudio:SwitchAudioFormat.h",
+        "//drivers/SwitchAudio:SwitchAudioMixer.cpp",
+        "//drivers/SwitchAudio:SwitchAudioMvc.cpp",
+        "//drivers/SwitchAudio:SwitchAudioOpe.cpp",
+        "//drivers/SwitchAudio:SwitchAudioSfc.cpp",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+    ],
+    copts = [
+        "-Wconversion",
+        "-Wsign-conversion",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+)
+
+host_test(
+    name = "switch_audio_ahub_test",
+    srcs = [
+        "switch_audio_ahub_test.cpp",
+        "//drivers/SwitchAudio:SwitchAudioAhub.h",
+        "//drivers/SwitchAudio:SwitchAudioFormat.h",
+        "//kits/SwitchMMIO:SwitchMMIO.h",
+    ],
+    defines = ["SWITCH_MMIO_HOST_MODEL=1"],
+    deps = [":ahub_engines"],
+)
+
 host_test(
     name = "switch_audio_source_test",
     srcs = [
@@ -58,12 +94,21 @@ host_test(
     ],
     data = [
         "//drivers/SwitchAudio:SwitchAudio.cpp",
+        "//drivers/SwitchAudio:SwitchAudioAhub.h",
         "//drivers/SwitchAudio:SwitchAudioClocks.cpp",
         "//drivers/SwitchAudio:SwitchAudioCodec.cpp",
         "//drivers/SwitchAudio:SwitchAudioDriver.h",
+        "//drivers/SwitchAudio:SwitchAudioMixer.cpp",
+        "//drivers/SwitchAudio:SwitchAudioMvc.cpp",
+        "//drivers/SwitchAudio:SwitchAudioOpe.cpp",
         "//drivers/SwitchAudio:SwitchAudioRegisters.h",
+        "//drivers/SwitchAudio:SwitchAudioSfc.cpp",
         "//drivers/SwitchAudio:SwitchAudioStream.cpp",
+        "//drivers/SwitchAudio:SwitchAudioSysctl.cpp",
+        "//drivers/SwitchAudio:SwitchDisplayAudio.cpp",
+        "//drivers/SwitchAudio:SwitchHDA.cpp",
         "//drivers/SwitchAudio:SwitchRT5639.cpp",
+        "//drivers/SwitchAudio:SwitchRT5639.h",
         "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
         "//drivers/TegraGPIO:TegraGPIO.cpp",
     ],
@@ -71,7 +116,7 @@ host_test(
 )
 
 # The overlay's speaker strips per IPSW kind (J120's and J181's AID2003): every box of the kind's speaker chains
-# bypassed but the volume.
+# bypassed except volume, with verified flat AUVariableEQV2 (vrq2) presets.
 py_test(
     name = "speaker_strips_test",
     size = "small",
@@ -92,6 +137,8 @@ PLUGIN_SRCS = [
     "//drivers/SwitchAudio:hal/SwitchAudioConvert.h",
     "//drivers/SwitchAudio:hal/SwitchAudioObjects.h",
     "//drivers/SwitchAudio:hal/SwitchAudioPlugIn.c",
+    "//drivers/SwitchAudio:hal/SwitchDisplayAudio.c",
+    "//drivers/SwitchAudio:hal/SwitchDisplayAudio.h",
     "//kits/SwitchDMA:SwitchDcache.h",
     "//kits/SwitchRefusal:SwitchRefusal.c",
     "//kits/SwitchRefusal:SwitchRefusal.h",
@@ -135,4 +182,16 @@ host_test(
     defines = ["SWITCH_AUDIO_J181=1"],
     linkopts = PLUGIN_LINKOPTS,
     deps = [":plugin_j181"],
+)
+
+host_test(
+    name = "display_audio_test",
+    srcs = [
+        "display_audio_test.cpp",
+        "//drivers/SwitchAudio:SwitchAudioAbi.h",
+        "//drivers/SwitchAudio:hal/SwitchAudioObjects.h",
+        "//drivers/SwitchAudio:hal/SwitchDisplayAudio.h",
+    ],
+    linkopts = PLUGIN_LINKOPTS,
+    deps = [":plugin_j120"],
 )
