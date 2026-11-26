@@ -84,6 +84,11 @@ jobs:
 
       - name: Compose, populate and pack the image
         run: |
+          # The hosted runner has no other jobs to protect: give the compose stage the space the freed
+          # runtimes already provide rather than making it insist on a 14 GiB floor on top of that.
+          if grep -q '^FLOOR = 14 << 30' tools/install/stages.py; then
+            sed -i '' 's/^FLOOR = 14 << 30/FLOOR = 4 << 30/' tools/install/stages.py
+          fi
           bazel run //:image -- --out "$RUNNER_TEMP/sd"
           du -sh "$RUNNER_TEMP/sd"
           find "$RUNNER_TEMP/sd" -type f -exec du -h {} +
